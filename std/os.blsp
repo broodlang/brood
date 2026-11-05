@@ -164,81 +164,47 @@ from LDAP or another NSS source too), or nil when there is no such user — what
     (contains? #{:linux :macos :windows} (os/type))   ;=> true"
   (%os-type))
 
-(defn- runnable? (p)
-  ;; A path `spawn` could actually execute: it exists, it is not a directory, and someone
-  ;; has an execute bit. Windows has no permission bits (`file/stat` reports `:mode` 0 and
-  ;; `:exec?` false there), so existence is the whole test — as much as it will say.
-  (let (st (file/stat p))
-    (and st (not (:dir? st)) (or (:exec? st) (= (type) :windows)))))
-
-(defn- path-separator ()
-  ;; What separates PATH's entries: `;` on Windows, `:` everywhere else. Splitting on `:`
-  ;; unconditionally would make every Windows entry one unsplit string beginning `C`.
-  (if (= (type) :windows) ";" ":"))
-
-(defn- which-in (dirs program)
-  ;; The first PATH entry holding a runnable `program`, as the path to it. Recursive
-  ;; rather than `keep` + `first` so the walk STOPS at the hit: this runs before a spawn,
-  ;; and a stat per remaining entry for an answer already found is pure waste.
-  (if (empty? dirs)
-    nil
-    (let (dir (first dirs)
-          base (str (if (= dir "") "." dir) "/" program)
-          found (seq/find (executable-names base) runnable?))
-      (if found found (which-in (rest dirs) program)))))
-
-(defn- windows-extensions ()
-  ;; PATHEXT's extensions, lower-cased: `.com .exe .bat .cmd` when it is unset
-  (map (seq/filter (string/split (or (env "PATHEXT") ".COM;.EXE;.BAT;.CMD") ";")
-         (fn (extension) (not (= extension ""))))
-    string/lower))
-
-(defn- executable-names (base)
-  ;; What a file named `base` may be called to run. Unix: itself. Windows: itself only when
-  ;; it already ends in an executable extension, else itself with each one — never the bare
-  ;; name, which there is no program: an npm package's `tsc` beside its `tsc.cmd` is an `sh`
-  ;; script, and running it fails.
-  (if (= (type) :windows)
-    (let (extensions (windows-extensions))
-      (if (any? extensions (fn (extension) (string/ends-with? (string/lower base) extension)))
-        [base]
-        (map extensions (fn (extension) (str base extension)))))
-    [base]))
-
-(defn which (program)
+(defn which (program &optional (opts {}))
   "Where [[spawn]] would find `program`, as an absolute-or-given path — or **nil** when
 nothing on `PATH` can be executed under that name.
 
-The question every caller of [[spawn]] / [[cmd]] / [[run-process]] has *before* it
-spawns, because the answer to \"it is not installed\" should be a sentence the user can
-act on (`elixir-ls is not on PATH`), not the raised error a failed spawn gives it. Asking
-is opportunistic, so this answers nil rather than raising, like [[exe-path]].
+The question every caller of [[spawn]] / [[cmd]] / [[spawn-pty]] / [[run-process]] has
+*before* it spawns, because the answer to \"it is not installed\" should be a sentence the
+user can act on (`elixir-ls is not on PATH`), not the raised error a failed spawn gives it.
+Asking is opportunistic, so this answers nil rather than raising, like [[exe-path]].
+
+It is not a second opinion: every spawn finds its program with this same resolver
+(ADR-607), so a yes here is a program a spawn starts. `opts` takes a spawn's `:cwd` and
+`:env`, and the answer is then where THAT spawn finds it — the `:env` `PATH` searched, a
+relative name taken against the `:cwd`.
 
 Follows the `execvp` rule: a `program` containing a path separator is **not** searched
 for — it is used as given, and answered only if it is executable — and otherwise each
-`PATH` entry is tried in order, an empty entry meaning the current directory. A
-directory, or a file with no execute bit for anyone, is not a match (`file/stat`'s
-`:exec?`; Windows has no permission bits, so there existence is the whole test).
+`PATH` entry is tried in order, an empty entry meaning the working directory (and no
+`PATH` at all finding nothing). A directory, or a file with no execute bit for anyone, is
+not a match.
 
 **Windows:** the entry separator is `;` and `\\` counts as a path separator. A program is
 a file with an executable extension from `PATHEXT` (`.com .exe .bat .cmd` by default):
-`\"git\"` finds `git.exe`, `\"tsc\"` finds `tsc.cmd`, and an extensionless file — an npm
-package's `sh` shim beside its `.cmd` — is never the answer.
+`\"git\"` finds `git.exe`, `\"tsc\"` finds `tsc.cmd`, `\"mix\"` finds `mix.bat`, and an
+extensionless file — an npm package's `sh` shim beside its `.cmd` — is never the answer.
+Windows's own search of the current directory first is not made: a `bash.exe` in the
+directory a spawn runs in is not found unless `PATH` names it. A batch file found is run
+through the system's `cmd.exe` with its arguments escaped for it.
 
     (os/which \"ls\")           ;; => \"/usr/bin/ls\"
     (os/which \"no-such-cmd\")  ;; => nil
     (os/which \"./build.sh\")   ;; => \"./build.sh\" if it is executable, else nil
+    (os/which \"sh\" {:env {\"PATH\" \"\"}})   ;; => nil: that spawn has no PATH
 
     (os/which \"surely-no-such-program\")   ;=> nil"
-  (if (or (includes? program "/") (and (= (type) :windows) (includes? program "\\")))
-    (seq/find (executable-names program) runnable?)
-    (which-in (string/split (or (env "PATH") "") (path-separator)) program)))
+  (%program-path program opts))
 
 (defn cmd (prog &optional (args []) (opts {}))
   "Run `prog` (a string) with `args` (a list or vector of strings) to completion and return
 `{:stdout s :stderr s :exit n}` — plus `:timed-out true` when `:timeout-ms` ended it. The
 arguments go to the program as they are, never through a shell: a file name with a space or
-a `$` in it is one argument. `opts`:
+a `$` in it is one argument. `prog` is found as [[which]] finds it with these options (ADR-607). `opts`:
 
 - `:cwd` — the working directory to run in (nil inherits this process's). Passed to the
   child, so this process's cwd is untouched and two calls in different directories cannot
@@ -459,7 +425,10 @@ environment, a nil value removing one. Its stdout/stderr arrive at the calling p
   is at end of file (or [[close]] ended it) — the same `code`, and no message for the
   handle follows it. Match this to collect everything, descendants' output included.
 
-Returns a subprocess handle. Throws if prog can't be spawned.
+`prog` is found as [[which]] finds it, with these options (ADR-607): the child's `PATH`, a
+relative path taken against `:cwd`, and on Windows a `.bat` / `.cmd` run through the system's
+`cmd.exe` with its arguments escaped for it. Returns a subprocess handle. Throws if prog
+can't be spawned.
 
     (let (p (os/spawn \"sh\" [\"-c\" \"sleep 5 & exit 3\"])) (receive ([:proc-exit ^p c] c)))   ;=> 3"
   (%proc-spawn prog args opts))

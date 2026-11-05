@@ -39,7 +39,7 @@ use windows_sys::Win32::System::Threading::{
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
-use super::{EnvEntry, ProcessTree};
+use super::{EnvEntry, ProcessTree, program};
 
 type CreatePseudoConsoleFunction =
     unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> i32;
@@ -389,6 +389,34 @@ fn environment_block(env: &[EnvEntry]) -> Vec<u16> {
     block
 }
 
+fn wide(text: &OsStr) -> Vec<u16> {
+    text.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+/// The application `CreateProcessW` starts and the command line it is given, both
+/// NUL-terminated: `program` resolved against the child's `cwd` and `env` (ADR-607) — an
+/// absolute path, so no search of Windows's own is made — and, for a batch file, the
+/// system's `cmd.exe` with the escaped line [`program::batch_command_line`] writes.
+fn application_and_line(
+    program: &str,
+    arguments: &[String],
+    raw: bool,
+    cwd: Option<&str>,
+    env: &[EnvEntry],
+) -> std::io::Result<(Vec<u16>, Vec<u16>)> {
+    let path = program::resolve(program, cwd, env)?;
+    if program::is_batch_file(&path) {
+        let interpreter = program::system_command_interpreter()?;
+        let line = program::batch_command_line(path.as_os_str(), arguments, raw)?;
+        return Ok((wide(interpreter.as_os_str()), wide(OsStr::new(&line))));
+    }
+    let resolved = path.to_string_lossy();
+    Ok((
+        wide(path.as_os_str()),
+        command_line(&resolved, arguments, raw)?,
+    ))
+}
+
 /// Start `program` attached to a fresh `cols`×`rows` pseudoconsole, in a Job Object (so
 /// closing it ends what it started, ADR-592), and hand back the child and our pipe ends.
 ///
@@ -413,7 +441,11 @@ pub(super) fn spawn(
              (Windows 10 version 1809 or later)",
         ));
     };
-    let mut line = command_line(program, arguments, raw)?;
+    // The program by absolute path, found as every spawn finds one (ADR-607): handed to
+    // CreateProcessW as the application, so its own search — the current directory first,
+    // and never an `:env` PATH — is not made. A batch file runs under the system's
+    // cmd.exe, its arguments escaped for it.
+    let (application, mut line) = application_and_line(program, arguments, raw, cwd, env)?;
     let environment = environment_block(env);
     let directory: Option<Vec<u16>> = cwd.map(|directory| {
         OsStr::new(directory)
@@ -462,7 +494,7 @@ pub(super) fn spawn(
     // its attribute list; no handles are inherited.
     let created = unsafe {
         CreateProcessW(
-            std::ptr::null(),
+            application.as_ptr(),
             line.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),

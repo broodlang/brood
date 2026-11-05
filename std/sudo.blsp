@@ -25,10 +25,12 @@ mode, ACLs, extended attributes and SELinux context, is then renamed over it. Wh
 cannot be had — a file with other hard links (a rename would part it from them), a directory
 the user may not write (the stage is then in $TMPDIR), a file bind-mounted into a container
 (the rename refused, EBUSY) — the checked text is copied into the file, its old text kept
-aside and put back if the copy does not land whole. A symbolic link is written through (its
-target replaced, the link kept). The temporary files are removed on every exit the shell
-sees; one a SIGKILL left is removed by a later write once it is a day old, never while
-another writer may be filling it.
+aside and put back if the copy does not land whole — or if a signal (C-g, a hang-up) cuts the
+copy off: the old text is removed only once the file is known whole. A symbolic link is written
+through (its target replaced, the link kept). The temporary files are removed on every exit the
+shell sees. An old text a SIGKILL left mid-copy is never aged out: the next write to that file
+refuses, naming where the old text is, unless the file holds it again. Other leftovers are
+removed by a later write once a day old, never while another writer may be filling them.
 
 `sudo/*program*` names the sudo to run — a test binds a stand-in script, so no test runs the real
 one; `opts`' `:program` does the same for one call.
@@ -156,40 +158,98 @@ the file. `:password` is handed to sudo once and kept nowhere; `:program` overri
 ;; after the file's old text was kept aside, and compared after; a copy that did not land whole
 ;; puts the old text back. Through a symbolic link to its target.
 ;;
-;; Its temporary files are `.sudo-write.PID.*` and `.sudo-keep.PID.*`, removed on every way out
-;; the shell sees (EXIT, HUP, INT, TERM). One a SIGKILL left behind is removed by a later write
-;; only once it is a day old: never another writer's file, still being written.
+;; Its temporary files are `.sudo-write.PID.*` (the stage) and `.sudo-keep.SUM.PID.*` (the old
+;; text, SUM the target path's `cksum`), removed on every way out the shell sees (EXIT, HUP, INT,
+;; TERM) — the keep only once the file is known whole: the copy compared equal, or the old text
+;; put back and compared equal. A signal that lands DURING the copy puts the old text back
+;; before the shell exits (a new file is removed again), so an interrupted copy leaves the file
+;; as it was too; one that cannot be put back keeps the keep and says where it is. A
+;; `.sudo-keep.….copying` marker beside the keep is up for exactly the copy. One a SIGKILL left
+;; is never aged out: the next write to that file, finding a keep with its marker whose writer
+;; is gone, removes it only when the file holds that text again, and otherwise refuses, naming
+;; the keep, so the user puts the old text back or removes it. A stage, or a keep with no marker
+;; (the file was never touched), a SIGKILL left is removed by a later write once it is a day old:
+;; never another writer's, still being written.
 (def- write-script
-  (str "target=$1; expected=$2; digest=$3\n"
+  (str
+    "target=$1; expected=$2; digest=$3\n"
     "if [ -L \"$target\" ]; then resolved=$(readlink -f \"$target\") && target=$resolved; fi\n"
-    "dir=$(dirname \"$target\")\n" "stage=''; keep=''\n"
-    "trap 'rm -f -- \"$stage\" \"$keep\"' EXIT\n" "trap 'exit 4' HUP INT TERM\n"
-    "find \"$dir\" -maxdepth 1 -type f \\( -name '.sudo-write.*' -o -name '.sudo-keep.*' \\)"
-    " -mmin +1440 -exec rm -f {} + 2>/dev/null\n" "links=1\n"
-    "if [ -e \"$target\" ]; then links=$(ls -ld -- \"$target\" | awk '{print $2}'); fi\n"
-    "rename=1\n" "stage=$(mktemp \"$dir/.sudo-write.$$.XXXXXX\" 2>/dev/null)"
-    " || { rename=0; stage=$(mktemp \"${TMPDIR:-/tmp}/.sudo-write.$$.XXXXXX\") || exit 4; }\n"
-    "if [ \"$links\" -gt 1 ]; then rename=0; fi\n" "if [ $rename = 1 ]; then\n"
-    "  if [ -e \"$target\" ]; then\n"
-    "    cp --preserve=all --attributes-only -- \"$target\" \"$stage\" 2>/dev/null"
-    " || cp -p -- \"$target\" \"$stage\" 2>/dev/null || rename=0\n"
+    "dir=$(dirname \"$target\"); tmp=${TMPDIR:-/tmp}\n"
+    "stage=''; keep=''; existed=0; copying=0; intact=1\n"
+    "restore() {\n"
+    "  if [ -n \"$keep\" ]; then cat -- \"$keep\" > \"$target\" && cmp -s -- \"$keep\" \"$target\"\n"
+    "  elif [ $existed = 0 ]; then rm -f -- \"$target\"\n"
+    "  else false; fi\n"
+    "}\n"
+    "put_back() {\n"
+    "  if restore; then intact=1; echo \"$1; its old text is back\" >&2\n"
+    "  else echo \"$1, and its old text could not be put back: it is kept in $keep\" >&2; fi\n"
+    "}\n"
+    "cleanup() {\n"
+    "  if [ -n \"$stage\" ]; then rm -f -- \"$stage\"; fi\n"
+    "  if [ -n \"$keep\" ] && [ $intact = 1 ]; then rm -f -- \"$keep\" \"$keep.copying\"; fi\n"
+    "}\n"
+    "interrupted() {\n"
+    "  if [ $copying = 1 ]; then copying=0; put_back 'the write was interrupted while copying'; fi\n"
+    "  exit 4\n"
+    "}\n"
+    "trap cleanup EXIT\n"
+    "trap interrupted HUP INT TERM\n"
+    "sum=$(printf '%s' \"$target\" | cksum | cut -d' ' -f1)\n"
+    "for old in \"$dir\"/.sudo-keep.\"$sum\".* \"$tmp\"/.sudo-keep.\"$sum\".*; do\n"
+    "  case \"$old\" in *.copying) continue ;; esac\n"
+    "  [ -f \"$old\" ] || continue\n"
+    "  pid=${old##*/.sudo-keep.$sum.}; pid=${pid%%.*}\n"
+    "  if ps -p \"$pid\" >/dev/null 2>&1; then continue; fi\n"
+    "  if [ ! -e \"$old.copying\" ] || { [ -e \"$target\" ] && cmp -s -- \"$old\" \"$target\"; }; then\n"
+    "    rm -f -- \"$old\" \"$old.copying\"; continue\n"
+    "  fi\n"
+    "  echo \"an earlier write to $target was cut off while copying; the text it had before is kept in $old: put it back or remove it (and $old.copying), then write again\" >&2\n"
+    "  exit 4\n"
+    "done\n"
+    "find \"$dir\" -maxdepth 1 -type f \\( -name '.sudo-write.*' -o -name '.sudo-keep.*' \\) ! -name '*.copying' -mmin +1440 -exec sh -c 'for kept; do [ -e \"$kept.copying\" ] || rm -f -- \"$kept\"; done' sh {} + 2>/dev/null\n"
+    "links=1\n"
+    "if [ -e \"$target\" ]; then existed=1; links=$(ls -ld -- \"$target\" | awk '{print $2}'); fi\n"
+    "rename=1\n"
+    "stage=$(mktemp \"$dir/.sudo-write.$$.XXXXXX\" 2>/dev/null) || { rename=0; stage=$(mktemp \"$tmp/.sudo-write.$$.XXXXXX\") || exit 4; }\n"
+    "if [ \"$links\" -gt 1 ]; then rename=0; fi\n"
+    "if [ $rename = 1 ]; then\n"
+    "  if [ $existed = 1 ]; then\n"
+    "    cp --preserve=all --attributes-only -- \"$target\" \"$stage\" 2>/dev/null || cp -p -- \"$target\" \"$stage\" 2>/dev/null || rename=0\n"
     "    if command -v chcon >/dev/null 2>&1; then chcon --reference=\"$target\" -- \"$stage\" 2>/dev/null; fi\n"
     "    if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then\n"
     "      getfacl -p -- \"$target\" 2>/dev/null | setfacl --set-file=- -- \"$stage\" 2>/dev/null\n"
-    "    fi\n" "  else\n" "    chmod \"$(printf '%o' $((0666 & ~$(umask))))\" \"$stage\"\n" "  fi\n"
-    "fi\n" "cat > \"$stage\" || exit 4\n" "size=$(wc -c < \"$stage\" | tr -d ' ')\n"
+    "    fi\n"
+    "  else\n"
+    "    chmod \"$(printf '%o' $((0666 & ~$(umask))))\" \"$stage\"\n"
+    "  fi\n"
+    "fi\n"
+    "cat > \"$stage\" || exit 4\n"
+    "size=$(wc -c < \"$stage\" | tr -d ' ')\n"
     "if [ \"$size\" != \"$expected\" ]; then\n"
-    "  echo \"$size of $expected bytes arrived; the file is unchanged\" >&2; exit 4\n" "fi\n"
+    "  echo \"$size of $expected bytes arrived; the file is unchanged\" >&2; exit 4\n"
+    "fi\n"
     "if command -v sha256sum >/dev/null 2>&1; then\n"
-    "  got=$(sha256sum < \"$stage\" | cut -d' ' -f1)\n" "  if [ \"$got\" != \"$digest\" ]; then\n"
-    "    echo 'the text arrived changed; the file is unchanged' >&2; exit 4\n" "  fi\n" "fi\n"
+    "  got=$(sha256sum < \"$stage\" | cut -d' ' -f1)\n"
+    "  if [ \"$got\" != \"$digest\" ]; then\n"
+    "    echo 'the text arrived changed; the file is unchanged' >&2; exit 4\n"
+    "  fi\n"
+    "fi\n"
     "if [ $rename = 1 ] && mv -f -- \"$stage\" \"$target\" 2>/dev/null; then stage=''; exit 0; fi\n"
-    "if [ -e \"$target\" ]; then\n" "  keep=$(mktemp \"$dir/.sudo-keep.$$.XXXXXX\" 2>/dev/null)"
-    " || keep=$(mktemp \"${TMPDIR:-/tmp}/.sudo-keep.$$.XXXXXX\") || exit 4\n"
-    "  cat -- \"$target\" > \"$keep\" || exit 4\n" "fi\n"
-    "if cat -- \"$stage\" > \"$target\" && cmp -s -- \"$stage\" \"$target\"; then exit 0; fi\n"
-    "if [ -n \"$keep\" ]; then cat -- \"$keep\" > \"$target\"; fi\n"
-    "echo 'the file could not be written; its old text is back' >&2\n" "exit 4\n"))
+    "if [ $existed = 1 ]; then\n"
+    "  keep=$(mktemp \"$dir/.sudo-keep.$sum.$$.XXXXXX\" 2>/dev/null) || keep=$(mktemp \"$tmp/.sudo-keep.$sum.$$.XXXXXX\") || exit 4\n"
+    "  if ! { cat -- \"$target\" > \"$keep\" && cmp -s -- \"$target\" \"$keep\"; }; then\n"
+    "    echo 'its old text could not be kept aside; the file is unchanged' >&2; exit 4\n"
+    "  fi\n"
+    "  : > \"$keep.copying\" || exit 4\n"
+    "fi\n"
+    "intact=0; copying=1\n"
+    "if cat -- \"$stage\" > \"$target\" && cmp -s -- \"$stage\" \"$target\"; then\n"
+    "  copying=0; intact=1; if [ -n \"$keep\" ]; then rm -f -- \"$keep.copying\"; fi; exit 0\n"
+    "fi\n"
+    "copying=0\n"
+    "put_back 'the file could not be written'\n"
+    "exit 4\n"))
 
 (defn write (path text &optional (opts {}))
   "Write `text` to the file at `path` as `opts`' `:user` (root by default) through sudo,

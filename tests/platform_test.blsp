@@ -81,7 +81,23 @@
       (assert= (:mtime (file/stat file)) 1577836800000)
       (is (string? (try
                      (do (file/set-mtime (path/join (fresh-dir) "missing") 0) nil)
-                     (catch e (error-message e))))))))
+                     (catch e (error-message e)))))))
+  (test "file/set-mtime dates a read-only file its caller owns, as touch -t does"
+    ;; it opened the file for WRITING, which a read-only file refuses its owner too
+    (let (file (path/join (fresh-dir) "read-only.txt"))
+      (file/spit file "x")
+      (if (windows?)
+        (os/cmd "attrib" ["+r" (backslashed file)])
+        (os/cmd "chmod" ["444" file]))
+      (file/set-mtime file 1577836800000)
+      (assert= (file/mtime file) 1577836800000)
+      (if (windows?)
+        (os/cmd "attrib" ["-r" (backslashed file)])
+        (os/cmd "chmod" ["644" file]))))
+  (test "file/set-mtime dates a directory"
+    (let (directory (fresh-dir))
+      (file/set-mtime directory 1577836800000)
+      (assert= (file/mtime directory) 1577836800000))))
 
 (describe "files: bytes go to disk as given"
   (test "CRLF is written and read back untranslated — no text mode on Windows"
@@ -142,6 +158,58 @@
       (assert= (:exit result) 3)))
   (test "a program that does not exist raises, rather than answering"
     (is (= :raised (try (os/cmd "brood-surely-no-such-program") (catch _ :raised))))))
+
+;; A program only a spawn's own `:env` PATH names, written in the platform's script form: a
+;; batch file on Windows (`mix.bat`, an npm `.cmd` shim — what `Command` alone never found),
+;; an executable `sh` script elsewhere. It prints its first two arguments.
+(defn- program-dir ()
+  (let (directory (fresh-dir))
+    (if (windows?)
+      (file/spit (path/join directory "brood-found.bat") "@echo off\r\necho %1 %2\r\n")
+      (let (script (path/join directory "brood-found"))
+        (file/spit script "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\"\n")
+        (os/cmd "chmod" ["755" script])))
+    directory))
+
+(defn- path-with (directory)
+  {"PATH" (str directory (if (windows?) ";" ":") (or (os/env "PATH") ""))})
+
+(defn- read-child (child acc)
+  (receive
+    ([:proc ^child data] (read-child child (str acc data)))
+    ([:proc-closed ^child _] (ansi/strip acc))
+    (after 10000 (ansi/strip acc))))
+
+(describe "a spawn finds its program as os/which does (ADR-607)"
+  (test "os/which answers for the spawn's own :env PATH"
+    (let (directory (program-dir))
+      (is (nil? (os/which "brood-found")))
+      (let (found (os/which "brood-found" {:env (path-with directory)}))
+        (is (string? found))
+        (assert= (path/basename (or found ""))
+          (if (windows?) "brood-found.bat" "brood-found")))))
+  (test "os/cmd runs it by its bare name — a batch file on Windows, its arguments literal"
+    ;; `&` would end cmd.exe's command and `%PATH%` expand, were the arguments not escaped
+    (let (directory (program-dir)
+          out (os/cmd-out (os/cmd "brood-found" ["a&b" "%PATH%"] {:env (path-with directory)})))
+      (is (includes? out "a&b"))
+      (is (includes? out "%PATH%"))))
+  (test "os/spawn runs it by its bare name"
+    (let (directory (program-dir)
+          out (read-child (os/spawn "brood-found" ["one" "two"] {:env (path-with directory)}) ""))
+      (is (includes? out "one"))
+      (is (includes? out "two"))))
+  (test "os/spawn-pty runs it by its bare name, from the :env PATH — ConPTY on Windows"
+    (let (directory (program-dir)
+          out (read-child (os/spawn-pty "brood-found" ["one" "a&b"] {:env (path-with directory)})
+                ""))
+      (is (includes? out "one"))
+      (is (includes? out "a&b"))))
+  (test "a program in the working directory is not run unless PATH names it"
+    (let (directory (program-dir))
+      (is (nil? (os/which "brood-found" {:cwd directory})))
+      (is (= :raised (try (os/cmd "brood-found" [] {:cwd directory}) (catch _ :raised))))
+      (is (= :raised (try (os/spawn-pty "brood-found" [] {:cwd directory}) (catch _ :raised)))))))
 
 (describe "the platform's shell (KI-364)"
   (test "os/shell is sh -c, or cmd.exe /d /s /c on Windows"
@@ -209,6 +277,19 @@
           (assert= (count entries) 1)
           (is (includes? (string/lower (or (first entries) ""))
                 (string/lower (or (os/env "USERNAME") "?"))))
+          (is (not (includes? (or (first entries) "") "(I)"))))
+        (assert= (math/mod (:mode (file/stat file)) 512) 384))))
+  (test "file/spit-private makes a file already there owner-only too"
+    ;; CreateFileW leaves an existing file's DACL alone, so it is replaced through the handle
+    (let (file (path/join (fresh-dir) "was-open"))
+      (file/spit file "old")
+      (file/spit-private file "s3cr3t")
+      (assert= (file/slurp file) "s3cr3t")
+      (if (windows?)
+        (let (entries (seq/filter (string/split (os/cmd-out (os/cmd "icacls" [(backslashed file)]))
+                                    "\n")
+                        (fn (line) (includes? line ":("))))
+          (assert= (count entries) 1)
           (is (not (includes? (or (first entries) "") "(I)"))))
         (assert= (math/mod (:mode (file/stat file)) 512) 384))))
   (test "file/mkdir-private leaves a directory only its owner can enter, and so what is made in it"

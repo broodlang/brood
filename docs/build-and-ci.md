@@ -72,6 +72,7 @@ What that proves, per OS (2026-11-04):
 | CRLF / BOM bytes untranslated; the editor buffer keeps both | ✅ | ✅ |
 | names with spaces and non-ASCII | ✅ | ✅ |
 | `os/which`; a command line through the platform's shell (`os/shell-cmd`) | ✅ `sh -c` | ✅ `cmd.exe /d /s /c`, the line raw: quotes, pipes, `&&` (KI-364) |
+| a program found the way `os/which` finds it, by every spawn (ADR-607) | ✅ `PATH`, the `:env` one when set | ✅ `PATHEXT` too: `mix` runs `mix.bat` through the system `cmd.exe`, arguments escaped; never the current directory unasked, ConPTY included |
 | a timeout, C-g or `os/close` stops the child's children too (`os/cmd`, `os/spawn`) | ✅ process group | ✅ Job Object (ADR-592) |
 | a pty (`os/spawn-pty`, `os/shell-spawn-pty`): output, exit code, size and resize, an interactive shell (`tests/pty_test.blsp`) | ✅ | ✅ ConPTY (KI-369, ADR-597); `os/pty-mode` is nil there — no termios |
 | POSIX signals (`os/signal`) | ✅ | ❌ none |
