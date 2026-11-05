@@ -73,15 +73,15 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 **Seen** 2026-11-05, once: a full `nest check std/ tests/ examples/` printed
 `examples/life_bands.blsp:70:15: warning: send: argument 1 expects keyword | map | pid, got
 nil | pid ((nth pids k))` — four warnings where the run before it printed none. It ran right
-after a `make release`, with `std/gui.blsp` freshly given its image types (ADR-609's gui
-sigs, the `gui/image` / `gui/frame-image` deftypes). The file is from 2026-10-28 and nothing in
-it or its requires changed. Two things about it are wrong on their face: a non-strict check
+after a `make release` over a working tree that was giving `std/gui.blsp` signatures for its
+images (an attempt since dropped for the gui round's own fix). The file is from 2026-10-28 and
+nothing in it or its requires changed. Two things about it are wrong on their face: a non-strict check
 flagged `nil | pid` into a domain that includes `pid` (overlap reads it consistent), and
 `life_bands` uses nothing from `gui`.
 
 **Not reproduced** in 12 runs on the next builds: full-tree and single-file, imaged and
 `BROOD_NO_STDIMAGE=1`, and on a rebuild with the first version of the `image-thumb` sig put
-back. Ruled out: the check cache's stamp (it carries `system/build-id`, whose third field is
+back (that version was later dropped altogether). Ruled out: the check cache's stamp (it carries `system/build-id`, whose third field is
 the binary's own mtime, so a rebuild drops it).
 
 **Diagnostic for the next sighting:** keep the binary, re-run the same command with
