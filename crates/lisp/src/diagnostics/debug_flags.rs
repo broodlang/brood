@@ -542,6 +542,26 @@ pub const FLAGS: &[DebugFlag] = &[
         "run the GUI/display layer with no real window, and no audio — for a headless CI box",
     ),
     f(
+        "BROOD_TEST_RUN",
+        HOST,
+        "`=1`: this process is part of a test run — set by `nest test` before the interpreter starts, inherited by what a test spawns; `test/running?` reads it (ADR-602)",
+    ),
+    f(
+        "BROOD_TEST_SCRATCH",
+        HOST,
+        "the test run's private scratch home, set by `nest test`; `test/scratch-dir` reads it, and XDG_CONFIG_HOME / XDG_STATE_HOME / XDG_DATA_HOME point inside it (ADR-602)",
+    ),
+    f(
+        "BROOD_TEST_HOME",
+        HOST,
+        "`=keep`: `nest test` keeps the real XDG homes instead of giving the run a scratch home — the same as `--real-home` (ADR-602)",
+    ),
+    f(
+        "BROOD_USER_CONFIG_HOME",
+        HOST,
+        "the user's real config home, kept by `nest test` while XDG_CONFIG_HOME points at the scratch home, so nest's own config (registry, token) still reads from it (ADR-602)",
+    ),
+    f(
         "BROOD_GUI_GPU",
         HOST,
         "`=0`: paint on the CPU (softbuffer) in a `--with-gui-gpu` build instead of the GPU (wgpu) render target it selects by default — the A/B lever, and the escape hatch for a misbehaving GPU driver; the pixel-space `:quad` / `:sprite` ops draw on both (in software here)",
