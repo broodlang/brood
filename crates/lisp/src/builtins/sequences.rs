@@ -11,6 +11,8 @@ use std::sync::LazyLock;
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.
 pub(super) fn register(primitives: &mut super::Primitives) {
     use super::signature_types::*;
+    // A map or a record (ADR-542): the map primitives act on a record's fields.
+    let fields_ty = map_ty.union(crate::types::Ty::of(crate::core::value::Tag::Record));
     use crate::core::value::Arity;
     use crate::types::Sig;
     // pair / sequence — `empty?` is Brood (type dispatch over string/length /
@@ -267,15 +269,15 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%map-get",
         Arity::range(2, 3),
-        Sig::with_rest(vec![map_ty, any], any, any),
+        Sig::with_rest(vec![fields_ty.clone(), any], any, any),
         &["m", "k", "default"],
-        "The value at key k in map m, or default (else nil).",
+        "The value at key k in map or record m, or default (else nil).",
         map_get,
     );
     primitives.def(
         "%map-assoc",
         Arity::exact(3),
-        Sig::new(vec![map_ty, any, any], map_ty),
+        Sig::new(vec![fields_ty.clone(), any, any], fields_ty.clone()),
         &["m", "k", "v"],
         "A fresh map like m with key k set to v.",
         map_assoc,
@@ -283,22 +285,22 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%map-int-add",
         Arity::exact(3),
-        Sig::new(vec![map_ty, any, int], map_ty),
+        Sig::new(vec![fields_ty.clone(), any, int], fields_ty.clone()),
         &["m", "k", "delta"],
         "A fresh map like m with key k's value incremented by the integer delta (inserts delta when k is absent): exactly (assoc m k (+ (get m k 0) delta)) — a float under the key adds as + does and an i64 overflow promotes to a bignum — in a single trie traversal when the stored value is a plain integer. The compiler recognises the idiomatic spelling and treats both the same; prefer writing the assoc/get form.",
         map_int_add);
     primitives.def(
         "%map-dissoc",
         Arity::exact(2),
-        Sig::new(vec![map_ty, any], map_ty),
+        Sig::new(vec![fields_ty.clone(), any], fields_ty.clone()),
         &["m", "k"],
-        "A fresh map like m with key k removed.",
+        "A fresh map (or record) like m with key k removed.",
         map_dissoc,
     );
     primitives.def(
         "%map-pairs",
         Arity::exact(1),
-        Sig::new(vec![map_ty], list_ty),
+        Sig::new(vec![fields_ty.clone()], list_ty),
         &["m"],
         "The entries of m as a list of [k v] vectors, in insertion order.",
         map_pairs,
@@ -306,7 +308,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%map-count",
         Arity::exact(1),
-        Sig::new(vec![map_ty], int),
+        Sig::new(vec![fields_ty.clone()], int),
         &["m"],
         "The number of entries in map m. O(1) — the CHAMP root tracks its size.",
         map_count,
@@ -314,7 +316,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%map-into",
         Arity::exact(2),
-        Sig::new(vec![map_ty, any], map_ty),
+        Sig::new(vec![fields_ty.clone(), any], fields_ty.clone()),
         &[],
         "",
         map_into,

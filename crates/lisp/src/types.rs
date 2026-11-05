@@ -75,6 +75,12 @@ const SEQ_BITS: u32 =
 
 /// The map tag — the one tag a key/value refinement applies to.
 const MAP_BIT: u32 = 1u32 << bit(Tag::Map);
+/// The record tag (ADR-542) — a `defrecord` value: its own kind, never a map.
+const RECORD_BIT: u32 = 1u32 << bit(Tag::Record);
+/// The tags a record SHAPE (`fields`) refines: a map's keyword-keyed shape, and a record's
+/// fields. A shape carrying the `__id__` identity literal describes a record and is built on
+/// `RECORD_BIT`; any other is a plain map's ([`Ty::record_shape`]).
+const SHAPE_BITS: u32 = MAP_BIT | RECORD_BIT;
 /// The nil tag — the one non-map a keyword read does not raise on (it answers `nil`).
 const NIL_BIT: u32 = 1u32 << bit(Tag::Nil);
 
@@ -874,6 +880,30 @@ impl Ty {
             .difference(Ty::bool_lit(false))
     }
 
+    /// The **unknown keyed value** (ADR-542): `map | record` with nothing known of either —
+    /// no key/value types, no shape, no id. A record is its own kind, so a parameter read
+    /// only by keyword (`(:server m)`) or an update of an unknown receiver (`(assoc m :k v)`,
+    /// which keeps whichever kind `m` is) is "some map or record": it says the value is
+    /// keyed and nothing about which kind — as `any` says nothing at all. Strict checking
+    /// reads this part by overlap, like the unknown, and everything else in the term by
+    /// inclusion. `None` when the term does not carry both kinds unrefined; otherwise the
+    /// rest of the term, without the two keyed tags (`never` when there is none).
+    pub fn without_unknown_keyed(&self) -> Option<Ty> {
+        if self.tags & SHAPE_BITS != SHAPE_BITS
+            || self.fields.is_some()
+            || self.map_kv.is_some()
+            || self.neg.is_some()
+        {
+            return None;
+        }
+        Some(
+            (0..32)
+                .map(|i| 1u32 << i)
+                .filter(|b| self.tags & b != 0 && b & SHAPE_BITS == 0)
+                .fold(Ty::NEVER, |acc, b| acc.union(self.project_tag(b))),
+        )
+    }
+
     /// Is this type known only by what it is NOT — `any`, or `any` less a guard's
     /// `nil`/`false`? Such a bound says nothing positive about the value, so strict
     /// checking (`GradualTy::consistent_with_mode`) keeps the overlap reading for it.
@@ -1106,12 +1136,34 @@ impl Ty {
     }
 
     /// The general constructor: declared fields plus the type of every undeclared key.
+    ///
+    /// A shape whose `__id__` field holds an identity literal is a `defrecord` value's
+    /// type and is tagged `record` (ADR-542) — the id stays in the shape as the nominal
+    /// part the checker dispatches and seals on; every other shape is a plain map's.
     pub fn record_shape(fields: BTreeMap<Symbol, (Ty, bool)>, rest: Ty) -> Ty {
+        let tag = if fields
+            .get(&value::intern("__id__"))
+            .is_some_and(|(ty, _)| is_record_identity(ty))
+        {
+            RECORD_BIT
+        } else {
+            MAP_BIT
+        };
         Ty {
             fields: Some(Arc::new(RecordShape { fields, rest })),
-            ..Ty::flat(MAP_BIT)
+            ..Ty::flat(tag)
         }
         .canonical_shape()
+    }
+
+    /// The one shape tag (`map` or `record`, ADR-542) this term carries a `fields` shape on,
+    /// or 0 — for none, or for a term carrying both (its shape cannot say which it refines).
+    pub(crate) fn shape_bit(&self) -> u32 {
+        match self.tags & SHAPE_BITS {
+            MAP_BIT if self.fields.is_some() => MAP_BIT,
+            RECORD_BIT if self.fields.is_some() => RECORD_BIT,
+            _ => 0,
+        }
     }
 
     /// The record-shape refinement's declared fields, if this map type carries one.
@@ -1157,10 +1209,10 @@ impl Ty {
     /// the field types the record had declared. Any other non-map tag (a vector, a string
     /// — a keyword read raises on those) still declines.
     fn term_field_ty_or_nil(&self, key: Symbol) -> Option<Ty> {
-        if self.tags & !(MAP_BIT | NIL_BIT) != 0 {
+        if self.tags & !(SHAPE_BITS | NIL_BIT) != 0 {
             return None;
         }
-        let from_map = if self.tags & MAP_BIT != 0 {
+        let from_map = if self.tags & SHAPE_BITS != 0 {
             Some(self.term_field_ty(key)?)
         } else {
             None
@@ -1181,11 +1233,11 @@ impl Ty {
         for term in self.terms_vec() {
             // The `nil` member reads as the default — `(get nil :k 7)` is `7` — see
             // `term_field_ty_or_nil` for why a `nil | {…}` union is one term.
-            if term.tags & !(MAP_BIT | NIL_BIT) != 0 {
+            if term.tags & !(SHAPE_BITS | NIL_BIT) != 0 {
                 return None;
             }
             let from_nil = (term.tags & NIL_BIT != 0).then(|| default.clone());
-            let from_map = if term.tags & MAP_BIT != 0 {
+            let from_map = if term.tags & SHAPE_BITS != 0 {
                 let shape = term.fields.as_deref()?;
                 Some(if !shape.fields.contains_key(&key) && shape.is_open() {
                     match term.map_kv.as_deref() {
@@ -2001,10 +2053,11 @@ impl Ty {
             "pair?" => Ty::of(Tag::Pair),
             "vector?" => Ty::of(Tag::Vector),
             "map?" => Ty::of(Tag::Map),
-            // A map or a record (ADR-542) — the test a map pattern and the field operations
-            // make. The checker still models a record as a map shape (ADR-542, step 3 moves
-            // it to `Record`), so this narrows to `map` for now.
-            "%map-like?" => Ty::of(Tag::Map),
+            // A record is its own kind (ADR-542), so `record?` is biconditional: it holds
+            // for exactly the records.
+            "record?" | "%record?" => Ty::of(Tag::Record),
+            // A map or a record — the test a map pattern and the field operations make.
+            "%map-like?" => Ty::of(Tag::Map).union(Ty::of(Tag::Record)),
             "set?" => Ty::of(Tag::Set),
             "ref?" => Ty::of(Tag::Ref),
             "pid?" => Ty::of(Tag::Pid),
@@ -2026,15 +2079,11 @@ impl Ty {
 
     /// The type a truthy `(pred x)` PROVES of `x` when the predicate is not biconditional:
     /// every value it accepts has this type, but so do values it rejects, so only the
-    /// then-branch may narrow. `record?` holds for a `defrecord` value — a map — and fails
-    /// for a plain map, so a guard on it narrows `number | usd` to `usd` and its else
-    /// branch to nothing; read as `tested_by` it would have `(seq/reject xs record?)` drop
-    /// every map. `None` for a name [`tested_by`](Ty::tested_by) answers, or no predicate.
-    pub fn implied_by(predicate: &str) -> Option<Ty> {
-        Some(match predicate {
-            "record?" => Ty::of(Tag::Map),
-            _ => return None,
-        })
+    /// then-branch may narrow. None today: `record?`, the one such predicate while a record
+    /// was a map, is biconditional since a record became its own kind (ADR-542) and is a
+    /// [`tested_by`](Ty::tested_by) predicate. Kept as the seam a later one would use.
+    pub fn implied_by(_predicate: &str) -> Option<Ty> {
+        None
     }
 
     /// `self ∪ other` — values in either. A refinement survives only where it's
@@ -2294,9 +2343,9 @@ impl Ty {
             &other.map_kv,
         );
         let fields = merge_union(
-            self.tags & MAP_BIT != 0,
+            self.tags & SHAPE_BITS != 0,
             &self.fields,
-            other.tags & MAP_BIT != 0,
+            other.tags & SHAPE_BITS != 0,
             &other.fields,
         );
         // Two tuple shapes of one arity: exact when they differ in one position
@@ -2462,12 +2511,12 @@ impl Ty {
         // widening to `None` the way the generic refinement merge does — this is the
         // narrowing a type guard performs, and dropping it would lose the fact the
         // guard just established. A shape pair no value satisfies clears the `map` bit.
-        let fields = if tags & MAP_BIT != 0 {
+        let fields = if tags & SHAPE_BITS != 0 {
             match (&self.fields, &other.fields) {
                 (Some(a), Some(b)) => match intersect_records(a, b) {
                     Some(shape) => Some(Arc::new(shape)),
                     None => {
-                        tags &= !MAP_BIT;
+                        tags &= !SHAPE_BITS;
                         None
                     }
                 },
@@ -2680,8 +2729,11 @@ impl Ty {
         if self.elem.is_some() {
             tags |= self.tags & SEQ_BITS;
         }
-        if self.map_kv.is_some() || self.fields.is_some() {
+        if self.map_kv.is_some() {
             tags |= self.tags & MAP_BIT;
+        }
+        if self.fields.is_some() {
+            tags |= self.tags & SHAPE_BITS;
         }
         if self.tuple.is_some() {
             tags |= self.tags & VECTOR_BIT;
@@ -3087,6 +3139,10 @@ impl Ty {
         fn fill(ty: &Ty) -> Ty {
             if ty.is_known_only_by_exclusion() {
                 Ty::NEVER
+            } else if let Some(rest) = ty.without_unknown_keyed() {
+                // The unknown keyed value (`map | record`, ADR-542) is a nested unknown
+                // too: which kind it is was never known, so it fills like `?`.
+                fill(&rest)
             } else {
                 ty.unknowns_as_never()
             }
@@ -3102,7 +3158,7 @@ impl Ty {
             if let Some(elems) = &term.list_shape {
                 out.list_shape = Some(Arc::new(elems.iter().map(fill).collect()));
             }
-            if term.tags & MAP_BIT != 0 {
+            if term.tags & SHAPE_BITS != 0 {
                 match (&term.map_kv, &term.fields) {
                     (Some(kv), _) => out.map_kv = Some(Arc::new((fill(&kv.0), fill(&kv.1)))),
                     (None, Some(shape)) => {
@@ -3156,7 +3212,7 @@ impl Ty {
             overload: keep(tag_bit & FN_BITS != 0, &self.overload),
             elem: keep(tag_bit & SEQ_BITS != 0, &self.elem),
             map_kv: keep(tag_bit & MAP_BIT != 0, &self.map_kv),
-            fields: keep(tag_bit & MAP_BIT != 0, &self.fields),
+            fields: keep(tag_bit & SHAPE_BITS != 0, &self.fields),
             tuple: keep(tag_bit & VECTOR_BIT != 0, &self.tuple),
             list_shape: keep(tag_bit & PAIR_BIT != 0, &self.list_shape),
             lit: keep(tag_bit & KEYWORD_BIT != 0, &self.lit),
@@ -3315,8 +3371,10 @@ impl Ty {
                 None => return false,
             }
         }
-        if self.tags & MAP_BIT != 0 {
-            if let Some(b) = &other.map_kv {
+        if self.tags & MAP_BIT != 0
+            && let Some(b) = &other.map_kv
+        {
+            {
                 match &self.map_kv {
                     Some(a) => {
                         // Covariant in both K and V — maps are immutable in Brood.
@@ -3333,20 +3391,10 @@ impl Ty {
                         // `map<K, V>` its step builds instead of the union's bare `map`. An
                         // OPEN record's undeclared keys are keywords (a shape comes from a
                         // keyword-keyed literal), so it keeps the "any keyword" reading.
-                        //
-                        // A `defrecord` value's identity (`:__id__` holding a keyword
-                        // literal) is NOT one of its entries: `keys`, `vals`, `count`, `seq`
-                        // and the runtime contract's `type-matches?` all skip it, so
-                        // `(pt 1 2)` is a `map<keyword, int>` over its fields alone. Only
-                        // the relation to `map<K,V>` skips it — against a structural
-                        // `(record …)` the identity is still a field the other must allow.
+                        // (A `defrecord` value's shape is tagged `record`, never `map`, so
+                        // it never reaches here — ADR-542.)
                         Some(shape) => {
-                            let identity = value::intern("__id__");
-                            let entries = || {
-                                shape.fields.iter().filter(move |(name, (ty, _))| {
-                                    !(**name == identity && is_record_identity(ty))
-                                })
-                            };
+                            let entries = || shape.fields.iter();
                             if shape.is_open() {
                                 if !Ty::of(Tag::Keyword).is_subtype(&b.0) {
                                     return false;
@@ -3373,15 +3421,18 @@ impl Ty {
                     },
                 }
             }
-            if let Some(b) = &other.fields {
-                match &self.fields {
-                    Some(a) => {
-                        if !record_is_subtype(a, b) {
-                            return false;
-                        }
+        }
+        // A shape — a map's or a record's (ADR-542) — must have `other`'s.
+        if self.tags & SHAPE_BITS != 0
+            && let Some(b) = &other.fields
+        {
+            match &self.fields {
+                Some(a) => {
+                    if !record_is_subtype(a, b) {
+                        return false;
                     }
-                    None => return false, // self doesn't provably have `other`'s shape
                 }
+                None => return false, // self doesn't provably have `other`'s shape
             }
         }
         // Each literal member: every value `self` admits for the tag must be one
@@ -3529,7 +3580,7 @@ impl Ty {
         // disjointness (the other side permits the extra field freely). This is
         // what lets a guard-refined base — `(record :age int)` from
         // `(if (int? (get r :age)) …)` — flag a call wanting `(record :age string)`.
-        if shared == MAP_BIT
+        if (shared == MAP_BIT || shared == RECORD_BIT)
             && let (Some(a), Some(b)) = (&self.fields, &other.fields)
             && records_are_disjoint(a, b)
         {
@@ -3730,7 +3781,7 @@ impl Ty {
             }
             self.tags &= !(1u32 << bit(Tag::Set));
         }
-        if self.tags & MAP_BIT != 0
+        if self.tags & SHAPE_BITS != 0
             && self.fields.as_deref().is_some_and(|shape| {
                 shape
                     .fields
@@ -3738,7 +3789,7 @@ impl Ty {
                     .any(|(ty, required)| *required && ty.is_never())
             })
         {
-            self.tags &= !MAP_BIT;
+            self.tags &= !SHAPE_BITS;
         }
         // A slot whose member is gone says nothing.
         if self.tags & SEQ_BITS == 0 {
@@ -3746,6 +3797,8 @@ impl Ty {
         }
         if self.tags & MAP_BIT == 0 {
             self.map_kv = None;
+        }
+        if self.tags & SHAPE_BITS == 0 {
             self.fields = None;
         }
         if self.tags & FN_BITS == 0 {
@@ -4568,7 +4621,7 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
         // And a record shape (C9): its declared keys are the positions of a
         // product, so `{a: int|string}` is covered by `{a: int} | {a: string}` the way a
         // 1-tuple is. The undeclared remainder is not a position — see `record_covered_by`.
-        if tag_bit == MAP_BIT
+        if (tag_bit == MAP_BIT || tag_bit == RECORD_BIT)
             && let Some(shape) = part.fields.as_deref()
         {
             // A candidate whose map member ALSO carries `map<K, V>` is the intersection of
@@ -4579,7 +4632,7 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
             // Left out, it can only fail to help cover (incomplete, never unsound).
             let candidates: Vec<&RecordShape> = others
                 .iter()
-                .filter(|b| b.tags & MAP_BIT != 0 && b.map_kv.is_none())
+                .filter(|b| b.tags & tag_bit != 0 && b.map_kv.is_none())
                 .filter_map(|b| b.fields.as_deref())
                 .collect();
             if record_covered_by(shape, &candidates) {
@@ -4886,13 +4939,14 @@ fn merge_is_exact(a: &Ty, b: &Ty) -> bool {
     let (fa, fb) = (a.tags & FN_BITS != 0, b.tags & FN_BITS != 0);
     let (sa, sb) = (a.tags & SEQ_BITS != 0, b.tags & SEQ_BITS != 0);
     let (ma, mb) = (a.tags & MAP_BIT != 0, b.tags & MAP_BIT != 0);
+    let (ra, rb) = (a.tags & SHAPE_BITS != 0, b.tags & SHAPE_BITS != 0);
     let (va, vb) = (a.tags & VECTOR_BIT != 0, b.tags & VECTOR_BIT != 0);
     let (pa, pb) = (a.tags & PAIR_BIT != 0, b.tags & PAIR_BIT != 0);
     !contested(fa, &a.arrow, fb, &b.arrow)
         && !contested(fa, &a.overload, fb, &b.overload)
         && (!contested(sa, &a.elem, sb, &b.elem) || elem_union_exact(a, b).is_some())
         && !contested(ma, &a.map_kv, mb, &b.map_kv)
-        && !contested(ma, &a.fields, mb, &b.fields)
+        && !contested(ra, &a.fields, rb, &b.fields)
         && (!contested(va, &a.tuple, vb, &b.tuple)
             || positional_union_is_exact(&a.tuple, a.tags, &b.tuple, b.tags, VECTOR_BIT))
         && (!contested(pa, &a.list_shape, pb, &b.list_shape)
@@ -5431,6 +5485,13 @@ impl GradualTy {
             // use of an untyped parameter.
             let by_exclusion = term.is_known_only_by_exclusion();
             if strict && !by_exclusion {
+                // The unknown keyed part (`map | record`, nothing known of either) is read
+                // by overlap; the rest of the term strictly.
+                if let Some(rest) = term.without_unknown_keyed() {
+                    let keyed = Ty::of(Tag::Map).union(Ty::of(Tag::Record));
+                    return !keyed.is_disjoint(&expected)
+                        && (rest.is_never() || rest.is_consistent_subtype(&expected));
+                }
                 return term.is_consistent_subtype(&expected);
             }
             // **A failure is never a valid materialisation** of a domain that excludes

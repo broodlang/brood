@@ -222,11 +222,11 @@ another Lisp has it.
    ability unless the choice depends on more than the first argument (a symmetric binary
    operator). The rule is in `language.md` §Polymorphism, and `nest check` reports a
    `defmulti` whose methods vary only the first argument, an ability written the long way.
-8. 🚧 **What a record is (2026-11-04, ADR-542 — in progress).** Decided: a record is its own value
-   kind (`type-of` `:record`, printed `#point{…}`), so no map operation can see or forge an
-   identity. Steps 1 (the kernel kind) and 2 (`defrecord` builds one; the map operations,
-   the VM/JIT `get`/`assoc` and node links carry one) are in; the checker's move to a `Record`
-   tag is next. Original item:
+8. ✅ **What a record is (2026-11-04, ADR-542).** A record is its own value kind (`type-of`
+   `:record`, printed `#point{…}`), so no map operation can see or forge an identity:
+   `defrecord` builds one; the map operations, the VM/JIT `get`/`assoc` and node links carry
+   one; and the checker types it by the `record` tag (`record?` narrows both branches, a
+   record is never a `map<K, V>`). Original item:
    **What a record is.** A record is a map with a reserved `:__id__` key: `type-of` is
    `:map`, but `=` is nominal. Audit which map operations expose `:__id__` (`keys`,
    `count`, `seq`, `merge` with a plain map, `into {}`, `pr-str`, JSON encoding) and make

@@ -325,7 +325,7 @@ Always true for `n` <= 0.
     (%impl-exact? '[Conjable conj-onto] (%identity-of coll)) (conj-onto coll x)
     else (error "conj: not a collection: " (pr-str coll))))
 
-(defn conj (coll: (or list vector set map) & xs:any -> any)
+(defn conj (coll: (or list vector set map record) & xs:any -> any)
   "Add element(s) to `coll` at its natural insertion point (Clojure-style):
 APPEND to a vector, PREPEND to a list (`nil` counts as an empty list), ADD to a
 set (a duplicate is a no-op), and `assoc` a `[k v]` pair — or merge a map — into
@@ -529,13 +529,18 @@ prelude declares one, so `:derives` always names an ability from your own code."
                        (let (fnm (%defrecord-fname f))
                          (list '/sig
                            (%defrecord-acc-sym rec fnm)
-                           ;; `&open` (ADR-264): an accessor takes any record CARRYING
-                           ;; this field — a real value also has `:__id__` and every
-                           ;; sibling field, so a closed one-field shape would describe
-                           ;; no record at all. The constructor's RESULT stays closed:
-                           ;; the ctor builds exactly those keys, which is what lets a
-                           ;; field read through a union of records resolve.
-                           (list (list 'record '&open (keyword (->string fnm)) (%defrecord-ftype f))
+                           ;; `&open` (ADR-264): an accessor takes this record type
+                           ;; carrying the field — named by its `:__id__` (ADR-542: a
+                           ;; record is its own kind, so a shape without the id would be a
+                           ;; plain map's) — and every sibling field, so a closed one-field
+                           ;; shape would describe no record at all. The constructor's
+                           ;; RESULT stays closed: the ctor builds exactly those keys,
+                           ;; which is what lets a field read through a union resolve.
+                           (list (list 'record
+                                   '&open
+                                   :__id__ id
+                                   (keyword (->string fnm))
+                                   (%defrecord-ftype f))
                              '->
                              (%defrecord-ftype f))))))
                    nil)

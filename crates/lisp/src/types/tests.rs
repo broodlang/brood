@@ -2642,46 +2642,27 @@ fn two_recursive_types_meet_without_diverging() {
 }
 
 #[test]
-fn a_nominal_records_identity_is_not_one_of_its_map_entries() {
-    // `(pt 1 2)`: the hidden `:__id__` is skipped by keys/vals/count/seq and by the
-    // runtime contract, so the record is a `map<keyword, int>` over its fields alone…
+fn a_nominal_record_is_its_own_kind_never_a_map() {
+    // ADR-542: a shape carrying an identity literal is a record's type, tagged `record`, so
+    // it is no `map<K, V>` however its fields fit — the runtime agrees (`map?` is false).
     let identity = Ty::keyword_lit(value::intern("contract-test/c-pt"));
     let int_map = Ty::map_of(Ty::of(Tag::Keyword), Ty::of(Tag::Int));
-    for point in [
-        rec(&[
-            ("__id__", identity.clone(), true),
-            ("x", Ty::int_lit(1), true),
-            ("y", Ty::int_lit(2), true),
-        ]),
-        rec_open(&[("__id__", identity.clone(), true)]).intersect(int_map.clone()),
-    ] {
-        assert!(point.is_subtype(&int_map), "{point} ⊆ {int_map}");
-    }
-    // …and a closed key set needs only the field names.
-    let xy_map = Ty::map_of(src_ty("(or :x :y)"), Ty::of(Tag::Int));
-    let closed = rec(&[
+    let point = rec(&[
         ("__id__", identity.clone(), true),
-        ("x", Ty::of(Tag::Int), true),
+        ("x", Ty::int_lit(1), true),
+        ("y", Ty::int_lit(2), true),
     ]);
-    assert!(closed.is_subtype(&xy_map));
-    // A field outside V still fails it, and an `:__id__` that is not an identity is an entry.
-    let bad = rec(&[
-        ("__id__", identity.clone(), true),
-        ("x", Ty::of(Tag::Str), true),
-    ]);
-    assert!(!bad.is_subtype(&int_map));
+    assert!(point.is_subtype(&Ty::of(Tag::Record)), "{point} ⊆ record");
+    assert!(!point.is_subtype(&int_map), "{point} ⊄ {int_map}");
+    assert!(point.is_disjoint(&Ty::of(Tag::Map)));
+    // A map shape whose `__id__` holds no identity is a plain map, and that key an entry.
     let plain = rec(&[("__id__", Ty::of(Tag::Str), true)]);
+    assert!(plain.is_subtype(&Ty::of(Tag::Map)));
     assert!(!plain.is_subtype(&int_map));
-    // A nominal record is still NOT inside a structural shape that omits its identity.
+    // A nominal record is NOT inside a structural shape that omits its identity: the
+    // structural one is a map's.
     let structural = rec(&[("x", Ty::of(Tag::Int), true), ("y", Ty::of(Tag::Int), true)]);
-    assert!(
-        !rec(&[
-            ("__id__", identity, true),
-            ("x", Ty::of(Tag::Int), true),
-            ("y", Ty::of(Tag::Int), true)
-        ])
-        .is_subtype(&structural)
-    );
+    assert!(!point.is_subtype(&structural));
 }
 
 #[test]

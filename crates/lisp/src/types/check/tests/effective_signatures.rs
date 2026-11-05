@@ -135,7 +135,7 @@ fn file_signatures_reads_pattern_clauses() {
     // signature, so it is pinned rather than relaxed — a change to `conj`'s domain has to
     // come past this line on purpose.
     assert_eq!(
-        sigs[0].1, "(nil | pair | vector | map | set, string) -> any",
+        sigs[0].1, "(nil | pair | vector | map | set | record, string) -> any",
         "{sigs:?}"
     );
     // Two arms that agree on a position keep it: a literal head pins its type. The return
@@ -143,7 +143,7 @@ fn file_signatures_reads_pattern_clauses() {
     // call-site specialization test below that types it from what a combinator hands over.
     let sigs = signatures("(defn op ((acc \"+\") (conj acc 1)) ((acc \"-\") (conj acc 2)))");
     assert_eq!(
-        sigs[0].1, "(nil | pair | vector | map | set, string) -> any",
+        sigs[0].1, "(nil | pair | vector | map | set | record, string) -> any",
         "{sigs:?}"
     );
 }

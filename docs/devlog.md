@@ -5085,3 +5085,16 @@ record's `->seq` under `first` blocked its worker at tier 1 — `interrupt_one_w
 ±1.6% at the default tier. `make ab-vm`: `fib` −1.0%, `spawn-live` +0.2%, `collatz` +2.1%
 (inside its floor), and `pfib` +5–7.5% — but byte-identical binaries read +8.1% on `pfib` at
 tier 1 in the same session, so that row's spread is the measurement, not the change.
+
+2026-11-04 (ADR-542, step 3 — record kind done). The checker types a record by the `record` tag:
+a shape whose `__id__` slot holds an identity literal is built on `record`, every other shape on
+`map`, and the lattice's shape rules (union, intersection, complement, subtype, disjointness,
+canonical form, cover) run over both. `record?` became biconditional, so it narrows both
+branches and flags a test on a value that can never be a record (three runtime tests asked
+`(record? plain-map)` and now assert `(type-of …)` instead). The map primitives,
+`contains?` and `conj` take a record; a `defrecord` accessor's parameter carries the record's
+id; a keyword-keyed `assoc`/`update`/`dissoc` keeps its receiver's kind, and for a receiver
+that could be either answers the unknown keyed value `map | record` — which `--strict` reads by
+overlap, as it reads `any` (ADR-542 § The unknown keyed value; `map` was a guess a record
+falsified, and `any` put 148 strict findings on bedit). A mixed kind-and-record seal
+(`[:int usd]`) now keeps the record's id instead of widening to `map`.

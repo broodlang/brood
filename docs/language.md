@@ -575,7 +575,7 @@ present field is answered without asking. A plain map never consults `Lookup`, a
 > nominal, there is no structural path — you cannot `impl` an ability for "a map whose
 > `:kind` is `:circle`". If you are building a value on plain maps told apart by a tag
 > field and later want to dispatch on the kind, the move is to make it a `defrecord` first
-> (its predicate `circle?` and its `:__id__` then carry the identity), then `impl` against
+> (its predicate `circle?` and its `record-id` then carry the identity), then `impl` against
 > that. This is a deliberate constraint, not a gap — it keeps identity construction-time
 > and explicit — but it lands as a small refactor if you defer it, so prefer records for
 > any value you expect to dispatch on.
@@ -683,10 +683,10 @@ provable mismatch; anything whose type isn't pinned down defers — sound, no fa
 
 > **Members may be built-in kinds, not just records.** `impl` dispatches on either, so
 > `(defability Numeric :sealed [:int :float :decimal :ratio] …)` is legal, and such a member
-> denotes **its own lattice point** — an int, not a record carrying `:__id__ :int`. Mixing the
-> two in one seal works and accepts every member, but the record half widens to `map` in the
-> union, so a mixed seal trades `:__id__` precision for coverage. A purely-record seal keeps
-> it. (Until 2026-08-28 every member was turned into a record shape, so a kind-sealed
+> denotes **its own lattice point** — an int, not a record whose id is `:int`. Mixing the
+> two in one seal works and keeps both halves exact: `(defability Money :sealed [:int usd] …)`
+> types as `int | usd`, and a `eur` is a provable mismatch. (Until ADR-542 a record was a map
+> to the checker, so the record half of a mixed seal widened to `map`.) (Until 2026-08-28 every member was turned into a record shape, so a kind-sealed
 > ability's domain **rejected its own members** — `(use-it 42)` warned against
 > `{__id__: :int | :float}`, which no int is. Only passing a real member exposed it; the
 > exhaustiveness gate and non-member rejection both looked right.)
@@ -745,9 +745,12 @@ makes the whole expression a float (contagion wins). Declaring `int` over it is 
 for an even numerator that is correct, and proving it would need range analysis (ADR-011).
 
 **A record name is a type.** `(sig area (circle -> float))`, `:-> circle` — a record is the
-language's nominal type, so its name resolves in type position to the open shape
-`%{__id__: :ns/circle, …}`. Open, so a record carrying extra fields (`(assoc (circle 2) :z 3)`)
-is still one; a *different* record or a non-record is a provable mismatch. Both the bare
+language's nominal type, so its name resolves in type position to that record type: the
+`record` kind narrowed to one id, its fields open. Open, so a record carrying extra fields
+(`(assoc (circle 2) :z 3)`) is still one; a *different* record, a plain map or any other
+non-record is a provable mismatch. `record?` narrows both ways — to a record in the then
+branch, to what is left in the else branch — and a map type is never a record type, however
+its fields line up. Both the bare
 spelling (inside the declaring module) and the qualified one (`shapes/circle`) work; a bare
 name that two modules both claim **declines** rather than guessing, so it reads as an unknown
 type rather than the wrong one. A base type name outranks a record that took the same id — in

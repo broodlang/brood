@@ -36,7 +36,7 @@
     (assert= (record-id (update (point 1 2) :x inc)) :record-test/point)
     ;; the field views never show an id
     (assert= (sort (map/reduce-kv (point 1 2) [] (fn (acc k _) (conj acc k)))) (list :x :y))
-    (is (not (record? (map/select-keys (point 1 2) [:x])))))
+    (assert= :map (type-of (map/select-keys (point 1 2) [:x]))))
   (test "a record prints as #id{fields}, never as a map literal (ADR-542)"
     (is (string/starts-with? (pr-str (point 1 2)) "#record-test/point{"))
     (is (not (includes? (pr-str (point 1 2)) ":__id__"))))
@@ -73,10 +73,10 @@
   ;; `:__id__` — so the plain map came out as a `point` (record-kind.md §2).
   (test "a record poured into a plain map contributes its fields, never its identity"
     (let (plain (into {} (point 1 2)))
-      (refute (record? plain))
+      (assert= :map (type-of plain))
       (assert= plain {:x 1 :y 2}))
     (let (plain (into {:z 3} (point 1 2)))
-      (refute (record? plain))
+      (assert= :map (type-of plain))
       (assert= plain {:x 1 :y 2 :z 3})))
   (test "a record merged INTO a plain map leaves the result a plain map"
     (let (merged (merge {:z 1} (point 1 2)))
@@ -215,7 +215,7 @@
       (spawn (fn () (send me [(merge {:z 1} (point 1 2)) (merge (point 1 2) {:y 9})])))
       (receive
         ([plain updated] (do
-                           (refute (record? plain))
+                           (assert= :map (type-of plain))
                            (assert= plain {:x 1 :y 2 :z 1})
                            (assert= (record-id updated) :record-test/point)
                            (assert= (point-y updated) 9)))))))

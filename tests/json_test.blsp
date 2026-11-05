@@ -285,7 +285,7 @@
   ;; the key dropped.
   (test "an __id__ key stays a string key"
     (let (v (as-map (decode "{\"__id__\":\"http/response\",\"a\":1}")))
-      (is (not (record? v)))
+      (assert= :map (type-of v))
       (assert= "http/response" (get v "__id__"))
       (assert= 1 (get v :a))))
   (test "decode → encode round-trips the key"

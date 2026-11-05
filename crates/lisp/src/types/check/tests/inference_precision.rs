@@ -528,9 +528,17 @@ fn a_vector_literal_keeps_its_arity_over_unknown_elements() {
 // keeps the honest `vector | map`. This is every `(assoc (step m) :k v)` in an editor's
 // `model -> model` chain, and the strict finding at each of them.
 #[test]
-fn assoc_with_keyword_keys_on_an_unknown_receiver_is_a_map() {
-    assert_eq!(ty_str("(fn (x) (assoc x :k 1))"), "(any) -> map");
-    assert_eq!(ty_str("(fn (x) (assoc x 0 1))"), "(any) -> vector | map");
+fn assoc_with_keyword_keys_on_an_unknown_receiver_is_the_unknown_keyed_value() {
+    // A keyword-keyed update keeps its receiver's kind — a map stays a map, a record the
+    // same record (ADR-542) — so on a receiver nothing is known of, the answer is the
+    // unknown keyed value `map | record`, not `map`: that was a guess a record receiver
+    // falsified. A known kind answers by it.
+    assert_eq!(ty_str("(fn (x) (assoc x :k 1))"), "(any) -> map | record");
+    assert_eq!(ty_str("(fn (k) (assoc nil :k k))"), "(any) -> map");
+    assert_eq!(
+        ty_str("(fn (x) (assoc x 0 1))"),
+        "(any) -> vector | map | record"
+    );
     let src = "\
          (defmodule t)\n\
          (defn step (m) (assoc m :n 1))\n\
@@ -542,13 +550,16 @@ fn assoc_with_keyword_keys_on_an_unknown_receiver_is_a_map() {
 
 // `update` / `assoc-in` / `update-in` keep a record shape the way `assoc` and `dissoc`
 // do: the named field becomes unknown, the others keep their types, and on an unknown
-// receiver with a keyword key the answer is `map`.
+// receiver the answer is `map | record` (it may be either, and keeps its kind).
 #[test]
 fn update_and_assoc_in_keep_a_record_shape() {
-    assert_eq!(ty_str("(fn (x) (update x :k inc))"), "(any) -> map");
+    assert_eq!(
+        ty_str("(fn (x) (update x :k inc))"),
+        "(any) -> map | record"
+    );
     assert_eq!(
         ty_str("(fn (x) (map/assoc-in x [:a :b] 1))"),
-        "(any) -> map"
+        "(any) -> map | record"
     );
     let src = "\
          (defmodule t)\n\
@@ -612,7 +623,7 @@ fn a_dynamic_key_on_a_known_map_keeps_it_a_map() {
     );
     assert_eq!(
         ty_str("(fn (m k) (update m k inc))"),
-        "(any, any) -> vector | map"
+        "(any, any) -> vector | map | record"
     );
 }
 
@@ -1167,4 +1178,43 @@ fn a_self_call_is_typed_under_the_functions_own_demands() {
         about("want-int: argument 1 expects int, got number"),
         "{strict:?}"
     );
+}
+
+// The unknown keyed value (ADR-542): `map | record` with nothing known of either is "some map
+// or record" — a parameter only read by keyword, an update of an unknown receiver. Strict reads
+// it by overlap, at the top and nested in a field, so it passes on to a map shape or a record
+// type; it is still keyed, so a non-keyed parameter rejects it in both modes, and a value
+// whose kind IS known is still read exactly.
+#[test]
+fn the_unknown_keyed_value_is_read_by_overlap_under_strict() {
+    // `sync`'s parameter is derived from its caller, which hands it the unknown keyed value
+    // (an update of an unknown); `nested` puts one in a field the declaration says is a map.
+    let src = "\
+         (defmodule t)\n\
+         (deftype model (record &open :layout map))\n\
+         (sig idx (map string -> any))\n\
+         (defn idx (m s) 1)\n\
+         (defn bump (r) (assoc r :seen true))\n\
+         (defn- sync (m) (if (nil? (idx m \"x\")) m m))\n\
+         (defn go (x) (sync (bump x)))\n\
+         (sig nested (model any -> model))\n\
+         (defn nested (m l) (assoc m :layout (bump l)))";
+    let strict = file_warnings_mode(src, true);
+    assert!(strict.is_empty(), "{strict:?}");
+    let wrong = file_warnings_mode(
+        "(defmodule t)\n(defn bump (r) (assoc r :seen true))\n(defn f (x) (+ 1 (bump x)))",
+        true,
+    );
+    assert!(
+        wrong
+            .iter()
+            .any(|w| w.contains("expects number, got map | record")),
+        "{wrong:?}"
+    );
+    let map_into_record = file_warnings_mode(
+        "(defmodule t)\n(defrecord usd ((cents int)))\n(sig cents (usd -> int))\n\
+         (defn cents (u) (:cents u))\n(defn f () (cents {:cents 1}))",
+        true,
+    );
+    assert!(!map_into_record.is_empty(), "a known map is no record");
 }

@@ -850,19 +850,19 @@ fn a_bare_path_test_narrows_the_path_by_truthiness() {
     );
 }
 
-// `record?` holds for a `defrecord` value — a map — and FAILS for a plain map, so it
-// narrows the then-branch to `map` and its negation proves nothing: a guard whose else
-// branch read `¬map` made `(map? x)` there "never true", and `(seq/reject xs record?)`
-// dropped every map. `Ty::implied_by` is the one-sided table beside `tested_by`.
+// `record?` is biconditional since a record is its own kind (ADR-542): it narrows the
+// then-branch to the record and the else-branch to what is left, so a later `(map? x)` there
+// reads a map, and `(seq/reject xs record?)` keeps every map. On a value that can never be a
+// record, the guarded branch is dead — which `record?` could not say while a record was a map.
 #[test]
-fn a_record_guard_narrows_the_then_branch_only() {
+fn a_record_guard_narrows_both_branches() {
     let ws = file_warnings_mode(
         "\
          (defmodule t)\n\
          (defrecord usd ((cents int)))\n\
          (sig f ((or number usd) -> int))\n\
-         (defn f (x) (if (record? x) (get x :cents 0) 0))\n\
-         (sig g ((or number map) -> int))\n\
+         (defn f (x) (if (record? x) (get x :cents 0) (if (> x 0) 1 0)))\n\
+         (sig g ((or number map usd) -> int))\n\
          (defn g (x) (if (record? x) 1 (if (map? x) 2 3)))\n\
          (sig h ((list (or number map)) -> (list (or number map))))\n\
          (defn h (xs) (seq/reject xs record?))",
@@ -870,12 +870,16 @@ fn a_record_guard_narrows_the_then_branch_only() {
     );
     assert!(ws.is_empty(), "{ws:?}");
     assert_eq!(
-        ty_str("(seq/filter (list 1 {:a 1}) record?)"),
-        "nil | list<{a: 1}>"
-    );
-    assert_eq!(
         ty_str("(seq/reject (list 1 {:a 1}) record?)"),
         "nil | list<1 | {a: 1}>"
+    );
+    let dead = file_warnings_mode(
+        "(defmodule t)\n(sig k ((or number map) -> int))\n(defn k (x) (if (record? x) 1 2))",
+        true,
+    );
+    assert!(
+        dead.iter().any(|w| w.contains("never be record")),
+        "{dead:?}"
     );
 }
 

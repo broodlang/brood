@@ -557,7 +557,9 @@ fn check_dispatch_hooks(
 /// nil (empty).
 fn keyed_receiver() -> Ty {
     use crate::types::Tag;
+    // A record is keyed by its fields (ADR-542).
     Ty::of(Tag::Map)
+        .union(Ty::of(Tag::Record))
         .union(Ty::of(Tag::Set))
         .union(Ty::of(Tag::Nil))
 }
@@ -625,7 +627,7 @@ fn check_keyword_get(
         out.push((
             arg_pos(heap, items[1], form),
             format!(
-                "get: a keyword key needs a map, set or nil, got {} ({}) — an \
+                "get: a keyword key needs a map, record, set or nil, got {} ({}) — an \
                  integer-indexed collection is indexed by position",
                 gradual.bound,
                 crate::syntax::printer::print(heap, items[1]),

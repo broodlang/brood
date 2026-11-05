@@ -231,23 +231,24 @@ impl fmt::Display for Ty {
         // `tags == MAP_BIT` branch below knows to render one by name; listing the tags
         // would print it as the bare `map` and lose the one word that matters. Split the
         // term into its map projection and everything else, each rendered by its own rule.
+        let shape_bit = self.shape_bit();
         if self.record_fields().is_some()
             && self.neg.is_none()
-            && self.tags != MAP_BIT
-            && self.tags & MAP_BIT != 0
+            && shape_bit != 0
+            && self.tags != shape_bit
         {
             let rest = (0..32)
                 .map(|i| 1u32 << i)
-                .filter(|b| self.tags & b != 0 && *b != MAP_BIT)
+                .filter(|b| self.tags & b != 0 && *b != shape_bit)
                 .fold(Ty::NEVER, |acc, b| acc.union(self.project_tag(b)));
-            return write!(f, "{rest} | {}", self.project_tag(MAP_BIT));
+            return write!(f, "{rest} | {}", self.project_tag(shape_bit));
         }
         // A record shape: `{name: string, age?: int}` — `?` marks an
         // optional field. `fields` is keyed by interned `Symbol` (intern
         // order, not alphabetical — same trap `lit` avoids below), so sort
         // by spelling for a stable rendering.
         if let Some(fields) = self.record_fields()
-            && self.tags == MAP_BIT
+            && (self.tags == MAP_BIT || self.tags == RECORD_BIT)
         {
             // A record's NAME is its type. `{__id__: :shapes/circle, ...}` renders the
             // REPRESENTATION: `:__id__` is how nominal identity is *carried*, not
@@ -675,14 +676,15 @@ impl Ty {
         // A record riding in a wider term (`number | t/usd`, an operator's domain once a
         // record has a `num/add` method — ADR-299): spell the map member by the record
         // rule below and the rest by theirs, as one flat `(or …)`.
+        let shape_bit = self.shape_bit();
         if self.record_fields().is_some()
             && self.neg.is_none()
-            && self.tags != MAP_BIT
-            && self.tags & MAP_BIT != 0
+            && shape_bit != 0
+            && self.tags != shape_bit
         {
             let rest = (0..32)
                 .map(|i| 1u32 << i)
-                .filter(|b| self.tags & b != 0 && *b != MAP_BIT)
+                .filter(|b| self.tags & b != 0 && *b != shape_bit)
                 .fold(Ty::NEVER, |acc, b| acc.union(self.project_tag(b)));
             // Both halves may be unions of their own; one flat `(or …)` reads best.
             fn flat(source: String) -> String {
@@ -693,10 +695,10 @@ impl Ty {
                     .unwrap_or(source)
             }
             let rest = flat(rest.to_source()?);
-            let record = flat(self.project_tag(MAP_BIT).to_source()?);
+            let record = flat(self.project_tag(shape_bit).to_source()?);
             return Some(format!("(or {rest} {record})"));
         }
-        if self.tags == MAP_BIT {
+        if self.tags == MAP_BIT || self.tags == RECORD_BIT {
             if let Some((k, v)) = self.map_kv() {
                 let map = format!("(map {} {})", k.to_source()?, v.to_source()?);
                 // Beside a record shape the term is the INTERSECTION of the two; the

@@ -176,7 +176,10 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     }
     put(
         "contains?",
-        Sig::new(vec![Ty::of_tags(&[Tag::Map, Tag::Set]), any], bool_ty),
+        Sig::new(
+            vec![Ty::of_tags(&[Tag::Map, Tag::Record, Tag::Set]), any],
+            bool_ty,
+        ),
     );
     //   get — the polymorphic accessor, and it had NO signature at all: it is
     //   multi-arity (3 arms) and `infer_sig` bails on multi-arm closures, so its

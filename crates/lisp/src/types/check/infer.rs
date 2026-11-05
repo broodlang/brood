@@ -1496,6 +1496,15 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         "keys" if len == 2 => keys_ty(heap, items, ctx),
         "vals" if len == 2 => vals_ty(heap, items, ctx),
         "dissoc" if len >= 3 => dissoc_ty(heap, items, ctx),
+        // The keyed-update primitives answer with their receiver's kind: a map stays a map
+        // and a record the same record (ADR-542). Their declared result is `map | record`,
+        // the union over every receiver.
+        "%map-assoc" | "%map-dissoc" | "%map-int-add" | "%map-into" if len >= 3 => {
+            let receiver = expr_ty(heap, items[1], ctx)?;
+            receiver
+                .is_subtype(&keyed_kinds())
+                .then(|| keyed_result(Some(&receiver)))
+        }
         name @ ("update" | "map/assoc-in" | "map/update-in") if len >= 3 => {
             update_ty(heap, name == "update", items, ctx)
         }
@@ -2366,7 +2375,13 @@ fn vals_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
 /// remaining fields are still all present.
 fn dissoc_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
     let map_ty = expr_ty(heap, *items.get(1)?, ctx);
-    let shape = record_shape_of(map_ty.as_ref())?;
+    let Some(shape) = record_shape_of(map_ty.as_ref()) else {
+        // No shape to keep: the receiver's kind, when it is known to be keyed.
+        return map_ty
+            .as_ref()
+            .filter(|t| t.is_subtype(&keyed_kinds()))
+            .map(|t| keyed_result(Some(t)));
+    };
     let removed = literal_keyword_args(&items[2..])?;
     let mut fields = shape.fields;
     for name in removed {
@@ -2412,16 +2427,16 @@ fn update_ty(heap: &Heap, is_update: bool, items: &[Value], ctx: &Ctx) -> Option
             });
         }
         if map_ty.as_ref().and_then(Ty::map_kv).is_none() {
-            return Some(Ty::of(Tag::Map));
+            return Some(keyed_result(map_ty.as_ref()));
         }
     } else if map_ty
         .as_ref()
-        .is_some_and(|t| t.is_subtype(&Ty::of(Tag::Map)))
+        .is_some_and(|t| t.is_subtype(&keyed_kinds()))
     {
-        // A DYNAMIC key on a known map — `(update m (:key spec) …)`. Which field
-        // changed is unknown, so the shape cannot be kept; but the result is a map,
-        // never the `vector | map` of `update`'s body.
-        return Some(Ty::of(Tag::Map));
+        // A DYNAMIC key on a known map or record — `(update m (:key spec) …)`. Which field
+        // changed is unknown, so the shape cannot be kept; but the result is the
+        // receiver's kind, never the `vector | map` of `update`'s body.
+        return Some(keyed_result(map_ty.as_ref()));
     }
     // `assoc-in` / `update-in` keep a VECTOR node a vector (updated by index) and turn
     // any other node into a map. So a receiver that cannot be a vector answers `map`,
@@ -2431,7 +2446,7 @@ fn update_ty(heap: &Heap, is_update: bool, items: &[Value], ctx: &Ctx) -> Option
     if !is_update {
         let vector = Ty::of(Tag::Vector);
         match map_ty.as_ref() {
-            Some(t) if t.is_disjoint(&vector) => return Some(Ty::of(Tag::Map)),
+            Some(t) if t.is_disjoint(&vector) => return Some(keyed_result(Some(t))),
             None => return Some(Ty::ANY),
             Some(t) if *t == Ty::ANY => return Some(Ty::ANY),
             Some(_) => {}
@@ -2524,18 +2539,50 @@ fn assoc_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
         }
         return Some(Ty::map_of(key_ty, val_ty));
     }
-    // No usable receiver type but every key a literal keyword: the result is a `map`.
-    // `assoc`'s body is `(if (vector? coll) (%vector-assoc …) (%map-assoc …))`, but
-    // `%vector-assoc` RAISES on a keyword index, so a keyword-keyed call that returns
-    // at all returns a map.
+    // No usable receiver type but every key a literal keyword: the result is a map or a
+    // record — `assoc`'s body is `(if (vector? coll) (%vector-assoc …) (%map-assoc …))`,
+    // `%vector-assoc` RAISES on a keyword index, and `%map-assoc` keeps a record a record
+    // (ADR-542) — so a keyword-keyed call that returns at all returns the receiver's kind.
     if literal_keyword_pairs(&items[2..]).is_some()
         || map_ty
             .as_ref()
-            .is_some_and(|t| t.is_subtype(&Ty::of(Tag::Map)))
+            .is_some_and(|t| t.is_subtype(&keyed_kinds()))
     {
-        return Some(Ty::of(Tag::Map));
+        return Some(keyed_result(map_ty.as_ref()));
     }
     None
+}
+
+/// A map or a record — the kinds a keyed update (`assoc`, `update`, `dissoc`) answers with.
+fn keyed_kinds() -> Ty {
+    Ty::of(Tag::Map).union(Ty::of(Tag::Record))
+}
+
+/// The kind a keyed update of a receiver of type `receiver` returns, when its shape is not
+/// kept: a map for a map, the same record type (fields open — which field changed is not
+/// known) for a record (ADR-542). A receiver that could be either — an unannotated
+/// parameter read by keyword, typically — or that nothing is known of answers the unknown
+/// keyed value, `map | record` ([`Ty::without_unknown_keyed`]): the result is the SAME kind
+/// as the receiver, which no single kind can say, and strict reads it by overlap. A record
+/// never becomes a map by an update, nor a map a record.
+fn keyed_result(receiver: Option<&Ty>) -> Ty {
+    match receiver {
+        // `nil` is the empty map an update starts one from.
+        Some(t) if t.is_subtype(&Ty::of(Tag::Map).union(Ty::of(Tag::Nil))) => Ty::of(Tag::Map),
+        Some(t) if t.is_subtype(&Ty::of(Tag::Record)) => t
+            .record_fields()
+            .and_then(|fields| fields.get(&value::intern(crate::core::keywords::RECORD_ID)))
+            .map(|(id, _)| {
+                let mut fields = std::collections::BTreeMap::new();
+                fields.insert(
+                    value::intern(crate::core::keywords::RECORD_ID),
+                    (id.clone(), true),
+                );
+                Ty::record_of_open(fields)
+            })
+            .unwrap_or_else(|| Ty::of(Tag::Record)),
+        _ => keyed_kinds(),
+    }
 }
 
 /// `(string/->number "1")` is `1`, not `number | failure`: the declared signature admits
