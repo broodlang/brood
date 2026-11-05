@@ -360,6 +360,15 @@ jobs:
       matrix:
         partition: [1, 2]
     steps:
+      # The gui and gui-gpu test build, its nextest log and the rust cache outgrew the runner's
+      # free disk ("No space left on device", 2026-11-05) — as the tree-walker job did. The
+      # preinstalled toolchains this job never uses are ~30 GB.
+      - name: Free disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/share/powershell
+          df -h /
       - uses: actions/checkout@v7
 
       # System libraries for the --all-features surface: libasound2-dev for the

@@ -166,7 +166,7 @@
 (defn- latency-at (pairs total permille max-us)
   ;; the top of the first bucket (ascending `pairs`) whose running count reaches the
   ;; `permille`th input, never above the maximum; integer ranks, so p99 of 100 is the 99th
-  (let (rank (math/max 1 (math/quot (+ (* total permille) 999) 1000)))
+  (let (rank (math/max 1 (math/quot (math/round (+ (* total permille) 999)) 1000)))
     (letrec (walk (fn (left seen)
                     (if (empty? left)
                       max-us
@@ -353,7 +353,7 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
     (gui/pixel {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 30 1) (bytes/int-> 30 1) (bytes/int-> 46 1) (bytes/int-> 255 1))} 0 0)   ;=> [30 30 46]"
   (when (and (>= x 0) (>= y 0) (< x (:width image)) (< y (:height image)))
     (let (rgba (:rgba image)
-          at (* 4 (+ x (* y (:width image)))))
+          at (math/round (* 4 (+ x (* y (:width image))))))
       [(bytes/at rgba at) (bytes/at rgba (+ at 1)) (bytes/at rgba (+ at 2))])))
 
 ;; --- pixel space: the sprite / quad layer ---------------------------------------------
