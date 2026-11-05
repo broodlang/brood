@@ -16,16 +16,15 @@ rules, scoping — see [spec.md](spec.md).
 
 ## Coming from Clojure (the differences that bite)
 
-Brood's surface is deliberately Clojure-flavoured, so most Clojure reflexes
-transfer unchanged: nil/false-only truthiness, type-sensitive `=`
-(`(= 1 1.0)` is `false`), `:keyword`s, `cond` with flat test/expr pairs, the
-`->` threading macro, and quasiquote with `` ` `` / `~` / `~@` (Clojure's
-choice, not Common Lisp's `,` / `,@`).
+Brood is its own language, not a Clojure dialect. Its surface will look familiar to a
+Clojure reader, and many reflexes carry over: nil/false-only truthiness, type-sensitive
+`=` (`(= 1 1.0)` is `false`), `:keyword`s, `cond` with flat test/expr pairs, the `->`
+threading macro, and quasiquote with `` ` `` / `~` / `~@` (not Common Lisp's `,` / `,@`).
 
-The catch is that a few core forms borrow from Scheme / Common Lisp instead, in
-exactly the spots where a Clojure habit produces valid-looking code that fails
-**silently or with a misleading error**. If you (or an LLM) write Clojure here,
-these are the ones to unlearn:
+Where Brood chose differently, the choice is deliberate, and each row below says why or
+links the decision. They are listed because a Clojure habit in those spots produces
+valid-looking code that fails **silently or with a misleading error**. If you (or an LLM)
+write Clojure here, these are the ones to unlearn:
 
 | Clojure habit | Brood reality | What you get if you guess wrong |
 |---|---|---|
@@ -47,6 +46,13 @@ these are the ones to unlearn:
 | `0x1F`/`0b1010`/`0o17` radix literals | **Yes** (ADR-334) — they read as plain ints: `0xFF` → `255`, `0b1010` → `10`, `0o17` → `15`, signed forms too. The radix is spelling, not a type — `(type-of 0xFF)` is `:int` and it prints back as `255`. Past `i64` it is a bignum, like an oversized decimal literal. | Malformed digits (`0b102`, `0xZZ`, a bare `0x`) are a parse error **with a per-radix hint**, never a symbol. |
 | `1_000` separators, `1N` bigint | Neither — a digit-led token must be a number Brood has. `1000` needs no separator; plain `1` already widens to bignum. | A parse error **with a targeted hint** (ADR-169; these read as symbols before, surfacing as a far-away "unbound symbol"). Reserving the tokens is what let ratios (ADR-196) and radix literals (ADR-334) ship additively; the same holds for whatever comes next. |
 | `(/ 7 2)` → ratio `7/2` | **Yes — this is what happens** (ADR-196). `/` on integers is exact: `(/ 7 2)` → `7/2`, `(/ 12 3)` → `4` (divides evenly → int). `1/2` is a reader literal. Reach for `->float` when you want an inexact result. | A ratio, exactly as in Clojure/Scheme. |
+| `(map f coll)`, `(reduce f init coll)`, `(->> coll (map f) …)` | **The collection comes first**, in every collection function: `(map xs f)`, `(fold xs init f)`, `(reduce xs init f)`, `(seq/filter xs pred)`. With one argument convention there is one pipe, `->`, and `$` places the threaded value anywhere else: `(-> n (- 100 $))`. There is no `->>` (ADR-308): Brood's `map` takes exactly one collection, so nothing forces a collection-last order. A callback's own parameters keep the familiar order, `(fn (acc x) …)`. | `(map inc xs)`: `nest check` reports the argument types, and at run time `seq: expected a collection, got :fn`. `->>` is an unbound symbol. |
+| `(condp = x 1 :a 2 :b)` | **The subject comes first**, as in `case` and `match`: `(condp x = 1 :a 2 :b)`. Each test runs as `(pred x test)`, value first like every data-first predicate: `(condp line string/starts-with? "#" :heading "-" :item :text)`. | Usually `cannot call non-function` on the subject. Its hint is about `f(x)` call syntax, not the cause; swap the first two arguments. |
+| `(cond … :else x)` | The catch-all is the bare symbol **`else`**. `cond` refuses any constant test when it expands (ADR-518): a truthy one always runs, and a falsy one never can, so a constant there is always a mistake. A keyword is a constant. | A compile error that names `else`. |
+| `(or (parse s) default)` for a parse that can fail | A function that cannot interpret its input returns a **failure** value (`(string/->number "x")`, ADR-310), and a failure is **truthy**: `nil` means absence, a failure means a value could not be produced, and the two are kept apart. Say which one you mean: `(if (failure? n) 0 n)`, or narrow by type, `(if (int? n) n 0)`. See [Truthiness](#truthiness). | `nest check` warns that the failure tests true. Unchecked, the failure itself flows on as the value. |
+| `let` on an `*earmuffed*` var (Common Lisp, Emacs Lisp); bindings that follow work into a `future` | **`let` is always lexical**, even for a `defdyn` name; only `binding` rebinds dynamically. Dynamic bindings are **per-process**: a `spawn`ed child starts from the defaults, the way data is never shared between processes. To give a child a value, pass or send it. See [Dynamic variables](#dynamic-variables). | Silent: the callee or the child reads the default. |
+| `({:a 1} :a)`, `([10 20] 0)` | A **keyword** is callable, as an accessor: `(:a m)`, and `(map :name people)` (ADR-165). Nothing else data-like is: use `(get m :a)` and `(nth v 0)`. A callable map would be a second spelling of `get`, and a callable vector or set would answer by index or by membership, an ambiguity Brood refuses. | A clean error whose hint names `get` / `nth`. |
+| `()` as an empty list that is truthy and not `nil` | **`()` is `nil`**: `(= () nil)` is `true`, and the empty list is the one empty collection that is falsy (`[]`, `{}`, `#{}`, `""` are truthy). Test emptiness with `(empty? x)`, never a bare `(if x …)`. See [Truthiness](#truthiness). | Silent: an empty list result takes the else branch. |
 
 Within a *single* clause, optional and rest arguments use the Common-Lisp /
 Emacs-Lisp spelling (`&optional`, `&`), described under

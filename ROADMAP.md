@@ -269,7 +269,9 @@ another Lisp has it.
 
 #### C. Teaching — the "Coming from Clojure" table
 
-⬜ Add rows for the habits that are still wrong and are not yet in the table:
+✅ **Done (2026-11-05).** `docs/language.md`'s table has a row for each habit below, written
+as Brood's own design rather than a gap with Clojure (Brood is not a Clojure dialect), and
+`docs/brood-for-claude.md` carries the three it lacked. The rows it asked for:
 - collection-first argument order and the missing `->>`;
 - `condp` taking the value first;
 - `else` rather than `:else` (a constant `cond` test raises, ADR-518);

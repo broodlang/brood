@@ -1377,6 +1377,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   not Clojure's `require :as` aliasing.
 - **Not Scheme / CL**: no `setq`, no `cond`-with-`t`-catch-all: write `else`. Not
   Clojure's `:else` either — `cond` refuses any constant test (ADR-518).
+- **One pipe**: `->` (with `$` to place the value elsewhere); there is no `->>`, because
+  every collection function takes its collection first (ADR-308).
+- **`()` is `nil`**, so an empty list is falsy while `[]`, `{}`, `#{}` and `""` are truthy —
+  test emptiness with `empty?`.
+- **Dynamic scope is explicit and per-process**: `let` on a `defdyn` name is lexical (only
+  `binding` rebinds), and a `spawn`ed child starts from the defaults — send it the value.
 - **`sort` on heterogeneous / non-numeric items uses *structural* order.**
   `(sort coll)` is `<` for numbers, lexicographic for vectors/lists, text order
   for strings/symbols/keywords (so `(sort [[1 0] [2 1]])` works, no comparator

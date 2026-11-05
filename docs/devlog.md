@@ -5120,3 +5120,12 @@ admitted copy and refuses later ones (`RuntimeCode::suspend_latches`). The test 
 the sweep removed; with the fix, 0 of 172 921 primed runs failed (two Diagnose runs, the
 second on the final commits with no trace and four green full suites). Checked here: fmt, clippy, the
 `a_suspend_latch` unit tests, `doc_refs`, `process_wide_statics`; the loops ran on CI only.
+
+2026-11-05 (design pass item C). The "Coming from Clojure" table in `docs/language.md` has rows
+for collection-first order and the single `->` pipe (no `->>`, ADR-308), `condp`'s subject-first
+order, `else` (ADR-518), truthy failures (ADR-310), lexical `let` and per-process dynamic
+bindings, keywords as the only callable data (ADR-165), and `()` being `nil`. Each row is written
+as Brood's own design, with its reason, not as a gap with Clojure; the table's introduction now
+says Brood is its own language. Two findings, left unfixed: `condp` written in Clojure's order
+fails with a hint about `f(x)` call syntax that does not name the cause, and `->>` gets a bare
+"unbound symbol".
