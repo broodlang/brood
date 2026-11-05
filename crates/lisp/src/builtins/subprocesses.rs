@@ -55,6 +55,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "How pty child p's terminal is reading input right now: {:echo bool :canonical bool} — its termios ECHO flag (the line discipline echoes what is typed) and ICANON flag (input is read a line at a time). A program reading a password (sudo, ssh, getpass) turns echo off and keeps canonical mode for that read; a program with its own line editor (readline, a REPL in raw mode) turns both off. Returns nil when p is unknown or already closed, or off Unix, where nothing is known. Throws if p was spawned with pipes rather than a pty.",
         pty_mode);
     primitives.def(
+        "%program-path",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![string], map_ty, string.union(nil_ty)),
+        &["prog", "opts"],
+        "Where a child started with the options map opts (:cwd, :env as for %proc-spawn) finds prog — the resolver every spawn uses (ADR-607) — as the path found, or nil when nothing by that name can be run.",
+        program_path);
+    primitives.def(
         "%os-detach",
         Arity::range(2, 3),
         Sig::with_rest(vec![string, list_ty.union(vec_ty)], map_ty, nil_ty),
@@ -305,4 +312,17 @@ pub(super) fn proc_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     let id = expect_subprocess(heap, "os/close", arg(args, 0))?;
     crate::host::subprocess::close(id);
     Ok(Value::nil())
+}
+
+/// `(%program-path prog opts)` — where a spawn with `opts` finds `prog`, or nil: the
+/// resolver every spawn runs (ADR-607), so `os/which` cannot disagree with them.
+pub(super) fn program_path(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let program = expect_string(heap, "os/which", arg(args, 0))?;
+    let ChildOptions { cwd, env, .. } = child_options(heap, "os/which", arg(args, 1))?;
+    Ok(
+        match crate::host::subprocess::program::which(&program, cwd.as_deref(), &env) {
+            Some(found) => heap.alloc_string(&found.to_string_lossy()),
+            None => Value::nil(),
+        },
+    )
 }

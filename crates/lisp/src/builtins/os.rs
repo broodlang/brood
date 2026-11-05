@@ -332,9 +332,8 @@ pub(super) fn os_type_builtin(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispRe
 /// before reading any output deadlocks the moment the child emits more than one pipe
 /// buffer (~64 KiB) while still being fed.
 pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let prog = expect_string(heap, "%os-cmd", arg(args, 0))?;
-    let mut cmd = Command::new(&prog);
     let mut argv = Vec::new();
     if args.len() > 1 && !matches!(arg(args, 1), Value::Nil) {
         for a in heap.seq_items(arg(args, 1))? {
@@ -343,6 +342,11 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
     let super::subprocesses::ChildOptions { cwd, env, raw_args } =
         super::subprocesses::child_options(heap, "os/cmd", arg(args, 2))?;
+    let mut cmd =
+        crate::host::subprocess::program::command(&prog, cwd.as_deref(), &env).map_err(|e| {
+            LispError::runtime(format!("%os-cmd: {prog}: {e}"))
+                .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
+        })?;
     crate::host::subprocess::add_args(&mut cmd, &argv, raw_args);
     crate::host::subprocess::own_hidden_console(&mut cmd);
     // a responsive process is told it waited, or refused the wait (ADR-517)
@@ -1075,10 +1079,13 @@ pub(super) fn run_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let blocking = crate::process::responsive::enter_blocking(heap, "run-process", || {
         crate::process::responsive::command_detail(&prog, &argv)
     })?;
-    let status = std::process::Command::new(&prog)
-        .args(&argv)
-        .stdin(std::process::Stdio::null())
-        .status();
+    let status =
+        crate::host::subprocess::program::command(&prog, None, &[]).and_then(|mut command| {
+            command
+                .args(&argv)
+                .stdin(std::process::Stdio::null())
+                .status()
+        });
     if let Some(call) = blocking {
         call.report(heap);
     }

@@ -70,6 +70,7 @@ use crate::process::{
 
 #[cfg(windows)]
 mod conpty;
+pub mod program; // the one resolver: where os/which and every spawn find a program (ADR-607)
 
 /// What a registry entry keeps of a pty child's terminal, for `pty_resize` and
 /// `pty_input_mode`: on Unix the master fd, on Windows the pseudoconsole (ConPTY, KI-369).
@@ -1021,7 +1022,7 @@ pub fn detach(
     env: &[EnvEntry],
     raw: bool,
 ) -> std::io::Result<()> {
-    let mut command = Command::new(prog);
+    let mut command = program::command(prog, cwd, env)?;
     add_args(&mut command, args, raw);
     command
         .stdin(Stdio::null())
@@ -1052,7 +1053,7 @@ pub fn spawn(
     raw_args: bool,
     subscriber: u64,
 ) -> std::io::Result<u64> {
-    let mut command = Command::new(prog);
+    let mut command = program::command(prog, cwd, env)?;
     add_args(&mut command, args, raw_args);
     own_hidden_console(&mut command);
     command
@@ -1552,6 +1553,8 @@ pub fn spawn_pty(
 ) -> std::io::Result<u64> {
     use std::os::unix::process::CommandExt;
     let _ = raw_args;
+    // Found first: a program that is not there costs nothing to refuse.
+    let mut command = program::command(prog, cwd, env)?;
 
     // Before the spawn: once there is a child, every failure would have to clean it up.
     let lifecycle = Arc::new(Lifecycle::new(1)?);
@@ -1563,7 +1566,6 @@ pub fn spawn_pty(
     let (master, slave) = pty::open_pair()?;
     pty::set_winsize(std::os::fd::AsRawFd::as_raw_fd(&master), cols, rows)?;
 
-    let mut command = Command::new(prog);
     command
         .args(args)
         .stdin(pty::stdio_dup(&slave)?)

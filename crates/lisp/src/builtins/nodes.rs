@@ -205,13 +205,12 @@ pub(super) fn spit_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
         let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
         f.write_all(content.as_bytes()).map_err(err)?;
     }
-    // Windows: the file's DACL is replaced, before a byte is written, by one granting only
-    // the current user, protected from its directory's inherited entries — owner-only, as
-    // 0600 is (KI-365; the plain create took the directory's ACL).
+    // Windows: the file is CREATED with a DACL granting only the current user, protected
+    // from its directory's inherited entries — owner-only from its first moment, as 0600 is
+    // (KI-365); a file already there is made owner-only before it is emptied.
     #[cfg(windows)]
     {
-        let mut f = std::fs::File::create(&path).map_err(err)?;
-        crate::host::owner_only::restrict_to_owner(std::path::Path::new(&path), false)
+        let mut f = crate::host::owner_only::create_private_file(std::path::Path::new(&path))
             .map_err(err)?;
         f.write_all(content.as_bytes()).map_err(err)?;
     }
