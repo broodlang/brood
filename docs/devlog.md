@@ -5094,3 +5094,16 @@ never took, and watches the session rather than the loop), within 3 restarts a m
 owner's lifetime, so a served session's documents live in processes that outlive its loop and go
 with the session. bedit hosts a served session's buffers that way and auto-saves and restarts
 over them, as its window's lifeline does.
+2026-11-05 (KI-313 fixed). Reproduced on CI at last, and the trigger was the cache, not the load:
+once a full suite run has left its stdlib image in `~/.cache/brood`, the native-walk case alone
+fails in 86% of runs; on a cache the suite never touched it passes every time, which is every
+isolated loop anyone ran. The bail trace named two arms of `%vector-fold-walk`: the waiter
+latched its copy, and a second copy the root had compiled, which had adopted the walk's native
+code before the latch, blocked `late`'s worker. The latch is now the function's: each copy is
+admitted before it can go native (adopting, or queueing its compile), and a latch takes every
+admitted copy and refuses later ones (`RuntimeCode::suspend_latches`). The test also waits for
+`late` before spawning `woken`, since a latch lands on exit and the two walks overlapped (48 of
+15 548 failures). Guard `a_suspend_latch_reaches_every_copy_of_the_function`, red on CI with
+the sweep removed; with the fix, 0 of 172 921 primed runs failed (two Diagnose runs, the
+second on the final commits with no trace and four green full suites). Checked here: fmt, clippy, the
+`a_suspend_latch` unit tests, `doc_refs`, `process_wide_statics`; the loops ran on CI only.

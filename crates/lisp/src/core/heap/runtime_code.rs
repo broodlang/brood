@@ -115,6 +115,18 @@ pub(crate) enum LoadWrite {
     },
 }
 
+/// The runtime's suspend-host latches, per function (`RuntimeCode::suspend_latches`, KI-313).
+#[cfg(feature = "jit")]
+#[derive(Default)]
+pub(crate) struct SuspendLatches {
+    /// The `share_key`s latched: no copy of these goes native again in this runtime.
+    pub(super) latched: std::collections::HashSet<(u64, u16)>,
+    /// Every copy admitted toward native code under a key not yet latched — what the latch
+    /// takes off native code along with the copy that blocked.
+    pub(super) admitted:
+        HashMap<(u64, u16), Vec<std::sync::Weak<crate::eval::compile::CompiledArm>>>,
+}
+
 /// One OPEN module load's staging frame (KI-135, ADR-344): the bindings and registry
 /// results the load has produced so far — read by the loading process's own lookups before
 /// the table, by nobody else — and the ordered writes that publish it. A load is a
@@ -533,6 +545,15 @@ pub struct RuntimeCode {
     /// it on `def`/compaction just like the small-native cache. See
     /// [`Heap::jit_inline_lookup`] / [`Heap::jit_inline_publish`].
     pub(super) jit_inline_cache: RwLock<HashMap<(u64, u16), (usize, u64)>>,
+    /// The suspend-host latch per FUNCTION rather than per compiled copy (KI-313): the
+    /// `share_key`s whose native code has blocked a worker under a `receive`, and every copy
+    /// of an arm that may yet go native under a key not latched so far. A function can have
+    /// more than one `CompiledArm` at once — a recompile after a module load staled the
+    /// first (ADR-366), a peer compiling the same closure concurrently — and a latch on one
+    /// copy left the others native, so the next process through blocked its worker again.
+    /// See [`Heap::jit_suspend_admit`] and [`Heap::jit_suspend_latch_function`].
+    #[cfg(feature = "jit")]
+    pub(super) suspend_latches: Mutex<SuspendLatches>,
     /// User-declared `(sig name type)` signatures, keyed by the **module-qualified**
     /// global `Symbol` (the same key `def` produces for `name`) and holding the raw
     /// type-expression as a promoted RUNTIME `Value` (e.g. the `(int -> int)` form).
@@ -830,6 +851,8 @@ impl Default for RuntimeCode {
             jit_code_cache: RwLock::new(HashMap::new()),
             shared_closures: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
+            #[cfg(feature = "jit")]
+            suspend_latches: Mutex::new(SuspendLatches::default()),
             declared_sigs: RwLock::new(SymbolMap::default()),
             declared_sigs_version: AtomicU64::new(0),
             image_files: Mutex::new(HashMap::new()),
@@ -980,6 +1003,8 @@ impl RuntimeCode {
             jit_code_cache: RwLock::new(HashMap::new()),
             shared_closures: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
+            #[cfg(feature = "jit")]
+            suspend_latches: Mutex::new(SuspendLatches::default()),
             declared_sigs: RwLock::new(SymbolMap::default()),
             declared_sigs_version: AtomicU64::new(0),
             image_files: Mutex::new(HashMap::new()),

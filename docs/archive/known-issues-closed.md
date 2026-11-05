@@ -15999,3 +15999,61 @@ closure by it.
 `tests/plugin_registry_test.blsp` "bare closures a package registers from its processes and
 timers" — a closure from a worker the package's load spawned, from a timer's fire hook and from
 a process that hook started, each credited to the package and gone after its removal.
+## KI-313 — KI-309 again: `interrupt_one_worker`'s native-walk case blocked its worker twice ✅ FIXED 2026-11-05
+
+**Symptom.** `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` failed `<= dirty + 1`
+("a native walk blocked more than once") in the Nightly on `a1bced33` (run 41188576448, suite run
+3 of 3), with KI-309's fix in; the next Nightly on the same commit passed. 1980 isolated runs on
+the test machine passed.
+
+**Reproduced** on CI (Diagnose, `what=ki313`, branch `ki313-interrupt`). What decides it is the
+cache, not the load: after one full suite run has left its stdlib image
+(`~/.cache/brood/std-image-*.bin`) in the cache, the case alone fails in 86% of runs (9439 of
+10 909 in run 41928675391; 15 548 failures in run 41899292020, where a suite started beside the
+loop); on a runner whose cache the suite never touched it passes 0 of 73 000 times (runs
+41922281541, 41925654344). The bail trace of a failure:
+
+```
+[jit-bail] dirty-receive-block gateway-token=1 pid=2
+[jit-bail] arm=%vector-fold-walk uid=246 reason=suspend-latched
+[jit-bail] dirty-receive-block gateway-token=1 pid=4
+[jit-bail] arm=%vector-fold-walk uid=248 reason=suspend-latched
+```
+
+Two different arms of the one function: 15 500 of the 15 548 failures had this shape.
+
+**Cause.** The suspend-host latch took one `CompiledArm` off native code, and a function can
+have several at once. With the stdlib image cached, the root process compiled a second arm of
+`%vector-fold-walk` (uid 248) while the waiter (pid 2) ran its own copy, and 248 adopted the
+walk's published native code before the waiter blocked. The waiter's block latched its copy
+and retracted the published code (KI-309), but 248 already held it: `late` (pid 4) took 248
+from the shared closures, ran it natively and blocked its worker too. Why the root compiled a
+second copy in that setting was not pinned down (a recompile after a module load staled the
+first, ADR-366, is the likely route); copies are legitimate either way, which is why the fix
+does not depend on it.
+
+The other 48 failures were the test's own: two processes in the same native arm at once.
+A latch lands when the blocked activation exits, and `late` exits only once interrupted, while
+the program had already spawned `woken`, whose walk ran natively beside it and blocked too.
+
+**Why it survived.** The case passes on a fresh cache, which is every isolated loop (the test
+machine's 1980 runs, Diagnose's `repeat`). Only the suite writes the stdlib image, and the
+Nightly runs the case inside the suite, after other binaries have written it.
+
+**Fix.** The latch is the function's (`RuntimeCode::suspend_latches`). Every copy of an arm
+passes `Heap::jit_suspend_admit` before it can go native — adopting published code, or the
+election that queues its own compile — and the latch (`jit_latch_suspend_host`) marks the
+`share_key` and latches every admitted copy (`Heap::jit_suspend_latch_function`); a copy that
+asks after it is latched on the spot. One lock orders the two, and a copy latched between
+admission and install loses its compare-and-swap over `BAILED`. The latches are forgotten with
+the shared closures, since the key is a closure handle a freed generation recycles. And
+`waits_in_a_window` takes each waiter's answer before spawning the next, so no two walks
+overlap. The dirty-block trace line names the process, and the case's failure says how many
+blocks it saw.
+
+**Guard.** `a_suspend_latch_reaches_every_copy_of_the_function` (two copies admitted, one
+latched, the other must be too; a copy admitted afterwards is refused) — red on CI with the
+sweep removed (Diagnose 41933986722, "another copy of the latched function stayed native").
+The case itself, primed with a suite run: 0 of 83 845 runs failed with the fix and the bail
+trace armed (run 41933986722), and 0 of 89 076 on the final commits with no trace, after four
+green full suites (run 41939859441) — against 86% without the fix.

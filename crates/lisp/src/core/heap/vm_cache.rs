@@ -585,6 +585,8 @@ impl Heap {
             }
             m.clear();
         }
+        #[cfg(feature = "jit")]
+        self.jit_suspend_latches_clear();
     }
 
     /// Record the compile result for closure key `k` (eligible body or `None`). Any
@@ -1545,6 +1547,64 @@ impl Heap {
         if let Ok(mut cache) = self.runtime.jit_inline_cache.write() {
             cache.remove(&key);
         }
+    }
+
+    /// May `arm` head for native code? Asked at the two places a copy of an arm leaves the
+    /// untried state — adopting a peer's published native, and the election that queues
+    /// its own compile — so every copy that could ever run native passes here first
+    /// (KI-313). `false`: its function was suspend-latched, and so is this copy, now. `true`:
+    /// the copy is admitted, and a later latch of its function reaches it.
+    ///
+    /// One lock orders this against [`Self::jit_suspend_latch_function`]: an admission
+    /// either sees the key latched, or is in the list the latch sweeps. A copy the sweep
+    /// latches between its admission and its install loses that compare-and-swap
+    /// (`replace_code` over `BAILED` fails), so it never goes native. An arm with no
+    /// `share_key` has no other copies, and is admitted as before.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_suspend_admit(&self, arm: &Arc<crate::eval::compile::CompiledArm>) -> bool {
+        let Some(key) = arm.share_key else {
+            return true;
+        };
+        let mut latches = crate::core::sync::lock(&self.runtime.suspend_latches);
+        if latches.latched.contains(&key) {
+            drop(latches);
+            arm.latch_bailed("suspend-latched");
+            return false;
+        }
+        let copies = latches.admitted.entry(key).or_default();
+        copies.retain(|copy| copy.strong_count() > 0);
+        if !copies
+            .iter()
+            .any(|copy| std::ptr::eq(copy.as_ptr(), Arc::as_ptr(arm)))
+        {
+            copies.push(Arc::downgrade(arm));
+        }
+        true
+    }
+
+    /// Latch the function `key` names off native code for this runtime: every admitted
+    /// copy, and any copy admitted from now on ([`Self::jit_suspend_admit`]). The latch of
+    /// the copy that blocked is the caller's; this takes the rest (KI-313).
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_suspend_latch_function(&self, key: (u64, u16)) {
+        let copies = {
+            let mut latches = crate::core::sync::lock(&self.runtime.suspend_latches);
+            latches.latched.insert(key);
+            latches.admitted.remove(&key).unwrap_or_default()
+        };
+        for copy in copies.iter().filter_map(std::sync::Weak::upgrade) {
+            copy.latch_bailed("suspend-latched");
+        }
+    }
+
+    /// Forget every function latch: the key is a closure handle, which a freed generation
+    /// recycles for another function, so it goes when the shared closures do — latches and
+    /// all, as `shared-arms-dropped` says.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_suspend_latches_clear(&self) {
+        let mut latches = crate::core::sync::lock(&self.runtime.suspend_latches);
+        latches.latched.clear();
+        latches.admitted.clear();
     }
 
     /// Shared-JIT lookup for the **inlined** upgrade — the [`Self::jit_shared_lookup`]

@@ -426,8 +426,8 @@ fn jit_tier_in_frame_slow(
             }
         }
         // Over what was read, or not at all: a peer may have latched or installed this arm
-        // since (KI-309).
-        if !arm.replace_code(code, ptr) {
+        // since (KI-309) — or latched its function, which this copy then joins (KI-313).
+        if !heap.jit_suspend_admit(arm) || !arm.replace_code(code, ptr) {
             return None;
         }
         arm.shared_published.store(true, Relaxed); // already in the cache
@@ -551,6 +551,10 @@ fn jit_tier_in_frame_slow(
         arm.compile_relocations
             .store(heap.code_relocations(), Release);
         arm.compile_epoch.store(heap.global_epoch(), Release);
+        // A copy of a function another copy was suspend-latched for stays on the VM (KI-313).
+        if !heap.jit_suspend_admit(arm) {
+            return None;
+        }
         if arm
             .jit_code
             .compare_exchange(std::ptr::null_mut(), crate::jit::QUEUED, AcqRel, Acquire)

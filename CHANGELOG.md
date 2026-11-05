@@ -61,7 +61,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - A native loop whose callback had compiled natively before it first blocked in `receive`
   stops blocking its worker after that first time: one block now moves every native frame
   under it to the parking path, not only the innermost. (Found chasing KI-313, which this
-  turned out not to be; KI-313 is still watched.)
+  turned out not to be.)
+- A native loop that blocked its worker in `receive` stays off native code in every process,
+  whichever compiled copy of it each one runs (KI-313). The latch that moves it to the parking
+  path took one compiled copy off native code; a second copy of the same function, already
+  native, blocked the next process's worker again.
 - GUI: a background band one row tall at the window's edge bleeds sideways only, so a header
   line on the top row stays centred on its text (ADR-508).
 
