@@ -660,12 +660,11 @@ mod tests {
                     let header_x = 6 + 2 * image.cell.0;
                     assert_eq!(pixel(&image, header_x, top), HEADER, "{what}");
                     if !top_band {
-                        // the margin is the window's beside the header (column 0), and the
-                        // header's own colour above it (a band on row 0 bleeds up, as one on
-                        // the last row bleeds down)
+                        // the margin is the window's, above the header too: a band one row
+                        // tall does not bleed up
                         assert_eq!(pixel(&image, 6, top - 1), BACKGROUND, "{what}");
-                        assert_eq!(pixel(&image, 6, top), BACKGROUND, "{what}");
-                        assert_eq!(pixel(&image, header_x, 0), HEADER, "{what}");
+                        assert_eq!(pixel(&image, header_x, 0), BACKGROUND, "{what}");
+                        assert_eq!(pixel(&image, header_x, top - 1), BACKGROUND, "{what}");
                     }
                     // rows above the seam are top-anchored, the gap sits at the seam
                     for k in 0..seam as usize {

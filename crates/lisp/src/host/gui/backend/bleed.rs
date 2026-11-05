@@ -294,7 +294,9 @@ impl Band {
     fn pieces(&self, m: &Margins, vertical: bool) -> Vec<Op> {
         let left = m.left > 0.0 && self.x0 <= TOUCH;
         let right = m.right > 0.0 && self.x1 >= m.cols - TOUCH;
-        let top = vertical && m.top > 0.0 && self.y0 <= TOUCH;
+        // up only for a band taller than one row (a gutter, a pane background): a one-row band
+        // (the current line on row 0) bled up would sit its text low in a taller band
+        let top = vertical && m.top > 0.0 && self.y0 <= TOUCH && self.y1 - self.y0 > 1.0 + TOUCH;
         let bottom = vertical && m.bottom > 0.0 && self.y1 >= m.rows - TOUCH;
         let piece = |x: f32, y: f32, w: f32, h: f32| Op::FRect {
             x,
@@ -618,5 +620,9 @@ mod tests {
         // without one, nothing goes above row 0
         let flush_top = edge_bleed(&[rect(0, 0, 4, 1, [5, 5, 5])], &MARGINS).expect("bled");
         assert!(frects(&flush_top).iter().all(|piece| piece[1] >= 0.0));
+        // a band one row tall (the current line) does not bleed up even with one: its text
+        // would sit low in a taller band; it still bleeds sideways
+        let line = edge_bleed(&[rect(0, 0, 80, 1, [5, 5, 5])], &framed).expect("bled");
+        assert!(frects(&line).iter().all(|piece| piece[1] >= 0.0));
     }
 }

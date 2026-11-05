@@ -311,3 +311,23 @@ descriptions, empty when the rule holds."
                 (is (nil? (:seam image)))
                 (is (= (:row-tops image)
                       (vec (map (range (inc (second (:grid image)))) (fn (k) (* k cell-h))))))))))
+
+(describe "gui/render-frame — what bleeds into a top margin (ADR-610)"
+  (test "a one-row band on row 0 stays out of it; a taller band reaches the top edge"
+    (when-gui (fn ()
+                (let (spec (seam-spec 300 15)
+                      [cols rows] (:grid (gui/render-frame [[:clear] [:seam nil {:top-band false}]]
+                                           spec))
+                      image (gui/render-frame [[:clear]
+                                                [:seam (- rows 2) {:top-band false}]
+                                                [:rect 0 0 cols 1 {:bg seam-above}]
+                                                [:rect 0 0 3 (- rows 2) {:bg seam-body}]]
+                              spec)
+                      [cell-w _] (:cell image)
+                      line-x (+ 6 (* 10 cell-w))
+                      gutter-x (+ 6 cell-w))
+                  (is (= (first (:row-tops image)) 6))
+                  (is (every? (vec (range 0 6)) (fn (y) (= (gui/pixel image line-x y) capture-bg))))
+                  (is (= (gui/pixel image line-x 6) seam-above))
+                  (is (= (gui/pixel image gutter-x 0) seam-body))
+                  (is (= (gui/pixel image 0 0) seam-body)))))))
