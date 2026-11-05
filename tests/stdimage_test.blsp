@@ -254,7 +254,11 @@
     ;; subcommand, exit 2.) A regression test for KI-72 that never executes is worse than no
     ;; test, so resolve the real binary: beside the runner (`brood --test`, `nest test`) or
     ;; one level up (`target/release/deps/` → `target/release/`), and skip if absent.
-    (let (exe (sibling-binary "brood")
+    ;; Skipped (exe nil) in a run that loads std from SOURCE (BROOD_NO_STDIMAGE: the
+    ;; contracts-armed job, the weekly tree-walker): no image exists there, so the child has to
+    ;; build one from nothing (it failed there, 2026-11-05), and the race is an imaged run's to
+    ;; catch: every imaged run keeps this case.
+    (let (exe (when (not (os/env "BROOD_NO_STDIMAGE")) (sibling-binary "brood"))
           prog (path/temp "stdimage-race-")
           _ (file/spit prog
               (string/join ["(require-one 'stdimage) (stdimage/ensure)"
@@ -268,7 +272,7 @@
                              "      (system/halt 1))))"]
                 "\n"))
           code (if exe
-                 (os/run-process "env" ["-u" "BROOD_NO_STDIMAGE" "BROOD_STDIMAGE=1" exe prog])
+                 (os/run-process "env" ["BROOD_STDIMAGE=1" exe prog])
                  0))
       ;; `exe` nil means no brood binary beside the runner — a legitimate environment, not a
       ;; failure. Assert it separately so a skip is visible rather than silently green.
