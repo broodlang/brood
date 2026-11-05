@@ -173,7 +173,9 @@ fn frame_global(op: &Op) -> bool {
         | Op::Emitter { .. }
         | Op::Burst { .. }
         | Op::Seam { .. } => true,
-        Op::ScrollRegion { ops, .. } | Op::CellRegion { ops, .. } => ops.iter().any(frame_global),
+        Op::ScrollRegion { ops, .. } | Op::CellRegion { ops, .. } | Op::AboveSeam { ops } => {
+            ops.iter().any(frame_global)
+        }
         _ => false,
     }
 }

@@ -118,6 +118,7 @@ function walkOps(ops, f) {
     if (!Array.isArray(op)) continue;
     if (op[0] === "scroll-region") walkOps(op[2], f);
     else if (op[0] === "cell-region") walkOps(op[6], f);
+    else if (op[0] === "above-seam") walkOps(op[1], f);
     else f(op);
   }
 }
@@ -447,6 +448,10 @@ function paintOps(ops, ox, oy, cw, ch, dy) {
         paintOps(inner, ox, oy, cw, ch, Math.round(dyFrac * ch));
         break;
       }
+      case "above-seam":
+        // no leftover strip here (the tab's grid has no seam): the ops paint where they are
+        paintOps(op[1], ox, oy, cw, ch, dy);
+        break;
       case "cell-region": {
         // The region's own font size: scale the grid by px / FONT_PX and clip its rows.
         const [, x, y, w, h, px, inner] = op;

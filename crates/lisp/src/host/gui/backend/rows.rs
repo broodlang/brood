@@ -15,6 +15,12 @@
 //!   it, and the hit-test gives its pixels to row `seam - 1`. An editor declares its bottom
 //!   mode line as the seam, so the leftover is the text body's partial line, as Emacs and
 //!   VS Code give it to the text.
+//! - **A frame may paint the leftover as content** (ADR-615): ops in an `Op::AboveSeam`
+//!   group are laid out on the rows above the seam carried on uniformly ([`RowMap::uniform_rows`])
+//!   and cut off at the seam's row ([`RowMap::seam_top`]), so what they put on the seam's
+//!   row number shows its top in the strip — the next line, partly visible. The map then
+//!   says so ([`RowMap::partial`]): the strip's pixels are that row's to the hit-test,
+//!   flagged ([`RowMap::in_strip`]), rather than the row above's.
 //! - **No seam: the leftover sits under the last row**, which is the layout every frame
 //!   without an `Op::Seam` gets.
 //!
@@ -37,6 +43,9 @@ pub(crate) struct RowMap {
     seam: u16,
     /// The leftover pixels between row `seam - 1` and row `seam`.
     gap: usize,
+    /// Whether the frame paints the leftover with the next row of the text above it
+    /// (`Op::AboveSeam`, ADR-615): the strip is then that row's to the hit-test.
+    partial: bool,
 }
 
 impl RowMap {
@@ -48,6 +57,7 @@ impl RowMap {
             ch: ch.max(1),
             seam: u16::MAX,
             gap: 0,
+            partial: false,
         }
     }
 
@@ -55,7 +65,11 @@ impl RowMap {
     /// `inset` pixels of margin under the last row, and the frame's `seam`. The leftover is
     /// `h_px - inset - top - rows * ch`; a seam inside the grid puts it before that row, a
     /// seam of 0 (every row bottom-anchored) above row 0, and no seam (or one at or past
-    /// `rows`) under the last row, where it always was.
+    /// `rows`) under the last row, where it always was. `partial` is whether the frame
+    /// paints the leftover as content (an `Op::AboveSeam`, ADR-615).
+    ///
+    /// A seam inside the grid is kept with no leftover too: an `Op::AboveSeam` group is cut
+    /// off at it at every height, not only the ones with a strip to show.
     pub(crate) fn window(
         top: usize,
         ch: usize,
@@ -63,6 +77,7 @@ impl RowMap {
         inset: usize,
         h_px: usize,
         seam: Option<u16>,
+        partial: bool,
     ) -> RowMap {
         let ch = ch.max(1);
         let gap = h_px
@@ -70,7 +85,13 @@ impl RowMap {
             .saturating_sub(top + rows as usize * ch);
         match seam {
             Some(0) => RowMap::uniform(top + gap, ch),
-            Some(seam) if seam < rows && gap > 0 => RowMap { top, ch, seam, gap },
+            Some(seam) if seam < rows => RowMap {
+                top,
+                ch,
+                seam,
+                gap,
+                partial,
+            },
             _ => RowMap::uniform(top, ch),
         }
     }
@@ -87,6 +108,41 @@ impl RowMap {
         ]
     }
 
+    /// The rows above the seam carried on past it, with no gap: `top + row * ch` from the
+    /// same top. Where an `Op::AboveSeam` group's ops are laid out (ADR-615) — identical to
+    /// this map above the seam, so only what the group puts on the seam's row and below it
+    /// moves (up, into the strip).
+    pub(crate) fn uniform_rows(&self) -> RowMap {
+        RowMap::uniform(self.top, self.ch)
+    }
+
+    /// Where the seam's row begins — the strip's bottom edge, and the line an
+    /// `Op::AboveSeam` group is cut off at; `None` without a seam inside the grid.
+    pub(crate) fn seam_top(&self) -> Option<isize> {
+        (self.seam != u16::MAX).then(|| self.y(self.seam as isize))
+    }
+
+    /// The leftover strip's pixel rows `[top, bottom)` — between row `seam - 1`'s cell and
+    /// row `seam` — or `None` when there is none to show (no seam, or no leftover).
+    pub(crate) fn strip(&self) -> Option<(isize, isize)> {
+        let bottom = self.seam_top()?;
+        (self.gap > 0).then(|| (bottom - self.gap as isize, bottom))
+    }
+
+    /// Whether the frame paints the strip as content (`Op::AboveSeam`, ADR-615).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn partial(&self) -> bool {
+        self.partial
+    }
+
+    /// Whether window pixel row `py` is in the strip of a frame that paints it as content:
+    /// a pointer there is on the seam's row as the strip's ops laid it out — `Mouse::partial`.
+    pub(crate) fn in_strip(&self, py: f64) -> bool {
+        self.partial
+            && self
+                .strip()
+                .is_some_and(|(top, bottom)| py >= top as f64 && py < bottom as f64)
+    }
     /// The pixel row grid row `row` starts at — and, the same number, where row `row - 1`
     /// ends. THE row→pixel rule: `top + row * ch`, plus the gap from the seam down.
     /// Saturating, since a frame is app data and a row can be anything.
@@ -128,7 +184,23 @@ impl RowMap {
     /// `floor` of it is the row painted there. Each row is `[y(k), y(k + 1))`, and the
     /// fraction is the position inside that, so the gap's pixels are row `seam - 1`
     /// (whose backgrounds paint them), its fraction running over `ch + gap` pixels.
+    ///
+    /// When the frame paints the strip as content ([`RowMap::partial`], ADR-615) the gap's
+    /// pixels are the seam's row as the strip's ops laid it out instead — the top of it, so
+    /// the fraction runs from `seam` over `ch` pixels and stops short of `seam + 1` — and
+    /// row `seam - 1` is its own cell. [`RowMap::in_strip`] tells that row from the
+    /// bottom-anchored one of the same number.
     pub(crate) fn row_at(&self, py: f64) -> f64 {
+        if self.in_strip(py) {
+            let (top, _) = self.strip().unwrap_or((0, 0));
+            return self.seam as f64 + (py - top as f64) / self.ch as f64;
+        }
+        self.row_at_folded(py)
+    }
+
+    /// [`RowMap::row_at`] with the gap always folded into row `seam - 1`: the row whose span
+    /// `[y(k), y(k + 1))` holds `py`, which is what a damage strip is.
+    pub(crate) fn row_at_folded(&self, py: f64) -> f64 {
         let ch = self.ch as f64;
         let rel = (py - self.top as f64).max(0.0);
         if self.gap == 0 {
@@ -162,29 +234,70 @@ impl RowMap {
 
     /// The inverse of [`RowMap::window_y`]: window pixel row `py` in the grid's uniform
     /// space, the gap folded into row `seam - 1` as [`RowMap::row_at`] folds it. Above row
-    /// 0 it is negative (a pointer in the top margin is over no zone).
+    /// 0 it is negative (a pointer in the top margin is over no zone). Folded also when the
+    /// strip is content (ADR-615): in uniform space the strip's row is the seam's row, where
+    /// the bottom-anchored row's zones are, so a pointer in the strip takes the zones of the
+    /// row above it — an `Op::AboveSeam` group's zones stop at the seam (`collect_zones`).
     pub(crate) fn uniform_y(&self, py: f64) -> f64 {
         if py < self.top as f64 {
             py - self.top as f64
         } else {
-            self.row_at(py) * self.ch as f64
+            self.row_at_folded(py) * self.ch as f64
         }
     }
+}
+
+/// How a frame's rows sit in the window: what its `Op::Seam` declares, and whether it paints
+/// the leftover strip as content (an `Op::AboveSeam` anywhere a painter reaches it with the
+/// window's rows — at the top level, in a fragment, in a scroll region; ADR-615).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Layout {
+    pub(crate) seam: Option<u16>,
+    pub(crate) top_band: bool,
+    pub(crate) partial: bool,
+}
+
+impl Layout {
+    /// The layout of a frame with no `Op::Seam`: no seam, row 0 a band.
+    pub(crate) const PLAIN: Layout = Layout {
+        seam: None,
+        top_band: true,
+        partial: false,
+    };
 }
 
 /// The layout a frame declares: its first top-level `Op::Seam`'s row and top band, or no
 /// seam and row 0 a band (the layout of a frame without one). Top level only: `%gui-draw`
 /// splices a memoised fragment that holds one (`fragments::frame_global`), and inside a
-/// region a seam would mean nothing.
-pub(crate) fn frame_layout(frame: &[crate::host::gui::Op]) -> (Option<u16>, bool) {
-    frame
-        .iter()
-        .find_map(|op| match op {
-            crate::host::gui::Op::Seam { row, top_band } => Some((*row, *top_band)),
-            _ => None,
-        })
-        .unwrap_or((None, true))
+/// region a seam would mean nothing. `partial` is found wherever an `Op::AboveSeam` paints
+/// on the window's rows: a pane's text is usually memoised, so it is looked for in
+/// fragments too.
+pub(crate) fn frame_layout(frame: &[crate::host::gui::Op]) -> Layout {
+    let declared = frame.iter().find_map(|op| match op {
+        crate::host::gui::Op::Seam { row, top_band } => Some((*row, *top_band)),
+        _ => None,
+    });
+    match declared {
+        None => Layout::PLAIN,
+        Some((seam, top_band)) => Layout {
+            seam,
+            top_band,
+            partial: paints_above_seam(frame),
+        },
+    }
 }
+
+/// Whether `ops` hold an `Op::AboveSeam` on the window's rows.
+fn paints_above_seam(ops: &[crate::host::gui::Op]) -> bool {
+    use crate::host::gui::Op;
+    ops.iter().any(|op| match op {
+        Op::AboveSeam { .. } => true,
+        Op::ScrollRegion { ops, .. } => paints_above_seam(ops),
+        Op::Fragment(fragment) => paints_above_seam(&fragment.0),
+        _ => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,17 +305,17 @@ mod tests {
     /// 10 rows of 20 px under a 6 px inset in a 219 px window, the seam at row 8: the
     /// leftover is 219 - 6 - 200 = 13 px.
     fn seamed() -> RowMap {
-        RowMap::window(0, 20, 10, 6, 219, Some(8))
+        RowMap::window(0, 20, 10, 6, 219, Some(8), false)
     }
 
     #[test]
     fn without_a_seam_rows_are_top_anchored_and_the_leftover_is_below() {
-        let rows = RowMap::window(0, 20, 10, 6, 219, None);
+        let rows = RowMap::window(0, 20, 10, 6, 219, None, false);
         assert_eq!(rows.gap, 0);
         assert_eq!(rows.y(0), 0);
         assert_eq!(rows.y(10), 200);
         // a seam at or past the grid is the same layout
-        assert_eq!(RowMap::window(0, 20, 10, 6, 219, Some(10)), rows);
+        assert_eq!(RowMap::window(0, 20, 10, 6, 219, Some(10), false), rows);
     }
 
     #[test]
@@ -222,7 +335,7 @@ mod tests {
 
     #[test]
     fn a_seam_of_zero_anchors_every_row_to_the_bottom() {
-        let rows = RowMap::window(0, 20, 10, 6, 219, Some(0));
+        let rows = RowMap::window(0, 20, 10, 6, 219, Some(0), false);
         assert_eq!(rows.y(0), 13);
         assert_eq!(rows.y(10), 213);
     }
@@ -260,5 +373,47 @@ mod tests {
         assert_eq!(rows.y(isize::MAX), isize::MAX);
         assert_eq!(rows.y(isize::MIN), isize::MIN);
         let _ = rows.span(isize::MAX, isize::MAX);
+    }
+
+    /// ADR-615: with the strip painted as content, its pixels are the seam's row (flagged),
+    /// the row above is one cell again, and the rest of the map is unchanged.
+    #[test]
+    fn a_painted_strip_is_the_seams_row_to_the_hit_test() {
+        let rows = RowMap::window(0, 20, 10, 6, 219, Some(8), true);
+        assert!(rows.partial());
+        assert_eq!(rows.strip(), Some((160, 173)));
+        assert_eq!(rows.seam_top(), Some(173));
+        assert_eq!(
+            rows.uniform_rows().y(8),
+            160,
+            "the group's seam row is the strip"
+        );
+        // row 7 is its own cell
+        assert_eq!(rows.row_of(159.5), 7);
+        assert!(!rows.in_strip(159.5));
+        // the strip: row 8 as the group laid it out, its top part
+        for py in 160..173 {
+            let at = rows.row_at(py as f64 + 0.5);
+            assert!(rows.in_strip(py as f64 + 0.5), "pixel {py}");
+            assert_eq!(at.floor(), 8.0, "pixel {py}");
+            assert!((at - 8.0 - (py as f64 + 0.5 - 160.0) / 20.0).abs() < 1e-9);
+        }
+        // the bottom-anchored row 8 is not flagged
+        assert_eq!(rows.row_of(173.5), 8);
+        assert!(!rows.in_strip(173.5));
+        // zones fold the strip into the row above, as without a painted strip
+        assert_eq!(rows.uniform_y(165.0), seamed().uniform_y(165.0));
+        // and without the flag nothing changes
+        assert!(!seamed().in_strip(165.0));
+    }
+
+    /// A seam with no leftover is still a seam: an `AboveSeam` group is cut off at it.
+    #[test]
+    fn a_seam_with_no_leftover_is_kept() {
+        let rows = RowMap::window(0, 20, 10, 6, 206, Some(8), true);
+        assert_eq!(rows.seam_top(), Some(160));
+        assert_eq!(rows.strip(), None);
+        assert!(!rows.in_strip(160.0));
+        assert_eq!(rows.y(10), 200);
     }
 }
