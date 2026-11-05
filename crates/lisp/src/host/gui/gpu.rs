@@ -49,7 +49,7 @@ use winit::window::Window;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::host::gui::backend::{
-    CURSOR_FG, Renderer, caret_cells, caret_glyph, cursor_rim, holds_blinking_caret, luma,
+    CURSOR_FG, Renderer, RowMap, caret_cells, caret_glyph, cursor_rim, holds_blinking_caret, luma,
     paint_stall_ms, snap_hairline, text_px_width, text_units, unit_cells,
 };
 use crate::host::gui::effects::{EmitterStep, FrameEffects};
@@ -1286,8 +1286,9 @@ fn replay(fb: &mut FrameBuilder, quads: &[RunQuad], anchor_x: f32, anchor_y: f32
 /// Everything a fragment's quads depend on besides its ops — compared whole on a lookup.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct FragmentContext {
-    /// the grid it is expanded on (`Grid`: origin, cell size, scroll shift), as bits
-    grid: [u32; 5],
+    /// the grid it is expanded on (`Grid`: left edge, row map, cell size, scroll shift), as
+    /// bits
+    grid: [u32; 8],
     /// the clip band in effect and the viewport, which decide what was culled
     clip: [u32; 4],
     viewport: [u32; 2],
@@ -2100,17 +2101,29 @@ fn params_words(step: &EmitterStep, capacity: u32) -> [u32; 28] {
     ]
 }
 
-/// Where the ops being expanded land: the grid origin and cell size in effect (a
-/// `CellRegion` installs its own), the scroll shift an enclosing `ScrollRegion` applies,
-/// and the clip rect to restore when a region ends. The CPU painter threads the same
-/// values through `render_ops`.
+/// Where the ops being expanded land: the grid's left edge, its rows (`RowMap`, ADR-610:
+/// every row's pixel top) and cell size in effect (a `CellRegion` installs its own), the
+/// scroll shift an enclosing `ScrollRegion` applies, and the clip rect to restore when a
+/// region ends. The CPU painter threads the same values through `render_ops`.
 #[derive(Clone, Copy)]
 struct Grid {
     ox: f32,
-    oy: f32,
+    rows: RowMap,
     cw: f32,
     ch: f32,
     scroll_dy: f32,
+}
+
+impl Grid {
+    /// The pixel top of (fractional) row `row`, shifted by the scroll in effect.
+    fn top(&self, row: f32) -> f32 {
+        self.rows.yf(row) - self.scroll_dy
+    }
+
+    /// The pixel height of the rows `[row, row + n)` (`RowMap::spanf`).
+    fn span(&self, row: f32, n: f32) -> f32 {
+        self.rows.spanf(row, n)
+    }
 }
 
 /// How a device draws subpixel (LCD) text: in ONE pass with dual-source blending (each
@@ -3223,13 +3236,19 @@ impl GpuWindow {
     fn fragment_context(&self, fb: &FrameBuilder, renderer: &Renderer, g: Grid) -> FragmentContext {
         let metrics = renderer.metrics();
         FragmentContext {
-            grid: [
-                g.ox.to_bits(),
-                g.oy.to_bits(),
-                g.cw.to_bits(),
-                g.ch.to_bits(),
-                g.scroll_dy.to_bits(),
-            ],
+            grid: {
+                let [top, ch, seam, gap] = g.rows.key();
+                [
+                    g.ox.to_bits(),
+                    top,
+                    ch,
+                    seam,
+                    gap,
+                    g.cw.to_bits(),
+                    g.ch.to_bits(),
+                    g.scroll_dy.to_bits(),
+                ]
+            },
             clip: fb.clip.map(f32::to_bits),
             viewport: [fb.fw.to_bits(), fb.fh.to_bits()],
             metrics: [
@@ -3310,7 +3329,7 @@ impl GpuWindow {
                     let saved_clip = fb.clip;
                     // A shifted op is clipped at the grid origin, never painted into the
                     // inset above it — the CPU path's `clip_skip`.
-                    fb.clip[1] = fb.clip[1].max(g.oy);
+                    fb.clip[1] = fb.clip[1].max(g.rows.top as f32);
                     let inner = Grid {
                         scroll_dy: scroll_px(*dy_frac, g.ch),
                         ..g
@@ -3332,8 +3351,8 @@ impl GpuWindow {
                     if region.cell_w == 0 || region.cell_h == 0 {
                         continue;
                     }
-                    let top = g.oy + *y as f32 * g.ch - g.scroll_dy;
-                    let bottom = top + *h as f32 * g.ch;
+                    let top = g.top(*y as f32);
+                    let bottom = top + g.span(*y as f32, *h as f32);
                     let saved_clip = fb.clip;
                     fb.clip[1] = fb.clip[1].max(top).max(0.0);
                     fb.clip[3] = fb.clip[3].min(bottom);
@@ -3342,7 +3361,7 @@ impl GpuWindow {
                         renderer.set_metrics(region);
                         let inner = Grid {
                             ox: g.ox + *x as f32 * g.cw,
-                            oy: top.max(0.0),
+                            rows: RowMap::uniform(top.max(0.0) as usize, region.cell_h),
                             cw: region.cell_w as f32,
                             ch: region.cell_h as f32,
                             scroll_dy: 0.0,
@@ -3360,7 +3379,7 @@ impl GpuWindow {
                 // which together form one textured batch, then any underline. Shaped once
                 // and replayed while the run repeats (`draw_run`).
                 Op::Text { row, col, s, face } => {
-                    let top = g.oy + *row as f32 * g.ch - g.scroll_dy;
+                    let top = g.top(*row as f32);
                     self.draw_run(
                         fb,
                         renderer,
@@ -3384,9 +3403,9 @@ impl GpuWindow {
                     if let Some(bg) = bg {
                         let (x, y, pw, ph) = (
                             g.ox + *col as f32 * g.cw,
-                            g.oy + *row as f32 * g.ch - g.scroll_dy,
+                            g.top(*row as f32),
                             *w as f32 * g.cw,
-                            *h as f32 * g.ch,
+                            g.span(*row as f32, *h as f32),
                         );
                         if *radius > 0.0 {
                             fb.solid(
@@ -3420,8 +3439,8 @@ impl GpuWindow {
                         let (fx, fw, fy, fh, r) = snap_hairline(
                             g.ox + *x * g.cw,
                             *w * g.cw,
-                            g.oy + *y * g.ch - g.scroll_dy,
-                            *h * g.ch,
+                            g.top(*y),
+                            g.span(*y, *h),
                             *radius * g.cw,
                             scale_factor,
                         );
@@ -3451,7 +3470,7 @@ impl GpuWindow {
                     ..
                 } => {
                     let left = g.ox + *col as f32 * g.cw;
-                    let top = g.oy + *row as f32 * g.ch - g.scroll_dy;
+                    let top = g.top(*row as f32);
                     let cells = caret_cells(&under.0);
                     let fill = color.unwrap_or(CURSOR_FG);
                     fb.solid(
@@ -3474,7 +3493,7 @@ impl GpuWindow {
                     ..
                 } => {
                     let left = g.ox + *col as f32 * g.cw;
-                    let top = g.oy + *row as f32 * g.ch - g.scroll_dy;
+                    let top = g.top(*row as f32);
                     for (x, y, w, h, rgba) in cursor_quads(left, top, g.cw, g.ch, *style, *color) {
                         fb.solid(x, y, w, h, rgba, 0.0, Edge::Plain);
                     }
@@ -3489,6 +3508,8 @@ impl GpuWindow {
                 | Op::Bloom { .. }
                 | Op::Crt { .. }
                 | Op::Burst { .. } => {}
+                // Placed the rows (`Grid::rows`); draws nothing itself.
+                Op::Seam { .. } => {}
                 Op::Overlay => {
                     if fb.nested == 0 && fb.overlay_at.is_none() {
                         fb.overlay_at = Some(fb.batches.len());
@@ -3497,16 +3518,14 @@ impl GpuWindow {
                 // Drawn in op order, out of the emitter's own buffer.
                 Op::Emitter { id, .. } => fb.batches.push(Batch::Particles { id: *id }),
                 Op::VSpans { row0, col0, cols } => {
-                    let top0 = g.oy + *row0 as f32 * g.ch - g.scroll_dy;
                     for (i, segs) in cols.iter().enumerate() {
                         let left = g.ox + (*col0 as usize + i) as f32 * g.cw;
-                        let mut y = top0;
+                        let mut row = *row0 as f32;
                         for (sh, color) in segs {
-                            let span_h = *sh as f32 * g.ch;
                             if let Some(rgb) = color {
-                                fb.fill(left, y, g.cw, span_h, *rgb);
+                                fb.fill(left, g.top(row), g.cw, g.span(row, *sh as f32), *rgb);
                             }
-                            y += span_h;
+                            row += *sh as f32;
                         }
                     }
                 }
@@ -3531,9 +3550,9 @@ impl GpuWindow {
                                 let y = (bit / wmod) as f32;
                                 fb.fill(
                                     g.ox + (*col0 as f32 + x * asp as f32) * g.cw,
-                                    g.oy + (*row0 as f32 + y) * g.ch - g.scroll_dy,
+                                    g.top(*row0 as f32 + y),
                                     cell_w,
-                                    g.ch,
+                                    g.span(*row0 as f32 + y, 1.0),
                                     *rgb,
                                 );
                                 b &= b - 1;
@@ -3563,9 +3582,9 @@ impl GpuWindow {
                             let y = (bit / wmod) as f32;
                             fb.fill(
                                 g.ox + (*col0 as f32 + x * asp as f32) * g.cw,
-                                g.oy + (*row0 as f32 + y) * g.ch - g.scroll_dy,
+                                g.top(*row0 as f32 + y),
                                 cell_w,
-                                g.ch,
+                                g.span(*row0 as f32 + y, 1.0),
                                 rgb,
                             );
                             b &= b - 1;
@@ -3633,10 +3652,10 @@ impl GpuWindow {
 
         let (fwf, fhf) = (fw as f32, fh as f32);
         let mut fb = FrameBuilder::new(fwf, fhf);
-        let (ox, oy) = renderer.grid_origin(fw as usize, fh as usize);
+        let (ox, _) = renderer.grid_origin(fw as usize, fh as usize);
         let grid = Grid {
             ox: ox as f32,
-            oy: oy as f32,
+            rows: renderer.rows(fw as usize, fh as usize),
             cw: cw as f32,
             ch: ch as f32,
             scroll_dy: 0.0,
@@ -4658,7 +4677,10 @@ mod reuse_tests {
         FragmentContext {
             grid: [
                 0.0f32.to_bits(),
-                0.0f32.to_bits(),
+                0,
+                16,
+                u16::MAX as u32,
+                0,
                 8.0f32.to_bits(),
                 16.0f32.to_bits(),
                 0,

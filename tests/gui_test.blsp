@@ -167,70 +167,70 @@
 
 (describe "gui/render-frame — the window's painter, without a window"
   (test "row 0 starts at the window's top edge: a band on it is coloured from y = 0"
-    (when-gui
-      (fn ()
-        (let (cols (first (:grid (gui/render-frame [[:clear]] (capture-spec))))
-              image (gui/render-frame [[:clear] [:rect 0 0 cols 1 {:bg capture-band}]]
-                      (capture-spec))
-              [_ cell-h] (:cell image))
-          (is (= (:origin image) [6 0]))
-          (is (= (gui/pixel image 200 0) capture-band))
-          (is (= (gui/pixel image 200 (dec cell-h)) capture-band))
-          (is (= (gui/pixel image 200 cell-h) capture-bg))))))
+    (when-gui (fn ()
+                (let (cols (first (:grid (gui/render-frame [[:clear]] (capture-spec))))
+                      image (gui/render-frame [[:clear] [:rect 0 0 cols 1 {:bg capture-band}]]
+                              (capture-spec))
+                      [_ cell-h] (:cell image))
+                  (is (= (:origin image) [6 0]))
+                  (is (= (gui/pixel image 200 0) capture-band))
+                  (is (= (gui/pixel image 200 (dec cell-h)) capture-band))
+                  (is (= (gui/pixel image 200 cell-h) capture-bg))))))
 
   (test "the inset is a margin on the left, right and bottom; the leftover is below"
-    (when-gui
-      (fn ()
-        (let (image (gui/render-frame [[:clear] [:rect 1 1 3 2 {:bg capture-band}]]
-                      (capture-spec))
-              [cell-w cell-h] (:cell image)
-              [cols rows] (:grid image))
-          (is (= (:inset image) 6))
-          (is (= cols (math/quot (- 400 12) cell-w)))
-          (is (= rows (math/quot (- 203 6) cell-h)))
-          (is (= (gui/pixel image 3 (+ cell-h 2)) capture-bg))
-          (is (= (gui/pixel image (+ 6 cell-w) (+ cell-h 2)) capture-band))
-          (is (= (gui/pixel image (+ 6 cell-w) 202) capture-bg))))))
+    (when-gui (fn ()
+                (let (image (gui/render-frame [[:clear] [:rect 1 1 3 2 {:bg capture-band}]]
+                              (capture-spec))
+                      [cell-w cell-h] (:cell image)
+                      [cols rows] (:grid image))
+                  (is (= (:inset image) 6))
+                  (is (= cols (math/quot (- 400 12) cell-w)))
+                  (is (= rows (math/quot (- 203 6) cell-h)))
+                  (is (= (gui/pixel image 3 (+ cell-h 2)) capture-bg))
+                  (is (= (gui/pixel image (+ 6 cell-w) (+ cell-h 2)) capture-band))
+                  (is (= (gui/pixel image (+ 6 cell-w) 202) capture-bg))))))
 
   (test "a band reaching the grid's edges bleeds through the margin to the window's"
-    (when-gui
-      (fn ()
-        (let ([cols rows] (:grid (gui/render-frame [[:clear]] (capture-spec)))
-              image (gui/render-frame [[:clear] [:rect (dec rows) 0 cols 1 {:bg capture-band}]]
-                      (capture-spec)))
-          (is (= (gui/pixel image 0 202) capture-band))
-          (is (= (gui/pixel image 399 202) capture-band))))))
+    (when-gui (fn ()
+                (let ([cols rows] (:grid (gui/render-frame [[:clear]] (capture-spec)))
+                      image (gui/render-frame [[:clear]
+                                                [:rect (dec rows) 0 cols 1 {:bg capture-band}]]
+                              (capture-spec)))
+                  (is (= (gui/pixel image 0 202) capture-band))
+                  (is (= (gui/pixel image 399 202) capture-band))))))
 
   (test "a glyph's ink is inside its own cell"
-    (when-gui
-      (fn ()
-        (let (image (gui/render-frame [[:clear] [:text 1 2 "M" {:fg [255 255 255]}]]
-                      (capture-spec))
-              [cell-w cell-h] (:cell image)
-              x (+ 6 (* 2 cell-w)))
-          (is (> (ink-in image x cell-h cell-w cell-h) 10))
-          (is (= (ink-in image (- x cell-w) cell-h cell-w cell-h) 0))
-          (is (= (ink-in image (+ x cell-w) cell-h cell-w cell-h) 0))
-          (is (= (ink-in image x 0 cell-w cell-h) 0))
-          (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0)))))))
+    (when-gui (fn ()
+                (let (image (gui/render-frame [[:clear] [:text 1 2 "M" {:fg [255 255 255]}]]
+                              (capture-spec))
+                      [cell-w cell-h] (:cell image)
+                      x (+ 6 (* 2 cell-w)))
+                  (is (> (ink-in image x cell-h cell-w cell-h) 10))
+                  (is (= (ink-in image (- x cell-w) cell-h cell-w cell-h) 0))
+                  (is (= (ink-in image (+ x cell-w) cell-h cell-w cell-h) 0))
+                  (is (= (ink-in image x 0 cell-w cell-h) 0))
+                  (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0)))))))
 
 (describe "gui/write-png and gui/pixel"
   (test "a picture written as PNG decodes back to the same pixels, cropped and scaled"
-    (when-gui
-      (fn ()
-        (let (image (gui/render-frame [[:clear] [:rect 0 0 2 1 {:bg capture-band}]]
-                      (capture-spec))
-              path (str (path/temp "brood-capture-") ".png")
-              _ (gui/write-png image path {:crop [0 0 10 4] :scale 3})
-              back (gui/image-thumb (file/slurp-bytes path) 100 100))
-          (file/rm path)
-          (is (= [(:width back) (:height back)] [30 12]))
-          (is (= (gui/pixel back 0 0) capture-band))
-          (is (= (gui/pixel back 29 11) capture-band))))))
+    (when-gui (fn ()
+                (let (image (gui/render-frame [[:clear] [:rect 0 0 2 1 {:bg capture-band}]]
+                              (capture-spec))
+                      path (str (path/temp "brood-capture-") ".png")
+                      _ (gui/write-png image path {:crop [0 0 10 4] :scale 3})
+                      back (gui/image-thumb (file/slurp-bytes path) 100 100))
+                  (file/rm path)
+                  (is (= [(:width back) (:height back)] [30 12]))
+                  (is (= (gui/pixel back 0 0) capture-band))
+                  (is (= (gui/pixel back 29 11) capture-band))))))
 
   (test "a pixel outside the picture is nil"
-    (let (image {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 1 1) (bytes/int-> 2 1)
-                                             (bytes/int-> 3 1) (bytes/int-> 255 1))})
+    (let (image {:width 1
+                 :height 1
+                 :rgba (bytes/concat (bytes/int-> 1 1)
+                         (bytes/int-> 2 1)
+                         (bytes/int-> 3 1)
+                         (bytes/int-> 255 1))})
       (is (= (gui/pixel image 0 0) [1 2 3]))
       (is (nil? (gui/pixel image 1 0)))
       (is (nil? (gui/pixel image 0 -1)))))
@@ -241,3 +241,73 @@
 (describe "gui/capture"
   (test "a window that is not open is an error, not an empty picture"
     (assert-error (gui/capture 987654321))))
+
+;; --- the seam (ADR-610): rows above it top-anchored, from it down bottom-anchored ------
+
+(def- seam-header [200 40 40])
+(def- seam-body [40 200 40])
+(def- seam-above [40 40 200])
+(def- seam-mode [200 200 40])
+(def- seam-echo [40 200 200])
+
+(defn- seam-spec (h size)
+  {:width 400 :height h :inset 6 :bg capture-bg :size size :line-height 1.4})
+
+(defn- seam-frame (cols rows top-band)
+  "An editor's frame: a header on row 0 (three columns, so it does not bleed), the body,
+the body's last row in its own colour, the mode line on the seam and the echo area last."
+  (let (seam (- rows 2))
+    [[:clear]
+      [:seam seam {:top-band top-band}]
+      [:rect 0 1 3 1 {:bg seam-header}]
+      [:rect 1 0 cols (- seam 2) {:bg seam-body}]
+      [:rect (dec seam) 0 cols 1 {:bg seam-above}]
+      [:rect seam 0 cols 1 {:bg seam-mode}]
+      [:rect (dec rows) 0 cols 1 {:bg seam-echo}]]))
+
+(defn- seam-failures (h size top-band)
+  "What breaks the layout rule for a window `h` px tall at font `size`: a vector of
+descriptions, empty when the rule holds."
+  (let ([cols rows] (:grid (gui/render-frame [[:clear] [:seam nil {:top-band top-band}]]
+                             (seam-spec h size)))
+        image (gui/render-frame (seam-frame cols rows top-band) (seam-spec h size))
+        tops (:row-tops image)
+        [cell-w cell-h] (:cell image)
+        seam (- rows 2)
+        top (if top-band 0 6)
+        gap-from (+ (nth tops (dec seam)) cell-h)
+        gap-to (nth tops seam)
+        bare (seq/filter (range (second tops) h) (fn (y) (= (gui/pixel image 200 y) capture-bg)))
+        gap-wrong (seq/filter (range gap-from gap-to)
+                    (fn (y) (not (= (gui/pixel image 200 y) seam-above)))))
+    (vec (seq/filter [(when (not (= (:seam image) seam)) [:seam (:seam image)])
+                       (when (not (= (last tops) (- h 6))) [:last-row-ends (last tops)])
+                       (when (not (= (gui/pixel image 200 (dec h)) seam-echo))
+                         :bottom-inset-not-echo)
+                       (when (not (= (first tops) top)) [:row-0 (first tops)])
+                       (when (not (= (gui/pixel image (+ 6 (* 2 cell-w)) top) seam-header))
+                         :header-not-at-top)
+                       (when (and (not top-band) (not (= (gui/pixel image 6 (dec top)) capture-bg)))
+                         :top-margin-painted)
+                       (when (>= (- gap-to gap-from) cell-h) [:gap (- gap-to gap-from)])
+                       (when (not (empty? gap-wrong)) [:gap-not-the-row-above (first gap-wrong)])
+                       (when (not (empty? bare)) [:bare-row (first bare)])]
+           (fn (failure) (not (nil? failure)))))))
+
+(describe "gui/render-frame — the seam holds the leftover at every height (ADR-610)"
+  (test "every height in one row's span, two font sizes, row 0 a band and not"
+    (when-gui (fn ()
+                (doseq (size [15 21])
+                  (let (cell-h (second (:cell (gui/render-frame [[:clear]] (seam-spec 300 size)))))
+                    (doseq (h (range 300 (+ 300 cell-h)))
+                      (doseq (top-band [true false])
+                        (is (= [size h top-band (seam-failures h size top-band)]
+                              [size h top-band []]))))))))))
+
+(test "without a seam the leftover stays under the last row"
+  (when-gui (fn ()
+              (let (image (gui/render-frame [[:clear]] (seam-spec 307 15))
+                    cell-h (second (:cell image)))
+                (is (nil? (:seam image)))
+                (is (= (:row-tops image)
+                      (vec (map (range (inc (second (:grid image)))) (fn (k) (* k cell-h))))))))))

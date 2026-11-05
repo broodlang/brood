@@ -161,8 +161,9 @@ pub struct FontInfo {
 /// answer (ADR-609). `rgba` is `width * height * 4` bytes, row-major, opaque. The rest
 /// is the geometry the picture was painted with, so a test can find a row or a cell in
 /// it without re-deriving the layout rule: the cell in physical px, the grid in cells,
-/// where the grid's top-left sits and the inset. Plain data, defined here so the
-/// builtins compile without the GUI.
+/// where the grid's top-left sits, the inset, the seam the frame declared and the pixel
+/// top of every row (ADR-610). Plain data, defined here so the builtins compile without
+/// the GUI.
 #[derive(Clone, Debug, Default)]
 pub struct FrameImage {
     pub width: u32,
@@ -172,6 +173,13 @@ pub struct FrameImage {
     pub grid: (u16, u16),
     pub origin: (u32, u32),
     pub inset: u32,
+    /// The frame's seam row (`Op::Seam`), when it declared one inside the grid.
+    pub seam: Option<u16>,
+    /// The pixel row each grid row starts at, then where the last one ends: `grid.1 + 1`
+    /// entries, read off the renderer's row map (`RowMap::y`), so row `k` covers
+    /// `[row_tops[k], row_tops[k] + cell.1)` and a seam's leftover is the step between
+    /// `row_tops[seam - 1] + cell.1` and `row_tops[seam]`.
+    pub row_tops: Vec<u32>,
 }
 
 /// Which font `gui/render-frame` paints with: a family keyword the offscreen painter
@@ -759,6 +767,29 @@ pub enum Op {
     /// one that would, so the scanners that read those stay at the top level and in
     /// regions.
     Fragment(FragmentOps),
+    /// How the frame's rows sit in the window (`[:seam row]` / `[:seam row {:top-band b}]`,
+    /// ADR-610): state of the frame, read at the top level only (the first one wins), and
+    /// painting nothing itself.
+    ///
+    /// `row` is the SEAM: rows above it are anchored to the top of the window, rows from it
+    /// down to the bottom, so the last row ends exactly at the bottom inset, and the
+    /// leftover height (the window less the margins, mod one row) lies between row
+    /// `row - 1` and row `row`, painted by the backgrounds of the row above it. An editor
+    /// names its bottom mode line: the echo area stays on the window's bottom edge and the
+    /// leftover becomes the text body's partial line, as in Emacs. `None` (or a row past
+    /// the grid) leaves the leftover under the last row.
+    ///
+    /// `top_band` says row 0 is a full-width band (a header line, a tab bar): no margin
+    /// above it. False gives the top the inset as the sides have it, and the grid loses
+    /// those rows (the window re-publishes its size when it changes). True, the default,
+    /// is the layout of a frame without the op.
+    ///
+    /// The rows stay whole cells and the app stays in cell units: only the renderer's
+    /// row-to-pixel map (`backend::rows::RowMap`) and its inverse in the hit-test change.
+    Seam {
+        row: Option<u16>,
+        top_band: bool,
+    },
 }
 
 /// How an emitter emits: what an `[:emitter id x y opts]` op's map says, with defaults

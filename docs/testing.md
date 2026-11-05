@@ -186,6 +186,18 @@ picture (`:crop` and `:scale` to look closely at a few pixels).
     (is (= (gui/pixel image 500 0) header-background))))
 ```
 
+The picture carries the row map it was painted with (ADR-610): `:row-tops` is the pixel row
+every grid row starts at, then where the last one ends, and `:seam` the frame's `[:seam row]`.
+A test finds a row's pixels there rather than re-deriving the layout rule. The rule itself is
+a property, so test it over every window height in one row's span, not at one size:
+
+```lisp fragment
+(test "the echo area sits on the bottom inset at every height"
+  (doseq (h (range 600 (+ 600 cell-h)))
+    (let (image (gui/render-frame (frame-for h) {:width 800 :height h :inset 6}))
+      (is (= (last (:row-tops image)) (- h 6))))))
+```
+
 It needs a `--features gui` runtime; guard a test with `(gui/available?)` so a build without
 the GUI skips it rather than failing. To look at an app's REAL loop — its own startup, fonts
 and timers — run it under `BROOD_GUI_HEADLESS=paint`: every window is then painted offscreen,

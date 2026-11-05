@@ -2,6 +2,7 @@
 //! software rasteriser that paints one cell (or one cluster, or a rounded rect, or the
 //! cursor) into the frame buffer.
 
+use super::rows::RowMap;
 use super::*;
 
 use swash::scale::ScaleContext;
@@ -632,8 +633,15 @@ pub(crate) struct Renderer {
     px: f32,
     pub(crate) cell_w: usize,
     pub(crate) cell_h: usize,
-    baseline: i32,       // pixels from a cell's top to the text baseline
-    base_inset: f32,     // logical-px content margin before the grid (ADR-079); 0 = flush
+    baseline: i32,   // pixels from a cell's top to the text baseline
+    base_inset: f32, // logical-px content margin before the grid (ADR-079); 0 = flush
+    /// The seam row the frame being painted declared (`Op::Seam`, ADR-610): rows from it
+    /// down are anchored to the bottom ([`Renderer::rows`]). Set from each frame that
+    /// arrives (`set_layout`).
+    seam: Option<u16>,
+    /// Whether row 0 is a band (no margin above it) — `Op::Seam`'s `top_band`, true for a
+    /// frame without one.
+    top_band: bool,
     bg: Option<[u8; 3]>, // window background (clear/inset-margin fill); None = DEFAULT_BG
     line_height: f32,    // cell height as a multiple of the font px (`gui-line-height!`)
     text_aa: TextAa,     // how monochrome text is anti-aliased (`gui-text-aa!`)
@@ -710,6 +718,8 @@ impl Renderer {
             cell_h: 1,
             baseline: 0,
             base_inset: 0.0,
+            seam: None,
+            top_band: true,
             bg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
@@ -734,10 +744,9 @@ impl Renderer {
     }
 
     /// The content inset in PHYSICAL pixels (the logical `base_inset` × HiDPI
-    /// scale) — the margin on the grid's left, right and bottom (never above row 0,
-    /// [`Renderer::grid_origin`]), and the
-    /// offset every pixel↔cell conversion shares (`update_cells`, `px_to_cell`,
-    /// `paint`) so the grid the renderer draws and the one the mouse hit-tests stay
+    /// scale) — the margin on the grid's left, right and bottom, and above row 0 when row 0
+    /// is not a band ([`Renderer::rows`]); every pixel↔cell conversion goes through the row
+    /// map built from it, so the grid the renderer draws and the one the mouse hit-tests stay
     /// the same. 0 leaves the grid flush to the window edge (the default).
     pub(crate) fn inset(&self) -> usize {
         (self.base_inset * self.scale as f32).round().max(0.0) as usize
@@ -815,32 +824,73 @@ impl Renderer {
         self.invalidate();
     }
 
-    /// The grid's top-left origin in PHYSICAL px. THE LAYOUT RULE, in one place:
-    ///
-    ///   - **Row 0 starts at the window's top edge.** Nothing is ever painted above it, so
-    ///     a header line or tab bar on row 0 is the top of the window, its text centred in
-    ///     its own row like every other row's.
-    ///   - **The inset is a margin on the LEFT, RIGHT and BOTTOM** ([`grid_cells`]).
-    ///   - **The leftover is on the right and at the bottom**: `cols`/`rows` are floor
-    ///     divisions, so up to a cell less a pixel per axis is left over, and it goes
-    ///     after the grid, never before it.
-    ///
-    /// Why not a top margin: it was the inset plus half the vertical leftover, so its height
-    /// changed with the window and the font, and it put a strip of window between the title
-    /// bar and a header line. Painting the header's colour into it (ADR-508's edge bleed)
-    /// still left the header's text sitting low in a taller strip. With no top margin there
-    /// is nothing to cover and nothing to centre (2026-11-05, ADR-508 addendum).
+    /// The grid's top-left origin in PHYSICAL px: `(inset, top)`, where `top` is 0 when
+    /// row 0 is a band and the inset when it is not ([`Renderer::rows`] has the rule).
     ///
     /// Why not centre horizontally on the leftover: it is `width % cell_w`, so it depends on
-    /// the cell size, and a font-size zoom would slide the grid sideways on every step.
+    /// the cell size, and a font-size zoom would slide the grid sideways on every step. The
+    /// columns stay left-anchored; the leftover width sits beyond the last column.
+    pub(crate) fn grid_origin(&self, _w_px: usize, _h_px: usize) -> (usize, usize) {
+        (self.inset(), self.grid_top())
+    }
+
+    /// The pixel row grid row 0 starts at: the window's top edge when row 0 is a band (a
+    /// header line, a tab bar), so the band is the top of the window, its text centred in
+    /// its own row; the inset otherwise, so the first line of text has the margin the
+    /// sides have (ADR-610, the second rule).
+    pub(crate) fn grid_top(&self) -> usize {
+        if self.top_band { 0 } else { self.inset() }
+    }
+
+    /// The rows of a `w_px`×`h_px` window as pixels — THE LAYOUT RULE, in one place
+    /// ([`RowMap`], ADR-610, refining ADR-508):
+    ///
+    ///   - **The inset is a margin on the LEFT, RIGHT and BOTTOM**, and on the top only
+    ///     when row 0 is not a band ([`Renderer::grid_top`]).
+    ///   - **Rows above the frame's seam are anchored to the top, rows from it down to the
+    ///     bottom**: the last row ends exactly at `h_px - inset`.
+    ///   - **The leftover height** (up to a cell less a pixel; `rows` is a floor division)
+    ///     **sits at the seam**, painted by the row above it — or under the last row when
+    ///     the frame declares no seam.
+    ///
+    /// Why a seam, and not the old rules: a top margin of the inset plus half the leftover
+    /// changed with the window and put a strip of window above a header line; the leftover
+    /// all under the last row (2026-11-05) moved an editor's echo area off the bottom edge
+    /// by 0..cell_h-1 pixels as the window resized. Every terminal policy leaves the
+    /// leftover beside a chrome band; the seam puts it inside the text, as Emacs does.
     ///
     /// WM-independent (no window resize, so it works where `request_inner_size` is
-    /// ignored), and the mouse hit-test (`px_to_cell`) shares it so clicks stay
-    /// aligned with what's painted.
-    ///
-    /// [`grid_cells`]: super::bleed::grid_cells
-    pub(crate) fn grid_origin(&self, _w_px: usize, _h_px: usize) -> (usize, usize) {
-        (self.inset(), 0)
+    /// ignored), and the mouse hit-test (`px_to_cell`) inverts the same map
+    /// ([`RowMap::row_at`]) so clicks stay aligned with what's painted.
+    pub(crate) fn rows(&self, w_px: usize, h_px: usize) -> RowMap {
+        let (_, rows) = super::bleed::grid_cells(self, w_px, h_px);
+        RowMap::window(
+            self.grid_top(),
+            self.cell_h,
+            rows,
+            self.inset(),
+            h_px,
+            self.seam,
+        )
+    }
+
+    /// The seam this renderer paints with: the last frame's (`set_layout`).
+    pub(crate) fn seam(&self) -> Option<u16> {
+        self.seam
+    }
+
+    /// Take the layout a frame declares (`Op::Seam`, [`super::rows::frame_layout`]). Returns
+    /// true when the GRID changed — row 0 became or stopped being a band, which moves the top
+    /// margin and so the row count — so the caller re-publishes the window's size; a new seam
+    /// alone moves pixels, not cells. Either change invalidates the retained frame.
+    pub(crate) fn set_layout(&mut self, (seam, top_band): (Option<u16>, bool)) -> bool {
+        let grid_changed = top_band != self.top_band;
+        if seam != self.seam || grid_changed {
+            self.seam = seam;
+            self.top_band = top_band;
+            self.invalidate();
+        }
+        grid_changed
     }
 
     /// Recompute the px size + cell metrics by shaping a reference glyph ('M') in
