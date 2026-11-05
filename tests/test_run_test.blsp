@@ -5,7 +5,7 @@
 ;; to check — `crates/nest/tests/test_scratch_home.rs` drives `nest test` itself either way,
 ;; and a plain `nest run` asked to be a test run (`BROOD_TEST_ARM=1`, ADR-608).
 
-(defmodule test-run-test (:use test))
+(defmodule test-run-test (:use test) (:use-internals repl))
 
 (describe "a test run"
   (test "running? is the runner's own word, and scratch-dir needs a run"

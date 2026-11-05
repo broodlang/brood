@@ -97,7 +97,9 @@
           out (pty-drain child ""))
       ;; `stty size` prints "rows cols"; `mode con` lists Lines: and Columns:
       (if (windows?)
-        (do (assert= "30" (console-field out "Lines")) (assert= "100" (console-field out "Columns")))
+        (do
+          (assert= "30" (console-field out "Lines"))
+          (assert= "100" (console-field out "Columns")))
         (assert= "30 100" (string/trim out)))))
 
   :isolated (test "resize-pty changes it"
@@ -106,7 +108,9 @@
           _ (os/resize-pty child 120 40)
           out (pty-drain child ""))
       (if (windows?)
-        (do (assert= "40" (console-field out "Lines")) (assert= "120" (console-field out "Columns")))
+        (do
+          (assert= "40" (console-field out "Lines"))
+          (assert= "120" (console-field out "Columns")))
         (assert= "40 120" (string/trim out)))))
 
   :isolated (test "resizing a piped child is refused rather than silently ignored"
