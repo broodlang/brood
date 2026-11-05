@@ -51,8 +51,8 @@ use winit::window::Window;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::host::gui::backend::{
-    CURSOR_FG, Renderer, RowMap, caret_cells, caret_glyph, cursor_rim, holds_blinking_caret, luminance,
-    paint_stall_ms, snap_hairline, text_px_width, text_units, unit_cells,
+    CURSOR_FG, Renderer, RowMap, caret_cells, caret_glyph, cursor_rim, holds_blinking_caret,
+    luminance, paint_stall_ms, snap_hairline, text_px_width, text_units, unit_cells,
 };
 use crate::host::gui::effects::{EmitterStep, FrameEffects};
 use crate::host::gui::{Align, CursorStyle, Face, MAX_PARTICLES, Op};
