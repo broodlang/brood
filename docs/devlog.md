@@ -5085,3 +5085,17 @@ record's `->seq` under `first` blocked its worker at tier 1 — `interrupt_one_w
 ±1.6% at the default tier. `make ab-vm`: `fib` −1.0%, `spawn-live` +0.2%, `collatz` +2.1%
 (inside its floor), and `pfib` +5–7.5% — but byte-identical binaries read +8.1% on `pfib` at
 tier 1 in the same session, so that row's spread is the measurement, not the change.
+
+2026-11-05 (KI-313 fixed). Reproduced on CI at last, and the trigger was the cache, not the load:
+once a full suite run has left its stdlib image in `~/.cache/brood`, the native-walk case alone
+fails in 86% of runs; on a cache the suite never touched it passes every time, which is every
+isolated loop anyone ran. The bail trace named two arms of `%vector-fold-walk`: the waiter
+latched its copy, and a second copy the root had compiled, which had adopted the walk's native
+code before the latch, blocked `late`'s worker. The latch is now the function's: each copy is
+admitted before it can go native (adopting, or queueing its compile), and a latch takes every
+admitted copy and refuses later ones (`RuntimeCode::suspend_latches`). The test also waits for
+`late` before spawning `woken`, since a latch lands on exit and the two walks overlapped (48 of
+15 548 failures). Guard `a_suspend_latch_reaches_every_copy_of_the_function`, red on CI with
+the sweep removed; with the fix, 0 of 172 921 primed runs failed (two Diagnose runs, the
+second on the final commits with no trace and four green full suites). Checked here: fmt, clippy, the
+`a_suspend_latch` unit tests, `doc_refs`, `process_wide_statics`; the loops ran on CI only.
