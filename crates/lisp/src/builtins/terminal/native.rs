@@ -2452,6 +2452,145 @@ pub(in crate::builtins) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -
     Ok(Value::nil())
 }
 
+/// `(%gui-render-frame frame spec)` — paint `frame` into memory as a window `spec`
+/// describes would paint it, and answer the picture (ADR-609). The frame is parsed as
+/// `%gui-draw` parses one; a fragment marker paints its ops (nothing is kept for a
+/// later frame — there is no window to keep them for).
+pub(in crate::builtins) fn gui_render_frame(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let parsed = frame_ops(heap, arg(args, 0), "%gui-render-frame", "vector (a frame)")?;
+    let spec = render_spec(heap, arg(args, 1))?;
+    let tags = GuiOpTags::new();
+    let mut pass = fragments::FragmentPass::empty();
+    let ops = parse_gui_ops(heap, parsed, &tags, &mut pass);
+    let image = crate::host::gui::render_frame(ops, spec).map_err(LispError::runtime)?;
+    Ok(frame_image_value(heap, image))
+}
+
+/// `(%gui-capture id)` — window `id`'s current frame painted into memory (ADR-609).
+pub(in crate::builtins) fn gui_capture(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let win = gui_window_id(heap, "%gui-capture", arg(args, 0))?;
+    let image = crate::host::gui::capture(win).map_err(LispError::runtime)?;
+    Ok(frame_image_value(heap, image))
+}
+
+/// `(%gui-windows)` — the ids of the open windows, oldest first.
+pub(in crate::builtins) fn gui_windows(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let ids = crate::host::gui::window_ids()
+        .into_iter()
+        .map(|id| Value::int(id as i64))
+        .collect();
+    Ok(heap.alloc_vector(ids))
+}
+
+/// A picture as Brood sees it: `{:width :height :rgba :cell [w h] :grid [cols rows]
+/// :origin [x y] :inset px}` — `gui/image-thumb`'s `{:width :height :rgba}` plus the
+/// geometry it was painted with, so `gui/write-png` and `gui/texture` take it as is.
+fn frame_image_value(heap: &mut Heap, image: crate::host::gui::FrameImage) -> Value {
+    let pair = |heap: &mut Heap, a: u32, b: u32| {
+        heap.alloc_vector(vec![Value::int(a as i64), Value::int(b as i64)])
+    };
+    // GC-safe: a builtin never collects mid-execution, so the handles below stay live
+    // until the map holds them (as `image_thumb` does).
+    let rgba = crate::builtins::bytes::bytes_to_value(&image.rgba, heap);
+    let cell = pair(heap, image.cell.0, image.cell.1);
+    let grid = pair(heap, image.grid.0 as u32, image.grid.1 as u32);
+    let origin = pair(heap, image.origin.0, image.origin.1);
+    let pairs = vec![
+        (value::kw("width"), Value::int(image.width as i64)),
+        (value::kw("height"), Value::int(image.height as i64)),
+        (value::kw("rgba"), rgba),
+        (value::kw("cell"), cell),
+        (value::kw("grid"), grid),
+        (value::kw("origin"), origin),
+        (value::kw("inset"), Value::int(image.inset as i64)),
+    ];
+    heap.map_from_pairs(pairs)
+}
+
+/// The window a `%gui-render-frame` spec map describes: `:width`/`:height` (physical
+/// px), `:font` (an installed family's name, or a family keyword), `:size` (the font px),
+/// `:line-height`, `:inset`, `:bg` (a colour), `:scale`, `:text-aa` and `:ligatures`.
+/// nil is every default.
+fn render_spec(heap: &Heap, spec: Value) -> Result<crate::host::gui::RenderSpec, LispError> {
+    use crate::host::gui::{FontChoice, RenderSpec, TextAa};
+    let who = "%gui-render-frame";
+    let map = match spec {
+        Value::Nil => return Ok(RenderSpec::default()),
+        Value::Map(id) => id,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                who,
+                "map (a render spec)",
+                other,
+            ));
+        }
+    };
+    let get = |name: &str| {
+        heap.map_get(map, value::kw(name))
+            .filter(|v| !matches!(v, Value::Nil))
+    };
+    let number = |name: &str| -> Result<Option<f64>, LispError> {
+        match get(name) {
+            None => Ok(None),
+            Some(Value::Int(n)) => Ok(Some(n as f64)),
+            Some(Value::Float(f)) => Ok(Some(f)),
+            Some(other) => Err(LispError::wrong_type(heap, who, "a number", other)),
+        }
+    };
+    let pixels = |name: &str| -> Result<Option<u32>, LispError> {
+        Ok(number(name)?.map(|n| n.round().clamp(1.0, u32::MAX as f64) as u32))
+    };
+    let size = match (pixels("width")?, pixels("height")?) {
+        (None, None) => None,
+        (w, h) => Some((w.unwrap_or(840), h.unwrap_or(560))),
+    };
+    let font = match get("font") {
+        None => None,
+        Some(Value::Keyword(k)) => Some(FontChoice::Registered(k)),
+        Some(other) => Some(FontChoice::Installed(expect_string(heap, who, other)?)),
+    };
+    let bg = match get("bg") {
+        None => None,
+        Some(colour) => Some(
+            face_rgb(heap, colour)
+                .ok_or_else(|| LispError::wrong_type(heap, who, "a colour for :bg", colour))?,
+        ),
+    };
+    let text_aa = match get("text-aa") {
+        None => None,
+        Some(Value::Keyword(k)) => Some(match value::symbol_name_ref(k) {
+            "gray" | "grey" | "grayscale" => TextAa::Gray,
+            "subpixel" | "rgb" | "lcd" => TextAa::Subpixel,
+            "bgr" => TextAa::Bgr,
+            _ => TextAa::Auto,
+        }),
+        Some(other) => {
+            return Err(LispError::wrong_type(
+                heap,
+                who,
+                "a :text-aa keyword",
+                other,
+            ));
+        }
+    };
+    Ok(RenderSpec {
+        size,
+        font,
+        px: number("size")?.map(|n| n as f32),
+        line_height: number("line-height")?.map(|n| n as f32),
+        inset: number("inset")?.map(|n| n.max(0.0) as f32),
+        bg,
+        scale: number("scale")?,
+        text_aa,
+        ligatures: get("ligatures").map(crate::eval::truthy),
+    })
+}
+
 /// `ops` (a fragment's, as a marker carries them) as the `(tag, parts)` pairs
 /// `parse_gui_ops` reads — `frame_ops` for a sequence already in hand.
 fn tagged_ops(heap: &Heap, ops: Vec<Value>) -> Vec<(value::Symbol, Vec<Value>)> {

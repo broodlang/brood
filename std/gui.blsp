@@ -16,7 +16,7 @@
   (%gui-compiled?))
 
 (defn headless? ()
-  "True when this runtime's GUI is HEADLESS — `BROOD_GUI_HEADLESS` set in a --features gui build: `gui/open` hands back a fake window that draws nothing, and there is no font engine, so the questions only one can answer (`gui/font-info`, `gui/cell-size`) error. Ask it before such a question, as `gui/available?` is asked before a side effect, rather than calling and catching (ADR-557): an app that tells its user the font they configured is not installed asks `gui/font-info` only when this is false. False in a windowed runtime and without --features gui.
+  "True when this runtime's GUI is HEADLESS — `BROOD_GUI_HEADLESS` set in a --features gui build: `gui/open` hands back a fake window that draws nothing, and there is no font engine, so the questions only one can answer (`gui/font-info`, `gui/cell-size`) error — unless the runtime runs under `BROOD_GUI_HEADLESS=paint`, where every window is painted offscreen (ADR-609, gui/capture) and both answer. Ask it before such a question, as `gui/available?` is asked before a side effect, rather than calling and catching (ADR-557): an app that tells its user the font they configured is not installed asks `gui/font-info` only when this is false. False in a windowed runtime and without --features gui.
 
     (bool? (gui/headless?))   ;=> true"
   (%gui-headless?))
@@ -190,6 +190,41 @@
 
     (gui/image-thumb (file/slurp-bytes \"photo.jpg\") 64 64)   ;~> {:width 64 :height 48 :rgba …}, or nil"
   (%image-thumb bytes max-w max-h))
+
+;; --- frame capture: what a window paints, as pixels (ADR-609) -------------------------
+
+(defn render-frame (frame &optional spec)
+  "Paint `frame` (a gui/draw frame) into memory as a window described by `spec` would paint it, and return the picture: `{:width :height :rgba :cell [w h] :grid [cols rows] :origin [x y] :inset px}`, `:rgba` being width*height*4 bytes (row-major, opaque) and the rest the geometry it was painted with — the cell in physical pixels, the grid in cells, where the grid's top-left sits, the inset. It is the WINDOW's own CPU painter that paints it — the same layout rule (row 0 at the top edge; the inset a margin left, right and below), the same edge bleed, the same glyph rasteriser — so what a test asserts about the pixels is true of the window. Needs no window and no display, so it runs headless and in `nest test`. `spec` (every key optional) is the window it stands in for: `:width`/`:height` in physical pixels (840x560), `:font` (an installed family's name, as gui/font-register's `:family-name` resolves one, or a family keyword the offscreen painter knows — the bundled `:mono` by default), `:size` (the font px, 15), `:line-height` (1.4), `:inset` (logical px, 0), `:bg` (the window colour), `:scale` (HiDPI, 1), `:text-aa`, `:ligatures`. Read a pixel with gui/pixel, save it with gui/write-png. Needs --features gui.
+
+    (gui/render-frame [[:clear] [:text 0 0 \"hi\" {:fg :red}]] {:width 200 :height 60 :inset 6})   ;~> {:width 200 :height 60 :rgba … :cell [9 21] :grid [20 2] :origin [6 0] :inset 6}"
+  (%gui-render-frame frame spec))
+
+(defn capture (id)
+  "Window id's current frame painted into memory as the window paints it — the picture gui/render-frame returns, with the window's own size, font, inset and background. For a real window it is rasterised on the GUI thread by the window's renderer (a GPU window's by the CPU painter over the same frame, without its sprites). HEADLESS, a window has nothing to paint with unless the runtime runs under `BROOD_GUI_HEADLESS=paint`: then every window is painted offscreen, keeps its settings and frames, and reports the grid the real cell metrics give — so an app's real loop can be looked at with no display (gui/windows finds the window it opened). Errors for a window that is not open and for a plain headless one.
+
+    (gui/write-png (gui/capture (first (gui/windows))) \"/tmp/editor.png\")   ;~> \"/tmp/editor.png\""
+  (%gui-capture id))
+
+(defn windows ()
+  "The ids of the windows open in this runtime, oldest first — how a driver finds the window an app's loop opened, to gui/capture it. Empty without --features gui.
+
+    (vector? (gui/windows))   ;=> true"
+  (%gui-windows))
+
+(defn write-png (image path &optional opts)
+  "Write `image` — a {:width :height :rgba} map, as gui/render-frame, gui/capture and gui/image-thumb return — to `path` as a PNG, and return `path`. `opts`: `:crop [x y w h]` keeps that rectangle (clipped to the image) and `:scale n` (1..16) enlarges it n times by repeating pixels, so the spacing of a few pixels can be looked at without a blur. Errors when `:rgba` is not width*height*4 bytes or the file cannot be written.
+
+    (gui/write-png {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 255 1) (bytes/int-> 0 1) (bytes/int-> 0 1) (bytes/int-> 255 1))} \"/tmp/red.png\")   ;~> \"/tmp/red.png\""
+  (%image-write-png image path opts))
+
+(defn pixel (image x y)
+  "The colour of pixel (`x`, `y`) of `image` (a {:width :height :rgba} map) as `[r g b]`, or nil outside it. What a test reads a picture with.
+
+    (gui/pixel {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 30 1) (bytes/int-> 30 1) (bytes/int-> 46 1) (bytes/int-> 255 1))} 0 0)   ;=> [30 30 46]"
+  (when (and (>= x 0) (>= y 0) (< x (:width image)) (< y (:height image)))
+    (let (rgba (:rgba image)
+          at (* 4 (+ x (* y (:width image)))))
+      [(bytes/at rgba at) (bytes/at rgba (+ at 1)) (bytes/at rgba (+ at 2))])))
 
 ;; --- pixel space: the sprite / quad layer ---------------------------------------------
 ;;

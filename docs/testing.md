@@ -170,6 +170,29 @@ example misses.
   (check-property 50 (fn (s) (seq/shuffle s [1 2 3 4 5])) (fn (sh) (= (count sh) 5))))
 ```
 
+### Testing what a window paints
+
+A GUI app's view is a function from its model to a frame of render ops, and most tests assert
+on the frame. What the frame cannot tell you is where it lands on the screen: the gap above
+row 0, the margin under the last row, whether a glyph sits centred in its cell. Those are the
+renderer's, and `gui/render-frame` (ADR-609) shows them — it paints a frame through the
+window's own CPU painter into memory, with no window and no display, and returns the pixels
+with the geometry they were painted at. `gui/pixel` reads one; `gui/write-png` saves the
+picture (`:crop` and `:scale` to look closely at a few pixels).
+
+```lisp fragment
+(test "the header line starts at the window's top edge"
+  (let (image (gui/render-frame frame {:width 1000 :height 600 :inset 6 :size 15}))
+    (is (= (gui/pixel image 500 0) header-background))))
+```
+
+It needs a `--features gui` runtime; guard a test with `(gui/available?)` so a build without
+the GUI skips it rather than failing. To look at an app's REAL loop — its own startup, fonts
+and timers — run it under `BROOD_GUI_HEADLESS=paint`: every window is then painted offscreen,
+keeps its settings and frames, and lays out on the grid the real cell metrics give, and
+`(gui/capture (first (gui/windows)))` paints what it last drew. A plain `BROOD_GUI_HEADLESS=1`
+window keeps its fixed nominal grid and no font engine, so it cannot be captured.
+
 ## Execution model — parallel by default
 
 Every test runs concurrently, **each in its own process** (`spawn`/`receive`),

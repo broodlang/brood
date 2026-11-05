@@ -7,6 +7,14 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## v0.49.1 — the parallel cold build finishes
 
 **Added.**
+- **A frame can be painted into memory by the window's own painter** (ADR-609).
+  `gui/render-frame frame spec` paints a frame as a window of a given size, font, inset and
+  background would — the same layout rule, edge bleed and glyph rasteriser — with no window
+  or display, and returns `{:width :height :rgba :cell :grid :origin :inset}`; `gui/capture`
+  is an open window's current frame; `gui/write-png` saves a picture (`:crop`, `:scale`) and
+  `gui/pixel` reads one pixel. Under `BROOD_GUI_HEADLESS=paint` headless windows are painted
+  offscreen, keep their settings and lay out on the real cell grid, so an app's real loop can
+  be captured; `gui/windows` lists the open windows.
 - A streaming ANSI decoder (ADR-567): `(ansi/feed (ansi/decoder) chunk)` turns a chunk of
   program output into `[text attr]` segments with the SGR attributes (16 / 256 / true colour,
   bold, italic, underline, …) carried from chunk to chunk, and holds an escape a chunk ends

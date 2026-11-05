@@ -138,3 +138,13 @@ pub fn font_info(_family: Option<u32>) -> Result<super::FontInfo, String> {
 pub fn ligatures(_on: bool) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }
+pub fn render_frame(_ops: Vec<Op>, _spec: super::RenderSpec) -> Result<super::FrameImage, String> {
+    Err(NOT_COMPILED.into())
+}
+pub fn capture(_id: u64) -> Result<super::FrameImage, String> {
+    Err(NOT_COMPILED.into())
+}
+/// No backend, so no window is ever open.
+pub fn window_ids() -> Vec<u64> {
+    Vec::new()
+}
