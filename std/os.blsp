@@ -281,12 +281,20 @@ once instead of hanging behind a full-screen program; `os/spawn-pty` gives it on
     (rest (os/shell))   ;~> (\"-c\"), or (\"/d\" \"/s\" \"/c\") on Windows — its first is the shell's path"
   (if (= (type) :windows) [(or (env "COMSPEC") "cmd.exe") "/d" "/s" "/c"] ["sh" "-c"]))
 
+(defn- without-line-ends (line)
+  ;; `line` with its trailing newlines and carriage returns dropped — and nothing else: a
+  ;; trailing SPACE is part of a cmd line (`set /p secret=Secret: ` prompts with it)
+  (if (or (string/ends-with? line "\n") (string/ends-with? line "\r"))
+    (without-line-ends (string/substring line 0 (dec (string/length line))))
+    line))
+
 (defn- windows-line (line)
   ;; What cmd.exe is handed for `line`. `cmd /c` runs ONE line — a newline cuts the rest off
-  ;; without a word — so a line with one in it is refused (a trailing one is dropped). And
-  ;; its built-ins write in the console's codepage while the output is read as UTF-8, so
-  ;; the line runs after `chcp 65001` (UTF-8) in the child's own console (KI-364's sequel).
-  (let (trimmed (string/trimr line))
+  ;; without a word — so a line with one in it is refused (a trailing one is dropped, and
+  ;; only that: trailing spaces are the line's own). And its built-ins write in the
+  ;; console's codepage while the output is read as UTF-8, so the line runs after
+  ;; `chcp 65001` (UTF-8) in the child's own console (KI-364's sequel).
+  (let (trimmed (without-line-ends line))
     (when (or (includes? trimmed "\n") (includes? trimmed "\r"))
       (error "os/shell-cmd: cmd.exe /c runs one line, and this has several — join them with & or && first: "
         (pr-str line)))

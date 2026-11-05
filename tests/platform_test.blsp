@@ -157,6 +157,12 @@
       (if (windows?) "first\r\nhello" "first\nhello")))
   (test "a failing line is its exit code"
     (assert= (:exit (os/shell-cmd "exit 4")) 4))
+  (test "a line's trailing space is its own; only a trailing newline is dropped"
+    ;; `set /p` prompts with what follows `=`, its last space included — trimming the line's
+    ;; whitespace made bedit's `Secret: ` prompt read `Secret:` under ConPTY
+    (assert= (:stdout (os/shell-cmd (if (windows?) "set /p answer=Ask: \n" "printf 'Ask: '\n")
+                        {:stdin ""}))
+      "Ask: "))
   (test "os/shell-spawn streams the line's output"
     (let (child (os/shell-spawn "echo \"spawned it\""))
       (is (includes? (receive ([:proc ^child data] data) (after 10000 "nothing arrived"))
