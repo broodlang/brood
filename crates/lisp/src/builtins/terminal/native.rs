@@ -2587,7 +2587,7 @@ fn frame_image_value(heap: &mut Heap, image: crate::host::gui::FrameImage) -> Va
 
 /// The window a `%gui-render-frame` spec map describes: `:width`/`:height` (physical
 /// px), `:font` (an installed family's name, or a family keyword), `:size` (the font px),
-/// `:line-height`, `:inset`, `:bg` (a colour), `:scale`, `:text-aa` and `:ligatures`.
+/// `:line-height`, `:inset`, `:bg` and `:fg` (colours), `:scale`, `:text-aa` and `:ligatures`.
 /// nil is every default.
 fn render_spec(heap: &Heap, spec: Value) -> Result<crate::host::gui::RenderSpec, LispError> {
     use crate::host::gui::{FontChoice, RenderSpec, TextAa};
@@ -2635,6 +2635,13 @@ fn render_spec(heap: &Heap, spec: Value) -> Result<crate::host::gui::RenderSpec,
                 .ok_or_else(|| LispError::wrong_type(heap, who, "a colour for :bg", colour))?,
         ),
     };
+    let fg = match get("fg") {
+        None => None,
+        Some(colour) => Some(
+            face_rgb(heap, colour)
+                .ok_or_else(|| LispError::wrong_type(heap, who, "a colour for :fg", colour))?,
+        ),
+    };
     let text_aa = match get("text-aa") {
         None => None,
         Some(Value::Keyword(k)) => Some(match value::symbol_name_ref(k) {
@@ -2659,6 +2666,7 @@ fn render_spec(heap: &Heap, spec: Value) -> Result<crate::host::gui::RenderSpec,
         line_height: number("line-height")?.map(|n| n as f32),
         inset: number("inset")?.map(|n| n.max(0.0) as f32),
         bg,
+        fg,
         scale: number("scale")?,
         text_aa,
         ligatures: get("ligatures").map(crate::eval::truthy),
@@ -2805,6 +2813,27 @@ pub(in crate::builtins) fn gui_bg(args: &[Value], _: EnvId, heap: &mut Heap) -> 
         })?),
     };
     crate::host::gui::bg(rgb).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
+/// `(gui-fg! color)` — set the window's default text colour: what a text op whose face
+/// names no `:fg` is drawn in, as `gui-bg!` is the colour no op paints. So a light theme's
+/// plain text is its own dark text instead of the hardcoded light default (ADR-613). Same
+/// colour forms as `gui-bg!`; `nil` restores the default. Every open window + ones opened
+/// later. GUI only; returns nil.
+pub(in crate::builtins) fn gui_fg(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let rgb = match arg(args, 0) {
+        Value::Nil => None,
+        other => Some(face_rgb(heap, other).ok_or_else(|| {
+            LispError::wrong_type(
+                heap,
+                "%gui-fg!",
+                "a colour (keyword, [r g b] vector, or \"#rrggbb\" string) or nil",
+                other,
+            )
+        })?),
+    };
+    crate::host::gui::fg(rgb).map_err(LispError::runtime)?;
     Ok(Value::nil())
 }
 

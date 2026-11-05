@@ -296,8 +296,8 @@ fn flush_wheel(w: &mut Win, now: Instant) -> bool {
 }
 
 // The rendering *mechanism's* fallback colours — used ONLY when Brood supplies
-// none: `Op::Clear` / the inset-margin fill when no `gui-bg!` is set, and a face
-// with no `:bg`/`:fg`. Brood owns the actual palette as *policy* — every render op
+// none: `Op::Clear` / the inset-margin fill when no `gui-bg!` is set, and the text of a
+// face with no `:fg` when no `gui-fg!` is set. Brood owns the actual palette as *policy* — every render op
 // carries its own `[r g b]`/hex colour resolved through `std/editor/face.blsp`, so
 // these are defaults, not a duplicated palette (there is no `theme.blsp`). Catppuccin
 // Mocha base/text tones, chosen so an un-styled window still reads as an editor.
@@ -427,6 +427,10 @@ enum UserEvent {
     /// and ones opened later. Behind `gui-bg!`; `None` restores `DEFAULT_BG`. Pure
     /// repaint, no metric change.
     Background { rgb: Option<[u8; 3]> },
+    /// Set the default text colour — what a text op whose face names no `:fg` is drawn
+    /// in — for every open window and ones opened later. Behind `gui-fg!`; `None`
+    /// restores `DEFAULT_FG`. Pure repaint, no metric change.
+    Foreground { rgb: Option<[u8; 3]> },
     /// Set the cell height as a multiple of the font px — for every open window and
     /// ones opened later. Behind `gui-line-height!`. A metric change, like a font
     /// change: the row count moves, so each window is told its new grid and re-renders.
@@ -1086,6 +1090,19 @@ pub fn bg(rgb: Option<[u8; 3]>) -> Result<(), String> {
     Ok(())
 }
 
+/// `(gui-fg! rgb)` — set the default text colour (a text op whose face names no `:fg`) on
+/// every window + the default for ones opened later. `None` restores `DEFAULT_FG`. No-op
+/// (silently) if the GUI thread never started.
+pub fn fg(rgb: Option<[u8; 3]>) -> Result<(), String> {
+    if headless() {
+        return headless_send(|| offscreen::Request::Foreground(rgb));
+    }
+    if let Ok(g) = gui() {
+        let _ = lock(g).send_event(UserEvent::Foreground { rgb });
+    }
+    Ok(())
+}
+
 /// `(gui-line-height! mult)` — set the cell height as a multiple of the font px on
 /// every window + the default for ones opened later. No-op (silently) if the GUI
 /// thread never started.
@@ -1622,6 +1639,8 @@ struct RenderDefaults {
     inset: f32,
     /// Window background; `None` = `DEFAULT_BG`.
     bg: Option<[u8; 3]>,
+    /// Default text colour; `None` = `DEFAULT_FG`.
+    fg: Option<[u8; 3]>,
     /// Cell height as a multiple of the font px.
     line_height: f32,
     /// How monochrome text is anti-aliased.
@@ -1639,6 +1658,7 @@ impl Default for RenderDefaults {
             px: DEFAULT_PX,
             inset: 0.0,
             bg: None,
+            fg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
             text_contrast: TEXT_CONTRAST,
@@ -1731,6 +1751,7 @@ fn build_window(
     }
     renderer.set_inset(defaults.inset);
     renderer.set_bg(defaults.bg);
+    renderer.set_fg(defaults.fg);
     renderer.set_line_height(defaults.line_height);
     renderer.set_text_aa(defaults.text_aa);
     renderer.set_text_contrast(defaults.text_contrast);
@@ -2215,6 +2236,13 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     w.renderer.set_bg(rgb);
                     // Background is a pure repaint — no metric change, so no
                     // `update_cells`/snap.
+                    w.window.request_redraw();
+                }
+            }
+            UserEvent::Foreground { rgb } => {
+                self.defaults.fg = rgb;
+                for w in self.wins.values_mut() {
+                    w.renderer.set_fg(rgb);
                     w.window.request_redraw();
                 }
             }

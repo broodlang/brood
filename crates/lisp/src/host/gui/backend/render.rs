@@ -759,6 +759,7 @@ pub(crate) struct Renderer {
     /// frame without one.
     top_band: bool,
     bg: Option<[u8; 3]>, // window background (clear/inset-margin fill); None = DEFAULT_BG
+    fg: Option<[u8; 3]>, // default text colour (a face with no :fg); None = DEFAULT_FG
     line_height: f32,    // cell height as a multiple of the font px (`gui-line-height!`)
     text_aa: TextAa,     // how monochrome text is anti-aliased (`gui-text-aa!`)
     /// The text contrast exponent γ (`gui-text-contrast!`): a glyph's partial coverage
@@ -839,6 +840,7 @@ impl Renderer {
             seam: None,
             top_band: true,
             bg: None,
+            fg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
             text_contrast: TEXT_CONTRAST,
@@ -939,6 +941,20 @@ impl Renderer {
     /// repaint — so the caller just requests a redraw.
     pub(super) fn set_bg(&mut self, rgb: Option<[u8; 3]>) {
         self.bg = rgb;
+        self.invalidate();
+    }
+
+    /// The window's default text colour — what a text op whose face names no `:fg` is
+    /// drawn in (and the ground of a reversed face that names none). `None` falls back to
+    /// `DEFAULT_FG`. Behind `gui-fg!`, so a light theme's plain text is its own dark text,
+    /// not the hardcoded light default (ADR-613).
+    pub(crate) fn fg(&self) -> [u8; 3] {
+        self.fg.unwrap_or(DEFAULT_FG)
+    }
+
+    /// Set the default text colour. A pure repaint, as [`Renderer::set_bg`].
+    pub(super) fn set_fg(&mut self, rgb: Option<[u8; 3]>) {
+        self.fg = rgb;
         self.invalidate();
     }
 

@@ -231,6 +231,19 @@ and, per row, the rows of its cell the `x` inks."
                   (is (= (ink-in image x 0 cell-w cell-h) 0))
                   (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0))))))
 
+  (test "text whose face names no :fg is drawn in the window's text colour (ADR-613)"
+    (when-gui (fn ()
+                (let (ink [76 79 105]
+                      image (gui/render-frame [[:clear]
+                                                [:text 0 0 "█" {}]
+                                                [:text 0 2 " " {:reverse true}]]
+                              (assoc (capture-spec) :fg ink))
+                      [cell-w cell-h] (:cell image)
+                      middle-y (math/quot cell-h 2))
+                  ;; a full block's middle, and a reversed blank's ground, are the colour
+                  (is (= (gui/pixel image (+ 6 (math/quot cell-w 2)) middle-y) ink))
+                  (is (= (gui/pixel image (+ 6 (* 2 cell-w) (math/quot cell-w 2)) middle-y) ink))))))
+
   (test "a lowercase letter sits on the same pixels in every row, in its row's middle (ADR-611)"
     (when-gui (fn ()
                 (doseq (size [11 15 22])

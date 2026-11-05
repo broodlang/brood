@@ -62,6 +62,7 @@ pub(super) enum Request {
     },
     Inset(f32),
     Background(Option<[u8; 3]>),
+    Foreground(Option<[u8; 3]>),
     LineHeight(f32),
     TextAa(TextAa),
     TextContrast(f32),
@@ -190,6 +191,7 @@ impl Painter {
         }
         renderer.set_inset(self.defaults.inset);
         renderer.set_bg(self.defaults.bg);
+        renderer.set_fg(self.defaults.fg);
         renderer.set_line_height(self.defaults.line_height);
         renderer.set_text_aa(self.defaults.text_aa);
         renderer.set_text_contrast(self.defaults.text_contrast);
@@ -264,6 +266,10 @@ impl Painter {
             Request::Background(rgb) => {
                 self.defaults.bg = rgb;
                 self.each_window(|renderer| renderer.set_bg(rgb));
+            }
+            Request::Foreground(rgb) => {
+                self.defaults.fg = rgb;
+                self.each_window(|renderer| renderer.set_fg(rgb));
             }
             Request::LineHeight(mult) => {
                 self.defaults.line_height = mult;
@@ -374,6 +380,9 @@ impl Painter {
         }
         if let Some(rgb) = spec.bg {
             renderer.set_bg(Some(rgb));
+        }
+        if let Some(rgb) = spec.fg {
+            renderer.set_fg(Some(rgb));
         }
         if let Some(mult) = spec.line_height {
             renderer.set_line_height(mult);

@@ -193,7 +193,7 @@ pub enum FontChoice {
 
 /// What `gui/render-frame` paints a frame AS: the window it stands in for. Every
 /// `None` is the default a window opens with (840×560 at scale 1, the bundled mono at
-/// 15 px, line height 1.4, no inset, the default background).
+/// 15 px, line height 1.4, no inset, the default background and text colour).
 #[derive(Clone, Debug, Default)]
 pub struct RenderSpec {
     /// Physical pixels.
@@ -203,6 +203,8 @@ pub struct RenderSpec {
     pub line_height: Option<f32>,
     pub inset: Option<f32>,
     pub bg: Option<[u8; 3]>,
+    /// The default text colour (`gui-fg!`): what a text op with no `:fg` is drawn in.
+    pub fg: Option<[u8; 3]>,
     pub scale: Option<f64>,
     pub text_aa: Option<TextAa>,
     pub ligatures: Option<bool>,
@@ -1320,7 +1322,7 @@ pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, focus, font,
+    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font,
     font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
     key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, maximize,
     minimize, next_texture_id, open, register_family, register_installed_family, render_frame,
@@ -1330,7 +1332,7 @@ pub use disabled::{
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, focus, font,
+    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font,
     font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
     key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, maximize,
     minimize, next_texture_id, open, register_family, register_installed_family, render_frame,

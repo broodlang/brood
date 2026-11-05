@@ -1158,8 +1158,7 @@ pub(super) fn render_ops(
                 r.set_metrics(saved);
             }
             Op::Text { row, col, s, face } => {
-                let (mut fg, mut bg) =
-                    (face.fg.unwrap_or(DEFAULT_FG), face.bg.unwrap_or(DEFAULT_BG));
+                let (mut fg, mut bg) = (face.fg.unwrap_or(r.fg()), face.bg.unwrap_or(r.bg()));
                 // Only paint a cell background when the face specifies one (or is
                 // reversed). A face with no `:bg` is TRANSPARENT — the glyph composites
                 // over whatever's already there (the frame clear, or an hl-line /
@@ -1167,7 +1166,7 @@ pub(super) fn render_ops(
                 // highlight shows behind the text too, exactly like Emacs. (Before,
                 // every glyph filled its cell with DEFAULT_BG, painting over the band so
                 // hl-line only showed in the line's trailing empty space.) For an
-                // un-banded line the pixel beneath is already DEFAULT_BG, so this is
+                // un-banded line the pixel beneath is already the window background, so this is
                 // visually identical there — only banded lines change.
                 let mut paint_bg = face.bg.is_some();
                 if face.reverse {
@@ -1436,8 +1435,7 @@ pub(super) fn render_ops(
                 face,
                 align,
             } => {
-                let (mut fg, mut bg) =
-                    (face.fg.unwrap_or(DEFAULT_FG), face.bg.unwrap_or(DEFAULT_BG));
+                let (mut fg, mut bg) = (face.fg.unwrap_or(r.fg()), face.bg.unwrap_or(r.bg()));
                 let mut paint_bg = face.bg.is_some();
                 if face.reverse {
                     std::mem::swap(&mut fg, &mut bg);

@@ -61,9 +61,6 @@ use crate::host::gui::{Align, CursorStyle, Face, MAX_PARTICLES, Op};
 // program that wants its own width expands tabs before it paints (`string/expand-tabs`).
 use crate::host::text_width::{TAB_WIDTH, cluster_cells, cluster_cells_at};
 
-const DEFAULT_FG: [u8; 3] = [0xe5, 0xe5, 0xe5];
-const DEFAULT_BG_RGB: [u8; 3] = [12, 12, 16];
-
 /// The most a scroll region shifts its ops, in pixels — the CPU painter's cap, so a
 /// runaway `dy_frac` moves a region off-screen rather than to infinity.
 const MAX_SCROLL_PX: f32 = 16384.0;
@@ -3231,8 +3228,8 @@ impl GpuWindow {
     ) -> Vec<RunQuad> {
         let atlas_size = ATLAS_SIZE as f32;
         let (mut fg, mut bg) = (
-            face.fg.unwrap_or(DEFAULT_FG),
-            face.bg.unwrap_or(DEFAULT_BG_RGB),
+            face.fg.unwrap_or(renderer.fg()),
+            face.bg.unwrap_or(renderer.bg()),
         );
         // A face with no `:bg` is transparent: the glyph composites over whatever is
         // under it (an hl-line band), exactly like Emacs.

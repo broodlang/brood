@@ -43,6 +43,7 @@ const EFFECTFUL: &[&str] = &[
     "%primary-get",
     "%primary-set",
     "%gui-bg!",
+    "%gui-fg!",
     "%gui-cell-size",
     "%gui-close",
     "%gui-drag-move",

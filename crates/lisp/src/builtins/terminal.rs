@@ -435,6 +435,24 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
         &["color"],
         "Set the window background colour: the fill for :clear, the per-frame pre-clear, and — being outside every cell — the gui-inset! margin and the cell-grid snap remainder. So a GUI app's padding matches its own theme background instead of the hardcoded default. color is a keyword named colour, an [r g b] vector (0..255 per channel), or a \"#rrggbb\"/\"#rgb\" hex string; nil restores the default. Applies to every open window and the default for ones opened later (a pure repaint — no grid change). Needs --features gui. Returns nil.",
         gui_bg);
+    // The default text colour (`gui-fg!`): what a text op whose face names no :fg is
+    // drawn in — gui-bg!'s partner, so a light theme's plain text is not the hardcoded
+    // light default (ADR-613).
+    primitives.def(
+        "%gui-fg!",
+        Arity::exact(1),
+        Sig::new(
+            vec![Ty::of_tags(&[
+                Tag::Keyword,
+                Tag::Vector,
+                Tag::Str,
+                Tag::Nil,
+            ])],
+            nil_ty,
+        ),
+        &["color"],
+        "Set the window's default text colour: what a text op whose face names no :fg is drawn in (and the background of a reversed face that names none), as gui-bg! is the colour of what no op paints. So a light theme's plain text is its own dark text instead of the hardcoded light default. color is a keyword named colour, an [r g b] vector (0..255 per channel), or a \"#rrggbb\"/\"#rgb\" hex string; nil restores the default. Applies to every open window and the default for ones opened later (a pure repaint — no grid change). Needs --features gui. Returns nil.",
+        gui_fg);
     // The line height (`gui-line-height!`): the cell height as a multiple of the font
     // px — 1.4 by default (an editor's breathing room); denser code wants ~1.25.
     primitives.def(
