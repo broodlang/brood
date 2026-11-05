@@ -167,70 +167,70 @@
 
 (describe "gui/render-frame — the window's painter, without a window"
   (test "row 0 starts at the window's top edge: a band on it is coloured from y = 0"
-    (when-gui
-      (fn ()
-        (let (cols (first (:grid (gui/render-frame [[:clear]] (capture-spec))))
-              image (gui/render-frame [[:clear] [:rect 0 0 cols 1 {:bg capture-band}]]
-                      (capture-spec))
-              [_ cell-h] (:cell image))
-          (is (= (:origin image) [6 0]))
-          (is (= (gui/pixel image 200 0) capture-band))
-          (is (= (gui/pixel image 200 (dec cell-h)) capture-band))
-          (is (= (gui/pixel image 200 cell-h) capture-bg))))))
+    (when-gui (fn ()
+                (let (cols (first (:grid (gui/render-frame [[:clear]] (capture-spec))))
+                      image (gui/render-frame [[:clear] [:rect 0 0 cols 1 {:bg capture-band}]]
+                              (capture-spec))
+                      [_ cell-h] (:cell image))
+                  (is (= (:origin image) [6 0]))
+                  (is (= (gui/pixel image 200 0) capture-band))
+                  (is (= (gui/pixel image 200 (dec cell-h)) capture-band))
+                  (is (= (gui/pixel image 200 cell-h) capture-bg))))))
 
   (test "the inset is a margin on the left, right and bottom; the leftover is below"
-    (when-gui
-      (fn ()
-        (let (image (gui/render-frame [[:clear] [:rect 1 1 3 2 {:bg capture-band}]]
-                      (capture-spec))
-              [cell-w cell-h] (:cell image)
-              [cols rows] (:grid image))
-          (is (= (:inset image) 6))
-          (is (= cols (math/quot (- 400 12) cell-w)))
-          (is (= rows (math/quot (- 203 6) cell-h)))
-          (is (= (gui/pixel image 3 (+ cell-h 2)) capture-bg))
-          (is (= (gui/pixel image (+ 6 cell-w) (+ cell-h 2)) capture-band))
-          (is (= (gui/pixel image (+ 6 cell-w) 202) capture-bg))))))
+    (when-gui (fn ()
+                (let (image (gui/render-frame [[:clear] [:rect 1 1 3 2 {:bg capture-band}]]
+                              (capture-spec))
+                      [cell-w cell-h] (:cell image)
+                      [cols rows] (:grid image))
+                  (is (= (:inset image) 6))
+                  (is (= cols (math/quot (- 400 12) cell-w)))
+                  (is (= rows (math/quot (- 203 6) cell-h)))
+                  (is (= (gui/pixel image 3 (+ cell-h 2)) capture-bg))
+                  (is (= (gui/pixel image (+ 6 cell-w) (+ cell-h 2)) capture-band))
+                  (is (= (gui/pixel image (+ 6 cell-w) 202) capture-bg))))))
 
   (test "a band reaching the grid's edges bleeds through the margin to the window's"
-    (when-gui
-      (fn ()
-        (let ([cols rows] (:grid (gui/render-frame [[:clear]] (capture-spec)))
-              image (gui/render-frame [[:clear] [:rect (dec rows) 0 cols 1 {:bg capture-band}]]
-                      (capture-spec)))
-          (is (= (gui/pixel image 0 202) capture-band))
-          (is (= (gui/pixel image 399 202) capture-band))))))
+    (when-gui (fn ()
+                (let ([cols rows] (:grid (gui/render-frame [[:clear]] (capture-spec)))
+                      image (gui/render-frame [[:clear]
+                                                [:rect (dec rows) 0 cols 1 {:bg capture-band}]]
+                              (capture-spec)))
+                  (is (= (gui/pixel image 0 202) capture-band))
+                  (is (= (gui/pixel image 399 202) capture-band))))))
 
   (test "a glyph's ink is inside its own cell"
-    (when-gui
-      (fn ()
-        (let (image (gui/render-frame [[:clear] [:text 1 2 "M" {:fg [255 255 255]}]]
-                      (capture-spec))
-              [cell-w cell-h] (:cell image)
-              x (+ 6 (* 2 cell-w)))
-          (is (> (ink-in image x cell-h cell-w cell-h) 10))
-          (is (= (ink-in image (- x cell-w) cell-h cell-w cell-h) 0))
-          (is (= (ink-in image (+ x cell-w) cell-h cell-w cell-h) 0))
-          (is (= (ink-in image x 0 cell-w cell-h) 0))
-          (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0)))))))
+    (when-gui (fn ()
+                (let (image (gui/render-frame [[:clear] [:text 1 2 "M" {:fg [255 255 255]}]]
+                              (capture-spec))
+                      [cell-w cell-h] (:cell image)
+                      x (+ 6 (* 2 cell-w)))
+                  (is (> (ink-in image x cell-h cell-w cell-h) 10))
+                  (is (= (ink-in image (- x cell-w) cell-h cell-w cell-h) 0))
+                  (is (= (ink-in image (+ x cell-w) cell-h cell-w cell-h) 0))
+                  (is (= (ink-in image x 0 cell-w cell-h) 0))
+                  (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0)))))))
 
 (describe "gui/write-png and gui/pixel"
   (test "a picture written as PNG decodes back to the same pixels, cropped and scaled"
-    (when-gui
-      (fn ()
-        (let (image (gui/render-frame [[:clear] [:rect 0 0 2 1 {:bg capture-band}]]
-                      (capture-spec))
-              path (str (path/temp "brood-capture-") ".png")
-              _ (gui/write-png image path {:crop [0 0 10 4] :scale 3})
-              back (gui/image-thumb (file/slurp-bytes path) 100 100))
-          (file/rm path)
-          (is (= [(:width back) (:height back)] [30 12]))
-          (is (= (gui/pixel back 0 0) capture-band))
-          (is (= (gui/pixel back 29 11) capture-band))))))
+    (when-gui (fn ()
+                (let (image (gui/render-frame [[:clear] [:rect 0 0 2 1 {:bg capture-band}]]
+                              (capture-spec))
+                      path (str (path/temp "brood-capture-") ".png")
+                      _ (gui/write-png image path {:crop [0 0 10 4] :scale 3})
+                      back (gui/image-thumb (file/slurp-bytes path) 100 100))
+                  (file/rm path)
+                  (is (= [(:width back) (:height back)] [30 12]))
+                  (is (= (gui/pixel back 0 0) capture-band))
+                  (is (= (gui/pixel back 29 11) capture-band))))))
 
   (test "a pixel outside the picture is nil"
-    (let (image {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 1 1) (bytes/int-> 2 1)
-                                             (bytes/int-> 3 1) (bytes/int-> 255 1))})
+    (let (image {:width 1
+                 :height 1
+                 :rgba (bytes/concat (bytes/int-> 1 1)
+                         (bytes/int-> 2 1)
+                         (bytes/int-> 3 1)
+                         (bytes/int-> 255 1))})
       (is (= (gui/pixel image 0 0) [1 2 3]))
       (is (nil? (gui/pixel image 1 0)))
       (is (nil? (gui/pixel image 0 -1)))))
