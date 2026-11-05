@@ -1773,10 +1773,10 @@ temp, and the second rename would find it gone.
 
 ;; The lock lives beside the project's other derived state (the check caches), NOT in
 ;; the project directory — no stray file appears next to the user's source, and the
-;; inode is stable across manifest rewrites. `/tmp` is the fallback when there is no
+;; inode is stable across manifest rewrites. The temp root is the fallback when there is no
 ;; cache dir (no HOME), so an edit is always serialised.
 (defn- package-manifest-lock (root)
-  (let (dir (or (project-check/project-cache-dir root) "/tmp"))
+  (let (dir (or (project-check/project-cache-dir root) (path/temp-root)))
     (path/join dir (str "manifest-" (hash/sha256 root) ".lock"))))
 
 ;; Attempts are bounded so a pathological writer can't spin here forever; each retry

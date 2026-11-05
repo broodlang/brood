@@ -344,6 +344,7 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let super::subprocesses::ChildOptions { cwd, env, raw_args } =
         super::subprocesses::child_options(heap, "os/cmd", arg(args, 2))?;
     crate::host::subprocess::add_args(&mut cmd, &argv, raw_args);
+    crate::host::subprocess::own_hidden_console(&mut cmd);
     // a responsive process is told it waited, or refused the wait (ADR-517)
     let blocking = crate::process::responsive::enter_blocking(heap, "os/cmd", || {
         crate::process::responsive::command_detail(&prog, &argv)
@@ -435,6 +436,7 @@ enum Stop {
 
 /// The longest one wait of `%os-cmd` runs before it looks for its caller's exit signal
 /// again — how long a killed caller's child can outlive it.
+#[cfg(unix)]
 const KILL_CHECK: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// What `%os-cmd` collects from a finished (or killed) child: its status, stdout,

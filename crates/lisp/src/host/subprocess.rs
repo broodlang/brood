@@ -808,6 +808,19 @@ pub fn add_args(command: &mut Command, args: &[String], raw: bool) {
     command.args(args);
 }
 
+/// Windows: a piped console child gets a console of its own, never shown. Without it a GUI
+/// caller (no console to share) had a console window flash up for every `cmd.exe`, and a
+/// console caller shared its console — so a `chcp` the child ran changed the caller's.
+pub fn own_hidden_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 /// Windows's process group: a Job Object holding a child, which every process the child
 /// starts joins too, so stopping the child stops its whole tree (ADR-592). Killing the
 /// child alone left a `sh -c "…; sleep 60"` grandchild running and holding the output
@@ -841,6 +854,27 @@ impl ProcessTree {
                 return None;
             }
             let tree = ProcessTree { job };
+            // Breakaway allowed: a process the child hands to the desktop (`os/detach`,
+            // created with CREATE_BREAKAWAY_FROM_JOB) leaves the job, so stopping the child
+            // does not close the browser it opened. Best effort: refused, the tree still is one.
+            {
+                use windows_sys::Win32::System::JobObjects::{
+                    JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                    JobObjectExtendedLimitInformation, SetInformationJobObject,
+                };
+                let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+                // SAFETY: `limits` is a live JOBOBJECT_EXTENDED_LIMIT_INFORMATION of the size
+                // passed; the job handle is live.
+                let _ = unsafe {
+                    SetInformationJobObject(
+                        job,
+                        JobObjectExtendedLimitInformation,
+                        (&raw const limits).cast(),
+                        std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                    )
+                };
+            }
             // SAFETY: both handles are live — the job just made, the child's held by
             // `child`.
             let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) };
@@ -870,6 +904,29 @@ impl Drop for ProcessTree {
     }
 }
 
+/// Spawn `command` outside the caller: on Windows with no console of ours, no Ctrl-C of ours,
+/// and out of any Job Object the caller is in (ours allow it, ADR-592) — falling back to
+/// staying in it when the job does not allow breakaway (a CI runner's may not).
+fn spawn_detached(command: &mut Command) -> std::io::Result<Child> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        const DETACHED: u32 = 0x0000_0008 | 0x0000_0200;
+        const BREAKAWAY: u32 = windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+        command.creation_flags(DETACHED | BREAKAWAY);
+        match command.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                command.creation_flags(DETACHED);
+                command.spawn()
+            }
+            result => result,
+        }
+    }
+    #[cfg(not(windows))]
+    command.spawn()
+}
+
 /// `(os/detach prog args opts)` — start `prog` and let it go: no pipes (its stdio is the
 /// null device), no handle, not stopped when its caller dies, and not in the caller's
 /// process group or Job Object. What opening a URL or a file in another application wants:
@@ -890,18 +947,12 @@ pub fn detach(
         .stderr(Stdio::null());
     #[cfg(unix)]
     new_session(&mut command);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console of ours, no Ctrl-C of ours
-        command.creation_flags(0x0000_0008 | 0x0000_0200);
-    }
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
     apply_env(&mut command, env);
     reset_inherited_signals(&mut command);
-    let mut child = command.spawn()?;
+    let mut child = spawn_detached(&mut command)?;
     // Reap it when it ends, so it leaves no zombie; a refused thread only costs that.
     let _ = std::thread::Builder::new()
         .name("brood-detached-wait".into())
@@ -921,6 +972,7 @@ pub fn spawn(
 ) -> std::io::Result<u64> {
     let mut command = Command::new(prog);
     add_args(&mut command, args, raw_args);
+    own_hidden_console(&mut command);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

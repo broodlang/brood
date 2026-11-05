@@ -511,6 +511,7 @@ const WORLD_EFFECTS: &[&str] = &[
     "file/spit-bytes",
     "file/spit-bytes-append",
     "file/spit-private",
+    "file/set-mtime",
     "file/write-lines",
     "file/cp",
     "file/mkdir",

@@ -144,6 +144,14 @@ from LDAP or another NSS source too), or nil when there is no such user — what
     (os/user-home \"brood-surely-no-such-user\")   ;=> nil"
   (%user-home name))
 
+(defn user-name (-> (or string nil))
+  "The name of the user this process runs as: `$USER` (Unix), `%USERNAME%` (Windows), or
+`$LOGNAME` — nil when none is set (a bare service environment).
+
+    (or (nil? (os/user-name)) (string? (os/user-name)))   ;=> true"
+  (seq/find [(env "USER") (env "USERNAME") (env "LOGNAME")]
+    (fn (name) (and name (not (= name ""))))))
+
 (defn env-all ()
   "All environment variables as a `{string → string}` map.
 
@@ -175,15 +183,27 @@ from LDAP or another NSS source too), or nil when there is no such user — what
   (if (empty? dirs)
     nil
     (let (dir (first dirs)
-          candidate (str (if (= dir "") "." dir) "/" program)
-          executable (str candidate ".exe"))
-      (cond
-        (runnable? candidate) candidate
-        ;; Windows: what a spawn runs for `git` is `git.exe` — CreateProcess adds `.exe`
-        ;; to a name without one, and nothing else (not `.cmd`, not PATHEXT).
-        (and (= (type) :windows) (not (string/ends-with? program ".exe")) (runnable? executable))
-          executable
-        else (which-in (rest dirs) program)))))
+          base (str (if (= dir "") "." dir) "/" program)
+          found (seq/find (executable-names base) runnable?))
+      (if found found (which-in (rest dirs) program)))))
+
+(defn- windows-extensions ()
+  ;; PATHEXT's extensions, lower-cased: `.com .exe .bat .cmd` when it is unset
+  (map (seq/filter (string/split (or (env "PATHEXT") ".COM;.EXE;.BAT;.CMD") ";")
+         (fn (extension) (not (= extension ""))))
+    string/lower))
+
+(defn- executable-names (base)
+  ;; What a file named `base` may be called to run. Unix: itself. Windows: itself only when
+  ;; it already ends in an executable extension, else itself with each one — never the bare
+  ;; name, which there is no program: an npm package's `tsc` beside its `tsc.cmd` is an `sh`
+  ;; script, and running it fails.
+  (if (= (type) :windows)
+    (let (extensions (windows-extensions))
+      (if (any? extensions (fn (extension) (string/ends-with? (string/lower base) extension)))
+        [base]
+        (map extensions (fn (extension) (str base extension)))))
+    [base]))
 
 (defn which (program)
   "Where [[spawn]] would find `program`, as an absolute-or-given path — or **nil** when
@@ -200,9 +220,10 @@ for — it is used as given, and answered only if it is executable — and other
 directory, or a file with no execute bit for anyone, is not a match (`file/stat`'s
 `:exec?`; Windows has no permission bits, so there existence is the whole test).
 
-**Windows:** the entry separator is `;` and `\\` counts as a path separator. A name is
-also tried with `.exe` added, as a spawn tries it (`\"git\"` finds `git.exe`); `PATHEXT`
-is not applied — a spawn does not apply it either, so `.cmd` / `.bat` are named in full.
+**Windows:** the entry separator is `;` and `\\` counts as a path separator. A program is
+a file with an executable extension from `PATHEXT` (`.com .exe .bat .cmd` by default):
+`\"git\"` finds `git.exe`, `\"tsc\"` finds `tsc.cmd`, and an extensionless file — an npm
+package's `sh` shim beside its `.cmd` — is never the answer.
 
     (os/which \"ls\")           ;; => \"/usr/bin/ls\"
     (os/which \"no-such-cmd\")  ;; => nil
@@ -210,7 +231,7 @@ is not applied — a spawn does not apply it either, so `.cmd` / `.bat` are name
 
     (os/which \"surely-no-such-program\")   ;=> nil"
   (if (or (includes? program "/") (and (= (type) :windows) (includes? program "\\")))
-    (when (runnable? program) program)
+    (seq/find (executable-names program) runnable?)
     (which-in (string/split (or (env "PATH") "") (path-separator)) program)))
 
 (defn cmd (prog &optional (args []) (opts {}))
@@ -257,15 +278,26 @@ once instead of hanging behind a full-screen program; `os/spawn-pty` gives it on
 `[\"sh\" \"-c\"]`, or on Windows `[%COMSPEC% \"/d\" \"/s\" \"/c\"]` (`cmd.exe` when
 `COMSPEC` is unset). [[shell-cmd]] and [[shell-spawn]] run a line through it.
 
-    (contains? #{\"sh\" \"cmd.exe\"} (first (os/shell)))   ;~> true, unless COMSPEC names another"
+    (rest (os/shell))   ;~> (\"-c\"), or (\"/d\" \"/s\" \"/c\") on Windows — its first is the shell's path"
   (if (= (type) :windows) [(or (env "COMSPEC") "cmd.exe") "/d" "/s" "/c"] ["sh" "-c"]))
+
+(defn- windows-line (line)
+  ;; What cmd.exe is handed for `line`. `cmd /c` runs ONE line — a newline cuts the rest off
+  ;; without a word — so a line with one in it is refused (a trailing one is dropped). And
+  ;; its built-ins write in the console's codepage while the output is read as UTF-8, so
+  ;; the line runs after `chcp 65001` (UTF-8) in the child's own console (KI-364's sequel).
+  (let (trimmed (string/trimr line))
+    (when (or (includes? trimmed "\n") (includes? trimmed "\r"))
+      (error "os/shell-cmd: cmd.exe /c runs one line, and this has several — join them with & or && first: "
+        (pr-str line)))
+    (str "\"chcp 65001>nul & " trimmed "\"")))
 
 (defn- shell-call (line opts)
   ;; `[program args opts]` running `line` through [[shell]]
   (let (interpreter (shell))
     (if (= (type) :windows)
       [(first interpreter)
-        (conj (vec (rest interpreter)) (str "\"" line "\""))
+        (conj (vec (rest interpreter)) (windows-line line))
         (assoc (or opts {}) :raw-args true)]
       [(first interpreter) (conj (vec (rest interpreter)) line) (or opts {})])))
 
@@ -520,6 +552,24 @@ closed, or `sig` is not one of those. Unix only.
 
     (os/signal (os/spawn \"sh\" [\"-c\" \"sleep 60\"]) :int)   ;~> nil; the sleep gets SIGINT"
   (%proc-signal p sig))
+
+(defn interrupt (p)
+  "Interrupt subprocess `p` the way the platform can — what a terminal's Ctrl-C (an
+editor's `C-c C-c`) means. On Unix SIGINT to its process group ([[signal]] `:int`): the
+child decides, and may carry on. Windows has no SIGINT for a piped child, so there the
+child and everything it started are stopped ([[close]], its Job Object). Answers
+`:interrupted` or `:closed` — what was done — or nil when `p` was already gone; never raises
+for that, so a key bound to it cannot kill its caller.
+
+    (os/interrupt (os/spawn \"sh\" [\"-c\" \"sleep 60\"]))   ;~> :interrupted (:closed on Windows)"
+  ;; check-allow :discarded-catch — an unknown or closed `p` is the one failure, and nil
+  ;; is its documented answer
+  (check-allow :discarded-catch
+    (try
+      (if (= (type) :windows)
+        (do (close p) :closed)
+        (do (signal p :int) :interrupted))
+      (catch _ nil))))
 
 (defn trap (sig & pid)
   "Deliver signal `sig` sent to THIS runtime — `:term`, `:int` (Ctrl-C) or `:hup`, or the job
