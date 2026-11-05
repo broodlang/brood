@@ -220,6 +220,30 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         rebound_since,
     );
     primitives.def(
+        "reflect/global-values",
+        Arity::exact(0),
+        Sig::nullary(map_ty),
+        &[],
+        "Every global a `def` may rebind, as a map of symbol -> value: the names the language does not reserve (a project's, a plugin's, a dynamic variable), each by its exact global name. Taken before a load, it is what each global `reflect/rebound-since` names held before the load — the names a macro generated and the ones a project rooted included (ADR-606).\n\n    (map? (reflect/global-values))   ;=> true",
+        global_values,
+    );
+    primitives.def(
+        "reflect/source-locations",
+        Arity::exact(0),
+        Sig::nullary(map_ty),
+        &[],
+        "Where every global a `def` may rebind was defined, as a map of symbol -> [file line col]: the companion of `reflect/global-values`, taken before a load so a global given back its old value can say where that value was defined again (`reflect/set-source-location`, ADR-606).\n\n    (map? (reflect/source-locations))   ;=> true",
+        source_locations,
+    );
+    primitives.def(
+        "reflect/set-source-location",
+        Arity::exact(2),
+        Sig::new(vec![sym, any], any),
+        &["name", "location"],
+        "Record global `name` (its exact name; a root escape `/org/f` is read as `org/f`) as defined at `location` — `[file line col]`, as `reflect/source-location` answers — or forget its site with nil. What a host undoing a load puts back with the value (ADR-606). Answers `location`.\n\n    (reflect/set-source-location 'my-fn nil)   ;=> nil",
+        set_source_location,
+    );
+    primitives.def(
         "reflect/undef",
         Arity::exact(1),
         Sig::new(vec![sym], bool_ty),
@@ -869,6 +893,89 @@ pub(super) fn global_generation(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
 /// `(reflect/generation)` — the runtime's global generation now (ADR-603).
 pub(super) fn runtime_generation(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Int(heap.runtime_generation() as i64))
+}
+
+/// `(reflect/global-values)` — every rebindable global with its value (ADR-606).
+pub(super) fn global_values(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let pairs = heap
+        .rebindable_globals()
+        .into_iter()
+        .map(|(sym, value)| (Value::Sym(sym), value))
+        .collect();
+    // GC-safe: nothing evaluates between the read and the map's build (a builtin never
+    // fires GC mid-execution).
+    Ok(heap.map_from_pairs(pairs))
+}
+
+/// `(reflect/source-locations)` — every rebindable global's def site (ADR-606).
+pub(super) fn source_locations(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let sites = heap.rebindable_def_sites();
+    // A file's string is shared by every global defined in it (strings are immutable).
+    let mut files: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    let mut pairs = Vec::with_capacity(sites.len());
+    for (sym, loc) in sites {
+        let file = match files.get(&loc.file) {
+            Some(&file) => file,
+            None => {
+                let file = heap.alloc_string(&loc.file);
+                files.insert(loc.file.clone(), file);
+                file
+            }
+        };
+        let site = heap.alloc_vector(vec![
+            file,
+            Value::int(loc.pos.line as i64),
+            Value::int(loc.pos.col as i64),
+        ]);
+        pairs.push((Value::Sym(sym), site));
+    }
+    // GC-safe: nothing evaluates between the allocations and the map's build.
+    Ok(heap.map_from_pairs(pairs))
+}
+
+/// `(reflect/set-source-location name location)` — put back (or forget) a def site (ADR-606).
+pub(super) fn set_source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    const WHO: &str = "reflect/set-source-location";
+    let name = expect_symbol(heap, WHO, arg(args, 0))?;
+    let name = root_escaped(name).unwrap_or(name);
+    let location = arg(args, 1);
+    if matches!(location, Value::Nil) {
+        heap.forget_def_site(name);
+        return Ok(location);
+    }
+    let items = match location.unpack() {
+        value::ValueRef::Vector(id) => heap.vector(id).to_vec(),
+        _ => {
+            return Err(LispError::wrong_type(
+                heap,
+                WHO,
+                "[file line col] or nil",
+                location,
+            ));
+        }
+    };
+    let [file, line, col] = items[..] else {
+        return Err(LispError::wrong_type(
+            heap,
+            WHO,
+            "[file line col] or nil",
+            location,
+        ));
+    };
+    let file = expect_string(heap, WHO, file)?;
+    let line = super::args::expect_int(heap, WHO, line)?;
+    let col = super::args::expect_int(heap, WHO, col)?;
+    heap.set_def_site(
+        name,
+        crate::core::heap::SourceLoc {
+            file,
+            pos: crate::error::Pos {
+                line: u32::try_from(line).unwrap_or(0),
+                col: u32::try_from(col).unwrap_or(0),
+            },
+        },
+    );
+    Ok(location)
 }
 
 /// `(reflect/rebound-since generation)` — the globals stamped after `generation` (ADR-603).

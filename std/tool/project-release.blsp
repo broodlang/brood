@@ -250,7 +250,13 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
         (bundle-reject-duplicate-names (map pairs first))
         (bundle-reject-builtin-names (map pairs first))
         (bundle-reject-missing-entry (map pairs first))
-        (cons (bundle-augment-manifest manifest dep-packages)
+        (cons
+          (bundle-augment-manifest manifest
+            dep-packages
+            ;; the project's own modules by their `(defmodule …)` names, as `setup` registers
+            ;; them from disk: what `reflect/project-modules` answers in the bundle (ADR-606)
+            (seq/distinct (map (/apply append (map src-dirs package/module-files))
+                            (fn (module-file) (->string (first module-file))))))
           (fold pairs nil (fn (acc p) (cons (first p) (cons (second p) acc)))))))))
 
 ;; A bundle whose entry module was never collected is a 22 MB binary that cannot boot,
@@ -278,8 +284,10 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 
 ;; Re-emit the bundle manifest with `:bundled-packages` (every rooted dependency package,
 ;; transitive included) added, so `run-bundle` roots all of them — not just the direct deps
-;; `:dependencies` names. Serialised as DATA: the embedded manifest is only ever read back with
-;; `reflect/read-first` + `apply`, so dropping comments/formatting is fine.
+;; `:dependencies` names — and `:project-modules`, the root project's own module names, so the
+;; bundle answers `reflect/project-modules` as `setup` does from disk (ADR-606). Serialised as
+;; DATA: the embedded manifest is only ever read back with `reflect/read-first` + `apply`, so
+;; dropping comments/formatting is fine.
 ;;
 ;; This is also where a release gets DATED. `:built-at` (epoch ms) and `:built-with` (the
 ;; `build-id` of the runtime that ran `nest release`) are stamped in here rather than into a
@@ -287,13 +295,14 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; format — so "when was this built, and by which brood" costs no format-version bump, and
 ;; `apply-config` ignores keys it doesn't know. Nothing writes them to the on-disk
 ;; project.blsp: a build stamp is a fact about an artifact, not about the source.
-(defn- bundle-augment-manifest (manifest dep-packages)
+(defn- bundle-augment-manifest (manifest dep-packages &optional (project-modules []))
   (let (form (reflect/read-first manifest))
     (if (and (pair? form) (= (first form) 'project))
       (pr-str (cons 'project
                 (append (rest form)
                   (list :bundled-packages
                     (/apply vector dep-packages)
+                    :project-modules (/apply vector project-modules)
                     :built-at (os/now)
                     :built-with (system/build-id)))))
       manifest)))
@@ -365,6 +374,27 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
           (when shorts (%register-package-modules! pkg shorts)))))
     nil))
 
+;; Register the root project's own module names for a running bundle (ADR-606), as
+;; `project-root-project-rooting` does from disk: the manifest's `:project-modules`, which
+;; `bundle-collect` bakes from each file's `(defmodule …)`. A bundle built before that field
+;; falls back to its embedded keys that are no dependency's (`pkg/mod` under a bundled package)
+;; — each the module's require-name, the same name for a module whose file is named for it.
+(defn- bundle-register-project-modules ()
+  (let (form (reflect/read-first (or (%bundle-manifest) "")))
+    (when (and (pair? form) (= (first form) 'project))
+      (let (baked (project/plist-get (rest form) :project-modules)
+            packages (into #{}
+                       (or project/*bundled-packages*
+                         (map project/*dependencies* (fn (d) (->string (get d :name)))))))
+        (%register-project-modules! (map (or baked
+                                           (seq/reject (%bundle-module-names)
+                                             (fn (key)
+                                               (let (segment (bundle-key-package key))
+                                                 (and (not (= segment key))
+                                                   (contains? packages segment))))))
+                                      symbol)))))
+  nil)
+
 ;; ═══ The bundle's startup image (ADR-484) ═════════════════════════════════════
 ;; Booting a bundle used to compile every embedded module's source on every launch — a GUI
 ;; app of ~120 modules spent ~650 ms of its ~700 ms start doing it. `nest release` now has
@@ -426,6 +456,9 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
   ;; targets root — exactly as `%require-force-package` does from disk. Must run BEFORE the
   ;; loads below (it is what makes `%require-force`'s embedded branch pick the right context).
   (bundle-register-dep-rooting)
+  ;; The root project's own modules, for `reflect/project-modules` (ADR-606): they load unrooted
+  ;; here, so no package context names them as `setup`'s does from disk.
+  (bundle-register-project-modules)
   ;; After the rooting context, which the image's root section leaves alone
   ;; (`*package-modules-of*` is a registry exclusion), and before any module loads.
   (let (sections (if from-source? nil (bundle-install-image)))

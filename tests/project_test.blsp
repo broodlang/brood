@@ -561,6 +561,19 @@
         (let (bundle (project-release/bundle-collect root))
           (is (any? bundle (fn (s) (and (string? s) (includes? s "defn shipped")))))
           (is (not (any? bundle (fn (s) (and (string? s) (includes? s "describe"))))))))))
+  (test "bundle-collect bakes the project's own module names into the manifest"
+    ;; ADR-606: what `reflect/project-modules` answers in the released program — the
+    ;; `(defmodule …)` names, as `setup` registers them from disk, not the file stems
+    (let (root (temp-dir "brood-projmods-"))
+      (file/mkdir root)
+      (file/mkdir (path/join (or root "") "src"))
+      (file/spit (path/join (or root "") "project.blsp")
+        "(project :name \"projmods\" :source-paths [\"src\"] :main app)\n")
+      (file/spit (path/join (or root "") "src" "app.blsp") "(defmodule app)\n(defn main () 1)\n")
+      (file/spit (path/join (or root "") "src" "helpers.blsp") "(defmodule util)\n(defn h () 2)\n")
+      (let (manifest (reflect/read-first (first (project-release/bundle-collect root))))
+        (assert= (vec (sort (project/plist-get (rest manifest) :project-modules)))
+          ["app" "util"]))))
   (test "bundle-collect refuses a runtime the manifest's :brood does not admit"
     ;; `nest release` never calls `setup`, so without its own check an image built on an
     ;; older brood shipped a project that requires a newer one

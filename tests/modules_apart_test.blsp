@@ -59,6 +59,23 @@
           (assert= (first (reflect/source-location 'modhost/modorg/escaped)) file)
           (is (nil? (reflect/source-location '/modorg/escaped))))))))
 
+(describe "reflect/project-modules"
+  ;; ADR-606: a release bundle loads the project's modules unrooted and sets no package
+  ;; context, so the answer cannot come from the context — it is what the project registered
+  :isolated (test "answers the project's registered modules with no package context, as in a release bundle"
+    (let (previous (%set-package-context nil nil))
+      (try
+        (do
+          (%register-project-modules! '(modorg modother))
+          (assert= (reflect/project-modules) ["modorg" "modother"])
+          ;; a plugin loaded apart, or a dependency's load, does not change the project's list
+          (in-host (fn ()
+                     (assert= (reflect/with-modules-apart ["modorg"] reflect/project-modules)
+                       ["modorg" "modother"])))
+          (%register-project-modules! nil)
+          (assert= (reflect/project-modules) []))
+        (finally (%set-package-context (first previous) (second previous)))))))
+
 (describe "reflect/with-modules-apart"
   (test "restores the project's context, a throw included"
     (in-host (fn ()

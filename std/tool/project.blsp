@@ -1103,11 +1103,14 @@ rules merged in declaration order, then this project's own `:format-headers` on 
         ;; Ambient: not restored — the project's default context for the whole run. A dep
         ;; load nests its own context over this and restores back to it.
         (%set-package-context (symbol pkg) short-modules)
+        ;; what `reflect/project-modules` answers — a release bundle registers the same list
+        ;; from its manifest (ADR-606)
+        (%register-project-modules! short-modules)
         nil))
     ;; Nameless project (a bare run, or a manifest with no :name): clear any ambient
     ;; context a *prior* setup left in a long-lived tooling image, so this
     ;; project's short modules don't get wrongly rooted under the previous name.
-    (%set-package-context nil nil)))
+    (do (%set-package-context nil nil) (%register-project-modules! nil))))
 
 ;; Load a full project image for **tooling** (the LSP and the `nest mcp` server):
 ;; put the project's sources on *load-path* and load them (so cross-module names
