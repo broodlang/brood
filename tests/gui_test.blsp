@@ -160,6 +160,7 @@
 (defn- capture-spec ()
   {:width 400 :height 203 :inset 6 :bg capture-bg :size 15 :line-height 1.4})
 
+(sig ink-in (map int int int int -> int))
 (defn- ink-in (image x0 y0 w h)
   "How many pixels of the w×h rectangle at (x0, y0) are not the window background."
   (fold-for (acc 0 y (range y0 (+ y0 h)) x (range x0 (+ x0 w)))
@@ -218,7 +219,8 @@
                               (capture-spec))
                       path (str (path/temp "brood-capture-") ".png")
                       _ (gui/write-png image path {:crop [0 0 10 4] :scale 3})
-                      back (gui/image-thumb (file/slurp-bytes path) 100 100))
+                      back (or (gui/image-thumb (file/slurp-bytes path) 100 100)
+                             (error "the written PNG did not decode")))
                   (file/rm path)
                   (is (= [(:width back) (:height back)] [30 12]))
                   (is (= (gui/pixel back 0 0) capture-band))

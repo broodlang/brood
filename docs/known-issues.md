@@ -68,12 +68,33 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-370 — `nest check` reported a warning on `examples/life_bands.blsp` once, then never again
+
+**Seen** 2026-11-05, once: a full `nest check std/ tests/ examples/` printed
+`examples/life_bands.blsp:70:15: warning: send: argument 1 expects keyword | map | pid, got
+nil | pid ((nth pids k))` — four warnings where the run before it printed none. It ran right
+after a `make release`, with `std/gui.blsp` freshly given its image types (ADR-609's gui
+sigs, the `gui/image` / `gui/frame-image` deftypes). The file is from 2026-10-28 and nothing in
+it or its requires changed. Two things about it are wrong on their face: a non-strict check
+flagged `nil | pid` into a domain that includes `pid` (overlap reads it consistent), and
+`life_bands` uses nothing from `gui`.
+
+**Not reproduced** in 12 runs on the next builds: full-tree and single-file, imaged and
+`BROOD_NO_STDIMAGE=1`, and on a rebuild with the first version of the `image-thumb` sig put
+back. Ruled out: the check cache's stamp (it carries `system/build-id`, whose third field is
+the binary's own mtime, so a rebuild drops it).
+
+**Diagnostic for the next sighting:** keep the binary, re-run the same command with
+`BROOD_NO_CHECK_CACHE=1` (cache or checker?) and then on the one file alone (cross-file
+inference or not), and save the stdlib image named in the run's footer.
+
 ## Index — status per issue
 
 Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](archive/known-issues-closed.md).
 
 | # | What | Status |
 |---|---|---|
+| KI-370 | **`nest check` reported `send: … got nil \| pid` on `examples/life_bands.blsp` once** — a non-strict warning on an overlapping type, in a file that changed nothing, right after a rebuild | ⚠️ **watching 2026-11-05** — 0 of 12 re-runs across three boot paths; diagnostic named in the section |
 | KI-360 | **a terminal without the kitty keyboard protocol cannot send `C-;`, `C-.`, `C-'`** — xterm's `modifyOtherKeys` form has no parser in crossterm, so it is not asked for | ✅ **fixed** 2026-11-04 — Brood reads and decodes the tty's bytes itself (`decoder`), `modifyOtherKeys` 2 asked for where kitty is not spoken |
 | KI-369 | **Windows has no pseudo-terminal** — `os/spawn-pty` raises naming ConPTY, so terminal buffers and the line-mode REPL are Unix-only | ✅ **FIXED 2026-11-04** — ConPTY (ADR-597): a raw-handle child type in the subprocess registry, `CreatePseudoConsole` + `CreateProcessW` with an attribute list, the waiter closing the pseudoconsole after the exit; `os/pty-mode` nil there. Was: OPEN — needs ConPTY |
 | KI-365 | **`file/spit-private` is not private on Windows** — a plain create there, so the file takes its directory's ACL; bedit's auto-save sidecars are as private as the file beside them | ✅ **FIXED 2026-11-04** — a protected one-entry DACL (the current user) the file is CREATED with (`CreateFileW` with security attributes, shared with no one while open; a file already there made owner-only through its handle before it is emptied) — private from its first moment, 2026-11-05. Guard: `tests/platform_test.blsp` "owner-only files", the ACL read back with `icacls` on the Windows runner |
