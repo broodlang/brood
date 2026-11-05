@@ -15919,6 +15919,13 @@ parked session restarted and adopted; no restart, no supervision) and
 `tests/buffer_registry_test.blsp` "buffer-registry — an owner's lifetime"; bedit's
 `tests/remote_test.blsp` "remote — a served session's loop that dies is saved and restarted".
 
+**Follow-up (2026-11-05).** A review of the fix found its replay of the manager's hand-overs
+replayed handled ones too (a declined claim, replayed to a restarted parked loop, took the
+claimant's window), its ledger kept the old client's key number after a hand-over, a restarted
+parked loop parked afresh, and dead watchers and deaths were never dropped. ADR-605 fixes each:
+only unhandled hand-overs replay, a new client starts a fresh ledger, a parked session keeps its
+park time, a registry drops a watcher that ends, and a browser tab's input has one owner process.
+
 ## KI-357 — a module materialised from a startup image had fewer registry writers than its source load ✅ FIXED 2026-11-04
 
 **Symptom.** `registry/written-by #{'m}` (ADR-582) answers what module `m`'s load wrote when

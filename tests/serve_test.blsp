@@ -1171,3 +1171,183 @@
     (do
       (assert= (served-session) nil)
       (assert= (serve-retain {:anything 1}) nil))))
+
+;; ---- ADR-605: only the hand-overs no loop handled are given to a restarted one ----------
+
+;; A client that attaches as `opts` and reports to `report` every attach it is told of —
+;; `[:observed-attached loop]` and `[:observed-reattached loop]` — and every ping and bye,
+;; answering pings while not told :deaf. The second user of a name, whose own session must
+;; never be taken from it by another session's restart.
+(defn observing-client (mgr report opts)
+  (send mgr [:attach (self) 80 24 opts])
+  (observing-client-loop report true))
+
+(defn observing-client-loop (report answers?)
+  (receive
+    ([:attached s] (do (send report [:observed-attached s]) (observing-client-loop report answers?)))
+    ([:reattached s _ _] (do
+                           (send report [:observed-reattached s])
+                           (observing-client-loop report answers?)))
+    ([:ping from asked] (do
+                          (when answers? (send from [:pong asked]))
+                          (send report [:observed-ping])
+                          (observing-client-loop report answers?)))
+    ([:bye] (do (send report [:observed-bye]) (observing-client-loop report answers?)))
+    (:deaf (observing-client-loop report false))
+    (:die nil)
+    (_ (observing-client-loop report answers?))))
+
+;; A client that attaches as `opts`, reports the loop and the SESSION it was told, and waits
+;; to be told to die — its death is the dropped link.
+(defn session-client (mgr report opts)
+  (send mgr [:attach (self) 80 24 opts])
+  (let (loop-process (receive ([:attached s] s) (after test/*wait-ms* nil))
+        session (receive ([:session s] s) (after test/*wait-ms* nil)))
+    (do (send report [:session-client loop-process session]) (receive (:die nil)))))
+
+;; A client that attaches as `opts` and ships three NUMBERED keys, as a client attached to a
+;; supervised session does, then reports the loop and waits to be told to die.
+(defn numbered-client (mgr report opts)
+  (send mgr [:attach (self) 80 24 opts])
+  (receive
+    ([:attached s] (do
+                     (send s [:key "+" false 1])
+                     (send s [:key "+" false 2])
+                     (send s [:key "+" false 3])
+                     (send report [:numbered-client s])
+                     (receive (:die nil))))
+    (after test/*wait-ms* (send report [:numbered-client nil]))))
+
+;; The counter, whose FIRST loop dies folding a client's return — before it can take a key
+;; of the client that came back. A restarted loop's model has no :first.
+(defn back-crash-up (m input c r)
+  (if (and (= input [:client-back]) (:first m))
+    (do (exit (self) :boom) (receive (after 0 nil)) m)
+    (resume-up m input c r)))
+
+(defn await-down (watch)
+  (receive ([:down ^watch _ _] :down) (after test/*wait-ms* :alive)))
+
+(describe "serve: a restarted loop is given only the hand-overs no loop handled (ADR-605)"
+  (test "a declined claim is not replayed to a restarted parked loop, hijacking its claimant"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk
+                       vw
+                       crash-up
+                       (crash-opts me {} {:resume-ms :forever})))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [first-loop _] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none]))
+          ;; the same name again while the first still answers: declined, a session of its own
+          second-client (spawn (observing-client mgr me {:name "ann"}))
+          own (receive ([:observed-attached s] s) (after test/*wait-ms* :none))
+          watch-first (monitor first-client))
+      (is (pid? own))
+      (is (not (= own first-loop)))
+      (send first-client :die)
+      (await-down watch-first)
+      ;; let the first session's loop fold its client's death and park
+      (receive (after 200 nil))
+      (send first-loop [:crash])
+      (assert= (receive ([:saved _ restarting? _] restarting?) (after test/*wait-ms* :none)) true)
+      ;; the restarted parked loop leaves the second client alone
+      (assert= (receive
+                 ([:observed-attached s] [:hijacked s])
+                 ([:observed-reattached s] [:hijacked s])
+                 (after 500 :untouched))
+        :untouched)
+      ;; and the manager still has the first session parked: the name takes it back
+      (send mgr [:attach me 80 24 {:name "ann"}])
+      (let (back (receive ([:attached s] s) (after test/*wait-ms* :none)))
+        (is (pid? back))
+        (is (not (= back own)))
+        (is (not (= back first-loop)))
+        (send back [:key "q"]))
+      (send second-client :die)))
+
+  (test "a claim that took the session is not replayed: the restarted loop asks its client nothing"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk
+                       vw
+                       crash-up
+                       (crash-opts me {} {:resume-ms :forever})))
+          first-client (spawn (resume-client mgr me {:name "ann"}))
+          [first-loop _] (receive ([:client s t] [s t]) (after test/*wait-ms* [nil :none])))
+      ;; the first client's link dropped unnoticed: the second takes its session over
+      (send first-client :deaf)
+      (let (claimant (spawn (observing-client mgr me {:name "ann"}))
+            taken (receive ([:observed-attached s] s) (after test/*wait-ms* :none)))
+        (assert= taken first-loop)
+        (assert= (receive (:old-client-bye :bye) (after test/*wait-ms* :none)) :bye)
+        ;; the claimant goes deaf too, so a replayed claim's ping would cost it the session
+        (send claimant :deaf)
+        (send first-loop [:crash])
+        (assert= (receive
+                   ([:observed-reattached s] (not (= s first-loop)))
+                   (after test/*wait-ms* :none))
+          true)
+        (assert= (receive
+                   ([:observed-ping] :pinged)
+                   ([:observed-bye] :told-bye)
+                   (after 2000 :quiet))
+          :quiet)
+        (send claimant :die)
+        (send first-client :die))))
+
+  (test "a client that adopts a session starts a fresh ledger: a restart resends all its keys"
+    (let (me (self)
+          opts {:resume-ms :forever :supervise {:restart (fn (retained death) {:n 0})}}
+          mgr (spawn (editor/serve/serve-manager (fn () {:n 0 :first true}) vw back-crash-up opts))
+          old (spawn (numbered-client mgr me {:name "ann"}))
+          first-loop (receive ([:numbered-client s] s) (after test/*wait-ms* nil))
+          watch-old (monitor old))
+      (is (pid? first-loop))
+      ;; let the loop take the old client's three keys
+      (receive (after 200 nil))
+      (send old :die)
+      (await-down watch-old)
+      (receive (after 200 nil))
+      ;; this client adopts it; the loop dies folding [:client-back], before any key of ours
+      (send mgr [:attach me 80 24 {:name "ann"}])
+      (let (adopted (receive ([:attached s] s) (after test/*wait-ms* :none)))
+        (is (pid? adopted))
+        (send adopted [:key "+" false 1])
+        ;; none of OUR keys was taken — not the old client's 3, which would drop our 1..3
+        (assert= (receive ([:reattached _ _ taken] taken) (after test/*wait-ms* :none)) nil))))
+
+  (test "a parked session's restarted loop lives only as long as the session had left"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve-manager mk
+                       vw
+                       crash-up
+                       (crash-opts me {} {:resume-ms 1000})))
+          client (spawn (session-client mgr me {:name "ann"}))
+          [first-loop session] (receive
+                                 ([:session-client l s] [l s])
+                                 (after test/*wait-ms* [nil nil]))
+          watch-session (monitor session)
+          watch-client (monitor client))
+      (is (pid? session))
+      (send client :die)
+      (await-down watch-client)
+      ;; most of its time to live gone, the parked loop dies and is restarted
+      (receive (after 700 nil))
+      (send first-loop [:crash])
+      (assert= (receive ([:saved _ restarting? _] restarting?) (after test/*wait-ms* :none)) true)
+      ;; it ends when the session's time is up, about 300 ms on — not a fresh second later
+      (assert= (receive ([:down ^watch-session _ reason] reason) (after 650 :alive)) :client-gone)))
+
+  (test "a session keeps only the deaths its restart budget counts"
+    (do
+      (assert= (editor/serve/serve-recent-deaths [1000 50000 59000 61000] 70000 60000)
+        [50000 59000 61000])
+      (assert= (editor/serve/serve-recent-deaths [] 70000 60000) [])
+      (is (editor/serve/serve-restart-allowed? [1000 2000 3000] 70000 3 60000))
+      (is (not (editor/serve/serve-restart-allowed? [50000 59000 61000] 70000 3 60000)))))
+
+  (test "a handled hand-over leaves the pending list; an unhandled one stays"
+    (let (adopt [:adopt :token :client 80 24]
+          claim [:claim :token :client 80 24])
+      (assert= (editor/serve/serve-pending-handled [adopt claim] adopt) [claim])
+      (assert= (editor/serve/serve-pending-handled [adopt claim] [:client-can :other []])
+        [adopt claim])
+      (assert= (editor/serve/serve-pending-handled [] adopt) []))))

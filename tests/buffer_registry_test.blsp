@@ -3,7 +3,8 @@
 (defmodule buffer-registry-test
   (:use test)
   (:use editor/buffer)
-  (:use editor/buffer-registry))
+  (:use editor/buffer-registry)
+  (:use-internals editor/buffer-registry))
 
 (defn- drain (acc)
   "Every `[:registry-…]` notification already in the mailbox, oldest first."
@@ -253,4 +254,31 @@
           watch-registry (monitor reg))
       (send owner :go)
       (assert= (receive ([:down ^watch-registry _ _] :ended) (after 200 :alive)) :alive)
+      (registry-stop reg))))
+
+(describe "buffer-registry — a watcher that ends is dropped (ADR-605)"
+  (test "each restarted loop that watches leaves no dead pid behind"
+    ;; a served session's loop watches its registry; one that dies is restarted under a new
+    ;; pid and watches again — the dead one must not stay a watcher for the session's life
+    (let (reg (registry-start)
+          first-loop (spawn (receive (:stop nil)))
+          watch-first (monitor first-loop)
+          next-loop (spawn (receive (:stop nil))))
+      (registry-watch reg first-loop)
+      (registry-watch reg next-loop)
+      (registry-watch reg next-loop)
+      (assert= (into #{} (editor/buffer-registry/registry-watchers reg)) #{first-loop next-loop})
+      (exit first-loop :kill)
+      (receive ([:down ^watch-first _ _] nil) (after test/*wait-ms* nil))
+      ;; the registry folds the death before the call that follows it (FIFO behind the monitor)
+      (letrec (await-dropped (fn (left)
+                               (let (watchers (editor/buffer-registry/registry-watchers reg))
+                                 (if (or (= watchers [next-loop]) (<= left 0))
+                                   watchers
+                                   (receive (after 10 (await-dropped (dec left))))))))
+        (assert= (await-dropped 100) [next-loop]))
+      ;; and an unwatch stops its monitor too: its end is no message the registry acts on
+      (registry-unwatch reg next-loop)
+      (assert= (editor/buffer-registry/registry-watchers reg) [])
+      (send next-loop :stop)
       (registry-stop reg))))
