@@ -2072,39 +2072,68 @@ already share leaves the exact rest of the run — small, because a run is — w
       changed
       (properties-relative properties same-lo (+ same-lo (string/length changed)))]))
 
-(defn- buffer-splice-path (from from-stamp:int log target)
+(defn- buffer-log-newer-property? (log stamp:int -> bool)
+  "Whether `log` still holds a property entry stamped after `stamp`."
+  (any? log
+    (fn (entry)
+      (let (properties (nth entry 6))
+        (and (property-change? properties) (> (nth properties 3 0) stamp))))))
+
+(defn- buffer-splice-path (from from-stamp:int to-stamp:int log target)
   "The steps `[rope-before lo hi repl properties]`, oldest first, that `log` records from the text
 `from` to the text `target` (ropes), or nil when it cannot account for them. A property
-change leaves the text as it was, so reaching `from` is not yet the end: a property entry
-stamped after `from-stamp` (the `:property-stamp` the text `from` was taken at) is still
-newer than it and joins the path."
-  (letrec (walk (fn (target log acc)
-                  (let (entry (when (not (empty? log)) (first log))
-                        properties (when entry (nth entry 6)))
-                    (cond
-                      (and (= target from)
-                        (not (and (property-change? properties)
-                               (> (nth properties 3 0) from-stamp)
-                               (= (nth entry 1) target))))
-                        acc
-                      (nil? entry) nil
-                      else
-                        (let ([rope-before rope-after lo hi repl mids _] entry
-                              ;; a property change's stamp is the log's, not the edit's
-                              properties (if (property-change? properties)
-                                           [(nth properties 0)
-                                             (nth properties 1)
-                                             (nth properties 2)]
-                                           properties))
-                          (if (= rope-after target)
-                            (let (mid (seq/find mids (fn (m) (= (first m) from))))
-                              (if mid
-                                (cons (buffer-splice-from-mid lo hi repl properties mid) acc)
-                                (walk rope-before
-                                  (rest log)
-                                  (cons [rope-before lo hi repl properties] acc))))
-                            nil))))))
-    (walk target log ())))
+change leaves the text as it was, so reaching `from` is not yet the end: every property entry
+stamped after `from-stamp` (the `:property-stamp` the text `from` was taken at) is newer than
+it and joins the path, however deep in the log — behind an insert and its delete, which
+brought the text back to `from`'s, the walk goes on to it. `to-stamp` is `target`'s stamp:
+when it is no newer than `from-stamp` no property changed since, and the first entry back at
+`from`'s text ends the walk. A `from-stamp` of -1 (a snapshot, which keeps no stamp) ends
+it there too, unless the entry at hand is itself a property change."
+  (let (settled? (fn (log)
+                   ;; nothing newer than `from` left in `log` to walk back to
+                   (or (< from-stamp 0)
+                     (<= to-stamp from-stamp)
+                     (not (buffer-log-newer-property? log from-stamp)))))
+    (letrec (walk (fn (target log acc)
+                    (let (entry (when (not (empty? log)) (first log))
+                          properties (when entry (nth entry 6)))
+                      (cond
+                        (and (= target from)
+                          (if (< from-stamp 0)
+                            (not (and (property-change? properties) (= (nth entry 1) target)))
+                            (settled? log)))
+                          acc
+                        (nil? entry) nil
+                        else
+                          (let ([rope-before rope-after lo hi repl mids _] entry
+                                ;; a property change's stamp is the log's, not the edit's
+                                properties (if (property-change? properties)
+                                             [(nth properties 0)
+                                               (nth properties 1)
+                                               (nth properties 2)]
+                                             properties))
+                            (if (= rope-after target)
+                              (let (mid (seq/find mids (fn (m) (= (first m) from))))
+                                (if (and mid (settled? (rest log)))
+                                  (cons (buffer-splice-from-mid lo hi repl properties mid) acc)
+                                  (walk rope-before
+                                    (rest log)
+                                    ;; a run that took back all it did (typed, then deleted)
+                                    ;; is no step — passed only for what lies behind it
+                                    (if (and (= lo hi) (= repl "") (nil? properties))
+                                      acc
+                                      (cons [rope-before lo hi repl properties] acc)))))
+                              nil))))))
+      (walk target log ()))))
+
+(defn- buffer-path-between (before:buffer after:buffer -> (or nil list))
+  "[[buffer-splice-path]] from `before`'s text and property stamp to `after`'s, through
+`after`'s log."
+  (buffer-splice-path (get before :rope)
+    (or (get before :property-stamp) 0)
+    (or (get after :property-stamp) 0)
+    (or (get after :splices) ())
+    (get after :rope)))
 
 (defn buffer-splices-since (before:buffer after:buffer -> (or nil list))
   "The splices `[lo hi repl]`, oldest first, that the editing primitives made to turn
@@ -2119,10 +2148,7 @@ this can. Costs no text but a run's own: the walk compares rope handles. A prope
 (`put-properties`) is no text change and is not among them.
 
     (let (b (editor/buffer/make-buffer \"ab\")) (editor/buffer/buffer-splices-since b (editor/buffer/insert (editor/buffer/insert b \"x\") \"y\")))   ;=> ([0 0 \"xy\"])"
-  (let (path (buffer-splice-path (get before :rope)
-               (or (get before :property-stamp) 0)
-               (or (get after :splices) ())
-               (get after :rope)))
+  (let (path (buffer-path-between before after))
     (when (not (nil? path))
       (reverse (fold path
                  ()
@@ -2142,10 +2168,7 @@ cannot account for the change; [[buffer-edits-between]] then compares instead.
 
     (let (b (editor/buffer/make-buffer \"ab\")) (editor/buffer/buffer-edits-since b (editor/buffer/insert b \"x\" {:face [[0 1 :red]]})))   ;=> ([0 0 \"x\" {:face [[0 1 :red]]}])
     (let (b (editor/buffer/make-buffer \"abc\")) (editor/buffer/buffer-edits-since b (editor/buffer/put-properties b :face 1 3 [[1 2 :red]])))   ;=> ([1 1 \"\" [:put-properties 2 {:face [[0 1 :red]]}]])"
-  (let (path (buffer-splice-path (get before :rope)
-               (or (get before :property-stamp) 0)
-               (or (get after :splices) ())
-               (get after :rope)))
+  (let (path (buffer-path-between before after))
     (when (not (nil? path))
       (reverse (fold path
                  ()
@@ -2194,23 +2217,74 @@ changed: nil. O(spans) when either has properties."
   "The edits a comparison of `before` and `after` finds, for when the log cannot account for
 the change: the minimal changed range of the text (`text/changed-range`, natively, no
 string built) widened to cover any changed property ([[buffer-edit-between]]) — `()` when
-nothing changed. When `after` was REDACTED since `before` (its `:redactions` count grew),
-that range is redacted first and its new text inserted after: every holder drops its
-history, wherever in the range the secret was (ADR-581)."
+nothing changed.
+
+When `after` was REDACTED since `before` (its `:redactions` count grew) the answer is ALWAYS a
+redaction, whatever the comparison found — even nothing, when the event put the very
+characters back where they were: every holder must drop its history, which holds the secret.
+What is redacted is the changed range joined with everything the redaction touched since
+([[buffer-redaction-cover]]: where it cut, carried and widened through the edits logged after
+it), and the text `after` has there is inserted after it. When the log cannot place the
+redaction (more than one since `before`, or its entry fell off the log) the whole text is
+redacted and inserted again (ADR-581)."
   (let (range (text/changed-range (get before :rope) (get after :rope))
         splice (when range
                  (let ([start old-end new-end] range)
                    [start old-end (text/slice (get after :rope) start new-end)]))
         edit (buffer-edit-between before after splice)
-        redacted? (> (or (get after :redactions) 0) (or (get before :redactions) 0)))
+        redactions (- (or (get after :redactions) 0) (or (get before :redactions) 0)))
     (cond
-      (nil? edit) ()
-      (and redacted? (< (nth edit 0) (nth edit 1)) (not (property-change? (nth edit 3))))
-        (let ([lo hi repl properties] edit)
-          (if (= repl "")
-            (list [lo hi "" :redact])
-            (list [lo hi "" :redact] [lo lo repl properties])))
-      else (list edit))))
+      (<= redactions 0) (if (nil? edit) () (list edit))
+      else
+        (let (
+              ;; `[lo old-hi new-hi]`: before's `[lo, old-hi)` became after's `[lo, new-hi)`
+              changed (cond
+                        (nil? edit) nil
+                        (property-change? (nth edit 3))
+                          (let (to (+ (nth edit 0) (nth (nth edit 3) 1))) [(nth edit 0) to to])
+                        else (let ([lo hi repl _] edit) [lo hi (+ lo (string/length repl))]))
+              cover (when (= redactions 1) (buffer-redaction-cover after))
+              [lo old-hi new-hi] (buffer-redaction-range before after changed cover)
+              redaction [lo old-hi "" :redact])
+          (if (< lo new-hi)
+            (list redaction
+              [lo
+                lo
+                (text/slice (get after :rope) lo new-hi)
+                (properties-relative (get after :properties) lo new-hi)])
+            (list redaction))))))
+
+(defn- buffer-redaction-range (before:buffer after:buffer changed:any cover:any -> splice-cover)
+  "`[lo old-hi new-hi]`: the stretch `[lo, old-hi)` of `before` that became `[lo, new-hi)` of
+`after` and holds both the `changed` range (`[lo old-hi new-hi]`, nil when the texts are the
+same) and the redaction's `cover` (`[lo hi]` of `after`, nil when the log cannot place it:
+then the whole text)."
+  (cond
+    (nil? cover) [0 (buffer-length before) (buffer-length after)]
+    ;; the same text: before's positions are after's
+    (nil? changed) [(first cover) (second cover) (second cover)]
+    else
+      (let ([changed-lo changed-old-hi changed-new-hi] changed
+            new-hi (math/max changed-new-hi (second cover)))
+        ;; past the changed range, after is before shifted
+        [(math/min changed-lo (first cover)) (- new-hi (- changed-new-hi changed-old-hi)) new-hi])))
+
+(defn- buffer-redaction-cover (after:buffer -> (or nil (tuple int int)))
+  "`[lo hi]`: the stretch of `after`'s text holding everything its last redaction touched —
+where it cut, carried and widened through every text edit logged after it (a property change
+moves nothing) — or nil when its log does not start with a redaction (none, or it fell off).
+A redaction leaves itself alone in the log ([[buffer-redact]]), so it is the oldest entry."
+  (let (oldest-first (reverse (or (get after :splices) ()))
+        oldest (when (not (empty? oldest-first)) (first oldest-first)))
+    (when (and oldest (= (nth oldest 6) :redact))
+      (let (cut (nth oldest 2)
+            steps (fold (rest oldest-first)
+                    [[cut cut ""]]
+                    (fn (acc entry)
+                      (let ([_ _ lo hi repl _ properties] entry)
+                        (if (property-change? properties) acc (conj acc [lo hi repl])))))
+            [cover-lo _ cover-hi] (buffer-splices-cover steps))
+        [cover-lo cover-hi]))))
 
 (defn buffer-edits-between (before:buffer after:buffer -> list)
   "The edits `[lo hi repl properties]` that turn `before` into `after`, always: the log's
@@ -2271,7 +2345,11 @@ current one; the covering range of its text splices, re-read from the restored t
 trimmed to what actually differs, reverses all of it at once."
   ;; a snapshot keeps no stamp: every property change in reach counts as newer than it,
   ;; which only lengthens the path by changes the cover leaves out anyway
-  (let (path (buffer-splice-path restored-rope -1 (or (get buf :splices) ()) (get buf :rope)))
+  (let (path (buffer-splice-path restored-rope
+               -1
+               (or (get buf :property-stamp) 0)
+               (or (get buf :splices) ())
+               (get buf :rope)))
     (when (not (empty? path))
       (let (text-steps (seq/reject path (fn (step) (property-change? (nth step 4)))))
         (if (empty? text-steps)
@@ -2470,13 +2548,14 @@ like any edit.
 
 The two edits that are not plain splices ([[buffer-edits-since]]) apply as what they are:
 `:redact` for `properties` redacts `[lo, hi)` — this copy's history and splice log go with
-it, nothing of the text kept even for an edit (ADR-581) — and a property change
+it, nothing of the text kept even for an edit, and an EMPTY range still drops them (the
+history may hold the secret wherever the owner's cut fell, ADR-581) — and a property change
 (`[:put-properties width changes]`) sets `changes` over `[lo, lo + width)` without touching
 the text, recorded for undo.
 
     (editor/buffer/buffer-text (editor/buffer/apply-splice (editor/buffer/set-read-only (editor/buffer/make-buffer \"abc\") true) 3 3 \"d\"))   ;=> \"abcd\""
   (cond
-    (= properties :redact) (buffer-redact buf lo hi)
+    (= properties :redact) (buffer-redact buf lo hi true)
     (property-change? properties)
       (let ([_ width changes] properties
             [from to] (property-change-range buf lo width)
@@ -2505,45 +2584,44 @@ the text, recorded for undo.
 ;; undo brought `Password: hun` back. What the owner needs is the delete that leaves NO trace:
 ;; the history before it may hold any prefix of the text, so it goes with it.
 ;;
-;; The splice log is the one place the text may stay a little longer: the redacting buffer
-;; keeps its earlier entries (the event's other edits — output appended before the prompt
-;; was seen) under the redaction's, so a holder syncing at the end of that event walks
-;; through all of it and redacts its own copy; its next edit seals them (drops every entry
-;; below the redaction and the text before it). `:redactions` counts the redactions a buffer
-;; has had, so a holder too far behind for the log still sends one (`buffer-edits-between`),
-;; and an `undo-group` around one does not bring the history back.
+;; The splice log keeps nothing from before it either: a redaction leaves its own entry alone
+;; in the log, naming no rope from before the cut, so no holder can walk back past it. A
+;; holder that synced before the redaction finds the change by comparison instead
+;; (`buffer-edits-between`), and `:redactions` — the count of redactions a buffer has had —
+;; tells that comparison a redaction happened, so it ALWAYS sends one: the changed range
+;; joined with what the redaction touched (its entry, at the bottom of the log, carried
+;; through the edits after it), even when the event put the same characters back. An
+;; `undo-group` around one does not bring the history back, and the ropes a buffer keeps
+;; beside its text (the saved baseline, annotations) go too (`buffer-forget-ropes`).
 
-(defn- buffer-redact (buf:buffer lo:int hi:int -> buffer)
+(defn- buffer-forget-ropes (buf:buffer -> buffer)
+  "`buf` without the ropes it keeps BESIDE its text that a redaction may have taken text out
+of: the saved baseline (`:saved-rope` — the buffer counts as modified from here on, which it
+is) and every annotation's (`annotate` — the annotation goes stale, as it would after any
+edit). Its history and log are the redaction's own to drop."
+  (let (unsaved (if (nil? (get buf :saved-rope)) buf (assoc buf :saved-rope nil)))
+    (fold (keys unsaved)
+      unsaved
+      (fn (acc key)
+        (let (value (get acc key))
+          (if (and (map? value) (rope? (get value :rope)) (contains? value :lines))
+            (assoc acc key (assoc value :rope nil))
+            acc))))))
+
+(defn- buffer-redact (buf:buffer lo:int hi:int &optional (even-empty:bool false) -> buffer)
   "[[redact-region]]'s work, the owner's and a copy applying another holder's redaction
 (`apply-splice`) alike: the log is left with the redaction alone, naming no text from before
-it — no rope it keeps holds the redacted characters."
+it, and no rope the buffer keeps holds the redacted characters — not its history, not its
+saved baseline, not an annotation ([[buffer-forget-ropes]]). An empty range is no edit,
+unless `even-empty` — a copy told of a redaction drops its history whatever range reached it
+(its history may hold the secret, wherever the owner's cut fell)."
   (let (length (buffer-length buf)
         from (buffer-clamp 0 length lo)
         to (math/max from (buffer-clamp 0 length hi)))
-    (if (= from to)
+    (if (and (= from to) (not even-empty))
       buf
-      (let (regions (get buf :editable)
-            open (dissoc buf :editable)
-            carry (fn (position:int)
-                    (cond
-                      (<= position from) position
-                      (< position to) from
-                      else (- position (- to from))))
-            deleted (buffer-apply-edit open
-                      (assoc open
-                        :rope (text/delete (get open :rope) from to)
-                        :point (carry (buffer-point open))
-                        :mark (let (mark (buffer-mark open)) (when (int? mark) (carry mark))))
-                      :delete from
-                      to
-                      "")
-            narrowed (cond
-                       (nil? regions) deleted
-                       (empty? regions) (assoc deleted :editable regions)
-                       else
-                         (buffer-adjust-editable (assoc deleted :editable regions) :delete from to)))
-        (assoc narrowed
-          :modified true
+      (let (cut (if (= from to) buf (assoc (buffer-delete-traced buf from to) :modified true)))
+        (assoc (buffer-forget-ropes cut)
           :undo ()
           :pending-undo ()
           :undo-size 0
@@ -2551,7 +2629,32 @@ it — no rope it keeps holds the redacted characters."
           :redactions (inc (or (get buf :redactions) 0))
           ;; the entry names no text to walk back to: a holder comparing from before the
           ;; redaction finds the change by `buffer-edits-between`, which redacts too
-          :splices (list [nil (get narrowed :rope) from to "" () :redact]))))))
+          :splices (list [nil (get cut :rope) from to "" () :redact]))))))
+
+(defn- buffer-delete-traced (buf:buffer from:int to:int -> buffer)
+  "`buf` with `[from, to)` (already clamped) deleted whatever its narrowing or read-only
+state, point, mark, markers, text properties and the narrowing carried as for any edit —
+[[buffer-redact]]'s delete, before it drops every trace of it."
+  (let (regions (get buf :editable)
+        open (dissoc buf :editable)
+        carry (fn (position:int)
+                (cond
+                  (<= position from) position
+                  (< position to) from
+                  else (- position (- to from))))
+        deleted (buffer-apply-edit open
+                  (assoc open
+                    :rope (text/delete (get open :rope) from to)
+                    :point (carry (buffer-point open))
+                    :mark (let (mark (buffer-mark open)) (when (int? mark) (carry mark))))
+                  :delete from
+                  to
+                  "")
+        narrowed (cond
+                   (nil? regions) deleted
+                   (empty? regions) (assoc deleted :editable regions)
+                   else (buffer-adjust-editable (assoc deleted :editable regions) :delete from to)))
+    narrowed))
 
 (defn redact-region (buf:buffer lo:int hi:int -> buffer)
   "`buf` with the characters `[lo, hi)` deleted and every trace of them gone: the undo
@@ -2977,6 +3080,34 @@ subscriber verbatim, bypassing projections: one small value, fanned as-is."
   (doseq (s subs)
     (send (get s :pid) [:buffer-updated (self) version view origin])))
 
+(defn- buffer-serve-property-change (buf:buffer lo:int properties foreign -> any)
+  "`[lo lo \"\" change next-buf]`: the property change `properties` (`[:put-properties width
+changes]`, computed at `lo` against text without the `foreign` splices) applied to `buf` on
+what is left of its range ([[property-change-transform]]: a foreign insert inside it splits
+it, and keeps its own properties), and `change` the ONE property change a holder in step with
+`buf` applies for the same result — over the pieces' whole extent, each changed key set to what
+`next-buf` now has there. A range the foreign edits took out entirely changes nothing (an
+empty change, still pushed: its sender waits for the echo)."
+  (let ([_ width changes] properties
+        normalized (properties-changes-normalize changes (math/max 0 width))
+        pieces (fold foreign [[lo (+ lo (math/max 0 width)) normalized]] property-change-transform)
+        next-buf (fold pieces
+                   buf
+                   (fn (acc piece)
+                     (let ([from to piece-changes] piece)
+                       (apply-splice acc from from "" [:put-properties (- to from) piece-changes]))))
+        from (if (empty? pieces)
+               (first (splice-transform-all [lo lo ""] foreign))
+               (first (first pieces)))
+        to (if (empty? pieces) from (second (last pieces))))
+    [from
+      from
+      ""
+      [:put-properties
+        (- to from)
+        (properties-changes (buffer-property-map next-buf) from to (keys normalized))]
+      next-buf]))
+
 (defn- buffer-serve-splice (buf subs version recent lo hi repl origin base properties)
   "One structured splice in a buffer process, then back to `buffer-serve`. With a `base`
 (the version the sender computed it against) it is first TRANSFORMED over every splice
@@ -2985,30 +3116,54 @@ inside one round-trip window both land where they meant to. Entries from the SAM
 are skipped: the sender's local copy already contained them when it computed these
 positions (local-apply-first), so shifting over them again would land a pipelined second
 keystroke one column too far. `properties` (`{key spans}` relative to `repl`, ADR-579) are
-laid on the new text; `:redact` instead makes it a REDACTION, which the holders redact too,
-and a property change (`[:put-properties width changes]`) changes no text — its RANGE is
-transformed, and it stays out of the ring, which holds only what moved text. The push carries
-the splice AS APPLIED, with its properties."
+laid on the new text. Two edits are not text splices and are not transformed as one, whose
+overlap degrades to an insert after the other's text: a REDACTION (`:redact`, which the
+holders redact too) keeps its range and GROWS over a foreign edit inside it
+(`redaction-transform` — a character typed into the secret from another frame is redacted
+with it, never left behind), and a PROPERTY CHANGE (`[:put-properties width changes]`, no
+text changed) is laid on what is left of its range, not on text inserted inside it
+(`property-change-transform`); it stays out of the ring, which holds only what moved text.
+The push carries the edit AS APPLIED, with its properties — exactly one push per splice
+received, the echo its sender counts on."
   (let (since (if (nil? base) () (reverse (seq/take-while recent (fn (e) (> (first e) base)))))
         foreign (map (seq/filter since (fn (e) (or (nil? origin) (not (= (nth e 4 nil) origin)))))
                   (fn (e) [(nth e 1) (nth e 2) (nth e 3)]))
         property-change (property-change? properties)
-        [applied-lo applied-hi applied-repl] (splice-transform-all (if property-change
-                                                                     [lo
-                                                                       (+ lo (nth properties 1))
-                                                                       ""]
-                                                                     [lo hi repl])
-                                               foreign)
-        ;; a property change keeps the text: the transformed range is its width
-        [applied-hi applied-properties] (if property-change
-                                          [applied-lo
-                                            [:put-properties
-                                              (- applied-hi applied-lo)
-                                              (nth properties 2)]]
-                                          [applied-hi properties])
         ;; a redaction leaves no trace here either; this process keeps no history
         ;; (`spawn-buffer`) and no splice log (`buffer-serve`)
-        next-buf (apply-splice buf applied-lo applied-hi applied-repl applied-properties)
+        [applied-lo applied-hi applied-repl applied-properties next-buf] (cond
+                                                                           property-change
+                                                                             (buffer-serve-property-change buf
+                                                                               lo properties foreign)
+                                                                           (= properties :redact)
+                                                                             (let ([redact-lo
+                                                                                     redact-hi] (fold foreign
+                                                                                                                                                                                                [lo
+                                                                                                                                                                                                  hi]
+                                                                                                                                                                                                redaction-transform))
+                                                                               [redact-lo
+                                                                                 redact-hi
+                                                                                 ""
+                                                                                 :redact (apply-splice buf
+                                                                                   redact-lo
+                                                                                   redact-hi ""
+                                                                                   :redact)])
+                                                                           else
+                                                                             (let ([splice-lo
+                                                                                     splice-hi
+                                                                                     splice-repl] (splice-transform-all [lo
+                                                                                                                                                                                                                                                                                                                       hi
+                                                                                                                                                                                                                                                                                                                       repl]
+                                                                                                                                                                                                                                                                                                 foreign))
+                                                                               [splice-lo
+                                                                                 splice-hi
+                                                                                 splice-repl
+                                                                                 properties
+                                                                                 (apply-splice buf
+                                                                                   splice-lo
+                                                                                   splice-hi
+                                                                                   splice-repl
+                                                                                   properties)]))
         next-version (inc version)
         view {:splice [applied-lo applied-hi applied-repl]
               :markers (buffer-markers next-buf)
@@ -3258,6 +3413,57 @@ to delete no longer exists as written).
 
     (editor/buffer/splice-transform-all [5 6 \"x\"] [[0 2 4] [0 0 1]])   ;=> [8 9 \"x\"]"
   (fold applieds splice (fn (sp a) (splice-transform sp a))))
+
+;; Two edits are not text splices, and transforming them as one is wrong: an overlap
+;; degrades a splice to an insert after the other's text, which shrank a REDACTION racing a
+;; character typed into its range in another frame to nothing — dropped, the password kept
+;; whole in the process and every copy that resynced from it. A redaction's range only ever
+;; grows over a foreign edit inside it; a property change's range is cut around one, as a
+;; text property is around text inserted inside it (ADR-579's Emacs semantics). An edit at
+;; either EDGE is outside both, as it is outside a text property.
+
+(defn- redaction-transform (range:any applied:splice-cover -> any)
+  "The redacted range `[lo hi]` — computed against text that did NOT yet contain `applied`
+`[alo ahi alen]` — on the text that does: shifted past an edit before it, kept for one after,
+and for one that overlaps it (an insert inside it, a replace across an edge) WIDENED to cover
+the overlapping edit's text as well, so nothing of the secret survives the race."
+  (let ([lo hi] range
+        [applied-lo applied-hi applied-length] applied
+        delta (- applied-length (- applied-hi applied-lo)))
+    (cond
+      (<= applied-hi lo) [(+ lo delta) (+ hi delta)]
+      (>= applied-lo hi) range
+      else
+        [(math/min lo applied-lo)
+          (if (<= applied-hi hi) (+ hi delta) (+ applied-lo applied-length))])))
+
+;; One piece of a property change in flight: `[lo hi changes]`, `changes` relative to `lo`.
+(deftype property-piece (tuple int int any))
+
+(defn- property-change-transform (pieces:any applied:splice-cover -> any)
+  "The pieces `[[lo hi changes] …]` of a property change (each `changes` normalized and
+relative to its `lo`) — computed against text that did NOT yet contain `applied` `[alo ahi
+alen]` — on the text that does: a piece before the edit shifts, one after it stays, and one
+the edit cuts keeps only what is left of it on either side, `changes` cut to match — the
+edit's own text is not in it, as inserted text is in no span it lands inside."
+  (fold pieces [] (fn (out piece) (into out (property-piece-transform piece applied)))))
+
+(defn- property-piece-transform (piece:property-piece applied:splice-cover -> vector)
+  "What is left of one piece of [[property-change-transform]] after `applied`: none, one or
+two pieces."
+  (let ([lo hi changes] piece
+        [applied-lo applied-hi applied-length] applied
+        delta (- applied-length (- applied-hi applied-lo))
+        slice (fn (from:int to:int) (properties-changes changes from to (keys changes))))
+    (cond
+      (<= applied-hi lo) [[(+ lo delta) (+ hi delta) changes]]
+      (>= applied-lo hi) [piece]
+      else
+        (let (left (if (< lo applied-lo) [[lo applied-lo (slice 0 (- applied-lo lo))]] []))
+          (if (< applied-hi hi)
+            (conj left
+              [(+ applied-lo applied-length) (+ hi delta) (slice (- applied-hi lo) (- hi lo))])
+            left)))))
 
 (defn buffer-splice (bp lo hi repl &optional origin base properties)
   "Replace `[lo, hi)` with `repl` inside buffer process `bp` — the structured-edit
