@@ -105,19 +105,26 @@ output — reaches its `update` exactly as it would locally. Without the pass-th
 those messages would strand in the session's mailbox (a selective receive never
 consumes them), leaving a served app deaf to everything but keys.
 
-`supervision`, when given, is `{:session :ledger :restarted?}` (ADR-593). `:session` is the
-session's SUPERVISOR, which outlives this loop: the display tells it who the client is and
-its size whenever either changes (`[:editor/serve/session-state …]`), so a loop restarted
-after this one died serves the same client at the same size, and tells an adopting client
-the supervisor (`[:session session]`, after `[:attached …]`) — the pid whose end, not this
-loop's, ends the client. `:ledger` is a table the session owns, where the display notes the
+`supervision`, when given, is `{:session :ledger :restarted? :parked-at}` (ADR-593).
+`:session` is the session's SUPERVISOR, which outlives this loop: the display tells it who the
+client is, its size and when the session parked whenever one changes
+(`[:editor/serve/session-state …]`), so a loop restarted after this one died serves the same
+client at the same size — or, parked, lives only as long as the session had left — and is
+told which of the manager's hand-overs this loop HANDLED (`[:editor/serve/handled message]`),
+so a restarted loop is given again only the ones no loop did (ADR-605). It tells an
+adopting client the supervisor (`[:session session]`, after `[:attached …]`) — the pid whose
+end, not this loop's, ends the client. `:ledger` is a table the session owns, where the display notes the
 sequence number of each numbered key it TAKES (`[:key k held? seq]`, as a client attached to
 a supervised session ships them): a restarted loop tells the client the last one, and the
-client sends again every key after it — the keys the dead loop never took. `:restarted?`
+client sends again every key after it — the keys the dead loop never took; a new client
+(an adopter, a claimant) numbers its keys from 1, so the ledger is cleared when one takes the
+session over (ADR-605). `:restarted?`
 holds the client's input back until the loop has folded the events queued ahead of it (its
 identity, `[:session-restarted …]`; `[:editor/serve/started]` marks their end), so a key
 typed through the restart is never folded before them. A `client` of nil with `resume` is a
-restarted loop of a PARKED session: it starts parked.
+restarted loop of a PARKED session: it starts parked, at the session's `:parked-at` — the time
+its client was lost, not the restart, so a loop that keeps dying cannot keep a parked session
+alive past its time to live.
 
     (editor/serve/remote-display client 80 24)   ;~> {:enter … :leave … :size … :draw … :poll …} shipping frames to `client`"
   ;; the display's state, in a table the session process owns: the client it serves now
@@ -132,8 +139,9 @@ restarted loop of a PARKED session: it starts parked.
       (table/put state :session (:session supervision))
       (table/put state :ledger (:ledger supervision))
       (table/put state :awaiting-start (= true (:restarted? supervision)))
-      ;; a restarted loop of a parked session: parked from its start
-      (when (and (nil? client) resume) (table/put state :parked-at (os/now)))
+      ;; a restarted loop of a parked session: parked from its start, since the session parked
+      (when (and (nil? client) resume)
+        (table/put state :parked-at (or (:parked-at supervision) (os/now))))
       (merge
         {:enter (fn ()
                   (serve-busy-start state
@@ -299,10 +307,10 @@ and ends when that is up."
       ([:key k held?] (do (table/put state :held? held?) [(remote-note-resize state k) true]))
       ([:key k] [(remote-note-resize state k) true])
       ([:detach] [:close true])
-      ([:client-can from capabilities] (remote-note-capabilities state from capabilities))
+      ((and message [:client-can _ _]) (remote-hand-over state resume message))
       ([:down _ ^client _] [(remote-client-lost state resume) true])
-      ([:adopt token adopter cols rows] [(remote-adopt state resume token adopter cols rows) true])
-      ([:claim token claimant cols rows] [(remote-claim state resume token claimant cols rows) true])
+      ((and message [:adopt _ _ _ _]) [(remote-hand-over state resume message) true])
+      ((and message [:claim _ _ _ _]) [(remote-hand-over state resume message) true])
       ;; a restarted loop has folded what was queued ahead of its client's input: take it
       ;; from now on (nil: a tick)
       ([:editor/serve/started] (do (table/put state :awaiting-start false) nil))
@@ -339,13 +347,36 @@ ADR-593), or the loop itself for a display made without one."
 
 (defn- serve-report (state)
   "Tell the session's supervisor (`:session` in the display `state`, when it has one) the
-client this loop serves now and its size, `[:editor/serve/session-state {:client :size}]` —
-what a loop restarted after this one died starts from (ADR-593). Returns nil."
+client this loop serves now, its size and when the session parked (nil while it has a
+client), `[:editor/serve/session-state {:client :size :parked-at}]` — what a loop restarted
+after this one died starts from (ADR-593). Returns nil."
   (let (session (table/get state :session nil))
     (when session
       (send session
         [:editor/serve/session-state
-          {:client (table/get state :client nil) :size (table/get state :size nil)}])))
+          {:client (table/get state :client nil)
+           :size (table/get state :size nil)
+           :parked-at (table/get state :parked-at nil)}])))
+  nil)
+
+(defn- serve-handled (state message)
+  "Tell the session's supervisor (`:session` in the display `state`) that this loop handled
+the manager's `message` — an `[:adopt …]`, a `[:claim …]`, a `[:client-can …]` — whatever
+came of it, so a loop restarted after this one is not given it again (ADR-605): a hand-over
+replayed to a loop whose session has since parked, or been taken over, would hand the
+session to a client the manager gave another. Sent after what handling it sent, so the
+supervisor folds it before this loop's death. Returns nil."
+  (let (session (table/get state :session nil))
+    (when session (send session [:editor/serve/handled message])))
+  nil)
+
+(defn- serve-ledger-clear (state)
+  "Clear the session's key ledger (`:ledger` in the display `state`): a new client numbers
+its keys from 1, so the last key the OLD client had taken says nothing about it — a restart
+before the new client's first key was taken must send it again every key it kept (ADR-605).
+Returns nil."
+  (let (ledger (table/get state :ledger nil))
+    (when ledger (table/delete ledger :taken)))
   nil)
 
 (defn- serve-tell-attached (state client)
@@ -376,12 +407,25 @@ input for rehost/reshare, not tear the session down)."
       ([:key k] (remote-note-resize state k))
       ([:detach] :close)
       ;; what this client can be asked beyond keys and frames ([[served-client-can?]])
-      ([:client-can from capabilities] (remote-note-capabilities state from capabilities))
+      ((and message [:client-can _ _]) (remote-hand-over state resume message))
       ; client process died / link net-split
       ([:down _ ^client _] (remote-client-lost state resume))
-      ([:adopt token adopter cols rows] (remote-adopt state resume token adopter cols rows))
-      ([:claim token claimant cols rows] (remote-claim state resume token claimant cols rows))
+      ((and message [:adopt _ _ _ _]) (remote-hand-over state resume message))
+      ((and message [:claim _ _ _ _]) (remote-hand-over state resume message))
       (after 0 nil))))
+
+(defn- remote-hand-over (state resume message)
+  "Handle the manager's `message` — `[:adopt …]` ([[remote-adopt]]), `[:claim …]`
+([[remote-claim]]) or `[:client-can …]` ([[remote-note-capabilities]]) — and tell the
+session it was handled ([[serve-handled]]), so no restarted loop is given it again. Answers
+what handling it answered: the app's input, or nil."
+  (let (input (match message
+                ([:adopt token adopter cols rows] (remote-adopt state
+                                                    resume token adopter cols rows))
+                ([:claim token claimant cols rows] (remote-claim state
+                                                     resume token claimant cols rows))
+                ([:client-can from capabilities] (remote-note-capabilities state from capabilities))))
+    (do (serve-handled state message) input)))
 
 (defn- remote-note-capabilities (state from capabilities)
   "Note what the client `from` can do beyond keys and frames (`[:client-can from capabilities]`,
@@ -425,6 +469,8 @@ which the loop reads as a timeout)."
         (table/put state :client-can #{})
         (table/put state :size [cols rows])
         (table/put state :parked-at nil)
+        ;; the new client numbers its keys from 1 (ADR-605)
+        (serve-ledger-clear state)
         (serve-report state)
         (serve-tell-attached state client)
         (serve-replay state client)
@@ -548,18 +594,32 @@ for one that says nothing, as every client older than the saying."
 (def- serve-restart-max 3)
 (def- serve-restart-window-ms 60000)
 
-;; How many of the manager's latest hand-over messages a session keeps, to give a loop
-;; restarted before it took them. Replaying one it did take is harmless: an adopt of a
-;; session that has a client is ignored, a claim asks the client again.
-(def- serve-pending-max 6)
+;; The manager's hand-overs a session keeps for a loop restarted before it HANDLED them
+;; (ADR-605): a loop says each one it handled ([[serve-handled]]) and the session forgets
+;; it, so only the ones no loop took are given to a restarted one. Replaying a handled one
+;; is NOT harmless — a claim replayed to a loop whose session has parked since adopts the
+;; claimant without asking anyone, and one replayed to a loop serving the claimant asks the
+;; claimant whether it is there. A bound on what a dead loop's backlog can hold, never reached
+;; by one restart's gap.
+(def- serve-pending-max 16)
 
 ;; The ways a loop ends WITHOUT failing: its app quit, its parked session's time ran out.
 (def- serve-loop-ends #{:normal :client-gone})
 
+(defn- serve-recent-deaths (deaths now window-ms)
+  "The times among a session's loop `deaths` inside the last `window-ms` before `now` — all
+the restart budget counts ([[serve-restart-allowed?]]), so all a session keeps."
+  (into [] (seq/filter deaths (fn (at) (< (- now at) window-ms)))))
+
 (defn- serve-restart-allowed? (deaths now max window-ms)
   "Whether a loop that died at `now` may be started again, given the times of the session's
 earlier loop `deaths`: fewer than `max` of them inside the last `window-ms`."
-  (< (count (seq/filter deaths (fn (at) (< (- now at) window-ms)))) max))
+  (< (count (serve-recent-deaths deaths now window-ms)) max))
+
+(defn- serve-pending-handled (pending message)
+  "The hand-overs `pending` without the first that equals `message`, which a loop handled."
+  (let (at (index-of pending message))
+    (if (< at 0) pending (into (into [] (take pending at)) (drop pending (inc at))))))
 
 (defn- serve-session (client cols rows identity resume app)
   "One attached client's SESSION (ADR-593): this process supervises the app's loop
@@ -578,7 +638,12 @@ loop's death arrives as a message ([[serve-supervise]]) and a `:kill` of this pr
          :resume (when resume (assoc resume :session (self)))
          :app app
          :retained nil
+         ;; when the session parked (nil while it has a client), kept across a restart
+         :parked-at nil
+         ;; the times of its loops' deaths inside the restart window, and how many restarts
          :deaths []
+         :restarts 0
+         ;; the manager's hand-overs forwarded to a loop that has not said it handled them
          :pending []
          ;; the last numbered key a loop took ([[remote-display]])
          :ledger (table/new)}
@@ -616,7 +681,10 @@ parked."
                   cols
                   rows
                   (when resume (assoc resume :monitor watch))
-                  {:session supervisor :ledger ledger :restarted? (not (nil? death))})
+                  {:session supervisor
+                   :ledger ledger
+                   :restarted? (not (nil? death))
+                   :parked-at (:parked-at session)})
         identity (:identity session)
         app (:app session))
     (do
@@ -644,16 +712,22 @@ parked."
 
 (defn- serve-supervise (session)
   "The session's loop over its running loop: keep what the loop retains and reports (its
-client and size), pass the manager's hand-overs on to it — keeping the latest, for a loop
-restarted before it took them — and when it ends, [[serve-loop-ended]]."
+client, size and when it parked), pass the manager's hand-overs on to it — keeping each until
+the loop says it handled it, for a loop restarted before it did (ADR-605) — and when it
+ends, [[serve-loop-ended]]."
   (let (loop-process (:loop session))
     (receive
       ([:editor/serve/retain value] (serve-supervise (assoc session :retained value)))
       ([:editor/serve/session-state facts] (serve-supervise (assoc session
                                                               :client (:client facts)
                                                               :size
-                                                                (or (:size facts)
-                                                                  (:size session)))))
+                                                                (or (:size facts) (:size session))
+                                                              :parked-at (:parked-at facts))))
+      ;; a loop handled one: no restarted loop is given it again
+      ([:editor/serve/handled message] (serve-supervise (assoc session
+                                                          :pending
+                                                            (serve-pending-handled (:pending session)
+                                                              message))))
       ;; the manager's word for the loop: a parked session adopted, one asked to hand itself
       ;; over, what a client can do
       ((and message (or [:adopt _ _ _ _] [:claim _ _ _ _] [:client-can _ _])) (do
@@ -665,9 +739,9 @@ restarted before it took them — and when it ends, [[serve-loop-ended]]."
       (_ (serve-supervise session)))))
 
 (defn- serve-note-forwarded (session message)
-  "`session` after passing the manager's `message` to its loop: kept among the latest
-`serve-pending-max`, and a client's capabilities noted (`[:client-can client
-capabilities]`), so a restarted loop knows what its client can do."
+  "`session` after passing the manager's `message` to its loop: kept until the loop says it
+handled it (at most `serve-pending-max`), and a client's capabilities noted (`[:client-can
+client capabilities]`), so a restarted loop knows what its client can do."
   (let (pending (conj (:pending session) message)
         kept (if (> (count pending) serve-pending-max) (into [] (rest pending)) pending))
     (match message
@@ -696,32 +770,37 @@ restart."
 (`:on-crash` in its `:supervise` options — [[serve-crash-hook]]) with what the loop retained
 and `{:reason :restarting?}`, and then, when the app can restart one (`:restart`) and the
 budget allows ([[serve-restart-allowed?]]), a fresh loop starts over the retained value for
-the same client (or parked, when it had none), the manager's latest hand-overs given to it
-again; otherwise the session ends, and its client with it. The session ends with its
-loop's reason ([[serve-end]])."
+the same client (or parked, when it had none, since the session parked), given again the
+manager's hand-overs no loop handled (ADR-605); otherwise the session ends, and its client
+with it. The session keeps only the deaths the budget still counts. The session ends with
+its loop's reason ([[serve-end]])."
   (if (contains? serve-loop-ends reason)
     (serve-end reason)
     (let (now (os/now)
           supervise (or (:supervise (or (:opts (:app session)) {})) {})
           restart (:restart supervise)
-          deaths (:deaths session)
+          window-ms (or (:window-ms supervise) serve-restart-window-ms)
+          deaths (serve-recent-deaths (:deaths session) now window-ms)
           restarting? (and (fn? restart)
                         (serve-restart-allowed? deaths
                           now
                           (or (:max supervise) serve-restart-max)
-                          (or (:window-ms supervise) serve-restart-window-ms)))
+                          window-ms))
           on-crash (:on-crash supervise)
           retained (:retained session)
           saved (when (fn? on-crash)
                   (serve-crash-hook on-crash retained {:reason reason :restarting? restarting?}))
+          restarts (inc (or (:restarts session) 0))
           death {:reason reason
                  :saved saved
                  :restarting? restarting?
-                 :restarts (inc (count deaths))
+                 :restarts restarts
                  :identity (:identity session)})
       (if restarting?
         (let (client (:client session)
-              restarted (serve-start-loop (assoc session :deaths (conj deaths now))
+              restarted (serve-start-loop (assoc session
+                                            :deaths (conj deaths now)
+                                            :restarts restarts)
                           (fn () (restart retained death))
                           death))
           (do

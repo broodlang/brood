@@ -1,7 +1,7 @@
 ;; The bridge's pure half: what goes on the wire and what is accepted off it. The
 ;; server itself is exercised by hand (serve an app, `editor/web/listen`, then curl or a
 ;; tab) — a test that bound a port would fight other suites for it.
-(defmodule editor-web-test (:use editor/web) (:use test))
+(defmodule editor-web-test (:use editor/web) (:use-internals editor/web) (:use test))
 
 (describe "frame-json"
   (test "a frame's ops become JSON arrays, keywords as strings"
@@ -37,3 +37,44 @@
     (assert= (input-tab "/input/") nil)
     (assert= (input-tab "/input/x") nil)
     (assert= (input-tab "/events") nil)))
+
+;; A stand-in for a session's loop: every message it is sent goes to `report` as `[tag m]`.
+(defn web-loop-stand-in (report tag)
+  (receive (m (do (send report [tag m]) (web-loop-stand-in report tag)))))
+
+(defn web-post (id text)
+  (editor/web/input {:path (str "/input/" id) :body (string/->bytes text)}))
+
+(defn web-next (tag)
+  (receive ([^tag m] m) (after test/*wait-ms* :none)))
+
+(describe "a tab's input across a restarted loop (ADR-605)"
+  (test "an input posted while the stream takes in a restart goes to the new loop, numbered after the rest"
+    ;; the stream process owns the tab's input: a post is queued behind the [:reattached …]
+    ;; it has not folded yet, so it is never sent to the dead loop, nor wiped from the log
+    ;; by the resend, nor its number reused
+    (let (me (self)
+          id 900001
+          supervisor (spawn (receive (:stop nil)))
+          old-loop (spawn (web-loop-stand-in me :old))
+          new-loop (spawn (web-loop-stand-in me :new))
+          tab (spawn (editor/web/tab-run nil id old-loop)))
+      (send tab [:session supervisor])
+      ;; the post waits for the stream to know the tab: it answers 404 until then
+      (letrec (await-tab (fn (left)
+                           (when (and (> left 0) (not (= (table/get (editor/web/tabs) id nil) tab)))
+                             (receive (after 10 (await-tab (dec left)))))))
+        (await-tab 200))
+      (assert= (:status (web-post id "\"a\"")) 204)
+      (assert= (web-next :old) [:key "a" false 1])
+      ;; the dead loop took none; the restart and a post race to the stream
+      (send tab [:reattached new-loop supervisor nil])
+      (web-post id "\"b\"")
+      (assert= (web-next :new) [:key "a" false 1])
+      (assert= (web-next :new) [:key "b" false 2])
+      (web-post id "\"c\"")
+      (assert= (web-next :new) [:key "c" false 3])
+      (assert= (receive ([:old m] m) (after 0 :none)) :none)
+      (assert= (:status (web-post 900002 "\"d\"")) 404)
+      (exit tab :kill)
+      (send supervisor :stop))))

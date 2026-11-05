@@ -26,8 +26,9 @@ evaluated). Listens on 127.0.0.1 only.
 (def *web-tabs* nil)
 
 (defn- tabs ()
-  "Tab id → the session process its input goes to, and `[:inputs id]` → the input a tab keeps
-for a restarted loop (ADR-593). Created on first use."
+  "Tab id → the stream process that owns its input ([[stream]]), and `[:inputs id]` → the
+input a tab keeps for a restarted loop (ADR-593), written by that process alone (ADR-605).
+Created on first use."
   (when (nil? *web-tabs*) (def *web-tabs* (table/new)))
   *web-tabs*)
 
@@ -119,16 +120,23 @@ A build of an app that runs in the tab copies these beside its bundle.
 or the tab goes away (its socket closes). Each message is one SSE event. `session` is the
 loop the tab's input goes to; `supervisor` the session it belongs to, once it said so
 (`[:session supervisor]`, ADR-593) — then only ITS death ends the stream, and a loop that
-died and was restarted under it (`[:attached next]`) takes the tab's input from then on."
+died and was restarted under it (`[:attached next]`) takes the tab's input from then on.
+This process OWNS the tab's input: a posted input reaches it as `[:editor/web/input m]`
+([[input]]) and is numbered, kept and shipped here, in the order it arrived among the
+session's own messages — so a restart's resend and a new input never race over the log,
+and an input posted after the restart goes to the new loop, numbered after the rest
+(ADR-605)."
   (receive
-    ([:attached next] (do (table/put (tabs) id next) (stream sock id next supervisor)))
+    ([:editor/web/input m] (do
+                             (send session (tab-input-message id m))
+                             (stream sock id session supervisor)))
+    ([:attached next] (stream sock id next supervisor))
     ([:session given] (do (monitor given) (tab-supervised id) (stream sock id session given)))
     ;; a restarted loop: the tab's input goes to it, every input the dead one never took
     ;; sent again first
     ([:reattached next given taken] (do
                                       (when (nil? supervisor) (monitor given))
                                       (tab-supervised id)
-                                      (table/put (tabs) id next)
                                       (tab-resend-after id next taken)
                                       (stream sock id next given)))
     ([:down _ who _] (when (and supervisor (not (= who supervisor)))
@@ -150,9 +158,21 @@ died and was restarted under it (`[:attached next]`) takes the tab's input from 
     ([:tcp-closed _] (send session [:detach]))
     (_ (stream sock id session supervisor))))
 
+(defn- tab-run (sock id session)
+  "Run tab `id`'s event stream to `session` in THIS process ([[stream]]): known by its id
+as the process the tab's posted input goes to, from now until the stream ends, when the tab
+and the input it kept are forgotten. Returns nil."
+  (do
+    (monitor session)
+    (table/put (tabs) id (self))
+    (stream sock id session nil)
+    (table/delete (tabs) id)
+    (table/delete (tabs) [:inputs id])
+    nil))
+
 (defn- events (req)
   "The `/events` handler: attach a fresh session for this tab, announce its id, then
-stream. Runs in the connection's own process, which is exactly the process the
+stream ([[tab-run]]). Runs in the connection's own process, which is exactly the process the
 session's `remote-display` sends to."
   (stream-response 200
     (sse/headers)
@@ -162,26 +182,23 @@ session's `remote-display` sends to."
         (if (nil? session)
           (sse/emit sock (json/encode {:error "nothing is being served"}) "error")
           (do
-            (monitor session)
-            (table/put (tabs) id session)
             (sse/emit sock (json/encode {:id id}) "hello")
-            (stream sock id session nil)
-            (table/delete (tabs) id)
-            (table/delete (tabs) [:inputs id])))
+            (tab-run sock id session)))
         (tcp/close sock)))))
 
 (defn- input (req)
-  "The `/input/<id>` handler: the posted form to that tab's session, as a window's
-message would arrive (`[:key m]`)."
+  "The `/input/<id>` handler: the posted form to that tab's stream process, which ships it to
+the tab's session as a window's message would arrive (`[:key m]`, numbered once the session
+supervises its loop) — the stream alone touches the tab's input log ([[stream]])."
   (let (id (input-tab (get req :path))
-        session (if (nil? id) nil (table/get (tabs) id))
+        tab (if (nil? id) nil (table/get (tabs) id))
         m (parse-input (string/bytes-> (get req :body))))
     (cond
-      (nil? session) (not-found)
+      (nil? tab) (not-found)
       (nil? m) (response 400 {} "not an input message")
       else
         (do
-          (send session (tab-input-message id m))
+          (send tab [:editor/web/input m])
           (response 204 {} "")))))
 
 ;; How many inputs a tab keeps for a loop restarted after one died (ADR-593).

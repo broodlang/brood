@@ -61,8 +61,8 @@ documents.
   (seq/find (%map-pairs entries) (fn (entry) (= (:proc (second entry)) pid))))
 
 (defn- registry-notify (watchers msg)
-  "Send `msg` to every watcher."
-  (doseq (w watchers) (send w msg)))
+  "Send `msg` to every watcher (`watchers`: pid -> its monitor ref)."
+  (doseq (w (keys watchers)) (send w msg)))
 
 (defn- registry-live (entries key)
   "The entry for `key` while its process is alive, else nil. A holder can re-share a died
@@ -118,7 +118,9 @@ mirror's log, and every entry would pin the texts it spans, a redacted secret am
 (defn- registry-loop (entries watchers mirror? owner)
   ;; entries: {key {:name <string> :proc <pid> :meta <map> :mref <monitor ref>
   ;;                [:link <link> :mirror <buffer>]}} — the last two only when `mirror?`;
-  ;; watchers: a list of pids; owner: the pid whose end ends the registry, or nil
+  ;; watchers: {pid monitor-ref} — each monitored, so one that ends is dropped (a served
+  ;; session's loop that died and was restarted watches again as a new pid); owner: the pid
+  ;; whose end ends the registry, or nil
   (receive
     ;; the OWNER ended: the registry was its, and goes with it, stopping every document —
     ;; checked before a directed process's death, which is the same message shape
@@ -183,31 +185,47 @@ mirror's log, and every entry would pin the texts it spans, a redacted secret am
                                 (send from [:reply r (:proc e)])
                                 (registry-loop (dissoc entries key) watchers mirror? owner)))))
     ([:watch pid] (registry-loop entries
-                    (if (includes? watchers pid) watchers (cons pid watchers))
+                    (if (contains? watchers pid) watchers (assoc watchers pid (monitor pid)))
                     mirror?
                     owner))
-    ([:unwatch pid] (registry-loop entries (seq/reject watchers (fn (w) (= w pid))) mirror? owner))
-    ;; One of the directed processes died: it is no longer the process for its key. Without
-    ;; a mirror the holders still have the text and one of them will share it again. With
-    ;; one, the registry respawns it from the mirror at once — the document survives its
-    ;; process with every edit the process had acknowledged — and the watchers see the same
-    ;; removed-then-added pair a re-share produces, so a holder relinks either way.
-    ([:down _ pid _] (let (hit (registry-entry-by-proc entries pid))
-                       (if (nil? hit)
-                         (registry-loop entries watchers mirror? owner)
-                         (let ([key dead] hit)
-                           (do
-                             (registry-notify watchers [:registry-removed key :died])
-                             (if mirror?
-                               (let (entry (registry-spawn (:name dead)
-                                             (:mirror dead)
-                                             (:meta dead)
-                                             true))
+    ([:unwatch pid] (let (watch (get watchers pid))
+                      (do
+                        (when watch (demonitor watch))
+                        (registry-loop entries (dissoc watchers pid) mirror? owner))))
+    ([:watchers from r] (do
+                          (send from [:reply r (into [] (keys watchers))])
+                          (registry-loop entries watchers mirror? owner)))
+    ;; A watcher ended: it is told nothing more (a served session's restarted loop watches
+    ;; again under its own pid, so the dead one's would otherwise stay for the session's life)
+    ;; — and otherwise, one of the directed processes died: it is no longer the process for
+    ;; its key. Without a mirror the holders still have the text and one of them will share
+    ;; it again. With one, the registry respawns it from the mirror at once — the document
+    ;; survives its process with every edit the process had acknowledged — and the watchers
+    ;; see the same removed-then-added pair a re-share produces, so a holder relinks either way.
+    ([:down watch pid _] (let (hit (registry-entry-by-proc entries pid))
+                           (cond
+                             (= watch (get watchers pid))
+                               (registry-loop entries (dissoc watchers pid) mirror? owner)
+                             (nil? hit) (registry-loop entries watchers mirror? owner)
+                             else
+                               (let ([key dead] hit)
                                  (do
-                                   (registry-notify watchers
-                                     [:registry-added key (:name dead) (:proc entry) (:meta dead)])
-                                   (registry-loop (assoc entries key entry) watchers mirror? owner)))
-                               (registry-loop (dissoc entries key) watchers mirror? owner)))))))
+                                   (registry-notify watchers [:registry-removed key :died])
+                                   (if mirror?
+                                     (let (entry (registry-spawn (:name dead)
+                                                   (:mirror dead)
+                                                   (:meta dead)
+                                                   true))
+                                       (do
+                                         (registry-notify watchers
+                                           [:registry-added
+                                             key
+                                             (:name dead)
+                                             (:proc entry)
+                                             (:meta dead)])
+                                         (registry-loop (assoc entries key entry)
+                                           watchers mirror? owner)))
+                                     (registry-loop (dissoc entries key) watchers mirror? owner)))))))
     ([:stop from r] (do (registry-stop-all entries) (send from [:reply r (count entries)])))
     (_ (registry-loop entries watchers mirror? owner))))
 
@@ -238,7 +256,7 @@ goes with the session, where a runtime-wide name could hold only one and leak th
         ;; monitored from inside, before the first message: an owner already gone
         ;; ends the registry at once rather than never
         (when (pid? owner) (monitor owner))
-        (registry-loop {} '() mirror? (if (pid? owner) owner nil))))))
+        (registry-loop {} {} mirror? (if (pid? owner) owner nil))))))
 
 (defn- registry-call (reg msg-fn &optional (timeout 2000))
   "Send `(msg-fn self ref)` to `reg` and wait for its `[:reply ref v]`; `:no-reply` after
@@ -288,7 +306,7 @@ nil when there was none.
   "Have `pid` sent `[:registry-added key name proc meta]` for every buffer shared from now
 on, `[:registry-renamed old-key new-key name meta]` for every rekey, and
 `[:registry-removed key reason]` for every one removed (`:killed`) or died (`:died`).
-Idempotent. Asynchronous.
+Idempotent. Asynchronous. The registry monitors `pid` and drops it when it ends.
 
     (let (r (editor/buffer-registry/registry-start)) (editor/buffer-registry/registry-watch r (self)) (editor/buffer-registry/registry-share r \"a\" \"\" {}) (editor/buffer-registry/registry-stop r) (receive ([:registry-added k _ _ _] k) (after 1000 :none)))   ;=> \"a\""
   (send reg [:watch pid]))
@@ -304,3 +322,7 @@ Idempotent. Asynchronous.
 
     (editor/buffer-registry/registry-stop (editor/buffer-registry/registry-start))   ;=> 0"
   (registry-call reg (fn (me r) [:stop me r]) timeout))
+
+(defn- registry-watchers (reg &optional (timeout 2000))
+  "The pids `reg` notifies now — a watcher that ended is dropped — or `:no-reply`."
+  (registry-call reg (fn (me r) [:watchers me r]) timeout))
