@@ -472,10 +472,24 @@ the child's stderr arrives as `[:proc handle data]` like everything else and the
 no `[:proc-err …]` stream. A caller that needs the two apart wants pipes.
 
 The child gets its own session and controlling terminal, so job control and ^C reach
-IT rather than the program hosting it. Unix only: on Windows it raises, naming ConPTY (KI-369).
+IT rather than the program hosting it. On Windows the terminal is a ConPTY pseudoconsole
+(Windows 10 1809 or later; an older Windows raises, naming ConPTY): the same handle and
+messages, its screen arriving as VT sequences; `:raw-args` writes the arguments into the
+command line unquoted, as for [[spawn]] (KI-369).
 
     (os/spawn-pty \"bash\" [\"-i\"] {:cols 100 :rows 30})   ;~> a subprocess handle; output arrives as [:proc handle data]"
   (%pty-spawn prog args opts))
+
+(defn shell-spawn-pty (line:string &optional opts)
+  "Start the command line `line` through the platform's shell ([[shell]]) under a
+pseudo-terminal — [[spawn-pty]] for a line rather than a program and its arguments, as
+[[shell-spawn]] is [[spawn]]'s, with [[spawn-pty]]'s messages and options. `sh -c LINE`
+on Unix, `cmd.exe /d /s /c \"LINE\"` on Windows. What a terminal emulator that runs a
+configured command needs.
+
+    (os/shell-spawn-pty \"echo hi\" {:cols 80 :rows 24})   ;~> a subprocess handle; [:proc handle …hi…] arrives"
+  (let ([program arguments options] (shell-call line opts))
+    (%pty-spawn program arguments options)))
 
 (defn resize-pty (p cols rows)
   "Tell pty child `p` its terminal is now `cols` × `rows`; it sees `SIGWINCH` and
@@ -497,8 +511,8 @@ for. Most callers want [[pty-password?]], the question this answers. Read it whe
 arrives or before a line is sent, not on every frame.
 
 `nil` when `p` is unknown or already closed (the child is gone, so a caller need not race
-its exit), and off Unix, where nothing is known. Throws if `p` was spawned with pipes
-rather than a pty.
+its exit), and for a Windows ConPTY child, whose pseudoconsole has no termios to ask
+(KI-369). Throws if `p` was spawned with pipes rather than a pty.
 
     (os/pty-mode (os/spawn-pty \"sh\" [\"-c\" \"sleep 1\"]))   ;~> {:echo true :canonical true}"
   (%pty-mode p))
@@ -513,8 +527,9 @@ REPL) turns echo off too, but along with line mode, and echoes for itself —
 so echo alone would call every prompt of theirs a password. This is the pair: echo off
 AND canonical.
 
-`true` or `false`; `nil` when nothing can be known — `p` closed, or off Unix — so a caller
-can fall back to guessing from the prompt's text. Throws if `p` was spawned with pipes.
+`true` or `false`; `nil` when nothing can be known — `p` closed, or a Windows ConPTY
+child, which has no termios — so a caller can fall back to guessing from the prompt's
+text. Throws if `p` was spawned with pipes.
 
     (os/pty-password? (os/spawn-pty \"sh\" [\"-c\" \"stty -echo; read secret\"]))   ;~> true, once stty has run"
   (let (mode (%pty-mode p))

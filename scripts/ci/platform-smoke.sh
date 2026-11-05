@@ -22,6 +22,10 @@ portable=(
   # (a drive letter on Windows), files with spaces in their names, CRLF and BOM bytes
   # through spit/slurp, os/which and os/cmd spawning the platform's own shell.
   tests/platform_test.blsp
+  # The pseudo-terminal through the platform's shell: output, one channel, the exit code,
+  # :env / :cwd, the size and resize, the input mode (nil on Windows), an interactive
+  # shell, close. A Unix pty, or ConPTY on Windows (KI-369).
+  tests/pty_test.blsp
   # The editor buffer's file round trip: CRLF kept, a byte-order mark kept, a file's
   # coding read back as it was written — the bugs Emacs has had per OS.
   tests/buffer_test.blsp
@@ -46,7 +50,8 @@ unix_only=(
   tests/io_test.blsp
   # os/cmd: cwd, env, stdin, timeouts, shell quoting — through `sh`.
   tests/system_test.blsp
-  # os/spawn and os/spawn-pty: a child's stdout, signals, a pty's echo and resize.
+  # os/spawn and os/spawn-pty: a child's stdout, signals, a pty's termios modes and
+  # descriptors (tests/pty_test.blsp is the portable half of the pty).
   tests/proc_test.blsp
 )
 

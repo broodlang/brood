@@ -179,15 +179,17 @@
       (is (not (file/exists? marker))))))
 
 (describe "a pseudo-terminal"
-  (test "spawns on Unix; on Windows it raises naming ConPTY, never obscurely (KI-369)"
-    (if (windows?)
-      (let (raised (try (os/spawn-pty "cmd.exe" []) (catch e (str e))))
-        (is (string? raised))
-        (is (includes? raised "ConPTY")))
-      (let (child (os/spawn-pty "sh" ["-c" "echo in a pty"]))
-        (is (includes? (receive ([:proc ^child data] data) (after 10000 "nothing arrived"))
-              "in a pty"))
-        (os/close child)))))
+  ;; a Unix pty, or a ConPTY pseudoconsole on Windows (KI-369); tests/pty_test.blsp has the rest
+  (test "spawns on every platform, the child's output arriving through it"
+    (let (child (os/shell-spawn-pty "echo in a pty"))
+      (letrec (read-until (fn (acc)
+                            (if (includes? (ansi/strip acc) "in a pty")
+                              acc
+                              (receive
+                                ([:proc ^child data] (read-until (str acc data)))
+                                (after 10000 acc)))))
+        (is (includes? (ansi/strip (read-until "")) "in a pty")))
+      (os/close child))))
 
 (describe "owner-only files (KI-365)"
   (test "file/spit-private leaves a file only its owner can read"
