@@ -174,8 +174,10 @@
   "An `x` on each of three rows at `size` px and a line height of 1.25: the cell height
 and, per row, the rows of its cell the `x` inks."
   (let (face {:fg [255 255 255]}
-        image (gui/render-frame [[:clear] [:text 0 0 "x" face] [:text 1 0 "x" face]
-                                 [:text 2 0 "x" face]]
+        image (gui/render-frame [[:clear]
+                                  [:text 0 0 "x" face]
+                                  [:text 1 0 "x" face]
+                                  [:text 2 0 "x" face]]
                 (assoc (capture-spec) :size size :line-height 1.25))
         [cell-w cell-h] (:cell image))
     [cell-h (map [0 1 2] (fn (row) (inked-rows image 6 (* row cell-h) cell-w cell-h)))]))
@@ -227,15 +229,15 @@ and, per row, the rows of its cell the `x` inks."
                   (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0))))))
 
   (test "a lowercase letter sits on the same pixels in every row, in its row's middle (ADR-611)"
-    (when-gui
-      (fn ()
-        (doseq (size [11 15 22])
-          (let ([cell-h rows] (lowercase-rows size)
-                [top bottom] [(first (first rows)) (last (first rows))]
-                middle (/ (+ top bottom 1) 2.0))
-            (is (every? rows (fn (inked) (= inked (first rows)))))
-            (is (<= (math/abs (- middle (/ cell-h 2.0))) 1.0))))))))
-
+    (when-gui (fn ()
+                (doseq (size [11 15 22])
+                  (let ([cell-h rows] (lowercase-rows size)
+                        inked (or (first rows) (error "no row was measured"))
+                        [top bottom] [(or (first inked) (error "the x inked nothing"))
+                                       (or (last inked) (error "the x inked nothing"))]
+                        middle (/ (+ top bottom 1) 2.0))
+                    (is (every? rows (fn (inked) (= inked (first rows)))))
+                    (is (<= (math/abs (- middle (/ cell-h 2.0))) 1.0))))))))
 
 (describe "gui/write-png and gui/pixel"
   (test "a picture written as PNG decodes back to the same pixels, cropped and scaled"
@@ -360,12 +362,14 @@ descriptions, empty when the rule holds."
                              (seam-spec h size)))
         image (gui/render-frame (seam-frame cols rows top-band) (seam-spec h size))
         tops (:row-tops image)
+        ;; a row's top, which a frame of `rows` rows has for every row below `rows`
+        top-of (fn (row) (or (nth tops row) (error "no top for row " row)))
         [cell-w cell-h] (:cell image)
         seam (- rows 2)
         top (if top-band 0 6)
-        gap-from (+ (nth tops (dec seam)) cell-h)
-        gap-to (nth tops seam)
-        bare (seq/filter (range (second tops) h) (fn (y) (= (gui/pixel image 200 y) capture-bg)))
+        gap-from (+ (top-of (dec seam)) cell-h)
+        gap-to (top-of seam)
+        bare (seq/filter (range (top-of 1) h) (fn (y) (= (gui/pixel image 200 y) capture-bg)))
         gap-wrong (seq/filter (range gap-from gap-to)
                     (fn (y) (not (= (gui/pixel image 200 y) seam-above)))))
     (vec (seq/filter [(when (not (= (:seam image) seam)) [:seam (:seam image)])

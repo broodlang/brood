@@ -180,7 +180,8 @@
 
     (gui/latency-percentiles {:count 4 :max-us 9000 :buckets {2047 2 4095 1 9215 1}})   ;=> {:count 4 :p50 2.047 :p99 9.0 :p999 9.0 :max 9.0}
     (:p50 (gui/latency-percentiles {:count 0 :max-us 0 :buckets {}}))   ;=> nil"
-  (let (total (or (:count histogram) 0)
+  ;; a count is an integer by construction; anything else counts nothing
+  (let (total (let (n (:count histogram)) (if (int? n) n 0))
         max-us (or (:max-us histogram) 0)
         pairs (sort (vec (or (:buckets histogram) {})))
         ms (fn (us) (/ us 1000.0)))
@@ -328,7 +329,9 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
     :cell (tuple int int)
     :grid (tuple int int)
     :origin (tuple int int)
-    :inset int))
+    :inset int
+    :seam (or nil int)
+    :row-tops (vector int)))
 
 (sig image-thumb ((or bytes (vector int)) int int -> (or nil image)))
 (defn image-thumb (bytes max-w max-h)
@@ -365,12 +368,12 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
     (gui/write-png {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 255 1) (bytes/int-> 0 1) (bytes/int-> 0 1) (bytes/int-> 255 1))} \"/tmp/red.png\")   ;~> \"/tmp/red.png\""
   (%image-write-png image path opts))
 
-(sig pixel (image int int -> (or nil (tuple int int int))))
+(sig pixel (image number number -> (or nil (tuple int int int))))
 (defn pixel (image x y)
-  "The colour of pixel (`x`, `y`) of `image` (a {:width :height :rgba} map) as `[r g b]`, or nil outside it. What a test reads a picture with.
+  "The colour of pixel (`x`, `y`) of `image` (a {:width :height :rgba} map) as `[r g b]`, or nil outside it (a coordinate that is not an integer names no pixel). What a test reads a picture with.
 
     (gui/pixel {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 30 1) (bytes/int-> 30 1) (bytes/int-> 46 1) (bytes/int-> 255 1))} 0 0)   ;=> [30 30 46]"
-  (when (and (>= x 0) (>= y 0) (< x (:width image)) (< y (:height image)))
+  (when (and (int? x) (int? y) (>= x 0) (>= y 0) (< x (:width image)) (< y (:height image)))
     (let (rgba (:rgba image)
           at (* 4 (+ x (* y (:width image)))))
       [(bytes/at rgba at) (bytes/at rgba (+ at 1)) (bytes/at rgba (+ at 2))])))

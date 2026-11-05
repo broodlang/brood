@@ -127,6 +127,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("host/gui/backend.rs", "W", OneMachine),
     // The GUI thread's exit gate: one GUI thread per OS process, shut once at its exit.
     ("host/gui/backend.rs", "EXIT_GATE", OneMachine),
+    // The offscreen painter's request channel (ADR-609): one painter thread per OS process,
+    // started on first use, serving every runtime's `gui/render-frame` and headless capture.
+    ("host/gui/backend/offscreen.rs", "T", OneMachine),
     // The parsed memo fragments of each window (ADR-470), by window id — an id the one GUI
     // event loop hands out — and stamped with the pid that drew them: a draw from any other
     // process, of this runtime or another, finds no entry and parses afresh.
