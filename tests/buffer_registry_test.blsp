@@ -216,3 +216,41 @@
         (assert= (buffer-query p2 buffer-text) "ERROR\n")
         (assert= (buffer-query p2 (fn (b) (buffer-properties b :ansi))) [[0 5 {:fg 1}]]))
       (registry-stop reg))))
+
+;; ADR-593: a registry owned by a process lives as long as it does — one per served
+;; session, owned by the session that outlives its loop, ends with the session.
+(describe "buffer-registry — an owner's lifetime"
+  (test "the registry outlives a holder but not its owner: the owner's end stops every document"
+    (let (owner (spawn (receive (:go nil)))
+          reg (registry-start {:owner owner})
+          watch-registry (monitor reg)
+          holder (spawn (registry-share reg "notes" "kept" {:file "/tmp/owned-notes"}))
+          watch-holder (monitor holder))
+      ;; the holder (a session's loop) ends; its document does not
+      (receive ([:down ^watch-holder _ _] nil) (after test/*wait-ms* nil))
+      (let (entries (registry-entries reg)
+            proc (:proc (first entries))
+            watch-proc (monitor proc))
+        (assert= (count entries) 1)
+        (assert= (buffer-query proc buffer-text) "kept")
+        ;; the owner (the session) ends: the registry and the document go with it
+        (send owner :go)
+        (assert= (receive ([:down ^watch-registry _ _] :ended) (after test/*wait-ms* :alive))
+          :ended)
+        (assert= (receive ([:down ^watch-proc _ _] :stopped) (after test/*wait-ms* :alive))
+          :stopped))))
+  (test "an owner already gone ends the registry at once"
+    (let (owner (spawn nil)
+          watch-owner (monitor owner))
+      (receive ([:down ^watch-owner _ _] nil) (after test/*wait-ms* nil))
+      (let (reg (registry-start {:owner owner})
+            watch-registry (monitor reg))
+        (assert= (receive ([:down ^watch-registry _ _] :ended) (after test/*wait-ms* :alive))
+          :ended))))
+  (test "without an owner the registry lives until it is stopped"
+    (let (owner (spawn (receive (:go nil)))
+          reg (registry-start)
+          watch-registry (monitor reg))
+      (send owner :go)
+      (assert= (receive ([:down ^watch-registry _ _] :ended) (after 200 :alive)) :alive)
+      (registry-stop reg))))

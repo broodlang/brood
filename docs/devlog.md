@@ -5085,3 +5085,12 @@ record's `->seq` under `first` blocked its worker at tier 1 — `interrupt_one_w
 ±1.6% at the default tier. `make ab-vm`: `fib` −1.0%, `spawn-live` +0.2%, `collatz` +2.1%
 (inside its floor), and `pfib` +5–7.5% — but byte-identical binaries read +8.1% on `pfib` at
 tier 1 in the same session, so that row's spread is the measurement, not the change.
+
+2026-11-04 (ADR-593, KI-334). A served session supervises its loop: the session is a process
+of its own running the loop linked, and a loop that dies abnormally runs the app's
+`:supervise` `:on-crash` hook and is restarted from `:restart` over what it handed
+`serve-retain`, for the same client (told `[:reattached …]`, it replays the keys the dead loop
+never took, and watches the session rather than the loop), within 3 restarts a minute. `registry-start {:owner pid}` gives a buffer registry its
+owner's lifetime, so a served session's documents live in processes that outlive its loop and go
+with the session. bedit hosts a served session's buffers that way and auto-saves and restarts
+over them, as its window's lifeline does.
