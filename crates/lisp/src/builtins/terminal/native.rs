@@ -1377,7 +1377,7 @@ pub(in crate::builtins) fn gui_settle(args: &[Value], _: EnvId, heap: &mut Heap)
 }
 
 /// `(%gui-latency id)` — window `id`'s recent input-to-present samples, oldest first, as
-/// maps of milliseconds: `:total` (input to present) and `:paint` (the paint's share),
+/// maps of milliseconds (and `:input`, `:key` or `:pointer`, ADR-612): `:total` (input to present) and `:paint` (the paint's share),
 /// plus the GPU paint's `:encode` `:upload` `:acquire` `:submit` `:present` phases when
 /// the GPU target drew it (ADR-440). GC-safe: a builtin never fires GC mid-execution,
 /// so the maps stay live until the vector holds them.
@@ -1390,6 +1390,13 @@ pub(in crate::builtins) fn gui_latency(args: &[Value], _: EnvId, heap: &mut Heap
         let mut pairs = vec![
             (value::kw("total"), ms(sample.total_us)),
             (value::kw("paint"), ms(sample.paint_us)),
+            (
+                value::kw("input"),
+                value::kw(match sample.input {
+                    crate::host::gui::InputKind::Key => "key",
+                    crate::host::gui::InputKind::Pointer => "pointer",
+                }),
+            ),
         ];
         if let Some(split) = sample.split {
             for (name, us) in crate::host::gui::PAINT_PHASES.into_iter().zip(split) {
@@ -1401,6 +1408,45 @@ pub(in crate::builtins) fn gui_latency(args: &[Value], _: EnvId, heap: &mut Heap
     Ok(heap.alloc_vector(maps))
 }
 
+/// `(%gui-latency-histogram id)` — window `id`'s input-to-present distribution since it
+/// opened, `{:key h :pointer h}`, each `h` a `{:count n :max-us n :buckets {upper-us n}}` —
+/// a bucket's key its largest value in microseconds, so two histograms add bucket by bucket
+/// (ADR-612). Percentiles are std's (`gui/latency-percentiles`), over this data. GC-safe as
+/// `gui_latency` is.
+pub(in crate::builtins) fn gui_latency_histogram(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let id = gui_window_id(heap, "%gui-latency-histogram", arg(args, 0))?;
+    let (keys, pointer) = crate::host::gui::latency_histograms(id).map_err(LispError::runtime)?;
+    let count = |n: u64| Value::int(n as i64);
+    let mut histogram = |h: &crate::host::gui::LatencyHistogram| {
+        let buckets: Vec<_> = h
+            .buckets()
+            .map(|(upper_us, n)| (count(upper_us), count(n)))
+            .collect();
+        let buckets = heap.map_from_pairs(buckets);
+        heap.map_from_pairs(vec![
+            (value::kw("count"), count(h.count)),
+            (value::kw("max-us"), count(h.max_us)),
+            (value::kw("buckets"), buckets),
+        ])
+    };
+    let keys = histogram(&keys);
+    let pointer = histogram(&pointer);
+    Ok(heap.map_from_pairs(vec![
+        (value::kw("key"), keys),
+        (value::kw("pointer"), pointer),
+    ]))
+}
+
+/// `(%gui-key-repeat? id)` — whether the last key press window `id`'s app took from its
+/// mailbox was an OS auto-repeat (ADR-612); false for a window not open.
+pub(in crate::builtins) fn gui_key_repeat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-key-repeat?", arg(args, 0))?;
+    Ok(Value::boolean(crate::host::gui::key_repeat(id)))
+}
 /// `(gui-key-repeats id)` — how window `id`'s held keys have repeated since it opened:
 /// `{:delivered n :dropped n :delay ms :interval ms}`, `:delay` and `:interval` the
 /// desktop's as the last key that repeated showed them (nil before any has).

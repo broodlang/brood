@@ -13,9 +13,11 @@ pub(super) struct KeyReport {
 }
 
 /// One press's message for the app: a fresh press, or an OS repeat carrying the gate's
-/// credit (`process::deliver_credited`), which the release can take back.
+/// credit (`process::deliver_credited`), which the release can take back. A fresh press
+/// carries a credit too, a receipt costing nothing (`PressReceipt`): every press marks, as
+/// the app takes it from its mailbox, whether it was a repeat (`gui-key-repeat?`, ADR-612).
 pub(super) enum KeyMessage {
-    Press(Message),
+    Press(Message, crate::process::DeliveryCredit),
     Repeat(Message, crate::process::DeliveryCredit),
     /// A key still down now types another keystroke (Shift let go while `(` repeats, so it
     /// repeats as `9`): the key-up of the one it typed, then the press of the new one, so
@@ -23,6 +25,7 @@ pub(super) enum KeyMessage {
     Restroke {
         up: Message,
         press: Message,
+        receipt: crate::process::DeliveryCredit,
     },
 }
 
@@ -69,6 +72,12 @@ impl Keyboard {
         self.report.clone()
     }
 
+    /// Whether the last press the app took from its mailbox was an OS repeat, shared with
+    /// the window's handle for `gui-key-repeat?` (ADR-612).
+    pub(super) fn received_repeat(&self) -> Arc<AtomicBool> {
+        self.gate.received_repeat.clone()
+    }
+
     /// One press of `stroke` from `physical` at `at`. A fresh press is always sent. A
     /// repeat is dropped under `KeyRepeat::App`, where the app repeats from `gui-held-key`;
     /// under `KeyRepeat::Os` it goes through the gate, so at most one is ever undelivered.
@@ -96,8 +105,9 @@ impl Keyboard {
                 Some(before) => KeyMessage::Restroke {
                     up: key_up_message(&before),
                     press: message,
+                    receipt: PressReceipt::credit(&self.gate),
                 },
-                None => KeyMessage::Press(message),
+                None => KeyMessage::Press(message, PressReceipt::credit(&self.gate)),
             });
         }
         let micros = |since: Instant| at.saturating_duration_since(since).as_micros() as u64;
@@ -173,6 +183,11 @@ impl Keyboard {
 pub(super) struct RepeatGate {
     outstanding: AtomicBool,
     withdrawn: AtomicBool,
+    /// Whether the last key press the app took from its mailbox was an OS repeat: set as
+    /// a repeat's credit comes back, cleared as a fresh press's receipt does
+    /// (`PressReceipt`). A message leaves the mailbox when the app receives it, so while
+    /// the app folds a press this names that press (ADR-612).
+    received_repeat: Arc<AtomicBool>,
 }
 
 impl RepeatGate {
@@ -195,11 +210,37 @@ impl RepeatGate {
 
 impl crate::process::CreditSource for RepeatGate {
     fn release(&self, _cost: usize) {
+        // a repeat taken back at the release never reached the app: it marks nothing
+        if !self.withdrawn.load(Ordering::Acquire) {
+            self.received_repeat.store(true, Ordering::Release);
+        }
         self.outstanding.store(false, Ordering::Release);
     }
 
     fn withdrawn(&self) -> bool {
         self.withdrawn.load(Ordering::Acquire)
+    }
+}
+
+/// A fresh press's receipt (ADR-612): a credit that costs nothing and gates nothing, and
+/// clears the gate's `received_repeat` as the press leaves the mailbox — so the app,
+/// folding that press, reads it as not a repeat.
+pub(super) struct PressReceipt {
+    received_repeat: Arc<AtomicBool>,
+}
+
+impl PressReceipt {
+    fn credit(gate: &Arc<RepeatGate>) -> crate::process::DeliveryCredit {
+        let receipt = PressReceipt {
+            received_repeat: gate.received_repeat.clone(),
+        };
+        crate::process::DeliveryCredit::new(Arc::new(receipt), 0)
+    }
+}
+
+impl crate::process::CreditSource for PressReceipt {
+    fn release(&self, _cost: usize) {
+        self.received_repeat.store(false, Ordering::Release);
     }
 }
 
@@ -230,9 +271,9 @@ mod tests {
 
     fn sent(answer: Option<KeyMessage>) -> (&'static str, String) {
         match answer {
-            Some(KeyMessage::Press(message)) => ("press", spelled(&message)),
+            Some(KeyMessage::Press(message, _)) => ("press", spelled(&message)),
             Some(KeyMessage::Repeat(message, _)) => ("repeat", spelled(&message)),
-            Some(KeyMessage::Restroke { up, press }) => (
+            Some(KeyMessage::Restroke { up, press, .. }) => (
                 "restroke",
                 format!("{} then {}", spelled(&up), spelled(&press)),
             ),
@@ -274,6 +315,53 @@ mod tests {
         assert_eq!((repeats.delivered, repeats.dropped), (2, 1));
         assert_eq!(repeats.delay_us, Some(500_000), "press to first repeat");
         assert_eq!(repeats.interval_us, Some(33_000), "between the last two");
+    }
+
+    #[test]
+    fn each_press_marks_whether_it_was_a_repeat_as_the_app_takes_it() {
+        let mut keyboard = Keyboard::new(KeyRepeat::Os);
+        let repeat = keyboard.received_repeat();
+        let start = Instant::now();
+        let a = physical(KeyCode::KeyA);
+        let Some(KeyMessage::Press(_, receipt)) = keyboard.press(char_key('a'), a, start) else {
+            panic!("a fresh press, with its receipt")
+        };
+        drop(receipt); // the app took the press
+        assert!(
+            !repeat.load(Ordering::Acquire),
+            "a fresh press is not a repeat"
+        );
+        let Some(KeyMessage::Repeat(_, credit)) = keyboard.press(char_key('a'), a, start) else {
+            panic!("a repeat")
+        };
+        assert!(
+            !repeat.load(Ordering::Acquire),
+            "not marked until the app takes it: it is still folding the press"
+        );
+        drop(credit);
+        assert!(
+            repeat.load(Ordering::Acquire),
+            "the app is folding a repeat"
+        );
+
+        // released, pressed again: a double tap is two fresh presses
+        keyboard.release(a, Some(Key::Char('a')));
+        let Some(KeyMessage::Press(_, receipt)) = keyboard.press(char_key('a'), a, start) else {
+            panic!("a fresh press after the release")
+        };
+        drop(receipt);
+        assert!(!repeat.load(Ordering::Acquire));
+
+        // a repeat taken back at the release never reached the app, so it marks nothing
+        let Some(KeyMessage::Repeat(_, credit)) = keyboard.press(char_key('a'), a, start) else {
+            panic!("a repeat")
+        };
+        keyboard.release(a, Some(Key::Char('a')));
+        drop(credit);
+        assert!(
+            !repeat.load(Ordering::Acquire),
+            "a withdrawn repeat is not received"
+        );
     }
 
     #[test]

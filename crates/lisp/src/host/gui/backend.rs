@@ -28,8 +28,9 @@ pub(crate) use {
 };
 
 use super::{
-    CursorShape, Key, KeyRepeat, Keystroke, LatencySample, Mouse, MouseAction, MouseButton, Op,
-    OptionMeta, PAINT_PHASES, RepeatCounts, WheelMode, WindowSpec,
+    CursorShape, InputKind, Key, KeyRepeat, Keystroke, LatencyHistogram, LatencyLog, LatencySample,
+    Mouse, MouseAction, MouseButton, Op, OptionMeta, PAINT_PHASES, RepeatCounts, WheelMode,
+    WindowSpec,
 };
 
 use crate::core::sync::lock;
@@ -43,7 +44,7 @@ use crate::process::{
 
 use std::cell::RefCell;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use std::num::NonZeroU32;
 
@@ -464,7 +465,8 @@ struct OpenReply {
     size: Arc<Mutex<(u16, u16)>>,
     size_px: Arc<Mutex<(u32, u32)>>,
     keys: Arc<Mutex<KeyReport>>,
-    latency: Arc<Mutex<VecDeque<LatencySample>>>,
+    key_repeat: Arc<AtomicBool>,
+    latency: Arc<Mutex<LatencyLog>>,
 }
 
 /// What the Brood side keeps per open window (keyed by the id `open` returns) —
@@ -479,9 +481,13 @@ struct WinHandle {
     /// for `gui-held-key` (the source of truth for a held key — immune to a missed key-up,
     /// ADR-086), and how its repeats went, for `gui-key-repeats`.
     keys: Arc<Mutex<KeyReport>>,
+    /// Whether the last key press the app took from its mailbox was an OS repeat
+    /// (`Keyboard::received_repeat`), for `gui-key-repeat?` (ADR-612).
+    key_repeat: Arc<AtomicBool>,
     /// The last `LATENCY_SAMPLES` input-to-present samples, newest last, for
-    /// `gui-latency` (ADR-440).
-    latency: Arc<Mutex<VecDeque<LatencySample>>>,
+    /// `gui-latency` (ADR-440), and the session's distribution per kind of input, for
+    /// `gui-latency-histogram` (ADR-612).
+    latency: Arc<Mutex<LatencyLog>>,
 }
 
 /// The one GUI thread's event-loop proxy, started lazily on the first `open`.
@@ -785,6 +791,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
                 size,
                 size_px: Arc::new(Mutex::new(size_px)),
                 keys: Arc::default(),
+                key_repeat: Arc::default(),
                 latency: Arc::default(),
             },
         );
@@ -807,6 +814,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
         size,
         size_px,
         keys,
+        key_repeat,
         latency,
     } = reply_rx
         .recv()
@@ -817,6 +825,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
             size,
             size_px,
             keys,
+            key_repeat,
             latency,
         },
     );
@@ -972,8 +981,27 @@ pub fn key_repeats(id: u64) -> Result<RepeatCounts, String> {
 pub fn latency(id: u64) -> Result<Vec<LatencySample>, String> {
     let w = lock(windows());
     let h = w.get(&id).ok_or("gui window not open")?;
-    let samples = lock(&h.latency).iter().copied().collect();
+    let samples = lock(&h.latency).samples.iter().copied().collect();
     Ok(samples)
+}
+
+/// `(gui-latency-histogram id)` — window `id`'s input-to-present distribution since it
+/// opened, keys and pointer apart (ADR-612). Both empty headless.
+pub fn latency_histograms(id: u64) -> Result<(LatencyHistogram, LatencyHistogram), String> {
+    let w = lock(windows());
+    let h = w.get(&id).ok_or("gui window not open")?;
+    let log = lock(&h.latency);
+    Ok((log.keys.clone(), log.pointer.clone()))
+}
+
+/// `(gui-key-repeat? id)` — whether the last key press window `id`'s app took from its
+/// mailbox was an OS auto-repeat (ADR-612): exact for the press the app is folding, since
+/// the mark is set as the press leaves the mailbox. False for a window not open (one
+/// closed under a turn that still names it) and headless.
+pub fn key_repeat(id: u64) -> bool {
+    lock(windows())
+        .get(&id)
+        .is_some_and(|h| h.key_repeat.load(Ordering::Acquire))
 }
 
 /// `(gui-draw id ops)` — paint a frame to window `id`.
@@ -1551,12 +1579,13 @@ struct Win {
     opened_at: Instant,
     /// When the earliest input not yet answered by a frame arrived (a key press, a
     /// button, a wheel step) — consumed by the next `UserEvent::Draw` (ADR-440).
-    input_at: Option<Instant>,
+    input_at: Option<(Instant, InputKind)>,
     /// The input stamp the frame waiting to be painted answers, carried to the paint so
     /// it can report input -> present.
-    draw_input: Option<Instant>,
-    /// The last `LATENCY_SAMPLES` input-to-present samples, shared with `gui-latency`.
-    latency: Arc<Mutex<VecDeque<LatencySample>>>,
+    draw_input: Option<(Instant, InputKind)>,
+    /// The last `LATENCY_SAMPLES` input-to-present samples and the session's distribution,
+    /// shared with `gui-latency` and `gui-latency-histogram`.
+    latency: Arc<Mutex<LatencyLog>>,
     /// The frame's blinking caret and its clock (ADR-469), `None` when the frame on screen
     /// has no `[:cursor … blink]`: the window toggles it itself, between frames.
     caret_blink: Option<CaretBlink>,
@@ -1805,6 +1834,7 @@ impl GuiApp {
                     size: win.size.clone(),
                     size_px: win.size_px.clone(),
                     keys: win.keyboard.report(),
+                    key_repeat: win.keyboard.received_repeat(),
                     latency: win.latency.clone(),
                 }));
                 self.ids.insert(id, wid);
@@ -2270,27 +2300,33 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         // turn that settles with nothing to draw (`settle`) drops it. A press the arms below
         // drop (an auto-repeat) is stamped too — the frame the app's own repeat draws
         // answers it, which is what the user waits on. A bare modifier is not: `C-x` is
-        // timed from the `x`, not from however long Ctrl was held before it.
-        let is_input = match &event {
+        // timed from the `x`, not from however long Ctrl was held before it. Each stamp names
+        // its kind, so key-to-paint is counted apart from the pointer (ADR-612).
+        let input = match &event {
             WindowEvent::KeyboardInput {
                 event: key_event,
                 is_synthetic,
                 ..
-            } => {
-                key_event.state == ElementState::Pressed
-                    && !is_synthetic
-                    && !is_modifier_key(key_event)
+            } => (key_event.state == ElementState::Pressed
+                && !is_synthetic
+                && !is_modifier_key(key_event))
+            .then_some(InputKind::Key),
+            WindowEvent::MouseInput { state, .. } => {
+                (*state == ElementState::Pressed).then_some(InputKind::Pointer)
             }
-            WindowEvent::MouseInput { state, .. } => *state == ElementState::Pressed,
             // a horizontal-only wheel event scrolls nothing here, so no frame answers it
             WindowEvent::MouseWheel { delta, .. } => match delta {
                 MouseScrollDelta::LineDelta(_, y) => *y != 0.0,
                 MouseScrollDelta::PixelDelta(position) => position.y != 0.0,
-            },
+            }
+            .then_some(InputKind::Pointer),
             // an input method's commit is typing, whatever the keyboard did
-            WindowEvent::Ime(winit::event::Ime::Commit(text)) => !text.is_empty(),
-            _ => false,
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                (!text.is_empty()).then_some(InputKind::Key)
+            }
+            _ => None,
         };
+        let is_input = input.is_some();
         if is_input && w.busy_check.is_none() {
             // the loop may now be busy with this input: look in a moment (ADR-491)
             w.busy_check = Some(Instant::now() + BUSY_PROBE);
@@ -2300,7 +2336,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             // phase, and the next blink is a whole interval away (ADR-469)
             wake_caret(w, true);
             if w.input_at.is_none() {
-                w.input_at = Some(Instant::now());
+                w.input_at = input.map(|kind| (Instant::now(), kind));
             }
         }
         // A key that reached the window ends a composition that already ended: one that
@@ -2380,13 +2416,15 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     match stroke.and_then(|stroke| {
                         w.keyboard.press(stroke, ke.physical_key, Instant::now())
                     }) {
-                        Some(KeyMessage::Press(message)) => deliver(w.subscriber, message),
+                        Some(KeyMessage::Press(message, receipt)) => {
+                            deliver_credited(w.subscriber, message, receipt)
+                        }
                         Some(KeyMessage::Repeat(message, credit)) => {
                             deliver_credited(w.subscriber, message, credit)
                         }
-                        Some(KeyMessage::Restroke { up, press }) => {
+                        Some(KeyMessage::Restroke { up, press, receipt }) => {
                             deliver(w.subscriber, up);
-                            deliver(w.subscriber, press);
+                            deliver_credited(w.subscriber, press, receipt);
                         }
                         None => {}
                     }
@@ -2797,9 +2835,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     }
                 }
                 if let Some(split) = painted
-                    && let Some(input_at) = w.draw_input.take()
+                    && let Some((input_at, kind)) = w.draw_input.take()
                 {
-                    record_latency(w, input_at, paint_start, presented, split);
+                    record_latency(w, input_at, kind, paint_start, presented, split);
                 }
                 w.particles_next = w
                     .renderer
@@ -3034,6 +3072,7 @@ fn end_composition(w: &mut Win) {
 fn record_latency(
     w: &Win,
     input_at: Instant,
+    input: InputKind,
     paint_start: Instant,
     presented: Instant,
     split: Option<[u64; 5]>,
@@ -3042,6 +3081,7 @@ fn record_latency(
         total_us: presented.duration_since(input_at).as_micros() as u64,
         paint_us: presented.duration_since(paint_start).as_micros() as u64,
         split,
+        input,
     };
     if let Some(threshold_ms) = paint_stall_ms()
         && u128::from(sample.total_us) >= threshold_ms * 1000
@@ -3065,11 +3105,7 @@ fn record_latency(
             ms(sample.paint_us),
         );
     }
-    let mut samples = lock(&w.latency);
-    if samples.len() == LATENCY_SAMPLES {
-        samples.pop_front();
-    }
-    samples.push_back(sample);
+    lock(&w.latency).record(sample, LATENCY_SAMPLES);
 }
 
 /// Republish a window's size to the Brood side and wake its app loop with the

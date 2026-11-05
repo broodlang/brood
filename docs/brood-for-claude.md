@@ -898,6 +898,11 @@ code paints to a terminal or a GUI window unchanged.
   `ui-run: view=4.71ms 236 ops`, `draw=`, `update=… <input>` — the Brood side of a
   keystroke; `BROOD_GUI_TRACE=1` is the window's paint, the other half, plus
   `[gui-latency] input->present` per answered input (`gui/latency id` returns them, ADR-440).
+  For the tail, `gui/latency-histogram id` counts every input since the window opened, keys
+  apart from the pointer, and `gui/latency-percentiles` reads p50 / p99 / p99.9 off it; the
+  histograms add and subtract (`gui/latency-merge`, `gui/latency-since`), so an app keeps one
+  across sessions (ADR-612). `gui/key-repeat? id` says whether the press being folded is an OS
+  repeat, and `gui/reduce-motion?` reads the desktop's reduced-motion switch.
 - **Input before background** (ADR-490) = a display's `:poll-input` answers queued USER
   input without waiting (a window delivers it on the mailbox's priority lane,
   `proc/send-priority` / `proc/take-priority`), and its `:poll-tagged` answers
