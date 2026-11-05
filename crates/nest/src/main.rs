@@ -316,7 +316,7 @@ fn blsp_routed(args: &[String]) -> Option<(Option<usize>, Vec<String>)> {
 ///     lowering anyway, but turning it off outright keeps the measurement honest.
 ///   * The default memory ceiling (ADR-043), so a runaway test can't OOM the host; an
 ///     explicit `BROOD_MEM_LIMIT` still wins.
-fn arm_test_env(argv: &[String]) {
+fn arm_test_env(argv: &[String], armed: bool) {
     if argv.first().map(String::as_str) != Some("test") {
         return;
     }
@@ -349,7 +349,10 @@ fn arm_test_env(argv: &[String]) {
     }
     // A test run says so, and gets a private scratch home for program state unless asked
     // to keep the real one (ADR-602): no project's tests write the user's config by accident.
-    brood::cli_support::arm_test_run(has(&["--real-home"]));
+    // Unless a parent already asked for one (`BROOD_TEST_ARM`, ADR-608) and it is armed.
+    if !armed {
+        brood::cli_support::arm_test_run(has(&["--real-home"]));
+    }
     // See `brood --test`: a green suite from a binary older than the `std/` under test is a
     // gate that lies, and this is where the reading gets believed.
     brood::cli_support::warn_if_stdlib_is_stale();
@@ -390,7 +393,10 @@ fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
         // is usually still right); a checker run is refused (B7).
         brood::cli_support::refuse_if_stdlib_is_stale("nest check");
     }
-    arm_test_env(&argv);
+    // Any subcommand started with `BROOD_TEST_ARM=1` is a test run (ADR-608): the editor's
+    // generated runner under `nest run`, a warm test child — armed before the interpreter.
+    let armed = brood::cli_support::arm_requested_test_run();
+    arm_test_env(&argv, armed);
     arm_contracts_default(&argv);
     let mut interp = Interp::new();
     // `complete` runs on a keypress: read an image if there is one, never spend the
@@ -430,6 +436,8 @@ fn run_main(cli: Cli) {
         stdimage_from_source();
     }
     init_runtime(cli.max_parallel);
+    // `BROOD_TEST_ARM=1` makes every entry point a test run (ADR-608), not only the routed ones.
+    brood::cli_support::arm_requested_test_run();
 
     let mut interp = Interp::new();
 

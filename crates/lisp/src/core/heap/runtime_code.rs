@@ -122,9 +122,52 @@ pub(crate) struct SuspendLatches {
     /// The `share_key`s latched: no copy of these goes native again in this runtime.
     pub(super) latched: std::collections::HashSet<(u64, u16)>,
     /// Every copy admitted toward native code under a key not yet latched — what the latch
-    /// takes off native code along with the copy that blocked.
+    /// takes off native code along with the copy that blocked. Only LIVE copies are worth
+    /// keeping, and a dead one is not free: its `Weak` holds the `CompiledArm` allocation.
+    /// A re-evaluated def (eval-buffer, a hot reload) admits under a new key and never
+    /// revisits the old one, so [`Self::admit`] sweeps the whole map whenever it has grown
+    /// to [`Self::sweep_at`] keys.
     pub(super) admitted:
         HashMap<(u64, u16), Vec<std::sync::Weak<crate::eval::compile::CompiledArm>>>,
+    /// The key count at which the next admission sweeps dead copies out of
+    /// [`Self::admitted`]: twice what survived the last sweep (at least
+    /// [`SUSPEND_SWEEP_FLOOR`]), so the sweeps cost O(1) per admission amortised and the
+    /// map stays within twice its live keys plus the floor.
+    pub(super) sweep_at: usize,
+}
+
+/// The fewest keys [`SuspendLatches::admitted`] holds before an admission sweeps it.
+#[cfg(feature = "jit")]
+pub(crate) const SUSPEND_SWEEP_FLOOR: usize = 64;
+
+#[cfg(feature = "jit")]
+impl SuspendLatches {
+    /// Record `arm` as admitted under `key` (once per copy), first dropping the key's dead
+    /// copies — and, when the map has reached [`Self::sweep_at`] keys, every key whose
+    /// copies are all gone.
+    pub(super) fn admit(&mut self, key: (u64, u16), arm: &Arc<crate::eval::compile::CompiledArm>) {
+        if self.admitted.len() >= self.sweep_at.max(SUSPEND_SWEEP_FLOOR) {
+            self.sweep();
+        }
+        let copies = self.admitted.entry(key).or_default();
+        copies.retain(|copy| copy.strong_count() > 0);
+        if !copies
+            .iter()
+            .any(|copy| std::ptr::eq(copy.as_ptr(), Arc::as_ptr(arm)))
+        {
+            copies.push(Arc::downgrade(arm));
+        }
+    }
+
+    /// Drop every dead copy, and every key left with none, then set the next sweep at
+    /// twice what survived.
+    pub(super) fn sweep(&mut self) {
+        self.admitted.retain(|_, copies| {
+            copies.retain(|copy| copy.strong_count() > 0);
+            !copies.is_empty()
+        });
+        self.sweep_at = (self.admitted.len() * 2).max(SUSPEND_SWEEP_FLOOR);
+    }
 }
 
 /// One OPEN module load's staging frame (KI-135, ADR-344): the bindings and registry

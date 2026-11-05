@@ -549,7 +549,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_TEST_SCRATCH",
         HOST,
-        "the test run's private scratch home, set by `nest test`; `test/scratch-dir` reads it, and XDG_CONFIG_HOME / XDG_STATE_HOME / XDG_DATA_HOME point inside it (ADR-602)",
+        "the test run's private scratch home, set by `nest test` (or `BROOD_TEST_ARM`); `test/scratch-dir` reads it, and XDG_CONFIG_HOME / XDG_STATE_HOME / XDG_DATA_HOME / BROOD_HISTORY point inside it (ADR-602, ADR-608)",
     ),
     f(
         "BROOD_TEST_HOME",
@@ -557,9 +557,14 @@ pub const FLAGS: &[DebugFlag] = &[
         "`=keep`: `nest test` keeps the real XDG homes instead of giving the run a scratch home — the same as `--real-home` (ADR-602)",
     ),
     f(
+        "BROOD_TEST_ARM",
+        HOST,
+        "`=1`: make this process a test run with a scratch home of its own, as `nest test` does — any `nest` or `brood` entry point arms before the interpreter starts and removes the request from its environment, so what it starts joins its run; what a test runner that is not `nest test` sets on its child (ADR-608)",
+    ),
+    f(
         "BROOD_USER_CONFIG_HOME",
         HOST,
-        "the user's real config home, kept by `nest test` while XDG_CONFIG_HOME points at the scratch home, so nest's own config (registry, token) still reads from it (ADR-602)",
+        "the user's real config home, kept by `nest test` while XDG_CONFIG_HOME points at the scratch home, so nest's own config (registry, token) still reads from it; a run inside a run keeps the outer run's value (ADR-602, ADR-608)",
     ),
     f(
         "BROOD_GUI_GPU",

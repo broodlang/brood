@@ -69,7 +69,8 @@ are the dynamic vars `repl/*prompt*` / `repl/*cont-prompt*`; rebind them with
 ;; Persistent history: an interactive session loads its history on start and saves
 ;; it (capped to the most recent *repl-history-max* entries) after each submitted
 ;; form, so ↑/↓ and C-r span sessions. The file is `$BROOD_HISTORY`, else
-;; `$HOME/.brood_history`; one entry per line, oldest first.
+;; `$HOME/.brood_history`; one entry per line, oldest first. A test run points
+;; `BROOD_HISTORY` into its scratch home (ADR-608), so a test never writes the user's.
 (def *repl-history-max* 1000)
 
 ;; The reader's INCOMPLETE_INPUT error code (error_codes::INCOMPLETE_INPUT, ADR-049)

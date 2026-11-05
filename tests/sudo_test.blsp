@@ -250,9 +250,71 @@
             (file/spit path "old\n")
             ;; no rename to be had, and the copy into the file comes out wrong
             (fake-tool dir "mv" "exit 1")
-            (fake-tool dir "cmp" "exit 1")
+            ;; (only the copy's check: the old text's own checks are real)
+            (fake-tool dir "cmp" "case \"$3\" in *.sudo-write.*) exit 1 ;; esac; PATH=${PATH#*:}; exec cmp \"$@\"")
             (is (failure? (sudo/write path "new\n" opts)))
             (assert= (file/slurp path) "old\n")
+            (is (no-temporaries? dir)))))))
+  (test "a signal that cuts the in-place copy off puts the old text back"
+    ;; the copy into the file is cut off after two bytes by a TERM to the writing shell (C-g,
+    ;; a hang-up): the trap used to remove the kept old text and exit, leaving `ne` behind
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/hosts"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path "old text\n")
+            (fake-tool dir "mv" "exit 1")
+            (fake-tool dir "cat"
+              (str "if [ \"$1\" = -- ]; then case \"$2\" in *.sudo-write.*)"
+                " head -c 2 -- \"$2\"; kill -TERM $PPID; exit 1 ;; esac; fi\n"
+                "PATH=${PATH#*:}; exec cat \"$@\""))
+            (let (result (sudo/write path "new text\n" opts))
+              (do
+                (is (failure? result))
+                (is (includes? (error-message result) "interrupted while copying"))))
+            (assert= (file/slurp path) "old text\n")
+            (is (no-temporaries? dir)))))))
+  (test "a signal that cuts off the copy into a NEW file removes it again"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/new.conf"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (fake-tool dir "mv" "exit 1")
+            (fake-tool dir "cat"
+              (str "if [ \"$1\" = -- ]; then case \"$2\" in *.sudo-write.*)"
+                " head -c 2 -- \"$2\"; kill -TERM $PPID; exit 1 ;; esac; fi\n"
+                "PATH=${PATH#*:}; exec cat \"$@\""))
+            (is (failure? (sudo/write path "new text\n" opts)))
+            (is (not (file/exists? path)))
+            (is (no-temporaries? dir)))))))
+  (test "an old text a SIGKILL left mid-copy is reported by the next write, never aged out"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/hosts")
+              sum (string/trim (:stdout (os/cmd "sh"
+                                          ["-c" "printf '%s' \"$1\" | cksum | cut -d' ' -f1" "sh"
+                                            path])))
+              ;; a pid past any pid_max: its writer is certainly gone
+              keep (str dir "/.sudo-keep." sum ".4194999.abc123"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            ;; the copy died halfway: the file is cut, the old text is in the keep
+            (file/spit path "half")
+            (file/spit keep "the whole old text\n")
+            (file/spit (str keep ".copying") "")
+            (os/cmd "touch" ["-d" "2 days ago" keep (str keep ".copying")])
+            (let (result (sudo/write path "new\n" opts))
+              (do
+                (is (failure? result))
+                (is (includes? (error-message result) keep))))
+            (assert= (file/slurp path) "half")
+            (assert= (file/slurp keep) "the whole old text\n")
+            ;; once the file holds that text again, the keep is cleared and the write goes on
+            (file/spit path "the whole old text\n")
+            (assert= (sudo/write path "new\n" opts) true)
+            (assert= (file/slurp path) "new\n")
             (is (no-temporaries? dir)))))))
   (test "a sudo that caches nothing still opens a file that does not exist yet as new"
     (with-stub (fn (dir opts)

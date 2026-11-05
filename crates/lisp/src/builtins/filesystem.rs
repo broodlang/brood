@@ -75,7 +75,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
         &["path"],
-        "Create a directory and any missing parents (like mkdir -p), the directory itself owner-only (0700 on Unix, a protected one-entry DACL its contents inherit on Windows) whether it was made now or was already there — where an app keeps what other users must not read (an editor's sidecars of files edited as root, ADR-588), as file/spit-private is for a file.\n\n    (file/mkdir-private \"state/auto-save\")   ;~> nil, state/auto-save made, mode 0700",
+        "Create a directory and any missing parents (like mkdir -p), the directory itself owner-only whether it was made now or was already there — where an app keeps what other users must not read (an editor's sidecars of files edited as root, ADR-588), as file/spit-private is for a file. On Unix that is mode 0700, and no one else can reach anything inside, whatever its own mode. On Windows it is NOT the same guard: the directory gets a protected one-entry DACL (the current user) that what is made inside afterwards inherits, but every user holds the bypass-traverse-checking right, so a directory's DACL does not stop a file inside being opened by its path — a file that keeps entries of its own (made there before, or moved in) stays as open as they say. Write each secret with file/spit-private, which makes the file itself owner-only.\n\n    (file/mkdir-private \"state/auto-save\")   ;~> nil, state/auto-save made owner-only (mode 0700 on Unix)",
         make_private_dir,
     );
     primitives.def(
@@ -380,8 +380,10 @@ pub(super) fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     Ok(Value::nil())
 }
 
-/// `(file/mkdir-private path)` — `file/mkdir`, then the directory made owner-only (0700 on
-/// Unix; on Windows a protected one-entry DACL its contents inherit, KI-365). Returns nil.
+/// `(file/mkdir-private path)` — `file/mkdir`, then the directory made owner-only: 0700 on
+/// Unix; on Windows a protected one-entry DACL that what is made inside inherits (KI-365) —
+/// not 0700's guard there, since bypass traverse checking lets a file inside be opened by
+/// its path whatever the directory says. Returns nil.
 pub(super) fn make_private_dir(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file/mkdir-private", arg(args, 0))?;
     make_dir(args, env, heap)?;
@@ -662,8 +664,8 @@ pub(super) fn file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 }
 
 /// `(file/set-mtime path ms)` — set `path`'s last-modified time to `ms` epoch-milliseconds
-/// (negative for before 1970). Through the open file (`File::set_modified`), so it is the
-/// same call on every OS — no `touch` program.
+/// (negative for before 1970). By path, as `touch -t` dates a file: a read-only file or a
+/// directory its caller owns is dated too, and no `touch` program is run.
 pub(super) fn set_file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file/set-mtime", arg(args, 0))?;
     let ms = expect_int(heap, "file/set-mtime", arg(args, 1))?;
@@ -678,13 +680,53 @@ pub(super) fn set_file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
         std::time::UNIX_EPOCH.checked_sub(offset)
     }
     .ok_or_else(|| LispError::runtime(format!("file/set-mtime: {ms} ms is out of range")))?;
-    // Opened for writing (nothing written): Windows needs write access to change a time.
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .map_err(failed)?;
-    file.set_modified(when).map_err(failed)?;
+    set_modified_at(&path, ms, when).map_err(failed)?;
     Ok(Value::nil())
+}
+
+/// Set `path`'s modification time as `touch -t` does: by PATH, needing only that the caller
+/// may change the file's times (it owns it), never write access — a 0444 file, or a
+/// directory, is dated like any other. Unix: `utimensat`, the access time left alone.
+#[cfg(unix)]
+fn set_modified_at(path: &str, ms: i64, _when: std::time::SystemTime) -> std::io::Result<()> {
+    let name = std::ffi::CString::new(path)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "a NUL in the path"))?;
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: ms.div_euclid(1000) as libc::time_t,
+            tv_nsec: (ms.rem_euclid(1000) * 1_000_000) as _,
+        },
+    ];
+    // SAFETY: a NUL-terminated path and a two-entry timespec array, both live for the call.
+    let result = unsafe { libc::utimensat(libc::AT_FDCWD, name.as_ptr(), times.as_ptr(), 0) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Windows: the file opened for FILE_WRITE_ATTRIBUTES alone — which a read-only file grants
+/// its owner — with backup semantics so a directory opens too; then its time set.
+#[cfg(windows)]
+fn set_modified_at(path: &str, _ms: i64, when: std::time::SystemTime) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .access_mode(windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES)
+        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    file.set_modified(when)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn set_modified_at(path: &str, _ms: i64, when: std::time::SystemTime) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_modified(when)
 }
 
 /// `(file-stat path)` — one `stat` for `path` as a map, or `nil` if it is missing.

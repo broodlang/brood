@@ -1571,15 +1571,17 @@ impl Heap {
             arm.latch_bailed("suspend-latched");
             return false;
         }
-        let copies = latches.admitted.entry(key).or_default();
-        copies.retain(|copy| copy.strong_count() > 0);
-        if !copies
-            .iter()
-            .any(|copy| std::ptr::eq(copy.as_ptr(), Arc::as_ptr(arm)))
-        {
-            copies.push(Arc::downgrade(arm));
-        }
+        latches.admit(key, arm);
         true
+    }
+
+    /// How many function keys hold admitted copies — what [`Self::jit_suspend_admit`]'s
+    /// sweep bounds (tests).
+    #[cfg(all(feature = "jit", test))]
+    pub(crate) fn jit_suspend_admitted_keys(&self) -> usize {
+        crate::core::sync::lock(&self.runtime.suspend_latches)
+            .admitted
+            .len()
     }
 
     /// Latch the function `key` names off native code for this runtime: every admitted
@@ -1605,6 +1607,7 @@ impl Heap {
         let mut latches = crate::core::sync::lock(&self.runtime.suspend_latches);
         latches.latched.clear();
         latches.admitted.clear();
+        latches.sweep_at = 0;
     }
 
     /// Shared-JIT lookup for the **inlined** upgrade — the [`Self::jit_shared_lookup`]

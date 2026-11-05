@@ -569,6 +569,24 @@ impl Heap {
             .collect()
     }
 
+    /// The recorded def site of every global a `def` may rebind — none the language reserves
+    /// (ADR-166) — the sites [`Heap::rebindable_globals`]' values were defined at (ADR-606).
+    /// What a host keeps before a load so a global it gives back its old value also reads
+    /// as defined where that value was.
+    pub fn rebindable_def_sites(&self) -> Vec<(Symbol, SourceLoc)> {
+        self.runtime
+            .def_sites_read()
+            .iter()
+            .filter(|&(&sym, _)| !self.runtime.is_sealed(sym))
+            .map(|(&sym, loc)| (sym, loc.clone()))
+            .collect()
+    }
+
+    /// Forget `name`'s def site — what a global put back to a value of no recorded site reads.
+    pub fn forget_def_site(&self, name: Symbol) {
+        self.runtime.def_sites_write().remove(&name);
+    }
+
     /// Reinstate a def site verbatim — the restore half of [`Heap::def_sites_snapshot`].
     /// Unlike `note_definition` this takes the file explicitly rather than reading
     /// `current_file`, because the imaged boot is not "inside" a file when it runs.

@@ -140,7 +140,7 @@ arg silently becoming `nil`.
 | | `file/exists?` `file/dir?` | 1 | path exists / is a directory → bool |
 | | `file/ls` | 1 | entry names directly under a directory (sorted) |
 | | `file/mkdir` | 1 | create a directory and parents (`mkdir -p`) |
-| | `file/mkdir-private` | 1 | `file/mkdir`, the directory itself owner-only (0700) — the directory counterpart of `file/spit-private` (ADR-588) |
+| | `file/mkdir-private` | 1 | `file/mkdir`, the directory itself owner-only — mode 0700 on Unix; on Windows a protected one-entry DACL what is made inside inherits, which is not 0700's guard (bypass traverse checking opens a file inside by its path, so a file with entries of its own stays open) — the directory counterpart of `file/spit-private` (ADR-588) |
 | | `file/spit` | 2 | write a string to a file (write-side of `reflect/load`) |
 | | `file/slurp` | 1 | read a whole file into a string (read-side of `file/spit`; unlike `reflect/load`, does not evaluate) |
 | | `file/mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `reflect/load` for hot-reload) |
@@ -150,7 +150,7 @@ arg silently becoming `nil`.
 | | `file/spit-bytes` | 2 | Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. |
 | | `file/spit-bytes-append` | 2 | Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. |
 | | `file/spit-append` | 2 | Append s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, creating it if absent (unlike file/spit, which truncates). Returns nil. |
-| | `file/spit-private` | 2 | Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (file/spit leaves a world-readable file). |
+| | `file/spit-private` | 2 | Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. On Windows the file is created with an owner-only DACL, so it is never open to anyone else, even for a moment. The private-by-default write for a secret (file/spit leaves a world-readable file). |
 | | `%file-swap` | 4 | Replace the entire contents of data-path with new, but ONLY if they currently equal expected; returns true when swapped, false when they differ (re-read, recompute, retry). |
 | | `canonicalize` | 1 | The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. |
 | | `file/cp` | 2 | Copy file `from` to `to` (replacing `to`), preserving contents and permissions. Binary-safe (unlike slurp+spit). Returns nil; errors on failure. |
@@ -165,6 +165,7 @@ arg silently becoming `nil`.
 | | `%os-type` | 0 | The host OS as a keyword: :linux, :macos, or :windows. |
 | | `%os-cmd` | 1+ | Run prog (with optional args list) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}. |
 | | `%os-detach` | 2–3 | Start prog with args and let it go: null stdio, no handle, not stopped with the caller (own session — process group, no controlling terminal; no Job Object on Windows). |
+| | `%program-path` | 1–2 | Where a spawn with opts (`:cwd`, `:env`) finds prog — the one resolver every spawn uses (ADR-607) — or nil. `os/which` is it. |
 | | `%halt` | 1 | Terminate the process with exit code. Never returns. |
 | | `image-thumb` | 3 | Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). |
 | **Macro support** | `macroexpand-1` `macroexpand` | 1 | expand a form (one step / fully) |

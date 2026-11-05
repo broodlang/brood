@@ -51,7 +51,10 @@ takes; everything else is the mechanism behind it.")
     ;; ADR-070's dependency-module maps. The image already carries a dep's bindings, and
     ;; restoring these would only send `require` down the source-load branch for modules the
     ;; image can serve directly.
-    '*module-files* '*package-modules-of*])
+    '*module-files* '*package-modules-of*
+    ;; ADR-606: the running project's own modules — registered by `setup` or a bundle's boot
+    ;; before the image installs, and true of THIS run rather than the one that wrote it.
+    '*project-modules*])
 
 (defn image-path (root)
   "Where `root`'s startup image lives.

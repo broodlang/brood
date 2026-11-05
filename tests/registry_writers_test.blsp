@@ -184,6 +184,39 @@
       (is (includes? (reflect/rebound-since generation) 'regwriters-early))
       (assert= (reflect/rebound-since (reflect/generation)) ()))))
 
+(describe "reflect/global-values"
+  ;; ADR-606: what each global a load rebound held before it, whatever spelled the name
+  :isolated (test "holds every rebindable global's value before a load, a macro-made name included, and no reserved one"
+    (reflect/eval '(def regwriters-patched (fn () :core)))
+    (reflect/eval '(defmacro regwriters-define-patch ()
+                     (list 'def (symbol "regwriters-patched") :patch)))
+    (let (before (reflect/global-values)
+          generation (reflect/generation))
+      ;; the load spells no `regwriters-patched`: a macro builds the name
+      (reflect/eval '(regwriters-define-patch))
+      (is (includes? (reflect/rebound-since generation) 'regwriters-patched))
+      (assert= ((get before 'regwriters-patched)) :core)
+      (assert= (reflect/eval 'regwriters-patched) :patch)
+      ;; the language's own names are reserved — a load cannot rebind them, so they are not here
+      (refute (contains? before 'map))
+      (refute (contains? before 'reflect/global-values))))
+  :isolated (test "reflect/source-locations keeps a global's site, and set-source-location puts it back"
+    (let (first-file (path/join *dir* "regwriters-site-a.blsp")
+          second-file (path/join *dir* "regwriters-site-b.blsp"))
+      (file/spit first-file "(defn regwriters-sited () :first)\n")
+      (file/spit second-file "\n\n(defn regwriters-sited () :second)\n")
+      (reflect/load first-file)
+      (let (sites (reflect/source-locations))
+        (assert= (get sites 'regwriters-sited) [first-file 1 1])
+        (refute (contains? sites 'map))
+        (reflect/load second-file)
+        (assert= (first (reflect/source-location 'regwriters-sited)) second-file)
+        ;; a host giving the global back its first value gives it back its site too
+        (reflect/set-source-location '/regwriters-sited (get sites 'regwriters-sited))
+        (assert= (reflect/source-location 'regwriters-sited) [first-file 1 1])
+        (reflect/set-source-location 'regwriters-sited nil)
+        (is (nil? (reflect/source-location 'regwriters-sited)))))))
+
 (describe "registry/put-new!"
   :isolated (test "the first one wins, until the key is free again"
     (is (registry/put-new! :regwriters/slots :only {:holder 1}))

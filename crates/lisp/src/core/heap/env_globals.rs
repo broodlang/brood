@@ -291,6 +291,20 @@ impl Heap {
             .collect()
     }
 
+    /// Every global a `def` may rebind — none the language reserves (ADR-166: the prelude, a
+    /// builtin, an embedded std module) — with its value now (ADR-606). The table read once
+    /// under its lock; the values are `Copy` handles. What a host compares a load against to
+    /// learn the value each global the load rebound held before it, however the load spelled
+    /// or generated the name.
+    pub fn rebindable_globals(&self) -> Vec<(Symbol, Value)> {
+        self.runtime
+            .globals_read()
+            .iter()
+            .filter(|&(&sym, _)| !self.runtime.is_sealed(sym))
+            .map(|(&sym, &value)| (sym, value))
+            .collect()
+    }
+
     /// Is `sym` bound in the global table (prelude + user `def`s)? An authoritative,
     /// non-racy read of `runtime.globals` (which is seeded with the prelude). Used by
     /// the unbound-symbol diagnostic to tell a *spuriously*-unbound known global (the

@@ -352,7 +352,16 @@ there, never into the user's real home. Programs that keep their files under the
 need no test-mode code. `XDG_CACHE_HOME` is left alone (Brood's stdlib image lives there);
 `nest`'s own preferences still read the user's `~/.config/brood/config.blsp`
 (`BROOD_USER_CONFIG_HOME`). `nest test --real-home`, or `BROOD_TEST_HOME=keep`, keeps the real
-homes. Both are environment variables, so a process a test starts is part of the run too.
+homes. Both are environment variables, so a process a test starts is part of the run too. The
+REPL's history (`BROOD_HISTORY`) goes to the scratch home as well.
+
+**A runner that is not `nest test` asks for the same run (ADR-608).** An editor that runs a
+project's tests through a generated script, or keeps a warm test child, starts that child with
+`BROOD_TEST_ARM=1`: any `nest` or `brood` entry point arms exactly as `nest test` does before
+its interpreter exists, and drops the request from its environment so what it starts joins its
+run. A run holds a lock in its scratch home while it lives; the next run purges only the homes
+of runs that are gone. A `nest test` started inside a run keeps the user's config base for
+`nest`'s preferences.
 
 In a project, run the whole suite with **`nest test`** (or `make suite`, or
 `cargo test`): the runner discovers `tests/**/*_test.blsp`, loads them, and calls

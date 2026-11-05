@@ -508,3 +508,42 @@ fn a_bundle_image_built_for_another_release_is_ignored() {
     assert!(check.contains("from source"), "{check}");
     let _ = std::fs::remove_dir_all(app.parent().unwrap());
 }
+
+/// ADR-606: a bundle knows its root project's own modules, as `setup` does from disk — the
+/// project's modules load UNROOTED in a bundle and no package context names them, so a host
+/// checking a plugin's module names against `reflect/project-modules` (bedit refusing a
+/// package module named like one of its own) used to read `[]` in the released program. The
+/// list `bundle-collect` bakes into the manifest is what the bundle answers; a dependency's
+/// modules are not the project's.
+#[test]
+fn a_bundle_answers_its_own_project_modules() {
+    let modules: &[(&str, &str)] = &[
+        (
+            "main",
+            "(defmodule main (:use lib) (:alias repo))\n\
+             (defn main () (io/puts (pr-str [(reflect/project-modules) (repo/tag)])))",
+        ),
+        ("lib", "(defmodule lib)\n(defn greet () 1)"),
+        ("store/repo", "(defmodule repo)\n(defn tag () \"dep\")"),
+    ];
+    // the manifest `bundle-collect` writes: the project's modules by their `(defmodule …)` names
+    let baked = "(project :name \"t\" :version \"0\" :bundled-packages [\"store\"] \
+                 :project-modules [\"main\" \"lib\"])";
+    let (app, cwd) = write_app("project-modules", baked, modules);
+    assert_eq!(
+        run_ok(&app, &cwd, &[], false).trim(),
+        "[[\"lib\" \"main\"] \"dep\"]"
+    );
+    let _ = std::fs::remove_dir_all(app.parent().unwrap());
+    // a bundle built before the field: its embedded keys that are no dependency's
+    let (app, cwd) = write_app(
+        "project-modules-old",
+        "(project :name \"t\" :version \"0\" :bundled-packages [\"store\"])",
+        modules,
+    );
+    assert_eq!(
+        run_ok(&app, &cwd, &[], false).trim(),
+        "[[\"lib\" \"main\"] \"dep\"]"
+    );
+    let _ = std::fs::remove_dir_all(app.parent().unwrap());
+}

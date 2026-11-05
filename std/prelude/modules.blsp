@@ -183,6 +183,15 @@ The primary source is consulted first, then `*image-sources*` in install order."
   "Record package `prefix`'s SHORT module names (a list of symbols) — the intra-package set."
   (%registry-update! '*package-modules-of* :assoc [prefix] short-modules)
   prefix)
+;; The RUNNING project's own module names (ADR-606): `{:modules (short symbols)}`, set where
+;; the project's sources come from — `setup`'s rooting from disk, a release bundle's boot from
+;; its manifest — so `reflect/project-modules` answers the same in both, whether or not a
+;; package context roots them (a bundle loads the project's modules unrooted).
+(def- *project-modules* {})
+(defn %register-project-modules! (short-modules)
+  "Record the running project's SHORT module names (a list of symbols, nil for none)."
+  (%registry-update! '*project-modules* :assoc [:modules] short-modules)
+  short-modules)
 (def- *features-waiting* {})
 ; feature key → the list of pids WAITING for that key's in-flight load. The per-module
 ; waiter queue — see `%require-await` for the protocol and
