@@ -112,8 +112,17 @@ docs/testing.md for the full guide."
 ;; `--real-home` or `BROOD_TEST_HOME=keep` — points `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and
 ;; `XDG_DATA_HOME` into a fresh per-run directory (`BROOD_TEST_SCRATCH`), removed when the
 ;; run ends. A program that keeps its files under the XDG directories needs to do nothing:
-;; its tests write the scratch home, never the user's. Both are environment variables, so a
-;; program a test starts is part of the run too.
+;; its tests write the scratch home, never the user's; the REPL's history (`BROOD_HISTORY`)
+;; goes there too. Both are environment variables, so a program a test starts is part of the
+;; run too.
+;;
+;; A test runner that is not `nest test` — an editor that runs a project's tests through a
+;; generated script under `nest run`, a warm test child it keeps — asks for the same run by
+;; starting its child with `BROOD_TEST_ARM=1` (ADR-608): every Brood entry point (`nest`,
+;; `brood`) arms before its interpreter exists, so not one line of test code ever runs with
+;; the real home. In-process arming is not offered: the environment cannot be changed safely
+;; once the runtime's threads are up, and the code a runner loads before its tests could
+;; already have read it.
 
 (defn running? ()
   "Whether this process is part of a test run: `nest test` said so when it started

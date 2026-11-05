@@ -405,16 +405,42 @@ pub fn arm_contracts_by_default() {
     crate::builtins::contracts::arm_by_default();
 }
 
-/// The per-run scratch home `nest test` armed ([`arm_test_run`]), removed at the end of
+/// The per-run scratch home a test run armed ([`arm_test_run`]), removed at the end of
 /// the run by [`remove_test_scratch_home`].
 static TEST_SCRATCH_HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// How old an earlier run's scratch home must be before a new run purges it: a run of the
-/// same suite beside this one (another checkout, another terminal) keeps its own.
-const TEST_SCRATCH_STALE: std::time::Duration = std::time::Duration::from_secs(3600);
+/// The scratch home's liveness lock, held for the life of the run that made it: an earlier
+/// run's home whose lock can be taken belongs to a run that is gone (ADR-608).
+static TEST_SCRATCH_LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+/// The file inside a scratch home whose exclusive lock says its run is alive.
+const TEST_SCRATCH_LOCK_FILE: &str = "run.lock";
+
+/// A scratch home with no lock file — one a binary from before ADR-608 made, or one caught
+/// between its directory and its lock being made — is purged only once it is this old.
+const TEST_SCRATCH_UNLOCKED_STALE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// The variable a program sets on a child to ask that the child BE a test run (ADR-608):
+/// any Brood entry point started with `BROOD_TEST_ARM=1` arms exactly as `nest test` does,
+/// before its interpreter exists, and removes the request from its own environment, so the
+/// processes it starts inherit the armed run rather than arming runs of their own.
+pub const TEST_ARM_VARIABLE: &str = "BROOD_TEST_ARM";
+
+/// Arm a test run when the process was started with `BROOD_TEST_ARM=1` — a test runner that
+/// is not `nest test` (an editor's generated runner, a warm test child) asking for the same
+/// scratch home (ADR-608). Answers whether it armed. Call before the interpreter exists.
+pub fn arm_requested_test_run() -> bool {
+    let requested = std::env::var_os(TEST_ARM_VARIABLE).is_some_and(|value| value == "1");
+    // SAFETY: called before any interpreter exists, from the one thread running the program.
+    unsafe { std::env::remove_var(TEST_ARM_VARIABLE) };
+    if requested {
+        arm_test_run(false);
+    }
+    requested
+}
 
 /// Mark this process as a test run, and give it a private scratch home for program state
-/// (ADR-602). Call before any thread or interpreter exists — it sets environment variables.
+/// (ADR-602). Call before any interpreter exists — it sets environment variables.
 ///
 /// * `BROOD_TEST_RUN=1` — what `test/running?` answers from: the runner says it, rather than
 ///   a program guessing from what happens to be loaded. Inherited, so a program a test
@@ -422,15 +448,19 @@ const TEST_SCRATCH_STALE: std::time::Duration = std::time::Duration::from_secs(3
 /// * Unless `BROOD_TEST_HOME=keep` (or `keep_home`, `nest test --real-home`): a fresh
 ///   directory under the temp root — `BROOD_TEST_SCRATCH`, `test/scratch-dir` — with
 ///   `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_DATA_HOME` pointed at `config/`, `state/`
-///   and `data/` inside it, so no program's tests write the user's real config, history or
-///   data by accident. `BROOD_USER_CONFIG_HOME` keeps the real config base, for the one
-///   reader that wants the user's own: `nest`'s tooling preferences. `XDG_CACHE_HOME` is
-///   left alone — Brood's own caches (the stdlib image, grammars, the check cache) live
-///   there, and a cache is regenerable; a fresh one per run would cost a cold start each.
+///   and `data/` inside it, and `BROOD_HISTORY` (the REPL's history, which is not under an
+///   XDG home) at `state/brood_history`, so no program's tests write the user's real
+///   config, history or data by accident. `BROOD_USER_CONFIG_HOME` keeps the real config
+///   base, for the one reader that wants the user's own: `nest`'s tooling preferences. A
+///   run started inside another (its `XDG_CONFIG_HOME` already the outer run's scratch)
+///   keeps the base the outer run kept. `XDG_CACHE_HOME` is left alone — Brood's own
+///   caches (the stdlib image, grammars, the check cache) live there, and a cache is
+///   regenerable; a fresh one per run would cost a cold start each.
 ///
-/// Earlier runs' scratch homes older than an hour are purged first.
+/// The run holds a lock in its scratch home for as long as it lives; earlier runs' homes
+/// whose lock is free — their run is gone — are purged first (ADR-608).
 pub fn arm_test_run(keep_home: bool) {
-    // SAFETY (all set_var below): called before any thread or interpreter is created.
+    // SAFETY (all set_var below): called before any interpreter is created.
     unsafe { std::env::set_var("BROOD_TEST_RUN", "1") };
     let keep = keep_home || std::env::var_os("BROOD_TEST_HOME").is_some_and(|v| v == "keep");
     if keep {
@@ -446,17 +476,24 @@ pub fn arm_test_run(keep_home: bool) {
     let made = ["config", "state", "data"]
         .iter()
         .all(|sub| std::fs::create_dir_all(scratch.join(sub)).is_ok());
-    if !made {
+    let lock = made.then(|| hold_test_scratch_lock(&scratch)).flatten();
+    let Some(lock) = lock else {
+        let _ = std::fs::remove_dir_all(&scratch);
         eprintln!(
-            "nest test: could not make a scratch home under {}; running with the real one",
+            "brood: could not make a test run's scratch home under {}; running with the real one",
             root.display()
         );
         return;
-    }
+    };
     let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-    let real_config = set("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|path| path.is_absolute())
+    let absolute = |value: std::ffi::OsString| {
+        Some(std::path::PathBuf::from(value)).filter(|path| path.is_absolute())
+    };
+    // An outer run already kept the user's base: its XDG_CONFIG_HOME is its scratch, which
+    // is no one's preferences.
+    let real_config = set("BROOD_USER_CONFIG_HOME")
+        .and_then(absolute)
+        .or_else(|| set("XDG_CONFIG_HOME").and_then(absolute))
         .or_else(|| {
             set("HOME")
                 .or_else(|| {
@@ -476,37 +513,65 @@ pub fn arm_test_run(keep_home: bool) {
         std::env::set_var("XDG_CONFIG_HOME", scratch.join("config"));
         std::env::set_var("XDG_STATE_HOME", scratch.join("state"));
         std::env::set_var("XDG_DATA_HOME", scratch.join("data"));
+        std::env::set_var("BROOD_HISTORY", scratch.join("state").join("brood_history"));
     }
+    let _ = TEST_SCRATCH_LOCK.set(lock);
     let _ = TEST_SCRATCH_HOME.set(scratch);
 }
 
+/// Make `scratch`'s lock file and take its exclusive lock — the run's proof of life, released
+/// by the OS however the process ends. None when either fails.
+fn hold_test_scratch_lock(scratch: &Path) -> Option<std::fs::File> {
+    let file = std::fs::File::create(scratch.join(TEST_SCRATCH_LOCK_FILE)).ok()?;
+    file.try_lock().ok()?;
+    Some(file)
+}
+
 /// Remove the scratch home [`arm_test_run`] made, if it made one. Best-effort; a run that
-/// dies first leaves it for the next run's purge.
+/// dies first leaves it for the next run's purge, which sees its lock free.
 pub fn remove_test_scratch_home() {
+    if let Some(lock) = TEST_SCRATCH_LOCK.get() {
+        let _ = lock.unlock();
+    }
     if let Some(scratch) = TEST_SCRATCH_HOME.get() {
         let _ = std::fs::remove_dir_all(scratch);
     }
 }
 
+/// Remove every earlier run's scratch home under `root` whose run is gone: its lock file can
+/// be locked. A home whose lock is held belongs to a live run — however long it has been
+/// running — and is kept. A home with no lock file is kept until it is an hour old.
 fn purge_stale_test_scratch(root: &Path) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        if !name.to_string_lossy().starts_with("brood-test-home-") {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("brood-test-home-")
+        {
             continue;
         }
-        let old = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age > TEST_SCRATCH_STALE);
-        if old {
+        if test_scratch_is_dead(&entry.path()) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
+    }
+}
+
+/// Whether the scratch home at `dir` belongs to a run that is gone.
+fn test_scratch_is_dead(dir: &Path) -> bool {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join(TEST_SCRATCH_LOCK_FILE))
+    {
+        // Taken: no live run holds it. Dropping the file releases it again.
+        Ok(file) => file.try_lock().is_ok(),
+        Err(_) => std::fs::metadata(dir)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age > TEST_SCRATCH_UNLOCKED_STALE),
     }
 }
 
@@ -1177,5 +1242,69 @@ mod run_check_cache_tests {
             without, with,
             "an imaged run would replay an un-imaged run's loads"
         );
+    }
+}
+
+#[cfg(test)]
+mod test_scratch_liveness_tests {
+    use super::*;
+
+    /// A fresh directory named the way a scratch home is, under a private root.
+    fn scratch_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "brood-scratch-liveness-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_live_runs_home_survives_a_purge_however_old_and_a_dead_ones_goes() {
+        let root = scratch_root("purge");
+        let live = root.join("brood-test-home-1-live");
+        let dead = root.join("brood-test-home-2-dead");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&dead).unwrap();
+        // The live run holds its lock; the dead run's lock file is there, released.
+        let held = hold_test_scratch_lock(&live).expect("lock the live home");
+        drop(hold_test_scratch_lock(&dead).expect("lock the dead home"));
+        // Both look ancient by mtime: age must not decide it.
+        let ancient = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        for dir in [&live, &dead] {
+            std::fs::File::open(dir)
+                .unwrap()
+                .set_modified(ancient)
+                .unwrap();
+        }
+        purge_stale_test_scratch(&root);
+        assert!(live.exists(), "a live run's home was purged mid-run");
+        assert!(!dead.exists(), "a dead run's home was kept");
+        drop(held);
+        purge_stale_test_scratch(&root);
+        assert!(!live.exists(), "the home outlived its run's lock");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_home_without_a_lock_is_kept_until_it_is_an_hour_old() {
+        let root = scratch_root("unlocked");
+        let young = root.join("brood-test-home-3-young");
+        let old = root.join("brood-test-home-4-old");
+        std::fs::create_dir_all(&young).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        let ancient = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        std::fs::File::open(&old)
+            .unwrap()
+            .set_modified(ancient)
+            .unwrap();
+        purge_stale_test_scratch(&root);
+        assert!(
+            young.exists(),
+            "a home caught before its lock was made was purged"
+        );
+        assert!(!old.exists(), "a lockless home older than an hour was kept");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -2,7 +2,8 @@
 ;; `nest test` sets `BROOD_TEST_RUN` and points the XDG config / state / data homes into a
 ;; per-run directory before the interpreter exists. A runner that is not `nest test` (or a
 ;; run with `--real-home`) gives no scratch home, and the cases that need one have nothing
-;; to check — `crates/nest/tests/test_scratch_home.rs` drives `nest test` itself either way.
+;; to check — `crates/nest/tests/test_scratch_home.rs` drives `nest test` itself either way,
+;; and a plain `nest run` asked to be a test run (`BROOD_TEST_ARM=1`, ADR-608).
 
 (defmodule test-run-test (:use test))
 
@@ -31,3 +32,10 @@
           real (os/env "BROOD_USER_CONFIG_HOME"))
       (when (and scratch real)
         (refute (string/starts-with? real scratch))))))
+
+(describe "a test run's REPL history (ADR-608)"
+  (test "the history file the REPL saves to is inside the scratch home"
+    (let (scratch (test/scratch-dir))
+      (when scratch
+        (assert= (os/env "BROOD_HISTORY") (path/join scratch "state" "brood_history"))
+        (is (string/starts-with? (repl/repl-history-path) scratch))))))
