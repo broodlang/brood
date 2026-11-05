@@ -1550,6 +1550,8 @@ mod roots_buf;
 /// The runtime's shared code region: the `def`'d code and globals table every process of
 /// a runtime holds in common, and the generation machinery around them.
 mod runtime_code;
+#[cfg(all(feature = "jit", test))]
+pub(crate) use self::runtime_code::SUSPEND_SWEEP_FLOOR;
 use self::runtime_code::{
     ClosureTemplateMap, ConstClosureMap, LoadStage, LoadWrite, MemberSlot, RegistryWriters,
     reg_trace_enabled,
