@@ -267,7 +267,9 @@
                              "      (io/puts (str \"FAILED \" (count bad) \" of 24: \" (first bad)))"
                              "      (system/halt 1))))"]
                 "\n"))
-          code (if exe (os/run-process "env" ["BROOD_STDIMAGE=1" exe prog]) 0))
+          code (if exe
+                 (os/run-process "env" ["-u" "BROOD_NO_STDIMAGE" "BROOD_STDIMAGE=1" exe prog])
+                 0))
       ;; `exe` nil means no brood binary beside the runner — a legitimate environment, not a
       ;; failure. Assert it separately so a skip is visible rather than silently green.
       (is (or (nil? exe) (string? exe)))

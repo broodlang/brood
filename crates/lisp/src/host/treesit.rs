@@ -2402,6 +2402,7 @@ fn grammar_cache_dir() -> Option<std::path::PathBuf> {
         })?;
     let dir = base.join("brood").join("grammars");
     std::fs::create_dir_all(dir.parent()?).ok()?;
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);

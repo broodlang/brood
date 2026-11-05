@@ -1,7 +1,7 @@
 //! A tool version pinned in more than one place must say the same thing everywhere.
 //!
 //! cargo-nextest is pinned in each CI job that installs it and in the Makefile's
-//! `ensure-nextest`, and one nightly job used to float on `install-action@nextest` while
+//! `ensure-nextest`, and one nightly (now full.yml) job used to float on `install-action@nextest` while
 //! the rest were pinned — a floating tool is an unreviewed bump on every run (0.9.144's
 //! checksum failure redded CI before any test ran).
 
@@ -11,8 +11,8 @@ const SOURCES: [(&str, &str); 3] = [
         include_str!("../../../.github/workflows/ci.yml"),
     ),
     (
-        ".github/workflows/nightly.yml",
-        include_str!("../../../.github/workflows/nightly.yml"),
+        ".github/workflows/full.yml",
+        include_str!("../../../.github/workflows/full.yml"),
     ),
     ("Makefile", include_str!("../../../Makefile")),
 ];
