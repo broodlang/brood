@@ -190,8 +190,7 @@ pub(super) fn spit_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     if let Some(parent) = std::path::Path::new(&path).parent() {
         std::fs::create_dir_all(parent).map_err(err)?;
     }
-    // Owner-only 0600 permissions are a Unix concept; wasm has no filesystem perms,
-    // so it falls back to a plain private-intent write.
+    // Owner-only: 0600 on Unix, a one-entry DACL on Windows (below).
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -206,7 +205,18 @@ pub(super) fn spit_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
         let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
         f.write_all(content.as_bytes()).map_err(err)?;
     }
-    #[cfg(not(unix))]
+    // Windows: the file's DACL is replaced, before a byte is written, by one granting only
+    // the current user, protected from its directory's inherited entries — owner-only, as
+    // 0600 is (KI-365; the plain create took the directory's ACL).
+    #[cfg(windows)]
+    {
+        let mut f = std::fs::File::create(&path).map_err(err)?;
+        crate::host::owner_only::restrict_to_owner(std::path::Path::new(&path), false)
+            .map_err(err)?;
+        f.write_all(content.as_bytes()).map_err(err)?;
+    }
+    // wasm has no filesystem permissions: a plain private-intent write.
+    #[cfg(not(any(unix, windows)))]
     {
         let mut f = std::fs::File::create(&path).map_err(err)?;
         f.write_all(content.as_bytes()).map_err(err)?;

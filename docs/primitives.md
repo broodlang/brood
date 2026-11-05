@@ -90,6 +90,12 @@ arg silently becoming `nil`.
 | | `term/draw` | 1 | paint a **frame** — a vector of render ops `[:clear]` / `[:text row col s]` / `[:text row col s face]` / `[:cursor row col]`, where a face is a map like `{:fg :red :bold true}` → nil. The frontend that interprets the display protocol |
 | | `term/raw-enter` | 0 | enter raw mode **only** — no alternate screen, cursor stays visible, scrollback preserved → nil. The seam for an *inline* editor (the REPL, `std/editor/lineedit.blsp`); use `term/enter` for a full-screen TUI. Pair with `term/raw-leave` |
 | | `term/raw-leave` | 0 | leave raw mode (teardown for `term/raw-enter`) → nil |
+| | `term/invalidate` | 0 | forget what the terminal shows: the next `term/draw` paints every cell (ADR-586) |
+| | `term/colors` | 0–1 | the colour depth frames are written at (`:truecolor` / `:256` / `:16`), or set it (ADR-586) |
+| | `term/bg` | 1–2 | the terminal's default face — what `[:clear]` fills, a face with no colour of its own drawn in (ADR-586) |
+| | `term/suspend` | 0 | give the terminal back, stop the process (SIGTSTP), take it again when continued → `:suspended`; `:no-job-control` (nothing stopped) in an orphaned process group (ADR-586) |
+| | `term/refresh` | 0 | raw mode back and the next frame painted whole, after a stop and continue (ADR-586) |
+| | `term/repaint-due?` | 0 | whether the next `term/draw` paints the screen whole (ADR-586) |
 | | `term/emit` | 1 | paint inline, **relative**-motion ops: `[:print str]` / `[:print str face]` / `[:cr]` / `[:nl]` / `[:up n]` / `[:down n]` / `[:col n]` / `[:clear-eol]` / `[:clear-below]` / `[:clear-screen]` → nil. The inline counterpart to `term/draw` (which is absolute); queues all ops then flushes once |
 | **Process introspection** | `proc/mailbox-size` | 1 | `(proc/mailbox-size pid)` → the number of messages queued in a live local process's mailbox (its receive backlog), or `nil` for a remote/dead pid. The one process-state accessor Brood can't reach (the queue lives behind the scheduler registry); `(list-processes)` + `self` are the others. Used by `std/tool/observer.blsp` |
 | | `proc/info` | 1 | `(proc/info pid)` → a snapshot map of a live local process — `{:id :node :name :status :mailbox :monitored-by :parent :memory}` (`:status` `:running`/`:runnable`/`:waiting`; `:name` nil if unregistered; `:parent` the spawner's id, nil for the root; `:memory` LOCAL heap-footprint bytes, published on `receive` — 0 for a process that never receives) — or `nil` for a remote/dead pid. Assembled from registry/scheduler/monitor cells (ADR-051). The observer reads this |
@@ -134,9 +140,11 @@ arg silently becoming `nil`.
 | | `file/exists?` `file/dir?` | 1 | path exists / is a directory → bool |
 | | `file/ls` | 1 | entry names directly under a directory (sorted) |
 | | `file/mkdir` | 1 | create a directory and parents (`mkdir -p`) |
+| | `file/mkdir-private` | 1 | `file/mkdir`, the directory itself owner-only (0700) — the directory counterpart of `file/spit-private` (ADR-588) |
 | | `file/spit` | 2 | write a string to a file (write-side of `reflect/load`) |
 | | `file/slurp` | 1 | read a whole file into a string (read-side of `file/spit`; unlike `reflect/load`, does not evaluate) |
 | | `file/mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `reflect/load` for hot-reload) |
+| | `file/set-mtime` | 2 | set the last-modified time to epoch-milliseconds — the portable `touch -t` (no program needed) |
 | | `file/stat` | 1 | one-stat metadata map `{:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}`, or nil if missing (collapses `file/dir?`+`file/size`+`file/mtime` for a directory lister + a recency sort) |
 | | `file/slurp-bytes` | 1 | Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (file/slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset. |
 | | `file/spit-bytes` | 2 | Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. |
@@ -156,6 +164,7 @@ arg silently becoming `nil`.
 | | `%argv` | 0 | Command-line arguments as a vector of strings (including argv[0]). |
 | | `%os-type` | 0 | The host OS as a keyword: :linux, :macos, or :windows. |
 | | `%os-cmd` | 1+ | Run prog (with optional args list) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}. |
+| | `%os-detach` | 2–3 | Start prog with args and let it go: null stdio, no handle, not stopped with the caller (own session — process group, no controlling terminal; no Job Object on Windows). |
 | | `%halt` | 1 | Terminate the process with exit code. Never returns. |
 | | `image-thumb` | 3 | Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). |
 | **Macro support** | `macroexpand-1` `macroexpand` | 1 | expand a form (one step / fully) |
@@ -181,6 +190,7 @@ arg silently becoming `nil`.
 | | `%tree-sitter-range-spans` | 5 | `(text lang ranges table keywords?)` → char `ranges` of `text` (rope or string) parsed as ONE `lang` document (included ranges), `[start end reported]` in the outer text's offsets clipped to the ranges; nil when no grammar loads. Capped at 256 ranges, 128 KB. What a lexer host calls for embedded code. ADR-489 |
 | | `%tree-sitter-declare-grammar` | 2 | `(path lang)` → true: say that `lang`'s grammar is the library at `path` WITHOUT loading it; the first parse, query or tree handle naming `lang` loads it, once. A re-declaration of a loaded language reloads it at its next use. A failed load is kept (not retried until declared again): the parse raises its message when nothing else parses `lang`, else keeps the grammar it had. Feature `treesit`. ADR-481 |
 | | `%tree-sitter-grammar-status` | 1 | `(lang)` → `:declared`, `:loaded`, `:built-in`, a failure value carrying the last declaration's load error, or nil. Loads nothing. ADR-481 |
+| | `%tree-sitter-grammar-info` | 1 | `(lang)` → `{:lang :abi :version :name :source :loaded-via :named :anonymous :fields}`: the grammar's visible node kinds (keyword sets, aliases included) and field names, its ABI, its own version and name (nil before ABI 15) and the library it was loaded from (or `:built-in`), with `:loaded-via` `:beside` / `:cache` (a content-named copy, so a rebuilt library loads as the new build) or `:in-place` (no copy possible: a library rebuilt at that path may stay the old one until restart). Loads a declared grammar; errors without one. What makes a renamed node detectable. ADR-583 |
 | | `scan-tokens` | 1 | Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. |
 | | `scan-form-start` | 2 | The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. |
 | | `scan-source-extract` | 1 | Native per-file scan for the whole-project check (ADR-119): parse src and return [counts privs def-names] — a map of every symbol's occurrence count, this file's `defn-`/`def-` privates as [bare qual], and every top-level def's qualified name. The fast path replacing the interpreted CST walk. (Post-ADR-146 step 2 privacy is a def-form fact, so the scan collects private *heads* and counts *all* symbols, rather than keying on the retired `--` name marker.) |

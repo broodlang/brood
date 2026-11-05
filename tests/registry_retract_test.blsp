@@ -1,0 +1,200 @@
+;;; Taking a plugin's registrations back: `registry/written-by` lists what a module's load
+;;; wrote into any registry — a map entry by its key path, a list registry's member by its
+;;; position (the kernel journals the writer of each, KI-136, ADR-582) — and `registry/retract` /
+;;; `editor/layers`' `unregister-*` take them back as journalled operations.
+;;;
+;;; The fixture is a module nothing else knows, written to a temp dir on `*load-path*`, so
+;;; its writes are made by ITS load.
+
+(defmodule registry-retract-test (:use test))
+
+(purge-stale-temp "regretract-")
+(def- *dir* (temp-dir "regretract-"))
+(file/mkdir *dir*)
+(reflect/add-load-path *dir*)
+(file/spit (path/join *dir* "regretract-plugin.blsp")
+  (str "(defmodule regretract-plugin)\n"
+    "(registry/put! :regretract/rows :plugin-row {:hook 'regretract-plugin/hook})\n"
+    "(editor/layers/register-system-layer 'regretract-plugin/layer)\n"
+    "(editor/layers/register-type-layers :regretract-type ['regretract-plugin/layer])\n"
+    "(editor/layers/register-file-type \".regretract\" :regretract-type)\n"
+    "(editor/layers/register-interpreter-type \"regretract\" :regretract-type)\n"
+    "(defn hook () :ran)\n"))
+
+(describe "registry/written-by and retract"
+  :isolated (test "every write a plugin's load made is listed, by writer, and taken back"
+    (registry/put! :regretract/rows :core-row 1)
+    (assert= ((reflect/eval 'regretract-plugin/hook)) :ran) ; a qualified reference loads it
+    (let (writes (registry/written-by #{'regretract-plugin})
+          globals (into #{} (map writes :global)))
+      (assert= (registry/writer :regretract/rows :plugin-row) 'regretract-plugin)
+      (is (nil? (registry/writer :regretract/rows :core-row)))
+      (is (contains? globals 'registry/*registries*))
+      (is (contains? globals 'editor/layers/*system-layers*))
+      (is (contains? globals 'editor/layers/*auto-type-by-file*))
+      (is (contains? globals 'editor/layers/*type-layers*))
+      (is (contains? globals 'editor/layers/*auto-type-by-interpreter*))
+      ;; inside the load journal: a load's registrations outlive an :isolated test by design
+      ;; (KI-134), and a plain retract would be rolled back while they came back — so a
+      ;; later test file would meet a system layer whose module is gone
+      (%with-load-journal (fn () (doseq (write writes) (is (registry/retract write)))))
+      ;; a replaced entry can be put back as it was
+      (is (registry/restore {:global (quote registry/*registries*)
+                             :path [:regretract/rows :core-row]}
+            2))
+      (assert= (registry/lookup :regretract/rows :core-row) 2)
+      (registry/restore {:global (quote registry/*registries*) :path [:regretract/rows :core-row]}
+        1)
+      (assert= (registry/written-by #{'regretract-plugin}) [])
+      (is (nil? (registry/lookup :regretract/rows :plugin-row)))
+      (assert= (registry/lookup :regretract/rows :core-row) 1)
+      (is (not (includes? editor/layers/*system-layers* 'regretract-plugin/layer)))
+      (is (nil? (editor/layers/layers-for-type :regretract-type)))
+      (is (not (any? editor/layers/*auto-type-by-file*
+                 (fn (rule) (= (:type rule) :regretract-type))))))))
+
+(describe "editor/layers unregister-*"
+  :isolated (test "each takes back exactly what its register made"
+    (editor/layers/register-system-layer 'regretract-test/layer)
+    (editor/layers/register-type-layers :regretract-own ['regretract-test/layer])
+    (editor/layers/register-file-type ".own" :regretract-own)
+    (editor/layers/register-interpreter-type "own" :regretract-own)
+    (is (editor/layers/unregister-system-layer 'regretract-test/layer))
+    (is (editor/layers/unregister-type-layers :regretract-own))
+    (is (editor/layers/unregister-file-type ".own" :regretract-own))
+    (is (editor/layers/unregister-interpreter-type "own"))
+    (is (not (editor/layers/unregister-system-layer 'regretract-test/layer)))
+    (is (not (includes? editor/layers/*system-layers* 'regretract-test/layer)))
+    (is (nil? (editor/layers/layers-for-type :regretract-own)))))
+
+;; ---- ADR-582's edges -----------------------------------------------------------------
+
+(defn- fixture (name text)
+  "Write fixture `name`.blsp under the load path, and answer its path."
+  (let (path (path/join *dir* (str name ".blsp")))
+    (file/spit path text)
+    path))
+
+(fixture "regretract-pred-a"
+  "(defmodule regretract-pred-a)\n(editor/layers/register-file-type (fn (name) (string/ends-with? name \".pa\")) :regretract-pred)\n(defn loaded () true)\n")
+(fixture "regretract-pred-b"
+  "(defmodule regretract-pred-b)\n(editor/layers/register-file-type (fn (name) (string/ends-with? name \".pb\")) :regretract-pred)\n(defn loaded () true)\n")
+
+(describe "list members that print alike"
+  :isolated (test "two packages' anonymous predicates are two members with two writers"
+    (require-one 'regretract-pred-a)
+    (require-one 'regretract-pred-b)
+    (let (a-writes (registry/written-by #{'regretract-pred-a})
+          b-writes (registry/written-by #{'regretract-pred-b})
+          typed (fn (file) (editor/layers/buffer-type-for {:file file})))
+      (assert= (count a-writes) 1)
+      (assert= (count b-writes) 1)
+      (assert= (typed "/x/one.pa") :regretract-pred)
+      (assert= (typed "/x/one.pb") :regretract-pred)
+      ;; taking B's back leaves A's rule, still A's
+      (is (%with-load-journal (fn () (registry/retract (first b-writes)))))
+      (assert= (typed "/x/one.pa") :regretract-pred)
+      (refute (= (typed "/x/one.pb") :regretract-pred))
+      (assert= (registry/written-by #{'regretract-pred-b}) [])
+      (assert= (count (registry/written-by #{'regretract-pred-a})) 1)
+      ;; and A's goes with A
+      (is (%with-load-journal (fn ()
+                                (registry/retract (first (registry/written-by #{'regretract-pred-a}))))))
+      (refute (= (typed "/x/one.pa") :regretract-pred))
+      (assert= (registry/written-by #{'regretract-pred-a}) []))))
+
+(fixture "regretract-keeper"
+  "(defmodule regretract-keeper)\n(editor/layers/register-system-layer 'regretract-keeper/layer)\n(registry/put! :regretract/kept :row :keeper)\n")
+(def- *failing*
+  (fixture "regretract-failing"
+    "(defmodule regretract-failing)\n(editor/layers/unregister-system-layer 'regretract-keeper/layer)\n(editor/layers/register-system-layer 'regretract-failing/layer)\n(registry/put! :regretract/kept :row :failing)\n(error \"regretract-failing: boom\")\n"))
+
+(describe "a load that throws"
+  :isolated (test "changes no writer: what it removed keeps its writer, what it wrote credits nobody"
+    (require-one 'regretract-keeper)
+    (is (failure? (try (reflect/load *failing*) (catch e (failure (error-message e))))))
+    (is (includes? editor/layers/*system-layers* 'regretract-keeper/layer))
+    (refute (includes? editor/layers/*system-layers* 'regretract-failing/layer))
+    (assert= (%registry-writer 'editor/layers/*system-layers* ['regretract-keeper/layer])
+      'regretract-keeper)
+    (assert= (%registry-writer 'editor/layers/*system-layers* ['regretract-failing/layer]) nil)
+    (assert= (registry/lookup :regretract/kept :row) :keeper)
+    (assert= (registry/writer :regretract/kept :row) 'regretract-keeper)
+    (assert= (registry/written-by #{'regretract-failing}) [])
+    ;; a load's registrations outlive an :isolated test by design (KI-134); taken back
+    ;; inside the load journal, the removal is replayed too, so no later test file sees a
+    ;; system layer whose module is gone
+    (%with-load-journal (fn () (editor/layers/unregister-system-layer 'regretract-keeper/layer)))))
+
+(def- *loose*
+  (fixture "regretract-loose"
+    "(registry/put! :regretract/loose :row 1)\n(editor/layers/register-system-layer 'regretract-loose/layer)\n(editor/face/face-set :regretract/loose-face {:fg \"#ffffff\"})\n"))
+
+(describe "a file without a defmodule"
+  :isolated (test "credits its registry writes to the file, by its absolute path"
+    (reflect/load *loose*)
+    (let (file (path/absolute *loose*)
+          writes (registry/written-by #{file}))
+      (assert= (registry/writer :regretract/loose :row) file)
+      (assert= (%registry-writer 'editor/layers/*system-layers* ['regretract-loose/layer]) file)
+      (is (any? writes (fn (write) (= (:global write) 'editor/face/*faces*))))
+      (assert= (count writes) 3)
+      (%with-load-journal (fn () (doseq (write writes) (is (registry/retract write)))))
+      (assert= (registry/written-by #{file}) [])
+      (is (nil? (registry/lookup :regretract/loose :row)))
+      (refute (includes? editor/layers/*system-layers* 'regretract-loose/layer)))))
+
+(fixture "regretract-under"
+  "(defmodule regretract-under)\n(registry/put! :regretract/stack :k :under)\n")
+(fixture "regretract-over"
+  "(defmodule regretract-over)\n(registry/put! :regretract/stack :k :over)\n")
+(fixture "regretract-restorer"
+  "(defmodule regretract-restorer)\n(registry/restore {:global 'registry/*registries* :path [:regretract/stack :k]} :restored)\n")
+
+(describe "retract and restore are conditional on the writer"
+  :isolated (test "a write another load has replaced is neither retracted nor restored over"
+    (require-one 'regretract-under)
+    (let (under (first (registry/written-by #{'regretract-under})))
+      (require-one 'regretract-over)
+      (assert= (registry/written-by #{'regretract-under}) [])
+      (refute (registry/retract under))
+      (refute (registry/restore under :stale))
+      (assert= (registry/lookup :regretract/stack :k) :over)
+      ;; the live write is restored over, crediting the value's own writer
+      (is (registry/restore (first (registry/written-by #{'regretract-over}))
+            :under 'regretract-under))
+      (assert= (registry/writer :regretract/stack :k) 'regretract-under)
+      (is (registry/retract under))
+      (is (nil? (registry/lookup :regretract/stack :k)))))
+  :isolated (test "a restore with no credit leaves the entry writer-less, even inside a load"
+    (registry/put! :regretract/stack :k :before)
+    (require-one 'regretract-restorer)
+    (assert= (registry/lookup :regretract/stack :k) :restored)
+    (is (nil? (registry/writer :regretract/stack :k)))))
+
+(fixture "regretract-isolated"
+  "(defmodule regretract-isolated)\n(editor/layers/register-system-layer 'regretract-isolated/layer)\n")
+(def- *remover*
+  (fixture "regretract-remover"
+    "(defmodule regretract-remover)\n(editor/layers/unregister-system-layer 'regretract-isolated/layer)\n"))
+
+(describe "an isolate restore"
+  :isolated (test "rolls the writer journal back with the registries"
+    (require-one 'regretract-isolated)
+    (%isolate (fn () (editor/layers/unregister-system-layer 'regretract-isolated/layer)))
+    (%isolate-discard-loads (fn () (reflect/load *remover*)))
+    (is (includes? editor/layers/*system-layers* 'regretract-isolated/layer))
+    (assert= (%registry-writer 'editor/layers/*system-layers* ['regretract-isolated/layer])
+      'regretract-isolated)
+    ;; taken back inside the load journal, as above, so the layer does not outlive the test
+    (%with-load-journal (fn () (editor/layers/unregister-system-layer 'regretract-isolated/layer)))))
+
+(fixture "regretract-vector"
+  "(defmodule regretract-vector)\n(def *things* ())\n(%registry-update! 'regretract-vector/*things* :cons-new [] :thing)\n")
+
+(describe "a vector-valued registry"
+  :isolated (test "lists no members: no registry op adds one"
+    (require-one 'regretract-vector)
+    (assert= (count (registry/written-by #{'regretract-vector})) 1)
+    (is (%registry-cas! 'regretract-vector/*things* regretract-vector/*things* [:thing]))
+    (assert= (registry/written-by #{'regretract-vector}) [])))

@@ -64,19 +64,121 @@ Merge the result into the display map.
   ;; a key typed while the loop is busy is queued where the kernel's quit key sees it, so a
   ;; terminal C-g stops a stuck turn. So the terminal polls the mailbox as the window does —
   ;; input first, and the loop's background messages arrive tagged as such (ADR-490).
-  (merge {:enter (fn ()
-                   (do
-                     (term/enter)
-                     (term/forward-input (self))))
-          :leave (fn ()
-                   (do
-                     (term/forward-input nil)
-                     (term/leave)))
-          :size term/size
-          :draw term/draw
-          :poll-input (fn () (ui-take-input))
-          :key-held? (fn () (not (nil? (term/held-key))))}
-    (display-polls (fn (ms) (ui-receive-tagged ms)))))
+  ;; And it owns the process's job-control and hang-up signals while entered (ADR-586):
+  ;; SIGTSTP gives the terminal back and stops, SIGCONT takes it again and repaints, and
+  ;; SIGTERM / SIGHUP end the loop as `[:hangup sig]` — the app's `:on-hangup` runs (an
+  ;; editor's emergency auto-save) and `:leave` restores the terminal, where the default
+  ;; action would have left it raw and on the alternate screen.
+  (merge
+    {:enter (fn ()
+              (do
+                (term/enter)
+                (term/forward-input (self))
+                (term-trap-signals (self))))
+     :leave (fn ()
+              (do
+                (term-trap-signals nil)
+                (term/forward-input nil)
+                (term/leave)))
+     :size term/size
+     :draw term/draw
+     :poll-input (fn () (ui-take-input))
+     :key-held? (fn () (not (nil? (term/held-key))))
+     ;; the screen was forgotten (a resize, a continue): draw though the model is unchanged
+     :repaint-due? (fn () (term/repaint-due?))
+     ;; a kill reaches the clipboard of the machine the user sits at: the desktop's
+     ;; when there is one, the TERMINAL's (OSC 52) over ssh or on a console (ADR-587)
+     :clipboard-set (fn (text) (term-clipboard-set text))
+     :primary-set (fn (text) (term-clipboard-set text :primary))}
+    (display-polls (fn (ms) (term-signal-input (ui-receive-tagged ms))))))
+
+(def- term-signals [:tstp :cont :term :hup])
+
+;; who had each signal before the terminal display took it, given back on leave
+(def- term-signal-previous (table/new))
+
+(defn- term-trap-signals (pid)
+  "Route the terminal display's signals to `pid` (the loop) — or, nil, give each back to
+whoever had it before. A platform without Unix signals has nothing to route."
+  (check-allow :discarded-catch
+    (try
+      (doseq (sig term-signals)
+        (if (nil? pid)
+          (os/trap sig (table/get term-signal-previous sig nil))
+          (table/put term-signal-previous sig (os/trap sig pid))))
+      (catch _ nil)))
+  nil)
+
+(defn- term-signal-input (tagged)
+  "A poll result `[message input?]` with the terminal display's signals acted on: SIGTSTP
+suspends (`term/suspend`) and SIGCONT refreshes (`term/refresh`) — each answering a
+`[:resize cols rows]`, so the app re-lays out and the loop repaints — and SIGTERM / SIGHUP
+become `[:hangup sig]`, which ends the loop (`ui-run`). Anything else as it came."
+  (let (input (when tagged (term-signal (first tagged))))
+    (if (nil? input) tagged [input true])))
+
+(defn term-signal (message)
+  "The input a terminal display's signal `message` becomes, acted on — or nil when `message`
+is not one: `[:signal :tstp]` suspends (`term/suspend`) and `[:signal :cont]` refreshes
+(`term/refresh`), each answering `[:resize cols rows]` so the app re-lays out and repaints;
+`[:signal :term]` / `[:signal :hup]` become `[:hangup sig]`. What `*term-display*`'s poll
+does, for a loop that receives its mailbox itself (an attached client, std/editor/serve).
+
+    (editor/ui/term-signal [:signal :hup])   ;=> [:hangup :hup]
+    (editor/ui/term-signal \"a\")   ;=> nil"
+  (cond
+    (= message [:signal :tstp]) (do (term/suspend) (term-resize))
+    (= message [:signal :cont]) (do (term/refresh) (term-resize))
+    (or (= message [:signal :term]) (= message [:signal :hup])) [:hangup (second message)]
+    else nil))
+
+(defn- term-resize ()
+  (let ([cols rows] (term/size)) [:resize cols rows]))
+
+(defn display-available? ()
+  "Whether a native window can be opened here: the runtime has the GUI backend
+(`gui/available?`) and the session has a display to put it on — `$WAYLAND_DISPLAY` or
+`$DISPLAY` on Linux and the BSDs, a desktop login (not an ssh session) on macOS, always on
+Windows. A headless GUI runtime (`BROOD_GUI_HEADLESS`) counts as one: its windows open,
+drawing nothing. The question a program that can run in a window OR the terminal asks
+before choosing — Emacs's `-nw` when there is no display (ADR-587).
+
+    (bool? (editor/ui/display-available?))   ;=> true"
+  (let (set? (fn (name) (let (value (os/env name)) (and (string? value) (not (= value ""))))))
+    (and (gui/available?)
+      (or (gui/headless?)
+        (case (os/type)
+          :windows true
+          :macos (not (or (set? "SSH_CONNECTION") (set? "SSH_TTY")))
+          (or (set? "WAYLAND_DISPLAY") (set? "DISPLAY")))))))
+
+(defn term-clipboard-set (text &optional (selection :clipboard))
+  "Put `text` on the clipboard (or, `selection` `:primary`, the PRIMARY selection) of the
+machine the user sits at, from a program in a TERMINAL: the desktop's own when a display is
+reachable (`display-available?`, `os/clipboard-set`), else the terminal's, through the OSC
+52 escape (`editor/ansi/ansi-clipboard`) — what reaches the user's machine from the far end
+of ssh, from tmux, from a console. A terminal without OSC 52 ignores it. Returns nil (ADR-587)
+— or `:too-large` when the text is over `*osc52-max-bytes*` and so was NOT sent to the
+terminal (Emacs's `xterm-max-cut-length`): an escape that size stalls a terminal or a link,
+and many terminals drop it anyway, so the caller can say so (ADR-586).
+
+    (editor/ui/term-clipboard-set \"copied\")   ;~> nil, \"copied\" on the user's clipboard"
+  (cond
+    (display-available?)
+      (do (if (= selection :primary) (os/primary-set text) (os/clipboard-set text)) nil)
+    (not (osc52-fits? text)) :too-large
+    else (do (io/write (editor/ansi/ansi-clipboard text selection)) nil)))
+
+(def *osc52-max-bytes* 100000)
+;; The most text (in UTF-8 bytes) `term-clipboard-set` sends a terminal through OSC 52 —
+;; Emacs's `xterm-max-cut-length`, 100000.
+
+(defn osc52-fits? (text)
+  "Whether `text` is small enough to send a terminal's clipboard through OSC 52: at most
+`*osc52-max-bytes*` UTF-8 bytes (ADR-587).
+
+    (editor/ui/osc52-fits? \"copied\")   ;=> true"
+  (<= (count (string/->bytes text)) *osc52-max-bytes*))
 
 (defn- ui-coalesce-motion (msg)
   "Collapse a flood of pointer-motion events — a `:drag` or a `:move` — down to the
@@ -586,7 +688,39 @@ through `update` like any key instead — so it can ask about unsaved work befor
 (Emacs's `save-buffers-kill-terminal` on the window manager's close) and quit by setting
 `:done` itself. Without the flag every `ui-run` app stays closeable by its X button with
 no wiring, as before."
-  (and (quit-request? input) (not (get model :close-is-input?))))
+  (or (and (quit-request? input) (not (get model :close-is-input?))) (hangup-request? input)))
+
+(defn hangup-request? (input)
+  "True if `input` is `[:hangup sig]` — the terminal display's SIGTERM or SIGHUP (ADR-586).
+`ui-run` ends on it, after the model's `:on-hangup` (`(fn (model sig) …)`, for its side
+effects — an editor's emergency auto-save), and `:leave` restores the terminal.
+
+    (editor/ui/hangup-request? [:hangup :hup])   ;=> true"
+  (and (vector? input) (= (count input) 2) (= (first input) :hangup)))
+
+(defn- ui-quit (model input)
+  "The loop's end on a quit it acts on: for a hang-up, the model's `:on-hangup` first —
+whatever it throws is logged, never kept from the exit. nil, so the loop stops."
+  (when (hangup-request? input)
+    (let (hook (get model :on-hangup))
+      (when (fn? hook)
+        ;; a hook that hangs must not keep a hung-up program alive: past the grace the
+        ;; terminal is given back and the runtime exits (129, as a SIGHUP death would)
+        (let (watchdog (spawn (receive
+                                (:hook-done nil)
+                                (after *ui-hangup-grace-ms* (do (term/leave) (system/halt 129))))))
+          (do
+            (try (hook model (second input)) (catch e (ui-log-error "on-hangup" e)))
+            (send watchdog :hook-done))))))
+  nil)
+
+(def *ui-hangup-grace-ms* 10000)
+;; How long a model's `:on-hangup` may run before the runtime exits anyway (ADR-586).
+
+(defn- display-repaint-due? (display)
+  ;; the display forgot what it shows (a terminal resized or continued): draw this turn
+  ;; even though the model and grid are what was last drawn
+  (let (due (get display :repaint-due?)) (and (fn? due) (due))))
 
 (defn focus-request? (input)
   "True if `input` is a `:focus` control message — a request (delivered to this
@@ -1053,7 +1187,8 @@ re-raises, surfacing a genuine startup bug instead of spinning."
           ;; nothing (a key-up, an echo, a timer that found nothing to do, a poll that
           ;; timed out) renders nothing. `=` is a pointer test when `update` handed the
           ;; model back untouched, and stops at the first differing subtree otherwise.
-          unchanged (= (get clock :shown) [model cols rows])
+          unchanged (and (= (get clock :shown) [model cols rows])
+                      (not (display-repaint-due? display)))
           ;; render this model; a `[:frame …]` result is the frame to draw, `:failed`
           ;; means `view` threw (already logged) and we must fall back to `last-good`,
           ;; `[:unchanged …]` means there is nothing new to draw, and `[:interrupted …]`
@@ -1113,7 +1248,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                            :jumped (and (not (nil? input)) (not (get model :coalesce-input?)))))
               (cond
                 ;; the window's close button always quits; `ui-run` then runs `:leave`
-                (ui-close-quits? model raw) nil
+                (ui-close-quits? model raw) (ui-quit model raw)
                 ;; raise-to-front request: act on the display, keep the model untouched and
                 ;; do NOT advance `:last-input` (a focus message from another process is
                 ;; not user input — it must not reset idle timers).
@@ -1197,7 +1332,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                                  rows
                                  (ui-command-timer? timers tevent))))
                     (cond
-                      (ui-close-quits? next pending) nil
+                      (ui-close-quits? next pending) (ui-quit next pending)
                       (focus-request? pending)
                         (let (f (get display :focus))
                           (do

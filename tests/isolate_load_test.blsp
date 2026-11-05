@@ -72,7 +72,12 @@
   :isolated (test "a system layer registered inside a journalled load, inside an isolate, survives too"
     (%isolate (fn ()
                 (%with-load-journal (fn () (editor/layers/register-system-layer :ki141-layer)))))
-    (is (any? editor/layers/*system-layers* (fn (r) (= r :ki141-layer)))))
+    (is (any? editor/layers/*system-layers* (fn (r) (= r :ki141-layer))))
+    ;; …and taken back the same way, so no later file in the run sees a system layer that
+    ;; names nothing (layers_test's every-buffer layer stacks did)
+    (%isolate (fn ()
+                (%with-load-journal (fn () (editor/layers/unregister-system-layer :ki141-layer)))))
+    (is (not (any? editor/layers/*system-layers* (fn (r) (= r :ki141-layer))))))
   :isolated (test "…and a test's own def-face inside an isolate is still rolled back"
     (%isolate (fn () (editor/face/def-face :ki141-scratch {:fg :blue})))
     (is (nil? (editor/face/face :ki141-scratch)))))

@@ -656,6 +656,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // The terminal seam (ADR-046): policy over the `%term-*` primitives, so raw-mode /
     // input polling / paint live under `term/*` rather than the bare language core.
     embedded_module!("term", "std/term.blsp"),
+    // Reading and writing a file as another user through `sudo` (ADR-588): the password
+    // handed to `sudo -S -v` once and kept nowhere, the text on a `sudo -n` command's
+    // stdin. Pure Brood over `os/cmd`; opt-in.
+    embedded_module!("sudo", "std/sudo.blsp"),
     // Native window seam (ADR-046/080): policy over the `%gui-*` primitives → `gui/*`.
     embedded_module!("gui", "std/gui.blsp"),
     // The rope text-engine seam: policy over the `%rope-*` primitives → `text/*`.

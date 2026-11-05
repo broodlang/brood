@@ -139,10 +139,18 @@ selection or no clipboard feature (ADR-553).
 (defn user-home (name:string -> (or string nil))
   "The home directory of the user called `name`, from the password database (so a user
 from LDAP or another NSS source too), or nil when there is no such user — what a
-`~name/` path names ([[path/absolute]]). The current user's is `(os/env \"HOME\")`.
+`~name/` path names ([[path/absolute]]). The current user's is `(path/home)`.
 
     (os/user-home \"brood-surely-no-such-user\")   ;=> nil"
   (%user-home name))
+
+(defn user-name (-> (or string nil))
+  "The name of the user this process runs as: `$USER` (Unix), `%USERNAME%` (Windows), or
+`$LOGNAME` — nil when none is set (a bare service environment).
+
+    (or (nil? (os/user-name)) (string? (os/user-name)))   ;=> true"
+  (seq/find [(env "USER") (env "USERNAME") (env "LOGNAME")]
+    (fn (name) (and name (not (= name ""))))))
 
 (defn env-all ()
   "All environment variables as a `{string → string}` map.
@@ -175,8 +183,27 @@ from LDAP or another NSS source too), or nil when there is no such user — what
   (if (empty? dirs)
     nil
     (let (dir (first dirs)
-          candidate (str (if (= dir "") "." dir) "/" program))
-      (if (runnable? candidate) candidate (which-in (rest dirs) program)))))
+          base (str (if (= dir "") "." dir) "/" program)
+          found (seq/find (executable-names base) runnable?))
+      (if found found (which-in (rest dirs) program)))))
+
+(defn- windows-extensions ()
+  ;; PATHEXT's extensions, lower-cased: `.com .exe .bat .cmd` when it is unset
+  (map (seq/filter (string/split (or (env "PATHEXT") ".COM;.EXE;.BAT;.CMD") ";")
+         (fn (extension) (not (= extension ""))))
+    string/lower))
+
+(defn- executable-names (base)
+  ;; What a file named `base` may be called to run. Unix: itself. Windows: itself only when
+  ;; it already ends in an executable extension, else itself with each one — never the bare
+  ;; name, which there is no program: an npm package's `tsc` beside its `tsc.cmd` is an `sh`
+  ;; script, and running it fails.
+  (if (= (type) :windows)
+    (let (extensions (windows-extensions))
+      (if (any? extensions (fn (extension) (string/ends-with? (string/lower base) extension)))
+        [base]
+        (map extensions (fn (extension) (str base extension)))))
+    [base]))
 
 (defn which (program)
   "Where [[spawn]] would find `program`, as an absolute-or-given path — or **nil** when
@@ -193,8 +220,10 @@ for — it is used as given, and answered only if it is executable — and other
 directory, or a file with no execute bit for anyone, is not a match (`file/stat`'s
 `:exec?`; Windows has no permission bits, so there existence is the whole test).
 
-**Windows:** the entry separator is `;` and `\\` counts as a path separator, but `PATHEXT`
-is not applied — name the extension you mean (`\"cargo.exe\"`), as a spawn would.
+**Windows:** the entry separator is `;` and `\\` counts as a path separator. A program is
+a file with an executable extension from `PATHEXT` (`.com .exe .bat .cmd` by default):
+`\"git\"` finds `git.exe`, `\"tsc\"` finds `tsc.cmd`, and an extensionless file — an npm
+package's `sh` shim beside its `.cmd` — is never the answer.
 
     (os/which \"ls\")           ;; => \"/usr/bin/ls\"
     (os/which \"no-such-cmd\")  ;; => nil
@@ -202,7 +231,7 @@ is not applied — name the extension you mean (`\"cargo.exe\"`), as a spawn wou
 
     (os/which \"surely-no-such-program\")   ;=> nil"
   (if (or (includes? program "/") (and (= (type) :windows) (includes? program "\\")))
-    (when (runnable? program) program)
+    (seq/find (executable-names program) runnable?)
     (which-in (string/split (or (env "PATH") "") (path-separator)) program)))
 
 (defn cmd (prog &optional (args []) (opts {}))
@@ -224,6 +253,11 @@ a `$` in it is one argument. `opts`:
 The child dies with its caller: a process killed while it waits here (`exit`, `task/cancel`)
 kills the command and every process it started, and dies itself as it would in a `receive`.
 
+The child runs in a SESSION of its own (as does an `os/spawn` child): its own process group,
+and no controlling terminal — so nothing it starts can prompt on this program's terminal or
+stop reading it. A command that wants a terminal (sudo or ssh asking for a password) fails at
+once instead of hanging behind a full-screen program; `os/spawn-pty` gives it one.
+
     (os/cmd-out (os/cmd \"echo\" [\"a b\"]))   ;=> \"a b\"
     (os/cmd-out (os/cmd \"cat\" [] {:stdin \"piped\"}))   ;=> \"piped\"
     (os/cmd-out (os/cmd \"sh\" [\"-c\" \"echo $X\"] {:env {\"X\" \"set\"}}))   ;=> \"set\"
@@ -231,6 +265,90 @@ kills the command and every process it started, and dies itself as it would in a
   (%os-cmd prog args opts))
 (sig cmd
   (string &optional (or list vector) map -> (record &open :stdout string :stderr string :exit int)))
+
+;; ---- the platform's shell (KI-364) --------------------------------------------
+;; A command LINE — pipes, redirections, `&&` — needs the platform's command interpreter.
+;; Naming `sh` works where there is one; Windows has `cmd.exe`, which reads its line raw:
+;; `cmd /d /s /c "LINE"` strips the outer quotes and runs LINE as typed, so the line goes
+;; into the command line unquoted (`:raw-args`), not through the MSVC quoting a normal
+;; argument gets (where a `"` in the line became `\"`, which `cmd` does not read).
+
+(defn shell ()
+  "The platform's command interpreter as the argument vector a command line follows:
+`[\"sh\" \"-c\"]`, or on Windows `[%COMSPEC% \"/d\" \"/s\" \"/c\"]` (`cmd.exe` when
+`COMSPEC` is unset). [[shell-cmd]] and [[shell-spawn]] run a line through it.
+
+    (rest (os/shell))   ;~> (\"-c\"), or (\"/d\" \"/s\" \"/c\") on Windows — its first is the shell's path"
+  (if (= (type) :windows) [(or (env "COMSPEC") "cmd.exe") "/d" "/s" "/c"] ["sh" "-c"]))
+
+(defn- without-line-ends (line)
+  ;; `line` with its trailing newlines and carriage returns dropped — and nothing else: a
+  ;; trailing SPACE is part of a cmd line (`set /p secret=Secret: ` prompts with it)
+  (if (or (string/ends-with? line "\n") (string/ends-with? line "\r"))
+    (without-line-ends (string/substring line 0 (dec (string/length line))))
+    line))
+
+(defn- windows-line (line)
+  ;; What cmd.exe is handed for `line`. `cmd /c` runs ONE line — a newline cuts the rest off
+  ;; without a word — so a line with one in it is refused (a trailing one is dropped, and
+  ;; only that: trailing spaces are the line's own). And its built-ins write in the
+  ;; console's codepage while the output is read as UTF-8, so the line runs after
+  ;; `chcp 65001` (UTF-8) in the child's own console (KI-364's sequel).
+  (let (trimmed (without-line-ends line))
+    (when (or (includes? trimmed "\n") (includes? trimmed "\r"))
+      (error "os/shell-cmd: cmd.exe /c runs one line, and this has several — join them with & or && first: "
+        (pr-str line)))
+    (str "\"chcp 65001>nul & " trimmed "\"")))
+
+(defn- shell-call (line opts)
+  ;; `[program args opts]` running `line` through [[shell]]
+  (let (interpreter (shell))
+    (if (= (type) :windows)
+      [(first interpreter)
+        (conj (vec (rest interpreter)) (windows-line line))
+        (assoc (or opts {}) :raw-args true)]
+      [(first interpreter) (conj (vec (rest interpreter)) line) (or opts {})])))
+
+(defn shell-cmd (line:string &optional (opts {}))
+  "Run the command line `line` through the platform's shell ([[shell]]) to completion — the
+line as a person types it, pipes and quotes included — and answer as [[cmd]] does, with
+[[cmd]]'s options. `sh -c` on Unix, `cmd.exe /d /s /c` on Windows (so the line is written
+in that shell's language there).
+
+    (os/cmd-out (os/shell-cmd \"echo hello\"))   ;=> \"hello\""
+  (let ([program arguments options] (shell-call line opts))
+    (cmd program arguments options)))
+
+(defn shell-spawn (line:string &optional opts)
+  "Start the command line `line` through the platform's shell ([[shell]]) as a persistent
+child — [[spawn]] for a line rather than a program and its arguments, with [[spawn]]'s
+messages and options.
+
+    (os/shell-spawn \"echo hi\")   ;~> a subprocess handle; [:proc handle \"hi\\n\"] arrives"
+  (let ([program arguments options] (shell-call line opts))
+    (%proc-spawn program arguments options)))
+
+(defn detach (prog args &optional opts)
+  "Start `prog` with `args` and let it go: no pipes, no handle, and it is not stopped when
+the caller dies (it is in neither the caller's process group nor, on Windows, its Job
+Object). For handing something to another application that must outlive the caller.
+Options as [[spawn]]. Returns nil; raises when `prog` cannot be started.
+
+    (os/detach \"brood-surely-no-such-program\" [])   ;~> raises: it cannot be started"
+  (%os-detach prog args opts))
+
+(defn open (target:string -> nil)
+  "Open `target` — a URL, or a path — in the application the desktop opens it with (the
+default browser for a URL), detached ([[detach]]): `open` on macOS, the URL protocol handler
+on Windows (`rundll32 url.dll,FileProtocolHandler`, which no shell parses, so `&` and
+spaces in the URL are safe), `xdg-open` elsewhere. Returns nil; raises when the opener
+cannot be started.
+
+    (os/open \"https://example.org\")   ;~> nil, the page opening in the browser"
+  (case (type)
+    :macos (detach "open" [target])
+    :windows (detach "rundll32.exe" ["url.dll,FileProtocolHandler" target])
+    (detach "xdg-open" [target])))
 
 (defn cmd-ok? (result:map -> bool)
   "True if the command result has exit code 0.
@@ -362,10 +480,24 @@ the child's stderr arrives as `[:proc handle data]` like everything else and the
 no `[:proc-err …]` stream. A caller that needs the two apart wants pipes.
 
 The child gets its own session and controlling terminal, so job control and ^C reach
-IT rather than the program hosting it. Unix only.
+IT rather than the program hosting it. On Windows the terminal is a ConPTY pseudoconsole
+(Windows 10 1809 or later; an older Windows raises, naming ConPTY): the same handle and
+messages, its screen arriving as VT sequences; `:raw-args` writes the arguments into the
+command line unquoted, as for [[spawn]] (KI-369).
 
     (os/spawn-pty \"bash\" [\"-i\"] {:cols 100 :rows 30})   ;~> a subprocess handle; output arrives as [:proc handle data]"
   (%pty-spawn prog args opts))
+
+(defn shell-spawn-pty (line:string &optional opts)
+  "Start the command line `line` through the platform's shell ([[shell]]) under a
+pseudo-terminal — [[spawn-pty]] for a line rather than a program and its arguments, as
+[[shell-spawn]] is [[spawn]]'s, with [[spawn-pty]]'s messages and options. `sh -c LINE`
+on Unix, `cmd.exe /d /s /c \"LINE\"` on Windows. What a terminal emulator that runs a
+configured command needs.
+
+    (os/shell-spawn-pty \"echo hi\" {:cols 80 :rows 24})   ;~> a subprocess handle; [:proc handle …hi…] arrives"
+  (let ([program arguments options] (shell-call line opts))
+    (%pty-spawn program arguments options)))
 
 (defn resize-pty (p cols rows)
   "Tell pty child `p` its terminal is now `cols` × `rows`; it sees `SIGWINCH` and
@@ -375,6 +507,41 @@ unknown, closed, or was spawned with pipes.
 
     (os/resize-pty p 120 40)   ;~> nil; the child sees SIGWINCH and redraws"
   (%pty-resize p cols rows))
+
+(defn pty-mode (p)
+  "How pty child `p`'s terminal is reading input right now: `{:echo bool :canonical
+bool}` — its termios `ECHO` flag (the terminal echoes what is typed) and `ICANON` flag
+(input is read a line at a time, edited by the terminal).
+
+A host that shows the child's input ITSELF — an editor's line-mode REPL, which inserts
+what is typed and sends the line on RET — reads this to learn what the program asked
+for. Most callers want [[pty-password?]], the question this answers. Read it when output
+arrives or before a line is sent, not on every frame.
+
+`nil` when `p` is unknown or already closed (the child is gone, so a caller need not race
+its exit), and for a Windows ConPTY child, whose pseudoconsole has no termios to ask
+(KI-369). Throws if `p` was spawned with pipes rather than a pty.
+
+    (os/pty-mode (os/spawn-pty \"sh\" [\"-c\" \"sleep 1\"]))   ;~> {:echo true :canonical true}"
+  (%pty-mode p))
+
+(defn pty-password? (p)
+  "Whether pty child `p` is reading a line it does not want shown — a password.
+
+A program reading a secret (`sudo`, `ssh`, `git` asking for credentials, anything over
+`getpass`) turns its terminal's echo OFF and keeps line mode for that one read, then
+turns echo back on. A program with its own line editor (readline's bash, a raw-mode
+REPL) turns echo off too, but along with line mode, and echoes for itself —
+so echo alone would call every prompt of theirs a password. This is the pair: echo off
+AND canonical.
+
+`true` or `false`; `nil` when nothing can be known — `p` closed, or a Windows ConPTY
+child, which has no termios — so a caller can fall back to guessing from the prompt's
+text. Throws if `p` was spawned with pipes.
+
+    (os/pty-password? (os/spawn-pty \"sh\" [\"-c\" \"stty -echo; read secret\"]))   ;~> true, once stty has run"
+  (let (mode (%pty-mode p))
+    (if (nil? mode) nil (and (:canonical mode) (not (:echo mode))))))
 
 (defn write (p data)
   "Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a
@@ -396,7 +563,8 @@ because close stops reading.
   (%proc-close p))
 
 (defn signal (p sig)
-  "Send `sig` — `:int` (Ctrl-C), `:term`, `:hup`, `:quit` or `:kill` — to subprocess `p`
+  "Send `sig` — `:int` (Ctrl-C), `:term`, `:hup`, `:quit` or `:kill`, or the job-control
+`:tstp`, `:stop`, `:cont` and `:winch` — to subprocess `p`
 and everything it started: the child leads its own process group, and the signal goes to
 the group, so interrupting `sh -c \"make\"` reaches `make` and its compilers too. Unlike
 [[close]] the child is not unregistered: a program may catch `:int` and carry on (a REPL
@@ -408,10 +576,32 @@ closed, or `sig` is not one of those. Unix only.
     (os/signal (os/spawn \"sh\" [\"-c\" \"sleep 60\"]) :int)   ;~> nil; the sleep gets SIGINT"
   (%proc-signal p sig))
 
+(defn interrupt (p)
+  "Interrupt subprocess `p` the way the platform can — what a terminal's Ctrl-C (an
+editor's `C-c C-c`) means. On Unix SIGINT to its process group ([[signal]] `:int`): the
+child decides, and may carry on. Windows has no SIGINT for a piped child, so there the
+child and everything it started are stopped ([[close]], its Job Object). Answers
+`:interrupted` or `:closed` — what was done — or nil when `p` was already gone; never raises
+for that, so a key bound to it cannot kill its caller.
+
+    (os/interrupt (os/spawn \"sh\" [\"-c\" \"sleep 60\"]))   ;~> :interrupted (:closed on Windows)"
+  ;; check-allow :discarded-catch — an unknown or closed `p` is the one failure, and nil
+  ;; is its documented answer
+  (check-allow :discarded-catch
+    (try
+      (if (= (type) :windows)
+        (do (close p) :closed)
+        (do (signal p :int) :interrupted))
+      (catch _ nil))))
+
 (defn trap (sig & pid)
-  "Deliver signal `sig` sent to THIS runtime — `:term`, `:int` (Ctrl-C) or `:hup` — to a
-process as the message `[:signal sig]` instead of its default action (which for all three
-ends the runtime). The process is the caller, or `pid`; `(os/trap sig nil)` gives the
+  "Deliver signal `sig` sent to THIS runtime — `:term`, `:int` (Ctrl-C) or `:hup`, or the job
+control signals `:tstp` (stop) and `:cont` (continued) — to a process as the message
+`[:signal sig]` instead of its default action (which for the first three ends the runtime,
+and for `:tstp` stops it): what lets a full-screen terminal app restore the terminal before
+it stops or exits and repaint after it continues (ADR-586). A SECOND `:term` or `:hup`
+arriving after the first was handed over does what it did before the trap: the program had
+its chance, and a loop wedged before it read the first can still be ended. The process is the caller, or `pid`; `(os/trap sig nil)` gives the
 signal back what it did before it was trapped (the default, or the `SIG_IGN` a `nohup`
 leaves). One subscriber per signal: a later trap replaces an earlier one. Returns the
 previous subscriber, or nil. If the subscriber has exited when the signal arrives, the

@@ -1144,3 +1144,256 @@
         (free-tree kept)
         (assert= (owned-trees) [])
         (send child :done)))))
+
+;; ---- grammar drift: the names a language wrote against the grammar it has (ADR-583) ------
+
+(describe "language-names: every kind and field a language's tables refer to"
+  (test "faces, injections, indent and definitions, each by its own shape"
+    (assert= (language-names {:faces {:string :s
+                                      {:kind :identifier
+                                       :field :name
+                                       :parent {:kind :call :field :function}} :f
+                                      {:text "def"} :k}
+                              :injections [{:content {:kind :heredoc_template :parent :heredoc}
+                                            :exclude :heredoc_marker
+                                            :lang-from :heredoc_identifier
+                                            :aliases {"BASH" :bash}}]
+                              :indent {:width 2
+                                       :blocks #{:do_block}
+                                       :brackets #{:arguments}
+                                       :dedent #{"end"}
+                                       :opens #{"{"}
+                                       :verbatim #{:heredoc_body}}
+                              :definitions {:kinds #{:method} :calls #{"def"}}})
+      {:kinds #{:string
+                :identifier :call :heredoc_template :heredoc :heredoc_marker :heredoc_identifier
+                :do_block :arguments :heredoc_body :method}
+       :fields #{:name :function}}))
+
+  (test "an empty language refers to nothing"
+    (assert= (language-names {}) {:kinds #{} :fields #{}})))
+
+(def tsm-drift-info
+  {:lang :demo :abi 14 :named #{:call :identifier} :anonymous #{:def} :fields #{:name}})
+
+(describe "grammar-problems: what the grammar lacks, named"
+  (test "a grammar with every name has no problems; anonymous tokens and ERROR count"
+    (assert= (grammar-problems tsm-drift-info {:kinds #{:call :def :ERROR} :fields #{:name}}) '()))
+
+  (test "each missing kind and field is its own message, sorted, naming the grammar"
+    (assert= (grammar-problems tsm-drift-info
+               {:kinds #{:heredoc_body :call :alpha} :fields #{:body}})
+      '("node kind `alpha` is not in the :demo grammar" "node kind `heredoc_body` is not in the :demo grammar"
+         "field `body` is not in the :demo grammar")))
+
+  (test "no grammar at all is one problem, not a raise"
+    (assert= (language-grammar-problems :tsm-no-such-grammar {:faces {:x :y}})
+      '("no :tsm-no-such-grammar grammar to check"))))
+
+(describe "grammar-fingerprint: the grammar's shape, not its bytes"
+  (test "the same names hash alike whatever their order; a renamed node does not"
+    (let (a {:abi 14 :named #{:call :identifier} :anonymous #{:def} :fields #{:name}}
+          b {:abi 14
+             :named #{:identifier :call}
+             :anonymous #{:def}
+             :fields #{:name}
+             :source "/x.so"}
+          renamed {:abi 14 :named #{:call :ident} :anonymous #{:def} :fields #{:name}}
+          other-abi (assoc a :abi 15))
+      (assert= (grammar-fingerprint a) (grammar-fingerprint b))
+      (refute (= (grammar-fingerprint a) (grammar-fingerprint renamed)))
+      (refute (= (grammar-fingerprint a) (grammar-fingerprint other-abi))))))
+
+(when tsm-grammars?
+  (describe "grammar-info: a built-in grammar's vocabulary"
+    (test "kinds, tokens, fields and ABI come from the grammar itself"
+      (let (info (grammar-info :ruby))
+        (assert= (:lang info) :ruby)
+        (is (int? (:abi info)))
+        (is (contains? (:named info) :method))
+        (is (contains? (:anonymous info) :def))
+        (is (contains? (:fields info) :name))
+        ;; a hidden rule is never a node's kind
+        (refute (contains? (:named info) :_statement))))
+
+    (test "a language checked against it: present names pass, a renamed one is reported"
+      (assert= (language-grammar-problems :ruby
+                 {:faces {:method :f {:parent :method :field :name} :g}})
+        '())
+      (assert= (language-grammar-problems :ruby {:faces {:method_definition :f}})
+        '("node kind `method_definition` is not in the :ruby grammar")))))
+
+;; A grammar load moves only ITS language's epoch: a held Elixir tree still reparses
+;; incrementally after the HCL grammar loads. One runtime-wide counter made every held tree of
+;; every language parse afresh whenever any grammar loaded — a file of a new language opened.
+(when (and tsm-grammars? (file/exists? (str tsm-grammar-dir "libtree-sitter-hcl.so")))
+  (describe "a grammar load leaves other languages' trees incremental"
+    (test "an Elixir tree reparses incrementally across an HCL grammar load"
+      (let (src "x = 1\ny = 2\n"
+            tree (open-tree src :elixir)
+            _ (%tree-sitter-load-grammar (str tsm-grammar-dir "libtree-sitter-hcl.so") :hcl)
+            next (update-tree tree "x = 1\ny = 23\n" :elixir))
+        (is (vector? (tree-changes next)))
+        (free-tree tree)
+        (free-tree next)))))
+
+(describe "grammar-info without a grammar"
+  (test "raises, as a parse would"
+    (is (check-allow :discarded-catch
+          (try (do (grammar-info :tsm-no-such-grammar) false) (catch _ true))))))
+
+;; Fetching at a revision and the manifest, against a local repository: `file://` is a git
+;; URL, so this is the real fetch path with no network. The "grammar" is a C file with the
+;; generator's ABI line — enough to compile; nothing here loads it.
+(def tsm-git? (and (os/which "git") (os/which "cc")))
+
+(defn- tsm-git (dir & args)
+  (os/cmd "git"
+    (append ["-C" dir "-c" "user.name=t" "-c" "user.email=t@t" "-c" "commit.gpgsign=false"] args)))
+
+(defn- tsm-commit (repository text)
+  ;; write `text` as the grammar's parser.c, commit it, answer the commit
+  (file/spit (path/join repository "src" "parser.c")
+    (str "#define LANGUAGE_VERSION 14\nint tree_sitter_demo(void) { return " text "; }\n"))
+  (tsm-git repository "add" "-A")
+  (tsm-git repository "commit" "-q" "-m" text)
+  (string/trim (:stdout (tsm-git repository "rev-parse" "HEAD"))))
+
+(purge-stale-temp "brood-grammarpin-")
+
+(when tsm-git?
+  (describe "grammar-install at a revision, and the manifest it writes"
+    (test "installs the pinned commit, records it, and moves to another on the next install"
+      (let (root (temp-dir "brood-grammarpin-")
+            repository (path/join root "repo")
+            out (path/join root "out")
+            work (path/join root "work")
+            url (str "file://" repository))
+        (file/mkdir (path/join repository "src"))
+        (tsm-git repository "init" "-q")
+        (let (first-commit (tsm-commit repository "1")
+              second-commit (tsm-commit repository "2")
+              pinned (grammar-install url :demo out work {:revision first-commit})
+              library (path/join out "libtree-sitter-demo.so")
+              manifest (grammar-manifest library))
+          (assert= pinned {:ok library :commit first-commit})
+          (is (includes? (file/slurp (path/join work "demo" "src" "parser.c")) "return 1;"))
+          (assert= (:revision manifest) first-commit)
+          (assert= (:commit manifest) first-commit)
+          (assert= (:source manifest) url)
+          (assert= (:abi manifest) 14)
+          (assert= (:sha256 manifest) (grammar-file-hash library))
+          ;; the same checkout moved to the default branch's head: an update
+          (let (updated (grammar-install url :demo out work))
+            (assert= (:commit updated) second-commit)
+            (assert= (:revision (grammar-manifest library)) nil)
+            (assert= (:commit (grammar-manifest library)) second-commit))
+          ;; and back to the pin; an abbreviated hash cannot be fetched, and says so
+          (assert= (:commit (grammar-fetch url (path/join work "demo") first-commit)) first-commit)
+          (is (includes? (:error (grammar-fetch url
+                                   (path/join work "demo")
+                                   (string/substring first-commit 0 12)))
+                "abbreviated")))
+        (file/rmdir root)))
+
+    (test "a revision the repository does not have is an error, not the default branch"
+      (let (root (temp-dir "brood-grammarpin-")
+            repository (path/join root "repo"))
+        (file/mkdir (path/join repository "src"))
+        (tsm-git repository "init" "-q")
+        (tsm-commit repository "1")
+        (is (contains? (grammar-fetch (str "file://" repository) (path/join root "work") "v9.9.9")
+              :error))
+        (file/rmdir root)))))
+
+(describe "the manifest's place"
+  (test "beside the library, not a library itself"
+    (assert= (grammar-manifest-path "/g/libtree-sitter-c-sharp.so")
+      "/g/libtree-sitter-c-sharp.manifest"))
+  (test "a library with no manifest has none"
+    (assert= (grammar-manifest "/nonexistent/libtree-sitter-x.so") nil)))
+
+;; A library rebuilt IN PLACE and loaded again is the new build (ADR-583). The dynamic loader
+;; answers a name it has opened with the object it already has, so before the private
+;; content-named copy this kept parsing with the first build until the process restarted.
+;; Two one-line shims export the same entry point, `tree_sitter_tsswap`, each answering a
+;; different installed grammar (JSON, then TOML) — two builds of one "language" whose node
+;; kinds tell them apart, compiled in a moment.
+(defn- tsm-shim (dir grammar out)
+  ;; a library exporting `tree_sitter_tsswap` that answers `grammar`'s language
+  (let (source (path/join dir (str "shim-" grammar ".c"))
+        entry (str "tree_sitter_" grammar))
+    (file/spit source
+      (str "extern const void *"
+        entry "(void);\n" "const void *tree_sitter_tsswap(void) { return " entry "(); }\n"))
+    (os/cmd "cc"
+      ["-shared"
+        "-fPIC"
+        "-o"
+        out
+        source
+        (str "-L" tsm-grammar-dir)
+        (str "-l:libtree-sitter-" grammar ".so")
+        (str "-Wl,-rpath," tsm-grammar-dir)])))
+
+(when (and (os/which "cc")
+        (file/exists? (str tsm-grammar-dir "libtree-sitter-json.so"))
+        (file/exists? (str tsm-grammar-dir "libtree-sitter-toml.so")))
+  (describe "a grammar replaced at the same path and loaded again"
+    (test "the new build is the one in use, and a held tree of it parses afresh"
+      (let (root (temp-dir "brood-grammarpin-")
+            library (path/join root "libtree-sitter-tsswap.so")
+            built-json (path/join root "json.so")
+            built-toml (path/join root "toml.so"))
+        (file/mkdir root)
+        (tsm-shim root "json" built-json)
+        (tsm-shim root "toml" built-toml)
+        (file/cp built-json library)
+        (%tree-sitter-load-grammar library :tsswap)
+        (let (first-info (grammar-info :tsswap)
+              tree (open-tree "{\"a\": 1}\n" :tsswap))
+          (is (contains? (:named first-info) :object))
+          ;; opened from a copy beside it, which is gone once mapped
+          (assert= (:loaded-via first-info) :beside)
+          (assert= (sort (file/ls root))
+            (sort ["json.so" "libtree-sitter-tsswap.so" "shim-json.c" "shim-toml.c" "toml.so"]))
+          ;; rebuilt in place: a new file at the same path
+          (file/rm library)
+          (file/cp built-toml library)
+          (%tree-sitter-load-grammar library :tsswap)
+          (let (second-info (grammar-info :tsswap))
+            (is (contains? (:named second-info) :table))
+            (refute (contains? (:named second-info) :object))
+            (assert= (:source second-info) library)
+            (refute (= (grammar-fingerprint first-info) (grammar-fingerprint second-info)))
+            ;; a parse is the new grammar's, and the held tree of the old one is not
+            ;; reparsed from: what changed is everything
+            (assert= (:kind (%tree-sitter-parse "a = 1\n" :tsswap)) :document)
+            (let (next (update-tree tree "a = 1\n" :tsswap))
+              (assert= (tree-changes next) true)
+              (free-tree next)))
+          (free-tree tree))
+        ;; the same build loaded again is the object already loaded, not a second one
+        (%tree-sitter-load-grammar library :tsswap)
+        (is (contains? (:named (grammar-info :tsswap)) :table))
+        (file/rmdir root)))
+
+    ;; A grammar directory the user cannot write: the copy goes to the user's cache directory,
+    ;; and the rebuilt library is still the one in use. (Skipped as root, who writes anyway.)
+    (test "a read-only grammar directory falls back to the cache"
+      (let (root (temp-dir "brood-grammarpin-")
+            locked (path/join root "locked")
+            library (path/join locked "libtree-sitter-tsswap.so")
+            built-json (path/join root "json.so"))
+        (file/mkdir locked)
+        (tsm-shim root "json" built-json)
+        (file/cp built-json library)
+        (os/cmd "chmod" ["555" locked])
+        (when (not (os/cmd-ok? (os/cmd "sh" ["-c" "touch \"$1/probe\"" "sh" locked])))
+          (%tree-sitter-load-grammar library :tsswap)
+          (let (info (grammar-info :tsswap))
+            (assert= (:loaded-via info) :cache)
+            (assert= (:source info) library)
+            (is (contains? (:named info) :object))))
+        (os/cmd "chmod" ["755" locked])
+        (file/rmdir root)))))

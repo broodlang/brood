@@ -23,7 +23,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(2, 3),
         Sig::with_rest(vec![string, list_ty.union(vec_ty)], map_ty, subprocess_ty),
         &["prog", "args", "opts"],
-        "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment, a nil value removing one. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages; [:proc-exit handle code] arrives the moment the child itself exits, after the output it wrote before exiting (code is the exit status, or nil if signalled), even while a background job it started still holds its stdout; and [:proc-closed handle code] is the last message, once the child has exited AND its output is at end of file (or os/close ended it). Returns a subprocess handle. Throws if prog can't be spawned.",
+        "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment, a nil value removing one; :raw-args true (Windows) puts the arguments into the command line unquoted, as cmd.exe /c needs. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages; [:proc-exit handle code] arrives the moment the child itself exits, after the output it wrote before exiting (code is the exit status, or nil if signalled), even while a background job it started still holds its stdout; and [:proc-closed handle code] is the last message, once the child has exited AND its output is at end of file (or os/close ended it). Returns a subprocess handle. Throws if prog can't be spawned.",
         proc_spawn);
     // The same seam under a pseudo-terminal, for a child that expects to BE in a
     // terminal — a REPL, a shell, anything that asks `isatty` and drops its prompt,
@@ -43,6 +43,24 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["p", "cols", "rows"],
         "Tell pty child p its terminal is now cols x rows; it sees SIGWINCH and redraws. Returns nil; throws if p is unknown, closed, or was spawned with pipes rather than a pty.",
         pty_resize);
+    // How a pty child's terminal reads input (termios ECHO and ICANON, ADR-570): a
+    // program reading a password turns echo off and keeps line mode, so a host that shows
+    // the child's input itself — an editor's line-mode REPL — knows to read that line
+    // masked instead.
+    primitives.def(
+        "%pty-mode",
+        Arity::exact(1),
+        Sig::new(vec![subprocess_ty], map_or_nil),
+        &["p"],
+        "How pty child p's terminal is reading input right now: {:echo bool :canonical bool} — its termios ECHO flag (the line discipline echoes what is typed) and ICANON flag (input is read a line at a time). A program reading a password (sudo, ssh, getpass) turns echo off and keeps canonical mode for that read; a program with its own line editor (readline, a REPL in raw mode) turns both off. Returns nil when p is unknown or already closed, or off Unix, where nothing is known. Throws if p was spawned with pipes rather than a pty.",
+        pty_mode);
+    primitives.def(
+        "%os-detach",
+        Arity::range(2, 3),
+        Sig::with_rest(vec![string, list_ty.union(vec_ty)], map_ty, nil_ty),
+        &["prog", "args", "opts"],
+        "Start prog (a string) with args and let it go: its stdio is the null device, no handle is returned, and it is not stopped when the caller dies — not in the caller's process group, nor its Job Object on Windows. For handing something to another application (a browser, a file manager) that must outlive the caller. Options as %proc-spawn, plus :raw-args. Returns nil; throws if prog can't be started.",
+        os_detach);
     primitives.def(
         "%proc-send",
         Arity::exact(2),
@@ -71,7 +89,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![subprocess_ty, kw], nil_ty),
         &["p", "sig"],
-        "Send signal sig (:int, :term, :hup, :quit or :kill) to subprocess p's whole process group — the child and everything it started — and leave it running if it chooses to survive. :int is Ctrl-C. If it exits, [:proc-exit handle code] arrives as for any exit; until [:proc-closed …] the group can still be signalled, which reaches descendants the child left running. Returns nil; throws if p is unknown/closed or sig is not one of those. Unix only.",
+        "Send signal sig (:int, :term, :hup, :quit, :kill, or the job-control :tstp, :stop, :cont, :winch) to subprocess p's whole process group — the child and everything it started — and leave it running if it chooses to survive. :int is Ctrl-C. If it exits, [:proc-exit handle code] arrives as for any exit; until [:proc-closed …] the group can still be signalled, which reaches descendants the child left running. Returns nil; throws if p is unknown/closed or sig is not one of those. Unix only.",
         proc_signal);
 }
 
@@ -95,6 +113,7 @@ struct SpawnSpec {
     argv: Vec<String>,
     cwd: Option<String>,
     env: Vec<EnvEntry>,
+    raw_args: bool,
 }
 
 /// The `:cwd` and `:env` of a child-process options map — read the one way `os/spawn`,
@@ -105,9 +124,9 @@ pub(super) fn child_options(
     heap: &Heap,
     who: &str,
     opts: Value,
-) -> Result<(Option<String>, Vec<EnvEntry>), LispError> {
+) -> Result<ChildOptions, LispError> {
     let Value::Map(opts) = opts else {
-        return Ok((None, Vec::new()));
+        return Ok(ChildOptions::default());
     };
     let cwd = match heap.map_get(opts, value::kw("cwd")) {
         Some(Value::Nil) | None => None,
@@ -124,7 +143,19 @@ pub(super) fn child_options(
             env.push((name, value));
         }
     }
-    Ok((cwd, env))
+    let raw_args = heap
+        .map_get(opts, value::kw("raw-args"))
+        .is_some_and(crate::eval::truthy);
+    Ok(ChildOptions { cwd, env, raw_args })
+}
+
+/// A child-process options map, read: `:cwd`, `:env`, and `:raw-args` (Windows: the
+/// arguments go into the command line as given, unquoted — KI-364; ignored elsewhere).
+#[derive(Default)]
+pub(super) struct ChildOptions {
+    pub(super) cwd: Option<String>,
+    pub(super) env: Vec<EnvEntry>,
+    pub(super) raw_args: bool,
 }
 
 fn spawn_spec(heap: &Heap, who: &str, args: &[Value]) -> Result<SpawnSpec, LispError> {
@@ -133,12 +164,13 @@ fn spawn_spec(heap: &Heap, who: &str, args: &[Value]) -> Result<SpawnSpec, LispE
     for a in heap.seq_items(arg(args, 1))? {
         argv.push(expect_string(heap, who, a)?);
     }
-    let (cwd, env) = child_options(heap, who, arg(args, 2))?;
+    let ChildOptions { cwd, env, raw_args } = child_options(heap, who, arg(args, 2))?;
     Ok(SpawnSpec {
         prog,
         argv,
         cwd,
         env,
+        raw_args,
     })
 }
 
@@ -148,13 +180,31 @@ pub(super) fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
         argv,
         cwd,
         env,
+        raw_args,
     } = spawn_spec(heap, "os/spawn", args)?;
     let owner = crate::process::self_pid();
-    match crate::host::subprocess::spawn(&prog, &argv, cwd.as_deref(), &env, owner) {
+    match crate::host::subprocess::spawn(&prog, &argv, cwd.as_deref(), &env, raw_args, owner) {
         Ok(id) => Ok(Value::subprocess(id)),
         Err(e) => Err(LispError::runtime(format!("os/spawn {}: {}", prog, e))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)),
     }
+}
+
+/// `(os/detach prog args opts)` — start a program and let it go (see
+/// [`crate::host::subprocess::detach`]).
+pub(super) fn os_detach(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let SpawnSpec {
+        prog,
+        argv,
+        cwd,
+        env,
+        raw_args,
+    } = spawn_spec(heap, "os/detach", args)?;
+    crate::host::subprocess::detach(&prog, &argv, cwd.as_deref(), &env, raw_args).map_err(|e| {
+        LispError::runtime(format!("os/detach {}: {}", prog, e))
+            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
+    })?;
+    Ok(Value::nil())
 }
 
 /// `(pty-spawn prog args opts)` — like `proc-spawn`, but the child runs under a
@@ -166,6 +216,7 @@ pub(super) fn pty_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         argv,
         cwd,
         env,
+        raw_args,
     } = spawn_spec(heap, "os/spawn-pty", args)?;
     let mut cols: u16 = 80;
     let mut rows: u16 = 24;
@@ -182,8 +233,16 @@ pub(super) fn pty_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         }
     }
     let owner = crate::process::self_pid();
-    match crate::host::subprocess::spawn_pty(&prog, &argv, cwd.as_deref(), &env, owner, cols, rows)
-    {
+    match crate::host::subprocess::spawn_pty(
+        &prog,
+        &argv,
+        raw_args,
+        cwd.as_deref(),
+        &env,
+        owner,
+        cols,
+        rows,
+    ) {
         Ok(id) => Ok(Value::subprocess(id)),
         Err(e) => Err(LispError::runtime(format!("os/spawn-pty {}: {}", prog, e))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)),
@@ -199,6 +258,21 @@ pub(super) fn pty_resize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     crate::host::subprocess::pty_resize(id, cols, rows)
         .map_err(|e| LispError::runtime(format!("os/resize-pty: {}", e)))?;
     Ok(Value::nil())
+}
+
+/// `(pty-mode handle)` — `{:echo bool :canonical bool}`, how a pty child's terminal reads
+/// input right now; nil when the child is gone, so a caller checking at a prompt need not
+/// race its exit — and for a Windows ConPTY child, which has no termios to ask.
+pub(super) fn pty_mode(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_subprocess(heap, "os/pty-mode", arg(args, 0))?;
+    match crate::host::subprocess::pty_input_mode(id) {
+        Ok(Some(mode)) => Ok(heap.map_from_pairs(vec![
+            (value::kw("echo"), Value::boolean(mode.echo)),
+            (value::kw("canonical"), Value::boolean(mode.canonical)),
+        ])),
+        Ok(None) => Ok(Value::nil()),
+        Err(e) => Err(LispError::runtime(format!("os/pty-mode: {}", e))),
+    }
 }
 
 pub(super) fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

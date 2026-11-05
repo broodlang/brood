@@ -109,7 +109,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::at_least(1),
         Sig::new(vec![string, seq, map_ty], map_ty),
         &["prog", "&", "args", "opts"],
-        "Run prog (with optional args list and an opts map {:cwd :env :stdin :timeout-ms}) to completion; returns {:stdout s :stderr s :exit n}, plus :timed-out true when the timeout ended the call. The timeout bounds the WHOLE call — a grandchild still holding the output pipes is killed with the child's process group.",
+        "Run prog (with optional args list and an opts map {:cwd :env :stdin :timeout-ms :raw-args}) to completion; returns {:stdout s :stderr s :exit n}, plus :timed-out true when the timeout ended the call. The timeout bounds the WHOLE call — a grandchild still holding the output pipes is killed with the child's process group.",
         os_cmd);
     primitives.def(
         "%halt",
@@ -341,14 +341,16 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             argv.push(expect_string(heap, "%os-cmd", a)?);
         }
     }
-    cmd.args(&argv);
+    let super::subprocesses::ChildOptions { cwd, env, raw_args } =
+        super::subprocesses::child_options(heap, "os/cmd", arg(args, 2))?;
+    crate::host::subprocess::add_args(&mut cmd, &argv, raw_args);
+    crate::host::subprocess::own_hidden_console(&mut cmd);
     // a responsive process is told it waited, or refused the wait (ADR-517)
     let blocking = crate::process::responsive::enter_blocking(heap, "os/cmd", || {
         crate::process::responsive::command_detail(&prog, &argv)
     })?;
     let mut stdin_text: Option<String> = None;
     let mut timeout: Option<std::time::Duration> = None;
-    let (cwd, env) = super::subprocesses::child_options(heap, "os/cmd", arg(args, 2))?;
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -374,11 +376,10 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     });
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // its own session: its own process group (killpg ends what it started) and no
+    // controlling terminal, so nothing it runs can prompt on, or stop reading, ours
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    crate::host::subprocess::new_session(&mut cmd);
     let fail = |e: std::io::Error| {
         LispError::runtime(format!("%os-cmd: {prog}: {e}"))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
@@ -435,6 +436,7 @@ enum Stop {
 
 /// The longest one wait of `%os-cmd` runs before it looks for its caller's exit signal
 /// again — how long a killed caller's child can outlive it.
+#[cfg(unix)]
 const KILL_CHECK: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// What `%os-cmd` collects from a finished (or killed) child: its status, stdout,
@@ -604,7 +606,7 @@ fn os_cmd_collect(
     // neither.
     let status = loop {
         if stop.is_some() {
-            // SAFETY: killpg on the group `process_group(0)` made for this child; the
+            // SAFETY: killpg on the group the child leads (`new_session` made it a session leader); the
             // child is not reaped yet, so its pid (the group id) cannot have been reused.
             unsafe {
                 libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
@@ -623,8 +625,9 @@ fn os_cmd_collect(
 }
 
 /// The portable fallback: a thread per pipe, the child killed at the deadline or when
-/// `killed` says the caller is dying. Without process groups a grandchild holding a pipe
-/// can still outlast either here.
+/// `killed` says the caller is dying. On Windows every process the child started goes
+/// with it (a `ProcessTree`); elsewhere off Unix a grandchild holding a pipe can still
+/// outlast either.
 #[cfg(not(unix))]
 fn os_cmd_collect(
     mut child: std::process::Child,
@@ -633,6 +636,13 @@ fn os_cmd_collect(
     killed: fn() -> bool,
 ) -> std::io::Result<OsCmdOutcome> {
     use std::io::{Read, Write};
+    let tree = crate::host::subprocess::ProcessTree::of(&child);
+    let stop_child = |child: &mut std::process::Child| {
+        if let Some(tree) = &tree {
+            tree.terminate();
+        }
+        let _ = child.kill();
+    };
     // `Builder::spawn`, not `thread::spawn`: the OS can refuse a thread (KI-241), and the
     // child is already running, so a refusal kills and reaps it and is the call's error.
     let stdin_pipe = child.stdin.take();
@@ -675,7 +685,7 @@ fn os_cmd_collect(
         }
         stop = os_cmd_stop(deadline, killed);
         if stop.is_some() {
-            let _ = child.kill();
+            stop_child(&mut child);
             break child.wait()?;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -807,10 +817,14 @@ pub(super) fn interrupt_taken(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult
 
 /// The signals a Brood process may trap, by the keyword it names them with.
 #[cfg(unix)]
-const TRAPPABLE_SIGNALS: [(&str, libc::c_int); 3] = [
+const TRAPPABLE_SIGNALS: [(&str, libc::c_int); 5] = [
     ("term", libc::SIGTERM),
     ("int", libc::SIGINT),
     ("hup", libc::SIGHUP),
+    // job control, for a full-screen terminal app that must give the terminal back before it
+    // stops and repaint after it continues (ADR-586)
+    ("tstp", libc::SIGTSTP),
+    ("cont", libc::SIGCONT),
 ];
 
 /// One trappable signal's trap.
@@ -822,6 +836,8 @@ struct Trap {
     /// leaves on SIGHUP, the REPL's Ctrl-C handler — put back when the trap is lifted or
     /// its subscriber has exited.
     prior: Option<libc::sigaction>,
+    /// Whether a signal has been handed to the subscriber since it trapped it.
+    delivered: bool,
 }
 
 #[cfg(unix)]
@@ -841,17 +857,18 @@ impl Trap {
 /// reads it (it only writes the pipe), so a lock is safe, and it orders a trap against the
 /// reader thread lifting one.
 #[cfg(unix)]
-static SIGNAL_TRAPS: std::sync::Mutex<[Trap; 3]> = std::sync::Mutex::new(
+static SIGNAL_TRAPS: std::sync::Mutex<[Trap; 5]> = std::sync::Mutex::new(
     [const {
         Trap {
             subscriber: 0,
             prior: None,
+            delivered: false,
         }
-    }; 3],
+    }; 5],
 );
 
 #[cfg(unix)]
-fn signal_traps() -> std::sync::MutexGuard<'static, [Trap; 3]> {
+fn signal_traps() -> std::sync::MutexGuard<'static, [Trap; 5]> {
     SIGNAL_TRAPS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -912,7 +929,13 @@ fn start_signal_pipe() -> Result<(), String> {
             };
             let mut traps = signal_traps();
             let subscriber = traps[index].subscriber;
-            if subscriber != 0 && crate::process::is_alive(subscriber) {
+            // A SECOND SIGTERM or SIGHUP while trapped is the default action: the first was
+            // handed over and the program has not ended — a wedged loop, a hook that hangs —
+            // and whoever sent it again means it (ADR-586). Ctrl-C and job control repeat.
+            let escalate =
+                traps[index].delivered && matches!(TRAPPABLE_SIGNALS[index].0, "term" | "hup");
+            if subscriber != 0 && crate::process::is_alive(subscriber) && !escalate {
+                traps[index].delivered = true;
                 crate::process::deliver(
                     subscriber,
                     crate::process::Message::Vector(vec![
@@ -921,7 +944,8 @@ fn start_signal_pipe() -> Result<(), String> {
                     ]),
                 );
             } else {
-                // Nobody is left to act on it: the signal does what it did before it was
+                // Nobody is left to act on it (or it is a repeated SIGTERM / SIGHUP): the
+                // signal does what it did before it was
                 // trapped, so a dead subscriber cannot make the runtime unkillable.
                 traps[index].lift(signum);
                 drop(traps);
@@ -956,7 +980,7 @@ pub(super) fn trap_signal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             .position(|(n, _)| *n == name.as_str())
         else {
             return Err(LispError::runtime(format!(
-                "%trap-signal: cannot trap :{name} (expected :term, :int or :hup)"
+                "%trap-signal: cannot trap :{name} (expected :term, :int, :hup, :tstp or :cont)"
             )));
         };
         let subscriber = match arg(args, 1) {
@@ -987,6 +1011,7 @@ pub(super) fn trap_signal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             trap.lift(signum);
         } else {
             trap.subscriber = subscriber;
+            trap.delivered = false;
             // Installed on every trap (something may have replaced the handler since), but
             // the disposition to restore is the one from before the FIRST trap.
             unsafe {

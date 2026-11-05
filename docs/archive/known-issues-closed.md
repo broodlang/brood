@@ -5,6 +5,92 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-364 — Windows has no platform shell: a `sh -c` command needs an `sh` on PATH ✅ fixed 2026-11-04
+
+**Symptom.** On Windows every program that ran a command line as `(os/cmd "sh" ["-c" line])`
+— bedit's M-! / M-|, M-x compile, the project shell — raised `program not found` unless an
+`sh` was on PATH (Git for Windows, MSYS2). CI's Windows runner has Git's `sh` on PATH in a
+bash step, so bedit's `shell_command_test` passed there and proved nothing about a machine
+without one.
+
+**Cause.** Brood had no notion of the platform's command interpreter, and the obvious one,
+`cmd.exe /d /s /c LINE`, could not be spelled through `os/cmd`: the kernel built the Windows
+command line with the MSVC quoting rules (`Command::arg`), which put `\"` inside a quoted
+argument, and `cmd` does not read `\"` — any line holding a double quote reached it mangled.
+
+**Why it survived.** Nothing ran a command line on Windows until the platform smoke job.
+
+**Fix.** `:raw-args` on `os/cmd`, `os/spawn` and `os/detach`: on Windows the arguments are
+written into the command line as given (`CommandExt::raw_arg`); ignored elsewhere.
+`os/shell` is the platform's interpreter (`["sh" "-c"]`, or `[%COMSPEC% "/d" "/s" "/c"]`),
+and `os/shell-cmd` / `os/shell-spawn` run a line through it — on Windows as `"LINE"`, raw,
+which `cmd /s` strips and runs as typed. bedit's M-! / M-|, compile and project shell use
+them. A deliberate non-fix: an `sh` on PATH is not preferred over `cmd.exe` on Windows; a
+line is written in the platform shell's language, as Emacs's `shell-file-name` default does.
+
+**Guard.** `tests/platform_test.blsp` "the platform's shell": a line with quotes and two
+spaces echoed back exactly, a pipe and `&&`, an exit code, `os/shell-spawn` streaming — on
+the Windows runner (cmd prints the quotes) and on macOS and Linux (sh removes them).
+
+## KI-365 — `file/spit-private` is not private on Windows ✅ fixed 2026-11-04
+
+**Symptom.** `file/spit-private` writes a file readable by its owner only (0600) on Unix. On
+Windows it was a plain `File::create`, so the file took its directory's inherited ACL —
+under a shared directory as readable as the directory. bedit's auto-save sidecars use it.
+
+**Cause.** `nodes.rs`'s `spit_private` had a `cfg(unix)` arm only, and `file/stat`'s
+`:mode` is 0 on Windows, so nothing could report it.
+
+**Why it survived.** No test ran on Windows that asked.
+
+**Fix.** After the create and before the first byte, the file's DACL is replaced with a
+protected one granting the current user (from the process token) full control and nothing
+else — no inherited entries, no group, no `Users` (`SetEntriesInAclW` +
+`SetNamedSecurityInfoW` with `PROTECTED_DACL_SECURITY_INFORMATION`).
+
+**Guard.** `tests/platform_test.blsp` "owner-only files": on Windows the ACL is read back
+with `icacls` — one entry, the current user's, not inherited; elsewhere mode 0600.
+
+## KI-369 — Windows has no pseudo-terminal: `os/spawn-pty` raises, so terminal buffers cannot run ✅ fixed 2026-11-04
+
+**Symptom.** On Windows `(os/spawn-pty prog args)` raised `pty-spawn: a pseudo-terminal on
+Windows needs ConPTY, which this runtime does not drive yet (KI-369)`. Everything built on a
+pty was Unix-only: bedit's terminal buffers (C-x p t, C-x p r, M-x claude, C-u M-x term) and
+its line-mode project REPL, which said so instead (`terminal/term-unavailable`).
+
+**Cause.** `host/subprocess.rs`'s pty half is `openpty` + `setsid` + `TIOCSCTTY` + termios,
+all Unix. Windows's equivalent, ConPTY (`CreatePseudoConsole`, Windows 10 1809+), attaches
+its child at creation through a `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` attribute list, which
+`std::process::Command` cannot pass on stable Rust — and the subprocess registry was built
+on `std::process::Child`.
+
+**Why it survived.** Nothing ran a pty on Windows; the platform smoke job ran `proc_test` on
+macOS only and asserted the raise on Windows.
+
+**Fix.** ADR-597. The registry's slot holds a `ChildProcess`: a `std::process::Child`, or on
+Windows a `ConsoleChild` — a raw process handle (`WaitForSingleObject` /
+`GetExitCodeProcess`, `TerminateProcess`) and the pseudoconsole — so the waiter, `close` and
+the reap serve both, and the reader / writer threads run over the two pipe ends unchanged.
+The spawn (`host/subprocess/conpty.rs`): two pipes, `CreatePseudoConsole`, the attribute list,
+`Command`'s argument quoting (or raw with `:raw-args`), a Unicode environment block,
+`CreateProcessW` suspended with its std handles set invalid under `STARTF_USESTDHANDLES` (a
+runtime with redirected stdio otherwise hands the child those), resumed inside its Job
+Object. The waiter closes the pseudoconsole after the exit, which is what ends the output
+pipe. `os/resize-pty` is `ResizePseudoConsole`. The ConPTY functions are looked up at run
+time, so a Windows before 10 1809 raises (`this Windows has no ConPTY …`) rather than failing
+to load the executable. `os/pty-mode` / `os/pty-password?` answer nil for a ConPTY child — a
+deliberate non-fix: a pseudoconsole has no termios, and nil is ADR-570's "unknown", so bedit
+falls back to the prompt's text. `os/shell-spawn-pty` runs a line through the platform's
+shell under a pty; bedit's terminal worker uses it, and `term-unavailable` is gone.
+
+**Guard.** `tests/pty_test.blsp` (portable, in the Windows and macOS smoke sets): output,
+stderr on the one channel, the exit code, `:env` / `:cwd`, size and resize (`mode con` on
+Windows), the input mode (nil on Windows), `cmd.exe` / `sh -i` answering a typed line, close;
+`tests/platform_test.blsp`'s pty case; `host::subprocess::conpty::command_line_tests` on the
+Windows runner; bedit's `terminal_test` (a live `cmd /k` taking keys on its screen) and
+`passwd_test` in its Windows smoke. Not sabotage-verified on Windows beyond the first run:
+before this change the same pty_test cases raised there (the entry's symptom).
+
 ## KI-102 — `tcp/set-binary` on an accepted socket is racy ✅ fixed 2026-09-02
 
 **Symptom.** `breakage/chaos2_tcp_stress.blsp` P38 ("binary mode round-trip") failed in CI:
@@ -15761,3 +15847,213 @@ is not Latin is read by the key's US position, an Option key that is not Meta (`
 **Guard.** `host::gui::backend::input::adr_541_tests`. With the positional fallback removed, four
 went red, e.g. `left: "ctrl-ф" right: "ctrl-a"` and `left: "-" right: "ctrl-'"`; restored, all
 ten green.
+
+## KI-360 — a terminal without the kitty keyboard protocol could not send `C-;`, `C-.`, `C-'` and friends ✅ FIXED 2026-11-04
+
+**Symptom.** In the terminal display (ADR-586) a chord the legacy keyboard encoding has no byte
+for — Control with most punctuation (`C-;`, `C-.`, `C-'`, `C-,`), `C-S-letter`, `C-<return>` —
+arrived as the bare key or not at all. bedit's `C-.` (embark) and `C-'` (avy) were unreachable
+there. kitty, foot, WezTerm, Ghostty, Alacritty 0.13+ and iTerm2 speak the kitty protocol, which
+`term-enter` turns on, and send every chord; xterm and tmux send them only through xterm's
+`modifyOtherKeys`.
+
+**Cause.** `modifyOtherKeys` (`CSI > 4 ; 2 m` turns it on) sends a chord as
+`CSI 27 ; mods ; code ~`. crossterm read the tty, and its parser has no case for that form — it
+dropped the sequence — so `term-enter` could not ask for it.
+
+**Fix.** On Unix Brood reads the tty itself (`builtins/terminal/native/tty.rs`) and decodes the
+bytes (`decoder.rs`) into crossterm's own `Event` values, so nothing downstream changed. The
+decoder reads everything crossterm read — the legacy keys, SS3, cursor and function keys with
+modifiers, the kitty protocol and `CSI u`, SGR / rxvt / X10 mouse, focus, bracketed paste — and
+adds `CSI 27 ; mods ; code ~`, the legacy bytes 0x1C–0x1F as `C-\ C-] C-^ C-_` (crossterm read
+`C-4`…`C-7`, so `C-/` was no undo), and a terminal's answers to queries swallowed. A resize, which
+writes no byte, is the terminal's size changing between reads (the wait is sliced at 50 ms).
+`term-enter` asks for `modifyOtherKeys` 2 where the kitty protocol is not spoken; every leave
+resets it (`CSI > 4 ; 0 m`). Under tmux, `set -g extended-keys on` lets the request through
+(tmux 3.5's `set -g extended-keys-format csi-u` sends the `CSI u` form, read as well). A terminal
+that speaks neither protocol (the Linux console, older VTE) has no way to send these chords at all.
+The Windows console sends no bytes; crossterm still reads it there.
+
+**Guard.** `decoder` unit tests on byte strings (modifyOtherKeys, `CSI u`, the legacy bytes, a
+sequence split across reads, queries' answers swallowed); `tests/term_display_test.blsp` under a
+pty: the request on enter, the reset on leave, `C-;` and `C-_` reaching the app.
+
+## KI-334 — a served session whose loop dies takes its unsaved buffers with it ✅ FIXED 2026-11-04
+
+**Symptom.** In bedit's local window, a loop that dies abnormally (a panic in a native call,
+an error outside `update` and `view`) has every unsaved file buffer auto-saved and a fresh loop
+started over the same buffers (bedit's `src/lifeline.blsp`). In a `serve` session the same
+death ends the session: the client sees the session's `[:down …]` and closes, and every buffer
+that lived in the session's model is gone — no sidecar, no restart. Found while giving served
+sessions the window's startup path (ADR-539's bedit side); not seen in use.
+
+**Cause.** Two halves. `serve-session` runs the app's `ui-run` unsupervised: the manager
+monitors the session and only forgets it on `[:down …]`, and ADR-519's parking covers the
+CLIENT going away, never the session's own loop. And bedit's recovery stands on things a
+served session does not have: its buffers are not hosted in processes of their own, because
+hosting goes through the buffer registry (`frames/frames-registry-start`), which registers
+the runtime-wide name `:buffer-registry` — one per runtime, so a registry per session
+collides on it, and one shared by every session would show each session (a guest's
+included) the others' buffers. A collab session already hosts its slot 0 through the collab
+registry, which a second hosting would double.
+
+**Why it survived.** Nothing kills a served session's loop in a test, and the window's
+lifeline tests run the window's loop. Served sessions started from a bare `ed-init` model
+until ADR-539, so nothing in them looked like the window's.
+
+**Fix.** ADR-593. A served session is a supervisor process running its loop linked: a loop
+that dies runs the app's `:supervise` `:on-crash` hook with what the loop handed
+`serve-retain`, then — within a budget of 3 a minute — restarts the loop from `:restart` for
+the same client, which is told the new loop (`[:reattached …]`), sends it again every key the
+dead loop never took and, monitoring the session rather than the loop, keeps its window. `registry-start` takes `{:owner pid}`: a registry that
+lives as long as its owner and stops its documents with it, so one per session needs no name
+and leaks nothing. bedit hosts a served private session's buffers in a registry the session
+owns (`remote/ed-served-host`), writes their sidecars from the buffer processes when the loop
+dies (`lifeline/emergency-save!`) and restarts over them (`remote/ed-served-restart`); a
+shared session saves from, and restarts over, the collab registry it already had.
+
+**Guard.** `tests/serve_test.blsp` "serve: a session supervises its loop (ADR-593)" (a loop
+that dies is restarted for the same client from what it retained; the window client keeps its
+window; the session's documents outlive its loop and are saved when the budget runs out; a
+parked session restarted and adopted; no restart, no supervision) and
+`tests/buffer_registry_test.blsp` "buffer-registry — an owner's lifetime"; bedit's
+`tests/remote_test.blsp` "remote — a served session's loop that dies is saved and restarted".
+
+## KI-357 — a module materialised from a startup image had fewer registry writers than its source load ✅ FIXED 2026-11-04
+
+**Symptom.** `registry/written-by #{'m}` (ADR-582) answers what module `m`'s load wrote when
+`m` loaded from source in this process. When `m` came out of a startup image instead, it
+answered less:
+
+- **The project image** (`.brood/image.bin`, ADR-218/419): nothing at all. A project or
+  dependency module materialised from it had no writer for any registry entry, map or list;
+  `%registry-writer` answered nil for each.
+- **The stdlib image**: map entries were credited (each module's registrations replay with the
+  module as their writer); list-registry members were not — the build skipped every registry
+  whose value is not a map. No std module adds a list member at load today
+  (`editor/layers`' `*system-layers*` and `*auto-type-by-file*` are filled by programs, not
+  by std), so nothing was lost yet.
+
+A program that loads and unloads plugins at run time was unaffected: a plugin loads from source,
+and its writes are credited as it loads. Not seen in use: bedit retires packages, never its
+own modules.
+
+**Cause.** The writer journal (`RuntimeCode::registry_writers`) is a property of the loads a
+process ran. The stdlib image carries each module's map registrations grouped by writer and
+replays them with `%registry-update! … key` (`%replay-std-regs!`), which re-credits them; it had
+no shape for a list member (whose position is precedence — `:append-new` vs `:cons-new` — and
+whose replay would reorder the list). The project image installs registry VALUES wholesale in
+its root section and replayed no registration.
+
+**Why it survived.** ADR-582's guards load their fixtures from source; the KI-136 differential
+(`image_registrations_match_source`) compared the keys an imaged module registers, and a map
+entry's writer, but no list member.
+
+**Fix.** ADR-595. `%registry-update!` gains `:credit` — name the writer of an entry that is
+already there (a map entry by its key path, a list member by `[index]`), the value untouched;
+a list member's journal slot keeps the op that added it (`%registry-members`). The stdlib image
+records a list member as `[registry nil member op]`, takes it out of the value it snapshots, and
+replays it with its op as the module materialises (`%replay-registrations!`). The project image
+carries `[registry path writer]` for every entry a carried load wrote (`*project-image-credits*`,
+in its root section) and credits them as the root section is installed, before the live entries
+are merged back.
+
+**Guard.** `crates/lisp/tests/image_registrations_match_source.rs` compares every entry's writer
+and every list member's writer and op, materialised against loaded, for each std module;
+`tests/registry_writers_test.blsp` — `:credit`, and a fixture's appended and consed members
+taken out and replayed into the same list with the same writers;
+`crates/nest/tests/project_image_registries.rs`
+`an_imaged_boot_credits_each_registry_entry_to_the_module_that_wrote_it` — a project module's
+map entry and list members credited to it on an imaged boot as on a source one.
+
+## KI-356 — a plugin's bare-closure hook registered from a timer or a process it spawned could not be taken back ✅ FIXED 2026-11-04
+
+**Symptom.** bedit removes or updates a package while it runs and takes back everything the
+package registered (ADR-582; bedit's `packages/retire-package`). One kind of registration
+survived the removal: a hook the package registers AT RUN TIME as a bare closure (an
+anonymous `fn`, not a symbol naming one of its functions) from a context that is neither a
+module load nor one of the package's commands or hooks — a timer callback, or a process the
+package spawned. The row stayed in its registry, holding a closure over code that is gone;
+calling it ran the old package's code. Not seen in use: bedit's own registries take hook
+SYMBOLS, and no installed package registers this way.
+
+**Cause.** Ownership had three sources and this write had none of them. The kernel journalled a
+registry write's writer only while a module LOAD is open (KI-136, ADR-582); bedit claims a
+run-time write for the package whose command or hook is running (`ownership/with-symbol-
+claimant`), but a timer or a spawned process runs outside that dynamic extent; and the
+retirement backstop finds a row by what it NAMES — a symbol in the package's namespaces, a
+named function defined in its files — and a bare closure names nothing (`pr-str` gives
+`#<fn>`).
+
+**Fix.** ADR-596, both halves the entry proposed. Every process has an ACTING WRITER, set at
+`spawn` to whoever the spawner's registry writes credit (the module whose load is spawning it,
+else the spawner's own acting writer), and a registry write outside any load credits it —
+so a worker a plugin's load spawned, and every process that one starts (a timer, a task), writes
+as the plugin. `registry/with-acting-writer` sets it for an extent; bedit's
+`ownership/with-symbol-claimant` runs a package's command or hook under it, and its claim falls
+back to it. `reflect/fn-module` answers the module an anonymous `fn` was written in
+(`Closure::module`, already kept for the contract boundary), and bedit's backstop matches a
+closure by it.
+
+**Guard.** `tests/registry_writers_test.blsp` "the acting writer" and "reflect/fn-module"; bedit's
+`tests/plugin_registry_test.blsp` "bare closures a package registers from its processes and
+timers" — a closure from a worker the package's load spawned, from a timer's fire hook and from
+a process that hook started, each credited to the package and gone after its removal.
+## KI-313 — KI-309 again: `interrupt_one_worker`'s native-walk case blocked its worker twice ✅ FIXED 2026-11-05
+
+**Symptom.** `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` failed `<= dirty + 1`
+("a native walk blocked more than once") in the Nightly on `a1bced33` (run 41188576448, suite run
+3 of 3), with KI-309's fix in; the next Nightly on the same commit passed. 1980 isolated runs on
+the test machine passed.
+
+**Reproduced** on CI (Diagnose, `what=ki313`, branch `ki313-interrupt`). What decides it is the
+cache, not the load: after one full suite run has left its stdlib image
+(`~/.cache/brood/std-image-*.bin`) in the cache, the case alone fails in 86% of runs (9439 of
+10 909 in run 41928675391; 15 548 failures in run 41899292020, where a suite started beside the
+loop); on a runner whose cache the suite never touched it passes 0 of 73 000 times (runs
+41922281541, 41925654344). The bail trace of a failure:
+
+```
+[jit-bail] dirty-receive-block gateway-token=1 pid=2
+[jit-bail] arm=%vector-fold-walk uid=246 reason=suspend-latched
+[jit-bail] dirty-receive-block gateway-token=1 pid=4
+[jit-bail] arm=%vector-fold-walk uid=248 reason=suspend-latched
+```
+
+Two different arms of the one function: 15 500 of the 15 548 failures had this shape.
+
+**Cause.** The suspend-host latch took one `CompiledArm` off native code, and a function can
+have several at once. With the stdlib image cached, the root process compiled a second arm of
+`%vector-fold-walk` (uid 248) while the waiter (pid 2) ran its own copy, and 248 adopted the
+walk's published native code before the waiter blocked. The waiter's block latched its copy
+and retracted the published code (KI-309), but 248 already held it: `late` (pid 4) took 248
+from the shared closures, ran it natively and blocked its worker too. Why the root compiled a
+second copy in that setting was not pinned down (a recompile after a module load staled the
+first, ADR-366, is the likely route); copies are legitimate either way, which is why the fix
+does not depend on it.
+
+The other 48 failures were the test's own: two processes in the same native arm at once.
+A latch lands when the blocked activation exits, and `late` exits only once interrupted, while
+the program had already spawned `woken`, whose walk ran natively beside it and blocked too.
+
+**Why it survived.** The case passes on a fresh cache, which is every isolated loop (the test
+machine's 1980 runs, Diagnose's `repeat`). Only the suite writes the stdlib image, and the
+Nightly runs the case inside the suite, after other binaries have written it.
+
+**Fix.** The latch is the function's (`RuntimeCode::suspend_latches`). Every copy of an arm
+passes `Heap::jit_suspend_admit` before it can go native — adopting published code, or the
+election that queues its own compile — and the latch (`jit_latch_suspend_host`) marks the
+`share_key` and latches every admitted copy (`Heap::jit_suspend_latch_function`); a copy that
+asks after it is latched on the spot. One lock orders the two, and a copy latched between
+admission and install loses its compare-and-swap over `BAILED`. The latches are forgotten with
+the shared closures, since the key is a closure handle a freed generation recycles. And
+`waits_in_a_window` takes each waiter's answer before spawning the next, so no two walks
+overlap. The dirty-block trace line names the process, and the case's failure says how many
+blocks it saw.
+
+**Guard.** `a_suspend_latch_reaches_every_copy_of_the_function` (two copies admitted, one
+latched, the other must be too; a copy admitted afterwards is refused) — red on CI with the
+sweep removed (Diagnose 41933986722, "another copy of the latched function stayed native").
+The case itself, primed with a suite run: 0 of 83 845 runs failed with the fix and the bail
+trace armed (run 41933986722), and 0 of 89 076 on the final commits with no trace, after four
+green full suites (run 41939859441) — against 86% without the fix.

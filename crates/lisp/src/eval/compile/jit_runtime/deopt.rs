@@ -268,9 +268,13 @@ pub(crate) fn jit_latch_suspend_host(heap: &Heap, arm: &CompiledArm) {
     arm.latch_bailed("suspend-latched");
     // And take back what it published: another copy of the same closure's arm, untried or
     // still queued, would adopt that native code from the shared cache and block its worker
-    // the same way (KI-309). The code stays alive for a peer still running it.
+    // the same way (KI-309). The code stays alive for a peer still running it. Then latch
+    // the function, not just this copy: a copy that already adopted or compiled native
+    // code — a recompile after a module load, a peer's own compile — would block the next
+    // process's worker in turn (KI-313).
     if let Some(key) = arm.share_key {
         heap.jit_shared_retract(key);
+        heap.jit_suspend_latch_function(key);
     }
 }
 
@@ -279,8 +283,9 @@ pub(crate) fn jit_latch_suspend_host(heap: &Heap, arm: &CompiledArm) {
 /// none — so that one latches too when it exits. Every native frame under the blocked
 /// `receive` keeps the process uncapturable, and the latch only ever named the innermost: a
 /// native walk calling a native reducer latched the reducer, and the walk, still native,
-/// blocked its worker again on the next call before it latched in turn (KI-313). Only an
-/// enclosing activation is still live, so a native that runs later is never blamed.
+/// blocked its worker again on the next call before it latched in turn (found chasing
+/// KI-313). Only an enclosing activation is still live, so a native that runs later is
+/// never blamed.
 #[cfg(feature = "jit")]
 pub(crate) fn blame_enclosing_gateway(heap: &mut Heap) {
     heap.blocked_under_gateway = heap.cur_native_gateway;

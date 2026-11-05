@@ -1,23 +1,518 @@
-;; std/ansi.blsp — ANSI / VT100 escape-sequence stripping.
-;; Callers use `ansi/strip` — a qualified name loads the module. Pure Brood over string
-;; primitives, no IO or editor dependency — reusable in any process that reads
-;; pipe output from a subprocess that emits colour escapes (a shell, a build
-;; tool, a test runner).
+;; std/ansi.blsp — ANSI / VT escape sequences in program output: a STREAMING decoder that
+;; turns output into text plus SGR attributes, the SGR attribute model and its colours
+;; (shared with `vt`, the full terminal emulator), `strip` and `render`.
+;; Pure Brood over string primitives, no IO or editor dependency — reusable in any process
+;; that reads pipe output from a subprocess that emits escapes (a shell, a build tool, a
+;; test runner, the REPL, nest's own output capture).
 (defmodule ansi
-  "ANSI / VT100 escape-sequence stripping for pipe output.
-Strips CSI colour/cursor sequences (`ESC [ … letter`, the SGR `m` and cursor
-`A`–`D`/`H`/`J`/`K` family) and bare carriage returns (`\\r`) — the characters a
-subprocess emits when it detects a TTY but gets a pipe instead. `strip` is
-the public entry point; the helpers are private (`--`).")
+  "ANSI / VT escape sequences in program output.
+
+- [[decoder]] / [[feed]] — a STREAMING decoder: a chunk of output in, `[text attr]`
+  segments out, the SGR attributes (colour, bold, italic, underline, …) carried across
+  chunks and a sequence SPLIT across two reads kept pending until its rest arrives, so
+  half an escape never shows as text. Every other escape (cursor motion, erase, OSC
+  titles and hyperlinks, DCS, charset selection) is consumed. Emacs's `ansi-color` with
+  its `ansi-color-context`.
+- [[sgr]] / [[params]] — the SGR attribute fold, `{:fg :bg :bold :dim :italic :underline
+  :underline-style :underline-colour :inverse :strike}`, `:` sub-parameters (`4:3`,
+  `38:2::r:g:b`) read per ECMA-48 / ITU T.416; [[colour]] / [[face]] / [[xterm-palette]] — an attribute as display
+  colours. `vt` (the terminal emulator) uses the same model.
+- [[strip]] — the escapes and carriage returns removed from a whole string.
+- [[render]] — the cursor and erase sequences a line editor emits, applied.")
+
+;; ---- SGR: the attribute state ------------------------------------------------------------
+;; An attribute is nil (the default face) or a map of the keys set: `:fg` / `:bg` /
+;; `:underline-colour` a palette index (0–255) or a true colour `[r g b]`, the flags `:bold
+;; :dim :italic :underline :inverse :strike`, and `:underline-style` — `:double :curly
+;; :dotted :dashed` beside `:underline true` (a single underline has no style key). `vt`
+;; keeps one per cell; the decoder keeps the current one.
+
+(def- sgr-flags
+  ;; parameter -> the `[key value]` pairs it sets (nil clears); 22 clears bold AND dim, and
+  ;; a plain 4 is a SINGLE underline, so it drops a style a `4:3` set
+  {1 [[:bold true]]
+   2 [[:dim true]]
+   3 [[:italic true]]
+   4 [[:underline true] [:underline-style nil]]
+   7 [[:inverse true]]
+   9 [[:strike true]]
+   22 [[:bold nil] [:dim nil]]
+   23 [[:italic nil]]
+   24 [[:underline nil] [:underline-style nil]]
+   27 [[:inverse nil]]
+   29 [[:strike nil]]
+   39 [[:fg nil]]
+   49 [[:bg nil]]
+   59 [[:underline-colour nil]]})
+
+(def- underline-styles
+  ;; the `4:n` sub-parameter (ITU T.416, as kitty / VTE / iTerm2 read it) -> the pairs it sets
+  {0 [[:underline nil] [:underline-style nil]]
+   1 [[:underline true] [:underline-style nil]]
+   2 [[:underline true] [:underline-style :double]]
+   3 [[:underline true] [:underline-style :curly]]
+   4 [[:underline true] [:underline-style :dotted]]
+   5 [[:underline true] [:underline-style :dashed]]})
+
+(def- colour-keys
+  ;; the extended-colour parameter -> the key its colour goes to
+  {38 :fg 48 :bg 58 :underline-colour})
+
+(defn- attr-pairs (attr: (or nil map) pairs: (or nil vector) -> (or nil map))
+  (fold pairs attr (fn (a kv) (attr-set a (first kv) (second kv)))))
+
+(defn- attr-set (attr: (or nil map) k:keyword v:any -> (or nil map))
+  "`attr` with `k` set (removed when `v` is nil), nil once empty — the default face has no map."
+  (let (a (if (nil? v) (dissoc (or attr {}) k) (assoc (or attr {}) k v)))
+    (if (empty? a) nil a)))
+
+(defn- channel-at (parameters:vector j:int -> (or nil int))
+  "Parameter `j` as a colour channel, 0–255: an empty or missing slot is 0, as ECMA-48
+reads one; anything that is not a number — a `:` group where a `;` form wanted a plain
+channel — is nil, and the colour it was part of is malformed."
+  (let (v (nth parameters j nil))
+    (cond
+      (nil? v) 0
+      (int? v) (math/clamp v 0 255)
+      else nil)))
+
+(defn- extended-colour (parameters:vector i:int -> (tuple any int))
+  "The colour after a `;`-separated 38 / 48 / 58 at `parameters[i]`: `[colour
+next-index]` — `5;n` an index, `2;r;g;b` a true colour (`2;;r;g;b`, an empty
+colour-space slot first, is read too). Anything else — an unknown kind, or a channel
+that is a `:` group (`38;5;1:2`) — is `[nil next-index]`: malformed, skipped, the
+attributes left alone. The `:` spellings arrive as one group and are [[group-colour]]'s."
+  (let (kind (nth parameters i nil))
+    (cond
+      (= kind 5) [(channel-at parameters (inc i)) (+ i 2)]
+      (= kind 2)
+        (let (j (if (nil? (nth parameters (inc i) nil)) (+ i 2) (inc i))
+              channels [(channel-at parameters j)
+                         (channel-at parameters (inc j))
+                         (channel-at parameters (+ j 2))])
+          [(if (includes? channels nil) nil channels) (+ j 3)])
+      else [nil (inc i)])))
+
+(defn- group-colour (group:vector -> any)
+  "The colour a `38:…` / `48:…` / `58:…` sub-parameter group names, nil when it names none:
+`5:n` an index, `2:r:g:b` a true colour — or `2:cs:r:g:b`, with the colour-space id
+(usually empty, `38:2::r:g:b`) first, which ITU T.416 puts there."
+  (let (n (count group))
+    (case (nth group 1 nil)
+      5 (if (< n 3) nil (channel-at group 2))
+      2
+        (cond
+          (>= n 6) [(channel-at group 3) (channel-at group 4) (channel-at group 5)]
+          (= n 5) [(channel-at group 2) (channel-at group 3) (channel-at group 4)]
+          else nil)
+      nil)))
+
+(defn- sgr-group (attr: (or nil map) group:vector -> (or nil map))
+  "A `:`-joined SGR parameter group (`4:3`, `38:2::r:g:b`) applied as ONE parameter. A
+group this model does not know — or one whose sub-parameters it cannot read — leaves
+`attr` alone: a sub-parameter never spills into the parameters after it."
+  (let (head (first group)
+        colour-key (get colour-keys head))
+    (cond
+      (= head 4) (attr-pairs attr (get underline-styles (or (nth group 1 nil) 0)))
+      (nil? colour-key) attr
+      else (let (c (group-colour group)) (if (nil? c) attr (attr-set attr colour-key c))))))
+
+(defn- sgr-number (attr: (or nil map) parameters:vector i:int p:int -> (tuple any int))
+  "The plain SGR parameter `p`, at `parameters[i]`, applied: `[attr next-index]`."
+  (let (one (fn (a) [a (inc i)])
+        colour-key (get colour-keys p))
+    (cond
+      (= p 0) (one nil)
+      (not (nil? colour-key))
+        (let ([c j] (extended-colour parameters (inc i)))
+          [(if (nil? c) attr (attr-set attr colour-key c)) j])
+      (<= 30 p 37) (one (attr-set attr :fg (- p 30)))
+      (<= 40 p 47) (one (attr-set attr :bg (- p 40)))
+      (<= 90 p 97) (one (attr-set attr :fg (- p 82)))
+      (<= 100 p 107) (one (attr-set attr :bg (- p 92)))
+      else (one (attr-pairs attr (get sgr-flags p))))))
+
+(defn- sgr-step (attr: (or nil map) parameters:vector i:int -> (tuple any int))
+  "One SGR parameter applied: `[attr next-index]` — a `:` group whole, an empty slot as 0."
+  (let (raw (nth parameters i nil))
+    (cond
+      (vector? raw) [(sgr-group attr raw) (inc i)]
+      (int? raw) (sgr-number attr parameters i raw)
+      else (sgr-number attr parameters i 0))))
+
+(defn- param-number (p:string -> (or nil int))
+  "A parameter's digits as a number, nil for an empty slot — and for anything but digits
+(`-5`, `+5`, `1e3`): ECMA-48 parameters are decimal digits, so a sign or an exponent is
+malformed and reads as an empty slot, never as a negative count."
+  (if (or (= p "") (< (string/span p 0 "0123456789") (string/length p)))
+    nil
+    (let (n (string/->number p)) (if (int? n) n nil))))
+
+(defn- param-or-group (p:string -> any)
+  (if (includes? p ":") (into [] (map (string/split p ":") param-number)) (param-number p)))
+
+(defn params (s:string -> vector)
+  "The parameters of a CSI's parameter bytes `s`: a vector with one entry per
+`;`-separated parameter — an int, nil for an empty slot, or, for a parameter carrying
+`:` sub-parameters (ECMA-48 / ITU T.416: `4:3` a curly underline, `38:2::r:g:b` a true
+colour), the vector of its sub-parameters, read as one parameter.
+
+    (ansi/params \"1;38;5;196\")   ;=> [1 38 5 196]
+    (ansi/params \"0;\")   ;=> [0 nil]
+    (ansi/params \"4:3;38:2::9:8:7\")   ;=> [[4 3] [38 2 nil 9 8 7]]"
+  (cond
+    (= s "") []
+    (includes? s ":") (into [] (map (string/split s ";") param-or-group))
+    else (into [] (map (string/split s ";") param-number))))
+
+(defn sgr (attr: (or nil map) parameters:vector)
+  "`attr` with the SGR `parameters` (as [[params]] reads them) applied, nil for the
+default face; no parameters at all is a reset, as `ESC[m` is.
+
+    (ansi/sgr nil [1 31])   ;=> {:bold true :fg 1}
+    (ansi/sgr {:bold true :fg 1} [22])   ;=> {:fg 1}
+    (ansi/sgr nil [38 2 255 128 0])   ;=> {:fg [255 128 0]}
+    (ansi/sgr {:bold true} [[4 3]])   ;=> {:bold true :underline true :underline-style :curly}
+    (ansi/sgr {:bold true :underline true} [[4 0]])   ;=> {:bold true}
+    (ansi/sgr {:fg 1} [])   ;=> nil
+
+A `:` group (see [[params]]) is one parameter: `4:0`–`4:5` the underline style (none,
+single, double, curly, dotted, dashed), `38:` / `48:` / `58:` a foreground, background or
+underline colour (`58`, and `59` to reset it, are the underline colour in either
+spelling). A group it does not know changes nothing."
+  (letrec (go (fn (current i)
+                (if (>= i (count parameters))
+                  current
+                  (let ([next-attr j] (sgr-step current parameters i)) (go next-attr j)))))
+    (if (empty? parameters) nil (go attr 0))))
+
+;; ---- colours: an attribute as a display face ----------------------------------------------
+
+(def xterm-palette
+  ;; the 16 ANSI colours as xterm draws them — the default palette
+  [[0 0 0]
+    [205 0 0]
+    [0 205 0]
+    [205 205 0]
+    [0 0 238]
+    [205 0 205]
+    [0 205 205]
+    [229 229 229]
+    [127 127 127]
+    [255 0 0]
+    [0 255 0]
+    [255 255 0]
+    [92 92 255]
+    [255 0 255]
+    [0 255 255]
+    [255 255 255]])
+
+(defn- cube-level (n:int -> int)
+  (if (= n 0) 0 (+ 55 (* n 40))))
+
+(defn colour (c:any palette:vector -> any)
+  "Colour `c` — a palette index or `[r g b]` — as a colour: 0–15 from `palette` (16
+entries, each `[r g b]` or a hex string), 16–231 the 6×6×6 cube, 232–255 the grey ramp.
+
+    (ansi/colour 1 ansi/xterm-palette)   ;=> [205 0 0]
+    (ansi/colour 196 ansi/xterm-palette)   ;=> [255 0 0]
+    (ansi/colour [1 2 3] ansi/xterm-palette)   ;=> [1 2 3]"
+  (cond
+    (not (int? c)) c
+    (< c 16) (nth palette c)
+    (< c 232)
+      (let (i (- c 16))
+        [(cube-level (math/quot i 36))
+          (cube-level (math/mod (math/quot i 6) 6))
+          (cube-level (math/mod i 6))])
+    else (let (g (+ 8 (* 10 (- c 232)))) [g g g])))
+
+(defn face (attr: (or nil map) palette:any -> (or nil map))
+  "The SGR `attr` as a display face `{:fg [r g b] :bg … :bold …}`, colours through
+`palette` — `{:colors <16 entries> :fg <default fg> :bg <default bg>}`, the defaults used
+when inverse video needs a colour the text never set (nil: xterm's colours). An
+`:underline-colour` resolves the same way; the other keys (`:underline-style` among them)
+pass through. Nil for the default face.
+
+    (ansi/face {:fg 1 :bold true} nil)   ;=> {:bold true :fg [205 0 0]}
+    (ansi/face nil nil)   ;=> nil"
+  (if (nil? attr)
+    nil
+    (let (colors (or (:colors palette) xterm-palette)
+          fg (if (nil? (:fg attr)) nil (colour (:fg attr) colors))
+          bg (if (nil? (:bg attr)) nil (colour (:bg attr) colors))
+          [fg2 bg2] (if (:inverse attr) [(or bg (:bg palette)) (or fg (:fg palette))] [fg bg])
+          underline (:underline-colour attr)
+          flags (dissoc attr :fg :bg :inverse :underline-colour))
+      (attr-pairs flags
+        [[:fg fg2]
+          [:bg bg2]
+          [:underline-colour (if (nil? underline) nil (colour underline colors))]]))))
+
+;; ---- the streaming decoder ---------------------------------------------------------------
+;; Output arrives in chunks the reader did not choose, so an escape may be cut anywhere:
+;; `ESC[1` at the end of one read and `mERROR` at the start of the next. The decoder is a
+;; value — `{:attr :pending :inside}` — threaded from one chunk to the next: `:attr` the
+;; SGR attributes in force, `:pending` the start of an escape the chunk ended inside (it is
+;; prepended to the next chunk), and `:inside` what the chunk ended inside of that is
+;; being SWALLOWED rather than held — `:string`, an OSC / DCS / APC / PM / SOS string
+;; whose terminator has not arrived, or `:csi`, a CSI past `csi-pending-max` whose final
+;; byte has not — nil otherwise. A swallowed sequence's content is discarded as it comes,
+;; so a long or unterminated one holds no memory, and its tail never shows as text.
+;;
+;; The scan splits the chunk at ESC: the first piece is text, every later piece starts
+;; with the body of one escape and continues with text. A piece is examined only as far as
+;; its escape reaches (a few ASCII characters), then the rest is taken whole — no
+;; per-character walk over the text.
+
+(def- csi-pending-max 256) ; an unfinished CSI longer than this is swallowed, not held
+
+(defn decoder ()
+  "A fresh streaming decoder: the default attributes, nothing pending. Thread it through
+[[feed]], one per stream (stdout and stderr are two).
+
+    (:attr (ansi/decoder))   ;=> nil"
+  {:attr nil :pending "" :inside nil})
+
+(defn- code-at (piece:string i:int -> int)
+  (string/char->int (string/char-at piece i)))
+
+(def- csi-body-bytes
+  ;; the bytes a CSI holds before its final byte: parameters (0x30–0x3F) and
+  ;; intermediates (0x20–0x2F)
+  " !\"#$%&'()*+,-./0123456789:;<=>?")
+
+(defn- csi-scan (piece:string i:int n:int -> vector)
+  "From index `i` of a CSI's body: `[:final end]` past its final byte (0x40–0x7E),
+`[:incomplete]` when the piece ends first, or `[:abort at]` at a byte no CSI may hold
+(a control character inside one cancels it, and the character is text again). The run
+of body bytes is one native `string/span`, not a walk."
+  (let (j (string/span piece i csi-body-bytes))
+    (cond
+      (>= j n) [:incomplete]
+      (<= 0x40 (code-at piece j) 0x7e) [:final (inc j)]
+      else [:abort j])))
+
+(defn- plain-sgr-body? (body:string -> bool)
+  "Whether a CSI body ending in `m` is SGR: parameters only — digits, `;` and `:`. A
+private marker (`ESC[>4;2m` is xterm's modifyOtherKeys, not a colour) or an
+intermediate byte makes it some other sequence."
+  (= (string/span body 0 "0123456789;:") (string/length body)))
+
+(defn- intermediate-scan (piece:string j:int n:int -> vector)
+  "From index `j`, past an escape's intermediate bytes (0x20–0x2F) and its final byte."
+  (cond
+    (>= j n) [:incomplete]
+    (<= 0x20 (code-at piece j) 0x2f) (intermediate-scan piece (inc j) n)
+    (<= 0x30 (code-at piece j) 0x7e) [:skip (inc j)]
+    else [:skip j]))
+
+(defn- csi-final (piece:string end:int -> vector)
+  "A complete CSI ending just before `end`: `[:sgr body end]` when it is SGR, else `[:skip end]`."
+  (let (body (string/substring piece 1 (dec end)))
+    (if (and (= (string/char-at piece (dec end)) "m") (plain-sgr-body? body))
+      [:sgr body end]
+      [:skip end])))
+
+(defn- escape-scan (piece:string sgr?:bool -> vector)
+  "What the escape starting `piece` (the text after an ESC) is: `[:sgr body end]` (only
+when `sgr?` — else an SGR is `[:skip end]` like any CSI), `[:skip end]` (consumed; text
+resumes at `end`), `[:string]` (an OSC-like string still open at the piece's end),
+`[:csi]` (a CSI past `csi-pending-max` still open at the piece's end) or `[:incomplete]`
+(the piece ends inside the escape)."
+  (let (n (string/length piece))
+    (if (= n 0)
+      [:incomplete]
+      ;; `char->int` reads the first character natively — no one-character substring
+      (let (k (string/char->int piece))
+        (cond
+          (= k 0x5b)
+            (let (scan (csi-scan piece 1 n))
+              (case (first scan)
+                :final (if sgr? (csi-final piece (second scan)) [:skip (second scan)])
+                :abort [:skip (second scan)]
+                (if (> n csi-pending-max) [:csi] [:incomplete])))
+          ;; `]` OSC, `P` DCS, `X` SOS, `^` PM, `_` APC
+          (includes? [0x5d 0x50 0x58 0x5e 0x5f] k)
+            (let (bel (index-of piece "\x07"))
+              (if (>= bel 0) [:skip (inc bel)] [:string]))
+          ;; intermediates then one final byte: charset selection (`ESC ( B`), `ESC # 8`
+          (<= 0x20 k 0x2f) (intermediate-scan piece 1 n)
+          ;; a two-character escape: `ESC 7`, `ESC =`, `ESC M`, `ESC c`
+          (<= 0x30 k 0x7e) [:skip 1]
+          ;; ESC then a control character: the ESC alone is dropped
+          else [:skip 0])))))
+
+(defn- tail-from (piece:string at:int -> string)
+  (if (= at 0) piece (string/substring piece at (string/length piece))))
+
+(defn- swallow-head (piece:string inside -> (tuple any (or nil string)))
+  "The text before a chunk's first ESC when the last chunk ended `inside` a swallowed
+sequence: `[inside' text]` — still inside (text nil) when the sequence's end is not
+here, else nil and the text after it. A string ends at a BEL (an `ESC \\\\` is its next
+piece's); a CSI at its final byte, or at a control character, which is text again."
+  (if (= inside :string)
+    (let (bel (index-of piece "\x07"))
+      (if (>= bel 0) [nil (tail-from piece (inc bel))] [:string nil]))
+    (let (scan (csi-scan piece 0 (string/length piece)))
+      (if (= (first scan) :incomplete) [:csi nil] [nil (tail-from piece (second scan))]))))
+
+(defn- emit (acc text:string attr -> any)
+  (if (= text "") acc (cons [text attr] acc)))
+
+(defn- merge-runs (reversed -> vector)
+  "The reversed `[text attr]` list as a vector in order, adjacent runs of one attribute
+joined into one segment."
+  (let (runs (fold reversed
+               ()
+               (fn (out segment)
+                 (let ([text attr] segment
+                       head (first out))
+                   (if (and head (= (second head) attr))
+                     (cons [(cons text (first head)) attr] (rest out))
+                     (cons [(list text) attr] out))))))
+    (into [] (map runs (fn (run) [(string/join (first run) "") (second run)])))))
+
+(defn- finish (attr pending:string inside acc -> vector)
+  [{:attr attr :pending pending :inside inside} (merge-runs acc)])
+
+(defn- feed-pieces (pieces:vector i:int n:int attr inside acc -> vector)
+  "Walk the ESC-separated `pieces` from `i`: `[decoder segments]`. `inside` is what the
+last piece left open (`:string`, `:csi` or nil); only a string outlives the ESC that
+starts the next piece — that ESC ends a swallowed CSI."
+  (if (>= i n)
+    (finish attr "" inside acc)
+    (let (piece (nth pieces i)
+          last? (= i (dec n)))
+      (cond
+        ;; inside a string: `ESC \` ends it; any other escape cancels it and starts anew
+        (and (= inside :string) (= piece "") last?) (finish attr "\e" :string acc)
+        (and (= inside :string) (string/starts-with? piece "\\"))
+          (feed-pieces pieces (inc i) n attr nil (emit acc (tail-from piece 1) attr))
+        else
+          (let (scan (escape-scan piece true))
+            (case (first scan)
+              :sgr
+                (let (next-attr (sgr attr (params (second scan))))
+                  (feed-pieces pieces
+                    (inc i)
+                    n
+                    next-attr
+                    nil
+                    (emit acc (tail-from piece (nth scan 2)) next-attr)))
+              :skip
+                (feed-pieces pieces
+                  (inc i)
+                  n
+                  attr
+                  nil
+                  (emit acc (tail-from piece (second scan)) attr))
+              :string
+                (if last?
+                  (finish attr "" :string acc)
+                  (feed-pieces pieces (inc i) n attr :string acc))
+              ;; an over-long CSI at the chunk's end is swallowed through its final byte,
+              ;; in this chunk or a later one; an ESC arriving first cancels it
+              :csi (if last? (finish attr "" :csi acc) (feed-pieces pieces (inc i) n attr nil acc))
+              ;; :incomplete — held for the next chunk when the chunk ends here; an ESC
+              ;; arriving inside it instead cancels it
+              (if last?
+                (finish attr (str "\e" piece) nil acc)
+                (feed-pieces pieces (inc i) n attr nil acc))))))))
+
+(defn feed (state:map chunk:string -> vector)
+  "Decode `chunk`, the next piece of a stream, with the decoder `state`: `[state'
+segments]` — `segments` a vector of `[text attr]` in order (`attr` as [[sgr]] builds it,
+nil for the default face; adjacent runs of one attribute joined, no empty text). An escape
+the chunk ends inside is held in `state'` and finished by the next chunk, so splitting a
+stream at ANY position decodes the same as feeding it whole.
+
+    (second (ansi/feed (ansi/decoder) (str (string/int->char 27) \"[1mERROR\")))   ;=> [[\"ERROR\" {:bold true}]]
+    (second (ansi/feed (first (ansi/feed (ansi/decoder) (str (string/int->char 27) \"[3\"))) \"1mx\"))   ;=> [[\"x\" {:fg 1}]]
+
+SGR (`ESC[…m`) changes the attributes; every other escape — CSI cursor motion and erase,
+OSC (titles, OSC 8 hyperlinks, ended by BEL or `ESC \\\\`), DCS / APC / PM / SOS strings,
+charset selection, two-character escapes — is consumed and shows nothing. A CSI that runs
+past 256 characters without its final byte is not held: it is swallowed through that
+byte, however many chunks later it comes. Control characters (`\\r`, `\\b`, BEL outside a
+string, …) stay in the text for the caller: `\\r` means one thing to a log (drop it) and
+another to a progress line (overwrite). At the end of a stream an escape still pending is
+incomplete and is dropped with the decoder."
+  (let (text (str (:pending state) chunk)
+        attr (:attr state)
+        inside (:inside state))
+    (cond
+      (= text "") [(assoc state :pending "") []]
+      (and (nil? inside) (not (includes? text "\e"))) [(assoc state :pending "") [[text attr]]]
+      else
+        (let (pieces (into [] (string/split text "\e"))
+              head (first pieces)
+              [still-inside head-text] (if (nil? inside) [nil head] (swallow-head head inside))
+              acc (if (nil? head-text) () (emit () head-text attr)))
+          (feed-pieces pieces 1 (count pieces) attr still-inside acc)))))
+
+(defn segments-text (segments:vector -> string)
+  "The text of decoded `segments`, attributes dropped.
+
+    (ansi/segments-text [[\"a\" nil] [\"b\" {:bold true}]])   ;=> \"ab\""
+  (string/join (map segments first) ""))
+
+(defn segments-spans (segments:vector offset:int -> vector)
+  "The attributes of decoded `segments` as `[start end attr]` character ranges, the first
+segment starting at `offset` — one per segment that has an attribute (the default face
+makes none). Where an editor lays the segments' text into a buffer at `offset`, these are
+its faces.
+
+    (ansi/segments-spans [[\"ab\" nil] [\"cd\" {:bold true}]] 10)   ;=> [[12 14 {:bold true}]]"
+  (first (fold segments
+           [[] offset]
+           (fn (state segment)
+             (let ([spans at] state
+                   [text attr] segment
+                   end (+ at (string/length text)))
+               [(if (nil? attr) spans (conj spans [at end attr])) end])))))
+
+;; ---- strip: the escapes removed --------------------------------------------------------------
+;; The decoder's piece walk with nothing decoded: no SGR parameters read, no attribute
+;; folded, no segments built or merged — only the text after each escape kept, so a
+;; colourful log costs one split and a few character reads per escape.
+
+(defn- strip-pieces (pieces:vector i:int n:int in-string:bool acc -> string)
+  "The text of the ESC-separated `pieces` from `i` with every escape removed, `acc` the
+text so far, reversed."
+  (if (>= i n)
+    (string/join (reverse acc) "")
+    (let (piece (nth pieces i))
+      (if (and in-string (string/starts-with? piece "\\"))
+        (strip-pieces pieces (inc i) n false (cons (tail-from piece 1) acc))
+        (let (scan (escape-scan piece false))
+          (case (first scan)
+            :skip (strip-pieces pieces (inc i) n false (cons (tail-from piece (second scan)) acc))
+            :string (strip-pieces pieces (inc i) n true acc)
+            ;; cancelled by the next ESC, or cut off at the end: nothing of it shows
+            (strip-pieces pieces (inc i) n false acc)))))))
+
+(defn strip (s:string -> string)
+  "`s` with all ANSI escape sequences and carriage returns removed — exactly the text
+[[feed]] decodes from the whole string, without building its segments. A sequence cut
+off at the end is dropped; for a STREAM, where the rest of it is in the next read,
+thread a [[decoder]] instead.
+
+    (ansi/strip (str (string/int->char 27) \"[1mx\" (string/int->char 27) \"[0m\"))   ;=> \"x\""
+  (let (plain (if (includes? s "\e")
+                (let (pieces (into [] (string/split s "\e")))
+                  (strip-pieces pieces 1 (count pieces) false (list (first pieces))))
+                s))
+    (if (includes? plain "\r") (string/replace plain "\r" "") plain)))
+
+;; ---- the CSI scan `render` shares -------------------------------------------------------------
+;; `v` below is a CODE-POINT VECTOR, and `n` its length, threaded rather than recomputed:
+;; `char-at` on a raw UTF-8 string is O(i) and `string-length` O(n).
 
 (defn- ansi-csi-final? (c)
   "Whether `c` is the final byte of a CSI sequence — a letter (SGR `m`, cursor ops)."
   (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" c))
-
-;; `v` below is a CODE-POINT VECTOR (built once in `strip`), and `n` its length,
-;; threaded rather than recomputed. Both matter: `char-at` on a raw UTF-8 string is O(i)
-;; and `string-length` is `chars().count()`, i.e. O(n) — so a scan doing one of each per
-;; character is O(n²) twice over. Same fix as `url.blsp` / `csv.blsp`.
 
 (defn- ansi-csi-end (v:vector i:int n:int -> int)
   "Index just past the CSI final byte, scanning `v` from `i` (clamped to `n`)."
@@ -26,33 +521,14 @@ the public entry point; the helpers are private (`--`).")
     (ansi-csi-final? (nth v i)) (+ i 1)
     else (ansi-csi-end v (+ i 1) n)))
 
-(defn- ansi-strip (v:vector i:int n:int out: (or nil list) -> string)
-  "Tail-recursive scan: copy `v[i..n]` to the reversed char list `out`, dropping ANSI
-escape sequences and carriage returns."
-  (if (>= i n)
-    (apply str (reverse out))
-    (let (c (nth v i))
-      (cond
-        (= c "\e")
-          (if (and (< (+ i 1) n) (= (nth v (+ i 1)) "["))
-            ; CSI: skip to final byte
-            (ansi-strip v (ansi-csi-end v (+ i 2) n) n out)
-            (ansi-strip v (+ i 2) n out))
-        ; other ESC X: drop both
-        (= c "\r") (ansi-strip v (+ i 1) n out)
-        ; bare CR: drop
-        else (ansi-strip v (+ i 1) n (cons c out))))))
-
-(defn strip (s:string -> any)
-  "`s` with all ANSI escape sequences and bare carriage returns removed.
-Fast path: a chunk with no ESC byte only needs its CRs dropped (a single
-`replace` pass, no char-by-char scan).
-
-    (ansi/strip (str (string/int->char 27) \"[1mx\" (string/int->char 27) \"[0m\"))   ;=> \"x\""
-  (if (includes? s "\e")
-    (let (v (into [] (string/->list s)))
-      (ansi-strip v 0 (count v) ()))
-    (string/replace s "\r" "")))
+(defn- ansi-string-end (v:vector i:int n:int -> int)
+  "Index just past the terminator (BEL, or ESC `\\`) of an OSC / DCS-like string whose body
+starts at `i` in `v`, or `n` when it is unterminated."
+  (cond
+    (>= i n) n
+    (= (nth v i) "\x07") (inc i)
+    (and (= (nth v i) "\e") (< (inc i) n) (= (nth v (inc i)) "\\")) (+ i 2)
+    else (ansi-string-end v (inc i) n)))
 
 ;; ---- rendering terminal output into text -------------------------------------
 ;; [[strip]] throws away the escapes, which is right for a build log — append-only text
@@ -94,25 +570,35 @@ would write spaces where the program asked for deletion."
 
 (defn- ansi-param (params default)
   "The numeric parameter of a CSI, or `default` — `ESC[A` and `ESC[1A` are the same."
-  (if (= params "")
-    default
-    (let (n (string/->number params)) (if (int? n) n default))))
+  (let (n (param-number params)) (if (nil? n) default n)))
+
+(def- render-column-max 4096)
+;; The furthest column a cursor motion reaches. A write past a line's end pads it out to the
+;; cursor, so `ESC[999999999C` then one character would build a gigabyte line; a real
+;; terminal stops the cursor at its right margin, and no line a program draws is wider.
+
+(def- render-row-max 4096)
+;; The furthest row below the text a cursor motion reaches — the same bound downwards.
 
 (defn- ansi-csi (lines row col params final)
   "Apply one CSI; returns [lines row col]. Anything not listed is a no-op, which is the
-right answer for colour (`m`) and the honest one for what this does not model."
-  (let (n (ansi-param params 1))
+right answer for colour (`m`) and the honest one for what this does not model. A motion
+stops at `render-column-max` columns and `render-row-max` rows past the text, as a real
+terminal's cursor stops at its margins."
+  (let (n (ansi-param params 1)
+        column (fn (c) (math/clamp c 0 render-column-max))
+        down (fn (r) (math/min r (+ (count lines) render-row-max))))
     (cond
       ; cursor up / down / forward / back
       (= final "A") [lines (math/max 0 (- row n)) col]
-      (= final "B") [lines (+ row n) col]
-      (= final "C") [lines row (+ col n)]
+      (= final "B") [lines (down (+ row n)) col]
+      (= final "C") [lines row (column (+ col n))]
       (= final "D") [lines row (math/max 0 (- col n))]
       ; carriage-return-and-move-line
-      (= final "E") [lines (+ row n) 0]
+      (= final "E") [lines (down (+ row n)) 0]
       (= final "F") [lines (math/max 0 (- row n)) 0]
       ; column
-      (= final "G") [lines row (math/max 0 (dec n))]
+      (= final "G") [lines row (column (dec n))]
       ; erase in line: 0/absent = to end (the only form a line editor emits)
       (= final "K")
         (if (= (ansi-param params 0) 0)
@@ -140,7 +626,8 @@ right answer for colour (`m`) and the honest one for what this does not model."
             (inc row)
             0)
         (= c "\r") (ansi-render-loop v (inc i) n lines row 0)
-        ;; a lone ESC that is not a CSI: it and the byte after it are dropped
+        ;; an OSC / DCS-like string is dropped through its terminator; any other ESC that
+        ;; is not a CSI is dropped with the byte after it
         (= c "\e")
           (if (and (< (inc i) n) (= (nth v (inc i)) "["))
             (let (end (ansi-csi-end v (+ i 2) n)
@@ -148,7 +635,14 @@ right answer for colour (`m`) and the honest one for what this does not model."
                   final (if (> end (+ i 2)) (nth v (dec end)) "")
                   [lines2 row2 col2] (ansi-csi lines row col params final))
               (ansi-render-loop v end n lines2 row2 col2))
-            (ansi-render-loop v (math/min n (+ i 2)) n lines row col))
+            (ansi-render-loop v
+              (if (and (< (inc i) n) (includes? "]PX^_" (nth v (inc i))))
+                (ansi-string-end v (+ i 2) n)
+                (math/min n (+ i 2)))
+              n
+              lines
+              row
+              col))
         else (ansi-render-loop v (inc i) n (ansi-write lines row col c) row (inc col))))))
 
 (defn render (text:string chunk:string -> string)
@@ -165,8 +659,10 @@ can be reached by the sequences modelled here.
 
 Models: `\\r`, `\\n`, cursor up/down/forward/back (`A`–`D`), next/previous line (`E`/`F`),
 column (`G`), erase-to-end-of-line (`K`) and erase-to-end-of-display (`J`). Everything
-else — colour included — is dropped. NOT a terminal emulator: no absolute positioning,
-no wrapping, no alternate screen."
+else — colour included — is dropped. A motion stops 4096 columns in, and 4096 rows past
+the text, as a terminal's cursor stops at its margins: output cannot make a huge line by
+moving the cursor far out and writing there. NOT a terminal emulator: no absolute
+positioning, no wrapping, no alternate screen."
   (if (and (not (includes? chunk "\e")) (not (includes? chunk "\r")))
     ;; the common case: ordinary output, which only ever appends
     (str text chunk)

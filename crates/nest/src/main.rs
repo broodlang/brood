@@ -347,6 +347,9 @@ fn arm_test_env(argv: &[String]) {
         // SAFETY: as above.
         unsafe { std::env::set_var("BROOD_NO_RELOAD_DIAG", "1") };
     }
+    // A test run says so, and gets a private scratch home for program state unless asked
+    // to keep the real one (ADR-602): no project's tests write the user's config by accident.
+    brood::cli_support::arm_test_run(has(&["--real-home"]));
     // See `brood --test`: a green suite from a binary older than the `std/` under test is a
     // gate that lies, and this is where the reading gets believed.
     brood::cli_support::warn_if_stdlib_is_stale();
@@ -415,6 +418,8 @@ fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
         let _raw = (!full_screen).then(|| RawTermGuard);
         run_for_value(&mut interp, &code)
     };
+    // A test run's scratch home goes with it (a no-op for every other command).
+    brood::cli_support::remove_test_scratch_home();
     if let brood::core::value::Value::Int(code) = result {
         std::process::exit(code as i32);
     }

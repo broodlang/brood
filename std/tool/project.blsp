@@ -1181,11 +1181,12 @@ resolve in the advisory checker. Returns the project root.
   nil)
 
 (defn- config-base-dir ()
-  ; $XDG_CONFIG_HOME, else ~/.config
-  (let (xdg (os/env "XDG_CONFIG_HOME"))
+  ; $XDG_CONFIG_HOME, else ~/.config — the user's REAL one under `nest test`, which points
+  ; XDG_CONFIG_HOME at a scratch home and keeps the real base in BROOD_USER_CONFIG_HOME
+  ; (ADR-602): these are the user's tooling preferences, not the program's state
+  (let (xdg (or (os/env "BROOD_USER_CONFIG_HOME") (os/env "XDG_CONFIG_HOME")))
     (if (nil? xdg)
-      (path/join (or (os/env "HOME")
-                   (error "config-base-dir: neither XDG_CONFIG_HOME nor HOME is set"))
+      (path/join (or (path/home) (error "config-base-dir: neither XDG_CONFIG_HOME nor HOME is set"))
         ".config")
       xdg)))
 (defn- config-dir () (path/join (config-base-dir) "brood"))

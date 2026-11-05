@@ -3,7 +3,7 @@
 ;; reporter registers a global name and holds a runtime-global subscription; every test
 ;; uses a `:sink` so nothing reaches stderr and the report text can be asserted on.
 
-(defmodule crash-report-test (:use test) (:use crash-report))
+(defmodule crash-report-test (:use test :exclude [running?]) (:use crash-report))
 
 (defn- crash-report-collect (me)
   "A sink that forwards each report to the test process."

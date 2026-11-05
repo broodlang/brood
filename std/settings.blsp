@@ -50,6 +50,15 @@ already there, and return the stored spec. `spec` keys:
                else (count (registry/entries id))))
     (registry/put! id name (assoc spec :name name :rank rank))))
 
+(defn undefine (id:any name:keyword -> bool)
+  "Remove the declaration of setting `name` from the settings registry `id` — what a
+plugin that declared its own settings takes back when it is removed or replaced, so the
+generated default file, the warnings and `specs` stop naming a setting nothing provides.
+True when there was one.
+
+    (do (settings/define :doc/gone :k {:default 1}) [(settings/undefine :doc/gone :k) (settings/spec-of :doc/gone :k)])   ;=> [true nil]"
+  (registry/remove! id name))
+
 (defn specs (id:any -> list)
   "The settings declared under `id`, as spec maps in rank order.
 

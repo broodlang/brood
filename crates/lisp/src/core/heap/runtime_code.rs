@@ -100,12 +100,31 @@ pub(crate) enum LoadWrite {
         op: RegistryOp,
         path: Vec<Value>,
         val: Value,
+        /// Who the write credits (ADR-582) — the module, or the namespace-less file, whose
+        /// load staged it — recorded in the writer journal only when the op APPLIES: at the
+        /// publish, or as a restore replays it. A load that throws credits nobody.
+        writer: Option<RegistryWriter>,
+        /// The op applies only while the entry's writer is still this one (ADR-582's
+        /// conditional retract and restore), checked again wherever the op is applied.
+        guard: Option<RegistryWriter>,
     },
     /// A `reflect/undef` made inside the load (ADR-391): the name leaves the table when
     /// the load publishes, and again when a restore replays the load.
     Undefine {
         sym: Symbol,
     },
+}
+
+/// The runtime's suspend-host latches, per function (`RuntimeCode::suspend_latches`, KI-313).
+#[cfg(feature = "jit")]
+#[derive(Default)]
+pub(crate) struct SuspendLatches {
+    /// The `share_key`s latched: no copy of these goes native again in this runtime.
+    pub(super) latched: std::collections::HashSet<(u64, u16)>,
+    /// Every copy admitted toward native code under a key not yet latched — what the latch
+    /// takes off native code along with the copy that blocked.
+    pub(super) admitted:
+        HashMap<(u64, u16), Vec<std::sync::Weak<crate::eval::compile::CompiledArm>>>,
 }
 
 /// One OPEN module load's staging frame (KI-135, ADR-344): the bindings and registry
@@ -159,6 +178,41 @@ pub(super) struct LoadJournal {
     pub(super) entries: Vec<(u64, u64, bool, LoadWrite)>,
 }
 
+/// Who wrote a registry entry (KI-136, ADR-582): the module whose load made the write, or —
+/// for a load with no namespace, a file without a `defmodule` — that FILE, by its absolute
+/// path. `%registry-writer` answers a module as a symbol and a file as a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RegistryWriter {
+    Module(Symbol),
+    File(Symbol),
+}
+
+/// One member of a list registry in the writer journal: the member as it printed when the
+/// slot was made, and who added it.
+#[derive(Debug, Clone)]
+pub(crate) struct MemberSlot {
+    pub(crate) printed: String,
+    pub(crate) writer: Option<RegistryWriter>,
+    /// The op that added the member — `ConsNew` or `AppendNew` — so the stdlib image can
+    /// replay it at the same end of the list its source load put it (ADR-595). `None` for a
+    /// slot rebuilt writer-less, or one credited without being added (`:credit`).
+    pub(crate) added_by: Option<RegistryOp>,
+}
+
+/// The writer journal (KI-136, ADR-582) — who wrote each registry entry. A map entry is
+/// keyed by its printed key path. A LIST registry's members are kept as one slot per member
+/// in the list's own order, so a member is found by POSITION, through the same `equal` the
+/// `:remove` op matches with: two closures that print alike (`#<fn>`) are two members with
+/// two writers, never one key. Each slot keeps its member's printed form, so a list that
+/// changed underneath (a whole-value swap, a `def`) is noticed — the slots answer for
+/// nothing until an op realigns them, writer-less. No `Value` is held, so the journal is no
+/// collector root. Cloned with a globals snapshot and restored with it (an `%isolate`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RegistryWriters {
+    pub(crate) entries: HashMap<(Symbol, String), RegistryWriter>,
+    pub(crate) members: HashMap<Symbol, Vec<MemberSlot>>,
+}
+
 /// read-modify-write has to happen inside one kernel call (KI-22).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryOp {
@@ -174,11 +228,21 @@ pub enum RegistryOp {
     /// twin, for a registry whose ORDER is precedence and whose newcomers rank lowest
     /// (`editor/layers/*system-layers*`, KI-141).
     AppendNew,
+    /// Remove the members of a list-valued global equal to the value — the retraction of a
+    /// `:cons-new` / `:append-new`, an op (journalled with a load, replayed by an isolate
+    /// restore) where a compare-and-swap would be a live write the restore drops. Declines
+    /// when the value is not a member.
+    Remove,
     /// Merge a map into the map at a one-key `path` (creating it), the whole read-merge-write
     /// under the registry lock — `face-set`'s restyle, where a lost update is a missing key
     /// (`registry_test`: 64 concurrent merges into one face must all land). Non-map values
     /// on either side decline.
     Merge,
+    /// Credit an EXISTING entry to the op's writer, leaving the registry's value as it is
+    /// (ADR-595) — how a startup image that installs registry values whole says whose load
+    /// wrote each entry. `path` is the key path of a map registry's entry, or `[index]` for
+    /// a list registry's member at that position. Declines when there is no such entry.
+    Credit,
 }
 
 /// What a `(meta name …)` form records about a global (ADR-283): three independent facts,
@@ -293,17 +357,18 @@ pub struct RuntimeCode {
     /// Recorded on the write path only, under the lock already held, so it costs one
     /// `HashSet` insert per registration and nothing at all per lookup.
     pub(super) registry_lock: Mutex<HashSet<Symbol>>,
-    /// KI-136: WHO wrote each registry entry — `(registry, printed key path)` → the module
-    /// whose load made the write (its compile namespace at the time), for every entry a
-    /// `%registry-update!` set. A registration is data about the module that made it, and
-    /// the startup image has to carry it with THAT module: attributing by the key's
-    /// qualifier credited `:syntax/comment` — a face `editor/highlight` declares — to the
-    /// registry's own module, so materialising `editor/face` registered twenty-six faces
-    /// where its source load registers six. Written under `registry_lock` (lock order:
-    /// `registry_lock` → this), read by `%registry-writer`. A root write (no namespace)
-    /// clears the entry: nothing owns it, so the image keeps it in the registry's own
-    /// value rather than replaying it.
-    pub(super) registry_writers: Mutex<HashMap<(Symbol, String), Symbol>>,
+    /// KI-136 / ADR-582: WHO wrote each registry entry (see [`RegistryWriters`]) — the
+    /// module whose load made the write (its compile namespace at the time), or the file a
+    /// namespace-less load was reading, for every entry a `%registry-update!` set. A
+    /// registration is data about the module that made it, and the startup image has to
+    /// carry it with THAT module: attributing by the key's qualifier credited
+    /// `:syntax/comment` — a face `editor/highlight` declares — to the registry's own
+    /// module, so materialising `editor/face` registered twenty-six faces where its source
+    /// load registers six. Written ONLY under `registry_lock` (lock order: `registry_lock`
+    /// → this), read by `%registry-writer`. A write with no writer (a prelude or run-time
+    /// write) clears the entry: nothing owns it, so the image keeps it in the registry's
+    /// own value rather than replaying it.
+    pub(super) registry_writers: Mutex<RegistryWriters>,
     /// ADR-419: the modules whose LOAD evaluated source text — `reflect/eval-string`,
     /// `%load-string`, `%eval-in` with a namespace open. What such a load defines depends on
     /// a string the module computed, which no scan of its file can see, so the project image
@@ -480,6 +545,15 @@ pub struct RuntimeCode {
     /// it on `def`/compaction just like the small-native cache. See
     /// [`Heap::jit_inline_lookup`] / [`Heap::jit_inline_publish`].
     pub(super) jit_inline_cache: RwLock<HashMap<(u64, u16), (usize, u64)>>,
+    /// The suspend-host latch per FUNCTION rather than per compiled copy (KI-313): the
+    /// `share_key`s whose native code has blocked a worker under a `receive`, and every copy
+    /// of an arm that may yet go native under a key not latched so far. A function can have
+    /// more than one `CompiledArm` at once — a recompile after a module load staled the
+    /// first (ADR-366), a peer compiling the same closure concurrently — and a latch on one
+    /// copy left the others native, so the next process through blocked its worker again.
+    /// See [`Heap::jit_suspend_admit`] and [`Heap::jit_suspend_latch_function`].
+    #[cfg(feature = "jit")]
+    pub(super) suspend_latches: Mutex<SuspendLatches>,
     /// User-declared `(sig name type)` signatures, keyed by the **module-qualified**
     /// global `Symbol` (the same key `def` produces for `name`) and holding the raw
     /// type-expression as a promoted RUNTIME `Value` (e.g. the `(int -> int)` form).
@@ -624,6 +698,9 @@ pub struct GlobalsSnapshot {
     /// module-load write at or past it landed after the table was read, and is replayed
     /// over the restored table (KI-134).
     pub(super) journal_mark: u64,
+    /// The writer journal as it stood with `saved` (ADR-582): restored with the table, and
+    /// the journalled loads' writes re-credited as they are replayed over it.
+    pub(super) writers: RegistryWriters,
     /// The `rt_collect_block` depth this snapshot established (post-increment). Restore
     /// asserts the live depth still matches — catching an out-of-order (non-LIFO) restore,
     /// which would release the wrong scope's suppression.
@@ -755,7 +832,7 @@ impl Default for RuntimeCode {
             global_generations: RwLock::new(SymbolMap::default()),
             meta: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(HashSet::new()),
-            registry_writers: Mutex::new(HashMap::new()),
+            registry_writers: Mutex::new(RegistryWriters::default()),
             dynamic_loaders: Mutex::new(HashSet::new()),
             load_journal: Mutex::new(LoadJournal::default()),
             // A default (un-seeded) runtime reserves nothing — the prelude hasn't run.
@@ -774,6 +851,8 @@ impl Default for RuntimeCode {
             jit_code_cache: RwLock::new(HashMap::new()),
             shared_closures: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
+            #[cfg(feature = "jit")]
+            suspend_latches: Mutex::new(SuspendLatches::default()),
             declared_sigs: RwLock::new(SymbolMap::default()),
             declared_sigs_version: AtomicU64::new(0),
             image_files: Mutex::new(HashMap::new()),
@@ -911,7 +990,7 @@ impl RuntimeCode {
             globals: RwLock::new(globals),
             global_generations: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(HashSet::new()),
-            registry_writers: Mutex::new(HashMap::new()),
+            registry_writers: Mutex::new(RegistryWriters::default()),
             dynamic_loaders: Mutex::new(HashSet::new()),
             load_journal: Mutex::new(LoadJournal::default()),
             version: AtomicU64::new(0),
@@ -924,6 +1003,8 @@ impl RuntimeCode {
             jit_code_cache: RwLock::new(HashMap::new()),
             shared_closures: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
+            #[cfg(feature = "jit")]
+            suspend_latches: Mutex::new(SuspendLatches::default()),
             declared_sigs: RwLock::new(SymbolMap::default()),
             declared_sigs_version: AtomicU64::new(0),
             image_files: Mutex::new(HashMap::new()),

@@ -1,0 +1,276 @@
+;; tests/sudo_test.blsp — reading and writing a file through sudo (ADR-588), against a
+;; STAND-IN sudo: a shell script that speaks the flags `sudo` takes (`-n`, `-S`, `-k`, `-v`,
+;; `-p`, `-u`, `--`), keeps its "credential cache" as a file, and runs the command as the
+;; test's own user. No test runs the real sudo.
+(defmodule sudo-test
+  (:use test))
+
+(defn- stub-source (state)
+  (str "#!/bin/sh\n"
+    "state="
+    (os/shell-quote state)
+    "\n"
+    "noninteractive=0; from_stdin=0; ignore_cache=0; validate=0\n"
+    "while [ $# -gt 0 ]; do\n"
+    "  case \"$1\" in\n"
+    "    -n) noninteractive=1 ;; -S) from_stdin=1 ;; -k) ignore_cache=1 ;; -v) validate=1 ;;\n"
+    "    -p|-u) shift ;;\n"
+    "    --) shift; break ;;\n"
+    "    *) break ;;\n"
+    "  esac\n"
+    "  shift\n"
+    "done\n"
+    "echo \"$noninteractive $from_stdin $ignore_cache $validate $*\" >> \"$state/calls\"\n"
+    "needs_password=1\n"
+    "[ -f \"$state/nopasswd\" ] && needs_password=0\n"
+    "[ -f \"$state/cached\" ] && [ $ignore_cache = 0 ] && needs_password=0\n"
+    "if [ $needs_password = 1 ]; then\n"
+    "  if [ $from_stdin = 1 ] && [ $noninteractive = 0 ]; then\n"
+    "    IFS= read -r typed\n"
+    "    if [ \"$typed\" != secret ]; then echo 'Sorry, try again.' >&2; exit 1; fi\n"
+    "    [ -f \"$state/nocache\" ] || touch \"$state/cached\"\n"
+    "  else\n"
+    "    if [ -f \"$state/message\" ]; then cat \"$state/message\" >&2; else echo 'sudo: a password is required' >&2; fi; exit 1\n"
+    "  fi\n"
+    "fi\n"
+    "[ $validate = 1 ] && exit 0\n"
+    "export PATH=\"$state/bin:$PATH\"\n"
+    "if [ -f \"$state/cut\" ]; then head -c \"$(cat \"$state/cut\")\" | \"$@\"; exit $?; fi\n"
+    "exec \"$@\"\n"))
+
+(defn- with-stub (body)
+  "Run `(body dir opts)` with a fresh stand-in sudo in a temp `dir`, `opts` naming it."
+  (let (dir (test/temp-dir "brood-sudo-")
+        stub (str dir "/sudo"))
+    (do
+      (file/mkdir dir)
+      (file/spit stub (stub-source dir))
+      (os/cmd "chmod" ["+x" stub])
+      (try
+        (body dir {:program stub})
+        (finally (file/rmdir dir))))))
+
+(describe "sudo (ADR-588)"
+  (test "asks whether a password is needed, without prompting"
+    (with-stub (fn (dir opts)
+                 (do
+                   (is (sudo/password-required? opts))
+                   (file/spit (str dir "/nopasswd") "")
+                   (is (not (sudo/password-required? opts)))))))
+  (test "a read without the password it needs fails, saying so"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/file") "root's text")
+                   (let (result (sudo/read (str dir "/file") opts))
+                     (do
+                       (is (failure? result))
+                       (is (includes? (error-message result) "a password is required"))))))))
+  (test "a wrong password fails and caches nothing"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/file") "root's text")
+                   (is (failure? (sudo/read (str dir "/file") (assoc opts :password "wrong"))))
+                   (is (not (file/exists? (str dir "/cached"))))))))
+  (test "the password validates once; sudo's cache serves the next call"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/file") "root's text")
+                   (assert= (sudo/read (str dir "/file") (assoc opts :password "secret"))
+                     "root's text")
+                   (assert= (sudo/read (str dir "/file") opts) "root's text")
+                   (is (not (sudo/password-required? opts)))))))
+  (test "a missing file reads as nil"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/nopasswd") "")
+                   (assert= (sudo/read (str dir "/absent") opts) nil)))))
+  (test "a write replaces the text in place, keeping the mode, and never holds the password"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/hosts")
+              text "secret\n127.0.0.1 localhost\n")
+          (do
+            (file/spit path "old")
+            (os/cmd "chmod" ["640" path])
+            (let (mode-before (:mode (file/stat path)))
+              (do
+                (assert= (sudo/write path text (assoc opts :password "secret")) true)
+                (assert= (file/slurp path) text)
+                (assert= (:mode (file/stat path)) mode-before)))
+            ;; the command's stdin was the text alone: it ran as `-n`, after `-v`
+            (is (includes? (file/slurp (str dir "/calls")) "0 1 0 1"))
+            (is (includes? (file/slurp (str dir "/calls")) "1 0 0 0 sh -c")))))))
+  (test "a sudo that caches nothing gets the password and the text in one call"
+    (with-stub (fn (dir opts)
+                 (let (path (str dir "/conf"))
+                   (do
+                     (file/spit (str dir "/nocache") "")
+                     (assert= (sudo/write path "line one\n" (assoc opts :password "secret")) true)
+                     (assert= (file/slurp path) "line one\n")
+                     (is (includes? (file/slurp (str dir "/calls")) "0 1 1 0 sh -c")))))))
+  (test "a write creates a file that was not there"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/nopasswd") "")
+                   (assert= (sudo/write (str dir "/new") "fresh" opts) true)
+                   (assert= (file/slurp (str dir "/new")) "fresh")))))
+  (test "a file that is not UTF-8 is read byte for byte, and refused as text"
+    (with-stub (fn (dir opts)
+                 (let (path (str dir "/latin1"))
+                   (do
+                     (file/spit (str dir "/nopasswd") "")
+                     (file/spit-bytes path [99 97 102 233 10 0 255])
+                     (let (bytes (sudo/read-bytes path opts))
+                       (do
+                         (is (bytes? bytes))
+                         (when (bytes? bytes) (assert= (vec bytes) [99 97 102 233 10 0 255]))))
+                     (let (text (sudo/read path opts))
+                       (do
+                         (is (failure? text))
+                         (is (includes? (error-message text) "not UTF-8")))))))))
+  (test "sudo-rs's wording is a refusal too: the cache-less fallback still runs"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/conf"))
+          (do
+            (file/spit (str dir "/nocache") "")
+            (file/spit (str dir "/message") "sudo: interactive authentication is required\n")
+            (assert= (sudo/write path "rs\n" (assoc opts :password "secret")) true)
+            (assert= (file/slurp path) "rs\n")
+            ;; and with no password, the refusal is said as one
+            (is (includes? (error-message (sudo/read path opts)) "a password is required")))))))
+  (test "file/mkdir-private makes an owner-only directory, and makes an existing one so"
+    (let (dir (test/temp-dir "brood-private-dir-")
+          inner (str dir "/a/b"))
+      (do
+        (file/mkdir-private inner)
+        (assert= (math/mod (:mode (file/stat inner)) 512) 448)
+        (os/cmd "chmod" ["755" inner])
+        (file/mkdir-private inner)
+        (assert= (math/mod (:mode (file/stat inner)) 512) 448)
+        (file/rmdir dir))))
+  (test "a symbolic link is written through: the target replaced, the link kept"
+    (with-stub (fn (dir opts)
+                 (let (target (str dir "/real.conf")
+                       link (str dir "/link.conf"))
+                   (do
+                     (file/spit (str dir "/nopasswd") "")
+                     (file/spit target "old\n")
+                     (os/cmd "ln" ["-s" target link])
+                     (assert= (sudo/write link "new\n" opts) true)
+                     (assert= (file/slurp target) "new\n")
+                     (is (:symlink? (file/stat link))))))))
+  (test "a write that fails halfway leaves the old file whole, and no temporary file"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/sudoers"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path "root ALL=(ALL) ALL\n")
+            ;; the text stops after three bytes: a full disk, a killed pipe
+            (fake-tool dir "cat" "head -c 3; exit 1")
+            (is (failure? (sudo/write path "broken text\n" opts)))
+            (assert= (file/slurp path) "root ALL=(ALL) ALL\n")
+            (is (no-temporaries? dir)))))))
+  (test "a rename the filesystem refuses (a bind-mounted file, EBUSY) is a write in place"
+    (with-stub (fn (dir opts)
+                 (let (path (str dir "/hosts"))
+                   (do
+                     (file/spit (str dir "/nopasswd") "")
+                     (file/spit path "old\n")
+                     (fake-tool dir
+                       "mv" "echo 'mv: cannot move: Device or resource busy' >&2; exit 1")
+                     (assert= (sudo/write path "new\n" opts) true)
+                     (assert= (file/slurp path) "new\n")
+                     (is (no-temporaries? dir)))))))
+  (test "a user who may write the file but not its directory writes it in place"
+    (with-stub (fn (dir opts)
+                 (let (locked (str dir "/locked")
+                       path (str locked "/conf"))
+                   (do
+                     (file/spit (str dir "/nopasswd") "")
+                     (file/mkdir locked)
+                     (file/spit path "old\n")
+                     (os/cmd "chmod" ["555" locked])
+                     (assert= (sudo/write path "new\n" opts) true)
+                     (os/cmd "chmod" ["755" locked])
+                     (assert= (file/slurp path) "new\n"))))))
+  (test "the file's ACL survives the rename"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/shadow"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path "old\n")
+            ;; only where this filesystem keeps ACLs (and the tools are here)
+            (when (and (os/which "setfacl")
+                    (= 0 (:exit (os/cmd "setfacl" ["-m" "u:65534:r" path]))))
+              (do
+                (assert= (sudo/write path "new\n" opts) true)
+                (is (includes? (:stdout (os/cmd "getfacl" ["-n" path])) "user:65534:r--")))))))))
+  (test "a temporary file a SIGKILL left behind a day ago is cleared — another writer's, never"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/conf")
+              stale (str dir "/.sudo-write.99.left0")
+              filling (str dir "/.sudo-write.98.busy0"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path "old\n")
+            (file/spit stale "half")
+            (os/cmd "touch" ["-d" "2 days ago" stale])
+            ;; another write's stage, minutes old: perhaps still being filled
+            (file/spit filling "part")
+            (os/cmd "touch" ["-d" "10 minutes ago" filling])
+            (assert= (sudo/write path "new\n" opts) true)
+            (is (not (file/exists? stale)))
+            (is (file/exists? filling)))))))
+  (test "a caller killed halfway — its text cut short — leaves the file as it was"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/target.conf")
+              old (string/repeat "ORIGINAL-LINE\n" 100))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path old)
+            ;; the pipe closes after ten bytes, as when the caller dies
+            (file/spit (str dir "/cut") "10")
+            (let (result (sudo/write path (string/repeat "NEW-CONTENT\n" 100) opts))
+              (do
+                (is (failure? result))
+                (is (includes? (error-message result) "10 of 1200 bytes"))))
+            (assert= (file/slurp path) old)
+            (is (no-temporaries? dir)))))))
+  (test "an in-place write that does not land whole puts the old text back"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/hosts"))
+          (do
+            (file/spit (str dir "/nopasswd") "")
+            (file/spit path "old\n")
+            ;; no rename to be had, and the copy into the file comes out wrong
+            (fake-tool dir "mv" "exit 1")
+            (fake-tool dir "cmp" "exit 1")
+            (is (failure? (sudo/write path "new\n" opts)))
+            (assert= (file/slurp path) "old\n")
+            (is (no-temporaries? dir)))))))
+  (test "a sudo that caches nothing still opens a file that does not exist yet as new"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/nocache") "")
+                   (assert= (sudo/read-bytes (str dir "/new.conf") (assoc opts :password "secret"))
+                     nil))))))
+
+(defn- fake-tool (dir name body)
+  "A stand-in `name` first on the PATH the stand-in sudo runs its command with."
+  (let (bin (str dir "/bin")
+        tool (str bin "/" name))
+    (do
+      (file/mkdir bin)
+      (file/spit tool (str "#!/bin/sh\n" body "\n"))
+      (os/cmd "chmod" ["+x" tool]))))
+
+(defn- no-temporaries? (dir)
+  (empty? (seq/filter (file/ls dir)
+            (fn (name)
+              (or (string/starts-with? name ".sudo-write") (string/starts-with? name ".sudo-keep"))))))

@@ -180,3 +180,77 @@
         (receive ([:registry-removed "plain" why] why) (after test/*wait-ms* :timeout)))
       (assert= (registry-entries reg) [])
       (registry-stop reg))))
+
+;; ADR-579: a document's text properties (a program's colours) are part of it — shared from
+;; a holder's copy, kept by the mirror, given back by a respawn.
+(describe "buffer-registry — text properties are part of the document"
+  (test "a document shared with properties starts its process with them"
+    (let (reg (registry-start)
+          p (registry-share reg "log" {:text "ok\n" :properties {:ansi [[0 2 {:fg 2}]]}} {}))
+      (assert= (buffer-query p (fn (b) (buffer-properties b :ansi))) [[0 2 {:fg 2}]])
+      (registry-stop reg)))
+  (test "a respawn from the mirror keeps the properties an append brought"
+    (let (reg (registry-start {:mirror true})
+          p1 (registry-share reg "out" "$ make\n" {}))
+      (registry-watch reg (self))
+      (buffer-splice p1 7 7 "ERROR\n" :someone nil {:ansi [[0 5 {:fg 1}]]})
+      (buffer-query p1 buffer-text) ; a barrier: the push is on its way to the registry
+      (registry-share reg "out" "" {}) ; and a second: the registry folded it
+      (exit p1 :kill)
+      (let (p2 (await-added "out"))
+        (assert= (buffer-query p2 buffer-text) "$ make\nERROR\n")
+        (assert= (buffer-query p2 (fn (b) (buffer-properties b :ansi))) [[7 12 {:fg 1}]]))
+      (registry-stop reg))))
+
+;; ADR-579: a property change reaches the mirror as one, so a respawn keeps it.
+(describe "buffer-registry — the mirror takes a property change"
+  (test "a respawn from the mirror keeps properties put on text already there"
+    (let (reg (registry-start {:mirror true})
+          p1 (registry-share reg "out" "ERROR\n" {}))
+      (registry-watch reg (self))
+      (buffer-splice p1 0 0 "" :someone nil [:put-properties 5 {:ansi [[0 5 {:fg 1}]]}])
+      (buffer-query p1 buffer-text) ; a barrier: the push is on its way to the registry
+      (registry-share reg "out" "" {}) ; and a second: the registry folded it
+      (exit p1 :kill)
+      (let (p2 (await-added "out"))
+        (assert= (buffer-query p2 buffer-text) "ERROR\n")
+        (assert= (buffer-query p2 (fn (b) (buffer-properties b :ansi))) [[0 5 {:fg 1}]]))
+      (registry-stop reg))))
+
+;; ADR-593: a registry owned by a process lives as long as it does — one per served
+;; session, owned by the session that outlives its loop, ends with the session.
+(describe "buffer-registry — an owner's lifetime"
+  (test "the registry outlives a holder but not its owner: the owner's end stops every document"
+    (let (owner (spawn (receive (:go nil)))
+          reg (registry-start {:owner owner})
+          watch-registry (monitor reg)
+          holder (spawn (registry-share reg "notes" "kept" {:file "/tmp/owned-notes"}))
+          watch-holder (monitor holder))
+      ;; the holder (a session's loop) ends; its document does not
+      (receive ([:down ^watch-holder _ _] nil) (after test/*wait-ms* nil))
+      (let (entries (registry-entries reg)
+            proc (:proc (first entries))
+            watch-proc (monitor proc))
+        (assert= (count entries) 1)
+        (assert= (buffer-query proc buffer-text) "kept")
+        ;; the owner (the session) ends: the registry and the document go with it
+        (send owner :go)
+        (assert= (receive ([:down ^watch-registry _ _] :ended) (after test/*wait-ms* :alive))
+          :ended)
+        (assert= (receive ([:down ^watch-proc _ _] :stopped) (after test/*wait-ms* :alive))
+          :stopped))))
+  (test "an owner already gone ends the registry at once"
+    (let (owner (spawn nil)
+          watch-owner (monitor owner))
+      (receive ([:down ^watch-owner _ _] nil) (after test/*wait-ms* nil))
+      (let (reg (registry-start {:owner owner})
+            watch-registry (monitor reg))
+        (assert= (receive ([:down ^watch-registry _ _] :ended) (after test/*wait-ms* :alive))
+          :ended))))
+  (test "without an owner the registry lives until it is stopped"
+    (let (owner (spawn (receive (:go nil)))
+          reg (registry-start)
+          watch-registry (monitor reg))
+      (send owner :go)
+      (assert= (receive ([:down ^watch-registry _ _] :ended) (after 200 :alive)) :alive)
+      (registry-stop reg))))

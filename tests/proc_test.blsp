@@ -94,6 +94,29 @@
         (assert= got (bytes 207 128))
         (os/close p)))))
 
+(describe "a pipe child leads a session of its own, with no controlling terminal"
+  ;; so nothing it runs (sudo, ssh, pinentry) can prompt on a full-screen program's terminal
+  ;; or stop on SIGTTIN reading it — it fails at once instead (Emacs's Bug#30762)
+  :isolated (test "os/cmd and os/spawn: the child's session id is its own pid; /dev/tty does not open"
+    ;; `ps -o sid=` is procps's (Linux); macOS's ps has no session-id column (`sess` is a
+    ;; kernel pointer there), so where it answers no number the session half compares the
+    ;; pid with itself and only the /dev/tty half is checked
+    (let (probe "sid=$(ps -o sid= -p $$ 2>/dev/null | tr -d ' '); case \"$sid\" in ''|*[!0-9]*) sid=$$;; esac; echo \"$sid $$\"; (exec 3</dev/tty) 2>/dev/null && echo tty || echo none"
+          answer (fn (out)
+                   (let (lines (string/split (string/trim out) "\n")
+                         ids (vec (string/split (first lines) " ")))
+                     [(= (first ids) (second ids)) (second lines)])))
+      (do
+        (assert= (answer (:stdout (os/cmd "sh" ["-c" probe]))) [true "none"])
+        (let (p (os/spawn "sh" ["-c" probe])
+              out (letrec (gather (fn (acc)
+                                    (receive
+                                      ([:proc ^p d] (gather (str acc d)))
+                                      ([:proc-closed ^p _] acc)
+                                      (after test/*wait-ms* acc))))
+                    (gather "")))
+          (assert= (answer out) [true "none"]))))))
+
 (describe "proc: stdout stream + exit code"
   :isolated (test "a child's stdout then [:proc-closed handle code] with its exit status"
     (let (p (os/spawn "sh" ["-c" "printf hello; exit 3"]))
@@ -249,6 +272,50 @@
   :isolated (test "resizing a piped child is refused rather than silently ignored"
     (let (p (os/spawn "cat" []))
       (assert= :refused (try (do (os/resize-pty p 80 24) :resized) (catch e :refused)))
+      (os/close p))))
+
+;; ADR-570: a program reading a password turns its terminal's ECHO off and keeps line
+;; mode; a host that shows the child's input itself (an editor's line-mode REPL) reads the
+;; pair to know the next line is a secret. The child says when stty has run by printing a
+;; marker, so the test asks only after the mode changed — a barrier, not a sleep.
+(describe "proc: a pty says how it reads input"
+  :isolated (test "a fresh terminal echoes, a line at a time — no password"
+    (let (p (os/spawn-pty "sh" ["-c" "echo READY; sleep 5"])
+          _ (pty-await "" "READY"))
+      (assert= {:echo true :canonical true} (os/pty-mode p))
+      (assert= false (os/pty-password? p))
+      (os/close p)))
+
+  :isolated (test "echo off in line mode, as a password read sets it — and back on after"
+    (let (p (os/spawn-pty "sh"
+              ["-c" "stty -echo; echo HIDDEN; read line; stty echo; echo SHOWN; sleep 5"])
+          _ (pty-await "" "HIDDEN")
+          hidden (os/pty-mode p)
+          hidden-password (os/pty-password? p)
+          _ (os/write p "secret\n")
+          _ (pty-await "" "SHOWN")
+          shown-password (os/pty-password? p))
+      (assert= {:echo false :canonical true} hidden)
+      (assert= true hidden-password)
+      (assert= false shown-password)
+      (os/close p)))
+
+  :isolated (test "echo off with line mode off is a line editor, not a password"
+    (let (p (os/spawn-pty "sh" ["-c" "stty -echo -icanon; echo RAW; sleep 5"])
+          _ (pty-await "" "RAW"))
+      (assert= {:echo false :canonical false} (os/pty-mode p))
+      (assert= false (os/pty-password? p))
+      (os/close p)))
+
+  :isolated (test "a closed child is nil: nothing left to ask"
+    (let (p (os/spawn-pty "sh" ["-c" "sleep 5"]))
+      (os/close p)
+      (assert= nil (os/pty-mode p))
+      (assert= nil (os/pty-password? p))))
+
+  :isolated (test "a piped child is refused: it has no terminal"
+    (let (p (os/spawn "cat" []))
+      (assert= :refused (try (do (os/pty-mode p) :answered) (catch e :refused)))
       (os/close p))))
 
 ;; A pty costs a descriptor, and a descriptor that is never closed is a leak that only

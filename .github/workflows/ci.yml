@@ -32,7 +32,7 @@ env:
   # `gh api repos/broodlang/bedit/commits/main -q .sha`), paste it here, and run
   # `make smoke-bedit` against that checkout first — bump it whenever bedit adopts a
   # brood change (a rename wave, a new std name) that its previous commit predates.
-  BEDIT_REF: 81035bad9a4dd739c4f255de263e953d9cd03259
+  BEDIT_REF: 9c0d7cf0b24885909973c527cdf27dc1f2bae3ab
 
 jobs:
   # Is the version in Cargo.toml actually released? Not a gate — a NOTICE, because the
@@ -251,8 +251,15 @@ jobs:
   # never once been compiled for macOS (KI-125). So the gui is checked here on purpose: it
   # is the configuration a developer on a Mac actually builds, and the one with no other
   # coverage anywhere. `audio` stays out — it is not implicated and costs build time.
+  #
+  # Since 2026-11-04 it also RUNS: a `nest` built here with the gui runs the platform smoke
+  # set (scripts/ci/platform-smoke.sh — paths, files with CRLF / BOM / spaces, os/cmd and
+  # os/spawn, the pty, the clipboard with no display, display width), and the gui's key
+  # translation unit tests run here, where Option is a key of its own (ADR-541's
+  # Option-as-Meta). A compile proves the code exists; this proves it does what the Linux
+  # run says it does on the OS bedit's "avoided by design" claims are about.
   macos-check:
-    name: macOS compiles (the target only a tag used to reach)
+    name: macOS compiles and runs the platform smoke set
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -264,19 +271,15 @@ jobs:
         run: >
           cargo check -p cli --no-default-features
           --features brood/treesit-grammars --features brood/jit --features brood/stdimage
-      # Separate step so a gui-only break is named as one in the step list rather than
-      # hiding inside the release check above.
-      - name: cargo check — the gui backend (KI-125; no other job compiles it for macOS)
-        run: >
-          cargo check -p cli --no-default-features
-          --features brood/gui --features brood/jit --features brood/stdimage
-      - name: cargo check — nest
-        run: >
-          cargo check -p nest --no-default-features
-          --features brood/treesit-grammars --features brood/jit --features brood/stdimage
-          --features brood/dev-tools
       - name: cargo check — brood-lsp
         run: cargo check -p brood-lsp
+      # The gui backend (KI-125) is compiled by this build, so it needs no check of its own.
+      - name: cargo build — nest with the gui
+        run: cargo build -p nest --features brood/gui --features brood/treesit-grammars
+      - name: platform smoke set (nest test, headless)
+        run: scripts/ci/platform-smoke.sh target/debug/nest
+      - name: gui key translation unit tests (Option-as-Meta, ADR-541)
+        run: cargo test -p brood --features gui --lib host::gui::backend::input
 
   # Windows: the third desktop the runtime is meant for (the GPU target is wgpu so that DX12
   # draws what Vulkan and Metal do), and until 2026-10-18 no job compiled the tree for it.
@@ -301,14 +304,13 @@ jobs:
           cargo check --workspace --exclude brood-tab --exclude brood-playground --all-targets
           --features brood/gui-gpu --features brood/audio --features brood/treesit-grammars
 
-  # Whether the runtime RUNS on Windows, which nothing has yet shown: build `brood` and run
-  # a program that spawns, sends, receives and requires a std module. Allowed to fail while
-  # the port is new — its log is the to-do list — and to be made a gate (drop
-  # `continue-on-error`) once it has passed.
+  # Whether the runtime RUNS on Windows: build `brood` and run a program that spawns, sends,
+  # receives and requires a std module, then a gui `nest` running the platform smoke set.
+  # A gate since 2026-11-04 (it was `continue-on-error` while the port was new): the probe
+  # had passed, and the smoke set's first run found only a test race (clipboard reads).
   windows-smoke:
-    name: Windows runs a program (the port's probe)
+    name: Windows runs a program and the platform smoke set
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -330,6 +332,18 @@ jobs:
           out=$(target/debug/brood smoke.blsp)
           echo "$out"
           test "$out" = "$(printf 'pong 3\n{"ok":true}')"
+      # The same platform smoke set macOS runs, Windows's half of it: the portable files
+      # (tests/platform_test.blsp in place of the POSIX-userland ones; the script says
+      # which and why). Built with the CPU gui, as macOS is: the clipboard is the gui's.
+      - name: cargo build — nest with the gui
+        run: cargo build -p nest --features brood/gui --features brood/treesit-grammars
+      - name: platform smoke set (nest test, headless)
+        shell: bash
+        run: scripts/ci/platform-smoke.sh target/debug/nest.exe
+      - name: gui key translation unit tests (AltGr is Ctrl+Alt here, ADR-541)
+        run: cargo test -p brood --features gui --lib host::gui::backend::input
+      - name: ConPTY command-line quoting unit tests (KI-369)
+        run: cargo test -p brood --features gui --lib host::subprocess::conpty
 
   build-test:
     name: test
@@ -433,6 +447,16 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
+      # The tree-walked suite's debug build, its nextest log and the rust cache outgrew the
+      # runner's free disk: the runner died with "No space left on device" twice in a row
+      # (2026-11-04/05). The preinstalled toolchains this job never uses are ~30 GB.
+      - name: Free disk space
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/share/powershell
+          df -h /
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

@@ -60,6 +60,9 @@ pub(in crate::types::check) fn sym_appears_in(heap: &Heap, form: Value, sym: Sym
                     work.push(val);
                 }
             }
+            // A set literal (`#{x y}`) evaluates its elements too, so a binding used only
+            // inside one is used: `(let (x 1) #{x})` was reported unused.
+            Value::Set(sid) => work.extend(heap.map_entries(sid).iter().map(|&(k, _)| k)),
             _ => {}
         }
     }
@@ -95,6 +98,11 @@ pub(super) fn collect_syms_into_inner(heap: &Heap, form: Value, out: &mut HashSe
             for (k, v) in heap.map_entries(mid) {
                 collect_syms_into(heap, k, out);
                 collect_syms_into(heap, v, out);
+            }
+        }
+        Value::Set(sid) => {
+            for (element, _) in heap.map_entries(sid) {
+                collect_syms_into(heap, element, out);
             }
         }
         _ => {}

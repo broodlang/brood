@@ -1,0 +1,33 @@
+;; std/tool/test — the test run says so, and runs in a scratch home of its own (ADR-602).
+;; `nest test` sets `BROOD_TEST_RUN` and points the XDG config / state / data homes into a
+;; per-run directory before the interpreter exists. A runner that is not `nest test` (or a
+;; run with `--real-home`) gives no scratch home, and the cases that need one have nothing
+;; to check — `crates/nest/tests/test_scratch_home.rs` drives `nest test` itself either way.
+
+(defmodule test-run-test (:use test))
+
+(describe "a test run"
+  (test "running? is the runner's own word, and scratch-dir needs a run"
+    (assert= (test/running?) (= (os/env "BROOD_TEST_RUN") "1"))
+    (when (not (test/running?)) (is (nil? (test/scratch-dir)))))
+  (test "the XDG homes are inside the scratch home"
+    (let (scratch (test/scratch-dir))
+      (when scratch
+        (is (includes? scratch "brood-test-home-"))
+        (assert= (os/env "XDG_CONFIG_HOME") (path/join scratch "config"))
+        (assert= (os/env "XDG_STATE_HOME") (path/join scratch "state"))
+        (assert= (os/env "XDG_DATA_HOME") (path/join scratch "data"))
+        (is (file/dir? (path/join scratch "config"))))))
+  (test "a file kept under the config home lands in the scratch home"
+    (let (scratch (test/scratch-dir))
+      (when scratch
+        (let (file (path/join (or (os/env "XDG_CONFIG_HOME") "") "test-run-test" "state.blsp"))
+          (file/mkdir (path/dirname file))
+          (file/spit file "[1]")
+          (is (string/starts-with? file scratch))
+          (assert= (file/slurp file) "[1]")))))
+  (test "the user's own config base is kept for nest's preferences, outside the scratch home"
+    (let (scratch (test/scratch-dir)
+          real (os/env "BROOD_USER_CONFIG_HOME"))
+      (when (and scratch real)
+        (refute (string/starts-with? real scratch))))))

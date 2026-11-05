@@ -71,6 +71,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         make_dir,
     );
     primitives.def(
+        "file/mkdir-private",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        &["path"],
+        "Create a directory and any missing parents (like mkdir -p), the directory itself owner-only (0700 on Unix, a protected one-entry DACL its contents inherit on Windows) whether it was made now or was already there — where an app keeps what other users must not read (an editor's sidecars of files edited as root, ADR-588), as file/spit-private is for a file.\n\n    (file/mkdir-private \"state/auto-save\")   ;~> nil, state/auto-save made, mode 0700",
+        make_private_dir,
+    );
+    primitives.def(
         "file/spit",
         Arity::exact(2),
         Sig::new(vec![string, iolist], nil_ty),
@@ -129,6 +137,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["path"],
         "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader.\n\n    (file/mtime \"project.blsp\")   ;~> 1761213600000, or nil when missing",
         file_mtime);
+    primitives.def(
+        "file/set-mtime",
+        Arity::exact(2),
+        Sig::new(vec![string, int], nil_ty),
+        &["path", "ms"],
+        "Set the last-modified time of the file at path to ms epoch-milliseconds — what `file/mtime` then answers. Returns nil; throws if the file is missing or cannot be changed. The portable `touch -t`: a test that needs a file older than another (an auto-save sidecar, a stale cache) on every OS, with no `touch` program.\n\n    (file/set-mtime \"notes.txt\" 1577836800000)   ;~> nil, notes.txt now dated 2020-01-01",
+        set_file_mtime);
     primitives.def(
         "file/size",
         Arity::exact(1),
@@ -203,9 +218,33 @@ pub(super) fn register(primitives: &mut super::Primitives) {
 /// the answer stops being usable the moment the binary is upgraded in place.
 pub(super) fn exe_path(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match std::env::current_exe() {
-        Ok(p) => Ok(heap.alloc_string(strip_deleted_marker(&p.to_string_lossy()))),
+        Ok(p) => Ok(heap.alloc_string(strip_deleted_marker(&host_path_text(&p)))),
         Err(_) => Ok(Value::nil()),
     }
+}
+
+/// A path the host handed back (the cwd, the executable, a canonical path), as the text
+/// Brood's `path` module reads (ADR-592). On Windows that is `/` separators — Win32 takes
+/// them, and `path` splits on nothing else — and no `\\?\` verbatim prefix, which
+/// `fs::canonicalize` adds and most programs a path is handed to refuse. Elsewhere the
+/// path as it is: a `\` there is an ordinary character of a file name.
+fn host_path_text(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        windows_path_text(&text)
+    } else {
+        text.into_owned()
+    }
+}
+
+/// [`host_path_text`]'s Windows rule, over text so it is tested on every host.
+fn windows_path_text(text: &str) -> String {
+    let unprefixed = if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{share}")
+    } else {
+        text.strip_prefix(r"\\?\").unwrap_or(text).to_string()
+    };
+    unprefixed.replace('\\', "/")
 }
 
 /// Strip Linux's `" (deleted)"` marker from a `/proc/self/exe` readlink.
@@ -232,7 +271,7 @@ fn strip_deleted_marker(path: &str) -> &str {
 
 pub(super) fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match std::env::current_dir() {
-        Ok(p) => Ok(heap.alloc_string(&p.to_string_lossy())),
+        Ok(p) => Ok(heap.alloc_string(&host_path_text(&p))),
         Err(e) => Err(LispError::runtime(format!("file/cwd: {}", e))
             .with_code(crate::error::error_codes::FILE_IO)),
     }
@@ -293,13 +332,13 @@ pub(super) fn path_canonicalize(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
         }
         if let Ok(real) = std::fs::canonicalize(&prefix) {
             let out = apply_tail(real, &comps[k..]);
-            return Ok(heap.alloc_string(&out.to_string_lossy()));
+            return Ok(heap.alloc_string(&host_path_text(&out)));
         }
     }
     // Nothing (not even the root) canonicalized — a broken mount. Fall back to a
     // purely lexical normalization so callers still get a stable, `..`-free path.
     let out = apply_tail(PathBuf::new(), &comps);
-    Ok(heap.alloc_string(&out.to_string_lossy()))
+    Ok(heap.alloc_string(&host_path_text(&out)))
 }
 
 /// `(file/dir? path)` — true if `path` exists and is a directory.
@@ -338,6 +377,29 @@ pub(super) fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         LispError::runtime(format!("file/mkdir: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
+    Ok(Value::nil())
+}
+
+/// `(file/mkdir-private path)` — `file/mkdir`, then the directory made owner-only (0700 on
+/// Unix; on Windows a protected one-entry DACL its contents inherit, KI-365). Returns nil.
+pub(super) fn make_private_dir(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file/mkdir-private", arg(args, 0))?;
+    make_dir(args, env, heap)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+            LispError::runtime(format!("file/mkdir-private: {}: {}", path, e))
+                .with_code(crate::error::error_codes::FILE_IO)
+        })?;
+    }
+    #[cfg(windows)]
+    crate::host::owner_only::restrict_to_owner(std::path::Path::new(&path), true).map_err(|e| {
+        LispError::runtime(format!("file/mkdir-private: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    #[cfg(not(any(unix, windows)))]
+    let _ = path;
     Ok(Value::nil())
 }
 
@@ -597,6 +659,32 @@ pub(super) fn file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
         return Ok(Value::nil());
     };
     Ok(Value::int(since.as_millis() as i64))
+}
+
+/// `(file/set-mtime path ms)` — set `path`'s last-modified time to `ms` epoch-milliseconds
+/// (negative for before 1970). Through the open file (`File::set_modified`), so it is the
+/// same call on every OS — no `touch` program.
+pub(super) fn set_file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file/set-mtime", arg(args, 0))?;
+    let ms = expect_int(heap, "file/set-mtime", arg(args, 1))?;
+    let failed = |e: std::io::Error| {
+        LispError::runtime(format!("file/set-mtime: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    };
+    let offset = std::time::Duration::from_millis(ms.unsigned_abs());
+    let when = if ms >= 0 {
+        std::time::UNIX_EPOCH.checked_add(offset)
+    } else {
+        std::time::UNIX_EPOCH.checked_sub(offset)
+    }
+    .ok_or_else(|| LispError::runtime(format!("file/set-mtime: {ms} ms is out of range")))?;
+    // Opened for writing (nothing written): Windows needs write access to change a time.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .map_err(failed)?;
+    file.set_modified(when).map_err(failed)?;
+    Ok(Value::nil())
 }
 
 /// `(file-stat path)` — one `stat` for `path` as a map, or `nil` if it is missing.
@@ -886,5 +974,28 @@ impl Drop for FileLock<'_> {
     fn drop(&mut self) {
         // Not actionable here, and closing the file would release it regardless.
         let _ = self.file.unlock();
+    }
+}
+
+#[cfg(test)]
+mod windows_path_text_tests {
+    use super::windows_path_text;
+
+    #[test]
+    fn a_drive_path_takes_forward_slashes() {
+        assert_eq!(windows_path_text(r"C:\Users\me\src"), "C:/Users/me/src");
+    }
+
+    #[test]
+    fn the_verbatim_prefix_is_dropped() {
+        assert_eq!(windows_path_text(r"\\?\C:\Users\me"), "C:/Users/me");
+    }
+
+    #[test]
+    fn a_verbatim_unc_path_is_a_unc_path_again() {
+        assert_eq!(
+            windows_path_text(r"\\?\UNC\server\share\x"),
+            "//server/share/x"
+        );
     }
 }

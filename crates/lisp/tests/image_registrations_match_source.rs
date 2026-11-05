@@ -35,6 +35,12 @@ fn own_the_cache() -> std::path::PathBuf {
 /// declares worked from the image and not from source, and the only witness was a test
 /// that passed on one binary and failed on another (KI-136).
 ///
+/// Each line names WHO the entry is credited to (KI-357, ADR-595): a map entry's owner is
+/// its writer in the journal (`%registry-writer`), so an entry the image put back without
+/// crediting the module reads `<- -` there and differs; a LIST registry's member carries
+/// its writer and the op that added it (`%registry-members`), which the stdlib image
+/// replays.
+///
 /// `*features-loading*` is in-flight state and `*require-edges*` is installed for every
 /// module at once by the image; neither is a registration.
 const REGISTRY_SNAPSHOT: &str = r#"
@@ -52,7 +58,23 @@ const REGISTRY_SNAPSHOT: &str = r#"
           else (let (w (%registry-writer r path)) (when w (->string w)))))
       (defn- %mine? (m owner) (or (nil? owner) (= owner m)))
       (defn- %reg-lines (m r v)
-        (if (map? v)
+        (cond
+          ;; A LIST registry's members, each with who added it and the op that did (ADR-595):
+          ;; the image replays a member at the end of the list its source load put it.
+          (list? v)
+            (sort
+              (seq/keep (%registry-members r)
+                (fn (row)
+                  ;; Owned members only: one no op credited (a whole-list swap — `repl`'s
+                  ;; commands go in through `%swap-registry!`) rides the list's own value,
+                  ;; and the two arms' baselines differ in which modules are already loaded,
+                  ;; so an unowned member says nothing about the module being compared.
+                  (let (owner (when (get row 1) (->string (get row 1))))
+                    (when (and owner (= owner m))
+                      (str "  " (->string r) " member " (pr-str (get row 0))
+                           " " (pr-str (get row 2)) " <- " (or owner "-")))))))
+          (not (map? v)) (list)
+          else
           (sort
             (apply append
               (map (%map-pairs v)
@@ -71,8 +93,7 @@ const REGISTRY_SNAPSHOT: &str = r#"
                                            (str "  " (->string r) " " (str k1) " " (str (first kv2))
                                                 " <- " (or o2 "-"))))))
                          (nil? owner) (list (str "  " (->string r) " " (str k1) " <- -"))
-                         else (list)))))))
-          (list)))
+                         else (list)))))))))
       (apply str
         (map (cons "%baseline" (reflect/builtin-modules))
              (fn (m)

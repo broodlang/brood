@@ -1,0 +1,217 @@
+;; std/sudo.blsp — reading and writing a file as another user, through `sudo` (ADR-588).
+(defmodule sudo
+  "Reading and writing a file as another user — root by default — through `sudo`: what an
+editor needs to edit `/etc/hosts` (Emacs's TRAMP `/sudo::` method), and what an installer or
+a script fixing a system file needs too.
+
+A password is the CALLER's to ask for and is never kept here: it is handed to `sudo` on its
+standard input for one validation (`sudo -S -v`), so sudo's own credential cache — its
+timestamp, as for a `sudo` typed in a shell — is what lets the next call go without one. The
+file's text never shares a stream with the password: every command runs as `sudo -n`, which
+never reads a password, after the validation (or after `password-required?` said none is
+needed). A sudo configured to cache nothing (`timestamp_timeout=0`) gets the password and
+the command in one call, with `-k`, so the password is the line sudo reads first.
+
+Whether a failed `sudo -n` was SUDO wanting a password, or the command failing, is told by
+asking sudo again — `sudo -n true` — not by its message: classic sudo says \"a password is
+required\", sudo-rs \"interactive authentication is required\", and either may be translated.
+
+A file is READ as its bytes (`read-bytes`, through `base64`, so nothing is lost to a text
+decode); `read` is its text, refused when the bytes are not UTF-8. A WRITE never puts text
+over the file until all of it has arrived: it is staged in a temporary file and checked
+against the byte count and SHA-256 the caller sent, so a caller killed halfway — its pipe
+closed early — leaves the file as it was. The stage, beside the file and given its owner,
+mode, ACLs, extended attributes and SELinux context, is then renamed over it. Where a rename
+cannot be had — a file with other hard links (a rename would part it from them), a directory
+the user may not write (the stage is then in $TMPDIR), a file bind-mounted into a container
+(the rename refused, EBUSY) — the checked text is copied into the file, its old text kept
+aside and put back if the copy does not land whole. A symbolic link is written through (its
+target replaced, the link kept). The temporary files are removed on every exit the shell
+sees; one a SIGKILL left is removed by a later write once it is a day old, never while
+another writer may be filling it.
+
+`sudo/*program*` names the sudo to run — a test binds a stand-in script, so no test runs the real
+one; `opts`' `:program` does the same for one call.
+
+    (sudo/password-required? {:program \"false\"})   ;=> true")
+
+(defdyn sudo/*program* "sudo")
+;; The sudo program run — a path or a name on `PATH`. A test binds a stand-in.
+
+(def- sudo-env
+  ;; sudo's messages in English where it can be asked — read only to say why a call failed
+  {"LC_ALL" "C" "LANG" "C"})
+
+(defn- program-of (opts)
+  (or (:program opts) sudo/*program*))
+
+(defn- user-args (opts)
+  (if (:user opts) ["-u" (:user opts)] []))
+
+(defn password-required? (&optional (opts {}))
+  "Whether running a command through sudo needs a password typed NOW — false when sudo's
+policy needs none (`NOPASSWD`) or its credential cache still holds one from an earlier
+call. Asks `sudo -n -v`, which never prompts. `opts` `:program` overrides `sudo/*program*`.
+
+    (sudo/password-required? {:program \"true\"})   ;=> false"
+  (not (= 0 (:exit (os/cmd (program-of opts) ["-n" "-v"] {:env sudo-env})))))
+
+(defn- sudo-refused? (opts result)
+  "Whether `result`, a `sudo -n` run that failed, failed because sudo would not run the
+command without a password — told by asking sudo whether it would run `true` as the same
+user, never by its message (classic sudo and sudo-rs word it differently)."
+  (and (not (= 0 (:exit result)))
+    (not (= 0
+           (:exit (os/cmd (program-of opts)
+                    (append ["-n"] (user-args opts) ["--" "true"])
+                    {:env sudo-env}))))))
+
+(defn- failure-of (who result)
+  (failure (str "sudo/"
+             who
+             ": "
+             (let (said (string/trim (or (:stderr result) "")))
+               (if (= said "") (str "exit " (:exit result)) said)))))
+
+(defn- run-as (opts who command input own-exits)
+  "Run `command` (a vector) through sudo as `opts`' user with `input` on its stdin: the
+command's result map — whatever its exit — or a failure when sudo itself refused (a wrong
+password, none given when one is required). See the module doc for how a password goes."
+  (let (program (program-of opts)
+        password (:password opts)
+        validated (when password
+                    (os/cmd program ["-S" "-p" "" "-v"] {:stdin (str password "\n") :env sudo-env})))
+    (if (and validated (not (= 0 (:exit validated))))
+      (failure-of who validated)
+      (let (result (os/cmd program
+                     (append ["-n"] (user-args opts) ["--"] command)
+                     {:stdin input :env sudo-env}))
+        (cond
+          ;; an exit the command itself chose (the read's 3: no file) is its answer — never
+          ;; sudo's, which a probe would wrongly say it is when sudo caches nothing
+          (or (contains? own-exits (:exit result)) (not (sudo-refused? opts result))) result
+          ;; validated, yet sudo keeps no cache: the password and the input in one call,
+          ;; `-k` so the password is the line sudo reads before the command sees any
+          password
+            (let (once (os/cmd program
+                         (append ["-S" "-k" "-p" ""] (user-args opts) ["--"] command)
+                         {:stdin (str password "\n" input) :env sudo-env}))
+              (if (and (not (contains? own-exits (:exit once))) (sudo-refused? opts once))
+                (failure-of who once)
+                once))
+          else (failure (str "sudo/" who ": a password is required")))))))
+
+;; the file's bytes as Base64 (no text decode can lose one), a missing file told by exit 3
+(def- read-script "if [ -e \"$1\" ]; then exec base64 < \"$1\"; else exit 3; fi")
+
+(defn read-bytes (path &optional (opts {}))
+  "The bytes of the file at `path`, read as `opts`' `:user` (root by default) through sudo;
+nil when no file is there; a failure when sudo refuses or the read fails — `sudo/read: a
+password is required` when one is and `opts` has no `:password`. Byte-faithful: the file
+comes through `base64`, so a binary or a file in another encoding arrives exactly.
+
+    (sudo/read-bytes \"/etc/shadow\" {:password typed})   ;~> the file's bytes, or a failure"
+  (let (result (run-as opts "read" ["sh" "-c" read-script "sh" path] "" #{0 3}))
+    (cond
+      (failure? result) result
+      (= 0 (:exit result))
+        (encoding/base64-decode-bytes (string/replace (string/replace (:stdout result) "\n" "")
+                                        "\r" ""))
+      (= 3 (:exit result)) nil
+      else (failure-of "read" result))))
+
+(defn read (path &optional (opts {}))
+  "The text of the file at `path`, read as `opts`' `:user` through sudo (`read-bytes`): nil
+when no file is there; a failure when sudo refuses, the read fails, or the file is not UTF-8
+text — never a text with its undecodable bytes replaced, which a save would write back over
+the file. `:password` is handed to sudo once and kept nowhere; `:program` overrides
+`sudo/*program*`.
+
+    (sudo/read \"/etc/hosts\" {:password typed})   ;~> the file's text, or a failure"
+  (let (bytes (read-bytes path opts))
+    (cond
+      (or (nil? bytes) (failure? bytes)) bytes
+      else
+        (check-allow :discarded-catch
+          (try
+            (string/bytes-> bytes)
+            (catch _
+              (failure (str "sudo/read: " path " is not UTF-8 text (sudo/read-bytes reads it)"))))))))
+
+;; The write, as the target user: `sh -c write-script sh PATH BYTES SHA256`. Its own failures
+;; exit 4 (so they are never taken for sudo's refusal).
+;;
+;; The text is STAGED first, never written straight over anything: into a temporary file beside
+;; the file (or, where the user may not write the directory, one in $TMPDIR), and checked —
+;; exactly BYTES bytes, and the SHA256 when `sha256sum` is there — before anything is replaced.
+;; A caller killed halfway (C-g, a timeout, a hang-up) closes the pipe early: `cat` sees EOF
+;; and stops short, and the check refuses the partial text, so the file is left as it was.
+;;
+;; Then the staged text replaces the file: renamed over it when it is beside it — the stage
+;; given the file's owner, mode, ACLs, extended attributes and SELinux context before it was
+;; filled (`cp --preserve=all --attributes-only`, else `cp -p`; `chcon --reference`;
+;; getfacl/setfacl), or the umask's mode for a new file. Where no rename can be had — the file
+;; has other hard links, the stage is not beside it, or the rename is refused (a file
+;; bind-mounted into a container, /etc/hosts under Docker: EBUSY) — it is copied INTO the file,
+;; after the file's old text was kept aside, and compared after; a copy that did not land whole
+;; puts the old text back. Through a symbolic link to its target.
+;;
+;; Its temporary files are `.sudo-write.PID.*` and `.sudo-keep.PID.*`, removed on every way out
+;; the shell sees (EXIT, HUP, INT, TERM). One a SIGKILL left behind is removed by a later write
+;; only once it is a day old: never another writer's file, still being written.
+(def- write-script
+  (str "target=$1; expected=$2; digest=$3\n"
+    "if [ -L \"$target\" ]; then resolved=$(readlink -f \"$target\") && target=$resolved; fi\n"
+    "dir=$(dirname \"$target\")\n" "stage=''; keep=''\n"
+    "trap 'rm -f -- \"$stage\" \"$keep\"' EXIT\n" "trap 'exit 4' HUP INT TERM\n"
+    "find \"$dir\" -maxdepth 1 -type f \\( -name '.sudo-write.*' -o -name '.sudo-keep.*' \\)"
+    " -mmin +1440 -exec rm -f {} + 2>/dev/null\n" "links=1\n"
+    "if [ -e \"$target\" ]; then links=$(ls -ld -- \"$target\" | awk '{print $2}'); fi\n"
+    "rename=1\n" "stage=$(mktemp \"$dir/.sudo-write.$$.XXXXXX\" 2>/dev/null)"
+    " || { rename=0; stage=$(mktemp \"${TMPDIR:-/tmp}/.sudo-write.$$.XXXXXX\") || exit 4; }\n"
+    "if [ \"$links\" -gt 1 ]; then rename=0; fi\n" "if [ $rename = 1 ]; then\n"
+    "  if [ -e \"$target\" ]; then\n"
+    "    cp --preserve=all --attributes-only -- \"$target\" \"$stage\" 2>/dev/null"
+    " || cp -p -- \"$target\" \"$stage\" 2>/dev/null || rename=0\n"
+    "    if command -v chcon >/dev/null 2>&1; then chcon --reference=\"$target\" -- \"$stage\" 2>/dev/null; fi\n"
+    "    if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then\n"
+    "      getfacl -p -- \"$target\" 2>/dev/null | setfacl --set-file=- -- \"$stage\" 2>/dev/null\n"
+    "    fi\n" "  else\n" "    chmod \"$(printf '%o' $((0666 & ~$(umask))))\" \"$stage\"\n" "  fi\n"
+    "fi\n" "cat > \"$stage\" || exit 4\n" "size=$(wc -c < \"$stage\" | tr -d ' ')\n"
+    "if [ \"$size\" != \"$expected\" ]; then\n"
+    "  echo \"$size of $expected bytes arrived; the file is unchanged\" >&2; exit 4\n" "fi\n"
+    "if command -v sha256sum >/dev/null 2>&1; then\n"
+    "  got=$(sha256sum < \"$stage\" | cut -d' ' -f1)\n" "  if [ \"$got\" != \"$digest\" ]; then\n"
+    "    echo 'the text arrived changed; the file is unchanged' >&2; exit 4\n" "  fi\n" "fi\n"
+    "if [ $rename = 1 ] && mv -f -- \"$stage\" \"$target\" 2>/dev/null; then stage=''; exit 0; fi\n"
+    "if [ -e \"$target\" ]; then\n" "  keep=$(mktemp \"$dir/.sudo-keep.$$.XXXXXX\" 2>/dev/null)"
+    " || keep=$(mktemp \"${TMPDIR:-/tmp}/.sudo-keep.$$.XXXXXX\") || exit 4\n"
+    "  cat -- \"$target\" > \"$keep\" || exit 4\n" "fi\n"
+    "if cat -- \"$stage\" > \"$target\" && cmp -s -- \"$stage\" \"$target\"; then exit 0; fi\n"
+    "if [ -n \"$keep\" ]; then cat -- \"$keep\" > \"$target\"; fi\n"
+    "echo 'the file could not be written; its old text is back' >&2\n" "exit 4\n"))
+
+(defn write (path text &optional (opts {}))
+  "Write `text` to the file at `path` as `opts`' `:user` (root by default) through sudo,
+replacing what it held, and creating it when it does not exist. The text is staged and
+checked — its byte count and SHA-256 — before anything is replaced, so a write cut short (the
+caller killed, the pipe closed) leaves the file as it was; it then replaces the file by a
+rename where it can, else by a copy into it that puts the old text back if it does not land
+whole (see the module doc). True, or a failure as `sudo/read` gives one.
+
+    (sudo/write \"/etc/hosts\" text {:password typed})   ;~> true, or a failure"
+  (let (result (run-as opts
+                 "write"
+                 ["sh"
+                   "-c"
+                   write-script
+                   "sh"
+                   path
+                   (str (count (string/->bytes text)))
+                   (hash/sha256 text)]
+                 text
+                 #{0 4}))
+    (cond
+      (failure? result) result
+      (= 0 (:exit result)) true
+      else (failure-of "write" result))))

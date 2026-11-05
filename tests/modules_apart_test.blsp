@@ -1,0 +1,71 @@
+;;; A plugin's module that shares a short name with one of the host project's (ADR-604).
+;;; Inside a project every `mod/name` of one of its modules roots to `project/mod/name`
+;;; (ADR-070); a plugin loaded at run time with a module `org` beside the project's `org`
+;;; loaded INTO the project's module. `reflect/with-modules-apart` loads it apart, a name bound
+;;; exactly is reached by a late-bound reference, and a definition's site is recorded under
+;;; the global it binds.
+
+(defmodule modules-apart-test (:use test))
+
+(purge-stale-temp "modapart-")
+(def- *dir* (temp-dir "modapart-"))
+(file/mkdir *dir*)
+
+(defn- in-host (thunk)
+  "Call `thunk` inside a host project `modhost` whose modules include `modorg`."
+  (let (previous (%set-package-context 'modhost '(modorg)))
+    (try (thunk) (finally (%set-package-context (first previous) (second previous))))))
+
+(defn- fixture (name text)
+  (let (path (path/join *dir* name))
+    (file/spit path text)
+    path))
+
+(describe "a plugin module named like one of the host's"
+  :isolated (test "loads apart: its own global, its own site, the host's left alone"
+    (let (host-file (fixture "host-modorg.blsp"
+                      "(defmodule modorg)\n(defn f () :host)\n(defn shared () :host)\n")
+          plugin-file (fixture "plugin-modorg.blsp"
+                        "(defmodule modorg)\n(defn f () :plugin)\n(defn only-plugin () :plugin)\n"))
+      (in-host
+        (fn ()
+          (reflect/load host-file)
+          (assert= ((reflect/eval 'modhost/modorg/f)) :host)
+          (reflect/with-modules-apart ["modorg"] (fn () (reflect/load plugin-file)))
+          ;; the plugin's globals are its own, unrooted
+          (assert= ((reflect/eval '/modorg/f)) :plugin)
+          (assert= (first (reflect/source-location '/modorg/f)) plugin-file)
+          ;; the host's module is untouched, its site its own
+          (assert= ((reflect/eval 'modhost/modorg/f)) :host)
+          (assert= (first (reflect/source-location 'modhost/modorg/f)) host-file)
+          ;; a late-bound reference reaches a name only the plugin binds; the host's own compiled
+          ;; code names its function in full (`modhost/modorg/f`), so an exact name both bind is the
+          ;; plugin's — the same name spelled the same way
+          (assert= ((reflect/eval 'modorg/only-plugin)) :plugin)
+          (assert= ((reflect/eval 'modorg/f)) :plugin)
+          ;; removing the plugin's leaves the host's
+          (is (reflect/undef '/modorg/f))
+          (assert= ((reflect/eval 'modhost/modorg/f)) :host))))))
+
+(describe "a definition's site"
+  :isolated (test "is recorded under the global it binds"
+    (let (file (fixture "escaped-def.blsp" "(defn /modorg/escaped () 1)\n"))
+      (in-host
+        (fn ()
+          (reflect/load file)
+          ;; inside the host a root-escaped `modorg/…` binds the host's module …
+          (is (bound? 'modhost/modorg/escaped))
+          ;; … and its site says so, not a global that does not exist
+          (assert= (first (reflect/source-location 'modhost/modorg/escaped)) file)
+          (is (nil? (reflect/source-location '/modorg/escaped))))))))
+
+(describe "reflect/with-modules-apart"
+  (test "restores the project's context, a throw included"
+    (in-host (fn ()
+               (assert= (try
+                          (reflect/with-modules-apart ["modorg"] (fn () (error "boom")))
+                          (catch e (error-message e)))
+                 "boom")
+               (let (now (%set-package-context nil nil))
+                 (%set-package-context (first now) (second now))
+                 (assert= [(first now) (vec (second now))] ['modhost ['modorg]]))))))

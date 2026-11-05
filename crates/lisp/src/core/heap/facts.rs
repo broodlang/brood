@@ -229,16 +229,20 @@ impl Heap {
                     self.runtime.def_sites_write().remove(&sym);
                 }
                 FactKind::RegistryName => {
-                    self.runtime
+                    // The writer journal changes only under the registry lock (ADR-582).
+                    let mut names = self
+                        .runtime
                         .registry_lock
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&sym);
-                    self.runtime
+                        .unwrap_or_else(|e| e.into_inner());
+                    names.remove(&sym);
+                    let mut writers = self
+                        .runtime
                         .registry_writers
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .retain(|(registry, _), _| *registry != sym);
+                        .unwrap_or_else(|e| e.into_inner());
+                    writers.entries.retain(|(registry, _), _| *registry != sym);
+                    writers.members.remove(&sym);
                 }
                 FactKind::Dynamic => self.runtime.unmark_dynamic(sym),
             }

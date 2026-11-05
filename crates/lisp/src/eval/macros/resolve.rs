@@ -40,6 +40,7 @@ pub struct NsLoadScope<'a> {
     known_by_module: std::collections::HashMap<Symbol, HashSet<Symbol>>,
     imports: crate::core::heap::ImportTable,
     assume_own: bool,
+    root_load_file: Option<Symbol>,
 }
 
 impl<'a> NsLoadScope<'a> {
@@ -63,6 +64,9 @@ impl<'a> NsLoadScope<'a> {
         let known_by_module = heap.set_ns_known_by_module(by_module);
         let imports = heap.set_imports(crate::core::heap::ImportTable::default());
         let assume_own = heap.set_ns_assume_own(false);
+        // A nested load is not the file around it: its registry writes credit its own
+        // module, or itself (`credit_file`), never the namespace-less file that loaded it.
+        let root_load_file = heap.set_root_load_file(None);
         Self {
             heap,
             compile_ns,
@@ -70,6 +74,7 @@ impl<'a> NsLoadScope<'a> {
             known_by_module,
             imports,
             assume_own,
+            root_load_file,
         }
     }
 
@@ -78,10 +83,18 @@ impl<'a> NsLoadScope<'a> {
     pub fn heap(&mut self) -> &mut Heap {
         self.heap
     }
+
+    /// Credit the registry writes this file makes while no namespace is open to the file
+    /// itself (ADR-582) — `reflect/load` of a file without a `defmodule`. Undone with the
+    /// rest of the scope.
+    pub fn credit_file(&mut self, file: Symbol) {
+        self.heap.set_root_load_file(Some(file));
+    }
 }
 
 impl Drop for NsLoadScope<'_> {
     fn drop(&mut self) {
+        self.heap.set_root_load_file(self.root_load_file);
         self.heap.set_compile_ns(self.compile_ns);
         self.heap
             .set_ns_known_names(std::mem::take(&mut self.known));

@@ -272,6 +272,25 @@ impl Heap {
             .unwrap_or(0)
     }
 
+    /// The runtime's global generation now (ADR-603): every later `def` or removal of a
+    /// global stamps it with a greater one (`RuntimeCode::global_generations`).
+    pub fn runtime_generation(&self) -> u64 {
+        self.runtime.version.load(Ordering::Relaxed)
+    }
+
+    /// Every global stamped after `generation` — defined, redefined or removed since
+    /// (ADR-603). One pass over the stamps; no value is read.
+    pub fn rebound_since(&self, generation: u64) -> Vec<Symbol> {
+        self.runtime
+            .global_generations
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|&(_, &stamped)| stamped > generation)
+            .map(|(&sym, _)| sym)
+            .collect()
+    }
+
     /// Is `sym` bound in the global table (prelude + user `def`s)? An authoritative,
     /// non-racy read of `runtime.globals` (which is seeded with the prelude). Used by
     /// the unbound-symbol diagnostic to tell a *spuriously*-unbound known global (the
@@ -474,7 +493,14 @@ impl Heap {
                     staged_regs.insert(sym, val);
                     pending.push((sym, Some(val), LoadWrite::Define { sym, val }));
                 }
-                LoadWrite::Registry { sym, op, path, val } => {
+                LoadWrite::Registry {
+                    sym,
+                    op,
+                    path,
+                    val,
+                    writer,
+                    guard,
+                } => {
                     // Later ops on one registry within this load build on the earlier ones'
                     // result, not on the live value again.
                     let cur = staged_regs
@@ -482,10 +508,32 @@ impl Heap {
                         .copied()
                         .or_else(|| self.runtime.globals_read().get(&sym).copied())
                         .unwrap_or(Value::nil());
+                    let mut writers = rt
+                        .registry_writers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if !self.writer_guard_holds(&writers, sym, op, &path, val, cur, guard) {
+                        continue;
+                    }
                     if let Some(next) = self.registry_next(cur, op, &path, val) {
+                        // ADR-582: the writer journal changes HERE, for an op that applies —
+                        // never at staging, which a declined op or a thrown load undoes.
+                        self.record_registry_writer(&mut writers, sym, op, &path, val, cur, writer);
+                        drop(writers);
                         let next = self.promote_global(next);
                         staged_regs.insert(sym, next);
-                        pending.push((sym, Some(next), LoadWrite::Registry { sym, op, path, val }));
+                        pending.push((
+                            sym,
+                            Some(next),
+                            LoadWrite::Registry {
+                                sym,
+                                op,
+                                path,
+                                val,
+                                writer,
+                                guard,
+                            },
+                        ));
                     }
                 }
                 LoadWrite::Undefine { sym } => {
@@ -663,10 +711,17 @@ impl Heap {
     /// onto a present key, `:cons-new` of an existing member) — so Brood can still report
     /// "already there" without a second, racy read.
     ///
-    /// `from` names the module making the write, for the KI-136 writer journal; `None`
-    /// means "the namespace being compiled", which is the module whose LOAD is running the
-    /// registration — a replay from an image passes the module it is replaying, since the
-    /// namespace at that moment is whoever `require`d it.
+    /// `writer` is who the write credits in the writer journal (KI-136, ADR-582) — the
+    /// builtin resolves it: the namespace being compiled or the namespace-less file being
+    /// loaded by default (`Heap::current_registry_writer`), the module an image replay
+    /// names, or nobody. It is journalled when the op APPLIES: here for a live write, at the
+    /// publish for one a module load staged (a load that throws credits nobody).
+    ///
+    /// `guard`, when given, makes the op conditional: it applies only while the entry it
+    /// targets (the key path, or for a list op the member) is still credited to that
+    /// writer — checked under the registry lock, and again wherever a staged op is applied —
+    /// so a retract or restore cannot take an entry another module has since written.
+    #[allow(clippy::too_many_arguments)]
     pub fn registry_update(
         &mut self,
         env: EnvId,
@@ -674,38 +729,21 @@ impl Heap {
         op: RegistryOp,
         path: &[Value],
         val: Value,
-        from: Option<Symbol>,
+        writer: Option<RegistryWriter>,
+        guard: Option<RegistryWriter>,
     ) -> bool {
         // Clone the Arc so the guard borrows a LOCAL, leaving `&mut self` free for the map
         // ops between the read and the write. Recover from a poisoned lock rather than
         // propagate: a panicking registrar leaves the registry structurally sound (values
         // are immutable), and wedging every later registration would be worse.
         let rt = self.runtime.clone();
-        let mut guard = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let wrote = self.registry_apply(env, sym, op, path, val, true);
-        if !wrote {
+        let mut lock = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.registry_apply(env, sym, op, path, val, writer, guard) {
             return false;
         }
         // Only on the write path: a declined op leaves the registry untouched, and a name
         // that was never written has nothing for an image to carry.
-        guard.insert(sym);
-        // The writer journal (KI-136): who owns this entry now. A `:dissoc` retires it; any
-        // other write records the writing module, or clears the entry for a root write.
-        {
-            let key = (sym, self.registry_path_key(path));
-            let mut writers = rt
-                .registry_writers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            match (op, from.or_else(|| self.compile_ns())) {
-                (RegistryOp::Dissoc, _) | (_, None) => {
-                    writers.remove(&key);
-                }
-                (_, Some(writer)) => {
-                    writers.insert(key, writer);
-                }
-            }
-        }
+        lock.insert(sym);
         if reg_trace_enabled() && crate::core::value::symbol_name(sym) == reg::RECORD_IDS {
             let k1 = path.first().copied().unwrap_or(Value::nil());
             // Ancestry chain (up to 4 hops), so a leaked writer can be attributed to the
@@ -739,11 +777,184 @@ impl Heap {
         true
     }
 
-    /// The body of [`Self::registry_update`] — the read-modify-write itself, with
-    /// `registry_lock` HELD BY THE CALLER. Split out so a restore can re-apply a journalled
-    /// registry operation to the restored table under the lock it already holds (KI-134);
-    /// `journal` is false there, since the entry being replayed IS the journal. Returns
-    /// whether the registry was written (false when the op declined).
+    /// A value as it prints — how the writer journal tells that a list registry's member
+    /// slots still describe the list (see [`RegistryWriters`]).
+    fn printed(&self, value: Value) -> String {
+        crate::syntax::printer::print(self, value)
+    }
+
+    /// The member position a `:credit` of a list registry names — its path is `[index]` —
+    /// when it is one of `length` members.
+    fn credit_index(path: &[Value], length: usize) -> Option<usize> {
+        match path {
+            [index] => index
+                .as_int()
+                .and_then(|index| usize::try_from(index).ok())
+                .filter(|&index| index < length),
+            _ => None,
+        }
+    }
+
+    /// Bring `slots` into line with list `list`, the registry's value before an op: when
+    /// they no longer describe it member for member — the list was swapped or redefined
+    /// underneath — they are rebuilt with no writers. Returns the list's members.
+    fn align_member_slots(&self, slots: &mut Vec<MemberSlot>, list: Value) -> Vec<Value> {
+        let items = self.list_to_vec(list).unwrap_or_default();
+        let aligned = slots.len() == items.len()
+            && slots
+                .iter()
+                .zip(&items)
+                .all(|(slot, &item)| slot.printed == self.printed(item));
+        if !aligned {
+            *slots = items
+                .iter()
+                .map(|&item| MemberSlot {
+                    printed: self.printed(item),
+                    writer: None,
+                    added_by: None,
+                })
+                .collect();
+        }
+        items
+    }
+
+    /// Who added `member` to list registry `sym`, whose value is `list`: the slot at the
+    /// member's position, found with the `equal` a `:remove` matches with. `None` when it is
+    /// not a member, or the slots no longer describe the list.
+    fn member_writer(
+        &self,
+        writers: &RegistryWriters,
+        sym: Symbol,
+        list: Value,
+        member: Value,
+    ) -> Option<RegistryWriter> {
+        let slots = writers.members.get(&sym)?;
+        let items = self.list_to_vec(list).ok()?;
+        if slots.len() != items.len() {
+            return None;
+        }
+        let index = items.iter().position(|&item| self.equal(item, member))?;
+        if slots[index].printed != self.printed(items[index]) {
+            return None;
+        }
+        slots[index].writer
+    }
+
+    /// Who the entry `op` targets is credited to in `writers` — the member for a list op,
+    /// the key path otherwise — given the registry's value `cur` before the op.
+    #[allow(clippy::too_many_arguments)]
+    fn target_writer(
+        &self,
+        writers: &RegistryWriters,
+        sym: Symbol,
+        op: RegistryOp,
+        path: &[Value],
+        val: Value,
+        cur: Value,
+    ) -> Option<RegistryWriter> {
+        match op {
+            RegistryOp::ConsNew | RegistryOp::AppendNew | RegistryOp::Remove => {
+                self.member_writer(writers, sym, cur, val)
+            }
+            RegistryOp::Credit if matches!(cur.unpack(), ValueRef::Pair(_)) => {
+                let slots = writers.members.get(&sym)?;
+                let items = self.list_to_vec(cur).ok()?;
+                let index = Self::credit_index(path, items.len())?;
+                (slots.len() == items.len() && slots[index].printed == self.printed(items[index]))
+                    .then_some(slots[index].writer)
+                    .flatten()
+            }
+            _ => writers
+                .entries
+                .get(&(sym, self.registry_path_key(path)))
+                .copied(),
+        }
+    }
+
+    /// Does `guard` (an op's expected writer, ADR-582) still hold for the entry it targets?
+    /// An unguarded op always may apply.
+    #[allow(clippy::too_many_arguments)]
+    fn writer_guard_holds(
+        &self,
+        writers: &RegistryWriters,
+        sym: Symbol,
+        op: RegistryOp,
+        path: &[Value],
+        val: Value,
+        cur: Value,
+        guard: Option<RegistryWriter>,
+    ) -> bool {
+        guard.is_none_or(|expected| {
+            self.target_writer(writers, sym, op, path, val, cur) == Some(expected)
+        })
+    }
+
+    /// Record in `writers` who owns the entry `op` just wrote — `cur` is the registry's
+    /// value BEFORE the op, which applied. A `:dissoc` or `:remove` retires the entry; any
+    /// other write credits `writer`, or clears the entry for a write nobody made (a prelude
+    /// or run-time write). A list op moves the member slots exactly as it moved the members.
+    #[allow(clippy::too_many_arguments)]
+    fn record_registry_writer(
+        &self,
+        writers: &mut RegistryWriters,
+        sym: Symbol,
+        op: RegistryOp,
+        path: &[Value],
+        val: Value,
+        cur: Value,
+        writer: Option<RegistryWriter>,
+    ) {
+        match op {
+            RegistryOp::Credit if matches!(cur.unpack(), ValueRef::Pair(_)) => {
+                let slots = writers.members.entry(sym).or_default();
+                let items = self.align_member_slots(slots, cur);
+                if let Some(index) = Self::credit_index(path, items.len()) {
+                    slots[index].writer = writer;
+                }
+            }
+            RegistryOp::ConsNew | RegistryOp::AppendNew | RegistryOp::Remove => {
+                let slots = writers.members.entry(sym).or_default();
+                let items = self.align_member_slots(slots, cur);
+                match op {
+                    RegistryOp::ConsNew => slots.insert(
+                        0,
+                        MemberSlot {
+                            printed: self.printed(val),
+                            writer,
+                            added_by: Some(op),
+                        },
+                    ),
+                    RegistryOp::AppendNew => slots.push(MemberSlot {
+                        printed: self.printed(val),
+                        writer,
+                        added_by: Some(op),
+                    }),
+                    _ => {
+                        let mut index = 0;
+                        slots.retain(|_| {
+                            let kept = !self.equal(items[index], val);
+                            index += 1;
+                            kept
+                        });
+                    }
+                }
+                if slots.is_empty() {
+                    writers.members.remove(&sym);
+                }
+            }
+            _ => {
+                let key = (sym, self.registry_path_key(path));
+                match (op, writer) {
+                    (RegistryOp::Dissoc, _) | (_, None) => {
+                        writers.entries.remove(&key);
+                    }
+                    (_, Some(writer)) => {
+                        writers.entries.insert(key, writer);
+                    }
+                }
+            }
+        }
+    }
 
     /// The value registry global `sym` takes after `op` at `path` with `val`, given its
     /// current value `cur` — the read-modify-write's MODIFY, with no read and no write, so
@@ -760,6 +971,25 @@ impl Heap {
     ) -> Option<Value> {
         let k1 = path.first().copied().unwrap_or(Value::nil());
         let next = match op {
+            // The value stays as it is; the op applies only to an entry that exists.
+            RegistryOp::Credit => {
+                let present = match cur.unpack() {
+                    ValueRef::Pair(_) => {
+                        let length = self.list_to_vec(cur).map(|items| items.len()).unwrap_or(0);
+                        Self::credit_index(path, length).is_some()
+                    }
+                    ValueRef::Map(id) => match (self.map_get(id, k1), path.get(1)) {
+                        (Some(_), None) => path.len() == 1,
+                        (Some(inner), Some(&k2)) => match inner.unpack() {
+                            ValueRef::Map(inner_id) => self.map_get(inner_id, k2).is_some(),
+                            _ => false,
+                        },
+                        (None, _) => false,
+                    },
+                    _ => false,
+                };
+                return present.then_some(cur);
+            }
             RegistryOp::ConsNew => {
                 if self.list_contains(cur, val) {
                     return None;
@@ -773,6 +1003,18 @@ impl Heap {
                 let mut items = self.list_to_vec(cur).unwrap_or_default();
                 items.push(val);
                 self.list(items)
+            }
+            RegistryOp::Remove => {
+                if !self.list_contains(cur, val) {
+                    return None;
+                }
+                let kept: Vec<Value> = self
+                    .list_to_vec(cur)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|&item| !self.equal(item, val))
+                    .collect();
+                self.list(kept)
             }
             RegistryOp::Merge => {
                 let ValueRef::Map(patch) = val.unpack() else {
@@ -862,6 +1104,12 @@ impl Heap {
         Some(next)
     }
 
+    /// The body of [`Self::registry_update`] — the read-modify-write itself, with
+    /// `registry_lock` HELD BY THE CALLER. Returns whether the registry was written (false
+    /// when the op declined, or its `guard` no longer holds). A write that lands live is
+    /// credited in the writer journal here; one a module load stages is credited when the
+    /// load publishes it (`publish_module_load`), so a load that throws credits nobody.
+    #[allow(clippy::too_many_arguments)]
     fn registry_apply(
         &mut self,
         env: EnvId,
@@ -869,7 +1117,8 @@ impl Heap {
         op: RegistryOp,
         path: &[Value],
         val: Value,
-        journal: bool,
+        writer: Option<RegistryWriter>,
+        guard: Option<RegistryWriter>,
     ) -> bool {
         // `def` binds at `env_root(env)`, which is NOT always `EnvId::GLOBAL`: during prelude
         // load the root is a bootstrap env whose bindings later seed the shared runtime. A
@@ -883,6 +1132,28 @@ impl Heap {
             .staged_lookup(sym)
             .unwrap_or_else(|| self.env_get(env, sym))
             .unwrap_or(Value::nil());
+        let staged = self.in_journalled_load() && !self.is_live_coordination_registry(sym);
+        if guard.is_some() {
+            // The writer journal describes the LIVE table, so a staged op's guard is read
+            // against it; the publish checks it again against what it applies to.
+            let against = if staged {
+                self.runtime
+                    .globals_read()
+                    .get(&sym)
+                    .copied()
+                    .unwrap_or(Value::nil())
+            } else {
+                cur
+            };
+            let rt = self.runtime.clone();
+            let writers = rt
+                .registry_writers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !self.writer_guard_holds(&writers, sym, op, path, val, against, guard) {
+                return false;
+            }
+        }
         let Some(next) = self.registry_next(cur, op, path, val) else {
             return false;
         };
@@ -892,7 +1163,7 @@ impl Heap {
         // the op to the live registry — never the map, which would clobber what a concurrent
         // process registered meanwhile — and journals it for the KI-134 replay. The two
         // registries loads coordinate through stay live (`is_live_coordination_registry`).
-        if journal && self.in_journalled_load() && !self.is_live_coordination_registry(sym) {
+        if staged {
             let path: Vec<Value> = path.iter().map(|v| self.promote_global(*v)).collect();
             let val = self.promote_global(val);
             let next = self.promote_global(next);
@@ -903,7 +1174,14 @@ impl Heap {
             let stages = &mut self.cold_mut().load_stages;
             let idx = owner.unwrap_or(stages.len() - 1);
             let st = &mut stages[idx];
-            st.writes.push(LoadWrite::Registry { sym, op, path, val });
+            st.writes.push(LoadWrite::Registry {
+                sym,
+                op,
+                path,
+                val,
+                writer,
+                guard,
+            });
             st.bindings.insert(sym, next);
             self.runtime.version.fetch_add(1, Ordering::Relaxed);
             // And `code_epoch`, as the staged DEFINE branch of `env_define` does for a
@@ -918,6 +1196,16 @@ impl Heap {
             self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
             return true;
         }
+        if op == RegistryOp::Credit {
+            // Nothing to write back: a credit changes who owns the entry, not the value.
+            let rt = self.runtime.clone();
+            let mut writers = rt
+                .registry_writers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            self.record_registry_writer(&mut writers, sym, op, path, val, cur, writer);
+            return true;
+        }
         let was_private = self.runtime.is_private_recorded(sym);
         // The whole-map write-back goes to the live table (a live coordination registry, or
         // no load open); `journal_suppressed` keeps `env_define` from staging or journalling
@@ -929,6 +1217,13 @@ impl Heap {
         if was_private {
             self.runtime.mark_private(sym);
         }
+        // The writer journal (KI-136, ADR-582): who owns the entry now.
+        let rt = self.runtime.clone();
+        let mut writers = rt
+            .registry_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.record_registry_writer(&mut writers, sym, op, path, val, cur, writer);
         true
     }
 
@@ -1069,9 +1364,10 @@ impl Heap {
         guard.extend(names.iter().copied());
     }
 
-    /// The journal key for a registry write's path: each key printed, space-joined — the
-    /// same rendering `registry_writer` asks with, so a Brood caller never has to
-    /// reproduce it.
+    /// The journal key for a map registry write's path: each key printed, space-joined —
+    /// the same rendering `registry_writer` asks with, so a Brood caller never has to
+    /// reproduce it. (A list registry's members are not keyed by print: see
+    /// [`RegistryWriters`].)
     fn registry_path_key(&self, path: &[Value]) -> String {
         path.iter()
             .map(|&k| crate::syntax::printer::print(self, k))
@@ -1079,16 +1375,95 @@ impl Heap {
             .join(" ")
     }
 
-    /// The module whose load wrote registry `sym`'s entry at `path` (KI-136), or `None`
-    /// for an entry nobody owns — a prelude or root write, or one a `:dissoc` retired.
-    pub fn registry_writer(&self, sym: Symbol, path: &[Value]) -> Option<Symbol> {
-        let key = (sym, self.registry_path_key(path));
-        self.runtime
+    /// Who wrote registry `sym`'s entry at `path` (KI-136, ADR-582) — the module whose load
+    /// made the write, or the namespace-less file — or `None` for an entry nobody owns: a
+    /// prelude, root or run-time write, or one a `:dissoc` / `:remove` retired. For a
+    /// LIST registry `path` is `[member]`, found as `:remove` finds it (`equal`).
+    pub fn registry_writer(&self, sym: Symbol, path: &[Value]) -> Option<RegistryWriter> {
+        let live = self
+            .runtime
+            .globals_read()
+            .get(&sym)
+            .copied()
+            .unwrap_or(Value::nil());
+        let writers = self
+            .runtime
             .registry_writers
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
+            .unwrap_or_else(|e| e.into_inner());
+        match (live.unpack(), path) {
+            (ValueRef::Pair(_), [member]) => self.member_writer(&writers, sym, live, *member),
+            (ValueRef::Map(_), _) => writers
+                .entries
+                .get(&(sym, self.registry_path_key(path)))
+                .copied(),
+            _ => None,
+        }
+    }
+
+    /// The registries holding an entry or a member credited to one of `writers` (ADR-604):
+    /// what `registry/written-by` walks, so taking a plugin back costs what the plugin wrote
+    /// rather than every registry in the runtime. One pass over the writer journal.
+    pub fn registries_written_by(&self, writers: &[RegistryWriter]) -> Vec<Symbol> {
+        let journal = self
+            .runtime
+            .registry_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut found: std::collections::BTreeSet<Symbol> = journal
+            .entries
+            .iter()
+            .filter(|(_, writer)| writers.contains(writer))
+            .map(|((sym, _), _)| *sym)
+            .collect();
+        for (sym, slots) in &journal.members {
+            if slots
+                .iter()
+                .any(|slot| slot.writer.is_some_and(|writer| writers.contains(&writer)))
+            {
+                found.insert(*sym);
+            }
+        }
+        found.into_iter().collect()
+    }
+
+    /// List registry `sym`'s members in order, each with who added it and the op that did
+    /// (`ConsNew` / `AppendNew`) — `(None, None)` for every member when the journal's slots no
+    /// longer describe the list (ADR-595). Empty when `sym` is not a list.
+    pub fn registry_members(
+        &self,
+        sym: Symbol,
+    ) -> Vec<(Value, Option<RegistryWriter>, Option<RegistryOp>)> {
+        let live = self
+            .runtime
+            .globals_read()
+            .get(&sym)
             .copied()
+            .unwrap_or(Value::nil());
+        if !matches!(live.unpack(), ValueRef::Pair(_)) {
+            return Vec::new();
+        }
+        let items = self.list_to_vec(live).unwrap_or_default();
+        let writers = self
+            .runtime
+            .registry_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let slots = writers.members.get(&sym).filter(|slots| {
+            slots.len() == items.len()
+                && slots
+                    .iter()
+                    .zip(&items)
+                    .all(|(slot, &item)| slot.printed == self.printed(item))
+        });
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, &item)| match slots {
+                Some(slots) => (item, slots[index].writer, slots[index].added_by),
+                None => (item, None, None),
+            })
+            .collect()
     }
 
     /// Record that the module whose load is open evaluated source text (ADR-419): called by
@@ -1577,10 +1952,25 @@ impl Heap {
         while self.runtime.aging.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
+        // The table and the writer journal read as ONE state (ADR-582): every registry write
+        // changes both under `registry_lock`, so holding it here keeps a write from landing
+        // between the two copies.
+        let _registry = self
+            .runtime
+            .registry_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let writers = self
+            .runtime
+            .registry_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         GlobalsSnapshot {
             saved: self.runtime.globals_read().clone(),
             block_depth: self.rt_collect_block.get(),
             journal_mark,
+            writers,
         }
     }
 
@@ -1939,6 +2329,9 @@ impl Heap {
         // (the apply allocates and takes `promote_lock`); still under `registry_lock`, so no
         // registry read-modify-write interleaves with the rebuild.
         let mut table = snapshot.saved;
+        // The writer journal rolls back with the table (ADR-582): a write the isolate made,
+        // or a load it discards, credited or retired a writer the restore must take back too.
+        let mut writers = snapshot.writers;
         let mut rebound: Vec<Symbol> = Vec::new();
         if let Some(t) = Self::global_trace_target() {
             let live = self.runtime.globals_read().get(&t).copied();
@@ -2026,9 +2419,30 @@ impl Heap {
                         });
                         rebound.push(sym);
                     }
-                    LoadWrite::Registry { sym, op, path, val } => {
+                    LoadWrite::Registry {
+                        sym,
+                        op,
+                        path,
+                        val,
+                        writer,
+                        guard,
+                    } => {
                         let cur = table.get(&sym).copied().unwrap_or(Value::nil());
+                        if !self.writer_guard_holds(&writers, sym, op, &path, val, cur, guard) {
+                            continue;
+                        }
                         if let Some(next) = self.registry_next(cur, op, &path, val) {
+                            // ADR-582: the replayed load's writes are credited over the
+                            // writer journal the snapshot restores, as its values are.
+                            self.record_registry_writer(
+                                &mut writers,
+                                sym,
+                                op,
+                                &path,
+                                val,
+                                cur,
+                                writer,
+                            );
                             self.promote_rehome_publish(next, |_h, shared| {
                                 table.insert(sym, shared).is_some()
                             });
@@ -2057,6 +2471,12 @@ impl Heap {
         {
             let mut globals = self.runtime.globals_write();
             *globals = table;
+            // Beside the table, under the registry lock both were rebuilt under.
+            *self
+                .runtime
+                .registry_writers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = writers;
             self.features_audit_table(&globals, "isolate restore");
             self.runtime.version.fetch_add(1, Ordering::Relaxed);
             self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);

@@ -445,6 +445,11 @@ pub(crate) struct ColdHeap {
     pub(crate) current_file_arc: Option<Arc<str>>,
     /// The namespace being compiled (`defmodule`).
     pub(crate) compile_ns: Option<Symbol>,
+    /// The file a `reflect/load` is reading when that file declares no module — its
+    /// absolute path, interned — which a registry write made while no namespace is open
+    /// credits (ADR-582). `None` outside such a load, and for a file that has a
+    /// `defmodule` (its writes credit the module).
+    pub(crate) root_load_file: Option<Symbol>,
     /// Names the current namespace defines — the *active* forward-ref set, which
     /// [`Heap::activate_ns_region`] switches to the module `%in-ns` opens.
     pub(crate) ns_known_names: HashSet<Symbol>,
@@ -1331,6 +1336,13 @@ pub struct Heap {
     /// else — a builtin another builtin called from Rust, with a slice of its own — keeps
     /// the nested call.
     redirect_offer: usize,
+    /// Who a registry write this process makes OUTSIDE any load credits (ADR-596): the module
+    /// (or namespace-less file) whose load spawned this process, or an ancestor's, or what a
+    /// `registry/with-acting-writer` set for an extent. `spawn` hands it to the child — so a
+    /// timer, a task, a worker started by a plugin registers as that plugin. `None` for a
+    /// process nothing spawned under a load and nothing set: its run-time writes credit
+    /// nobody, as before.
+    pub(crate) acting_writer: Option<RegistryWriter>,
     /// Per-process state almost no process touches — the GC statistics, the `proc/flag`
     /// settings, a test's shared-code floor — boxed at its first write. Inline it was ~130
     /// bytes on every process; most never collect, never set a flag, and park
@@ -1539,11 +1551,12 @@ mod roots_buf;
 /// a runtime holds in common, and the generation machinery around them.
 mod runtime_code;
 use self::runtime_code::{
-    ClosureTemplateMap, ConstClosureMap, LoadStage, LoadWrite, reg_trace_enabled,
+    ClosureTemplateMap, ConstClosureMap, LoadStage, LoadWrite, MemberSlot, RegistryWriters,
+    reg_trace_enabled,
 };
 pub use self::runtime_code::{
-    GenPin, GlobalsSnapshot, NameMeta, RegistryOp, RuntimeCode, SourceLoc, SymbolHasher, SymbolMap,
-    VmCacheMap,
+    GenPin, GlobalsSnapshot, NameMeta, RegistryOp, RegistryWriter, RuntimeCode, SourceLoc,
+    SymbolHasher, SymbolMap, VmCacheMap,
 };
 mod slabs;
 mod small_map;
@@ -1959,6 +1972,7 @@ impl Heap {
             blocked_under_gateway: 0,
             jit_i64_overflow: false,
             redirect_offer: 0,
+            acting_writer: None,
         }
     }
 

@@ -68,73 +68,24 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
-## KI-334 — a served session whose loop dies takes its unsaved buffers with it — OPEN 2026-11-03
-
-**Symptom.** In bedit's local window, a loop that dies abnormally (a panic in a native call,
-an error outside `update` and `view`) has every unsaved file buffer auto-saved and a fresh loop
-started over the same buffers (bedit's `src/lifeline.blsp`). In a `serve` session the same
-death ends the session: the client sees the session's `[:down …]` and closes, and every buffer
-that lived in the session's model is gone — no sidecar, no restart. Found while giving served
-sessions the window's startup path (ADR-539's bedit side); not seen in use.
-
-**Cause.** Two halves. `serve-session` runs the app's `ui-run` unsupervised: the manager
-monitors the session and only forgets it on `[:down …]`, and ADR-519's parking covers the
-CLIENT going away, never the session's own loop. And bedit's recovery stands on things a
-served session does not have: its buffers are not hosted in processes of their own, because
-hosting goes through the buffer registry (`frames/frames-registry-start`), which registers
-the runtime-wide name `:buffer-registry` — one per runtime, so a registry per session
-collides on it, and one shared by every session would show each session (a guest's
-included) the others' buffers. A collab session already hosts its slot 0 through the collab
-registry, which a second hosting would double.
-
-**Why it survived.** Nothing kills a served session's loop in a test, and the window's
-lifeline tests run the window's loop. Served sessions started from a bare `ed-init` model
-until ADR-539, so nothing in them looked like the window's.
-
-**Fix.** Not yet. It needs a supervised session in `editor/serve` — the manager respawning a
-dead session's loop for the same client over state that outlived it — and, in bedit, a
-registry that is per session without being a runtime-wide name, so served buffers can be
-hosted and recovered as the window's are.
-
-**Guard.** None yet.
-
-## KI-313 — KI-309 again: `interrupt_one_worker`'s native-walk case blocked its worker twice 👀 WATCHING
-
-**Seen:** `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` failed `<= dirty + 1` ("a
-native walk blocked more than once") in the Nightly on `a1bced33` (run 41188576448, suite run 3
-of 3), with KI-309's fix in. The next Nightly on the same commit passed. No bail trace: the suite
-does not arm `BROOD_JIT_BAIL_TRACE`.
-
-**Not reproduced.** On the test machine, 1980 isolated runs of the case at `63afdb45` passed:
-300 one after another with every core spinning, 480 as 12 concurrent loops, 1200 as 48. Every
-traced run took the same path: ONE `dirty-receive-block` under the walk's first native activation,
-which latches `%vector-fold-walk`. The window's reducer `step` never goes native (it bails
-`chunk-outside-jit-subset`), so it is never a second native frame under the receive.
-
-**What `63afdb45` fixed, and what it did not.** The latch blamed only the innermost native
-activation under a blocked `receive`, so a native walk calling a NATIVE reducer latched the reducer
-and blocked again on the next call. `blame_enclosing_gateway` now hands the block to the enclosing
-activation, so one park latches every native frame under it (guard:
-`a_suspend_latch_reaches_the_native_activation_enclosing_it`, sabotage-verified). That gap is real,
-but this case cannot hit it while `step` bails, so it does not explain the Nightly failure; the
-first account of KI-313 said it did, and was wrong.
-
-**Still to try:** the Nightly's conditions: the full suite in parallel, built with
-`--features brood/treesit-grammars` (`scripts/nextest-no-flakes.sh`), looped; and a bail trace
-on the case under that suite, so a second failure names its arms.
-
 ## Index — status per issue
 
 Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](archive/known-issues-closed.md).
 
 | # | What | Status |
 |---|---|---|
-| KI-334 | **a served session whose loop dies takes its unsaved buffers with it** — the local window's loop auto-saves and restarts over its buffers (bedit's lifeline); a `serve` session's loop dying just ends the session, its buffers in its model | **OPEN** — needs a supervised session in `editor/serve` and per-session buffer hosting in bedit (the buffer registry's runtime-wide name blocks it); found with ADR-539 |
+| KI-360 | **a terminal without the kitty keyboard protocol cannot send `C-;`, `C-.`, `C-'`** — xterm's `modifyOtherKeys` form has no parser in crossterm, so it is not asked for | ✅ **fixed** 2026-11-04 — Brood reads and decodes the tty's bytes itself (`decoder`), `modifyOtherKeys` 2 asked for where kitty is not spoken |
+| KI-369 | **Windows has no pseudo-terminal** — `os/spawn-pty` raises naming ConPTY, so terminal buffers and the line-mode REPL are Unix-only | ✅ **FIXED 2026-11-04** — ConPTY (ADR-597): a raw-handle child type in the subprocess registry, `CreatePseudoConsole` + `CreateProcessW` with an attribute list, the waiter closing the pseudoconsole after the exit; `os/pty-mode` nil there. Was: OPEN — needs ConPTY |
+| KI-365 | **`file/spit-private` is not private on Windows** — a plain create there, so the file takes its directory's ACL; bedit's auto-save sidecars are as private as the file beside them | ✅ **FIXED 2026-11-04** — a protected one-entry DACL (the current user) set before the write. Guard: `tests/platform_test.blsp` "owner-only files", the ACL read back with `icacls` on the Windows runner |
+| KI-364 | **Windows has no platform shell** — a `sh -c` command line needs an `sh` on PATH, and `cmd.exe /c` cannot be spelled through `os/cmd` because a `"` in the line reaches it MSVC-quoted | ✅ **FIXED 2026-11-04** — `:raw-args` on `os/cmd` / `os/spawn` / `os/detach`, and `os/shell` / `os/shell-cmd` / `os/shell-spawn` (`cmd.exe /d /s /c "LINE"` on Windows). Guard: `tests/platform_test.blsp` "the platform's shell", quotes, spaces, pipes and `&&` on the Windows runner |
+| KI-357 | **a module materialised from a startup image had fewer registry writers than its source load** — the project image credited none, the stdlib image credited map entries but no list member, so `registry/written-by` of an imaged module answered less | ✅ **fixed** 2026-11-04 — ADR-595: a `:credit` registry op; the stdlib image replays a list member with the op that added it, the project image credits what it carries as it installs |
+| KI-356 | **a plugin's bare-closure hook registered from a timer or a process it spawned could not be taken back** — no load was open, no claimant bound, and the closure named nothing the retirement backstop could match | ✅ **fixed** 2026-11-04 — ADR-596: a process's acting writer (inherited at `spawn`, set by `registry/with-acting-writer`) credits its run-time writes; `reflect/fn-module` names an anonymous `fn`'s module |
+| KI-334 | **a served session whose loop dies takes its unsaved buffers with it** — the local window's loop auto-saves and restarts over its buffers (bedit's lifeline); a `serve` session's loop dying just ends the session, its buffers in its model | ✅ **FIXED 2026-11-04** — ADR-593: a session is a supervisor over its loop, which a death restarts (within a budget) for the same client after the app's `:on-crash` hook, from what the loop retained; `registry-start {:owner pid}` gives a registry a session's lifetime, so bedit hosts a served session's buffers in processes that outlive its loop, auto-saves them and restarts over them. Guards: `serve_test` "serve: a session supervises its loop", `buffer_registry_test` "an owner's lifetime" |
 | KI-336 | **a non-Latin keyboard layout lost every Control and Meta shortcut** — Control+A under a Russian layout arrived as `:ctrl-ф`; macOS Option was always Meta, so a layout's Option characters could not be typed; a dead key with Control or Alt delivered nothing | ✅ **FIXED 2026-11-03** — ADR-541: a chord whose character is not Latin is read by the key's US position, `{:option-meta …}` picks which Option is Meta (left by default, the right one composing), a dead key in a chord is its accent. Guard: `host::gui::backend::input::adr_541_tests` (red with the fallback removed) |
 | KI-316 | **the doc catalogue filed `match` under `case` and three names under `:other`, after a prelude edit** — `doc_catalog_test` red on a tree whose only prelude change added 28 lines, while an older build ran beside it | ✅ **FIXED 2026-11-03** — every Brood wrote its prelude to one shared `~/.cache/brood/prelude.blsp`, so whichever ran last owned it and a newer build's def-sites pointed into an older text; `doc-catalog` bakes the section headers it reads from that file into the stdlib image, and `nest stdimage` rebuilt from the image it was replacing, so the wrong headers survived every rebuild. The copy is now keyed by the prelude's text (`prelude-source-<hash>/prelude.blsp`) and `nest stdimage` builds from source. Guard: `boot::prelude_copy_tests` (red with the unkeyed name) |
 | KI-315 | **`accept_starvation`'s client could read an empty port file and die** — CI's tree-walker job failed "the client never connected all 50" after 60 s on `fe79302d` | ✅ **FIXED 2026-11-02** — the server `file/spit` the port and the client read it the moment `port.txt` existed; `file/spit` creates the file before it writes it, so the client could read `""` (or a partial port) and die, and the old test waited out its 60 s. The server writes `port.tmp` and renames it into place. Reproduced on demand by widening that window (client: `string/->number: not a number: ""`); green with the rename under the same window |
 | KI-314 | **`disconnect` could return before `[:nodedown]` reached its monitors** — `dist::tests::a_guest_is_never_registered_under_the_name_it_claims` read an empty mailbox right after `disconnect` (once in 13 full-suite runs on the test machine, 2026-11-02) | ✅ **FIXED 2026-11-02** — the socket was shut before `disconnect`'s own `drop_link`, so our reader could remove the link and be about to deliver while `disconnect` found nothing and returned. The link leaves `NODES` before the shutdown now. Reproduced on demand with two temporary sleeps (red), green with the fix under them; 500 runs of the case and the 62 dist tests green |
-| KI-313 | **KI-309 again: `interrupt_one_worker`'s native-walk case saw its worker block twice** — `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` failed `<= dirty + 1` in the Nightly on `a1bced33` (run 41188576448, suite run 3 of 3), after KI-309's fix; the next Nightly on the same commit passed | 👀 **WATCHING** — not reproduced in 1980 isolated runs on the test machine (quiet and under load). `63afdb45` closed a real latch gap (a native reducer under a native walk), but this case's reducer never goes native, so that is not the cause. Next: the Nightly's own conditions (full parallel suite, `treesit-grammars`) with a bail trace. Section above |
+| KI-313 | **KI-309 again: `interrupt_one_worker`'s native-walk case saw its worker block twice** — `a_native_walk_that_hosts_a_park_blocks_once_and_then_parks` failed `<= dirty + 1` in the Nightly on `a1bced33` (run 41188576448, suite run 3 of 3), after KI-309's fix; the next Nightly on the same commit passed | ✅ **FIXED 2026-11-05** — the latch took one compiled copy of the walk off native code while another copy (a second `CompiledArm` of the same function, native already) blocked the next process; it shows once the suite's stdlib image is in the cache (86% of isolated runs then, 0% on a fresh cache, which is why 1980 local runs passed). The latch is now per function (`jit_suspend_admit` / `jit_suspend_latch_function`); guard `a_suspend_latch_reaches_every_copy_of_the_function`, sabotage-verified on CI; 0 of 172 921 primed runs failed with the fix (Diagnose 41933986722, 41939859441). Was: 👀 WATCHING, not reproduced in 1980 isolated runs |
 | KI-312 | **a cold parallel build hung on a require cycle of many modules, and on a broken dependency** — bedit's cold `nest run --check-boot` never finished on 0.49.0 (two in two), a 24-module ring hung where the sequential walk takes 0.15 s, and mur-forge with a stale `hatch` sat for minutes instead of reporting the ADR-512 error; waiters reached the 30 s backstop and force-loaded | ✅ **FIXED 2026-10-30** — pool workers give a cross-process cycle up rather than break it one process a round (`*require-cycle-abandons*`), the driver kills the pool at the first real failure, and a waiter on a failed load raises its error instead of loading it again. Guards: `parallel_load.rs` (a ring builds; a failure does not wait out loads in flight; a broken module under a ring fails) and `require_failure_test.blsp` (every waiter raises, the module loads once), each sabotage-verified |
 | KI-311 | **`table_address_space`'s exit case read 192 MB of growth with every table reclaimed** — 2000 spawned and exited processes moved the process's `VmSize` through the allocator's arenas (CI tree-walker job on `543f0b86`, and once before) | ✅ **FIXED 2026-10-30** — the case counts the table store's own chunk mappings (`core::table::chunks_mapped`); with `release_owned` disabled it reads 2000 and fails |
 | KI-310 | **a `fn` or `let` over a 100 000-level pattern overflowed the native stack** — `robustness_limits_test` aborted on the desktop (not in CI): `mentions_types` recursed per level before the pattern depth cap could refuse it | ✅ **FIXED 2026-10-30** — the walk uses a work list. Guard: `a_deep_untyped_pattern_is_walked_on_a_small_stack` (256 KB thread; the recursive walk aborts it) |

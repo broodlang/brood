@@ -44,13 +44,13 @@
 (describe "view-parts — the three wire shapes"
   (test "a delta map"
     (assert= (view-parts {:splice [1 2 "x"] :markers {:a 1} :participants {:a "al"}})
-      {:text nil :splice [1 2 "x"] :cursors {:a 1} :names {:a "al"}}))
+      {:text nil :splice [1 2 "x"] :properties nil :cursors {:a 1} :names {:a "al"}}))
   (test "the presence triple"
     (assert= (view-parts ["txt" {:a 1} {:a "al"}])
-      {:text "txt" :splice nil :cursors {:a 1} :names {:a "al"}}))
+      {:text "txt" :splice nil :properties nil :cursors {:a 1} :names {:a "al"}}))
   (test "a bare string projection"
     (assert= (view-parts "txt")
-      {:text "txt" :splice nil :cursors {} :names {}})))
+      {:text "txt" :splice nil :properties nil :cursors {} :names {}})))
 
 ;; ---- link-fold: the merge matrix ------------------------------------------------
 ;; Hand-fed pushes against a hand-built link — every branch of the fold, no process.
@@ -66,7 +66,7 @@
       (assert= (get l :version) 0)))
   (test "the seed (version -1 link) applies as a full-text view"
     (let ([l a] (link-fold (link-init :proc :me) 0 ["doc" {} {}] nil))
-      (assert= a [:text "doc"])
+      (assert= a [:text "doc" nil])
       (assert= (get l :version) 0)))
   (test "our own echo is a version bump — content never rebuilt, pending popped"
     (let ([l a] (link-fold (fresh (list [3 3 1])) 1 {:splice [3 3 "x"]} :me))
@@ -94,21 +94,21 @@
 (describe "link-fold — foreign splices"
   (test "a foreign splice with nothing in flight applies as-is"
     (let ([l a] (link-fold (fresh) 1 {:splice [5 5 "Y"]} :other))
-      (assert= a [:splice [5 5 "Y"]])
+      (assert= a [:splice [5 5 "Y"] nil])
       (assert= (get l :version) 1)))
   ; ours before theirs — unmoved
   (test "disjoint concurrent merge: theirs after ours shifts past our insert"
     ;; we inserted 1 char at 0 (in flight); they inserted at 5 (computed before ours)
     (let ([l a] (link-fold (fresh (list [0 0 1])) 1 {:splice [5 5 "Y"]} :other))
       ; transformed over our pending insert
-      (assert= a [:splice [6 6 "Y"]])
+      (assert= a [:splice [6 6 "Y"] nil])
       (assert= (get l :pending) (list [0 0 1]))))
   ; ours shifted by their insert
   (test "disjoint concurrent merge: theirs before ours remaps our pending forward"
     ;; we have an insert in flight at 8; they inserted 2 chars at 0
     (let ([l a] (link-fold (fresh (list [8 8 1])) 1 {:splice [0 0 "ab"]} :other))
       ; theirs lands where it meant to
-      (assert= a [:splice [0 0 "ab"]])
+      (assert= a [:splice [0 0 "ab"] nil])
       (assert= (get l :pending) (list [10 10 1]))))
   (test "an ambiguous same-span collision resets pending and asks for a resync"
     (let ([l a] (link-fold (fresh (list [3 5 1])) 1 {:splice [4 6 "zz"]} :other))
@@ -129,7 +129,7 @@
       (let ([l0 a0] (receive
                       ([:buffer-updated _bp v w o] (link-fold (link-init bp (self)) v w o))
                       (after test/*wait-ms* (error "no push arrived"))))
-        (assert= a0 [:text "hello"])
+        (assert= a0 [:text "hello" nil])
         ;; our own edit: propagate, then its echo comes back suppressed
         (let (l1 (link-propagate l0 "hello" "hello!"))
           (assert= (count (get l1 :pending)) 1)
@@ -144,7 +144,7 @@
             (let ([l3 a3] (receive
                             ([:buffer-updated _bp v w o] (link-fold l2 v w o))
                             (after test/*wait-ms* (error "no push arrived"))))
-              (assert= a3 [:splice [0 0 ">"]])
+              (assert= a3 [:splice [0 0 ">"] nil])
               (assert= (buffer-query bp buffer-text) ">hello!")))))
       (stop-buffer bp))))
 
@@ -169,3 +169,199 @@
       (assert= (get link :pending) (list [2 2 1]))
       (assert= (buffer-query bp buffer-text) "abXc")
       (stop-buffer bp))))
+
+;; ---- text properties over the wire (ADR-579) ------------------------------------
+;; A holder's coloured append reaches the process and every other holder WITH its
+;; colours: the splice carries the properties its text came with.
+
+(describe "text properties travel with the splices"
+  (test "a foreign splice's properties come back in the action"
+    (let ([_ a] (link-fold (fresh) 1 {:splice [5 5 "Y"] :properties {:face [[0 1 :red]]}} :other))
+      (assert= a [:splice [5 5 "Y"] {:face [[0 1 :red]]}])))
+  (test "a content-view seed carries the document's properties"
+    (let ([_ a] (link-fold (link-init :proc :me) 0 ["ab" {} {} {:face [[0 2 :red]]}] nil))
+      (assert= a [:text "ab" {:face [[0 2 :red]]}])))
+  (test "buffer-apply-action lays a splice's properties on a read-only copy"
+    (let (copy (set-read-only (make-buffer "hello") true)
+          applied (buffer-apply-action copy [:splice [5 5 " you"] {:face [[1 4 :red]]}]))
+      (assert= (buffer-text applied) "hello you")
+      (assert= (buffer-properties applied :face) [[6 9 :red]])
+      (is (read-only? applied))))
+  (test "buffer-apply-action rebuilds from a full view whose properties differ"
+    (let (applied (buffer-apply-action (make-buffer "ab") [:text "ab" {:face [[0 1 :red]]}]))
+      (assert= (buffer-properties applied :face) [[0 1 :red]])))
+  :isolated (test "a propertied append reaches the process and a second holder"
+    (let (bp (spawn-buffer (make-buffer "log\n"))
+          before (end-of-buffer (make-buffer "log\n"))
+          after (insert before "ERROR\n" {:face [[0 5 {:fg 1}]]}))
+      (subscribe-buffer bp content-view)
+      (let ([seeded _] (receive
+                         ([:buffer-updated _bp v w o] (link-fold (link-init bp :other) v w o))
+                         (after test/*wait-ms* (error "no seed arrived"))))
+        (link-propagate-buffers (link-init bp (self)) before after)
+        (let ([_ action] (receive
+                           ([:buffer-updated _bp v w o] (link-fold seeded v w o))
+                           (after test/*wait-ms* (error "no push arrived"))))
+          (assert= action [:splice [4 4 "ERROR\n"] {:face [[0 5 {:fg 1}]]}])
+          (assert= (buffer-query bp (fn (b) (buffer-properties b :face))) [[4 9 {:fg 1}]])))
+      (stop-buffer bp)))
+  :isolated (test "a buffer spawned with properties seeds them to a subscriber"
+    (let (bp (spawn-buffer (insert (make-buffer "") "ok" {:face [[0 2 :green]]})))
+      (subscribe-buffer bp content-view)
+      (let ([_ action] (receive
+                         ([:buffer-updated _bp v w o] (link-fold (link-init bp :other) v w o))
+                         (after test/*wait-ms* (error "no seed arrived"))))
+        (assert= action [:text "ok" {:face [[0 2 :green]]}]))
+      (stop-buffer bp)))
+  :isolated (test "the diff fallback of a propertied buffer sends the changed range with its properties"
+    (let (bp (spawn-buffer (make-buffer "abc"))
+          after (insert (make-buffer "") "abX" {:face [[2 3 :red]]}))
+      (link-propagate-buffers (link-init bp (self)) (make-buffer "abc") after)
+      (assert= (buffer-query bp buffer-text) "abX")
+      (assert= (buffer-query bp (fn (b) (buffer-properties b :face))) [[2 3 :red]])
+      (stop-buffer bp))))
+
+(describe "a redaction travels as one"
+  :isolated (test "a holder's redaction redacts the other holder's copy, history and all"
+    (let (bp (spawn-buffer (make-buffer "pw: ")))
+      (subscribe-buffer bp content-view)
+      (let ([seeded _] (receive
+                         ([:buffer-updated _bp v w o] (link-fold (link-init bp :other) v w o))
+                         (after test/*wait-ms* (error "no seed arrived")))
+            ;; the other holder's copy receives the typed-ahead text, recording it
+            other (buffer-apply-action (make-buffer "pw: ") [:splice [4 4 "hun"] nil])
+            before (end-of-buffer (make-buffer "pw: "))
+            typed (insert before "hun")
+            mine (link-propagate-buffers (link-init bp (self)) before typed)
+            redacted (redact-region typed 4 7)
+            _ (link-propagate-buffers mine typed redacted)
+            [after-typing typing-action] (receive
+                                           ([:buffer-updated _bp v w o] (link-fold seeded v w o))
+                                           (after test/*wait-ms* (error "no push arrived")))
+            [_ action] (receive
+                         ([:buffer-updated _bp v w o] (link-fold after-typing v w o))
+                         (after test/*wait-ms* (error "no push arrived")))
+            cleaned (buffer-apply-action other action))
+        (assert= typing-action [:splice [4 4 "hun"] nil])
+        (assert= action [:splice [4 7 ""] :redact])
+        (assert= (buffer-text cleaned) "pw: ")
+        (assert= (get cleaned :undo) ())
+        (assert= (buffer-text (undo cleaned)) "pw: "))
+      (stop-buffer bp))))
+
+;; The shell's case, over the wire: output appended and the type-ahead redacted in ONE event
+;; of the holder that redacts. The other holder's copy had the type-ahead (recorded in its
+;; history, one splice per key); after the event it holds no text with it anywhere.
+(defn- secret-held? (buf secret)
+  (any? (append (mapcat (or (get buf :splices) ())
+                  (fn (entry)
+                    (let ([before after _ _ replacement mids _] entry)
+                      (append (seq/keep [before after] (fn (rope) (when rope (text/->string rope))))
+                        [replacement]
+                        (map mids (fn (mid) (text/->string (first mid))))))))
+          (map (or (get buf :undo) ()) (fn (snapshot) (text/->string (get snapshot :rope)))))
+    (fn (text) (includes? text secret))))
+
+(defn- next-push (link)
+  (receive
+    ([:buffer-updated _bp v w o] (link-fold link v w o))
+    (after test/*wait-ms* (error "no push arrived"))))
+
+(describe "a redaction after another edit in the same event"
+  :isolated (test "reaches the other holder as a redaction, its history and log cleared"
+    (let (bp (spawn-buffer (make-buffer "$ sudo x\nhun")))
+      (subscribe-buffer bp content-view)
+      (let ([seeded _] (next-push (link-init bp :other))
+            ;; the other holder's copy took the type-ahead a key at a time
+            other (fold ["h" "u" "n"]
+                    (make-buffer "$ sudo x\n")
+                    (fn (acc key) (apply-splice acc (buffer-length acc) (buffer-length acc) key)))
+            synced (insert (make-buffer "$ sudo x\n") "hun")
+            ;; one event: output at the process mark, then the redaction
+            redacted (redact-region (replace-region synced 9 9 "pw: ") 13 16)
+            _ (link-propagate-buffers (link-init bp (self)) synced redacted)
+            ;; the redacting buffer keeps no text from before the redaction, so the event
+            ;; arrives as the comparison sends it: the changed range redacted, then the text
+            [after-redaction redact-action] (next-push seeded)
+            [_ output-action] (next-push after-redaction)
+            cleaned (buffer-apply-action (buffer-apply-action other redact-action) output-action))
+        (assert= redact-action [:splice [9 12 ""] :redact])
+        (assert= output-action [:splice [9 9 "pw: "] nil])
+        (is (secret-held? other "hun"))
+        (assert= (buffer-text cleaned) "$ sudo x\npw: ")
+        ;; the text inserted after the redaction is undoable; nothing before it is
+        (assert= (buffer-text (undo cleaned)) "$ sudo x\n")
+        (is (not (secret-held? cleaned "hun")))
+        (assert= (buffer-query bp buffer-text) "$ sudo x\npw: "))
+      (stop-buffer bp)))
+  :isolated (test "a holder too far behind for the log still redacts"
+    (let (bp (spawn-buffer (make-buffer "$ sudo x\nhun")))
+      (subscribe-buffer bp content-view)
+      (let ([seeded _] (next-push (link-init bp :other))
+            synced (insert (make-buffer "$ sudo x\n") "hun")
+            redacted (insert (redact-region (replace-region synced 9 9 "pw: ") 13 16) "x")
+            _ (link-propagate-buffers (link-init bp (self)) synced redacted)
+            [after-redact redact-action] (next-push seeded)
+            [_ insert-action] (next-push after-redact))
+        (assert= redact-action [:splice [9 12 ""] :redact])
+        (assert= insert-action [:splice [9 9 "pw: x"] nil])
+        (assert= (buffer-query bp buffer-text) "$ sudo x\npw: x"))
+      (stop-buffer bp))))
+
+;; A property change crosses as one: an empty splice and the change, so nothing in the other
+;; holder's copy moves.
+(describe "a property change travels as one"
+  :isolated (test "the other holder gets the properties, its text and positions untouched"
+    (let (bp (spawn-buffer (make-buffer "abcdef")))
+      (subscribe-buffer bp content-view)
+      (let ([seeded _] (next-push (link-init bp :other))
+            before (make-buffer "abcdef")
+            after (put-properties before :face 1 5 [[2 4 :red]])
+            _ (link-propagate-buffers (link-init bp (self)) before after)
+            [_ action] (next-push seeded)
+            other (buffer-marker-set (goto-char (make-buffer "abcdef") 3) :m 2)
+            applied (buffer-apply-action other action))
+        (assert= action [:splice [1 1 ""] [:put-properties 4 {:face [[1 3 :red]]}]])
+        (assert= (buffer-text applied) "abcdef")
+        (assert= (buffer-properties applied :face) [[2 4 :red]])
+        (assert= [(buffer-point applied) (buffer-marker applied :m)] [3 2])
+        (assert= (text-apply-action "abcdef" action) "abcdef")
+        (assert= (buffer-query bp (fn (b) (buffer-properties b :face))) [[2 4 :red]]))
+      (stop-buffer bp))))
+
+(describe "a property change in flight is counted over its range"
+  :isolated (test "the pending entry is the range it changes, so a foreign edit inside collides"
+    (let (bp (spawn-buffer (make-buffer "abcdef"))
+          before (make-buffer "abcdef")
+          after (put-properties before :face 1 5 [[2 4 :red]])
+          link (link-propagate-buffers (assoc (link-init bp (self)) :version 0) before after))
+      (assert= (get link :pending) (list [1 5 4]))
+      ;; another holder's insert inside that range: ambiguous, resync
+      (assert= (second (link-fold link 1 {:splice [3 3 "X"]} :other)) :resync)
+      ;; one after it: merges, unmoved (a property change moves no text)
+      (assert= (second (link-fold link 1 {:splice [6 6 "X"]} :other)) [:splice [6 6 "X"] nil])
+      (stop-buffer bp)))
+  (test "a foreign property change over our in-flight insert moves with it"
+    (let ([_ action] (link-fold (fresh (list [0 0 2]))
+                       1
+                       {:splice [3 3 ""] :properties [:put-properties 2 {:face [[0 2 :red]]}]}
+                       :other))
+      (assert= action [:splice [5 5 ""] [:put-properties 2 {:face [[0 2 :red]]}]])))
+  (test "a foreign property change across our in-flight insert is ambiguous"
+    (let ([_ action] (link-fold (fresh (list [4 4 1]))
+                       1
+                       {:splice [3 3 ""] :properties [:put-properties 3 {:face [[0 3 :red]]}]}
+                       :other))
+      (assert= action :resync))))
+
+(describe "a full-text view with only other properties"
+  (test "sets the properties and leaves the text, point, markers and flag alone"
+    (let (b (buffer-marker-set (goto-char (insert (make-buffer "") "hello") 2) :m 4)
+          saved (mark-buffer-saved b)
+          applied (buffer-apply-action saved [:text "hello" {:face [[0 1 :red]]}]))
+      (assert= (buffer-properties applied :face) [[0 1 :red]])
+      (assert= [(buffer-point applied) (buffer-marker applied :m)] [2 4])
+      (is (not (buffer-modified? applied)))
+      (assert= (buffer-text (undo applied)) "hello")
+      ;; a key only the copy had is cleared
+      (assert= (buffer-property-map (buffer-apply-action applied [:text "hello" {}])) {}))))

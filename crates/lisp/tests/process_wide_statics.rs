@@ -79,6 +79,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // The terminal's input forwarder (ADR-491): one thread reading the one tty this OS process
     // has, delivering to whichever process asked for its input.
     ("builtins/terminal/native.rs", "FORWARDER", OneMachine),
+    // What the one tty shows now, cell by cell, and its colour depth (ADR-586): the next
+    // frame writes only what differs from it, whichever runtime draws.
+    ("builtins/terminal/native.rs", "TERMINAL_SCREEN", OneMachine),
     // The net reactor multiplexes every socket in the OS process on one thread.
     ("host/net.rs", "STARTING", OneMachine),
     // One audio thread owns the output device for the whole OS process.
@@ -155,6 +158,14 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // Grammars declared and not yet loaded (ADR-481): the same machine-wide table as
     // DYNAMIC, one step earlier.
     ("host/treesit.rs", "DECLARED", OneMachine),
+    // Where each grammar in DYNAMIC was loaded from (ADR-583): written beside it, as wide.
+    ("host/treesit.rs", "LOADED_FROM", OneMachine),
+    // How many times each language's grammar has loaded, which a held tree's reparse checks
+    // (ADR-583): a fact about the machine-wide DYNAMIC table, so as wide as it.
+    ("host/treesit.rs", "GRAMMAR_EPOCHS", OneMachine),
+    // Serialises the private copies a grammar is dlopened from (ADR-583): the dynamic loader
+    // and the temporary directory are the process's, so the lock is too.
+    ("host/treesit.rs", "GRAMMAR_COPY_LOCK", OneMachine),
     // Facts of the binary: the std sources baked into it, and the signatures derived from
     // them (the stdlib id is a build constant).
     ("types/check.rs", "STD_REQUIRES", FactOfTheBinary),

@@ -1,0 +1,261 @@
+;; tests/term_display_test.blsp — the terminal display, end to end (ADR-586, ADR-587).
+;;
+;; A real `ui-run` over `editor/ui/*term-display*` under a pseudo-terminal, read back through
+;; `std/vt` — the terminal emulator — so what is asserted is what a terminal SHOWS: the frame
+;; drawn, the cursor where the frame put it, a keystroke's update costing the cells it changed
+;; and not the screen, a bracketed paste arriving whole as `[:paste text]`, a resize as
+;; `[:resize cols rows]`, and the terminal given back (the alternate screen left) on exit.
+;; The pure halves — the cell grid, the diff, the colour depth — are the Rust unit tests in
+;; `crates/lisp/src/builtins/terminal/native/screen.rs`.
+(defmodule term-display-test
+  (:use test)
+  (:use suite-helpers))
+
+(defn- app-source (marker &optional (hang? false))
+  ;; a `ui-run` app: the model's text and the last event on screen, a panel of background
+  ;; below them (so a full repaint is many cells and a keystroke's update few), the cursor
+  ;; after the text
+  (str "(defmodule term-display-app (:use editor/ui))\n"
+    "(ui-run {:text \"start\" :event \"none\" :on-hangup (fn (m sig) (file/spit "
+    (pr-str marker)
+    " (str sig)) (when "
+    (pr-str hang?)
+    " (receive (:never nil))))}\n"
+    "  (fn (m cols rows)\n"
+    "    [[:clear]\n"
+    "     [:text 0 0 (str \"text:\" (:text m))]\n"
+    "     [:text 1 0 (str \"size:\" cols \"x\" rows)]\n"
+    "     [:text 2 0 (str \"event:\" (:event m))]\n"
+    "     [:rect 3 0 cols (- rows 3) {:bg \"#202040\"}]\n"
+    "     [:text 4 2 \"日本\" {:fg :yellow}]\n"
+    "     [:cursor 0 (+ 5 (string/length (:text m))) :bar]])\n"
+    "  (fn (m input cols rows)\n"
+    "    (cond\n"
+    "      (= input \"q\") (assoc m :done true)\n"
+    "      (string? input) (assoc m :text (str (:text m) input))\n"
+    "      (and (vector? input) (= (first input) :paste))\n"
+    "        (assoc m :event (str \"paste \" (string/replace (second input) \"\\n\" \"|\")))\n"
+    "      (keyword? input) (assoc m :event (str \"key \" input))\n"
+    "      (and (vector? input) (= (first input) :resize))\n"
+    "        (assoc m :event (str \"resize \" (nth input 1) \"x\" (nth input 2)))\n"
+    "      else m))\n"
+    "  editor/ui/*term-display*)\n"))
+
+(defn- screen-text (vt)
+  (string/join (vt/lines vt) "\n"))
+
+(defn- read-until (p state pred ms)
+  "Feed the child's output into `state`'s vt until `(pred vt)` holds or `ms` passes; the
+state, with `:bytes` the count of bytes read since it was last reset and `:closed` once the
+child exited."
+  (if (pred (:vt state))
+    state
+    (receive
+      ([:proc ^p data] (read-until p
+                         (assoc state
+                           :vt (vt/feed (:vt state) data)
+                           :raw (str (:raw state "") data)
+                           :bytes (+ (:bytes state) (string/length data)))
+                         pred
+                         ms))
+      ([:proc-closed ^p _] (assoc state :closed true))
+      (after ms state))))
+
+(defn- showing? (needle)
+  (fn (vt) (includes? (screen-text vt) needle)))
+
+(describe "the terminal display under a pty (ADR-586)"
+  :isolated (test "draws the frame, writes only what changed, and takes pastes and resizes"
+    (let (dir (test/temp-dir "brood-term-display-")
+          script (str dir "/app.blsp"))
+      (do
+        (file/mkdir dir)
+        (file/spit script (app-source (str dir "/hangup")))
+        (let (p (os/spawn-pty (sibling-binary "nest") ["run" script] {:cols 40 :rows 10})
+              first-frame (read-until p
+                            {:vt (vt/make 40 10) :bytes 0}
+                            (showing? "size:40x10")
+                            20000))
+          (do
+            (is (vt/mode (:vt first-frame) :alt-screen))
+            (is (includes? (screen-text (:vt first-frame)) "text:start"))
+            ;; a wide grapheme takes its two cells
+            (is (includes? (screen-text (:vt first-frame)) "日本"))
+            ;; the cursor is shown where the frame put it, and bracketed paste is on
+            (assert= (vt/cursor (:vt first-frame)) [0 10])
+            (is (vt/mode (:vt first-frame) :cursor-visible))
+            (is (vt/mode (:vt first-frame) :bracketed-paste))
+            ;; the first frame writes the 280-cell panel; a keystroke writes the cell it changed
+            (is (> (:bytes first-frame) 280))
+            (os/write p "x")
+            (let (typed (read-until p
+                          (assoc first-frame :bytes 0)
+                          (fn (vt) (= (vt/cursor vt) [0 11]))
+                          20000))
+              (do
+                (is (includes? (screen-text (:vt typed)) "text:startx"))
+                (is (< (:bytes typed) 80))
+                ;; a paste arrives whole, newlines and all
+                (os/write p "\e[200~hello\nworld\e[201~")
+                (let (pasted (read-until p typed (showing? "event:paste hello|world") 20000))
+                  (do
+                    (is (includes? (screen-text (:vt pasted)) "event:paste hello|world"))
+                    (is (includes? (screen-text (:vt pasted)) "text:startx"))
+                    ;; a resize reaches the app at once, and the next frame is drawn whole
+                    (os/resize-pty p 50 12)
+                    (let (resized (read-until p
+                                    (assoc pasted :vt (vt/resize (:vt pasted) 50 12))
+                                    (showing? "event:resize 50x12")
+                                    20000))
+                      (do
+                        (is (includes? (screen-text (:vt resized)) "size:50x12"))
+                        ;; no kitty protocol here, so xterm's modifyOtherKeys was asked for
+                        ;; (KI-360), and the chords it sends are read: C-; and C-S-a…
+                        (is (includes? (:raw first-frame) "\e[>4;2m"))
+                        (os/write p "\e[27;5;59~")
+                        (let (chorded (read-until p resized (showing? "key :ctrl-;") 20000))
+                          (do
+                            (is (includes? (screen-text (:vt chorded)) "key :ctrl-;"))
+                            ;; …and C-/, whose legacy byte is C-_'s
+                            (os/write p "\x1f")
+                            (is (includes? (screen-text (:vt (read-until p
+                                                               chorded
+                                                               (showing? "key :ctrl-_")
+                                                               20000)))
+                                  "key :ctrl-_"))))
+                        (os/write p "q")
+                        (let (closed (read-until p resized (fn (vt) false) 20000))
+                          (do
+                            (is (:closed closed))
+                            ;; the terminal is given back
+                            (is (not (vt/mode (:vt closed) :alt-screen)))
+                            (is (not (vt/mode (:vt closed) :bracketed-paste)))
+                            (is (includes? (:raw closed) "\e[>4;0m"))
+                            (is (vt/mode (:vt closed) :cursor-visible))))))))))))
+        (file/rmdir dir)))))
+
+(describe "the terminal display and the process's signals (ADR-586)"
+  :isolated (test "SIGTSTP with no job control keeps the terminal, SIGCONT repaints, SIGTERM restores it and runs :on-hangup"
+    (let (dir (test/temp-dir "brood-term-signals-")
+          script (str dir "/app.blsp")
+          marker (str dir "/hangup"))
+      (do
+        (file/mkdir dir)
+        (file/spit script (app-source marker))
+        (let (p (os/spawn-pty (sibling-binary "nest") ["run" script] {:cols 40 :rows 10})
+              up (read-until p {:vt (vt/make 40 10) :bytes 0} (showing? "size:40x10") 20000))
+          (do
+            (is (vt/mode (:vt up) :alt-screen))
+            ;; this app leads its own session under the pty — an ORPHANED process group, as
+            ;; under `gnome-terminal -- app` or `ssh host app`: nothing could `fg` it, so a
+            ;; SIGTSTP must not stop it (it would freeze for good); it keeps the terminal and
+            ;; goes on answering keys
+            (os/signal p :tstp)
+            (os/write p "z")
+            (let (stopped (read-until p up (showing? "text:startz") 20000))
+              (do
+                (is (vt/mode (:vt stopped) :alt-screen))
+                (is (includes? (screen-text (:vt stopped)) "text:startz"))
+                ;; continued (as after a stop someone else made): raw again, painted whole
+                (os/signal p :cont)
+                (let (back (read-until p
+                             (assoc stopped :bytes 0)
+                             (fn (vt)
+                               (and (vt/mode vt :alt-screen)
+                                 (includes? (screen-text vt) "size:40x10")))
+                             20000))
+                  (do
+                    (is (vt/mode (:vt back) :alt-screen))
+                    (is (includes? (screen-text (:vt back)) "text:startz"))
+                    ;; a resize there and back between two looks still repaints the screen
+                    (os/resize-pty p 60 14)
+                    (os/resize-pty p 40 10)
+                    (let (bounced (read-until p (assoc back :bytes 0) (fn (vt) false) 1500))
+                      (is (> (:bytes bounced) 280)))
+                    ;; SIGTERM: the app's :on-hangup runs, the terminal is restored, it exits
+                    (os/signal p :term)
+                    (let (ended (read-until p back (fn (vt) false) 20000))
+                      (do
+                        (is (:closed ended))
+                        (is (not (vt/mode (:vt ended) :alt-screen)))
+                        (assert= (file/slurp marker) ":term")))))))))
+        (file/rmdir dir)))))
+
+(describe "a program that will not end on SIGTERM (ADR-586)"
+  :isolated (test "a second SIGTERM ends it — its :on-hangup hung"
+    (let (dir (test/temp-dir "brood-term-hang-")
+          script (str dir "/app.blsp")
+          marker (str dir "/hangup"))
+      (do
+        (file/mkdir dir)
+        (file/spit script (app-source marker true))
+        (let (p (os/spawn-pty (sibling-binary "nest") ["run" script] {:cols 40 :rows 10})
+              up (read-until p {:vt (vt/make 40 10) :bytes 0} (showing? "size:40x10") 20000))
+          (do
+            (is (vt/mode (:vt up) :alt-screen))
+            (os/signal p :term)
+            (letrec (await (fn (left)
+                             (cond
+                               (file/exists? marker) true
+                               (<= left 0) false
+                               else (do (proc/sleep 20) (await (- left 20))))))
+              (is (await 10000)))
+            ;; the hook hangs; the loop does not end; the second SIGTERM is the default action
+            (os/signal p :term)
+            (is (:closed (read-until p up (fn (vt) false) 5000)))))
+        (file/rmdir dir)))))
+
+(describe "a frame the terminal never received (ADR-586)"
+  :isolated (test "is not taken as shown: the next frame repaints whole"
+    (let (dir (test/temp-dir "brood-term-lost-")
+          script (str dir "/draw.blsp"))
+      (do
+        (file/mkdir dir)
+        (file/spit script
+          (str "(check-allow :discarded-catch (try (term/draw [[:text 0 0 \"x\"]]) (catch _ nil)))\n"
+            "(file/spit "
+            (pr-str (str dir "/due"))
+            " (str (term/repaint-due?)))\n"))
+        ;; stdout a full device: the write fails (ENOSPC)
+        (os/cmd "sh"
+          ["-c"
+            (str (os/shell-quote (or (sibling-binary "nest") "nest"))
+              " run "
+              (os/shell-quote script)
+              " > /dev/full")])
+        (assert= (file/slurp (str dir "/due")) "true")
+        (file/rmdir dir)))))
+
+(describe "term/colors (ADR-586)"
+  (test "names the depth and can be set and reset"
+    (let (environment (term/colors))
+      (do
+        (is (contains? #{:truecolor :256 :16} environment))
+        (assert= (term/colors :16) :16)
+        (assert= (term/colors) :16)
+        (assert= (term/colors nil) environment))))
+  (test "refuses a depth it does not know"
+    (is (failure? (try (term/colors :lots) (catch e (failure (error-message e))))))))
+
+(describe "term/bg (ADR-586)"
+  (test "takes a colour or nil for the default face, and refuses anything else"
+    (assert= (term/bg "#1e1e2e" "#cdd6f4") nil)
+    (assert= (term/bg [30 30 46]) nil)
+    (assert= (term/bg nil) nil)
+    (is (failure? (try (term/bg "not a colour") (catch e (failure (error-message e))))))))
+
+(describe "the terminal clipboard (ADR-587)"
+  (test "OSC 52 carries the text base64-encoded, to the clipboard or PRIMARY"
+    (assert= (editor/ansi/ansi-clipboard "héllo")
+      (str "\e]52;c;" (encoding/base64-encode "héllo") "\x07"))
+    (is (string/starts-with? (editor/ansi/ansi-clipboard "x" :primary) "\e]52;p;")))
+  (test "the terminal display carries clipboard setters, so an attached session's kills land"
+    (is (fn? (:clipboard-set editor/ui/*term-display*)))
+    (is (fn? (:primary-set editor/ui/*term-display*))))
+  (test "OSC 52 carries at most 100000 bytes, as Emacs's xterm-max-cut-length"
+    (is (editor/ui/osc52-fits? (string/repeat "x" 100000)))
+    (is (not (editor/ui/osc52-fits? (string/repeat "x" 100001))))
+    ;; counted in bytes, not characters
+    (is (not (editor/ui/osc52-fits? (string/repeat "é" 50001)))))
+  (test "display-available? answers a boolean"
+    (is (bool? (editor/ui/display-available?)))))

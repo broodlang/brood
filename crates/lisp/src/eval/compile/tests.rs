@@ -2693,9 +2693,50 @@ fn a_suspend_latch_takes_back_the_code_it_published() {
     );
 }
 
-/// KI-313: one park latches every native arm under it. A native walk calling a native
-/// reducer that opens a window blocks with both on the stack; the latch named only the
-/// innermost, so the walk stayed native and blocked its worker again on the next call
+/// KI-313: the latch is the function's, not one copy's. A function can have two
+/// `CompiledArm`s at once — a recompile after a module load staled the first, a peer
+/// compiling the same closure — and in the Nightly's conditions (the suite's stdlib image
+/// in the cache) the first process latched its copy while a second copy, already native,
+/// blocked the next process's worker (`interrupt_one_worker`'s native-walk case, 85% of
+/// runs once primed). The latch reaches every copy admitted toward native code, and refuses
+/// any copy that comes after it.
+#[cfg(feature = "jit")]
+#[test]
+fn a_suspend_latch_reaches_every_copy_of_the_function() {
+    use std::sync::atomic::Ordering::Acquire;
+    let mut interp = crate::Interp::new();
+    let heap = &mut interp.heap;
+    let key = (0x0313_0003, 2);
+    let blocked = published_native_arm(heap, key);
+    let sibling = published_native_arm(heap, key);
+    assert!(heap.jit_suspend_admit(&blocked));
+    assert!(heap.jit_suspend_admit(&sibling));
+    let gateway = 13;
+    heap.blocked_under_gateway = gateway;
+    let exit = NativeExit {
+        outcome: 0,
+        gateway,
+        env: heap.global(),
+    };
+    let base = heap.roots_len();
+    native_feedback(heap, &blocked, base, blocked.nslots, &exit);
+    assert_eq!(blocked.jit_code.load(Acquire), crate::jit::BAILED);
+    assert_eq!(
+        sibling.jit_code.load(Acquire),
+        crate::jit::BAILED,
+        "another copy of the latched function stayed native"
+    );
+    let later = published_native_arm(heap, key);
+    assert!(
+        !heap.jit_suspend_admit(&later),
+        "a copy compiled after the latch was admitted toward native code"
+    );
+    assert_eq!(later.jit_code.load(Acquire), crate::jit::BAILED);
+}
+
+/// Found chasing KI-313, and not its cause: one park latches every native arm under it. A
+/// native walk calling a native reducer that opens a window blocks with both on the stack;
+/// the latch named only the innermost, so the walk stayed native and blocked its worker again on the next call
 /// (`interrupt_one_worker`'s native-walk case, intermittently: only when the reducer had
 /// tiered before the first block). The reducer's exit hands the block to the walk.
 #[cfg(feature = "jit")]

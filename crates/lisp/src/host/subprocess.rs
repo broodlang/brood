@@ -68,6 +68,19 @@ use crate::process::{
     reserve_io_thread,
 };
 
+#[cfg(windows)]
+mod conpty;
+
+/// What a registry entry keeps of a pty child's terminal, for `pty_resize` and
+/// `pty_input_mode`: on Unix the master fd, on Windows the pseudoconsole (ConPTY, KI-369).
+/// A raw fd as a plain `i32` rather than `std::os::fd::RawFd`: that module does not exist
+/// on `wasm32-unknown-unknown`, and this type is not unix-gated, so naming the alias here
+/// broke the playground's build. `RawFd` IS `i32` on every unix target.
+#[cfg(not(windows))]
+type PtyEndpoint = i32;
+#[cfg(windows)]
+type PtyEndpoint = Arc<conpty::PseudoConsole>;
+
 /// A live child process: the write half (its stdin) plus a shared handle to the
 /// `Child` itself, used to reap (`wait`) and to `kill`. The stdout/stderr read
 /// halves are owned by their reader threads, not held here.
@@ -104,19 +117,67 @@ struct Proc {
     /// Shared with the reader threads, which load it per chunk, so
     /// `proc-set-binary` flips an already-running child mid-stream.
     binary: Arc<AtomicBool>,
-    /// The pty master fd, for a child spawned by [`spawn_pty`]; `None` for a plain
-    /// piped child. Only `pty_resize` reads it — the reader and writer already hold
-    /// their own `File` clones of it.
-    /// A raw fd as a plain `i32` rather than `std::os::fd::RawFd`: that module does not
-    /// exist on `wasm32-unknown-unknown`, and this struct is not itself unix-gated, so
-    /// naming the alias here broke the playground's build. `RawFd` IS `i32` on every
-    /// unix target; the unix-only code below converts at its own boundary.
+    /// The child's terminal, for a child spawned by [`spawn_pty`] — the pty master fd on
+    /// Unix, the pseudoconsole on Windows; `None` for a plain piped child. Only
+    /// `pty_resize` and `pty_input_mode` read it — the reader and writer already hold
+    /// their own `File`s.
     ///
-    /// Its only reader (`pty_resize`) is unix-gated while this struct is not, so on wasm32
-    /// and Windows nothing reads it and those targets warned. Allowed rather than cfg'd out:
-    /// gating the field would fork the constructor for one dead word.
-    #[cfg_attr(not(unix), allow(dead_code))]
-    pty: Option<i32>,
+    /// On wasm32 nothing spawns a pty, so nothing reads it there. Allowed rather than
+    /// cfg'd out: gating the field would fork the constructor for one dead word.
+    #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
+    pty: Option<PtyEndpoint>,
+}
+
+/// A child: a `std::process::Child` — every `os/spawn` child, and a Unix pty child — or,
+/// on Windows, a child attached to a pseudoconsole, which `Command` cannot start (KI-369)
+/// and so has only a raw process handle. The waiter, `close` and `signal` go through
+/// these methods and never ask which.
+enum ChildProcess {
+    Standard(Child),
+    #[cfg(windows)]
+    Console(conpty::ConsoleChild),
+}
+
+impl ChildProcess {
+    /// The OS process id, which is also its process group's (`close`, `signal`).
+    #[cfg(unix)]
+    fn id(&self) -> u32 {
+        match self {
+            ChildProcess::Standard(child) => child.id(),
+        }
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        match self {
+            ChildProcess::Standard(child) => child.kill(),
+            #[cfg(windows)]
+            ChildProcess::Console(child) => child.kill(),
+        }
+    }
+
+    /// `Some(code)` once the child has exited (`code` nil when no exit status — a
+    /// signal), reaping it; `None` while it runs.
+    #[cfg(not(unix))]
+    fn try_wait(&mut self) -> std::io::Result<Option<Option<i32>>> {
+        match self {
+            ChildProcess::Standard(child) => Ok(child.try_wait()?.map(|status| status.code())),
+            #[cfg(windows)]
+            ChildProcess::Console(child) => Ok(child.try_wait()?.map(Some)),
+        }
+    }
+
+    /// Reap the child, which has exited by now.
+    fn reap(&mut self) {
+        match self {
+            ChildProcess::Standard(child) => {
+                let _ = child.wait();
+            }
+            #[cfg(windows)]
+            ChildProcess::Console(child) => {
+                let _ = child.wait();
+            }
+        }
+    }
 }
 
 /// The `Child`, and whether the waiter has reaped it.
@@ -130,12 +191,15 @@ struct ChildHandle {
 }
 
 struct ChildSlot {
-    child: Child,
+    child: ChildProcess,
     /// Set by the waiter under this mutex when it reaps. Until then the child's pid —
     /// which is also its process group id — is held by the zombie and cannot be reused,
     /// so `close` and `signal` may `killpg` it; after, they must not, and they check this
     /// under the same lock.
     reaped: bool,
+    /// The child's Job Object on Windows, so `close` ends what it started too; `None`
+    /// elsewhere, where its process group does that.
+    tree: Option<ProcessTree>,
 }
 
 /// Where a child is in its life: shared by its reader threads, its waiter thread and
@@ -644,6 +708,10 @@ fn start_waiter(
         let code = wait_for_exit(&child);
         #[cfg(unix)]
         lifecycle.raise_exited();
+        // A pseudoconsole holds its output pipe open past the child: closing it is what
+        // brings the reader to end of file (after what the console still had to write).
+        #[cfg(windows)]
+        close_pseudoconsole(&child);
         lifecycle.wait_until(|state| state.undrained == 0);
         sink.emit(end_msg("proc-exit", id, code));
         lifecycle.wait_until(|state| state.open == 0);
@@ -654,11 +722,24 @@ fn start_waiter(
         {
             let mut slot = crate::core::sync::lock(&child.slot);
             // A zombie by now, so this returns at once.
-            let _ = slot.child.wait();
+            slot.child.reap();
             slot.reaped = true;
         }
         sink.emit(end_msg("proc-closed", id, code));
     });
+}
+
+/// Close a ConPTY child's pseudoconsole, which may block while the console host writes
+/// its last frame — so not under the slot's lock, which `close` takes.
+#[cfg(windows)]
+fn close_pseudoconsole(child: &ChildHandle) {
+    let console = match &crate::core::sync::lock(&child.slot).child {
+        ChildProcess::Console(console_child) => Some(console_child.console().clone()),
+        ChildProcess::Standard(_) => None,
+    };
+    if let Some(console) = console {
+        console.close();
+    }
 }
 
 /// Block until the child exits and return its exit code (`None` if a signal ended it),
@@ -705,9 +786,9 @@ fn wait_for_exit(child: &ChildHandle) -> Option<i32> {
         {
             let mut slot = crate::core::sync::lock(&child.slot);
             match slot.child.try_wait() {
-                Ok(Some(status)) => {
+                Ok(Some(code)) => {
                     slot.reaped = true;
-                    return status.code();
+                    return code;
                 }
                 Ok(None) => {}
                 Err(_) => return None,
@@ -767,16 +848,214 @@ pub fn reset_inherited_signals(command: &mut Command) {
 #[cfg(not(unix))]
 pub fn reset_inherited_signals(_command: &mut Command) {}
 
+/// Start a pipe child in a NEW SESSION (`setsid`), which also makes it the leader of its own
+/// process group — so a `killpg` on its pid still ends it and everything it started — and
+/// leaves it no controlling terminal. Without that, a child that opens `/dev/tty` (sudo
+/// asking for a password, ssh asking about a host key or a passphrase, pinentry-curses) wrote
+/// its prompt over a full-screen program's display and, reading, stopped on SIGTTIN forever:
+/// it was in a background group of the runtime's session. With no terminal it fails at once
+/// instead ("no tty present"), which a caller can report. Emacs does the same for its pipe
+/// processes (Bug#30762). A pty child (`spawn_pty`) gets its own session and terminal.
+#[cfg(unix)]
+pub fn new_session(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: runs in the forked child before exec; `setsid` is async-signal-safe. It fails
+    // only for a process-group leader, which a freshly forked child never is.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+/// Put `args` on `command`. With `raw` on Windows each is written into the command line
+/// exactly as given, unquoted — what `cmd.exe /d /s /c "LINE"` needs, since `cmd` does not
+/// read the MSVC quoting `Command::arg` applies (a `"` in the line became `\"`), KI-364.
+/// Elsewhere `raw` changes nothing: a Unix child gets its arguments as an array.
+pub fn add_args(command: &mut Command, args: &[String], raw: bool) {
+    #[cfg(windows)]
+    if raw {
+        use std::os::windows::process::CommandExt;
+        for argument in args {
+            command.raw_arg(argument);
+        }
+        return;
+    }
+    let _ = raw;
+    command.args(args);
+}
+
+/// Windows: a piped console child gets a console of its own, never shown. Without it a GUI
+/// caller (no console to share) had a console window flash up for every `cmd.exe`, and a
+/// console caller shared its console — so a `chcp` the child ran changed the caller's.
+pub fn own_hidden_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
+/// Windows's process group: a Job Object holding a child, which every process the child
+/// starts joins too, so stopping the child stops its whole tree (ADR-592). Killing the
+/// child alone left a `sh -c "…; sleep 60"` grandchild running and holding the output
+/// pipes. Off Windows it holds nothing — the child leads its own process group there.
+pub(crate) struct ProcessTree {
+    #[cfg(windows)]
+    job: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: a job handle is a kernel handle, usable from any thread; it is closed once, on
+// drop, and `terminate` only reads it.
+#[cfg(windows)]
+unsafe impl Send for ProcessTree {}
+#[cfg(windows)]
+unsafe impl Sync for ProcessTree {}
+
+impl ProcessTree {
+    /// A job holding `child` — or `None` off Windows, or when the OS refuses one (the
+    /// child is then stopped alone, as before).
+    pub(crate) fn of(child: &Child) -> Option<ProcessTree> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            ProcessTree::of_handle(child.as_raw_handle())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            None
+        }
+    }
+
+    /// A job holding the process behind `process` — a live process handle (a ConPTY
+    /// child's, which is no `Child`).
+    #[cfg(windows)]
+    fn of_handle(process: windows_sys::Win32::Foundation::HANDLE) -> Option<ProcessTree> {
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        // SAFETY: a null name and default security make an anonymous job, owned here
+        // and closed on drop.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return None;
+        }
+        let tree = ProcessTree { job };
+        // Breakaway allowed: a process the child hands to the desktop (`os/detach`,
+        // created with CREATE_BREAKAWAY_FROM_JOB) leaves the job, so stopping the child
+        // does not close the browser it opened. Best effort: refused, the tree still is one.
+        {
+            use windows_sys::Win32::System::JobObjects::{
+                JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JobObjectExtendedLimitInformation, SetInformationJobObject,
+            };
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            // SAFETY: `limits` is a live JOBOBJECT_EXTENDED_LIMIT_INFORMATION of the size
+            // passed; the job handle is live.
+            let _ = unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    (&raw const limits).cast(),
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+        }
+        // SAFETY: both handles are live — the job just made, and the caller's process.
+        let assigned = unsafe { AssignProcessToJobObject(job, process) };
+        (assigned != 0).then_some(tree)
+    }
+
+    /// End every process in the tree.
+    pub(crate) fn terminate(&self) {
+        // SAFETY: the job handle is live until drop.
+        #[cfg(windows)]
+        let _ = unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job, 1) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        // SAFETY: owned, closed once. Closing does not end the processes (no
+        // KILL_ON_JOB_CLOSE): a command that finished may leave a daemon running, as on Unix.
+        let _ = unsafe { windows_sys::Win32::Foundation::CloseHandle(self.job) };
+    }
+}
+
+/// Spawn `command` outside the caller: on Windows with no console of ours, no Ctrl-C of ours,
+/// and out of any Job Object the caller is in (ours allow it, ADR-592) — falling back to
+/// staying in it when the job does not allow breakaway (a CI runner's may not).
+fn spawn_detached(command: &mut Command) -> std::io::Result<Child> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        const DETACHED: u32 = 0x0000_0008 | 0x0000_0200;
+        const BREAKAWAY: u32 = windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+        command.creation_flags(DETACHED | BREAKAWAY);
+        match command.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                command.creation_flags(DETACHED);
+                command.spawn()
+            }
+            result => result,
+        }
+    }
+    #[cfg(not(windows))]
+    command.spawn()
+}
+
+/// `(os/detach prog args opts)` — start `prog` and let it go: no pipes (its stdio is the
+/// null device), no handle, not stopped when its caller dies, and not in the caller's
+/// process group or Job Object. What opening a URL or a file in another application wants:
+/// the opener may start the browser itself, which must outlive the editor and must not
+/// hold a pipe the editor waits on. The child is reaped on a thread of its own.
+pub fn detach(
+    prog: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    env: &[EnvEntry],
+    raw: bool,
+) -> std::io::Result<()> {
+    let mut command = Command::new(prog);
+    add_args(&mut command, args, raw);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    new_session(&mut command);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    apply_env(&mut command, env);
+    reset_inherited_signals(&mut command);
+    let mut child = spawn_detached(&mut command)?;
+    // Reap it when it ends, so it leaves no zombie; a refused thread only costs that.
+    let _ = std::thread::Builder::new()
+        .name("brood-detached-wait".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(())
+}
+
 pub fn spawn(
     prog: &str,
     args: &[String],
     cwd: Option<&str>,
     env: &[EnvEntry],
+    raw_args: bool,
     subscriber: u64,
 ) -> std::io::Result<u64> {
     let mut command = Command::new(prog);
+    add_args(&mut command, args, raw_args);
+    own_hidden_console(&mut command);
     command
-        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -785,10 +1064,7 @@ pub fn spawn(
     // pipes. (A pty child already leads its own session — `spawn_pty` — and the same
     // `killpg` covers it.)
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    new_session(&mut command);
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
@@ -807,8 +1083,10 @@ pub fn spawn(
     let stdout: ChildStdout = child.stdout.take().expect("piped stdout");
     let stderr: ChildStderr = child.stderr.take().expect("piped stderr");
 
+    let tree = ProcessTree::of(&child);
     let (id, child, binary) = register_child(
-        child,
+        ChildProcess::Standard(child),
+        tree,
         start_stdin_writer(writer_thread, stdin),
         &lifecycle,
         subscriber,
@@ -868,15 +1146,17 @@ impl ChildThreads {
 /// the inbound decode flag, for the caller's readers and waiter. Infallible on purpose —
 /// it runs with a live child, where any failure would leak it.
 fn register_child(
-    child: std::process::Child,
+    child: ChildProcess,
+    tree: Option<ProcessTree>,
     writer: mpsc::SyncSender<Vec<u8>>,
     lifecycle: &Arc<Lifecycle>,
     subscriber: u64,
-    pty: Option<i32>,
+    pty: Option<PtyEndpoint>,
 ) -> (u64, Arc<ChildHandle>, Arc<AtomicBool>) {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let child = Arc::new(ChildHandle {
         slot: Mutex::new(ChildSlot {
+            tree,
             child,
             reaped: false,
         }),
@@ -1007,6 +1287,9 @@ fn shut_down(entry: Proc) {
             unsafe {
                 libc::killpg(slot.child.id() as libc::pid_t, libc::SIGKILL);
             }
+            if let Some(tree) = &slot.tree {
+                tree.terminate();
+            }
             let _ = slot.child.kill();
         }
     }
@@ -1034,10 +1317,17 @@ pub fn signal(id: u64, sig: &str) -> std::io::Result<()> {
             "hup" => libc::SIGHUP,
             "quit" => libc::SIGQUIT,
             "kill" => libc::SIGKILL,
+            // job control: a terminal app is stopped and continued with these (ADR-586)
+            "tstp" => libc::SIGTSTP,
+            "stop" => libc::SIGSTOP,
+            "cont" => libc::SIGCONT,
+            "winch" => libc::SIGWINCH,
             other => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("unknown signal :{other} (one of :int :term :hup :quit :kill)"),
+                    format!(
+                        "unknown signal :{other} (one of :int :term :hup :quit :kill :tstp :stop :cont :winch)"
+                    ),
                 ));
             }
         };
@@ -1145,6 +1435,23 @@ mod pty {
         Ok(())
     }
 
+    /// The local modes of the terminal behind pty master `fd` that say how input is being
+    /// read: whether it echoes (`ECHO`) and whether it is line-buffered (`ICANON`).
+    pub(super) fn input_mode(fd: RawFd) -> std::io::Result<super::PtyInputMode> {
+        // SAFETY: `termios` is plain old data, so all-zero is a valid value for
+        // `tcgetattr` to overwrite; `fd` is a pty master we opened and still hold.
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: as above — a valid descriptor and a valid, writable termios.
+        let rc = unsafe { libc::tcgetattr(fd, &mut termios) };
+        if rc == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(super::PtyInputMode {
+            echo: termios.c_lflag & libc::ECHO != 0,
+            canonical: termios.c_lflag & libc::ICANON != 0,
+        })
+    }
+
     /// Open a pty pair, returning `(master, slave)` as OWNED descriptors.
     ///
     /// Owned rather than raw so that every `?` on the way through [`super::spawn_pty`]
@@ -1229,10 +1536,14 @@ mod pty {
 /// Same handle type and same messages as [`spawn`], except that there is no
 /// `[:proc-err …]` stream — a terminal has one channel, and the child's stderr goes
 /// to it. `cols`/`rows` set the initial window size; [`pty_resize`] changes it.
+/// `raw_args` writes the arguments into a Windows command line unquoted (see
+/// [`add_args`]); a Unix child gets an argument array, so it changes nothing there.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_pty(
     prog: &str,
     args: &[String],
+    raw_args: bool,
     cwd: Option<&str>,
     env: &[EnvEntry],
     subscriber: u64,
@@ -1240,6 +1551,7 @@ pub fn spawn_pty(
     rows: u16,
 ) -> std::io::Result<u64> {
     use std::os::unix::process::CommandExt;
+    let _ = raw_args;
 
     // Before the spawn: once there is a child, every failure would have to clean it up.
     let lifecycle = Arc::new(Lifecycle::new(1)?);
@@ -1317,7 +1629,8 @@ pub fn spawn_pty(
     // it. Everything above this line was owned, so no earlier exit could leak it.
     let master = std::os::fd::IntoRawFd::into_raw_fd(master);
     let (id, child, binary) = register_child(
-        child,
+        ChildProcess::Standard(child),
+        None,
         start_stdin_writer(writer_thread, write_file),
         &lifecycle,
         subscriber,
@@ -1336,9 +1649,60 @@ pub fn spawn_pty(
     Ok(id)
 }
 
+/// Windows's [`spawn_pty`]: the child attached to a ConPTY pseudoconsole (KI-369,
+/// ADR-597), through the same registry, reader, writer and waiter as every child — one
+/// output channel, as on Unix. Raises on a Windows without ConPTY (before 10 1809).
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_pty(
+    prog: &str,
+    args: &[String],
+    raw_args: bool,
+    cwd: Option<&str>,
+    env: &[EnvEntry],
+    subscriber: u64,
+    cols: u16,
+    rows: u16,
+) -> std::io::Result<u64> {
+    // Before the spawn: once there is a child, every failure would have to clean it up.
+    let lifecycle = Arc::new(Lifecycle::new(1)?);
+    let ChildThreads {
+        writer: writer_thread,
+        readers: mut reader_threads,
+        waiter: waiter_thread,
+    } = ChildThreads::reserve(1)?;
+    let conpty::Spawned {
+        child,
+        tree,
+        input,
+        output,
+    } = conpty::spawn(prog, args, raw_args, cwd, env, cols, rows)?;
+    // From here to the end nothing can fail: a child now exists.
+    let console = child.console().clone();
+    let (id, child, binary) = register_child(
+        ChildProcess::Console(child),
+        tree,
+        start_stdin_writer(writer_thread, input),
+        &lifecycle,
+        subscriber,
+        Some(console),
+    );
+    start_output_reader(
+        next_reader(&mut reader_threads),
+        id,
+        "proc",
+        output,
+        lifecycle.clone(),
+        subscriber,
+        binary,
+    );
+    start_waiter(waiter_thread, id, child, lifecycle, subscriber);
+    Ok(id)
+}
+
 /// `(pty-resize handle cols rows)` — tell a pty child its terminal changed size.
 /// A no-op error for a handle that is not a pty, or is already closed.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn pty_resize(id: u64, cols: u16, rows: u16) -> std::io::Result<()> {
     let registry = reg();
     let Some(p) = registry.get(&id) else {
@@ -1347,19 +1711,80 @@ pub fn pty_resize(id: u64, cols: u16, rows: u16) -> std::io::Result<()> {
             "pty-resize: unknown or closed handle",
         ));
     };
-    let Some(fd) = p.pty else {
+    let Some(terminal) = &p.pty else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "pty-resize: this child was spawned with pipes, not a pty",
         ));
     };
-    pty::set_winsize(fd, cols, rows)
+    #[cfg(unix)]
+    return pty::set_winsize(*terminal, cols, rows);
+    #[cfg(windows)]
+    return terminal.resize(cols, rows);
 }
 
-#[cfg(not(unix))]
+/// How a pty child's terminal is reading input right now: the two termios local modes a
+/// host showing the child's input itself needs (ADR-570).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PtyInputMode {
+    /// `ECHO`: the line discipline echoes what is typed.
+    pub echo: bool,
+    /// `ICANON`: input is read a LINE at a time, edited by the line discipline. A program
+    /// with its own line editor (readline, a raw-mode REPL) turns this off
+    /// along with `ECHO` and echoes for itself; a password read (`getpass`, `sudo`, ssh's
+    /// `readpassphrase`) turns off `ECHO` alone — which is what tells the two apart.
+    pub canonical: bool,
+}
+
+/// `(pty-mode handle)` — how pty child `id`'s terminal is reading input: echo and
+/// canonical (line) mode.
+///
+/// A program reading a password clears `ECHO` and keeps `ICANON` for that read, then
+/// restores both. That pair is the one reliable signal a host showing the child's input
+/// itself has that the next line is a secret — a prompt regexp is only a guess.
+///
+/// `tcgetattr` on the MASTER answers with the slave's termios on Linux and macOS (a
+/// master's mode ioctls go to its linked slave), so no slave descriptor is kept open for
+/// this. `Ok(None)` when the handle is unknown or already closed — the child is gone, so
+/// there is no terminal to ask, and a caller checking around a prompt should not have to
+/// race the child's exit. An error for a piped child (misuse) or a failed `tcgetattr`.
+///
+/// On Windows a ConPTY child answers `Ok(None)` too: a pseudoconsole has no termios and
+/// says nothing of how its child reads (KI-369, ADR-597), so a caller falls back to what
+/// it would do without the signal — an editor, to guessing from the prompt's text.
+#[cfg(any(unix, windows))]
+pub fn pty_input_mode(id: u64) -> std::io::Result<Option<PtyInputMode>> {
+    let registry = reg();
+    let Some(p) = registry.get(&id) else {
+        return Ok(None);
+    };
+    let Some(terminal) = &p.pty else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "pty-mode: this child was spawned with pipes, not a pty",
+        ));
+    };
+    #[cfg(unix)]
+    return pty::input_mode(*terminal).map(Some);
+    #[cfg(windows)]
+    {
+        let _ = terminal;
+        Ok(None)
+    }
+}
+
+/// Neither Unix nor Windows (wasm32): no child processes at all, so no terminal.
+#[cfg(not(any(unix, windows)))]
+pub fn pty_input_mode(_id: u64) -> std::io::Result<Option<PtyInputMode>> {
+    Ok(None)
+}
+
+#[cfg(not(any(unix, windows)))]
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_pty(
     _prog: &str,
     _args: &[String],
+    _raw_args: bool,
     _cwd: Option<&str>,
     _env: &[EnvEntry],
     _subscriber: u64,
@@ -1368,15 +1793,15 @@ pub fn spawn_pty(
 ) -> std::io::Result<u64> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "pty-spawn: pseudo-terminals are a Unix facility",
+        "pty-spawn: no pseudo-terminal on this platform",
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn pty_resize(_id: u64, _cols: u16, _rows: u16) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "pty-resize: pseudo-terminals are a Unix facility",
+        "pty-resize: no pseudo-terminal on this platform",
     ))
 }
 

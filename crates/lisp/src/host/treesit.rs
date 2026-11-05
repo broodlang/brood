@@ -1712,15 +1712,24 @@ fn normalized_pieces_keep_empty(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, 
 // A gone handle still reads as `nil` from every query and reparsing from it is a full
 // parse — but now only its holder can make it gone.
 
-/// Bumped by every `%tree-sitter-load-grammar`. A tree parsed under an older grammar is
-/// never handed to the new grammar's parser as the tree to reparse from: that is not stale
-/// but ill-formed, and fails the parse outright (see `load_grammar`).
+/// Per language, bumped by every load of that language's grammar. A tree parsed under an
+/// older grammar is never handed to the new grammar's parser as the tree to reparse from:
+/// that is not stale but ill-formed, and fails the parse outright (see `load_grammar`).
+///
+/// Per LANGUAGE, not one counter for the runtime: loading the HCL grammar says nothing about
+/// an Elixir tree, and a single counter made every held tree of every language reparse from
+/// scratch whenever any grammar loaded — which, with grammars declared and loaded at first
+/// use (ADR-481), is whenever a file of a new language is first opened (ADR-583).
 #[cfg(feature = "treesit")]
-static GRAMMAR_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GRAMMAR_EPOCHS: LazyLock<Mutex<HashMap<String, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[cfg(feature = "treesit")]
-fn grammar_epoch() -> u64 {
-    GRAMMAR_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+fn grammar_epoch(lang: &str) -> u64 {
+    crate::core::sync::lock(&GRAMMAR_EPOCHS)
+        .get(lang)
+        .copied()
+        .unwrap_or(0)
 }
 
 /// One handle's document: the tree, the text it was parsed from (a rope clone — ropey
@@ -1958,7 +1967,7 @@ pub fn tree_open(text: ropey::Rope, lang: &str, owner: u64) -> Result<u64, LispE
             tree,
             text,
             lang: lang.to_string(),
-            epoch: grammar_epoch(),
+            epoch: grammar_epoch(lang),
             changed: None,
         },
         owner,
@@ -1983,7 +1992,7 @@ pub fn tree_reparse(
     // Resolved before the epoch is read: a declared grammar's first use (re)loads it here and
     // moves the epoch, and the old tree must then not be handed to the new grammar's parser.
     language_for(lang)?;
-    let previous = tree_entry(old).filter(|e| e.lang == lang && e.epoch == grammar_epoch());
+    let previous = tree_entry(old).filter(|e| e.lang == lang && e.epoch == grammar_epoch(lang));
     let Some(previous) = previous else {
         return tree_open(text, lang, owner); // gone, another language, or another grammar
     };
@@ -2328,7 +2337,9 @@ pub fn range_spans(
 /// tree ever parsed with it. Grammars are loaded once and used for the life of
 /// the process; `std::mem::forget` says that in one line, where an `Arc` holding
 /// the `Library` alongside every `Language` would say it in many and still never
-/// drop.
+/// drop. Because the loader would then answer a second load of the same PATH with that
+/// first object, the library is opened from a copy named for its content
+/// ([`open_library`]): a library rebuilt in place and loaded again is the new build.
 ///
 /// Failure is an ordinary error at every step — a missing file, a library with no
 /// such grammar, a grammar built for an incompatible tree-sitter. None of them is
@@ -2343,6 +2354,168 @@ pub fn load_grammar(path: &str, lang: &str) -> LispResult {
     // parse, nor a failed one shadow it.
     crate::core::sync::lock(&DECLARED).remove(lang);
     Ok(Value::int(abi))
+}
+
+/// How a runtime grammar library was opened ([`open_library`]), reported by
+/// [`grammar_info`] as `:loaded-via` (ADR-583).
+#[cfg(feature = "treesit")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadedVia {
+    /// A content-named copy beside the library, in its own directory: the same filesystem
+    /// (so the same exec permission) and the same `$ORIGIN` for its RPATH.
+    Beside,
+    /// A content-named copy in the user's cache directory, the library's own directory not
+    /// being writable.
+    Cache,
+    /// The library's own path, no copy being possible: a later load of a library rebuilt at
+    /// that path may still be this one until the process restarts.
+    InPlace,
+}
+
+#[cfg(feature = "treesit")]
+impl LoadedVia {
+    fn keyword(self) -> &'static str {
+        match self {
+            LoadedVia::Beside => "beside",
+            LoadedVia::Cache => "cache",
+            LoadedVia::InPlace => "in-place",
+        }
+    }
+}
+
+/// Held across one copy, open and clean-up, so two loads in this process never write or
+/// remove a copy under each other.
+#[cfg(feature = "treesit")]
+static GRAMMAR_COPY_LOCK: Mutex<()> = Mutex::new(());
+
+/// The user's cache directory for grammar copies, `$XDG_CACHE_HOME/brood/grammars` (else
+/// `~/.cache/brood/grammars`), made owner-only — or accepted when it already is: a real
+/// directory this user owns that no one else can write, so no one else can have planted a
+/// library in it.
+#[cfg(feature = "treesit")]
+fn grammar_cache_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".cache"))
+        })?;
+    let dir = base.join("brood").join("grammars");
+    std::fs::create_dir_all(dir.parent()?).ok()?;
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    match builder.create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    let meta = std::fs::symlink_metadata(&dir).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+            return None;
+        }
+    }
+    Some(dir)
+}
+
+/// Write `bytes` to `copy`, owner-only, through a staging name renamed into place — so a copy
+/// of the same name still mapped from an earlier load is replaced by a new file, never
+/// truncated under it — then dlopen it and remove the file (the mapping outlives it). `None`
+/// when the copy could not be written or opened, for the caller to try the next place.
+///
+/// # Safety
+/// As `libloading::Library::new`.
+#[cfg(feature = "treesit")]
+unsafe fn open_copy_at(copy: &std::path::Path, bytes: &[u8]) -> Option<libloading::Library> {
+    use std::io::Write;
+    let staging = copy.with_extension("partial");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o700);
+    let written = options
+        .open(&staging)
+        .and_then(|mut file| file.write_all(bytes))
+        .and_then(|()| std::fs::rename(&staging, copy));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staging);
+        return None;
+    }
+    // SAFETY: the caller's — the dlopen it asked for, of the bytes it named.
+    let opened = unsafe { libloading::Library::new(copy) }.ok();
+    let _ = std::fs::remove_file(copy);
+    opened
+}
+
+/// Open the grammar library at `path` (ADR-583): from a copy named for its CONTENT beside it,
+/// else from one in the user's cache directory, else — neither being writable or loadable —
+/// from `path` itself. Answers the library (or the loader's error for `path`) and how it was
+/// opened.
+///
+/// **Why a copy.** The dynamic loader keys what it has loaded by NAME: `dlopen` of a path it
+/// already opened returns the object it has, whatever the file holds now. A library is never
+/// unloaded here (see [`load_grammar`]), so loading a grammar, rebuilding it in place and
+/// loading it again kept parsing with the first build until the process restarted — an
+/// install, an update or a reload all reported success while the old grammar ran. A name
+/// made of the content (and this process) gives the loader a new name exactly when the
+/// content is new, and the same name when it is not, so an unchanged library loaded again is
+/// the object already loaded rather than a second mapping.
+///
+/// **Why beside it.** A copy in the temporary directory fails on a `noexec` /tmp (a hardened
+/// host, a container), and a grammar whose RPATH says `$ORIGIN` finds its sibling libraries
+/// only from its own directory. Beside the original it is on the same filesystem with the
+/// same `$ORIGIN`; the cache directory is the fallback for a read-only grammar directory, and
+/// the path itself the last resort, reported as `:in-place`.
+///
+/// # Safety
+/// As `libloading::Library::new`: the library's initialisers run, with the process's
+/// privileges.
+#[cfg(feature = "treesit")]
+unsafe fn open_library(
+    who: &str,
+    path: &str,
+) -> Result<(Result<libloading::Library, libloading::Error>, LoadedVia), LispError> {
+    use std::hash::{Hash, Hasher};
+    let bytes =
+        std::fs::read(path).map_err(|e| LispError::runtime(format!("{who}:{path}: {e}")))?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let original = std::path::Path::new(path);
+    let stem = original
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("grammar");
+    let name = format!(".{stem}.{:016x}.{}.so", hasher.finish(), std::process::id());
+    let _held = crate::core::sync::lock(&GRAMMAR_COPY_LOCK);
+    let beside = original.parent().map(|dir| {
+        if dir.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            dir
+        }
+    });
+    // SAFETY: the caller's, for each attempt.
+    if let Some(dir) = beside
+        && let Some(library) = unsafe { open_copy_at(&dir.join(&name), &bytes) }
+    {
+        return Ok((Ok(library), LoadedVia::Beside));
+    }
+    if let Some(dir) = grammar_cache_dir()
+        && let Some(library) = unsafe { open_copy_at(&dir.join(&name), &bytes) }
+    {
+        return Ok((Ok(library), LoadedVia::Cache));
+    }
+    Ok((
+        unsafe { libloading::Library::new(path) },
+        LoadedVia::InPlace,
+    ))
 }
 
 /// dlopen `path`, check the grammar's ABI and register it under `lang` — the work of
@@ -2364,9 +2537,13 @@ fn load_library(
     // SAFETY: dlopen'ing a caller-chosen library and calling the grammar constructor it
     // exports. The symbol type is tree-sitter's documented grammar entry point, and the
     // Language it yields is validated against the host's ABI range below before any use.
+    // The library is opened from a private copy named for its CONTENT, never from `path`
+    // itself: the dynamic loader hands back the object it already has for a name it has
+    // seen, so a grammar rebuilt in place and loaded again from the same path would go on
+    // parsing with the old one (ADR-583). See `open_library`.
+    let (opened, via) = unsafe { open_library(who, path)? };
     let language = unsafe {
-        let lib = libloading::Library::new(path)
-            .map_err(|e| LispError::runtime(format!("{who}:{path}: {e}")))?;
+        let lib = opened.map_err(|e| LispError::runtime(format!("{who}:{path}: {e}")))?;
         let entry: libloading::Symbol<unsafe extern "C" fn() -> *const ()> = lib
             .get(symbol.as_bytes())
             .map_err(|e| LispError::runtime(format!("{who}:{path} exports no {symbol}: {e}")))?;
@@ -2389,6 +2566,7 @@ fn load_library(
         })?;
     let abi = language.abi_version() as i64;
     crate::core::sync::lock(&DYNAMIC).insert(lang.to_string(), language.clone());
+    crate::core::sync::lock(&LOADED_FROM).insert(lang.to_string(), (path.to_string(), via));
     // A re-load replaces the entry, so a grammar can be swapped without restarting; the
     // parser pool is keyed by language name and holds parsers bound to the OLD language, so
     // it is cleared for this one rather than left to hand out stale parsers.
@@ -2401,8 +2579,10 @@ fn load_library(
     crate::core::sync::lock(&TREE_CACHE).retain(|(l, _, _)| l != lang);
     // Held tree handles keep answering queries from the trees they have — those are valid
     // trees, merely from the old grammar — but none is reparsed FROM again, for the reason
-    // above: a reparse after this sees a newer epoch and parses afresh.
-    GRAMMAR_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    // above: a reparse after this sees a newer epoch for this language and parses afresh.
+    *crate::core::sync::lock(&GRAMMAR_EPOCHS)
+        .entry(lang.to_string())
+        .or_insert(0) += 1;
     Ok((abi, language))
 }
 
@@ -2417,6 +2597,96 @@ static DYNAMIC: LazyLock<Mutex<HashMap<String, tree_sitter::Language>>> =
 #[cfg(feature = "treesit")]
 fn dynamic_language(lang: &str) -> Option<tree_sitter::Language> {
     crate::core::sync::lock(&DYNAMIC).get(lang).cloned()
+}
+
+/// The library each grammar in [`DYNAMIC`] was loaded from, keyed by language name — what
+/// [`grammar_info`] reports as `:source`, so "which grammar is this" has an answer a user
+/// can go and look at. Written beside `DYNAMIC`, after it (never held together).
+#[cfg(feature = "treesit")]
+static LOADED_FROM: LazyLock<Mutex<HashMap<String, (String, LoadedVia)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// `(%tree-sitter-grammar-info lang)` — what the grammar `lang` parses with IS (ADR-583):
+/// `{:lang :abi :version :name :source :loaded-via :named :anonymous :fields}`. `:named` and `:anonymous`
+/// are the visible node kinds (aliases included, hidden and supertype rules not — no tree
+/// ever holds one) as keyword sets, `:fields` the field names; `:version` is the grammar's
+/// own `"major.minor.patch"` and `:name` its name, both nil before ABI 15, which did not
+/// record them; `:source` the library path, or `:built-in`; `:loaded-via` how it was opened —
+/// `:beside` / `:cache` (a content-named copy, see [`open_library`]) or `:in-place` (its own
+/// path, when no copy could be made: a library rebuilt there may stay the old one until a
+/// restart) — nil for a built-in grammar.
+///
+/// Loads the grammar when it is only declared — asking what a grammar contains is a use of
+/// it — and errors as a parse would when there is none. The answer is the whole vocabulary a
+/// language's face table, indent spec and injections may name, which is what makes a grammar
+/// update that renamed a node DETECTABLE: the editor compares the names it wrote against this
+/// set instead of finding out from a file that stopped colouring.
+#[cfg(feature = "treesit")]
+pub fn grammar_info(heap: &mut Heap, lang: &str) -> LispResult {
+    let language = language_for(lang)?;
+    let keyword = |name: &str| Value::keyword(value::intern(name));
+    let mut named = Vec::new();
+    let mut anonymous = Vec::new();
+    for id in 0..language.node_kind_count() {
+        let Ok(id) = u16::try_from(id) else { break };
+        if !language.node_kind_is_visible(id) {
+            continue;
+        }
+        let Some(kind) = language.node_kind_for_id(id) else {
+            continue;
+        };
+        if language.node_kind_is_named(id) {
+            named.push(keyword(kind));
+        } else {
+            anonymous.push(keyword(kind));
+        }
+    }
+    let fields: Vec<Value> = (1..=language.field_count())
+        .filter_map(|id| u16::try_from(id).ok())
+        .filter_map(|id| language.field_name_for_id(id))
+        .map(keyword)
+        .collect();
+    let named = heap.set_from_elems(named);
+    let anonymous = heap.set_from_elems(anonymous);
+    let fields = heap.set_from_elems(fields);
+    let version = match language.metadata() {
+        Some(meta) => heap.alloc_string_owned(format!(
+            "{}.{}.{}",
+            meta.major_version, meta.minor_version, meta.patch_version
+        )),
+        None => Value::Nil,
+    };
+    let name = match language.name() {
+        Some(name) => heap.alloc_string(name),
+        None => Value::Nil,
+    };
+    let (source, via) = if dynamic_language(lang).is_some() {
+        match crate::core::sync::lock(&LOADED_FROM).get(lang).cloned() {
+            Some((path, via)) => (heap.alloc_string_owned(path), keyword(via.keyword())),
+            None => (keyword("loaded"), Value::Nil),
+        }
+    } else {
+        (keyword("built-in"), Value::Nil)
+    };
+    Ok(heap.map_from_pairs(vec![
+        (keyword("lang"), keyword(lang)),
+        (keyword("abi"), Value::int(language.abi_version() as i64)),
+        (keyword("version"), version),
+        (keyword("name"), name),
+        (keyword("source"), source),
+        (keyword("loaded-via"), via),
+        (keyword("named"), named),
+        (keyword("anonymous"), anonymous),
+        (keyword("fields"), fields),
+    ]))
+}
+
+#[cfg(not(feature = "treesit"))]
+pub fn grammar_info(_heap: &mut crate::core::heap::Heap, lang: &str) -> LispResult {
+    Err(LispError::runtime(format!(
+        "%tree-sitter-grammar-info::{lang}: this runtime was built without tree-sitter \
+         (rebuild with --features treesit)"
+    )))
 }
 
 /// What a declared grammar is waiting on: its library, or the reason it did not load.
