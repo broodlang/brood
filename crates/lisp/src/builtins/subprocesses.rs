@@ -321,7 +321,7 @@ pub(super) fn program_path(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     let ChildOptions { cwd, env, .. } = child_options(heap, "os/which", arg(args, 1))?;
     Ok(
         match crate::host::subprocess::program::which(&program, cwd.as_deref(), &env) {
-            Some(found) => heap.alloc_string(&found.to_string_lossy()),
+            Some(found) => heap.alloc_string(&super::filesystem::host_path_text(&found)),
             None => Value::nil(),
         },
     )

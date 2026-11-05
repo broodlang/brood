@@ -228,7 +228,7 @@ pub(super) fn exe_path(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// them, and `path` splits on nothing else — and no `\\?\` verbatim prefix, which
 /// `fs::canonicalize` adds and most programs a path is handed to refuse. Elsewhere the
 /// path as it is: a `\` there is an ordinary character of a file name.
-fn host_path_text(path: &std::path::Path) -> String {
+pub(super) fn host_path_text(path: &std::path::Path) -> String {
     let text = path.to_string_lossy();
     if cfg!(windows) {
         windows_path_text(&text)
