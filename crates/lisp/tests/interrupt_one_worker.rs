@@ -55,6 +55,10 @@ const PRELUDE: &str = r#"
 /// checks: another process runs on the one worker meanwhile, the waiter answers once
 /// released, a ceiling passed while it waited lands once it runs, and so does
 /// `proc/interrupt` — which a waiting process refuses.
+///
+/// Each waiter answers before the next is spawned: a suspend-host latch lands as the blocked
+/// walk EXITS, so a waiter still in its walk when the next began would let that one block too
+/// (KI-313: `late` was interrupted while `woken` walked natively beside it).
 fn waits_in_a_window(open: &str) -> String {
     run(&format!(
         r#"{PRELUDE}
@@ -69,12 +73,13 @@ fn waits_in_a_window(open: &str) -> String {
         (await-waiting late)
         (proc/sleep 30)
         (send late :go)
+        (def late-answer (receive ([:late r] r) (after 10000 :late-lost)))
         (def woken (spawn (send root [:woken (first (open nil (fn () (do (receive (:go nil)) (spin 0)))))])))
         (await-waiting woken)
         (def refused (proc/interrupt woken))
         (send woken :go)
         [ran waited
-         (receive ([:late r] r) (after 10000 :late-lost))
+         late-answer
          refused
          (interrupt-until woken 10000)
          (receive ([:woken r] r) (after 10000 :woken-lost))]
@@ -240,8 +245,9 @@ fn a_native_walk_that_hosts_a_park_blocks_once_and_then_parks() {
                    (fold (into [] (range 5000)) nil step)))";
     let dirty = process::dirty_receive_block_count();
     assert_eq!(waits_in_a_window(hot), ANSWERED);
+    let blocks = process::dirty_receive_block_count() - dirty;
     assert!(
-        process::dirty_receive_block_count() <= dirty + 1,
-        "a native walk blocked more than once: the latch did not take it off native code"
+        blocks <= 1,
+        "a native walk blocked {blocks} times: the latch did not take it off native code"
     );
 }

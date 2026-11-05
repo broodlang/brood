@@ -1933,8 +1933,8 @@ fn scan_until_answered(
                     // latchable native host by silence cost a debugging round.
                     if crate::diagnostics::debug_flags::jit_bail_trace() {
                         eprintln!(
-                            "[jit-bail] dirty-receive-block gateway-token={}",
-                            heap.cur_native_gateway
+                            "[jit-bail] dirty-receive-block gateway-token={} pid={}",
+                            heap.cur_native_gateway, ctx.pid
                         );
                     }
                 }
