@@ -180,7 +180,7 @@
   (%gui-text-aa! mode))
 
 (defn text-contrast (gamma)
-  "Set the text contrast exponent γ: 1.0 by default (the plain linear-light blend), clamped to 0.5..3.0. A monochrome glyph's partial coverage is lifted to cov^(1/γ) where the text is lighter than the pixel it lands on — light text on a dark ground, which a linear-light blend renders with thin stems, reads fuller; a glyph's interior and exterior, dark-on-light text and colour emoji are untouched. 1.4–1.8 is the range other linear-light renderers ship. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.
+  "Set the text contrast exponent γ: 1.4 by default, clamped to 0.5..3.0. Text blends in linear light with the weight of a lerp of the encoded colours (ADR-611); a monochrome glyph's partial coverage is first lifted to cov^(1/γ) where the text is lighter than the pixel it lands on, so γ is the perceptual gamma light-on-dark text is weighted at — 1.0 the encoded lerp's weight (thin stems on a dark ground), about 2.2 linear light's (soft). A glyph's interior and exterior, dark-on-light text and colour emoji are untouched. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.
 
     (gui/text-contrast 1.6)   ;~> nil; light-on-dark text reads fuller"
   (%gui-text-contrast! gamma))

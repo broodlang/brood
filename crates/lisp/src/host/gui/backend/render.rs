@@ -613,6 +613,118 @@ pub(super) fn default_families() -> Families {
 /// from asking the shaper for a line box the size of the address space.
 pub(super) const MAX_FONT_PX: f32 = 512.0;
 
+/// A font's vertical metrics, in font units: what CSS's inline layout places a line of it by
+/// (ADR-611). `ascent` and `descent` are the box the half-leading is split around — the OS/2
+/// typographic ascender and descender, the hhea ones when the font has no plausible typo
+/// metrics — and `x_height` is where lowercase ink tops out, which is where the optical
+/// middle of a line of code sits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct FontVertical {
+    pub(super) units_per_em: f32,
+    pub(super) ascent: f32,
+    /// Below the baseline, positive.
+    pub(super) descent: f32,
+    /// The hhea ascender: the line a font's tallest glyphs (an accented capital) are drawn
+    /// under, which a baseline is never placed so high as to cut off (`line_box`).
+    pub(super) clip_ascent: f32,
+    pub(super) x_height: f32,
+}
+
+impl FontVertical {
+    /// For a font whose tables cannot be read: an 0.8/0.2 em box, a half-em x-height.
+    pub(super) const FALLBACK: FontVertical = FontVertical {
+        units_per_em: 1.0,
+        ascent: 0.8,
+        descent: 0.2,
+        clip_ascent: 0.8,
+        x_height: 0.5,
+    };
+
+    /// Read `font`'s `head`, `hhea` and `OS/2` tables; `None` when it has no usable box.
+    pub(super) fn read(font: &swash::FontRef) -> Option<FontVertical> {
+        use swash::{TableProvider, tag_from_bytes};
+        let be_u16 = |table: &[u8], at: usize| -> Option<u16> {
+            Some(u16::from_be_bytes([*table.get(at)?, *table.get(at + 1)?]))
+        };
+        let be_i16 = |table: &[u8], at: usize| be_u16(table, at).map(|v| v as i16);
+        let head = font.table_by_tag(tag_from_bytes(b"head"))?;
+        let units_per_em = be_u16(head, 18).filter(|u| *u > 0)? as f32;
+        let hhea = font
+            .table_by_tag(tag_from_bytes(b"hhea"))
+            .and_then(|t| Some((be_i16(t, 4)?, be_i16(t, 6)?)));
+        let os2 = font.table_by_tag(tag_from_bytes(b"OS/2"));
+        let typo = os2.and_then(|t| Some((be_i16(t, 68)?, be_i16(t, 70)?)));
+        // sxHeight exists from OS/2 version 2 on
+        let x_height = os2
+            .filter(|t| be_u16(t, 0).is_some_and(|version| version >= 2))
+            .and_then(|t| be_i16(t, 86))
+            .filter(|x| *x > 0)
+            .map(f32::from);
+        let (ascent, descent) = vertical_box(units_per_em, typo, hhea)?;
+        let clip_ascent = hhea
+            .map(|(hhea_ascent, _)| f32::from(hhea_ascent))
+            .filter(|clip| *clip > ascent)
+            .unwrap_or(ascent);
+        Some(FontVertical {
+            units_per_em,
+            ascent,
+            descent,
+            clip_ascent,
+            x_height: x_height.unwrap_or(units_per_em * 0.5),
+        })
+    }
+}
+
+/// The ascent/descent box a line of a font is laid out by (CSS Inline 3): the OS/2
+/// typographic ascender and descender when they are plausible — a positive ascender, a
+/// descender at or below the baseline, a box between 0.6 and 2.5 em — else the hhea ones.
+/// The typo metrics are the font's statement of its text's extent; hhea is often stretched
+/// to clear every accent in the font (DejaVu's spans 1.16 em), which is the box that sat
+/// bedit's text low in its rows. Descent comes back positive.
+pub(super) fn vertical_box(
+    units_per_em: f32,
+    typo: Option<(i16, i16)>,
+    hhea: Option<(i16, i16)>,
+) -> Option<(f32, f32)> {
+    let plausible = |(ascent, descent): (i16, i16)| {
+        let span = (ascent as f32 - descent as f32) / units_per_em;
+        ascent > 0 && descent <= 0 && (0.6..=2.5).contains(&span)
+    };
+    typo.filter(|box_| plausible(*box_))
+        .or(hhea.filter(|(ascent, descent)| *ascent > 0 && *descent <= 0))
+        .map(|(ascent, descent)| (ascent as f32, -(descent as f32)))
+}
+
+/// Where text sits in a cell `cell_h` px tall at font size `px`: `(baseline, x_middle)`
+/// from the cell's top. CSS's half-leading: the leading `L = cell − (A + D)` is split half
+/// above the ascent and half below the descent, and the baseline lands at `round(L/2 + A)`
+/// — a whole pixel, rounded once, here, so every row of every region puts its baseline on
+/// the same pixel of its cell.
+///
+/// One guard on it: where the font's clip ascent (hhea, where its accented capitals reach)
+/// would leave the cell, the baseline moves down a pixel, while the cell has room for that
+/// and the descent. DejaVu Sans Mono's typo box is an em and its accents reach 0.93 em, so
+/// at a line height of 1.25 the pure half-leading baseline cuts an É's tip off. One pixel,
+/// not as far as the accents want: further puts the lowercase visibly low again, which is
+/// the fault the typo box fixes, for a glyph code rarely holds.
+///
+/// `x_middle` is half an x-height above the baseline, in px (the x-height rounded to whole
+/// pixels as the hinter rounds it): the optical middle of lowercase text, where a geometric
+/// mark is centred.
+pub(super) fn line_box(vertical: &FontVertical, px: f32, cell_h: f32) -> (i32, f32) {
+    let scale = px / vertical.units_per_em;
+    let (ascent, descent) = (vertical.ascent * scale, vertical.descent * scale);
+    let half_leading = (cell_h - (ascent + descent)) / 2.0;
+    let centred = (half_leading + ascent).round();
+    let clear_of_accents = (vertical.clip_ascent * scale)
+        .ceil()
+        .min(cell_h - descent.ceil())
+        .min(centred + 1.0);
+    let baseline = centred.max(clear_of_accents).clamp(0.0, cell_h);
+    let x_middle = baseline - (vertical.x_height * scale).round() / 2.0;
+    (baseline as i32, x_middle.clamp(0.0, cell_h))
+}
+
 /// The cell metrics one font size produces. The renderer holds the window's set, and
 /// `Op::CellRegion` swaps in another for the span of its ops — which is how ONE FRAME
 /// carries two text sizes (a per-buffer zoom).
@@ -622,6 +734,9 @@ pub(crate) struct CellMetrics {
     pub(crate) cell_w: usize,
     pub(crate) cell_h: usize,
     pub(super) baseline: i32,
+    /// Where a lowercase letter's ink is centred, px from the cell's top — the baseline less
+    /// half the x-height —, which is where a geometric mark is centred (ADR-516, ADR-611).
+    pub(super) x_middle: f32,
 }
 
 pub(crate) struct Renderer {
@@ -633,13 +748,15 @@ pub(crate) struct Renderer {
     pub(crate) cell_w: usize,
     pub(crate) cell_h: usize,
     baseline: i32,       // pixels from a cell's top to the text baseline
+    x_middle: f32,       // where lowercase ink centres (`CellMetrics::x_middle`)
     base_inset: f32,     // logical-px content margin before the grid (ADR-079); 0 = flush
     bg: Option<[u8; 3]>, // window background (clear/inset-margin fill); None = DEFAULT_BG
     line_height: f32,    // cell height as a multiple of the font px (`gui-line-height!`)
     text_aa: TextAa,     // how monochrome text is anti-aliased (`gui-text-aa!`)
     /// The text contrast exponent γ (`gui-text-contrast!`): a glyph's partial coverage
-    /// is lifted to `cov^(1/γ)` where the text is lighter than what it is drawn over.
-    /// 1.0 is the plain linear-light blend.
+    /// is lifted to `cov^(1/γ)` where the text is lighter than what it is drawn over, so γ
+    /// is the perceptual gamma light-on-dark text is weighted at (`TextInk`, ADR-611). 1.0
+    /// is no lift: the encoded lerp's weight.
     text_contrast: f32,
     /// `cov -> lifted cov` for the current `text_contrast`, 256 entries; identity at 1.0.
     cov_lut: Box<[u8; 256]>,
@@ -656,10 +773,10 @@ pub(crate) struct Renderer {
     // which is what per-buffer zoom needs.
     pub(super) cache: HashMap<(ClusterKey, u32, bool, bool, u16, bool, u32), CachedGlyph>,
 
-    /// `px bits -> (cell_w, cell_h, baseline)`: shaping the reference glyph is not free and a
+    /// `px bits -> CellMetrics`: shaping the reference glyph is not free and a
     /// frame with per-buffer zoom asks for the same handful of sizes on every paint. Dropped
     /// whenever the inputs to that shaping change (`recompute` clears it).
-    metrics_memo: RefCell<HashMap<u32, (usize, usize, i32)>>,
+    metrics_memo: RefCell<HashMap<u32, CellMetrics>>,
 
     // The retained frame (see `paint`): `canvas` holds the pixels of the last frame
     // rasterised, `prev_ops` the ops that produced it. A new frame is diffed against
@@ -709,12 +826,13 @@ impl Renderer {
             cell_w: 1,
             cell_h: 1,
             baseline: 0,
+            x_middle: 0.0,
             base_inset: 0.0,
             bg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
-            text_contrast: 1.0,
-            cov_lut: Box::new(contrast_lut(1.0)),
+            text_contrast: TEXT_CONTRAST,
+            cov_lut: Box::new(contrast_lut(TEXT_CONTRAST)),
             ligatures: false,
             cache: HashMap::new(),
             metrics_memo: RefCell::new(HashMap::new()),
@@ -862,19 +980,18 @@ impl Renderer {
         // glyph on every step. The retained FRAME is still stale — every cell moved — so
         // that is invalidated.
         self.invalidate();
-        let (cw, ch, base) = self.metrics_for_px(self.px);
-        self.cell_w = cw;
-        self.cell_h = ch;
-        self.baseline = base;
+        let metrics = self.metrics_for_px(self.px);
+        self.set_metrics(metrics);
     }
 
-    /// The cell metrics a given font size produces — `(cell_w, cell_h, baseline)` in physical
-    /// px — by shaping the reference glyph at that size.
+    /// The cell metrics a given font size produces, in physical px: the cell width from the
+    /// reference glyph ('M') shaped at that size, and the vertical metrics from the grid
+    /// font's own tables by CSS's line box (`line_box`, ADR-611).
     ///
     /// Pure: it stores nothing. That is what lets ONE FRAME carry two sizes, which is what
     /// per-buffer zoom is: `Op::CellRegion` paints its ops with the metrics of its own px
     /// while the window keeps its own. `recompute` is this plus storing the result.
-    pub(super) fn metrics_for_px(&self, px: f32) -> (usize, usize, i32) {
+    pub(super) fn metrics_for_px(&self, px: f32) -> CellMetrics {
         let line_h = (px * self.line_height).round().max(1.0);
         // `name_of` returns owned data, so the immutable borrow ends on this
         // line — letting the `borrow_mut` below succeed (don't make it borrow).
@@ -887,18 +1004,24 @@ impl Renderer {
         let attrs = Attrs::new().family(Family::Name(fam.as_str()));
         tb.set_text("M", &attrs, Shaping::Advanced, None);
         tb.shape_until_scroll(&mut shared.fs, false);
-        let (mut cw, mut base) = (px, px);
-        if let Some(run) = tb.layout_runs().next() {
-            base = run.line_y;
-            if let Some(gl) = run.glyphs.first() {
-                cw = gl.w;
-            }
+        let mut cw = px;
+        let mut font = None;
+        if let Some(gl) = tb.layout_runs().next().and_then(|run| run.glyphs.first()) {
+            cw = gl.w;
+            font = Some((gl.font_id, gl.font_weight));
         }
-        (
-            cw.round().max(1.0) as usize,
-            line_h as usize,
-            base.round() as i32,
-        )
+        let vertical = font
+            .and_then(|(id, weight)| shared.fs.get_font(id, weight))
+            .and_then(|font| FontVertical::read(&font.as_swash()))
+            .unwrap_or(FontVertical::FALLBACK);
+        let (baseline, x_middle) = line_box(&vertical, px, line_h);
+        CellMetrics {
+            px,
+            cell_w: cw.round().max(1.0) as usize,
+            cell_h: line_h as usize,
+            baseline,
+            x_middle,
+        }
     }
 
     /// The metrics currently in effect — what a scoped change restores.
@@ -908,6 +1031,7 @@ impl Renderer {
             cell_w: self.cell_w,
             cell_h: self.cell_h,
             baseline: self.baseline,
+            x_middle: self.x_middle,
         }
     }
 
@@ -923,24 +1047,12 @@ impl Renderer {
             .round()
             .clamp(1.0, MAX_FONT_PX);
         let key = px.to_bits();
-        if let Some(&(cell_w, cell_h, baseline)) = self.metrics_memo.borrow().get(&key) {
-            return CellMetrics {
-                px,
-                cell_w,
-                cell_h,
-                baseline,
-            };
+        if let Some(&metrics) = self.metrics_memo.borrow().get(&key) {
+            return metrics;
         }
-        let (cell_w, cell_h, baseline) = self.metrics_for_px(px);
-        self.metrics_memo
-            .borrow_mut()
-            .insert(key, (cell_w, cell_h, baseline));
-        CellMetrics {
-            px,
-            cell_w,
-            cell_h,
-            baseline,
-        }
+        let metrics = self.metrics_for_px(px);
+        self.metrics_memo.borrow_mut().insert(key, metrics);
+        metrics
     }
 
     /// Install `metrics` for the ops that follow — the caller restores what `metrics()`
@@ -951,6 +1063,7 @@ impl Renderer {
         self.cell_w = metrics.cell_w;
         self.cell_h = metrics.cell_h;
         self.baseline = metrics.baseline;
+        self.x_middle = metrics.x_middle;
     }
 
     /// Adjust for a new HiDPI scale factor (then recompute metrics).
@@ -996,7 +1109,7 @@ impl Renderer {
     }
 
     /// Set the text contrast exponent (behind `gui-text-contrast!`): γ in 0.5..3.0, 1.0
-    /// the plain sRGB lerp (`blend_text`) — i.e. no lift at all. Rebuilds the coverage
+    /// no lift at all — the weight of the encoded lerp (`TextInk`, ADR-611). Rebuilds the coverage
     /// curve and forgets the retained frame; the glyph cache holds raw coverage and is
     /// untouched.
     pub(super) fn set_text_contrast(&mut self, gamma: f32) {
@@ -1178,10 +1291,11 @@ impl Renderer {
             );
             (false, false)
         };
-        // A geometric mark (a status dot) sits in the middle of its cell, not where its
-        // font's design puts it on the baseline (ADR-516).
+        // A geometric mark (a status dot) sits on the optical middle of the text beside it
+        // (half an x-height above the baseline), not where its font's design puts it
+        // (ADR-516, ADR-611).
         if !color && is_centred_symbol(g) {
-            centre_ink_vertically(&mut rgba, cw, ch);
+            centre_ink_vertically(&mut rgba, cw, ch, self.x_middle * scale as f32);
         }
         CachedGlyph {
             color,
@@ -1240,14 +1354,11 @@ impl Renderer {
         // canvas rect clips the rest: pixels outside `[x0, x1) × [y0, y1)` are not touched.
         let (fb_w, y0, y1) = (canvas.w, canvas.y0, canvas.y1);
         let columns = canvas.cols(left, cg.width);
-        // Contrast lift (`text_contrast`): applied to a monochrome glyph where its
-        // colour is lighter than the pixel it lands on, and never to a colour glyph
-        // (emoji). A taste knob now, not a correction: the text lerp is in sRGB space
-        // (`blend_text`), so γ = 1.0 already puts an edge pixel at the coverage it
-        // represents.
-        let lift = self.text_contrast != 1.0 && !cg.color;
-        let lut = &self.cov_lut;
-        let fg_lum = luma(fg);
+        // Text blends in linear light with its weight corrected to the encoded lerp's, and
+        // lifted by `text_contrast` where it is lighter than the pixel it lands on (ADR-611,
+        // `TextInk`); a colour glyph (emoji) is plain linear-light `blend`, never lifted.
+        let lift = (self.text_contrast != 1.0 && !cg.color).then_some(&*self.cov_lut);
+        let ink = TextInk::new(fg, lift);
         for ry in clip_skip..cg.height {
             let py = top + (ry - clip_skip);
             if py >= y1 {
@@ -1265,23 +1376,12 @@ impl Renderer {
                     continue;
                 }
                 let dst = &mut canvas.buf[row + pxx];
-                let lifted = lift && fg_lum > luma_packed(*dst);
                 *dst = if cg.color {
                     blend(*dst, [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]], a)
                 } else if cg.subpixel {
-                    let cov = [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]];
-                    let cov = if lifted {
-                        [
-                            lut[cov[0] as usize],
-                            lut[cov[1] as usize],
-                            lut[cov[2] as usize],
-                        ]
-                    } else {
-                        cov
-                    };
-                    blend_text_rgb(*dst, fg, cov)
+                    ink.over_rgb(*dst, [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]])
                 } else {
-                    blend_text(*dst, fg, if lifted { lut[a as usize] } else { a })
+                    ink.over(*dst, a)
                 };
             }
         }
@@ -1321,16 +1421,20 @@ pub(super) fn canvas_over(
 
 /// Whether cluster `g` is a geometric MARK rather than text: one character from Unicode's
 /// Geometric Shapes block (`●` `■` `◆` `▲` `○` …) or the large circles and squares of
-/// Miscellaneous Symbols and Arrows (`⬤` `⬛` `⭕`). These are drawn as status dots, bullets
-/// and markers, which read as centred in their cell; their fonts place them on the baseline
-/// at heights that differ from font to font (ADR-516). Box drawing and block elements are
-/// not here: they fill their cell edge to edge already.
+/// Miscellaneous Symbols and Arrows (`⬤` `⬛` `⭕`), or a check mark or cross from Dingbats
+/// (`✓` `✔` `✗` `✘`, a gutter's pass and fail marks). These are drawn as status dots,
+/// bullets and markers, which read as centred on the text beside them; their fonts place
+/// them on the baseline at heights that differ from font to font (ADR-516, ADR-611). Box
+/// drawing and block elements are not here: they fill their cell edge to edge already.
 pub(super) fn is_centred_symbol(g: &str) -> bool {
     let mut chars = g.chars();
     let (Some(c), None) = (chars.next(), chars.next()) else {
         return false;
     };
-    matches!(c, '\u{25A0}'..='\u{25FF}' | '\u{2B1B}'..='\u{2B2F}' | '\u{2B55}')
+    matches!(
+        c,
+        '\u{25A0}'..='\u{25FF}' | '\u{2B1B}'..='\u{2B2F}' | '\u{2B55}' | '\u{2713}'..='\u{2718}'
+    )
 }
 
 /// The first and last rows of a baked `w`×`h` RGBA canvas that carry ink, or `None` for a
@@ -1346,20 +1450,24 @@ pub(super) fn ink_rows(rgba: &[u8], w: usize, h: usize) -> Option<(usize, usize)
     Some(((0..h).find(inked)?, (0..h).rev().find(inked)?))
 }
 
-/// Move the rows of a baked `w`×`h` RGBA canvas so its ink's top and bottom margins are
-/// equal, the odd pixel below; a blank canvas is left as it is. The move is a rotation of
-/// whole rows: the rows that wrap round are ones the ink leaves blank, since it moves by at
-/// most the margin on the side it moves into.
-fn centre_ink_vertically(rgba: &mut [u8], w: usize, h: usize) {
+/// Move the rows of a baked `w`×`h` RGBA canvas so its ink is centred on `middle` (px from
+/// the top: the optical middle of lowercase text, half an x-height above the baseline,
+/// ADR-611) as near as whole rows and the canvas allow: ink never leaves it, so a mark too
+/// tall to centre there ends up against the edge it was moving toward. A blank canvas is left as it is. The move
+/// is a rotation of whole rows: the rows that wrap round are ones the ink leaves blank, since
+/// it moves by at most the margin on the side it moves into.
+fn centre_ink_vertically(rgba: &mut [u8], w: usize, h: usize, middle: f32) {
     let Some((first, last)) = ink_rows(rgba, w, h) else {
         return;
     };
-    let target = (first + (h - 1 - last)) / 2;
+    let ink_middle = (first + last + 1) as f32 / 2.0;
+    let shift =
+        ((middle - ink_middle).round() as i32).clamp(-(first as i32), (h - 1 - last) as i32);
     let stride = w * 4;
-    if target < first {
-        rgba.rotate_left((first - target) * stride);
+    if shift < 0 {
+        rgba.rotate_left(shift.unsigned_abs() as usize * stride);
     } else {
-        rgba.rotate_right((target - first) * stride);
+        rgba.rotate_right(shift as usize * stride);
     }
 }
 
@@ -1813,54 +1921,188 @@ pub(super) fn blend(dst: u32, fg: [u8; 3], cov: u8) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-/// Composite `fg` over `dst` at coverage `cov` **in sRGB space** — a plain per-channel
-/// lerp of the encoded values, no linear round trip. This is the TEXT path, and it is
-/// deliberately not what `blend` above does.
-///
-/// A rasteriser's coverage is not a light quantity, it is the fraction of the pixel the
-/// outline covers, and every font stack that text is tuned against (FreeType/cairo/Xft,
-/// and so Emacs) composites it in the encoded space. Blending it in linear light instead
-/// makes a partly covered pixel far brighter than the fraction it represents: white on
-/// black at half coverage lands at 188/255 rather than 128, and at quarter coverage 137
-/// rather than 64. Every antialiased rim then glows, which reads as soft, puffy text —
-/// and it is why this renderer grew a contrast knob whose useful setting was BELOW 1.0
-/// (γ=0.5 squares the coverage, which is roughly the inverse of the sRGB encode: it was
-/// cancelling this blend). With the lerp in sRGB, γ = 1.0 is the honest default again.
-///
-/// Geometry keeps `blend`: a rounded rect's edge coverage and the cursor's translucent
-/// overlay ARE light quantities, and linear light is right for them.
-pub(super) fn blend_text(dst: u32, fg: [u8; 3], cov: u8) -> u32 {
-    if cov == 0 {
-        return dst;
+/// The sRGB transfer curve as a float, 0..1 → 0..1: linear light to its encoded value.
+#[inline]
+pub(crate) fn srgb_encode(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
     }
-    if cov == 255 {
-        return pack(fg);
-    }
-    let a = cov as u32;
-    let inv = 255 - a;
-    // +127 rounds to nearest rather than truncating, so a symmetric pair of coverages
-    // composites symmetrically.
-    let ch =
-        |shift: u32, f: u8| -> u32 { (((dst >> shift) & 0xff) * inv + f as u32 * a + 127) / 255 };
-    (ch(16, fg[0]) << 16) | (ch(8, fg[1]) << 8) | ch(0, fg[2])
 }
 
-/// The subpixel sibling of `blend_text`: composite `fg` over `dst` with a separate
-/// coverage per colour channel (`cov[0]` red, `[1]` green, `[2]` blue), in sRGB space.
-/// Each channel is the same single-channel lerp `blend_text` does, so the two stay
-/// consistent where a gray and a subpixel glyph sit side by side.
+/// The inverse of [`srgb_encode`]: an encoded value, 0..1, to linear light.
+#[inline]
+pub(crate) fn srgb_decode(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The linear-light luminance of an encoded colour, 0..1 (sRGB primaries, Rec. 709
+/// weights) — what a text blend compares and corrects by (ADR-611).
+#[inline]
+pub(crate) fn luminance(rgb: [u8; 3]) -> f32 {
+    let lut = &*SRGB_TO_LINEAR;
+    0.2126 * lut[rgb[0] as usize] + 0.7152 * lut[rgb[1] as usize] + 0.0722 * lut[rgb[2] as usize]
+}
+
+/// The alpha text is blended with IN LINEAR LIGHT (ADR-611): the one whose result has the
+/// luminance a lerp of the ENCODED values at `cov` would have. `fg` and `bg` are the text's
+/// and the ground's luminances, `fg_encoded` and `bg_encoded` the same through
+/// [`srgb_encode`] (passed in because a caller blending a run of pixels has them already).
+///
+/// This is Ghostty's `linear-corrected` blend. A rasteriser's coverage is the fraction of a
+/// pixel an outline covers, and every font is tuned for it lerped in the encoded space
+/// (ADR-358: a plain linear-light lerp puts white-on-black at half coverage at 188/255, and
+/// every rim glows). But an encoded lerp of two COLOURS darkens between them: the mix of a
+/// red glyph's rim and a green ground is muddier than either. So the hue is mixed in linear
+/// light, and the weight — the luminance — is the encoded lerp's. For a neutral pair the
+/// two agree exactly; they differ only where hues differ.
+///
+/// The weight is then `text_contrast`'s to set: the caller lifts `cov` to `cov^(1/γ)` first
+/// for text lighter than its ground, so γ is the perceptual gamma light-on-dark text is
+/// weighted at — 1 the encoded lerp's weight, about 2.2 linear light's (a light stem keeps
+/// its light whatever pixel phase it falls on).
+#[inline]
+pub(crate) fn text_alpha(cov: f32, fg: f32, bg: f32, fg_encoded: f32, bg_encoded: f32) -> f32 {
+    if (fg - bg).abs() <= 0.001 {
+        return cov;
+    }
+    let target = srgb_decode(fg_encoded * cov + bg_encoded * (1.0 - cov));
+    ((target - bg) / (fg - bg)).clamp(0.0, 1.0)
+}
+
+/// Linear light (0..1) to an sRGB byte through a table fine enough to round as
+/// [`linear_to_srgb`] does: the text blend encodes three channels per rim pixel.
+static LINEAR_TO_SRGB_BYTE: std::sync::LazyLock<Box<[u8; LINEAR_STEPS + 1]>> =
+    std::sync::LazyLock::new(|| {
+        let mut table = Box::new([0u8; LINEAR_STEPS + 1]);
+        for (index, slot) in table.iter_mut().enumerate() {
+            *slot = linear_to_srgb(index as f32 / LINEAR_STEPS as f32) as u8;
+        }
+        table
+    });
+const LINEAR_STEPS: usize = 8191;
+
+#[inline]
+fn encode_byte(c: f32) -> u32 {
+    LINEAR_TO_SRGB_BYTE[(c.clamp(0.0, 1.0) * LINEAR_STEPS as f32 + 0.5) as usize] as u32
+}
+
+/// One text colour's blend, ready for a run of pixels (ADR-611): [`text_alpha`]'s inputs
+/// for the text, and the contrast curve to lift its coverage with where it is lighter than
+/// the pixel it lands on (`None` at γ = 1). The ground's half is recomputed only when the
+/// pixel under the glyph changes, which along a run of text is rarely.
+pub(super) struct TextInk<'a> {
+    fg: [u8; 3],
+    fg_linear: [f32; 3],
+    fg_luminance: f32,
+    fg_encoded: f32,
+    lift: Option<&'a [u8; 256]>,
+    ground: std::cell::Cell<Option<(u32, [f32; 3], f32, f32)>>,
+}
+
+impl<'a> TextInk<'a> {
+    pub(super) fn new(fg: [u8; 3], lift: Option<&'a [u8; 256]>) -> TextInk<'a> {
+        let lut = &*SRGB_TO_LINEAR;
+        let fg_luminance = luminance(fg);
+        TextInk {
+            fg,
+            fg_linear: [
+                lut[fg[0] as usize],
+                lut[fg[1] as usize],
+                lut[fg[2] as usize],
+            ],
+            fg_luminance,
+            fg_encoded: srgb_encode(fg_luminance),
+            lift,
+            ground: std::cell::Cell::new(None),
+        }
+    }
+
+    /// The ground pixel `dst` decoded: its channels in linear light, its luminance and that
+    /// encoded.
+    fn ground(&self, dst: u32) -> ([f32; 3], f32, f32) {
+        if let Some((pixel, linear, lum, encoded)) = self.ground.get()
+            && pixel == dst
+        {
+            return (linear, lum, encoded);
+        }
+        let lut = &*SRGB_TO_LINEAR;
+        let linear = [
+            lut[((dst >> 16) & 0xff) as usize],
+            lut[((dst >> 8) & 0xff) as usize],
+            lut[(dst & 0xff) as usize],
+        ];
+        let lum = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+        let encoded = srgb_encode(lum);
+        self.ground.set(Some((dst, linear, lum, encoded)));
+        (linear, lum, encoded)
+    }
+
+    /// The linear-light alpha for coverage `cov` over a ground of luminance `lum`.
+    fn alpha(&self, cov: u8, lum: f32, encoded: f32) -> f32 {
+        let cov = match self.lift {
+            Some(lut) if self.fg_luminance > lum => lut[cov as usize],
+            _ => cov,
+        };
+        text_alpha(
+            cov as f32 / 255.0,
+            self.fg_luminance,
+            lum,
+            self.fg_encoded,
+            encoded,
+        )
+    }
+
+    /// Composite the text over pixel `dst` at coverage `cov`.
+    pub(super) fn over(&self, dst: u32, cov: u8) -> u32 {
+        match cov {
+            0 => dst,
+            255 => pack(self.fg),
+            _ => {
+                let (ground, lum, encoded) = self.ground(dst);
+                let a = self.alpha(cov, lum, encoded);
+                let ch = |k: usize| encode_byte(self.fg_linear[k] * a + ground[k] * (1.0 - a));
+                (ch(0) << 16) | (ch(1) << 8) | ch(2)
+            }
+        }
+    }
+
+    /// The subpixel sibling of [`TextInk::over`]: a coverage per colour channel (`cov[0]`
+    /// red, `[1]` green, `[2]` blue), each corrected as a gray glyph's would be, so a gray
+    /// and an LCD glyph side by side carry the same weight.
+    pub(super) fn over_rgb(&self, dst: u32, cov: [u8; 3]) -> u32 {
+        if cov == [0, 0, 0] {
+            return dst;
+        }
+        if cov == [255, 255, 255] {
+            return pack(self.fg);
+        }
+        let (ground, lum, encoded) = self.ground(dst);
+        let ch = |k: usize| {
+            let a = self.alpha(cov[k], lum, encoded);
+            encode_byte(self.fg_linear[k] * a + ground[k] * (1.0 - a))
+        };
+        (ch(0) << 16) | (ch(1) << 8) | ch(2)
+    }
+}
+
+/// Composite `fg` over `dst` at coverage `cov` as text: [`TextInk::over`] with no lift.
+#[cfg(test)]
+pub(super) fn blend_text(dst: u32, fg: [u8; 3], cov: u8) -> u32 {
+    TextInk::new(fg, None).over(dst, cov)
+}
+
+/// [`TextInk::over_rgb`] with no lift.
+#[cfg(test)]
 pub(super) fn blend_text_rgb(dst: u32, fg: [u8; 3], cov: [u8; 3]) -> u32 {
-    if cov == [0, 0, 0] {
-        return dst;
-    }
-    if cov == [255, 255, 255] {
-        return pack(fg);
-    }
-    let ch = |shift: u32, c: u8, f: u8| -> u32 {
-        let a = c as u32;
-        (((dst >> shift) & 0xff) * (255 - a) + f as u32 * a + 127) / 255
-    };
-    (ch(16, cov[0], fg[0]) << 16) | (ch(8, cov[1], fg[1]) << 8) | ch(0, cov[2], fg[2])
+    TextInk::new(fg, None).over_rgb(dst, cov)
 }
 
 pub(super) fn fill_cell(
@@ -2206,23 +2448,6 @@ pub(super) fn contrast_lut(gamma: f32) -> [u8; 256] {
     lut
 }
 
-/// Rec. 601 luma of an sRGB triple, in 0..=255·1000 units — a cheap "is this lighter
-/// than that" ordering, not a colorimetric quantity.
-#[inline]
-pub(crate) fn luma(rgb: [u8; 3]) -> u32 {
-    299 * rgb[0] as u32 + 587 * rgb[1] as u32 + 114 * rgb[2] as u32
-}
-
-/// `luma` of a packed `0xRRGGBB` pixel.
-#[inline]
-pub(super) fn luma_packed(px: u32) -> u32 {
-    luma([
-        ((px >> 16) & 0xff) as u8,
-        ((px >> 8) & 0xff) as u8,
-        (px & 0xff) as u8,
-    ])
-}
-
 #[cfg(test)]
 mod text_contrast_tests {
     use super::*;
@@ -2310,6 +2535,85 @@ mod text_contrast_tests {
         let (_, a) = ink(&mut r, 1.0, [0; 3], 0xffffff);
         let (_, b) = ink(&mut r, 1.8, [0; 3], 0xffffff);
         assert_eq!(a, b, "dark on light must be untouched by the lift");
+    }
+
+    fn rgb(pixel: u32) -> [u8; 3] {
+        [(pixel >> 16) as u8, (pixel >> 8) as u8, pixel as u8]
+    }
+
+    /// The encoded lerp `TextInk` takes its weight from: plain bytes, per channel.
+    fn encoded_lerp(ground: [u8; 3], fg: [u8; 3], cov: u8) -> [u8; 3] {
+        let a = cov as u32;
+        [0, 1, 2].map(|k| ((ground[k] as u32 * (255 - a) + fg[k] as u32 * a + 127) / 255) as u8)
+    }
+
+    /// Text blends in LINEAR light with the encoded lerp's weight (ADR-611, Ghostty's
+    /// `linear-corrected`): over every pairing of bedit's colours and partial coverage, the
+    /// result's luminance is the encoded lerp's (of the two luminances) within a byte's worth, while a pair of
+    /// differing hues mixes in linear light, so the result is a different colour than the
+    /// encoded lerp's.
+    #[test]
+    fn text_mixes_hue_in_linear_light_at_the_encoded_lerps_weight() {
+        let colours: [[u8; 3]; 6] = [
+            [0xcd, 0xd6, 0xf4], // text
+            [0x1e, 0x1e, 0x2e], // base
+            [0xf3, 0x8b, 0xa8], // red
+            [0xa6, 0xe3, 0xa1], // green
+            [0x89, 0xb4, 0xfa], // blue
+            [0x45, 0x47, 0x5a], // surface
+        ];
+        let mut hue_moved = 0;
+        for fg in colours {
+            for ground in colours {
+                for cov in [32u8, 96, 128, 160, 224] {
+                    let out = rgb(blend_text(pack(ground), fg, cov));
+                    let lerped = encoded_lerp(ground, fg, cov);
+                    let c = cov as f32 / 255.0;
+                    let (fg_luminance, ground_luminance) = (luminance(fg), luminance(ground));
+                    let want = srgb_decode(
+                        srgb_encode(fg_luminance) * c + srgb_encode(ground_luminance) * (1.0 - c),
+                    );
+                    let got = luminance(out);
+                    assert!(
+                        (got - want).abs() <= 0.004,
+                        "{fg:?} over {ground:?} at {cov}: luminance {got}, the encoded lerp's \
+                         {want}"
+                    );
+                    if out.iter().zip(lerped).any(|(a, b)| a.abs_diff(b) >= 3) {
+                        hue_moved += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            hue_moved > 20,
+            "only {hue_moved} blends mixed their hue apart from the encoded lerp"
+        );
+    }
+
+    /// `text_contrast` is the perceptual gamma light-on-dark text is weighted at: at γ ≈ 2.2
+    /// white on black comes out at the luminance of its coverage — linear light's weight, a
+    /// stem's light the same whatever pixel phase it lands on — and at 1.0 at the encoded
+    /// lerp's, much less.
+    #[test]
+    fn the_contrast_gamma_moves_light_text_from_the_encoded_weight_to_linear_lights() {
+        let lut = contrast_lut(2.2);
+        let lifted = TextInk::new([0xff; 3], Some(&lut));
+        let plain = TextInk::new([0xff; 3], None);
+        for cov in [64u8, 128, 192] {
+            let fraction = cov as f32 / 255.0;
+            let linear_weight = luminance(rgb(lifted.over(0, cov)));
+            assert!(
+                (linear_weight - fraction).abs() < 0.03,
+                "γ 2.2 at {cov}: luminance {linear_weight}, coverage {fraction}"
+            );
+            let encoded_weight = luminance(rgb(plain.over(0, cov)));
+            assert!(
+                (encoded_weight - srgb_decode(fraction)).abs() < 0.01
+                    && encoded_weight < linear_weight - 0.05,
+                "γ 1 at {cov}: luminance {encoded_weight}, γ 2.2's {linear_weight}"
+            );
+        }
     }
 }
 
@@ -2564,29 +2868,34 @@ mod centred_symbol_tests {
     }
 
     /// A status dot (bedit's VCS state, a modified marker) and the geometric shapes like it
-    /// mean "here is a mark", not text: they sit in the MIDDLE of their cell, as a terminal
-    /// draws them, wherever their font's design puts them on the baseline. DejaVu's sit
-    /// low, and a taller line (`set_line_height`) made it plainer: the dot at the end of a
-    /// mode line read as dropped below the text. Every size, both line heights, gray and
-    /// subpixel: the ink's top and bottom margins differ by a pixel at most.
+    /// mean "here is a mark", not text: they sit on the OPTICAL middle of the text beside
+    /// them — the middle of its lowercase, half an x-height above the baseline (ADR-611) —
+    /// wherever their font's design puts them on the baseline. DejaVu's sit low, and a taller
+    /// line (`set_line_height`) made it plainer: the dot at the end of a mode line read as
+    /// dropped below the text. Every size, two line heights, gray and subpixel: the mark's ink
+    /// is centred within a pixel of an `x`'s, or — a mark too tall to move that far — lies
+    /// against the cell's edge.
     #[test]
-    fn a_geometric_symbol_is_centred_in_its_cell() {
+    fn a_geometric_symbol_is_centred_on_the_lowercase_beside_it() {
+        let middle = |(first, last): (usize, usize)| (first + last + 1) as f32 / 2.0;
         for line_height in [1.0, 1.4] {
             for px in 10..=30 {
                 for subpixel in [false, true] {
                     let mut r = Renderer::new(1.0, default_families(), px as f32);
                     r.set_line_height(line_height);
-                    for symbol in ["●", "■", "◆", "▲", "○", "◉"] {
+                    let x = r.build_cluster("x", r.default_family, false, false, 1, subpixel);
+                    let x_middle = middle(glyph_ink(&x).expect("x drew no ink"));
+                    for symbol in ["●", "■", "◆", "▲", "○", "◉", "✓", "✗"] {
                         let glyph =
                             r.build_cluster(symbol, r.default_family, false, false, 1, subpixel);
                         let (first, last) = glyph_ink(&glyph)
                             .unwrap_or_else(|| panic!("{symbol} at {px} px drew no ink"));
-                        let above = first;
-                        let below = glyph.height - 1 - last;
+                        let against_an_edge = first == 0 || last == glyph.height - 1;
+                        let off = middle((first, last)) - x_middle;
                         assert!(
-                            above.abs_diff(below) <= 1,
+                            off.abs() <= 1.0 || against_an_edge,
                             "{symbol} at {px} px, line height {line_height}, subpixel \
-                             {subpixel}: {above} rows above its ink, {below} below"
+                             {subpixel}: its ink {first}..={last} is centred {off} px from x's"
                         );
                     }
                 }
@@ -2605,5 +2914,147 @@ mod centred_symbol_tests {
         let (_, g_bottom) = glyph_ink(&g).expect("g drew no ink");
         assert!(g_bottom > x_bottom, "g's descender no longer drops below x");
         assert!(x_top > 0);
+    }
+}
+
+#[cfg(test)]
+mod line_box_tests {
+    use super::super::offscreen::picture;
+    use super::*;
+    use crate::host::gui::{Face, FrameImage, Op};
+
+    /// DejaVu Sans Mono's own numbers: a typo box of exactly an em, an hhea box of 1.16 em.
+    const DEJAVU: FontVertical = FontVertical {
+        units_per_em: 2048.0,
+        ascent: 1556.0,
+        descent: 492.0,
+        clip_ascent: 1901.0,
+        x_height: 1120.0,
+    };
+
+    /// The box a line is laid out by is the OS/2 typo one when it is plausible (CSS Inline
+    /// 3), the hhea one when the typo metrics are missing or absurd.
+    #[test]
+    fn the_typo_box_is_used_when_plausible_else_hhea() {
+        let hhea = Some((1901, -483));
+        assert_eq!(
+            vertical_box(2048.0, Some((1556, -492)), hhea),
+            Some((1556.0, 492.0))
+        );
+        assert_eq!(
+            vertical_box(2048.0, Some((0, 0)), hhea),
+            Some((1901.0, 483.0))
+        );
+        assert_eq!(vertical_box(2048.0, None, hhea), Some((1901.0, 483.0)));
+        assert_eq!(
+            vertical_box(1000.0, Some((3000, -200)), Some((800, -200))),
+            Some((800.0, 200.0))
+        );
+        assert_eq!(vertical_box(1000.0, None, None), None);
+    }
+
+    /// The baseline is the half-leading one, rounded once — and never so high that the
+    /// font's accents leave the cell while the cell has room for them.
+    #[test]
+    fn the_baseline_is_the_half_leading_one_clear_of_the_accents() {
+        let no_accents = FontVertical {
+            clip_ascent: DEJAVU.ascent,
+            ..DEJAVU
+        };
+        // 16 px in 22: A 12.16, D 3.84, L 6 — round(3 + 12.16) = 15, the accents clear
+        assert_eq!(line_box(&DEJAVU, 16.0, 22.0), (15, 10.5));
+        // 16 px in 20: round(2 + 12.16) = 14, but É reaches 14.85 px: one lower
+        assert_eq!(line_box(&no_accents, 16.0, 20.0).0, 14);
+        assert_eq!(line_box(&DEJAVU, 16.0, 20.0).0, 15);
+        // 16 px in 16: no room for both, and the descent keeps its pixels
+        assert_eq!(line_box(&DEJAVU, 16.0, 16.0).0, 12);
+    }
+
+    /// Rows `[top, bottom]` of ink in the `w`×`h` box at `(x0, y0)` of `image`, where ink
+    /// is any pixel that is not black.
+    fn ink_in(image: &FrameImage, x0: u32, y0: u32, w: u32, h: u32) -> Option<(u32, u32)> {
+        let inked = |y: u32| {
+            (x0..x0 + w).any(|x| {
+                let i = ((y * image.width + x) * 4) as usize;
+                image.rgba[i..i + 3] != [0, 0, 0]
+            })
+        };
+        let first = (y0..y0 + h).find(|y| inked(*y))?;
+        let last = (y0..y0 + h).rev().find(|y| inked(*y))?;
+        Some((first - y0, last - y0))
+    }
+
+    /// What `gui/render-frame` paints (`offscreen::picture`): "Hxg" on every row, at three
+    /// sizes and two line heights. Every row puts its `H`'s cap top and its baseline on the
+    /// same pixel of its cell, and the baseline is the one the metrics say: the `H` stands on
+    /// it (its last inked row is the one above).
+    #[test]
+    fn every_row_puts_its_cap_top_and_baseline_on_the_same_pixel() {
+        for px in [11.0, 15.0, 22.0] {
+            for line_height in [1.25, 1.4] {
+                let mut r = Renderer::new(1.0, default_families(), px);
+                r.set_line_height(line_height);
+                r.set_bg(Some([0, 0, 0]));
+                let metrics = r.metrics();
+                let rows = 5u16;
+                let mut ops = vec![Op::Clear];
+                ops.extend((0..rows).map(|row| Op::Text {
+                    row,
+                    col: 0,
+                    s: "Hxg".into(),
+                    face: Face {
+                        fg: Some([255, 255, 255]),
+                        ..Face::default()
+                    },
+                }));
+                let (w, h) = (metrics.cell_w * 4, metrics.cell_h * rows as usize);
+                let image = picture(&mut r, &ops, w, h);
+                let (cell_w, cell_h) = (metrics.cell_w as u32, metrics.cell_h as u32);
+                let per_row: Vec<_> = (0..rows as u32)
+                    .map(|row| ink_in(&image, 0, row * cell_h, cell_w, cell_h))
+                    .collect();
+                let (top, bottom) = per_row[0].expect("the H drew no ink");
+                assert!(
+                    per_row.iter().all(|ink| *ink == Some((top, bottom))),
+                    "{px} px, line height {line_height}: the H sits differently by row: \
+                     {per_row:?}"
+                );
+                assert_eq!(
+                    bottom as i32 + 1,
+                    metrics.baseline,
+                    "{px} px, line height {line_height}: the H does not stand on the baseline"
+                );
+            }
+        }
+    }
+
+    /// A lowercase letter's ink is centred in its row — within a pixel of the row's middle
+    /// and of `x_middle`, the half-leading prediction — at every size from 10 to 30 px and
+    /// the line heights an editor uses. Before the typo box, DejaVu's lowercase sat up to two
+    /// pixels low (its hhea box carries the accents' room above the caps).
+    #[test]
+    fn lowercase_ink_is_centred_in_its_row() {
+        for line_height in [1.25, 1.4, 1.6] {
+            for px in 10..=30 {
+                let mut r = Renderer::new(1.0, default_families(), px as f32);
+                r.set_line_height(line_height);
+                let metrics = r.metrics();
+                let x = r.build_cluster("x", r.default_family, false, false, 1, false);
+                let (first, last) = ink_rows(&x.rgba, x.width, x.height).expect("x drew no ink");
+                let ink_middle = (first + last + 1) as f32 / 2.0;
+                let row_middle = metrics.cell_h as f32 / 2.0;
+                assert!(
+                    (ink_middle - row_middle).abs() <= 1.0,
+                    "{px} px, line height {line_height}: x's ink {first}..={last} is centred at \
+                     {ink_middle}, the row's middle is {row_middle}"
+                );
+                assert!(
+                    (ink_middle - metrics.x_middle as f32).abs() <= 1.0,
+                    "{px} px, line height {line_height}: x's ink centred at {ink_middle}, \
+                     x_middle says {}",
+                    metrics.x_middle
+                );
+            }
+        }
     }
 }

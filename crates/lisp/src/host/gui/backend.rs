@@ -6,6 +6,8 @@
 
 mod bleed;
 #[cfg(all(test, feature = "gui-gpu"))]
+mod gpu_ink;
+#[cfg(all(test, feature = "gui-gpu"))]
 mod gpu_replay;
 mod input;
 mod keyboard;
@@ -23,7 +25,7 @@ use render::*;
 #[cfg(feature = "gui-gpu")]
 pub(crate) use {
     paint::holds_blinking_caret, paint::paint_stall_ms, paint::text_px_width, render::caret_cells,
-    render::caret_glyph, render::cursor_rim, render::luma, render::snap_hairline,
+    render::caret_glyph, render::cursor_rim, render::luminance, render::snap_hairline,
     render::text_units, render::unit_cells,
 };
 
@@ -150,6 +152,12 @@ const DEFAULT_PX: f32 = 15.0;
 // typical ~1.2 so text gets vertical breathing room and the grid reads as an
 // editor, not a console. Drives `cell_h` (and so the row count) in `recompute`.
 const LINE_HEIGHT: f32 = 1.4;
+
+// The text contrast exponent γ a window starts with: the perceptual gamma light-on-dark text is
+// weighted at (`TextInk`, ADR-611). 1.0 is the encoded lerp's weight, which reads thin for
+// light text on a dark ground (its stems lose light where they straddle pixels); 2.2 is linear
+// light's, which reads soft (ADR-358). 1.4 is between: fuller stems, rims that do not glow.
+const TEXT_CONTRAST: f32 = 1.4;
 
 /// The velocity a wheel notch of `dy` (±1 per notch on most mice) leaves the kinetic
 /// scroll with, on top of the `carried` velocity of a glide already running the same
@@ -1588,7 +1596,7 @@ struct RenderDefaults {
     line_height: f32,
     /// How monochrome text is anti-aliased.
     text_aa: TextAa,
-    /// The text contrast exponent (1.0 = the plain linear-light blend).
+    /// The text contrast exponent (`TEXT_CONTRAST`; 1.0 = no lift, the encoded lerp's weight).
     text_contrast: f32,
     /// Whether punctuation runs are shaped together (programming ligatures).
     ligatures: bool,
@@ -1603,7 +1611,7 @@ impl Default for RenderDefaults {
             bg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
-            text_contrast: 1.0,
+            text_contrast: TEXT_CONTRAST,
             ligatures: false,
         }
     }

@@ -26,6 +26,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   moved to `ansi/`).
 
 **Changed.**
+- **GUI text sits by CSS's line box and blends in linear light** (ADR-611). The baseline is
+  the half-leading one around the font's OS/2 typo box (hhea when the typo metrics are
+  missing), rounded once, so it is the same pixel in every row; DejaVu-style fonts no longer
+  sit low, and a geometric mark (`●`, `✓`) centres on the lowercase beside it rather than the
+  cell. Text blends in linear light with the encoded lerp's weight on both painters (the GPU
+  through the sRGB view), and `gui-text-contrast!`'s γ is the gamma light-on-dark text is
+  weighted at; its default is now 1.4 (was 1.0), so light text on a dark ground reads fuller.
 - **A GUI window's row 0 starts at its top edge** (ADR-508 addendum). The inset is a margin on
   the left, right and bottom only, and the leftover height goes under the last row. The top
   margin was the inset plus half the leftover, so an editor's header line had a strip of window

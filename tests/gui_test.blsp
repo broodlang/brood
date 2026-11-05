@@ -165,6 +165,20 @@
   (fold-for (acc 0 y (range y0 (+ y0 h)) x (range x0 (+ x0 w)))
     (if (= (gui/pixel image x y) capture-bg) acc (inc acc))))
 
+(defn- inked-rows (image x0 y0 w h)
+  "The rows, counted from y0, of the w×h rectangle at (x0, y0) holding ink."
+  (into [] (seq/filter (range h) (fn (dy) (> (ink-in image x0 (+ y0 dy) w 1) 0)))))
+
+(defn- lowercase-rows (size)
+  "An `x` on each of three rows at `size` px and a line height of 1.25: the cell height
+and, per row, the rows of its cell the `x` inks."
+  (let (face {:fg [255 255 255]}
+        image (gui/render-frame [[:clear] [:text 0 0 "x" face] [:text 1 0 "x" face]
+                                 [:text 2 0 "x" face]]
+                (assoc (capture-spec) :size size :line-height 1.25))
+        [cell-w cell-h] (:cell image))
+    [cell-h (map [0 1 2] (fn (row) (inked-rows image 6 (* row cell-h) cell-w cell-h)))]))
+
 (describe "gui/render-frame — the window's painter, without a window"
   (test "row 0 starts at the window's top edge: a band on it is coloured from y = 0"
     (when-gui
@@ -212,7 +226,17 @@
           (is (= (ink-in image (- x cell-w) cell-h cell-w cell-h) 0))
           (is (= (ink-in image (+ x cell-w) cell-h cell-w cell-h) 0))
           (is (= (ink-in image x 0 cell-w cell-h) 0))
-          (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0)))))))
+          (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0))))))
+
+  (test "a lowercase letter sits on the same pixels in every row, in its row's middle (ADR-611)"
+    (when-gui
+      (fn ()
+        (doseq (size [11 15 22])
+          (let ([cell-h rows] (lowercase-rows size)
+                [top bottom] [(first (first rows)) (last (first rows))]
+                middle (/ (+ top bottom 1) 2.0))
+            (is (every? rows (fn (inked) (= inked (first rows)))))
+            (is (<= (math/abs (- middle (/ cell-h 2.0))) 1.0))))))))
 
 (describe "gui/write-png and gui/pixel"
   (test "a picture written as PNG decodes back to the same pixels, cropped and scaled"

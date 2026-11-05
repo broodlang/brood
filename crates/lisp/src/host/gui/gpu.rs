@@ -22,8 +22,10 @@
 //! would be — `gui-text-aa!`, `:auto` meaning at a 1× scale — in one pass with dual-source
 //! blending where the adapter has it (the second fragment output is each channel's
 //! coverage, `fs_tex_lcd`), else in three, one colour channel each (`LcdText`). The
-//! blending otherwise matches: text lerps in the encoded space with the contrast lift in the
-//! shader, and translucent geometry blends in linear light through an sRGB view of the frame.
+//! blending otherwise matches: text and translucent geometry are drawn through an sRGB view
+//! of the frame and blend in linear light, text with its alpha corrected to the encoded
+//! lerp's weight and lifted by the contrast setting (`fs_tex_linear`, the CPU's `TextInk`,
+//! ADR-611).
 //!
 //! A frame is re-walked, but not re-shaped: a text run's quads are kept and replayed
 //! while it repeats (`RunCache`), an unchanged memoised fragment's instances are pushed
@@ -49,7 +51,7 @@ use winit::window::Window;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::host::gui::backend::{
-    CURSOR_FG, Renderer, caret_cells, caret_glyph, cursor_rim, holds_blinking_caret, luma,
+    CURSOR_FG, Renderer, caret_cells, caret_glyph, cursor_rim, holds_blinking_caret, luminance,
     paint_stall_ms, snap_hairline, text_px_width, text_units, unit_cells,
 };
 use crate::host::gui::effects::{EmitterStep, FrameEffects};
@@ -194,6 +196,7 @@ struct TexInst {
                                     // 3 / 4 = the same per colour channel (LCD, `fs_tex_lcd`)
     @location(4) rot: f32,          // radians about the centre
     @location(5) clip: vec4<f32>,   // x0, y0, x1, y1 in pixels
+    @location(6) ground: f32,       // a glyph's ground's linear luminance (`text_alpha`)
 };
 struct TexOut {
     @builtin(position) pos: vec4<f32>,
@@ -201,6 +204,7 @@ struct TexOut {
     @location(1) tint: vec4<f32>,
     @location(2) @interpolate(flat) mode: u32,
     @location(3) @interpolate(flat) clip: vec4<f32>,
+    @location(4) @interpolate(flat) ground: f32,
 };
 
 @group(1) @binding(0) var tex: texture_2d<f32>;
@@ -215,6 +219,7 @@ fn vs_tex(@builtin(vertex_index) vi: u32, inst: TexInst) -> TexOut {
     out.tint = inst.tint;
     out.mode = inst.mode;
     out.clip = inst.clip;
+    out.ground = inst.ground;
     return out;
 }
 
@@ -224,8 +229,9 @@ fn fs_tex(in: TexOut) -> @location(0) vec4<f32> {
         discard;
     }
     let t = textureSample(tex, samp, in.uv);
-    // Text lerps in the ENCODED space (ADR-358): the target is non-sRGB, so the blend
-    // unit composites the bytes as given — `blend_text`, exactly.
+    // The encoded target, where the surface has no sRGB view (else text is drawn by
+    // `fs_tex_linear`, ADR-611): the blend unit lerps the bytes as given, which has the
+    // weight `TextInk` corrects to, without its linear-light hue.
     // An LCD mask (3 / 4) reaches this pipeline only if no LCD one was made; its alpha is
     // the greatest of its channels' coverage, so it draws as grey text.
     if (in.mode == 1u || in.mode == 3u) {
@@ -274,6 +280,90 @@ fn fs_tex_lcd_blue(in: TexOut) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(in.tint.rgb, lcd_coverage(in).b * in.tint.a);
 }
+
+// --- text in linear light (ADR-611): the CPU painter's `TextInk`, into the sRGB view ----
+
+fn srgb_encode1(c: f32) -> f32 {
+    let x = clamp(c, 0.0, 1.0);
+    return select(1.055 * pow(x, 1.0 / 2.4) - 0.055, x * 12.92, x <= 0.0031308);
+}
+
+fn srgb_decode1(c: f32) -> f32 {
+    let x = clamp(c, 0.0, 1.0);
+    return select(pow((x + 0.055) / 1.055, 2.4), x / 12.92, x <= 0.04045);
+}
+
+fn luminance(linear: vec3<f32>) -> f32 {
+    return dot(linear, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// render.rs `text_alpha`: the linear-light alpha whose result has the luminance an encoded
+// lerp at `cov` would — hue mixed in linear light, weight the encoded blend's.
+fn text_alpha(cov: f32, fg: f32, bg: f32) -> f32 {
+    if (abs(fg - bg) <= 0.001) {
+        return cov;
+    }
+    let blended = srgb_decode1(srgb_encode1(fg) * cov + srgb_encode1(bg) * (1.0 - cov));
+    return clamp((blended - bg) / (fg - bg), 0.0, 1.0);
+}
+
+// A glyph's coverage, lifted (`cov^(1/γ)`) for text lighter than its ground (mode 2 / 4).
+fn lifted(cov: vec3<f32>, mode: u32) -> vec3<f32> {
+    if (mode == 2u || mode == 4u) {
+        return pow(cov, vec3<f32>(viewport.text.x));
+    }
+    return cov;
+}
+
+fn text_alpha3(cov: vec3<f32>, fg: f32, bg: f32) -> vec3<f32> {
+    return vec3<f32>(text_alpha(cov.r, fg, bg), text_alpha(cov.g, fg, bg), text_alpha(cov.b, fg, bg));
+}
+
+@fragment
+fn fs_tex_linear(in: TexOut) -> @location(0) vec4<f32> {
+    if (clipped(in.pos.xy, in.clip)) {
+        discard;
+    }
+    let t = textureSample(tex, samp, in.uv);
+    if (in.mode == 0u) {
+        let c = t * in.tint;
+        return vec4<f32>(srgb_to_linear(c.rgb), c.a);
+    }
+    // a grey mask, or an LCD one drawn grey (its alpha is its greatest channel)
+    let fg = srgb_to_linear(in.tint.rgb);
+    let cov = lifted(vec3<f32>(t.a), in.mode).x;
+    return vec4<f32>(fg, text_alpha(cov, luminance(fg), in.ground) * in.tint.a);
+}
+
+fn lcd_alpha_linear(in: TexOut) -> vec3<f32> {
+    let fg = srgb_to_linear(in.tint.rgb);
+    let cov = lifted(textureSample(tex, samp, in.uv).rgb, in.mode);
+    return text_alpha3(cov, luminance(fg), in.ground);
+}
+
+@fragment
+fn fs_tex_lcd_red_linear(in: TexOut) -> @location(0) vec4<f32> {
+    if (clipped(in.pos.xy, in.clip)) {
+        discard;
+    }
+    return vec4<f32>(srgb_to_linear(in.tint.rgb), lcd_alpha_linear(in).r * in.tint.a);
+}
+
+@fragment
+fn fs_tex_lcd_green_linear(in: TexOut) -> @location(0) vec4<f32> {
+    if (clipped(in.pos.xy, in.clip)) {
+        discard;
+    }
+    return vec4<f32>(srgb_to_linear(in.tint.rgb), lcd_alpha_linear(in).g * in.tint.a);
+}
+
+@fragment
+fn fs_tex_lcd_blue_linear(in: TexOut) -> @location(0) vec4<f32> {
+    if (clipped(in.pos.xy, in.clip)) {
+        discard;
+    }
+    return vec4<f32>(srgb_to_linear(in.tint.rgb), lcd_alpha_linear(in).b * in.tint.a);
+}
 "#;
 
 /// Subpixel (LCD) text: [`SHADER_SRC`] plus a fragment entry with two outputs, blended as
@@ -302,6 +392,20 @@ fn fs_tex_lcd(in: TexOut) -> LcdOut {
     var out: LcdOut;
     let alpha = max(cov.r, max(cov.g, cov.b)) * in.tint.a;
     out.colour = vec4<f32>(in.tint.rgb, alpha);
+    out.coverage = vec4<f32>(cov * in.tint.a, alpha);
+    return out;
+}
+
+// Into the sRGB view (ADR-611): each channel's alpha corrected as `fs_tex_linear`'s is.
+@fragment
+fn fs_tex_lcd_linear(in: TexOut) -> LcdOut {
+    if (clipped(in.pos.xy, in.clip)) {
+        discard;
+    }
+    let cov = lcd_alpha_linear(in);
+    var out: LcdOut;
+    let alpha = max(cov.r, max(cov.g, cov.b)) * in.tint.a;
+    out.colour = vec4<f32>(srgb_to_linear(in.tint.rgb), alpha);
     out.coverage = vec4<f32>(cov * in.tint.a, alpha);
     return out;
 }
@@ -605,8 +709,8 @@ const POST_BYTES: u64 = 48;
 /// One solid instance: rect (4) + rgba (4) + rot (1) + radius (1) + aa (1) + clip (4).
 const SOLID_FLOATS: usize = 15;
 /// One textured instance: rect (4) + uv (4) + tint (4) + mode (1 u32 as its bits) + rot (1)
-/// + clip (4).
-const TEX_WORDS: usize = 18;
+/// + clip (4) + the ground's luminance (1, a glyph's `text_alpha` input).
+const TEX_WORDS: usize = 19;
 
 /// The glyph atlas page size. 2048² RGBA is 16 MB — a few thousand cells' worth of
 /// glyphs at an editor size, and every device wgpu runs on allows at least 8192².
@@ -891,9 +995,9 @@ impl FrameBuilder {
             self.clip[2],
             self.clip[3],
         ]);
-        // Only a translucent fill needs linear light. An opaque shape's anti-aliased rim
-        // blends in the encoded space, as text does, and rides whichever pass is open —
-        // a pane divider or a mode-line chip between two runs of text costs no pass switch.
+        // Only a translucent fill needs linear light. An opaque shape's anti-aliased rim reads
+        // the same blended either way, so it rides whichever pass is open — a pane divider or
+        // a mode-line chip between two runs of text costs no pass switch.
         let blends = rgba[3] < 255;
         let merge = self.can_merge();
         match self.batches.last_mut() {
@@ -974,7 +1078,8 @@ impl FrameBuilder {
 
     /// A textured quad sampling `uv` (`[u0 v0 du dv]`, texture space) of `key`; `mode`
     /// is the shader's: 0 a colour texel, 1 a coverage mask tinted, 2 a mask lifted, 3 / 4
-    /// the same per colour channel (`glyph_mode`).
+    /// the same per colour channel (`glyph_mode`). `ground` is the linear luminance of what a
+    /// glyph is drawn over, which its blend is corrected by (ADR-611); 0 for a sprite.
     #[allow(clippy::too_many_arguments)]
     fn textured(
         &mut self,
@@ -987,6 +1092,7 @@ impl FrameBuilder {
         tint: [u8; 4],
         mode: u32,
         rot: f32,
+        ground: f32,
     ) {
         if !self.visible(x, y, w, h, rot) {
             return;
@@ -1011,6 +1117,7 @@ impl FrameBuilder {
             self.clip[1].to_bits(),
             self.clip[2].to_bits(),
             self.clip[3].to_bits(),
+            ground.to_bits(),
         ]);
         let merge = self.can_merge();
         let lcd = mode >= 3;
@@ -1072,6 +1179,8 @@ enum RunQuad {
         uv: [f32; 4],
         tint: [u8; 4],
         mode: u32,
+        /// the linear luminance of the glyph's ground (`textured`)
+        ground: f32,
     },
 }
 
@@ -1201,12 +1310,13 @@ fn decode_clear(colour: wgpu::Color) -> wgpu::Color {
 }
 
 /// The draw order of `batches` as render passes: `(linear, range)` each, where a linear
-/// pass draws through the swapchain's sRGB view (translucent solids, blended in linear
-/// light) and the rest through the encoded view (text, sprites,
-/// particles — and an opaque fill, which looks the same in either, joins whichever pass
-/// is open). Consecutive batches of one kind share a pass, so a frame pays a pass switch
-/// only where its translucent geometry and its text interleave. Without an sRGB view
-/// (`linear_available` false) it is one encoded pass, as before.
+/// pass draws through the swapchain's sRGB view (text, ADR-611, and translucent solids,
+/// blended in linear light) and the rest through the encoded view (an app's textures and
+/// particles — and an opaque fill, which looks the same in either, joins whichever pass is
+/// open). Consecutive batches of one kind share a pass, so an editor's frame — text and
+/// fills — is one linear pass, and a frame pays a switch only where a sprite or particles
+/// interleave with text. Without an sRGB view (`linear_available` false) it is one encoded
+/// pass.
 fn segments(batches: &[Batch], linear_available: bool) -> Vec<(bool, std::ops::Range<usize>)> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -1214,6 +1324,10 @@ fn segments(batches: &[Batch], linear_available: bool) -> Vec<(bool, std::ops::R
     for (index, batch) in batches.iter().enumerate() {
         let wants = match batch {
             Batch::Solid { linear, .. } => (*linear && linear_available).then_some(true),
+            Batch::Tex {
+                key: TexKey::Atlas(_),
+                ..
+            } => Some(linear_available),
             Batch::Tex { .. } | Batch::Particles { .. } => Some(false),
         };
         let Some(wants) = wants else {
@@ -1249,6 +1363,7 @@ fn replay(fb: &mut FrameBuilder, quads: &[RunQuad], anchor_x: f32, anchor_y: f32
                 uv,
                 tint,
                 mode,
+                ground,
             } => fb.textured(
                 TexKey::Atlas(page),
                 anchor_x + x,
@@ -1259,6 +1374,7 @@ fn replay(fb: &mut FrameBuilder, quads: &[RunQuad], anchor_x: f32, anchor_y: f32
                 tint,
                 mode,
                 0.0,
+                ground,
             ),
         }
     }
@@ -2159,6 +2275,11 @@ pub struct GpuWindow {
     /// How subpixel text is drawn on this device (`LcdText`); `None`, should the driver reject
     /// both ways, draws every glyph grey.
     lcd: Option<LcdText>,
+    /// The text pipelines into the sRGB view (`fs_tex_linear`, `fs_tex_lcd_linear` …): glyphs
+    /// blend in linear light with the encoded lerp's weight, as the CPU painter's `TextInk`
+    /// (ADR-611). `None` with no sRGB view, and then text blends in the encoded space.
+    tex_linear_pipeline: Option<wgpu::RenderPipeline>,
+    lcd_linear: Option<LcdText>,
     tex_layout: wgpu::BindGroupLayout,
     tex_instances: InstanceBuffer,
     sampler: wgpu::Sampler,
@@ -2555,7 +2676,8 @@ impl GpuWindow {
         // The textured quads: one vertex layout, drawn three ways — `fs_tex` (colour, grey
         // text) under alpha blending, `fs_tex_lcd` (subpixel text) under `LCD_BLEND`, or
         // subpixel text one channel per pass (`fs_tex_lcd_red` …, writing only that channel).
-        let textured_quads = |label: &str,
+        let textured_quads = |target_format: wgpu::TextureFormat,
+                              label: &str,
                               module: &wgpu::ShaderModule,
                               fragment: &str,
                               blend: wgpu::BlendState,
@@ -2572,7 +2694,7 @@ impl GpuWindow {
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &wgpu::vertex_attr_array![
                             0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Uint32,
-                            4 => Float32, 5 => Float32x4
+                            4 => Float32, 5 => Float32x4, 6 => Float32
                         ],
                     })],
                 },
@@ -2584,7 +2706,7 @@ impl GpuWindow {
                     entry_point: Some(fragment),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format,
+                        format: target_format,
                         blend: Some(blend),
                         write_mask,
                     })],
@@ -2593,54 +2715,73 @@ impl GpuWindow {
                 cache: None,
             })
         };
-        let tex_pipeline = textured_quads(
-            "textured quads",
-            &shader,
-            "fs_tex",
-            wgpu::BlendState::ALPHA_BLENDING,
-            wgpu::ColorWrites::ALL,
-        );
-        // Subpixel text: one dual-source pass where the device has it, else three passes,
-        // one per colour channel. Built inside a validation scope: a driver that rejects
-        // either costs subpixel text, not the window.
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let lcd = if device
+        // Text into a target format: `fs_tex{suffix}` for colour and grey glyphs, and the
+        // subpixel pipelines — one dual-source pass where the device has it, else three
+        // passes, one per colour channel. Built once for the encoded target and once (suffix
+        // `_linear`, ADR-611) for its sRGB view.
+        let lcd_module = device
             .features()
             .contains(wgpu::Features::DUAL_SOURCE_BLENDING)
-        {
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("lcd text"),
-                source: wgpu::ShaderSource::Wgsl(lcd_shader_source().into()),
+            .then(|| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("lcd text"),
+                    source: wgpu::ShaderSource::Wgsl(lcd_shader_source().into()),
+                })
             });
-            LcdText::DualSource(textured_quads(
-                "lcd text",
-                &module,
-                "fs_tex_lcd",
-                LCD_BLEND,
+        let text_pipelines = |target_format: wgpu::TextureFormat, suffix: &str| {
+            let tex = textured_quads(
+                target_format,
+                "textured quads",
+                &shader,
+                &format!("fs_tex{suffix}"),
+                wgpu::BlendState::ALPHA_BLENDING,
                 wgpu::ColorWrites::ALL,
-            ))
-        } else {
-            let channel = |fragment: &str, mask: wgpu::ColorWrites| {
-                textured_quads(
-                    "lcd text, one channel",
-                    &shader,
-                    fragment,
-                    wgpu::BlendState::ALPHA_BLENDING,
-                    mask,
-                )
+            );
+            // Built inside a validation scope: a driver that rejects either costs subpixel
+            // text, not the window.
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let lcd = if let Some(module) = &lcd_module {
+                LcdText::DualSource(textured_quads(
+                    target_format,
+                    "lcd text",
+                    module,
+                    &format!("fs_tex_lcd{suffix}"),
+                    LCD_BLEND,
+                    wgpu::ColorWrites::ALL,
+                ))
+            } else {
+                let channel = |colour: &str, mask: wgpu::ColorWrites| {
+                    textured_quads(
+                        target_format,
+                        "lcd text, one channel",
+                        &shader,
+                        &format!("fs_tex_lcd_{colour}{suffix}"),
+                        wgpu::BlendState::ALPHA_BLENDING,
+                        mask,
+                    )
+                };
+                LcdText::PerChannel([
+                    channel("red", wgpu::ColorWrites::RED),
+                    channel("green", wgpu::ColorWrites::GREEN),
+                    channel("blue", wgpu::ColorWrites::BLUE),
+                ])
             };
-            LcdText::PerChannel([
-                channel("fs_tex_lcd_red", wgpu::ColorWrites::RED),
-                channel("fs_tex_lcd_green", wgpu::ColorWrites::GREEN),
-                channel("fs_tex_lcd_blue", wgpu::ColorWrites::BLUE),
-            ])
+            let lcd = match pollster::block_on(scope.pop()) {
+                None => Some(lcd),
+                Some(error) => {
+                    eprintln!("brood gui: subpixel text unavailable, drawing grey: {error}");
+                    None
+                }
+            };
+            (tex, lcd)
         };
-        let lcd = match pollster::block_on(scope.pop()) {
-            None => Some(lcd),
-            Some(error) => {
-                eprintln!("brood gui: subpixel text unavailable, drawing grey: {error}");
-                None
+        let (tex_pipeline, lcd) = text_pipelines(format, "");
+        let (tex_linear_pipeline, lcd_linear) = match linear_format {
+            Some(linear) => {
+                let (tex, lcd) = text_pipelines(linear, "_linear");
+                (Some(tex), lcd)
             }
+            None => (None, None),
         };
 
         let solid_instances = InstanceBuffer::new(&device, "solid instances", 64 * 1024);
@@ -2660,6 +2801,8 @@ impl GpuWindow {
             solid_instances,
             tex_pipeline,
             lcd,
+            tex_linear_pipeline,
+            lcd_linear,
             tex_layout,
             tex_instances,
             sampler,
@@ -3085,11 +3228,12 @@ impl GpuWindow {
             std::mem::swap(&mut fg, &mut bg);
             paint_bg = true;
         }
-        // The contrast lift applies to text lighter than what it lands on. The CPU
-        // compares per pixel; here the ground is the run's own background, or — for a
-        // transparent face — the window's, since what else lies under it is not known
-        // until the blend (ADR-440).
-        let lift = luma(fg) > luma(if paint_bg { bg } else { ground });
+        // The ground a glyph's blend is corrected by, and the contrast lift applies to text
+        // lighter than (ADR-611). The CPU reads it per pixel; here it is the run's own
+        // background, or — for a transparent face — the window's, since what else lies under
+        // it is not known until the blend (ADR-440).
+        let ground_luminance = luminance(if paint_bg { bg } else { ground });
+        let lift = luminance(fg) > ground_luminance;
         let scale = face.scale.max(1) as usize;
         let ch_s = scale as f32 * ch;
         let mut quads = Vec::new();
@@ -3191,6 +3335,7 @@ impl GpuWindow {
                 ],
                 tint: [fg[0], fg[1], fg[2], 255],
                 mode: glyph_mode(glyph.mono, glyph.lcd, lift),
+                ground: ground_luminance,
             });
         }
         if face.underline {
@@ -3584,7 +3729,7 @@ impl GpuWindow {
                     rot,
                 } => {
                     if self.textures.contains_key(tex) {
-                        fb.textured(TexKey::User(*tex), *x, *y, *w, *h, *uv, *tint, 0, *rot);
+                        fb.textured(TexKey::User(*tex), *x, *y, *w, *h, *uv, *tint, 0, *rot, 0.0);
                     }
                 }
                 Op::Quad {
@@ -3842,7 +3987,7 @@ impl GpuWindow {
         {
             // runs: text runs replayed / shaped; frags: memoised fragments pushed whole / expanded; up: instance bytes written (a frame that
             // changed one line writes that line's tail, not the page); passes: render
-            // passes (more than one only where translucent geometry and text interleave); lcd:
+            // passes (more than one only where an app's textures or particles and text interleave); lcd:
             // how this device draws subpixel text (`LcdText`).
             let lcd = match &self.lcd {
                 Some(LcdText::DualSource(_)) => "dual-source",
@@ -3952,12 +4097,17 @@ impl GpuWindow {
                         };
                         pass.set_vertex_buffer(0, self.tex_instances.buffer.slice(..));
                         pass.set_bind_group(1, bind_group, &[]);
-                        let pipelines: &[wgpu::RenderPipeline] = match &self.lcd {
+                        // Text in a linear pass takes the linear-light pipelines (ADR-611).
+                        let (tex_pipeline, lcd_pipelines) = match &self.tex_linear_pipeline {
+                            Some(linear) if *in_linear => (linear, &self.lcd_linear),
+                            _ => (&self.tex_pipeline, &self.lcd),
+                        };
+                        let pipelines: &[wgpu::RenderPipeline] = match lcd_pipelines {
                             Some(LcdText::DualSource(pipeline)) if *lcd => {
                                 std::slice::from_ref(pipeline)
                             }
                             Some(LcdText::PerChannel(channels)) if *lcd => channels,
-                            _ => std::slice::from_ref(&self.tex_pipeline),
+                            _ => std::slice::from_ref(tex_pipeline),
                         };
                         for pipeline in pipelines {
                             pass.set_pipeline(pipeline);
@@ -4358,10 +4508,54 @@ mod tests {
         // they draw with different pipelines, so one batch cannot hold both
         let mut fb = FrameBuilder::new(FW, FH);
         let uv = [0.0, 0.0, 0.1, 0.1];
-        fb.textured(TexKey::Atlas(0), 0.0, 0.0, 8.0, 8.0, uv, [255; 4], 3, 0.0);
-        fb.textured(TexKey::Atlas(0), 8.0, 0.0, 8.0, 8.0, uv, [255; 4], 4, 0.0);
-        fb.textured(TexKey::Atlas(0), 16.0, 0.0, 8.0, 8.0, uv, [255; 4], 1, 0.0);
-        fb.textured(TexKey::Atlas(0), 24.0, 0.0, 8.0, 8.0, uv, [255; 4], 3, 0.0);
+        fb.textured(
+            TexKey::Atlas(0),
+            0.0,
+            0.0,
+            8.0,
+            8.0,
+            uv,
+            [255; 4],
+            3,
+            0.0,
+            0.0,
+        );
+        fb.textured(
+            TexKey::Atlas(0),
+            8.0,
+            0.0,
+            8.0,
+            8.0,
+            uv,
+            [255; 4],
+            4,
+            0.0,
+            0.0,
+        );
+        fb.textured(
+            TexKey::Atlas(0),
+            16.0,
+            0.0,
+            8.0,
+            8.0,
+            uv,
+            [255; 4],
+            1,
+            0.0,
+            0.0,
+        );
+        fb.textured(
+            TexKey::Atlas(0),
+            24.0,
+            0.0,
+            8.0,
+            8.0,
+            uv,
+            [255; 4],
+            3,
+            0.0,
+            0.0,
+        );
         let shape: Vec<(u32, u32, bool)> = fb
             .batches
             .iter()
@@ -4381,9 +4575,42 @@ mod tests {
         fb.solid(0.0, 0.0, 10.0, 10.0, [255, 0, 0, 255], 0.0, Edge::Plain);
         fb.solid(20.0, 0.0, 10.0, 10.0, [255, 0, 0, 255], 0.0, Edge::Plain);
         let uv = [0.0, 0.0, 1.0, 1.0];
-        fb.textured(TexKey::User(7), 0.0, 0.0, 8.0, 8.0, uv, [255; 4], 0, 0.0);
-        fb.textured(TexKey::User(7), 8.0, 0.0, 8.0, 8.0, uv, [255; 4], 0, 0.0);
-        fb.textured(TexKey::User(9), 16.0, 0.0, 8.0, 8.0, uv, [255; 4], 0, 0.0);
+        fb.textured(
+            TexKey::User(7),
+            0.0,
+            0.0,
+            8.0,
+            8.0,
+            uv,
+            [255; 4],
+            0,
+            0.0,
+            0.0,
+        );
+        fb.textured(
+            TexKey::User(7),
+            8.0,
+            0.0,
+            8.0,
+            8.0,
+            uv,
+            [255; 4],
+            0,
+            0.0,
+            0.0,
+        );
+        fb.textured(
+            TexKey::User(9),
+            16.0,
+            0.0,
+            8.0,
+            8.0,
+            uv,
+            [255; 4],
+            0,
+            0.0,
+            0.0,
+        );
         fb.solid(40.0, 0.0, 10.0, 10.0, [0, 255, 0, 255], 0.0, Edge::Plain);
         let shape: Vec<(bool, u32, u32)> = fb
             .batches
@@ -4700,6 +4927,7 @@ mod reuse_tests {
                 [255; 4],
                 1,
                 0.0,
+                0.0,
             )
         };
         glyph(fb, 0, 0.0);
@@ -4748,6 +4976,7 @@ mod reuse_tests {
                     [0.0; 4],
                     [255; 4],
                     1,
+                    0.0,
                     0.0,
                 )
             },
@@ -4867,7 +5096,7 @@ mod reuse_tests {
     }
 
     #[test]
-    fn translucent_geometry_gets_a_linear_pass_and_opaque_fills_ride_along() {
+    fn text_and_translucent_geometry_share_a_linear_pass_and_opaque_fills_ride_along() {
         let mut fb = FrameBuilder::new(800.0, 600.0);
         fb.fill(0.0, 0.0, 10.0, 10.0, [1, 2, 3]);
         fb.textured(
@@ -4879,6 +5108,7 @@ mod reuse_tests {
             [0.0; 4],
             [255; 4],
             1,
+            0.0,
             0.0,
         );
         // the cursor wash: translucent, so its batch blends in linear light
@@ -4893,11 +5123,28 @@ mod reuse_tests {
             [255; 4],
             1,
             0.0,
+            0.0,
+        );
+        // text blends in linear light too (ADR-611): the whole frame is one linear pass
+        assert_eq!(segments(&fb.batches, true), vec![(true, 0..4)]);
+        // an app's texture (a sprite) blends in the encoded space: it takes a pass of its own
+        fb.textured(
+            TexKey::User(7),
+            0.0,
+            20.0,
+            8.0,
+            8.0,
+            [0.0; 4],
+            [255; 4],
+            0,
+            0.0,
+            0.0,
         );
         assert_eq!(
             segments(&fb.batches, true),
-            vec![(false, 0..2), (true, 2..3), (false, 3..4)]
+            vec![(true, 0..4), (false, 4..5)]
         );
+        fb.batches.pop();
         // without an sRGB view it is one pass, as before
         assert_eq!(segments(&fb.batches, false), vec![(false, 0..4)]);
         // a frame of opaque fills only: one pass, whatever is available
@@ -4918,6 +5165,7 @@ mod reuse_tests {
             [255; 4],
             1,
             0.0,
+            0.0,
         );
         chips.solid(
             0.0,
@@ -4937,6 +5185,7 @@ mod reuse_tests {
             [0.0; 4],
             [255; 4],
             1,
+            0.0,
             0.0,
         );
         assert_eq!(segments(&chips.batches, true).len(), 1);
