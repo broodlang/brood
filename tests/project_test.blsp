@@ -32,6 +32,7 @@
 (purge-stale-temp "brood-incl-")
 (purge-stale-temp "brood-manifest-")
 (purge-stale-temp "brood-p2-")
+(purge-stale-temp "brood-projmods-")
 (purge-stale-temp "brood-shadow-")
 (purge-stale-temp "brood-skip-")
 (purge-stale-temp "brood-walk-")
