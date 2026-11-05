@@ -405,6 +405,111 @@ pub fn arm_contracts_by_default() {
     crate::builtins::contracts::arm_by_default();
 }
 
+/// The per-run scratch home `nest test` armed ([`arm_test_run`]), removed at the end of
+/// the run by [`remove_test_scratch_home`].
+static TEST_SCRATCH_HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// How old an earlier run's scratch home must be before a new run purges it: a run of the
+/// same suite beside this one (another checkout, another terminal) keeps its own.
+const TEST_SCRATCH_STALE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Mark this process as a test run, and give it a private scratch home for program state
+/// (ADR-602). Call before any thread or interpreter exists — it sets environment variables.
+///
+/// * `BROOD_TEST_RUN=1` — what `test/running?` answers from: the runner says it, rather than
+///   a program guessing from what happens to be loaded. Inherited, so a program a test
+///   starts is part of the run too.
+/// * Unless `BROOD_TEST_HOME=keep` (or `keep_home`, `nest test --real-home`): a fresh
+///   directory under the temp root — `BROOD_TEST_SCRATCH`, `test/scratch-dir` — with
+///   `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_DATA_HOME` pointed at `config/`, `state/`
+///   and `data/` inside it, so no program's tests write the user's real config, history or
+///   data by accident. `BROOD_USER_CONFIG_HOME` keeps the real config base, for the one
+///   reader that wants the user's own: `nest`'s tooling preferences. `XDG_CACHE_HOME` is
+///   left alone — Brood's own caches (the stdlib image, grammars, the check cache) live
+///   there, and a cache is regenerable; a fresh one per run would cost a cold start each.
+///
+/// Earlier runs' scratch homes older than an hour are purged first.
+pub fn arm_test_run(keep_home: bool) {
+    // SAFETY (all set_var below): called before any thread or interpreter is created.
+    unsafe { std::env::set_var("BROOD_TEST_RUN", "1") };
+    let keep = keep_home || std::env::var_os("BROOD_TEST_HOME").is_some_and(|v| v == "keep");
+    if keep {
+        return;
+    }
+    let root = std::env::temp_dir();
+    purge_stale_test_scratch(&root);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let scratch = root.join(format!("brood-test-home-{}-{nanos:x}", std::process::id()));
+    let made = ["config", "state", "data"]
+        .iter()
+        .all(|sub| std::fs::create_dir_all(scratch.join(sub)).is_ok());
+    if !made {
+        eprintln!(
+            "nest test: could not make a scratch home under {}; running with the real one",
+            root.display()
+        );
+        return;
+    }
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let real_config = set("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            set("HOME")
+                .or_else(|| {
+                    if cfg!(windows) {
+                        set("USERPROFILE")
+                    } else {
+                        None
+                    }
+                })
+                .map(|home| std::path::PathBuf::from(home).join(".config"))
+        });
+    unsafe {
+        if let Some(real) = real_config {
+            std::env::set_var("BROOD_USER_CONFIG_HOME", real);
+        }
+        std::env::set_var("BROOD_TEST_SCRATCH", &scratch);
+        std::env::set_var("XDG_CONFIG_HOME", scratch.join("config"));
+        std::env::set_var("XDG_STATE_HOME", scratch.join("state"));
+        std::env::set_var("XDG_DATA_HOME", scratch.join("data"));
+    }
+    let _ = TEST_SCRATCH_HOME.set(scratch);
+}
+
+/// Remove the scratch home [`arm_test_run`] made, if it made one. Best-effort; a run that
+/// dies first leaves it for the next run's purge.
+pub fn remove_test_scratch_home() {
+    if let Some(scratch) = TEST_SCRATCH_HOME.get() {
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+}
+
+fn purge_stale_test_scratch(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("brood-test-home-") {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > TEST_SCRATCH_STALE);
+        if old {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Warn once if this binary's baked-in standard library is **older than the tree it is
 /// running in** — a trap that comes in several disguises.
 ///
