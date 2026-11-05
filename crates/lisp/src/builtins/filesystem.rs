@@ -167,6 +167,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). nil when the bytes aren't a decodable image or the dims are non-positive. Per-call decode limits bound a decompression bomb. The one image primitive; rendering (half-block cells, a GUI texture) is Brood policy over the decoded buffer.",
         image_thumb);
     primitives.def(
+        "%image-write-png",
+        Arity::range(2, 3),
+        Sig::with_optional(vec![map_ty, string], vec![map_ty.union(nil_ty)], string),
+        &["image", "path", "opts"],
+        "Write image — a {:width :height :rgba} map (what gui/image-thumb, gui/render-frame and gui/capture return; :rgba width*height*4 bytes) — to path as a PNG, and return path. opts: :crop [x y w h] keeps that rectangle (clipped to the image), :scale n (1..16) enlarges it n times by repeating pixels, so a few pixels of spacing can be looked at. Errors when :rgba is not width*height*4 bytes or the file cannot be written.",
+        image_write_png);
+    primitives.def(
         "file/rm",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
@@ -642,6 +649,72 @@ pub(super) fn image_thumb(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         (kw("rgba"), rgba),
     ];
     Ok(heap.map_from_pairs(pairs))
+}
+
+/// `(image-write-png image path [opts])` — encode a `{:width :height :rgba}` map as a
+/// PNG at `path` (ADR-609): the other half of `gui/render-frame` and `gui/capture`, and
+/// of `image-thumb` (whatever it decodes writes back). `opts` `:crop [x y w h]` keeps a
+/// rectangle and `:scale n` enlarges it by repeating pixels — nearest neighbour, so a
+/// one-pixel gap stays a sharp n-pixel one rather than a blur.
+pub(super) fn image_write_png(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "gui/write-png";
+    let Value::Map(image) = arg(args, 0) else {
+        return Err(LispError::wrong_type(
+            heap,
+            who,
+            "map {:width :height :rgba}",
+            arg(args, 0),
+        ));
+    };
+    let field = |name: &str| heap.map_get(image, kw(name)).unwrap_or(Value::Nil);
+    let (width_value, height_value, rgba_value) = (field("width"), field("height"), field("rgba"));
+    let width = expect_int(heap, who, width_value)?;
+    let height = expect_int(heap, who, height_value)?;
+    let rgba = collect_bytes("gui/write-png", rgba_value, heap)?;
+    let path = expect_string(heap, who, arg(args, 1))?;
+    if width <= 0 || height <= 0 || (width * height * 4) as usize != rgba.len() {
+        return Err(LispError::runtime(format!(
+            "{who}: :rgba is {} bytes, not {width}*{height}*4",
+            rgba.len()
+        )));
+    }
+    let Some(mut picture) = image::RgbaImage::from_raw(width as u32, height as u32, rgba) else {
+        return Err(LispError::runtime(format!("{who}: not an image")));
+    };
+    if let Value::Map(opts) = arg(args, 2) {
+        if let Some(Value::Vector(crop)) = heap.map_get(opts, kw("crop")) {
+            let parts: Vec<i64> = heap
+                .vector(crop)
+                .iter()
+                .map(|v| match v {
+                    Value::Int(n) => *n,
+                    _ => 0,
+                })
+                .collect();
+            if let [x, y, w, h] = parts[..] {
+                let (x, y) = (x.clamp(0, width - 1), y.clamp(0, height - 1));
+                let (w, h) = (w.clamp(1, width - x), h.clamp(1, height - y));
+                picture =
+                    image::imageops::crop_imm(&picture, x as u32, y as u32, w as u32, h as u32)
+                        .to_image();
+            }
+        }
+        if let Some(Value::Int(scale)) = heap.map_get(opts, kw("scale")) {
+            let scale = scale.clamp(1, 16) as u32;
+            if scale > 1 {
+                picture = image::imageops::resize(
+                    &picture,
+                    picture.width() * scale,
+                    picture.height() * scale,
+                    image::imageops::FilterType::Nearest,
+                );
+            }
+        }
+    }
+    picture
+        .save_with_format(&path, image::ImageFormat::Png)
+        .map_err(|e| LispError::runtime(format!("{who}: {path}: {e}")))?;
+    Ok(arg(args, 1))
 }
 
 /// `(file-mtime path)` — last-modified time of `path` as epoch-milliseconds, or

@@ -9,6 +9,7 @@ mod bleed;
 mod gpu_replay;
 mod input;
 mod keyboard;
+mod offscreen;
 mod paint;
 mod render;
 
@@ -447,6 +448,12 @@ enum UserEvent {
     /// Shape runs of punctuation as one unit so a font's ligatures form — for every
     /// open window and ones opened later. Behind `gui-ligatures!`. A pure repaint.
     Ligatures { on: bool },
+    /// Paint window `id`'s current frame into memory, as its last paint drew it, and reply
+    /// with the picture. Behind `gui/capture` (ADR-609).
+    Capture {
+        id: u64,
+        reply: Sender<Result<super::FrameImage, String>>,
+    },
 }
 
 /// A freshly opened window's wiring, handed back to the Brood side: its id and
@@ -513,6 +520,74 @@ pub fn headless() -> bool {
             .map(|v| v != "0" && !v.is_empty())
             .unwrap_or(false)
     })
+}
+
+/// HEADLESS PAINTING (`BROOD_GUI_HEADLESS=paint`, ADR-609): headless as above — no OS
+/// window, no input — but every window is painted offscreen by the window's own CPU
+/// painter (`offscreen`): it keeps its font, inset, background and the frames drawn to
+/// it, reports the grid the real cell metrics give, and `gui/capture` paints its frame.
+/// What lets a test or an agent look at an app's real loop with no display. Read once.
+fn headless_paint() -> bool {
+    static P: OnceLock<bool> = OnceLock::new();
+    *P.get_or_init(|| {
+        headless() && std::env::var("BROOD_GUI_HEADLESS").is_ok_and(|v| v.trim() == "paint")
+    })
+}
+
+/// Headless: hand the request `make` builds to the offscreen painter when windows are
+/// painted headless (ADR-609); drop it otherwise, as every headless window op is.
+fn headless_send(make: impl FnOnce() -> offscreen::Request) -> Result<(), String> {
+    if headless_paint() {
+        offscreen::send(make())
+    } else {
+        Ok(())
+    }
+}
+
+/// `(gui/render-frame ops spec)` — paint `ops` into memory as a window `spec` describes
+/// would paint them (ADR-609): the window's own CPU painter, edge bleed and layout rule,
+/// on the offscreen painter's thread. Needs no window and no display.
+pub fn render_frame(ops: Vec<Op>, spec: super::RenderSpec) -> Result<super::FrameImage, String> {
+    offscreen::ask(|reply| offscreen::Request::Render { ops, spec, reply })
+}
+
+/// `(gui/capture id)` — window `id`'s current frame, painted into memory as the window
+/// paints it (ADR-609). A real window's is rasterised on the GUI thread by its own
+/// renderer (a GPU window's by the CPU painter over the same frame, its sprites
+/// missing); a headless painting window's on the offscreen thread. A plain headless
+/// window has nothing to paint with, so that is an error naming the setting.
+pub fn capture(id: u64) -> Result<super::FrameImage, String> {
+    if !lock(windows()).contains_key(&id) {
+        return Err("gui window not open".into());
+    }
+    if headless_paint() {
+        return offscreen::ask(|reply| offscreen::Request::Capture { id, reply })?;
+    }
+    if headless() {
+        return Err(
+            "gui is headless with no painter — run with BROOD_GUI_HEADLESS=paint \
+             to paint headless windows, or use gui/render-frame"
+                .into(),
+        );
+    }
+    let (reply_tx, reply_rx) = mpsc::channel();
+    lock(gui()?)
+        .send_event(UserEvent::Capture {
+            id,
+            reply: reply_tx,
+        })
+        .map_err(|_| "gui thread is gone".to_string())?;
+    reply_rx
+        .recv()
+        .map_err(|_| "gui thread did not reply".to_string())?
+}
+
+/// `(gui/windows)` — the ids of the windows open in this runtime, oldest first: how a
+/// driver finds the window an app's loop opened, to `gui/capture` it.
+pub fn window_ids() -> Vec<u64> {
+    let mut ids: Vec<u64> = lock(windows()).keys().copied().collect();
+    ids.sort_unstable();
+    ids
 }
 
 /// The cell grid a headless window reports for a requested logical pixel `size`
@@ -691,11 +766,24 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
     // starting winit, so nothing pops up.
     if headless() {
         let id = next_id();
+        let size = Arc::new(Mutex::new(headless_cells(spec.size)));
+        let size_px = headless_px(spec.size);
+        // Headless painting (ADR-609): the window is painted offscreen, so its grid is the
+        // one the real cell metrics give, measured before `open` returns.
+        if headless_paint() {
+            offscreen::ask(|reply| offscreen::Request::Open {
+                id,
+                subscriber,
+                px: size_px,
+                size: size.clone(),
+                reply,
+            })?;
+        }
         lock(windows()).insert(
             id,
             WinHandle {
-                size: Arc::new(Mutex::new(headless_cells(spec.size))),
-                size_px: Arc::new(Mutex::new(headless_px(spec.size))),
+                size,
+                size_px: Arc::new(Mutex::new(size_px)),
                 keys: Arc::default(),
                 latency: Arc::default(),
             },
@@ -739,7 +827,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
 pub fn close(id: u64) -> Result<(), String> {
     lock(windows()).remove(&id);
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::Close { id });
     }
     if let Ok(g) = gui() {
         let _ = lock(g).send_event(UserEvent::Close { id });
@@ -836,6 +924,9 @@ pub fn cell_size(id: u64, px: Option<f32>) -> Result<(u16, u16), String> {
             return Err("gui window not open".into());
         }
     }
+    if headless_paint() {
+        return offscreen::ask(|reply| offscreen::Request::Metrics { id, px, reply })?;
+    }
     if headless() {
         return Err("gui is headless — no font engine to measure a cell with".into());
     }
@@ -894,7 +985,7 @@ pub fn draw(id: u64, ops: Vec<Op>) -> Result<(), String> {
         }
     }
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::Draw { id, ops });
     }
     gui()?
         .lock()
@@ -921,7 +1012,7 @@ pub fn settle(id: u64) -> Result<(), String> {
 /// No-op (silently) if the GUI thread never started.
 pub fn font(id: Option<u64>, family: Option<u32>, px: Option<f32>) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::Font { id, family, px });
     }
     if let Ok(g) = gui() {
         let _ = g
@@ -937,7 +1028,7 @@ pub fn font(id: Option<u64>, family: Option<u32>, px: Option<f32>) -> Result<(),
 /// started.
 pub fn inset(px: f32) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::Inset(px));
     }
     if let Ok(g) = gui() {
         let _ = lock(g).send_event(UserEvent::Inset { px });
@@ -950,7 +1041,7 @@ pub fn inset(px: f32) -> Result<(), String> {
 /// `DEFAULT_BG`. No-op (silently) if the GUI thread never started.
 pub fn bg(rgb: Option<[u8; 3]>) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::Background(rgb));
     }
     if let Ok(g) = gui() {
         let _ = lock(g).send_event(UserEvent::Background { rgb });
@@ -963,7 +1054,7 @@ pub fn bg(rgb: Option<[u8; 3]>) -> Result<(), String> {
 /// thread never started.
 pub fn line_height(mult: f32) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::LineHeight(mult));
     }
     if let Ok(g) = gui() {
         let _ = lock(g).send_event(UserEvent::LineHeight { mult });
@@ -975,7 +1066,7 @@ pub fn line_height(mult: f32) -> Result<(), String> {
 /// the default for ones opened later. No-op (silently) if the GUI thread never started.
 pub fn text_aa(mode: TextAa) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::TextAa(mode));
     }
     if let Ok(g) = gui() {
         let _ = lock(g).send_event(UserEvent::TextAa { mode });
@@ -987,7 +1078,7 @@ pub fn text_aa(mode: TextAa) -> Result<(), String> {
 /// default for ones opened later. No-op (silently) if the GUI thread never started.
 pub fn text_contrast(gamma: f32) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::TextContrast(gamma));
     }
     if let Ok(g) = gui() {
         let _ = g
@@ -1032,7 +1123,13 @@ pub fn icon(id: u64, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), String> {
 /// (`next_texture_id`), so this is fire-and-forget like `icon`: no reply to wait for.
 pub fn texture(id: u64, tex: u32, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::Texture {
+            id,
+            tex,
+            rgba,
+            w,
+            h,
+        });
     }
     if let Ok(g) = gui() {
         let _ = lock(g).send_event(UserEvent::Texture {
@@ -1049,7 +1146,7 @@ pub fn texture(id: u64, tex: u32, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), S
 /// `(gui-texture-free id tex)` — release texture `tex` of window `id`.
 pub fn texture_free(id: u64, tex: u32) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::TextureFree { id, tex });
     }
     if let Ok(g) = gui() {
         let _ = g
@@ -1218,7 +1315,11 @@ pub fn size_px(id: u64) -> Result<(u32, u32), String> {
 /// (so a family can be registered up front).
 pub fn register_family(name: u32, faces: [Vec<u8>; 4], paths: [String; 4]) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::RegisterFamily {
+            name,
+            faces: Box::new(faces),
+            paths,
+        });
     }
     gui()?
         .lock()
@@ -1237,7 +1338,7 @@ pub fn register_family(name: u32, faces: [Vec<u8>; 4], paths: [String; 4]) -> Re
 /// thread if needed, like `register_family`.
 pub fn register_installed_family(name: u32, family_name: String) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::RegisterInstalled { name, family_name });
     }
     gui()?
         .lock()
@@ -1251,6 +1352,9 @@ pub fn register_installed_family(name: u32, family_name: String) -> Result<(), S
 /// after every registration sent before it (the proxy is FIFO). Headless there is no
 /// font engine, so this fails, as `cell_size` does.
 pub fn font_info(family: Option<u32>) -> Result<super::FontInfo, String> {
+    if headless_paint() {
+        return offscreen::ask(|reply| offscreen::Request::FontInfo { family, reply });
+    }
     if headless() {
         return Err("gui is headless — no font engine to ask".into());
     }
@@ -1273,7 +1377,7 @@ pub fn font_info(family: Option<u32>) -> Result<super::FontInfo, String> {
 /// thread never started.
 pub fn ligatures(on: bool) -> Result<(), String> {
     if headless() {
-        return Ok(());
+        return headless_send(|| offscreen::Request::Ligatures(on));
     }
     if let Ok(g) = gui() {
         let _ = lock(g).send_event(UserEvent::Ligatures { on });
@@ -2121,6 +2225,30 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     w.renderer.set_ligatures(on);
                     w.window.request_redraw();
                 }
+            }
+            // The window's frame as its paint draws it: the same bled frame, margins and
+            // renderer (ADR-609). The raster forgets the retained frame, so the next paint
+            // repaints whole rather than trusting a canvas the picture may have moved.
+            UserEvent::Capture { id, reply } => {
+                let answer = match self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                    Some(w) => {
+                        let inner = w.window.inner_size();
+                        let (width, height) = (inner.width.max(1), inner.height.max(1));
+                        let margins =
+                            bleed::Margins::of(&w.renderer, width as usize, height as usize);
+                        let frame = w.bleed.frame(&w.frame, margins).to_vec();
+                        let image = offscreen::raster(
+                            &mut w.renderer,
+                            &frame,
+                            width as usize,
+                            height as usize,
+                        );
+                        w.window.request_redraw();
+                        Ok(image)
+                    }
+                    None => Err("gui window not open".to_string()),
+                };
+                let _ = reply.send(answer);
             }
         }
     }

@@ -157,6 +157,49 @@ pub struct FontInfo {
     pub ligatures: bool,
 }
 
+/// A frame as a window paints it, in pixels: what `gui/render-frame` and `gui/capture`
+/// answer (ADR-609). `rgba` is `width * height * 4` bytes, row-major, opaque. The rest
+/// is the geometry the picture was painted with, so a test can find a row or a cell in
+/// it without re-deriving the layout rule: the cell in physical px, the grid in cells,
+/// where the grid's top-left sits and the inset. Plain data, defined here so the
+/// builtins compile without the GUI.
+#[derive(Clone, Debug, Default)]
+pub struct FrameImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub cell: (u32, u32),
+    pub grid: (u16, u16),
+    pub origin: (u32, u32),
+    pub inset: u32,
+}
+
+/// Which font `gui/render-frame` paints with: a family keyword the offscreen painter
+/// knows (the bundled `:mono`, or one registered while headless painting), or an
+/// installed family by its name, resolved as `gui-font-register`'s `:family-name` is.
+#[derive(Clone, Debug)]
+pub enum FontChoice {
+    Registered(u32),
+    Installed(String),
+}
+
+/// What `gui/render-frame` paints a frame AS: the window it stands in for. Every
+/// `None` is the default a window opens with (840×560 at scale 1, the bundled mono at
+/// 15 px, line height 1.4, no inset, the default background).
+#[derive(Clone, Debug, Default)]
+pub struct RenderSpec {
+    /// Physical pixels.
+    pub size: Option<(u32, u32)>,
+    pub font: Option<FontChoice>,
+    pub px: Option<f32>,
+    pub line_height: Option<f32>,
+    pub inset: Option<f32>,
+    pub bg: Option<[u8; 3]>,
+    pub scale: Option<f64>,
+    pub text_aa: Option<TextAa>,
+    pub ligatures: Option<bool>,
+}
+
 /// What `gui-open` can decide about a window only while it is being *built* — as
 /// opposed to the `gui-*!` primitives, which mutate a window that already exists.
 /// One struct rather than a growing positional tail, since every one of these rides
@@ -1082,18 +1125,18 @@ pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    TextAa, bg, busy, cell_size, close, drag_move, drag_resize, draw, focus, font, font_info,
-    fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset, key_repeats,
-    latency, ligatures, line_height, maximize, minimize, next_texture_id, open, register_family,
-    register_installed_family, settle, size, size_px, sound, sound_free, text_aa, text_contrast,
-    texture, texture_free, title,
+    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, focus, font,
+    font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
+    key_repeats, latency, ligatures, line_height, maximize, minimize, next_texture_id, open,
+    register_family, register_installed_family, render_frame, settle, size, size_px, sound,
+    sound_free, text_aa, text_contrast, texture, texture_free, title, window_ids,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    TextAa, bg, busy, cell_size, close, drag_move, drag_resize, draw, focus, font, font_info,
-    fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset, key_repeats,
-    latency, ligatures, line_height, maximize, minimize, next_texture_id, open, register_family,
-    register_installed_family, settle, size, size_px, sound, sound_free, text_aa, text_contrast,
-    texture, texture_free, title,
+    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, focus, font,
+    font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
+    key_repeats, latency, ligatures, line_height, maximize, minimize, next_texture_id, open,
+    register_family, register_installed_family, render_frame, settle, size, size_px, sound,
+    sound_free, text_aa, text_contrast, texture, texture_free, title, window_ids,
 };

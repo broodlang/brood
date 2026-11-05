@@ -128,8 +128,8 @@ impl Bleed {
 
 /// `frame` with the margin pieces of every edge-touching background inserted right after
 /// the op they continue, or `None` when nothing reaches an edge (the frame paints as is,
-/// and nothing was copied). Without a cache: every fragment is bled afresh.
-#[cfg(test)]
+/// and nothing was copied). Without a cache: every fragment is bled afresh — what a
+/// one-off picture of a frame (`offscreen`, ADR-609) wants.
 pub(super) fn edge_bleed(frame: &[Op], m: &Margins) -> Option<Vec<Op>> {
     bleed_ops(frame, m, true, &mut HashMap::new(), &mut HashMap::new())
 }

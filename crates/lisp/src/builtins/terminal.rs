@@ -351,6 +351,30 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["id", "frame"],
         "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), :underline (a rule along the cell bottom), or :hollow (an outline box, the cursor of an unfocused window) — and an optional colour after it (`[:cursor row col style colour]`, a face colour; `style` may be nil), the caret's colour: a block washes its cell in it at 50% and rims it solid, the other shapes are solid in it. A sixth element `{:interval ms :blinks n}` blinks the caret in the window itself, between frames (ADR-469). A `[:ui/memo key deps ops reused?]` marker (a `:fragments?` display's frame) paints its ops in place; a reused one is not parsed again (ADR-470). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it).",
         gui_draw);
+    // Frame capture (ADR-609): what a window paints, as pixels, through the window's own
+    // CPU painter — for a test, an agent, a person reviewing a UI change.
+    primitives.def(
+        "%gui-render-frame",
+        Arity::exact(2),
+        Sig::new(vec![vec_ty, map_ty.union(nil_ty)], map_ty),
+        &["frame", "spec"],
+        "Paint frame (a %gui-draw frame) into memory as a window described by spec would paint it, and return the picture {:width :height :rgba :cell [w h] :grid [cols rows] :origin [x y] :inset px} — :rgba width*height*4 bytes. spec keys (all optional): :width/:height (physical px, 840x560), :font (an installed family's name, or a family keyword the offscreen painter knows), :size (font px, 15), :line-height (1.4), :inset (logical px, 0), :bg (a colour), :scale (1), :text-aa, :ligatures. The window's own CPU painter, layout rule and edge bleed; needs no window or display. Needs --features gui.",
+        gui_render_frame);
+    primitives.def(
+        "%gui-capture",
+        Arity::exact(1),
+        Sig::new(vec![int], map_ty),
+        &["id"],
+        "Window id's current frame painted into memory as the window paints it — the picture map %gui-render-frame returns. Works for a real window and, headless, for a window opened under BROOD_GUI_HEADLESS=paint; a plain headless window has no painter, so that errors. Needs --features gui.",
+        gui_capture);
+    primitives.def(
+        "%gui-windows",
+        Arity::exact(0),
+        Sig::new(vec![], vec_ty),
+        &[],
+        "The ids of the windows open in this runtime, oldest first — empty without --features gui.",
+        gui_windows,
+    );
     // The font seam: a global default cell font (`gui-font!`) and runtime family
     // registration (`gui-font-register`); a face's `:family`/`:italic` then select
     // per-section, within the fixed cell grid. (gui feature; error without it.)

@@ -57,8 +57,8 @@ pub(super) struct FragmentPass {
 }
 
 impl FragmentPass {
-    /// A pass with nothing cached — every fragment parses.
-    #[cfg(test)]
+    /// A pass with nothing cached — every fragment parses: a frame painted once, with no
+    /// window to keep its fragments for (`%gui-render-frame`, ADR-609).
     pub(super) fn empty() -> FragmentPass {
         FragmentPass::over(HashMap::new())
     }
