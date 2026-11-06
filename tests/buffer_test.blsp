@@ -8,7 +8,11 @@
 ;; process); the final :isolated block adds explicit spawn/send/receive coverage
 ;; of the actor shell — and proves a buffer's rope stays inside its process.
 
-(defmodule buffer-test (:use test) (:use-internals editor/buffer) (:use editor/buffer-server))
+(defmodule buffer-test
+  (:use test)
+  (:use-internals editor/buffer)
+  (:use editor/buffer-server)
+  (:use editor/buffer-file))
 
 ;; The buffer-as-log-sink integration test drives a real logger; `log` and
 ;; `gen` (for `call`, to flush the logger's casts before asserting) are

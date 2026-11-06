@@ -268,6 +268,66 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "editor/grammar-install/grammar-identity",
         "ADR-630",
     ),
+    (
+        "editor/buffer/buffer-stamp-file",
+        "editor/buffer-file/buffer-stamp-file",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/eol-decode",
+        "editor/buffer-file/eol-decode",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/eol-encode",
+        "editor/buffer-file/eol-encode",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-eol",
+        "editor/buffer-file/buffer-eol",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/file-text-decode",
+        "editor/buffer-file/file-text-decode",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/file-text-encode",
+        "editor/buffer-file/file-text-encode",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-bom?",
+        "editor/buffer-file/buffer-bom?",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-from-file",
+        "editor/buffer-file/buffer-from-file",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/find-file-buffer",
+        "editor/buffer-file/find-file-buffer",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/save-buffer",
+        "editor/buffer-file/save-buffer",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/revert-buffer",
+        "editor/buffer-file/revert-buffer",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-file-changed?",
+        "editor/buffer-file/buffer-file-changed?",
+        "ADR-630",
+    ),
     // ADR-630 block end
     // ADR-506 — the bare namespace is the language: syntax, a measured core and the
     // built-in kinds. Everything else is qualified by its family.

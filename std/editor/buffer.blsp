@@ -106,183 +106,6 @@ unmodified: `text` is its baseline (`buffer-modified?`).
       (if (get b :file) (str " file=" (get b :file)) "")
       ">")))
 
-(defn buffer-stamp-file (buf)
-  "`buf` with `:file-mtime` set to its file's modification time as it is NOW (nil when
-it has no file, or the file is missing) — the moment the buffer's text and the file
-agreed. `buffer-from-file` and `save-buffer` stamp it; `buffer-file-changed?` reads it.
-
-    (get (editor/buffer/buffer-stamp-file (editor/buffer/make-buffer \"x\")) :file-mtime)   ;=> nil"
-  (let (f (get buf :file))
-    (assoc buf :file-mtime (if (nil? f) nil (file/mtime f)))))
-
-;; ---- line endings ------------------------------------------------------------
-;; A buffer's text always ends its lines with a bare newline: motion, search, a regex's `$`,
-;; RET and every mode see one line ending. A file written with CRLF (Windows) is decoded at
-;; the read and encoded again at the save, so it goes back to disk the way it came; Emacs's
-;; `buffer-file-coding-system` end-of-line part. A file MIXING the two is left alone — read
-;; byte for byte, its stray `\r`s in the text — because no single choice writes it back
-;; unchanged.
-
-(defn eol-decode (text)
-  "`{:text :eol}` for a file's `text`: when every newline in it follows a carriage return
-(and there is one), `:eol :crlf` and the text with each `\\r\\n` made `\\n`; otherwise
-`:eol :lf` and the text untouched — a file that mixes the two included.
-
-    (:eol (editor/buffer/eol-decode \"a\\r\\nb\\r\\n\"))   ;=> :crlf
-    (:eol (editor/buffer/eol-decode \"a\\r\\nb\\n\"))   ;=> :lf
-    (:eol (editor/buffer/eol-decode \"no newline\"))   ;=> :lf"
-  (let (decoded (string/replace text "\r\n" "\n")
-        removed (- (string/length text) (string/length decoded)))
-    (if (= removed 0)
-      {:text text :eol :lf}
-      (let (rope (text/from-string decoded)
-            ;; the line the end is on counts the newlines before it
-            newlines (text/char->line rope (text/length rope)))
-        (if (= newlines removed) {:text decoded :eol :crlf} {:text text :eol :lf})))))
-
-(defn eol-encode (text eol)
-  "`text` as a file with line ending `eol` holds it: each newline a `\\r\\n` for `:crlf`,
-unchanged for `:lf`. The inverse of [[eol-decode]].
-
-    (count (editor/buffer/eol-encode \"a\\nb\\n\" :crlf))   ;=> 6"
-  (if (= eol :crlf) (string/replace text "\n" "\r\n") text))
-
-(defn buffer-eol (buf)
-  "The line ending `buf`'s file is written with: `:crlf` for a file read with CRLF line
-endings ([[eol-decode]]), else `:lf`.
-
-    (editor/buffer/buffer-eol (editor/buffer/make-buffer \"x\"))   ;=> :lf"
-  (or (get buf :eol) :lf))
-
-;; ---- the byte-order mark -------------------------------------------------------
-;; A UTF-8 file may open with U+FEFF, the "signature" (Windows tools write one). It is no
-;; part of the text: Emacs decodes such a file as `utf-8-with-signature`, keeps the mark off
-;; the buffer — so it is neither shown (as `<feff>`) nor moved over, searched or counted in
-;; a column — and writes it back on save. The buffer remembers it as `:bom true`, as it
-;; remembers `:eol :crlf`.
-
-(def- byte-order-mark "\u{feff}")
-
-(defn file-text-decode (text)
-  "`{:text :eol :bom}` for the text a file holds, as a buffer keeps it: a leading byte-order
-mark taken off (`:bom` true when there was one), then the line endings as [[eol-decode]]
-reads them. What `buffer-from-file` and `revert-buffer` do to a file's text, and what
-anything comparing a file to a buffer must do to it too.
-
-    (editor/buffer/file-text-decode \"\\u{feff}a\\r\\nb\\r\\n\")   ;=> {:text \"a\\nb\\n\" :eol :crlf :bom true}
-    (editor/buffer/file-text-decode \"plain\")   ;=> {:text \"plain\" :eol :lf :bom false}"
-  (let (bom (string/starts-with? text byte-order-mark)
-        {:keys [text eol]} (eol-decode (if bom (string/substring text 1) text)))
-    {:text text :eol eol :bom bom}))
-
-(defn file-text-encode (text eol bom)
-  "`text` as a file holds it: its newlines written as `eol` ([[eol-encode]]) and, when
-`bom`, the byte-order mark in front. The inverse of [[file-text-decode]].
-
-    (editor/buffer/file-text-encode \"a\\n\" :crlf true)   ;=> \"\\u{feff}a\\r\\n\""
-  (let (encoded (eol-encode text eol)) (if bom (str byte-order-mark encoded) encoded)))
-
-(defn buffer-bom? (buf)
-  "Whether `buf`'s file is written with a leading byte-order mark — it was read with one
-([[file-text-decode]]); Emacs's `utf-8-with-signature`.
-
-    (editor/buffer/buffer-bom? (editor/buffer/make-buffer \"x\"))   ;=> false"
-  (= true (get buf :bom)))
-
-(defn- buffer-with-file-coding (buf eol bom)
-  "`buf` remembering the line ending and signature its file was read with — a key only for
-what differs from a plain LF file, so a buffer of one carries neither."
-  (let (with-eol (if (= eol :crlf) (assoc buf :eol :crlf) (dissoc buf :eol)))
-    (if bom (assoc with-eol :bom true) (dissoc with-eol :bom))))
-
-(defn buffer-from-file (path &optional contents)
-  "Read the file at `path` into a fresh buffer, with `:file` set to `path` so
-`save-buffer` can write it back, stamped with the file's mtime (`buffer-stamp-file`). A
-file with CRLF line endings is read with bare newlines and remembered as `:eol :crlf`
-([[buffer-eol]]), and one opening with a byte-order mark is read without it and remembered
-as `:bom true` ([[buffer-bom?]]), so the save writes both back.
-
-`contents` is the file's text when the caller has read it already — an editor that reads
-the bytes once to tell a text file from a binary one (`string/bytes->` failing is the
-answer) hands the decoded text here rather than reading the file a second time.
-
-    (editor/buffer/buffer-from-file \"notes.txt\")   ;~> …a buffer named notes.txt holding the file's text, :file set…"
-  (let ({:keys [text eol bom]} (file-text-decode (if (nil? contents) (file/slurp path) contents)))
-    (buffer-stamp-file (buffer-with-file-coding (make-buffer text path path) eol bom))))
-
-(defn find-file-buffer (path)
-  "Open `path` for editing, vim/emacs `find-file` style: its contents if the file
-exists, else a fresh *empty* buffer — either way backed by `path`, so `save-buffer`
-writes it (creating the file for a new path). Visiting a missing path starts an
-unsaved buffer rather than erroring.
-
-    (editor/buffer/find-file-buffer \"new.txt\")   ;~> …an empty buffer backed by new.txt, when no such file exists yet…"
-  (if (file/exists? path) (buffer-from-file path) (make-buffer "" path path)))
-
-(defn save-buffer (buf)
-  "Write `buf`'s text to its `:file` whole (`file/replace`: a crash mid-save leaves the old file),
-with the line ending and byte-order mark it was read with
-([[buffer-eol]], [[buffer-bom?]]); raise if it has none. Returns `buf` stamped with the file's new mtime
-(`buffer-stamp-file`) and unmodified (`mark-buffer-saved`), so a caller that keeps the
-result knows the file and the text agree again.
-
-    (editor/buffer/save-buffer buf)   ;~> buf, stamped and unmodified — after writing its text to its :file"
-  (let (f (get buf :file))
-    (if (nil? f)
-      (error "save-buffer: buffer has no file: " (get buf :name))
-      (do
-        (file/replace f (file-text-encode (buffer-text buf) (buffer-eol buf) (buffer-bom? buf)))
-        (mark-buffer-saved (buffer-stamp-file buf))))))
-
-(defn revert-buffer (buf:buffer &optional contents -> buffer)
-  "`buf` with its file's text read back in — the file as it is NOW, its line ending
-included — as ONE undoable edit, then unmodified and stamped with the file's mtime: a
-single `undo` brings back the text it had, unsaved edits and all (Emacs's `revert-buffer`
-keeps the undo list the same way). What a revert, and an auto-revert picking up another
-writer's change, need so neither costs the history before it. A read-only buffer is
-reverted too, and stays read-only; a file whose text did not change records nothing.
-`contents` is the file's text when the caller has read it already, as for [[buffer-from-file]]:
-an editor whose file is in another encoding decodes it itself. Raises when `buf` has no file
-or the file cannot be read.
-
-    (editor/buffer/revert-buffer buf)   ;~> buf holding its file's text, unmodified — undo gives back what it held"
-  (let (f (or (get buf :file) (error "revert-buffer: buffer has no file: " (get buf :name)))
-        {:keys [text eol bom]} (file-text-decode (if (nil? contents) (file/slurp f) contents))
-        reread (if (= text (buffer-text buf))
-                 buf
-                 ;; through the mutators, so markers, the edit log a held parse is updated
-                 ;; from and the history all see one edit; widened for it — a read-only
-                 ;; buffer's file changes too — and its own step, never merged into typing
-                 (let (open (dissoc (assoc buf :undo-amalgamate false) :editable)
-                       ;; point stays where it was, clamped — not after the new text
-                       replaced (goto-char (replace-region open 0 (buffer-length open) text)
-                                  (math/min (buffer-point buf) (string/length text)))
-                       restored (if (contains? buf :editable)
-                                  (assoc replaced :editable (get buf :editable))
-                                  replaced))
-                   ;; the step's snapshot is of the WIDENED buffer: undo would leave it
-                   ;; writable, so it is the buffer as it was, narrowing and all
-                   (if (get buf :undo-disabled)
-                     restored
-                     (assoc restored :undo (cons (buffer-snapshot buf) (rest (get restored :undo)))))))
-        coded (buffer-with-file-coding reread eol bom))
-    (buffer-stamp-file (mark-buffer-saved coded))))
-
-(defn buffer-file-changed? (buf)
-  "True when the file behind `buf` has been written since the buffer last agreed with it
-— its mtime differs from the `:file-mtime` stamped at the read or the last save — so
-someone else (another editor, a formatter, `git checkout`) changed it. False for a
-buffer with no file, one never stamped, or a file that has since vanished (that is a
-different question). One `stat`; cheap enough to ask on an idle beat.
-
-    (editor/buffer/buffer-file-changed? (editor/buffer/make-buffer \"x\"))   ;=> false"
-  (let (f (get buf :file)
-        stamp (get buf :file-mtime))
-    (if (or (nil? f) (nil? stamp))
-      false
-      (let (now (file/mtime f))
-        (and (not (nil? now)) (not (= now stamp)))))))
-
 ;; ---- reads ------------------------------------------------------------------
 
 (defn buffer-rope (buf)
@@ -2221,6 +2044,29 @@ with, as for [[insert]].
         lo (buffer-clamp 0 length start)
         hi (math/max lo (buffer-clamp 0 length end)))
     (undo-group buf (fn (b) (insert (buffer-delete-range b lo hi) s properties)))))
+
+(defn buffer-replace-text (buf:buffer text:string -> buffer)
+  "`buf` holding `text`, as ONE undoable edit of its own, point where it was (clamped) and
+any narrowing kept: `buf` itself when the text is already `text`. A read-only buffer takes
+it too. What a revert needs, so a file read back costs none of the history before it.
+
+    (editor/buffer/buffer-text (editor/buffer/undo (editor/buffer/buffer-replace-text (editor/buffer/make-buffer \"old\") \"new\")))   ;=> \"old\""
+  (if (= text (buffer-text buf))
+    buf
+    ;; through the mutators, so markers, the edit log a held parse is updated from and the
+    ;; history all see one edit; widened for it, and its own step, never merged into typing
+    (let (open (dissoc (assoc buf :undo-amalgamate false) :editable)
+          ;; point stays where it was, clamped: not after the new text
+          replaced (goto-char (replace-region open 0 (buffer-length open) text)
+                     (math/min (buffer-point buf) (string/length text)))
+          restored (if (contains? buf :editable)
+                     (assoc replaced :editable (get buf :editable))
+                     replaced))
+      ;; the step's snapshot is of the WIDENED buffer: undo would leave it writable, so it
+      ;; is the buffer as it was, narrowing and all
+      (if (get buf :undo-disabled)
+        restored
+        (assoc restored :undo (cons (buffer-snapshot buf) (rest (get restored :undo))))))))
 
 (defn- property-change-range (buf:buffer lo:int width:int -> (tuple int int))
   "`[from to]`: the range `[lo, lo + width)` a property change names, clamped into `buf`."

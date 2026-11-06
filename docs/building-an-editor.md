@@ -90,7 +90,7 @@ The vocabulary you'll use most:
   the model, not the command layer, so no consumer can forget to check. Build a
   generated/`special-mode` buffer (a process list, a help page) with `make-buffer`
   *then* `set-read-only` it — construction never checks the flag.
-- **Files:** `buffer-from-file` (file/slurp, or text you already read) · `save-buffer` (file/spit) · `revert-buffer` (the file read back as one undoable edit) — a CRLF file is held with bare newlines and written back with CRLF (`eol-decode` / `eol-encode`, `buffer-eol`); a file opening with a byte-order mark is held without it and written back with it, Emacs's `utf-8-with-signature` (`file-text-decode` / `file-text-encode`, `buffer-bom?`)
+- **Files** (`editor/buffer-file`)**:** `buffer-from-file` (file/slurp, or text you already read) · `save-buffer` (file/spit) · `revert-buffer` (the file read back as one undoable edit) — a CRLF file is held with bare newlines and written back with CRLF (`eol-decode` / `eol-encode`, `buffer-eol`); a file opening with a byte-order mark is held without it and written back with it, Emacs's `utf-8-with-signature` (`file-text-decode` / `file-text-encode`, `buffer-bom?`)
 
 Because operations are pure, you compose them with `->` and they never surprise
 you with aliasing. A command is just a function `buffer -> buffer`.
