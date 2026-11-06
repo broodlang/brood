@@ -100,6 +100,8 @@ pub(super) fn lint_allow_mask(category: Option<Value>) -> u16 {
         crate::types::check::ctx::SUPPRESS_TRUSTED
     } else if value::symbol_is(k, "constant-condition") {
         crate::types::check::ctx::SUPPRESS_CONSTANT_COND
+    } else if value::symbol_is(k, "list-truthiness") {
+        crate::types::check::ctx::SUPPRESS_LIST_TRUTHINESS
     } else {
         0
     }

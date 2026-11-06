@@ -292,10 +292,13 @@ than the feature would:
 - metadata and reader macros (ADR-150);
 - a character type (ADR-159).
 
-There is also a constraint for B-items: arity clauses do not mix with pattern clauses in
-one `defn`, an `&optional` slot cannot be a pattern, and `:when` does not combine with
-`&optional`/`&`. Each is defensible on its own; together they are a matrix users have to
-look up. Any B-item that touches `fn` heads should state where it leaves this matrix.
+✅ **The `fn`-head matrix is gone (2026-11-06, ADR-619).** Arity clauses did not mix with
+pattern clauses, an `&optional` slot could not be a pattern, and `:when` did not combine with
+`&optional`/`&`. Now every head takes the same slots, clauses run in order, and a shadowed
+clause is a compile error.
+
+✅ **`()` stays `nil` (2026-11-06, ADR-620)**, with a lint for a truthiness test on a value
+that may be a list or another collection (`empty-list-truthiness.md`, option 3).
 
 ### Findings from bedit (2026-09-13) — the display seam, buffers as a directory, and regex speed
 
@@ -501,8 +504,10 @@ needs a Brood-specific form to respect an ADR.
   table, which the run drops on every exit — no completion arity.
 - ✅ **6. Declarative macro argument grammars** (2026-10-24, ADR-434): a pattern clause may
   take `& rest`, so a macro takes one clause per shape plus a catch-all with its own
-  message; no `:hint` syntax was needed. Still open: an error located at the offending
-  sub-form, and moving the prelude's hand-rolled checks onto clauses. Original note: *(shape)*. Racket's `syntax-parse` is the
+  message; no `:hint` syntax was needed. The rest landed 2026-11-06 (ADR-618): a macro's
+  error sits at the call (it used to sit at the enclosing top-level form), and
+  `reflect/error-at` points at the offending sub-form; the prelude's checks use it, and
+  `dotimes`/`dolist` moved onto clauses. Original note: *(shape)*. Racket's `syntax-parse` is the
   best macro-error story in any Lisp; Brood has the philosophy (ADR-152) and the match
   compiler but each prelude macro hand-rolls its checks (`%for-check-binds`). Multi-pattern
   clauses on `defmacro` heads (they exist for `defn`) plus a `:hint` per clause, so a

@@ -261,12 +261,17 @@ simplicity for the user is the priority (ADR-011).
 ```ebnf
 param-list = "(" spec ")" ;   (* a vector here is an error, ADR-149 *)
 
-spec       = { required } [ "&optional" optional { optional } ] [ "&" symbol ] ;
+spec       = { required } [ "&optional" optional { optional } ] [ "&" pattern ] ;
 
-required   = symbol ;
-optional   = symbol | "(" symbol default ")" ;
+required   = pattern ;
+optional   = symbol | "(" pattern default ")" ;
 default    = form ;   (* evaluated only when the argument is omitted *)
 ```
+
+A `pattern` is a plain symbol or any pattern `match` takes (§7.5); a symbol is the
+pattern that matches anything. A clause head is the same `spec`, followed in the body by
+an optional `:when guard`, and a multi-clause `fn` tries its clauses in order, refusing
+one an earlier clause shadows (ADR-619).
 
 **Binding** happens at call time in a fresh function scope, **left to right**, so
 a later `default` may reference an earlier parameter.

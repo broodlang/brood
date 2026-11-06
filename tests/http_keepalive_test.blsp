@@ -89,13 +89,13 @@
       (assert= "ok" (body (http/request-on conn "GET" "/close")))
       (assert= "/again" (body (http/request-on conn "GET" "/again")))
       (assert= 2 (accepted counter))))
-  (test "nothing listening is a :status 0 response, not a raise"
+  (test "nothing listening is a failure, not a raise"
     (let (listener (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port listener)
           _ (tcp/close listener)
           resp (http/request-on (http/connection (str "http://127.0.0.1:" port)) "GET" "/"))
-      (assert= 0 (:status resp))
-      (is (string? (:error resp))))))
+      (is (failure? resp))
+      (is (string? (error-message resp))))))
 
 (describe "tls/connect and ALPN"
   (let ([cert key] (tls/self-signed "localhost"))

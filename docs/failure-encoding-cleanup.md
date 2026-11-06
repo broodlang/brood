@@ -1,10 +1,14 @@
 # One encoding for expected failure — finishing what ADR-310 started
 
-**Status: MOSTLY DONE — scoped and landed 2026-10-27.** Done: "What it would take" steps 1–3
+**Status: DONE (2026-11-06) — scoped and mostly landed 2026-10-27.** Done: "What it would take" steps 1–3
 (the docs, bedit's tutor lesson, and `supervisor/start-child`/`restart-child` and
-`stream/next`, which now return a `failure`). **Still open:** step 4 (a payload on `failure`,
-then `http/request` and `registry-get-json`) and step 5 (the fold short-circuit on vectors and
-ranges). The text below is the scoping as written.
+`stream/next`, which now return a `failure`), and step 4 on 2026-11-06 (ADR-617:
+`failure/with` + `fields`; `http/request`, `fetch`, `post`, `request-on` and
+`registry-get-json` answer with a failure — the table's claim that `request-on` already did
+was wrong, it answered `:status 0` too), and step 5 the same day: the vector and range walks
+stop on a failed accumulator, and so do the counted loops `range_fold_rewrite` writes for a
+`fold` with a literal `fn` (the range loop had no guard either). **Status: DONE.** The text
+below is the scoping as written.
 
 ## The finding
 

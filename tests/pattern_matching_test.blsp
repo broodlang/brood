@@ -256,12 +256,13 @@
     (assert= :neg (fhg-sign -2))
     (assert= :pos (fhg-sign 5))
     (assert= :zero (fhg-sign 0)))
-  ;; ADR-434: a guarded head is a list pattern over the arguments, so `&` is its rest and
-  ;; works; `&optional` has no meaning there and is still refused.
-  (test ":when combined with &optional in one fn is rejected"
-    (is (try
-          (do (reflect/eval '(fn ((r) :when (> r 0) r) ((r &optional y) :bad))) false)
-          (catch e (includes? (str (error-message e)) "guard-dispatched")))))
+  ;; ADR-434/615: a guarded head is a list pattern over the arguments, so `&` is its rest
+  ;; and `&optional` its optional elements.
+  (test ":when combined with &optional in one fn dispatches"
+    (let (f (fn ((r) :when (> r 0) [:pos r]) ((r &optional (y :none)) [:other r y])))
+      (assert= [:pos 3] (f 3))
+      (assert= [:other -1 :none] (f -1))
+      (assert= [:other 3 4] (f 3 4))))
   (test ":when combined with a & rest clause dispatches"
     (let (f (fn ((r) :when (> r 0) [:pos r]) ((& xs) [:rest xs])))
       (assert= [:pos 3] (f 3))

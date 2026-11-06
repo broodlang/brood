@@ -713,6 +713,45 @@ pub(super) fn check_if(
         ));
     }
 
+    // **List-truthiness lint** (ADR-620). The empty list is `nil` (ADR-003), so it is the one
+    // collection whose empty value is falsy: `(if xs …)` on a value that may be a list OR a
+    // vector, map, set or string answers by KIND when the value is empty — false for `()`,
+    // true for `[]`. Generic code over "a collection" is where that bites; `empty?` asks the
+    // question the same way of every kind.
+    //
+    // Positively-known types only, as above: the list must be a member the type names, and
+    // one that can be EMPTY (`pair` and `nil` both — a list known non-empty cannot be the
+    // falsy kind, and the constant-condition lint below speaks for it), and so must the other
+    // collection; `any` admits all of them and says nothing.
+    if !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_LIST_TRUTHINESS)
+        && let Some(ty) = crate::types::check::infer::expr_ty(heap, test, ctx)
+        && !ty.is_known_only_by_exclusion()
+        && ty.contains_tag(crate::types::Tag::Pair)
+        && ty.contains_tag(crate::types::Tag::Nil)
+        && let Some(other) = [
+            crate::types::Tag::Vector,
+            crate::types::Tag::Map,
+            crate::types::Tag::Set,
+            crate::types::Tag::Str,
+        ]
+        .into_iter()
+        .find(|&t| ty.contains_tag(t))
+    {
+        let pos = heap
+            .form_pos_only(test)
+            .or_else(|| heap.form_pos_only(form));
+        out.push((
+            pos,
+            format!(
+                "this tests a value that may be a list or a {} ({ty}) for truthiness — an empty \
+                 list is nil, so falsy, but an empty {} is truthy. Ask `(empty? …)` (or \
+                 `(nil? …)` for absence) so every kind answers alike",
+                other.name(),
+                other.name()
+            ),
+        ));
+    }
+
     // **Constant-condition lint** (ADR-373). Brood's falsy set is exactly `nil` and `false`, so a test
     // whose type admits NEITHER is true every time it runs — the branch is not a branch.
     //

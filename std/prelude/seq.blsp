@@ -805,19 +805,24 @@ iterating for side effects.
 ;; :when has a guard expression. An odd-count suffix silently produces an empty result
 ;; (the missing coll becomes nil), which is almost always a mistake.
 (defn- %for-check-binds (binds)
+  (%for-check-pairs binds binds))
+;; `all` is the whole binding list, which the reader positioned: the place an error points
+;; at, since the offending piece is usually a bare symbol, which carries no position.
+(defn- %for-check-pairs (binds all)
   (cond
     (empty? binds) nil
     (%eq (first binds) :when)
       (if (empty? (rest binds))
-        (error "for: :when at end of bindings has no guard expression")
-        (%for-check-binds (rest (rest binds))))
+        (reflect/error-at all "for: :when at end of bindings has no guard expression")
+        (%for-check-pairs (rest (rest binds)) all))
     ;; `:into coll` is checked by `%for-split-into` (last clause, has a value).
-    (%eq (first binds) :into) (%for-check-binds (rest (rest binds)))
+    (%eq (first binds) :into) (%for-check-pairs (rest (rest binds)) all)
     (empty? (rest binds))
-      (error "for: binding '"
+      (reflect/error-at all
+        "for: binding '"
         (pr-str (first binds))
         "' has no collection — bindings must be paired as (var coll ...)")
-    else (%for-check-binds (rest (rest binds)))))
+    else (%for-check-pairs (rest (rest binds)) all)))
 
 (defmacro for (binds & body)
   "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure. Multiple body forms are evaluated in order and the LAST one is collected (like `let`/`when`/`doseq`).
@@ -865,7 +870,8 @@ A trailing `:into coll` collects with `conj` onto `coll` instead of building a l
     (when (vector? binds)
       (error "fold-for: bindings must be a list, not a vector: write (fold-for (acc init x xs) body)."))
     (when (or (empty? binds) (empty? (rest binds)) (not (symbol? (first binds))))
-      (error "fold-for: the first pair must name the accumulator and its start, got "
+      (reflect/error-at binds
+        "fold-for: the first pair must name the accumulator and its start, got "
         (pr-str binds)
         ". Syntax: (fold-for (acc init x xs :when p) body)"))
     (%for-check-binds (rest (rest binds)))
@@ -891,16 +897,16 @@ A trailing `:into coll` collects with `conj` onto `coll` instead of building a l
 ;; lean iteration primitive: a plain tail-recursive walker, no result list built
 ;; (unlike `doseq`, which routes through `for`/`mapcat`). For effects only.
 (defn- %dotimes-loop (n f i) (when (< i n) (f i) (%dotimes-loop n f (+ i 1))))
-(defmacro dotimes (bind & body)
-  "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`.
+(defmacro dotimes "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`.
 
     (with-out-str (dotimes (i 3) (io/write i)))   ;=> \"012\"
     (dotimes (i 3) i)                             ;=> nil"
-  (if (not (and (pair? bind) (pair? (rest bind))))
-    (error "dotimes: bind must be (var n), got "
-      (pr-str bind)
-      ". Syntax: (dotimes (i n) body...)")
-    `(do (%dotimes-loop ~(second bind) (fn (~(first bind)) ~@body) 0) nil)))
+  (((var n) & body) `(do (%dotimes-loop ~n (fn (~var) ~@body) 0) nil))
+  ((bind & _) (reflect/error-at bind
+                "dotimes: bind must be (var n), got "
+                (pr-str bind)
+                ". Syntax: (dotimes (i n) body...)"))
+  (() (error "dotimes: expected a bind. Syntax: (dotimes (i n) body...)")))
 
 ;; (dolist (x xs) body...) — run `body` for each element of `xs`; returns nil.
 ;; The list-only counterpart to `dotimes`: lean and tail-recursive, no discard
@@ -908,16 +914,16 @@ A trailing `:into coll` collects with `conj` onto `coll` instead of building a l
 ;; for `dolist` for the common "do this for each item" loop.
 (defn- %dolist-loop (xs f)
   (if (nil? xs) nil (do (f (first xs)) (%dolist-loop (rest xs) f))))
-(defmacro dolist (bind & body)
-  "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`.
+(defmacro dolist "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`.
 
     (with-out-str (dolist (x '(1 2 3)) (io/write x)))   ;=> \"123\"
     (dolist (x '(1 2)) x)                               ;=> nil   ; the value is discarded"
-  (if (not (and (pair? bind) (pair? (rest bind))))
-    (error "dolist: bind must be (var coll), got "
-      (pr-str bind)
-      ". Syntax: (dolist (x xs) body...)")
-    `(do (%dolist-loop ~(second bind) (fn (~(first bind)) ~@body)) nil)))
+  (((var coll) & body) `(do (%dolist-loop ~coll (fn (~var) ~@body)) nil))
+  ((bind & _) (reflect/error-at bind
+                "dolist: bind must be (var coll), got "
+                (pr-str bind)
+                ". Syntax: (dolist (x xs) body...)"))
+  (() (error "dolist: expected a bind. Syntax: (dolist (x xs) body...)")))
 
 ;; `bench` moved to the `dev` module (`dev/bench`) with the other diagnostics.
 

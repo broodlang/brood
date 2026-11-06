@@ -74,9 +74,9 @@ or a failure for a platform no release is built for.
   ;; GitHub answers a release download with a redirect to its CDN; `http/fetch` does not
   ;; follow one, so this does, a bounded number of times.
   (let (response (binding (http/*max-response-bytes* *max-download-bytes*) (http/fetch url))
-        status (get response :status))
+        status (if (failure? response) 0 (get response :status)))
     (cond
-      (= status 0) (failure (str "update-brood: " url ": " (get response :error)))
+      (failure? response) (failure "update-brood: " url ": " (error-message response))
       (and (>= status 300) (< status 400))
         (let (location (get (get response :headers) "location"))
           (cond

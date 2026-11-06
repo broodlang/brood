@@ -692,8 +692,9 @@ transitively-closed lock file and puts each dep's source on *load-path*."
 
 (defn- package-http-fetch (url redirects-left)
   (let (resp (http/fetch url)
-        status (get resp :status))
+        status (if (failure? resp) 0 (get resp :status)))
     (cond
+      (failure? resp) (error "package: cannot fetch " url ": " (error-message resp))
       (and (>= status 200) (< status 300)) (get resp :body)
       (and (>= status 300) (< status 400) (> redirects-left 0))
         (let (loc (get (get resp :headers)
@@ -703,7 +704,6 @@ transitively-closed lock file and puts each dep's source on *load-path*."
               url " returned HTTP " status " with no Location header")
             (package-http-fetch loc
               (dec redirects-left))))
-      (= status 0) (error "package: cannot fetch " url ": " (get resp :error))
       else (error "package: fetching " url " returned HTTP " status))))
 
 (defn- package-fetch-bytes (url)
@@ -795,30 +795,35 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
       (str "HTTP " (get resp :status)))))
 
 (defn- registry-get-json (url)
-  "GET `url` and parse its JSON body. Returns `[:ok data]` on 2xx with `data` the decoded
-  JSON OBJECT (every registry endpoint answers one; a body that is not an object is an
-  error like any other, not a map the callers then `get` from), `[:error status message]`
-  on an error status (with the server's `:error` text when present), or `[:error 0 message]`
-  on a transport failure."
+  "GET `url` and parse its JSON body: on 2xx, the decoded JSON OBJECT (every registry
+  endpoint answers one; a body that is not an object is an error like any other, not a map
+  the callers then `get` from). Otherwise a `failure`: one whose fields carry the `:status`
+  for an answer the registry gave (with the server's `:error` text as the message when
+  present), and a plain one when the registry could not be reached."
   (let (resp (http/fetch url)
-        status (get resp :status))
+        status (if (failure? resp) 0 (get resp :status)))
     (cond
-      (= status 0) [:error 0 (str "cannot reach the registry at " url ": " (get resp :error))]
+      (failure? resp) (failure "cannot reach the registry at " url ": " (error-message resp))
       (and (>= status 200) (< status 300))
       ;; a body that is not JSON at all (a proxy's HTML page, a truncated answer) is the
       ;; registry answering badly, an error like the rest — never a raise out of here
         (let (data (try (json/decode (http/body-text resp)) (catch e (failure (error-message e)))))
           (cond
-            (map? data) [:ok data]
+            (map? data) data
             (failure? data)
-              [:error
-                status
-                (str "the registry at " url " answered with no JSON: " (error-message data))]
+              (failure/with {:status status}
+                "the registry at "
+                url
+                " answered with no JSON: "
+                (error-message data))
             else
-              [:error
-                status
-                (str "the registry at " url " answered with a JSON value that is not an object")]))
-      else [:error status (registry-error-text resp)])))
+              (failure/with {:status status}
+                "the registry at " url " answered with a JSON value that is not an object")))
+      else (failure/with {:status status} (registry-error-text resp)))))
+
+(defn- registry-not-found? (answer)
+  ;; whether `registry-get-json` came back with the registry's 404
+  (and (failure? answer) (= (get (fields answer) :status) 404)))
 
 ;; --- the resolver's registry provider (ADR-209) ---------------------------------
 ;; The resolver needs, per package, its versions AND each release's deps. That is ONE
@@ -863,22 +868,24 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
   "Every published release of `name` at `base` as `[{:version V :dependencies [[dep-name
 range]...]} ...]`, in ONE request. An unknown package (404) is nil (the resolver reports it
 as having no versions rather than raising mid-search); any other error raises."
-  (match (registry-get-json (registry-releases-url base name))
-    ([:ok data]
-      (map (or (get data :releases) nil)
-        (fn (release)
-          {:version (get release :version)
-           ;; the release's runtime-version constraint (ADR-209), nil/"" if the
-           ;; release predates it or the registry doesn't serve it — treated as
-           ;; unconstrained, so this stays backward-compatible with old releases.
-           :brood (get release :brood)
-           :dependencies (map (or (get release :dependencies) nil)
-                           (fn (d) [(registry-dep-name name (get d :name)) (get d :version)]))})))
-    ([:error 404 _message] nil)
-    ([:error _status message] (error "package: listing releases of "
-                                (->string name)
-                                " failed: "
-                                message))))
+  (let (data (registry-get-json (registry-releases-url base name)))
+    (cond
+      (registry-not-found? data) nil
+      (failure? data)
+        (error "package: listing releases of "
+          (->string name)
+          " failed: "
+          (error-message data))
+      else
+        (map (or (get data :releases) nil)
+          (fn (release)
+            {:version (get release :version)
+             ;; the release's runtime-version constraint (ADR-209), nil/"" if the
+             ;; release predates it or the registry doesn't serve it — treated as
+             ;; unconstrained, so this stays backward-compatible with old releases.
+             :brood (get release :brood)
+             :dependencies (map (or (get release :dependencies) nil)
+                             (fn (d) [(registry-dep-name name (get d :name)) (get d :version)]))})))))
 
 ;; Thin views over the one-request release list, for callers that want just one slice.
 (defn- registry-list-versions (base name)
@@ -922,43 +929,44 @@ TOFU-pinned signing key, nil for an unsigned package)."
     :deps (package-manifest-deps (path/join target "project.blsp"))))
 
 (defn- registry-fetch-release (root dep base target name version locked-pubkey)
-  (match (registry-get-json (registry-release-url base name version))
-    ([:error 404 _message] (error "package: no registry entry for "
-                             name
-                             " "
-                             version
-                             " (run `nest search "
-                             (->string name)
-                             "` to see what's published)"))
-    ([:error _status message] (error "package: " message))
-    ([:ok meta] (let (checksum (get meta :checksum))
-                  (when (nil? checksum)
-                    (error "package: registry release " name " " version " has no checksum"))
-                  (registry-download-extract root
-                    dep
-                    base
-                    target
-                    name
-                    version
-                    checksum
-                    (get meta :source_url)
-                    (get meta :signature)
-                    (get meta :pubkey)
-                    locked-pubkey)))))
+  (let (meta (registry-get-json (registry-release-url base name version)))
+    (cond
+      (registry-not-found? meta)
+        (error "package: no registry entry for "
+          name
+          " "
+          version
+          " (run `nest search "
+          (->string name)
+          "` to see what's published)")
+      (failure? meta) (error "package: " (error-message meta))
+      else
+        (let (checksum (get meta :checksum))
+          (when (nil? checksum)
+            (error "package: registry release " name " " version " has no checksum"))
+          (registry-download-extract root
+            dep
+            base
+            target
+            name
+            version
+            checksum
+            (get meta :source_url)
+            (get meta :signature)
+            (get meta :pubkey)
+            locked-pubkey)))))
 
 ;; The hive-hosted tarball bytes for a release (root-level layout), erroring on a non-2xx.
 (defn- registry-download-hosted (base name version)
   (let (resp (http/fetch (registry-tarball-url base name version))
-        status (get resp :status))
-    (when (not (and (>= status 200) (< status 300)))
-      ;; the reason, not just the number: the transport's complaint, or the server's text
-      (error "package: downloading "
-        name
-        " "
-        version
-        " failed: "
-        (if (= status 0) (get resp :error) (registry-error-text resp))))
-    (get resp :body)))
+        status (if (failure? resp) 0 (get resp :status)))
+    ;; the reason, not just the number: the transport's complaint, or the server's text
+    (cond
+      (failure? resp)
+        (error "package: downloading " name " " version " failed: " (error-message resp))
+      (not (and (>= status 200) (< status 300)))
+        (error "package: downloading " name " " version " failed: " (registry-error-text resp))
+      else (get resp :body))))
 
 (defn- registry-download-extract
   (root dep
@@ -1088,17 +1096,20 @@ not be asked (unreachable, or answering an error). Backs an app's 'is there an u
     (package/registry-latest-version 'json)   ;~> \"1.4.2\", nil when unpublished, a failure when the registry is down"
   (let (base (registry-base-for nil)
         name-sym (if (symbol? name) name (symbol name)))
-    (match (registry-get-json (registry-releases-url base name-sym))
-      ([:ok data] (fold (or (get data :releases) nil)
-                    nil
-                    (fn (best release)
-                      (let (version (get release :version))
-                        (if (or (nil? best) (version/newer? version best)) version best)))))
-      ([:error 404 _message] nil)
-      ([:error _status message] (failure "package: listing releases of "
-                                  (->string name-sym)
-                                  " failed: "
-                                  message)))))
+    (let (data (registry-get-json (registry-releases-url base name-sym)))
+      (cond
+        (registry-not-found? data) nil
+        (failure? data)
+          (failure "package: listing releases of "
+            (->string name-sym)
+            " failed: "
+            (error-message data))
+        else
+          (fold (or (get data :releases) nil)
+            nil
+            (fn (best release)
+              (let (version (get release :version))
+                (if (or (nil? best) (version/newer? version best)) version best))))))))
 
 (defn registry-enhancers (app)
   "The packages published to the configured registry that ENHANCE application `app` — a list of
@@ -1108,12 +1119,13 @@ when the registry could not be asked (unreachable, or answering an error). The r
 
     (package/registry-enhancers 'bedit)   ;~> ({:name \"bedit-git\" :latest_version \"0.3.1\" :description \"…\" :kind … :enhances …} …)"
   (let (base (registry-base-for nil))
-    (match (registry-get-json (registry-search-url base "" (->string app)))
-      ([:ok data] (or (get data :packages) nil))
-      ([:error _status message] (failure "package: listing the packages that enhance "
-                                  (->string app)
-                                  " failed: "
-                                  message)))))
+    (let (data (registry-get-json (registry-search-url base "" (->string app))))
+      (if (failure? data)
+        (failure "package: listing the packages that enhance "
+          (->string app)
+          " failed: "
+          (error-message data))
+        (or (get data :packages) nil)))))
 
 ;; A runtime install has no lock to pin a signing key in (ADR-212's TOFU), so the install
 ;; directory keeps its own: `.signing-pins.blsp`, `{name pubkey}`. Without it, the user-package
@@ -1177,29 +1189,36 @@ a bad or changed signature is reported, not refused.
 (defn- registry-install-release (base name-sym name-str version dest-dir)
   ;; `registry-install` past the name and version: the release's metadata, its bytes, the
   ;; checksum, the extraction, the signature verdict — a failure at any step answered as one
-  (match (registry-get-json (registry-release-url base name-sym version))
-    ([:error 404 _message] (failure "package: no release " name-str " " version))
-    ([:error _status message] (failure "package: fetching the release "
-                                name-str " " version " failed: " message))
-    ([:ok meta] (let (checksum (get meta :checksum)
-                      bytes (registry-install-bytes base
-                              name-sym
-                              name-str
-                              version
-                              (get meta :source_url)))
-                  (cond
-                    (failure? bytes) bytes
-                    (not (= (hash/sha256-bytes bytes) checksum))
-                      (failure "package: "
-                        name-str
-                        " "
-                        version
-                        " sha256 mismatch — declared "
-                        checksum
-                        ", got "
-                        (hash/sha256-bytes bytes)
-                        " (tampered or corrupted — not installed)")
-                    else (registry-install-extract name-str version checksum bytes meta dest-dir))))))
+  (let (meta (registry-get-json (registry-release-url base name-sym version)))
+    (cond
+      (registry-not-found? meta) (failure "package: no release " name-str " " version)
+      (failure? meta)
+        (failure "package: fetching the release "
+          name-str
+          " "
+          version
+          " failed: "
+          (error-message meta))
+      else
+        (let (checksum (get meta :checksum)
+              bytes (registry-install-bytes base
+                      name-sym
+                      name-str
+                      version
+                      (get meta :source_url)))
+          (cond
+            (failure? bytes) bytes
+            (not (= (hash/sha256-bytes bytes) checksum))
+              (failure "package: "
+                name-str
+                " "
+                version
+                " sha256 mismatch — declared "
+                checksum
+                ", got "
+                (hash/sha256-bytes bytes)
+                " (tampered or corrupted — not installed)")
+            else (registry-install-extract name-str version checksum bytes meta dest-dir))))))
 
 (defn- registry-install-bytes (base name-sym name-str version source-url)
   ;; The release's archive bytes — from its external `:source_url` when it has one (refused
@@ -1911,19 +1930,21 @@ application (`nest search --enhances bedit zig`). Backs `nest search`.
         enhances (plist-get opts :enhances)
         base (registry-base-for (plist-get opts :index))
         url (registry-search-url base term-string enhances))
-    (match (registry-get-json url)
-      ([:error _status message] (error "package: " message))
-      ([:ok data] (let (pkgs (get data :packages))
-                    (if (empty? pkgs)
-                      (io/puts (str "No packages matching \""
-                                 term-string
-                                 "\""
-                                 (if (or (nil? enhances) (= enhances ""))
-                                   ""
-                                   (str " that enhance " enhances))
-                                 "."))
-                      (dolist (p pkgs) (io/puts (registry-search-line p)))))
-        nil))))
+    (let (data (registry-get-json url))
+      (if (failure? data)
+        (error "package: " (error-message data))
+        (do
+          (let (pkgs (get data :packages))
+            (if (empty? pkgs)
+              (io/puts (str "No packages matching \""
+                         term-string
+                         "\""
+                         (if (or (nil? enhances) (= enhances ""))
+                           ""
+                           (str " that enhance " enhances))
+                         "."))
+              (dolist (p pkgs) (io/puts (registry-search-line p)))))
+          nil)))))
 
 ;; --- publish: build a source tarball, then POST it (Bearer-token authed) -----
 
@@ -2211,9 +2232,10 @@ published is refused. Backs `nest publish`.
                {:headers {"Content-Type" "application/gzip"
                           "X-Brood-Publish" meta-header
                           "Authorization" (str "Bearer " token)}})
-        status (get resp :status))
+        status (if (failure? resp) 0 (get resp :status)))
     (cond
-      (= status 0) (error "package: cannot reach the registry at " base ": " (get resp :error))
+      (failure? resp)
+        (error "package: cannot reach the registry at " base ": " (error-message resp))
       (and (>= status 200) (< status 300))
         (io/puts (str "package: published " project/*name* " " project/*version* "."))
       else (error "package: publish failed (HTTP " status "): " (registry-error-text resp)))))

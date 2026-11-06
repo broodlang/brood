@@ -1,0 +1,112 @@
+;; ADR-619: one grammar for every `fn` head, and one dispatch rule. Clauses are tried in
+;; order and the first that matches runs, whether its head is plain names or patterns; a
+;; clause an earlier one shadows is refused when the fn is built. Every head takes the same
+;; slots: required patterns, `&optional` slots (`name`, `(name default)`, `(pattern
+;; default)`), a rest pattern after `&`, and a `:when` guard.
+
+(defmodule fn-heads-test (:use test) (:use fn-heads-macros))
+
+(defn- err-of (src)
+  "The message of the error evaluating `src` raises, or nil if it ran."
+  (check-allow :discarded-catch
+    (try (do (reflect/eval-string src) nil) (catch e (error-message e)))))
+
+(defn- arity-first ((x) [:one x]) ((x &optional y) [:opt x y]) ((x y & more) [:many x y more]))
+
+(defn- mixed ((0) :zero) ((x &optional (y (* x 10))) [x y]) ((x y z & more) [:long more]))
+
+(defn- slot-pattern (x &optional ([p q] [0 0])) [x p q])
+
+(defn- rest-pattern (x & (y z)) [x y z])
+
+(defn- guarded (n) :when (> n 0) [:pos n])
+
+(defn- guarded-pair ([a b]) :when (< a b) [a b])
+
+(defn- guarded-doc (n)
+  "A docstring before the guard."
+  :when (int? n)
+  [:int n])
+
+(describe "clauses are tried in order"
+  (test "an arity clause runs for the counts no earlier clause takes"
+    (assert= [:one 1] (arity-first 1))
+    (assert= [:opt 1 2] (arity-first 1 2))
+    (assert= [:many 1 2 (list 3)] (arity-first 1 2 3)))
+  (test "where two arity clauses overlap, the first wins"
+    ;; ADR-047 ran the clause with the most required parameters, `:second`, for two arguments
+    (let (f (fn ((_a &optional _b) :first) ((_a _b &optional _c) :second)))
+      (assert= :first (f 1 2))
+      (assert= :second (f 1 2 3))))
+  (test "pattern and arity clauses mix in one fn"
+    (assert= :zero (mixed 0))
+    (assert= [2 20] (mixed 2))
+    (assert= [2 3] (mixed 2 3))
+    (assert= [:long (list 4)] (mixed 1 2 3 4))))
+
+(describe "a clause an earlier one shadows is refused"
+  (test "an arity clause whose every count is taken"
+    (is (includes? (err-of "(fn ((x &optional y) :a) ((x) :b))") "can never run"))
+    (is (includes? (err-of "(fn ((& xs) :a) ((x y) :b))") "can never run")))
+  (test "a pattern clause after a clause that takes every call"
+    (is (includes? (err-of "(fn ((n) :any) ((0) :zero))") "can never run"))
+    (is (includes? (err-of "(fn ((x &optional (y 1)) :a) ((x [a b]) :b))") "can never run")))
+  (test "a guarded or non-linear clause takes only some calls, so shadows nothing"
+    (is (nil? (err-of "(fn ((n) :when (> n 0) :pos) ((n) :other))")))
+    (is (nil? (err-of "(fn ((x x) :same) ((x y) :differ))"))))
+  (test "a fn the compile pass never saw is checked when it is built"
+    ;; a macro expanded within the form that defines it expands lazily, so its `fn` reaches
+    ;; the evaluator unlowered and is checked where its arms are built
+    (is (includes? (err-of "(do (defmacro fh-q () '(fn ((x & r) :a) ((x) :b))) ((fh-q) 1))")
+          "can never run"))))
+
+(describe "every head takes the same slots"
+  (test "an &optional slot may be a pattern with a default"
+    (assert= [1 0 0] (slot-pattern 1))
+    (assert= [1 3 4] (slot-pattern 1 [3 4])))
+  (test "a rest may be a pattern"
+    (assert= [1 2 3] (rest-pattern 1 2 3)))
+  (test "a single clause takes a guard, after its docstring too"
+    (assert= [:pos 3] (guarded 3))
+    (assert= :match (get (try (guarded -1) (catch e e)) :kind))
+    (assert= [:int 4] (guarded-doc 4))
+    (assert= "A docstring before the guard." (reflect/doc guarded-doc)))
+  (test "a single clause's guard sees its patterns' names, and a failed guard says which call"
+    (assert= [1 2] (guarded-pair [1 2]))
+    (let (e (try (guarded-pair [2 1]) (catch e e)))
+      (assert= :match (get e :kind))
+      (assert= :fn (get e :context))
+      (assert= (list [2 1]) (get e :value))))
+  (test "match takes &optional in a list pattern, the default seeing earlier names"
+    (assert= [1 11] (match '(1) ((a &optional (b (+ a 10))) [a b])))
+    (assert= [1 2] (match '(1 2) ((a &optional (b (+ a 10))) [a b])))
+    (assert= :longer (match '(1 2 3) ((a &optional b) :fits) (_ :longer)))
+    (assert= [1 nil nil] (match '(1) ((a &optional b & r) [a b r])))
+    (assert= [1 2 (list 3 4)] (match '(1 2 3 4) ((a &optional b & r) [a b r]))))
+  (test "a default runs only when its argument is absent"
+    (assert= "" (with-out-str (mixed 2 3)))
+    (assert= "" (with-out-str (match '(1 2) ((a &optional (b (io/write "d"))) b))))
+    (assert= "d" (with-out-str (match '(1) ((a &optional (b (do (io/write "d") 0))) b))))))
+
+(defmacro local-native () `(fn (a &optional (b (+ a 10))) [a b]))
+(defmacro local-clauses () `(fn ((0) :z) ((a &optional (b (* a 3))) [a b])))
+
+(describe "a macro template's &optional defaults"
+  (test "are references, not binders: hygiene leaves their names alone"
+    (assert= [1 11] ((local-native) 1))
+    (assert= [2 6] ((local-clauses) 2))
+    (assert= :z ((local-clauses) 0)))
+  (test "resolve in the macro's module wherever it expands"
+    (assert= [1 10] (opt-match '(1)))
+    (assert= [1 10] ((opt-clauses) 1))
+    (assert= [1 11] ((opt-native) 1))))
+
+(describe "fn heads across processes"
+  :isolated (test "many processes dispatch the same clauses and defaults at once"
+    (let (me (self)
+          n 8
+          _ (each (range n) (fn (i) (spawn (fn () (send me [i (mixed i) (slot-pattern i)]))))))
+      (each (range n)
+        (fn (_)
+          (receive
+            ([i m s] (do (assert= m (if (= i 0) :zero [i (* i 10)])) (assert= s [i 0 0])))))))))

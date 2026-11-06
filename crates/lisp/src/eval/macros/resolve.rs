@@ -1513,13 +1513,46 @@ fn resolve_match(
         let mut scope = locals.to_vec();
         collect_all_syms(heap, cparts[0], &mut scope);
         let mut cout = Vec::with_capacity(cparts.len());
-        cout.push(cparts[0]); // pattern verbatim
+        // the pattern verbatim but for its `&optional` defaults, which are expressions
+        cout.push(resolve_pattern_defaults(heap, cparts[0], ns_name, &scope));
         for &b in &cparts[1..] {
             cout.push(resolve_walk(heap, b, ns_name, &scope));
         }
         out.push(reuse_or_rebuild(heap, clause, &cparts, cout));
     }
     reuse_or_rebuild(heap, form, items, out)
+}
+
+/// `pattern` with each `&optional` slot's default resolved, at any depth; everything else
+/// verbatim. The defaults see the pattern's own names as bound (`scope`).
+fn resolve_pattern_defaults(
+    heap: &mut Heap,
+    pattern: Value,
+    ns_name: &str,
+    scope: &[value::Symbol],
+) -> Value {
+    let Some(items) = heap.list_items(pattern) else {
+        return pattern;
+    };
+    let mut optional = false;
+    let mut out = Vec::with_capacity(items.len());
+    for &it in &items {
+        match it.unpack() {
+            ValueRef::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) => optional = true,
+            ValueRef::Sym(s) if value::symbol_is(s, kw::AMP) => optional = false,
+            _ => {}
+        }
+        let slot = heap.list_items(it);
+        out.push(match slot.as_deref() {
+            Some(&[pat, default]) if optional => {
+                let pat = resolve_pattern_defaults(heap, pat, ns_name, scope);
+                let default = resolve_walk(heap, default, ns_name, scope);
+                rebuild_list(heap, it, vec![pat, default])
+            }
+            _ => resolve_pattern_defaults(heap, it, ns_name, scope),
+        });
+    }
+    reuse_or_rebuild(heap, pattern, &items, out)
 }
 
 /// Resolve every element of a list and rebuild (the fallback for binder forms whose
@@ -1650,14 +1683,27 @@ fn collect_param_syms(heap: &Heap, params: Value, out: &mut Vec<value::Symbol>) 
 }
 
 /// Collect every symbol appearing anywhere in `v` (used to over-approximate a
-/// pattern's bound names — see `resolve_match`).
+/// pattern's bound names — see `resolve_match`) — except an `&optional` slot's default,
+/// `(p default)`, which is an expression: its names are references, and taken for binders
+/// they were never qualified (ADR-619).
 pub(super) fn collect_all_syms(heap: &Heap, v: Value, out: &mut Vec<value::Symbol>) {
     match v.unpack() {
         ValueRef::Sym(s) => out.push(s),
         ValueRef::Pair(_) => {
             if let Some(items) = heap.list_items(v) {
+                let mut optional = false;
                 for it in items {
-                    collect_all_syms(heap, it, out);
+                    match it.unpack() {
+                        ValueRef::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) => {
+                            optional = true
+                        }
+                        ValueRef::Sym(s) if value::symbol_is(s, kw::AMP) => optional = false,
+                        _ => {}
+                    }
+                    match heap.list_items(it).as_deref() {
+                        Some(&[pat, _default]) if optional => collect_all_syms(heap, pat, out),
+                        _ => collect_all_syms(heap, it, out),
+                    }
                 }
             }
         }

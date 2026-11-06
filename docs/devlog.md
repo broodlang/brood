@@ -5130,3 +5130,52 @@ says Brood is its own language. Then the two rough edges the rows exposed: `cond
 other order now names the swap (a literal in the predicate slot is refused when the form expands;
 any other non-function raises before the first test, instead of `cannot call non-function` with a
 hint about `f(x)` syntax), and `->>`/`some->>`/`cond->>` carry a hint naming `->`, `$` and `cond->`.
+
+2026-11-06 (ADR-617). A failure carries fields: `(failure/with {:status 404} "not found: " p)`,
+read back with `fields` (already the way into a record). The kernel change is one optional
+argument on `%failure` and a `%failure-fields` accessor; storage, printing, equality, messages
+and the wire format already took any number of fields. On top of it the last two non-failure
+encodings went: the HTTP clients (`request`, `fetch`, `post`, `request-on`) answer a transport
+failure with a `failure` instead of a `{:status 0 :error …}` response — `failure-encoding-
+cleanup.md` said `request-on` already did; it did not — and `registry-get-json` answers the
+object or a failure carrying `:status`. `nest check --strict` then found 18 test reads and one
+`package.blsp` read of a response that never asked whether there was one.
+
+2026-11-06 (ADR-618). A macro's error is placed at the call. ADR-434 said it already was; it was
+at the enclosing TOP-LEVEL form, because the compile pass expands the whole form first and the
+expander's error had no position. `macroexpand` now roots the call and places an unpositioned
+error there, which also covers an expansion the macro built (`match` → `match*`). `(reflect/
+error-at form & parts)` places it at a sub-form, through an `:at` entry `%raise` strips; the
+prelude's binding/clause checks use it, and `dotimes`/`dolist` moved onto pattern clauses. A
+first cut also defaulted the position inside `macroexpand_1`; sabotaging it left every test
+green (the loop already covered it), so it came out.
+
+2026-11-06 (ADR-315, finished). A fold stops on a failed accumulator whatever it folds. Only
+the list walk had the guard: a vector or range fold returned the failure but ran every step
+after it, side effects included. The vector and range walks carry it now, and so do the counted
+loops `range_fold_rewrite` writes for a `fold` with a literal `fn` — which is why the first test
+still printed `1234` for a range after the walks were fixed. Guard: `failure_mechanisms_test`
+"no step runs after the failure", with a literal and a named reducer over a list, a vector and
+both directions of range (each guard sabotaged red).
+
+2026-11-06 (ADR-619). One grammar for every `fn` head, one dispatch rule. Clauses run in
+order, first match wins, arity and pattern clauses alike (`select_arm_by` is a `find` now, not
+ADR-047's most-specific `max_by_key`), and a clause an earlier one shadows is refused — checked
+in `lower_fn` and where arity arms are built, because a `fn` from a macro expanded inside its
+own defining form never meets the compile pass (the first test of that site used `reflect/eval`,
+which does, and passed with the check sabotaged). Every head takes `&optional` slots (`name`,
+`(name default)`, `(pattern default)`), a pattern rest and a `:when` guard; `match`'s list
+patterns take `&optional` too, a default computed once as a value rather than by duplicating
+the success branch. Before flipping the rule a temporary audit compared both choices for every
+arity-only `fn` in std, tests, examples and bedit: none differed. Found on the way: hygiene
+renamed the names inside an `&optional` default in a macro template as if they were binders
+(`` `(fn (a &optional (b (+ a 10))) …) `` raised `unbound symbol: +__733`, before this change
+too), and resolution left a default's module-private call unqualified. And a single clause's
+`:when` had never been a guard at runtime — the keyword and the guard ran as body forms — though
+the checker read it as one; it now wraps the native body, so the checker keeps the parameters
+(the first cut lowered it to `match*`, and `domains::a_clause_guard_constrains_the_argument`
+caught the lost domain).
+
+2026-11-06 (ADR-620). `()` stays `nil`. The checker flags a truthiness test whose type admits a
+possibly-empty list beside a vector, map, set or string — the only place the asymmetry answers
+differently by kind. No finding across std, tests, examples or bedit.

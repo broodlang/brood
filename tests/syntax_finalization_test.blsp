@@ -132,12 +132,14 @@
     (assert= (try (throw :x) (catch e e)) :x)
     (assert= (try (throw :x) (catch e (str "got") :recovered)) :recovered)))
 
-(describe "ADR-152: &optional does not mix with pattern dispatch"
-  (test "an &optional marker in a pattern-dispatched fn is rejected"
-    ;; Was: matched as a literal symbol, so the clause silently stopped being
-    ;; variadic and `(f 1 2)` died with a `:match` error.
-    (is (includes? (err-of "(defn bad ((x) [:one x]) ((x &optional (y 5)) [:two x y]))")
-          "pattern-dispatched fn")))
+(describe "ADR-619: one head grammar for every clause"
+  (test "an &optional marker in a pattern-dispatched fn takes optional arguments"
+    ;; ADR-152 refused it (it was matched as a literal symbol); since ADR-619 a pattern
+    ;; clause's head takes the same `&optional` an arity clause does.
+    (defn- sf-opt ((0) :zero) ((x &optional (y 5)) [:two x y]))
+    (assert= (sf-opt 0) :zero)
+    (assert= (sf-opt 1) [:two 1 5])
+    (assert= (sf-opt 1 2) [:two 1 2]))
 
   (test "arity clauses with &optional / & rest still work"
     (defn- sf-g ((x) :one) ((x &optional y) [:two x y]))
@@ -149,13 +151,14 @@
     (assert= (sf-cnt 1) 1)
     (assert= (sf-cnt 1 2 3) 3))
 
-  (test "arity precedence is order-independent (exact beats optional beats rest)"
-    ;; Before the fewest-optionals tie-break, the winner depended on which clause
-    ;; was written last.
+  (test "clauses are tried in order, and a clause an earlier one shadows is refused (ADR-619)"
+    ;; ADR-047 picked the most specific arm whatever the order; first-match plus refusing a
+    ;; dead clause keeps order from deciding silently, with one rule for every fn.
     (defn- sf-a ((x) :exact) ((x &optional y) :opt))
-    (defn- sf-b ((x &optional y) :opt) ((x) :exact))
     (assert= (sf-a 1) :exact)
-    (assert= (sf-b 1) :exact)
+    (assert= (sf-a 1 2) :opt)
+    (is (includes? (err-of "(defn sf-b ((x &optional y) :opt) ((x) :exact))") "can never run"))
+    (is (includes? (err-of "(defn sf-d ((x & r) :rest) ((x y) :two))") "can never run"))
     (defn- sf-c ((x) :exact) ((x & r) :rest))
     (assert= (sf-c 1) :exact)
     (assert= (sf-c 1 2) :rest))

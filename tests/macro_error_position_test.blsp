@@ -1,0 +1,66 @@
+;; ADR-618: a macro's error is placed where the problem is. An expander that raises points at
+;; the macro call — never at the enclosing top-level form, where the compile pass used to put
+;; it — and `reflect/error-at` lets the macro point at the sub-form it is complaining about.
+;; An expansion the macro BUILT (`match` → `match*`) has no reader position, so its error falls
+;; back to the call the user wrote.
+
+(defmodule macro-error-position-test (:use test))
+
+(defn- where (src)
+  "`[line col message]` of the error evaluating `src` raises, or nil if it ran."
+  (check-allow :discarded-catch
+    (try
+      (do (reflect/eval-string src) nil)
+      (catch e [(get e :line) (get e :col) (error-message e)]))))
+
+(defn- at (found)
+  "The `[line col]` of a `where` result."
+  [(nth found 0) (nth found 1)])
+
+(defmacro needs-pair (form)
+  "A two-element list, or an error at it."
+  (if (and (pair? form) (= (count form) 2))
+    `(quote ~form)
+    (reflect/error-at form "needs-pair: expected (a b), got " (pr-str form))))
+
+(describe "a macro's error is located at the call"
+  (test "a prelude macro's check points at the call, not the top-level form"
+    (assert= (at (where "(do 1\n  (dotimes))")) [2 3]))
+  (test "an expansion the macro built falls back to the call"
+    (assert= (at (where "(do 1\n  (match 1\n    x 1))")) [2 3])))
+
+(describe "reflect/error-at"
+  (test "places a macro's error at the offending sub-form"
+    (let ([line col msg] (where "(do 1\n  (macro-error-position-test/needs-pair\n     (a b c)))"))
+      (assert= [line col] [3 6])
+      (is (includes? msg "needs-pair: expected (a b)"))))
+  (test "a sub-form with no position leaves the error at the call"
+    (assert= (at (where "(do 1\n  (macro-error-position-test/needs-pair x))")) [2 3]))
+  (test "the place is not part of what the handler is handed"
+    (let (e (try (reflect/error-at '(a) "boom") (catch e e)))
+      (assert= :error (get e :kind))
+      (assert= "boom" (get e :message))
+      (refute (contains? e :at))))
+  (test "the prelude's binding checks point at the binding list"
+    (assert= (at (where "(do 1\n  (dotimes (i) i))")) [2 12])
+    (assert= (at (where "(do 1\n  (for (x [1]\n         y) x))")) [2 8])
+    (assert= (at (where "(do 1\n  (binding (*a*\n    1 *b*) 1))")) [2 12])
+    (assert= (at (where "(match 1\n  (x 1)\n    (y 2))")) [3 5]))
+  (test "dotimes and dolist still run on a well-formed bind"
+    (assert= "012" (with-out-str (dotimes (i 3) (io/write i))))
+    (assert= "ab" (with-out-str (dolist (s '("a" "b")) (io/write s))))))
+
+(describe "macro error positions across processes"
+  :isolated (test "many processes locate the same macro error independently"
+    (let (me (self)
+          n 8
+          _ (each (range n)
+              (fn (i)
+                (spawn (fn ()
+                         (send me
+                           [:at
+                             i
+                             (at (where (str "(do "
+                                          i
+                                          "\n  (macro-error-position-test/needs-pair\n     (a b c)))")))]))))))
+      (each (range n) (fn (_) (receive ([:at _ pos] (assert= pos [3 6]))))))))

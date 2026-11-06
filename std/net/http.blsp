@@ -802,15 +802,16 @@ any header carries a CR or LF (request splitting).
     ;; fd-exhaustion DoS for any process that fetches untrusted URLs in a loop.
     (tcp/close sock)
     (if (= (first result) :error)
-      {:status 0 :error (second result) :headers {} :body #b""}
+      (failure (second result))
       (parse-response (second result)))))
 
 (defn request (method url &optional (opts {}))
   "Make an HTTP/1.0 request: `method` (e.g. \"GET\"/\"POST\"), `url` (http or https),
 and `opts` `{:headers <name→value map> :body <string|bytes|iolist>}`. Always
 returns a response map `{:status :headers :body}` — `:body` is a byte-faithful
-`bytes` value (`(body-text resp)` decodes a text body); a transport failure
-yields `{:status 0 :error msg :headers {} :body #b\"\"}`. Adds Host / User-Agent /
+`bytes` value (`(body-text resp)` decodes a text body) — whatever the status; a
+transport failure (no connection, a dropped read, a timeout) is a `failure` whose
+message says why, since no response exists to answer with. Adds Host / User-Agent /
 Connection: close, and (with a body) Content-Length as the body's byte count —
 each overridable via `:headers`. Over `https://`, `opts` may also carry `:ca` —
 a PEM certificate replacing the Mozilla roots as the trust anchor (private CAs,
@@ -831,8 +832,8 @@ response); the root process counts."
         ;; the mode goes in with it.
         ;; A connection that cannot be made — nothing listening, a name that does not
         ;; resolve, a TLS handshake refused — is a TRANSPORT failure like a dropped read,
-        ;; so it answers `:status 0` as the docstring promises (and `request-on` already
-        ;; did). `tcp/connect` raises it, and it used to escape from here (ADR-559).
+        ;; so it answers a `failure` as the docstring promises. `tcp/connect` raises it,
+        ;; and it used to escape from here (ADR-559).
         sock (try
                (if (= (/get u :scheme) "https")
                  (tls/request (/get u :host) (/get u :port) [head body-bytes] (/get opts :ca) true)
@@ -843,15 +844,13 @@ response); the root process counts."
                      (do (tcp/set-binary s true) (tcp/send s [head body-bytes]) s)
                      (catch e (do (tcp/close s) (throw e))))))
                (catch e (failure (error-message e)))))
-    (if (failure? sock)
-      {:status 0 :error (error-message sock) :headers {} :body #b""}
-      (http-collect-response sock))))
+    (if (failure? sock) sock (http-collect-response sock))))
 
 (defn fetch (url &optional (opts {}))
   "GET `url` (http or https) — `request` with method \"GET\". `opts` may carry a
 `:headers` map. Returns `{:status :headers :body}` with `:body` a byte-faithful
-`bytes` value — `(body-text resp)` decodes a text body (`:status 0` + `:error` on
-a transport failure). Must run in a process.
+`bytes` value — `(body-text resp)` decodes a text body (a `failure` on a transport
+failure). Must run in a process.
 
     (http/fetch \"https://example.com/\")   ;~> {:status 200 :headers {…} :body #b\"<!doctype html>…\"}"
   (request "GET" url opts))
@@ -1035,10 +1034,7 @@ nothing but its close.
                                                       [:http-response
                                                         ref
                                                         (if (failure? result)
-                                                          {:status 0
-                                                           :error (error-message result)
-                                                           :headers {}
-                                                           :body #b""}
+                                                          result
                                                           (:response result))])
                                                     (http-connection-loop u
                                                       opts
@@ -1069,8 +1065,8 @@ process that made it does.
 
 (defn request-on (conn method target &optional (opts {}))
   "Send `method` `target` (a path, with `?query`) on the `connection` `conn` and return the
-response map `{:status :headers :body}` (`:body` bytes); a transport failure is `:status 0`
-with `:error`, as for `request`. `opts`: `:headers` (merged over Host, User-Agent and
+response map `{:status :headers :body}` (`:body` bytes); a transport failure is a `failure`,
+as for `request`. `opts`: `:headers` (merged over Host, User-Agent and
 `Connection: keep-alive`) and `:body`.
 
     (http/request-on conn \"POST\" \"/v1/items\" {:body \"{}\" :headers {\"Content-Type\" \"application/json\"}})
@@ -1080,7 +1076,7 @@ with `:error`, as for `request`. `opts`: `:headers` (merged over Host, User-Agen
     (receive
       ([:http-response ^ref resp] resp)
       (after (* 3 *http-connection-timeout-ms*)
-        {:status 0 :error "http: the connection did not answer" :headers {} :body #b""}))))
+        (failure "http: the connection did not answer")))))
 
 (defn close-connection (conn)
   "Close the `connection` `conn` and its socket. Returns once it has.

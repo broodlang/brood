@@ -49,7 +49,7 @@ const PIPELINE_HEADS: [&str; 21] = [
     "empty?",
     "first",
     "rest",
-    "type-of",
+    "failure?",
 ];
 
 /// [`PIPELINE_HEADS`] interned, once per process (symbols are process-global).
@@ -496,9 +496,11 @@ fn form_has_range_fold(heap: &Heap, form: Value) -> bool {
 ///
 /// ```text
 /// (let (B (%range-bounds r) LO (nth B 0) HI (nth B 1) STEP (nth B 2))
-///   (letrec (L (fn (I A) (if (if (> STEP 0) (>= I HI) (<= I HI))
+///   (letrec (L (fn (I A) (if (failure? A)
 ///                          A
-///                          (L (+ I STEP) (let (acc_name A elem_name I) body…)))))
+///                          (if (if (> STEP 0) (>= I HI) (<= I HI))
+///                            A
+///                            (L (+ I STEP) (let (acc_name A elem_name I) body…))))))
 ///     (L LO init)))
 /// ```
 ///
@@ -539,7 +541,7 @@ fn counted_range_loop(
     }
     let step_form = heap.list(step_body);
     let recur = heap.list(vec![loop_name, next_i, step_form]);
-    let branch = heap.list(vec![value::sym(kw::IF), done, acc, recur]);
+    let branch = stop_on_failure(heap, acc, done, recur);
     let loop_params = heap.list(vec![i, acc]);
     let loop_fn = heap.list(vec![value::sym(kw::FN), loop_params, branch]);
     let loop_binds = heap.list(vec![loop_name, loop_fn]);
@@ -551,6 +553,17 @@ fn counted_range_loop(
     let nth2 = heap.list(vec![value::sym("nth"), bounds, Value::int(2)]);
     let b_binds = heap.list(vec![bounds, get_bounds, lo, nth0, hi, nth1, step, nth2]);
     heap.list(vec![value::sym(kw::LET), b_binds, letrec])
+}
+
+/// `(if (failure? acc) acc (if done acc recur))`: each loop's step, which stops
+/// once the accumulator is a failure (ADR-315), as `fold`'s own walks do.
+fn stop_on_failure(heap: &mut Heap, acc: Value, done: Value, recur: Value) -> Value {
+    // `failure?`, not `(= (type-of acc) :failure)`: the predicate lowers to one tag test
+    // (`PrimOp1::TypeIs`), where the spelled-out compare reads the type as a keyword and
+    // compares it — +2-4% on `nqueens`, whose `reduce` over a range is this loop.
+    let failed = heap.list(vec![value::sym("failure?"), acc]);
+    let inner = heap.list(vec![value::sym(kw::IF), done, acc, recur]);
+    heap.list(vec![value::sym(kw::IF), failed, acc, inner])
 }
 
 /// The counted loop over the vector bound to `r`: `(nth r i)` per element, `count` once.
@@ -583,7 +596,7 @@ fn counted_vector_loop(
     }
     let step_form = heap.list(step_body);
     let recur = heap.list(vec![loop_name, next_i, step_form]);
-    let branch = heap.list(vec![value::sym(kw::IF), done, acc, recur]);
+    let branch = stop_on_failure(heap, acc, done, recur);
     let loop_params = heap.list(vec![i, acc]);
     let loop_fn = heap.list(vec![value::sym(kw::FN), loop_params, branch]);
     let loop_binds = heap.list(vec![loop_name, loop_fn]);
@@ -607,8 +620,6 @@ fn list_loop(
     let loop_name = value::gensym("list-loop");
     let xs = value::gensym("list-xs");
     let acc = value::gensym("list-acc");
-    let ty = heap.list(vec![value::sym("type-of"), acc]);
-    let failed = heap.list(vec![value::sym("="), ty, value::kw("failure")]);
     let done = heap.list(vec![value::sym("empty?"), xs]);
     let next_xs = heap.list(vec![value::sym("rest"), xs]);
     let elem = heap.list(vec![value::sym("first"), xs]);
@@ -626,8 +637,7 @@ fn list_loop(
     }
     let step_form = heap.list(step_body);
     let recur = heap.list(vec![loop_name, next_xs, step_form]);
-    let inner = heap.list(vec![value::sym(kw::IF), done, acc, recur]);
-    let branch = heap.list(vec![value::sym(kw::IF), failed, acc, inner]);
+    let branch = stop_on_failure(heap, acc, done, recur);
     let loop_params = heap.list(vec![xs, acc]);
     let loop_fn = heap.list(vec![value::sym(kw::FN), loop_params, branch]);
     let loop_binds = heap.list(vec![loop_name, loop_fn]);

@@ -90,16 +90,31 @@
     (assert= (reduce [1 2 3] 0 +) 6))
 
   (test "on every collection kind, not just the list path"
-    ;; `fold` dispatches a vector to `%vector-fold-span` and a range to `%range-fold-span`, both
-    ;; Rust, and only the list path carries the guard. They still answer with the failure
-    ;; because `conj` is itself built on `fold` and short-circuits — they run the remaining
-    ;; steps against a failed accumulator rather than stopping, which costs work but never
-    ;; the answer.
+    ;; `fold` dispatches a vector and a range to their own walks; each carries the guard, as
+    ;; the list path does (the test after this one counts the steps).
     (letrec (step (fn (acc s) (with (n (string/->number s)) (conj acc n))))
       (assert= (error-message (reduce '("1" "q" "2") '() step))
         "string/->number: not a number: \"q\"")
       (assert= (error-message (reduce ["1" "q" "2"] '() step))
         "string/->number: not a number: \"q\"")))
+
+  (test "no step runs after the failure, on a list, a vector or a range"
+    ;; each step writes its item, and the step for 2 fails: nothing after it may run. A
+    ;; literal `fn` is rewritten into a counted loop per kind (`range_fold_rewrite`); a
+    ;; reducer passed by name takes `fold`'s own walks — both must stop.
+    (letrec (step (fn (acc x) (do (io/write x) (if (= x 2) (failure "two") acc)))
+             literal (fn (coll)
+                       (with-out-str (fold coll
+                                       0
+                                       (fn (acc x)
+                                         (do (io/write x) (if (= x 2) (failure "two") acc))))))
+             named (fn (coll) (with-out-str (fold coll 0 step))))
+      (each ['(1 2 3 4) [1 2 3 4] (range 1 5)]
+        (fn (coll)
+          (assert= (literal coll) "12")
+          (assert= (named coll) "12")))
+      (assert= (literal (range 4 0 -1)) "432")
+      (assert= (named (range 4 0 -1)) "432")))
 
   (test "ADR-312's exemplar now answers, where it used to raise"
     ;; `(calc "1 q 2")` raised `conj: not a collection` — the fold fed the failure back as
@@ -161,6 +176,39 @@
           _ (each (range n)
               (fn (i) (spawn (fn () (send me (failure? (with (v (string/->number "q")) (+ i v)))))))))
       (assert= (count (map (range n) (fn (_) (receive (ok ok))))) n))))
+
+;; ADR-617: a failure carries fields beside its message, so a caller branches on WHICH
+;; failure it got (an HTTP status) without parsing the text.
+(def- *shared-failure* (failure/with {:status 503} "down"))
+
+(describe "ADR-617: a failure carries fields"
+  (test "failure/with puts the fields beside the message, and fields reads them back"
+    (let (f (failure/with {:status 404 :path "/x"} "not found: " "/x"))
+      (is (failure? f))
+      (assert= (error-message f) "not found: /x")
+      (assert= (fields f) {:message "not found: /x" :status 404 :path "/x"})))
+  (test "a plain failure's fields are its message"
+    (assert= (fields (failure "no" "pe")) {:message "nope"}))
+  (test "the fields may not name :message"
+    (is (includes? (error-message (try (failure/with {:message "x"} "y") (catch e e)))
+          "may not name :message")))
+  (test "two failures with the same fields are equal, and different fields are not"
+    (assert= (failure/with {:status 404} "a") (failure/with {:status 404} "a"))
+    (refute (= (failure/with {:status 404} "a") (failure/with {:status 500} "a"))))
+  (test "the fields survive a send, and many processes fan their failures in"
+    (let (me (self)
+          n 8
+          _ (each (range n)
+              (fn (i) (spawn (fn () (send me (failure/with {:status i} "boom " i))))))
+          got (map (range n) (fn (_) (receive (f f)))))
+      (is (every? got failure?))
+      (assert= (into #{} (map got (fn (f) (get (fields f) :status)))) (into #{} (range n)))))
+  (test "a failure built in a shared global reads the same in every process"
+    (let (me (self)
+          n 4
+          _ (each (range n) (fn (_) (spawn (fn () (send me (fields *shared-failure*)))))))
+      (each (range n)
+        (fn (_) (receive (fs (assert= fs {:message "down" :status 503}))))))))
 
 ;; ---- the checker side -------------------------------------------------------------
 

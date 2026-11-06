@@ -38,9 +38,11 @@ macro's own message."
     (assert= [:plain 1] (with-fallback 1)))
   (test "no clause matching is still a match error"
     (is (check-allow :discarded-catch (try (do (apply tagged []) false) (catch _ true)))))
-  (test "an &optional in a pattern clause is still refused"
-    (is (includes? (err-of "(defn bad-opt ((0) :zero) ((x &optional y) [x y]))")
-          "`&optional` in the clause"))))
+  (test "an &optional in a pattern clause takes optional arguments (ADR-619)"
+    (let (f (fn ((0) :zero) ((x &optional y) [x y])))
+      (assert= :zero (f 0))
+      (assert= [1 nil] (f 1))
+      (assert= [1 2] (f 1 2)))))
 
 (describe "a macro with one clause per shape"
   (test "the matching clause expands"

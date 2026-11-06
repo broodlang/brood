@@ -11,6 +11,11 @@
 
 (purge-stale-temp "brood-http-")
 
+;; A client call's response, or a failed test: since ADR-617 a transport failure comes back as a
+;; `failure` rather than a `:status 0` response, so a test that expects an answer says so here.
+(defn- answered (resp)
+  (if (failure? resp) (error "http-test: no response: " (error-message resp)) resp))
+
 (defn- served (r)
   "`r` as the `[port …]` vector it should be, or a failed test — the loopback helpers answer
   `:timeout | vector`, and a `:timeout` means the exchange never happened."
@@ -357,17 +362,18 @@
         (tcp/close c)
         (tcp/close ls)))))
 
-;; ADR-559: the one-shot client promised `:status 0` for a transport failure, but a connection
+;; ADR-559: the one-shot client promised a transport failure as a value, but a connection
 ;; that could not be made raised out of `tcp/connect` — so a registry that was down threw past
-;; the package client's status checks instead of answering why.
-(describe "http: a connection that cannot be made is a :status 0 response, not a raise"
+;; the package client's status checks instead of answering why. Since ADR-617 that value is a
+;; `failure`, not a `:status 0` response.
+(describe "http: a connection that cannot be made is a failure, not a raise"
   (test "nothing listening"
     (let (listener (tcp/listen "127.0.0.1" 0)
           port (tcp/local-port listener)
           _ (tcp/close listener)
           response (http/fetch (str "http://127.0.0.1:" port "/")))
-      (assert= (:status response) 0)
-      (is (includes? (:error response) "Connection refused")))))
+      (is (failure? response))
+      (is (includes? (error-message response) "Connection refused")))))
 
 (describe "http: a binary request body survives byte-faithfully"
   ;; read-request reads in binary mode, so a POST body containing bytes that
@@ -413,7 +419,7 @@
         (dotimes (i n)
           (spawn (do
                    (let (path (str "/" i)
-                         resp (fetch (str "http://127.0.0.1:" port path)))
+                         resp (answered (fetch (str "http://127.0.0.1:" port path))))
                      (send me [:done (get resp :status) (body-text resp)])))))
         ;; Fan-in: every client reports a 200 whose body is its own requested path.
         (dotimes (_ n)
@@ -452,9 +458,9 @@
                            "|"
                            (get (get req :headers) "x-token"))))))))
       (let (port (receive ([:port p] p) (after test/*wait-ms* :timeout)))
-        (let (resp (post (str "http://127.0.0.1:" port "/act")
-                     "{\"a\":1}"
-                     {:headers {"X-Token" "secret" "Content-Type" "application/json"}}))
+        (let (resp (answered (post (str "http://127.0.0.1:" port "/act")
+                               "{\"a\":1}"
+                               {:headers {"X-Token" "secret" "Content-Type" "application/json"}})))
           (assert= (get resp :status) 200)
           ;; method echoed as POST, the JSON body intact, the custom header received
           (assert= (body-text resp) "POST|{\"a\":1}|secret")))))
@@ -465,7 +471,7 @@
                  (send me [:port (tcp/local-port ls)])
                  (serve-loop ls (fn (req) (text-response (str "got " (get req :path))))))))
       (let (port (receive ([:port p] p) (after test/*wait-ms* :timeout)))
-        (let (resp (fetch (str "http://127.0.0.1:" port "/zen")))
+        (let (resp (answered (fetch (str "http://127.0.0.1:" port "/zen"))))
           (assert= (get resp :status) 200)
           (assert= (body-text resp) "got /zen"))))))
 
@@ -481,8 +487,8 @@
                  (send me [:ready (tcp/local-port ls) (first ck)])
                  (serve-loop ls (router {"/" (fn (req) (ok "<h1>secure brood</h1>"))})))))
       (let (pc (receive ([:ready p ct] [p ct]) (after test/*wait-ms* :timeout)))
-        (let (resp (fetch (str "https://localhost:" (first (served pc)) "/")
-                     {:ca (second (served pc))}))
+        (let (resp (answered (fetch (str "https://localhost:" (first (served pc)) "/")
+                               {:ca (second (served pc))})))
           (assert= (get resp :status) 200)
           (is (includes? (body-text resp) "secure brood"))))))
   (test "a binary body is byte-faithful over https too"
@@ -497,8 +503,8 @@
                        {"Content-Type" "application/octet-stream"}
                        (bytes 255 128 0 7)))))))
       (let (pc (receive ([:ready p ct] [p ct]) (after test/*wait-ms* :timeout)))
-        (let (resp (fetch (str "https://localhost:" (first (served pc)) "/blob")
-                     {:ca (second (served pc))}))
+        (let (resp (answered (fetch (str "https://localhost:" (first (served pc)) "/blob")
+                               {:ca (second (served pc))})))
           (assert= (get resp :status) 200)
           (assert= (get resp :body) (bytes 255 128 0 7)))))))
 
@@ -552,7 +558,7 @@
                        {"Content-Type" "application/octet-stream"}
                        (bytes 255 128 65 0 7)))))))
       (let (port (receive ([:port p] p) (after test/*wait-ms* :timeout)))
-        (let (resp (fetch (str "http://127.0.0.1:" port "/blob")))
+        (let (resp (answered (fetch (str "http://127.0.0.1:" port "/blob"))))
           (assert= (get resp :status) 200)
           (assert= (get (get resp :headers) "content-length") "5")
           (assert= (get resp :body) (bytes 255 128 65 0 7))))))
@@ -563,7 +569,7 @@
                  (send me [:port (tcp/local-port ls)])
                  (serve-loop ls (fn (req) (text-response "héllo ☃"))))))
       (let (port (receive ([:port p] p) (after test/*wait-ms* :timeout)))
-        (let (resp (fetch (str "http://127.0.0.1:" port "/")))
+        (let (resp (answered (fetch (str "http://127.0.0.1:" port "/"))))
           (assert= (get resp :status) 200)
           ;; 7 codepoints, 10 UTF-8 bytes — the :body carries the bytes,
           ;; body-text decodes them
@@ -578,7 +584,7 @@
                    (fn (req)
                      (text-response (pr-str (into [] (seq (get req :body))))))))))
       (let (port (receive ([:port p] p) (after test/*wait-ms* :timeout)))
-        (let (resp (post (str "http://127.0.0.1:" port "/up") (bytes 0 255 7)))
+        (let (resp (answered (post (str "http://127.0.0.1:" port "/up") (bytes 0 255 7))))
           (assert= (get resp :status) 200)
           (assert= (body-text resp) "[0 255 7]"))))))
 

@@ -731,3 +731,56 @@ fn a_failure_condition_is_left_to_the_truthy_failure_lint() {
         "…and it must still fire: {w:?}"
     );
 }
+
+// ---- list-truthiness (ADR-620) ----------------------------------------------------------
+// `()` is `nil`, so an empty list is falsy while an empty vector is truthy: a truthiness test
+// on a value that may be either answers by kind.
+
+const LIST_OR_VECTOR: &str = "(defn pick (flag xs) (if flag (seq/filter xs int?) (into [] xs)))";
+
+fn list_truthiness(w: &[String]) -> usize {
+    w.iter()
+        .filter(|m| m.contains("may be a list or a"))
+        .count()
+}
+
+#[test]
+fn a_test_on_a_list_or_a_vector_is_flagged_through_if_when_and_or() {
+    for body in [
+        "(defn f (flag xs) (if (pick flag xs) :some :none))",
+        "(defn f (flag xs) (when (pick flag xs) :some))",
+        "(defn f (flag xs) (or (pick flag xs) :default))",
+        "(defn f (flag xs) (let (ys (pick flag xs)) (if ys :some :none)))",
+    ] {
+        let w = file_warnings(&format!("{LIST_OR_VECTOR} {body}"));
+        assert_eq!(list_truthiness(&w), 1, "{body}: {w:?}");
+    }
+}
+
+#[test]
+fn a_list_alone_absence_or_a_non_empty_list_is_not_flagged() {
+    for body in [
+        // a list on its own: the classic `(if xs …)` recursion, one kind
+        "(defn f (xs) (if (seq/filter xs int?) :some :none))",
+        // nil as absence beside a vector: no list in the type
+        "(defn f (flag) (if (if flag nil [1]) :a :b))",
+        // the asked-alike spelling
+        "(defn f (flag xs) (if (empty? (pick flag xs)) :none :some))",
+        // nothing positively known
+        "(defn f (x) (if x :a :b))",
+    ] {
+        let w = file_warnings(&format!("{LIST_OR_VECTOR} {body}"));
+        assert_eq!(list_truthiness(&w), 0, "{body}: {w:?}");
+    }
+    // a list that cannot be empty is never the falsy kind; the constant-condition lint owns it
+    let w = file_warnings("(defn f (flag) (if (if flag (list 1) [2]) :a :b))");
+    assert_eq!(list_truthiness(&w), 0, "{w:?}");
+}
+
+#[test]
+fn check_allow_list_truthiness_silences_it() {
+    let w = file_warnings(&format!(
+        "{LIST_OR_VECTOR} (defn f (flag xs) (check-allow :list-truthiness (if (pick flag xs) :a :b)))"
+    ));
+    assert_eq!(list_truthiness(&w), 0, "{w:?}");
+}

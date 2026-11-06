@@ -338,7 +338,8 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
   (if (or (empty? clauses) (empty? (rest clauses)))
     nil
     (if (and (pair? (first clauses)) (%eq (first (first clauses)) 'after))
-      (error "receive: (after ...) must be the last clause, but it appears before "
+      (reflect/error-at (first clauses)
+        "receive: (after ...) must be the last clause, but it appears before "
         (count (rest clauses))
         " more clause(s)")
       (%receive-check-after (rest clauses)))))

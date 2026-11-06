@@ -86,20 +86,6 @@ fn is_clause_shaped(heap: &Heap, f: Value) -> bool {
     }
 }
 
-/// Does this clause head carry an `&optional` marker? A pattern-dispatched head is a
-/// LIST PATTERN over the argument list, where `&optional` means nothing, so a clause like
-/// `((x &optional (y 5)) …)` would only ever match a literal `&optional` argument. That
-/// is rejected rather than reinterpreted. `&` is different: in a list pattern it already
-/// means "the rest" (`(x & more)`), which is exactly a variadic clause, so a pattern clause
-/// may take one (ADR-434) — the shape a macro's argument list needs.
-fn head_has_optional_marker(heap: &Heap, head: Value) -> bool {
-    heap.list_or_vector_items(head).is_some_and(|items| {
-        items.iter().any(
-            |&p| matches!(p.unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL)),
-        )
-    })
-}
-
 /// Does any clause head of an all-clause-shaped `fn` body use the vector
 /// spelling? (`clauses` is every form after `fn` and an optional docstring.)
 fn has_vector_clause_head(heap: &Heap, clauses: &[Value]) -> bool {
@@ -148,6 +134,204 @@ pub(crate) fn clause_has_when_guard(heap: &Heap, clause: Value) -> bool {
         )
 }
 
+/// What a clause head reaches: the argument counts it accepts, and whether it takes EVERY
+/// call of those counts — no `:when` guard, and every slot a pattern that cannot fail (a
+/// plain name, `_`, an `&optional` name with or without a default, a named rest).
+#[derive(Clone, Copy)]
+struct ClauseReach {
+    required: usize,
+    optional: usize,
+    rest: bool,
+    total: bool,
+}
+
+impl ClauseReach {
+    /// Does `self` take every call `later` would? Then `later` can never run.
+    fn covers(self, later: ClauseReach) -> bool {
+        self.total
+            && self.required <= later.required
+            && (self.rest
+                || (!later.rest
+                    && self.required + self.optional >= later.required + later.optional))
+    }
+}
+
+/// A slot pattern that matches anything: a plain name (`_` included). A name repeated
+/// within the head requires equality, so it is not total.
+fn total_slot(p: Value, seen: &mut Vec<value::Symbol>) -> bool {
+    let ValueRef::Sym(s) = p.unpack() else {
+        return false;
+    };
+    let repeated = !value::symbol_is(s, "_") && seen.contains(&s);
+    seen.push(s);
+    !repeated
+}
+
+fn clause_reach(heap: &Heap, clause: Value) -> Option<ClauseReach> {
+    let head = match clause.unpack() {
+        ValueRef::Pair(p) => heap.car(p),
+        _ => return None,
+    };
+    let items = match head.unpack() {
+        ValueRef::Nil => Vec::new(),
+        _ => heap.list_items(head)?,
+    };
+    let mut reach = ClauseReach {
+        required: 0,
+        optional: 0,
+        rest: false,
+        total: !clause_has_when_guard(heap, clause),
+    };
+    let mut seen = Vec::new();
+    let mut section = 0; // 0 required, 1 &optional, 2 rest
+    for p in items {
+        if let ValueRef::Sym(s) = p.unpack() {
+            if value::symbol_is(s, kw::AMP_OPTIONAL) {
+                section = 1;
+                continue;
+            }
+            if value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_REST) {
+                section = 2;
+                reach.rest = true;
+                continue;
+            }
+        }
+        let slot = match section {
+            0 => {
+                reach.required += 1;
+                p
+            }
+            // `name`, `(name default)` or `(pattern default)`: the slot's pattern is its first
+            1 => {
+                reach.optional += 1;
+                match p.unpack() {
+                    ValueRef::Pair(c) => heap.car(c),
+                    _ => p,
+                }
+            }
+            _ => p,
+        };
+        if !total_slot(slot, &mut seen) {
+            reach.total = false;
+        }
+    }
+    Some(reach)
+}
+
+/// The error for the first clause an earlier clause shadows, if any. Clauses are tried in
+/// order and the first that matches runs (ADR-619), so a clause whose every call an earlier
+/// one takes is dead code — refused rather than silently never run, which is what keeps
+/// clause order from changing a program's meaning unnoticed.
+pub(crate) fn shadowed_clause_error(heap: &Heap, clauses: &[Value]) -> Option<LispError> {
+    let reaches: Vec<Option<ClauseReach>> =
+        clauses.iter().map(|&c| clause_reach(heap, c)).collect();
+    for (j, later) in reaches.iter().enumerate() {
+        let Some(later) = *later else { continue };
+        for (i, earlier) in reaches[..j].iter().enumerate() {
+            let Some(earlier) = *earlier else { continue };
+            if earlier.covers(later) {
+                let head_of = |c: Value| match c.unpack() {
+                    ValueRef::Pair(p) => crate::syntax::printer::print(heap, heap.car(p)),
+                    _ => crate::syntax::printer::print(heap, c),
+                };
+                let (shown_j, shown_i) = (head_of(clauses[j]), head_of(clauses[i]));
+                return Some(
+                    LispError::runtime(format!(
+                        "fn: the clause {shown_j} can never run: the clause {shown_i} before it \
+                         takes every call it would"
+                    ))
+                    .with_hint(
+                        "clauses are tried in order and the first that matches runs (ADR-619). \
+                         Put the more specific clause first, or delete the dead one.",
+                    ),
+                );
+            }
+        }
+    }
+    None
+}
+
+/// `(%raise (%match-error :fn ARGS '(HEAD)))` for a single clause whose guard failed: ARGS
+/// the arguments as a list, rebuilt from the native parameters (`(append (list a b) rest)`
+/// with a rest), as the `match*` a clause `fn` lowers to would report them.
+fn guard_failure(heap: &mut Heap, params: &[Value], head: Value) -> Value {
+    let mut fixed = vec![value::sym("list")];
+    let mut rest = None;
+    let mut section = 0; // 0 required, 1 &optional, 2 rest
+    for &p in params {
+        if let ValueRef::Sym(s) = p.unpack() {
+            if value::symbol_is(s, kw::AMP_OPTIONAL) {
+                section = 1;
+                continue;
+            }
+            if value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_REST) {
+                section = 2;
+                continue;
+            }
+        }
+        match (section, p.unpack()) {
+            (2, _) => rest = Some(p),
+            (1, ValueRef::Pair(c)) => fixed.push(heap.car(c)),
+            _ => fixed.push(p),
+        }
+    }
+    let fixed = heap.list(fixed);
+    let args = match rest {
+        Some(r) => heap.list(vec![value::sym("append"), fixed, r]),
+        None => fixed,
+    };
+    let quoted_head = heap.list(vec![head]);
+    let patterns = heap.list(vec![value::sym(kw::QUOTE), quoted_head]);
+    let error = heap.list(vec![
+        value::sym("%match-error"),
+        value::kw("fn"),
+        args,
+        patterns,
+    ]);
+    heap.list(vec![value::sym("%raise"), error])
+}
+
+/// Is `body` a single clause's `:when guard rest…`? The guard and the forms after it.
+fn single_clause_guard(body: &[Value]) -> Option<(Value, &[Value])> {
+    match body {
+        [w, guard, rest @ ..] if matches!(w.unpack(), ValueRef::Keyword(s) if value::symbol_name_ref(s) == "when") => {
+            Some((*guard, rest))
+        }
+        _ => None,
+    }
+}
+
+/// Does a single-clause `fn` need the `match*` lowering rather than native parameters — a
+/// pattern in an `&optional` slot (`([a b] [0 0])`, or a bare `[a b]`), or a pattern after
+/// `&`? (A guard does not: it wraps the native body, so the checker keeps the parameters.)
+fn single_clause_needs_match(heap: &Heap, params: &[Value]) -> bool {
+    let mut section = 0; // 0 required, 1 &optional, 2 rest
+    let mut pattern_slot = false;
+    for &p in params {
+        if let ValueRef::Sym(s) = p.unpack() {
+            if value::symbol_is(s, kw::AMP_OPTIONAL) {
+                section = 1;
+                continue;
+            }
+            if value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_REST) {
+                section = 2;
+                continue;
+            }
+        }
+        pattern_slot |= match section {
+            0 => false,
+            // `name` and `(name default)` are native; anything else is a pattern
+            1 => match p.unpack() {
+                ValueRef::Sym(_) => false,
+                ValueRef::Pair(c) => !is_sym(heap.car(c)),
+                _ => true,
+            },
+            _ => !is_sym(p),
+        };
+    }
+    pattern_slot
+}
+
 /// Cheap predicate: does this `fn`/`lambda` form need pattern lowering — i.e. is
 /// it multi-clause, or single-clause with a pattern in a required parameter?
 /// Mirrors [`lower_fn`]'s dispatch. Used by the evaluator as a fallback for `fn`
@@ -177,11 +361,19 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
         return !forms.iter().all(|&f| is_arity_clause(heap, f))
             || forms.iter().any(|&f| clause_has_when_guard(heap, f));
     }
-    // single-clause: a pattern in a required slot (before &optional / & rest)?
+    // single-clause: a guard, a pattern optional or rest, or a pattern in a required slot?
     let params = match heap.list_or_vector_items(forms[0]) {
         Some(p) => p,
         None => return false,
     };
+    let body = &forms[1..];
+    let body = match body.first().map(|v| v.unpack()) {
+        Some(ValueRef::Str(_)) if body.len() > 1 => &body[1..],
+        _ => body,
+    };
+    if single_clause_needs_match(heap, &params) || single_clause_guard(body).is_some() {
+        return true;
+    }
     let required_end = params
         .iter()
         .position(|&p| matches!(p.unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) || value::symbol_is(s, kw::AMP)))
@@ -215,6 +407,9 @@ pub(super) fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>
         if !clauses.is_empty() && clauses.iter().all(|&f| is_clause(heap, f)) {
             // This IS a multi-clause fn — never fall through to the single-clause
             // path below (which would misread the first clause as a param list).
+            if let Some(e) = shadowed_clause_error(heap, clauses) {
+                return Err(e);
+            }
             if clauses.iter().all(|&f| is_arity_clause(heap, f))
                 && !clauses.iter().any(|&f| clause_has_when_guard(heap, f))
             {
@@ -224,34 +419,11 @@ pub(super) fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>
                 // guard forces the `match*` path below, which evaluates it (ADR-226).
                 return Ok(None);
             }
-            // At least one literal/destructuring *pattern* clause, or a `:when`
-            // *guard* clause (ADR-226) → lower the whole dispatch to the `match*`
-            // engine, where each head is a list pattern over the argument list. A `&`
-            // there is that pattern's rest (`(x & more)`), so it stays variadic
-            // (ADR-434). An `&optional` marker is an error rather than a literal-symbol
-            // pattern: `(f 1 2)` would fail with a `:match` error listing
-            // `(x &optional (y 5))` as a *pattern*.
-            let guarded = clauses.iter().any(|&c| clause_has_when_guard(heap, c));
-            for &clause in clauses {
-                let head = match clause.unpack() {
-                    ValueRef::Pair(p) => heap.car(p),
-                    _ => continue,
-                };
-                if head_has_optional_marker(heap, head) {
-                    let shown = crate::syntax::printer::print(heap, head);
-                    let dispatch = if guarded { "guard" } else { "pattern" };
-                    return Err(LispError::runtime(format!(
-                        "fn: `&optional` in the clause {shown} of a {dispatch}-dispatched fn"
-                    ))
-                    .with_hint(
-                        "these axes don't combine: `&optional` controls ARITY, while patterns \
-                         and `:when` guards route the fn through the match engine, where a head \
-                         is a list pattern over the arguments and the marker would be a literal \
-                         symbol. A rest is fine — `((x & more) …)` — but an optional argument \
-                         wants arity clauses `((x) …) ((x y) …)`, or a `match` on it in the body.",
-                    ));
-                }
-            }
+            // At least one literal/destructuring *pattern* clause, or a `:when` *guard*
+            // clause (ADR-226) → lower the whole dispatch to the `match*` engine, where each
+            // head is a list pattern over the argument list: `&` is that pattern's rest
+            // (ADR-434) and `&optional` its optional elements (ADR-619), so a pattern clause
+            // takes the same head grammar as an arity clause.
             let g = value::gensym("args");
             let params = heap.list(vec![value::sym(kw::AMP), g]);
             let mut mexpr = vec![value::sym(kw::MATCH_STAR), value::kw("fn"), g];
@@ -293,13 +465,32 @@ pub(super) fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>
         _ => (None, body),
     };
 
-    // Patterns are allowed only in required slots (before &optional / & rest).
+    // A pattern in an `&optional` slot, or a pattern rest: the head is a list pattern over the
+    // arguments, as a clause's is (ADR-619), so it lowers as a one-clause fn.
+    if single_clause_needs_match(heap, &params) {
+        let g = value::gensym("args");
+        let rest_params = heap.list(vec![value::sym(kw::AMP), g]);
+        let mut clause = vec![param_form];
+        clause.extend_from_slice(body);
+        let clause = heap.list(clause);
+        let dispatch = heap.list(vec![value::sym(kw::MATCH_STAR), value::kw("fn"), g, clause]);
+        let mut lowered = vec![value::sym(kw::FN), rest_params];
+        if let Some(doc) = doc {
+            lowered.push(doc);
+        }
+        lowered.push(dispatch);
+        return Ok(Some(heap.list(lowered)));
+    }
+
+    // Patterns in required slots (before &optional / & rest) bind refutably, keeping the
+    // native parameter list.
     let required_end = params
         .iter()
         .position(|&p| matches!(p.unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) || value::symbol_is(s, kw::AMP)))
         .unwrap_or(params.len());
-    if !params[..required_end].iter().any(|&p| !is_sym(p)) {
-        return Ok(None); // no pattern in the required params — ordinary fn
+    let guard = single_clause_guard(body);
+    if guard.is_none() && !params[..required_end].iter().any(|&p| !is_sym(p)) {
+        return Ok(None); // no pattern in the required params and no guard — ordinary fn
     }
 
     // Replace each required pattern slot with a fresh symbol; bind it refutably.
@@ -312,7 +503,16 @@ pub(super) fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>
             binds.push((g, p));
         }
     }
-    let mut acc = make_do(heap, body);
+    // A guard wraps the body, inside the pattern binds so it sees their names; when it fails
+    // the call raises the match error a failed clause does.
+    let mut acc = match guard {
+        Some((test, rest)) => {
+            let then = make_do(heap, rest);
+            let fail = guard_failure(heap, &new_params, param_form);
+            heap.list(vec![value::sym(kw::IF), test, then, fail])
+        }
+        None => make_do(heap, body),
+    };
     for &(g, pat) in binds.iter().rev() {
         acc = refutable_bind(heap, kw::FN, g, pat, acc);
     }

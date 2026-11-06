@@ -26,10 +26,10 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     // cannot interpret), is falsy, and carries its own message.
     primitives.def(
         "%failure",
-        Arity::exact(1),
-        Sig::new(vec![string], Ty::of(Tag::Failure)),
-        &["message"],
-        "Build a failure value carrying message. The primitive behind the prelude's `failure`.",
+        Arity::range(1, 2),
+        Sig::new(vec![string, map_ty.union(nil_ty)], Ty::of(Tag::Failure)),
+        &["message", "fields"],
+        "Build a failure value carrying message and, optionally, the fields of a map (which must not name `:message`). The primitive behind the prelude's `failure` and `failure/with`.",
         failure_new,
     );
     primitives.def(
@@ -39,6 +39,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["f"],
         "The message a failure carries, else nil. Behind the prelude's `error-message`.",
         failure_message,
+    );
+    primitives.def(
+        "%failure-fields",
+        Arity::exact(1),
+        Sig::new(vec![any], map_ty),
+        &["f"],
+        "The fields of failure f as a plain map, `:message` among them; raises for anything that is not a failure.",
+        failure_fields,
     );
     // `%force-panic` — deliberately panics the Rust thread when called. Exists
     // *only* in debug builds: it gives the MCP-host panic-isolation regression
@@ -81,7 +89,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![map_ty], Ty::NEVER),
         &["error"],
-        "Raise the error map `error` — `{:kind k :message s :code c …}`, `c` one of the codes the language raises itself (`E0090` `error`, `E0091` `assert`, `E0092` a failed match). A catch binds the map with the `:file`/`:line`/`:col` and `:trace` of the raise added, as for a built-in error; uncaught it renders as `error: <message>`. The primitive behind `error`, `assert` and a failed pattern (ADR-501).",
+        "Raise the error map `error` — `{:kind k :message s :code c …}`, `c` one of the codes the language raises itself (`E0090` `error`, `E0091` `assert`, `E0092` a failed match). A catch binds the map with the `:file`/`:line`/`:col` and `:trace` of the raise added, as for a built-in error; uncaught it renders as `error: <message>`. An `:at form` entry places the error at `form`'s source position instead (and is removed from the map). The primitive behind `error`, `assert` and a failed pattern (ADR-501).",
         raise,
     );
     primitives.def(
@@ -135,8 +143,29 @@ pub(super) fn raise(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         },
         _ => None,
     };
+    // `:at form` locates the error at `form`'s source position rather than the call that
+    // raised it — how a macro points at the sub-form it is complaining about. The form is
+    // taken out of the map: it is a place, not part of what a handler is handed.
+    let at_key = Value::keyword(intern("at"));
+    let (error, at) = match (code, error) {
+        (Some(_), Value::Map(map)) => match heap.map_get(map, at_key) {
+            Some(form) => (heap.map_dissoc(map, at_key), heap.form_pos(form)),
+            None => (error, None),
+        },
+        _ => (error, None),
+    };
     match code {
-        Some(code) => Err(LispError::thrown(error, heap).with_code(code)),
+        Some(code) => {
+            let mut raised = LispError::thrown(error, heap).with_code(code);
+            if let Some((pos, file)) = at {
+                raised = raised.with_pos(pos);
+                // the form's own file: the position means nothing against another one
+                if let Some(file) = file {
+                    raised.file = Some(file.to_string());
+                }
+            }
+            Err(raised)
+        }
         None => Err(LispError::wrong_type(
             heap,
             "%raise",
@@ -178,12 +207,50 @@ fn with_caught_origin(mut error: LispError, v: Value, heap: &mut Heap) -> LispEr
     error
 }
 
-/// `(%failure message)` — build a **failure** value. The kernel primitive behind the
-/// prelude's `failure`: a failure is its own `Value` kind, so Brood cannot construct
-/// one without a primitive (the language has no way to make a new tag).
+/// `(%failure message [fields])` — build a **failure** value. The kernel primitive behind
+/// the prelude's `failure` and `failure/with`: a failure is its own `Value` kind, so Brood
+/// cannot construct one without a primitive (the language has no way to make a new tag).
+/// `fields` adds the caller's own keys beside `:message`, which it may not name: the
+/// message is always the one the parts spelled.
 pub(super) fn failure_new(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let message = expect_string(heap, "%failure", arg(args, 0))?;
-    Ok(heap.alloc_failure(&message))
+    let fields = match args.get(1).copied().unwrap_or(Value::nil()) {
+        Value::Nil => return Ok(heap.alloc_failure(&message)),
+        Value::Map(fields) => fields,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%failure",
+                "map of fields",
+                other,
+            ));
+        }
+    };
+    let key = Value::Keyword(crate::core::value::intern("message"));
+    if heap.map_get(fields, key).is_some() {
+        return Err(LispError::runtime(
+            "failure/with: the fields may not name :message; the message parts are the message",
+        ));
+    }
+    let msg = heap.alloc_string(&message);
+    match heap.map_assoc(fields, key, msg) {
+        Value::Map(id) => Ok(Value::failure(id)),
+        other => Ok(other),
+    }
+}
+
+/// `(%failure-fields f)` — every field a failure carries, `:message` among them, as a plain
+/// map. A non-failure raises; the prelude's `fields` asks `failure?` first.
+pub(super) fn failure_fields(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Failure(id) => Ok(Value::map(id)),
+        other => Err(LispError::wrong_type(
+            heap,
+            "%failure-fields",
+            "failure",
+            other,
+        )),
+    }
 }
 
 /// `(%failure-message f)` — the `:message` a failure carries, else `nil`. A failure is

@@ -93,24 +93,13 @@ devlog entries of the same dates.
 
 ## Open threads, in value order
 
-### OPEN (2026-10-27): three language-surface findings, each with its own doc
+### DONE (2026-11-06): the language design pass
 
-A review of Brood as a language, apart from the runtime. In order of cost:
-
-1. **One encoding for expected failure** — [`failure-encoding-cleanup.md`](failure-encoding-cleanup.md).
-   **Mostly done 2026-10-27:** the docs, bedit's tutor lesson, and the three public tuple
-   returns (`supervisor/start-child`, `restart-child`, `stream/next`'s error arm) are on
-   `failure`. Open: a payload on `failure` (for HTTP-status-style branching), then
-   `http/request` and `registry-get-json`.
-2. **Records leak their `:__id__`** — [`record-kind.md`](record-kind.md). **`into`/`merge`
-   leaks fixed 2026-10-27.** Open: `(assoc m :__id__ …)` still forges an identity; it waits
-   for the decision on a real `Record` value kind (reversing ADR-130/168, an estimated 50–70
-   files), which removes the forge by construction.
-3. **`()` is `nil`, so the empty list is the only falsy collection** —
-   [`empty-list-truthiness.md`](empty-list-truthiness.md). Decide first between the
-   Clojure-style split, a strict split, or keeping ADR-003. A checker lint for
-   `(if <list> …)` is worth shipping in every case. If we split, a stray `nil?` end test
-   turns into a silent infinite loop, so the lint has to come before the flip.
+A–D of ROADMAP's language design pass are done. The last two decisions: `()` stays `nil` with a
+`:list-truthiness` lint (ADR-620), and one grammar for every `fn` head with in-order clauses
+and a compile error for a shadowed clause (ADR-619). Also landed: fields on `failure`
+(ADR-617), macro errors at the call or the named sub-form (ADR-618), and folds over vectors
+and ranges stopping on a failure (ADR-315 finished).
 
 ### DONE (2026-10-21): a wait for another process's module load parks, at every tier
 

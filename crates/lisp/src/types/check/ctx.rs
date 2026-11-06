@@ -375,6 +375,10 @@ pub(super) const SUPPRESS_TRUSTED: u16 = 1 << 8;
 /// the point: a test asserting that an empty record or a non-empty list is truthy is
 /// pinning the language's falsy set, and the lint restating it is noise.
 pub(super) const SUPPRESS_CONSTANT_COND: u16 = 1 << 9;
+/// `(check-allow :list-truthiness …)` — a truthiness test on a value that may be a list or
+/// another collection (ADR-620). Suppressed where the asymmetry is the point: a test pinning
+/// that `()` is `nil` while `[]` is truthy.
+pub(super) const SUPPRESS_LIST_TRUTHINESS: u16 = 1 << 10;
 
 /// One step of a narrowable access path: a keyword field (`(get x :k)`) or a
 /// fixed integer index (`(nth x 0)` / `(first x)` / `(second x)` / `(third x)`).

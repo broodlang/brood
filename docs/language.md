@@ -81,7 +81,7 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 | Function | `#<fn name>`, `#<native +>` | Closures and builtins. |
 | Ref | `#<ref 0>` | A unique, opaque reference token from `(ref)` — no literal syntax; the only way to make one. Used to tag a request to its reply (see [Processes](#processes-concurrency)). |
 | Pid | `#<pid a/7>` | A process id from `self`/`spawn`; carries node identity (`node/id`). No literal syntax. The location-transparent handle for `send` — local or across a node link (see [Distributed nodes](#distributed-nodes)). |
-| Failure | `#failure{:message "…"}` | What a function returns when it cannot interpret its input — `(string/->number "abc")` (ADR-310). No literal syntax; build one with `failure`, test with `failure?`, read it with `error-message`. **Truthy**, so it is never silently taken for absence (see [Truthiness](#truthiness)), and distinct from `nil`, which means *absence*. Prints self-identifyingly and is deliberately not re-readable — reconstructing one from text would manufacture a provenance it never had. See [Errors](#errors). |
+| Failure | `#failure{:message "…"}` | What a function returns when it cannot interpret its input — `(string/->number "abc")` (ADR-310). No literal syntax; build one with `failure` (or `failure/with`, to carry fields beside the message), test with `failure?`, read it with `error-message` and `fields`. **Truthy**, so it is never silently taken for absence (see [Truthiness](#truthiness)), and distinct from `nil`, which means *absence*. Prints self-identifyingly and is deliberately not re-readable — reconstructing one from text would manufacture a provenance it never had. See [Errors](#errors). |
 
 ### Truthiness
 
@@ -114,6 +114,14 @@ See [Errors](#errors).
 > for emptiness uniformly across every collection, use `(empty? x)`** — never a
 > bare `(if x …)`. (`(if (seq x) …)` also works, since `seq` of an empty
 > collection is `nil`.)
+>
+> It is kept on purpose (ADR-620): lists are mostly code here, and on a list alone
+> `(if xs (f (first xs) (rest xs)) done)` is the recursion every classic Lisp writes —
+> the checker narrows `xs` to a non-empty list in the `then` branch. Where the
+> asymmetry bites is a value that may be a list **or** another collection, and
+> `nest check` flags exactly that: a truthiness test (`if`, `when`, `and`, `or`, `cond`)
+> whose type admits a possibly-empty list and a vector, map, set or string. Silence it
+> on purpose with `(check-allow :list-truthiness …)`.
 
 ## Immutability
 
@@ -1614,13 +1622,11 @@ falls through to the next clause:
   ((n) :positive))
 ```
 
-The guard sees every parameter the clause binds. A guarded fn dispatches through the
-match engine (so tail calls are still TCO-safe, and a single guarded clause whose guard
-fails raises a `:match` error like any unmatched `match`). The guard belongs on a
-**clause head** — the double-paren form `((n) :when …)`, not the bare `(fn (n) :when …)`
-parameter form. `:when` does **not** combine with `&optional`/`&` in one clause (a loud
-error — one dispatch mechanism per fn); express a guarded variadic with a `match` on the
-rest argument in the body.
+The guard sees every parameter the clause binds, `&optional` and rest ones included. A
+guarded fn dispatches through the match engine (so tail calls are still TCO-safe, and a
+guard that fails on the last clause raises a `:match` error like any unmatched `match`).
+A single-clause `fn` takes one too, first in its body (after a docstring, if any):
+`(defn half (n) :when (math/even? n) (/ n 2))` (ADR-619).
 
 A guard is **any expression** — Brood does not restrict it to a whitelist of guard-safe operators: it may call your own functions, closures, `let`, or any
 computation that yields a truthy value. Two consequences: a guard **can** have side effects,
@@ -1719,32 +1725,47 @@ pattern. `defn` inherits all of this (it forwards to `fn`).
   …)
 ```
 
-The two multi-clause axes **don't mix in one `defn`**: a head is read as *either*
-an arity arm *or* a pattern clause. An `&optional`/`&` inside a clause that's being
-matched as a pattern is treated as a literal symbol — it does *not* make that arm
-variadic. Use arity overloading or pattern dispatch, not both in the same `defn`.
+**One head grammar, one dispatch rule (ADR-619).** Every head — single-clause,
+multi-clause, `defmacro`, and the clauses of a pattern-dispatched `fn` — is a parameter
+list built from the same slots:
+
+- **required** slots: each a pattern (a plain name is the pattern that matches anything);
+- after `&optional`, **optional** slots: `name`, `(name default)`, or `(pattern
+  default)` — the default is evaluated only when the argument is absent, and sees the
+  names bound before it;
+- after `&`, a **rest**: a name, or a pattern over the list of remaining arguments;
+- a **`:when` guard** first in the body.
+
+**Clauses are tried in order, and the first that matches runs** — by argument count and
+by shape alike, so arity clauses and pattern clauses mix in one `defn`:
+
+```clojure
+(defn rect
+  ((:unit) 1)
+  ((w &optional (h w)) (* w h)))
+(rect :unit)    ;=> 1
+(rect 3)        ;=> 9
+(rect 3 4)      ;=> 12
+```
+
+**A clause an earlier one shadows is a compile error.** When an earlier clause takes
+every call a later one would — it accepts every argument count the later one does, has no
+guard, and every slot is a plain name — the later clause could never run, so the `fn` is
+refused, naming both. `((x &optional y) …)` before `((x) …)` is refused; written the
+other way round it is fine, and `(f 1)` runs `((x) …)`. That is what keeps clause order
+from changing a program's meaning unnoticed. (Until ADR-619 arity clauses picked the most
+specific clause whatever the order, while pattern clauses went in order; now there is one
+rule.) Partial overlap is allowed and runs the first: `((n) :when (> n 0) …)` before
+`((n) …)`, or `((0) …)` before `((n) …)`.
+
+The same slots work in a `match` list pattern: `(a &optional (b 0) & more)` matches a list
+of one or more elements, and binds `b` to `0` when there is no second one.
 
 Parameter lists stay **lists** (ADR-010), so a single tuple parameter must be
 wrapped: `(defn g ([x y]) …)` is one 2-tuple param, while `(defn g (x y) …)` is
 two params.
 
-**Matching and `&optional` don't nest.** `&optional` controls *arity*, patterns
-control *shape*, multi-clause controls *dispatch* — and the three don't combine
-into the optional slot:
-
-- An `&optional` slot **must be a plain symbol** (with an optional default); it
-  **cannot be a pattern**. `(defn k (x &optional ([a b] …)) …)` is a *type
-  error* ("expected a symbol").
-- **`&optional` in a pattern-dispatched `defn` is an error; `&` rest is not.** A
-  multi-clause `defn` is *either* arity-dispatched (every head is plain symbols,
-  optionally with `&`/`&optional`) *or* pattern-dispatched (some head carries a
-  literal/destructuring form). A pattern-dispatched head is a **list pattern over the
-  argument list**, so `&` there is that pattern's rest and the clause stays variadic:
-  `((:all & more) …)`, `((x :else & fallback) …)` (ADR-434). `&optional` has no meaning
-  in a pattern and is rejected with a hint — it used to be matched as a literal symbol,
-  so `(f 1 2)` failed with a `[:match-error …]` listing `(x &optional (y 5))` as a
-  *pattern*.
-- **A macro takes clauses the same way**, since `defmacro` forwards to `fn`: one clause
+**A macro takes clauses the same way**, since `defmacro` forwards to `fn`: one clause
   per accepted shape of the arguments, and a final catch-all that raises the macro's own
   message instead of a generic match error:
 
@@ -1753,14 +1774,19 @@ into the optional slot:
     (([a b])   [b a])
     ((& args)  (error "swap-pair: expected one [a b] vector literal, got " (pr-str args))))
   ```
-- **Overlapping arity arms resolve most-specific-first**, in this order: an exact
-  fixed arity beats a variadic (`&` rest) one; then the most required params;
-  then the *fewest* `&optional` slots. So with `((x) :one)` and
-  `((x &optional y) …)`, `(f 1)` picks `:one` regardless of clause order. (Before
-  the last tie-break the answer depended on the order the clauses were written.)
-- Required parameters *can* still be patterns alongside `&optional` / `& rest`
-  (only the optional/rest slots are restricted): `(defn move (p [dx dy]
-  &optional (n 1)) …)` is fine.
+
+  A macro's error is placed at the macro call, never at the top-level form around it
+  (ADR-618). To point at the sub-form it is complaining about, a macro raises with
+  `(reflect/error-at form & parts)`, which reads like `error` but takes its position from
+  `form`. Only lists carry a reader position, so a symbol, a number or a vector leaves the
+  error at the call:
+
+  ```clojure
+  (defmacro needs-pair (form)
+    (if (and (pair? form) (= (count form) 2))
+      `(quote ~form)
+      (reflect/error-at form "needs-pair: expected (a b), got " (pr-str form))))
+  ```
 
 To branch on an optional argument, **bind it as a symbol and `match`/`cond` on
 it in the body** — using `nil` as the "was it omitted?" sentinel (or a custom
@@ -1842,6 +1868,20 @@ Write one with `failure`, in the same place you would have written `error`:
 Reach for `failure` when the caller asked something whose honest answer is "that cannot
 be interpreted". Reach for `error` when the caller made a mistake — that is a bug, and
 it should unwind.
+
+When a caller needs to tell *which* failure it got, without parsing the message, attach
+fields with `failure/with` and read them back with `fields` (ADR-617). The message is
+still the concatenated parts; the fields sit beside it, and may not name `:message`:
+
+```clojure
+(def missing (failure/with {:status 404} "not found: " path))
+(error-message missing)            ;=> "not found: /x"
+(get (fields missing) :status)     ;=> 404
+(fields (failure "nope"))          ;=> {:message "nope"}
+```
+
+A failure is still not a collection — `get` on one raises — so `fields` is the one way
+in, after `failure?` has said it is one.
 
 ### Raising — for bugs and the unexpected
 

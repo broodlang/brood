@@ -717,7 +717,7 @@ fn collect_clause_binders(heap: &Heap, pat: Value, out: &mut Vec<Symbol>) {
     match pat {
         Value::Sym(s) => {
             let nm = value::symbol_name(s);
-            if nm != "&" && nm != "_" {
+            if nm != "&" && nm != "_" && nm != "&optional" && nm != "&rest" {
                 out.push(s);
             }
         }
@@ -733,8 +733,19 @@ fn collect_clause_binders(heap: &Heap, pat: Value, out: &mut Vec<Symbol>) {
                     return;
                 }
             }
+            // After `&optional`, a `(pattern default)` slot binds its pattern's names; the
+            // default is an expression (ADR-619).
+            let mut optional = false;
             for it in items {
-                collect_clause_binders(heap, it, out);
+                match it {
+                    Value::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) => optional = true,
+                    Value::Sym(s) if value::symbol_is(s, kw::AMP) => optional = false,
+                    _ => {}
+                }
+                match list_items(heap, it).as_deref() {
+                    Some(&[slot, _default]) if optional => collect_clause_binders(heap, slot, out),
+                    _ => collect_clause_binders(heap, it, out),
+                }
             }
         }
         _ => {}

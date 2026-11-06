@@ -1,6 +1,8 @@
 # The empty list is `nil` — what it would take to separate them
 
-**Status: OPEN — scoped 2026-10-27, nothing changed yet.** A language-design finding, not a
+**Status: DECIDED 2026-11-06 (ADR-620) — option 3: `()` stays `nil`, and the checker flags
+a truthiness test on a value that may be a list or another collection.** The scoping below is
+kept as written. A language-design finding, not a
 bug. The evidence below was gathered by reading and grepping; counts over Brood source come
 from regex heuristics and are marked as estimates. The decision to make (§4) comes before any
 code.

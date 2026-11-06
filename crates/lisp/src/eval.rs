@@ -1405,6 +1405,11 @@ fn parse_closure_template(heap: &Heap, rest: Value) -> Result<ClosureTemplate, L
             .iter()
             .all(|&f| crate::eval::macros::is_arity_clause(heap, f))
     {
+        // The compile pass checks this in `lower_fn`; a `fn` built at runtime (a quasiquote,
+        // a macro expanded lazily) reaches here without it.
+        if let Some(e) = crate::eval::macros::shadowed_clause_error(heap, clause_forms) {
+            return Err(e);
+        }
         let doc = lead_doc.and_then(|d| match d.unpack() {
             ValueRef::Str(id) => Some(heap.string(id).to_string()),
             _ => None,

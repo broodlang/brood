@@ -275,11 +275,18 @@ this by implementing the `Display` ability, which takes over this name below.
 ;; where a call from the span's native loop blocked the worker. Each is a self-tail loop, so
 ;; the process yields at its back edge as it does in any loop, and the JIT runs it natively.
 ;; No reducer returns that private keyword by accident, as none returns `:%fold-more`.
+;; Both stop once the accumulator is a failure, as `%fold-loop` does (ADR-315): the
+;; result was already the failure, but the steps after it ran, side effects and all.
+;; Raw kernel ops, as in `%fold-loop`: the guard runs once per element.
 (defn- %vector-fold-walk (f acc v i n)
-  (if (%lt i n) (%vector-fold-walk f (f acc (%vector-ref v i)) v (%add i 1) n) acc))
+  (if (%lt i n)
+    (if (%eq (type-of acc) :failure)
+      acc
+      (%vector-fold-walk f (f acc (%vector-ref v i)) v (%add i 1) n))
+    acc))
 (defn- %range-fold-walk (f acc i hi step)
   (if (if (%lt 0 step) (%lt i hi) (%lt hi i))
-    (%range-fold-walk f (f acc i) (%add i step) hi step)
+    (if (%eq (type-of acc) :failure) acc (%range-fold-walk f (f acc i) (%add i step) hi step))
     acc))
 ;; The public entry coerces once via `seq`; the inner `%fold-loop` then stays in
 ;; list form for the recursion, so a map costs one extra `%map-pairs` pass total
@@ -762,7 +769,8 @@ top-level definition of a name in one file that is a deliberate override),
 purpose — normally an ability, ADR-523), `:pure` (a
 `ui-memo` thunk, or a `:pure`-declared function, that performs an effect on purpose),
 `:total` (a `:total`-declared function
-the checker cannot see terminate or cover its cases) or `:trusted` (a declared return the
+the checker cannot see terminate or cover its cases), `:list-truthiness` (a truthiness test on
+a value that may be a list or another collection, kept on purpose) or `:trusted` (a declared return the
 checker cannot verify — the body's result is a kernel message or a primitive with no
 signature — which `--strict` otherwise reports as trusted, not verified). A runtime
 no-op; the marker is read only by the type checker (`nest check`).

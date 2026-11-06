@@ -527,6 +527,16 @@ Bindings are ONE flat list, exactly like `let`'s — not a list per pair. `(with
     (try (error \"bad\") (catch {:kind kind} kind))        ;=> :error"
   (%raise {:kind :error :code "E0090" :message (apply str parts)}))
 
+(defn reflect/error-at (form & parts)
+  "Raise an error like `error`, located at `form`'s source position instead of the call that
+raised it — how a macro points at the sub-form it is complaining about rather than at the
+whole call. A form the reader gave no position (a symbol, a number, one built at runtime)
+leaves the error at the macro call.
+
+    (defmacro twice (n) (if (int? n) `(* 2 ~n) (reflect/error-at n \"twice: expected an int\")))
+    (try (reflect/error-at '(x) \"bad\") (catch e (error-message e)))   ;=> \"bad\""
+  (%raise {:kind :error :code "E0090" :message (apply str parts) :at form}))
+
 (defn failure (& parts)
   "**Return** a failure carrying the concatenated display forms of `parts` — the
 other channel from `error`, which *raises*.
@@ -545,6 +555,17 @@ absence and failure stay distinct; and `error-message` reads it.
     (failure? (failure \"nope\"))            ;=> true
     (if (failure \"nope\") :yes :no)         ;=> :yes   ; truthy — never silently absent"
   (%failure (apply str parts)))
+
+(defn failure/with (fields & parts)
+  "**Return** a failure that carries the map `fields` beside its message, so a caller can
+branch on *which* failure it got without parsing the text: an HTTP status, the offset a
+parse stopped at. The message is the concatenated display forms of `parts`, as for
+`failure`; `fields` may not name `:message`. Read the fields back with `fields`.
+
+    (:status (fields (failure/with {:status 404} \"not found: \" \"/x\")))   ;=> 404
+    (error-message (failure/with {:status 404} \"not found\"))            ;=> \"not found\"
+    (failure? (failure/with {} \"nope\"))                                 ;=> true"
+  (%failure (apply str parts) fields))
 
 ;; The form's printed text is baked into the expansion, so a failure names what was
 ;; asserted without the caller restating it. The message parts sit in the failing branch
@@ -605,7 +626,8 @@ clause, else `[body nil]`. A `finally` anywhere but last is an error."
     (if (and (pair? clause) (= (first clause) 'finally))
       (do
         (when (empty? (rest clause))
-          (error "try: `(finally)` has no body — write `(finally cleanup…)` or drop the clause."))
+          (reflect/error-at clause
+            "try: `(finally)` has no body — write `(finally cleanup…)` or drop the clause."))
         [(seq/but-last body) (rest clause)])
       (do
         ;; `any?` lives in seq.blsp, concatenated AFTER this file — walk by hand.
@@ -659,7 +681,8 @@ line is EXECUTED by `doctest` (tests/doc_examples_test.blsp), so it has to be ru
 
 (defn- %try-class-catch-error (clause)
   (let (binder (second clause) handler (rest (rest clause)))
-    (error "try: `(catch "
+    (reflect/error-at clause
+      "try: `(catch "
       (str binder)
       " "
       (str (first handler))
@@ -701,7 +724,8 @@ raised again — from where it was first raised."
             ;; Common mistake: (try body (fn (e) handler)) instead of (try body (catch e handler)).
             ;; Fail loud at macro-expansion time so the bug is caught before it silently becomes
             ;; (do body (fn (e) ...)) — a handler that is never installed.
-              (error "try: last form is `"
+              (reflect/error-at clause
+                "try: last form is `"
                 (pr-str clause)
                 "` — did you mean `(catch "
                 (let (params (second clause))
@@ -792,5 +816,5 @@ message it carries, and anything else its printed form.
     (error "binding: bindings must be a list, not a vector: write (binding (*a* 1 *b* 2) …)."
       " Brood is lists-for-code, vectors-for-data (unlike Clojure).")
     (if (= 1 (%rem (count bindings) 2))
-      (error "binding: bindings must be name/value pairs, got " bindings)
+      (reflect/error-at bindings "binding: bindings must be name/value pairs, got " bindings)
       `(%binding (quote ~(%binding-names bindings)) [~@(%binding-vals bindings)] (fn () ~@body)))))

@@ -1354,27 +1354,21 @@ impl ArmShape {
 /// apply, each over its own arm type, so the tiers cannot run different arms of one
 /// function.
 ///
-/// Among accepting arms: a fixed arity (no `&` rest) beats a variadic one; then the most
-/// required parameters (most specific); then the FEWEST optional slots. Without the last
-/// term, `((x) …) ((x &optional y) …)` tied on the first two and `max_by_key`'s last-wins
-/// tie-break picked the `&optional` arm for `(f 1)`, so the answer depended on clause
-/// ORDER. Remaining ties resolve to the later arm.
+/// The FIRST arm, in clause order, that accepts `argc` (ADR-619) — the rule pattern clauses
+/// have always had, so one `fn` has one dispatch rule whatever its heads. A clause an
+/// earlier one shadows is refused when the `fn` is built
+/// (`eval::macros::shadowed_clause_error`), so order never silently decides between two
+/// arms that both take every call of a count.
 pub(crate) fn select_arm_by<T>(
     arms: &[T],
     argc: usize,
     shape: impl Fn(&T) -> ArmShape,
 ) -> Option<&T> {
-    // Fast path: a single-arity function — the overwhelming majority, one select per
-    // call. Skips the filter + `max_by_key` machinery; identical in result.
+    // Fast path: a single-arity function — the overwhelming majority, one select per call.
     if let [only] = arms {
         return shape(only).accepts(argc).then_some(only);
     }
-    arms.iter()
-        .filter(|arm| shape(arm).accepts(argc))
-        .max_by_key(|arm| {
-            let s = shape(arm);
-            (!s.rest, s.required, std::cmp::Reverse(s.optional))
-        })
+    arms.iter().find(|arm| shape(arm).accepts(argc))
 }
 
 /// A user-defined function. Captures its defining environment (an [`EnvId`]) for

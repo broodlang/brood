@@ -407,13 +407,40 @@ fn hyg_list_pattern(heap: &mut Heap, pattern: Value, scope: &mut HygScope, start
             }
         }
         _ => {
-            // A list pattern: every element, the first included, is a pattern.
+            // A list pattern: every element, the first included, is a pattern — except after
+            // `&optional`, where a `(pattern default)` slot's default is an expression that
+            // reads the names bound before it (ADR-619).
+            let mut optional = false;
             for &p in &items {
-                out.push(hyg_pattern(heap, p, scope, start));
+                match p.unpack() {
+                    ValueRef::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) => {
+                        optional = true;
+                        out.push(p);
+                    }
+                    ValueRef::Sym(s) if value::symbol_is(s, kw::AMP) => {
+                        optional = false;
+                        out.push(p);
+                    }
+                    _ if optional => out.push(hyg_optional_slot(heap, p, scope, start)),
+                    _ => out.push(hyg_pattern(heap, p, scope, start)),
+                }
             }
         }
     }
     rebuild_list(heap, pattern, out)
+}
+
+/// An `&optional` slot of a list pattern: `p`, or `(p default)` — the pattern's binders are
+/// renamed, the default walked as a reference (it is evaluated before `p` binds).
+fn hyg_optional_slot(heap: &mut Heap, slot: Value, scope: &mut HygScope, start: usize) -> Value {
+    match heap.list_items(slot).as_deref() {
+        Some(&[pat, default]) => {
+            let default = hyg_walk(heap, default, scope);
+            let pat = hyg_pattern(heap, pat, scope, start);
+            rebuild_list(heap, slot, vec![pat, default])
+        }
+        _ => hyg_pattern(heap, slot, scope, start),
+    }
 }
 
 /// One `bytes` segment: `x` binds a byte; `(x n)` binds `x` to `n` bytes, where a symbol
@@ -600,8 +627,22 @@ fn hyg_param_list(heap: &mut Heap, params: Value, inner: &mut HygScope) -> Value
     };
     let start = inner.len();
     let mut out = Vec::with_capacity(elems.len());
+    // After `&optional`, a `(name default)` slot's default is an expression over the params
+    // before it, not a pattern: read as one, its every name was renamed as a binder.
+    let mut optional = false;
     for p in elems {
-        out.push(hyg_pattern(heap, p, inner, start));
+        match p.unpack() {
+            ValueRef::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) => {
+                optional = true;
+                out.push(p);
+            }
+            ValueRef::Sym(s) if value::symbol_is(s, kw::AMP) => {
+                optional = false;
+                out.push(p);
+            }
+            _ if optional => out.push(hyg_optional_slot(heap, p, inner, start)),
+            _ => out.push(hyg_pattern(heap, p, inner, start)),
+        }
     }
     rebuild_seq_like(heap, params, out)
 }

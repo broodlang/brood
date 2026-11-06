@@ -770,10 +770,13 @@
             "no registry entry"))))
   (test "registry-get-json parses a 2xx body and reports an error status"
     (let (base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "greetings" "x" #b"")))
-      (match (package/registry-get-json (str base "/api/v1/packages?q=greet"))
-        ([:ok data] (assert= (get (first (get data :packages)) :name) "greeter")))
-      (match (package/registry-get-json (str base "/api/v1/packages/nope/releases/9.9.9"))
-        ([:error status _message] (assert= status 404)))))
+      (let (found (package/registry-get-json (str base "/api/v1/packages?q=greet")))
+        (if (failure? found)
+          (error "registry-get-json failed on a 2xx: " (error-message found))
+          (assert= (get (first (get found :packages)) :name) "greeter")))
+      (let (missing (package/registry-get-json (str base "/api/v1/packages/nope/releases/9.9.9")))
+        (is (failure? missing))
+        (assert= (get (fields missing) :status) 404))))
   (test "registry-search-line formats a hit"
     (assert= (package/registry-search-line {:name "greeter"
                                             :latest_version "1.0.0"

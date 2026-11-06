@@ -21,10 +21,15 @@
   (%record-id x))
 
 (defn fields (x)
-  "The FIELDS of record `x` as a plain map. A plain map is returned unchanged.
+  "The FIELDS of record `x` as a plain map, or of a **failure**, `:message` among them (see
+`failure/with`). A plain map is returned unchanged.
 
-    (fields {:a 1 :b 2}) ;=> {:a 1 :b 2}"
-  (if (%record? x) (%record-fields x) x))
+    (fields {:a 1 :b 2}) ;=> {:a 1 :b 2}
+    (fields (failure \"nope\")) ;=> {:message \"nope\"}"
+  (cond
+    (%record? x) (%record-fields x)
+    (failure? x) (%failure-fields x)
+    else x))
 
 ; ---- library type predicates ------------------------------------------------
 ; Every TYPE PREDICATE is bare (`list?`/`vector?`/`map?`/`set?`/`record?`), so a value's

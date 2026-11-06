@@ -103,35 +103,33 @@ Clojure: `(map xs f)`, `(fold xs init f)`, `(reduce xs init f)`, `(seq/filter xs
 `(string/starts-with? s "#")`, `(contains? m k)`, `(index-of coll x)`. A callback's own
 parameters keep the familiar order: `(fold xs 0 (fn (acc x) (+ acc x)))`.
 
-`fn` is multi-clause two ways (don't mix them in one `defn`):
+`fn` takes several clauses, tried **in order** — the first that matches runs, by argument
+count and by shape alike, so arity and pattern clauses mix in one `defn` (ADR-619):
 
 ```lisp
-(defn arity-fn                       ; multi-ARITY: dispatch by arg count (Clojure-style)
+(defn arity-fn                       ; dispatch by arg count
   ((x)   (arity-fn x 0))             ; param lists are LISTS (x), not vectors [x]
   ((x y) (+ x y)))
 
-(defn classify                       ; multi-PATTERN: same arity, dispatch by shape + :when guard
+(defn classify                       ; dispatch by shape + :when guard
   ((0)               :zero)
   ((n) :when (< n 0)  :neg)
   ((n)               :pos))
+
+(defn rect                           ; both in one fn, with an optional in a pattern clause
+  ((:unit)               1)
+  ((w &optional (h w))   (* w h)))
 ```
 
-Arity arms (plain-symbol heads, optionally with `&`/`&optional`) bind directly and
-are cheap — this is how the prelude's variadic `+`/`-`/`<`/`=` stay fast. Pattern
-heads (literals/destructuring) use the matcher.
+Every head takes the same slots: required patterns, `&optional` slots (`name`, `(name
+default)`, `(pattern default)`), a rest after `&` (a name or a pattern), and a `:when`
+guard first in the body — a single-clause `fn` included. Plain-symbol heads still bind
+directly and stay cheap (the prelude's variadic `+`/`-`/`<`/`=`).
 
-**Trap — `&optional` defaults & patterns don't combine with arity overloading.** An
-`&optional` slot must be a plain symbol (it can't be a pattern). A clause head with
-a `(default …)` optional form or a pattern is matched as a *pattern* clause, so its
-`&optional` is read literally — don't expect it to act as an arity marker. Pick one
-mechanism per `defn`. Required params *can* still be patterns next to `&optional`
-(only the optional/rest slot is restricted). To branch on an optional, bind it and
-`match` in the body (`nil` = omitted):
-
-```lisp
-(defn h (x &optional opt) (match opt (nil [:no x]) (v [:yes x v])))
-;; NOT: (defn h ((x) …) ((x &optional (y 9)) …))   ; &optional in a clause head → match error
-```
+**Trap — order matters, and a dead clause is a compile error.** `((x &optional y) …)`
+written before `((x) …)` takes every call the second would, so the `fn` is refused
+("can never run"); put the more specific clause first. (Clojure picks by arity whatever
+the order; Brood goes in order and refuses what order would hide.)
 
 Local bindings — `let` takes a **flat** name/value list (not Scheme's double-parens), and is sequential (each binding sees the earlier ones):
 

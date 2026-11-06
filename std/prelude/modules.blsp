@@ -352,8 +352,9 @@ one call site is inside `defmodule`'s template — see the note there."
         opts (rest (rest clause))
         marker (first opts))
     (when (and marker (not (= marker :only)) (not (= marker :exclude)))
-      (error "defmodule: unknown (:use "
-        mod " " marker " …) marker — the import filters are :only and :exclude, as " "`(:use " mod
+      (reflect/error-at clause
+        "defmodule: unknown (:use " mod " " marker
+        " …) marker — the import filters are :only and :exclude, as " "`(:use " mod
         " :only [a b])` or `(:use " mod " :exclude [a b])`"))
     (let (subset (if (= marker :only) (second opts) nil)
           exclude (if (= marker :exclude) (second opts) nil)
@@ -385,9 +386,9 @@ one call site is inside `defmodule`'s template — see the note there."
         opts (rest (rest clause))
         marker (first opts))
     (when (and marker (not (= marker :only)))
-      (error "defmodule: unknown (:use-internals "
-        mod " " marker " …) marker — the only import filter is :only, as " "`(:use-internals " mod
-        " :only [a b])`"))
+      (reflect/error-at clause
+        "defmodule: unknown (:use-internals " mod " " marker
+        " …) marker — the only import filter is :only, as " "`(:use-internals " mod " :only [a b])`"))
     (let (subset (if (= marker :only) (second opts) nil)
           ;; Root an intra-package target to `foo/mod` under a dependency load (ADR-070).
           rooted (list '%root-module-name (list 'quote mod)))

@@ -1,0 +1,13 @@
+;; Macros whose templates carry `&optional` defaults calling this module's PRIVATE function,
+;; for `fn_heads_test`: the defaults must resolve to `fn-heads-macros/ten` wherever the macro
+;; expands (ADR-619). Before, a pattern's every symbol was taken for a binder, so `ten`
+;; stayed bare and came out unbound in the caller's module.
+(defmodule fn-heads-macros)
+
+(defn- ten () 10)
+
+(defmacro opt-match (v) `(match ~v ((a &optional (b (ten))) [a b])))
+
+(defmacro opt-clauses () `(fn ((0) :zero) ((a &optional (b (ten))) [a b])))
+
+(defmacro opt-native () `(fn (a &optional (b (+ a (ten)))) [a b]))

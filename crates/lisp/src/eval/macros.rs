@@ -479,6 +479,12 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     // the initial `form` before any eval, so it needs no slot.
     let eb = heap.env_roots_len();
     heap.push_env_root(env);
+    // The original call, rooted. An expander that raises is complaining about the call, so
+    // an error with no position of its own is placed there — not at the enclosing top-level
+    // form the compile pass would otherwise blame — and that includes an expansion a macro
+    // BUILT (`match` → `match*`), which has no reader position.
+    let rb = heap.roots_len();
+    heap.push_root(form);
     let mut cur = form;
     // Bounded fixpoint (kernel audit): a macro that forever expands to another
     // macro call (`(defmacro m (x) `(m ~x))`) otherwise hard-hangs the expander
@@ -488,6 +494,7 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     loop {
         if rounds >= MAX_EXPAND_ROUNDS {
             heap.truncate_env_roots(eb);
+            heap.truncate_roots(rb);
             return Err(LispError::runtime(format!(
                 "macro expansion did not reach a fixpoint after {} rounds \
                  (a macro that expands to itself?)",
@@ -500,11 +507,14 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
             Ok(r) => r,
             Err(e) => {
                 heap.truncate_env_roots(eb);
-                return Err(e);
+                let original = heap.root_at(rb);
+                heap.truncate_roots(rb);
+                return Err(e.or_form_pos(heap, original));
             }
         };
         if !expanded {
             heap.truncate_env_roots(eb);
+            heap.truncate_roots(rb);
             return Ok(next);
         }
         cur = next;
