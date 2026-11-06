@@ -12,6 +12,7 @@ mod strips;
 use super::render::CpuTexture;
 use super::rows::RowMap;
 use super::*;
+#[cfg(feature = "gui-gpu")]
 pub(crate) use strips::holds_blinking_caret;
 use strips::*;
 
