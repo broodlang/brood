@@ -25,7 +25,7 @@ to 2026-11-06 moved, unedited, to the end of
   before the next release.
 - **Known issues:** nothing open. One watch, **KI-370** (`nest check` warned once on
   `examples/life_bands.blsp`; the diagnostic for the next sighting is in its entry).
-- **bedit** is pinned at `df808b2` (`BEDIT_REF`). Smoke with a grammar-enabled
+- **bedit** is pinned at `1d132cc3` (`BEDIT_REF`). Smoke with a grammar-enabled
   `nest`, or its mode tests fail on "no grammar", which is not a regression.
 - **Before pushing:** `make prepush`, and `git merge --ff-only origin/main` first if it moved.
 - **Is the tree green?** `make green`, never by reading the run list.

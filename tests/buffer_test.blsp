@@ -15,6 +15,7 @@
 ;; auto-required by the qualified `log/…` / `gen/…` references below.
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-buf-")
+(purge-stale-temp "brood-revert-")
 
 (describe "buffer construction & reads"
   (test "make-buffer"
