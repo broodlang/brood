@@ -33,9 +33,11 @@
                                                              ([:go s] (do
                                                                         (tcp/set-binary s true)
                                                                         (serve-conn s #b"")))))))
+                                      ;; Counted before the handler can answer, or the client can
+                                      ;; ask for the count ahead of this send (KI-373).
+                                      (send counter :accepted)
                                       (tcp/controlling-process client handler)
                                       (send handler [:go client])
-                                      (send counter :accepted)
                                       (accept-loop listener counter)))
     ([:stop] (tcp/close listener))))
 
