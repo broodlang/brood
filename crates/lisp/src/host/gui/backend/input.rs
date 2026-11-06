@@ -92,10 +92,18 @@ pub(super) fn mouse_message(m: &Mouse) -> Message {
         if v.len() == 6 {
             v.push(Message::Nil);
         }
-        v.push(Message::Map(vec![(
+        let mut extra = vec![(
             Message::Keyword(value::intern("at")),
             Message::Vector(vec![Message::Float(row), Message::Float(col)]),
-        )]));
+        )];
+        // in the strip a frame paints its next line into (ADR-615): `row` is that line's
+        if m.partial {
+            extra.push((
+                Message::Keyword(value::intern("partial")),
+                Message::Bool(true),
+            ));
+        }
+        v.push(Message::Map(extra));
     }
     Message::Vector(v)
 }
@@ -108,6 +116,7 @@ pub(super) fn release_of(
     col: u16,
     row: u16,
     at: Option<(f64, f64)>,
+    partial: bool,
     mods: &ModifiersState,
 ) -> Mouse {
     Mouse {
@@ -121,6 +130,7 @@ pub(super) fn release_of(
         count: 0,
         scroll_dy: 0.0,
         at,
+        partial,
     }
 }
 
@@ -169,6 +179,7 @@ pub(super) fn deliver_scroll(w: &Win, dy: f64) {
             count: 0,
             scroll_dy: dy.abs(),
             at: w.pointer_at(),
+            partial: w.pointer_partial(),
         }),
     );
 }
@@ -671,6 +682,8 @@ fn find_cursor(
             find_cursor(ops, r, ox, oy, cw, ch, scroll_px(*dy_frac, ch))
         }
         Op::Fragment(fragment) => find_cursor(&fragment.0, r, ox, oy, cw, ch, scroll_dy),
+        // laid out on the uniform rows already, the space this walk measures in (ADR-615)
+        Op::AboveSeam { ops } => find_cursor(ops, r, ox, oy, cw, ch, scroll_dy),
         Op::CellRegion { x, y, px, ops, .. } => {
             let region = r.metrics_at(*px);
             if region.cell_w == 0 || region.cell_h == 0 {
@@ -722,6 +735,7 @@ mod tests {
             count,
             scroll_dy: 0.0,
             at,
+            partial: false,
         };
         // `Message` implements `Drop` (its children are freed iteratively), so the vector
         // is taken out by `mem::take` rather than moved out of the pattern.

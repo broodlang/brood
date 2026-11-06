@@ -296,8 +296,8 @@ fn flush_wheel(w: &mut Win, now: Instant) -> bool {
 }
 
 // The rendering *mechanism's* fallback colours — used ONLY when Brood supplies
-// none: `Op::Clear` / the inset-margin fill when no `gui-bg!` is set, and a face
-// with no `:bg`/`:fg`. Brood owns the actual palette as *policy* — every render op
+// none: `Op::Clear` / the inset-margin fill when no `gui-bg!` is set, and the text of a
+// face with no `:fg` when no `gui-fg!` is set. Brood owns the actual palette as *policy* — every render op
 // carries its own `[r g b]`/hex colour resolved through `std/editor/face.blsp`, so
 // these are defaults, not a duplicated palette (there is no `theme.blsp`). Catppuccin
 // Mocha base/text tones, chosen so an un-styled window still reads as an editor.
@@ -427,6 +427,10 @@ enum UserEvent {
     /// and ones opened later. Behind `gui-bg!`; `None` restores `DEFAULT_BG`. Pure
     /// repaint, no metric change.
     Background { rgb: Option<[u8; 3]> },
+    /// Set the default text colour — what a text op whose face names no `:fg` is drawn
+    /// in — for every open window and ones opened later. Behind `gui-fg!`; `None`
+    /// restores `DEFAULT_FG`. Pure repaint, no metric change.
+    Foreground { rgb: Option<[u8; 3]> },
     /// Set the cell height as a multiple of the font px — for every open window and
     /// ones opened later. Behind `gui-line-height!`. A metric change, like a font
     /// change: the row count moves, so each window is told its new grid and re-renders.
@@ -1086,6 +1090,19 @@ pub fn bg(rgb: Option<[u8; 3]>) -> Result<(), String> {
     Ok(())
 }
 
+/// `(gui-fg! rgb)` — set the default text colour (a text op whose face names no `:fg`) on
+/// every window + the default for ones opened later. `None` restores `DEFAULT_FG`. No-op
+/// (silently) if the GUI thread never started.
+pub fn fg(rgb: Option<[u8; 3]>) -> Result<(), String> {
+    if headless() {
+        return headless_send(|| offscreen::Request::Foreground(rgb));
+    }
+    if let Ok(g) = gui() {
+        let _ = lock(g).send_event(UserEvent::Foreground { rgb });
+    }
+    Ok(())
+}
+
 /// `(gui-line-height! mult)` — set the cell height as a multiple of the font px on
 /// every window + the default for ones opened later. No-op (silently) if the GUI
 /// thread never started.
@@ -1283,7 +1300,9 @@ impl CaretBlink {
 fn blinking_caret(ops: &[Op]) -> Option<&Op> {
     ops.iter().find_map(|op| match op {
         Op::Cursor { blink: Some(_), .. } => Some(op),
-        Op::ScrollRegion { ops, .. } | Op::CellRegion { ops, .. } => blinking_caret(ops),
+        Op::ScrollRegion { ops, .. } | Op::CellRegion { ops, .. } | Op::AboveSeam { ops } => {
+            blinking_caret(ops)
+        }
         Op::Fragment(fragment) => blinking_caret(&fragment.0),
         _ => None,
     })
@@ -1500,6 +1519,9 @@ struct Win {
     /// and cell as `cursor` — what a mouse message carries as `{:at [row col]}` so a zoomed
     /// region can hit-test inside a window cell (`Mouse::at`).
     cursor_at: (f64, f64),
+    /// Whether the pointer is in the leftover strip of a frame that paints its next line
+    /// there (ADR-615): `cursor`'s row is then the seam's, the strip's own (`Mouse::partial`).
+    cursor_partial: bool,
     /// The button currently held down (set on press, cleared on release), so a
     /// `CursorMoved` while it's held can be reported as a `:drag` carrying that
     /// button. Deliberately one button at a time — all a drag gesture needs: a
@@ -1622,6 +1644,8 @@ struct RenderDefaults {
     inset: f32,
     /// Window background; `None` = `DEFAULT_BG`.
     bg: Option<[u8; 3]>,
+    /// Default text colour; `None` = `DEFAULT_FG`.
+    fg: Option<[u8; 3]>,
     /// Cell height as a multiple of the font px.
     line_height: f32,
     /// How monochrome text is anti-aliased.
@@ -1639,6 +1663,7 @@ impl Default for RenderDefaults {
             px: DEFAULT_PX,
             inset: 0.0,
             bg: None,
+            fg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
             text_contrast: TEXT_CONTRAST,
@@ -1731,6 +1756,7 @@ fn build_window(
     }
     renderer.set_inset(defaults.inset);
     renderer.set_bg(defaults.bg);
+    renderer.set_fg(defaults.fg);
     renderer.set_line_height(defaults.line_height);
     renderer.set_text_aa(defaults.text_aa);
     renderer.set_text_contrast(defaults.text_contrast);
@@ -1755,6 +1781,7 @@ fn build_window(
         cursor: (0, 0),
         cursor_px: (0, 0),
         cursor_at: (0.0, 0.0),
+        cursor_partial: false,
         held: None,
         last_click: None,
         keyboard: Keyboard::new(spec.key_repeat),
@@ -2218,6 +2245,13 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     w.window.request_redraw();
                 }
             }
+            UserEvent::Foreground { rgb } => {
+                self.defaults.fg = rgb;
+                for w in self.wins.values_mut() {
+                    w.renderer.set_fg(rgb);
+                    w.window.request_redraw();
+                }
+            }
             UserEvent::LineHeight { mult } => {
                 self.defaults.line_height = mult;
                 for w in self.wins.values_mut() {
@@ -2482,7 +2516,14 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     let (col, row) = w.cursor;
                     deliver(
                         w.subscriber,
-                        mouse_message(&release_of(b, col, row, w.pointer_at(), &w.mods)),
+                        mouse_message(&release_of(
+                            b,
+                            col,
+                            row,
+                            w.pointer_at(),
+                            w.pointer_partial(),
+                            &w.mods,
+                        )),
                     );
                 }
             }
@@ -2537,7 +2578,14 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     let (col, row) = w.cursor;
                     deliver(
                         w.subscriber,
-                        mouse_message(&release_of(b, col, row, w.pointer_at(), &w.mods)),
+                        mouse_message(&release_of(
+                            b,
+                            col,
+                            row,
+                            w.pointer_at(),
+                            w.pointer_partial(),
+                            &w.mods,
+                        )),
                     );
                 }
             }
@@ -2555,15 +2603,22 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     psz.height as usize,
                 );
                 let px = px_clamped(position);
+                // the strip a frame paints its next line into is a cell of its own (ADR-615): the
+                // seam's row number, but not the row bottom-anchored on it
+                let partial = w
+                    .renderer
+                    .rows(psz.width as usize, psz.height as usize)
+                    .in_strip(position.y);
                 // A pixel-input window (a game) reports every pixel of motion — that IS
                 // the grain it asked for, and winit already coalesces motion per frame —
                 // where a cell-grid window reports only a cell crossing.
                 let moved = if w.pixel_input {
                     px != w.cursor_px
                 } else {
-                    cell != w.cursor
+                    cell != w.cursor || partial != w.cursor_partial
                 };
                 w.cursor = cell;
+                w.cursor_partial = partial;
                 w.cursor_px = px;
                 w.cursor_at = px_to_cell_frac(
                     position,
@@ -2596,6 +2651,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             count: 0,
                             scroll_dy: 0.0,
                             at: w.pointer_at(),
+                            partial: w.pointer_partial(),
                         }),
                     );
                 }
@@ -2663,6 +2719,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             count,
                             scroll_dy: 0.0,
                             at: w.pointer_at(),
+                            partial: w.pointer_partial(),
                         }),
                     );
                 }
@@ -2688,6 +2745,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             count: 0,
                             scroll_dy: 0.0,
                             at: w.pointer_at(),
+                            partial: w.pointer_partial(),
                         }),
                     );
                 }
@@ -3177,6 +3235,12 @@ impl Win {
         } else {
             Some(self.cursor_at)
         }
+    }
+
+    /// Whether the pointer is in a painted leftover strip (ADR-615, `Mouse::partial`): never
+    /// for a pixel-input window, whose pointer is pixels.
+    fn pointer_partial(&self) -> bool {
+        !self.pixel_input && self.cursor_partial
     }
 }
 

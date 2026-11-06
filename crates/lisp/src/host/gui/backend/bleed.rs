@@ -168,6 +168,12 @@ fn bleed_ops(
                     .map(|bled| Op::Fragment(FragmentOps(bled))),
                 Vec::new(),
             ),
+            // a group above the seam (ADR-615) bleeds as the rows it is laid out on: the pieces
+            // beside a row it puts at the seam are cut off with it, in the strip
+            Op::AboveSeam { ops } => (
+                bleed_ops(ops, m, vertical, known, used).map(|ops| Op::AboveSeam { ops }),
+                Vec::new(),
+            ),
             _ => (None, band(op).map_or(Vec::new(), |b| b.pieces(m, vertical))),
         };
         if replaced.is_none() && pieces.is_empty() {
@@ -229,6 +235,7 @@ fn carry_nested(
     for op in ops {
         match op {
             Op::ScrollRegion { ops, .. } => carry_nested(ops, false, known, used),
+            Op::AboveSeam { ops } => carry_nested(ops, vertical, known, used),
             Op::Fragment(fragment) => {
                 let key = (Arc::as_ptr(&fragment.0) as *const Op as usize, vertical);
                 if let Some(entry) = known.remove(&key) {

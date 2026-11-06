@@ -108,6 +108,9 @@ pub fn inset(_px: f32) -> Result<(), String> {
 pub fn bg(_rgb: Option<[u8; 3]>) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }
+pub fn fg(_rgb: Option<[u8; 3]>) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
 pub fn line_height(_mult: f32) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }

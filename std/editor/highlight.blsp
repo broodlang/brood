@@ -57,11 +57,34 @@ Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently tes
 ;; hue difference.
 (def-face :syntax/doc {:fg :grey :italic true})
 (def-face :syntax/number {:fg :yellow})
+;; A language KEYWORD — Python's `def` / `return`, Rust's `fn` / `let`, Elixir's `do` / `end`: what a
+;; tree-sitter table's anonymous keyword tokens report (`face-of-syntax`) and a lexer table's
+;; `:keyword` role names. The Lisps' keywords are their special forms (`:syntax/special`); a Lisp
+;; `:keyword` LITERAL is `:syntax/symbol`, below (ADR-616).
 (def-face :syntax/keyword {:fg :magenta})
+;; A SYMBOL used as a value (ADR-616): a Lisp `:keyword`, and `nil` / `true` / `false`, which the
+;; reader classifies with them — and a data format's KEY (JSON, YAML, TOML, INI), a name written
+;; as data. Apart from `:syntax/keyword` so a theme can leave a language's keywords plain and
+;; colour its literals (Tonsky's rule); by default it IS the keyword face, the colour these
+;; tokens always had.
+(def-face :syntax/symbol {:inherit :syntax/keyword})
+;; A CONSTANT a language names (ADR-616): `true` / `false` / `nil` / `None` / `null`, an Elixir
+;; atom, a Ruby symbol — what tree-sitter and lexer tables coloured as specials. By default it IS
+;; the special face, the colour they always had; a theme that colours literals names it.
+(def-face :syntax/constant {:inherit :syntax/special})
 ; special forms / core macros
 (def-face :syntax/special {:fg :blue :bold true})
 ; a call head
 (def-face :syntax/function {:fg :cyan})
+;; The NAME a definition binds — `f` in `(defn f …)`, `def f():`, `fn f()` — apart from a
+;; call's head (ADR-614). By default it IS the call face, so a theme that names neither sees
+;; no difference; one that colours definitions and leaves calls plain (Tonsky's rule) restyles
+;; the two apart.
+(def-face :syntax/definition {:inherit :syntax/function})
+;; Brackets, commas and semicolons (ADR-614). Empty by default — the plain text colour — and
+;; a lexer paints nothing for a face with no attributes, so only a theme that dims
+;; punctuation pays a span per bracket.
+(def-face :syntax/punctuation {})
 ; the matched bracket pair (REPL)
 (def-face :syntax/match {:reverse true})
 ; a lone unmatched bracket (REPL)
@@ -81,8 +104,11 @@ Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently tes
 (def hl-face-doc (face :syntax/doc))
 (def hl-face-number (face :syntax/number))
 (def hl-face-keyword (face :syntax/keyword))
+(def hl-face-symbol (face :syntax/symbol))
+(def hl-face-constant (face :syntax/constant))
 (def hl-face-special (face :syntax/special))
 (def hl-face-function (face :syntax/function))
+(def hl-face-definition (face :syntax/definition))
 (def hl-face-match (face :syntax/match))
 (def hl-face-error (face :syntax/error))
 
@@ -174,7 +200,8 @@ ending the text included, whose escaped character is not there (`\"a\\` at a lin
 ;; A `:keyword` / `:number` / `:comment` token paints in the `:syntax/*` face of its
 ;; own kind — the position-independent kinds; `:symbol` and `:string` are resolved by
 ;; position (head: special form vs call vs plain; doc position: doc vs. string value),
-;; and `:open`/`:close` carry no colour. The faces are resolved once per lexing pass
+;; and `:open`/`:close` carry the punctuation face only when it paints (or a rainbow
+;; depth face). The faces are resolved once per lexing pass
 ;; (`hl-faces`), so a live restyle of `:syntax/*` takes effect on the next re-lex.
 
 ;; ---- the form stack ---------------------------------------------------------
@@ -247,31 +274,76 @@ string). `toks` is the stream AFTER the string."
 
 ;; ---- the lexer walk ---------------------------------------------------------
 
+(defn- hl-painted (name)
+  ;; face `name` resolved, or nil when it has no attributes — a face that would paint
+  ;; nothing costs no span
+  (let (resolved (face name)) (if (or (nil? resolved) (empty? resolved)) nil resolved)))
+
 (defn- hl-faces ()
   "The `:syntax/*` faces a lexing pass paints with, resolved ONCE per pass — a map
 from token kind (`:comment` `:number` `:keyword` `:string` `:doc` `:special`
-`:function`) to the attribute map. Resolving per span cost the inherit-chain walk per
-coloured token, a third of the pass on a 100-line band; per pass, a live `face-set` of
-a `:syntax/*` face still restyles the editor on its next re-lex."
+`:function` `:definition` `:punctuation`) to the attribute map — the `:keyword` token kind
+(`:foo`, `nil`, `true`, `false`) paints `:syntax/symbol` (ADR-616); `:punctuation` is nil
+when that face is empty (the default), so the brackets are left unpainted. Resolving
+per span cost the inherit-chain walk per coloured token, a third of the pass on a
+100-line band; per pass, a live `face-set` of a `:syntax/*` face still restyles the
+editor on its next re-lex."
   {:comment (face :syntax/comment)
    :number (face :syntax/number)
-   :keyword (face :syntax/keyword)
+   :keyword (face :syntax/symbol)
    :string (face :syntax/string)
    :doc (face :syntax/doc)
    :special (face :syntax/special)
-   :function (face :syntax/function)})
+   :function (face :syntax/function)
+   :definition (face :syntax/definition)
+   :punctuation (hl-painted :syntax/punctuation)})
 
-(defn- hl-rainbow (acc pass start end depth)
-  ;; `acc` with the bracket at `[start, end)` in the face of `depth` (0 the outermost) when the
-  ;; pass paints a rainbow (`:rainbow`, the resolved depth faces), else `acc`
-  (let (rainbow (:rainbow pass))
-    (if (nil? rainbow) acc (cons [start end (nth rainbow (math/mod depth (count rainbow)))] acc))))
+(defn- hl-bracket (acc pass start end depth)
+  ;; `acc` with the bracket at `[start, end)` painted: in the face of `depth` (0 the
+  ;; outermost) when the pass paints a rainbow (`:rainbow`, the resolved depth faces), else
+  ;; in the punctuation face when it has one, else `acc`
+  (let (rainbow (:rainbow pass)
+        punctuation (get (:faces pass) :punctuation))
+    (cond
+      (not (nil? rainbow)) (cons [start end (nth rainbow (math/mod depth (count rainbow)))] acc)
+      (nil? punctuation) acc
+      else (cons [start end punctuation] acc))))
+
+;; ---- definitions: the name a `def…` form binds (ADR-614) -----------------------
+;; A DEFINER is a `def…` head the pass's special-form set holds — Brood's `defn` / `def` /
+;; `defmacro` / `defmodule`, elisp's `defun` / `defvar`, Clojure's `defn`, Scheme's `define` —
+;; or a docstring-carrying one (`defn-`), or the private `-` form of one the set holds (`def-`);
+;; the symbol right after it is the name it defines. Scheme's
+;; `(define (f x) …)` puts the name at the head of the list in that place, so a list opened
+;; there is pushed with the `:definition` marker as its head until its own head is read.
+
+(defn- hl-definer? (head pass)
+  ;; a `def…` head the special-form set holds, or a doc-carrying one (`defn-`, `defserver`),
+  ;; or the private `-` form of one the set holds (`def-`)
+  (and (string? head)
+    (string/starts-with? head "def")
+    (let (specials (:specials pass))
+      (or (= true (get specials head))
+        (doc-form? head)
+        (and (string/ends-with? head "-")
+          (= true (get specials (string/substring head 0 (dec (string/length head))))))))))
+
+(defn- hl-name-place? (stack pass)
+  "True when the form starting here is the NAME place of a definer: the second form of a
+`(` list whose head defines."
+  (and (not (empty? stack))
+    (let ([open n head _] (first stack)) (and (= open "(") (= n 1) (hl-definer? head pass)))))
+
+(defn- hl-defining-list? (stack)
+  ;; the innermost frame is a list opened in a definer's name place, its head not yet read
+  (and (not (empty? stack)) (= (nth (first stack) 2) :definition)))
 
 (defn- hl-walk (toks stack acc pass)
   "Walk the `scan-tokens` stream into `[start end face]` colour spans, carrying the
 form `stack` (head position, and enough shape to tell a docstring from a string).
-`:symbol` needs position — head + special form → keyword face, head → call face, else
-uncoloured — and `:string` needs it too (doc vs. value). `pass` is what the walk does not
+`:symbol` needs position — head + special form → keyword face, head → call face, the name
+place of a `def…` head → definition face, else uncoloured — and `:string` needs it too (doc
+vs. value). `pass` is what the walk does not
 change: `:faces` (the resolved `hl-faces`), `:specials`, and `:open-end?` (the stream is one
 line of a longer source, see `hl-more-forms?`). Returns `[spans stack]`, the spans in
 REVERSE and the stack the stream ended with."
@@ -282,16 +354,21 @@ REVERSE and the stack the stream ended with."
           faces (:faces pass))
       (cond
         ;; with a rainbow, a bracket takes its depth's face: an opener the depth it opens, a
-        ;; closer the depth it closes, so a pair is one colour
+        ;; closer the depth it closes, so a pair is one colour; without one, the punctuation
+        ;; face when it paints anything. A list opened in a definer's name place (Scheme's
+        ;; `(define (f x) …)`) is marked, so its head reads as the name.
         (= kind :open)
           (hl-walk more
-            (hl-push (hl-advance stack true) text)
-            (hl-rainbow acc pass s e (count stack))
+            (let (pushed (hl-push (hl-advance stack true) text))
+              (if (and (= text "(") (hl-name-place? stack pass))
+                (cons ["(" 0 :definition false] (rest pushed))
+                pushed))
+            (hl-bracket acc pass s e (count stack))
             pass)
         (= kind :close)
           (hl-walk more
             (rest stack)
-            (hl-rainbow acc pass s e (math/max 0 (dec (count stack))))
+            (hl-bracket acc pass s e (math/max 0 (dec (count stack))))
             pass)
         ; a comment starts no form — the stack is untouched
         (= kind :comment) (hl-walk more stack (cons [s e (get faces :comment)] acc) pass)
@@ -299,7 +376,9 @@ REVERSE and the stack the stream ended with."
           (let (head? (hl-head? stack)
                 f (cond
                     (and head? (= true (get (:specials pass) text))) (get faces :special)
+                    (and head? (hl-defining-list? stack)) (get faces :definition)
                     head? (get faces :function)
+                    (hl-name-place? stack pass) (get faces :definition)
                     else nil))
             (hl-walk more (hl-name stack text) (if (nil? f) acc (cons [s e f] acc)) pass))
         (= kind :string)
@@ -314,7 +393,9 @@ REVERSE and the stack the stream ended with."
   "Lexically tokenize Lisp `src` into a list of `[start end face]` colour spans
 (character offsets, end-exclusive) for the tokens that carry a colour — comments,
 strings (a `def…` form's docstring apart from a string value), numbers, keywords, and
-head-position symbols (special forms vs calls).
+head-position symbols (special forms vs calls), and the name a `def…` form binds
+(`:syntax/definition`, ADR-614) — plus every bracket when `:syntax/punctuation` paints
+anything (by default it does not).
 Whitespace and plain variable references carry no span (the default colour). The
 per-character scan is the native `scan-tokens`; this only assigns faces over the token
 stream (O(tokens)), so it stays fast enough for per-frame fontification.

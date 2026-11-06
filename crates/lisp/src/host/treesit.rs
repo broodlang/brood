@@ -550,10 +550,11 @@ impl SpanText for ropey::Rope {
 }
 
 /// How many selector MAPS one face-table key may nest through `:parent` — the key itself, its
-/// parent's map and its grandparent's (ADR-487). Three reaches a method call's receiver
-/// (`identifier` in `field_expression` in `call_expression`) with room to spare, and a bound
-/// keeps a selector's specificity a fixed-size value.
-pub const MAX_SELECTOR_DEPTH: usize = 3;
+/// parent's map, its grandparent's and its great-grandparent's (ADR-487, ADR-614). Three reached
+/// a method call's receiver (`identifier` in `field_expression` in `call_expression`); four
+/// reaches the name an Elixir `def` with a guard defines (`identifier` in `call` in
+/// `binary_operator` in `arguments`). A bound keeps a selector's specificity a fixed-size value.
+pub const MAX_SELECTOR_DEPTH: usize = 4;
 
 /// The node SOURCE TEXT a selector requires (ADR-487): one of these strings, exactly. Sorted,
 /// for a binary search, with the shortest and longest lengths kept so most nodes are refused
@@ -598,7 +599,10 @@ impl TextMatch {
 /// CONTEXT — the FIELD it occupies in its parent (tree-sitter's field names: `function`,
 /// `name`, `body`), its position among the parent's NAMED children, its exact source TEXT,
 /// and a selector its PARENT must satisfy in turn (a plain `:parent :call` is the parent
-/// selector with a kind alone). Every constraint present must hold; an absent one is free.
+/// selector with a kind alone). `after` (ADR-614) is what the named sibling right before the
+/// node must be — a kind and/or a text, nothing else — which is how an Elixir `def`'s
+/// `arguments` are told from a call's: the `identifier` before them reads `def`. Every
+/// constraint present must hold; an absent one is free.
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(not(feature = "treesit"), allow(dead_code))]
 pub struct Selector {
@@ -607,6 +611,7 @@ pub struct Selector {
     pub field: Option<String>,
     pub nth: Option<usize>,
     pub text: Option<TextMatch>,
+    pub after: Option<Box<Selector>>,
 }
 
 #[cfg_attr(not(feature = "treesit"), allow(dead_code))]
@@ -626,6 +631,7 @@ impl Selector {
             && self.field.is_none()
             && self.nth.is_none()
             && self.text.is_none()
+            && self.after.is_none()
     }
 
     /// How many selector levels deep it reaches: 1 for a map with no parent selector.
@@ -633,14 +639,15 @@ impl Selector {
         1 + self.parent.as_ref().map_or(0, |parent| parent.depth())
     }
 
-    /// The selector's own constraints as distinct powers of two — text 16, field 8, parent
-    /// 4, nth 2, kind 1 — so two different constraint sets at one level never tie.
+    /// The selector's own constraints as distinct powers of two — after 32, text 16, field
+    /// 8, parent 4, nth 2, kind 1 — so two different constraint sets at one level never tie.
     fn level_weight(&self) -> u8 {
         u8::from(self.kind.is_some())
             | (u8::from(self.nth.is_some()) << 1)
             | (u8::from(self.parent.is_some()) << 2)
             | (u8::from(self.field.is_some()) << 3)
             | (u8::from(self.text.is_some()) << 4)
+            | (u8::from(self.after.is_some()) << 5)
     }
 
     /// The level weights from the node outward: the node's own constraints, then its parent
@@ -660,6 +667,7 @@ impl Selector {
     /// How many strings its `:text` sets accept, at every level — the narrower wins a tie.
     fn breadth(&self) -> usize {
         self.text.as_ref().map_or(0, |text| text.texts.len())
+            + self.after.as_ref().map_or(0, |after| after.breadth())
             + self.parent.as_ref().map_or(0, |parent| parent.breadth())
     }
 
@@ -684,6 +692,20 @@ impl Selector {
                 .text
                 .as_ref()
                 .is_none_or(|wanted| wanted.holds(node, text))
+            && match (&self.after, context.previous) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(after), Some(previous)) => {
+                    after
+                        .kind
+                        .as_deref()
+                        .is_none_or(|kind| kind == previous.kind())
+                        && after
+                            .text
+                            .as_ref()
+                            .is_none_or(|wanted| wanted.holds(previous, text))
+                }
+            }
     }
 }
 
@@ -808,7 +830,8 @@ impl SpanTable {
 /// Where a node sits, as the walk reaches it: its parent node, the field it fills there (None
 /// when the grammar names none), its index among the parent's named children (None for an
 /// anonymous token, which has no place in that count), and the PARENT's own context — the
-/// chain a nested `:parent` selector climbs (ADR-487). Read off the cursor that is already
+/// chain a nested `:parent` selector climbs (ADR-487) — and the named sibling right before it,
+/// what an `:after` constraint reads (ADR-614). Read off the cursor that is already
 /// walking the parent's children, and kept on the walk's own stack, so it costs nothing a
 /// plain-kind table did not.
 #[cfg(feature = "treesit")]
@@ -817,6 +840,7 @@ struct NodeContext<'a> {
     parent: Option<tree_sitter::Node<'a>>,
     field: Option<&'a str>,
     nth: Option<usize>,
+    previous: Option<tree_sitter::Node<'a>>,
     outer: Option<&'a NodeContext<'a>>,
 }
 
@@ -827,16 +851,43 @@ impl NodeContext<'_> {
         parent: None,
         field: None,
         nth: None,
+        previous: None,
         outer: None,
     };
 }
 
-/// What one span walk is asked for: the face table, the keyword flag, and the byte window
-/// `[from, to)` to report — `None` for the whole tree, unclipped.
+/// Which ANONYMOUS tokens a span walk reports though no table entry names them — the
+/// cross-language rules no grammar spells (ADR-614). `keywords`: a token beginning with a
+/// letter, reported as `:__keyword__`. `punctuation`: a token made only of brackets, commas
+/// and semicolons (`(` `]` `{` `,` `;` `)]`), reported as `:__punctuation__` — off unless asked
+/// for, since it is a span per bracket.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenRules {
+    pub keywords: bool,
+    pub punctuation: bool,
+}
+
+impl TokenRules {
+    /// The keyword rule alone — what a `true` flag has always meant.
+    pub const KEYWORDS: TokenRules = TokenRules {
+        keywords: true,
+        punctuation: false,
+    };
+}
+
+/// Is an anonymous token of kind `kind` (an anonymous token's kind IS its text) punctuation:
+/// brackets, commas and semicolons only?
+#[cfg_attr(not(feature = "treesit"), allow(dead_code))]
+fn punctuation_kind(kind: &str) -> bool {
+    !kind.is_empty() && kind.bytes().all(|byte| b"()[]{},;".contains(&byte))
+}
+
+/// What one span walk is asked for: the face table, the anonymous-token rules, and the byte
+/// window `[from, to)` to report — `None` for the whole tree, unclipped.
 #[cfg(feature = "treesit")]
 struct SpanQuery<'a> {
     table: &'a SpanTable,
-    keywords: bool,
+    tokens: TokenRules,
     window: Option<(usize, usize)>,
 }
 
@@ -870,16 +921,24 @@ fn spans_into<T: SpanText>(
 ) {
     // An anonymous token whose text starts with a letter is a language keyword — the
     // cross-language rule, so a table need only name the handful of NAMED nodes it
-    // colours. Reported as `:__keyword__` so the caller maps it like any other.
+    // colours. Reported as `:__keyword__` so the caller maps it like any other; a bracket,
+    // comma or semicolon as `:__punctuation__` when the query asks for those too.
     let reported = query
         .table
         .rule_for(node, context, text)
         .map(|rule| rule.reported)
         .or_else(|| {
-            (query.keywords
-                && !node.is_named()
-                && text.starts_alphabetic(node.start_byte(), node.end_byte()))
-            .then(|| Value::keyword(value::intern("__keyword__")))
+            if node.is_named() {
+                None
+            } else if query.tokens.keywords
+                && text.starts_alphabetic(node.start_byte(), node.end_byte())
+            {
+                Some(Value::keyword(value::intern("__keyword__")))
+            } else if query.tokens.punctuation && punctuation_kind(node.kind()) {
+                Some(Value::keyword(value::intern("__punctuation__")))
+            } else {
+                None
+            }
         });
     if let Some(reported) = reported {
         let (start, end) = match query.window {
@@ -897,6 +956,7 @@ fn spans_into<T: SpanText>(
         return;
     }
     let mut named_index = 0;
+    let mut previous_named = None;
     loop {
         let child = cursor.node();
         if let Some((_, to)) = query.window
@@ -908,10 +968,12 @@ fn spans_into<T: SpanText>(
             parent: Some(node),
             field: cursor.field_name(),
             nth: child.is_named().then_some(named_index),
+            previous: previous_named,
             outer: Some(context),
         };
         if child.is_named() {
             named_index += 1;
+            previous_named = Some(child);
         }
         if query.touches(&child) {
             spans_into(child, &child_context, text, query, out);
@@ -980,9 +1042,11 @@ fn host_and_injected_spans<T: SpanText>(
 /// face — the actual policy — stays entirely in the editor; what moves here is only the
 /// walk, which is where the allocation was.
 ///
-/// `keywords?` adds the cross-language rule that an anonymous token beginning with a
-/// letter is a keyword, reported as kind `:__keyword__`. It is a flag rather than a kind
-/// because no grammar names it: keywords surface as anonymous tokens of every kind.
+/// `tokens` ([`TokenRules`]) adds the cross-language rules: an anonymous token beginning with
+/// a letter is a keyword, reported as kind `:__keyword__`, and (when asked, ADR-614) one made
+/// of brackets, commas and semicolons is punctuation, `:__punctuation__`. Rules rather than
+/// kinds because no grammar names them: keywords and punctuation surface as anonymous tokens
+/// of every kind.
 ///
 /// `injections` (ADR-489) names the nodes whose text is another language's document; their
 /// spans replace the host's there.
@@ -992,14 +1056,14 @@ pub fn spans(
     src: &str,
     lang: &str,
     table: &SpanTable,
-    keywords: bool,
+    tokens: TokenRules,
     injections: Option<&Injections>,
 ) -> LispResult {
     let tree = parse_cached(src, lang)?;
     let b2c = byte_to_char_offsets(src);
     let query = SpanQuery {
         table,
-        keywords,
+        tokens,
         window: None,
     };
     let text = FlatText { src, b2c: &b2c };
@@ -1127,6 +1191,7 @@ fn injections_into<'tree, T: SpanText>(
         return;
     }
     let mut named_index = 0;
+    let mut previous_named = None;
     let mut here: Vec<InjectedDocument<'tree>> = Vec::new();
     loop {
         let child = cursor.node();
@@ -1139,10 +1204,12 @@ fn injections_into<'tree, T: SpanText>(
             parent: Some(node),
             field: cursor.field_name(),
             nth: child.is_named().then_some(named_index),
+            previous: previous_named,
             outer: Some(context),
         };
         if child.is_named() {
             named_index += 1;
+            previous_named = Some(child);
         }
         match rules
             .iter()
@@ -1199,16 +1266,19 @@ fn excluded_into<T: SpanText>(
         return;
     }
     let mut named_index = 0;
+    let mut previous_named = None;
     loop {
         let child = cursor.node();
         let child_context = NodeContext {
             parent: Some(node),
             field: cursor.field_name(),
             nth: child.is_named().then_some(named_index),
+            previous: previous_named,
             outer: Some(context),
         };
         if child.is_named() {
             named_index += 1;
+            previous_named = Some(child);
         }
         if selector.holds(child, &child_context, text) {
             out.push((child.start_byte(), child.end_byte()));
@@ -1374,13 +1444,13 @@ fn injected_spans<T: SpanText>(
     lang: &str,
     pieces: &[(usize, usize)],
     table: &SpanTable,
-    keywords: bool,
+    tokens: TokenRules,
     window: Option<(usize, usize)>,
 ) -> Option<Vec<RawSpan>> {
     let tree = parse_pieces(text, lang, &with_line_breaks(text, pieces))?;
     let query = SpanQuery {
         table,
-        keywords,
+        tokens,
         window: None,
     };
     let mut whole: Vec<RawSpan> = Vec::new();
@@ -1497,7 +1567,7 @@ fn splice_injections<T: SpanText>(
         if size > budget {
             continue;
         }
-        let Some(spans) = injected_spans(text, &lang, &pieces, table, query.keywords, query.window)
+        let Some(spans) = injected_spans(text, &lang, &pieces, table, query.tokens, query.window)
         else {
             continue;
         };
@@ -1561,7 +1631,7 @@ pub fn range_spans(
     lang: &str,
     ranges: &[(usize, usize)],
     table: &SpanTable,
-    keywords: bool,
+    tokens: TokenRules,
 ) -> LispResult {
     fn bounded_byte_ranges<T: SpanText>(
         text: &T,
@@ -1591,7 +1661,7 @@ pub fn range_spans(
         lang: &str,
         ranges: &[(usize, usize)],
         table: &SpanTable,
-        keywords: bool,
+        tokens: TokenRules,
     ) -> Value {
         let pieces = bounded_byte_ranges(text, ranges);
         if pieces.is_empty() {
@@ -1601,7 +1671,7 @@ pub fn range_spans(
                 Value::Nil
             };
         }
-        match injected_spans(text, lang, &pieces, table, keywords, None) {
+        match injected_spans(text, lang, &pieces, table, tokens, None) {
             Some(mut raw) => {
                 raw.sort_by_key(|(start, end, _)| (*start, *end));
                 raw_spans_value(heap, text, raw)
@@ -1610,14 +1680,14 @@ pub fn range_spans(
         }
     }
     Ok(match text {
-        RangeText::Rope(rope) => answer(heap, &rope, lang, ranges, table, keywords),
+        RangeText::Rope(rope) => answer(heap, &rope, lang, ranges, table, tokens),
         RangeText::Flat(src) => {
             let b2c = byte_to_char_offsets(&src);
             let flat = FlatText {
                 src: &src,
                 b2c: &b2c,
             };
-            answer(heap, &flat, lang, ranges, table, keywords)
+            answer(heap, &flat, lang, ranges, table, tokens)
         }
     })
 }
@@ -2078,7 +2148,7 @@ pub fn tree_spans(
     heap: &mut Heap,
     handle: u64,
     table: &SpanTable,
-    keywords: bool,
+    tokens: TokenRules,
     from: i64,
     to: i64,
     injections: Option<&Injections>,
@@ -2092,7 +2162,7 @@ pub fn tree_spans(
     let window = (entry.text.char_to_byte(from), entry.text.char_to_byte(to));
     let query = SpanQuery {
         table,
-        keywords,
+        tokens,
         window: Some(window),
     };
     let raw = host_and_injected_spans(&entry.tree, &entry.text, &query, injections);
@@ -2240,7 +2310,7 @@ pub fn tree_spans(
     _heap: &mut crate::core::heap::Heap,
     _handle: u64,
     _table: &SpanTable,
-    _keywords: bool,
+    _tokens: TokenRules,
     _from: i64,
     _to: i64,
     _injections: Option<&Injections>,
@@ -2301,7 +2371,7 @@ pub fn spans(
     src: &str,
     lang: &str,
     _table: &SpanTable,
-    _keywords: bool,
+    _tokens: TokenRules,
     _injections: Option<&Injections>,
 ) -> LispResult {
     parse(heap, src, lang)
@@ -2314,7 +2384,7 @@ pub fn range_spans(
     _lang: &str,
     _ranges: &[(usize, usize)],
     _table: &SpanTable,
-    _keywords: bool,
+    _tokens: TokenRules,
 ) -> LispResult {
     // no grammar can load in a runtime without tree-sitter, and a missing grammar is nil
     Ok(crate::core::value::Value::Nil)
@@ -3167,7 +3237,16 @@ mod tree_handle_tests {
     fn spans_of(handle: u64, from: i64, to: i64) -> Vec<(i64, i64)> {
         let mut heap = Heap::new();
         let table = SpanTable::of_kinds(vec!["string".to_string(), "comment".to_string()]);
-        let v = tree_spans(&mut heap, handle, &table, false, from, to, None).expect("spans");
+        let v = tree_spans(
+            &mut heap,
+            handle,
+            &table,
+            TokenRules::default(),
+            from,
+            to,
+            None,
+        )
+        .expect("spans");
         heap.seq_items(v)
             .expect("a vector")
             .into_iter()
@@ -3218,7 +3297,8 @@ mod tree_handle_tests {
         assert!(tree_free(fresh));
         let mut heap = Heap::new();
         let empty = SpanTable::default();
-        let gone = tree_spans(&mut heap, fresh, &empty, false, 0, 10, None).expect("answers");
+        let gone = tree_spans(&mut heap, fresh, &empty, TokenRules::default(), 0, 10, None)
+            .expect("answers");
         assert!(matches!(gone, Value::Nil), "a freed handle reads as nil");
     }
 
@@ -3374,6 +3454,39 @@ mod injection_piece_tests {
         assert_eq!(
             with_line_breaks(&text, &[(0, 6), (7, 13), (17, 19)]),
             vec![(0, 13), (17, 19)]
+        );
+    }
+}
+
+#[cfg(test)]
+mod token_rule_tests {
+    use super::*;
+
+    #[test]
+    fn punctuation_is_brackets_commas_and_semicolons_only() {
+        for kind in ["(", ")", "[", "]", "{", "}", ",", ";", ")]", "};"] {
+            assert!(punctuation_kind(kind), "{kind} is punctuation");
+        }
+        for kind in ["", ".", "=", "->", "::", "\"", "#{", "def", "|"] {
+            assert!(!punctuation_kind(kind), "{kind:?} is not punctuation");
+        }
+    }
+
+    #[test]
+    fn a_true_flag_is_the_keyword_rule_alone() {
+        assert_eq!(
+            TokenRules::KEYWORDS,
+            TokenRules {
+                keywords: true,
+                punctuation: false
+            }
+        );
+        assert_eq!(
+            TokenRules::default(),
+            TokenRules {
+                keywords: false,
+                punctuation: false
+            }
         );
     }
 }

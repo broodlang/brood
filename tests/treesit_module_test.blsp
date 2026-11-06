@@ -554,6 +554,68 @@
                  false)
         [[4 5 :argument]]))
 
+    ;; ADR-614: an Elixir `def`'s name is a call target like `foo(x)`'s; what tells them apart
+    ;; is the SIBLING its `arguments` follow — an identifier reading `def`
+    (test ":after selects by the named sibling right before the node"
+      (let (faces {{:kind :identifier
+                    :field :target
+                    :parent {:kind :call :nth 0 :parent {:kind :arguments :after {:text "def"}}}} :definition
+                   {:kind :identifier
+                    :field :target
+                    :parent {:kind :call
+                             :field :left
+                             :parent {:kind :binary_operator
+                                      :nth 0
+                                      :parent {:kind :arguments :after {:text "def"}}}}} :guarded
+                   {:parent :call :field :target :kind :identifier} :call})
+        (assert= (%tree-sitter-spans "def go(x) do\n  foo(x)\nend\n" :elixir faces false)
+          [[0 3 :call] [4 6 :definition] [15 18 :call]])
+        ;; four maps deep: the name a guarded clause defines
+        (assert= (%tree-sitter-spans "def go(x) when x > 0, do: x\n" :elixir faces false)
+          [[0 3 :call] [4 6 :guarded]])
+        ;; the same nesting under a call that is not `def` defines nothing
+        (assert= (%tree-sitter-spans "run go(x)\n" :elixir faces false)
+          [[0 3 :call] [4 6 :call]])
+        ;; a kind alone, and through a held tree
+        (assert= (%tree-sitter-spans "def go(x) do\nend\n"
+                   :elixir {{:kind :arguments :after {:kind :identifier}} :after-identifier}
+                   false)
+          [[4 9 :after-identifier]])
+        (let (tree (editor/treesit/open-tree "def go(x) do\n  foo(x)\nend\n" :elixir))
+          (assert= (%tree-sitter-tree-spans tree faces false 0 26)
+            [[0 3 :call] [4 6 :definition] [15 18 :call]])
+          (editor/treesit/free-tree tree))))
+
+    (test "a token-rule set asks for punctuation: brackets, commas and semicolons"
+      (let (src "foo(1, [2])\n")
+        (assert= (%tree-sitter-spans src :elixir {} #{:punctuation})
+          [[3 4 :__punctuation__]
+            [5 6 :__punctuation__]
+            [7 8 :__punctuation__]
+            [9 10 :__punctuation__]
+            [10 11 :__punctuation__]])
+        ;; `true` is the keyword rule alone, as it always was
+        (assert= (%tree-sitter-spans src :elixir {} true) [])
+        (assert= (%tree-sitter-spans "def f(a, b)\nend\n" :ruby {} #{:keywords :punctuation})
+          [[0 3 :__keyword__]
+            [5 6 :__punctuation__]
+            [7 8 :__punctuation__]
+            [10 11 :__punctuation__]
+            [12 15 :__keyword__]])
+        (is (failure? (try
+                        (%tree-sitter-spans src :elixir {} #{:bogus})
+                        (catch e (failure (error-message e))))))))
+
+    (test "fontify paints punctuation only when its face paints anything"
+      :isolated (let (src "foo(1)\n"
+            saved (get (editor/face/faces) :syntax/punctuation)
+            plain (editor/treesit/fontify src :elixir {})
+            _ (editor/face/def-face :syntax/punctuation {:fg "#000002"})
+            dimmed (editor/treesit/fontify src :elixir {})
+            _ (editor/face/def-face :syntax/punctuation saved))
+        (assert= plain '())
+        (assert= dimmed (list [3 4 {:fg "#000002"}] [5 6 {:fg "#000002"}]))))
+
     (test "the held tree answers what the text does, over the file and a window"
       (let (tree (editor/treesit/open-tree tsm-elixir-src :elixir)
             whole (%tree-sitter-spans tsm-elixir-src :elixir tsm-elixir-faces false))
@@ -574,7 +636,13 @@
                   {:kind :identifier :parent "call"}
                   {:kind :identifier :parent {}}
                   {:kind :identifier
-                   :parent {:kind :call :parent {:kind :call :parent {:kind :call}}}}
+                   :parent {:kind :call
+                            :parent {:kind :call :parent {:kind :call :parent {:kind :call}}}}}
+                  ;; `:after` names the sibling's kind and text, and nothing about where it sits
+                  {:kind :identifier :after :identifier}
+                  {:kind :identifier :after {}}
+                  {:kind :identifier :after {:field :x}}
+                  {:kind :identifier :after {:text #{}}}
                   {:kind :identifier :parent {:feild :x}}
                   ;; a constraint present with no value: the kernel reads every key it has
                   {:kind :identifier :text nil}
@@ -588,10 +656,14 @@
                             (catch e (failure (error-message e))))))))
         (assert= (count (editor/treesit/face-table-problems (into {} (map bad (fn (s) [s :f])))))
           (count bad)))
-      ;; three maps deep is the bound, and is allowed
+      ;; four maps deep is the bound, and is allowed (ADR-614)
       (assert= (editor/treesit/face-table-problems {{:kind :identifier
                                                      :parent {:kind :call
-                                                              :parent {:kind :call :field :x}}} :f
+                                                              :parent {:kind :call
+                                                                       :parent {:kind :call
+                                                                                :field :x}}}} :f
+                                                    {:kind :arguments
+                                                     :after {:kind :identifier :text "def"}} :h
                                                     {:text "def"} :g})
         '()))))
 
@@ -1169,6 +1241,12 @@
                 :identifier :call :heredoc_template :heredoc :heredoc_marker :heredoc_identifier
                 :do_block :arguments :heredoc_body :method}
        :fields #{:name :function}}))
+
+  (test "the sibling an :after names is a kind too (ADR-614)"
+    (assert= (language-names {:faces {{:kind :identifier
+                                       :parent {:kind :arguments
+                                                :after {:kind :alias :text "def"}}} :d}})
+      {:kinds #{:identifier :arguments :alias} :fields #{}}))
 
   (test "an empty language refers to nothing"
     (assert= (language-names {}) {:kinds #{} :fields #{}})))

@@ -48,11 +48,11 @@
   (test "strings and comments"
     (assert= (highlight-spans "\"hi\" ; c")
       (list [0 4 hl-face-string] [5 8 hl-face-comment])))
-  (test "keywords colour as keywords"
-    (assert= (highlight-spans ":foo") (list [0 4 hl-face-keyword])))
+  (test "keywords colour as symbols"
+    (assert= (highlight-spans ":foo") (list [0 4 hl-face-symbol])))
   (test "nil / true / false colour as constants, even in head position"
-    (assert= (highlight-spans "nil") (list [0 3 hl-face-keyword]))
-    (assert= (highlight-spans "(true)") (list [1 5 hl-face-keyword])))
+    (assert= (highlight-spans "nil") (list [0 3 hl-face-symbol]))
+    (assert= (highlight-spans "(true)") (list [1 5 hl-face-symbol])))
   (test "a radix literal colours as a number, in argument and in head position"
     (assert= (highlight-spans "(bit/and b 0x3F)")
       (list [1 8 hl-face-function] [11 15 hl-face-number]))
@@ -65,31 +65,136 @@
 (describe "highlight-spans — a docstring is not a string value"
   (test "the string after a defn's parameter list is documentation"
     (assert= (highlight-spans "(defn f () \"Doc.\" 1)")
-      (list [1 5 hl-face-special] [11 17 hl-face-doc] [18 19 hl-face-number])))
+      (list [1 5 hl-face-special]
+        [6 7 hl-face-definition]
+        [11 17 hl-face-doc]
+        [18 19 hl-face-number])))
   (test "a defmodule's docstring may be the form's last element"
     (assert= (highlight-spans "(defmodule m \"Doc.\")")
-      (list [1 10 hl-face-special] [13 19 hl-face-doc])))
+      (list [1 10 hl-face-special] [11 12 hl-face-definition] [13 19 hl-face-doc])))
   (test "a multi-arity defn's leading docstring comes before the arms"
     (assert= (highlight-spans "(defn f \"Doc.\" ((x) x))")
-      (list [1 5 hl-face-special] [8 14 hl-face-doc] [17 18 hl-face-function])))
+      (list [1 5 hl-face-special]
+        [6 7 hl-face-definition]
+        [8 14 hl-face-doc]
+        [17 18 hl-face-function])))
   (test "a function whose body is a LONE string returns it — that is a value"
     (assert= (highlight-spans "(defn f () \"hi\")")
-      (list [1 5 hl-face-special] [11 15 hl-face-string])))
+      (list [1 5 hl-face-special] [6 7 hl-face-definition] [11 15 hl-face-string])))
   (test "the body string after a docstring stays a string"
     (assert= (highlight-spans "(defn f () \"Doc.\" \"hi\")")
-      (list [1 5 hl-face-special] [11 17 hl-face-doc] [18 22 hl-face-string])))
+      (list [1 5 hl-face-special]
+        [6 7 hl-face-definition]
+        [11 17 hl-face-doc]
+        [18 22 hl-face-string])))
   (test "a def / def- value is never documentation (def takes no docstring)"
     (assert= (highlight-spans "(def- p \"[a-z]\")")
-      (list [1 5 hl-face-function] [8 15 hl-face-string])))
+      (list [1 5 hl-face-function] [6 7 hl-face-definition] [8 15 hl-face-string])))
   (test "a string deeper in the body is a value, whatever its position"
     (assert= (highlight-spans "(defn f () (str \"a\"))")
-      (list [1 5 hl-face-special] [12 15 hl-face-function] [16 19 hl-face-string])))
+      (list [1 5 hl-face-special]
+        [6 7 hl-face-definition]
+        [12 15 hl-face-function]
+        [16 19 hl-face-string])))
   (test "doc-form? mirrors the kernel's (reflect/doc-forms)"
     (is (doc-form? "defn"))
     (is (doc-form? "defmodule"))
     (is (not (doc-form? "def")))
     (is (not (doc-form? "def-")))
     (is (not (doc-form? "let")))))
+
+;; ---- definitions and punctuation (ADR-614) ----------------------------------------
+;; A theme that colours where a thing is DEFINED and leaves calls plain, and dims the
+;; brackets, needs the lexer to tell those apart. Each test styles the two faces apart from
+;; the call face, then puts the registry back: every other test reads the defaults.
+
+(defn- with-faces (styles thunk)
+  ;; `thunk`'s value with each `face -> attrs` of `styles` registered, the old ones restored
+  (let (saved (into [] (map (keys styles) (fn (name) [name (get (editor/face/faces) name)])))
+        _ (doseq (entry styles) (let ([name attrs] entry) (editor/face/def-face name attrs)))
+        result (thunk))
+    (doseq (entry saved) (let ([name attrs] entry) (editor/face/def-face name attrs)))
+    result))
+
+(def- parted
+  {:syntax/definition {:fg "#000001"} :syntax/punctuation {:fg "#000002"}})
+
+(defn- span-at (spans start)
+  ;; the face of the span that starts at `start`, or nil
+  (seq/find (map spans (fn ([s _ f]) (when (= s start) f))) (fn (f) f)))
+
+(describe "highlight-spans — a definition's name, apart from a call's head"
+  :isolated (test "the name a defn binds takes the definition face; a call head keeps the call face"
+    (let (spans (with-faces parted (fn () (highlight-spans "(defn area (s) (square s))"))))
+      (assert= (span-at spans 6) {:fg "#000001"})
+      (assert= (span-at spans 16) hl-face-function)))
+  (test "def, defmacro and defmodule name what they define too"
+    (with-faces parted
+      (fn ()
+        (assert= (span-at (highlight-spans "(def pi 3.14)") 5) {:fg "#000001"})
+        (assert= (span-at (highlight-spans "(defmacro when2 (c) c)") 10) {:fg "#000001"})
+        (assert= (span-at (highlight-spans "(defmodule geometry)") 11) {:fg "#000001"})
+        ;; the private forms, which are not special forms themselves
+        (assert= (span-at (highlight-spans "(defn- square (x) x)") 7) {:fg "#000001"})
+        (assert= (span-at (highlight-spans "(def- limit 3)") 6) {:fg "#000001"}))))
+  (test "a symbol after a head that defines nothing is left plain"
+    (with-faces {:syntax/definition {:fg "#000001"}}
+      (fn ()
+        (assert= (highlight-spans "(let x)") (list [1 4 hl-face-special]))
+        (assert= (span-at (highlight-spans "(map xs f)") 5) nil))))
+  (test "another dialect's definer, by its special-form set — Scheme's name inside a list"
+    (let (scheme {"define" true "lambda" true}
+          spans (with-faces parted (fn () (highlight-spans "(define (square x) (* x x))" scheme))))
+      (assert= (span-at spans 1) hl-face-special)
+      (assert= (span-at spans 9) {:fg "#000001"})
+      (assert= (span-at spans 20) hl-face-function)))
+  (test "elisp's defun"
+    (let (spans (with-faces parted
+                  (fn () (highlight-spans "(defun greet (name) (message name))" {"defun" true}))))
+      (assert= (span-at spans 7) {:fg "#000001"})
+      (assert= (span-at spans 21) hl-face-function)))
+  (test "by default the definition face IS the call face"
+    (assert= (span-at (highlight-spans "(defn area (s) s)") 6) hl-face-function)
+    (assert= hl-face-definition hl-face-function))
+  (test "the line lexer agrees, across a line break after the definer"
+    (let (lex (:lex (with-faces parted (fn () (lisp-line-lexer))))
+          [_ state] (lex "(defn" [nil nil])
+          [spans _] (lex "  area (s) s)" state))
+      (assert= (span-at spans 2) {:fg "#000001"}))))
+
+(describe "highlight-spans — punctuation"
+  :isolated (test "by default a bracket carries no span"
+    (assert= (highlight-spans "(+ 1)") (list [1 2 hl-face-function] [3 4 hl-face-number])))
+  (test "with a punctuation face every bracket takes it"
+    (let (spans (with-faces parted (fn () (highlight-spans "(f [1] {:a 2})"))))
+      (assert= (map (seq/filter spans (fn ([_ _ f]) (= f {:fg "#000002"}))) first)
+        (list 0 3 5 7 12 13))))
+  (test "the line lexer paints them too, and a rainbow takes precedence"
+    (let (plain (with-faces parted (fn () (lisp-line-lexer)))
+          rainbow (with-faces (assoc parted :syntax/delimiter-1 {:fg "#000003"})
+                    (fn () (lisp-line-lexer nil {:rainbow true})))
+          [plain-spans _] ((:lex plain) "(a)" [nil nil])
+          [rainbow-spans _] ((:lex rainbow) "(a)" [nil nil]))
+      (assert= (span-at plain-spans 0) {:fg "#000002"})
+      (assert= (span-at rainbow-spans 0) {:fg "#000003"}))))
+
+;; ---- a keyword literal, apart from a language keyword (ADR-616) ---------------------
+;; A theme that leaves keywords plain and colours literals (Tonsky's rule) needs `:foo` on a
+;; face of its own: the tree-sitter languages' keywords (`def`, `fn`) are `:syntax/keyword`.
+
+(describe "highlight-spans — a :keyword literal takes the symbol face"
+  :isolated (test "styled apart, `:foo`, nil, true and false take `:syntax/symbol`, not the keyword face"
+    (let (spans (with-faces {:syntax/keyword {:fg "#000001"} :syntax/symbol {:fg "#000004"}}
+                  (fn () (highlight-spans "(f :foo nil true false)"))))
+      (assert= (map (seq/filter spans (fn ([_ _ f]) (= f {:fg "#000004"}))) first) (list 3 8 12 17))
+      (is (not (any? spans (fn ([_ _ f]) (= f {:fg "#000001"})))))))
+  (test "the line lexer agrees"
+    (let (lex (:lex (with-faces {:syntax/symbol {:fg "#000004"}} (fn () (lisp-line-lexer)))))
+      (assert= (span-at (first (lex "(f :foo)" [nil nil])) 3) {:fg "#000004"})))
+  (test "by default the symbol face IS the keyword face, and the constant face the special"
+    (assert= hl-face-symbol hl-face-keyword)
+    (assert= hl-face-constant hl-face-special)
+    (assert= (highlight-spans ":foo") (list [0 4 hl-face-symbol]))))
 
 (describe "highlight-window — spans shifted into absolute coordinates"
   (test "base 0 equals highlight-spans"
@@ -741,7 +846,7 @@ reader sees, which a multi-line string's one span and its per-line spans agree o
     ;; by more body on the next line, so it reads as the doc it almost always is
     (let (lex (:lex (lisp-line-lexer)))
       (assert= (first (lex "(defn f () \"hi\"" [nil nil]))
-        (list [1 5 hl-face-special] [11 15 hl-face-doc])))))
+        (list [1 5 hl-face-special] [6 7 hl-face-definition] [11 15 hl-face-doc])))))
 
 (describe "lisp-line-lexer — rainbow brackets"
   (test "each bracket takes its depth's face, a pair one colour, across lines"

@@ -16,12 +16,12 @@
 ;;       (lexer-grammar
 ;;         {:structured [["\"(?:[^\"\\\\]|\\\\.)*\"" :string] ["-?\\d+(?:\\.\\d+)?" :number]]
 ;;          :words "[A-Za-z_]+"
-;;          :classes {"true" :keyword "false" :keyword "null" :keyword}}))
+;;          :classes {"true" :constant "false" :constant "null" :constant}}))
 ;;     (lexer-spans json-grammar src)      ; → ([start end face] …), the highlight-spans shape
 ;;
 ;; Faces are named by `:syntax/*` role (`:comment` `:string` `:doc` `:number` `:keyword`
-;; `:special` `:function`), resolved through `editor/face` once per pass, so a theme
-;; restyles every table-driven mode with the rest.
+;; `:symbol` `:constant` `:special` `:function` `:definition` `:punctuation`), resolved through `editor/face` once
+;; per pass, so a theme restyles every table-driven mode with the rest.
 
 (defmodule editor/lexer
   "A line-oriented lexer from a table of rules: `lexer-grammar` compiles a map of
@@ -30,8 +30,8 @@
 last), plus optional `:line` rules anchored at the line's start (`[prefix paint suffix
 role]` on `regex/paint`, or `[pattern role]` painting a capture group); `(lexer-spans grammar src)` returns `[start end face]`
 spans in the `highlight-spans` shape — what an editor's `:fontify` service is. Roles are
-`:syntax/*` faces (`:comment` `:string` `:doc` `:number` `:keyword` `:special`
-`:function`), resolved per pass."
+`:syntax/*` faces (`:comment` `:string` `:doc` `:number` `:keyword` `:symbol` `:constant`
+`:special` `:function` `:definition` `:punctuation`), resolved per pass."
   (:use editor/face)
   ;; `editor/highlight` is where the `:syntax/*` faces are DECLARED (`def-face`), and
   ;; nothing on this module's own path loads it: from source every role resolved to nil
@@ -50,8 +50,12 @@ spans in the `highlight-spans` shape — what an editor's `:fontify` service is.
    :doc :syntax/doc
    :number :syntax/number
    :keyword :syntax/keyword
+   :symbol :syntax/symbol
+   :constant :syntax/constant
    :special :syntax/special
-   :function :syntax/function})
+   :function :syntax/function
+   :definition :syntax/definition
+   :punctuation :syntax/punctuation})
 
 (defn lexer-grammar (spec:map -> map)
   "Compile `spec` into a grammar: `:structured` — a vector of `[pattern role]` rules,

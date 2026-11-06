@@ -571,7 +571,8 @@ fn style_of(heap: &Heap, face: Value) -> screen::Style {
 
 /// `(term-draw frame)` — paint a frame: a vector of op vectors `[:clear]`,
 /// `[:text row col str]`, `[:text row col str face]`, `[:rect row col w h face]`,
-/// `[:cursor row col]` / `[:cursor row col style]`, `[:scroll-region dy ops]` (its ops drawn
+/// `[:cursor row col]` / `[:cursor row col style]`, `[:scroll-region dy ops]` and
+/// `[:above-seam ops]` (their ops drawn
 /// in place). Unknown ops are skipped (forward-compatible protocol). The frame is painted
 /// over the screen the terminal shows ([`TERMINAL_SCREEN`]) and only the cells it changed
 /// are written, in one flush (ADR-586). The cursor shows where the frame's last `[:cursor]`
@@ -642,6 +643,7 @@ fn paint_ops(
     let cursor_t = value::intern("cursor");
     let rect_t = value::intern("rect");
     let scroll_region_t = value::intern("scroll-region");
+    let above_seam_t = value::intern("above-seam");
     // a scroll region's ops are drawn in place, in order: a deque they are prepended to
     let mut queue: std::collections::VecDeque<(value::Symbol, Vec<Value>)> = parsed.into();
     let mut hollow: Option<screen::Cursor> = None;
@@ -694,6 +696,15 @@ fn paint_ops(
             // a terminal can't do sub-cell offsets: the inner ops are drawn where they are
             let inner_val = arg(&parts, 2);
             if let Ok(inner_parsed) = frame_ops(heap, inner_val, "%term-draw", "scroll-region ops")
+            {
+                for item in inner_parsed.into_iter().rev() {
+                    queue.push_front(item);
+                }
+            }
+        } else if tag == above_seam_t {
+            // a terminal has no leftover strip (ADR-615): the inner ops are drawn where they are
+            if let Ok(inner_parsed) =
+                frame_ops(heap, arg(&parts, 1), "%term-draw", "above-seam ops")
             {
                 for item in inner_parsed.into_iter().rev() {
                     queue.push_front(item);
@@ -1838,6 +1849,7 @@ struct GuiOpTags {
     emitter_t: value::Symbol,
     burst_t: value::Symbol,
     seam_t: value::Symbol,
+    above_seam_t: value::Symbol,
 }
 impl GuiOpTags {
     fn new() -> Self {
@@ -1870,6 +1882,7 @@ impl GuiOpTags {
             emitter_t: value::intern("emitter"),
             burst_t: value::intern("burst"),
             seam_t: value::intern("seam"),
+            above_seam_t: value::intern("above-seam"),
         }
     }
 }
@@ -2316,6 +2329,14 @@ fn parse_gui_ops(
                 _ => true,
             };
             ops.push(crate::host::gui::Op::Seam { row, top_band });
+        } else if tag == tags.above_seam_t {
+            // `[:above-seam ops]` (ADR-615): ops on the rows above the seam carried on past it,
+            // cut off at the seam — what lands on its row shows in the leftover strip.
+            if let Ok(inner_parsed) = frame_ops(heap, arg(&parts, 1), "%gui-draw", "above-seam ops")
+            {
+                let inner_ops = parse_gui_ops(heap, inner_parsed, tags, pass);
+                ops.push(crate::host::gui::Op::AboveSeam { ops: inner_ops });
+            }
         } else if tag == tags.overlay_t {
             ops.push(crate::host::gui::Op::Overlay);
         } else if tag == tags.bloom_t {
@@ -2587,7 +2608,7 @@ fn frame_image_value(heap: &mut Heap, image: crate::host::gui::FrameImage) -> Va
 
 /// The window a `%gui-render-frame` spec map describes: `:width`/`:height` (physical
 /// px), `:font` (an installed family's name, or a family keyword), `:size` (the font px),
-/// `:line-height`, `:inset`, `:bg` (a colour), `:scale`, `:text-aa` and `:ligatures`.
+/// `:line-height`, `:inset`, `:bg` and `:fg` (colours), `:scale`, `:text-aa` and `:ligatures`.
 /// nil is every default.
 fn render_spec(heap: &Heap, spec: Value) -> Result<crate::host::gui::RenderSpec, LispError> {
     use crate::host::gui::{FontChoice, RenderSpec, TextAa};
@@ -2635,6 +2656,13 @@ fn render_spec(heap: &Heap, spec: Value) -> Result<crate::host::gui::RenderSpec,
                 .ok_or_else(|| LispError::wrong_type(heap, who, "a colour for :bg", colour))?,
         ),
     };
+    let fg = match get("fg") {
+        None => None,
+        Some(colour) => Some(
+            face_rgb(heap, colour)
+                .ok_or_else(|| LispError::wrong_type(heap, who, "a colour for :fg", colour))?,
+        ),
+    };
     let text_aa = match get("text-aa") {
         None => None,
         Some(Value::Keyword(k)) => Some(match value::symbol_name_ref(k) {
@@ -2659,6 +2687,7 @@ fn render_spec(heap: &Heap, spec: Value) -> Result<crate::host::gui::RenderSpec,
         line_height: number("line-height")?.map(|n| n as f32),
         inset: number("inset")?.map(|n| n.max(0.0) as f32),
         bg,
+        fg,
         scale: number("scale")?,
         text_aa,
         ligatures: get("ligatures").map(crate::eval::truthy),
@@ -2805,6 +2834,27 @@ pub(in crate::builtins) fn gui_bg(args: &[Value], _: EnvId, heap: &mut Heap) -> 
         })?),
     };
     crate::host::gui::bg(rgb).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
+/// `(gui-fg! color)` — set the window's default text colour: what a text op whose face
+/// names no `:fg` is drawn in, as `gui-bg!` is the colour no op paints. So a light theme's
+/// plain text is its own dark text instead of the hardcoded light default (ADR-613). Same
+/// colour forms as `gui-bg!`; `nil` restores the default. Every open window + ones opened
+/// later. GUI only; returns nil.
+pub(in crate::builtins) fn gui_fg(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let rgb = match arg(args, 0) {
+        Value::Nil => None,
+        other => Some(face_rgb(heap, other).ok_or_else(|| {
+            LispError::wrong_type(
+                heap,
+                "%gui-fg!",
+                "a colour (keyword, [r g b] vector, or \"#rrggbb\" string) or nil",
+                other,
+            )
+        })?),
+    };
+    crate::host::gui::fg(rgb).map_err(LispError::runtime)?;
     Ok(Value::nil())
 }
 

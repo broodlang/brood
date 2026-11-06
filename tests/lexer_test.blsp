@@ -34,6 +34,28 @@
     (let (g (lexer-grammar {:line [["^(\\w+):" :function]]})
           src "build: x\n  not: a target\nall:")
       (assert= (spans-of (lexer-spans g src) src :function) (list "build" "all"))))
+  (test "a definition and punctuation are roles too (ADR-614)"
+    (assert= (get lexer-roles :definition) :syntax/definition)
+    (assert= (get lexer-roles :punctuation) :syntax/punctuation)
+    (let (g (lexer-grammar {:structured [["[\\[\\]]" :punctuation]]
+                            :line [["^\\[(\\w+)\\]" :definition]]})
+          src "[server]"
+          spans (lexer-spans g src))
+      (is (any? spans (fn ([s e _]) (and (= s 1) (= e 7)))))
+      (is (any? spans (fn ([s e _]) (and (= s 0) (= e 1)))))))
+  (test "a symbol and a constant are roles of their own, the keyword and special faces by default (ADR-616)"
+    (assert= (get lexer-roles :symbol) :syntax/symbol)
+    (assert= (get lexer-roles :constant) :syntax/constant)
+    (let (g (lexer-grammar {:structured [["\"\\w+\":" :symbol]]
+                            :words "[a-z]+"
+                            :classes {"null" :constant}})
+          src "\"k\": null"
+          spans (lexer-spans g src))
+      (assert= (spans-of spans src :symbol) (list "\"k\":"))
+      (assert= (spans-of spans src :constant) (list "null"))
+      ;; untouched by a theme, each is the face its tokens always had
+      (assert= (face :syntax/symbol) (face :syntax/keyword))
+      (assert= (face :syntax/constant) (face :syntax/special))))
   (test "every span list is ascending and non-overlapping"
     (let (g (lexer-grammar {:structured [["#.*" :comment] ["\\d+" :number]]
                             :words "[a-z]+"
@@ -52,3 +74,21 @@
                       0
                       (text/line-count rope)))
       (assert= spans (lexer-spans g src)))))
+
+(describe "editor/lexer — a theme styles a keyword apart from a literal (ADR-616)"
+  :isolated (test "the keyword role and the symbol / constant roles take their own faces"
+    (let (saved (into {}
+                  (map [:syntax/keyword :syntax/symbol :syntax/constant]
+                    (fn (name) [name (get (faces) name)])))
+          _ (do
+              (def-face :syntax/keyword {:fg "#000001"})
+              (def-face :syntax/symbol {:fg "#000002"})
+              (def-face :syntax/constant {:fg "#000003"}))
+          g (lexer-grammar {:structured [["\"\\w+\":" :symbol]]
+                            :words "[a-z]+"
+                            :classes {"if" :keyword "null" :constant}})
+          src "\"k\": null if"
+          painted (map (lexer-spans g src) (fn ([s e f]) [(string/substring src s e) f])))
+      (doseq (entry saved) (let ([name attrs] entry) (def-face name attrs)))
+      (assert= painted
+        (list ["\"k\":" {:fg "#000002"}] ["null" {:fg "#000003"}] ["if" {:fg "#000001"}])))))

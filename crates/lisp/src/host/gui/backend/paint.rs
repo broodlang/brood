@@ -220,6 +220,9 @@ fn op_band(op: &Op, dy: isize, rows: &RowMap) -> Option<(isize, isize)> {
         // A seam places the rows; it paints nothing (a new one invalidates the whole frame:
         // `Renderer::set_layout`).
         Op::Seam { .. } => None,
+        // Never a leaf either (`flatten` descends, each child carrying the group's map); for
+        // `render_ops`' skip test, everything above where the group is cut off.
+        Op::AboveSeam { .. } => Some((isize::MIN, rows.seam_top().unwrap_or(isize::MAX))),
     }
 }
 
@@ -231,6 +234,30 @@ struct Entry<'a> {
     /// Whether the leaf is, or (a cell region) holds, a blinking caret: its pixels depend on
     /// the blink phase as well as on the op (ADR-469).
     caret: bool,
+    /// Whether the leaf sits in an `Op::AboveSeam` group: laid out on the rows above the seam
+    /// carried on ([`RowMap::above_seam_rows`]) and cut off at the seam (ADR-615).
+    above_seam: bool,
+}
+
+impl Entry<'_> {
+    /// The rows this leaf is laid out on: the window's, or the uniform rows of a group.
+    fn rows(&self, rows: &RowMap) -> RowMap {
+        if self.above_seam {
+            rows.above_seam_rows()
+        } else {
+            *rows
+        }
+    }
+
+    /// Its pixel band (`op_band` on its own rows), cut off at the seam inside a group.
+    fn band(&self, rows: &RowMap) -> Option<(isize, isize)> {
+        let (top, bottom) = op_band(self.op, self.dy, &self.rows(rows))?;
+        if !self.above_seam {
+            return Some((top, bottom));
+        }
+        let bottom = bottom.min(rows.seam_top().unwrap_or(isize::MAX));
+        (bottom > top).then_some((top, bottom))
+    }
 }
 
 /// Whether `op` is a blinking caret or a block holding one — a leaf (or, on the GPU target, a
@@ -238,7 +265,7 @@ struct Entry<'a> {
 pub(crate) fn holds_blinking_caret(op: &Op) -> bool {
     match op {
         Op::Cursor { blink, .. } => blink.is_some(),
-        Op::ScrollRegion { ops, .. } | Op::CellRegion { ops, .. } => {
+        Op::ScrollRegion { ops, .. } | Op::CellRegion { ops, .. } | Op::AboveSeam { ops } => {
             ops.iter().any(holds_blinking_caret)
         }
         Op::Fragment(fragment) => fragment.0.iter().any(holds_blinking_caret),
@@ -247,12 +274,16 @@ pub(crate) fn holds_blinking_caret(op: &Op) -> bool {
 }
 
 /// Flatten a frame's op tree into leaves, each carrying its region's shift.
-fn flatten<'a>(ops: &'a [Op], ch: usize, dy: isize, out: &mut Vec<Entry<'a>>) {
+fn flatten<'a>(ops: &'a [Op], ch: usize, dy: isize, above_seam: bool, out: &mut Vec<Entry<'a>>) {
     for op in ops {
         match op {
-            Op::ScrollRegion { dy_frac, ops } => flatten(ops, ch, scroll_px(*dy_frac, ch), out),
+            Op::ScrollRegion { dy_frac, ops } => {
+                flatten(ops, ch, scroll_px(*dy_frac, ch), above_seam, out)
+            }
             // A memoised fragment is its ops in place (ADR-470): its leaves are the frame's.
-            Op::Fragment(fragment) => flatten(&fragment.0, ch, dy, out),
+            Op::Fragment(fragment) => flatten(&fragment.0, ch, dy, above_seam, out),
+            // A group above the seam is its ops in place too, each on the group's rows (ADR-615)
+            Op::AboveSeam { ops } => flatten(ops, ch, dy, true, out),
             // A cell region is ONE leaf: its children are on the region's grid, not this one,
             // so their bands cannot be computed with `ch` and their positions mean nothing
             // here. The whole region is compared (and repainted) as a unit.
@@ -260,6 +291,7 @@ fn flatten<'a>(ops: &'a [Op], ch: usize, dy: isize, out: &mut Vec<Entry<'a>>) {
                 op,
                 dy,
                 caret: holds_blinking_caret(op),
+                above_seam,
             }),
         }
     }
@@ -318,7 +350,12 @@ impl Strips {
             if y < self.rows.top as isize {
                 0
             } else {
-                (1 + self.rows.row_of(y as f64 + 0.5) as usize).min(self.count - 1)
+                (1 + self
+                    .rows
+                    .row_at_folded(y as f64 + 0.5)
+                    .floor()
+                    .min(u16::MAX as f64) as usize)
+                    .min(self.count - 1)
             }
         };
         strip_of(top)..strip_of(bottom - 1) + 1
@@ -339,9 +376,8 @@ impl<'a> Leaves<'a> {
     fn of(ops: &'a [Op], strips: &Strips, caret_hidden: bool) -> Leaves<'a> {
         let rows = &strips.rows;
         let mut leaves = Vec::new();
-        flatten(ops, rows.ch, 0, &mut leaves);
-        let bands: Vec<Option<(isize, isize)>> =
-            leaves.iter().map(|e| op_band(e.op, e.dy, rows)).collect();
+        flatten(ops, rows.ch, 0, false, &mut leaves);
+        let bands: Vec<Option<(isize, isize)>> = leaves.iter().map(|e| e.band(rows)).collect();
         let mut per_strip = vec![Vec::new(); strips.count];
         for (i, band) in bands.iter().enumerate() {
             if let Some((top, bottom)) = band {
@@ -396,6 +432,7 @@ fn strip_diff(new: &Leaves, old: &Leaves, strips: &Strips) -> Vec<bool> {
 fn same_leaf(new: &Leaves, i: usize, old: &Leaves, j: usize) -> bool {
     let (x, y) = (&new.leaves[i], &old.leaves[j]);
     x.dy == y.dy
+        && x.above_seam == y.above_seam
         && !(x.caret && new.caret_hidden != old.caret_hidden)
         && (std::ptr::eq(x.op, y.op) || x.op == y.op)
 }
@@ -598,6 +635,11 @@ fn leaf_translates(
     rows: &RowMap,
     cw: usize,
 ) -> bool {
+    // a leaf in a group above the seam is on other rows than one outside it (ADR-615)
+    if new.above_seam != old.above_seam {
+        return false;
+    }
+    let rows = &new.rows(rows);
     let (src0, src1) = (y0 - delta, y1 - delta);
     let top = |row: u16, dy: isize| rows.y(row as isize).saturating_sub(dy);
     let covers = |top: f32, bottom: f32, margin: f32, lo: isize, hi: isize| {
@@ -748,7 +790,7 @@ fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, rows: &RowMap) -> Vec<isize
     let mut deltas = Vec::new();
     for &i in &new.per_strip[k] {
         let leaf = &new.leaves[i as usize];
-        let Some(top) = leaf_top(leaf.op, leaf.dy, rows) else {
+        let Some(top) = leaf_top(leaf.op, leaf.dy, &leaf.rows(rows)) else {
             continue;
         };
         // a whole-pane rect anchors nothing (it matches anywhere by covering)
@@ -756,7 +798,7 @@ fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, rows: &RowMap) -> Vec<isize
             continue;
         }
         for old_leaf in &old.leaves {
-            let Some(old_top) = leaf_top(old_leaf.op, old_leaf.dy, rows) else {
+            let Some(old_top) = leaf_top(old_leaf.op, old_leaf.dy, &old_leaf.rows(rows)) else {
                 continue;
             };
             let same = match (leaf.op, old_leaf.op) {
@@ -1029,6 +1071,20 @@ fn collect_zones(
             Op::Fragment(fragment) => {
                 collect_zones(&fragment.0, r, ox, oy, cw, ch, scroll_dy, clip, zones);
             }
+            // Zones are in the grid's uniform space, where a group above the seam is laid out
+            // already (ADR-615); cut off at the seam's row, whose uniform pixels are the
+            // bottom-anchored row's zones'. A zone on the partial line is not hoverable: a
+            // pointer in the strip takes the zones of the row above (`RowMap::uniform_y`).
+            Op::AboveSeam { ops } => {
+                // (on the window's grid only: inside a cell region there is no seam)
+                let on_window_grid = oy == 0 && ch == r.cell_h.max(1);
+                let cut = match r.seam() {
+                    Some(seam) if seam > 0 && on_window_grid => (seam as isize) * ch as isize,
+                    _ => isize::MAX,
+                };
+                let band = (clip.0, clip.1.min(cut));
+                collect_zones(ops, r, ox, oy, cw, ch, scroll_dy, band, zones);
+            }
             Op::CellRegion {
                 x, y, h, px, ops, ..
             } => {
@@ -1117,6 +1173,18 @@ pub(super) fn render_ops(
             Op::Fragment(fragment) => {
                 render_ops(&fragment.0, canvas, r, ox, rows, cw, bg0, scroll_dy);
             }
+            Op::AboveSeam { ops } => {
+                // ADR-615: the rows above the seam carried on with no gap, the band cut off
+                // where the seam's row begins — so what the group puts on the seam's row shows
+                // its top in the leftover strip, and nothing of it reaches the rows below.
+                // Under half a row of strip the window's own rows: phase 1 (`above_seam_rows`).
+                let cut = rows.seam_top().unwrap_or(isize::MAX).max(0) as usize;
+                let mut inner = canvas.narrowed(0, cut);
+                if inner.y1 > inner.y0 {
+                    let uniform = rows.above_seam_rows();
+                    render_ops(ops, &mut inner, r, ox, &uniform, cw, bg0, scroll_dy);
+                }
+            }
             Op::CellRegion {
                 x, y, h, px, ops, ..
             } => {
@@ -1158,8 +1226,7 @@ pub(super) fn render_ops(
                 r.set_metrics(saved);
             }
             Op::Text { row, col, s, face } => {
-                let (mut fg, mut bg) =
-                    (face.fg.unwrap_or(DEFAULT_FG), face.bg.unwrap_or(DEFAULT_BG));
+                let (mut fg, mut bg) = (face.fg.unwrap_or(r.fg()), face.bg.unwrap_or(r.bg()));
                 // Only paint a cell background when the face specifies one (or is
                 // reversed). A face with no `:bg` is TRANSPARENT — the glyph composites
                 // over whatever's already there (the frame clear, or an hl-line /
@@ -1167,7 +1234,7 @@ pub(super) fn render_ops(
                 // highlight shows behind the text too, exactly like Emacs. (Before,
                 // every glyph filled its cell with DEFAULT_BG, painting over the band so
                 // hl-line only showed in the line's trailing empty space.) For an
-                // un-banded line the pixel beneath is already DEFAULT_BG, so this is
+                // un-banded line the pixel beneath is already the window background, so this is
                 // visually identical there — only banded lines change.
                 let mut paint_bg = face.bg.is_some();
                 if face.reverse {
@@ -1436,8 +1503,7 @@ pub(super) fn render_ops(
                 face,
                 align,
             } => {
-                let (mut fg, mut bg) =
-                    (face.fg.unwrap_or(DEFAULT_FG), face.bg.unwrap_or(DEFAULT_BG));
+                let (mut fg, mut bg) = (face.fg.unwrap_or(r.fg()), face.bg.unwrap_or(r.bg()));
                 let mut paint_bg = face.bg.is_some();
                 if face.reverse {
                     std::mem::swap(&mut fg, &mut bg);

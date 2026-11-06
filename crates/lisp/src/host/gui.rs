@@ -193,7 +193,7 @@ pub enum FontChoice {
 
 /// What `gui/render-frame` paints a frame AS: the window it stands in for. Every
 /// `None` is the default a window opens with (840×560 at scale 1, the bundled mono at
-/// 15 px, line height 1.4, no inset, the default background).
+/// 15 px, line height 1.4, no inset, the default background and text colour).
 #[derive(Clone, Debug, Default)]
 pub struct RenderSpec {
     /// Physical pixels.
@@ -203,6 +203,8 @@ pub struct RenderSpec {
     pub line_height: Option<f32>,
     pub inset: Option<f32>,
     pub bg: Option<[u8; 3]>,
+    /// The default text colour (`gui-fg!`): what a text op with no `:fg` is drawn in.
+    pub fg: Option<[u8; 3]>,
     pub scale: Option<f64>,
     pub text_aa: Option<TextAa>,
     pub ligatures: Option<bool>,
@@ -954,6 +956,23 @@ pub enum Op {
         row: Option<u16>,
         top_band: bool,
     },
+    /// Ops laid out on the rows ABOVE the seam, carried on past it as if the grid had no
+    /// seam (`[:above-seam ops]`, ADR-615): every row from the top, `ch` apart, and the whole
+    /// group cut off where the seam's row begins. What such ops put on the seam's own row
+    /// number lands in the leftover strip — its top, clipped to the strip's height — so the
+    /// strip shows the next line of the text above it, as Emacs shows a partly visible last
+    /// line, instead of the stretched background of the row above (ADR-610's phase 1). Rows
+    /// above the seam are where they always are (the two maps agree there).
+    ///
+    /// A frame that carries one says the strip is CONTENT: the hit-test reports a pointer in
+    /// it on the seam's row, flagged `:partial` (`Mouse::partial`), the row its ops were laid
+    /// out on. Only from half a row of strip: under that (a few pixels of a line are specks)
+    /// the group paints on the window's own rows, so the strip is ADR-610's phase 1 and a
+    /// pointer there is the row above's (`RowMap::above_seam_rows`). Without a seam the ops
+    /// paint as they are; inside a `CellRegion` (another grid) too. GUI-only: the terminal draws the ops as they are, having no leftover.
+    AboveSeam {
+        ops: Vec<Op>,
+    },
 }
 
 /// How an emitter emits: what an `[:emitter id x y opts]` op's map says, with defaults
@@ -1298,6 +1317,11 @@ pub struct Mouse {
     /// `mouse_message`); None where the frontend has no sub-cell position (a terminal) or
     /// the window reports pixels already.
     pub at: Option<(f64, f64)>,
+    /// The pointer is in the leftover strip of a frame that paints its next line there
+    /// (`Op::AboveSeam`, ADR-615): `row` is the seam's row, as the strip's ops were laid out,
+    /// and not the row bottom-anchored on that number. Appended as `:partial true` in the
+    /// trailing map (`mouse_message`); false everywhere else and omitted.
+    pub partial: bool,
 }
 
 #[cfg(not(feature = "gui"))]
@@ -1320,7 +1344,7 @@ pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, focus, font,
+    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font,
     font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
     key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, maximize,
     minimize, next_texture_id, open, register_family, register_installed_family, render_frame,
@@ -1330,7 +1354,7 @@ pub use disabled::{
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, focus, font,
+    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font,
     font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
     key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, maximize,
     minimize, next_texture_id, open, register_family, register_installed_family, render_frame,
