@@ -288,3 +288,11 @@ passes. A report that does not match belongs to another test — drop it and kee
     (assert= (redact "a -----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY----- b") "a [redacted key] b"))
   (test "a described message is redacted"
     (assert= (:message (describe-error {:kind :error :message "secret=xyz"})) "secret=[redacted]")))
+
+(describe "sending a report"
+  ;; `post` once named `net/http/post`, which does not exist (the module is `http`): every send
+  ;; raised `unbound symbol` and no test sent anything. A refused connection must come back as a
+  ;; failure saying so — which it can only do once the call reaches `http/post`.
+  (test "a collector that is not there answers a failure, not an error"
+    (let (answer (post "http://127.0.0.1:9/reports" (describe-error {:kind :probe :message "x"})))
+      (is (failure? answer)))))

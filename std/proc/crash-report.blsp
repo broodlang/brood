@@ -310,10 +310,10 @@ innermost `:frames` with project-relative paths, the `:brood` version, the `:os`
 
 (defn post (url:string report:map -> any)
   "Send `report` ([[describe-error]]'s, perhaps with a note the user added) to the collector at
-`url` as JSON: the response map, or a failure saying why. Blocking, under `net/http`'s own
+`url` as JSON: the response map, or a failure saying why. Blocking, under `http`'s own
 timeouts — call it off a loop that must stay responsive (a task).
 
     (crash-report/post \"https://brood.fly.dev/api/v1/reports\" report)   ;~> {:status 201 …}"
-  (net/http/post url
+  (http/post url
     (json/encode report)
     {:headers {"Content-Type" "application/json"}}))
