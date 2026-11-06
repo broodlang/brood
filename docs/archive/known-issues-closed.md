@@ -16094,25 +16094,46 @@ failed its first try after 25 s and passed its retry: `mesh did not fully conver
 … a: <none>, b: PARTIAL 2, c: FULL, d: FULL`. Every pair linked except `a` and `b`, the pair
 that dialed first.
 
-**Cause.** `register_link`'s tie-break compared connectors, and on equal connectors kept the
-link registered first. One node can dial a peer twice: `a`'s `node/connect` has finished its
-handshake and not yet registered when gossip through `c` names `b`, and `a` is not yet linked to
-`b`, so a mesh dial starts. If `b` registers the first link first and `a` the second, each end
-keeps a different link and closes the other. Both die, each reader fires a node-down, and the
-mesh has no re-heal (ADR-088).
+**Cause.** One node could dial a peer twice: `a`'s `node/connect` has finished its handshake and
+not yet registered when gossip through `c` names `b`, and `a` is not yet linked to `b`, so a mesh
+dial starts. Two links from one connector resolve to "the existing link wins". If `b` registers
+the first link first and `a` the second, each end closes the link the other kept. Both die, each
+reader fires a node-down, and the mesh has no re-heal (ADR-088).
 
-**Why it survived.** The rule was symmetric only for two connectors. The window needs the
-loser's close to arrive after the held dial registers, so it is rare: a fault that held only the
-dial passed five times of five, and 720 runs of the test in six parallel workers did not show
-this shape.
+**Why it survived.** The window needs the loser's close to arrive after the held dial registers,
+so it is rare: a fault holding only the dial passed five times of five.
 
-**Fix.** Two links from one connector are ordered by the initiator's handshake nonce, which both
-ends hold and which is unique to the link (`Authenticated::link_nonce`, `Conn::nonce`). No wire
-change. A cost, accepted: a duplicate can now evict the link already carrying traffic, as a
-crossing dial always could.
+**Fix.** Gossip is held while a program's dial is under way (`ProgramDial`) and considered when it
+ends, by when the peer is in `NODES`. The rule itself stands: a second link to a live peer must
+lose unheard, as `a_bare_name_connect_to_a_live_peer_does_not_disturb_its_link` says. A
+program's dial started while a mesh dial of the same peer runs can still produce the two links;
+no test or program is known to.
 
-**Guard.** `dist::tests::both_ends_keep_the_same_link_of_two_from_one_connector` drives
-`establish` with one pair of links in both orders. Sabotage-verified: with the nonce out of the
-comparison it failed with `left: [1, …]`, `right: [2, …]`. Confirmed end to end by a temporary
-fault holding the dial 1 s and `b`'s close of the loser 2 s: `a` saw 1 peer of 2, three times of
-three before the fix, and 2 of 2 three times of three after. The fault is not kept.
+**The first fix was wrong (`ec4f12af`).** It ordered two links from one connector by the
+initiator's nonce, so both ends agreed. That let a duplicate evict a live link about half the
+time, firing `:noconnection` at monitors, and the entry called that an accepted cost. The first
+`full.yml` failed on the test above. Per-push CI and five looped runs had passed because nextest
+retries that group and only the summary was read: count `TRY 1 FAIL` and `FLAKY`, or run the test
+binary directly.
+
+**Guard.** `dist::tests::gossip_waits_for_a_programs_dial_and_is_considered_after_it`.
+Sabotage-verified: with the hold disabled it failed with `gossip dialed during a program's dial`.
+Confirmed end to end by a temporary fault holding the dial 1 s and `b`'s close of the loser 2 s:
+`a` saw 1 peer of 2 three times of three before any fix, and 2 of 2 five times of five with this
+one. The fault is not kept.
+
+## KI-373 — `http_keepalive_test` counted connections before the count arrived ✅ fixed 2026-11-06
+
+**Symptom.** `full.yml` on `db74fde4`, suite run 2, passed on retry:
+`tests/http_keepalive_test.blsp:87: … Connection: close is honoured …`, `(assert= 2 (accepted
+counter))`, the count 1.
+
+**Cause.** The test's own server. `accept-loop` released the handler and then sent `:accepted`, so
+the handler could answer and the client ask for the count before that send. Not a runtime bug.
+
+**Why it survived.** The window is one send wide, and the suite passes on most runs.
+
+**Fix.** Count first, then release the handler.
+
+**Guard.** By construction, as a test of a race this narrow cannot go red on demand: `:accepted`
+is sent before the handler can run, and the client's question follows the handler's answer.

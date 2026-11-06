@@ -1034,6 +1034,8 @@ the code. `primitives.md` gained 233 unlisted primitives. Found on the way: `ful
 a moved name and an empty default hid it, so cross-file references answered from open buffers. A
 sweep of every Brood name embedded in Rust found no other. Then CI failed that push on a
 retry-passed mesh test: one node's two links to a peer, registered in opposite orders by the two
-ends, each closing the one the other kept. A loop did not show it and a dial-only fault passed;
-holding the loser's close as well made it certain, then the fix cleared it. Two links from one
-connector are now ordered by the initiator's nonce.
+ends, each closing the one the other kept. The first fix ordered such links by nonce; the first
+`full.yml` showed it evicted live links, against a test that says in so many words they must not
+be, and five looped runs had hidden it behind nextest's retries. The fix now is to not
+make the second dial: gossip waits while a program's dial is under way. KI-373, the other reds in
+that run, was a race in `http_keepalive_test`'s own server.

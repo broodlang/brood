@@ -312,9 +312,6 @@ struct Conn {
     /// link initiated by the lexicographically smaller node name, computed
     /// identically on both ends (see `establish`).
     connector: Symbol,
-    /// The initiator's handshake nonce, the tie-break between two links with one
-    /// connector, computed identically on both ends (see `register_link`).
-    nonce: [u8; wire::NONCE_LEN],
     /// The peer's incarnation, from its authenticated `Hello`: which life of the
     /// peer this link reaches. A new link under the same name with a different one
     /// means the peer restarted, and this link is to a process that no longer
@@ -592,6 +589,48 @@ static LISTEN_ADDRS: LazyLock<RwLock<Vec<String>>> = LazyLock::new(|| RwLock::ne
 /// race into two redundant dials. A peer already in `NODES` is never re-dialed.
 static PENDING_DIALS: LazyLock<RwLock<HashSet<Symbol>>> =
     LazyLock::new(|| RwLock::new(HashSet::new()));
+
+/// The dials a program has under way, and the gossip held until they finish
+/// ([`ProgramDial`]).
+#[derive(Default)]
+struct ProgramDials {
+    under_way: usize,
+    held_gossip: HashMap<Symbol, String>,
+}
+
+static PROGRAM_DIALS: LazyLock<Mutex<ProgramDials>> = LazyLock::new(Mutex::default);
+
+/// One `node/connect` under way. While any is, gossip is held rather than considered: the
+/// dial's link is not registered until its handshake ends, so gossip naming that same peer
+/// would start a second dial from this node, and the two ends can register the two links in
+/// opposite orders. "The existing link wins" then has each end close the one the other kept,
+/// both die, and the mesh does not re-heal (KI-372). Dropping the last one considers what
+/// was held, by when the peer is in `NODES`.
+struct ProgramDial;
+
+impl ProgramDial {
+    fn begin() -> Self {
+        crate::core::sync::lock(&PROGRAM_DIALS).under_way += 1;
+        ProgramDial
+    }
+}
+
+impl Drop for ProgramDial {
+    fn drop(&mut self) {
+        let held = {
+            let mut dials = crate::core::sync::lock(&PROGRAM_DIALS);
+            dials.under_way -= 1;
+            if dials.under_way == 0 {
+                dials.held_gossip.drain().collect()
+            } else {
+                Vec::new()
+            }
+        };
+        if !held.is_empty() {
+            mesh_consider(held);
+        }
+    }
+}
 
 /// Whether to form a transitive **cluster mesh** (ADR-088): when set (the
 /// default), connecting to one node auto-connects you to
@@ -1745,6 +1784,12 @@ fn dial_and_greet(addr: &str, offer: Offer) -> io::Result<(Stream, handshake::Au
 /// already-published identity (the prelude `connect` requires a prior
 /// `node-start`). Returns the peer's authoritative node name on success.
 pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
+    let _dial = ProgramDial::begin();
+    connect_to(peer, addr)
+}
+
+/// [`node_connect`] for a dial gossip started, which holds no gossip back.
+fn connect_to(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     // Refuse to dial ourselves — it would race through the handshake and form a
     // tie-break loser in the same process; cleaner to reject up front.
     if peer == local_node() {
@@ -1913,7 +1958,6 @@ fn establish(authenticated: handshake::Authenticated, stream: Stream, role: Role
         peer,
         addr: peer_addr,
         incarnation,
-        link_nonce,
         session,
         grant,
         lanes,
@@ -1945,7 +1989,6 @@ fn establish(authenticated: handshake::Authenticated, stream: Stream, role: Role
         id,
         connector,
         incarnation,
-        nonce: link_nonce,
         addr: peer_addr,
         tx: tx.clone(),
         lanes,
@@ -2019,13 +2062,10 @@ fn register_link(peer: Symbol, link: Conn) -> Option<bool> {
                 continue;
             }
             Some(existing)
-                if (value::symbol_name(link.connector), link.nonce)
-                    >= (value::symbol_name(existing.connector), existing.nonce) =>
+                if value::symbol_name(link.connector) >= value::symbol_name(existing.connector) =>
             {
-                // The existing link to this same life of the peer wins: its connector
-                // sorts first, or one node dialed twice and its nonce does. Which link
-                // came first is no tie-break: the two ends can see them in either order,
-                // and each would close the link the other kept (KI-372).
+                // The existing link to this same life of the peer wins (its connector
+                // sorts first, or it's the same initiator — a plain duplicate).
                 return None;
             }
             other => {
@@ -2317,6 +2357,13 @@ fn mesh_consider(peers: Vec<(Symbol, String)>) {
     if !mesh_enabled() {
         return;
     }
+    {
+        let mut dials = crate::core::sync::lock(&PROGRAM_DIALS);
+        if dials.under_way > 0 {
+            dials.held_gossip.extend(peers);
+            return;
+        }
+    }
     let me = local_node();
     // Snapshot who we're already linked to (a different lock than PENDING_DIALS;
     // take it first and drop it before claiming, so the two are never held nested).
@@ -2351,7 +2398,7 @@ fn mesh_consider(peers: Vec<(Symbol, String)>) {
                 // from the other side may win the tie-break — either way we just
                 // stop. `node_connect` re-checks `NODES` and handles the self/dup
                 // guards; `establish` does the tie-break.
-                let _ = node_connect(name, &addr);
+                let _ = connect_to(name, &addr);
             }));
             crate::core::sync::write(&PENDING_DIALS).remove(&name);
         }) {
@@ -2605,7 +2652,6 @@ mod tests {
             peer,
             addr: String::new(),
             incarnation,
-            link_nonce: [0; wire::NONCE_LEN],
             grant: None,
             lanes: true,
             session: Session {
@@ -2633,34 +2679,28 @@ mod tests {
         }
     }
 
-    /// KI-372: one node dials a peer twice (a program's `node/connect` and a mesh dial
-    /// started by gossip), and the two ends register the links in opposite orders. Each
-    /// end closing the link it saw second kills both, and nothing dials again, so the
-    /// choice must not depend on the order. Two peer names stand for the two ends here.
+    /// KI-372: gossip naming a peer while a program's dial is under way must not start a
+    /// second dial, or the two links can register in opposite orders on the two ends and
+    /// each end closes the one the other kept. It waits for the dial, and is then
+    /// considered, so a peer it names is still reached.
     #[test]
-    fn both_ends_keep_the_same_link_of_two_from_one_connector() {
-        let kept = |name: &str, nonces: [u8; 2]| {
-            let peer = value::intern(name);
-            let far_ends: Vec<TcpStream> = nonces
-                .iter()
-                .map(|&n| {
-                    let (stream, far_end) = stream_pair();
-                    let authenticated = handshake::Authenticated {
-                        link_nonce: [n; wire::NONCE_LEN],
-                        ..authenticated_as(peer, 1)
-                    };
-                    establish(authenticated, stream, Role::Responder);
-                    far_end
-                })
-                .collect();
-            let nonce = crate::core::sync::read(&NODES)[&peer].nonce;
-            drop(far_ends);
-            nonce
+    fn gossip_waits_for_a_programs_dial_and_is_considered_after_it() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = format!("tcp:{}", listener.local_addr().unwrap());
+        let dialed = || {
+            (0..50).any(|_| {
+                std::thread::sleep(Duration::from_millis(10));
+                listener.accept().is_ok()
+            })
         };
-        assert_eq!(
-            kept("two-dials-seen-one-way@test", [1, 2]),
-            kept("two-dials-seen-the-other@test", [2, 1])
-        );
+        let gossip = || mesh_consider(vec![(value::intern("gossiped@test"), addr.clone())]);
+
+        let dial = ProgramDial::begin();
+        gossip();
+        assert!(!dialed(), "gossip dialed during a program's dial");
+        drop(dial);
+        assert!(dialed(), "the held gossip was never considered");
     }
 
     /// The guest standing of the link now registered for `peer`, if it is a guest link.
