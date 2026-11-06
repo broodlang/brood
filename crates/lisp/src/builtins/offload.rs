@@ -46,6 +46,7 @@ const OFFLOAD_ALLOWED: &[&str] = &[
     "file/slurp",
     "file/slurp-bytes",
     "file/spit",
+    "file/replace",
     "file/spit-bytes",
     "file/spit-append",
     "append-bytes",

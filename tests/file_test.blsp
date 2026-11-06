@@ -60,6 +60,20 @@
     (let (seen (file/slurp p))
       (fa-read-whole p whole (dec n) (if (contains? whole seen) torn (inc torn))))))
 
+(describe "file: replace"
+  (test "keeps the mode and leaves nothing beside the file"
+    (let (dir (ftmp) p (path/join dir "run.sh"))
+      (file/spit p "old")
+      (os/cmd "chmod" ["751" p])
+      (file/replace p "new")
+      (assert= (file/slurp p) "new")
+      (assert= (math/mod (:mode (file/stat p)) 512) 489)
+      (assert= (into [] (file/ls dir)) ["run.sh"])))
+  (test "takes bytes as well as text"
+    (let (p (path/join (ftmp) "data.bin"))
+      (file/replace p [0 200 255])
+      (assert= (vec (file/slurp-bytes p)) [0 200 255]))))
+
 (describe "file: spit-atomic"
   (test "writes the whole text and leaves no temp file behind"
     (let (d (ftmp)

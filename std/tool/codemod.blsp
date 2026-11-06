@@ -56,7 +56,7 @@
         after (apply-pairs before pairs))
     (if (= before after)
       nil
-      (do (file/spit f after) f))))
+      (do (file/replace f after) f))))
 
 (defn- project-blsp ()
   "Every .blsp file under the current directory, skipping .git and vendored _deps."

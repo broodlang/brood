@@ -86,6 +86,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Write s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, replacing any existing file.\n\n    (file/spit \"notes.txt\" \"hello\")   ;~> nil",
         spit);
     primitives.def(
+        "file/replace",
+        Arity::exact(2),
+        Sig::new(vec![string, iolist], nil_ty),
+        &["path", "s"],
+        "Replace the file at path with s (any iolist) so that a crash, a power cut or a full disk leaves the old file or the whole new one, never a torn file: s goes to a sibling temp file, is flushed to the disk, and is renamed over path. It keeps what the rename would lose: the file's mode, owner and group; a symlink stays a symlink, its TARGET replaced. It writes in place, as file/spit does and with the same risk, when a rename cannot keep the file as it was: a file with other hard links, one this user cannot give the same owner, extended attributes, a device, or a directory that takes no new entries. A full disk raises and leaves the old file. Atomic on Unix; on Windows it writes in place. For the file a person keeps (an editor's save, a tool rewriting source); file/spit-atomic is for a file other programs read while it changes.\n\n    (file/replace \"notes.txt\" \"text\\n\")   ;~> nil, notes.txt holds the text, its mode kept",
+        replace);
+    primitives.def(
         "file/spit-append",
         Arity::exact(2),
         Sig::new(vec![string, iolist], nil_ty),
@@ -425,6 +432,164 @@ pub(super) fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::nil())
+}
+
+/// `(file/replace path content)` — see the docstring where it is defined, and ADR-621.
+pub(super) fn replace(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file/replace", arg(args, 0))?;
+    let mut content = Vec::new();
+    flatten_iolist(heap, "file/replace", arg(args, 1), &mut content)?;
+    replace_file(std::path::Path::new(&path), &content, |file, bytes| {
+        std::io::Write::write_all(file, bytes)
+    })
+    .map_err(|e| {
+        LispError::runtime(format!("file/replace: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    Ok(Value::nil())
+}
+
+/// The file `path` really names: a symlink's target, since the link is what must survive.
+/// A path that does not exist yet is itself. A dangling link is the one `None`: only
+/// writing through it (as `open` does) creates what it points at.
+#[cfg(unix)]
+fn replace_target(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    match std::fs::canonicalize(path) {
+        Ok(target) => Some(target),
+        Err(_) if std::fs::symlink_metadata(path).is_ok() => None,
+        Err(_) => Some(path.to_path_buf()),
+    }
+}
+
+/// Whether the file has an extended attribute a sibling temp file would not get. A
+/// `security.selinux` label is not one: the directory gives the new file the same label,
+/// and counting it would make every save on such a system non-atomic.
+#[cfg(target_os = "linux")]
+fn has_extended_attributes(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(name) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return true;
+    };
+    let size = unsafe { libc::listxattr(name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size <= 0 {
+        return false;
+    }
+    let mut names = vec![0_u8; size as usize];
+    let read = unsafe { libc::listxattr(name.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    if read <= 0 {
+        return true;
+    }
+    names[..read as usize]
+        .split(|byte| *byte == 0)
+        .any(|attribute| !attribute.is_empty() && attribute != b"security.selinux")
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn has_extended_attributes(_: &std::path::Path) -> bool {
+    false
+}
+
+/// A new file beside `target`, its name fixed-length so a name at the filesystem's limit
+/// still has a sibling. Owner-only while it waits for an old file's mode (`mode` 0600); a new
+/// file's is `open`'s own, 0666 under the umask. `None` when the
+/// directory takes no new entries.
+#[cfg(unix)]
+fn replace_temp(
+    target: &std::path::Path,
+    mode: u32,
+) -> Option<(std::fs::File, std::path::PathBuf)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    (0..64).find_map(|attempt| {
+        let temp = directory.join(format!(
+            ".brood-replace-{}-{}",
+            std::process::id(),
+            stamp.wrapping_add(attempt)
+        ));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&temp)
+            .ok()
+            .map(|file| (file, temp))
+    })
+}
+
+/// Give `file` the owner, group and mode of `old`: chown first, since it clears the
+/// setuid bits a chmod sets. False when this user may not, which only a write in place
+/// can respect.
+#[cfg(unix)]
+fn replace_keep_identity(file: &std::fs::File, old: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, fchown};
+    fchown(file, Some(old.uid()), Some(old.gid())).is_ok()
+        && file
+            .set_permissions(std::fs::Permissions::from_mode(old.permissions().mode()))
+            .is_ok()
+}
+
+/// What [`replace`] does. `write` puts the bytes in the temp file; a test hands in one that
+/// fails, as a full disk does.
+#[cfg(unix)]
+fn replace_file(
+    path: &std::path::Path,
+    content: &[u8],
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(target) = replace_target(path) else {
+        return std::fs::write(path, content);
+    };
+    let old = std::fs::metadata(&target).ok();
+    let in_place = old.as_ref().is_some_and(|meta| {
+        !meta.is_file() || meta.nlink() > 1 || has_extended_attributes(&target)
+    });
+    if in_place {
+        return std::fs::write(&target, content);
+    }
+    let mode = if old.is_some() { 0o600 } else { 0o666 };
+    let Some((mut file, temp)) = replace_temp(&target, mode) else {
+        return std::fs::write(&target, content);
+    };
+    if let Some(meta) = &old
+        && !replace_keep_identity(&file, meta)
+    {
+        let _ = std::fs::remove_file(&temp);
+        return std::fs::write(&target, content);
+    }
+    // A failure here (a full disk) must leave the old file: no fallback to a write in place.
+    let written = write(&mut file, content).and_then(|()| file.sync_all());
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    drop(file);
+    if std::fs::rename(&temp, &target).is_err() {
+        // a bind-mounted file cannot be renamed over; the bytes are safe to write now
+        let _ = std::fs::remove_file(&temp);
+        return std::fs::write(&target, content);
+    }
+    // the rename is not durable until the directory is on disk; a filesystem that cannot
+    // sync a directory still did the rename
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let _ = std::fs::File::open(parent).and_then(|directory| directory.sync_all());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn replace_file(
+    path: &std::path::Path,
+    content: &[u8],
+    _: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    std::fs::write(path, content)
 }
 
 /// `(file/spit-append path content)` — append `content` (a string) to the file at
@@ -1112,5 +1277,115 @@ mod windows_path_text_tests {
             windows_path_text(r"\\?\UNC\server\share\x"),
             "//server/share/x"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod replace_tests {
+    use super::replace_file;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+    fn write_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+        std::io::Write::write_all(file, bytes)
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("brood-replace-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn names(directory: &std::path::Path) -> Vec<String> {
+        let mut found: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_full_disk_leaves_the_old_file_and_no_temp() {
+        let directory = scratch("full");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "old").unwrap();
+        let outcome = replace_file(&path, b"new", |_, _| {
+            Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+        });
+        assert_eq!(outcome.unwrap_err().raw_os_error(), Some(libc::ENOSPC));
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(names(&directory), ["notes.txt"]);
+    }
+
+    #[test]
+    fn the_mode_is_kept_and_the_file_is_a_new_inode() {
+        let directory = scratch("mode");
+        let path = directory.join("run.sh");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o751)).unwrap();
+        let before = std::fs::metadata(&path).unwrap().ino();
+        replace_file(&path, b"new", write_all).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o751);
+        assert_ne!(meta.ino(), before, "a rename, not a write in place");
+        assert_eq!(names(&directory), ["run.sh"]);
+    }
+
+    #[test]
+    fn a_new_file_gets_the_mode_a_plain_write_gives() {
+        let directory = scratch("new");
+        let plain = directory.join("plain");
+        std::fs::write(&plain, "x").unwrap();
+        let path = directory.join("made");
+        replace_file(&path, b"new", write_all).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode(),
+            std::fs::metadata(&plain).unwrap().permissions().mode()
+        );
+    }
+
+    #[test]
+    fn a_symlink_stays_one_and_its_target_is_replaced() {
+        let directory = scratch("link");
+        let target = directory.join("target.txt");
+        let link = directory.join("link.txt");
+        std::fs::write(&target, "old").unwrap();
+        symlink("target.txt", &link).unwrap();
+        replace_file(&link, b"new", write_all).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn a_dangling_symlink_is_written_through() {
+        let directory = scratch("dangling");
+        let link = directory.join("link.txt");
+        symlink("target.txt", &link).unwrap();
+        replace_file(&link, b"new", write_all).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(directory.join("target.txt")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn a_hard_linked_file_is_written_in_place_so_the_link_sees_it() {
+        let directory = scratch("hard");
+        let path = directory.join("one");
+        let other = directory.join("two");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::hard_link(&path, &other).unwrap();
+        replace_file(&path, b"new", write_all).unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"new");
     }
 }
