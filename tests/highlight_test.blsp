@@ -48,11 +48,11 @@
   (test "strings and comments"
     (assert= (highlight-spans "\"hi\" ; c")
       (list [0 4 hl-face-string] [5 8 hl-face-comment])))
-  (test "keywords colour as keywords"
-    (assert= (highlight-spans ":foo") (list [0 4 hl-face-keyword])))
+  (test "keywords colour as symbols"
+    (assert= (highlight-spans ":foo") (list [0 4 hl-face-symbol])))
   (test "nil / true / false colour as constants, even in head position"
-    (assert= (highlight-spans "nil") (list [0 3 hl-face-keyword]))
-    (assert= (highlight-spans "(true)") (list [1 5 hl-face-keyword])))
+    (assert= (highlight-spans "nil") (list [0 3 hl-face-symbol]))
+    (assert= (highlight-spans "(true)") (list [1 5 hl-face-symbol])))
   (test "a radix literal colours as a number, in argument and in head position"
     (assert= (highlight-spans "(bit/and b 0x3F)")
       (list [1 8 hl-face-function] [11 15 hl-face-number]))
@@ -177,6 +177,24 @@
           [rainbow-spans _] ((:lex rainbow) "(a)" [nil nil]))
       (assert= (span-at plain-spans 0) {:fg "#000002"})
       (assert= (span-at rainbow-spans 0) {:fg "#000003"}))))
+
+;; ---- a keyword literal, apart from a language keyword (ADR-616) ---------------------
+;; A theme that leaves keywords plain and colours literals (Tonsky's rule) needs `:foo` on a
+;; face of its own: the tree-sitter languages' keywords (`def`, `fn`) are `:syntax/keyword`.
+
+(describe "highlight-spans — a :keyword literal takes the symbol face"
+  :isolated (test "styled apart, `:foo`, nil, true and false take `:syntax/symbol`, not the keyword face"
+    (let (spans (with-faces {:syntax/keyword {:fg "#000001"} :syntax/symbol {:fg "#000004"}}
+                  (fn () (highlight-spans "(f :foo nil true false)"))))
+      (assert= (map (seq/filter spans (fn ([_ _ f]) (= f {:fg "#000004"}))) first) (list 3 8 12 17))
+      (is (not (any? spans (fn ([_ _ f]) (= f {:fg "#000001"})))))))
+  (test "the line lexer agrees"
+    (let (lex (:lex (with-faces {:syntax/symbol {:fg "#000004"}} (fn () (lisp-line-lexer)))))
+      (assert= (span-at (first (lex "(f :foo)" [nil nil])) 3) {:fg "#000004"})))
+  (test "by default the symbol face IS the keyword face, and the constant face the special"
+    (assert= hl-face-symbol hl-face-keyword)
+    (assert= hl-face-constant hl-face-special)
+    (assert= (highlight-spans ":foo") (list [0 4 hl-face-symbol]))))
 
 (describe "highlight-window — spans shifted into absolute coordinates"
   (test "base 0 equals highlight-spans"

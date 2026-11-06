@@ -57,7 +57,21 @@ Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently tes
 ;; hue difference.
 (def-face :syntax/doc {:fg :grey :italic true})
 (def-face :syntax/number {:fg :yellow})
+;; A language KEYWORD — Python's `def` / `return`, Rust's `fn` / `let`, Elixir's `do` / `end`: what a
+;; tree-sitter table's anonymous keyword tokens report (`face-of-syntax`) and a lexer table's
+;; `:keyword` role names. The Lisps' keywords are their special forms (`:syntax/special`); a Lisp
+;; `:keyword` LITERAL is `:syntax/symbol`, below (ADR-616).
 (def-face :syntax/keyword {:fg :magenta})
+;; A SYMBOL used as a value (ADR-616): a Lisp `:keyword`, and `nil` / `true` / `false`, which the
+;; reader classifies with them — and a data format's KEY (JSON, YAML, TOML, INI), a name written
+;; as data. Apart from `:syntax/keyword` so a theme can leave a language's keywords plain and
+;; colour its literals (Tonsky's rule); by default it IS the keyword face, the colour these
+;; tokens always had.
+(def-face :syntax/symbol {:inherit :syntax/keyword})
+;; A CONSTANT a language names (ADR-616): `true` / `false` / `nil` / `None` / `null`, an Elixir
+;; atom, a Ruby symbol — what tree-sitter and lexer tables coloured as specials. By default it IS
+;; the special face, the colour they always had; a theme that colours literals names it.
+(def-face :syntax/constant {:inherit :syntax/special})
 ; special forms / core macros
 (def-face :syntax/special {:fg :blue :bold true})
 ; a call head
@@ -90,6 +104,8 @@ Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently tes
 (def hl-face-doc (face :syntax/doc))
 (def hl-face-number (face :syntax/number))
 (def hl-face-keyword (face :syntax/keyword))
+(def hl-face-symbol (face :syntax/symbol))
+(def hl-face-constant (face :syntax/constant))
 (def hl-face-special (face :syntax/special))
 (def hl-face-function (face :syntax/function))
 (def hl-face-definition (face :syntax/definition))
@@ -266,14 +282,15 @@ string). `toks` is the stream AFTER the string."
 (defn- hl-faces ()
   "The `:syntax/*` faces a lexing pass paints with, resolved ONCE per pass — a map
 from token kind (`:comment` `:number` `:keyword` `:string` `:doc` `:special`
-`:function` `:definition` `:punctuation`) to the attribute map; `:punctuation` is nil
+`:function` `:definition` `:punctuation`) to the attribute map — the `:keyword` token kind
+(`:foo`, `nil`, `true`, `false`) paints `:syntax/symbol` (ADR-616); `:punctuation` is nil
 when that face is empty (the default), so the brackets are left unpainted. Resolving
 per span cost the inherit-chain walk per coloured token, a third of the pass on a
 100-line band; per pass, a live `face-set` of a `:syntax/*` face still restyles the
 editor on its next re-lex."
   {:comment (face :syntax/comment)
    :number (face :syntax/number)
-   :keyword (face :syntax/keyword)
+   :keyword (face :syntax/symbol)
    :string (face :syntax/string)
    :doc (face :syntax/doc)
    :special (face :syntax/special)
