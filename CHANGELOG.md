@@ -4,7 +4,7 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## v0.49.1 — the parallel cold build finishes
+## v0.50.0 — a window you can look at, a seam for the leftover pixels, and quiet chrome
 
 **Added.**
 - **A frame can declare a seam row** (ADR-610). `[:seam row]` (`editor/display/seam`) anchors
