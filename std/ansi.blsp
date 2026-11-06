@@ -283,16 +283,34 @@ pass through. Nil for the default face.
   ;; intermediates (0x20–0x2F)
   " !\"#$%&'()*+,-./0123456789:;<=>?")
 
-(defn- csi-scan (piece:string i:int n:int -> vector)
-  "From index `i` of a CSI's body: `[:final end]` past its final byte (0x40–0x7E),
-`[:incomplete]` when the piece ends first, or `[:abort at]` at a byte no CSI may hold
-(a control character inside one cancels it, and the character is text again). The run
-of body bytes is one native `string/span`, not a walk."
-  (let (j (string/span piece i csi-body-bytes))
-    (cond
-      (>= j n) [:incomplete]
-      (<= 0x40 (code-at piece j) 0x7e) [:final (inc j)]
-      else [:abort j])))
+(defn- csi-body-end (codes:vector i:int n:int -> int)
+  "The index of the first character of the code-point vector `codes` from `i` on that is
+not a CSI body byte (`n` when they all are)."
+  (cond
+    (>= i n) n
+    (<= 0x20 (string/char->int (nth codes i)) 0x3f) (csi-body-end codes (inc i) n)
+    else i))
+
+(defn csi-scan (source i:int n:int -> vector)
+  "Where the CSI whose body starts at index `i` of `source` ends: `[:final end]` past its
+final byte (0x40–0x7E, so `~` and `@` as well as a letter), `[:incomplete]` when `source`
+ends first, or `[:abort at]` at a byte no CSI may hold. `source` is a string of `n`
+characters, or a vector of `n` one-character strings for a caller that indexes its input.
+The one rule for where a CSI ends: [[feed]], [[strip]], [[render]] and `vt` all ask it, and
+each says what an abort means to it. Over a string the body bytes are one native
+`string/span`, not a walk.
+
+    (ansi/csi-scan \"3~cd\" 0 4)   ;=> [:final 2]
+    (ansi/csi-scan [\"3\" \"~\" \"c\"] 0 3)   ;=> [:final 2]
+    (ansi/csi-scan \"31\" 0 2)   ;=> [:incomplete]
+    (ansi/csi-scan \"3\\nx\" 0 3)   ;=> [:abort 1]"
+  (let (text? (string? source)
+        j (if text? (string/span source i csi-body-bytes) (csi-body-end source i n)))
+    (if (>= j n)
+      [:incomplete]
+      (if (<= 0x40 (if text? (code-at source j) (string/char->int (nth source j))) 0x7e)
+        [:final (inc j)]
+        [:abort j]))))
 
 (defn- plain-sgr-body? (body:string -> bool)
   "Whether a CSI body ending in `m` is SGR: parameters only — digits, `;` and `:`. A
@@ -506,20 +524,9 @@ thread a [[decoder]] instead.
                 s))
     (if (includes? plain "\r") (string/replace plain "\r" "") plain)))
 
-;; ---- the CSI scan `render` shares -------------------------------------------------------------
+;; ---- the string scan `render` keeps -------------------------------------------------------------
 ;; `v` below is a CODE-POINT VECTOR, and `n` its length, threaded rather than recomputed:
 ;; `char-at` on a raw UTF-8 string is O(i) and `string-length` O(n).
-
-(defn- ansi-csi-final? (c)
-  "Whether `c` is the final byte of a CSI sequence — a letter (SGR `m`, cursor ops)."
-  (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" c))
-
-(defn- ansi-csi-end (v:vector i:int n:int -> int)
-  "Index just past the CSI final byte, scanning `v` from `i` (clamped to `n`)."
-  (cond
-    (>= i n) i
-    (ansi-csi-final? (nth v i)) (+ i 1)
-    else (ansi-csi-end v (+ i 1) n)))
 
 (defn- ansi-string-end (v:vector i:int n:int -> int)
   "Index just past the terminator (BEL, or ESC `\\`) of an OSC / DCS-like string whose body
@@ -630,11 +637,20 @@ terminal's cursor stops at its margins."
         ;; is not a CSI is dropped with the byte after it
         (= c "\e")
           (if (and (< (inc i) n) (= (nth v (inc i)) "["))
-            (let (end (ansi-csi-end v (+ i 2) n)
-                  params (string/join (into [] (take (drop v (+ i 2)) (math/max 0 (- end i 3)))) "")
-                  final (if (> end (+ i 2)) (nth v (dec end)) "")
-                  [lines2 row2 col2] (ansi-csi lines row col params final))
-              (ansi-render-loop v end n lines2 row2 col2))
+            (let (scan (csi-scan v (+ i 2) n))
+              (case (first scan)
+                :final
+                  (let (end (second scan)
+                        params (string/join (check-allow :type-mismatch
+                                              (seq/subvec v (+ i 2) (dec end)))
+                                 "")
+                        [lines2 row2 col2] (ansi-csi lines row col params (nth v (dec end))))
+                    (ansi-render-loop v end n lines2 row2 col2))
+                ;; a control byte cancels the sequence, and is read as itself
+                :abort (ansi-render-loop v (second scan) n lines row col)
+                ;; the chunk ended inside it: nothing to apply and nothing to show
+                (ansi-render-loop v n n lines row col)))
+
             (ansi-render-loop v
               (if (and (< (inc i) n) (includes? "]PX^_" (nth v (inc i))))
                 (ansi-string-end v (+ i 2) n)

@@ -549,16 +549,17 @@ their own sequences rather than flags on `h`, `c` and `q`."
 (defn- control-code? (k:int -> bool)
   (or (< k 0x20) (= k 0x7f) (<= 0x80 k 0x9f)))
 
-(defn- csi-end (v:vector i:int n:int -> (or nil int))
-  "Past the final byte (0x40–0x7E) of a CSI whose parameters start at `i`."
-  (if (>= i n)
-    nil
-    (let (c (code-of (nth v i)))
-      (cond
-        (<= 0x40 c 0x7e) (inc i)
-        (<= 0x20 c 0x3f) (csi-end v (inc i) n)
+;; check-allow: `csi-scan` carries the index in a vector the checker reads element by element.
+(check-allow :trusted
+  (defn- csi-end (v:vector i:int n:int -> (or nil int))
+    "Past the CSI whose parameters start at `i` (`ansi/csi-scan`), nil when the chunk ends
+inside it."
+    (let (scan (ansi/csi-scan v i n))
+      (case (first scan)
+        :final (second scan)
         ;; a control byte inside a CSI aborts it (xterm executes it; we drop the sequence)
-        else (inc i)))))
+        :abort (inc (second scan))
+        nil))))
 
 (defn- string-end (v:vector i:int n:int -> (or nil int))
   "Past the terminator of an OSC / DCS / APC string starting at `i`: BEL, or ESC `\\`."

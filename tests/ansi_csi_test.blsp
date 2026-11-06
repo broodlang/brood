@@ -1,0 +1,43 @@
+;;; tests/ansi_csi_test.blsp — the one rule for where a CSI ends, seen from every reader.
+
+(defmodule ansi-csi-test (:use test))
+
+(defn- esc (s) (str "\e" s))
+
+(defn- decoded (chunk) (ansi/segments-text (second (ansi/feed (ansi/decoder) chunk))))
+
+(defn- screen-line (chunk) (first (vt/lines (vt/feed (vt/make 10 2) chunk))))
+
+;; A CSI's final byte is 0x40–0x7E (ECMA-48), not only a letter: `~` ends every navigation key
+;; and `@` inserts characters. A reader that took letters only ran on past it and ate the
+;; text behind it, up to the next letter.
+(describe "a CSI ends at its final byte, whichever reader finds it"
+  (test "render stops at a final that is not a letter"
+    (assert= (ansi/render "ab" (str (esc "[3~") "cd")) "abcd")
+    (assert= (ansi/render "ab" (str (esc "[2@") "cd")) "abcd"))
+  (test "strip stops there too"
+    (assert= (ansi/strip (str "ab" (esc "[3~") "cd")) "abcd"))
+  (test "the streaming decoder stops there too"
+    (assert= (decoded (str "ab" (esc "[3~") "cd")) "abcd"))
+  (test "the emulator stops there too"
+    (assert= (screen-line (str "ab" (esc "[3~") "cd")) "abcd")))
+
+(describe "a control character inside a CSI cancels it"
+  (test "render drops what it read and reads the control as itself"
+    (assert= (ansi/render "ab" (str (esc "[3") "\ncd")) "ab\ncd"))
+  (test "strip and the decoder agree"
+    (assert= (ansi/strip (str "ab" (esc "[3") "\ncd")) "ab\ncd")
+    (assert= (decoded (str "ab" (esc "[3") "\ncd")) "ab\ncd")))
+
+(describe "a CSI the chunk ends inside"
+  (test "render shows nothing of it"
+    (assert= (ansi/render "ab" (esc "[3")) "ab")))
+
+(describe "the scan answers alike over a string and a vector"
+  (test "a final, an abort and an unfinished body"
+    (let (both (fn (text)
+                 (let (n (string/length text))
+                   [(ansi/csi-scan text 0 n) (ansi/csi-scan (into [] (string/->list text)) 0 n)])))
+      (assert= (both "3;4~x") [[:final 4] [:final 4]])
+      (assert= (both "3\nx") [[:abort 1] [:abort 1]])
+      (assert= (both "3;4") [[:incomplete] [:incomplete]]))))
