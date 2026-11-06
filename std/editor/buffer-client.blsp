@@ -52,7 +52,8 @@ origin]` push into the link and tells the caller what to do with its LOCAL copy:
 The fold is pure (no sends, no receives) — the merge matrix is testable with
 hand-fed pushes. Start a link with `link-init` (version -1, so the subscription
 seed always applies); compute minimal splices with `text-splice`."
-  (:use editor/buffer))
+  (:use editor/buffer)
+  (:use editor/span-properties))
 ;; ---- the single positional splice diff ---------------------------------------
 
 (defn text-splice (old new)
@@ -187,10 +188,6 @@ outbound edits with). Version -1, so the subscription's seed push always applies
     (get (editor/buffer-client/link-init :proc :me) :version)   ;=> -1"
   {:proc proc :me me :version -1 :pending ()})
 
-(defn- link-property-change? (properties)
-  "Whether a splice's `properties` are a PROPERTY CHANGE (`[:put-properties width changes]`)."
-  (and (vector? properties) (= (first properties) :put-properties)))
-
 (defn- link-send-splice (link splice &optional properties)
   "Send one `[lo hi repl]` to the link's process, based and tagged, with the text
 `properties` its replacement comes with, and count it in `:pending`. The link unchanged for
@@ -200,7 +197,7 @@ untouched, so its splice is empty) is sent, and counted over the RANGE it change
   (if (and (splice-noop? splice) (nil? properties))
     link
     (let ([lo hi repl] splice
-          in-flight (if (link-property-change? properties)
+          in-flight (if (property-change? properties)
                       (let (width (math/max 0 (nth properties 1))) [lo (+ lo width) width])
                       [lo hi (string/length repl)]))
       (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version) properties)
@@ -209,7 +206,7 @@ untouched, so its splice is empty) is sent, and counted over the RANGE it change
 (defn- link-splice-range (splice properties)
   "The range a pushed `splice` touches, as `[lo hi repl]`: a property change's is the range
 it changes (its splice is empty), anything else its own."
-  (if (link-property-change? properties)
+  (if (property-change? properties)
     (let ([lo _ _] splice) [lo (+ lo (math/max 0 (nth properties 1))) ""])
     splice))
 
@@ -297,7 +294,7 @@ cursor-only delta is `:noop`."
         own? [nlink :noop]
         (and splice mergeable?)
           (let ([lo hi repl] (splice-transform-all touched pending))
-            (if (link-property-change? properties)
+            (if (property-change? properties)
               ;; the range moved with our in-flight edits; the text is still untouched
               [nlink
                 [:splice

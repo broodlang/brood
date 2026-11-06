@@ -1,0 +1,44 @@
+;;; tests/span_properties_test.blsp — text-property spans, with no buffer under them.
+
+(defmodule span-properties-test (:use test) (:use editor/span-properties))
+
+(describe "spans through an edit"
+  (test "an insert inside a span splits it, an insert at its edge leaves it alone"
+    (assert= {:k [[0 1 :v] [3 4 :v]]} (properties-map-carry {:k [[0 2 :v]]} :insert 1 2))
+    (assert= {:k [[0 2 :v]]} (properties-map-carry {:k [[0 2 :v]]} :insert 2 5)))
+  (test "a delete shrinks a span and drops the key when it empties"
+    (assert= {:k [[0 1 :v]]} (properties-map-carry {:k [[0 2 :v]]} :delete 1 5))
+    (assert= {} (properties-map-carry {:k [[1 2 :v]]} :delete 0 5)))
+  (test "replacing a range leaves the new text with none"
+    (assert= {:k [[0 1 :v] [3 4 :v]]} (properties-map-replace {:k [[0 3 :v]]} 1 2 2))))
+
+(describe "what a caller hands in"
+  (test "normalize sorts, clips and joins, and answers nil for nothing"
+    (assert= {:k [[0 4 :v]]} (properties-normalize {:k (list [2 9 :v] [0 2 :v])} 4))
+    (assert= nil (properties-normalize {:k [[5 9 :v]]} 4))
+    (assert= nil (properties-normalize {} 4))))
+
+(describe "ranges"
+  (test "relative cuts a range out, relative to its start"
+    (assert= {:k [[0 1 :a] [2 3 :b]]} (properties-relative {:k [[0 2 :a] [3 9 :b]]} 1 4))
+    (assert= nil (properties-relative {:k [[0 2 :a]]} 5 9)))
+  (test "clip keeps absolute offsets"
+    (assert= [[1 2 :a] [3 4 :b]] (spans-clip [[0 2 :a] [3 6 :b]] 1 4)))
+  (test "add lays spans into the gap an insert left, joining neighbours"
+    (assert= {:k [[0 3 :v] [3 4 :w]]}
+      (properties-map-add {:k [[0 2 :v] [3 4 :w]]} 2 {:k [[0 1 :v]]}))))
+
+(describe "comparing and changing"
+  (test "equal maps have no difference; a cut span differs only past the cut"
+    (assert= nil (properties-difference {:k [[0 2 :v]]} {:k [[0 2 :v]]}))
+    (assert= [2 4 #{:k}] (properties-difference {:k [[0 2 :v]]} {:k [[0 4 :v]]})))
+  (test "with-changes sets a range and drops a key left empty"
+    (assert= {} (properties-with-changes {:k [[1 2 :v]]} 0 3 {:k []}))
+    (assert= {:k [[0 1 :v] [1 2 :w] [2 3 :v]]}
+      (properties-with-changes {:k [[0 3 :v]]} 1 2 {:k [[0 1 :w]]})))
+  (test "changes names every key asked for, clearing one with no spans there"
+    (assert= [] (get (properties-changes {:k [[0 1 :v]]} 2 3 [:k]) :k)))
+  (test "a property change is told from a redaction and from inserted text's properties"
+    (is (property-change? [:put-properties 0 {}]))
+    (is (not (property-change? :redact)))
+    (is (not (property-change? {:k [[0 1 :v]]})))))

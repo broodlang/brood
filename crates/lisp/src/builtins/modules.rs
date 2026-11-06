@@ -598,6 +598,8 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     embedded_module!("editor/buffer", "std/editor/buffer.blsp"),
+    // Text-property spans as pure data: how they move through an edit.
+    embedded_module!("editor/span-properties", "std/editor/span-properties.blsp"),
     // The CLIENT half of the buffer-process protocol (ADR-134): the link record
     // + the pure push fold (echo suppression, splice transform over in-flight
     // edits, resync fallback) a subscriber uses to track a hosted document.

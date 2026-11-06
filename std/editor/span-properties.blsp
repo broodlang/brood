@@ -1,0 +1,312 @@
+;; std/editor/span-properties.blsp — spans of data laid over text, and how they move.
+;;
+;; Text properties (ADR-579) are kept as `{key [[start end value] …]}`: per key a vector of
+;; ascending, non-overlapping half-open spans. What happens to those spans when the text
+;; under them changes is pure arithmetic over offsets. It needs no rope, no buffer and no
+;; history, so it lives apart from `editor/buffer`, which calls it from every edit, and from
+;; the buffer process, which calls it when it transforms concurrent edits.
+;;
+;; The semantics are Emacs's text properties, not a marker pair's: text inserted INSIDE a
+;; span does not take its value (the span splits around it), text inserted at either edge
+;; is outside it, a delete shrinks a span and drops one it empties.
+
+(defmodule editor/span-properties
+  "Text-property spans as pure data: a property map is `{key [[start end value] …]}`, per
+key ascending, non-overlapping half-open spans. These functions carry a map through an
+insert or a delete, normalize what a caller hands in, cut a range out relative to its start,
+compare two maps and apply a set of changes. Nothing here knows a buffer.
+
+    (editor/span-properties/properties-map-carry {:face [[2 4 :red]]} :insert 0 3)   ;=> {:face [[5 7 :red]]}")
+
+(defn- properties-first-after (spans position)
+  "The index of the first of the ascending, non-overlapping `spans` that ENDS after
+`position` — its count when none does. A binary search: an edit after every span (an
+append to a log) costs only that."
+  (letrec (search (fn (low high)
+                    (if (>= low high)
+                      low
+                      (let (middle (math/quot (+ low high) 2))
+                        (if (> (nth (nth spans middle) 1) position)
+                          (search low middle)
+                          (search (inc middle) high))))))
+    (search 0 (count spans))))
+
+(defn- properties-push (spans span)
+  "`spans` (a vector) with `span` appended — joined to the last span when it continues it
+with the same value, so where an edit happened to cut a run never shows in the spans."
+  (let ([from to value] span
+        last-index (dec (count spans))
+        previous (when (>= last-index 0) (nth spans last-index)))
+    (if (and previous (= (nth previous 1) from) (= (nth previous 2) value))
+      (assoc spans last-index [(first previous) to value])
+      (conj spans span))))
+
+(defn- properties-carry (spans kind a b)
+  "`spans` carried through an edit — `:insert` of `b` chars at `a`, or `:delete` of `[a, b)`
+— or nil when the edit is after every span and changes none of them. Spans before the edit
+are kept as they are; only the rest are rebuilt."
+  (let (start (properties-first-after spans a))
+    (when (< start (count spans))
+      (fold (seq/subvec spans start)
+        (seq/subvec spans 0 start)
+        (fn (acc span)
+          (let ([from to value] span)
+            (if (= kind :insert)
+              ;; every span here ends after `a`: one that starts before it splits around
+              ;; the new text, the others move right past it
+              (if (< from a)
+                (conj (conj acc [from a value]) [(+ a b) (+ to b) value])
+                (conj acc [(+ from b) (+ to b) value]))
+              (let (width (- b a)
+                    moved-from (cond
+                                 (< from a) from
+                                 (< from b) a
+                                 else (- from width))
+                    moved-to (if (<= to b) a (- to width)))
+                (if (< moved-from moved-to) (properties-push acc [moved-from moved-to value]) acc)))))))))
+
+(defn properties-map-carry (property-map:map kind:keyword a:int b:int -> map)
+  "`property-map` (`{key spans}`) carried through an edit — `:insert` (a=pos, b=len) or
+`:delete` (a=lo, b=hi) — a key whose spans all went dropped; the map itself when the edit is
+after every span.
+
+    (editor/span-properties/properties-map-carry {:face [[2 4 :red]]} :delete 0 1)   ;=> {:face [[1 3 :red]]}
+    (editor/span-properties/properties-map-carry {:face [[2 4 :red]]} :insert 3 2)   ;=> {:face [[2 3 :red] [5 6 :red]]}"
+  (fold property-map
+    property-map
+    (fn (acc entry)
+      (let ([key spans] entry
+            moved (properties-carry spans kind a b))
+        (cond
+          (nil? moved) acc
+          (empty? moved) (dissoc acc key)
+          else (assoc acc key moved))))))
+
+(defn properties-map-replace (property-map:map lo:int hi:int length:int -> map)
+  "`property-map` carried through `[lo, hi)` replaced by `length` chars: a delete then an
+insert, the new text left with none — where a holder's copy stands before it lays the
+properties a splice came with.
+
+    (editor/span-properties/properties-map-replace {:face [[0 4 :red]]} 1 3 1)   ;=> {:face [[0 1 :red] [2 3 :red]]}"
+  (let (cut (if (< lo hi) (properties-map-carry property-map :delete lo hi) property-map))
+    (if (> length 0) (properties-map-carry cut :insert lo length) cut)))
+
+(defn properties-normalize (properties length)
+  "`properties` (`{key spans}` relative to an inserted text of `length` chars) as the
+ascending, non-overlapping, joined vectors the buffer keeps, each span clipped into the
+text — or nil when nothing is left. What the caller hands in may be unsorted, overlapping
+(the later start wins from where the earlier ended) or a list.
+
+    (editor/span-properties/properties-normalize {:face [[2 9 :b] [0 3 :a]]} 5)   ;=> {:face [[0 3 :a] [3 5 :b]]}"
+  (when (and (map? properties) (not (empty? properties)))
+    (let (kept (fold properties
+                 {}
+                 (fn (acc entry)
+                   (let ([key spans] entry
+                         clipped (fold (seq/sort-by (or spans []) first)
+                                   []
+                                   (fn (out span)
+                                     (let ([from to value] span
+                                           previous-end (if (empty? out) 0 (nth (last out) 1))
+                                           clipped-from (math/max previous-end from)
+                                           clipped-to (math/min length to))
+                                       (if (< clipped-from clipped-to)
+                                         (properties-push out [clipped-from clipped-to value])
+                                         out)))))
+                     (if (empty? clipped) acc (assoc acc key clipped))))))
+      (when (not (empty? kept)) kept))))
+
+(defn properties-map-add (property-map:map lo:int added:map -> map)
+  "`property-map` with the normalized `added` (`{key spans}` relative to text just inserted
+at `lo`, where no span of the map's is, since an insert leaves a gap) laid in, joined to a
+neighbour that continues one in the same value.
+
+    (editor/span-properties/properties-map-add {:face [[0 2 :red]]} 2 {:face [[0 1 :red]]})   ;=> {:face [[0 3 :red]]}"
+  (fold added
+    property-map
+    (fn (acc entry)
+      (let ([key spans] entry
+            existing (or (get acc key) [])
+            split (properties-first-after existing lo)
+            head (if (= split (count existing)) existing (seq/subvec existing 0 split))
+            laid (fold spans
+                   head
+                   (fn (out span)
+                     (let ([from to value] span)
+                       (properties-push out [(+ lo from) (+ lo to) value])))))
+        (assoc acc
+          key
+            (if (= split (count existing))
+              laid
+              (fold (seq/subvec existing split) laid properties-push)))))))
+
+(defn spans-clip (spans:vector lo:int hi:int -> vector)
+  "The ascending `spans` that overlap `[lo, hi)`, clipped to it: found by a binary search
+rather than a walk of them all.
+
+    (editor/span-properties/spans-clip [[0 2 :a] [3 6 :b]] 1 4)   ;=> [[1 2 :a] [3 4 :b]]"
+  (fold (seq/subvec spans (properties-first-after spans lo))
+    []
+    (fn (out span)
+      (let ([from to value] span)
+        (if (< from hi) (conj out [(math/max from lo) (math/min to hi) value]) out)))))
+
+(defn properties-relative (property-map lo hi)
+  "The spans of `property-map` (`{key spans}`) inside `[lo, hi)`, clipped to it and made
+relative to `lo` — `{key spans}`, or nil when there are none.
+
+    (editor/span-properties/properties-relative {:face [[0 4 :red]]} 1 3)   ;=> {:face [[0 2 :red]]}"
+  (when (and (map? property-map) (< lo hi))
+    (let (found (fold property-map
+                  {}
+                  (fn (acc entry)
+                    (let ([key spans] entry
+                          inside (fold (seq/subvec spans (properties-first-after spans lo))
+                                   []
+                                   (fn (out span)
+                                     (let ([from to value] span)
+                                       (if (< from hi)
+                                         (conj out
+                                           [(- (math/max from lo) lo) (- (math/min to hi) lo) value])
+                                         out)))))
+                      (if (empty? inside) acc (assoc acc key inside))))))
+      (when (not (empty? found)) found))))
+
+(defn properties-append (property-map added offset)
+  "`property-map` (`{key spans}`, or nil) with the normalized `added` (relative to text that
+starts at `offset`, after every span of the map's) laid on behind it — joined where a span
+continues one in the same value. What a run of appended chunks and a region undo's pieces
+build their properties with; nil when both are.
+
+    (editor/span-properties/properties-append {:face [[0 2 :red]]} {:face [[0 1 :red]]} 2)   ;=> {:face [[0 3 :red]]}"
+  (if (nil? added)
+    property-map
+    (fold added
+      (or property-map {})
+      (fn (acc entry)
+        (let ([key spans] entry)
+          (assoc acc
+            key
+              (fold spans
+                (or (get acc key) [])
+                (fn (out span)
+                  (let ([from to value] span)
+                    (properties-push out [(+ offset from) (+ offset to) value]))))))))))
+
+(defn- properties-replace-range (spans:vector from:int to:int laid:seqable -> vector)
+  "The ascending `spans` with `[from, to)` cleared — a span crossing an edge cut at it — and
+`laid` (ascending, absolute, inside the range) put there, joined at the edges."
+  (let (start (properties-first-after spans from)
+        crossing (when (< start (count spans)) (nth spans start))
+        head (seq/subvec spans 0 start)
+        head (if (and crossing (< (first crossing) from))
+               (conj head [(first crossing) from (nth crossing 2)])
+               head)
+        laid-in (fold laid head properties-push))
+    (fold (seq/subvec spans (properties-first-after spans to))
+      laid-in
+      (fn (out span) (let ([a b value] span) (properties-push out [(math/max a to) b value]))))))
+
+(defn- spans-difference (left:vector right:vector -> (or nil (tuple int int)))
+  "`[lo hi]`: the stretch outside which the ascending spans `left` and `right` say the same,
+or nil when they are equal. The spans both share from the front and from the back are left
+out; of the first pair that differs, a shared start and value means they agree up to the
+nearer end (a span cut short), and likewise from the back."
+  (let (left-count (count left)
+        right-count (count right)
+        front (letrec (walk (fn (i)
+                              (if (and (< i left-count)
+                                    (< i right-count)
+                                    (= (nth left i) (nth right i)))
+                                (walk (inc i))
+                                i)))
+                (walk 0)))
+    (when (not (and (= front left-count) (= front right-count)))
+      (let (back (letrec (walk (fn (k)
+                                 (if (and (< (+ front k) left-count)
+                                       (< (+ front k) right-count)
+                                       (= (nth left (- left-count k 1))
+                                         (nth right (- right-count k 1))))
+                                   (walk (inc k))
+                                   k)))
+                   (walk 0))
+            left-last (- left-count back 1)
+            right-last (- right-count back 1)
+            lo (cond
+                 (>= front left-count) (first (nth right front))
+                 (>= front right-count) (first (nth left front))
+                 else
+                   (let (l (nth left front)
+                         r (nth right front))
+                     (if (and (= (first l) (first r)) (= (nth l 2) (nth r 2)))
+                       (math/min (second l) (second r))
+                       (math/min (first l) (first r)))))
+            hi (cond
+                 (< left-last front) (second (nth right right-last))
+                 (< right-last front) (second (nth left left-last))
+                 else
+                   (let (l (nth left left-last)
+                         r (nth right right-last))
+                     (if (and (= (second l) (second r)) (= (nth l 2) (nth r 2)))
+                       (math/max (first l) (first r))
+                       (math/max (second l) (second r))))))
+        [(math/min lo hi) (math/max lo hi)]))))
+
+(defn properties-difference (left:map right:map -> (or nil (tuple int int any)))
+  "`[lo hi keys]`: the stretch outside which the property maps `left` and `right` agree, and
+the keys that differ in it — nil when they are the same. O(spans), for the paths that
+compare two whole states (an undo, a holder's diff fallback), never per keystroke.
+
+    (editor/span-properties/properties-difference {:face [[0 2 :red]]} {:face [[0 4 :red]]})   ;=> [2 4 #{:face}]"
+  (fold (set/union (into #{} (keys left)) (into #{} (keys right)))
+    nil
+    (fn (acc key)
+      (let (difference (spans-difference (or (get left key) []) (or (get right key) [])))
+        (cond
+          (nil? difference) acc
+          (nil? acc) [(first difference) (second difference) #{key}]
+          else
+            (let ([lo hi changed] acc)
+              [(math/min lo (first difference))
+                (math/max hi (second difference))
+                (conj changed key)]))))))
+
+(defn properties-changes (property-map lo:int hi:int changed:seqable -> map)
+  "A property entry's changes: for each key of `changed`, `property-map`'s spans over
+`[lo, hi)` relative to `lo` — `[]` for a key with none there, which clears it.
+
+    (editor/span-properties/properties-changes {:face [[0 4 :red]]} 1 3 [:face :link])   ;=> {:face [[0 2 :red]] :link []}"
+  (let (relative (or (properties-relative property-map lo hi) {}))
+    (fold changed {} (fn (acc key) (assoc acc key (or (get relative key) []))))))
+
+(defn property-change? (properties)
+  "Whether a splice's `properties` slot is a PROPERTY CHANGE — `[:put-properties width
+changes]`, the text untouched — rather than the properties of inserted text or `:redact`.
+
+    (editor/span-properties/property-change? [:put-properties 2 {}])   ;=> true
+    (editor/span-properties/property-change? :redact)   ;=> false"
+  (and (vector? properties) (= (first properties) :put-properties)))
+
+(defn properties-with-changes (property-map:map from:int to:int changes:map -> map)
+  "`property-map` with each key of `changes` (`{key spans}` relative to `from`; `[]` clears)
+set over `[from, to)`, a key left with no spans dropped.
+
+    (editor/span-properties/properties-with-changes {:face [[0 4 :red]]} 1 3 {:face []})   ;=> {:face [[0 1 :red] [3 4 :red]]}"
+  (fold changes
+    property-map
+    (fn (acc entry)
+      (let ([key spans] entry
+            laid (map spans (fn (span) (let ([a b value] span) [(+ from a) (+ from b) value])))
+            replaced (properties-replace-range (or (get acc key) []) from to laid))
+        (if (empty? replaced) (dissoc acc key) (assoc acc key replaced))))))
+
+(defn properties-changes-normalize (changes width:int -> map)
+  "`changes` (`{key spans}` relative to a range of `width` chars) normalized per key, clipped
+into the range — a key with none left kept as `[]`, which clears it.
+
+    (editor/span-properties/properties-changes-normalize {:face [[0 9 :red]] :link nil} 2)   ;=> {:face [[0 2 :red]] :link []}"
+  (fold (if (map? changes) changes {})
+    {}
+    (fn (acc entry)
+      (let ([key spans] entry)
+        (assoc acc key (or (get (or (properties-normalize {key spans} width) {}) key) []))))))
