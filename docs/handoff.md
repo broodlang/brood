@@ -17,7 +17,7 @@ to 2026-11-06 moved, unedited, to the end of
 - **Released:** v0.50.0 is the version in `Cargo.toml` and the changelog's newest heading, but
   **neither v0.49.1 nor v0.50.0 has a git tag or a GitHub Release**. The latest of both is
   v0.49.0. `CHANGELOG.md`'s "Unreleased" holds ADR-617..620.
-- **Green:** `make green` passed on `e30b1cc6` (CI plus its local gates). Per-push CI answers
+- **Green:** CI passed on `ec4f12af`, the KI-371 and KI-372 fixes. Per-push CI answers
   in about 12 minutes and leaves out the tree-walker differential, the repeat runs, GC stress,
   the stress suite, the tier audit, the soaks and the sanitizers. Those moved to
   `full.yml` (weekly, or `gh workflow run full.yml`; it replaced the Nightly on 2026-11-05)
