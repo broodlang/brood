@@ -148,6 +148,7 @@ arg silently becoming `nil`.
 | | `file/mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `reflect/load` for hot-reload) |
 | | `file/set-mtime` | 2 | set the last-modified time to epoch-milliseconds — the portable `touch -t` (no program needed) |
 | | `file/stat` | 1 | one-stat metadata map `{:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}`, or nil if missing (collapses `file/dir?`+`file/size`+`file/mtime` for a directory lister + a recency sort) |
+| | `file/replace` | 2 | Replace a file whole: a crash or a full disk leaves the old file or the new one. Keeps mode, owner, group and a symlink; in place where a rename could not (ADR-621). |
 | | `file/slurp-bytes` | 1 | Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (file/slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset. |
 | | `file/spit-bytes` | 2 | Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. |
 | | `file/spit-bytes-append` | 2 | Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. |

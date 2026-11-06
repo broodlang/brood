@@ -532,6 +532,7 @@ pub(super) fn references_in_source(args: &[Value], _env: EnvId, heap: &mut Heap)
 const WORLD_EFFECTS: &[&str] = &[
     "file/spit",
     "file/spit-append",
+    "file/replace",
     "file/spit-bytes",
     "file/spit-bytes-append",
     "file/spit-private",

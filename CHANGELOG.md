@@ -7,6 +7,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## Unreleased
 
 **Added.**
+- **`file/replace`** (ADR-621) replaces a file whole: a crash or a full disk leaves the old file or
+  the new one, its mode, owner, group and any symlink kept. `save-buffer` and `nest`'s codemod use
+  it. Atomic on Unix; Windows still writes in place.
 - **A failure carries fields** (ADR-617): `(failure/with {:status 404} "not found: " p)`, read
   back with `fields`.
 - **`reflect/error-at`** (ADR-618) places a macro's error at a sub-form. A macro's error is

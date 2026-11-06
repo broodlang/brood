@@ -223,7 +223,8 @@ unsaved buffer rather than erroring.
   (if (file/exists? path) (buffer-from-file path) (make-buffer "" path path)))
 
 (defn save-buffer (buf)
-  "Write `buf`'s text to its `:file`, with the line ending and byte-order mark it was read with
+  "Write `buf`'s text to its `:file` whole (`file/replace`: a crash mid-save leaves the old file),
+with the line ending and byte-order mark it was read with
 ([[buffer-eol]], [[buffer-bom?]]); raise if it has none. Returns `buf` stamped with the file's new mtime
 (`buffer-stamp-file`) and unmodified (`mark-buffer-saved`), so a caller that keeps the
 result knows the file and the text agree again.
@@ -233,7 +234,7 @@ result knows the file and the text agree again.
     (if (nil? f)
       (error "save-buffer: buffer has no file: " (get buf :name))
       (do
-        (file/spit f (file-text-encode (buffer-text buf) (buffer-eol buf) (buffer-bom? buf)))
+        (file/replace f (file-text-encode (buffer-text buf) (buffer-eol buf) (buffer-bom? buf)))
         (mark-buffer-saved (buffer-stamp-file buf))))))
 
 (defn revert-buffer (buf:buffer -> buffer)
