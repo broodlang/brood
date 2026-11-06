@@ -4,6 +4,32 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Added.**
+- **A failure carries fields** (ADR-617): `(failure/with {:status 404} "not found: " p)`, read
+  back with `fields`.
+- **`reflect/error-at`** (ADR-618) places a macro's error at a sub-form. A macro's error is
+  now placed at the call, not at the enclosing top-level form.
+- **Every `fn` head takes `&optional` slots**, a pattern rest and a `:when` guard, and
+  `match`'s list patterns take `&optional` too (ADR-619).
+- **A `:list-truthiness` lint** (ADR-620): a truthiness test on a value that may be a list or
+  another collection. `()` stays `nil`.
+
+**Changed.**
+- **Breaking:** clauses of a `fn` run in order and the first match wins, arity clauses too
+  (ADR-047's most-specific choice is gone). A clause an earlier one shadows is a compile error
+  (ADR-619).
+- **Breaking:** `http/request`, `fetch`, `post`, `request-on` and `registry-get-json` answer a
+  failure, not a `{:status 0 :error …}` map (ADR-617).
+
+**Fixed.**
+- A fold over a vector or a range stops on a failed accumulator; steps ran on after it before
+  (ADR-315).
+- A single clause's `:when` is a guard at runtime; it ran as body forms before.
+- `&optional` defaults in a macro template are no longer renamed as binders, and a default's
+  module-private call resolves.
+
 ## v0.50.0 — a window you can look at, a seam for the leftover pixels, and quiet chrome
 
 **Added.**
@@ -1048,7 +1074,7 @@ are Brood. `CLAUDE.md` is a third of its size; `brood --debug-flags` is the flag
 ## v0.37.0 — a whole-project review: forty-six defects fixed, inbound flow control, and every known issue closed
 
 A whole-project review: every finding reproduced, fixed, and guarded by a sabotage-verified
-test (`docs/review-2026-10-08.md`).
+test (`docs/archive/review-2026-10-08.md`).
 
 **Breaking.** `proc/register` binds nothing for a pid that has already exited (it used to
 leave the name bound to the corpse). `proc/system-monitor` of a dead pid raises. The node

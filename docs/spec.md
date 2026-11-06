@@ -1,6 +1,6 @@
 # Brood language specification
 
-**Version:** 0.1 · **Status:** draft, tracking the implementation.
+**Tracks:** Brood 0.50.0 · **Status:** draft, tracking the implementation.
 
 This is the normative description of Brood as currently implemented. Where it
 and the code disagree, that is a bug in one of them — please file/fix. The
@@ -39,13 +39,17 @@ and the reader-macro characters below.
 ```ebnf
 token   = number | string | keyword | boolean | nil | symbol ;
 
-integer = [ "+" | "-" ] digit { digit } ;
+integer = [ "+" | "-" ] digit { digit }
+        | [ "+" | "-" ] ( "0x" | "0o" | "0b" ) radixdigit { radixdigit } ;   (* ADR-334 *)
 float   = ? a token, beginning with a digit/sign/dot, that parses as an IEEE-754
             f64 and is not an integer ? ;
-number  = integer | float ;
+ratio   = integer "/" digit { digit } ;   (* 1/2 — always reduced, ADR-196 *)
+decimal = ? an integer or float token ending in "M" ? ;   (* 1.50M *)
+number  = integer | float | ratio | decimal ;
 
 string  = '"' { stringchar | escape } '"' ;
-escape  = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | ? any char ? ) ;
+escape  = "\" ( "n" | "t" | "r" | "e" | "0" | "\" | '"'
+               | "x" hex hex | "u{" hex { hex } "}" ) ;
 
 keyword = ":" symbolchar { symbolchar } ;
 boolean = "true" | "false" ;
@@ -56,7 +60,7 @@ symbol  = symbolchar { symbolchar } ;   (* any token that is none of the above *
 `symbolchar` is any non-delimiter character. A token is classified in this
 order: `nil`/`true`/`false`, then integer, then float (only if it lexically
 looks numeric), then keyword (leading `:`), otherwise a symbol. Thus `+`, `-`,
-`->`, `empty?`, `%add`, `string-length` are all symbols.
+`->`, `empty?`, `%add`, `string/length` are all symbols.
 
 ## 3. Syntax (reader grammar)
 
@@ -65,10 +69,12 @@ The reader turns text into values (§4).
 ```ebnf
 program = { form } ;
 form    = number | string | keyword | boolean | nil | symbol
-        | list | vector | map | reader-macro ;
+        | list | vector | map | set | bytes | reader-macro ;
 list    = "(" { form } ")" ;
 vector  = "[" { form } "]" ;
 map     = "{" { form form } "}" ;   (* alternating key/value forms *)
+set     = "#{" { form } "}" ;
+bytes   = '#b"' { stringchar | escape } '"' ;
 
 reader-macro = "'"  form        (* (quote form)            *)
              | "^"  form        (* (%pin form) — a pattern PIN, §7.4.1 *)
@@ -97,6 +103,8 @@ A value is exactly one of:
 | **vector** | a fixed sequence of values. |
 | **map** | immutable key→value associations (`{ }`); iteration order is hash-derived (CHAMP, ADR-040), **not** insertion order; any value as a structurally-compared key. |
 | **function** | a closure (`fn`) or a primitive. |
+| **record** | a nominal value: an identity plus its fields, built by a `defrecord` constructor and printed `#point{:x 1, :y 2}`. Its own kind (`type-of` is `:record`, `map?` is false), never `=` to a map; `get`, keyword calls, `assoc`, `update`, `dissoc` and destructuring act on its fields and keep the record (ADR-542). |
+| **failure** | an expected failure returned as a value, carrying `:message` and any fields (ADR-310, ADR-617). |
 | **set** | immutable collection of distinct elements (`#{ }`); its own kind — never `=` to a map (ADR-060). |
 | **bytes** | immutable byte sequence (`#b"…"`), the binary counterpart of `string`; addressed by byte, and the subject of bit-syntax patterns (ADR-140). |
 | **decimal** | exact arbitrary-precision base-10 (`1.50M`), for money — values a float cannot hold. |
@@ -147,7 +155,7 @@ Evaluation maps a (form, environment) pair to a value, or raises an error (§10)
      is the closure's captured environment, and evaluates the body (an implicit
      `do`).
    - A **keyword is callable** as an accessor: `(:k m)` is `(get m :k)`, so it can
-     be passed to a higher-order function (`(map :name people)`) (ADR-165).
+     be passed to a higher-order function (`(map people :name)`) (ADR-165).
      Nothing else data-like is — `({:a 1} :a)`, `([10 20] 1)` and `(#{1} 1)` all
      raise `cannot call non-function`, with a hint. A callable map would be a
      second spelling of `get`, and a callable vector/set answers by
@@ -170,7 +178,7 @@ Consequently, recursion is the idiomatic and safe way to loop.
 
 Brood is a **Lisp-1**: there is a single namespace. The operator position of a
 combination is resolved with the same lookup as any other variable reference, so
-functions are first-class values bound like any other (`(def + …)`, `(map f xs)`).
+functions are first-class values bound like any other (`(map xs f)`).
 A local binding may therefore shadow a global function of the same name.
 
 Scoping is **lexical**. An environment is a frame of bindings with an optional
@@ -243,8 +251,13 @@ A macro is invoked in operator position on its **unevaluated** argument forms;
 the value it returns is then evaluated in its place (and is itself subject to
 further macro expansion and tail-call treatment). Macros are ordinary closures
 tagged as macros, so a macro body is just Brood code that computes a form —
-typically with quasiquote. `gensym` yields fresh symbols for
-hygiene-by-convention. `macroexpand-1`/`macroexpand` expand without evaluating.
+typically with quasiquote. A binder a template writes is renamed fresh per expansion,
+at every binding site of the pattern grammar and in the standard binding macros, so
+it cannot capture the caller's code (ADR-500); `x#` (the auto-gensym) and
+`reflect/gensym` name a fresh symbol by hand, for a binder of the macro author's own
+binding macro, and `~'name` asks for the capture. `reflect/macroexpand-1` and
+`reflect/macroexpand` expand without evaluating. An expander's error is placed at the
+macro call, or at the sub-form `reflect/error-at` names (ADR-618).
 Macros are resolved after special forms and before function application, so a
 special-form name cannot be shadowed by a macro.
 
@@ -299,13 +312,8 @@ optionals). A `&` rest makes a trailing surplus legal.
 all in the closure calling convention, so `fn` and `defn` share them.
 (Argument binding is core mechanism, hence the kernel rather than macro sugar.)
 
-**Deferred (designed, not in v1) — keyword arguments.** Named, order-independent
-arguments (`&key (width 80) ...`, called `:width 100`) were designed and are a
-natural fit for the eventual editor command API. They are *deferred for
-simplicity*: they make the user learn keyword pairs, order-independence, and
-mixing rules. They are purely additive — adding them later needs no migration of
-existing code. Supplied-p flags and required-keyword markers are likewise
-out of scope. See `docs/devlog.md` for the design discussion.
+**No keyword arguments.** Brood has no `&key` and will not (ADR-163): three or more
+optional parameters take an options map, destructured with `{:keys [...]}`.
 
 ### 7.4.1 Patterns and the pin `^`
 
@@ -325,12 +333,14 @@ fix; Brood has no metadata, so `^` is unambiguous.
 ## 8. Truthiness and equality
 
 **Truthiness.** Only `nil` and `false` are falsy. Every other value — including
-`0`, `0.0`, `""`, and empty collections — is truthy.
+`0`, `0.0`, `""`, and empty vectors, maps and sets — is truthy. The empty list reads
+as `nil` (§3), so it is falsy (ADR-620).
 
 **Equality** (`=`, built on the `%eq` primitive) is structural for `nil`,
 booleans, numbers (within a type: `(= 1 1.0)` is `false`), strings, symbols,
-keywords, pairs, and vectors. Functions compare by identity. `=` is variadic and
-holds iff every adjacent pair is equal.
+keywords, pairs, vectors, maps, sets and bytes; two records are equal when their ids and
+fields are, and a record is never `=` to a map. Functions compare by identity. `=` is
+variadic and holds iff every adjacent pair is equal.
 
 ## 9. The kernel / library split
 
@@ -341,48 +351,57 @@ load-bearing design choice (see `CLAUDE.md` and `docs/decisions.md`).
 **Primitives (Rust)** — the irreducible kernel; the full annotated set is in
 [primitives.md](primitives.md). By area:
 
-- arithmetic substrate `%add %sub %mul %div %lt %eq` and integer `rem`
-- the one float→int crossing `floor` (`ceil`/`round`/`quot`/`pow`/`sqrt` are Brood over it)
-- pairs/vectors `cons first rest empty? vector vector-ref vector-length`
-- maps `hash-map %map-get %map-assoc %map-dissoc map-keys map-vals map-contains?`
-- strings `string-length substring upper lower string->number`
-- reflection/checking `type-of check`; value↔text & IO `str pr-str print stdout-tty?`
-- self-hosting `reflect/eval reflect/read-string reflect/eval-string reflect/load %builtin-module apply`; macros `macroexpand macroexpand-1 gensym`
-- filesystem/system `cwd file-exists? dir? list-dir make-dir spit slurp getenv run-process`
-- symbols/tooling `name form-pos current-file doc arglist reflect/global-names bound?`
-- time/memory `now mem-bytes mem-peak`; errors/control `throw %try %isolate`
-- processes `spawn send %receive self ref monitor demonitor spawn-count peak-threads worker-threads`
+- arithmetic substrate `%add %sub %mul %div %lt %eq %rem %quot`
+- the float→int crossing `math/floor`, and the floating-point functions (`%f64-sqrt %sin %exp` …)
+- pairs/vectors `cons first rest empty? vector %vector-ref %vector-length`
+- maps `%hash-map %map-get %map-assoc %map-dissoc %map-pairs %map-count`
+- strings `string/length string/substring string/upper string/lower string/->number`
+- reflection/checking `type-of %check`; value↔text & IO `str pr-str %render %write-out %write-err`
+- self-hosting `reflect/eval reflect/eval-string reflect/load %read-string %builtin-module apply`; macros `reflect/macroexpand-1 reflect/gensym`
+- filesystem/system `file/cwd file/exists? file/dir? file/ls file/mkdir file/spit file/slurp %getenv %run-process`
+- symbols/tooling `%form-pos %current-file reflect/doc reflect/arglist reflect/global-names bound?`
+- time/memory `%now %mem-bytes %mem-peak`; errors/control `throw %raise %try %isolate`
+- processes `%spawn send %receive self ref monitor demonitor %spawn-count %peak-threads %worker-threads`
 
 `%`-prefixed names are low-level and not intended for direct use. Note that the
-type-tag predicates (`nil? pair? int? …`), `mod`, `quot`, `println`, `require`,
+type-tag predicates (`nil? pair? int? …`), `math/mod`, `io/puts`, `require-one`,
 and the `receive`/`try`/`match` surfaces are **not** primitives — they are Brood,
 written over the kernel above.
 
 **Derived (Brood, in the prelude):**
 the macros `defn`, `when`/`unless`/`cond`/`and`/`or`, `->`, `match`/`match*`,
 `receive`, and `try`/`catch`; `error`; the full arithmetic/comparison family
-(`+ - * / < <= > >= = inc dec mod abs max min sum product` — plus ~~`not=`~~,
-deprecated since 0.19.1 in favour of `(not (= a b))` — plus the float
-ops `ceil round quot pow sqrt`); the type-tag predicates (`nil? pair? int? float?
+(`+ - * / < <= > >= = inc dec` — plus ~~`not=`~~, deprecated since 0.19.1 in favour of
+`(not (= a b))` — and, in the `math` module, `math/mod`, `math/abs`, `math/max`,
+`math/min`, `math/sum`, `math/product`, `math/ceil`, `math/round`, `math/pow` and
+`math/sqrt`); the type-tag predicates (`nil? pair? int? float?
 bool? string? symbol? keyword? vector? map? fn?`, over `type-of`); the map surface
 (`get assoc dissoc keys vals contains?`); the sequence library (`range take drop
-take-while drop-while any? every? find zip partition sort sort-by` …) and the
-list/string helpers (`list second third fold reduce map filter reverse
-append count nth last but-last` …); plus the pattern-match compiler itself.
+any? every? sort`, and the `seq` module: `seq/take-while`, `seq/filter`, `seq/find`,
+`seq/zip`, `seq/partition`, `seq/sort-by` …) and the list helpers
+(`list second third fold reduce map reverse append count nth last` …); plus the
+pattern-match compiler itself.
 
 ## 10. Errors
 
-Evaluation either yields a value or raises an error carrying a kind (`parse`,
-`unbound`, `arity`, `type`, `runtime`, or `user` for `throw`) and a message. In
-the REPL an error aborts the current form and prints a message; the session
-continues.
+Evaluation either yields a value or raises. Every error the language raises is a map,
+`{:kind :message …}`, with a `:code`, a position when known, and a `:trace` (ADR-501; the
+codes are in [error-codes.md](error-codes.md)). In the REPL an error aborts the current
+form and prints a message; the session continues.
 
-**Raising and handling.** `(throw v)` raises `v`. `(error msg ...)` raises a
-formatted message string. `(try body... (catch e handler...))` evaluates the
-body and, if anything raises, binds `e` and runs the handler. `e` is the thrown
-value for `throw`, or the error's message string for a built-in error (§simple
-by ADR-011). `throw` and the low-level `%try` are primitives; `try`/`catch` and
-`error` are macros/functions in the prelude.
+**Raising and handling.** `(throw v)` raises `v` as it is. `(error part...)` raises an
+error map of kind `:error` whose message is the concatenated parts; `(assert test part...)`
+raises kind `:assert`, and a pattern nothing matched raises kind `:match`. `(try body...
+(catch pattern [:when guard] handler...)... [(finally cleanup...)])` evaluates the body
+and, if anything raises, runs the first `catch` clause whose pattern matches; when none
+does, the error is raised again from where it was first raised. `(catch e …)` catches
+everything. `finally` runs on every path and its value is discarded (ADR-306). `throw`,
+`%raise` and the low-level `%try` are primitives; `try`/`catch` and `error` are
+macros/functions in the prelude.
+
+**Expected failure** is a value, not a raise: `(failure part...)` and `(failure/with fields
+part...)` build one, `failure?` tests it, `error-message` and `fields` read it (ADR-310,
+ADR-617). A failure is truthy.
 
 ## 11. Not yet specified (planned)
 
@@ -390,8 +409,8 @@ The features this section once listed have all shipped: **dynamic variables**
 (`defdyn` / `binding`), **map literals** `{ }` and their operations (CHAMP
 tries), **modules / namespaces** (`defmodule`), a **per-process tracing GC**
 (ADR-035 and its successors), **rest-parameter notation in `(sig …)`** (`&` /
-`&optional`, ADR-127), **records** (`defrecord` — pure sugar over closed maps,
-ADR-130), **fusing lazy seq-views** (`seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lremove` threaded
+`&optional`, ADR-127), **records** (`defrecord`, a value kind of their own, ADR-542),
+**fusing lazy seq-views** (`seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lreject` threaded
 with `->`, ADR-111), a **first-class set** kind with the `#{…}` literal
 (ADR-060 — `type-of` reports `:set` and a set is never `=` to a map),
 **callable keywords** (ADR-165/167) and **abilities** — open generic functions

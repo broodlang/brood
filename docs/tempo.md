@@ -204,9 +204,8 @@ boundaries, fractional-second truncation past three digits, the empty-set algebr
    (`2026-XX-15`), qualifications (`1984?`, `2004~`), open-ended intervals (`1985/..`).
    This is where "time as interval" starts paying for itself on archival and historical
    data. The interval set is already here, which is what a mask needs to denote.
-2. **Timezones.** Requires a tz database in Brood; `std/datetime` has none, so this is
-   a bigger lift than the rest combined. Until then everything is UTC, stated plainly
-   rather than fudged.
+2. **Timezones.** `std/tz.blsp` now reads the system's zone files, and `tempo` does not
+   use it yet. Until it does, everything here is UTC, stated plainly rather than fudged.
 3. **Non-Gregorian calendars.** Tempo delegates to `Calendrical`. A `Calendar` ability
    with Gregorian as the first impl is the natural shape.
 4. **Recurrence** — RRULE / cron / iCalendar import. `1985-XX-15` ("the 15th of every

@@ -24,6 +24,8 @@ A small, dynamic Lisp implemented in Rust.
   `(if () …)` takes `else`. A function returning a list-or-`nil` that you branch
   on directly will treat an empty-list result as false. **Test emptiness with
   `(empty? x)`** (uniform across every collection), never a bare `(if x …)`.
+  `nest check` reports a test on a value that may be a list or another collection
+  (`:list-truthiness`, ADR-620).
 - **Late binding**: globals can be re-defined; a redefinition is visible to
   every running process on its next lookup.
 
@@ -85,12 +87,12 @@ Common macros (expanded once at the compile pass — runtime-free): `defmacro`
 (defdyn *log-level* :info)                          ; dynamic variable
 (binding (*log-level* :debug) (do-thing))           ; scoped rebind
 
-(defrecord point (x y))                             ; a record: a map + a nominal identity
+(defrecord point (x y))                             ; a record: fields + a nominal identity
 (point 3 4)                                         ; => #<ns>/point{:x 3, :y 4}
 (point-x (point 3 4))                               ; => 3  (accessor per field; a typo is a
                                                     ;        checker-caught undefined-fn, not silent nil)
 ;; update with plain assoc/merge; `(record? r)`/`(record-id r)`/`(fields r)` are the id
-;; API; a record is NOT `=` to a bare map (`=` is structural and the id is an entry). Typed fields: (defrecord point ((x int) (y int)))
+;; API; a record is its own kind and is NOT `=` to a bare map (ADR-542). Typed fields: (defrecord point ((x int) (y int)))
 ```
 
 A `fn`/`defn` body of several forms is an **implicit `do`**: each is evaluated
@@ -217,8 +219,8 @@ and your packages stay fully redefinable, which is what hot reload is for. If a 
 you want is taken: pick another, shadow it locally (`(let (get …) …)` is fine), or
 define it in a `(defmodule your/mod …)` — that makes `your/mod/get`, which is yours.
 Inside that module your definition wins every bare call, even over a prelude **macro**
-(`(defn spy …)` → `(debug/spy x)` calls yours; `/spy` reaches the macro). Defining a prelude
-macro's name warns at load unless the header says `(:shadow spy)` (ADR-423).
+(`(defn unless …)` → `(unless x)` calls yours; `/unless` reaches the macro). Defining a prelude
+macro's name warns at load unless the header says `(:shadow unless)` (ADR-423).
 The rule reserves shipped **functions**; a `defdyn` name is never reserved whatever it
 holds, and it is ambient (root) — so `(def *print-length* 3)` from any module rebinds the
 one root binding, and `(def *out* my-port)` still redirects output permanently. A plain
@@ -432,18 +434,18 @@ edit the library. Beyond the core `Display` (`->string`, what `io/puts` shows) a
 | `impl` this | to get |
 |---|---|
 | `JsonEncode` — `(->json x)`, from `json` | `json/encode` handles your type (a record's wire shape; a pid/fn/datetime at all). **No `:default`** — an unimpl'd kind still errors loudly. |
-| `Port` — `(io-write p s)`, from `io` | your value is an output port (`with-out`, logger sinks). A bare 1-arg fn already is one. |
+| `Port` — `(emit p s)`, from `io` | your value is an output port (`with-out`, logger sinks). A bare 1-arg fn already is one. |
 | `LogBackend` — `(backend-emit b rec)`, from `log` | a backend that batches / emits JSON lines / samples. `backend-passes?` is the stock level+filter gate. |
 | `Response` — `(send-response r sock)`, from `http` | a response kind with its own wire behaviour, including who closes the socket. |
 | `Dependency` (**sealed**), from `package` · `Temporal` — `(->iso x)` (**sealed**), from `datetime` | a new manifest dep kind / calendar type. Sealed ⇒ `nest check` demands every op. |
 
 Also: `std/`'s value types are **records**, not plain maps — `buffer`, `queue`, `pq`,
 `multimap`, `datetime`/`date`/`time-of-day`, and the four dependency kinds. So
-`(buffer? x)` / `(queue/queue? x)` / `(datetime/date? x)` are identity checks a look-alike map fails, each
+`(editor/buffer/buffer? x)` / `(queue/queue? x)` / `(datetime/date? x)` are identity checks a look-alike map fails, each
 prints as itself (`#<buffer *scratch* 11 chars>`, `2026-07-29T…Z`) rather than dumping its
 internals, and **none of them is `=` to a map with the same fields** — build them with
 their constructors, and don't compare one against a map literal in a test. Where a library
-renders a *user* value to text (`template/render`, `csv-emit`, `url/query-encode`) it calls
+renders a *user* value to text (`template/render`, `csv/encode`, `url/query-encode`) it calls
 `->string`, so your `Display` impl governs that output too.
 
 ## Patterns (`let`, `fn`, `match`, `receive`)
@@ -515,7 +517,7 @@ Prefer the higher-order combinators:
 ```lisp
 (def xs [1 2 3 4])
 (defn sq (n) (* n n))
-(reduce xs 0 +)                    ;=> 10
+(reduce xs 0 +)                    ;=> 10   ; `(reduce xs +)` seeds with the first item and raises on empty
 (map xs sq)                        ;=> (1 4 9 16)
 (seq/filter xs math/even?)         ;=> (2 4)   ; even?/odd?/… live in the `math` module (ADR-227)
 (seq/reject xs math/even?)         ;=> (1 3)   ; the combinator/complement — `reject`, not `remove` (ADR-330)
@@ -702,7 +704,7 @@ pattern clauses just like `match`, plus an optional `(after ms body...)`
 clause for timeouts.
 
 **`spawn` is let-it-crash.** If `expr` throws, the process exits, its monitors fire
-`[:down ref pid [:error msg]]`, and (under `brood file` / `nest run`) the default crash
+`[:down ref pid [:error e]]` (`e` the error map), and (under `brood file` / `nest run`) the default crash
 reporter prints the pid, reason and trace once per crash site. There is no kernel-level supervisor — a
 hand-written one is ~10 lines of Brood (see `std/proc/supervisor.blsp`).
 Named-spawn `(spawn :name expr)` is idempotent on the name: if `:name` is
@@ -1122,7 +1124,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `string/starts-with?` `string/ends-with?` `string/->list` `string/list->`
   `string/->bytes` `string/bytes->`.
   **Bare (core, not in the module):** `str` `pr-str` `index-of` `includes?`
-  `string/->number` `->string` (the polymorphic Display op — on a symbol or keyword it
+  `->string` (the polymorphic Display op — on a symbol or keyword it
   yields the bare spelling, so `(->string :foo)` is `"foo"` while `(str :foo)` is `":foo"`).
   There is no `symbol->string`/`number->string`/`name` — use `str` or `->string`
   (ADR-239 removed both as redundant).
@@ -1191,7 +1193,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `try`/`catch`, or let the supervisor have it), while a **known failure comes back as a
   value** — `(string/->number "abc")`, the `encoding` decoders, `datetime/parse-*`,
   `url/percent-decode`. Test with `failure?`, read with `error-message`, build one with
-  `(failure "…")`. It is **truthy** — like every non-`nil`, non-`false` value — so it
+  `(failure "…")`, or with fields a caller can branch on with
+  `(failure/with {:status 404} "…")`, read back with `fields` (ADR-617) — the HTTP clients
+  answer a transport failure this way. It is **truthy** — like every non-`nil`, non-`false` value — so it
   never vanishes into a default: `(or (string/->number s) 0)` yields the *failure*, not
   `0`. To default, say so: `(let (n (string/->number s)) (if (failure? n) 0 n))`. It is
   also *not* `nil`, which still means absence (`get`, `nth`, `os/env`, `first` of empty).
@@ -1222,7 +1226,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   loop/process state like any other value.
 - **meta / eval**: `apply` (call a fn with a list of args — the only way to
   splat) `reflect/eval` `reflect/read-string` `reflect/eval-string` `reflect/gensym` (fresh symbol, for macros)
-- **discovery / introspection**: `doc` `reflect/arglist` `bound?` `reflect/source-location`;
+  `reflect/error-at` (a macro's error placed at the sub-form it names: `(reflect/error-at
+  form "my-macro: …")`, ADR-618)
+- **discovery / introspection**: `reflect/doc` `reflect/arglist` `bound?` `reflect/source-location`;
   and to *find* what exists rather than guess names — `reflect/global-names`,
   `reflect/apropos` (name substring, e.g. `(reflect/apropos "rand")`), `reflect/doc-search` (matches
   docstrings). The same three are `nest mcp` tools (the name-list tool is called
@@ -1369,15 +1375,15 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (ADR-227 follow-up), for any module, so naming where something comes from loads
   it on demand (`mod/foo`). No bare-name magic, though — a bare `sqrt` with no
   `math/` prefix and no `(:use math)` stays unbound. The header understands exactly `(:use …)`,
-  `(:use-internals …)`, `(:alias …)` and `(:load a b …)` (load now, refer nothing — the
-  eager request, since a plain reference loads on first use, ADR-335); **anything else is
-  an error** —
+  `(:use-internals …)`, `(:alias …)`, `(:shadow …)`, `(:implements …)` and `(:load a b …)`
+  (load now, refer nothing — the eager request, since a plain reference loads on first
+  use, ADR-335); **anything else is an error** —
   `(:require …)` and a misspelled `(:use-internal …)` are rejected rather than
   silently ignored.
 - **Not Clojure**: no transients, and **no `loop`/`recur`** — Brood has proper tail
   calls, so recursion is just calling a name (a `defn`, or a local `letrec`); see
-  *Looping is recursion*. Namespaces *do* exist now (ADR-065) but are `mod/name`-flat,
-  not Clojure's `require :as` aliasing.
+  *Looping is recursion*. Namespaces *do* exist now (ADR-065) but are `mod/name`-flat;
+  a short prefix is the header clause `(:alias mod :as m)`, not Clojure's `require :as`.
 - **Not Scheme / CL**: no `setq`, no `cond`-with-`t`-catch-all: write `else`. Not
   Clojure's `:else` either — `cond` refuses any constant test (ADR-518).
 - **One pipe**: `->` (with `$` to place the value elsewhere); there is no `->>`, because
@@ -1404,7 +1410,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   deliberately non-tail test helper, a catch whose nothing is the answer — is
   acknowledged in code with `(check-allow :category form…)`: `:non-tail-recursion`,
   `:discarded-catch`, `:cross-module-def`, `:constant-condition`, `:unreachable-clause`,
-  `:type-mismatch`, `:unbound`, `:deprecated`, `:trusted` (see `docs/type-annotations.md`).
+  `:type-mismatch`, `:unbound`, `:deprecated`, `:trusted`, `:list-truthiness`,
+  `:single-dispatch` (see `docs/type-annotations.md`).
 
 ## Module skeleton (what `nest new` scaffolds)
 
@@ -1489,9 +1496,8 @@ time and exit cleanly.
 
 `std/prelude/*.blsp` is the canonical example of idiomatic Brood — almost
 everything below the kernel is written there in the language itself; read it.
-(Ten files — `core`, `predicates`, `map`, `control`, `match`, `process`, `seq`,
-`string`, `tools`, `contracts` — concatenated in that order; older docs still say
-`std/prelude.blsp`, which no longer exists.)
+(Thirteen files, concatenated in the order `crates/lisp/src/boot.rs` lists, from `core`,
+`predicates`, `map` and `control` to `abilities` and `contracts`.)
 Deep references: `docs/language.md` (full reference), `docs/spec.md` (the
 formal spec), `docs/pattern-matching.md` (the pattern grammar in detail),
 `docs/type-annotations.md` (the `sig` grammar and every `check-allow` category).

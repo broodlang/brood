@@ -33,7 +33,7 @@ map, pid, ref). Closures, tables, bytes etc. can't be JSON-ified and surface as 
 ;; :hint :trace}` — see `LispError::to_value_map` in the kernel); user `(throw v)`s
 ;; come through as the value itself, so we wrap them as `{:kind :user :payload
 ;; v}` to keep `:error` always a map for the agent's JSON consumers. The
-;; asymmetry — built-in vs user — is deliberate per `docs/llm-native.md` §4.
+;; asymmetry — built-in vs user — is deliberate per `docs/archive/llm-native.md` §4.
 ;; Either way the raise site (`error`, from `%try-described`) fills in any of
 ;; `:file :line :col :trace` the value lacks: a `catch` binds a user throw verbatim,
 ;; and an agent debugging its own call needs to know where it came from.

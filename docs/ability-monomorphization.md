@@ -20,37 +20,37 @@
 ## The problem
 
 An `ability` op call (`(area shape)`) is ~4.1× the cost of a direct function call. The
-op is a plain `defn` (emitted by `defability`) whose body *is* the dispatch machinery
-(`std/ability.blsp:202-210`):
+op is a plain `defn` (emitted by `defability`, `std/prelude/abilities.blsp`) whose body *is*
+the dispatch machinery:
 
 ```
 (defn <op> (<args>)
-  (let (id   (ability/identity-of <first-arg>)
-        impl (ability/impl-for '[<A> <op>] id))
+  (let (id   (%identity-of <first-arg>)
+        impl (%dispatch *impls* '[<A> <op>] id))
     (if impl
       (impl <args...>)
-      (ability/no-impl '[<A> <op>] id))))
+      (%no-impl '[<A> <op>] id))))
 ```
 
-Per call the runtime does: `identity-of` (one `map?` + one `get :__id__`, else `type-of`)
-→ `impl-for` (two `*impls*` map fetches: op's method set, then by id, maybe `:default`)
-→ the `if` → a direct call to the resolved fn. When the target identity is **statically
+Per call the runtime does: `%identity-of` (the record's id, ADR-542, else `type-of`) →
+`%dispatch` (`%impl-for` through the per-op inline cache: on a miss two `*impls*` map fetches,
+op's method set, then by id, maybe `:default`) → the `if` → a direct call to the resolved fn.
+When the target identity is **statically
 known**, all of that — `identity-of`, both registry fetches, the branch — is redundant:
 the call can go straight to the impl.
 
 ## Why this isn't trivial (the two hard constraints)
 
 1. **The checker is fully decoupled from the compiler.** The type checker already
-   proves the target identity at a call site — `arg_identity` (`types/check/protocol.rs:529`)
+   proves the target identity at a call site — `arg_identity` (`types/check/protocol.rs`)
    for a literal or a direct constructor call, and `check_ability_call_inferred`
-   (`protocol.rs:818`) for a *variable* whose inferred `Ty` is a record (via
-   `ty_record_id`). `AbilityInfo` (`protocol.rs:559`, `build_ability_info`) precomputes
-   which globals are op fns and which `[ability op id]` triples are covered. **But it
-   throws all of this away as advisory warnings.** `nest check` is a separate pass
-   (`crates/nest/src/main.rs:934`); nothing feeds checker types into the VM/compiler.
+   for a *variable* whose inferred `Ty` is a record (via `ty_record_id`). `AbilityInfo`
+   (`build_ability_info_visible`) precomputes which globals are op fns and which
+   `[ability op id]` triples are covered. **But it throws all of this away as advisory
+   warnings.** `nest check` is a separate pass (`std/tool/project-check.blsp`); nothing feeds checker types into the VM/compiler.
    There is **no existing channel** — one has to be built.
 
-2. **Impl fns are anonymous.** The `impl` macro (`std/ability.blsp:214-238`) registers
+2. **Impl fns are anonymous.** The `impl` macro (`std/prelude/abilities.blsp`) registers
    each method as a bare `(fn …)` stored directly in `*impls*` — no global symbol names
    it. So a devirt target is the fn **value** (captured from the live registry at
    compile time), not a symbol we can emit a named call to. Capturing the value at
@@ -59,22 +59,20 @@ the call can go straight to the impl.
 ## The pipeline (where a rewrite would live)
 
 `parse → macros::compile (macroexpand-all + ns-resolve) → compile::run` (the closure-VM,
-the default) or `eval::eval` (tree-walker, `BROOD_TIER=0`). Dispatch point:
-`crates/lisp/src/lib.rs:463-483`.
+the default) or `eval::eval` (tree-walker, `BROOD_TIER=0`). Dispatch point: the
+`eval::macros::compile` … `run_top_form` chain in `crates/lisp/src/lib.rs`.
 
 The compiler lowers each macroexpanded form into a `Node` IR via `compile_node`
-(`eval/compile.rs:736`). An ability call is an ordinary `Node::Call` on
-`Node::Global(op)` (`compile.rs:984-1015`). There is already a Node→Node optimizer
-seam — `eval/compile/inline.rs` (linear-map rewrite, self/leaf inlining;
-`call_head_sym` at `inline.rs:26` extracts a call's resolved global symbol and is
+(`eval/compile/lower.rs`). An ability call is an ordinary `Node::Call` on
+`Node::Global(op)`. There is already a Node→Node optimizer
+seam — `eval/compile/inline.rs` (self/leaf inlining; `call_head_sym` extracts a call's resolved global symbol and is
 directly reusable). **The rewrite lives here**: when the target is proven, the
 `Node::Call{callee: Global(op), …}`'s head becomes the guarded `%dispatch-proven` call,
 bypassing the op's `%identity-of`.
 
-Recognizing an op fn in the compiler: read the `*abilities*` registry
-(`std/ability.blsp:43`, `ability name → op specs`) from the heap — the compiler has heap
-access — to know which global names are ability ops; or match the op body's fingerprint
-shape. `*impls*` (`ability.blsp:46`) gives the id → fn value to inline.
+Recognizing an op fn in the compiler: read the `*abilities*` registry (`ability name → op
+specs`) from the heap — the compiler has heap access — to know which global names are ability
+ops; or match the op body's fingerprint shape. `*impls*` gives the id → fn value to inline.
 
 ## Late binding: why the rewrite proves an identity, never an impl
 
@@ -104,9 +102,9 @@ row, at every tier, against the tree-walker.
 The compiler proves the id *itself* from syntax when the first arg is a literal
 (`(size 5)`) or a direct constructor call (`(area (circle 2))`) — mirroring
 `arg_identity`'s syntactic cases, **no checker integration**. **Weakness:** does almost nothing for the case that actually costs —
-a variable in a hot loop (`(map area shapes)`), where the arg isn't syntactically known.
+a variable in a hot loop (`(map shapes area)`), where the arg isn't syntactically known.
 
-> **Scoped differently since 2026-08-29 — see [dispatch-speculation.md](dispatch-speculation.md).**
+> **Scoped differently since 2026-08-29 — see [dispatch-speculation.md](archive/dispatch-speculation.md).**
 > The framing below ("build the checker→compiler channel") put an unsound data source in a
 > load-bearing position, which is exactly how Tier 1 came to miscompile (ADR-294). Behind a
 > runtime **guard**, a static fact is one prior among several and a wrong one costs a deopt,
@@ -132,15 +130,15 @@ dynamic runs (ADR-280).
 
 ## Anchors
 
-- Pipeline dispatch: `crates/lisp/src/lib.rs:463-483`
+- Pipeline dispatch: `crates/lisp/src/lib.rs`
 - VM overview + engine selection (`BROOD_TIER`): `crates/lisp/src/eval/compile.rs` module doc
-- AST→IR call lowering + call-site IC: `eval/compile.rs:736`, `984-1015`
+- AST→IR call lowering + call-site IC: `eval/compile/lower.rs` (`compile_node`)
 - Node→Node optimizer seam (rewrite home): `eval/compile/inline.rs` (`mono_devirtualize`,
   `ability_op_key`); the per-call guard: `%dispatch-proven` in `builtins/sequences.rs`
-- Runtime call dispatch: `eval/compile/dispatch.rs:185`
-- Ability op expansion (the dispatch to monomorphize): `std/ability.blsp:171-212`
-- `impl-for` / `*impls*` / anonymous impl fns: `std/ability.blsp:124-128`, `214-238`
-- Static proof already computed by the checker: `types/check/protocol.rs:529`
-  (`arg_identity`), `818-838` (`check_ability_call_inferred`), `559-610` (`AbilityInfo`)
+- Runtime call dispatch: `eval/compile/dispatch.rs` (`dispatch`)
+- Ability op expansion (the dispatch to monomorphize), `%impl-for`, `*impls*` and the
+  anonymous impl fns: `std/prelude/abilities.blsp` (`defability`, `impl`)
+- Static proof already computed by the checker: `types/check/protocol.rs`
+  (`arg_identity`, `check_ability_call_inferred`, `AbilityInfo`)
 - Related: [protocol-dispatch-design.md](protocol-dispatch-design.md) (the facility this
   optimizes), [language.md §Polymorphism](language.md) (reference docs).

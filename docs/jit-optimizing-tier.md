@@ -11,10 +11,14 @@
 > (`git show fdce5400^:docs/<name>.md`).
 
 
-> **Status: SCOPE / design (2026-06-16).** Not yet implemented. This is the plan for the
-> next big JIT lever after the tier-2 template JIT (`docs/jit-tier2.md`) and the two 2026-06-16
-> call-path wins (`e672cee` no-clone fast-link, `eebfbd3` shared native code across processes).
-> Background assumed: `docs/jit-tier2.md` (the hybrid operand model + the Brood→Brood call ABI).
+> **Status: built; this file is the scope plus its dated results.** It began on 2026-06-16 as
+> the plan for the next JIT lever after the template JIT (`docs/jit-tier2.md`) and the two
+> call-path wins of that day (`e672cee` no-clone fast-link, `eebfbd3` shared native code across
+> processes). Technique A shipped as the in-IR fast link (below), then as the inline call blob
+> (`compute-frontier.md` §7.5; `jit_lower/call.rs`, `lower_arm_hot`). Technique B shipped as the
+> self-inliner and the leaf inliner (`eval/compile/inline.rs`), both unconditional. The call
+> protocol's next steps are tracked in `call-convention.md`. "Today" in §1–§4 means June 2026,
+> and paths there predate the split of `compile/`: see §8 for where things live now.
 
 ## 1. The problem this solves
 
@@ -194,7 +198,7 @@ the benefit gate is revisited (that's the lever-2/allocation interaction, `alloc
 **DONE (2026-06-17) — Phase B / Phase 3 shipped, ~1.7× on fib.** The §6b self-inliner landed on top
 of Phase A: `shift_slots` + `inline_self_calls` + `self_inline_arm` in `compile.rs`, gated exactly as
 designed (top-level no-capture recursive `defn`, no `SelfCall`/`MakeClosure`, fixed arity,
-`SELF_INLINE_MAX_BODY = 64`). fib(35) 0.53 → 0.31 s (~1.7×, ~4.4× → ~2.6× of the actor-runtime baseline); the inlined arm
+`SELF_INLINE_MAX_BODY = 64`; these now live in `eval/compile/inline.rs`). fib(35) 0.53 → 0.31 s (~1.7×, ~4.4× → ~2.6× of the actor-runtime baseline); the inlined arm
 lowers to native (4 leaf calls, 3-handle spill — Phase A was the prerequisite). `BROOD_NO_INLINE=1`
 disables for A/B. **One miscompile was caught + fixed before shipping** (the §6b silent-wrong-result
 risk): `shift_slots` must **demote spliced `Call`s to `tail: false`** — a body's tail-position helper
@@ -215,8 +219,8 @@ structural lever after the incremental allocation levers measured neutral, devlo
 **SUPERSEDED (same day, 2026-06-17): the inliner shipped default-ON after all**, via two-stage
 tiering (dual-body: the VM keeps the small original, only the JIT runs the inlined body, with
 per-engine frame sizing + a deferred lower-priority inlined upgrade — see
-`crates/lisp/src/eval/compile.rs` around `jit_tier`). `BROOD_JIT_INLINE=1` is gone; the lever is
-now the opt-*out* `BROOD_NO_INLINE=1`.
+`crates/lisp/src/eval/compile/jit_runtime.rs`, `jit_tier_in_frame`). `BROOD_JIT_INLINE=1` is
+gone; so, since 2026-10-09, is its opt-out `BROOD_NO_INLINE=1`.
 
 **UPDATE (2026-07-19): Phase 2 (leaf-callee inlining) implemented; default ON since the same
 evening (`BROOD_NO_LEAF_INLINE=1` opts out — boot/`require`/`nest check`/suite/benchmark rows all
@@ -282,22 +286,23 @@ the target is `jit_dispatch_call` + `brood_rt_call_slow` dropping out of the pro
 
 ## 8. Key files & symbols
 
-- `crates/lisp/src/eval/compile/` — `jit_lower_arm` (the `Inst::Call` handler, `jit_lower.rs`),
-  `jit_dispatch_call` (`mod.rs`, the dispatch to replace/inline), `vm_call_ic_fast_link` /
-  `vm_call_ic_probe` (the IC, `core/heap.rs`), `jit_tier`, `chunk_in_jit_subset`, `CompiledArm`
-  (`share_key`, `jit_code`, `compile_epoch`).
-- `crates/lisp/src/jit/rt.rs` — `brood_rt_push`/`brood_rt_call_slow`/`brood_rt_roots_base` (the FFI
-  callbacks Phase 0/1 remove from the hot path), `Jit::new` (symbol registration).
-- `crates/lisp/src/core/heap.rs` — `RuntimeCode::jit_code_cache` (shared callee code ptrs),
-  `global_epoch` (= `runtime.version`, the free deopt guard), `roots` layout (frame setup).
-- Background: `docs/jit-tier2.md`, `docs/jit-stage1.md`, `docs/decisions.md` (ADR-101).
+- `crates/lisp/src/eval/compile/` — `jit_lower_arm` (`jit_lower.rs`; the `Inst::Call` lowering is
+  in `jit_lower/call.rs`), `jit_dispatch_call` and `jit_run_fast_link` (`jit_runtime/dispatch.rs`,
+  `jit_runtime/link.rs`), `jit_tier_in_frame` (`jit_runtime.rs`), `chunk_in_jit_subset`
+  (`jit_plan.rs`), `CompiledArm` (`ir.rs`).
+- `crates/lisp/src/core/heap/vm_cache.rs` — `vm_call_ic_fast_link` / `vm_call_ic_probe` (the IC).
+- `crates/lisp/src/jit/rt.rs` — the `brood_rt_*` callbacks; `jit/cranelift.rs` — the backend
+  and symbol registration.
+- `crates/lisp/src/core/heap/runtime_code.rs` — `RuntimeCode::jit_code_cache` (shared callee code
+  ptrs); `runtime.version` is the global epoch, the free deopt guard.
+- Background: `docs/decisions.md` (ADR-101).
 
 ---
 
 ## Technique A — increment 1: SHIPPED 2026-06-18 (behind `BROOD_JIT_ICALL`)
 
-**Status: done and gated.** Implemented exactly as the spec below, opt-in via `BROOD_JIT_ICALL`
-(default-on once it bakes). The flat `#[repr(C)]` side table is `Heap::vm_fast_links`
+**Status: done, and default-on since** (`BROOD_NO_JIT_ICALL=1` opts out). Implemented exactly as
+the spec below, then opt-in via `BROOD_JIT_ICALL`. The flat `#[repr(C)]` side table is `Heap::vm_fast_links`
 (`FastLink { epoch, code:u64, nslots, _pad, env }` — `code` as a `u64`, not `*const u8`, to keep the
 table `Send`/`Sync`); base+len via `Heap::vm_fast_links_base` (borrow-free `RefCell::as_ptr`); the two
 callbacks are `brood_rt_fastlink_base` / `brood_rt_fast_frame`. The hot-path body is shared with
@@ -307,9 +312,10 @@ debug-asserts the flat-table read equals the authoritative `vm_call_ic_fast_link
 JIT≡VM (ICALL on+off, `-C debug-assertions=on`), `differential` both ways, `nest test` 2161/2161 both
 ways, GC-stress+verify correct. See devlog 2026-06-18 (the Technique A increment-1 entry).
 
-**Next = increment 2** (the open item below): move the frame setup + `call_indirect` fully into IR
+**Increment 2** (the open item below): move the frame setup + `call_indirect` fully into IR
 (pre-reserve `roots` capacity so the nil-fill is branchless, no realloc), removing `brood_rt_fast_frame`
-— the last FFI crossing on the hot path.
+— the last FFI crossing on the hot path. A first attempt lost ~5% and was reverted (2026-06-19,
+`compute-frontier.md`); the inline call blob of §7.5 there landed it on 2026-09, on the hot re-lowering.
 
 The original spec, as implemented:
 

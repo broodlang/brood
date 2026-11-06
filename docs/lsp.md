@@ -20,7 +20,7 @@ one server that owns the language knowledge.
 > **Done:** Foundation A — the CST (`syntax::cst`) + shared lexical rules
 > (`syntax::atom`) + `error::Span`; Foundation B — the CST scope resolver
 > (`syntax::scope`); Foundation C — leading-string docstrings and the
-> introspection primitives `doc` / `reflect/arglist` / `global-names` / `bound?`.
+> introspection primitives `reflect/doc` / `reflect/arglist` / `reflect/global-names` / `bound?`.
 > **Tier 0** — the `crates/lsp` → `brood-lsp` binary: stdio lifecycle, full
 > document sync, and syntactic `publishDiagnostics` read off the CST
 > (`lsp-server` + `lsp-types`, no async runtime). `Uri`→text document store, a
@@ -29,16 +29,16 @@ one server that owns the language knowledge.
 > **Tier 1** (complete) — `textDocument/{completion,hover,documentSymbol,
 > definition,signatureHelp}`, wired to the Foundation B/C surface: completion
 > offers locals-in-scope (`scope::names_in_scope`) + interpreter globals
-> (`global-names`); hover renders a local note, a document def's
+> (`reflect/global-names`); hover renders a local note, a document def's
 > signature+docstring (read off the CST, `defs`), a prelude/builtin name's
-> `reflect/arglist`+`doc`, or — in a `defmodule` header — a `(:use …)`/`(:alias …)`
+> `reflect/arglist`+`reflect/doc`, or — in a `defmodule` header — a `(:use …)`/`(:alias …)`
 > module's docstring or a `(:implements …)` behaviour's ops (`module_ref`);
 > `documentSymbol` outlines top-level `def`/`defn`/`defmacro`;
 > goto-definition resolves through `scope::resolve_at`; signature help shows the
 > enclosing call's parameters with the active argument highlighted (params from
 > the CST def, or `reflect/arglist` for a prelude/builtin). The server holds one `Interp`
 > for introspection only — it still never evaluates the open buffer.
-> Hover/`doc`/`reflect/arglist` now cover **primitives** too (the `NativeFn` carries a
+> Hover/`reflect/doc`/`reflect/arglist` now cover **primitives** too (the `NativeFn` carries a
 > docstring + param names from the `PRIMITIVE_DOCS` table), and the public stdlib
 > carries leading-string docstrings — so a hover shows real documentation across
 > the surface.
@@ -48,13 +48,13 @@ one server that owns the language knowledge.
 > unbound-name / arity / type-misuse findings as `WARNING`s (located; a 1-char
 > marker at the form). It bootstraps the enclosing project first through the
 > shared tooling-image seam (`introspect::load_tooling_image` →
-> `std/tool/project.blsp`'s `setup-tooling-image`: `project-setup` +
-> `project-load-sources` + `require 'test` + `require 'format`), so cross-module
+> `std/tool/project.blsp`'s `project/setup-tooling-image`: `project/setup` +
+> `project-image/load-sources-cached`, plus the test and format frameworks), so cross-module
 > names and the test/format-framework macros resolve and don't false-positive as
 > unbound. `nest mcp` boots through the *same* Brood function, so the two servers
 > can't drift on what a tooling image contains.
 > • **Cross-file goto-definition** — the §Cross-file hybrid is wired: a name that
-> resolves `Free` in the buffer falls back to `(source-location 'name)` against
+> resolves `Free` in the buffer falls back to `(reflect/source-location 'name)` against
 > the bootstrapped image, including **into the standard library** (the prelude is
 > materialized to a cache file so its def sites are openable — see §Cross-file).
 > **Tier 2 (also done):** find-references and document-highlight (both off
@@ -68,7 +68,7 @@ one server that owns the language knowledge.
 > every `project_files` entry (`workspace.rs`); rename emits a multi-file
 > `WorkspaceEdit`. Locals stay single-file; no project → just the open buffer.
 > The same engine is exposed to agents as the MCP **`callers`** tool, via the
-> pure `(references-in-source name src)` primitive (docs/mcp.md).
+> pure `(reflect/references-in-source name src)` primitive (docs/mcp.md).
 > **Developer-ergonomics pass (also done):**
 > • **`textDocument/formatting`** (`formatting.rs`) — whole-document reformat,
 > delegated to the Brood formatter (`std/format.blsp`) via
@@ -238,7 +238,7 @@ shouldn't be made to:
 
 - Symbols are `Value::Sym(u32)` — `Copy`, interned, deduplicated, **not
   heap-addressed**. The same `foo` at line 4 and line 9 is *one* value. The
-  existing `form-pos` side-table is keyed by a heap pair-index, so it can only
+  existing `reflect/form-pos` side-table is keyed by a heap pair-index, so it can only
   position **list** forms, start-only — never "the symbol token under the
   cursor", which is what most LSP features need.
 - Bolting positions onto `Value` (boxing symbols, wrapping every read node)
@@ -254,7 +254,7 @@ contracts, which is why they are different functions rather than one shared one:
 | Malformed input | **rejects** with a precise `LispError` | **tolerates**: emits `Error` nodes and continues |
 | Trivia (whitespace, comments) | discarded | **kept** (the tree is lossless / round-trippable) |
 | Quote sugar `'` `` ` `` `~` `~@` | lowered to `(quote x)` … | kept *as written* (a `Quote` node wrapping its target) |
-| Spans | top-level form starts only (`form-pos`) | every node, start..end |
+| Spans | list-form starts only (`reflect/form-pos`) | every node, start..end |
 
 An LSP must parse a half-typed buffer on every keystroke; the evaluator must
 refuse to run one. That difference is the justification for two parsers — not
@@ -273,9 +273,10 @@ value. (See [the sketch](#sketch-parse_cst) below.)
 // crates/lisp/src/syntax/cst.rs
 pub enum NodeKind {
     Root,
-    List, Vector,                    // ( … )  and  [ … ]
+    List, Vector, Map, Set,          // ( … )  [ … ]  { … }  #{ … }
     Quote, Quasi, Unquote, Splice,   // ' ` ~ ~@  — kept as written, not lowered
-    Symbol, Keyword, Int, Float, Str, Bool, Nil,
+    Pin,                             // ^x — a pattern pin (ADR-150)
+    Symbol, Keyword, Int, Float, Decimal, Ratio, Str, Bool, Nil,
     Whitespace, Comment,             // trivia — present so the tree is lossless
     Error,                           // an unparseable run; parsing resumes after it
 }
@@ -341,17 +342,10 @@ is *designed* to analyse without executing and to never reject. The server must
 **not** call `eval` on document text — that would run side effects and could
 loop forever.
 
-Two honest gaps to close as increments, not now:
-
-- The checker currently returns `Vec<String>` — **un-located** messages. To
-  surface them as diagnostics it must carry spans. It runs over *macro-expanded*
-  forms, where original spans are already gone (the same macro caveat
-  `tooling.md` notes for runtime-error positions). The principled fix is to
-  check the **un-expanded** form and attribute findings to CST spans, accepting
-  that we don't see *into* macro-generated code at first.
-- Unbound/arity checks aren't in the advisory checker yet (it only flags
-  primitive type misuse). A name-resolution pass over the CST (next section)
-  gives "unbound symbol" cheaply and safely.
+`types::check::check_file` returns each finding with its position
+(`Vec<(Option<Pos>, String)>`), and covers unbound names and arity as well as type
+misuse. A position is a point, so a diagnostic anchors to the named token where it can
+(see *Other caveats* below).
 
 ## Resolution, scopes, and introspection
 
@@ -363,7 +357,7 @@ symbol binds to**. Two layers:
   - `(reflect/arglist f)` — the parameter list of a closure (`Closure` already stores
     `params` / `optionals` / `rest`) or a builtin (from its `Arity`). Feeds
     signature help and hover.
-  - `(global-names)` / `(bound? sym)` — for completion and workspace symbols.
+  - `(reflect/global-names)` / `(bound? sym)` — for completion and workspace symbols.
   - `(reflect/doc f)` — **implemented** (ADR-025): a docstring is an optional leading
     string in a `fn`/`defn`/`defmacro` body (only when more body follows it),
     stored on the closure. A module documents itself the same way — a leading
@@ -377,22 +371,21 @@ symbol binds to**. Two layers:
 
 ## Cross-file resolution: an image query, not a static index (ADR-031)
 
-Everything above is **single-file**. The server's knowledge of names has exactly
-two sources, and neither crosses a `require`:
+The Tier-1 server's knowledge of names had exactly two sources, and neither crossed
+a `require`:
 
 - the **open buffer's** CST + scope tree (locals and this file's `def`s), and
 - the **interpreter's globals** — the *prelude + Rust builtins* only. The server
   deliberately never evaluates the buffer (no side effects, no loops), so it also
-  never runs a `(require 'foo)`; a symbol another module `provide`s is invisible
-  to it. Today such a name resolves as `Free` (no goto target, no hover, but no
-  false "unbound" error either — diagnostics are syntactic-only at Tier 1).
+  never ran a `(require 'foo)`; a symbol another module provided was invisible
+  to it and resolved as `Free`.
 
 The tempting fix is a **static workspace-indexer** (rust-analyzer's model: walk
 the `require` graph off `*load-path*`, parse every file's CST, never run
 anything). We **reject that as the primary path** (ADR-031). Brood is an
 image-based, hot-reloadable Lisp (ADR-013), and the endgame is an editor that
 *is* a running Brood image editing Brood — so the running runtime already holds
-every loaded module's globals (it's what `global-names` enumerates). A static
+every loaded module's globals (it's what `reflect/global-names` enumerates). A static
 index just re-derives, approximately, what the image already knows for certain —
 and can't follow computed/conditional `require`s or see through macros.
 
@@ -402,21 +395,21 @@ each thing was defined as it loaded*, and `M-.` is a lookup against it. The plan
 
 1. ✅ **Record def sites at load/`def` time** — `name → (file, pos)` into the
    shared, mutable `RuntimeCode` region (so a redefinition updates it and spawned
-   processes see it, per ADR-013). `file` is the existing `current-file`; `pos`
+   processes see it, per ADR-013). `file` is the existing `reflect/current-file`; `pos`
    the form's start. **Span-accurate through macros for *definitions***, because
    the site is captured before macroexpansion (ADR-022) discards spans. (The file
-   loaders — the `load` builtin and `eval_source` — call `Heap::note_definition`
+   loaders — the `reflect/load` builtin and `eval_source` — call `Heap::note_definition`
    on each top-level form, **both un-expanded and expanded**. The un-expanded pass
    keeps span-accurate sites for `def`/`defn`/`defmacro`; the expanded pass, which
    descends into a `(do …)`, catches the globals a definer *macro* synthesizes — a
    `defrecord` constructor and its accessors, a `defability`'s op dispatchers — at
    the macro's call-site position. So goto-definition on a record constructor or an
    ability op resolves cross-file, not just on hand-written `defn`s. 2026-07-30.)
-2. ✅ **`(source-location 'foo) → [file line col]`** (or nil) — one Rust
+2. ✅ **`(reflect/source-location 'foo) → [file line col]`** (or nil) — one Rust
    primitive; policy on top is Brood. Already useful standalone (error provenance,
    `nest`, a self-hosted REPL `M-.`) before any LSP wiring consumes it.
 3. ✅ **Stay a hybrid:** the live (half-typed) buffer keeps using the CST + scope
-   walker; a name that resolves `Free` there falls back to `source-location`,
+   walker; a name that resolves `Free` there falls back to `reflect/source-location`,
    yielding a cross-file `Location` (LSP `Location` already carries a `Uri`).
    (`definition::definition` — `Resolution::Free` → `introspect::source_location`
    → `path_to_uri`. Works once the project is bootstrapped, which the first
@@ -430,7 +423,7 @@ each thing was defined as it loaded*, and `M-.` is a lookup against it. The plan
 `(require 'foo)` doesn't go through the def-site table (the feature name binds
 nothing); instead `definition.rs` detects the `require` call context (an
 enclosing `List` whose head is `require`) and resolves the name with
-`introspect::module_file` — `require--find "foo.blsp" *load-path*`, the same
+`introspect::module_file` — `%require-find "foo.blsp" *load-path*`, the same
 lookup `require` itself uses, against the bootstrapped project's load-path. It
 lands at the top of the module's file. (A baked-in std module — `%builtin-module`
 source, no file — has no target.)
@@ -444,7 +437,7 @@ module/behaviour names there also bind nothing, so they're recognized
   shows `(module foo)` plus the docstring its `defmodule` header declared
   (`introspect::module_doc`, read off `*module-docs*`).
 - `(:implements Bar)` → the behaviour name. The interface registry (`*protocols*`)
-  records ops but *no def-site*, so there's no `source-location` to ask; instead
+  records ops but *no def-site*, so there's no `reflect/source-location` to ask; instead
   `definition.rs` scans the project's `.blsp` files (`introspect::project_files`)
   for the `(defbehaviour Bar …)` form and lands on its name. Hover shows
   `(behaviour Bar)` plus its declared ops + arities
@@ -469,12 +462,14 @@ covers it.)
 
 **Navigating into the standard library.** The prelude is `include_str!`'d, so it
 has no source file at runtime — `M-.` on `map` would have nowhere to land. The
-prelude build therefore *materializes* a copy to `$XDG_CACHE_HOME/brood/prelude.blsp`
-(falling back to `~/.cache`), sets `current-file` to it, reads positioned, and
+prelude build therefore *materializes* a copy to
+`$XDG_CACHE_HOME/brood/prelude-source-<hash>/prelude.blsp`, keyed by the prelude text's
+hash (falling back to `~/.cache`), sets the current file to it, reads positioned, and
 records each prelude def's site there. These sites are immutable, so they live in
 the shared `SharedCode` region (not per-runtime `RuntimeCode`); `Heap::def_site`
 consults the runtime table first (a user redefinition wins) then the prelude. The
-cache copy is rewritten only when a new build's embedded prelude differs. Builtins
+key means one path names one text for good, so two builds on a machine do not read each
+other's lines. Builtins
 implemented in Rust (`cons`, `rem`, …) have no Brood source and remain `nil` —
 hover still documents them via `PRIMITIVE_DOCS`. Best-effort: if the cache can't
 be written, stdlib goto is simply unavailable and nothing else is affected.
@@ -490,9 +485,8 @@ static indexer survives only as the *fallback* when no image is available.
 ## The crate
 
 `crates/lsp` → a `brood-lsp` binary depending on the `brood` lib. This mirrors
-the existing `crates/lisp` + `crates/cli` + `crates/nest` split (and the planned
-`crates/editor` / `crates/server`); a loose top-level `tools/` dir would break
-that pattern for no gain.
+the existing `crates/lisp` + `crates/cli` + `crates/nest` split; a loose top-level
+`tools/` dir would break that pattern for no gain.
 
 **Protocol crates:** `lsp-server` + `lsp-types` (the synchronous stack
 rust-analyzer uses) rather than `tower-lsp`. Reasons:
@@ -514,8 +508,8 @@ additive change behind the same feature handlers.
 | Tier | Features | Needs | Status |
 |---|---|---|---|
 | **0** | `publishDiagnostics` (syntactic), document sync, lifecycle | `cst::parse` + `LineIndex` | **done** |
-| **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition**, **signature help** | `reflect/arglist` / `global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** |
-| **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto**, `require`-target goto | located `check_file`; project bootstrap; `source-location` + prelude-cache; `require--find` | **done** |
+| **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition**, **signature help** | `reflect/arglist` / `reflect/global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** |
+| **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto**, `require`-target goto | located `check_file`; project bootstrap; `reflect/source-location` + prelude-cache; `%require-find` | **done** |
 | **2** | **cross-file** references & rename (+prepareRename), document-highlight, semantic tokens, completion resolve | `scope::references` / `references_to_global`; `project_files`; CST token classification | **done** |
 | **2+** | formatting, workspace symbol, code actions (did-you-mean, remove-unused-require), folding ranges, inlay hints | `introspect::format_source`; `defs::top_level` + `workspace::all_sources`; `global_names`/`names_in_scope` + Levenshtein; CST container/comment walk; `arglist_tokens` | **done** |
 | **2++** | document links + `defmodule`-clause goto/hover, selection range, context-aware module completion, code actions (add-require, create-defn) | `module_ref` clause classifier; `introspect::module_file`/`module_doc`/`loadable_modules`; CST node-chain | **done** |
@@ -537,10 +531,10 @@ once their one prerequisite lands — which is the point of deciding the CST and
 the introspection surface up front.
 
 **Cross-file references and rename.** A name that resolves to a **global** is
-one binding across the whole project under the flat module model (ADR-019), so
+one binding across the whole project, so
 references and rename span every project file: `workspace.rs` gets the file set
-from `introspect::project_files` (`(project--all-files project/*root*)`, the same
-set `check-project` walks), preferring an open document's in-memory text over its
+from `introspect::project_files` (the set `project-check/all-files` returns, the one
+`nest check` walks), preferring an open document's in-memory text over its
 on-disk copy, and unions `ScopeTree::references_to_global` over each. Rename
 emits a multi-file `WorkspaceEdit`. **Locals stay single-file** (routed to the
 cursor-keyed `references`/`rename` path), and with no project bootstrapped the
@@ -565,7 +559,7 @@ Brood. An LSP is *mostly mechanism* — JSON-RPC transport, the document store,
 the byte↔UTF-16 map, the CST itself — legitimately Rust, the same category as
 the reader and the scheduler. But *policy* can be Brood: which findings become
 diagnostics, completion candidate ranking, what hover renders. A clean split:
-transport + CST + position mapping in Rust; expose `reflect/arglist`, `global-names`, and
+transport + CST + position mapping in Rust; expose `reflect/arglist`, `reflect/global-names`, and
 eventually an `analyze` / `completions-at` surface that is ultimately Brood
 source the server calls into. We don't owe that on day one, but designing the
 boundary this way keeps faith with why the project exists.
@@ -653,11 +647,9 @@ definition.
 ## Related
 
 - [`tooling.md`](tooling.md) — the existing editor contract (GNU errors,
-  structured test output, `form-pos` / `current-file`); the LSP is its Stage-3
-  generalisation.
+  structured test output, `reflect/form-pos` / `reflect/current-file`); the LSP is its
+  Stage-3 generalisation.
 - [`types.md`](types.md) — the advisory checker (ADR-024) that becomes the
   semantic-diagnostics engine.
 - [`architecture.md`](architecture.md) / [`components.md`](components.md) — where
   the `syntax` layer and the crate split sit.
-</content>
-</invoke>

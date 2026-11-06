@@ -83,7 +83,7 @@ impl ErrorKind {
     /// The stable lowercase tag name — the keyword that appears as `:kind` in a
     /// caught built-in error map (e.g. `:unbound`, `:type`). Stable across
     /// versions so agents and Brood code can branch on it (ADR-036,
-    /// `docs/llm-native.md` §4).
+    /// `docs/archive/llm-native.md` §4).
     pub fn tag_name(self) -> &'static str {
         match self {
             ErrorKind::Parse => "parse",
@@ -747,7 +747,7 @@ impl LispError {
     /// [:file <string> :line <int> :col <int>] [:hint <string>]}` — every
     /// optional field is omitted when absent, so the agent's pattern match
     /// stays simple. Used by `try_catch` when the error carries no user
-    /// payload (i.e. it's a built-in error). See `docs/llm-native.md` §4.
+    /// payload (i.e. it's a built-in error). See `docs/archive/llm-native.md` §4.
     pub fn to_value_map(&self, heap: &mut crate::core::heap::Heap) -> Value {
         use crate::core::value::{Value, intern};
         // A map the language raised (`%raise`, `%contract-raise`) names its own kind — `:error`,

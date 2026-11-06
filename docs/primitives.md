@@ -2,14 +2,17 @@
 
 The **complete set of functions implemented in Rust** (every `Value::Native`
 registered in `crates/lisp/src/builtins/`, split by domain). Everything else in the language —
-`+ - * / < = map filter reduce defn -> …` — is written *in Brood*
+`+ - * / < = map seq/filter reduce defn -> …` — is written *in Brood*
 (`std/prelude/*.blsp`) on top of these. Keeping this list small is a deliberate,
 load-bearing choice (ADR-006 "write the language in the language", ADR-008
 "Rust is a primitive kernel").
 
-`%`-prefixed names are low-level primitives not meant to be called directly.
+`%`-prefixed names are low-level primitives not meant to be called directly; most public
+names (`string/join`, `os/now`, `table/put`) are thin Brood wrappers over one, and the
+tables below list the primitive, not the wrapper.
 
-The **Arity** column below is now machine-enforced: each builtin declares an
+The **Arity** column below is checked against the registrations by a test
+(`documented_arities_match_the_registered_ones`): each builtin declares an
 `Arity` (`value.rs`) and the evaluator checks it once, at the single native call
 gate (`eval::call_native`), before the primitive runs — so a wrong-count call is
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
@@ -22,115 +25,114 @@ arg silently becoming `nil`.
 | **Numeric** (arithmetic substrate) | `%add` `%sub` `%mul` `%div` | 2 | int-preserving arithmetic; `%div` is exact-int-or-float and errors on ÷0 |
 | | `%lt` | 2 | numeric `<` → bool |
 | | `%eq` | 2 | structural equality → bool |
-| | `rem` | 2 | integer remainder (truncated, sign of dividend) — **irreducible**: deriving it via float division would lose precision past 2^53. `mod` (euclidean) and `quot` (truncated division) are Brood over it |
-| | `floor` | 1 | floor toward −∞ → **int** (an int passes through) — the one Float→Int crossing the language can't bootstrap. `ceil`/`round`/`sqrt`/`pow` are Brood over it |
+| | `%rem` | 2 | integer remainder (truncated, sign of dividend) — **irreducible**: deriving it via float division would lose precision past 2^53. `math/mod` (euclidean) and `%quot` (truncated division) are Brood over it |
+| | `math/floor` | 1 | floor toward −∞ → **int** (an int passes through) — the one Float→Int crossing the language can't bootstrap. `math/ceil`/`math/round` are Brood over it |
 | **Pair / sequence** | `cons` | 2 | make a pair |
 | | `first` `rest` | 1 | head / tail (nil, pair, or vector) — these *are* car/cdr; `empty?` is Brood over them + the length primitives |
 | | `range?` | 1 | True if x is a lazy range (as produced by range). Ranges fold/reduce/sum/count without materialising; other ops treat them as the list they stand for. |
 | | `seqview?` | 1 | True if x is a lazy sequence view — the reducible produced by range/map/filter/… before it is realized (into/count/…). |
-| **Vector** (data type, O(1)) | `vector` | n | construct a vector |
-| | `vector-ref` | 2 | index |
-| | `vector-length` | 1 | length |
-| | `vector-assoc` | 3 | a fresh vector with index `i` (in `[0, len)`) replaced — the vector counterpart of `%map-assoc`; the polymorphic `assoc`/`update` are Brood over it |
-| | `vector-concat` | 2 | a fresh vector of `v`'s elements followed by those of `xs` (a vector, list, range, set or nil), one allocation — the kernel op behind `conj` on a vector and `into` onto one, which built the result as a list twice and re-vectorised it (7.7 µs for four items, 2026-09-21) |
-| | `subvec` | 2–3 | a fresh vector slice `[start, end)`; `end` defaults to the length — the vector-preserving counterpart of the list-returning `take`/`drop`; `remove-nth` is Brood over it |
-| **Ordering** | `compare` | 2 | `(compare a b)` → `-1`/`0`/`1` by the structural total order (numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by stable tag rank). The binary form of `sort`'s order — `sort-by` and custom comparators build on it |
-| **Map** (immutable; data type) | `hash-map` | n | construct a map from `k v k v …` args (the `{ }` literal's programmatic form); last-wins on dup keys |
+| **Vector** (data type, O(1)) | `vector` | any | construct a vector |
+| | `%vector-ref` | 2 | index |
+| | `%vector-length` | 1 | length |
+| | `%vector-assoc` | 3 | a fresh vector with index `i` (in `[0, len)`) replaced — the vector counterpart of `%map-assoc`; the polymorphic `assoc`/`update` are Brood over it |
+| | `%vector-concat` | 2 | a fresh vector of `v`'s elements followed by those of `xs` (a vector, list, range, set or nil), one allocation — the kernel op behind `conj` on a vector and `into` onto one, which built the result as a list twice and re-vectorised it (7.7 µs for four items, 2026-09-21) |
+| | `%subvec` | 2–3 | a fresh vector slice `[start, end)`; `end` defaults to the length — the vector-preserving counterpart of the list-returning `take`/`drop`; `seq/remove-nth` is Brood over it |
+| **Ordering** | `compare` | 2 | `(compare a b)` → `-1`/`0`/`1` by the structural total order (numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by stable tag rank). The binary form of `sort`'s order — `seq/sort-by` and custom comparators build on it |
+| **Map** (immutable; data type) | `%hash-map` | any | construct a map from `k v k v …` args (the `{ }` literal's programmatic form); last-wins on dup keys |
 | | `%map-get` | 2–3 | value at a key, or the optional default (else nil) |
 | | `%map-assoc` | 3 | a fresh map with `key`→`val` added/updated |
 | | `%map-dissoc` | 2 | a fresh map with a key removed |
-| | `%map-pairs` | 1 | entries as a list of `[k v]` vectors, insertion order, one O(n) pass — the sole enumerator; `keys`/`vals`/`contains?`/`reduce-kv` are all Brood over it |
+| | `%map-pairs` | 1 | entries as a list of `[k v]` vectors, insertion order, one O(n) pass — the sole enumerator; `keys`/`vals`/`contains?`/`map/reduce-kv` are all Brood over it |
 | | `%map-count` | 1 | the number of entries in a map — O(1) (the CHAMP root tracks its size) |
 | | `%map-int-add` | 3 | `(%map-int-add m k delta)` → a fresh map with key `k`'s value incremented by the integer `delta` (inserts `delta` when `k` is absent) — exactly `(assoc m k (+ (get m k 0) delta))`, a single trie traversal when the stored value is a plain integer. The compiler recognises the idiomatic spelling (ADR-360), so there is no reason to write this one |
-| **String** | `string-length` | 1 | char count |
-| | `substring` | 2-3 | characters `[start, end)`, char-indexed; `end` defaults to `(string-length s)` |
-| | `%str-index-of` | 2-3 | char index of the first occurrence of a substring at or after the optional start (or -1; empty needle → the start). Linear (byte-level `find` → char index) — the search counterpart of `substring`, needed in Rust because Brood has no O(1) char access (a pure-Brood scan is O(n²)). `index-of` / `includes?` ride on it. The start offset is taken here rather than by slicing in Brood: `(index-of s needle from)` used to search `(substring s from n)`, copying the suffix on every call |
+| **String** | `string/length` | 1 | char count |
+| | `string/substring` | 2-3 | characters `[start, end)`, char-indexed; `end` defaults to `(string-length s)` |
+| | `%str-index-of` | 2-3 | char index of the first occurrence of a substring at or after the optional start (or -1; empty needle → the start). Linear (byte-level `find` → char index) — the search counterpart of `string/substring`, needed in Rust because Brood has no O(1) char access (a pure-Brood scan is O(n²)). `index-of` / `includes?` ride on it. The start offset is taken here rather than by slicing in Brood: `(index-of s needle from)` used to search `(substring s from n)`, copying the suffix on every call |
 | | `%str-last-index-of` | 2-3 | char index of the **last** occurrence starting strictly before the optional `before` bound (default end; -1 if none). One forward pass with an advancing cursor. Backs `string/last-index-of`, which used to walk forward in Brood calling `index-of` per match — O(matches × length), and on an editor hot path both ways (reverse buffer search; finding the current line's start per keystroke) |
-| | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
-| | `lower` | 1 | `s` lower-cased (Unicode-aware) |
+| | `string/upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
+| | `string/lower` | 1 | `s` lower-cased (Unicode-aware) |
 | | `string/->number` | 1–2 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `reflect/read-string`); optional radix 2–36 for integers (`("ff" 16)` → 255) |
-| | `string->codepoints` | 1 | the characters of `s` as a vector of integer Unicode codepoints, one O(n) pass — the random-access form text parsers index with `nth` and compare as ints |
+| | `string/->codepoints` | 1 | the characters of `s` as a vector of integer Unicode codepoints, one O(n) pass — the random-access form text parsers index with `nth` and compare as ints |
 | | `%codepoints->string` | 1 | its **inverse**: a string from a vector, list or `bytes` of codepoint ints, one O(n) pass. Backs `string/codepoints->`, which was `(apply str (map int->char cs))` — a seq view, a closure call and a one-character string per code point, then an N-way variadic concat. That shape was every text parser's way back from the code vector, and removing it took `json` parse 1.8× (row −20.8%). Errors on a non-int or a non-Unicode-scalar (negative, > U+10FFFF, or a surrogate) |
-| | `string-span` | 3 | `(string-span s start chars)` → the char index just past the maximal run of chars in the set `chars` (a string) starting at char `start` — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native |
-| | `string-span-until` | 3 | the char index of the first char of `s` in the set `chars` at or after `start`, or `(string-length s)` if none — the maximal run of chars *not* in the set, for scanning up to a delimiter. The complement of `string-span` |
+| | `string/span` | 3 | `(string-span s start chars)` → the char index just past the maximal run of chars in the set `chars` (a string) starting at char `start` — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native |
+| | `string/span-until` | 3 | the char index of the first char of `s` in the set `chars` at or after `start`, or `(string-length s)` if none — the maximal run of chars *not* in the set, for scanning up to a delimiter. The complement of `string/span` |
 | | `string/split` | 1–2 | Split s into a list of substrings on each occurrence of sep (default a space), in one O(n) pass; always at least one piece (`""` → `("")`). An empty separator splits s into its individual characters. The trimmed, empties-dropped form is Brood: `string/fields`. |
-| **Bytes** (immutable byte sequences; `crates/lisp/src/builtins/bytes.rs`) | `byte-at` | 2 | `(byte-at b i)` → the byte at index `i` as an int 0–255 (out of range errors) |
-| | `subbytes` | 2–3 | the byte slice `[start, end)` (`end` defaults to the length) as a fresh bytes value |
-| | `bytes-index-of` | 2–3 | the first index of the `needle` bytes in `haystack` at or after `from` (default 0), or -1 if not present — the byte-protocol workhorse (find a `\r\n\r\n`, a frame delimiter, …) |
-| | `byte-length` | 1 | The number of bytes in b. O(1). |
-| | `bytes-concat` | any | One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model. |
-| | `bytes->list` | 1 | The bytes b as a list of integers 0–255. |
+| **Bytes** (immutable byte sequences; `crates/lisp/src/builtins/bytes.rs`) | `%byte-at` | 2 | `(byte-at b i)` → the byte at index `i` as an int 0–255 (out of range errors) |
+| | `%subbytes` | 2–3 | the byte slice `[start, end)` (`end` defaults to the length) as a fresh bytes value |
+| | `%bytes-index-of` | 2–3 | the first index of the `needle` bytes in `haystack` at or after `from` (default 0), or -1 if not present — the byte-protocol workhorse (find a `\r\n\r\n`, a frame delimiter, …) |
+| | `%byte-length` | 1 | The number of bytes in b. O(1). |
+| | `%bytes-concat` | any | One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model. |
+| | `%bytes->list` | 1 | The bytes b as a list of integers 0–255. |
 | | `%base64-encode` | 2 | Padded Base64 of a byte sequence (bytes, or a vector/list of byte ints): the standard `+/` alphabet, or the URL-safe `-_` one when url? is truthy. The engine of `encoding/base64-encode-bytes` and its siblings. |
 | | `%base64-decode` | 2 | The bytes a Base64 string encodes (URL-safe alphabet when url? is truthy), or nil when it is not Base64: a character outside the alphabet, a `=` anywhere but a trailing run of at most two, or one character left over from a group of four. |
 | | `%json-encode-plain` | 1 | `v` as JSON text when it is plain data (nil, bool, int, finite float, string, keyword/symbol, vector, proper list, a non-record map keyed by strings/keywords/symbols/ints) — exactly as `json/encode` writes it; nil for anything else, which `json/encode` then handles itself. The native half of `json/encode`. |
-| **Table** (the one identity-mutable structure; shared by identity, deep-clones in/out) | `table` | 0 | create a new empty in-memory table: a shared, mutable key→value store behind an opaque handle — mutated in place and shared by identity (the handle can be sent to other processes, which all see the same store); keys/values are deep-cloned in and out, so no two processes alias stored data. Local to this runtime; returns the handle |
-| | `table-put` | 3 | store `v` under key `k` (overwriting; structural key equality); returns `t` for threading |
-| | `table-get` | 2–3 | a fresh copy of the value stored under `k`, or the default (nil if omitted) when absent |
-| | `table-has?` | 2 | true if the table has an entry for key `k` |
-| | `table-delete` | 2 | remove key `k` if present; returns `t` |
-| | `table-incr` | 2–3 | atomically add `delta` (default 1) to the integer at key `k` (absent → 0) and return the new value — the read-modify-write is atomic under the table lock, so concurrent increments never lose an update; errors if the existing value is not an integer |
-| | `table-count` | 1 | the number of entries |
-| | `table-snapshot` | 1 | a consistent point-in-time copy of the whole table as an immutable map — atomic, O(n), unaffected by later mutation |
-| | `table-drop` | 1 | remove the table from the registry, freeing its store; idempotent, returns true if it existed (other handles then error on use) |
-| **Rope** (editor buffer text; immutable, char-indexed — ADR-045) | `string->rope` | 1 | a rope holding the characters of a string — the constructor |
-| | `rope->string` | 1 | the full text of a rope as a string (the only way a rope's content crosses a process: ropes are process-local) |
-| | `rope-length` | 1 | character count |
-| | `rope-line-count` | 1 | line count (a trailing newline ends a line; `""` is 1 line) |
-| | `rope-insert` | 3 | `(rope-insert r idx s)` → a **fresh** rope with `s` inserted at char `idx` |
-| | `rope-delete` | 3 | `(rope-delete r start end)` → a **fresh** rope with chars `[start, end)` removed |
-| | `rope-slice` | 3 | text of chars `[start, end)` as a string |
-| | `rope-line` | 2 | text of line `n` (0-based), including its trailing newline — the viewport primitive |
-| | `rope-char->line` | 2 | 0-based line index containing a char index |
-| | `rope-line->char` | 2 | char index where a 0-based line begins |
-| **Terminal** (the editor/display/input seam — ADR-046; the in-process crossterm frontend that paints the render-op protocol, `std/editor/display.blsp`) | `term/enter` | 0 | take over the terminal: raw mode + alternate screen, cursor hidden, and the kitty keyboard protocol's repeats and releases where the terminal speaks it (inferred from the repeats where it does not) → nil. Pair with `term/leave` |
-| | `term/leave` | 0 | restore the terminal (show cursor, leave alternate screen, disable raw mode) → nil |
-| | `term/size` | 0 | terminal size as `[cols rows]` (character cells) |
-| | `term/poll` | 1 | `(term/poll ms)` → wait up to `ms` ms for a key: a 1-char string (printable), a keyword for specials (`:up` `:down` `:left` `:right` `:enter` `:escape` `:backspace` `:tab` `:back-tab` `:delete` `:home` `:end` `:page-up` `:page-down`, ctrl combos like `:ctrl-c`, alt combos like `:alt-f`; a named key under modifiers spells them the same way — `:ctrl-left`, `:alt-shift-up`, `:ctrl-meta-delete` (ADR-328)), or `nil` on timeout. Always pass a finite `ms`. **Enter caveat:** `:enter` is the named-key event, but a raw CR/LF byte (a pty, CRLF translation, or piped input) arrives as `:ctrl-m` (CR `0x0d`) / `:ctrl-j` (LF `0x0a`) — a line editor should treat all three as "submit". **After `term/enter`** a key coming up is delivered too, as `[:key-up press]` — `press` what that key's press delivered, though Ctrl or Shift came up first. The kitty keyboard protocol reports it (kitty, foot, WezTerm, Ghostty, Alacritty ≥0.13; `term/enter` turns it on when the terminal says it speaks it); any other terminal, tmux, and the keys the protocol still sends as text have it inferred: a held key is the same press arriving faster than a hand presses one key, and it comes up when the repeats stop (a tapped key has no key-up). A held key's repeat already superseded in the buffered input is dropped, so no backlog plays after the key is up; a press is never dropped, nor typed text (ADR-441) |
-| | `term/held-key` | 0 | the key held down now, as its press delivered it, or `nil`. Reported by a kitty-protocol terminal, inferred in any other from a run of repeats faster than a hand presses one key; `nil` outside `term/enter`. `editor/ui/*term-display*`'s `:key-held?` (ADR-441) |
-| | `term/draw` | 1 | paint a **frame** — a vector of render ops `[:clear]` / `[:text row col s]` / `[:text row col s face]` / `[:cursor row col]`, where a face is a map like `{:fg :red :bold true}` → nil. The frontend that interprets the display protocol |
-| | `term/raw-enter` | 0 | enter raw mode **only** — no alternate screen, cursor stays visible, scrollback preserved → nil. The seam for an *inline* editor (the REPL, `std/editor/lineedit.blsp`); use `term/enter` for a full-screen TUI. Pair with `term/raw-leave` |
-| | `term/raw-leave` | 0 | leave raw mode (teardown for `term/raw-enter`) → nil |
-| | `term/invalidate` | 0 | forget what the terminal shows: the next `term/draw` paints every cell (ADR-586) |
-| | `term/colors` | 0–1 | the colour depth frames are written at (`:truecolor` / `:256` / `:16`), or set it (ADR-586) |
-| | `term/bg` | 1–2 | the terminal's default face — what `[:clear]` fills, a face with no colour of its own drawn in (ADR-586) |
-| | `term/suspend` | 0 | give the terminal back, stop the process (SIGTSTP), take it again when continued → `:suspended`; `:no-job-control` (nothing stopped) in an orphaned process group (ADR-586) |
-| | `term/refresh` | 0 | raw mode back and the next frame painted whole, after a stop and continue (ADR-586) |
-| | `term/repaint-due?` | 0 | whether the next `term/draw` paints the screen whole (ADR-586) |
-| | `term/emit` | 1 | paint inline, **relative**-motion ops: `[:print str]` / `[:print str face]` / `[:cr]` / `[:nl]` / `[:up n]` / `[:down n]` / `[:col n]` / `[:clear-eol]` / `[:clear-below]` / `[:clear-screen]` → nil. The inline counterpart to `term/draw` (which is absolute); queues all ops then flushes once |
-| **Process introspection** | `proc/mailbox-size` | 1 | `(proc/mailbox-size pid)` → the number of messages queued in a live local process's mailbox (its receive backlog), or `nil` for a remote/dead pid. The one process-state accessor Brood can't reach (the queue lives behind the scheduler registry); `(list-processes)` + `self` are the others. Used by `std/tool/observer.blsp` |
-| | `proc/info` | 1 | `(proc/info pid)` → a snapshot map of a live local process — `{:id :node :name :status :mailbox :monitored-by :parent :memory}` (`:status` `:running`/`:runnable`/`:waiting`; `:name` nil if unregistered; `:parent` the spawner's id, nil for the root; `:memory` LOCAL heap-footprint bytes, published on `receive` — 0 for a process that never receives) — or `nil` for a remote/dead pid. Assembled from registry/scheduler/monitor cells (ADR-051). The observer reads this |
-| | `list-processes` | 0 | Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes. |
+| **Table** (the one identity-mutable structure; shared by identity, deep-clones in/out) | `%table` | 0 | create a new empty in-memory table: a shared, mutable key→value store behind an opaque handle — mutated in place and shared by identity (the handle can be sent to other processes, which all see the same store); keys/values are deep-cloned in and out, so no two processes alias stored data. Local to this runtime; returns the handle |
+| | `%table-put` | 3 | store `v` under key `k` (overwriting; structural key equality); returns `t` for threading |
+| | `%table-get` | 2–3 | a fresh copy of the value stored under `k`, or the default (nil if omitted) when absent |
+| | `%table-has?` | 2 | true if the table has an entry for key `k` |
+| | `%table-delete` | 2 | remove key `k` if present; returns `t` |
+| | `%table-incr` | 2–3 | atomically add `delta` (default 1) to the integer at key `k` (absent → 0) and return the new value — the read-modify-write is atomic under the table lock, so concurrent increments never lose an update; errors if the existing value is not an integer |
+| | `%table-count` | 1 | the number of entries |
+| | `%table-snapshot` | 1 | a consistent point-in-time copy of the whole table as an immutable map — atomic, O(n), unaffected by later mutation |
+| | `%table-drop` | 1 | remove the table from the registry, freeing its store; idempotent, returns true if it existed (other handles then error on use) |
+| **Rope** (editor buffer text; immutable, char-indexed — ADR-045) | `%string->rope` | 1 | a rope holding the characters of a string — the constructor |
+| | `%rope->string` | 1 | the full text of a rope as a string (the only way a rope's content crosses a process: ropes are process-local) |
+| | `%rope-length` | 1 | character count |
+| | `%rope-line-count` | 1 | line count (a trailing newline ends a line; `""` is 1 line) |
+| | `%rope-insert` | 3 | `(rope-insert r idx s)` → a **fresh** rope with `s` inserted at char `idx` |
+| | `%rope-delete` | 3 | `(rope-delete r start end)` → a **fresh** rope with chars `[start, end)` removed |
+| | `%rope-slice` | 3 | text of chars `[start, end)` as a string |
+| | `%rope-line` | 2 | text of line `n` (0-based), including its trailing newline — the viewport primitive |
+| | `%rope-char->line` | 2 | 0-based line index containing a char index |
+| | `%rope-line->char` | 2 | char index where a 0-based line begins |
+| **Terminal** (the editor/display/input seam — ADR-046; the in-process crossterm frontend that paints the render-op protocol, `std/editor/display.blsp`) | `%term-enter` | 0 | take over the terminal: raw mode + alternate screen, cursor hidden, and the kitty keyboard protocol's repeats and releases where the terminal speaks it (inferred from the repeats where it does not) → nil. Pair with `term/leave` |
+| | `%term-leave` | 0 | restore the terminal (show cursor, leave alternate screen, disable raw mode) → nil |
+| | `%term-size` | 0 | terminal size as `[cols rows]` (character cells) |
+| | `%term-poll` | 1 | `(term/poll ms)` → wait up to `ms` ms for a key: a 1-char string (printable), a keyword for specials (`:up` `:down` `:left` `:right` `:enter` `:escape` `:backspace` `:tab` `:back-tab` `:delete` `:home` `:end` `:page-up` `:page-down`, ctrl combos like `:ctrl-c`, alt combos like `:alt-f`; a named key under modifiers spells them the same way — `:ctrl-left`, `:alt-shift-up`, `:ctrl-meta-delete` (ADR-328)), or `nil` on timeout. Always pass a finite `ms`. **Enter caveat:** `:enter` is the named-key event, but a raw CR/LF byte (a pty, CRLF translation, or piped input) arrives as `:ctrl-m` (CR `0x0d`) / `:ctrl-j` (LF `0x0a`) — a line editor should treat all three as "submit". **After `term/enter`** a key coming up is delivered too, as `[:key-up press]` — `press` what that key's press delivered, though Ctrl or Shift came up first. The kitty keyboard protocol reports it (kitty, foot, WezTerm, Ghostty, Alacritty ≥0.13; `term/enter` turns it on when the terminal says it speaks it); any other terminal, tmux, and the keys the protocol still sends as text have it inferred: a held key is the same press arriving faster than a hand presses one key, and it comes up when the repeats stop (a tapped key has no key-up). A held key's repeat already superseded in the buffered input is dropped, so no backlog plays after the key is up; a press is never dropped, nor typed text (ADR-441) |
+| | `%term-held-key` | 0 | the key held down now, as its press delivered it, or `nil`. Reported by a kitty-protocol terminal, inferred in any other from a run of repeats faster than a hand presses one key; `nil` outside `term/enter`. `editor/ui/*term-display*`'s `:key-held?` (ADR-441) |
+| | `%term-draw` | 1 | paint a **frame** — a vector of render ops `[:clear]` / `[:text row col s]` / `[:text row col s face]` / `[:cursor row col]`, where a face is a map like `{:fg :red :bold true}` → nil. The frontend that interprets the display protocol |
+| | `%term-raw-enter` | 0 | enter raw mode **only** — no alternate screen, cursor stays visible, scrollback preserved → nil. The seam for an *inline* editor (the REPL, `std/editor/lineedit.blsp`); use `term/enter` for a full-screen TUI. Pair with `term/raw-leave` |
+| | `%term-raw-leave` | 0 | leave raw mode (teardown for `term/raw-enter`) → nil |
+| | `%term-invalidate` | 0 | forget what the terminal shows: the next `term/draw` paints every cell (ADR-586) |
+| | `%term-colors` | 0–1 | the colour depth frames are written at (`:truecolor` / `:256` / `:16`), or set it (ADR-586) |
+| | `%term-bg` | 1–2 | the terminal's default face — what `[:clear]` fills, a face with no colour of its own drawn in (ADR-586) |
+| | `%term-suspend` | 0 | give the terminal back, stop the process (SIGTSTP), take it again when continued → `:suspended`; `:no-job-control` (nothing stopped) in an orphaned process group (ADR-586) |
+| | `%term-refresh` | 0 | raw mode back and the next frame painted whole, after a stop and continue (ADR-586) |
+| | `%term-repaint-due` | 0 | whether the next `term/draw` paints the screen whole (ADR-586) |
+| | `%term-emit` | 1 | paint inline, **relative**-motion ops: `[:print str]` / `[:print str face]` / `[:cr]` / `[:nl]` / `[:up n]` / `[:down n]` / `[:col n]` / `[:clear-eol]` / `[:clear-below]` / `[:clear-screen]` → nil. The inline counterpart to `term/draw` (which is absolute); queues all ops then flushes once |
+| **Process introspection** | `%mailbox-size` | 1 | `(proc/mailbox-size pid)` → the number of messages queued in a live local process's mailbox (its receive backlog), or `nil` for a remote/dead pid. The one process-state accessor Brood can't reach (the queue lives behind the scheduler registry); `(list-processes)` + `self` are the others. Used by `std/tool/observer.blsp` |
+| | `%process-info` | 1 | `(proc/info pid)` → a snapshot map of a live local process — `{:id :node :name :status :mailbox :monitored-by :parent :memory}` (`:status` `:running`/`:runnable`/`:waiting`; `:name` nil if unregistered; `:parent` the spawner's id, nil for the root; `:memory` LOCAL heap-footprint bytes, published on `receive` — 0 for a process that never receives) — or `nil` for a remote/dead pid. Assembled from registry/scheduler/monitor cells (ADR-051). The observer reads this |
+| | `%list-processes` | 0 | Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes. |
 | **Type reflection** | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the one irreducible reflective primitive. The tag predicates (`nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `map?` `fn?`) are Brood wrappers over it, as are the in-language type checks |
-| **Type checking** (advisory; see [types.md](types.md)) | `check` | 1 | run the advisory type checker over a *quoted* form: macro-expand it (like the real compile pass), then return a **list of warning strings** for provably-wrong primitive arguments (e.g. `(first 5)` → `"first: argument 1 expects nil \| pair \| vector, got int (5)"`), or `nil` when nothing is wrong. Advisory: never raises |
-| | `check-file` | 1–2 | check every top-level form in the file at `path`, returning pre-formatted `"path:line:col: warning: …"` strings (or `nil` if clean). Reads but does **not** evaluate. Used by `(check-project)` for the `nest test` / `nest run` / `nest check` pre-flight |
-| | `check-file-structured` | 1–2 | Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics). |
-| | `check-string-here` | 1 | `(reflect/check-string-here src)` → `check-string-structured` under THIS process's compile context — the namespace last opened and its imports, as `eval` will resolve `src` — so a form evaluated out of a module's buffer is checked against the module's imports and `deftype`s; `()` when `src` doesn't parse. Forms opening their own `(defmodule …)` are checked under it instead. |
-| | `check-string-structured` | 1 | Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics. |
-| | `check-file-deps` | 1–2 | Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; |
-| | `check-deps-fp` | 1 | Recompute the fingerprint of a file's dep-keys (from check-file-deps) against the current global image. The incremental check cache reuses a file's warnings iff this equals the stored fingerprint. |
+| **Type checking** (advisory; see [types.md](types.md)) | `%check` | 1 | run the advisory type checker over a *quoted* form: macro-expand it (like the real compile pass), then return a **list of warning strings** for provably-wrong primitive arguments (e.g. `(first 5)` → `"first: argument 1 expects nil \| pair \| vector, got int (5)"`), or `nil` when nothing is wrong. Advisory: never raises |
+| | `%check-file` | 1–2 | check every top-level form in the file at `path`, returning pre-formatted `"path:line:col: warning: …"` strings (or `nil` if clean). Reads but does **not** evaluate. Used by `(check-project)` for the `nest test` / `nest run` / `nest check` pre-flight |
+| | `%check-file-structured` | 1–2 | Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `%check` tool, editor diagnostics). |
+| | `%check-string-here` | 1 | `(reflect/check-string-here src)` → `%check-string-structured` under THIS process's compile context — the namespace last opened and its imports, as `eval` will resolve `src` — so a form evaluated out of a module's buffer is checked against the module's imports and `deftype`s; `()` when `src` doesn't parse. Forms opening their own `(defmodule …)` are checked under it instead. |
+| | `%check-string-structured` | 1 | Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics. |
+| | `%check-file-deps` | 1–2 | Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; |
+| | `%check-deps-fp` | 1 | Recompute the fingerprint of a file's dep-keys (from check-file-deps) against the current global image. The incremental check cache reuses a file's warnings iff this equals the stored fingerprint. |
 | | `%check-walk-flags` | 0 | the names of the `BROOD_*` flags that change what a checker walk does (`cli_support::WALK_FLAGS`), as a vector of strings — `nest check`'s manifests and `brood file`'s pre-flight verdict cache key on their values from this one list (ADR-371/381) |
-| **Value ↔ text & I/O** | `str` | n | concatenate the *display* forms of args → string |
+| **Value ↔ text & I/O** | `str` | any | concatenate the *display* forms of args → string |
 | | `pr-str` | 1 | *readable* form of a value → string |
-| | `print` | n | write display forms to stdout → nil (`println`, which adds a newline, is Brood over it) |
-| | `eprint` | n | write display forms to **stderr** → nil (mirrors `print`; `eprintln` is the Brood newline-adding wrapper) |
-| | `stdout-tty?` | 0 | true when stdout is an interactive terminal (false when piped/captured) — gates colour output |
-| | `stdin-tty?` | 0 | true when stdin is an interactive terminal (false when redirected from a pipe/file) — the REPL gates raw-mode line editing on this |
-| | `%render` | any | The space-joined display forms of the arguments as one string (no output). The rendering half of `print`; Brood's print/println route the result through the dynamic `*out*` port. |
+| | `%eprint` | any | write display forms to **stderr** → nil (mirrors `io/write`; `io/puts` is the Brood newline-adding wrapper) |
+| | `%stdout-tty?` | 0 | true when stdout is an interactive terminal (false when piped/captured) — gates colour output |
+| | `%stdin-tty?` | 0 | true when stdin is an interactive terminal (false when redirected from a pipe/file) — the REPL gates raw-mode line editing on this |
+| | `%render` | any | The space-joined display forms of the arguments as one string (no output). The rendering half of `io/write`; Brood's print/println route the result through the dynamic `*out*` port. |
 | | `%write-out` | 1 | Write the ready string `s` to the current stdout sink — the active capture buffer (`with-out-str`) if set, else real stdout. The default `*out*` port. |
 | | `%write-err` | 1 | Write the ready string `s` to real stderr (never captured). The default `*err*` port. |
-| | `read-line` | 0 | Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input. |
-| | `reflect/read-all` | 1 | Parse every form in string s and return them as a list (the all-forms sibling of reflect/read-string). |
-| | `reflect/read-first` | 1 | Parse and return the first form in string s, ignoring any trailing forms (the lenient sibling of reflect/read-string — for peeking a multi-form source's leading form, e.g. a file's (defmodule …) header). |
-| **Time** | `now` | 0 | wall-clock milliseconds since the Unix epoch (integer); subtract two readings for elapsed time |
-| | `now-ns` | 0 | Wall-clock nanoseconds since the Unix epoch (finer-grained than now). |
-| **Memory** | `mem-bytes` | 0 | bytes currently allocated process-wide (from the counting global allocator) |
-| | `mem-peak` | 0 | high-water mark of allocated bytes since process start |
+| | `%read-line-start` | 0 | Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input. |
+| | `%read-all` | 1 | Parse every form in string s and return them as a list (the all-forms sibling of reflect/read-string). |
+| | `%read-first` | 1 | Parse and return the first form in string s, ignoring any trailing forms (the lenient sibling of reflect/read-string — for peeking a multi-form source's leading form, e.g. a file's (defmodule …) header). |
+| **Time** | `%now` | 0 | wall-clock milliseconds since the Unix epoch (integer); subtract two readings for elapsed time |
+| | `%now-ns` | 0 | Wall-clock nanoseconds since the Unix epoch (finer-grained than now). |
+| **Memory** | `%mem-bytes` | 0 | bytes currently allocated process-wide (from the counting global allocator) |
+| | `%mem-peak` | 0 | high-water mark of allocated bytes since process start |
 | **Self-hosting hooks** | `reflect/eval` | 1 | evaluate a form in the global env |
-| | `reflect/read-string` | 1 | parse one form from text |
+| | `%read-string` | 1 | parse one form from text |
 | | `reflect/eval-string` | 1 | read + evaluate every form in a string (string analogue of `reflect/load`) |
 | | `reflect/load` | 1 | read + evaluate a file |
-| | `%builtin-module` | 1 | source of a baked-in std module by name, or nil (used by Brood `require`) |
-| | `apply` | ≥2 | call a function with a spliced argument list |
+| | `%builtin-module` | 1 | source of a baked-in std module by name, or nil (used by Brood `require-one`) |
+| | `apply` | 2+ | call a function with a spliced argument list |
 | | `%run-program-file` | 1 | Run the program file at `path` as its own green process (ADR-135) and block until it finishes; nil, or raises if a top-level form did. |
 | | `system/reload-defs` | 1 | Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil. |
 | | `%offload` | 2 | Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. |
@@ -152,14 +154,14 @@ arg silently becoming `nil`.
 | | `file/spit-append` | 2 | Append s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, creating it if absent (unlike file/spit, which truncates). Returns nil. |
 | | `file/spit-private` | 2 | Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. On Windows the file is created with an owner-only DACL, so it is never open to anyone else, even for a moment. The private-by-default write for a secret (file/spit leaves a world-readable file). |
 | | `%file-swap` | 4 | Replace the entire contents of data-path with new, but ONLY if they currently equal expected; returns true when swapped, false when they differ (re-read, recompute, retry). |
-| | `canonicalize` | 1 | The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. |
+| | `%canonicalize` | 1 | The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. |
 | | `file/cp` | 2 | Copy file `from` to `to` (replacing `to`), preserving contents and permissions. Binary-safe (unlike slurp+spit). Returns nil; errors on failure. |
 | | `file/rename` | 2 | Rename/move file `from` to `to`. Returns nil; errors on failure. |
 | | `file/rm` | 1 | Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure. |
 | | `file/rmdir` | 1 | Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure. |
-| **System** | `getenv` | 1 | environment-variable value, or nil if unset |
-| | `run-process` | 2 | run an external program (`prog`, args list), inherit stdio → exit code |
-| | `hostname` | 0 | This machine's short hostname (no domain). Used to qualify a node name as name@host. |
+| **System** | `%getenv` | 1 | environment-variable value, or nil if unset |
+| | `%run-process` | 2 | run an external program (`prog`, args list), inherit stdio → exit code |
+| | `%hostname` | 0 | This machine's short hostname (no domain). Used to qualify a node name as name@host. |
 | | `%env-all` | 0 | All environment variables as a map of string→string. |
 | | `%argv` | 0 | Command-line arguments as a vector of strings (including argv[0]). |
 | | `%os-type` | 0 | The host OS as a keyword: :linux, :macos, or :windows. |
@@ -167,21 +169,21 @@ arg silently becoming `nil`.
 | | `%os-detach` | 2–3 | Start prog with args and let it go: null stdio, no handle, not stopped with the caller (own session — process group, no controlling terminal; no Job Object on Windows). |
 | | `%program-path` | 1–2 | Where a spawn with opts (`:cwd`, `:env`) finds prog — the one resolver every spawn uses (ADR-607) — or nil. `os/which` is it. |
 | | `%halt` | 1 | Terminate the process with exit code. Never returns. |
-| | `image-thumb` | 3 | Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). |
+| | `%image-thumb` | 3 | Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). |
 | | `%image-write-png` | 2–3 | Write a {:width :height :rgba} map (what image-thumb, `%gui-render-frame` and `%gui-capture` return) to path as a PNG and return path; opts `:crop [x y w h]` and `:scale n` (1..16, nearest neighbour). Wrapped as `gui/write-png`. ADR-609. |
-| **Macro support** | `macroexpand-1` `macroexpand` | 1 | expand a form (one step / fully) |
-| | `gensym` | 0–1 | a fresh, unique symbol (optional name prefix) |
-| **Source positions** (editor tooling) | `form-pos` | 1 | a form's `[line col]` source position vector, or nil |
-| | `current-file` | 0 | path of the file currently being loaded, or nil |
-| | `source-location` | 1 | `[file line col]` of where `'name` was defined (`def`/`defn`/`defmacro`/`defdyn` site), or nil. Captured pre-expansion so macros' surface forms are located accurately (ADR-031) |
-| | `parse-source` | 1 | parse a `.blsp` source string into a span-carrying CST node (`Atom`/`Cst`); the formatter and LSP read structure + positions from this rather than re-reading source. ADR-025 |
-| | `parse-source-positioned` | 1 | parse a source string into a CST of **maps** — `{:kind :start :end}` (leaves add `:text`, containers/wrappers add `:kids`) with half-open **character** offsets; backs structural navigation (`std/sexp`) without re-deriving positions in Brood. ADR-045 |
-| | `tree-sitter-parse` | 2 | parse `source` with the tree-sitter grammar named by keyword `lang` (`:ruby`/`:elixir`) into the **same** positioned-CST map shape as `parse-source-positioned` (`:kind` a node-type keyword, `:named` false for anonymous tokens) — so `std/sexp` + the editor's `:fontify` run over a foreign tree unchanged. Error-recovery nodes additionally carry `:error true` (an `ERROR` node) or `:missing true` (a zero-width inserted token), so a fontifier can draw diagnostics. Feature `treesit`; errors otherwise. ROADMAP §C |
-| | `tree-sitter-load-grammar` | 2 | load a tree-sitter grammar from the shared library at `path` and register it under the language keyword `lang`, so `tree-sitter-parse` uses it like a built-in one; returns its ABI version. How a language the runtime was not built with gets parsed at all. The kernel knows no path convention — the caller names the library, so an application keeps its own grammar directory. Overrides a bundled grammar of the same name. A missing file, a library exporting no `tree_sitter_<lang>`, or an incompatible grammar ABI are errors, never crashes; it is native code, so load only from a directory the user controls. Feature `treesit`. ROADMAP §C |
-| | `tree-sitter-languages` | 0 | the languages this runtime can parse right now — every grammar loaded with `tree-sitter-load-grammar` plus the built-in ones — as a sorted vector of keywords; `[]` without feature `treesit`. What an editor asks before offering to fetch a grammar. ROADMAP §C |
+| **Macro support** | `reflect/macroexpand-1` `reflect/macroexpand` | 1 | expand a form (one step / fully) |
+| | `reflect/gensym` | 0–1 | a fresh, unique symbol (optional name prefix) |
+| **Source positions** (editor tooling) | `%form-pos` | 1 | a form's `[line col]` source position vector, or nil |
+| | `%current-file` | 0 | path of the file currently being loaded, or nil |
+| | `%source-location` | 1 | `[file line col]` of where `'name` was defined (`def`/`defn`/`defmacro`/`defdyn` site), or nil. Captured pre-expansion so macros' surface forms are located accurately (ADR-031) |
+| | `%parse-source` | 1 | parse a `.blsp` source string into a span-carrying CST node (`Atom`/`Cst`); the formatter and LSP read structure + positions from this rather than re-reading source. ADR-025 |
+| | `%parse-source-positioned` | 1 | parse a source string into a CST of **maps** — `{:kind :start :end}` (leaves add `:text`, containers/wrappers add `:kids`) with half-open **character** offsets; backs structural navigation (`std/sexp`) without re-deriving positions in Brood. ADR-045 |
+| | `%tree-sitter-parse` | 2 | parse `source` with the tree-sitter grammar named by keyword `lang` (`:ruby`/`:elixir`) into the **same** positioned-CST map shape as `%parse-source-positioned` (`:kind` a node-type keyword, `:named` false for anonymous tokens) — so `std/sexp` + the editor's `:fontify` run over a foreign tree unchanged. Error-recovery nodes additionally carry `:error true` (an `ERROR` node) or `:missing true` (a zero-width inserted token), so a fontifier can draw diagnostics. Feature `treesit`; errors otherwise. ROADMAP §C |
+| | `%tree-sitter-load-grammar` | 2 | load a tree-sitter grammar from the shared library at `path` and register it under the language keyword `lang`, so `%tree-sitter-parse` uses it like a built-in one; returns its ABI version. How a language the runtime was not built with gets parsed at all. The kernel knows no path convention — the caller names the library, so an application keeps its own grammar directory. Overrides a bundled grammar of the same name. A missing file, a library exporting no `tree_sitter_<lang>`, or an incompatible grammar ABI are errors, never crashes; it is native code, so load only from a directory the user controls. Feature `treesit`. ROADMAP §C |
+| | `%tree-sitter-languages` | 0 | the languages this runtime can parse right now — every grammar loaded with `%tree-sitter-load-grammar` plus the built-in ones — as a sorted vector of keywords; `[]` without feature `treesit`. What an editor asks before offering to fetch a grammar. ROADMAP §C |
 | | `%tree-sitter-tree` | 2 | parse a whole document — a rope (read chunk by chunk, never copied) or a string — into a tree HANDLE: an opaque, immutable ref naming the tree and its text, OWNED by the calling process — freed when it frees it or exits, never evicted (ADR-495). The incremental counterpart of the slice-based queries. Feature `treesit`. ADR-443 |
 | | `%tree-sitter-tree-reparse` | 4 | `(tree text lang edits)` → a NEW handle for `text`, reparsed incrementally from `tree` (which stays valid). `edits`: one `[start old-end new-end]` in chars, a sequence of them in order, or nil to derive the change by comparing the texts. An edit that does not fit is an error; a gone handle, another `lang` or a reloaded grammar is a full parse. ADR-443 |
-| | `%tree-sitter-tree-spans` | 5–6 | `(tree table keywords? from to [injections])` → `[start end reported]` for the outermost nodes the face `table` colours (kind keywords, or a map from selector — a kind or a context map `{:kind :parent :field :nth :text :after}`, ADR-486, ADR-487, ADR-614 — to what a span reports) reaching chars `[from, to)`, clipped to it, absolute offsets; walks only the nodes in range and parses nothing. nil for a gone handle. `keywords?` true reports an anonymous token starting with a letter as `:__keyword__`; a set `#{:keywords :punctuation}` adds brackets, commas and semicolons as `:__punctuation__` (ADR-614). ADR-443. with `injections`, the embedded documents reaching the range are parsed per call and replace the host's spans over their pieces. ADR-489 |
+| | `%tree-sitter-tree-spans` | 5–6 | `(tree table keywords? from to [injections])` → `[start end reported]` for the outermost nodes the face `%table` colours (kind keywords, or a map from selector — a kind or a context map `{:kind :parent :field :nth :text :after}`, ADR-486, ADR-487, ADR-614 — to what a span reports) reaching chars `[from, to)`, clipped to it, absolute offsets; walks only the nodes in range and parses nothing. nil for a gone handle. `keywords?` true reports an anonymous token starting with a letter as `:__keyword__`; a set `#{:keywords :punctuation}` adds brackets, commas and semicolons as `:__punctuation__` (ADR-614). ADR-443. with `injections`, the embedded documents reaching the range are parsed per call and replace the host's spans over their pieces. ADR-489 |
 | | `%tree-sitter-tree-changes` | 1–2 | `(tree [injections])` → the char ranges `[start end]` whose colouring may differ from the tree this one was reparsed from (the edit plus tree-sitter's changed ranges); `[]` unchanged, `true` after a fresh parse, nil gone. ADR-443; with `injections`, each range widened over the embedded documents it reaches. ADR-489 |
 | | `%tree-sitter-tree-free` | 1 | drop a tree handle now; true when it was still held. ADR-443 |
 | | `%tree-sitter-tree-give` | 2 | `(tree pid)` → hand a tree handle the caller OWNS to the local process `pid`, which then frees it or takes it down when it exits; true when held, false when already gone or `pid` is dead; an error from a non-owner or for a remote pid. How a task that parsed off the loop returns its tree. ADR-495 |
@@ -193,18 +195,18 @@ arg silently becoming `nil`.
 | | `%tree-sitter-declare-grammar` | 2 | `(path lang)` → true: say that `lang`'s grammar is the library at `path` WITHOUT loading it; the first parse, query or tree handle naming `lang` loads it, once. A re-declaration of a loaded language reloads it at its next use. A failed load is kept (not retried until declared again): the parse raises its message when nothing else parses `lang`, else keeps the grammar it had. Feature `treesit`. ADR-481 |
 | | `%tree-sitter-grammar-status` | 1 | `(lang)` → `:declared`, `:loaded`, `:built-in`, a failure value carrying the last declaration's load error, or nil. Loads nothing. ADR-481 |
 | | `%tree-sitter-grammar-info` | 1 | `(lang)` → `{:lang :abi :version :name :source :loaded-via :named :anonymous :fields}`: the grammar's visible node kinds (keyword sets, aliases included) and field names, its ABI, its own version and name (nil before ABI 15) and the library it was loaded from (or `:built-in`), with `:loaded-via` `:beside` / `:cache` (a content-named copy, so a rebuilt library loads as the new build) or `:in-place` (no copy possible: a library rebuilt at that path may stay the old one until restart). Loads a declared grammar; errors without one. What makes a renamed node detectable. ADR-583 |
-| | `scan-tokens` | 1 | Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. |
-| | `scan-form-start` | 2 | The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. |
-| | `scan-source-extract` | 1 | Native per-file scan for the whole-project check (ADR-119): parse src and return [counts privs def-names] — a map of every symbol's occurrence count, this file's `defn-`/`def-` privates as [bare qual], and every top-level def's qualified name. The fast path replacing the interpreted CST walk. (Post-ADR-146 step 2 privacy is a def-form fact, so the scan collects private *heads* and counts *all* symbols, rather than keying on the retired `--` name marker.) |
-| | `span-runs` | 3–4 | Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. |
-| **Introspection** (editor tooling) | `doc` | 1 | a function/macro's docstring, or nil |
-| | `arglist` | 1 | a function/macro's parameter list (required, `&optional`, `& rest`), or nil |
+| | `%scan-tokens` | 1 | Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. |
+| | `%scan-form-start` | 2 | The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. |
+| | `%scan-source-extract` | 1 | Native per-file scan for the whole-project check (ADR-119): parse src and return [counts privs def-names] — a map of every symbol's occurrence count, this file's `defn-`/`def-` privates as [bare qual], and every top-level def's qualified name. The fast path replacing the interpreted CST walk. (Post-ADR-146 step 2 privacy is a def-form fact, so the scan collects private *heads* and counts *all* symbols, rather than keying on the retired `--` name marker.) |
+| | `%span-runs` | 3–4 | Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. |
+| **Introspection** (editor tooling) | `reflect/doc` | 1 | a function/macro's docstring, or nil |
+| | `reflect/arglist` | 1 | a function/macro's parameter list (required, `&optional`, `& rest`), or nil |
 | | `reflect/global-names` | 0 | every globally bound symbol, sorted by spelling (completion / doc generation) |
 | | `reflect/special-forms` | 0 | the special-form / core-macro names (strings) that read as keywords — the canonical list shared by the syntax highlighter (`std/editor/highlight.blsp`) and the LSP |
 | | `bound?` | 1 | whether a symbol is bound in scope → bool |
 | | `reflect/dynamic?` | 1 | whether a symbol names a dynamic variable (declared via `defdyn`) → bool |
 | | `reflect/builtin-modules` | 0 | The names of every module baked into this binary, as a sorted list of strings — what `(require 'name)` resolves without a load-path. Backs `nest` shell completion and lets a name be validated before requiring it. |
-| | `references-in-source` | 2 | Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded. |
+| | `%references-in-source` | 2 | Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded. |
 | | `system/build-id` | 0 | This brood build's identity as "<version>+<git-sha>+<binary-stamp>" (e.g. "0.1.0+dcab7ca+18f2e1a9b3c4d5e6") — the correct staleness stamp for an on-disk cache of anything the kernel computes. |
 | **Errors / control** | `throw` | 1 | raise a value as an error (non-local exit) |
 | | `%try` | 2 | call a thunk; on raise, call the handler with the caught value |
@@ -221,21 +223,21 @@ arg silently becoming `nil`.
 | | `exit` | 2 | `(exit pid reason)` — send an exit signal to a local process. `:kill` is the untrappable hard kill (dies at its next reduction tick, or now if parked); any other reason is the soft signal (dies at its next `receive`). Monitors fire `[:down ref pid reason]`. No-op for a dead/unknown pid (ADR-063) |
 | | `proc/register` | 2 | bind a local name → pid so peers can address it via `{:name n :node this-node}`. Returns the pid |
 | | `proc/whereis` | 1 | the local pid registered under `name`, or nil. Strictly local — does not query other nodes |
-| | `spawn-count` | 0 | green processes spawned since program start |
-| | `peak-threads` | 0 | high-water mark of spawned threads running concurrently (bounded by the CLI's `-j`) |
-| | `worker-threads` | 0 | size of the scheduler's worker-thread pool (≈ nproc; `-j` overrides) |
+| | `%spawn-count` | 0 | green processes spawned since program start |
+| | `%peak-threads` | 0 | high-water mark of spawned threads running concurrently (bounded by the CLI's `-j`) |
+| | `%worker-threads` | 0 | size of the scheduler's worker-thread pool (≈ nproc; `-j` overrides) |
 | | `link` | 1 | Symmetrically link the current process and pid, local or remote. When either dies, the other gets a [:EXIT pid reason] message if it set (proc/trap-exit true), else dies too on an abnormal reason (propagation cascades through links; :normal does not propagate). |
 | | `unlink` | 1 | Drop the symmetric link between the current process and pid (local or remote; best-effort). Returns nil. |
-| **Distributed nodes** ([docs](distribution.md), ADR-034) | `node/start` | 3 | name this runtime (`node`, `"host:port"`, `cookie`), start the acceptor; cookie is the HMAC key for handshake v2 (never on the wire). Returns the node name |
-| | `connect` | 1 | dial `"name@host:port"`, complete the v2 handshake (magic+version, nonce-exchange, HMAC challenge-response). Returns the peer's node name |
-| | `node/name` | 0 | this runtime's node name — a **keyword** like `:alice@host` (`:nonode` until `node/start`); `(str (node/name))` for string ops. `node/start`/`connect` likewise return keywords |
-| | `node/list` | 0 | list of currently connected peer node names |
-| | `node/monitor` | 1 | get `[:nodedown name]` when the link to node `name` drops (heartbeat timeout or clean close). Persistent — fires on each down |
-| | `node/disconnect` | 1 | tear the link to peer node `name` down now, **without exiting this process**; fires `[:nodedown name]` on both sides and prunes `name` from `(node/list)`. Returns `true` if a link existed, `false` otherwise. The clean way to leave a node cluster while staying alive |
-| | `demonitor-node` | 1 | Cancel this process's node monitor for node `name` (undo monitor-node); a no-op if none is registered. Returns nil. |
-| | `node/grant-guest` | 2 | accept peers that authenticate with a SECOND cookie as guests (ADR-415): their link reaches only the grant's `:names` and the pids this node has sent them, and a message carrying a function is dropped; `:as` names who the guest is. A credential to hand a collaborator instead of the machine cookie |
-| | `node/revoke-guest` | 1 | stop accepting a guest cookie from new links; true when it was granted |
-| | `node/peer-grant` | 1 | the grant a connected peer (a node name, or a pid on it) authenticated with — `{:names [...] :as ... :claimed ...}` — or nil for a full peer (`:claimed` is the node name a guest gave itself; its name here is one the host minted, ADR-425). How a server knows who it is talking to instead of trusting the client |
+| **Distributed nodes** ([docs](distribution.md), ADR-034) | `%node-listen` | 3 | name this runtime (`node`, `"host:port"`, `cookie`), start the acceptor; cookie is the HMAC key for handshake v2 (never on the wire). Returns the node name |
+| | `%node-connect` | 2 | dial `"name@host:port"`, complete the v2 handshake (magic+version, nonce-exchange, HMAC challenge-response). Returns the peer's node name |
+| | `%node-name` | 0 | this runtime's node name — a **keyword** like `:alice@host` (`:nonode` until `node/start`); `(str (node/name))` for string ops. `node/start`/`node/connect` likewise return keywords |
+| | `%nodes` | 0 | list of currently connected peer node names |
+| | `%monitor-node` | 1 | get `[:nodedown name]` when the link to node `name` drops (heartbeat timeout or clean close). Persistent — fires on each down |
+| | `%disconnect` | 1 | tear the link to peer node `name` down now, **without exiting this process**; fires `[:nodedown name]` on both sides and prunes `name` from `(node/list)`. Returns `true` if a link existed, `false` otherwise. The clean way to leave a node cluster while staying alive |
+| | `%demonitor-node` | 1 | Cancel this process's node monitor for node `name` (undo monitor-node); a no-op if none is registered. Returns nil. |
+| | `%node-grant-guest` | 3 | accept peers that authenticate with a SECOND cookie as guests (ADR-415): their link reaches only the grant's `:names` and the pids this node has sent them, and a message carrying a function is dropped; `:as` names who the guest is. A credential to hand a collaborator instead of the machine cookie |
+| | `%node-revoke-guest` | 1 | stop accepting a guest cookie from new links; true when it was granted |
+| | `%node-peer-grant` | 1 | the grant a connected peer (a node name, or a pid on it) authenticated with — `{:names [...] :as ... :claimed ...}` — or nil for a full peer (`:claimed` is the node name a guest gave itself; its name here is one the host minted, ADR-425). How a server knows who it is talking to instead of trusting the client |
 
 **Why this set is irreducible:** every entry needs Rust — raw number ops, heap
 construct/inspect, the type-tag *reflection* (`type-of`), I/O, value→text
@@ -244,16 +246,14 @@ pass, or a hook into `eval`/the reader. None of it can be written in Brood. Ever
 in the prelude — including the tag predicates (over `type-of`), the full
 arithmetic/comparison families `+ - * / < <= > >= =` (over `%add`/`%lt`/`%eq`; also
 ~~`not=`~~, deprecated since 0.19.1 — write `(not (= a b))`),
-the whole math library `mod`/`quot`/`ceil`/`round`/`pow`/`sqrt`/`even?`/`odd?` +
-variadic `min`/`max` (over `rem`/`floor`/`/`/`*`/`<` — `sqrt` is Newton's method),
-the whole sequence library
-(`range`/`take`/`drop`/`take-while`/`drop-while`/`any?`/`every?`/`find`/`zip`/
-`partition`/`sort`/`sort-by` — a Brood merge sort), `empty?` (type dispatch over
-the length primitives), `println` (over `print`), and the map surface
-`get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?`/`reduce-kv` (over `%map-get`/
-`%map-assoc`/`%map-dissoc`/`%map-pairs`). Of the math library only **`floor`** (the Float→Int crossing) and
-**`rem`** (exact integer remainder) need Rust — everything else is Brood over
-them. The map literal `{ }` is read by the reader and evaluated like a vector
+most of the `math` module,
+the sequence library (`seq/take-while`, `any?`, `every?`, `seq/find`, `seq/zip`,
+`seq/partition`, `seq/sort-by` …), `io/puts` and `io/write` (over `%render` and the
+`*out*` port), and the map surface `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?`
+(over `%map-get`/`%map-assoc`/`%map-dissoc`/`%map-pairs`). Where a primitive stands behind a
+math function it is the crossing or the precision that needs Rust: **`math/floor`** (the
+Float→Int crossing), **`%rem`** and **`%quot`** (exact integer division), and the
+floating-point functions (`%f64-sqrt`, `%sin`, `%exp` …). The map literal `{ }` is read by the reader and evaluated like a vector
 literal — no constructor call.
 
 | **Bitwise** (integers, two's-complement) | `bit/and` | 2 | Bitwise AND of integers a and b. |
@@ -267,25 +267,25 @@ literal — no constructor call.
 | **Float bit-level** | `bit/float->` | 1 | The IEEE 754 binary64 bit pattern of x, as a non-negative integer (a bignum when the sign bit is set). Reinterpretation, not conversion — the only exact float comparison there is: it separates -0.0 from 0.0 and distinguishes NaN payloads, both of which = collapses. The inverse of bits->float. |
 |  | `bit/->float` | 1 | The binary64 float whose bit pattern is n (0 <= n < 2^64). The inverse of float->bits. |
 |  | `%f64-sqrt` | 1 | The IEEE 754 square root of x (f64::sqrt). x must be non-negative; raises otherwise. Handles subnormals and ±0 correctly. |
-| **Math** (transcendental — all return floats) | `sin` | 1 | The sine of x (radians). Returns a float. |
-|  | `cos` | 1 | The cosine of x (radians). Returns a float. |
-|  | `tan` | 1 | The tangent of x (radians). Returns a float. |
-|  | `asin` | 1 | The arcsine of x in radians. x must be in [-1, 1]; raises otherwise. |
-|  | `acos` | 1 | The arccosine of x in radians. x must be in [-1, 1]; raises otherwise. |
-|  | `atan` | 1 | The arctangent of x in radians (result in [-π/2, π/2]). |
-|  | `atan2` | 2 | The angle in radians of the vector (x, y) from the positive x-axis, in (-π, π]. Handles x=0. |
-|  | `exp` | 1 | e raised to the power x. Returns a float. |
-|  | `ln` | 1 | The natural logarithm of x. x must be positive; raises otherwise. |
-|  | `log2` | 1 | The base-2 logarithm of x. x must be positive; raises otherwise. |
-|  | `log10` | 1 | The base-10 logarithm of x. x must be positive; raises otherwise. |
+| **Math** (transcendental — all return floats) | `%sin` | 1 | The sine of x (radians). Returns a float. |
+|  | `%cos` | 1 | The cosine of x (radians). Returns a float. |
+|  | `%tan` | 1 | The tangent of x (radians). Returns a float. |
+|  | `%asin` | 1 | The arcsine of x in radians. x must be in [-1, 1]; raises otherwise. |
+|  | `%acos` | 1 | The arccosine of x in radians. x must be in [-1, 1]; raises otherwise. |
+|  | `%atan` | 1 | The arctangent of x in radians (result in [-π/2, π/2]). |
+|  | `%atan2` | 2 | The angle in radians of the vector (x, y) from the positive x-axis, in (-π, π]. Handles x=0. |
+|  | `%exp` | 1 | e raised to the power x. Returns a float. |
+|  | `%ln` | 1 | The natural logarithm of x. x must be positive; raises otherwise. |
+|  | `%log2` | 1 | The base-2 logarithm of x. x must be positive; raises otherwise. |
+|  | `%log10` | 1 | The base-10 logarithm of x. x must be positive; raises otherwise. |
 | **Decimal** (exact base-10 for money — the `1.50M` literal) | `decimal/of` | 1 | Construct an exact arbitrary-precision base-10 decimal from x: a string ("1.50"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M. |
 |  | `decimal/->string` | 1 | The canonical decimal string of decimal d (no M suffix). |
 |  | `decimal/->float` | 1 | Decimal d as an (inexact) float. |
-|  | `->fixed` | 2 | Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0. |
+|  | `%->fixed` | 2 | Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0. |
 | **Ratio** (exact rational — the `1/2` literal; `/` on integers is exact, ADR-196) | `math/numerator` | 1 | The numerator of a ratio (`(math/numerator 3/4)` → 3), or an integer itself. |
 |  | `math/denominator` | 1 | The positive denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer. |
 |  | `decimal/number->` | 1 | A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision. (`->float`, `ratio?`, and `math/rational` are prelude functions.) |
-| **Set** (`#{…}`; CHAMP-backed. `%`-internal — `std/set.blsp` is the library) | `%set` | any | Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `set` library's constructor is Brood over this. |
+| **Set** (`#{…}`; CHAMP-backed. `%`-internal — `std/set.blsp` is the library) | `%set` | any | Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `%set` library's constructor is Brood over this. |
 |  | `%set-add` | 2 | A fresh set like s with element x added (a set already holding x is returned unchanged). O(log n). |
 |  | `%set-remove` | 2 | A fresh set like s with element x removed (absent → unchanged). O(log n). |
 |  | `%set-has?` | 2 | Is x an element of set s? O(log n). |
@@ -294,11 +294,11 @@ literal — no constructor call.
 |  | `string/width->index` | 2–4 | The character index in s of the grapheme cluster occupying display cell `cell`, or (string/length s) past the end — the inverse of string/display-width, with the same optional `start-col` / `tab-width`. A cell inside a 2-cell glyph gives its start (a cell inside a tab's span, the tab), so a click maps back to BEFORE a wide glyph, never inside it. |
 |  | `string/expand-tabs` | 1–3 | s with every tab replaced by the spaces that reach its next stop, laid out from `start-col` with a stop every `tab-width` — the tab-free string a frontend is handed (a render op has no column to expand one from). Under `*glyphless-display*` `:hex-code` each glyphless character becomes its `<200b>` escape too (ADR-556). s itself when there is nothing to replace. |
 |  | `string/glyphless-indices` | 1 | The character index of every glyphless character in s — the invisible format characters (U+200B, U+2060–2064, the bidi controls, the deprecated format characters U+206A–206F, U+FEFF, U+FFF9–FFFB, the tag characters), not the joiners. Where a view lays its escape face over the `<200b>` the three layout primitives show under `*glyphless-display*` `:hex-code` (ADR-556). |
-|  | `string-normalize` | 2 | s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; |
+|  | `string/normalize` | 2 | s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; |
 |  | `string/char->int` | 1 | Unicode codepoint of the first character of string s (identical to the byte value for ASCII). |
 |  | `string/int->char` | 1 | A 1-char string for Unicode codepoint n. Errors on an invalid codepoint. |
-|  | `string->utf8-bytes` | 1 | The UTF-8 encoding of s as a bytes value. |
-|  | `utf8-bytes->string` | 1–2 | Decode UTF-8 bytes (a bytes value, vector, or list of ints 0–255) into a string. Errors on invalid UTF-8, unless the optional `lossy` flag is truthy: then each invalid sequence becomes U+FFFD. |
+|  | `%string->utf8-bytes` | 1 | The UTF-8 encoding of s as a bytes value. |
+|  | `%utf8-bytes->string` | 1–2 | Decode UTF-8 bytes (a bytes value, vector, or list of ints 0–255) into a string. Errors on invalid UTF-8, unless the optional `lossy` flag is truthy: then each invalid sequence becomes U+FFFD. |
 | **Regex** (the matching engine, ADR-389; `%`-internal — `std/regex.blsp` owns the pattern language and translates into these) | `%regex-match?` | 2 | Whether a pattern in the engine's syntax matches anywhere in s. |
 |  | `%regex-find` | 3 | The leftmost-first match at or after char index `from`: `{:start :end :text :groups [...]}` in CHAR offsets, or nil. |
 |  | `%regex-find-all` | 2 | Every non-overlapping match, as a vector of those maps; an empty match steps one character on. |
@@ -308,23 +308,23 @@ literal — no constructor call.
 |  | `%rope-regex-rfind` | 4 | The match (non-empty unless `empty?`) starting LAST while ending at or before `before` (Emacs's `re-search-backward`), or nil. `regex/rope-find-backward`. |
 |  | `%rope-regex-count` | 4 | `[n resume]`: non-overlapping non-empty matches scanned from `from` that START before `limit` — `resume` where the next slice begins (the next match, or a point past `limit` where none is in progress), nil at the end. Slices add up exactly. `regex/rope-count`. |
 |  | `%rope-regex-spans` | 4 | Every non-empty match starting in `[from, to)` as `[start end]` (at most 4096) — a window's highlights. `regex/rope-spans`. |
-| **Networking** (thin non-blocking socket mechanism, ADR-062; `std/net/*` is the Brood library) | `tcp-listen` | 2 | Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket. |
-|  | `tcp-connect` | 2 | Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure. |
-|  | `tcp-send` | 2 | Queue data for sock (any iolist, flattened once at the write, ADR-139; string leaves always UTF-8, ADR-141). Returns true once the socket's unwritten output reaches its high-water mark (about 1 MiB): the caller then waits for [:tcp-drained sock], sent once the output is low again or the connection is gone — `tcp/send` does, so a producer runs at its peer's pace. |
-|  | `tcp-close` | 1 | Close sock (a stream or listener), releasing its fd / stopping its accept loop. Once it returns, no new message for sock reaches any mailbox (no data, no [:tcp-closed], no [:tcp-accept]); a stream's queued output still flushes to the peer (bounded by a 5 s linger) and bytes the peer sends meanwhile are discarded. Closing a listener is synchronous. Idempotent; returns nil. |
-|  | `tcp-local-port` | 1 | The local port sock is bound to, or nil. |
-|  | `tcp-set-binary` | 2 | Switch sock's INBOUND decode between text mode (default) and binary mode; outbound tcp-send is unaffected (ADR-141). |
-|  | `tcp-set-idle-timeout` | 2 | Arm (or, with ms 0, disarm) an idle timeout on an established stream: the reactor drops the connection if no bytes move in EITHER direction for ms milliseconds, delivering [:tcp-closed] (or [:tcp-error] for a one-shot TLS client). |
-|  | `tcp-set-stall-timeout` | 2 | Set how long an established stream's queued output may make no progress before the reactor drops the connection (on by default at 60 s; ms 0 disarms): what ends a send waiting on a peer that stopped reading. |
-|  | `tcp-controlling-process` | 2 | Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil. |
-|  | `tls-listen` | 4 | Bind a TLS listening socket on host:port using the PEM certificate chain cert-pem and private key key-pem (port 0 = OS-assigned). Like tcp-listen, connections arrive as [:tcp-accept lsock client]; |
-|  | `tls-request` | 3–5 | Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). request is any iolist (a string, bytes, or nested tree — ADR-141). Optional ca-pem replaces the trust roots; a truthy binary starts the response in binary mode (a later tcp-set-binary can lose the race with the first chunk). |
-|  | `tls-self-signed` | 1 | Generate a self-signed TLS certificate + private key for host (a DNS name like "localhost"), for zero-config dev TLS. Returns [cert-pem key-pem] — pass them to tls-listen. Not for production (clients reject a self-signed cert unless told to trust it). |
-| **Subprocess** (a persistent child OS process, ADR-104 — distinct from green processes) | `proc-spawn` | 2–3 | Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. Output arrives as [:proc handle data] / [:proc-err handle data]; [:proc-exit handle code] when the child itself exits (after its own output, not waiting on descendants holding its pipes); [:proc-closed handle code] last, once it has exited and its output is at end of file. |
-|  | `proc-send` | 2 | Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139); a string leaf is always its UTF-8 bytes, whatever the child's mode (ADR-141). Returns nil; |
-|  | `proc-set-binary` | 2 | Switch subprocess p's INBOUND decode between text mode (default) and binary mode (mirrors tcp-set-binary; outbound proc-send is unaffected, ADR-141). |
-|  | `proc-close` | 1 | Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. [:proc-exit …] (if not yet sent) and the final [:proc-closed handle code] still arrive at the owner, promptly. |
-|  | `proc-signal` | 2 | Send signal sig (:int, :term, :hup, :quit or :kill) to subprocess p's whole process group — the child and everything it started — and leave it running if it chooses to survive. :int is Ctrl-C. Unix only. |
+| **Networking** (thin non-blocking socket mechanism, ADR-062; `std/net/*` is the Brood library) | `%tcp-listen` | 2 | Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket. |
+|  | `%tcp-connect` | 2 | Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure. |
+|  | `%tcp-send` | 2 | Queue data for sock (any iolist, flattened once at the write, ADR-139; string leaves always UTF-8, ADR-141). Returns true once the socket's unwritten output reaches its high-water mark (about 1 MiB): the caller then waits for [:tcp-drained sock], sent once the output is low again or the connection is gone — `tcp/send` does, so a producer runs at its peer's pace. |
+|  | `%tcp-close` | 1 | Close sock (a stream or listener), releasing its fd / stopping its accept loop. Once it returns, no new message for sock reaches any mailbox (no data, no [:tcp-closed], no [:tcp-accept]); a stream's queued output still flushes to the peer (bounded by a 5 s linger) and bytes the peer sends meanwhile are discarded. Closing a listener is synchronous. Idempotent; returns nil. |
+|  | `%tcp-local-port` | 1 | The local port sock is bound to, or nil. |
+|  | `%tcp-set-binary` | 2 | Switch sock's INBOUND decode between text mode (default) and binary mode; outbound tcp-send is unaffected (ADR-141). |
+|  | `%tcp-set-idle-timeout` | 2 | Arm (or, with ms 0, disarm) an idle timeout on an established stream: the reactor drops the connection if no bytes move in EITHER direction for ms milliseconds, delivering [:tcp-closed] (or [:tcp-error] for a one-shot TLS client). |
+|  | `%tcp-set-stall-timeout` | 2 | Set how long an established stream's queued output may make no progress before the reactor drops the connection (on by default at 60 s; ms 0 disarms): what ends a send waiting on a peer that stopped reading. |
+|  | `%tcp-controlling-process` | 2 | Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil. |
+|  | `%tls-listen` | 4–5 | Bind a TLS listening socket on host:port using the PEM certificate chain cert-pem and private key key-pem (port 0 = OS-assigned). Like tcp-listen, connections arrive as [:tcp-accept lsock client]; |
+|  | `%tls-request` | 3–5 | Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). request is any iolist (a string, bytes, or nested tree — ADR-141). Optional ca-pem replaces the trust roots; a truthy binary starts the response in binary mode (a later tcp-set-binary can lose the race with the first chunk). |
+|  | `%tls-self-signed` | 1 | Generate a self-signed TLS certificate + private key for host (a DNS name like "localhost"), for zero-config dev TLS. Returns [cert-pem key-pem] — pass them to tls-listen. Not for production (clients reject a self-signed cert unless told to trust it). |
+| **Subprocess** (a persistent child OS process, ADR-104 — distinct from green processes) | `%proc-spawn` | 2–3 | Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. Output arrives as [:proc handle data] / [:proc-err handle data]; [:proc-exit handle code] when the child itself exits (after its own output, not waiting on descendants holding its pipes); [:proc-closed handle code] last, once it has exited and its output is at end of file. |
+|  | `%proc-send` | 2 | Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139); a string leaf is always its UTF-8 bytes, whatever the child's mode (ADR-141). Returns nil; |
+|  | `%proc-set-binary` | 2 | Switch subprocess p's INBOUND decode between text mode (default) and binary mode (mirrors tcp-set-binary; outbound proc-send is unaffected, ADR-141). |
+|  | `%proc-close` | 1 | Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. [:proc-exit …] (if not yet sent) and the final [:proc-closed handle code] still arrive at the owner, promptly. |
+|  | `%proc-signal` | 2 | Send signal sig (:int, :term, :hup, :quit or :kill) to subprocess p's whole process group — the child and everything it started — and leave it running if it chooses to survive. :int is Ctrl-C. Unix only. |
 | **Crypto / random** (`%`-internal; `std/crypto.blsp` + `std/hash.blsp` are the libraries) | `%random-bytes` | 1 | n cryptographically-strong random bytes as a bytes value. |
 |  | `%digest` | 2 | Raw digest of a byte sequence (bytes value, vector, or list of byte ints 0–255) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512 :blake3), returned as a bytes value (not hex). The one digest primitive; the public sha256/md5/… hex/string names are Brood over this in std/hash.blsp. |
 |  | `%hmac` | 3 | HMAC of `msg-bytes` keyed by `key-bytes` (both byte sequences) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512; not :blake3, which is keyed differently and has no HMAC), returned as a bytes value (raw MAC, not hex). The public hmac-sha256/… names are Brood over this in std/hash.blsp. |
@@ -342,66 +342,481 @@ literal — no constructor call.
 | **Coverage** (ADR-148; armed by `BROOD_COVERAGE=1`) | `%coverage-lines` | 0 | Every source line recorded as EXECUTED, as a list of [file (line …)]. Empty unless the run was started with BROOD_COVERAGE=1 (`nest test --cover-lines`). |
 |  | `%coverage-instrumented` | 0 | Every source line the compiler INSTRUMENTED, as a list of [file (line …)] — the denominator %coverage-lines is a subset of. Arms compile when defined, so a never-called function appears here and not there. |
 |  | `%coverage-precompile` | 1 | Compile f's body now, without calling it, so its lines count toward %coverage-instrumented. Returns true if a body was compiled. |
-| **GUI** (optional native window backend, ADR-046; needs `--features gui`) | `gui-open` | 0–4 | Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. An optional `opts` map carries the attributes fixed at build time: `{:decorations false}` for a borderless window, `{:app-id "my-app"}` for the desktop application id (Wayland `app_id` / X11 `WM_CLASS`) the installed `my-app.desktop` entry is named after — what gives the window its own icon and name in the dash instead of the desktop's generic fallback. The input options (ADR-441): `{:key-repeat :os}` delivers the OS auto-repeat as presses of the held key (at most one undelivered, taken back at the release; `:app`, the default, drops it), `{:ime false}` turns the input method off (on by default: `[:preedit text range]` while composing, `[:text text]` on commit), `{:wheel :glide}` makes a wheel notch glide (`:lines`, the default, scrolls its three lines at once). `{:option-meta :left}` (the default; `:right`, `:both`, `:none`) says which macOS Option key is Meta, the other composing (ADR-541). A chord under a non-Latin layout names the key's US position (`:ctrl-a` for Control+`ф`). |
-|  | `gui-close` | 1 | Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op. |
-|  | `gui-draw` | 2 | Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). |
+| **GUI** (optional native window backend, ADR-046; needs `--features gui`) | `%gui-open` | 0–4 | Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. An optional `opts` map carries the attributes fixed at build time: `{:decorations false}` for a borderless window, `{:app-id "my-app"}` for the desktop application id (Wayland `app_id` / X11 `WM_CLASS`) the installed `my-app.desktop` entry is named after — what gives the window its own icon and name in the dash instead of the desktop's generic fallback. The input options (ADR-441): `{:key-repeat :os}` delivers the OS auto-repeat as presses of the held key (at most one undelivered, taken back at the release; `:app`, the default, drops it), `{:ime false}` turns the input method off (on by default: `[:preedit text range]` while composing, `[:text text]` on commit), `{:wheel :glide}` makes a wheel notch glide (`:lines`, the default, scrolls its three lines at once). `{:option-meta :left}` (the default; `:right`, `:both`, `:none`) says which macOS Option key is Meta, the other composing (ADR-541). A chord under a non-Latin layout names the key's US position (`:ctrl-a` for Control+`ф`). |
+|  | `%gui-close` | 1 | Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op. |
+|  | `%gui-draw` | 2 | Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). |
 |  | `%gui-render-frame` | 2 | Paint a frame into memory as a window described by spec (`:width` `:height` `:font` `:size` `:line-height` `:inset` `:bg` `:scale` `:text-aa` `:ligatures`) would paint it — the window's own CPU painter, layout rule and edge bleed, no window or display needed — and return `{:width :height :rgba :cell :grid :origin :inset :seam :row-tops}`. Wrapped as `gui/render-frame`. ADR-609, ADR-610. |
 |  | `%gui-capture` | 1 | Window id's current frame painted into memory as the window paints it, the same picture map. A real window, or headless under `BROOD_GUI_HEADLESS=paint`; a plain headless window errors. Wrapped as `gui/capture`. ADR-609. |
 |  | `%gui-windows` | 0 | The ids of the open windows, oldest first. Wrapped as `gui/windows`. ADR-609. |
-|  | `gui-size` | 1 | Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size. |
-|  | `gui-size-px` | 1 | Window id's inner size as [w h] in PHYSICAL pixels — the frame a pixel-space app (`:sprite` / `:quad` ops, `{:input :pixels}`) lays itself out in, where gui-size is the cell grid. |
-|  | `gui-latency` | 1 | Window id's recent input-to-present samples (at most 64, oldest first), each a map of milliseconds (and `:input`, `:key` or `:pointer`, ADR-612): `:total` (input received on the GUI thread to the present of the next frame drawn) and `:paint`, plus `:encode :upload :acquire :submit :present` on the GPU target. Empty headless. ADR-440. |
-|  | `gui-latency-histogram` | 1 | Window id's input-to-present times since it opened as a distribution, keys apart from the pointer: `{:key h :pointer h}`, each `h` `{:count n :max-us n :buckets {upper-us n}}` (log-linear buckets, exact below 16 µs, then 16 per power of two). Wrapped as `gui/latency-histogram`; `gui/latency-percentiles`, `gui/latency-merge` and `gui/latency-since` are Brood over the data. Empty headless. ADR-612. |
-|  | `gui-key-repeat?` | 1 | Whether the last key press window id's app took from its mailbox was an OS auto-repeat (marked as each press leaves the mailbox, so exact for the press being folded). False for a window not open and headless. Wrapped as `gui/key-repeat?`. ADR-612. |
-|  | `gui-key-repeats` | 1 | How window id's held keys have repeated since it opened: `{:delivered n :dropped n :delay ms :interval ms}` — OS repeats delivered, those dropped because one was still waiting (the app fell behind the repeat rate), and the desktop's delay and interval from the last key that repeated (nil before any has). ADR-441. |
-|  | `gui-settle` | 1 | Tell window id the app finished a turn with nothing new to draw: the next wheel-glide step may fire, and the input the turn answered leaves the latency trace. `ui-run` sends it on a turn it skips. No-op headless. ADR-444. |
+|  | `%gui-size` | 1 | Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size. |
+|  | `%gui-size-px` | 1 | Window id's inner size as [w h] in PHYSICAL pixels — the frame a pixel-space app (`:sprite` / `:quad` ops, `{:input :pixels}`) lays itself out in, where gui-size is the cell grid. |
+|  | `%gui-latency` | 1 | Window id's recent input-to-present samples (at most 64, oldest first), each a map of milliseconds (and `:input`, `:key` or `:pointer`, ADR-612): `:total` (input received on the GUI thread to the present of the next frame drawn) and `:paint`, plus `:encode :upload :acquire :submit :present` on the GPU target. Empty headless. ADR-440. |
+|  | `%gui-latency-histogram` | 1 | Window id's input-to-present times since it opened as a distribution, keys apart from the pointer: `{:key h :pointer h}`, each `h` `{:count n :max-us n :buckets {upper-us n}}` (log-linear buckets, exact below 16 µs, then 16 per power of two). Wrapped as `gui/latency-histogram`; `gui/latency-percentiles`, `gui/latency-merge` and `gui/latency-since` are Brood over the data. Empty headless. ADR-612. |
+|  | `%gui-key-repeat?` | 1 | Whether the last key press window id's app took from its mailbox was an OS auto-repeat (marked as each press leaves the mailbox, so exact for the press being folded). False for a window not open and headless. Wrapped as `gui/key-repeat?`. ADR-612. |
+|  | `%gui-key-repeats` | 1 | How window id's held keys have repeated since it opened: `{:delivered n :dropped n :delay ms :interval ms}` — OS repeats delivered, those dropped because one was still waiting (the app fell behind the repeat rate), and the desktop's delay and interval from the last key that repeated (nil before any has). ADR-441. |
+|  | `%gui-settle` | 1 | Tell window id the app finished a turn with nothing new to draw: the next wheel-glide step may fire, and the input the turn answered leaves the latency trace. `ui-run` sends it on a turn it skips. No-op headless. ADR-444. |
 |  | `%gui-texture` | 5 | Upload rgba (w*h*4 bytes, row-major straight alpha; a bytes value or a vector of ints) as texture tex of window id, for its `[:sprite …]` ops. The handle is the caller's — `gui/texture` allocates it in Brood and keeps the size beside it — so this takes it rather than returns it. Errors when the byte count is not w*h*4. |
 |  | `%gui-texture-free` | 2 | Release texture tex of window id; a later `[:sprite …]` naming it draws nothing. Idempotent. |
 |  | `%gui-input!` | 2 | Deliver window id's mouse input in `:pixels` or `:cells` from now on — the `{:input …}` gui-open option, switchable after the window exists (how a window a generic thin client opened is told by the app it attached to which unit it wants). The window then reports its size in that unit. |
 |  | `%gui-sound` | 5 | Keep pcm — interleaved PCM16 little-endian bytes at rate Hz (1..384000) with channels (1 or 2) — as sound snd of window id, for its `[:sound snd vol]` frame ops. The handle is the caller's (`gui/sound` allocates it), as a texture's is. Errors on a bad rate/channel count or an odd byte count. |
 |  | `%gui-sound-free` | 2 | Forget sound snd of window id; a later `[:sound snd]` op plays nothing. Idempotent. |
-|  | `gui-cell-size` | 1–2 | Window id's cell size as [cell-w cell-h] in PHYSICAL pixels — for the size the window uses, or for a logical font size px: what a `[:cell-region …]` of that px paints with. Measured on the GUI thread (a cell is whatever shaping the reference glyph gives, rounded to whole pixels), memoised there; errors headless. ADR-363. |
-|  | `gui-title!` | 2 | Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil. |
-|  | `gui-icon!` | 4 | Set window id's taskbar / title-bar icon from raw RGBA pixels: rgba is a vector of w*h*4 byte ints (0-255), row-major, 4 per pixel (red, green, blue, alpha). Needs --features gui; a silent no-op if the GUI thread never started, id isn't a live window, or the data length isn't w*h*4. |
-|  | `gui-focus` | 1 | Raise window id to the front and give it OS keyboard focus, un-minimising it first. Lets an app surface an already-open (singleton) window instead of opening a duplicate — e.g. `(observe)` focuses its existing window rather than spawning a second. Errors only if id isn't a live window. |
-|  | `gui-bg!` | 1 | Set the window background colour: the fill for :clear, the per-frame pre-clear, and — being outside every cell — the gui-inset! margin and the cell-grid snap remainder, except beside a square background that reaches the edge of the grid, which continues across the margin to the window edge (edge bleed, ADR-508). So a GUI app's padding matches its own theme background instead of the hardcoded default. |
-|  | `gui-fg!` | 1 | Set the window's default text colour: what a text op whose face names no :fg is drawn in (and the background of a reversed face that names none), as gui-bg! is the colour of what no op paints. So a light theme's plain text is its own dark text instead of the hardcoded light default (ADR-613). Same colour forms as gui-bg!; nil restores the default. Every open window and the default for ones opened later; a pure repaint. |
-|  | `gui-line-height!` | 1 | Set the cell height as a multiple of the font pixel size (1.4 by default, clamped 0.8..3.0). A metric change like `gui-font!`: every open window gets its new (cols, rows) and re-renders; also the default for windows opened later. |
-|  | `gui-text-aa!` | 1 | Set how monochrome text is anti-aliased: `:gray` (one coverage per pixel), `:subpixel` / `:bgr` (one per colour channel — LCD text, three times the horizontal resolution of every stem), or `:auto` (the default: subpixel at 1×, gray on HiDPI). Every open window + the default for later ones; a pure repaint. |
-|  | `gui-text-contrast!` | 1 | Set the text contrast exponent γ (1.4 by default, 0.5..3.0). Text blends in linear light with the encoded lerp's weight (ADR-611); a monochrome glyph's partial coverage is first lifted to cov^(1/γ) where the text is lighter than what it lands on, so γ is the perceptual gamma light-on-dark text is weighted at (1.0 the encoded lerp's, thin on a dark ground; ~2.2 linear light's). Interiors, dark-on-light text and emoji are untouched. Every open window + the default for later ones; a pure repaint. |
-|  | `gui-inset!` | 1 | Set the window content inset to px logical pixels: a blank margin on the left, right and bottom of the cell grid (and above row 0 only when the frame's `[:seam row {:top-band false}]` says row 0 is not a band, ADR-610), so a GUI app's text breathes instead of sitting flush against the frame. Applies to every open window and the default for ones opened later; |
-|  | `gui-font!` | 1–2 | Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; |
-|  | `gui-font-register` | 2 | Register font family name (a keyword) from styles: an INSTALLED family by name, `{:family-name "JetBrains Mono"}` (looked up case-insensitively in the system fonts, scanned only on the first such ask; bold/italic picked by weight and slant; the bundled DejaVu stands in when the name is not installed), or a map of style → TTF file path {:regular "…" :bold "…" :italic "…" :bold-italic "…"} where only :regular is required and a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it; re-registering a family in use re-measures the cell. ADR-442. Needs --features gui. |
+|  | `%gui-cell-size` | 1–2 | Window id's cell size as [cell-w cell-h] in PHYSICAL pixels — for the size the window uses, or for a logical font size px: what a `[:cell-region …]` of that px paints with. Measured on the GUI thread (a cell is whatever shaping the reference glyph gives, rounded to whole pixels), memoised there; errors headless. ADR-363. |
+|  | `%gui-title!` | 2 | Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil. |
+|  | `%gui-icon!` | 4 | Set window id's taskbar / title-bar icon from raw RGBA pixels: rgba is a vector of w*h*4 byte ints (0-255), row-major, 4 per pixel (red, green, blue, alpha). Needs --features gui; a silent no-op if the GUI thread never started, id isn't a live window, or the data length isn't w*h*4. |
+|  | `%gui-focus` | 1 | Raise window id to the front and give it OS keyboard focus, un-minimising it first. Lets an app surface an already-open (singleton) window instead of opening a duplicate — e.g. `(observe)` focuses its existing window rather than spawning a second. Errors only if id isn't a live window. |
+|  | `%gui-bg!` | 1 | Set the window background colour: the fill for :clear, the per-frame pre-clear, and — being outside every cell — the gui-inset! margin and the cell-grid snap remainder, except beside a square background that reaches the edge of the grid, which continues across the margin to the window edge (edge bleed, ADR-508). So a GUI app's padding matches its own theme background instead of the hardcoded default. |
+|  | `%gui-fg!` | 1 | Set the window's default text colour: what a text op whose face names no :fg is drawn in (and the background of a reversed face that names none), as gui-bg! is the colour of what no op paints. So a light theme's plain text is its own dark text instead of the hardcoded light default (ADR-613). Same colour forms as gui-bg!; nil restores the default. Every open window and the default for ones opened later; a pure repaint. |
+|  | `%gui-line-height!` | 1 | Set the cell height as a multiple of the font pixel size (1.4 by default, clamped 0.8..3.0). A metric change like `gui-font!`: every open window gets its new (cols, rows) and re-renders; also the default for windows opened later. |
+|  | `%gui-text-aa!` | 1 | Set how monochrome text is anti-aliased: `:gray` (one coverage per pixel), `:subpixel` / `:bgr` (one per colour channel — LCD text, three times the horizontal resolution of every stem), or `:auto` (the default: subpixel at 1×, gray on HiDPI). Every open window + the default for later ones; a pure repaint. |
+|  | `%gui-text-contrast!` | 1 | Set the text contrast exponent γ (1.4 by default, 0.5..3.0). Text blends in linear light with the encoded lerp's weight (ADR-611); a monochrome glyph's partial coverage is first lifted to cov^(1/γ) where the text is lighter than what it lands on, so γ is the perceptual gamma light-on-dark text is weighted at (1.0 the encoded lerp's, thin on a dark ground; ~2.2 linear light's). Interiors, dark-on-light text and emoji are untouched. Every open window + the default for later ones; a pure repaint. |
+|  | `%gui-inset!` | 1 | Set the window content inset to px logical pixels: a blank margin on the left, right and bottom of the cell grid (and above row 0 only when the frame's `[:seam row {:top-band false}]` says row 0 is not a band, ADR-610), so a GUI app's text breathes instead of sitting flush against the frame. Applies to every open window and the default for ones opened later; |
+|  | `%gui-font!` | 1–2 | Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; |
+|  | `%gui-font-register` | 2 | Register font family name (a keyword) from styles: an INSTALLED family by name, `{:family-name "JetBrains Mono"}` (looked up case-insensitively in the system fonts, scanned only on the first such ask; bold/italic picked by weight and slant; the bundled DejaVu stands in when the name is not installed), or a map of style → TTF file path {:regular "…" :bold "…" :italic "…" :bold-italic "…"} where only :regular is required and a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it; re-registering a family in use re-measures the cell. ADR-442. Needs --features gui. |
 |  | `%gui-font-info` | 0–1 | Where font family `family` (the window default when omitted) got its faces: `{:name :requested :origin :regular :bold :italic :bold-italic :fallbacks :system-scanned :ligatures}` — `:origin` is `:bundled`, `:files`, `:system` or `:not-found`, each style its resolved file, `:fallbacks` the installed fonts loaded so far for glyphs the primary lacks (`{:name :file}`). Errors headless. ADR-442. |
 |  | `%gui-headless?` | 0 | True when the GUI is headless (`BROOD_GUI_HEADLESS` in a gui build): no real windows and no font engine, so `%gui-font-info` / `%gui-cell-size` error (under `BROOD_GUI_HEADLESS=paint` windows are painted offscreen and both answer, ADR-609) — `gui/headless?` is asked before them. False windowed and without the gui feature. ADR-557. |
 |  | `%gui-ligatures!` | 1 | Turn programming ligatures on (truthy) or off (the default): a run of 2–8 punctuation chars in a `:text` op is shaped as one unit spanning exactly its cells, so a font's `->` / `!=` / `===` ligatures form without moving the grid. Every window + the default for later ones; a pure repaint. ADR-442. |
-|  | `gui-fullscreen!` | 2 | Make window id borderless-fullscreen while `on` is truthy (covering the whole monitor it's on, NO title bar / decorations — distraction-free), or restore it to a normal window otherwise. For a big-but-normal window that keeps its title bar, use gui-maximize! instead. |
-|  | `gui-maximize!` | 2 | Maximise window id while `on` is truthy (fill the screen's work area, KEEPING the title bar / decorations), or restore it to its previous size otherwise — e.g. an editor's init file opening big without going true-fullscreen. |
-|  | `gui-grab-cursor` | 2 | Confine the pointer to window id while `on` is truthy, release it otherwise — for mouse-look that shouldn't let the cursor slip out of the window and click another app. |
-|  | `gui-held-key` | 1 | The key window id currently sees as physically held — the same value its press delivered (a 1-char string, a keyword like :ctrl-n / :up, or `[:text "…"]` for a keystroke that typed several characters, a compose sequence) — or nil when none is held. |
-| **Audio** (needs `--features audio`) | `audio-beep` | 2–3 | Play a short tone of freq-hz for ms milliseconds, optionally at peak amplitude vol (0..1, default ~0.18 — pass a small vol for quiet/ambient sounds). Fire-and-forget — it never blocks the caller, and overlapping beeps mix — so a game can blip from its frame loop. |
-| **Clipboard** | `clipboard-get` | 0 | The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature). |
-|  | `clipboard-set` | 1 | Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off. |
+|  | `%gui-fullscreen!` | 2 | Make window id borderless-fullscreen while `on` is truthy (covering the whole monitor it's on, NO title bar / decorations — distraction-free), or restore it to a normal window otherwise. For a big-but-normal window that keeps its title bar, use gui-maximize! instead. |
+|  | `%gui-maximize!` | 2 | Maximise window id while `on` is truthy (fill the screen's work area, KEEPING the title bar / decorations), or restore it to its previous size otherwise — e.g. an editor's init file opening big without going true-fullscreen. |
+|  | `%gui-grab-cursor` | 2 | Confine the pointer to window id while `on` is truthy, release it otherwise — for mouse-look that shouldn't let the cursor slip out of the window and click another app. |
+|  | `%gui-held-key` | 1 | The key window id currently sees as physically held — the same value its press delivered (a 1-char string, a keyword like :ctrl-n / :up, or `[:text "…"]` for a keystroke that typed several characters, a compose sequence) — or nil when none is held. |
+| **Audio** (needs `--features audio`) | `%audio-beep` | 2–3 | Play a short tone of freq-hz for ms milliseconds, optionally at peak amplitude vol (0..1, default ~0.18 — pass a small vol for quiet/ambient sounds). Fire-and-forget — it never blocks the caller, and overlapping beeps mix — so a game can blip from its frame loop. |
+| **Clipboard** | `%clipboard-get` | 0 | The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature). |
+|  | `%clipboard-set` | 1 | Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off. |
 |  | `%clipboard-image` | 1 | The OS clipboard's image as {:png bytes :width :height} (PNG-encoded, alpha kept), or nil when there is no image, no display or no clipboard feature. max-edge nil keeps the native size; an int downscales (never upscales) the longer side to it. Refuses (nil) a source over 16384 px a side or 512 MB of RGBA. Wrapped as `os/clipboard-image` (ADR-392). |
 |  | `%clipboard-set-image` | 1 | Put an encoded image (PNG, or any format image-thumb decodes) on the OS clipboard; returns its argument. Raises on bytes that are not a decodable image, no-op when no clipboard is available. Wrapped as `os/clipboard-set-image`. |
 |  | `%primary-get` | 0 | The PRIMARY selection's text (X11 / Wayland: what is highlighted, pasted by a middle click), or nil when empty, non-text or unavailable (not Linux, no display, no clipboard feature). A blocking read under `%clipboard-get`'s rules. Wrapped as `os/primary-get` (ADR-553). |
 |  | `%primary-set` | 1 | Own the PRIMARY selection with string s, leaving the CLIPBOARD alone; returns s. A no-op where there is no primary selection. Wrapped as `os/primary-set` (ADR-553). |
 | **Browser tab** (a program running in the page — the `brood-tab` wasm build; `crates/lisp/src/builtins/tab.rs`) | `%tab-post` | 2 | Queue display event `event` (a name: "frame", "texture", "sound", "window", …) with payload `data` (its JSON) for the page, which drains them after each pump. Outside a tab nothing drains them: the oldest are dropped past 4096. |
 |  | `%tab-subscribe` | 0 | Make the calling process the one the page's input goes to: each message arrives as a string holding a Brood form, to be read (never evaluated). The last subscriber wins. |
-| **Scheduler / signals** | `sched-stats` | 0 | A snapshot map of the scheduler's cumulative counters: {:spawned :exited :preempts :steals :migrations :workers :peak-threads}. :spawned - :exited is the live-process figure; :preempts counts reduction-budget quantum exhaustions; :steals/:migrations count work-stealing activity. |
-|  | `steal-count` | 0 | How many fresh processes the scheduler work-stole across worker threads since program start; 0 means placement-at-spawn kept the pool even. |
-|  | `profile-start` | 0–1 | Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram. Sampling walks each process's reified call stack (named frames) at its next VM frame boundary after every tick — no signals, near-zero cost when off (one relaxed load per frame boundary). |
-|  | `profile-stop` | 0 | Disarm the sampling profiler and return the histogram: a list of {:stack (fn-names... innermost-first) :count n} maps, most-sampled first. Empty list if never armed. A sample whose frames were all anonymous appears with :stack ("<anonymous>"). |
+| **Scheduler / signals** | `%sched-stats` | 0 | A snapshot map of the scheduler's cumulative counters: {:spawned :exited :preempts :steals :migrations :workers :peak-threads}. :spawned - :exited is the live-process figure; :preempts counts reduction-budget quantum exhaustions; :steals/:migrations count work-stealing activity. |
+|  | `%steal-count` | 0 | How many fresh processes the scheduler work-stole across worker threads since program start; 0 means placement-at-spawn kept the pool even. |
+|  | `%profile-start` | 0–2 | Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram. Sampling walks each process's reified call stack (named frames) at its next VM frame boundary after every tick — no signals, near-zero cost when off (one relaxed load per frame boundary). |
+|  | `%profile-stop` | 0 | Disarm the sampling profiler and return the histogram: a list of {:stack (fn-names... innermost-first) :count n} maps, most-sampled first. Empty list if never armed. A sample whose frames were all anonymous appears with :stack ("<anonymous>"). |
 |  | `proc/system-monitor` | 0–2 | Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (the observability event stream's kernel sources). |
-|  | `proc/flag` | 1–2 | Read or set a per-process runtime flag on the current process; returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (positive int sets, nil clears, absent reads). |
+|  | `%process-flag` | 1–2 | Read or set a per-process runtime flag on the current process; returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (positive int sets, nil clears, absent reads). |
 |  | `proc/trap-exit` | 1 | Set the current process's trap-exit flag; returns the previous value. When on, a linked peer's death arrives as a trappable [:EXIT pid reason] message instead of killing this process. |
-| **GC / VM stats** | `gc-stats` | 0 | A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the |
-|  | `gc-collect` | 0 | Force a collection of this process's LOCAL heap now, returning the post-collection gc-stats map. An observability/test aid, not a load-bearing trigger — automatic collection at the eval safepoint already keeps memory bounded. |
-|  | `gc-trace` | 0–1 | Query (no arg) or set (truthy arg) per-collection GC trace logging for this process; returns the resulting state. When on, each minor/major collection prints a one-line summary to stderr. Defaulted from BROOD_GC_TRACE. |
-|  | `runtime-collect` | 0 | Compact the shared RUNTIME code region, reclaiming superseded versions of redefined globals (hot-reload churn). Returns {:before N :after M :reclaimed (N-M) :ran bool} (closure counts). |
-|  | `vm-stats` | 0 | A snapshot map of VM work-attribution counters (the perf-stats feature). :enabled is false unless the binary was built with --features perf-stats; |
-|  | `mem-limit` | 0 | Hard memory ceiling in bytes (0 = unlimited); crossing it aborts the process. Set via BROOD_MEM_LIMIT, or by a container's memory cap. |
-|  | `mem-soft-limit` | 0 | Soft memory ceiling in bytes (0 = unlimited); crossing it stops the process holding the most memory with E0043. |
+| **GC / VM stats** | `%gc-stats` | 0 | A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the |
+|  | `%gc-collect` | 0 | Force a collection of this process's LOCAL heap now, returning the post-collection gc-stats map. An observability/test aid, not a load-bearing trigger — automatic collection at the eval safepoint already keeps memory bounded. |
+|  | `%gc-trace` | 0–1 | Query (no arg) or set (truthy arg) per-collection GC trace logging for this process; returns the resulting state. When on, each minor/major collection prints a one-line summary to stderr. Defaulted from BROOD_GC_TRACE. |
+|  | `%runtime-collect` | 0 | Compact the shared RUNTIME code region, reclaiming superseded versions of redefined globals (hot-reload churn). Returns {:before N :after M :reclaimed (N-M) :ran bool} (closure counts). |
+|  | `%vm-stats` | 0 | A snapshot map of VM work-attribution counters (the perf-stats feature). :enabled is false unless the binary was built with --features perf-stats; |
+|  | `%mem-limit` | 0 | Hard memory ceiling in bytes (0 = unlimited); crossing it aborts the process. Set via BROOD_MEM_LIMIT, or by a container's memory cap. |
+|  | `%mem-soft-limit` | 0 | Soft memory ceiling in bytes (0 = unlimited); crossing it stops the process holding the most memory with E0043. |
+## The rest of the kernel, by source file
+
+The primitives the tables above do not group, with the first sentence of each one's registered
+docstring. `crates/lisp/src/` is the root of every path.
+
+### `boot/image.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%boot-source` | 0 | How THIS process's prelude arrived, as a keyword: `:prelude-image` (ADR-314) or `:source` (a cold boot, which also WRITES the image — or `BROOD_NO_PRELUDE_IMAGE=1`, which reads … |
+| `%image-exists?` | 1 | Whether an image exists at `path`: a file, or — for a path under `mem:` — bytes the host handed the runtime (a tab has no filesystem, ADR-414) or `%image-write` wrote there. |
+| `%image-index` | 2 | Open the sectioned startup image at `path` if its stamp equals `fingerprint`, returning its section directory as a map {name -> [offset len]} — `""` is the always-materialised … |
+| `%image-load-section` | 3–5 | Materialise one section of a startup image: define its globals (rebuilding macros as macros) and register its declared sigs. |
+| `%image-write` | 3 | Write a sectioned startup image to `path`, stamped with the opaque `fingerprint` string; returns the number of entries written. |
+
+### `builtins/build_info.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%build-stdimage?` | 0 | Was this binary built with the stdlib startup image compiled in (`./configure --with-stdimage`, the default)? |
+| `%cache-dir` | 0 | Brood's cache directory — `$XDG_CACHE_HOME/brood`, else `$HOME/.cache/brood` (a relative or empty `XDG_CACHE_HOME` ignored, as the XDG spec says) — or nil when neither gives one. |
+| `system/brood-version` | 0 | This runtime's semantic version as a string (e.g. |
+| `system/build-time` | 0 | When THIS executable was built, as Unix epoch milliseconds (the unit os/now speaks, so datetime/epoch-ms-> formats it directly); nil when the platform won't say. |
+| `system/features` | 0 | The optional build features this runtime was compiled with, as a vector of keywords (e.g. |
+| `system/stdlib-id` | 0 | This build's STANDARD LIBRARY identity as "<version>+<git-sha>+<content-hash>" — like system/build-id, but hashing what is baked in rather than this executable's mtime. |
+
+### `builtins/bytes.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `bytes` | any | Build a bytes value from byte integers 0–255: (bytes 1 2 3), or (bytes [1 2 3]) / (bytes (list …)) taking a single vector/list as the sequence. |
+
+### `builtins/compress.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%brotli` | 1–2 | Brotli-compress a byte sequence (RFC 7932, the `Content-Encoding: br` wire format), returned as bytes. |
+| `%deflate` | 1–2 | Raw-DEFLATE-compress a byte sequence (RFC 1951 — no header or checksum), returned as bytes. |
+| `%gunzip` | 1–2 | Decompress gzip data (RFC 1952) back to a bytes value; errors on data that isn't valid gzip, or whose output would exceed `max-bytes` (default 1 GiB). |
+| `%gzip` | 1–2 | gzip-compress a byte sequence (RFC 1952, the `Content-Encoding: gzip` wire format), returned as a bytes value. |
+| `%inflate` | 1–2 | Decompress raw DEFLATE data (RFC 1951) to a bytes value; errors on invalid data, or output past `max-bytes` (default 1 GiB). |
+| `%unbrotli` | 1–2 | Decompress brotli data (RFC 7932) to a bytes value; errors on invalid data, or output past `max-bytes` (default 1 GiB). |
+| `%zlib-compress` | 1–2 | zlib-compress a byte sequence (RFC 1950 — 2-byte header + Adler-32), returned as bytes. |
+| `%zlib-uncompress` | 1–2 | Decompress zlib data (RFC 1950) to a bytes value; errors on invalid data, or output past `max-bytes` (default 1 GiB). |
+
+### `builtins/contracts.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%contract-args-known?` | 1+ | Whether every argument of a contracted call is already known to pass its declared type — by a base type's tag or a remembered verdict — so the shim can skip its full check … |
+| `%contract-await` | 2 | — |
+| `%contract-force!` | 1 | — |
+| `%contract-forced?` | 1 | — |
+| `%contract-raise` | 1 | — |
+| `%contract-tail?` | 1 | — |
+| `%contracts-armed?` | 0 | — |
+| `%contracts-sweep!` | 1 | — |
+| `%type-names-record?` | 1 | Whether some registered record id is named `name` as a `sig` spells a record type — bare (the record's name) or qualified (the id's trailing path). |
+| `%type-verdict` | 2 | Whether `value` inhabits `type` when the kernel can say without the Brood walk — by the value's tag (a base name, a literal), by the type's form (`?A`, an arrow, an `or` of … |
+| `%type-verdict!` | 3 | Remember `verdict` for `(type value)` — when the pair is worth remembering — and return it. |
+| `%type-verdict-counts` | 0 | This process's verdict memo as `{:hits :misses :entries :clears}` — what a test reads to tell a remembered verdict from a walked one (ADR-480). |
+
+### `builtins/diagnostics.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%coverage-branch-instrumented` | 0 | Every [line col] branch point the compiler INSTRUMENTED, as [file ([line col] …)] — the branch denominator (each needs both edges taken for full coverage). |
+| `%coverage-branches` | 0 | Every branch edge recorded as taken, as [file ([line col taken] …)]. |
+| `%ic-stats` | 0 | A snapshot map of this process's four inline-cache tables — the largest single attributed item in the green-process floor (896 B/process, bigger than the whole Box<Process>). |
+| `%jit-arm-state` | 2 | The JIT tier of `f`'s `argc`-ary arm, as a map: `:state` one of `:native` (its native code is installed), `:queued` (hot, compile in flight), `:bailed` (refused, or latched off … |
+| `%native-tier?` | 0 | True when this run may reach the NATIVE tier (ADR-222): the binary carries the JIT and the ceiling is not lowered by `BROOD_TIER`. |
+| `%pos-stats` | 0 | A snapshot map of the two source-position side tables: :local-forms/:local-cap/:local-bytes for this process's LOCAL `form_pos`, and :runtime-forms/:runtime-cap/:runtime-bytes … |
+| `%set-trace-context` | 1 | — |
+| `%trace-context` | 0 | — |
+| `%tree-walker?` | 0 | True when this run's tier CEILING is the tree-walker (ADR-222) — the differential reference engine. |
+| `%vm-arm-ops` | 2 | The bytecode of `f`'s `argc`-ary arm as this process would RUN it now — a vector of instruction spellings (`"Prim2(Rem, math/rem)"`, `"Call(…)"`, `"SelfCall(…)"`, …), compiling … |
+| `%vm-arm-stale?` | 2 | The compiled body this process holds for `f`'s `argc`-ary arm, by its ADR-366 state: `false` — present and current; `true` — present but marked stale (compiled before a module … |
+| `%vm-stats-reset` | 0 | Zero the VM work-attribution counters, returning :enabled (false without --features perf-stats). |
+
+### `builtins/dynamic.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%binding` | 3 | — |
+| `%declare-dynamic` | 1 | — |
+
+### `builtins/editor_native.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%rope-changed-range` | 2 | nil when ropes old and new hold the same text, else [start old-end new-end] in CHAR offsets: chars [start, old-end) of old became [start, new-end) of new, everything before … |
+| `%ui-harvest` | 1–2 | [frame' table]: frame (a vector or list of render ops) with every [:ui/memo key deps ops] (or [:ui/memo key deps ops reused?]) marker replaced by its ops — or, when keep-markers? |
+
+### `builtins/errors.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%blob-ptr` | 1 | — |
+| `%blob-strong-count` | 1 | — |
+| `%failure` | 1–2 | Build a failure value carrying message and, optionally, the fields of a map (which must not name `:message`). |
+| `%failure-fields` | 1 | The fields of failure f as a plain map, `:message` among them; raises for anything that is not a failure. |
+| `%failure-message` | 1 | The message a failure carries, else nil. |
+| `%force-panic` | 0–1 | — |
+| `%make-macro` | 1 | Tag fn f as a macro: the expander calls it on the unevaluated argument forms and splices its result in place. |
+| `%raise` | 1 | Raise the error map `error` — `{:kind k :message s :code c …}`, `c` one of the codes the language raises itself (`E0090` `error`, `E0091` `assert`, `E0092` a failed match). |
+
+### `builtins/evaluation.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%dynamic-loaders` | 0 | The modules whose load evaluated source text (`reflect/eval-string`, `%load-string`, `%eval-in` with the module's namespace open), sorted — what the project image never reuses … |
+| `%eval-in` | 2 | — |
+| `%isolate-discard-loads` | 1 | — |
+| `%load-journal-close` | 1 | — |
+| `%load-journal-open` | 0 | — |
+| `%load-module-source` | 1–2 | — |
+| `%load-string` | 1–2 | — |
+| `%locals` | 0 | — |
+| `%scope` | 0 | — |
+
+### `builtins/filesystem.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%exe-path` | 0 | The absolute path of the running executable, or nil when the platform won't say (a sandbox with no /proc/self/exe equivalent). |
+| `file/size` | 1 | Size of the file at path in bytes, or nil if it is missing. |
+
+### `builtins/fuzzy.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%fuzzy-top` | 2–4 | The best `limit` of `cands` for `query` under std/fuzzy's built-in rules (a space separates terms that must each match, in any order; `!x` `=x` `^x` `x$` and smart case as … |
+
+### `builtins/io.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%capture-begin` | 0 | — |
+| `%capture-take` | 0 | — |
+
+### `builtins/line_diff.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%diff-line-hunks` | 2 | The line diff of old and new (strings or ropes) as git's zero-context hunks: a vector of [old-start old-count new-start new-count], 0-based line numbers, in order. |
+
+### `builtins/modules.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%alias` | 2 | — |
+| `%baked-module?` | 1 | — |
+| `%builtin-doc` | 1 | — |
+| `%builtin-module-file` | 1 | — |
+| `%builtin-module?` | 1 | — |
+| `%bundle-manifest` | 0 | — |
+| `%bundle-module-names` | 0 | — |
+| `%bundled?` | 0 | — |
+| `%compile-context` | 0 | — |
+| `%declare-shadow` | 1 | — |
+| `%eager-loads!` | 1 | Pin the inferred-load policy (ADR-335): with `on?` truthy every qualified reference loads its module when the referencing file loads (the eager policy); otherwise a function … |
+| `%forget-absent-modules!` | 0 | Forget which modules a require has already failed to FIND. |
+| `%grant-internals` | 1 | — |
+| `%in-ns` | 1 | — |
+| `%load-edge-skipped?` | 0 | Consume the one-shot flag the kernel sets for a load it INFERRED from a qualified reference (ADR-335): true exactly once, for the `require-one` that load invokes, so … |
+| `%load-may-hand-off?` | 0 | Consume the one-shot flag the kernel sets for a load whose miss can park (a frame that can hand its wait to `%lazy-global`): true exactly once, for the `require-one` that load … |
+| `%mark-private` | 1 | — |
+| `%refer` | 2–3 | — |
+| `%register-sig` | 2 | — |
+| `%register-sig-props` | 2 | — |
+| `%register-type` | 2 | — |
+| `%restore-compile-context` | 1 | — |
+| `%root-module-name` | 1 | — |
+| `%set-package-context` | 2 | — |
+| `%side-facts` | 0 | Every SIDE FACT this runtime has recorded — what evaluating a definition recorded ABOUT a name rather than bound to it: privacy, stability meta, def site, registry-name marks, … |
+| `reflect/current-ns` | 0 | The current compilation namespace as a symbol, or nil at the root namespace (top level). |
+
+### `builtins/nodes.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%node-also-listen` | 1 | — |
+
+### `builtins/numeric.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%le` | 2 | — |
+| `%max` | 1+ | The greatest of one or more numbers (int/float/decimal), compared numerically; the result keeps its own type. |
+| `%min` | 1+ | The least of one or more numbers (int/float/decimal), compared numerically; the result keeps its own type. |
+| `%quot` | 2 | — |
+
+### `builtins/os.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%install-interrupt-handler` | 0 | Take over SIGINT so Ctrl-C records a request instead of terminating the runtime; returns true when installed (false with no Unix signals). |
+| `%interrupt-taken?` | 0 | True if an interrupt arrived since the last call, clearing it (read-and-clear, so one Ctrl-C is acted on once). |
+| `%restore-interrupt-handler` | 0 | Restore the default SIGINT disposition (Ctrl-C terminates again) and clear any pending request — the uninstall half of %install-interrupt-handler, so a transient REPL (pry) … |
+| `%script-args` | 0 | The host OS as a keyword: :linux, :macos, or :windows. |
+| `%trap-signal` | 2 | Deliver signal sig (:term, :int or :hup) to local process pid as the message [:signal sig] instead of its default action; a nil pid restores the default. |
+| `%user-home` | 1 | The home directory of the user called name (the password database, so NSS users too), or nil when there is no such user. |
+
+### `builtins/pkg.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%git-list-tags` | 1 | The tag names published by the remote at `url`, as a list of strings (via `git ls-remote --tags --refs`); nil when the remote has no tags. |
+
+### `builtins/processes.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%hibernate` | 0 | Tell the runtime this process is about to idle for a long time: collect, shrink its heap slabs and root vectors, and drop its inline caches and compiled-body cache. |
+| `%receive-spec-key` | 1 | — |
+| `%ref-deactivate` | 1 | Deactivate ref as a one-shot reply alias on this process's mailbox: a later message addressed to it ([:tag ref ...]) is dropped at delivery and never queued. |
+| `%spawn-monitor` | 1 | Like %spawn but atomically monitors the child from the caller before it runs, returning [pid ref] — so the [:down ref pid reason] carries the child's REAL exit reason even for … |
+| `%spawn-named` | 2 | — |
+| `proc/alive?` | 1 | Is `pid` a live process on this node? |
+| `proc/busy?` | 1 | Whether pid is BUSY (ADR-491): true while it has been running in one open interrupt window (`proc/interruptible`) for at least its quit key's busy-ms (300 without one), false … |
+| `proc/interrupt` | 1 | Interrupt pid at its next safepoint (ADR-491) — Emacs's quit, from outside: its running computation raises a catchable `{:kind :interrupted …}` there. |
+| `proc/interruptible` | 2 | Run `(thunk)` in an INTERRUPT WINDOW (ADR-491): `[:ok value]`, or `[:interrupted e]` when it was stopped mid-computation — by `proc/interrupt`, by the process's quit key … |
+| `proc/receive-lane` | 1 | Take the oldest message of any kind, waiting up to ms (nil: forever), and say which lane it came on: `[msg :priority]` for one sent with `proc/send-priority` (a window's … |
+| `proc/send-latest` | 3 | Send msg to target, REPLACING any message sent with the same key that target has not received yet — for state that only matters at its newest value (a file's diagnostics, a … |
+| `proc/send-priority` | 2 | Send msg to target on its mailbox's PRIORITY lane: `proc/take-priority` in the receiver takes it ahead of every ordinary message queued before it, oldest priority message first. |
+| `proc/set-quit-key` | 2–3 | Declare the calling process's QUIT KEY (ADR-491), Emacs's `quit-char`: when key — a keyword, string or integer, the shape a frontend delivers a keystroke in (a window's C-g is … |
+| `proc/take-priority` | 0 | Take the calling process's oldest PRIORITY-lane message (`proc/send-priority`, a window's input) out of its mailbox, as `[msg]` — or nil at once when none is queued. |
+| `proc/unregister` | 1 | Release the name `name`, so nothing is registered under it; true if a process was bound to it, false if it was already free. |
+
+### `builtins/pubkey.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%argon2id-hash` | 1 | An Argon2id hash of password-bytes with a fresh random salt and the crate's default (OWASP) cost, as a PHC string ("$argon2id$v=19$m=…") that carries its own salt and … |
+| `%argon2id-verify` | 2 | true when password-bytes hashes to the PHC string (as `%argon2id-hash` wrote it, or any Argon2 PHC string), else false — including for a string that is no PHC hash. |
+| `%ecdsa-keygen` | 1 | A fresh ECDSA keypair on `curve` (:p256 or :p384) as a [public private] vector: public the uncompressed SEC1 point (65 / 97 bytes), private a PKCS#8 document, both bytes values. |
+| `%ecdsa-sign` | 3 | The ECDSA signature of message-bytes (hashed with SHA-256 on :p256, SHA-384 on :p384) under the PKCS#8 private key, in the fixed r‖s form JOSE uses (64 / 96 bytes). |
+| `%ecdsa-verify` | 4 | true when signature-bytes (fixed r‖s) is a valid ECDSA signature of message-bytes under the uncompressed SEC1 public point on `curve`, else false. |
+| `%rsa-keygen` | 1 | A fresh RSA key of `bits` (2048, 3072, 4096 or 8192) as a [n e private] vector: the big-endian modulus and public exponent, and a PKCS#8 private key, all bytes values. |
+| `%rsa-sign` | 3 | The RSA signature of message-bytes under the PKCS#8 private key, by `scheme`: :pkcs1-sha256 :pkcs1-sha384 :pkcs1-sha512 (JWT RS*) or :pss-sha256 :pss-sha384 :pss-sha512 (PS*). |
+| `%rsa-verify` | 5 | true when signature-bytes is a valid RSA signature of message-bytes by `scheme` under the public key given as its big-endian modulus `n` and exponent `e` (a JWK's "n" and "e"), … |
+| `%x25519-keygen` | 0 | A fresh X25519 keypair as a [public private] vector of 32-byte bytes values. |
+| `%x25519-shared` | 2 | The 32-byte X25519 shared secret of our 32-byte private key and their 32-byte public key. |
+
+### `builtins/records.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%record` | 2 | A record of identity id (a keyword, `:point` or `:geo/point`) over the field map fields. |
+| `%record-fields` | 1 | The fields of record x as a plain map; raises for anything that is not a record. |
+| `%record-id` | 1 | The identity of record x as a keyword, else nil. |
+| `%record?` | 1 | Whether x is a record. |
+
+### `builtins/rope.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%rope-next-grapheme` | 2 | The character index of the next grapheme-cluster boundary after character idx (the rope's length at the end) — one user-perceived character forward. |
+| `%rope-prev-grapheme` | 2 | The character index of the grapheme-cluster boundary before character idx (0 at the start) — one user-perceived character back. |
+
+### `builtins/selfhost_macros.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%check-materialise-referenced!` | 0 | Load, to a fixpoint, every module a LOADED module's function bodies name with a qualified reference — the ADR-340 materialisation a check performs on demand, run once up front. |
+| `%check-strict!` | 1 | Set STRICT checking for this process and return the new value. |
+| `%check-strict?` | 0 | Is STRICT checking on for this process (`nest check --strict`, or BROOD_CHECK_STRICT=1)? |
+| `%expr-type` | 1 | The type the advisory checker infers for the FIRST form in source string `src`, written the way a `sig` is ("int", "(list any)", "(int -> int)"), or nil when `src` doesn't … |
+| `%file-signatures` | 1 | The signature the checker holds for every function the file at path defines: a list of {:name :sig :declared? |
+| `%meta-of` | 1 | The stability metadata a `(meta …)` recorded for `name`, as `{:since :deprecated :use :beta}` with absent facts omitted — nil if none. |
+| `%module-direct-requires` | 1 | Parse the file at path (no eval) and return `{:module <name-or-nil> :requires [<module-name> …] :modules (<sym> …)}` — its own module name, the modules it directly `:use`s / … |
+| `%register-meta` | 2 | Record a global's stability metadata (ADR-283) from a flat `:key value` list — `:since`/`:deprecated`/`:beta` take a version or reason string, `:use` a replacement symbol. |
+| `%source-signatures` | 1 | %file-signatures for source TEXT rather than a file: the checker's signature for every function src defines, as {:name :sig :declared? |
+
+### `builtins/sequences.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%acting-writer` | 0 | Who a registry write this process makes outside any load credits: the module (a symbol) or namespace-less file (a path string) whose load spawned it or an ancestor, or what … |
+| `%dispatch` | 3 | — |
+| `%dispatch-proven` | 5–7 | — |
+| `%hash` | 1 | The structural hash of `v` as an integer: equal values hash equal, and a symbol or keyword hashes by its spelling. |
+| `%map-into` | 2 | — |
+| `%range` | 3 | — |
+| `%range->list` | 1 | — |
+| `%range-bounds` | 1 | The [lo hi step] of a lazy range. |
+| `%range-count` | 1 | — |
+| `%range-fold-span` | 5 | — |
+| `%registries-written-by` | 1 | The registries holding an entry or list member credited to one of `writers` (module symbols, file path strings), as a list of symbols. |
+| `%registry-cas!` | 3 | — |
+| `%registry-member?` | 2 | — |
+| `%registry-members` | 1 | List registry `name`'s members in order, each as `[member writer op]`: who added it (a module symbol, a file path string, or nil) and the op that did (`:cons-new`, … |
+| `%registry-names` | 0 | Every global a registry update (%registry-update! |
+| `%registry-update!` | 4–6 | — |
+| `%registry-writer` | 2 | — |
+| `%seqview` | 2 | — |
+| `%seqview-parts` | 1 | — |
+| `%set-acting-writer!` | 1 | Set this process's acting writer (a module symbol, a file path string, or nil for nobody) and return the one it replaces. |
+| `%sort-asc` | 1 | — |
+| `%sort-cmp` | 1 | — |
+| `%vector-fold-span` | 5 | — |
+| `empty?` | 1 | True if coll is empty (nil, an empty string/vector/map, or a seq-view that realises to nothing). |
+| `nil?` | 1 | True if x is nil. |
+| `pair?` | 1 | True if x is a cons pair. |
+
+### `builtins/sockets.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%tls-connect` | 5 | Start a TLS connection to host:port and return the socket at once. |
+| `%tls-protocol` | 1 | The ALPN protocol a tls-connect stream negotiated ("h2", "http/1.1"), or nil: not connected yet, the server chose none, or not such a stream. |
+| `%udp-open` | 2 | Bind a UDP socket on host:port (an IP address or localhost; port 0 = OS-assigned), owned by the calling process: each datagram arrives as [:udp sock host port data], data bytes … |
+| `%udp-send` | 4 | Send one datagram (data an iolist: a string, bytes or a nested tree) from sock to host:port, an IP address or localhost. |
+
+### `builtins/string.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%str-splice-diff` | 2 | — |
+| `%string-join` | 2 | — |
+| `string/->graphemes` | 1 | The extended grapheme clusters of s as a vector of strings — the unit a human means by "character". |
+| `string/grapheme-at` | 2–3 | The i-th grapheme cluster of s as a string, or default (else nil) when i is out of range. |
+| `string/grapheme-count` | 1 | How many extended grapheme clusters s has — the length a human means, and the exclusive upper bound for grapheme-at. |
+| `string/next-grapheme` | 2 | The character index one user-perceived character after character index i in s — the next grapheme-cluster boundary, clamped to the ends. |
+| `string/prev-grapheme` | 2 | The character index one user-perceived character before character index i in s — the previous grapheme-cluster boundary, clamped to the ends (ADR-422). |
+| `string/substring-graphemes` | 2–3 | The half-open grapheme-cluster range [start, end) of s (end optional = to the end), clamped to the ends. |
+
+### `builtins/subprocesses.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%pty-mode` | 1 | How pty child p's terminal is reading input right now: {:echo bool :canonical bool} — its termios ECHO flag (the line discipline echoes what is typed) and ICANON flag (input is … |
+| `%pty-resize` | 3 | Tell pty child p its terminal is now cols x rows; it sees SIGWINCH and redraws. |
+| `%pty-spawn` | 2–3 | Spawn prog under a pseudo-terminal, so it behaves as it would in a terminal (prompt, line editing, unbuffered output) rather than as it does on a pipe. |
+
+### `builtins/syntax_scan.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%scan-form-end` | 3 | The char offset just after n-forms top-level forms starting at char offset from, skipping strings/comments and tracking bracket depth, or the length of s if the text ends first. |
+| `%scan-form-start-2` | 2 | [prev start] — the greatest top-level (depth-0) form-start offset <= pos AND the one before it, from a SINGLE forward pass. |
+
+### `builtins/table.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%table-add` | 3 | Store (+ (get t k 0) v) at key k in table t and return the new value: the read-modify-write the linear-map rewrite fuses `(assoc m k (+ (get m k 0) v))` into. |
+| `%table-free` | 2 | Internal: drop the private table t the linear-map rewrite built, then return v. |
+| `%table-sub` | 3 | Store (- (get t k 0) v) at key k in table t and return the new value: table-add's subtracting sibling, which the linear-map rewrite fuses `(assoc m k (- (get m k 0) v))` and … |
+
+### `builtins/terminal.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%gui-busy` | 2 | Show window id's busy (wait) cursor while `on` is truthy, as if the loop its input feeds were past its quit key's busy-ms (ADR-491) — for a thin client whose loop runs on … |
+| `%gui-compiled?` | 0 | Whether this runtime was built with the GUI backend (--features gui). |
+| `%gui-drag-move` | 1 | Hand window `id` to the window manager for an interactive move, for the rest of the currently-held press. |
+| `%gui-drag-resize` | 2 | Hand window `id` to the window manager for an interactive resize from `dir` — :north :south :east :west :north-east :north-west :south-east :south-west. |
+| `%gui-minimize!` | 1 | Iconify window `id`. |
+| `%term-forward-input` | 1 | Deliver every terminal input event — what term-poll would answer — to pid's PRIORITY lane from now on, from a reader thread, as a window delivers its input; nil stops it and … |
+
+### `builtins/text_search.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%fold-case` | 1 | s case-folded for comparison, ONE CHARACTER PER CHARACTER — so an index into the result is an index into s. |
+| `%rope-find` | 4 | The character index of the first occurrence of needle in rope r at or after from, or -1. |
+| `%rope-rfind` | 4 | The character index of the LAST occurrence of needle in rope r starting strictly before `before`, or -1. |
+| `%rope-skip` | 5 | Where a run of characters reaches from `at` in rope r: with inside? |
+
+### `builtins/tooling.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%declared-sig` | 1 | The type expression a `(sig …)` DECLARED for global `name`, as written — `(model any -> model)` — or nil when none was declared (a `deftype` alias is not a signature and … |
+| `%fn-module` | 1 | The module whose source function `f` was written in, as a symbol — an anonymous `fn` too, which carries its defining module from the code that built it — or nil for a builtin, … |
+| `%function-effect` | 1 | The effect a call to the loaded global `name` REACHES, described — `(io/puts …)`, or `calls f, which performs an effect: …` — or nil when the walk finds none. |
+| `%global-generation` | 1 | The rebinding generation of global sym: grows with every def of that name in this runtime, 0 for a name never def'd here. |
+| `%prelude-global?` | 1 | Is `name` a global the PRELUDE bound — its own definitions, every native builtin, the registries it seeds? |
+| `%renames` | 0 | The rename ledger (ADR-304): a map of old public name (string) to `{:to new-name :adr adr}` for every deliberate rename the runtime still points at. |
+| `%source-deps` | 1 | Per TOP-LEVEL form of `src`, in document order, what it defines, what globals it uses, and which of those change the world outside the evaluation (a file written or removed, a … |
+| `%type-alias` | 1 | The type expression a `(deftype name T)` alias declares, as written, or nil when `name` is not an alias. |
+| `%type-aliases` | 0 | Every `(deftype name T)` alias the checker knows (ADR-327), as a list of `[qualified-name-string type-form]` — the raw type-expression as written. |
+| `%type-signature` | 1 | The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like "(int -> int)", or nil if it can't be pinned. |
+| `reflect/arglists` | 1 | Every arm's parameter list of a function, macro, or primitive — one list per arity of a multi-arity `defn`, where `arglist` shows only the last — or nil. |
+| `reflect/doc-forms` | 0 | The def... |
+| `reflect/generation` | 0 | The runtime's global generation now: every later `def` or `reflect/undef` of a global stamps it with a greater one. |
+| `reflect/global-values` | 0 | Every global a `def` may rebind, as a map of symbol -> value: the names the language does not reserve (a project's, a plugin's, a dynamic variable), each by its exact global name. |
+| `reflect/private?` | 1 | Whether the global `name` is module-private (ADR-146). |
+| `reflect/rebound-since` | 1 | Every global defined, redefined or removed since `generation` (a `reflect/generation` taken before), as a list of symbols in no particular order — a removed one is no longer … |
+| `reflect/set-source-location` | 2 | Record global `name` (its exact name; a root escape `/org/f` is read as `org/f`) as defined at `location` — `[file line col]`, as `reflect/source-location` answers — or forget … |
+| `reflect/source-locations` | 0 | Where every global a `def` may rebind was defined, as a map of symbol -> [file line col]: the companion of `reflect/global-values`, taken before a load so a global given back … |
+| `reflect/undef` | 1 | Remove the global binding `name` — the inverse of `def` — and everything recorded about it (privacy, metadata, def site, declared sig). |
+
+### `builtins/treesit.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%tree-sitter-chain` | 3 | The nodes containing char `offset`, outermost first, each as {:kind :start :end :named :container} WITHOUT its children. |
+| `%tree-sitter-errors` | 2 | Where the parse came apart: the ERROR and MISSING nodes as {:kind :start :end :missing? |
+| `%tree-sitter-kids` | 3–4 | The named children of the deepest node STRICTLY containing char `offset`, each as {:kind :start :end :named :container} without its own children — the sibling list every … |
+| `%tree-sitter-spans` | 4–5 | The fontify query: [start end reported] for the OUTERMOST nodes the face `table` colours, in source order, not descending into one that matched. |
+
+### `builtins/wasm.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%wasm-call` | 3 | — |
+| `%wasm-close` | 1 | — |
+| `%wasm-exports` | 1 | — |
+| `%wasm-load` | 1–2 | — |
+| `%wasm-release` | 2 | — |
+
+---
+
 ## Special forms (not primitives)
 
 These are evaluation rules in `crates/lisp/src/eval.rs`, not functions — they
@@ -429,10 +844,10 @@ primitives, zero new special forms** — keeping the ergonomic layer in Brood.
 |---|---|---|
 | `throw` | **primitive** (kernel) | `(throw v)` raises `v` as an error — a non-local exit. |
 | `%try` | **primitive** (kernel) | `(%try thunk handler)` — call `thunk` (a 0-arg fn); if it raises, call `handler` with the caught value, else return the thunk's result. The low-level catch mechanism. |
-| `try` / `catch` | **prelude macro** (Brood) | `(try body... (catch e handler...))` — sugar that wraps the body and handler in `fn`s and calls `%try`. |
-| `error` | **prelude** (Brood) | `(error msg & parts)` ⇒ `(throw (str msg ...))` — the common "raise a message" case. |
+| `try` / `catch` | **prelude macro** (Brood) | `(try body... (catch pattern handler...)...)` — sugar that wraps the body and the clauses in `fn`s and calls `%try`. |
+| `error` | **prelude** (Brood) | `(error & parts)` raises the error map `{:kind :error :code "E0090" :message (str parts…)}` through `%raise` — the common "raise a message" case. |
 
-Net kernel growth: **+2 primitives (`throw`, `%try`), and zero new special forms.**
+Net kernel growth at the time: **+2 primitives (`throw`, `%try`), and zero new special forms**; `%raise` joined them for language-raised error maps (ADR-501).
 The `try`/`catch` *syntax* is a macro written in the language — keeping the
 evaluator's special-form set unchanged, per "the language must be as small as
 possible." Two functions are a smaller addition to the *language* than one
@@ -457,7 +872,7 @@ struct LispErrorData {
 }
 ```
 
-`throw` sets `payload`; kernel errors (e.g. `%div` ÷0, arity, type) leave it
+`throw` and `%raise` set `payload`; kernel errors (e.g. `%div` ÷0, arity, type) leave it
 `None`, and `try_catch` then projects the structured map described below.
 
 ### `try` / `catch` semantics
@@ -465,48 +880,53 @@ struct LispErrorData {
 ```clojure fragment
 (try
   (risky-thing)
+  (catch {:kind :type} :wrong-type)
   (catch e
-    (println "failed:" e)
+    (io/puts "failed:" (error-message e))
     :recovered))
 ```
 
 - Evaluate the body forms in order; the value of the last is the result.
-- If a body form raises, bind `e` to the **caught value** and evaluate the
-  handler forms; the value of the last handler is the result.
-- The `catch` clause is the last form of the `try`.
-- (No `finally` in v1 — can add later.)
+- If a body form raises, try the `catch` clauses in order. Each takes a **pattern** from
+  the one pattern grammar, with an optional `:when` guard (ADR-501); the first that matches
+  runs, and the value of its last form is the result.
+- When no clause matches, the error propagates, raised again from where it was first raised.
+- A final `(finally cleanup…)` clause runs on success, on a raise, and on a raise inside a
+  `catch`; its value is discarded (ADR-306).
 
 It desugars to the `%try` primitive:
 
 ```clojure fragment
 (try a b (catch e h))
-;; expands to:
+;; expands to, in effect:
 (%try (fn () a b) (fn (e) h))
 ```
 
 ### What `catch` binds
 
 For `(throw v)`, `e` is the thrown value `v`, unchanged — user throws are never
-wrapped. `error` throws a string, so `e` is that string.
+wrapped.
 
-For a **kernel-raised** error (parse, unbound, arity, type, runtime — e.g. `%div`
-÷0), `e` is a **structured map**:
+Every error the language raises is a **structured map** (ADR-501): a kernel error
+(parse, unbound, arity, type, runtime — e.g. `%div` ÷0) as well as what `error`, `assert`
+and a failed pattern raise:
 
 ```lisp fragment
-{:kind <keyword>           ; :parse | :unbound | :arity | :type | :runtime | :user
+{:kind <keyword>           ; :parse | :unbound | :arity | :type | :runtime | :interrupted
+                           ;   | :contract | :error | :assert | :match
  :message <string>         ; the rendered text
  :code <string>            ; stable, "E00xx"
  :file <string>            ; when known (set by load / the file runner)
  :line <int> :col <int>    ; when known (1-based)
- :hint <string>}           ; optional, points at a likely fix
+ :hint <string>            ; optional, points at a likely fix
+ :trace <list>}            ; the call stack at the raise, innermost first
 ```
 
-So branch on `:code` or `:kind` programmatically and show `:message`/`:hint` to a
-human:
+So match on `:code` or `:kind` and show `:message`/`:hint` to a human:
 
 ```clojure
 (try (/ 1 0)
-  (catch e (if (= (get e :code) "E0040") :div-by-zero (throw e))))
+  (catch {:code "E0040"} :div-by-zero))   ;=> :div-by-zero
 ```
 
 The full code list and the numbering scheme are in

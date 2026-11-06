@@ -7,10 +7,9 @@
 > lowered to `match*` in the **compile pass** (ADR-022), which also makes a `match`
 > in a hot loop expand once rather than per call.
 >
-> Two refinements landed slightly differently from the prose below, both noted
-> inline: the failure **context** for `fn` clauses is `:fn` (not the function
-> name — the name is attached after closure creation), and pattern destructuring
-> of `&optional` slots is deferred (required slots only for now).
+> One refinement landed differently from the original design: the failure **context**
+> for `fn` clauses is `:fn` (not the function name — the name is attached after closure
+> creation).
 
 ## The idea: binding *is* matching
 
@@ -70,8 +69,11 @@ One vocabulary, shared by every site:
 | `[p1 p2 …]` | a vector of exactly that length — the *tuple* |
 | `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the target isn't a map |
 | `{:k p}` | a map with key `:k` **present**, value matches `p` |
-| `(record name {…})` | a **`defrecord` value** of nominal id `name` (bare → current ns, or `mod/name`), then the map pattern `{…}` (optional; `{:k p}`/`:keys`/`:or` compose) against its fields. A record is a map carrying `:__id__`, so this is an id assertion + a map pattern; a plain map or non-record fails |
+| `(record name {…})` | a **`defrecord` value** of nominal id `name` (bare → current ns, or `mod/name`), then the map pattern `{…}` (optional; `{:k p}`/`:keys`/`:or` compose) against its fields. A record is its own kind (ADR-542), so this is an id assertion + a map pattern over its fields; a plain map or a different record fails |
 | `(bytes seg…)` | a **`bytes` value**, destructured segment-by-segment — bit syntax: byte/`#b"…"` literals, one-byte binders, sized `(x n)` sub-bytes (dynamic sizes), typed integers `(x :u16)`/`(x :i32-le)`/…, `& rest` — see `docs/language.md` §Bytes patterns |
+| `^expr` | the current value of `expr` — a pin, see below |
+| `(or p q …)` | any alternative, first match wins; every alternative binds the same names |
+| `(and p q …)` | every pattern against the same value, left to right — `(and whole {:keys [a]})` is Brood's `:as` |
 | nested | patterns compose to any depth |
 
 **It's additive.** Every binding form Brood has today is already the
@@ -144,8 +146,8 @@ Pure Brood, pure macro — no core change. Each chosen body lands in tail positi
 the generated `cond`/`let`, so **a `match` in tail position stays TCO-safe**:
 match-driven loops and receive loops won't overflow.
 
-`case` (dispatch on a value, literal patterns) is just `match` with literal
-patterns — no separate construct.
+`case` (dispatch on a value against literal tests) is a macro over the same engine, with
+flat `test result` pairs and a lone trailing default: `(case k :a 1 :b 2 :other)`.
 
 ### Refutable `let`
 
@@ -161,30 +163,30 @@ code is unchanged:
 ```
 
 This is Brood's `=`: a refutable bind that raises on mismatch. When you want to
-*handle* a non-match instead of raising, reach for `match` (a future `with` could
-add chained refutable binds with an `else`).
+*handle* a non-match instead of raising, reach for `match`; to stop on a returned
+`failure` instead, `with` is the failure `let` (ADR-315).
 
 ### `fn` / `defn` clauses (no `defmatch`)
 
 `defn` is already `(def name (fn …))` — a prelude macro. So multi-clause lives on
 **`fn`**, and `defn` inherits it unchanged; there is no separate `defmatch`.
 
-**Parameter lists stay lists** (ADR-010) and the parameter grammar is unchanged —
-`&optional` (with defaults) and `& rest` remain list-level markers, named `&key`
-is still deferred (ADR-011). The one new thing: each required or optional **slot
-may be a pattern** instead of a bare symbol, so vectors (tuples) and lists
-(sequences) can be destructured per argument:
+**Parameter lists stay lists** (ADR-010), and there is one head grammar for every `fn`
+(ADR-619): required slots are patterns; after `&optional`, a slot is `name`, `(name default)`
+or `(pattern default)`; after `&`, a name or a pattern; and a `:when` guard comes first in
+the body, a single-clause `fn` included. There is no `&key` (ADR-163). So vectors (tuples)
+and lists (sequences) can be destructured per argument:
 
-```clojure
-(defn f (a [x y] &optional (c 10) (p [0 0])) …)
-;  a      arg 0, binds
-;  [x y]  arg 1, destructured as a 2-tuple
-;  c      optional, default 10
-;  p      optional, defaults to [0 0]  (a bare symbol — optional *slots*
-;         can't yet be patterns; see the note above)
+```clojure fragment
+(defn f (a [x y] &optional (c 10) ([i j] [0 0])) …)
+;  a       arg 0, binds
+;  [x y]   arg 1, destructured as a 2-tuple
+;  c       optional, default 10
+;  [i j]   optional, destructured; defaults to [0 0]
 ```
 
-Multi-clause dispatches by pattern (and guard), in order:
+Multi-clause tries its clauses in order, and the first that matches runs, by argument
+count and by shape alike, so arity and pattern clauses mix in one `fn`:
 
 ```clojure
 (defn fac
@@ -195,8 +197,7 @@ Multi-clause dispatches by pattern (and guard), in order:
 Single- vs multi-clause is one rule:
 
 > **`fn` is multi-clause iff *every* form after the name is a clause** — a list
-> whose head is itself a parameter list (a list or vector). Otherwise it's
-> single-clause.
+> whose head is itself a parameter list. Otherwise it's single-clause.
 
 This resolves the cases by intent:
 
@@ -207,15 +208,15 @@ This resolves the cases by intent:
 | `(fn ((0) 1) ((n) (* n …))) ` | multi — every form is a clause |
 
 The only thing it can't express is a single-clause fn with a compound first
-parameter *and* an empty body — useless, so the cost is nil. Clauses are
-same-arity **pattern + guard** dispatch, *not* Clojure-style multi-arity
-dispatch, which ADR-011 deferred — we are not reopening that.
+parameter *and* an empty body — useless, so the cost is nil.
 
-**Footgun:** the form right after the name is always the parameter *list*, so a
-vector there is the whole list, not a tuple param — `(defn g [x y] …)` is two
-params (ADR-010's vector-param leniency), `(defn g ([x y]) …)` is one tuple param.
-Since vectors now read as tuples, "parameter lists are lists" is the firm idiom
-(we may retire the vector-param-list leniency).
+**Order decides, and what order would hide is refused** (ADR-619): a clause whose every
+call an earlier clause takes can never run, so the `fn` is a compile error naming both.
+Partial overlap stays legal and runs the first: `((0) …) ((n) …)` is the point of pattern
+dispatch.
+
+**A vector is never the parameter list** (ADR-149): `(defn g [x y] …)` is an error,
+and `(defn g ([x y]) …)` is one tuple param.
 
 **Style:** dispatching on a *single* tagged argument reads better as `match` in the
 body than as clause heads (which need the wrapping paren and get dense). Multi-clause
@@ -233,7 +234,7 @@ heads earn their keep dispatching on *several* parameters at once.
 These are layers on the same compiler.
 
 - **Guards** — `:when` after a pattern; the clause matches only if the guard is
-  truthy. `:when` (not bare `when`, which is a special form) avoids any clash.
+  truthy. `:when` (not bare `when`, which is a macro) avoids any clash.
 
   ```clojure
   (def n 5)
@@ -298,16 +299,16 @@ These are layers on the same compiler.
 
   Each symbol in `:keys` binds to the value at the same-named keyword — `nil`
   when the key is absent, or the `:or` default. In refutable position (`match`)
-  the clause fails if the value isn't a map. Only the `:keys`/`:or` subset ships;
-  general `{:key subpattern}` nesting and `:as` are deferred until a concrete need
-  (ADR-011).
+  the clause fails if the value isn't a map or a record. `{:key subpattern}` requires the
+  key present and matches its value; it nests, and it mixes with `:keys` in one pattern.
+  `:as` is an error in a map pattern, because it would test for an `:as` key: write
+  `(and m {…})`.
 
 ## Errors
 
 Clear errors are a requirement, and there are two kinds: **compile-time** (raised
-while the `match` macro expands) and **runtime** (a match that finds no clause).
-Neither has source locations yet — the reader tracks positions but doesn't attach
-them to values (a separate roadmap item) — so messages are made self-describing.
+while the `match` macro expands, placed at the `match` or at the offending clause,
+ADR-618) and **runtime** (a match that finds no clause). Messages are self-describing.
 
 **Runtime — nothing matched.** A `match`, a refutable `let`, or a `fn` call that
 matches nothing **crashes** (raises): a process handed a message it
@@ -315,12 +316,11 @@ can't match should die loudly, not limp on with `nil`. Add an explicit `_` claus
 to make a match total. The error is **structured and catchable**, and carries the
 value that didn't match, the patterns that were tried (the macro has them as data
 at expand time, so it quotes them in), and a context label — enough to read on its
-own. Target messages:
+own:
 
 ```
-match: no clause matched 42 — tried [:ok _], [:err _]
-let: pattern [:ok v] did not match [:err 404]
-area: no clause matched arguments (7 :hexagon) — clauses ([:circle r]), ([:rect w h])
+match: no clause matches 42 — tried [:ok _], [:err _]
+let: no clause matches [:err 404] — tried [:ok v]
 ```
 
 Structured means a handler can match on the failure itself:
@@ -346,15 +346,12 @@ The raised value is an error map (ADR-501): `{:kind :match :message … :context
 - **The matcher is Brood.** A pattern→code compiler in `std/` (a macro plus
   expand-time helper `defn`s, exactly like the threading macros compute at
   expansion time) emits nested `if`/`let` over existing primitives: `pair?`,
-  `first`, `rest`, `nil?`, `vector?`, `vector-ref`, `vector-length`, and `%eq`.
-  Fresh temporaries via `gensym`. No Rust, no new builtin. This is the
+  `first`, `rest`, `nil?`, `vector?`, `%vector-ref`, `%vector-length`, and `%eq`.
+  Fresh temporaries via `reflect/gensym`. No Rust, no new builtin. This is the
   `try`/`catch` precedent (a macro over a primitive) applied again.
-  - *Hygiene:* the generated code references those primitives by bare name, which
-    a local binding could shadow (Lisp-1, unhygienic macros — ADR-009). Equality
-    uses the kernel `%eq` rather than `=` by convention, since `%`-names aren't
-    rebound; the rest (`first`/`rest`/…) remain shadowable until macro hygiene
-    lands. In practice, don't bind `first`/`rest`/`pair?`/… as locals around a
-    `match`.
+  - *Hygiene:* a template's binders are renamed per expansion (ADR-500) and a prelude
+    macro's call heads are pinned to root as `/name` (ADR-423), so a local or a module
+    definition named `first` does not capture the generated code.
 
 - **`match` needs no core change** — it's a plain macro.
 
@@ -385,7 +382,7 @@ The raised value is an error map (ADR-501): `{:kind :match :message … :context
   leaves quasiquote opaque) or produced by a macro expanded lazily within its own
   defining form. So `eval`'s `let`/`fn` also detect a non-symbol target / a
   clause-shaped `fn` and lower it on the fly (rewrite through `macroexpand_all`,
-  then `continue 'tail`). The compile pass is the fast common path; this fallback
+  and carry on with the rewritten form). The compile pass is the fast common path; this fallback
   is the correctness backstop (otherwise such a binder failed with a misleading
   "expected a symbol"). The common all-symbol case is detected away cheaply, so an
   ordinary `let`/`fn` never pays for it.
@@ -431,7 +428,7 @@ runtime side (the green-process suspend + the receive timer) and ADR-027.
    template; ADR-150).
 3. **Failure → crash, with a structured value.** A non-matching `match`,
    refutable `let`, or `fn` call raises (catchable via `try`/`catch`); add a `_`
-   clause to make it total. The value is structured (e.g. `[:no-match v]`) so a
+   clause to make it total. The value is a structured error map (ADR-501) so a
    handler can match on it. "Let it crash" fits the supervision model.
 4. **Phasing → not a design question** (build order). Likely one PR; the shared
    compiler + `match` is the foundation, so it lands first regardless.
@@ -444,22 +441,21 @@ runtime side (the green-process suspend + the receive timer) and ADR-027.
    `receive` / `fn`. One clause concept; guards and multi-form bodies fit cleanly;
    misuse is a loud compile-time error, not a silent mis-parse. (`let` stays flat
    `pattern value …` — it interleaves bindings, it isn't a clause construct.)
-7. **Errors → structured, catchable, self-describing.** No-match crashes with a
-   tagged value carrying value + tried patterns + context; the macro also raises
+7. **Errors → structured, catchable, self-describing.** No-match crashes with an
+   error map carrying value + tried patterns + context; the macro also raises
    compile-time errors for malformed patterns and unreachable clauses. A bare
    symbol binds (the one trap) — match a known value with a keyword, `'sym`, or
    `^pin`; an unreachable clause after an irrefutable one is rejected.
 
 ### Parameter grammar (resolved)
 
-A parameter list stays a **list** (ADR-010); `&optional`/`& rest` are unchanged;
-named `&key` stays deferred (ADR-011). Each required/optional **slot** may be a
-pattern. A top-level vector after the name is still the whole param list, so wrap
-a single tuple param: `(defn g ([x y]) …)`. Clauses are same-arity pattern+guard
-dispatch, not arity overloading.
+A parameter list is a **list** (ADR-010, ADR-149): a vector there is an error, so a
+single tuple param is wrapped, `(defn g ([x y]) …)`. Every required slot, `&optional` slot
+and rest may be a pattern, and clauses are tried in order by count and by shape (ADR-619);
+there is no `&key` (ADR-163).
 
 ## Relationship to the roadmap
 
 This single feature subsumes Tier-2 "Destructuring in `let`/`fn`" and "`case`",
-and sets up `receive` clauses. It records as an ADR in
-[`decisions.md`](decisions.md) once the design here is accepted.
+and sets up `receive` clauses. It is recorded as ADR-021 in
+[`decisions.md`](decisions.md).

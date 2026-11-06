@@ -1,8 +1,17 @@
-# The call convention — scoped design (DRAFT, not yet an ADR)
+# The call convention — scoped design
 
-Status: **draft, 2026-09-16**. Written to scope the work before any code; the numbers are
-from this tree (`48e71d2d`, v0.29.2) unless dated otherwise. When a rung lands, the decision
-it embodies gets an ADR in `docs/decisions.md` and this file records what was measured.
+Status: **partly built; the ladder in §7 stopped after three rungs.** Written 2026-09-16 to
+scope the work before any code; the numbers are from that tree (`48e71d2d`, v0.29.2) unless
+dated otherwise, and "today" below means then. No ADR records the convention as a whole; §7
+records what was measured for each rung.
+
+State at v0.50.0: rungs **A0** and **A1** landed, and **A4**'s first half. `JitArmFn` is
+`(heap, base, out, ctx)` (`jit/backend.rs`): the context is one `JitCallCtx` pointer, which
+settled §8's question 1 and has since gained the `unwind` bits (ADR-401). **A2** has not
+landed: the gateway token is still `native_gateway_seq`. **A3** has not landed: the result
+still returns through `out`. **C1** has not landed in this form: `TraceFrame` is not POD,
+though it now shares its file as an `Arc<str>`. Part C's second half, `%try` as a frame
+marker, shipped as `Inst::TryEnter` (ADR-400).
 
 ## 1. Why this, now
 
@@ -36,7 +45,7 @@ Two conclusions the record already supports and this design accepts as premises:
   "no roots staging" moves stores from caller to callee prologue and saves nothing. What
   costs is the *ceremony* around the call, not where the arguments sit.
 
-## 2. What a native call does today, and why each piece exists
+## 2. What a native call did on 2026-09-16, and why each piece exists
 
 Read from `jit_runtime/link.rs::jit_run_fast_link` and the inline blob in
 `jit_lower/call.rs` (§7.5). Each row: the obligation, what it protects, and what the
@@ -193,4 +202,5 @@ repo's standing rule).
 3. **The third result word.** Which tags use `w2` — if only string aux data, A3's tag gate
    is one compare; if handles ever carry it, A3 needs a per-kind table.
 4. **`%try` as a frame marker** (Part C's second half) is bytecode-compiler work with its own
-   semantics questions (a `finally` under a suspend); it is not in this ladder.
+   semantics questions (a `finally` under a suspend); it was not in this ladder. Shipped
+   separately as ADR-400.

@@ -865,7 +865,7 @@ impl Heap {
     /// out once in Brood and **re-derived by hand** in the compiler's devirtualization
     /// (`inline::mono_arg_identity`, whose doc comment says "mirrors `identity-of`" — a claim,
     /// not a mechanism), with the checker reasoning about `:__id__` shapes independently
-    /// beside them. Speculative dispatch (docs/dispatch-speculation.md) adds a fourth reader
+    /// beside them. Speculative dispatch (docs/archive/dispatch-speculation.md) adds a fourth reader
     /// in native code, and a guard is only as sound as the agreement between the identity it
     /// compares and the one dispatch actually uses. Divergence there is not a slow path — it
     /// is the wrong impl, silently. So: one definition, and `identity_agreement.rs` pins it to

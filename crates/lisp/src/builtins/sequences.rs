@@ -1450,7 +1450,7 @@ pub(super) fn pair_kv(heap: &Heap, who: &str, p: Value) -> Result<(Value, Value)
 
 /// `(%map-into m seq)` — pour each `[k v]` item of `seq` into map `m`, returning
 /// a fresh map, via the transient builder (`Heap::map_from_pairs_into`, see
-/// `docs/transients.md`). The kernel hook behind the prelude's `into` (map
+/// `docs/archive/transients.md`). The kernel hook behind the prelude's `into` (map
 /// branch), `zipmap`, and `select-keys`; equals `(reduce assoc m seq)` but
 /// mutates only build-local trie nodes, so it allocates O(result-nodes) rather
 /// than O(n·depth).

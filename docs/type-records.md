@@ -1,14 +1,21 @@
 # Record/shape types — `(record :k1 T1 :k2 T2 …)` in the type grammar
 
-> Status: **slice 1 + 2 shipped** (Brood runtime, checker refinement, sinks,
-> literal inference, and the field-precise `get`/`assoc`/`dissoc`/`keys`/`vals` sinks).
-> `type-matches?` checks each declared field's
-> presence/type at the runtime-contract boundary; `Ty` carries a full `fields`
-> refinement with width/depth subtyping; `(get r :k)` on a declared or
-> inferred record resolves to the exact field type; a `{…}` map literal infers
-> its own record shape with no annotation needed. Remaining smaller items
-> (closed records, `assoc`/`keys`/`vals` field-precise sinks) deferred until a
-> real consumer drives them — see [Deferred](#deferred).
+> Status: **shipped** (Brood runtime, checker refinement, sinks, literal inference, and the
+> field-precise `get`/`assoc`/`dissoc`/`keys`/`vals` sinks). `type-matches?` checks each
+> declared field's presence/type at the runtime-contract boundary; `Ty` carries a `fields`
+> refinement with width/depth subtyping; `(get r :k)` on a declared or inferred record
+> resolves to the exact field type; a `{…}` map literal infers its own shape with no
+> annotation needed. A `(record …)` is **closed** by default, `&open` the marked case
+> (ADR-264).
+>
+> **Three later ADRs changed the design below**, whose code sketches are as written:
+> ADR-262 (a union of two different shapes keeps both terms instead of widening), ADR-264
+> (openness is the type of the undeclared keys, so one field reading, `field_ty`, drives
+> subtyping and disjointness; two records are disjoint on a required field with disjoint
+> types), and ADR-542 (a `defrecord` value is its own `record` kind, not a `map`: a shape
+> that carries an identity sits on the `record` tag, any other on `map`, and the lattice's
+> shape rules cover both through `SHAPE_BITS`). The runtime arm in `type-matches?` is now
+> `(%eq h 'record)` in `std/prelude/core.blsp`, which reads a record through its fields.
 
 ## Problem
 
@@ -89,8 +96,9 @@ trick `(map K V)`'s branch already relies on for its key/value checks.
 
 `Ty` carries a `fields: Option<Arc<BTreeMap<Symbol, (Ty, bool)>>>` refinement
 (field name → declared type, `required?`), alongside `arrow`/`elem`/`map_kv`
-and tagged `MAP_BIT` like `map_kv` — a record is still a runtime `map` value;
-this only refines it, the same trick `keyword_lit` uses layering onto the
+and tagged `MAP_BIT` like `map_kv` (as written; see the Status note for ADR-542 and for
+`RecordShape`, which replaced the bare `BTreeMap`) — this only refines the value, the same
+trick `keyword_lit` uses layering onto the
 `Keyword` tag. `Ty::record_of(fields)` builds one; `Ty::record_fields()` reads
 it back.
 
@@ -117,7 +125,8 @@ if value::symbol_is(head, "record") {
 }
 ```
 
-**Subtyping (`is_subtype`) — width and depth, deliberately conservative.** For
+**Subtyping (`is_subtype`) — width and depth, deliberately conservative (the open-record
+rule as first built; ADR-264 replaced it).** For
 every field `other` declares, `self` must also declare it (required if
 `other` requires it) with a covariant field type; a field `other` doesn't
 declare imposes no constraint, so `self` may carry extra fields freely (width,
@@ -146,7 +155,7 @@ fn record_fields_is_subtype(
 This is **sound but not complete** by construction (`docs/types.md` contract
 #5): it may miss a true subtype relation (e.g. an empty record *is* a subtype
 of any-record-with-only-optional-fields, but this algorithm says no), but it
-never claims a false one. See `crates/lisp/src/types.rs`'s
+never claims a false one. See `crates/lisp/src/types/tests.rs`'s
 `record_subtyping_is_width_and_depth_but_conservative` test for the exact
 cases this covers and deliberately doesn't.
 
@@ -164,7 +173,8 @@ exactly as a vector's element type must. Componentwise coverage is still refused
 `{a: int|string, b: int|string}` against `{a: int, b: int} | {a: string, b: string}`
 is false, and `{a: 1, b: "x"}` is why.
 
-**Union/intersect — reused verbatim, no new algorithm.** `fields` is threaded
+**Union/intersect — reused verbatim, no new algorithm (as first built; since ADR-262 a union
+of two different shapes keeps both as terms).** `fields` is threaded
 through the *existing* generic `merge_union`/`merge_intersect` helpers exactly
 like `map_kv` already is: two equal field maps survive a union/intersect
 unchanged; two different ones widen to `None` (no declared shape). This was a
@@ -176,22 +186,21 @@ inventing new merge logic. Less precise on a union of two different record
 shapes, but sound, and consistent with how `arrow`/`elem`/`map_kv` already
 behave.
 
-**`is_disjoint` — untouched, tags-only.** Like every other refinement, a
-`fields` mismatch is never inspected by disjointness — it can only *miss* a
-warning, never manufacture a false one.
+**`is_disjoint`.** Tags-only as first built. It now has a record rule: two records are
+disjoint when a shared field is required on some side and the two types are disjoint
+(`record_disjointness_needs_a_required_conflicting_field`).
 
 **`Display`** — a record renders as `{name: string, age?: int}` (`?` marks an
 optional field, sorted by field name since `Symbol` is an interned `u32` and
 sorts by intern order, not spelling — same trap `lit`'s rendering already
 avoids).
 
-### Static checker — sinks and literal inference (`check/guards.rs`)
+### Static checker — sinks and literal inference (`check/infer.rs`)
 
 **`(get r :k [default])`** on a record with a **literal keyword** key resolves
-to the exact field type (unioned with `nil`, since `get` always admits the
-"absent" case) — more specific than the flat `map_kv` fallback. A dynamic or
-undeclared key falls through: records are open, so an unknown key's type is
-genuinely unknown, not an error.
+to the exact field type (unioned with `nil` for an optional field) — more specific than the
+flat `map_kv` fallback. A dynamic key falls through. An undeclared key reads as `nil` on a
+closed shape and as unknown on an `&open` one (ADR-264).
 
 **Record-literal type inference** — `expr_ty` gained a `Value::Map` arm (it
 previously had none at all, unlike vector literals which already infer
@@ -219,15 +228,9 @@ Smaller items, each additive, gated on a real consumer (ADR-011):
   union of the declared field types. `keys`/`vals` read "these are ALL the keys", which
   is true only of a **closed** record — an open one falls through to the flat rule. A
   dynamic (non-literal) key widens, since the checker cannot say which field is touched.
-- **A less conservative subtyping algorithm** — the current one requires
-  `self` to declare every field `other` does, even optional ones (see the
-  `is_subtype` section above); a smarter version could prove more relations
-  (e.g. "self has no info about field X, other marks X optional" is actually
-  fine) at the cost of real additional design work.
-- **Field-wise union/intersect** — see the "reused verbatim" note above; a
-  union that combines two different record shapes field-by-field (rather than
-  widening to no shape at all) is more precise but wasn't needed to keep
-  things sound.
+- ✅ **A less conservative subtyping algorithm** — ADR-264's `field_ty` reading: a key a
+  closed shape omits reads as `nil`, so an optional field needs no declaration on the left.
+- ✅ **Union of different shapes** — ADR-262 keeps them as terms rather than widening.
 
 ## Soundness
 
@@ -238,9 +241,9 @@ Smaller items, each additive, gated on a real consumer (ADR-011):
 - **Checker:** every piece above was verified against contract #5 — see
   `record_subtyping_is_width_and_depth_but_conservative`,
   `record_union_widens_on_field_mismatch_but_keeps_a_match`, and
-  `record_is_disjoint_only_on_tags_like_every_other_refinement` in
-  `crates/lisp/src/types.rs`, plus `record_field_refinement_flows_through_checker`
-  in `crates/lisp/src/types/check.rs`. The record-literal inference (the
+  `record_disjointness_needs_a_required_conflicting_field` in
+  `crates/lisp/src/types/tests.rs`, plus `record_field_refinement_flows_through_checker`
+  in `crates/lisp/src/types/check/tests/refinement.rs`. The record-literal inference (the
   highest-blast-radius piece — it changes the inferred type of *every* map
   literal project-wide) was diffed against `nest check` output across the
   whole `std/` + `tests/` corpus with the new inference arm disabled vs.
@@ -250,11 +253,11 @@ Smaller items, each additive, gated on a real consumer (ADR-011):
 
 `tests/contract_test.blsp`, `describe "record type checks (record …)"`:
 runtime-contract coverage (required/optional/open, non-map rejection).
-`crates/lisp/src/types/check.rs`: `record_type_annotation_parses_and_accepts_valid_calls`
+`crates/lisp/src/types/check/tests/refinement.rs`: `record_type_annotation_parses_and_accepts_valid_calls`
 (grammar + malformed-annotation handling) and
 `record_field_refinement_flows_through_checker` (the `get` sink + literal
 inference, both the false-negative-avoidance and the true-positive cases).
-`crates/lisp/src/types.rs`: `record_renders_as_a_field_shape`,
+`crates/lisp/src/types/tests.rs`: `record_renders_as_a_field_shape`,
 `record_subtyping_is_width_and_depth_but_conservative`,
 `record_union_widens_on_field_mismatch_but_keeps_a_match`,
-`record_is_disjoint_only_on_tags_like_every_other_refinement`.
+`record_disjointness_needs_a_required_conflicting_field`.

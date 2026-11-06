@@ -1,8 +1,8 @@
 # Protocol dispatch & abilities — the polymorphism seam
 
 > Status: **Resolved and shipped — all four slices, `protocol` retired (ADR-168).**
-> `std/ability.blsp` (`defability`/`impl`/`defrecord*`, value-first nominal dispatch) +
-> a checker arm + `tests/ability_test.blsp`. It unifies value polymorphism and
+> `std/prelude/abilities.blsp` (`defability`/`impl`, value-first nominal dispatch, folded into
+> the prelude from `std/ability.blsp`), `defrecord` + a checker arm + `tests/ability_test.blsp`. It unifies value polymorphism and
 > drivers-as-values, detects cross-module impl conflicts, and dispatches records on a
 > baked `module/name` identity. `defprotocol`/`defimpl` have been **removed**;
 > `defbehaviour` stays in `std/protocol.blsp` as the module-contract seam. The
@@ -11,6 +11,11 @@
 > space that was explored to get here.
 >
 
+> **ADR-542 later reversed slice 2:** a record is its own value kind, `:__id__` is gone from
+> its fields, `type-of` is `:record`, and `keys`/`count`/JSON never see an id. The slice notes
+> below, and every mention of `defrecord*`, `ability/impl-for` and `ability/*impls*` (now
+> `defrecord`, `%impl-for`, `*impls*`), are the record of what was decided at the time.
+>
 > **Slice 2 (identity leak) — resolved pragmatically, no kernel change.** Verifying the
 > constraints changed the plan: the `Value` layout is JIT-pinned and map ops match
 > `Value::Map` with catch-alls, so a `Record` variant is a pervasive, risky change; and
@@ -57,7 +62,8 @@
 > points at `defability`/`impl`.
 >
 > **Still open:** **monomorphization** (codegen — the *runtime* win, deferred to last;
-> Tier 1 shipped opt-in as ADR-182/294, Tier 2 is queued as a perf item). **Return-type
+> Tier 1 is always on, ADR-182/294/398; Tier 2 found no workload with a site, see
+> [ability-monomorphization.md](ability-monomorphization.md)). **Return-type
 > dispatch is declined** (ADR-361, 2026-09-17): it can only be implemented as a
 > checker-driven rewrite, which the advisory rule forbids; generic code names its target
 > as a value.
@@ -316,22 +322,20 @@ We are not obliged to pick an existing point. Seeds for a Brood-native synthesis
 
 ## Already shipped vs. open
 
-- **Shipped:** `std/ability.blsp` — `defability`/`impl`/`defrecord*`, value-first
+- **Shipped:** `std/prelude/abilities.blsp` — `defability`/`impl`, with `defrecord`, value-first
   nominal dispatch (record identity or `type-of`), drivers-as-values,
   provenance-tagged cross-module conflict detection, `satisfies?`, `:default`,
-  `record?`/`record-id`/`fields`/`identity-of`; **sealed abilities** with
+  `record?`/`record-id`/`fields`/`%identity-of`; **sealed abilities** with
   exhaustiveness checking; the checker arm (arity/missing/undeclared-op diagnostics
   under the noun "ability") plus the inference-driven **missing-impl warning at call
-  sites**; `json-encode` omitting `:__id__`; and `tests/ability_test.blsp`.
+  sites**; and `tests/ability_test.blsp`.
   `defprotocol`/`defimpl` **retired** (ADR-168); `defbehaviour` retained in
   `std/protocol.blsp` with `tests/behaviour_test.blsp`.
 - **Open:** **monomorphization** (static resolution where the identity is known — the
-  runtime win; Tier 1 opt-in as ADR-182/294, Tier 2 a perf item). **Return-type
+  runtime win; Tier 1 always on, ADR-182/294/398; Tier 2 found no site). **Return-type
   dispatch is declined** (ADR-361): implicit, context-inferred selection would make a
   program's meaning depend on the advisory checker; the explicit-argument idioms are the
   answer, and a multimethod keyed on a type designator is the door left open if a
-  library ever asks. Two cosmetic/tooling residues also remain:
-  `keys`/`count` on a record still include `:__id__` (use `fields`; a hidden kernel
-  slot is the eventual fix, deferred as optional polish), and the **LSP has not been
-  migrated** off `defprotocol`/`defimpl` (KI-16). `defbehaviour` stays — the
+  library ever asks. The two residues this list carried are closed: ADR-542 took the id out
+  of a record's fields, and the LSP left `defprotocol`/`defimpl` (KI-16). `defbehaviour` stays — the
   module-as-implementor contract (Q3) is genuinely different from value dispatch.

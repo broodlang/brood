@@ -5,8 +5,9 @@
 > late-bound globals, append-only code). This doc is the *next* layer: the
 > handful of things still missing before you can edit the running editor all
 > day the way you edit a running Emacs. **Stages 1, 2, the dedup half of 5, and
-> 7 shipped 2026-05-29 under [ADR-042](decisions.md); Stages 3, 4, 6, and the
-> collector half of 5 remain.** Each stage lands behind `cargo test` + the Brood
+> 7 shipped 2026-05-29 under [ADR-042](decisions.md), Stage 6 on 2026-08-06 and the
+> single-process half of the collector under ADR-091; Stages 3, 4 and the multi-process
+> collector remain.** Each stage lands behind `cargo test` + the Brood
 > suite and gets an ADR in [`decisions.md`](decisions.md) when it ships.
 
 ## The bar
@@ -17,20 +18,17 @@ function and the change is live on the next call, with no restart, no lost
 state, all day. We don't need every Emacs feature — we need the *core loop* to
 feel the same.
 
-## What already works (verified 2026-05-29 against the live image)
+## What already works (first verified 2026-05-29 against the live image)
 
-The foundation is real, not aspirational. Confirmed by evaluating against a
-running `nest mcp` image:
+The foundation is real, not aspirational:
 
-- **Redefine-and-see-it** — `(def inc (fn (x) (+ x 100)))` then `(inc 1)` → `101`.
-  Late binding through the per-runtime globals table (`heap.rs` `RuntimeCode`).
-- **Overrides reach the prelude.** The prelude is seeded into the *mutable*
-  globals table, so a `def` shadows a prelude name — and because prelude
-  closures resolve their free references through that same live table,
-  **prelude internals pick up your override too.** Verified: overriding `first`
-  made the prelude's `(defn second (coll) (first (rest coll)))` return the
-  overridden value. This is bigger than I first assumed — "open up the prelude"
-  is *mostly already done* (see Stage 8).
+- **Redefine-and-see-it** — `(def greet (fn (x) (+ x 100)))` over your own `greet`, then
+  `(greet 1)` → `101`. Late binding through the per-runtime globals table
+  (`RuntimeCode`, `core/heap/runtime_code.rs`).
+- **Your code only.** On 2026-05-29 a `def` could override a prelude function and reach
+  prelude internals. ADR-166 ended that: a function that shipped in the binary is
+  reserved, and `(def inc …)` raises. A `(defmodule …)` of your own defines `your/mod/inc`
+  instead, and a `let` may shadow the name locally (see Stage 8).
 - **Cross-process** — a `def` reaches every spawned process on its next lookup
   (the shared `Arc<RuntimeCode>`).
 - **A top-level `defn` self-loop now DOES pick up its own redefinition** (fixed
@@ -102,6 +100,10 @@ Five things, roughly in order of how soon they bite:
    code-change hook to migrate it.
 5. **Stale macro expansions.** Redefining a macro doesn't re-expand callers
    already compiled with the old expansion — and nothing warns you.
+
+Written 2026-05-29. Since then gap 1 is closed by `defonce` (Stage 1), gap 4 by
+`code-change` (Stage 6) and gap 5 by the redefinition warning (Stage 7). Gap 2 is closed
+for a single-process runtime only (Stage 5). Gap 3 is open.
 
 ## Guiding principle
 
@@ -199,6 +201,11 @@ green. → **ADR-042 (shipped 2026-05-29).**
 slower in practice (expansion is cheap; we expand anyway). Skip the rollback
 machinery.
 
+**As shipped.** The whole file is read before any form runs, so a syntax error applies
+zero defs. Forms are then expanded and evaluated one at a time, like `reflect/load`, so a
+macro a form defines is visible to later forms in the same file. That leaves the expansion
+window open as well as the runtime one: an error at form N keeps forms 1..N-1.
+
 **Done when.** A file whose last def throws at eval time reports the error and
 the earlier defs are visibly applied (documented behaviour), while a
 syntactically broken save changes nothing. Suite green. → **ADR-042 (shipped
@@ -234,7 +241,7 @@ live with no file write and no poll wait. → ADR for the LSP command surface.
 
 ## Stage 4 — Watcher simplification (and an optional notify upgrade)
 
-**Problem.** `reload-on-change` spawns *one green process per watched file* plus
+**Problem.** `reload/on-change` spawns *one green process per watched file* plus
 a dir scanner; it never reaps deleted files and can double-watch a path covered
 by both a dir watch and an explicit watch.
 
@@ -264,8 +271,7 @@ deleting a file stops its reload attempts. Suite green.
 all-day session this leaks every intermediate version of every redefined
 function.
 
-**The tension (state it honestly).** The append-only `boxcar::Vec`
-(`heap.rs:311`) is *why* reads are lock-free and stable: existing elements never
+**The tension (state it honestly).** The append-only `boxcar::Vec` is *why* reads are lock-free and stable: existing elements never
 move, so process threads dereference closure bodies without locking while a
 `def` appends. Reclaiming individual slots fights that directly:
 - A **free-list slab** could free slots but gives up the lock-free stable-ref
@@ -281,7 +287,7 @@ body is small (hundreds of bytes to a couple of KB, depending on size and nested
 closures); a few thousand redefinitions a day is single-digit to low-tens of MB.
 For the common session this is a non-issue; for a multi-day session it's real but
 not catastrophic. So:
-- **Now:** document the leak (it's already implied by `heap.rs:18`); optionally
+- **Now:** document the leak; optionally
   **dedup** — skip the append if the promoted code is structurally identical to
   the current binding (helps save-without-change and formatter churn).
 - **Later (its own stage + ADR):** the compacting collector above, reusing the
@@ -297,7 +303,10 @@ correctness don't conflict — the leak is slow enough to wait.
 
 **Done when (this stage).** The leak is documented and dedup-on-identical lands.
 The collector is a tracked follow-up, not part of this stage. → **dedup half
-shipped 2026-05-29 under ADR-042; the collector remains deferred.**
+shipped 2026-05-29 under ADR-042. ADR-091 added the single-process collector: the eval
+safepoint compacts the RUNTIME region past a churn threshold, and `(dev/runtime-collect)`
+forces it. Both run only while the runtime has no other live process (otherwise it
+reports `:ran false`), so a multi-process runtime — an editor — still keeps every version.**
 
 ---
 
@@ -346,7 +355,7 @@ case, nominal schema migration.
 old expansion (gap #5).
 
 **Design — warn, don't track (for now).** Mirror the existing arity-change
-diagnostic (`eval.rs:195`): when `defmacro` *rebinds* an existing macro,
+diagnostic (`eval/machine.rs`): when `defmacro` *rebinds* an existing macro,
 print `[reload] macro X redefined; callers compiled before now keep the old
 expansion — re-eval them`. A true reverse dependency index (who expanded X) is
 deferred; the warning is 90% of the value at 5% of the cost.
@@ -360,30 +369,20 @@ deferred; the warning is 90% of the value at 5% of the cost.
 
 ## Stage 8 — The native floor (mostly a non-issue — recorded for completeness)
 
-The 2026-05-29 check showed **overriding the prelude already works**, internals
-included. So "open up the prelude" — which I'd initially flagged as a major
-gap — is largely solved by the existing late-binding-through-the-globals-table
-design. What genuinely *can't* be hot-patched:
+The 2026-05-29 check showed overriding the prelude worked, internals included.
+ADR-166 then drew the line on purpose: hot reload is about **your** code, so
+everything that shipped in the binary — the prelude, the Rust builtins and the embedded
+std modules — is reserved, and a `def` of one of those names raises. Your own globals and
+packages stay fully redefinable.
 
-- **Rust builtins / kernel** (`+`, `fold`'s primitive, the reader, the
-  scheduler). These are native; you can shadow the *symbol* with a Brood
-  redefinition but not edit the native body.
-- **Editing the prelude *source file*** and having new bodies go live — actually
-  works via `system/reload-defs` on the prelude path (each `defn` re-defs into RUNTIME,
-  shadowing the frozen original); the frozen PRELUDE copy just becomes dead
-  weight.
-
-**Action:** none required for the editor goal beyond a one-line note in
-[`shared-code.md`](shared-code.md) that overrides reach prelude internals. Revisit
-only if a concrete need to hot-patch a *native* builtin appears (it shouldn't —
-the editor is Brood, not Rust).
+**Action:** none. Revisit only if a concrete need to hot-patch a shipped function
+appears (it shouldn't — the editor is a downstream Brood program).
 
 ---
 
 ## Non-goals / explicitly deferred
 
-- **A true RUNTIME collector** (Stage 5 later half) — deferred until a real
-  session hurts.
+- **A multi-process RUNTIME collector** (Stage 5) — deferred until a real session hurts.
 - **`notify`-based watching** (Stage 4) — deferred; polling + editor-driven eval
   covers it.
 - **Macro dependency graph** (Stage 7) — warn instead.
@@ -391,14 +390,11 @@ the editor is Brood, not Rust).
   consistent with let-it-crash supervision (ADR-039).
 - **Snapshot/rollback in `system/reload-defs`** (Stage 2) — read+expand-first covers the
   common breakage; full transactional rebind deferred.
-- **Schema/record-redefinition migration** — *not applicable today and a
-  data-model win worth naming.* The classic hard reload case (nominal records,
-  CL `update-instance-for-redefined-class`) doesn't exist here because data is
-  structurally-typed immutable maps — there is no nominal type whose field set
-  can drift out of sync with live instances. A map simply has the keys it has.
-  Revisit only if nominal records/`deftype` are ever added (roadmap M-types
-  step 5+); until then, the only shape-drift concern is a *process loop's* state,
-  handled by Stage 6.
+- **Schema/record-redefinition migration** — the classic hard reload case
+  (CL `update-instance-for-redefined-class`). Records are nominal now (ADR-542), but a
+  record value carries its own fields and is immutable, so redefining a `defrecord` leaves
+  live values as they are. The shape-drift concern stays a *process loop's* state, handled
+  by Stage 6.
 
 ## Suggested order
 
@@ -410,10 +406,9 @@ real usage. Stage 8 is a doc note.
 ## Open questions
 
 1. Should `eval-buffer` (Stage 3) use `system/reload-defs` (skip the entry call) or full
-   `load` (run everything)? Likely `system/reload-defs`, matching the watcher — confirm
+   `reflect/load` (run everything)? Likely `system/reload-defs`, matching the watcher — confirm
    against how the editor's entry point is structured.
-2. `*code-version*` (Stage 6): a single per-runtime counter, or per-file
-   generations? Single counter is simpler and probably enough.
+2. `reload/*code-version*` (Stage 6): settled as a single per-runtime counter.
 3. Dedup-on-identical (Stage 5): compare promoted structure, or hash the source
    form? Source-hash is simpler and catches the common save-without-change case.
 4. `defonce` for singletons (Stage 1) interacts with Stage 6: if a `defonce`'d

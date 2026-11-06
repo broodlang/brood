@@ -5,11 +5,12 @@
 > is flagged as unreachable — the earlier occurrence always wins, so the
 > later one is dead code. Purely structural, not `match`-specific: this fires
 > on any same-symbol `%eq`-literal `if`-chain regardless of where it came
-> from.
+> from. `check_if` lives in `check/walk/binders.rs`; `match`'s failure is `(%raise
+> (%match-error …))` since ADR-501.
 
 ## Problem
 
-A different, independent problem from exhaustiveness (ADR-118/120):
+A different, independent problem from exhaustiveness (ADR-118/121):
 exhaustiveness asks "did every declared value get a clause?"; redundancy asks
 "does any clause duplicate one already handled?" — e.g.
 
@@ -29,7 +30,7 @@ twice on the same variable before a catch-all/end).
 test succeeds *first* wins, so a later test against the *same* literal on the
 *same* variable can never run. Detecting this needs no new parsing beyond what
 the exhaustiveness work already established: walking the compiled `if`/`%eq`
-chain directly (`check_if`, `crates/lisp/src/types/check/walk.rs`), reusing
+chain directly (`check_if`, `crates/lisp/src/types/check/walk/binders.rs`), reusing
 the exact point that function already recognizes a literal `%eq` guard.
 
 **New in `check/guards.rs`:**
@@ -55,7 +56,7 @@ the exact point that function already recognizes a literal `%eq` guard.
 - `render_literal_pattern` (already built for exhaustiveness) renders the
   duplicate literal for the warning message.
 
-**Hook** — `check_if` (`walk.rs`), right where it already computes `test`/
+**Hook** — `check_if` (`walk/binders.rs`), right where it already computes `test`/
 `else_form`: if `literal_eq_test_raw(test)` succeeds, call
 `find_redundant_clause(else_form, sym, lit)`; on `Some`, push `"match:
 unreachable clause — {label} is already handled above"` positioned at the
@@ -100,10 +101,8 @@ This is a **true positive**: the test deliberately writes a duplicate-literal
 match to verify the runtime semantics ("the first clause wins", i.e. the
 `:second` clause never executes) — and the new lint correctly identifies that
 `(1 :second)` clause as genuinely unreachable. The test still passes (this is
-advisory, never gating); it now also carries an accurate static warning it
-didn't have before. Left as-is — rewriting a pre-existing, working test to
-dodge a *correct* new warning isn't warranted, and the file wasn't otherwise
-touched by this session's work.
+advisory, never gating). It was left as it stood at the time; the test now says so with
+`(check-allow :unreachable-clause …)`, which keeps `nest check` at zero.
 
 ## Deferred
 
@@ -117,7 +116,7 @@ no evidence it's a real need.
 
 ## Soundness
 
-Four targeted tests in `crates/lisp/src/types/check.rs`:
+Four targeted tests in `crates/lisp/src/types/check/tests/match_lints.rs`:
 `match_redundancy_flags_an_adjacent_duplicate_clause`,
 `..._flags_a_non_adjacent_duplicate_clause` (the duplicate isn't the very next
 clause), `..._is_silent_with_no_duplicates`, and
@@ -130,5 +129,4 @@ above and nothing else.
 
 ## Tests
 
-`crates/lisp/src/types/check.rs`: the four tests listed above, right after
-`match_exhaustiveness_is_silent_for_a_non_literal_scrutinee_type`.
+`crates/lisp/src/types/check/tests/match_lints.rs`: the four tests listed above.

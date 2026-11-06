@@ -1,7 +1,8 @@
 # Large-project scaling — 100k files × 3k lines: what was measured, what it means, what to do
 
-**Status: OPEN — measured 2026-09-21; items 1 (Finding 1, ADR-380) and 2 (Finding 2 option 1,
-ADR-382 / KI-179) FIXED the same day.** The queue is at the end, in order. Reproduce every number here with the generator before
+**Status: mostly closed — measured 2026-09-21. Of the queue at the end, items 1, 2, 3, 5 and 6
+are done (ADR-380, 382, 386, 419, 426) and item 4 is mostly closed.** "Today" in the tables
+below means 2026-09-21. Reproduce every number here with the generator before
 believing any of them changed.
 
 ## The question

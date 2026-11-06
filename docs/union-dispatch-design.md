@@ -1,9 +1,13 @@
 # Union dispatch positions + typed multimethods — design
 
-> Status: **designed, not built.** Written 2026-08-28. The roadmap entry
+> Status: **partly built.** Written 2026-08-28. The roadmap entry
 > ("Union dispatch positions — and why the type system is the easy half") points here.
-> Nothing below is implemented; this is the record of the decisions so they are not
-> re-derived, and of the four things checked empirically rather than assumed.
+> **Typed multimethods shipped** (ADR-278): `defmulti … :-> RET`, `check_method_returns`, and
+> a multimethod call typed by its declared return. **Still open:** union positions in
+> `defmethod` (`(or …)` there is still the expansion error quoted below), the specificity
+> rule, the promotion primitive, and the strict numeric default; `std/num/tower.blsp` does
+> not exist, and mixed arithmetic still coerces. This is the record of the decisions so they
+> are not re-derived, and of the four things checked empirically rather than assumed.
 
 ## The ask
 
@@ -139,10 +143,10 @@ dispatch vocabulary disagree with the type vocabulary, which is a worse seam.
 
 ## What is left to build
 
-1. `defmulti` opts accept `:-> RET`; `%register-multi` stores it.
-2. `check_method_returns` — the `check_impl_returns` analogue. **Must land with (1)**, or the
+1. ✅ `defmulti` opts accept `:-> RET`; `%register-multi` stores it (ADR-278).
+2. ✅ `check_method_returns` — the `check_impl_returns` analogue. **Must land with (1)**, or the
    declared return is an unchecked assertion and the soundness argument above collapses.
-3. `infer.rs` consults the declared return for a multimethod call, as it already does for an
+3. ✅ `infer.rs` consults the declared return for a multimethod call, as it already does for an
    ability op's `:-> RET`.
 4. Union positions in `defmethod`, with Decision 4's expansion-time reduction to id sets.
 5. Decision 2's specificity resolution + registration-time ambiguity detection.
@@ -361,8 +365,8 @@ strict default creates is *exactly* what unions remove.
 
 ### Revised sequence
 
-1. **Typed multimethods** — `defmulti … :-> RET` + `check_method_returns`. Independently
-   useful; nothing else makes a multimethod call typeable.
+1. ✅ **Typed multimethods** (ADR-278) — `defmulti … :-> RET` + `check_method_returns`.
+   Independently useful; nothing else makes a multimethod call typeable.
 2. **Union dispatch positions** — Decisions 2 and 4 above.
 3. **A promotion primitive** that does not route through `+`/`-`/`*`/`/` (the circular-bootstrap
    fix), so a method body can widen its operands.

@@ -6,7 +6,10 @@
 > resolves the return type of the arm whose domain the argument's static
 > type provably matches — whether the call is in the *same* file as the
 > declaration or a *different* module entirely (`:use`/qualified). No new
-> grammar — reuses the already-shipped `(and …)` intersection syntax.
+> grammar — reuses the already-shipped `(and …)` intersection syntax. Later: an argument in
+> several arms' domains takes the meet of their results (2026-09-17), a declared overload is
+> checked against its body per arm (A4 in `type-system-status.md`), and an intersection can
+> satisfy a requirement no single arm does (ADR-292, `arrows_cover`).
 
 ## Problem
 
@@ -18,7 +21,7 @@ matched its argument — the classic overloaded-function shape:
 (sig f (and (int -> int) (bool -> bool)))
 (defn f (x) (if (int? x) (inc x) (not x)))
 
-(string-length (f 1))   ; f's result on an int arg is int — should warn
+(string/length (f 1))   ; f's result on an int arg is int — should warn
 (f true)                 ; f's result on a bool arg is bool — fine
 ```
 
@@ -109,13 +112,12 @@ check unchanged. For a genuine overload, `self` must satisfy *every*
 signature `other` requires — for each, at least one of `self`'s own
 candidates must be a `Sig::is_subtype` of it (self may carry extra arms
 beyond what's required — width-like). **Sound but not complete**
-(`docs/types.md` contract #5), the same conservative shape as
-`record_fields_is_subtype` (ADR-115): a missed subtype relation is fine, a
-false one is not.
+(`docs/types.md` contract #5) as first built: a missed subtype relation is fine, a
+false one is not. ADR-292 then decided the case no single arm covers (`arrows_cover`).
 
-**`is_disjoint`** — untouched, tags-only, per the whole lattice's convention.
+**`is_disjoint`** — untouched by this work.
 
-## Declaration storage & call-site resolution (`check/annot.rs`, `ctx.rs`, `guards.rs`)
+## Declaration storage & call-site resolution (`check/annot.rs`, `ctx.rs`, `infer.rs`)
 
 Mirrors the existing `SigWithVars` parallel-path pattern (`docs/type-variables.md`'s
 type variables): `parse_sig_decl` (single arrow) already can't produce a `Sig` for a
@@ -124,7 +126,7 @@ genuine overload (`Ty::as_arrow()` is `None`), so a new
 a new `Ctx::declared_overloads: HashMap<Symbol, Vec<Sig>>`, populated
 alongside `declared`/`declared_vars` in `check.rs`'s file-scan pass.
 
-`expr_ty`'s call-form handling (`guards.rs`) checks `ctx.declared_overload(s)`
+`expr_ty`'s call-form handling (`infer.rs`) checks `ctx.declared_overload(s)`
 at the same priority as `declared_sig_with_vars`/`declared_sig` (a user's
 explicit declaration wins over curated/inferred fallbacks), resolving via a
 new `resolve_overload_ret`:
@@ -161,7 +163,6 @@ which is also sound but made a catch-all arm cancel every sharper arm it overlap
 
 ```lisp
 (sig pow (and (int (int 0 _) -> int)
-           ((or (int -1 -1) (int 1 1)) int -> int)
            (float int -> float)
            (number int -> number)))
 ```
@@ -185,7 +186,7 @@ macro expands to `(%register-sig 'f '<type-expr>)`, which runs at **load
 time** and writes the raw, unparsed type-expression form into a shared
 heap-level store (`RuntimeCode::declared_sigs`); `declared_heap_sig`
 (`check/sigs.rs`) reads it back and calls `.as_arrow()`. Since
-`project--ensure-loaded` loads every project file before any file is
+`project-ensure-loaded` loads every project file before any file is
 checked, that store is fully populated project-wide by the time checking
 starts — so this path is what makes a declared sig visible from a *different*
 module in the first place.
@@ -210,18 +211,18 @@ wired into the same three sites that already fall back to `sig_of`/
 `declared_heap_sig` for return-type resolution: `expr_ty`'s call-form
 handling (the final fallback, after `ctx.declared_overload` and the
 sequence-aware rules all miss) and `callback_ret` (a named global function
-passed as a HOF callback, e.g. `(map f xs)`). The one `sig_of` call site
+passed as a HOF callback, e.g. `(map xs f)`). The one `sig_of` call site
 that *wasn't* touched — `check/walk.rs`'s argument/arity-checking loop — is
 intentionally out of scope; see Deferred below.
 
 Verified with a Rust test that actually *evaluates* a declaration (so
 `%register-sig` really fires) before typing a call against a **fresh, empty
 `Ctx`** — simulating a second module with zero local knowledge of the first
-(`overload_resolves_cross_module_via_the_heap_store`, `types/check.rs`) —
+(`overload_resolves_cross_module_via_the_heap_store`, `types/check/tests/refinement.rs`) —
 and, end-to-end, with a real two-file `nest new` project (`hello.blsp`
 declaring an overloaded `clamp`, `main.blsp` calling `hello/clamp` via
 `(:use hello)`): `nest check` correctly flagged a genuine mismatch
-(`(string-length (clamp 0 10 5))`) and stayed silent on the correct call
+(`(string/length (clamp 0 10 5))`) and stayed silent on the correct call
 (`(+ 1 (clamp 0 10 5))`).
 
 ## Argument check (shipped — the second hook)
@@ -249,7 +250,7 @@ warnings across the whole `std/` + `tests/` corpus.
 
 ## Soundness
 
-Every new piece has a targeted unit test in `crates/lisp/src/types.rs`
+Every new piece has a targeted unit test in `crates/lisp/src/types/tests.rs`
 (`intersect_of_two_distinct_arrows_builds_an_overload`,
 `intersect_of_identical_arrows_collapses_to_a_single_arrow`,
 `intersect_with_any_function_keeps_the_others_candidates_unchanged`,
@@ -257,7 +258,7 @@ Every new piece has a targeted unit test in `crates/lisp/src/types.rs`
 `overload_renders_each_arm_joined_by_and`,
 `overload_subtyping_is_conservative_but_sound`,
 `overload_is_disjoint_only_on_tags_like_every_other_refinement`) and a
-checker-level test in `crates/lisp/src/types/check.rs`
+checker-level test in `crates/lisp/src/types/check/tests/refinement.rs`
 (`overload_refinement_flows_through_checker`) covering the exact-match,
 alternate-arm-match, mismatched-sink, and unknown-arg-widens cases; plus
 `overload_resolves_cross_module_via_the_heap_store`, which actually
@@ -276,8 +277,6 @@ everything that doesn't use it).
 
 ## Tests
 
-`crates/lisp/src/types.rs`: the 7 unit tests listed above, under the
-"overloaded arrows (intersection of arrows) — ADR-116" section, right after
-the existing arrow tests. `crates/lisp/src/types/check.rs`:
-`overload_refinement_flows_through_checker`, right after
-`record_field_refinement_flows_through_checker`.
+`crates/lisp/src/types/tests.rs`: the 7 unit tests listed above.
+`crates/lisp/src/types/check/tests/refinement.rs`:
+`overload_refinement_flows_through_checker`.

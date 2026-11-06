@@ -16,6 +16,13 @@ anything measured-and-rejected to the dead-ends list at the bottom.
 > `Box<Process>`**. Ordering this menu off the stale table is how three separate wrong targets got
 > picked on 2026-08-20; see that day's devlog.
 
+**Built since the sections below were written (2026-11-06):** a receive loop runs native and
+simple patterns match in the kernel with no matcher closure (ADR-409/410, `compute-frontier.md`'s
+standing list), so "one matcher activation per candidate" below applies only to a guarded
+`receive`; `spawn` copies a capturing closure's values instead of promoting it (ADR-405); and the
+parked-process floor reached ~2.75 KB (see "The parked process" below), so Part 3 B's target is
+met. M2 was found not to be a lever for the message rows (`compute-frontier.md` §7.3).
+
 Current standing (**refreshed 2026-07-30** from the published run; the rest measured that
 week):
 
@@ -58,15 +65,16 @@ capacity-1 slab first-touch (110 B, `bintree` +4.8%), IC-drop on park (640 B,
 `pingpong` +26% / first-park-only still +11.5%). **Conclusion: the floor is working
 state.** Only *smaller* state or *shared* state moves it now.
 
-**The message path is TWO full copies.** `send` serializes `Value → Message` (a boxed
+**The message path was TWO full copies (a send to a parked receiver is one since L1,
+ADR-178).** `send` serializes `Value → Message` (a boxed
 intermediate tree; bigints/decimals go through decimal *strings*), the mailbox holds the
 `Message`, `receive` deserializes `Message → Value` into the receiver's heap. Both
 intermediate trees become garbage immediately. The design is right for the *dist* wire
 (heap-independent, node-portable) but local sends pay wire-format cost.
 
-**The receive matcher runs per-candidate `vm_apply`** (via the HOF fast path;
-`BROOD_NO_HOF=1` is 197 → 509 ms on pingpong, so the fast path already earns its keep —
-but a frame per scanned candidate remains).
+**The receive matcher ran per-candidate `vm_apply`** (via the HOF fast path;
+`BROOD_NO_HOF=1` was 197 → 509 ms on pingpong, so the fast path earned its keep —
+but a frame per scanned candidate remained; ADR-409 removed it for simple patterns).
 
 **`Heap` carries loader/checker state per process** — `form_pos`, `imports`,
 `ns_known_names`, `module_exports_cache`, `known_ns_cache`, `check_dep_rec`,
@@ -183,7 +191,7 @@ re-enqueue, worker pickup, and one matcher activation per candidate.
   **Shipped:** fix 1 below. Backlog 0/50/200/500 went 20/64/171/~420 ms → 21/23/26/34 ms
   (12× at 500), for `pingpong` +1.3% / `ring` +2.6% on a one-message mailbox — the decode
   is lazy (only when `queue.len() > 1`), which keeps the trivial case near-free. Fix 2
-  (receive markers) remains available for ref-addressed protocols.
+  (receive markers) shipped too, as A7 (ADR-195).
 
   Two independent fixes, either worth doing:
   1. **Don't rebuild to reject.** ✅ shipped The expensive part per candidate is `from_message` +
@@ -701,7 +709,9 @@ What this changes:
   epoch already lives per-runtime in `Arc<RuntimeCode>`, so the *semantics* of sharing are
   settled — only the read protocol is open.
 
-- [ ] **M3 — direct-link sealed callees at compile time** (ADR-175 Stage 1). **Design
+- [ ] **M3 — direct-link sealed callees at compile time** (ADR-175 Stage 1). Take it together
+  with reserved-name early binding (ADR-166), planned and never built:
+  [`archive/plan-reserved-early-binding.md`](archive/plan-reserved-early-binding.md). **Design
   analysed 2026-07-29; it does NOT deliver the memory win on its own.** An IC hit yields
   four things: `(callee, arm, env, callee_bases)`. For a sealed callee the first three are
   process-independent and permanent, so they bake into the shared chunk (a `OnceLock` per
@@ -741,7 +751,7 @@ What this changes:
   the reference VM's allocator free-lists, every thread pool. Expected: spawn 15.8 allocs → ~2, a large
   cut to the 7.6 µs spawn path; floor unchanged. Risk: staleness bugs (epoch stamps
   already guard heap handles; the mailbox needs a generation bump for pid reuse safety).
-- [x] **M5 — `(hibernate)` builtin — DONE 2026-07-29.** Measured: a process that works
+- [x] **M5 — `proc/hibernate` — DONE 2026-07-29.** Measured: a process that works
   briefly then parks goes **8.18 → 4.94 KB/proc (−40%)**, and the run is *faster*
   (0.68 → 0.45 s at 100k processes) because the smaller footprint eases allocator
   pressure. `Heap::hibernate` collects, shrinks slabs + root vectors, and drops the IC
@@ -769,12 +779,13 @@ What this changes:
   earlier); with M3, a spawned body's call sites need no per-process IC setup at all —
   measure spawn again after M3 lands.
 
-### D. Compute (tracked in benchmark FRONTIER; unchanged by this doc)
+### D. Compute (tracked in `compute-frontier.md` and benchmark FRONTIER)
 
-X-register call convention (`bintree`/`fib` class), capturing-closure fast-link
-(`pipeline`), in-arm alloc + variable-index vector reads (`nqueens`), bytes/codepoint
-fast path (`json`/`regex`/`base64`), unboxed float arrays (`nbody`/`matmul`,
-immutability-fraught).
+X-register call convention (`bintree`/`fib` class; partly built, `call-convention.md`),
+capturing-closure fast-link (`pipeline`; killed on profiling 2026-07-03, ADR-406 then took the
+computed-head call from native code), in-arm alloc + variable-index vector reads (`nqueens`),
+bytes/codepoint fast path (`json`/`regex`/`base64`), unboxed float arrays (`nbody`/`matmul`; set
+aside on measurement 2026-10-26).
 
 ## Recommended execution order
 
@@ -787,7 +798,9 @@ Revised after the payload measurement above moved L1 off the latency gap.
    payload-carrying apps (−35% at 1024), ≈−5% on `pingpong` and flat on `ring`. It was
    never the latency fix, and shipping it did not make it one.
 5. **M2 shared IC tables** — the largest remaining per-process item (664 B) *and* a warm
-   start. Highest value and highest risk; needs a lock-free design plus TSAN/loom.
+   start. Highest value and highest risk; needs a lock-free design plus TSAN/loom. Not started,
+   and the case is weaker now: the lazy tables took most of the memory (M2b), and it is no lever
+   for the message rows (`compute-frontier.md` §7.3).
 6. **M3 direct-link sealed callees** — blocked behind M2.
 7. **M4 / M6 / M7 / L2** — re-evaluate after the above land. What still owns the
    `pingpong`/`ring` gap is the per-message fixed cost (mailbox mutex, `wake_parked`,

@@ -1,6 +1,6 @@
 # Roadmap for v1.0 — the language freeze
 
-**Purpose.** [`ROADMAP.md`](../ROADMAP.md) is the canonical list of *everything*
+**Purpose.** [`ROADMAP.md`](../../ROADMAP.md) is the canonical list of *everything*
 planned. This file is the much shorter list of what must happen **to the language
 surface** before 1.0, and — just as importantly — what must *not*, because the point
 of a 1.0 is that the surface stops moving.
@@ -203,7 +203,7 @@ every answer below already exists, scattered across ADRs. A 1.0 that states clea
 what it refuses is far more trustworthy than one that leaves it implicit — and this is
 the document that stops the questions being re-litigated after the freeze.
 
-✅ **Ratified as [ADR-170](decisions.md) (2026-07-27).** The table below is the working
+✅ **Ratified as [ADR-170](../decisions.md) (2026-07-27).** The table below is the working
 copy; ADR-170 is the permanent record, with the generating principle (ADR-011 + the
 freeze asymmetry) and the note that every *relaxation* stays open post-1.0:
 
@@ -286,7 +286,7 @@ All purely additive — deferring costs a version number and nothing else.
 
 ## Not language, but 1.0 release blockers
 
-Tracked in [`ROADMAP.md`](../ROADMAP.md); listed here so a release checklist doesn't
+Tracked in [`ROADMAP.md`](../../ROADMAP.md); listed here so a release checklist doesn't
 miss them. **All three are now closed** (2026-08-29) — the last one had been closed in the
 code since 2026-07-31 and only this entry did not know it, which is its own lesson: an item
 resolved *as a side effect* of a fix aimed at something else gets no ceremony, so nothing

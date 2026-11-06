@@ -1,5 +1,9 @@
 # Findings from writing a "VERY complicated" Brood demo
 
+**Status 2026-11-06: a record from 2026-05-28; the names and figures below are of that date.**
+§11 is the last full re-check. Since then §6.4 closed (`nest repl` pre-loads the project) and
+§6.5 closed in substance (crash reports, ADR-305). §6.3 stands: `nest run` has no `--quiet`.
+
 Written 2026-05-28 by an LLM (Claude Opus 4.7) after attempting a
 concurrent ASCII Mandelbrot in Brood, working only from the supplied
 docs/brood-for-claude.md and the std/prelude source. The demo is
@@ -535,22 +539,22 @@ plus the prior MCP-server commits (`bd4aa2d`, `808b7f1`, `d662df7`).
 - **MCP server (`nest mcp`).** Six tools live: `eval`, `load`, `lookup`,
   `macroexpand`, `format`, `check` (with `run-tests` / `processes` /
   project-defined tools also wired). `.mcp.json` auto-scaffolded by
-  `nest new`. ADR-036; design in [`mcp.md`](mcp.md). This is the single
+  `nest new`. ADR-036; design in [`mcp.md`](../mcp.md). This is the single
   biggest improvement — the 30-minute "spelunk through `std/prelude.blsp`"
   detour I described in §2.1 becomes a tool call.
 - **Structured error values with stable codes.** `LispError` carries
   `:code` + `:kind`; `(try expr (catch e …))` rebinds `e` to a map
   `{:kind :code :message :hint :file :line :col}`. Codes `E0001`/`E0010`/
   `E0020`/`E0030`/`E0099` ship today, more to come. Design in
-  [`error-codes.md`](error-codes.md). Directly resolves §6.5 (error UX)
+  [`error-codes.md`](../error-codes.md). Directly resolves §6.5 (error UX)
   for catchable errors, and is the substrate for §6.5 (process death
   with context) once the wrapping reaches the process-death path.
-- **Incarnations file ([`incarnations.md`](incarnations.md)).** A
+- **Incarnations file ([`incarnations.md`](../incarnations.md)).** A
   self-improving record of what tripped real agents; my findings here
   are the first entry. The MCP server publishes it as
   `brood://docs/incarnations`. This is the path by which the *next*
   agent gets the warnings I had to discover the hard way.
-- **MCP system-prompt fragment ([`prompts/brood-task.md`](prompts/brood-task.md)).**
+- **MCP system-prompt fragment ([`prompts/brood-task.md`](../prompts/brood-task.md)).**
   Served via MCP `prompts/get`; also reusable verbatim by Cursor / Aider /
   Continue. Points the agent at the three resources it should fetch
   first (brood-for-claude, incarnations, project CLAUDE.md) and
@@ -568,7 +572,7 @@ plus the prior MCP-server commits (`bd4aa2d`, `808b7f1`, `d662df7`).
   isn't there yet, but the trigger and the hot-reload machinery are.
 - **GNU-anchored error output.** `FILE:LINE:COL: KIND error: MESSAGE`
   to stderr, parseable by Emacs `compilation-mode`, Flymake, and most
-  IDEs out of the box. Details in [`tooling.md`](tooling.md). Tightens
+  IDEs out of the box. Details in [`tooling.md`](../tooling.md). Tightens
   the "what file?" question that §6.5 raised.
 - **Preemptive M:N scheduler (ADR-027).** Green processes on an `nproc`
   worker pool; `receive` suspends rather than blocking. Doesn't fix the
@@ -651,11 +655,11 @@ Re-verified against HEAD post the kernel-supervisor strip (`e3d3a0d`,
 
 | # | Item | 2026-05-28 status | Today (2026-05-29) | Notes |
 |---|------|-------------------|---------------------|-------|
-| 1 | Multi-thread scheduler race | 🐛 still present | ✅ **fixed** | Three fixes in series: stripping the kernel supervisor (`e3d3a0d`) removed the bulk of the race surface; Phase-1 bump-only allocation (`f90f0de`) closed the stale-handle window; **per-worker pinned queues** (`2abf05e`) closed the remaining plain-release segfault (no cross-thread coroutine migration). Now **clean in both debug-assertions release and plain release**, single- and multi-threaded. Re-confirmed 2026-05-29 via a 40-worker prelude-hammering fan-out repro (12/12 clean, `-j 0`, debug-assertions release). See [`known-issues.md`](known-issues.md) KI-1. |
+| 1 | Multi-thread scheduler race | 🐛 still present | ✅ **fixed** | Three fixes in series: stripping the kernel supervisor (`e3d3a0d`) removed the bulk of the race surface; Phase-1 bump-only allocation (`f90f0de`) closed the stale-handle window; **per-worker pinned queues** (`2abf05e`) closed the remaining plain-release segfault (no cross-thread coroutine migration). Now **clean in both debug-assertions release and plain release**, single- and multi-threaded. Re-confirmed 2026-05-29 via a 40-worker prelude-hammering fan-out repro (12/12 clean, `-j 0`, debug-assertions release). See [`known-issues.md`](../known-issues.md) KI-1. |
 | 2 | Type-checker noise around `(require 'hatch)` | 🟢 partial fix | 🟢 **fully fixed** | `check_file` pre-evaluates top-level `(require …)` forms before walking, so macros from required modules resolve. Verified zero warnings on a correctly-written hatch file via both `nest check` *and* `brood file.blsp` direct. `crates/lisp/src/types/check.rs:148+`. |
 | 3 | `nest format` collapses readable code | 🐛 still present | 🟢 **substantially fixed** | Commit `5b19787` ("formatter respects author newlines"). Multi-line `let` / `defmacro` body / `cond` / quasiquoted templates all stay multi-line. **Still normalizes** multi-space alignment within a line (`w       64` → `w 64`) — a standard Lisp-formatter trade-off, not the original 8-lines-to-1 blocker. |
 | 4 | Quick-ref doc gaps | 🟢 partial fix | 🟢 **substantially closed** | `brood-for-claude.md` now covers `format`, `to-fixed`, `pad-left`/`pad-right`, `string-repeat`, `repeat`, `repeatedly`, `round-to`, plus the hatch concurrency surface. Remaining lookups go through the MCP `lookup` tool. |
-| 5 | Float formatting / no `format` builtin | 🟡 unchanged | 🟢 **shipped** | `(to-fixed x n)` has been the float-formatting primitive for a while; `(format "x=%d y=%.2f" 42 3.14)` lands in the prelude today as a small printf-style helper. Specifiers `%s %d %f %.Nf %%`; width via `pad-left`/`pad-right`. Pure Brood, no new Rust. See [`devlog.md`](devlog.md) 2026-05-29. |
+| 5 | Float formatting / no `format` builtin | 🟡 unchanged | 🟢 **shipped** | `(to-fixed x n)` has been the float-formatting primitive for a while; `(format "x=%d y=%.2f" 42 3.14)` lands in the prelude today as a small printf-style helper. Specifiers `%s %d %f %.Nf %%`; width via `pad-left`/`pad-right`. Pure Brood, no new Rust. See [`devlog.md`](../devlog.md) 2026-05-29. |
 | 6 | Pattern-destructure failure surfaces as Rust panic | 🐛 still present | 🟢 **fixed** | Every destructure-mismatch shape I could construct (vector/list/string/keyword scrutinee, nested, multi-clause `fn` exhaustion, `match` no-clause) now returns a clean Brood `[:match-error :ctx value pattern]`. No `index out of bounds` panic anywhere — the panic line in the original report (`eval.rs:446`) is the structured-error path now. |
 
 ### What's open

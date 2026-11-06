@@ -14,6 +14,27 @@
 > cites them, or the source; the full text is recoverable from git history
 > (`git show fdce5400^:docs/<name>.md`).
 
+> ## Standing at v0.50.0 (2026-11-06) — levers built or dropped since the sections below
+>
+> The dated sections stay as written. Where one still names an open lever, this is its state:
+>
+> - **The native call protocol (§7.5, the "X-register convention").** Scoped in
+>   [`call-convention.md`](call-convention.md). Rungs A0, A1 and half of A4 landed; A2, A3 and
+>   C1 did not, and that file's header says what is true of each.
+> - **The receive as an exit point / OSR (§7.3).** OSR was never built. ADR-410 took another
+>   route: an arm that receives at its head runs native and parks by a capture at ip 0, so a
+>   server loop is no longer `hosts-receive`-refused (`ring` −19.4%, `pingpong` −7.3%). A loop
+>   that does work before its `receive` still stays on the VM.
+> - **The matcher activation and the per-receive `hof_resolve` (§7.3).** ADR-409 matches simple
+>   patterns in the kernel, with no closure and no Brood call per scanned message. A guarded
+>   `receive` keeps the closure.
+> - **Computed-head calls from native code (the `pipeline` lever below).** ADR-406 memoises the
+>   resolve per closure instance and ADR-408 runs a thin wrapper's compiled body. Neither touches
+>   the interpreter's `dispatch` computed-head branch, the lever as first named.
+> - **Per-`try` closures (`errors-deep`).** The body runs inline in the driver (`Inst::TryEnter`,
+>   ADR-400).
+> - **Unboxed arrays.** Set aside, measured: see the design note below.
+
 > ## 📐 DESIGN NOTE (2026-10-25) — `matmul`'s gap is shared-region reads, not boxing
 >
 > The queue item **"Unboxed arrays (`matmul` — boxed 24-byte `Value` array reads)"** below assumed
@@ -801,25 +822,30 @@ Priority if/when this is picked up:
    noise-sensitive denominator) — bounded ultimately by the boxed 24-byte `Value`.
 2. **zero-copy message passing** (§3c, §6) — share immutable structures by handle instead of
    deep-copying across processes; attacks the `strings` ~180 MB outlier and `spawn`/`pfib`
-   message cost. Also opens **lazy combinators** as the eager-list fix.
-3. **`bintree` allocation** — GC/nursery tuning; diffuse.
+   message cost. Also opens **lazy combinators** as the eager-list fix. **Partly shipped:**
+   large strings cross by `Arc` (ADR-041), a send to a parked receiver is one copy (ADR-178,
+   `runtime-frontier.md` L1), and a closure already in RUNTIME crosses by handle.
+3. **`bintree` allocation** — GC/nursery tuning; diffuse. **Measured a dead end 2026-07-24**
+   (the "RESUME HERE" block at the top of this file).
 4. **`wordcount`** — **SHIPPED 2026-06-19** (`%map-int-add` + JIT GC safepoint, 810→422ms,
    gap ~31×→~13×). Residual: transient-map `into` for the final 13× → ~4× if wanted.
-5. **inline `first`/`rest`** (§3e) — `brood_rt_pair_bases` + CLIF inline loads for LOCAL
-   pairs; bintree/nqueens/sort-walk. Medium effort, 20–30% on affected benchmarks.
-6. **range-fold JIT bypass** (§3f) — `%range-reduce` PrimOp fast-path; reduce 109ms → ~20ms.
-   Medium effort; requires `prim_apply` accessible from builtins.
-7. **fib call inlining** (§3h) — long horizon; requires self-recursive CLIF inlining.
+5. **inline `first`/`rest`** (§3e) — **SHIPPED 2026-06-20.** `brood_rt_pair_bases` + CLIF
+   inline loads for LOCAL pairs; bintree/nqueens/sort-walk.
+6. **range-fold JIT bypass** (§3f) — **SHIPPED 2026-06-20**: reduce 139 → 28 ms.
+7. **fib call inlining** (§3h) — **SHIPPED 2026-06-20** at the Brood level (2-level
+   self-inlining); CLIF-level inlining stays long-horizon.
 
 NaN-boxing / `Value`-width is **not** on this list (§2).
 
 ## 5. How to pick it up
 
+On the test machine, not the development desktop.
+
 1. Re-baseline: `cd brood-benchmarks && python3 bench/harness.py --runs 5 --startup-runs 15`
    (needs `make install` of a `--features jit` binary first) — confirm the numbers above
    haven't drifted.
-2. Profile the target with a `--features jit,perf-stats` debug build:
-   `BROOD_PERF_STATS=1 BENCH_N=<small> ./target/debug/brood bench/brood/<t>.blsp` — read
+2. Profile the target with a counter-armed build (`make perf-brood`):
+   `BROOD_PERF_STATS=1 BENCH_N=<small> target/release-perf/brood bench/brood/<t>.blsp` — read
    `jit_native` / `jit_deopt` / `prim2_fallback` / `alloc`. Dump lowered arms with
    `BROOD_JIT_DUMP_IR=1`.
 3. For matmul specifically: the microbenchmark in §3a (a tight `nth` loop) isolates the
@@ -1411,6 +1437,9 @@ pinning exaggerates (CLAUDE.md's ADR-175 note).
 
 ### 7.3 Message rows are 15–17% interpreter, and their arms are NOT in the bail trace
 
+> **Overtaken 2026-10-16.** ADR-409 and ADR-410 changed the shape this section measures: see the
+> standing list at the top of this file. The profiles below are of the older receive path.
+
 > **2026-08-30: the biggest single cost in this family is CLOSED — pingpong −19.7%, ring
 > −17.6%** (the unconditional per-delivery `notify_all` futex syscall `473f8290`'s wake fix
 > introduced; now conditional on a lock-protected `cv_waiters` count, same invariant — see
@@ -1517,6 +1546,9 @@ same family. This is the multi-session allocation frontier; start with the quest
 design.
 
 ### 7.5 `bintree`'s call-path residue is structural
+
+> **Taken further 2026-09-16/17** in [`call-convention.md`](call-convention.md) §7 (rungs A0, A1,
+> half of A4).
 
 `jit_run_fast_link` ~20% + `brood_rt_fast_frame` ~13% at n=4000, after four instruction-level
 attempts (§2h–§2k) whose lesson is recorded in §2i: on these callbacks, self time does not

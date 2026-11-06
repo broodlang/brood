@@ -1,6 +1,15 @@
 # Plan — Phase 1: reserved-name early-binding (ADR-166 realization)
 
-Status: **not started, deliberately held** (2026-07-30) until the concurrent JIT
+Status **2026-11-06: not built, and no longer held.** The JIT thread it waited on has
+settled, but nothing here shipped: there is no resolved-call node in `eval/compile/`, the
+compiler reads `is_reserved_global` only for the KI-19 staging exemption, and the checker has
+no reserved case in its global typing. Phase 3's target is already met for the hot shapes by
+`PrimOp::MapGet` (ADR-296) and `PrimOp3` (ADR-368), so what is left is a pure speed change that
+must show it pays under `make ab` and `make ab-vm`. It overlaps
+`docs/runtime-frontier.md` M3 (direct-link sealed callees); take them as one item. File
+paths and line numbers below date from 2026-07-30: `compile.rs` is now `eval/compile/lower.rs`.
+
+Original status: **not started, deliberately held** (2026-07-30) until the concurrent JIT
 perf thread settles, so the two don't collide in `jit_lower`/`dispatch` or confound
 each other's `make ab` numbers. This is the concrete, ready-to-execute plan for
 ROADMAP "Language core & types" item — *Early-bind reserved names (ADR-166)* and its

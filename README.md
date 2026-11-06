@@ -115,9 +115,9 @@ change them. Each `--with-X` has a `--without-X` opposite, and a bare
 |--------|---------|--------|
 | `--prefix=DIR`    | `~/.local`  | Install root — binaries go in `DIR/bin`. |
 | `--with-jit`      | **on**      | Tier-1 native JIT for hot loops. `--without-jit` falls back to the bytecode VM (for unsupported hosts / minimal builds). |
-| `--with-gui`      | off         | Native window backend (winit/softbuffer/fontdue) for the display layer. |
-| `--with-gui-gpu`  | off         | Experimental OpenGL render backend (implies `--with-gui`). |
-| `--with-audio`    | off         | The `audio-beep` builtin (via rodio); links `libasound.so.2` on Linux, so it's off by default to keep the build portable. |
+| `--with-gui`      | off         | Native window backend (winit/softbuffer/cosmic-text) for the display layer. |
+| `--with-gui-gpu`  | off         | GPU render target via wgpu: Vulkan, Metal, DX12 (implies `--with-gui`). |
+| `--with-audio`    | off         | The `audio/beep` sound output (via rodio); links `libasound.so.2` on Linux, so it's off by default to keep the build portable. |
 
 So the defaults are: **JIT on; GUI, GPU, and audio off; prefix `~/.local`.** For
 example, a desktop build with sound:
@@ -226,38 +226,38 @@ a `.mcp.json` wired to it — see [`docs/mcp.md`](docs/mcp.md).
 
 Lexically-scoped closures, proper tail calls, `def`/`defn`/`let`/`fn`,
 `if`/`when`/`unless`/`cond`, `and`/`or`, **macros** (`defmacro` +
-Clojure-style `` ` ``/`~`/`~@` quasiquote, `reflect/macroexpand`, `reflect/gensym`), integers &
-floats with overflow-checked arithmetic, strings, symbols, keywords, cons-cell
+Clojure-style `` ` ``/`~`/`~@` quasiquote, `reflect/macroexpand`, `reflect/gensym`), integers that
+promote to bignums, floats, exact ratios, strings, symbols, keywords, cons-cell
 lists, `[ ]` vectors, immutable `{ }` maps (`get`/`assoc`/`dissoc`/`keys`/`vals`/
 `contains?`), `#b"…"` **byte strings**, **pattern matching** (`match` +
 destructuring in `let`/`fn`, including **bit syntax** — `(bytes
 (len :u16) (body len) & rest)`), higher-order functions
-(`map`/`filter`/`reduce`/`apply`), and the self-hosting trio
+(`map`/`seq/filter`/`reduce`/`apply`), and the self-hosting trio
 `reflect/eval`/`reflect/read-string`/`reflect/load`. Parameter lists are written as lists (`(x y)` —
 code is lists; vectors are data) and support `&optional` (with defaults) and
-`& rest`. Code is organised into **modules** (`defmodule`/`:use`/`:as`) with
-enforced privacy — a `foo--internal` name is module-private. **Dynamic
+`& rest`. Code is organised into **modules** (`defmodule`/`:use`/`:alias`) with
+enforced privacy — a `defn-` name is module-private. **Dynamic
 variables** (`defdyn`/
 `binding`) give per-process special vars; an advisory, set-theoretic **type
 checker** flags type/arity/unbound-symbol mistakes without ever gating the live
 image (see [The type system](#the-type-system) below); and a per-process tracing
 **GC** keeps long-running loops flat.
 `defn`, the operators (`+`, `<`, …), the sequence library, and the `->`
-threading macro are all defined in Brood itself (`std/prelude.blsp`) on top of a
+threading macro are all defined in Brood itself (`std/prelude/`) on top of a
 small Rust kernel.
 
 Beyond that: first-class **sets** (`#{…}`), exact **decimals** (`1.50M`) for money,
-**`bytes`** with bit syntax, `defrecord` for named map shapes, and
-**abilities** (`(require 'ability)`) for open generic functions when a `cond` on
+**`bytes`** with bit syntax, `defrecord` for records (a value kind of its own, with
+map-style field access), and **abilities** for open generic functions when a `cond` on
 `type-of` can't be extended from outside — each op dispatches on its first
-argument's identity (a built-in kind, or a `defrecord*` record's own nominal id, so
+argument's identity (a built-in kind, or a record's own nominal id, so
 two record shapes dispatch apart), extensible from any module at any time. Collection
 ops are one interface over every kind — `count`/`first`/`conj`/`into`/`get` accept a
 list, vector, map, set or `bytes` — and a **keyword is callable** as an accessor, so
-`(map :name people)` needs no throwaway lambda. Patterns support alternatives and
+`(map people :name)` needs no throwaway lambda. Patterns support alternatives and
 conjunctions (`(or 1 2)`,
 `(and whole {:keys [a]})`); text has grapheme-cluster-indexed accessors, because a
-cursor steps by cluster, not code point; and `transduce` exposes the fusing pipeline
+cursor steps by cluster, not code point; and `seq/transduce` exposes the fusing pipeline
 stages so you can write your own.
 
 The names the language ships are **reserved** — `(def get …)` is an error. Your own
@@ -308,7 +308,7 @@ never `Any`. A redefinable global under hot reload is exactly that case, and thi
 the valve that lets typing coexist with live redefinition.
 
 *Inferred first; annotations are optional refinements.* The checker infers a signature
-for a plain closure, flows element types through `map`/`filter`/`reduce`/`fold`, and
+for a plain closure, flows element types through `map`/`seq/filter`/`reduce`/`fold`, and
 derives body and return types; primitive signatures come from the kernel rather than a
 hand-kept table. No annotation is needed to catch this:
 
@@ -417,12 +417,11 @@ protocol** (`std/editor/display.blsp`) with terminal and optional GUI frontends,
 demoed end-to-end by `nest observe` (a live process viewer) and `nest attach` (a
 thin client for a daemon).
 
-What remains is incremental, each item gated on a concrete need (ADR-011): the
-Tier-2 runtime-parity gaps (a cluster **registry**, mailbox **backpressure**,
-the **observability** stream, state machines and applications), Tier-3
-ergonomics (grapheme-correct strings, `&key` args), full **server/daemon** socket
-serving, and the sandboxed **WASM component** extension host (ADR-145). The editor
-application itself is a separate downstream project, out of scope for this repo.
+What remains is incremental, each item gated on a concrete need (ADR-011): scaling to
+very large projects, the performance levers parked in
+[`docs/compute-frontier.md`](docs/compute-frontier.md), and the additive language items
+ROADMAP lists as still open. The editor application itself is a separate downstream
+project, out of scope for this repo.
 
 The full plan is in [`ROADMAP.md`](ROADMAP.md).
 

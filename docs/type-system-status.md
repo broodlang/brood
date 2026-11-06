@@ -1,8 +1,10 @@
 # Type system — status & what's left
 
-**Revised 2026-09-12** (the review at the end of this document — where the `any` tail
-actually is, measured); previous revisions 2026-08-27 (the audit's ranked items,
-ADR-259..263) and 2026-07-30. Where the type system actually
+**Header, verdict and inventory revised 2026-11-06.** The dated sections below stand as
+written on their dates; see [Since the dated sections](#since-the-dated-sections) for what
+later ADRs changed. Previous revisions 2026-09-12 (where the `any` tail actually is,
+measured), 2026-08-27 (the audit's ranked items, ADR-259..263) and 2026-07-30. Where the
+type system actually
 stands against its goal — a **set-theoretic, gradual, advisory** system in the Castagna
 line (see [research/set-theoretic-types-in-brood.md](research/set-theoretic-types-in-brood.md)).
 For the model and the compatibility contract see [types.md](types.md); for the "why" of each
@@ -10,8 +12,39 @@ piece, the ADRs cited below in [decisions.md](decisions.md).
 
 The invariant that governs everything: **the checker is advisory and sound — it warns only
 on a *provable* misuse and never false-positives.** Every feature below landed against a hard
-gate: `nest check std/**/*.blsp tests/**/*.blsp` stays at zero warnings, and the
-`types::check` unit suite stays green.
+gate: `nest check std/**/*.blsp tests/**/*.blsp` stays at zero warnings, plain and
+`--strict`, and the `types::check` unit suite stays green.
+
+## Since the dated sections
+
+The last dated section is 2026-09-18. What landed after it, and what it overturns in the text
+below:
+
+- **Contracts are binding-time policy, on by default under `nest run`/`nest test`** (ADR-381),
+  with caller/callee blame, a module boundary (ADR-383) and remembered verdicts (ADR-480). So
+  "contract blame and contracts-by-default" in the deferred lists below are done.
+- **Typed parameters** (ADR-420): `(defn area (w:number h:number -> number) …)` registers the
+  `sig`. `_` is an open position, and an open result stays inferred.
+- **A record is its own value kind** (ADR-542, step 3 in the checker). A shape carrying an
+  identity sits on the `record` tag, any other on `map`, and a record is no `map<K, V>`.
+  `record?` narrows both branches, where the 2026-09-17 entry calls it one-sided. Text below
+  that says a record is a map, or renders one as `{__id__ …}`, describes the tree before this;
+  `__id__` survives only as a checker-internal slot in a shape.
+- **`failure` carries fields** (ADR-617): `failure/with` and `fields`; the HTTP clients and the
+  registry answer with one.
+- **Lints:** a `defmulti` that is single dispatch (ADR-523, `:single-dispatch`); a truthiness
+  test on a value that may be an empty list or another collection (ADR-620,
+  `:list-truthiness`).
+- **`fn` heads** (ADR-619): clauses run in order, first match; a clause an earlier one shadows
+  is a compile error; a single clause's `:when` is a runtime guard, and the checker still
+  reads the guard's domain.
+- **Names and argument order** (ADR-506, ADR-507, with ADR-308): code in the dated sections
+  uses the names and order of its day. `filter` is `seq/filter` and `remove` is `seq/reject`
+  (ADR-330), `sort-by`, `take-while`, `but-last`, `assoc-in`, `update-in` and friends are
+  qualified, and the collection comes first. A parameter list is a list everywhere (ADR-512).
+- **Removed since:** the KI-17 unrequired-module lint (2026-10-14, see
+  [auto-derived-imports.md](auto-derived-imports.md)). **Fixed since:** KI-165, a `deftype`
+  alias is enforced at run time (2026-09-18).
 
 ---
 
@@ -61,8 +94,8 @@ Everything the audit listed, plus:
 (+ 1 2 1/2)                 ; ratio — but `+ - inc dec` over ints and exactly ONE ratio
                             ;   cannot: no ratio is integral (denominator 1 demotes to Int
                             ;   on construction), and a whole-number shift keeps q
-(reduce + 0 ints)           ; int — a numeric operator folds inside its closure (induction)
-(map inc ints)              ; nil | list<int> — the operator's closure, not its widened sig
+(reduce ints 0 +)           ; int — a numeric operator folds inside its closure (induction)
+(map ints inc)              ; nil | list<int> — the operator's closure, not its widened sig
 (cons 1 '())                ; list<1> — a nil tail has no elements
 '(1 2) (vec …) (into …) (conj …) (merge …) (apply …) (try …) ((fn …) x) (range n)
                             ; each typed by what it provably is; all were `any`/nil/bare tags
@@ -124,7 +157,7 @@ inference or a compiler channel (5, 7), and adoption (9), which is ongoing by na
 | ~~6~~ | ~~Qualified cross-module ability type names~~ | **Shipped 2026-08-29** — and the headline was already done: in a PROJECT check both `Shape` and `shapes/Shape` resolve, because `ability_type` reads the last `/` segment (the registry is keyed by bare CamelCase name, ADR-255). What was broken was the loose single-file fallback, where neither can resolve and the checker falls back to "capitalised means an ability I cannot see" — that test read the WHOLE spelling, so `shapes/Shape` reported `unknown type` while bare `Shape` was accepted. Naming the module an ability comes from must not be what manufactures a diagnostic | ✅ |
 | 7 | **Tier-2 monomorphization** — devirtualizing an *inferred-variable* op call | Still deferred. Tier 1 (always on since ADR-398) proves only the identity, leaves resolution behind the epoch-guarded cache (ADR-294), and re-checks the op's and constructor's bindings per call; `devirt_differential.rs` gates it against the tree-walker. Tier 2 multiplies that surface across every call site the checker can type and still needs the checker→compiler channel, and perf-handoff Task 5 found no workload with a site | Large |
 | ~~8~~ | ~~Runtime contracts for ability ops~~ | **Shipped 2026-08-29** (ADR-293): `impl` wraps a method whose op declares `:-> RET`, decided at expansion time so an unset flag emits nothing. Building it revealed `BROOD_CONTRACTS=1` had rotted into *unusable* — three cold-boot-cache-only defects, none of which any gate could see, because the mode had no end-to-end test at all (KI-81) | ✅ |
-| 9 | **`sig` adoption across std** — **787** declarations over **3357** `defn`s on 2026-09-12 (407/2942 on 2026-08-29; 34/2828 on 2026-08-28), plus 12 `deftype`s; +54 on 2026-09-20, chosen by the load graph | Every one now buys more than it did: a declared sig is what the reversed-args gate (KI-71) reads, and inference is checked against it (ADR-259). The strict sweeps of 2026-08-30 and 2026-09-07 were mostly this. Since ADR-370 a public declaration the checker reads as-is also rides in the stdlib image's footer (**196 of 2788 names** on 2026-09-20, from 146 — a type-variable declaration rides now, a `%defseq` definition is indexed, and a curated name never loads), so a check that never loads the module knows it; `BROOD_IMAGE_TRACE=1 brood --check f.blsp` names every reference still holding a load open — the next names to declare | Ongoing |
+| 9 | **`sig` adoption across std** — typed parameters (ADR-420) are the usual spelling now: on 2026-11-06 a grep finds at least 769 such `defn`s beside 97 `(sig …)` lines, over about 4600 `defn`s, plus 19 `deftype`s. Earlier: **787** declarations over **3357** `defn`s on 2026-09-12 (407/2942 on 2026-08-29; 34/2828 on 2026-08-28), plus 12 `deftype`s; +54 on 2026-09-20, chosen by the load graph | Every one now buys more than it did: a declared sig is what the reversed-args gate (KI-71) reads, and inference is checked against it (ADR-259). The strict sweeps of 2026-08-30 and 2026-09-07 were mostly this. Since ADR-370 a public declaration the checker reads as-is also rides in the stdlib image's footer (**196 of 2788 names** on 2026-09-20, from 146 — a type-variable declaration rides now, a `%defseq` definition is indexed, and a curated name never loads), so a check that never loads the module knows it; `BROOD_IMAGE_TRACE=1 brood --check f.blsp` names every reference still holding a load open — the next names to declare | Ongoing |
 
 **On adopting in bulk (2026-08-29).** `nest check --suggest-sigs` prints what the checker
 would infer, and it is advice rather than a patch for a good reason: an inferred domain
@@ -148,24 +181,27 @@ genuine element-typed seqable needs extending the `elem` refinement beyond `Pair
 Set-theoretic + gradual (ADR-023/024). A `Ty` is a **union of terms** (ADR-262): one term is
 a tag bitset plus at most one refinement per slot — function **arrows** and **overloads**
 (arrow intersections), sequence **element types**, **`(map K V)`**, **record shapes**,
-**literal singletons** (keyword/int/bool/string), **tuples** — and a union that cannot merge
-into one term keeps up to four. The named unions `number` / `list` / `seqable` and the
-complement `(not T)` (ADR-263) round out the grammar. `GradualTy { bound, dynamic }` is the
-gradual valve — `dynamic(T)`, with consistent subtyping derived from set inclusion. It is
-used at exactly one site (the `(def x …)` assignment check); the rest of the checker's
-vocabulary is `Option<Ty>` (known / unknown), which is why there is no strict mode and no
-strong arrows.
+**literal singletons** (keyword/int/bool/string), **tuples**, **list shapes**, **intervals**
+and **lengths**, and a μ binder for **recursive types** — and a union that cannot merge
+into one term keeps up to four. The tags are the 25 runtime `Tag`s, `failure` and `record`
+among them. The named unions `number` / `list` / `seqable` / `countable` / `numeric` /
+`ordered` and the complement `(not T)` (ADR-263) round out the grammar.
+`GradualTy { bound, dynamic }` is the gradual valve — `dynamic(T)`, with consistent subtyping
+derived from set inclusion. It decides the assignment and return checks and every argument
+check (`walk::gradual_of`, `check_arg_against_param`); `--strict` (ADR-298) reads a known
+bound by inclusion through `consistent_with_mode`. Elsewhere the vocabulary is `Option<Ty>`
+(known / unknown).
 
 ### Signature sources (`types/check/sigs.rs`)
-Simplest-first: **primitives** (every `NativeFn` carries a `Sig` — 382 of them, only 14
-fully `any`), **curated** stdlib (a hand-vetted table for variadic/HOF closures),
-**declared** (`sig`/`sig!` — 34 in `std/`, 23 in `tests/`, each now validated against its
-definition, ADR-259), and **inference**: a parameter's **domain** over the body's possible
+Simplest-first: **primitives** (every `NativeFn` carries a `Sig`), **curated** stdlib (a
+hand-vetted table for variadic/HOF closures), **declared** (`sig`/`sig!` and typed parameters,
+each validated against its definition, ADR-259), and **inference**: a parameter's **domain** over the body's possible
 executions (ADR-261 — a guarded use credited within its guard, alternatives unioned, a
 `match` failure branch contributing ⊥), one signature **per arm** of a multi-arm or
 `:when`-guarded definition, returns from the body tail unioned across branches,
 self-recursion contributing ⊥, and same-file `defn`s inferred from their forms over a
-bounded leaf-up fixpoint (ADR-188/190).
+bounded leaf-up fixpoint (ADR-188/190). `sig_of` states the precedence. Call-site
+specialization (ADR-340) and caller-derived parameters (ADR-341) sit on top.
 
 ### Typed abilities (ADR-180/181/185/186/187/192/193)
 Op specs carry types; returns flow into inference at every call site; impl bodies are graded
@@ -183,8 +219,7 @@ see [ability-monomorphization.md](ability-monomorphization.md).
 
 ### Reach
 `nest check` / `nest test` / `nest run` / `brood <file>` / `brood --check`; MCP `load`/`check`;
-LSP diagnostics + hover; REPL advisory warnings; per-file require-reachability (ADR-189);
-`make check-corpora` runs a static pass over `examples/`, `stress/` and `breakage/`, which
+LSP diagnostics + hover; REPL advisory warnings; `make check-corpora` runs a static pass over `examples/`, `stress/` and `breakage/`, which
 were previously gated only by *running* them. The walk's **totality** is itself gated
 (ADR-260): every `SPECIAL_HEAD` entry and every container literal has a planted-name case in
 `REACH_CASES`, in both the whole-file and expanded-fragment walks, and a companion test
@@ -198,13 +233,15 @@ requires a new special form to declare what its body is for.
 |---|---|
 | Lattice (`Ty`, ops, named unions), `GradualTy`, `Sig` | `crates/lisp/src/types.rs`, `types/sig.rs` |
 | Checker entry + passes (`check_file`) | `crates/lisp/src/types/check.rs` |
-| The walk (special-form handling, call checks, arity) | `crates/lisp/src/types/check/walk.rs` |
-| Signature sources + inference | `crates/lisp/src/types/check/sigs.rs`, `infer.rs` |
+| The walk (special-form handling, call checks, arity) | `crates/lisp/src/types/check/walk.rs`, `walk/` |
+| Signature sources + inference | `crates/lisp/src/types/check/sigs.rs`, `sigs/`, `infer.rs` |
 | Guard narrowing / occurrence typing | `crates/lisp/src/types/check/guards.rs`, `guard_effects.rs` |
 | Type-annotation grammar + its validation (`sig`, `record`, `tuple`, `not`, ability-as-type) | `crates/lisp/src/types/check/annot.rs` |
-| The reach gate (`REACH_CASES`) and the lattice/checker tests | `crates/lisp/src/types/check/tests.rs`, `types/tests.rs` |
+| The reach gate (`REACH_CASES`) and the lattice/checker tests | `crates/lisp/src/types/check/tests/reach_gate.rs`, `check/tests/`, `types/tests.rs` |
 | Ability/multimethod checks | `crates/lisp/src/types/check/protocol.rs` |
 | Record-pattern exhaustiveness | `crates/lisp/src/types/check/exhaustive.rs` |
+| `:pure` / `:total` | `crates/lisp/src/types/check/properties.rs` |
+| Runtime contracts | `std/prelude/contracts.blsp`, `type-matches?` in `std/prelude/core.blsp` |
 | Devirtualization (ADR-182) | `crates/lisp/src/eval/compile/inline.rs` |
 | REPL advisory check | `std/tool/repl.blsp` |
 | LSP hover / diagnostics | `crates/lsp/src/{hover,main}.rs` |
@@ -214,10 +251,14 @@ literal singletons · **116** overloads · **127** `&optional` · **128** tuples
 op returns/params · **181** sealed ability as a type · **182** mono
 devirtualization · **185** provided op bodies · **186** any ability name is a type · **187**
 record patterns + exhaustiveness · **188** same-file inference · **189** per-file
-require-reachability (KI-17) · **190** occurrence typing · **191** staged call head (KI-19) ·
+require-reachability (KI-17; lint since deleted) · **190** occurrence typing · **191** staged call head (KI-19) ·
 **192** ability bounds · **193** super-abilities · **226** clause guards · **259** a
 declaration that cannot be read is reported · **260** the walk's totality is gated · **261**
-parameter domains · **262** a union keeps its terms · **263** `(not T)`.
+parameter domains · **262** a union keeps its terms · **263** `(not T)` · **264** closed
+records · **298** strict mode · **327** `deftype` · **348** list shapes · **349** recursive
+types · **350** intervals · **351** `:pure`/`:total` · **381** contracts by default · **420**
+typed parameters · **523** single-dispatch lint · **542** the `record` kind · **620** list
+truthiness.
 
 ---
 
@@ -1153,8 +1194,8 @@ same commit with the reason. That is bedit's commit to make, and `BEDIT_REF` mov
   calls and mutual recursion; a `:total` coverage proof over destructuring patterns (only
   literal patterns are proven today). Each is listed in its ADR's *Deferred* and none has a
   consumer asking.
-- Items 5 and 7 above (return-type dispatch, tier-2 monomorphization): unchanged, large.
 - ~~Items 5 and 7 above (return-type dispatch, tier-2 monomorphization): unchanged, large.~~ Decided 2026-09-17: item 5 declined (ADR-361); item 7 is a perf item, queued in `perf-handoff.md` with its measurement plan.
+
 ## `tests/` to zero strict, and the checker gaps it named (2026-09-17)
 
 The 32 strict findings over `tests/` (the "37, not a gate" of the review above) read as
@@ -1181,8 +1222,9 @@ tests hand functions literals, and one stdlib defect no gate could see:
   derived, and a driver derived from its own recursion alone reported `number` on
   `(- i 1)`. Printing a datum cannot call anything; a quoted datum anywhere else still
   escapes (it may be `eval`ed).
-- **`record?` is a one-sided guard** (`Ty::implied_by` beside `tested_by`): it holds for
-  a record — a map — and fails for a plain map, so the then-branch narrows to `map` and
+- **`record?` is a one-sided guard** (`Ty::implied_by` beside `tested_by`; ADR-542 ended
+  this, since a record is no longer a map): it holds for a record — a map — and fails for a
+  plain map, so the then-branch narrows to `map` and
   the else-branch to nothing; `filter`/`find` keep the narrowing, `reject` does not.
 - **Lengths that were dropped.** A literal `(range 1000)` was "non-empty" and lost its
   exact length; `into` onto a vector lost the target's plus the source's; `map` over a
@@ -1412,9 +1454,9 @@ each lands; this section is the working list, `handoff.md` points at it.
       substitution when each name occurs once (`jval` → `jarr` → `jval` becomes
       `(rec X nil | number | string | vector<X>)`), exact at any depth; a cycle needing two
       live binders still unrolls. Three pins in `check/tests/names_as_types.rs` (replacing
-      the one that pinned the old bound), each sabotage-verified. **Filed, not closed:**
-      KI-165 — no `deftype` alias is enforced at RUNTIME (`type-matches?` has no alias case,
-      so `sig!` over one accepts anything), which is every alias since ADR-327.
+      the one that pinned the old bound), each sabotage-verified. **Filed and fixed the same
+      day:** KI-165 — no `deftype` alias was enforced at RUNTIME (`type-matches?` had no alias
+      case, so `sig!` over one accepted anything); it resolves through `%type-alias` now.
 - [x] **C15. Effects DISPLAYED** (2026-09-18) — the first half, which was the whole of what
       was already computed. The purity walk (ADR-351) only ever graded a `:pure`
       DECLARATION; `properties::effect_of` asks it as a question instead, `%function-effect`

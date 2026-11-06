@@ -48,7 +48,7 @@ Two more limits worth internalising:
 
 Only **functions** are counted. Macros are excluded (they are expanded, never
 called — wrapping one would break it), as are native primitives and non-callable
-data. Only globals whose recorded `source-location` falls inside the project's
+data. Only globals whose recorded `reflect/source-location` falls inside the project's
 `:source-paths` are counted, so std and the prelude never inflate the denominator.
 
 ## How it works — hot reload as the instrumentation seam
@@ -57,26 +57,26 @@ There is no coverage flag in the VM, no instrumented build, and no new primitive
 `std/tool/coverage.blsp` is pure Brood policy over three things the language
 already has:
 
-1. **`global-names` + `source-location`** enumerate the denominator: every global
+1. **`reflect/global-names` + `reflect/source-location`** enumerate the denominator: every global
    that is a function defined in this project's source dirs.
 2. **`def` rebinding + late binding (ADR-013)** are the instrumentation. Each
    target is rebound to a shim that records a hit and forwards to the original.
    Because callers resolve globals late, every already-loaded caller — including
    ones running in other processes — picks up the shim with no reload.
 3. **`Value::Table` (ADR-107)** collects the hits. Tests run across many green
-   processes with separate heaps; a table is shared by identity and `table-incr`
+   processes with separate heaps; a table is shared by identity and `table/incr`
    is atomic under the table lock, so concurrent hits from parallel tests cannot
    lose an update. This is the sanctioned mutable structure being used for exactly
    what it exists for.
 
 Instrumentation happens **after** the project's sources are loaded and **after**
-`check-project` (whose `%isolate` would otherwise roll the rebindings back), and
+`project-check/check` (whose `%isolate` would otherwise roll the rebindings back), and
 before the suite runs.
 
 ### Why the shim is variadic
 
 The shim is `(fn (& args) … (apply original args))` — it does **not** mirror the
-original's parameter list. It cannot: `arglist` reports only **one arm** of a
+original's parameter list. It cannot: `reflect/arglist` reports only **one arm** of a
 multi-arm function, so a shim built from it would silently break the arities it
 never saw. Given
 
@@ -84,7 +84,7 @@ never saw. Given
 (defn describe-arity ((x) :one) ((x y) :two))
 ```
 
-`arglist` answers `(x y)`, and an arity-preserving shim would make
+`reflect/arglist` answers `(x y)`, and an arity-preserving shim would make
 `(describe-arity 1)` fail. Variadic forwarding is correct for every shape — fixed,
 `&optional`, `& rest`, and multi-arm alike — and `tests/coverage_test.blsp` pins
 each of them.
@@ -136,9 +136,8 @@ compiled during construction, and a chunk compiled without the flag has no
 `RecordLine` in it. `nest` sets it in `main`, before subcommand dispatch. Getting this
 wrong fails silently, with no instrumentation and no error.
 
-`--cover-lines` also sets `BROOD_TIER=1` (unless the tree-walker was asked for). An instrumented arm bails JIT lowering
-anyway (`Inst::RecordLine` is not lowerable), but turning the JIT off outright keeps
-the measurement from depending on which arms happened to tier up. **A `--cover-lines`
+`--cover-lines` also sets `BROOD_TIER=1`, whatever was asked: the recording is a bytecode
+instruction, so native code runs without it and the tree-walker never sees it. **A `--cover-lines`
 run is a diagnostic run, never a timing one.**
 
 ### What "executable line" means, and why the denominator is not counted from source
@@ -162,7 +161,7 @@ and both looked plausible:
    well as the numerator, and the same fixture reported **100%** with a dead function
    in it.
 
-Hence `coverage-line-begin!`, which runs before the suite and forces every project
+Hence `coverage/line-begin`, which runs before the suite and forces every project
 function to compile (`%coverage-precompile`) without calling it. A never-called
 function then has its lines in the denominator and in nothing else — which is the
 whole point of the measurement.
@@ -182,14 +181,14 @@ coverage.
 
 `%load-string` now takes an optional name, and the embedded-module table carries the
 **repo-relative path each module was baked in from** — derived from the same literal as
-its `include_str!`, so the two cannot drift. `require--force` passes it, so `std/log`'s
+its `include_str!`, so the two cannot drift. `%require-force` passes it, so `std/log`'s
 forms are recorded as `std/log.blsp`: a real path a tool can open, not a marker and not
 someone else's name.
 
 Pinned by `crates/cli/tests/std_attribution.rs`, on a property that needs no knowledge
 of what the lines contain: **every recorded line must exist inside the file it is
 attributed to.** A line borrowed from another file almost always lands past the end of
-the file it was credited to. (`source-location` was never affected — definition sites
+the file it was credited to. (`reflect/source-location` was never affected — definition sites
 are recorded separately.)
 
 ## The third tier: branch coverage (`--cover-branches`)

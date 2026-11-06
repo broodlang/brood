@@ -1,5 +1,8 @@
 # Wilhelm's review — language core & standard library
 
+**Status 2026-11-06: nothing here is open.** The last `[ ]` is closed below; the one `[~]` is
+a surface question that the ADR-506 audit has since answered for the bare names.
+
 Status marks added 2026-08-28. `[x]` resolved, `[ ]` open, `[~]` partly. A note under an
 open item is what was *checked*, not a decision — the call is still yours.
 
@@ -138,6 +141,9 @@ if the question had never been asked. Same rule as `decisions.md` and `known-iss
       `seq` while `first` (kernel) and `second` (prelude) were elsewhere — one trio, three
       homes. `third` is now bare beside `second`.
 
+      *2026-11-06:* ADR-506 wrote down what is bare and audited the namespace against it, 113
+      names moved. Whether to cut `seq`'s helpers stays a product question, not a defect.
+
 ## stdimage
 
 - [x] **is some of this not just private?** — **audited: it is already right, no change.**
@@ -193,10 +199,16 @@ rather than reasoning about them.
       `:derive-record` recipe)" for an ability that is not loaded at all — which sends you
       looking for a recipe on something that does not exist. The two cases now read
       differently.
-- [ ] **`(but-last '(1 1 2))` is typed `nil | list<1 | 2>`, but the argument is a literal
+- [x] **`(but-last '(1 1 2))` is typed `nil | list<1 | 2>`, but the argument is a literal
       three-element list — the result cannot be empty.** A precision gap, not a soundness
       one: list types carry an element type and no length, so after `(rest …)` the checker
       cannot tell "two left" from "none left" and widens to maybe-nil (the empty list IS
       `nil`). Closing it is a lattice change — a non-empty refinement that literals, `cons`
       and `reverse` preserve and `rest` peels one level of — same family as the exact record
       complements (2026-08-30 plan, item 3). Recorded 2026-08-30.
+
+      *Closed 2026-11-06, read from the code, not run:* a literal list has a positional shape
+      now, and `drop_one_ty` (`types/check/infer.rs`) keeps it, so `seq/but-last` of three
+      elements is two exactly (`(rest '(1 2))` pins the same path in
+      `check/tests/declared_vs_curated.rs`). Without a shape, ADR-350's length on a list
+      carries the count, so `(len (list E) 1 _)` is the non-empty refinement asked for.

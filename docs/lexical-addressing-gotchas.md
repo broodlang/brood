@@ -6,16 +6,18 @@
 > (`Heap::vm_cache`, `Arc<CompiledArm>`) and reads frame slots directly off
 > `Heap::roots`. The branch's *code* is superseded, but the **edge cases it hit are
 > universal** — any lexical addressing must handle them. This is the checklist to
-> verify against as the VM grows (especially Stage 2c, local-capturing closures).
+> verify against as the VM grows. Compiled code is now also shared across a runtime's
+> processes (ADR-175, `RuntimeCode::shared_closures`); it holds slot numbers, never a
+> sender's frame layout.
 
-## Status against the merged VM (Stage 1)
+## Status against the VM
 
-| # | Gotcha | Stage 1 status |
+| # | Gotcha | Status |
 |---|---|---|
-| 1 | Shipped-closure stale coordinates | **Not a bug yet** — coords live in the per-process side cache, never serialized; Stage 1 compiles only global-capturing closures. **Becomes critical at Stage 2c.** |
+| 1 | Shipped-closure stale coordinates | **Handled.** Stage 2c landed: a closure's captures are read from a flat env frame by compile-time capture lists, and a free variable resolves by name through the closure's own env, so nothing addresses by frame offset across a process boundary (`bytecode-vm.md` §Stage 2c). |
 | 2 | Static analysis on addressed bodies | **Not a bug** — the closure's stored `body` is untouched source; the checker never sees coordinates. |
-| 3 | Frame-model edge cases | Partially live now (letrec/sequential-let arrive in Stage 2a). |
-| 4 | Verify-and-fallback safety | Not adopted (flat frame carries no names); rely on construction + tests for now. |
+| 3 | Frame-model edge cases | **Handled** by the flat frame (Stage 2a): one slot per binder, sequential `let`. A `(fn …)` capturing a not-yet-finalized `letrec` binder defers to the tree-walker. |
+| 4 | Verify-and-fallback safety | Not adopted (flat frame carries no names); rely on construction + tests. |
 | 5 | Frame-slot-direct beats coordinate-forms | **Confirmed** — validates the merged VM's design. |
 
 ## The checklist
@@ -30,7 +32,7 @@ indexed the sender's frame layout points at the wrong slot on the receiver.
 - The branch's fix: strip coordinates → names during `to_message`.
 - **The VM's defence:** never ship coordinates. They live in `Heap::vm_cache`
   (per-process), re-derived from the closure's *source* body on the receiving side.
-- **Stage 2c constraint:** when local-capturing closures become VM-eligible, the
+- **The constraint Stage 2c met:** with local-capturing closures VM-eligible, the
   compiler must derive captured-var slots from the closure's **actual captured-env
   layout in *this* process** (post-flatten/reorder), never from a remembered
   sender layout, and never bake them into anything that crosses a process boundary.
@@ -52,12 +54,13 @@ param-inference and unbound-checks misfire.
   `nil` then `env_define`s them, which *appends* (eval scans from the end). A naive
   slot assignment can hand one name two slots. Assign each letrec name **one
   distinct slot**, pre-init nil, then fill in order.
-- **Sequential `let`.** Brood `let` *is* sequential (`LET` and `LET_STAR` both map
-  to `SpecialForm::Let`): each binding sees the earlier ones. Assign slot indices
+- **Sequential `let`.** Brood `let` *is* sequential (`SpecialForm::Let`; there is no
+  separate `let*`): each binding sees the earlier ones. Assign slot indices
   **incrementally** as bindings are compiled, with the rhs compiled against the
   scope *so far*.
-- **`match*` opacity.** The pattern engine's output is opaque to addressing —
-  defer any body that reaches `match*`.
+- **`match*` opacity.** The branch found the pattern engine's output opaque to
+  addressing. In the VM a `match` expands to ordinary forms that compile, so this
+  applies only to a shape the compiler declines, which defers.
 - **Don't address the call-head position.** Leaving a call head as a name keeps the
   fast symbol-call path; addressing it buys nothing and risks the head-vs-operand
   distinction. (The merged VM compiles the head uniformly to `Global`/`Local` and

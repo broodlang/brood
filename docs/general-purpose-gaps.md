@@ -1,5 +1,10 @@
 # Brood as a general-purpose language — what is missing
 
+**Status 2026-11-06, checked against the tree at v0.50.0:** gaps 3, 4, 5, 6 and 7 carry their
+2026-10-26 updates; gap 2 is updated below; gap 8 was no gap. Open: gap 1 (no policy or 1.0
+yet), the release half of gap 2, build-on-fetch and a C API (gap 3), the rest in the package
+lists, and gaps 9 and 10.
+
 **Status: research note, 2026-10-25, read against `origin/main` at `288dfe03` (v0.43.0 + Unreleased).**
 Nothing here was run; every claim cites the file it was read from. Claims marked
 *unverified* could not be checked from the tree.
@@ -25,7 +30,7 @@ Some of this is ahead of most of the reference languages. A gap list should not 
 
 - **A mature actor runtime's process model, with a JIT.** Preemptive M:N scheduling with work stealing and
   live migration (docs/scheduler.md, ADR-100), and preemption inside native code since
-  ADR-400..403. Links, monitors, selective receive, mailbox bounds (ADR-308), supervisors,
+  ADR-400..403. Links, monitors, selective receive, mailbox bounds (ADR-307), supervisors,
   `gen`, `defstatem` (ADR-437), `defapp` with signal-driven shutdown (ADR-435/436) and a
   local registry (ADR-445) and cluster-wide process groups (ADR-446). Encrypted multi-node
   distribution (docs/distribution.md). In the cross-language benchmark it has the
@@ -75,6 +80,12 @@ until it exists.
 
 ### 2. Platforms: tested on Linux only
 
+**Update 2026-11-06: the test half is done, the release half is not.** CI runs the platform
+smoke set on macOS and Windows (`macos-check`, `windows-smoke`), and `windows-smoke` has been a
+gate since 2026-11-04. Paths and program lookup were fixed on the way (ADR-592, ADR-607). Those
+are smoke sets, not the whole suite. `release.yml` still builds the same four targets, no
+Windows and no musl, and `nest release --target` still takes a runtime copied in by hand.
+
 **Missing.** `.github/workflows/ci.yml` runs the tests on Linux only. macOS is
 `cargo check` only ("the target only a tag used to reach"). On Windows the tree compiles,
 but the job that runs a program has `continue-on-error: true`: "Whether the runtime RUNS on
@@ -94,6 +105,9 @@ its hash, instead of asking the user to scp one into place.
 needs an ADR.
 
 ### 3. Native interop: no C FFI, and the WASM route is half built
+
+*Checked 2026-11-06: as the update below says. Build-on-fetch and a C embedding API are still
+open; `crates/lisp` builds no C library.*
 
 **Update 2026-10-26: the WASM route is built.** A guest gets WASI preview 2 by grant
 (`:dirs`, `:env`, `:args`, `:stdio`; never the network), interface exports are callable, a
@@ -129,6 +143,8 @@ Guile are.
 **Kind.** Kernel. ADR-071/145 cover the WASM work. A C embedding API needs a new ADR.
 
 ### 4. Networking stops at HTTP/1.0 over TCP
+
+*Checked 2026-11-06: `std/net/dns` still runs over TCP, so the UDP resolver below remains.*
 
 **Update 2026-10-26: the kernel half is done.** UDP sockets deliver to the mailbox like TCP
 (`std/net/udp`, ADR-449); `%tls-connect` / `%tls-listen` negotiate ALPN and `tls/protocol`

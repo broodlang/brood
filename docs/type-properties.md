@@ -39,7 +39,7 @@ calls log-it, which performs an effect: (io/puts …)
 ```
 
 The effectful heads are a **deny-list** (`properties.rs`: the guard lint's names, plus
-`receive`, `gensym`, the clock, and whole namespaces — `io/`, `file/`, `os/`, `tcp/`,
+`receive`, `reflect/gensym`, the clock, and whole namespaces — `io/`, `file/`, `os/`, `tcp/`,
 `table/`, `proc/`, `timer/`, `rand/`, `reflect/`, …). That is the sound direction for a
 checker that promises never to flag a valid program: a reported effect is one the body
 reaches; what the list does not name is missed, not invented.
@@ -57,7 +57,7 @@ counts its recomputations by sending from the thunk on purpose, and opts out wit
 read in the branch scope the call sits in (`sigs::self_call_sites`, which types a site in
 its `if` branch):
 
-- `(rest p)` / `(but-last p)` of a `p` the branch knows is non-empty — length at least 1
+- `(rest p)` / `(seq/but-last p)` of a `p` the branch knows is non-empty — length at least 1
   and no `nil` (`(nil? xs)`'s else, `(not (empty? xs))`);
 - `(- p k)` / `(dec p)` / `(+ p -k)` of a `p` the branch bounds below — `(<= n 0)`'s else
   says `n ≥ 1`; `(= n 0)`'s else says only `n ≠ 0`, and is reported;
@@ -68,7 +68,7 @@ its `if` branch):
 
 A function with no self-call passes this half. Mutual recursion is not examined.
 
-**Coverage.** Reported by the walk (`walk.rs`, at the `(%raise (%match-error …))` a
+**Coverage.** Reported by the walk (`check/walk.rs`, at the `(%raise (%match-error …))` a
 catch-all-less `match` lowers to) under `Ctx::total_fn`: a `match` failure the checker
 cannot prove unreachable — a scrutinee that is not a closed literal type, or a pattern
 that is not a literal (`guards::match_coverage` answers `Unknown`) — is a case the
@@ -94,8 +94,10 @@ ADR-350's parameter relation to be sayable at all.
 
 ## Deferred
 
-- Effect *inference* as a reported property (an `Effects:` line in `nest docs`, a hover):
-  the walk computes it; nothing displays it yet.
+- ~~Effect *inference* as a reported property~~ — shipped 2026-09-18 for docs:
+  `properties::effect_of` feeds `%function-effect`, and `nest docs` prints an *Effects:* line.
+  It reports an effect and never claims purity, because the head list is a deny-list. A
+  hover has not followed.
 - Transitive totality across calls, and mutual recursion: a call graph with a measure per
   edge — a different analysis.
 - A runtime contract for either property — decided 2026-09-17: both stay STATIC-ONLY.

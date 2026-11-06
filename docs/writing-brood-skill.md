@@ -37,9 +37,11 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 4. **Lists for code, vectors for data.** Binding forms are **lists**, not
    Clojure vectors: `(let (a 1 b 2) …)`, `(for (x xs :when p) …)`,
    `(when-let (v e) …)`. `let` bindings are **flat** — `(let (a 1 b 2) …)`, not
-   `(let ((a 1) (b 2)) …)`. A vector in a binding-container position is an error.
-   Vectors `[ ]` are *only* for tuple values (`[x y]`), sequence literals
-   (`[1 2 3]`), and tuple **patterns**.
+   `(let ((a 1) (b 2)) …)`. Every parameter list is a list too — `defn`, `fn`, an ability
+   op, an `impl` method (ADR-512). A vector in either position is an error.
+   Vectors `[ ]` are for data: tuple values (`[x y]`), sequence literals (`[1 2 3]`),
+   tuple **patterns**, and lists of names that are data (`{:keys [a b]}`, a `defmethod`
+   dispatch tuple, `:sealed [a b]`).
 
 5. **Bare symbols in patterns BIND, they don't match.** In `match` / `fn` /
    `receive` / destructuring `let`, `x` binds; to match a known value pin it
@@ -71,12 +73,15 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 9. **Many familiar names live in a module, and bare they are unbound.** Output is
    `io/puts`/`io/write`/`io/inspect` (no `print`/`println`). `min`/`max`/`quot`/`rem`/
    `mod`/`floor`/`abs`/`sqrt`/`even?`/`odd?` are `math/…`; `zip`/`subvec`/`remove-nth`/
-   `repeatedly`/`frequencies`/`group-by`/`find`/`distinct`/`filter`/`reject` are `seq/…`;
+   `repeatedly`/`frequencies`/`group-by`/`find`/`distinct`/`filter`/`reject`/`sort-by`/
+   `partition`/`take-while` are `seq/…`; `get-in`/`assoc-in`/`update-in` are `map/…`;
+   `sleep` is `proc/sleep`; `gensym`, `macroexpand`, `doc` and `apropos` are `reflect/…`;
+   `spy` and `tap` are `debug/…`;
    the whole string surface is `string/…` (`string/length`, `string/join`,
    `string/format`, `string/interp` — interpolation, `(string/interp "x={x}")`); the
    clock is `os/now`. A qualified reference loads its module on first use; there is no
    `require` form. Still bare: `map fold reduce count first rest conj into get assoc
-   sort sort-by index-of includes? inc dec str + - * / < =`.
+   sort index-of includes? inc dec str + - * / < =`.
 
 10. **One sequence view over every collection.** `count`/`empty?`/`first`/`rest`/`last`/
    `map`/`fold`/`reduce`/`into`/`vec`/`seq` walk a list, vector, `bytes`, a **set** (its
@@ -149,7 +154,8 @@ test))`); `(:use mod :only [a b])` for a subset, `(:use mod :exclude [a])` for a
 some (`nest new` writes `(:use log :exclude [error])`, keeping the prelude's `error`).
 Merely *referencing* `mod/name` loads
 the module on first use but leaves names qualified. The header accepts exactly
-`(:use …)`, `(:use-internals …)`, `(:alias …)` and `(:load …)` — anything else,
+`(:use …)`, `(:use-internals …)`, `(:alias …)`, `(:load …)`, `(:shadow …)` and
+`(:implements …)` — anything else,
 `(:require …)` included, is an error. From outside a module (REPL, `nest mcp` eval)
 reach a `defn` qualified: `(life/step …)`.
 
@@ -168,10 +174,10 @@ Its tools:
   *old* defs until you `load` it. Reflex: edit → `load` → `eval`.
 - **`lookup`** — a global's arglist, docstring, and source location. Check a
   function's real argument order here instead of assuming (trap #3).
-- **`reflect/macroexpand`** — see what a macro expands to.
+- **`macroexpand`** — see what a macro expands to.
 - **`format`** — format a snippet/file the way `nest format` would.
 - **`callers`** — every reference to a global across the project (rename impact).
-- **`reflect/apropos`** / **`all-globals`** / **`reflect/doc-search`** — does X exist, and what is it
+- **`apropos`** / **`all-globals`** / **`doc-search`** — does X exist, and what is it
   called?
 
 ## Don't guess the standard library
@@ -193,9 +199,9 @@ muscle-memory reaches for, and what Brood actually has:
 | `parse-int` / `Integer.parseInt` | `(string/->number s)` → an int, a float, or a **failure** (trap #7); `(string/->number "1F" 16)` for a radix |
 | `some?` (non-nil) | `(not (nil? x))`; Brood's `any?` is "some element matches a pred" |
 | `set!` / `swap!` / atoms | nothing — state is a process or a `table` (trap #1) |
-| `combinator/juxt`, `combinator/fnil`, `condp`, `if-some` | all exist; the first two in `combinator/` (or bare under `(:use combinator)`), the last two bare. `condp` is value-first: `(condp < 15 10 :small 100 :medium :large)` → `:medium` |
+| `juxt`, `fnil`, `condp`, `if-some` | all exist; the first two in `combinator/` (or bare under `(:use combinator)`), the last two bare. `condp` takes the subject first and asks `(pred value test)`: `(condp 15 < 10 :small 100 :medium :large)` → `:medium` |
 | `for` into a vector/map | `(for (x xs :when p :into []) …)`; an accumulating walk is `(fold-for (acc 0 x xs) (+ acc x))` |
-| `pmap` / `seq/take-while` transducer | `seq/pmap` (a process per item, order kept); `seq/transduce` with `seq/reduced` to stop early |
+| `pmap` / a `take-while` transducer | `seq/pmap` (a process per item, order kept); `seq/transduce` with `seq/reduced` to stop early |
 | raw ANSI (`clear`/`home`/cursor) | `(:use editor/ansi)` → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — `(io/write (ansi-clear))`, never `(io/write ansi-clear)`. A render loop wants `editor/display` + `ui-run` |
 | a built-in RNG (`rand`) | `rand/int`, `rand/float`, `rand/rng`, plus `seq/shuffle`/`seq/sample` — pure & seedable: each takes a seed (`(rand/seed n)` from any int) and returns `[value next-seed]`; thread the seed through your state. `(rand/token n)` is the exception — `n` OS-random bytes as hex, for ids/secrets |
 | a set / `#{}` | first-class: `#{1 2 3}`, `(set? s)`, `(contains? s x)`, `(conj s x)`/`(set/disj s x)` with no import; `set/union`/`set/intersection`/`set/difference`/`set/subset?` for the algebra |
@@ -241,8 +247,8 @@ A runtime crash is a bug to report, not to work around:
 3. **Localise** with the knobs (`brood --debug-flags` lists them all); each one that
    flips the verdict (crash ↔ clean) names a subsystem:
    - `BROOD_GC_STRESS=1` — collect at every safepoint; makes a GC race deterministic.
-   - `BROOD_GC_VERIFY=1` — walk the live graph before each collection; names the
-     root→cell path of a stale handle.
+   - `BROOD_GC_VERIFY=1` — walk the live graph before each collection; names a stale
+     handle and the cell that holds it.
    - `BROOD_TIER=1` (no JIT) / `BROOD_TIER=0` (tree-walker) — which execution tier.
    - `BROOD_J=1` (one scheduler worker) or `nest test --jobs 1` (at most one spawned
      process running at a time) — rules the scheduler in or out.

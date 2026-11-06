@@ -2,8 +2,12 @@
 
 > **Since ADR-501** the failure branch is `(%raise (%match-error (quote context) target (quote
 > patterns)))` rather than a `(throw [:match-error …])` vector; the arguments sit in the same
-> positions, and `guards::match_failure_parts` is the one recogniser. The text below predates
-> that.
+> positions, and `guards::match_failure_parts` is the one recogniser. `guards::match_coverage`
+> does what `match_exhaustiveness_gap` did below, reported from `check_into` at that `%raise`.
+> **`case` exists now** (a `match*` over literal tests, `std/prelude/match.blsp`), so it is
+> covered by the same shape. ADR-268 made an equality guard biconditional where the literal
+> is exact, and ADR-187 added record-pattern exhaustiveness (`check/exhaustive.rs`). The text
+> below predates all of that.
 >
 > Status: **shipped, generalized to mixed-kind enums** (ADR-121). A `match`
 > over a scrutinee whose declared type is a *pure* enumerable literal type —
@@ -11,9 +15,7 @@
 > (`(or :ok :error :pending)`, `(or 200 404 500)`, `(or :ok 5)`,
 > `(or :ok :error nil)`, `(or true false)`, `(or "GET" "POST")`) — is flagged
 > when its clauses don't cover every member, unless a catch-all clause
-> (`_`/bare bind) is present, which makes it trivially exhaustive. `case`
-> doesn't exist in Brood (confirmed dead/vestigial — see Problem), so the
-> scope is `match` only.
+> (`_`/bare bind) is present, which makes it trivially exhaustive.
 
 ## Problem
 
@@ -32,17 +34,14 @@ usually *for*: catching a `match` that forgot an arm.
 
 Initial scoping assumed this needed a new `match`-clause parser: the checker
 has no correct view of `match`'s real clause shape today (the one existing
-"match-shape" code, `gradual_of_compound` in `check/walk.rs`, assumes a wrong
-flat `pat1 body1 pat2 body2…` layout and is effectively dead for genuine
+"match-shape" code, `gradual_of_compound` in `check/walk/calls.rs`, assumes a wrong
+flat `pat1 body1 pat2 body2…` layout and was effectively dead for genuine
 `match` forms — a pre-existing, minor bug, not fixed by this work). That
 framing would have made this a 2-3 slice effort. A much smaller design was
 found instead by reading the actual compiler.
 
-Also worth noting up front: **`case` doesn't exist in Brood.**
-`crates/lisp/src/eval.rs` explicitly tells users "Brood has no
-`case`/`condp` — use `match` (patterns) or `cond`." `kw::CASE` is referenced
-only by the checker itself and is vestigial. So this feature is `match`-only,
-correctly — there's nothing else to wire it into.
+When this was written `case` did not exist in Brood, so the feature was `match`-only. See
+the note at the top.
 
 ## The insight that made this small
 
@@ -159,7 +158,7 @@ all — this check only ever fires on the one specific compiled `throw` shape.
 ## Soundness
 
 Verified the same two ways as every literal/arrow slice this session:
-1. Six targeted tests in `crates/lisp/src/types/check.rs`
+1. Six targeted tests in `crates/lisp/src/types/check/tests/match_lints.rs`
    (`match_exhaustiveness_flags_a_missing_keyword_arm`,
    `..._is_silent_when_every_arm_is_covered`,
    `..._is_silent_with_a_catch_all_clause`,
@@ -182,5 +181,4 @@ ADR-121 (the mixed-kind generalization) added five more:
 
 ## Tests
 
-`crates/lisp/src/types/check.rs`: the eleven tests listed above, right after
-`int_literal_return_type_flows_through_checker`.
+`crates/lisp/src/types/check/tests/match_lints.rs`: the eleven tests listed above.

@@ -34,7 +34,8 @@ The groups below are coarse on purpose: they carry the *kind* of justification, 
 per name. `*earmuffed*` dynamics and operators are bare by convention and need no argument;
 the `core` list is the one worth pushing back on, and the one to read before adding to it.
 
-Counts are as of 2026-09-12: **264** bare public names.
+Since ADR-506 kept the bare namespace to the language, the count is **192** bare public
+names: the headers below are checked against their bullets.
 
 ## operator (13)
 
@@ -55,7 +56,7 @@ Operators — arithmetic, comparison and the reader's own punctuation. Bare by c
 
 ## dynamic (17)
 
-Dynamic variables (`defdyn`) — earmuffed, so they cannot be mistaken for ordinary bindings, and bare because `binding` sites read better unqualified. The largest group and the least contentious; note how many are one subsystem's configuration (`*project-*`, `*test-*`, `*repl-*`).
+Dynamic variables (`defdyn`) — earmuffed, so they cannot be mistaken for ordinary bindings, and bare because `binding` sites read better unqualified. What remains after ADR-506 moved the subsystem dynamics into their modules (`project/*root*`, `test/*wait-ms*`) is the output ports, the printer's limits and the module system's own.
 - `*spy-sink*`
 - `*transduce-run*`
 - `*err*`

@@ -714,7 +714,7 @@ pub(crate) fn call_native_redirectable(
 
 /// Construct an "unbound symbol: …" error, attaching the scheduler-race hint
 /// when we're currently executing in a *green* (spawned) process. The hint
-/// covers the under-load failure mode `docs/claude-demo-findings.md` flagged
+/// covers the under-load failure mode `docs/archive/claude-demo-findings.md` flagged
 /// — fan-out of ~20+ workers racing prelude lookups so internal names like
 /// `acc`/`fold`/`%eq` spuriously look unbound. False positives are
 /// tolerable: the hint conditions on "if this fired under fan-out, try
@@ -1660,7 +1660,7 @@ pub(crate) fn even_bindings_look_scheme(heap: &Heap, binds: &[Value]) -> bool {
 /// `(name value)` 2-list. Reached two ways: the odd-length guard (which errors
 /// regardless) calls this directly, and the compile pass / tree-walker route the
 /// *even*-length literal-valued shape here via [`even_bindings_look_scheme`]
-/// (LLM-native errors, `docs/llm-native.md`).
+/// (LLM-native errors, `docs/archive/llm-native.md`).
 pub(crate) fn scheme_binding_error(heap: &Heap, who: &str, binds: &[Value]) -> LispError {
     let looks_nested = !binds.is_empty()
         && binds.iter().all(|&b| {

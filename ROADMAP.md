@@ -29,7 +29,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 
 - [**Active work**](#active-work--dated-findings--backlogs) — dated findings & backlogs (the
   large, time-ordered section; skim by the `###` sub-headers below)
-  - [**Language design pass (the current focus)**](#language-design-pass-2026-10-28--the-next-months-focus) ·
+  - [**Language design pass (✅ done 2026-11-06)**](#language-design-pass-2026-10-28---complete-2026-11-06) ·
   - [Lisp survey + process-library backlog](#lisp-survey--process-library-backlog-2026-08-30) ·
   - [Backend seams](#backend-seams--swappable-jit--engine--perf-legibility-2026-08-11) ·
     [Runtime-feature parity](#runtime-feature-parity-program-2026-07-22) ·
@@ -56,9 +56,19 @@ bounds, super-abilities, occurrence typing). Active fronts: **perf/JIT tuning**,
 protocol on abilities** (read half done), **std-library breadth** (no markdown/WHATWG-URL yet),
 and **observability**. See "What's next — by area".
 
+**Refreshed 2026-11-06:** the language design pass is finished (ADR-500..620, section below). The
+seq protocol is on abilities, observability shipped, and `std/markdown` exists as a small
+subset; `std/url` is still RFC 3986, not WHATWG. `docs/known-issues.md` holds one open entry,
+KI-370, a `nest check` warning seen once. The order of what comes next is in
+[`docs/handoff.md`](docs/handoff.md).
+
 ## Active work — dated findings & backlogs
 
-### Language design pass (2026-10-28) — the next month's focus
+### Language design pass (2026-10-28) — ✅ COMPLETE (2026-11-06)
+
+✅ **Finished 2026-11-06** (the last decisions are ADR-617..620, commit `7252319a`). Every item
+in §A, §B and §C is closed, and §D's refusals stand. The text below is kept as it was written
+when the pass began, so "the next month" means 2026-10-28 to 2026-11-06.
 
 A read of the language as a Lisp: what is wrong, what is missing, and what an experienced
 Lisp/Clojure user will trip on. The source was `docs/language.md` checked against `std/`.
@@ -324,7 +334,9 @@ day: tab stops in the display seam (ADR-342), the scroll blit (ADR-343),
 - ⬜ **bedit's `lex-shell` onto `editor/lexer`** — its function-name rule is contextual (a word
   before `()`), one step past what a table expresses; a `:context` hook on the lexer would
   fold it in and delete its walker.
-- ⬜ **`collab.blsp`'s file registry onto `editor/buffer-registry`** — keyed by path with a
+- ✅ **`collab.blsp`'s file registry onto `editor/buffer-registry`** (checked 2026-11-06: bedit's
+  `src/collab.blsp` runs a registry started `{:mirror true}`, in place by bedit `280ce39`,
+  2026-10-18). Original note: keyed by path with a
   text mirror; the registry's `:meta` can carry the path, the mirror is the one thing to add.
 - ✅ **The GPU glyph atlas** — shipped 2026-09-20 with the wgpu render target (ADR-374):
   clusters pack into 2048² atlas pages as they first appear, so a page of text is one
@@ -836,7 +848,7 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
       never the bug** — a string returns itself from `seq` and raises on `first` too, so a
       rope doing the same is consistent with the thing it models. The checker's `countable`
       gained `Rope`/`Table` in step. Superseded text follows:
-- [ ] ~~**Ability seams do not reach built-in kinds** (ADR-253) — **half closed.** `Display`
+- [x] ~~**Ability seams do not reach built-in kinds** (ADR-253) — **half closed.** `Display`
       DOES reach a built-in now: `(impl Display :rope (->string (x) …))` is consulted, almost
       certainly because `->string` became an ability op in v0.15.0. What remains is the
       *seqable* family: `(count r)`, `(first r)` and `(empty? r)` raise on a rope and on a
@@ -1139,6 +1151,10 @@ Shipped as ADRs:
       machinery — and it's invisible to the language (a pure memo of `impl-for`). Dispatch
       overhead vs a direct call roughly halved. Still ⬜: compile-time *static* resolution
       where the receiver type is known, and `:sealed` → a closed exhaustive switch.
+      *Checked 2026-11-06:* the first half is in for a receiver whose identity is proved, a
+      literal or a direct record-constructor call: `inline::mono_devirtualize` (ADR-182/294) is
+      on by default and `BROOD_MONO` is gone. A `:sealed` op is exhaustive in the checker
+      (`check/exhaustive.rs`), but its dispatch is not a closed switch.
     - ✅ **Slice 6 — `Display` core, always on** (2026-07-28): the ability system +
       `Display`/`Inspect` folded into the prelude; the prelude wires `*show*` on by
       default. A record customizes printing with just `(impl Display …)` — no
@@ -1184,7 +1200,7 @@ What that review consciously left OPEN, with the reasoning:
   - 📋 **Phase 1 is planned** (2026-07-30, held pending the concurrent JIT perf thread):
     compile-time resolution of reserved-defn call heads + drop the staleness guard +
     checker precise-typing. Concrete, step-ordered, ready to execute — see
-    [`docs/plan-reserved-early-binding.md`](docs/plan-reserved-early-binding.md). Phases 2
+    [`docs/archive/plan-reserved-early-binding.md`](docs/archive/plan-reserved-early-binding.md). Phases 2
     (multi-arity devirt) and 3 (see-through inlining of `get`'s `cond`) build on it.
   - *Re-assessed 2026-10-24:* Phase 3's target is already met for the hot shapes, by
     instruction rather than by inlining: `(get m k)` is `PrimOp::MapGet` (ADR-296) and
@@ -1193,6 +1209,11 @@ What that review consciously left OPEN, with the reasoning:
     `is_reserved_global`. What is left is Steps B/C (the per-call identity re-check on a
     reserved head), a pure speed change: build it only with `make ab` and `make ab-vm` on
     the test machine to show it pays.
+  - *Checked 2026-11-06:* not shipped. There is no resolved-call node in `eval/compile/`, and
+    the compiler reads `is_reserved_global` only for the KI-19 staging exemption (`lower.rs`). Step A
+    did not ship as planned either: the checker has no reserved case in its global typing.
+    Steps B/C overlap `docs/runtime-frontier.md` M3 (direct-link sealed callees); take them as
+    one item. Status in the plan's header.
 - ✅ ~~**`get`'s call + type-dispatch overhead, which the JIT cannot see through.**~~
   Closed by ADR-296 (`MapGet`) and ADR-368 (`MapGet3`, `MapAssoc`); the text below is the
   original measurement. Found while measuring ADR-165: against the `map-get` kernel op at 107 ms/1M, a
@@ -1263,7 +1284,9 @@ What that review consciously left OPEN, with the reasoning:
   `0x1F`/`0b1010`/`0o17` are radix literals (ADR-334, 2026-09-12). **[kernel]**
 - ⬜ **Unbounded laziness** (`iterate`, `lazy-seq`) stays rejected — seq-views plus
   processes cover it, and `Value::Lazy` adds a GC story, force semantics, and
-  head-holding pitfalls. Recorded in [deferred.md](docs/deferred.md) #2.
+  head-holding pitfalls. Recorded in [deferred.md](docs/deferred.md) #2. *2026-11-06:*
+  `seq/iterate` shipped as a `transduce`-only source (ADR-431, 2026-10-24); `lazy-seq` stays
+  refused (ADR-170), so this is a decision, not open work.
 
 ### `jit_lower_arm_inner` emit-loop decomposition — ✅ COMPLETE (2026-07-25)
 
@@ -1322,7 +1345,8 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
 
 **Tier 1 — maintainability hazards (real payoff):**
 
-1. 🟡 **Split `eval/compile/jit_lower.rs` (5437 → 4576)** — partial, done
+1. ✅ **Split `eval/compile/jit_lower.rs` (5437 → 4576)** — finished 2026-07-25 by the emit-loop
+   decomposition section above (1119 lines on 2026-11-06); this slice done
    2026-07-24. Extracted the self-contained **unboxed i64/f64 scalar worker**
    (`Scalar`/`I64Ctx`, the `i64_*`/`lower_i64_*` family, and `jit_lower_i64_arm`,
    ~860 lines) — a cluster used only by the `jit_lower_arm` dispatcher, never by
@@ -1341,7 +1365,7 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
    `store_int`/`copy_value`) into `emit.rs` too, threading a `Copy` `Frame`
    context (`rb_var`/`base`/`nslots`/`deopt`/`carry_vars`).
    `jit_lower.rs` now 5437 → 4325 with `i64.rs`/`prepass.rs`/`emit.rs` split out.
-   🟡 The remaining **emit-loop decomposition** — the ~1,600-line
+   ✅ (2026-07-25, the section above) The remaining **emit-loop decomposition** — the ~1,600-line
    `for ip in 0..len` CLIF loop (Call ~300, Prim1/2/3 + fused ~700, SelfCall ~200,
    control ~130) over the virtualized `Op` stack — is the high-risk remainder.
    Every arm shares `b` (the `FunctionBuilder`, which can't move into a struct — it
@@ -1534,11 +1558,12 @@ ADR-436).
 `unicode-segmentation` is already a dep, wired only to display-width);
 ~~**protocols/multimethods**~~ (✅ shipped as **abilities**, ADR-168 — open generic
 functions with nominal dispatch replace hand-written `type-of` cascades);
-**`&key` args** (designed — ADR-011); ⬜ **lexically-shadowable operators**
+~~**`&key` args**~~ (refused: ADR-163, ADR-170); ⬜ **lexically-shadowable operators**
 ("Option C" — resolve operator position against local scope first, so a macro
 name like `for`/`when` stops being a reserved word; decision **deferred**, kept as
 reserved words for now, full spec + gotchas + hygiene notes in
-[deferred.md #7](docs/deferred.md)); the dist
+[deferred.md #7](docs/deferred.md); ADR-423 settled the module half, the lexical half stays
+deferred); the dist
 **terminate hook** + **FQDN long names** (dist refinements below). (The
 parked-`receive` mailbox-slot leak that used to sit here was fixed
 2026-07-23 — survey housekeeping above.)
@@ -1577,7 +1602,7 @@ mechanism/policy split: kernel primitive, Brood policy.
   :trace}]` (`message::error_reason`, heap-independent so it deep-copies to
   monitors/links and crosses the dist wire), so supervisors see reason and
   stack trace together.
-- 🟡 **Per-process resource limits (max heap size / mailbox bounds).**
+- ✅ **Per-process resource limits (max heap size / mailbox bounds).**
   Lever (1) shipped 2026-07-18: **`(process-flag :max-heap n)`** (positive int
   sets, nil clears, absent reads, returns previous). Mechanism: `Heap::proc_mem_limit` checked at the end of both
   collection paths against the *live* (post-GC nursery+old) footprint — a
@@ -1585,7 +1610,9 @@ mechanism/policy split: kernel primitive, Brood policy.
   process only** (uncaught → kills just the offender; the ADR-043 hard cap
   still aborts the whole OS process). Policy is Brood: set the flag first
   thing in the spawned fn. Tests `tests/process_limit_test.blsp` (7 cases,
-  green on VM/TW/no-JIT/GC_STRESS). ⬜ Remaining lever (2): optional mailbox
+  green on VM/TW/no-JIT/GC_STRESS). ✅ Lever (2) shipped 2026-08-30 as `(proc/flag :max-mailbox n)`
+  (ADR-307): a breach faults the receiver with E0046, the sender is never blocked and
+  nothing is dropped. Original note: optional mailbox
   bounds — a `send` to a full mailbox drops/errors by policy (accounting
   exists: `process-info` `:mailbox`); deferred per ADR-011 until a concrete
   consumer picks the policy (drop vs error vs park has real design surface,
@@ -1624,7 +1651,7 @@ mechanism/policy split: kernel primitive, Brood policy.
   was deleted 2026-09-12; `BROOD_NO_PRELUDE_IMAGE=1` opts out (full source boot). Guarded by
   `prelude_image_matches_source.rs`, a two-process differential.
   **[kernel]**
-- 🟡 **Observability: timing tier + trace pipeline + profiler.** Slice 1
+- ✅ **Observability: timing tier + trace pipeline + profiler.** Slice 1
   shipped 2026-07-18 — the survey's two named holes are closed: **GC pause
   durations** (`gc-stats` `:pause-total-us`/`:pause-max-us`/`:pause-last-us`,
   timed around `collect`), **scheduler counters** (`(sched-stats)` —
@@ -1644,7 +1671,7 @@ mechanism/policy split: kernel primitive, Brood policy.
   **aggregators** landed — counter/sum/gauge/summary/`sample-every`, then the
   **distribution/histogram** aggregator + `metric-percentile`, and **node up/down**
   folded into the `[:runtime kind]` stream via `watch-nodes` (poll-and-diff `(nodes)`;
-  see "Telemetry" under M3). ⬜ Remaining: `defevent` schemas, the
+  see "Telemetry" under M3). ✅ All three shipped 2026-08-01 (the Telemetry item): `defevent` schemas, the
   `nest observe`/`nest mcp` consumers (unify the snapshot builtins behind the stream),
   and the remote tier. **[kernel sources, Brood aggregation]**
 - ✅ **Distribution self-healing: auto-reconnect + backoff.** Shipped
@@ -1917,7 +1944,9 @@ track); `base64` is the residual coin-flip last place.
   the **call site**, so bodies compile into the owning arm and matcher arms tier
   (`tail_call` on pingpong: 400,309 → 473).
 
-  ⬜ Still open: the per-candidate `vm_apply` in the scan — `BROOD_NO_HOF=1` is
+  ✅ Done 2026-10-16 for simple patterns (ADR-409: the kernel matches them, no closure call; a
+  guarded or richer `receive` keeps the closure) and ADR-410 (a receive loop runs native).
+  Original note: the per-candidate `vm_apply` in the scan — `BROOD_NO_HOF=1` is
   197 → 509 ms, so that protocol is still doing real work. The deeper lever is
   compiling the pattern *test* into the calling arm's bytecode so the scan makes no
   closure call at all. Beyond that the residual is `send` (310 ns) + the remaining
@@ -2032,7 +2061,7 @@ corpus is a script run away for an exhaustive local pass.
 | 3 | **UCD test files** (Unicode licence) | `GraphemeBreakTest` + `NormalizationTest` — cursor motion in `std/editor/*` lives or dies here. Needed two new primitives (`string->graphemes`, `string-normalize`); `WordBreakTest`/`LineBreakTest`/`CaseFolding` still open, each needs its own surface | ✅ 2026-07-25 |
 | 4 | **Fowler testregex** + **rust-lang/regex `testdata/*.toml`** | POSIX regex semantics, leftmost-first vs leftmost-longest, capture groups | ✅ 2026-10-25 — rust-lang/regex's `fowler/*.toml` (345 cases, expectations re-derived for leftmost-first, so pass/fail needs no semantics column), `tests/conformance_regex_test.blsp`; dialect differences (no case-insensitive mode, no POSIX classes, `\n`/`\xHH` are letters) are a named list checked both ways. Original note: the engine grew ranges, `{m,n}` and captures (item 2 above), so the corpora are now mostly *runnable* rather than mostly skips. Backreferences and lookaround are still out, and Brood is deliberately leftmost-**first** (Perl), so the POSIX leftmost-longest expectations need a semantics column, not a pass/fail |
 | 5 | **JSONTestSuite** (MIT) | the `y_`/`n_`/`i_` minefield cases against `std/json`. **Found an RFC violation + KI-11** (below) | ✅ 2026-07-25 |
-| 6 | **CommonMark `spec.json`** (BSD-2) | ~650 examples against the markdown renderer | ⬜ **blocked** — there is no `std/markdown`; nothing to test yet |
+| 6 | **CommonMark `spec.json`** (BSD-2) | ~650 examples against the markdown renderer | ⬜ **blocked** — `std/markdown` exists now but is a small subset and, by its own header, "not a CommonMark parser"; most of the spec would fail by design |
 | 7 | **WPT `urltestdata.json`** (BSD-3) | WHATWG URL parsing against `std/url` | ⬜ **blocked** — `std/url` is RFC 3986 with no base-URL resolution, IDNA or per-component encode sets; WHATWG is a different spec, so this would be ~90% skips |
 | 8 | **NIST CAVP** (public domain) | SHA-1/256/384/512 byte vectors + ~1,250 HMAC cases — the one corpus whose failures would be *security* bugs. **Wycheproof deliberately not wired**: its value is ECDSA/AES-GCM/RSA, none of which Brood implements | ✅ 2026-07-26 |
 | 9 | **Kuhn `UTF-8-test.txt`** (CC BY 4.0) | malformed-UTF-8 decoding: overlongs, surrogates, truncation, boundary code points | ✅ 2026-07-26 |
@@ -2426,8 +2455,8 @@ Runtime housekeeping (both items landed):
   (`sig_of` surfaces params even when the return defers) — so an unannotated function now flags
   a wrong caller. Plus **ability-op occurrence typing**: `(area s)` on a sealed, `:default`-free
   op derives `s : Shape`. Sound throughout (under-constrained → under-warn); whole repo
-  warning-clean. ⬜ Remaining (deferred, ADR-011): demands from *conditional* positions, per-arm
-  checking of a multi-arity callee, and the merely-wider return case above.
+  warning-clean. ⬜ Remaining (deferred, ADR-011): demands from *conditional* positions and the
+  merely-wider return case above. (Per-arm checking of a multi-arity callee closed 2026-08-28.)
 - ✅ **Earmuffed-global typing** (2026-07-25, companion to the above): the checker now
   types a `*earmuffed*` global as unknown (like a `defdyn`), not by its load-time
   default value — a redefinable/dynamic-by-convention global (`*project-root*`, a plain
@@ -2446,8 +2475,9 @@ Runtime housekeeping (both items landed):
   Tests: `tests/set_test.blsp` (18, incl. cross-process), `reader_hints_test`;
   green under `GC_STRESS`+`GC_VERIFY`, differential, `nest check` zero-warnings,
   suite 2921/2921 (ADR-060).
-- ⬜ **Unbounded stream generation** (`iterate` / infinite producers) — lazy
-  seq-view fusion already shipped (ADR-111); picks up when an editor feature needs it.
+- ✅ **Unbounded stream generation** (`iterate` / infinite producers) — `seq/iterate` (ADR-431,
+  2026-10-24), a source `seq/transduce` ends with a stopping stage, and `std/stream` for values
+  that cross a `send`. Lazy seq-view fusion already shipped (ADR-111).
 - 🟡 **`std/` curation + frameworks sequencing** (ADR-085/097) — `std/` curated and
   hierarchical module names shipped; the model is batteries-included (frameworks ship
   in the default install, not fetched). ⬜ Next: a future GUI framework ships bundled
@@ -2466,7 +2496,10 @@ Runtime housekeeping (both items landed):
   int vector still lowers; an empty `list<u8>` result stays an empty vector — the
   documented ambiguity edge). Copy-based (zero-copy read-mapping is still
   deferred); `crates/lisp/src/wasm.rs` `lower`/`lift` + `tests/wasm_test.blsp`
-  (`blob-echo`/`byte-sum` over a `list<u8>` WAT component). ⬜ Remaining slices:
+  (`blob-echo`/`byte-sum` over a `list<u8>` WAT component). ✅ **WASI and delivery shipped
+  2026-10-26:** WASI preview 2 by grant, guest resources as tokens and interface exports
+  (ADR-453); a package ships its component with `include-bytes`, so no `:native` clause was
+  needed (ADR-454). ⬜ Left: build-on-fetch, epoch preemption, blob zero-copy. As first listed:
   the package-manager `:native` manifest/lock/build-on-fetch integration
   (`%wasm-build`) — the delivery vehicle, recommended next; WASI capability grants
   (gated on that manifest); guest `resource` handles; epoch preemption (low value
@@ -2993,7 +3026,7 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
   ⬜ **Delta** semantic tokens stay deferred — they need result-id caching + per-edit diffing
   for a payoff the roadmap already judged marginal (the walk is cheap), so not worth the
   stateful machinery until profiling shows the full/range responses hurt.
-- 🟡 **Errors that teach (LLM-native)** ([`docs/llm-native.md`](docs/llm-native.md))
+- 🟡 **Errors that teach (LLM-native)** ([`docs/archive/llm-native.md`](docs/archive/llm-native.md))
   — first instances landed. ✅ **reader-level hints** for the Clojure/Scheme
   syntax the reader mis-parses shipped 2026-07-23: `#{…}` (set literal),
   `#(…)` (anonymous-fn reader macro), and `#'` (var-quote) now raise a clean
@@ -3018,7 +3051,7 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
   `:hint` naming the Brood idiom (`read_hash` + a new `'\\'` arm in `read_form`;
   `tests/reader_hints_test.blsp`, language.md table). ⬜ Still: folding each new repeat
   mistake into the rule-of-three (ongoing curation, no named gap).
-- 🟡 **MCP tooling** — ✅ the write sandbox is **symlink-escape-proof** (shipped
+- ✅ **MCP tooling** — ✅ the write sandbox is **symlink-escape-proof** (shipped
   2026-07-23): a new `canonicalize` primitive (real-path resolution — symlinks
   + `.`/`..`, works for not-yet-existing targets) backs a second sandbox gate
   in `mcp--project-path`, so a project-relative `..`-free path that resolves out
@@ -3043,8 +3076,10 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
 
 ### Editor (M2) & display (M3)
 
-- ⬜ **Major/minor modes** — how a buffer selects which keymaps are active.
-- ⬜ **Mouse / resize input events** — deferred until a feature needs them.
+- ✅ **Major/minor modes** — how a buffer selects which keymaps are active. In bedit
+  (`src/lisp-modes.blsp`, `src/commands.blsp`), not std: `std/editor` leaves modes to the app.
+- ✅ **Mouse / resize input events** — `[:mouse …]` (ADR-056, ADR-077) and `[:resize cols rows]`
+  (`std/editor/ui`, `std/editor/serve`).
 - ✅ **GPU-window frontend** — the wgpu render target (ADR-374, 2026-09-20) speaks the
   same display protocol (the default of a `--with-gui-gpu` build; `BROOD_GUI_GPU=0` the
   CPU painter), with the pixel-space `:quad` / `:sprite` / `:text-px` / `:sound` ops and
@@ -3052,8 +3087,9 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
   a browser tab (`b2d-web`) shipped the same day, and the CPU painter draws the pixel-space
   ops in software since 2026-09-21 (addendum 4), so every GUI build plays. The runtime runs IN
   the tab since 2026-10-18 (ADR-414, its std modules imaged); Windows compiles in CI
-  (`windows-check`). Still ⬜: Windows shown to RUN (`windows-smoke` is the probe).
-- 🟡 **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
+  (`windows-check`). ✅ Windows shown to RUN: `windows-smoke` runs a program and the platform
+  smoke set, a CI gate since 2026-11-04 (paths ADR-592, program lookup ADR-607).
+- ✅ **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
   deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped
   2026-07-24: `counter`/`sum`/`last-value` (gauge)/`summary` (running
@@ -3119,8 +3155,8 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
   `terminate`) had both already shipped.
 - ⬜ **Process library deferred** (ADR-011, gated on a real consumer; **state machines, a
   registry with process groups, and applications are items D, E and B of the 2026-08-30
-  backlog above** — D and B shipped, E's local half shipped as `names`): cluster-wide
-  **process groups**; **synchronous, ordered, rollback-on-failure** supervisor
+  backlog above** — D and B shipped, E's local half shipped as `names`): ✅ cluster-wide
+  **process groups** (`std/proc/groups`, ADR-446); ⬜ **synchronous, ordered, rollback-on-failure** supervisor
   startup + per-child intensity counting + child `type`/`significant`/`auto_shutdown`
   metadata.
 - ✅ **Hot-upgrade state migration — a userland `code-change`** (ADR-013/039;
@@ -3193,10 +3229,11 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
   cloned-index auto-refresh from the old list are done / moot under the hosted design; a
   client-side response TTL cache was investigated and declined — see ADR-211. Still deferred:
   semver ranges over `:git`-**tarball** sources.)*
-- ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` appends a zip of
+- ✅ **Single-binary bundling** (ADR-038) — shipped as `nest release` (`docs/release.md`); there
+  is no `nest bundle`. Original note: `nest bundle` appends a zip of
   project + `_deps/` to a pre-built `brood`; deferred until the editor needs end-user
   distribution.
-- ⬜ **`nest release`** — a self-extracting filesystem for runtime data files, a
+- 🟡 **`nest release`** — ✅ the command ships. ⬜ Left: a self-extracting filesystem for runtime data files, a
   static-musl default, and `.deb`/`cargo install` packaging of the *runtime* (open
   until a real consumer needs it).
 - 🟡 **tree-sitter grammar + GitHub recognition** — editor grammars (`nest grammar`,
@@ -3257,8 +3294,8 @@ today's ad-hoc `gc-stats`/`vm-stats`/`process-info` instrumentation behind one s
 - **Brood as a general-purpose language** — what someone coming from Go, Rust, an actor
   runtime or Node would reach for and not find, ranked by how much it blocks adoption, with what "done"
   looks like for each: [docs/general-purpose-gaps.md](docs/general-purpose-gaps.md)
-  (2026-10-25). The stability policy heads it. The list also notes that this ROADMAP's
-  "Out of scope" section is stale: namespaces and rationals shipped, and `&key` was refused.
+  (2026-10-25). The stability policy heads it. The list also noted that this ROADMAP's
+  "Out of scope" section was stale; that section now says so itself.
 
 ---
 
@@ -3295,6 +3332,8 @@ The bar a candidate has to clear, in order:
   the permissive end for module code: a `(defn get …)` silently shadows, with no signal to
   a reader. Deferred, not rejected — KI-73 removed the *breakage* that made it urgent, so
   what remains is a legibility argument, and ADR-011 says wait for a concrete need.
+  *2026-11-06:* the macro half shipped as `(:shadow name)` (ADR-423): defining a root macro's
+  name warns unless declared. A module's `(defn get …)` over a root function is still silent.
 - **Full free-reference macro hygiene.** Would subsume the `/name` root-escape discipline
   that `tests/prelude_capture_test.blsp` now enforces by hand. ADR-066 rejected
   Scheme-style per-symbol lexical context on ship-by-name/homoiconicity/GC grounds, and
@@ -3418,6 +3457,11 @@ prelude macros:
 ---
 
 ## Out of scope (deferred, additive later)
+
+> *Status 2026-11-06:* this list is historical. `&key` is refused (ADR-163, ADR-170), not
+> deferred. Rationals shipped (ADR-196), as did `defmodule` namespaces (ADR-065/070/146)
+> and automatic hygiene for template binders (ADR-066, ADR-500). Characters stay 1-char strings
+> (ADR-159).
 
 - `&key` named arguments (designed — ADR-011) and supplied-p flags
 - Hygienic macros / `macroexpand-all`

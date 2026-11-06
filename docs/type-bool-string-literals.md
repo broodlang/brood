@@ -3,7 +3,9 @@
 > Status: **shipped**. `true`/`false`/`"GET"` in a `(sig …)` type position are
 > now literal singleton types, exactly like the already-shipped keyword
 > (ADR-105) and int (ADR-117) literals. Closes ADR-105's deferred item in
-> full — keyword, int, bool, and string literal types are all shipped now.
+> full — keyword, int, bool, and string literal types are all shipped now. Since ADR-268 the
+> four literal slots hold a `LitSet` (exactly these values, or anything but them), not a bare
+> `BTreeSet`.
 
 ## Design
 
@@ -53,7 +55,7 @@ bool/string literal arguments are no longer declared-sig-only.
 
 ## Tests
 
-`crates/lisp/src/types.rs`: `bool_literal_*`/`str_literal_*` — render,
+`crates/lisp/src/types/tests.rs`: `bool_literal_*`/`str_literal_*` — render,
 union-exact-but-widens, subtyping, disjointness, intersection — mirroring
 every `int_literal_*` test exactly. `tests/contract_test.blsp`:
 `describe "bool/string-literal type contracts"` — exact match passes, the

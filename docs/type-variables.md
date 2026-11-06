@@ -2,10 +2,17 @@
 
 > Status: **slices 1–2 shipped**. Slice 1: grammar + parse (`parse_type`
 > recognises `?`-prefix symbols, `type-matches?` accepts unknown names).
-> Slice 2: `SigTerm`/`SigWithVars` unification — `parse_sig_decl_with_vars`
-> in `annot.rs` parses variable-bearing sigs; `expr_ty` in `guards.rs`
-> resolves return types at call sites. Slice 3 (primitive migration) is
+> Slice 2: `SigTerm`/`SigWithVars` unification (`check/ctx.rs`) —
+> `parse_sig_decl_with_vars` in `annot.rs` parses variable-bearing sigs; `expr_ty` in
+> `infer.rs` resolves return types at call sites. Slice 3 (primitive migration) is
 > deferred — HOF cases are handled via per-HOF result rules (Option B).
+>
+> The design below is as written before it shipped. **As built:** `Sig` did not change;
+> `SigWithVars` is a parallel path for declarations that mention a variable. `SigTerm` has
+> `Ty`, `Var`, `ListOf`, `VectorOf`, `SetOf`, `SeqableOf`, `RecordOf`, `Or` and `And` and no
+> arrow, tuple or `map` case, so **a variable inside an arrow, a `tuple` or a `(map K V)`
+> widens to `any`** and does not bind. A self-recursive user `my-map` gets its result from
+> specialization (ADR-340) rather than from this signature.
 
 ## Problem
 
@@ -71,8 +78,10 @@ a full Hindley-Milner fixpoint.
 | `(list ?A)` | `list<T>` | `?A → T` |
 | `(vector ?A)` | `vector<T>` | `?A → T` |
 | `(record :k ?A …)` | a record shape with field `k : T` | `?A → T` (by field name; `&open` and optional fields as in `parse_type`) |
-| `(?A -> ?B)` | arrow `S → R` | `?A → S`, `?B → R` |
-| `(or ?A int)` | `T` | `?A → T` (widen the union; skip — see below) |
+| `(set ?A)` / `(seqable ?A)` | `set<T>` / a sequence of `T` | `?A → T` |
+| `(?A -> ?B)` | arrow `S → R` | nothing as built — no arrow term (planned `?A → S`, `?B → R`) |
+| `(or ?A nil)` | `T` | `?A → T ∖ nil` (the concrete alternatives carved off) |
+| `(and ?A B)` | `T` | each part unifies |
 
 `defrecord` is the main producer of a record-with-variables signature: every field with no
 declared type is a variable named after it — `(defrecord pt (x y))` declares
@@ -80,9 +89,10 @@ declared type is a variable named after it — `(defrecord pt (x y))` declares
 its argument types in its fields and `(:x (pt 1 2))` is `1`. A declared field type is a
 contract and stays concrete.
 
-Union/intersection params containing type vars are treated as **opaque** (no
-binding extracted) — a union `(or ?A int)` can't pin `?A` from a single concrete
-arg. Conservative: miss the refinement rather than risk a wrong binding.
+A union with one variable and concrete alternatives binds the variable to the argument
+minus those alternatives (2026-08-29), which is exact; with two variables in one union the
+binding is the over-approximation. A variable inside a refinement inside a union was still
+open on 2026-09-12 (`type-system-status.md`).
 
 When two args both bind the same var (`?A` appears in params 1 and 3), the
 bindings are **unioned** — `?A → T1 ∪ T2`. This is sound (we over-approximate)
@@ -112,8 +122,7 @@ a fn and arg 2 is a list.
 ### Brood side — none
 
 Type variables are valid Brood symbols starting with `?`. `parse_type` on a
-`?A` symbol currently returns `None` (unknown name → drop annotation). After the
-change it will return `Ty::ANY` (accept everything — the checker substitution
+`?A` symbol returns `Ty::ANY` (accept everything — the checker substitution
 handles the precision). No change to `type-matches?` or `sig!`.
 
 ### Rust side (`annot.rs` + `types.rs` + `walk.rs`)
@@ -199,7 +208,7 @@ cross-argument enforcement you need a handwritten contract:
 (defn my-map! (f xs)
   (let (elem-type (if (pair? xs) (type-of (first xs)) 'any))
     ;; ... check f against elem-type ...
-    (map f xs)))
+    (map xs f)))
 ```
 
 This is deliberate: a type-variable contract at runtime is costly (you'd have to
@@ -208,7 +217,7 @@ and not the right tool when `BROOD_CONTRACTS=1` is a dev-time flag.
 
 ## When to do this
 
-Gate on a real consumer. Strong signals:
+*(As written; the work shipped.)* Gate on a real consumer. Strong signals:
 1. A user project (or `std/`) writes enough generic utilities that the loss of
    element type at every user HOF boundary is annoying in practice.
 2. The LSP wants to show hover types for a generic function's return — today it

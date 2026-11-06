@@ -8,7 +8,7 @@ blocked them, what surprised them, what they'd tell the *next* agent.
 [`brood-for-claude.md`](brood-for-claude.md). Over time this becomes the
 highest-signal "learn Brood" resource in the repo because it's grounded in
 real attempts, not anticipated explanations. Idea originally from
-[`llm-native.md` §3](llm-native.md).
+[`archive/llm-native.md` §3](archive/llm-native.md).
 
 The MCP server exposes the index here at `brood://docs/incarnations`; full
 findings docs at `brood://docs/<entry-slug>`.
@@ -31,11 +31,17 @@ hour. Cross-reference docs / files where useful.
 ```
 
 When an agent finishes a non-trivial session, **append an entry here and
-write the full findings into `docs/<slug>.md`**. The dispatcher
-auto-publishes both (via `EMBEDDED_DOCS` + MCP `resources/list`); the next
-session sees them on first connect.
+write the full findings into `docs/<slug>.md`**. This file reaches MCP clients
+on the next build. A new `docs/<slug>.md` is served only once it is added to
+`DOCUMENTS` in `crates/nest/src/mcp.rs` and to `resources` in
+`std/tool/mcp.blsp`.
 
 ## Entries
+
+Entries are records of their date; the names and bugs in them are not kept
+current. Since the entry below: the prelude is `std/prelude/*.blsp`, `defserver`
+is in `std/proc/gen.blsp` (`hatch` is a separate package), and the scheduler race
+is fixed.
 
 ### 2026-05-28 — Claude Opus 4.7 — concurrent Mandelbrot demo
 
@@ -59,4 +65,4 @@ fixed; ignore type-checker warnings on hatch macros for now; pattern
 destructure failures surface as Rust panics, not Brood errors — wrap in
 `try` when unsure. The 511 lines of full notes are worth a read for
 anyone touching the scheduler, formatter, or quick-ref.
-**Full writeup:** [`./claude-demo-findings.md`](./claude-demo-findings.md)
+**Full writeup:** [`./claude-demo-findings.md`](archive/claude-demo-findings.md)

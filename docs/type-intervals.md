@@ -46,12 +46,12 @@ length is still known only by what it excludes.
 
 ## Inference
 
-- `count` / `string/length` / `vector-length` → `int` in the collection's length.
+- `count` / `string/length` → `int` in the collection's length.
 - `first` / `second` / `third` / `last` / `nth`: present (no `nil`) when the length proves
   it — `second` of a `[2..]`, `(nth xs 3)` of a `[4..]`, `(nth xs i)` when `i ≥ 0` and
   either a guard established `i < (count xs)` (`Ctx::index_bounds`) or `i`'s own interval
   ends below the length. A read from exactly `nil` is `nil` (or the `nth` default).
-- `rest` / `but-last` shorten the length by one; `cons` / `conj` lengthen it; `range` takes
+- `rest` / `seq/but-last` shorten the length by one; `cons` / `conj` lengthen it; `range` takes
   its length from its bound; `seq`, `reverse`, `sort`, `map`, … carry it through
   (`list_with_len`); `(list …)` and a quoted list are their arity.
 - Int-closed arithmetic carries intervals: `+ - * inc dec abs mod rem quot` (and the
@@ -120,9 +120,12 @@ bound on the length that the lattice holds, never from the absence of one.
 
 ## Deferred
 
-- A relation between two locals beyond `i < |xs|` (`i < j`, `i + 1 ≤ |xs|`): the index
-  bound is the case the corpus asks for; a general relational domain is a different lattice.
-- A `float` interval: nothing in the corpus reads one.
+- ~~A relation between two locals beyond `i < |xs|`~~ — the offset half shipped 2026-09-17
+  (C12): `index_bounds` is `i → {xs → k}`, `i + k < |xs|`, which reads `(+ i 1)` guards. `i < j`
+  between two locals appears nowhere as an index guard, so it is not built; a general
+  relational domain is a different lattice.
+- ~~A `float` interval~~ — declined (ADR-367): floats are not totally ordered here and NaN is
+  reachable, and `Range` depends on a total order.
 - ~~The runtime contract (`BROOD_CONTRACTS`) reads the interval grammar and checks the
   tag; checking the bound at runtime is a separate decision.~~ Done 2026-09-17:
   `type-matches?` checks the bound — `(int lo hi)` on the value, `(len T lo hi)` on its

@@ -10,7 +10,7 @@
 > - **Slice 1 — done (2026-05-29):** `:path` deps end-to-end. A hashing
 >   primitive (then `%sha256`, since generalised to `%digest`) + Brood
 >   tree-hashing, transitive resolution + conflict detection,
->   `project.lock.blsp` read/write, and `ensure-deps` wired into `project-setup`
+>   `project.lock.blsp` read/write, and `ensure-deps` wired into `project/setup`
 >   (a path dep's `src/` joins `*load-path*`, so `(require 'dep)` finds it).
 >   `std/tool/package.blsp` is the new module; no git, no network. The `(fetch)` verb
 >   exists; its `nest fetch` subcommand wiring lands with the other verbs.
@@ -55,10 +55,12 @@ Brood's module system (ADR-019) already resolves `(require 'foo)` through
 fill the missing piece: **where does the source for `foo` come from when
 it isn't yours and it isn't stdlib?**
 
-The answer in this design is **Git** — repositories pinned by commit (or
-tag) in the project manifest, cached under the project root, with a
-lock file for bit-for-bit reproducibility. No registry, no semver solver,
-no install scripts. Closest sibling design: Go modules in the pre-MVS era.
+The v1 answer was **Git** — repositories pinned by commit (or tag) in the
+project manifest, cached under the project root, with a lock file for
+bit-for-bit reproducibility and no install scripts. Closest sibling design: Go
+modules in the pre-MVS era. `:path` and `:tarball` sources, the hosted registry
+and the semver solver came after (see *Status* above); the sections below describe
+all of them, and the *Comparison* and *Future work* sections keep the v1 framing.
 
 ## What it looks like
 
@@ -77,7 +79,7 @@ A project that depends on two external packages and one internal sibling:
 ```
 
 `(project …)` is a **macro that treats its arguments as literal data** — it
-quotes them and hands them to `project--apply` — so dep names (`parser`,
+quotes them and hands them to `project/apply-config` — so dep names (`parser`,
 `pretty`, `shared`) and the `:main` pair are written as **bare symbols**, no
 leading `'`. A manifest is pure static data; nothing in it is ever evaluated.
 
@@ -143,6 +145,17 @@ shape stays forward-compatible):
 - `:dir SUBDIR` — the dep's source lives in `SUBDIR/` of the repo, not at the root.
 - `:features [a b]` — pass build-feature flags through to the dep.
 
+Other dependency settings in the manifest:
+
+- `:dev-dependencies` — the same entries as `:dependencies`, resolved for development and
+  tests and left out of a release bundle (ADR-172).
+- `:optional true` on an entry — declared but not force-installed (ADR-172).
+- `:brood ">= 0.2"` — the runtime this project needs, checked at setup (ADR-209). `nest
+  publish` derives `>= <the running brood>` when a manifest declares nothing.
+- `:enhances {bedit ">= 0.3"}` — the applications this package plugs into. The application
+  checks the constraint when it loads the package; nothing is fetched.
+- `:kind :app` or `:library` (the default) — how the registry lists the package.
+
 ### Project templates a package provides (ADR-424)
 
 A package may ship starter projects for `nest new`. Its manifest declares them:
@@ -192,7 +205,7 @@ language uses — so a diff in a PR is human-reviewable:
     :ref    "abc1234"
     :commit "abc1234567890abcdef..."
     :sha256 "..."
-    :deps   [[ansi :git "https://github.com/quux/brood-ansi.git" :ref "v0.1.0"]]]
+    :deps   [ansi]]
    [shared
     :path   "../shared"
     :sha256 "..."                         ; tree hash at fetch time
@@ -223,17 +236,14 @@ Two invariants:
    appears at the top level. Nesting is deliberately avoided — flat is
    easier to diff, easier to override, and easier to detect conflicts in.
 
-The `:deps` slot on each row records the dep's own direct dependencies —
-purely for traceability (`nest tree` and "why is X here?"). Transitive
+The `:deps` slot on each row records the *names* of the dep's own direct
+dependencies — purely for traceability (`nest tree` and "why is X here?"). That is
+enough to reconstruct the graph against the flat root list. Transitive
 resolution is at the root.
 
-> **Slice 1 note.** The current implementation stores `:deps` as a vector of
-> the dep's direct-dependency *names* (symbols), not the full sub-entries shown
-> above. That's enough to reconstruct the graph against the flat root list; the
-> richer sub-entry form lands with `nest tree` (Slice 3). Two other slice-1
-> simplifications: a dep's source dir is assumed to be `<dep>/src` (it doesn't
-> yet read the dep's own `:source-paths`), and a `:path` dep's `resolved-path`
-> is left un-normalised (`app/../greeter` — the OS resolves it; cosmetic).
+> **Slice 1 simplifications, still in place.** A dep's source dir is assumed to be
+> `<dep>/src` (the dep's own `:source-paths` is not read), and a `:path` dep's
+> `resolved-path` is left un-normalised (`app/../greeter` — the OS resolves it; cosmetic).
 
 ## Resolution algorithm
 
@@ -288,7 +298,7 @@ and gives nice trace output for `nest tree`.
 > `deps: TBD` and a separate `ensure_cache` pass filling them. In the
 > implementation the clone is **folded into `resolve`** for `:git` deps — a dep's
 > own `project.blsp` only exists on disk *after* the clone, and the walk needs its
-> `:dependencies` immediately to queue them. So `package--resolve-git` clones (on
+> `:dependencies` immediately to queue them. So `package-resolve-git` clones (on
 > a cache miss), then reads the dep's manifest for sub-deps in the same step,
 > exactly as `:path` resolution already does. A **cache hit** (the
 > `.brood-pkg.blsp` records the wanted commit) skips the clone *and* the tree-hash,
@@ -361,7 +371,7 @@ module — and even a non-colliding stdlib name (`json` providing `json/parser`)
 squats the stdlib's prefix. The rule is "you can't name your package after a stdlib
 module", enforced mechanically rather than by convention.
 
-The reserved set is derived from `(builtin-modules)` (so it tracks whatever is baked
+The reserved set is derived from `(reflect/builtin-modules)` (so it tracks whatever is baked
 into your `brood`), and three layers enforce it:
 
 - `nest new` refuses a reserved project name.
@@ -377,20 +387,18 @@ error: package: dependency 'net' is named after a standard-library module — th
   author renames it
 ```
 
-The fix is to rename the package. `(reserved-package-name? 'name)` answers the check
+The fix is to rename the package. `(reflect/reserved-package-name? 'name)` answers the check
 directly.
 
 ## `*load-path*` integration
 
-`project-setup` (in `std/tool/project.blsp`) gains an `(ensure-deps)` step that:
+`project/setup` (in `std/tool/project.blsp`) runs a `package/ensure-deps` step that:
 
 1. Reads `project.lock.blsp` (failing if it doesn't exist but `:dependencies`
    does — the user needs to run `nest fetch`).
 2. Verifies each `_deps/<name>/` exists and `.brood-pkg.blsp` matches the
    lock; if not, kicks off `fetch` automatically.
-3. Extends `*load-path*` with each dep's source dir
-   (`_deps/<name>/src/` by default; overridable via the dep's own
-   `project.blsp` `:source-paths`).
+3. Extends `*load-path*` with each dep's source dir (`_deps/<name>/src/`).
 
 A **`:path` dep loads *in place*** — its `<path>/src/` is added to
 `*load-path*` directly; it is **not** copied into `_deps/`. So `_deps/` only
@@ -413,7 +421,7 @@ Each is a one-liner from the Rust shell into Brood policy:
 | `nest fetch`                             | Ensure every dep is present; re-resolve any whose lockfile entry is stale. |
 | `nest update`                            | Re-resolve every dep's ref (re-running `ls-remote` for moving refs). |
 | `nest update <name>`                     | Same, but only for one dep. |
-| `nest add <name> :git URL :ref REF`      | Append to `:dependencies` (preserving the manifest's formatting via the existing `parse-source` / formatter), then `fetch`. |
+| `nest add <name> :git URL :ref REF`      | Append to `:dependencies` (preserving the manifest's formatting via the existing `reflect/parse-source` / formatter), then `fetch`. |
 | `nest add <name> :git URL :version RANGE` | Ranged-git variant — track a semver range over the repo's tags (ADR-209). |
 | `nest add <name> :path PATH`             | Path-dep variant of `add`. |
 | `nest add <name> :tarball URL :sha256 HEX` | Tarball-dep variant of `add` (v2). |
@@ -421,8 +429,9 @@ Each is a one-liner from the Rust shell into Brood policy:
 | `nest tree`                              | Print the resolved dep tree (root → direct → transitive). |
 | `nest new NAME --from SOURCE`           | Scaffold from a template the package at SOURCE (path, git URL or registry name) declares in `:templates`; `--template` picks one (ADR-424). |
 | `nest publish [<base-url>]`              | Build a source tarball and POST it (token-authed) to the hosted registry; releases are immutable (ADR-147/211). Signs the checksum when a signing key exists (ADR-212). |
+| `nest publish --bump LEVEL`              | Raise the manifest's `:version` by `LEVEL` (`major`, `minor`, `patch`), then publish. |
 | `nest publish --source-url URL`          | Publish an **external** release instead: fetch URL once to compute its checksum, then POST metadata only. The registry records the URL; downloaders re-verify the bytes they fetch from it (ADR-211). |
-| `nest search <term> [<base-url>]`        | Search the registry by name/description via its JSON API (ADR-147/211). |
+| `nest search <term> [<base-url>]`        | Search the registry by name/description via its JSON API (ADR-147/211). `--enhances APP` keeps only packages that plug into that application. |
 | `nest key gen [--force]`                 | Generate an ed25519 signing keypair, write the private key 0600 to `~/.config/brood/signing-key.blsp`, print the public key. `--force` replaces an existing key (invalidating signatures made with the old one). Signing is opt-in (ADR-212). |
 | `nest test` / `run` / `check` / `format` / `mcp` | Auto-fetch missing deps on first run (a no-op on the second). |
 
@@ -523,7 +532,7 @@ update** — two processes both read the original, both splice, and the second w
 erases the first, while *both* report success. Measured before the fix: three
 concurrent `nest add`s landed between one and three of them.
 
-The edit now goes through `package--edit-manifest!`, a **compare-and-swap**: the
+The edit now goes through `package-edit-manifest`, a **compare-and-swap**: the
 write only lands if the file still holds exactly what was read, and when it doesn't,
 the edit is *recomputed against the new content* and retried (bounded, 8 attempts,
 then a clear error saying nothing was written). Concurrent adds and removes all land,
@@ -581,9 +590,8 @@ This is the cache's source of truth; comparing it to the lock entry tells
 ## Hot reload + dev workflow
 
 Brood's `def`-based hot reload (ADR-013) is unchanged by packages. Deps
-load like any other module; re-`(require)`ing them with `(reload)` (a
-forced re-load via `eval-string` of the source) makes a redefinition
-visible to running processes. This means **a dep can be hot-edited
+load like any other module; `nest run --watch` or `project/reload-changed`
+re-load a changed file, which makes a redefinition visible to running processes. This means **a dep can be hot-edited
 in-place** in `_deps/<name>/src/`:
 
 - Useful for "what would happen if I patched this dep?" experimentation.
@@ -620,14 +628,15 @@ in the lock on first install and a key change is flagged. Verification is **advi
 it warns, it never blocks an install.
 
 **Eval still runs `require`d code.** A malicious package, once
-`(require)`d, can do anything Brood can — `run-process`, `file/spit`, network
-I/O via future primitives. **Don't `(require)` untrusted code**, same as
+`(require)`d, can do anything Brood can — `os/run-process`, `file/spit`, network
+I/O. **Don't `(require)` untrusted code**, same as
 `import` in Python or `require` in npm. The package manager doesn't (and
 shouldn't) sandbox.
 
 ## Comparison
 
-Why this shape, in three side-by-sides:
+Why this shape, in three side-by-sides (the v1 design; the *Status* note at the top
+lists what has shipped since):
 
 | Concern            | Brood (this design)        | Go modules         | Cargo            | npm                |
 |--------------------|----------------------------|--------------------|------------------|--------------------|
@@ -655,16 +664,14 @@ out-of-scope for v1.
 
 - **Registry** — ✅ shipped as the hosted **hive** service (ADR-211): discovery
   (`nest search`), human-readable names independent of URLs, and per-release metadata.
-- **Tarball / HTTP source kind** — `[name :tarball URL :sha256 HASH]`.
-  The `%http-get` primitive lands now so the Rust kernel doesn't have to
-  change later; the source-kind dispatch is gated until a real use case.
+- **Tarball / HTTP source kind** — ✅ shipped (ADR-147): `[name :tarball URL :sha256 HASH]`,
+  downloaded through `http`, not a kernel primitive.
 - **Semver + constraint solver** — ✅ shipped for registry deps (ADR-209):
   `[name :version "^1.2"]` names a range, resolved to a concrete published
   version by a PubGrub (CDCL) newest-compatible solver (`std/resolver.blsp`)
   that prefers the locked versions (adding one dep keeps the rest pinned). A
-  `:brood "<constraint>"` gate refuses an incompatible runtime. Still open:
-  semver ranges over `:git` tags (registry-only for now), and PubGrub-grade
-  conflict-error derivation.
+  `:brood "<constraint>"` gate refuses an incompatible runtime. Semver ranges over
+  `:git` tags take the newest satisfying tag, greedily, without a cross-package solve.
 - **Signed packages** — ✅ shipped (ADR-212), and *without* the key registry this entry
   assumed was the prerequisite: **TOFU** pins the publisher's pubkey in the lock on first
   install, so the registry stays a relay and no trust infrastructure was needed.
@@ -678,9 +685,11 @@ out-of-scope for v1.
 - **MCP `packages.list` tool surface** — exposes the resolved dep tree to
   agents. Drops in cleanly once `std/tool/package.blsp` is in.
 
-## Implementation sketch (when it lands)
+## Implementation sketch
 
-**Rust primitives** (`crates/lisp/src/builtins/io.rs`):
+Written before the code; updated to the names that landed.
+
+**Rust primitives** (`crates/lisp/src/builtins/pkg.rs`, `%digest` in `crypto.rs`):
 
 - `(%git-clone url dest ref commit)` — shell out to `git`: clone the ref
   shallowly into `dest`, then **check out the exact `commit`**. (A plain
@@ -697,34 +706,30 @@ out-of-scope for v1.
   correctly — and the canonical directory hash is a Brood tree-walk combining
   per-file hashes (see [Reproducibility notes](#reproducibility-notes) below); both
   live in `std/tool/package.blsp`, not the kernel. Also hashes the lock manifest.
-- `(%http-get url)` — GET → bytes. **Deferred** with the `:tarball` source kind
-  (ADR-011): it has no caller until then, so it isn't added yet. When a tarball
-  dep lands, the kernel gains this one primitive and the source-kind dispatch in
-  `std/tool/package.blsp` opens up — no other reshaping.
+- `(%untar-gz …)` — extracts a downloaded `:tarball` dep into `_deps/`. The download
+  itself is Brood, over `std/net/http`; no `%http-get` primitive was needed.
 - `(%rm-rf path)` — explicit because `nest update` overwrites cached deps.
   Bounded to paths under `_deps/`; refuses anything outside.
 
-**Brood policy** (`std/tool/package.blsp`, new module):
+**Brood policy** (`std/tool/package.blsp`):
 
 - `(read-lockfile root)` / `(write-lockfile root entries)`.
 - `(resolve-deps manifest lock)` — the walk in [Resolution
   algorithm](#resolution-algorithm).
-- `(ensure-cache root entries)` — the cache check + clone.
-- `(ensure-deps)` — called from `(project-setup)`; the auto-fetch on
-  every `nest` subcommand.
-- The CLI verbs: `(fetch)` / `(update & opts)` / `(add name & opts)` /
-  `(remove name)` / `(tree)`.
+- `(ensure-deps root deps)` — called from `(project/setup root)`; the cache check, clone
+  and auto-fetch on every project-aware `nest` subcommand.
+- The CLI verbs: `(fetch)` / `(update & names)` / `(add name & spec)` /
+  `(remove-dep name)` / `(tree)`.
 
 **Manifest extension** (`std/tool/project.blsp`):
 
 - `(project …)` recognises `:dependencies`. Stored in
-  `project/*dependencies*`. Empty when omitted (back-compat with v1
-  manifests).
+  `project/*dependencies*`. Empty when omitted.
 
-**`nest`'s Rust shell** (`crates/nest/src/main.rs`):
+**`nest`** (`std/tool/nest.blsp`, ADR-322):
 
-- New subcommand arms: `fetch`, `update`, `add`, `remove`, `tree`. Each
-  dispatches into `(require 'package) (<verb> …)`.
+- The `fetch`, `update`, `add`, `remove` and `tree` commands each dispatch into the
+  `package/<verb>` function.
 
 ### Reproducibility notes
 
@@ -738,13 +743,14 @@ dep's content hash) and `.git/`.
 
 As implemented in `std/tool/package.blsp`:
 
-```lisp
-(defn package--sha256-file (path) (hash/sha256-bytes (file/slurp-bytes path)))
+```lisp fragment
+(defn- package-sha256-file (path) (hash/sha256-bytes (file/slurp-bytes path)))
 
-(defn package-tree-hash (dir)
-  (hash/sha256 (join ""
-                 (map (fn (rel) (str rel "\0" (package--sha256-file (path-join dir rel)) "\n"))
-                   (package--tree-files dir)))))
+(defn tree-hash (dir)
+  (hash/sha256 (string/join (map (package-tree-files dir)
+                              (fn (rel)
+                                (str rel "\0" (package-sha256-file (path/join dir rel)) "\n")))
+                 "")))
 ```
 
 Per-file hashing reads **bytes** (`file/slurp-bytes` + `hash/sha256-bytes`), so a dep

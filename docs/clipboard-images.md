@@ -9,9 +9,11 @@ Wayland: one builtin, no `wl-paste` / `xclip` / `pngpaste` to install or shell o
 > [ADR-095](decisions/adr-001-099.md#adr-095--os-clipboard-clipboard-get--clipboard-set-builtins-the-clipboard-feature).
 > It comes from Zubr (the coding agent in `claudette/`), which wants "paste a screenshot
 > into the prompt" like Claude Code does. **Tried on one machine only: GNOME 50 on
-> Wayland, where it runs through XWayland** (see "Behaviour to settle"). macOS, Windows,
-> KDE, Sway and a pure X11 session are untested; the acceptance list below is not met
-> until they are, and apps should keep a shell-out fallback for a nil answer.
+> Wayland, where it runs through XWayland** (see "Behaviour to settle"). Image reads on
+> macOS, Windows, KDE, Sway and a pure X11 session are untested (CI's platform smoke
+> runs `clipboard_test` on macOS and Windows, which covers text); the acceptance list
+> below is not met until they are, and apps should keep a shell-out fallback for a nil
+> answer.
 
 ## Why
 
@@ -40,7 +42,7 @@ it encodes, not arboard's decode.
   `default-features = false` was chosen to drop arboard's `image-data` default so the
   `image` crate is not pulled in.
 - That reason is gone: the runtime **already** builds `image` 0.25 (png, jpeg, gif, webp,
-  bmp) for `image-thumb` (`builtins/filesystem.rs`).
+  bmp) for `gui/image-thumb` (`%image-thumb`, `builtins/filesystem.rs`).
 - arboard 3.6.1 has, behind `image-data`, `Clipboard::get_image() -> Result<ImageData,
   Error>` with `ImageData { width, height, bytes }` (RGBA8, row-major), and
   `set_image(ImageData)`. It returns `Error::ContentNotAvailable` when the clipboard is
@@ -63,12 +65,12 @@ it encodes, not arboard's decode.
   are the dimensions of what is in `:png` (after any downscale).
 - Returns `nil` when the clipboard is empty, holds text or a file list, is unreadable, no
   display is reachable, or the build has no `clipboard` feature. Same "graceful no-op"
-  contract as `clipboard-get`; a caller never branches on a build flag.
+  contract as `os/clipboard-get`; a caller never branches on a build flag.
 - `max-edge` is optional and downscale-only (never upscales), reusing the resize path of
-  `image-thumb`. Model APIs cap image size (the long edge is downscaled server-side anyway,
+  `gui/image-thumb`. Model APIs cap image size (the long edge is downscaled server-side anyway,
   and there is a byte limit), so letting the caller bound it here avoids encoding a 5K
   Retina screenshot only to throw most of it away.
-- Primitive `%clipboard-image`, wrapped in `std/os.blsp` next to `clipboard-get`, so the
+- Primitive `%clipboard-image`, wrapped in `std/os.blsp` next to `os/clipboard-get`, so the
   docstring and signature live in the same two places as the text pair.
 
 Optional companion, mainly so the feature is testable end to end:
@@ -77,7 +79,7 @@ Optional companion, mainly so the feature is testable end to end:
 (os/clipboard-set-image png-bytes)   ;; => png-bytes; no-op when unavailable
 ```
 
-(As built, it takes any format `image-thumb` decodes, and raises on bytes that are not an
+(As built, it takes any format `gui/image-thumb` decodes, and raises on bytes that are not an
 image: that is the caller's mistake, where a missing clipboard is the environment's.)
 
 ### Rust
@@ -91,10 +93,10 @@ image: that is the caller's mistake, where a missing clipboard is the environmen
 - `host/clipboard.rs`: add `get_image() -> Option<(usize, usize, Vec<u8>)>` under the same
   `cfg` and the same handle; a no-op returning `None` without the feature.
 - `builtins/clipboard.rs`: `%clipboard-image` takes the RGBA buffer, optionally downscales
-  (`image::imageops::thumbnail`, as in `image-thumb`), PNG-encodes with
+  (`image::imageops::thumbnail`, as in `gui/image-thumb`), PNG-encodes with
   `image::codecs::png`, and builds `{:png :width :height}` the way `image_thumb` builds its
   map (no eval between allocating the bytes and `map_from_pairs`, so no GC hazard).
-- Guard the size like `image-thumb` does: refuse a source over 16384 px on a side or an
+- Guard the size like `gui/image-thumb` does: refuse a source over 16384 px on a side or an
   allocation over 512 MB, and answer `nil`. The clipboard is untrusted input.
 
 ## Behaviour to settle
@@ -112,7 +114,7 @@ image: that is the caller's mistake, where a missing clipboard is the environmen
    `zwlr_data_control`, so arboard falls back to X11 through XWayland (unsetting
    `WAYLAND_DISPLAY` changes nothing). But the fallback worked for everything tried: an
    image already on the desktop clipboard read back as a valid 508×529 PNG, a PNG copied
-   with `xclip -t image/png` read back pixel-identical, and `clipboard-set-image` was
+   with `xclip -t image/png` read back pixel-identical, and `os/clipboard-set-image` was
    readable by `xclip -o` and outlived the Brood process. Presumably Mutter bridges its
    Wayland clipboard to XWayland; the mechanism was not examined. Not tried here: a copy
    from an app known to be Wayland-native without the bridge (no `wl-copy` on the
@@ -132,7 +134,7 @@ image: that is the caller's mistake, where a missing clipboard is the environmen
 4. **Alpha.** A screenshot is opaque; a copied UI element may not be. Keep alpha in the PNG
    and do not flatten. The consumer (a model API) handles it.
 5. **A copied file** (Finder, Files) puts a path or URI list on the clipboard, not pixels, so
-   this returns `nil` and `clipboard-get` returns the path. Apps that want "paste a file"
+   this returns `nil` and `os/clipboard-get` returns the path. Apps that want "paste a file"
    already have a path to read.
 6. **Cost.** Reading the clipboard can be slow (the selection owner has to serialise a large
    image). It blocks the calling process; the doc should say to call it from a worker, not
@@ -155,8 +157,8 @@ prompt line. The model sees it as an `image_url` data URL. Nothing else in Zubr 
   small fixed buffer (decode the PNG back with `image` and compare pixels and size), plus
   the size guard.
 - **Headless / no display / no feature:** `(os/clipboard-image)` returns `nil` and does not
-  raise (like `clipboard-get`).
-- **With a display:** a round trip, `clipboard-set-image` then `clipboard-image`, marked as a
+  raise (like `os/clipboard-get`).
+- **With a display:** a round trip, `os/clipboard-set-image` then `os/clipboard-image`, marked as a
   display test (skipped in CI without `WAYLAND_DISPLAY` / `DISPLAY`), the way the GUI dump
   tests already gate. The process-global clipboard makes these order dependent, so they
   must not run in the parallel green-process suite; run them serially by name.
@@ -170,10 +172,10 @@ prompt line. The model sees it as an `image_url` data URL. Nothing else in Zubr 
 - **Keep shelling out (status quo).** Works where the tool is installed; every app
   re-implements the three-way probe. The native path is small because the crates are
   already linked.
-- **Return raw RGBA `{:width :height :rgba}`**, like `image-thumb`. Fine for rendering, but
+- **Return raw RGBA `{:width :height :rgba}`**, like `gui/image-thumb`. Fine for rendering, but
   every consumer that wants a file or an API payload would need a PNG encoder, which Brood
   would then have to ship. Encoding once in the runtime is cheaper.
-- **A general `clipboard-get` with a MIME type** (`(os/clipboard-get "image/png")`).
+- **A general `os/clipboard-get` with a MIME type** (`(os/clipboard-get "image/png")`).
   More general, but arboard exposes typed accessors, not arbitrary MIME, so it would be a
   leaky abstraction over what it can actually do.
 - **Windows.** arboard supports it, but it is untested here; the builtin should work, and

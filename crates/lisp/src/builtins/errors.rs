@@ -376,7 +376,7 @@ fn run_guarded(
             //     "throw shape == catch shape" contract — `(throw 42)` → 42);
             //   * **a structured map** for any built-in error, so Brood code (and
             //     agents via MCP) can `(case (get e :kind) :unbound …)` without
-            //     parsing strings (`docs/llm-native.md` §4). Shape on
+            //     parsing strings (`docs/archive/llm-native.md` §4). Shape on
             //     `LispError::to_value_map`: `{:kind :message [:code] [:file
             //     :line :col] [:hint]}`.
             let handler_argv = handler_args(e, heap);

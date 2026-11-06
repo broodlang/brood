@@ -19,10 +19,13 @@ const DOCUMENTS: &[(&str, &str)] = &[
         "incarnations",
         include_str!("../../../docs/incarnations.md"),
     ),
-    ("llm-native", include_str!("../../../docs/llm-native.md")),
+    (
+        "llm-native",
+        include_str!("../../../docs/archive/llm-native.md"),
+    ),
     (
         "claude-demo-findings",
-        include_str!("../../../docs/claude-demo-findings.md"),
+        include_str!("../../../docs/archive/claude-demo-findings.md"),
     ),
     ("language", include_str!("../../../docs/language.md")),
     // The whole ADR log: the index, then the files it is split across by number.

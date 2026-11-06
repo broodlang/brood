@@ -72,7 +72,7 @@ The suite runs on Linux only: most of it is the language, which does not change 
 and a macOS minute costs ten Linux ones. What does change — paths, files, processes, the pty,
 the clipboard — is run on both by `scripts/ci/platform-smoke.sh`, with a `nest` built there
 with the gui, headless. The script lists each file and why it is in the set; the portable half
-(`tests/platform_test.blsp`, `buffer_test`, `strings_test`, `encoding_test`, `clipboard_test`)
+(`tests/platform_test.blsp`, `pty_test`, `buffer_test`, `strings_test`, `encoding_test`, `clipboard_test`)
 runs on both, the POSIX-userland half (`path_test`, `file_test`, `io_test`, `system_test`,
 `proc_test`) on macOS only, since it assumes `sh`, `pwd` and `/tmp`. Both jobs also run the gui
 key translation unit tests (`host::gui::backend::input`, ADR-541's Option-as-Meta and AltGr).

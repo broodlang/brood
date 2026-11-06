@@ -1208,7 +1208,7 @@ pub fn free_drained_gen(heap: &Heap) -> bool {
 /// *root* thread (the REPL / file runner / MCP dispatcher)? True when [`in_capture_run`]
 /// is set (the worker is driving a process body). Used by the eval-time `unbound` raise
 /// to attach a scheduler-race hint (the under-load failure mode
-/// `docs/claude-demo-findings.md` flagged — concurrent prelude lookups racing).
+/// `docs/archive/claude-demo-findings.md` flagged — concurrent prelude lookups racing).
 pub fn in_green_process() -> bool {
     in_capture_run()
 }

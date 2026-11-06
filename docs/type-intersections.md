@@ -2,7 +2,9 @@
 
 > Status: **shipped** (both slices). Runtime (`type-matches?`) and static checker
 > (`parse_type` → `Ty::intersect`) both handle `(and …)`. See
-> `tests/contract_test.blsp` "intersection type checks" for coverage.
+> `tests/contract_test.blsp` "intersection type checks" for coverage. The sections below are
+> the plan as written; the runtime arm is in `std/prelude/core.blsp`, and `(list E)` has since
+> come to mean `nil | list<E>` (ADR-350), which is what `(and (list int) pair)` relies on.
 
 ## Problem
 
@@ -44,23 +46,23 @@ Other realistic uses:
 narrowing, `is_subtype`, `difference`). The gap is purely at the *surface*:
 
 - `parse_type` in `annot.rs` doesn't recognise `(and …)`.
-- `type-matches?` in `prelude.blsp` doesn't handle `(and …)`.
+- `type-matches?` in `std/prelude/core.blsp` doesn't handle `(and …)`.
 
 No new data type, no new `Ty` variant, no compatibility-contract risk.
 
 ## Changes (both slices are small)
 
-### Slice 1 — Brood runtime (`prelude.blsp`)
+### Slice 1 — Brood runtime (`std/prelude/core.blsp`)
 
 In the `pair?` branch of `type-matches?`, add a symmetric `and` arm alongside
 the existing `or` arm:
 
 ```lisp fragment
 ;; current:
-(%eq h 'or) (any? (fn (s) (type-matches? s v)) (rest t))
+(%eq h 'or) (any? (rest t) (fn (s) (type-matches? s v)))
 
 ;; add:
-(%eq h 'and) (every? (fn (s) (type-matches? s v)) (rest t))
+(%eq h 'and) (every? (rest t) (fn (s) (type-matches? s v)))
 ```
 
 That's the entire runtime change. `every?` already exists; the recursion mirrors
@@ -100,8 +102,8 @@ arrow/elem refinements narrow on match). A `(and int string)` produces
 
 ## Soundness
 
-The `is_disjoint` check (what fires a warning) is tags-only, and intersection
-can only *narrow* the accepted set — it never widens it. So the static checker
+The check that fires a warning asks for disjointness (tags-only when this was written), and
+intersection can only *narrow* the accepted set — it never widens it. So the static checker
 becomes *more* precise, never wrong:
 
 - A call that was clean before is still clean (NEVER is impossible to satisfy,
@@ -115,8 +117,8 @@ becomes *more* precise, never wrong:
 **One edge case to document:** `(and (list int) (vector string))` is `NEVER` at
 the checker level (nil∪pair and vector are disjoint), so any call using this
 annotation fires. At runtime, `every?` over an empty conjunction `(and)` returns
-`true` (the `(empty? xs) → true` base case in `every?`). We should handle a
-bare `(and)` in `parse_type` as `Ty::ANY` to stay consistent.
+`true` (the `(empty? xs) → true` base case in `every?`), and `parse_type` reads a
+bare `(and)` as `Ty::ANY` to stay consistent.
 
 ## Tests to add
 
@@ -140,12 +142,12 @@ In `contract_test.blsp`:
 (assert-error (c-never "a"))
 ```
 
-Static checker tests (`check.rs`): `(f (and int string))` → NEVER param warns
+Static checker tests (`check/tests/`): `(f (and int string))` → NEVER param warns
 on any argument; `(f (and int number))` = `int` (intersection subsumed).
 
 ## Slicing order
 
-1. **Brood runtime** (prelude.blsp, 1 line). Ship first — immediately useful
+1. **Brood runtime** (`std/prelude/core.blsp`, 1 line). Ship first — immediately useful
    for `sig!` annotations with no Rust build. Add tests in `contract_test.blsp`.
 2. **Static checker** (annot.rs, ~10 lines). Adds checker coverage for `sig`
    declarations. Update grammar in `type-annotations.md`.

@@ -1,5 +1,5 @@
 ;; Teaching hints for Clojure/Scheme syntax Brood does not have (LLM-native
-;; errors, docs/llm-native.md): a mis-typed `#(…)` / `#'` / `#_` / `#"…"`
+;; errors, docs/archive/llm-native.md): a mis-typed `#(…)` / `#'` / `#_` / `#"…"`
 ;; reader macro, a `\c` character literal, or Scheme/Clojure's nested `let`
 ;; bindings, should produce a clear error WITH a `:hint` pointing at the Brood
 ;; idiom — not a confusing downstream "odd map" / "unbound #" / stray-symbol

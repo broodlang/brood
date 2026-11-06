@@ -71,7 +71,7 @@ program:
 
 - `eval` the smallest sub-expression that reproduces the failure — halve it until
   the culprit is isolated.
-- `macroexpand` (mode `"all"`) any macro in the failing form — a surprising
+- the `macroexpand` tool (mode `"all"`) on any macro in the failing form — a surprising
   expansion (captured binding, a list where you meant a vector) is a common cause.
 - `lookup` a name whose arity/type you're unsure of — don't assume the signature.
 - `load` the file and read its `:diagnostics` (the same checker as `nest check`).
@@ -102,12 +102,12 @@ debug-assertions and turn rare races deterministic (see `CLAUDE.md` → "Debug t
 ```
 RUSTFLAGS="-C debug-assertions=on" cargo build --release
 BROOD_GC_STRESS=1   # collect at every safepoint
-BROOD_GC_VERIFY=1   # walk the live graph each collection; print the root→cell path
+BROOD_GC_VERIFY=1   # walk the live graph each collection; name the stale handle and its cell
 ```
 
 The per-deref epoch tripwire panics at the *instant* of a stale deref;
 `BROOD_GC_VERIFY` catches a stale handle that was *stored* (surfaces at the store
-site's next collection, with the path). A `SIGSEGV` leaves no panic and no dump —
+site's next collection, naming the cell that holds it). A `SIGSEGV` leaves no panic and no dump —
 run it under `gdb --batch -ex run -ex bt --args <binary> <args>` (`rr` isn't
 installed; `valgrind` won't see a *logical* use-after-GC over safe `Vec` slabs).
 

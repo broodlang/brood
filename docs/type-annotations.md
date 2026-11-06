@@ -12,7 +12,8 @@ and the **gradual checks** — slice 11 (`(def x …)` vs a non-arrow `(sig x T)
 value type, `GradualTy`'s first consumer), slice 12 (return-type checking +
 declared globals in value position), slice 13 (precise sig-param returns — the
 first non-disjoint "merely wider" catch). See [the gradual checks](#the-gradual-checks-slices-1113)
-and [ADR-110](decisions.md).
+and [ADR-110](decisions.md). Since then: every declaration is a runtime contract under `nest
+run`/`nest test` (ADR-381), and typed parameters are the inline spelling (ADR-420).
 
 This is Brood's answer to "can we be *more sound* given our parameters?"
 (advisory, never-gate, zero-false-positive, hot-reload, policy-in-Brood). The
@@ -59,9 +60,11 @@ raw-form passes) split `name:type` with the same rule (`syntax/typed.rs`).
 ```
 type   ::= base | literal | typevar | arrow | seq | map-kv | union | inter
 base   ::= any | never | int | float | number | string | symbol
-         | keyword | bool | nil | pair | vector | list | map | fn
-         | rope | pid | ref | socket
-literal ::= <keyword>                          ; a bare keyword, e.g. :maximized
+         | keyword | bool | nil | pair | vector | list | map | set | fn
+         | seqable | countable | numeric | ordered | bytes | decimal | ratio
+         | failure | record | rope | pid | ref | socket | subprocess | table
+         | _                                   ; an open position (ADR-420)
+literal ::= <keyword> | <int> | <bool> | <string> ; a literal value, e.g. :maximized
 typevar ::= ? <name>                           ; e.g. ?A, ?el — static only
 arrow  ::= ( type* -> type )                   ; fixed arity
          | ( type* -> (is type) )              ; a type GUARD: truthy ⇒ arg 1 is `type` (ADR-301)
@@ -70,6 +73,8 @@ arrow  ::= ( type* -> type )                   ; fixed arity
          | ( type* &optional type* & type -> type ) ; + a trailing rest too
 seq    ::= (list type) | (vector type) | (set type) ; element type checked at runtime;
                                                ; `(list E)` is `nil | list<E>` — may be empty
+         | (list type type+)                   ; a fixed-arity positional list (ADR-348)
+         | (tuple type*)                       ; a fixed-arity positional vector (ADR-128)
          | (seqable type)                      ; a SEQUENCE of E, whichever shape carries it:
                                                ; `nil | list<E> | vector<E> | set<E>` (ADR-365).
                                                ; NOT `map`/`bytes` — see below
@@ -80,8 +85,12 @@ sig    ::= (sig name type prop*) | (sig name prop+) ; prop ::= :pure | :total (A
 union  ::= (or type type+)
 inter  ::= (and type+)                         ; intersection; (and) = any
 compl  ::= (not type)                          ; complement — every value that is NOT a type
-record ::= (record [&open] key-type-pair…)     ; a map shape; CLOSED unless `&open`
+record ::= (record [&open] key-type-pair…)     ; a keyed shape; CLOSED unless `&open`
+rec    ::= (rec name type)                     ; recursive: `name` in `type` is the whole (ADR-349)
 ```
+
+A bare name also resolves to an ability (ADR-181/186), a `defrecord` name, or a `deftype`
+alias (ADR-327). `record` alone is any nominal record value (ADR-542), which is not a `map`.
 
 **The complement `(not T)` (ADR-263).** Every value that is *not* a `T`. The
 lattice has computed complements since ADR-023 — the else-branch of a `(string?
@@ -92,9 +101,8 @@ most-wanted annotation in a nil-carrying language, could not be said:
 (sig head-of ((and any (not nil)) -> any))
 ```
 
-Exact on the flat tag lattice; the complement of a *refined* type (`(not (tuple
-int))`) widens to that tag, which over-approximates — sound, and it can only ever
-suppress a warning. Exactly one argument: `(not A B)` is reported as malformed
+Exact, a refined type included: `(not (tuple int))` subtracts that shape (ADR-288).
+Exactly one argument: `(not A B)` is reported as malformed
 rather than guessed. The runtime `type-matches?` implements the same clause, so a
 `sig!` contract agrees with the checker.
 
@@ -106,7 +114,7 @@ what the runtime `(sig! …)` contract matches by equality. A keyword outside th
 is flagged by the checker/LSP and throws under a runtime contract; the diagnostic
 names the exact value (`got :bogus`).
 
-**Int/bool/string-literal (singleton) types (ADR-117/119).** The same
+**Int/bool/string-literal (singleton) types (ADR-117/120).** The same
 machinery, three more kinds — `(or 200 404 500)`, `(or true false)`,
 `(or "GET" "POST")` — same runtime-contract behavior as the keyword case, and
 any combination composes freely on one declared type (`(or :ok 5)`). `false`
@@ -121,7 +129,7 @@ early int attempt was reverted; B0 landed it cleanly). See
 [type-int-literals.md](type-int-literals.md)/[type-bool-string-literals.md](type-bool-string-literals.md)
 for the history.
 
-**Match exhaustiveness and redundancy (ADR-118/120/121).** A `match` over a
+**Match exhaustiveness and redundancy (ADR-118/120/121/122).** A `match` over a
 scrutinee whose declared type is a pure enumerable literal type (any mix of
 the kinds above, plus `nil`) is flagged when its clauses don't cover every
 member (unless a catch-all is present); a clause whose literal duplicates one
@@ -208,8 +216,8 @@ unconditionally as if it can't be `nil` is still caught. `&optional` before
 dropped by the parser rather than misparsed.
 
 Base names map to the same lattice points the predicates imply (`number` =
-`int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, `seqable` =
-`nil∪pair∪vector∪set∪map∪bytes` — every collection the sequence combinators walk, `string`
+`int∪float∪decimal∪ratio`, `list` = `nil∪pair`, `fn` = `fn∪native`, `seqable` =
+`nil∪pair∪vector∪set∪map∪record∪bytes` — every collection the sequence combinators walk, `string`
 excluded — for a polymorphic-sequence parameter without falling back to `any`, `countable`
 = `seqable∪string∪rope∪table` — what `count`/`get`/`empty?` accept; `numeric` / `ordered` =
 `number` plus every record with a `num/*` / `compare-to` method, the domains of `+` and `<`
@@ -225,10 +233,10 @@ and it is exactly the union authors were writing by hand:
 (defn min (xs) … (reduce xs math/min))      ; …and now the body VERIFIES
 ```
 
-**`map` and `bytes` are in bare `seqable` and not in `(seqable T)`.** Their element types
-come from the kind, not from a refinement — a map walks as `[key value]` entries, a `bytes`
-as octets — so neither is a collection of an arbitrary `T`; write `(map K V)` or `bytes` for
-those. `(seqable T)` is therefore a *subtype* of `seqable`, the way `(map K V)` is of `map`:
+**`map`, `record` and `bytes` are in bare `seqable` and not in `(seqable T)`.** Their element
+types come from the kind, not from a refinement — a map walks as `[key value]` entries, a
+`bytes` as octets — so none is a collection of an arbitrary `T`; write `(map K V)` or `bytes`
+for those. `(seqable T)` is therefore a *subtype* of `seqable`, the way `(map K V)` is of `map`:
 refining drops the members that do not match.
 
 **Naming a type — `(deftype name T)` (ADR-327).** A structural alias: `name` in any
@@ -251,9 +259,8 @@ loaded module that declares it (two candidates at any step decline, and the sig 
 an unknown type, as a record name does). A declaration only: `name` is not bound at
 runtime, so a stray reference to it is unbound rather than a type-turned-value; `nest
 doc` lists a module's aliases under **Types**, and `(reflect/type-aliases 'm)` answers
-them as data. A recursive alias is unrolled one level — `(:v (:l t))` over a `tree` is
-typed — and reads as `any` where it meets itself past that: the checker has no recursive
-types, and unknown is the sound answer.
+them as data. A self-referential alias is a recursive type, exact at every depth (ADR-369),
+and a contract enforces an alias like the type it names (KI-165).
 
 Under the hood it is a declared-sig entry wrapped `(%type T)`, which is why it survives
 an image, is read through the checker's dep-tracked path, and costs no new store;
@@ -293,19 +300,20 @@ own declared type is disjoint from `x`'s, while deferring on a dynamic value
 ## How the checker uses it (slice 1 — shipped)
 
 - `check_file` scans the **un-expanded** top-level forms for `(sig name …)`
-  (the `sig` macro expands to `nil`, so this must run before expansion — same as
-  the hygiene lint), parses each to a `Sig`, and stores `name → Sig` on the
+  (`sig` lowers to a `%register-sig` call, which the checker does not read from the
+  expanded tree), parses each to a `Sig`, and stores `name → Sig` on the
   `Ctx` (`Ctx.declared`).
 - A declared sig is consulted **first** — ahead of primitive / curated / inferred
   sigs — in the call-check path (`walk`) and in `expr_ty` (for the result type).
   So `(foo "x")` is flagged against the declared params, and
-  `(string-length (foo 3))` against the declared result.
+  `(string/length (foo 3))` against the declared result.
 - Arity falls back to the declared param count when the callee isn't otherwise
   resolvable (a file-local `defn` the read-only checker can't inspect).
 
-This already closes the **biggest expressiveness gap**: multi-clause / branchy
-user functions, which `infer_sig` can't touch, now participate in checking the
-moment the author writes one line of `sig`.
+This closed the **biggest expressiveness gap** of its day: a multi-clause / branchy
+function, which `infer_sig` could not touch then, participates in checking the moment
+the author writes one line of `sig`. (Inference has since reached those shapes too —
+ADR-261 and the per-arm overloads.)
 
 **Slice 1 is not *sound* on its own — and says so.** Nothing forces `foo` to actually
 obey `(int -> int)`: the checker checks the body it can type against the declaration
@@ -341,7 +349,7 @@ closure's name and docstring, `defn-` privacy, `meta` — so a contracted name i
 like the plain one. A shim is recognised by construction (its captured frame binds the
 original as `%contract-orig`), so a second offer never stacks one on another, and a hot
 reload — a `def` — re-wraps the new definition instead of dropping the contract.
-Fixed arities up to eight keep the function's arity; `arglist` reads the shim's
+Fixed arities up to eight keep the function's arity; `reflect/arglist` reads the shim's
 parameters (`a b …`).
 
 **Blame.** A mismatch raises a structured error naming the party at fault
@@ -387,7 +395,7 @@ Design decisions, as built:
   `(sig …)` is enforced when `BROOD_CONTRACTS=1` is set, which **`nest run` and
   `nest test` set by default** (ADR-381); `BROOD_CONTRACTS=0` opts a run out, and a
   released bundle (the `brood` runtime) never arms. `BROOD_CONTRACTS=all` also enforces
-  the prelude's own sixteen declarations, which plain `1` leaves alone: they are the
+  the prelude's own declarations, which plain `1` leaves alone: they are the
   language's hottest names, each a thin wrapper over a native that already raises the
   precise error, and a shim on `nth` makes a 0.4 µs call a 4.5 µs one.
 - **Unknown types accept** — a type-expr `type-matches?` can't interpret (an
@@ -430,10 +438,9 @@ walk `(list E)` / `(vector E)` arguments at call time; `&` rest params let
 `(sig! f (int & number -> int))` check both fixed and variadic arguments;
 `(and A B …)` intersections are enforced at runtime and parsed by the static
 checker (`Ty::intersect`); `(map K V)` checks every key/value pair at runtime
-and the checker flat-accepts the annotation as `Ty::Map`; and `?A` type
-variables are parsed by both runtime and checker (resolved to `any` / `Ty::ANY`
-— the static-only constraint is not yet unified at call sites) (superseded by
-slice 10 — call-site unification shipped). See
+and the checker flat-accepted the annotation as `Ty::Map` (superseded by slice 9); and `?A`
+type variables are parsed by both runtime and checker (resolved to `any` / `Ty::ANY`,
+superseded by slice 10 — call-site unification shipped). See
 `tests/contract_test.blsp` for coverage.
 
 ## The gradual checks (slices 11–13)
@@ -454,7 +461,7 @@ decides the check.
 - **Slice 12 — return types + value-position globals.** A `(sig f (P… -> R))` checks the
   body's last form yields a value consistent with `R` (`(sig f (int -> string))` with body
   `(+ x 1)` flags — `number ∩ string = ⊥`). And `expr_ty` now surfaces a declared global's
-  type, so `(string-length g)` with `(sig g int)` is caught.
+  type, so `(string/length g)` with `(sig g int)` is caught.
 - **Slice 13 — precise sig-param returns.** A `(sig …)`-typed parameter carries its *exact*
   contract type, so returning one where it's *merely wider* than `R` is caught:
   `(sig f (number -> int)) (defn f (x) x)` flags. This is the first diagnostic the
@@ -474,10 +481,11 @@ over-approximated value (a call result — `(+ int int)` is typed `number`) is
 is `stat(t)` and checked with `⊆`. Project-wide `nest check` stayed at 3 (the intentional
 recursion lint) through all three slices.
 
-**Deferred (ADR-011):** catching a wider *call-result* body (typed `number`, declared `int`)
-needs precise result types — overloaded arithmetic sigs (`(+ int int) : int`) or full
-occurrence-typing inference (the historical false-positive source). Gated on a real
-consumer; the overloaded-sig option is the bounded next step.
+**Since closed (2026-09-17, C10).** Catching a wider *call-result* body (typed `number`,
+declared `int`) was deferred here on the ground that arithmetic results were imprecise.
+Integer-closed arithmetic now types exactly (`(+ int int)` is `int`, ADR-350 carries the
+interval), and `--strict` (ADR-298) reports the over-approximated case: a call result is
+named under `--strict` and deferred in plain mode, which is the gradual valve.
 
 ## Fixed gap — a `defmodule`-declared arrow sig didn't seed the body-return check (ADR-126)
 
@@ -497,7 +505,7 @@ pattern at the root namespace (no `defmodule`) worked correctly. Repro:
 records the declared sig under the symbol **as literally written** (bare
 `f`), with no `resolve_reference`/qualification step. But `defn f` inside a
 `defmodule` expands to `(def m/f (fn …))` — the qualified symbol. `check_def`'s
-seeding lookup (`ctx.declared_sig(name)`, `walk.rs`) used `name` from the
+seeding lookup (`ctx.declared_sig(name)`, `walk/binders.rs`) used `name` from the
 *expanded* form (`m/f`), which never matched the bare-keyed `f` Pass 2.5
 recorded — so the sig was invisible to the seeding path. Call-site checking
 (`sig_of`) never had this problem: it falls back through
@@ -526,7 +534,7 @@ first match wins. The lint is right; the warning is unwanted. Comments can't
 express the opt-out — the reader strips them before the checker runs — so the
 directive is a form:
 
-```lisp
+```lisp fragment
 (check-allow :non-tail-recursion
   (defn ut-fib (n) (if (< n 2) n (+ (ut-fib (- n 1)) (ut-fib (- n 2))))))
 
@@ -538,6 +546,7 @@ directive is a form:
 (check-allow :type-mismatch
   (defn c-bad-ret (x) "not an int"))
 (sig! c-bad-ret (int -> int))
+```
 
 `check-allow` is a prelude macro that expands to a `(%lint-allow :category (do …))`
 marker. That marker **survives macroexpansion** (which is what the checker walks)
@@ -567,7 +576,11 @@ it as *trusted, not verified* and this is the author saying so. Wrap the whole `
 the return check runs at the definition, not inside the body. Narrower than
 `:type-mismatch`, which also silences a body that provably contradicts its declaration —
 prefer fixing the leaf where one exists: a record's field types, a `(map K V)` where a
-bare `map` stood, a value sig on a `defdyn`), and
+bare `map` stood, a value sig on a `defdyn`), **`:pure`** and **`:total`** (ADR-351, see
+[type-properties.md](type-properties.md)), **`:single-dispatch`** (ADR-523 — a `defmulti`
+whose methods vary only the first argument, kept on purpose), **`:list-truthiness`** (ADR-620
+— a truthiness test on a value that may be an empty list or another collection, kept on
+purpose), and
 **`:constant-condition`** (2026-09-20 — a test the checker can prove is always true,
 because its type admits neither `nil` nor `false`. The class it exists for is the
 SENTINEL return: `index-of` answers `-1` for "not found", `-1` is truthy, and

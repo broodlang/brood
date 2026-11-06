@@ -34,9 +34,12 @@ The tools are all Brood: the `nest` subcommands `nest rename`, `nest ws`, and
 - **Bump the version and changelog it.** Edit `Cargo.toml` `version`, add a `## vX.Y.Z —
   DATE` section to `CHANGELOG.md`. A **breaking** change (a rename, a removed name) is a
   minor bump pre-1.0 (e.g. 0.5 → 0.6) so a consumer's `:brood ">= X"` can gate it.
-- Record the decision (`docs/decisions.md` ADR) and a `docs/devlog.md` line.
+- Record the decision (an ADR in the newest `docs/decisions/adr-*.md`, indexed in
+  `docs/decisions.md`) and a `docs/devlog.md` line. A renamed public name goes in the
+  rename ledger too (`crates/lisp/src/renames.rs`).
 
-**Verify (this machine runs only quick/targeted checks — never the full suite here):**
+**Verify (tests never run on the development desktop, see `CLAUDE.md`; run these on the
+test machine):**
 
 ```
 cargo build -p cli
@@ -45,7 +48,7 @@ cargo run -p cli -- --test tests/<the affected>_test.blsp
 cargo check -p cli --no-default-features --features brood/jit   # the LEAN gate (see below)
 ```
 
-The full suite and the cross-language benchmarks run on the other machine / in CI.
+The full suite and the cross-language benchmarks run on the test machine / in CI.
 
 > **The lean gate matters.** `dev-tools` is a brood *default* feature, and a
 > `cargo check --workspace` unifies features across members, so it compiles brood *with*
@@ -87,6 +90,10 @@ Install the new toolchain first so `nest ws check` checks against it:
 cd brood && make install          # builds + installs brood + nest (lean runtime + dev-tools)
 ```
 
+A rename wave ends in `bedit`: CI's `downstream-bedit` job builds it at `BEDIT_REF`. Fix and
+push bedit, then `make smoke-bedit ARGS=--bump` in `brood` moves the pin to bedit's pushed HEAD;
+commit the pin with the change.
+
 ---
 
 ## 3. Republish the registry packages
@@ -104,8 +111,8 @@ cd ../s3 && nest publish --bump patch
 ```
 
 `nest publish --bump` bumps only the project's **own** `:version` (never a dependency pin —
-the mistake that once shipped a `store 0.2.6` dep that did not exist), commits, pushes,
-and `nest publish`es. Releases are immutable, so a version already published is refused —
+the mistake that once shipped a `store 0.2.6` dep that did not exist), commits, and
+`nest publish`es; it does not push, so `nest ws push` afterwards. Releases are immutable, so a version already published is refused —
 bump again if needed.
 
 Then update any consumer that pins a bumped package (`:version` / `:ref`) and re-lock
@@ -118,7 +125,7 @@ Then update any consumer that pins a bumped package (`:version` / `:ref`) and re
 `hive` is the registry **server**, deployed to fly.io (app `brood`, `brood.fly.dev`). Its
 Docker image builds brood from a pinned `BROOD_REF`, so it must be moved to the brood
 commit that carries the change — otherwise the new hive code builds on old brood and
-breaks. The deploy script (pure Brood over `run-process`) does the bump + deploy + health check:
+breaks. The deploy script (pure Brood over `os/run-process`) does the bump + deploy + health check:
 
 ```
 cd hive && brood bin/deploy.blsp     # pins BROOD_REF to ../brood HEAD, fly deploy, checks /health
@@ -135,8 +142,8 @@ The changelog page (`/changelog`) renders from the `CHANGELOG.md` baked into the
 
 ## Checklist
 
-1. `brood`: implement (name constants for primitives) · bump version · changelog · ADR/devlog · `nest check` · lean gate · commit + push.
+1. `brood`: implement (name constants for primitives) · bump version · changelog · ADR/devlog · rename ledger · `nest check` · lean gate · commit + push.
 2. `make install` the new toolchain.
-3. `nest rename` the siblings · `nest ws check` · `nest ws commit` · `nest ws push`.
+3. `nest rename` the siblings · `nest ws check` · `nest ws commit` · `nest ws push` · `make smoke-bedit ARGS=--bump`.
 4. `nest publish --bump` each changed registry package in dep order · update + re-lock consumers.
 5. `hive`: bump dep `:ref`s + `nest fetch` · `brood bin/deploy.blsp`.

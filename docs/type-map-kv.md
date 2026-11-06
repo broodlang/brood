@@ -2,10 +2,10 @@
 
 > Status: **slice 1 shipped** (Brood runtime), **slice 2 shipped** (checker
 > flat-accept), **slice 3 shipped** (full `map_kv` refinement in `Ty`).
-> `type-matches?` walks `%map-pairs` to verify each key/value pair; `parse_type`
-> (`check/annot.rs:132-137`) now produces `Ty::map_of(k, v)`, and
-> `check/guards.rs:1188-1212` derives precise `get`/`keys`/`vals`/`assoc`
-> result types from `Ty::map_kv`.
+> `type-matches?` (`std/prelude/core.blsp`) walks `%map-pairs` to verify each key/value pair;
+> `parse_type` (`check/annot.rs`) produces `Ty::map_of(k, v)`, and `check/infer.rs` derives
+> precise `get`/`keys`/`vals`/`assoc` result types from `Ty::map_kv`. A record is its own kind
+> (ADR-542), so `(map K V)` never admits one. The sections below are the plan as written.
 
 ## Problem
 
@@ -47,10 +47,10 @@ The check walks `(%map-pairs m)` and verifies each `[k v]` pair:
        (let (ktype (first (rest t))
              vtype (first (rest (rest t))))
          (or (and (nil? ktype) (nil? vtype))
-             (every? (fn (kv)
+             (every? (%map-pairs v)
+                     (fn (kv)
                        (and (type-matches? ktype (first kv))
-                            (type-matches? vtype (second kv))))
-                     (%map-pairs v)))))
+                            (type-matches? vtype (second kv))))))))
 ```
 
 `%map-pairs` returns `[[k v] …]`; it's available at runtime
@@ -94,7 +94,7 @@ Then:
 - `Ty::map_of` is a new constructor setting `tags = Map`, `map_kv = Some(…)`.
 - `Ty::union`/`intersect` widen/narrow the `map_kv` refinement (if both sides
   have a refinement, union widens; intersect narrows; one-sided → drop to `None`).
-- `seq_aware_call_ty` in `guards.rs` derives return types for `get` (returns `V |
+- `seq_aware_call_ty` (`infer.rs`) derives return types for `get` (returns `V |
   nil`), `keys` (returns `nil | list<K>`), `vals` (returns `nil | list<V>`), and
   `assoc` (returns `map<K V>` preserving the input's type).
 
@@ -140,15 +140,15 @@ In `contract_test.blsp`:
 ```
 
 Static (slice 2) checker test: `(get (map-of-keyword-int) :k) : int | nil`
-doesn't warn against a `number` sink; `(string-length (get m k))` warns when
+doesn't warn against a `number` sink; `(string/length (get m k))` warns when
 `m : (map keyword int)`.
 
 ## Slicing order
 
-1. **Brood runtime** (`prelude.blsp`, ~10 lines). Pure Brood, ships alone.
+1. **Brood runtime** (`std/prelude/core.blsp`, ~10 lines). Pure Brood, ships alone.
    Update grammar in `type-annotations.md`.
 2. **Checker parse-accept** (`annot.rs`, ~5 lines). Parses and discards K/V,
    produces flat `Ty::Map`. No `Ty` struct change.
-3. **Full refinement** (`types.rs` + `guards.rs`, significant). Add
+3. **Full refinement** (`types.rs` + `infer.rs`, significant). Add
    `map_kv` field; wire `get`/`keys`/`vals`/`assoc` result rules. Do when a
    concrete consumer (LSP hover, a heavy map-using project) justifies the cost.

@@ -1,11 +1,17 @@
 # A unified module/symbol index — design
 
-> **Status:** the **index itself is proposed, not built** — a recorded *future direction*,
+> **Status:** the **unified index is proposed, not built** — a recorded *future direction*,
 > deferred under ADR-011 (defer power features until a concrete need justifies them). The
-> concrete trigger is **M2+ plugin pressure** (many modules from many authors, an editor that
+> concrete trigger is **plugin pressure** (many modules from many authors, an editor that
 > navigates by symbol), the same trigger `namespaces.md` §8 names for package-rooting. This
 > doc captures the design so it is shovel-ready when that pressure arrives; it does **not**
 > authorize building the index now. Backing decision: [ADR-223](decisions.md).
+>
+> **Not to be confused with `std/tool/module-index.blsp` (ADR-380).** That is a narrower thing
+> that did ship: a per-file cache of which modules a file declares, its requires and its
+> qualified references, at `.brood/module-index`, keyed by size and mtime. It is the first of
+> §7's steps for the module half only: `nest` reads it for the module graph. It has no symbol
+> locations and the LSP does not read it.
 >
 > **Update (2026-08-12): the per-region pre-scan and *intra-file* multiple-modules-per-file
 > shipped independently of the index (ADR-223 Phase 1).** It turned out the addressing index
@@ -19,8 +25,8 @@
 > **Update (2026-08-13): cross-file require-by-name shipped for named projects (ADR-223 Phase 2
 > MVP), still without the persisted index.** §7-step-5's payoff — reaching a co-located
 > secondary module across files by its own name — reduced for the root project to one scan
-> generalization (`package/package-module-files` now records every `(defmodule …)`, not just
-> the first), which feeds the existing ADR-070 rooting registry (`*package-module-files*`) that
+> generalization (`package/module-files` now records every `(defmodule …)`, not just
+> the first), which feeds the existing ADR-070 rooting registry (`*module-files*`) that
 > `require` already consults. So the *addressing* the index was meant to provide is, for the
 > in-project named case, already covered by the rooting registry. What the persisted index still
 > adds on top: module↔file decoupling beyond rooting, cross-*author* O(1) symbol location, LSP
@@ -45,10 +51,9 @@ Resolution and location are re-derived in many places, each answering one slice 
 
 - **Filename bijection** — `module foo → foo.blsp`, resolved by `%require-force-in`
   (`std/prelude/modules.blsp`) walking `*load-path*` with `file/exists?` probes. Simple, always
-  fresh, human-computable — but it *is* why only one module may live per file (the name
-  is the address, so a second module in a file has no file of its own name to be found
-  by).
-- **`*package-module-files*`** (`std/prelude/modules.blsp`) — a rooted module name (`"foo/b"`) →
+  fresh, human-computable — but the name is the address, so a second module in a file has
+  no file of its own name to be found by (the ADR-223 updates above patched that case).
+- **`*module-files*`** (`std/prelude/modules.blsp`) — a rooted module name (`"foo/b"`) →
   its `.blsp` path. Deps and the root project's own rooted modules already resolve by
   *index*, not by filename.
 - **`%builtin-module`** — baked-in std modules, keyed by module name → embedded source.
@@ -56,6 +61,7 @@ Resolution and location are re-derived in many places, each answering one slice 
 - **`*features*`** / **`*require-edges*`** (`std/prelude/modules.blsp`) — runtime load-state: what
   is loaded, and the require-edge graph used to materialize an image.
 - **The startup image** — an imaged prelude + modules with a manifest of what it holds.
+- **The module index** (ADR-380) — `.brood/module-index`, file → modules, requires and refs.
 - **The incremental `nest check` cache** (ADR-129) — check results keyed by file.
 - **`*record-ids*`** — record-constructor id registry the ability devirtualizer (ADR-182) reads
   to prove an ability call site.
@@ -67,8 +73,8 @@ Each is partial and locally maintained. The costs: (a) the same "where is X" is 
 several ways, risking drift between *what the editor thinks* and *what the runtime does* —
 the exact consistency `namespaces.md` §4 calls "what keeps a self-editing editor honest";
 (b) symbol-level "where is `parse-headers`?" requires a scan or a load; (c) the filename
-bijection forecloses multiple modules per file (see `namespaces.md` §8 and the pre-scan
-fix in `docs/devlog.md` 2026-08-12).
+bijection made multiple modules per file an exception to patch (see `namespaces.md` §8 and
+the pre-scan fix in `docs/devlog.md` 2026-08-12).
 
 ## 2. Prior art: make the artifact layout *be* the index
 
@@ -85,7 +91,7 @@ Two lessons carry over:
 
 1. **Don't hand-maintain an index — make the build emit name-keyed per-module entries and
    let that be the index.** Brood already does exactly this for std (`%builtin-module`) and
-   deps (`*package-module-files*`); the unified index finishes the pattern for root sources.
+   deps (`*module-files*`); the unified index finishes the pattern for root sources.
 2. **Even a system that allows many modules per file treats *nesting* as name-sugar, not
    scope.** A nested module there is merely name-prefixed; it does **not** see the outer
    module's private functions. This validates the scope decision in §6: flat multi-module,
@@ -202,12 +208,13 @@ loads together and the per-region pre-scan resolves each bare reference against 
   existing resolution/privacy/collision machinery *robust* — no drift bugs surfaced. The
   advantages above are real but shaped like "faster / more unified", which ADR-011 says to
   defer.
-- **Scale isn't there.** The root project is a handful of files today; the editor app is a
-  separate downstream project. The filename convention is not a bottleneck at this size.
+- **Scale wasn't the blocker.** The filename convention has not been a bottleneck; the one
+  scale problem found, re-parsing every file on a warm start, was fixed by ADR-380's
+  per-file cache, without this index.
 - **Risk.** It touches load-bearing, concurrency-sensitive machinery (`require`,
   `*features*`, the image, the check cache) that currently works.
 
-**Build it when** M2+ brings many modules from many authors and an editor that navigates by
+**Build it when** plugins bring many modules from many authors and an editor that navigates by
 symbol — the point at which O(1) symbol location, cross-author collision safety, and
 file/module decoupling stop being conveniences and become load-bearing. At that point this
 doc is the plan; §7 is the order.

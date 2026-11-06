@@ -3,19 +3,18 @@
 This is a hands-on guide to writing a text editor *in Brood*, on top of the
 pieces the language already ships: the **rope** text kernel, the **buffer**
 framework (`std/editor/buffer.blsp`), and the **editor/display/input seam** (`std/editor/display.blsp`
-+ the `term-*` primitives). By the end you'll have a small but real terminal
++ the `term/*` functions). By the end you'll have a small but real terminal
 editor — open a file, move around, edit, save — that you can grow into something
 Emacs-shaped.
 
 It assumes you've read [`brood-for-claude.md`](brood-for-claude.md) (the language
 in a page) and skimmed [`architecture.md`](architecture.md) (why the editor is a
-Brood program over a thin Rust substrate). If you're an AI assistant, load the
-`writing-brood` skill first.
+Brood program over a thin Rust substrate).
 
 ## The three layers
 
 ```
-  Rust kernel       rope primitives, term-* draw/input   ← mechanism (in the language)
+  Rust kernel       rope primitives, %term-* draw/input  ← mechanism (in the language)
   ───────────────────────────────────────────────────
   Brood framework   std/editor/buffer.blsp · std/editor/display.blsp    ← the editor toolkit (opt-in)
   ───────────────────────────────────────────────────
@@ -24,8 +23,8 @@ Brood program over a thin Rust substrate). If you're an AI assistant, load the
 ```
 
 This mirrors Emacs (C core → built-in elisp → your `init.el` + packages). The
-bottom layer — *your editor* — is an ordinary `nest` project that `(require's`
-the framework. Nothing about it is privileged; it's Brood functions you can
+bottom layer — *your editor* — is an ordinary `nest` project that names the framework
+modules it uses. Nothing about it is privileged; it's Brood functions you can
 redefine while it runs. That's the whole point.
 
 Two properties of the framework shape everything below:
@@ -148,7 +147,7 @@ value — the buffer plus the top visible line (the viewport) — and render it:
 (defmodule render "Pure buffer → frame rendering for my-editor."
   (:use editor/buffer) (:use editor/display))   ; `:use` imports; a bare `require` only loads
 
-(defn render--line (ed row line-idx cols)
+(defn- render-line (ed row line-idx cols)
   "One text op for buffer line `line-idx` drawn at screen `row`, clipped to `cols`."
   (let (raw (if (< line-idx (buffer-line-count (get ed :buffer)))
               (buffer-line-at (get ed :buffer) line-idx)
@@ -164,7 +163,7 @@ a status line, the visible buffer lines, and the cursor."
         top (get ed :top)
         text-rows (math/max 1 (dec rows))             ; reserve the last row for status
         body (map (range text-rows)
-                  (fn (i) (render--line ed i (+ top i) cols)))
+                  (fn (i) (render-line ed i (+ top i) cols)))
         cur-row (- (buffer-current-line buf) top)
         cur-col (buffer-column buf)
         status (str " " (buffer-name buf)
@@ -196,7 +195,7 @@ A **command** is a function `editor -> editor` (or `editor -> :quit` to exit). A
   (:use editor/buffer))
 
 ;; edit/move commands lift a buffer op into an editor-state op
-(defn cmd--on-buffer (f)
+(defn- cmd-on-buffer (f)
   "A command that applies buffer transform `f` and re-scrolls to the cursor."
   (fn (ed) (scroll-to-cursor (assoc ed :buffer (f (get ed :buffer))))))
 
@@ -211,14 +210,14 @@ A **command** is a function `editor -> editor` (or `editor -> :quit` to exit). A
       else ed)))
 
 (def *keymap*
-  {:up        (cmd--on-buffer (fn (b) (backward-line b)))
-   :down      (cmd--on-buffer (fn (b) (forward-line b)))
-   :left      (cmd--on-buffer (fn (b) (backward-char b)))
-   :right     (cmd--on-buffer (fn (b) (forward-char b)))
-   :enter     (cmd--on-buffer (fn (b) (insert b "\n")))
-   :backspace (cmd--on-buffer (fn (b) (delete-backward-char b)))
-   :home      (cmd--on-buffer beginning-of-line)
-   :end       (cmd--on-buffer end-of-line)
+  {:up        (cmd-on-buffer (fn (b) (backward-line b)))
+   :down      (cmd-on-buffer (fn (b) (forward-line b)))
+   :left      (cmd-on-buffer (fn (b) (backward-char b)))
+   :right     (cmd-on-buffer (fn (b) (forward-char b)))
+   :enter     (cmd-on-buffer (fn (b) (insert b "\n")))
+   :backspace (cmd-on-buffer (fn (b) (delete-backward-char b)))
+   :home      (cmd-on-buffer beginning-of-line)
+   :end       (cmd-on-buffer end-of-line)
    :ctrl-s    (fn (ed) (do (save-buffer (get ed :buffer)) ed))
    :ctrl-q    (fn (ed) :quit)
    :ctrl-c    (fn (ed) :quit)})
@@ -229,7 +228,7 @@ unbound key is a no-op. Returns a new editor state, or `:quit`."
   (cond
     (contains? *keymap* key) ((get *keymap* key) ed)
     (and (string? key) (= (string/length key) 1))
-      ((cmd--on-buffer (fn (b) (insert b key))) ed)
+      ((cmd-on-buffer (fn (b) (insert b key))) ed)
     else ed))
 ```
 
@@ -249,35 +248,35 @@ state — until a command returns `:quit`.
 (defmodule main "my-editor entry point."
   (:use editor/buffer) (:use editor/display) (:use render) (:use commands))
 
-(defn editor--loop (ed)
+(defn- editor-loop (ed)
   "Render, wait for a key, dispatch, repeat — until a command returns :quit."
   (let ([cols rows] (term/size)
         ed (assoc ed :height (math/max 1 (dec rows))))   ; keep height in state for scrolling
     (term/draw (render-frame ed cols rows))
     (let (key (term/poll 1000))
       (if (nil? key)
-        (editor--loop ed)                            ; timeout: just redraw (e.g. for a clock)
+        (editor-loop ed)                             ; timeout: just redraw (e.g. for a clock)
         (let (next (dispatch ed key))
           (if (= next :quit)
             (term/leave)
-            (editor--loop next)))))))
+            (editor-loop next)))))))
 
 (defn run (path)
   "Open `path` and run the editor. Pairs with a Rust-side terminal-restore guard
 (like `nest observe`) so a crash never wrecks the terminal."
   (let (buf (if (file/exists? path) (buffer-from-file path) (make-buffer "" path path)))
     (term/enter)
-    (editor--loop {:buffer buf :top 0 :height 1})))
+    (editor-loop {:buffer buf :top 0 :height 1})))
 
-(defn main (args)
+(defn main (& args)
   (if (empty? args)
     (io/puts "usage: my-editor <file>" :to *err*)
     (run (first args))))
 ```
 
 Run it: `nest run -- README.md`. (For a production editor, wrap the loop in a
-Rust RAII guard that calls the terminal-restore on panic — see `cmd_observe` in
-`crates/nest/src/main.rs` for the pattern. Until then, an error leaves the screen
+Rust RAII guard that calls the terminal-restore on panic — see `FullTermGuard` in
+`crates/nest/src/main.rs`, which `nest observe` runs under, for the pattern. Until then, an error leaves the screen
 in raw mode; `reset` in your shell fixes it.)
 
 That's a working editor: arrows move, typing inserts, Enter/Backspace edit, ^S
@@ -342,14 +341,14 @@ Everything except the loop is pure, so test it like any other Brood code:
   editor's own* processes and returns control on `q`. (Since it `term/leave`s on
   quit, redraw your UI afterward.) The observer reads the same `proc/info` /
   display seam this guide uses. To watch the editor **while it runs** (you can't show
-  both in one terminal), have it `(node/start …)` + `(observe-serve)`, then from
+  both in one terminal), have it `(node/start …)` + `(observer/observe-serve)`, then from
   another terminal `nest observe --connect editor@host:port --cookie …` — remote
   attach is the same observer loop with a remote data source (ADR-053).
 
 ## Reference
 
 - Buffer API: [`std/editor/buffer.blsp`](../std/editor/buffer.blsp) (every function has a
-  docstring; `nest doc buffer`).
+  docstring; `nest doc editor/buffer`).
 - Display protocol + terminal primitives: [`std/editor/display.blsp`](../std/editor/display.blsp),
   [`primitives.md`](primitives.md) (the **Terminal** section), ADR-046 in
   [`decisions.md`](decisions.md).

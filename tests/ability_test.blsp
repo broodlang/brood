@@ -462,7 +462,7 @@
   ;; then confirming that keyword is a registered record id. That is sound only if a record's
   ;; baked `:__id__` really IS its constructor's qualified name, and until now that was
   ;; asserted by a comment. It matters more under speculative dispatch
-  ;; (docs/dispatch-speculation.md): a guard compares this identity and then calls an impl
+  ;; (docs/archive/dispatch-speculation.md): a guard compares this identity and then calls an impl
   ;; directly, so a divergence is a silently wrong impl rather than a slow path.
   (test "a record's identity round-trips to its own constructor"
     ;; Behaviourally, not by closure identity: under armed contracts the module's own

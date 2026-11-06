@@ -124,7 +124,7 @@ mod maps {
         );
     }
 
-    // --- transient map build (docs/transients.md) ---------------------------
+    // --- transient map build (docs/archive/transients.md) ---------------------------
     // `build_via_into` is the end-to-end prelude path (`into {}` → `%map-into`),
     // now routed through the in-place transient builder; `build_transient` hits
     // the `%map-into` kernel hook directly. Both build an n-entry map from a

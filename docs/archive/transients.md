@@ -19,8 +19,14 @@ rationale — treat the "Phase 2 shipped — overruled" update as reverted.
 + `map_from_pairs_into` set the watermark and fold; the `%map-into` builtin backs
 the prelude's `into` (map branch) and `zipmap`. Measured ~1.6× on a 50k-entry
 build call (~7% end-to-end on build-heavy programs); no small-map regression.
-Covered by `tests/transients_test.blsp` (equivalence, input-immutability,
-cross-process round-trip, hot-reload), green under `BROOD_GC_STRESS=1`/`GC_VERIFY`.
+Covered at the time by `tests/transients_test.blsp` (equivalence, input-immutability,
+cross-process round-trip, hot-reload), since removed with Phase 2 (ADR-112); `tests/maps_test.blsp`
+exercises the `into` and `zipmap` paths today.
+
+Current code: `champ_assoc`, `is_owned`, `map_from_pairs` and `map_from_pairs_into` are in
+`core/heap/map_ops.rs`, `%map-into` in `builtins/sequences.rs`. The file and line references
+below are of 2026-06. The GC reasoning below cites ADR-035's `GC_BLOCK`; the collector now runs at
+any depth (ADR-061), and the build stays GC-quiet because the builtin reaches no safepoint.
 
 **REVERTED — the block below is kept as history only; none of this exists in
 the code today (immutability is absolute, ADR-026/112).**
@@ -237,20 +243,16 @@ result-build but **not** the tally itself — it will not on its own hit 60 fps.
 Accelerating the tally needs one of the deferred options below; do not promise
 the demo's hot loop from Phase 1.
 
-## Deferred (needs a separate decision, gated on a real consumer)
+## The read-modify-write case
 
-The read-modify-write case has two possible answers, both deferred:
-
-- **(A) A user-visible linear transient.** The genuinely powerful fix, but it
-  requires *amending ADR-026* to admit a linear/affine mutable value with a
-  defined contract (no aliasing, no send, `persistent!`-or-discard). Large
-  decision; do not take it speculatively (ADR-011: defer power features).
-- **(B) Targeted bulk primitives** — e.g. promote `frequencies`/`count-by` to a
-  kernel primitive over an internal transient. Smaller, but each is a step
-  toward domain-specific builtins; weigh against keep-the-core-small per case.
-
-Recommendation: ship Phase 1, measure, and only revisit (A)/(B) when a concrete
-workload justifies it.
+- **(A) A user-visible linear transient.** Refused, permanently. It was tried and
+  removed (ADR-112), and ADR-026 is absolute: no transient, no builder cell, no mutable
+  buffer, however much it would speed up a build.
+- **(B) Targeted bulk primitives.** `%map-int-add` fuses the tally
+  `(assoc m k (+ (get m k 0) delta))` into one trie walk. The compiler's linear-map
+  rewrite (ADR-360) goes further: it recognises a provably-linear tally, builds the
+  accumulator on a private table and snapshots it back to an immutable map, so the
+  user's code stays plain `get`/`assoc`.
 
 ## Risks & trade-offs
 
@@ -273,7 +275,8 @@ workload justifies it.
   no `Tag`" simplicity rests on the builder never re-entering `eval`. A future
   read-modify-write variant that calls a Brood combine fn breaks this *and*
   introduces an uncollectable-garbage spike on large reductions — it cannot just
-  extend this builtin; it needs its own rooting story.
+  extend this builtin; it needs its own rooting story. (ADR-360's rewrite avoids this by
+  not being a builtin.)
 - **Small-map regression risk.** Most maps are tiny (`{}` literals, 2–4 keys).
   The watermark approach adds ~nothing (one integer + a predicted branch), so
   unlike a `HashSet` it shouldn't regress small builds — but confirm with the
@@ -300,7 +303,7 @@ it — the global-immutability simplicity is worth a lot.
    the watermark and folds. Leave single-assoc `map_assoc` on `None` (a lone
    `assoc` has no reuse to exploit).
 2. the `crates/lisp/src/builtins/` directory: register `%map-from-pairs`
-   (initial-map + sequence → map) over the new builder; it reads the seq into
+   (shipped as `%map-into`; initial-map + sequence → map) over the new builder; it reads the seq into
    `Vec<(Value, Value)>` then builds. (Same `def(heap, name, arity, sig, fn_ptr)`
    pattern as the existing `map_assoc`/`hash-map` entries.)
 3. `std/prelude/*.blsp`: re-point `into` (map branch), `zipmap`, `select-keys` at
@@ -325,4 +328,4 @@ it — the global-immutability simplicity is worth a lot.
 Take the transient *technique*, not the transient *API*: mutate only
 build-local trie nodes inside a single GC-quiet builtin, keep every Brood-facing
 contract immutable, and accept that read-modify-write accumulation stays out of
-scope until a real consumer justifies amending ADR-026.
+scope (ADR-026 is never amended; see "The read-modify-write case").

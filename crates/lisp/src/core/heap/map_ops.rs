@@ -238,7 +238,7 @@ impl Heap {
     }
 
     /// True iff `id` names a node *this transient build allocated*, so it is
-    /// safe to mutate in place (see `docs/transients.md`). The rule is a single
+    /// safe to mutate in place (see `docs/archive/transients.md`). The rule is a single
     /// integer compare because `alloc_slot!` only ever appends to the nursery
     /// and GC cannot fire mid-build: a node whose nursery index is `>= watermark`
     /// (the slab length captured at build entry) was created by this build; any

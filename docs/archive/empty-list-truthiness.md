@@ -4,8 +4,9 @@
 a truthiness test on a value that may be a list or another collection.** The scoping below is
 kept as written. A language-design finding, not a
 bug. The evidence below was gathered by reading and grepping; counts over Brood source come
-from regex heuristics and are marked as estimates. The decision to make (§4) comes before any
-code.
+from regex heuristics and are marked as estimates. The lint is `:list-truthiness`, in
+`check_if` (`types/check/walk/binders.rs`): it reads a test whose type admits an empty list
+and a vector, map, set or string. A list alone is not reported.
 
 ## The finding
 

@@ -18,8 +18,8 @@ int))`, losing the fact that position 0 is always a `string` and position 1
 is always an `int`.
 
 ```lisp
-(sig parse-header ((string) -> (tuple string int)))
-(defn parse-header (line) (let (parts (string-split line ":")) [(first parts) (string->int (second parts))]))
+(sig parse-header (string -> (tuple string int)))
+(defn parse-header (line) (let (parts (string/split line ":")) [(first parts) (string/->number (second parts))]))
 ```
 
 `(tuple …)` fixes this the same way `(record …)` (ADR-115) fixed the
@@ -116,9 +116,8 @@ each position against its declared type. See `tests/contract_test.blsp`'s
 ## Deferred
 
 - **Nested generics inside a tuple position** (`(tuple ?A ?B)` unifying
-  against a call's actual argument types) — the type-variable route
-  (`SigWithVars`/`SigTerm`, type-variables.md) doesn't yet have a tuple case;
-  only the non-variable `parse_type` path does. Gated on a real consumer
+  against a call's actual argument types) — `SigTerm` (type-variables.md) has no tuple
+  case; a variable there widens to `any` through `parse_type`. Gated on a real consumer
   (ADR-011).
 - **`assoc`/positional-update sinks** — Brood vectors are immutable, so
   there's no in-place tuple mutation to type; a hypothetical
@@ -140,7 +139,7 @@ shape never admits it).
 
 - **Where it comes from**: `(list a b …)`, a quoted list `'(1 "s")` (each datum in its
   position; nested lists recursively), `(cons x <shape>)` and `(cons x nil)` (one longer),
-  `(rest <shape>)` / `(but-last <shape>)` (one shorter, `nil` at one), a `& rest` binder
+  `(rest <shape>)` / `(seq/but-last <shape>)` (one shorter, `nil` at one), a `& rest` binder
   over a shape (the positions that remain). The grammar reads it: `(list int string)` —
   two or more types; one type is still the uniform `(list T)`, and a one-position shape
   has no spelling (it needs none).

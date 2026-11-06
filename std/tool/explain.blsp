@@ -1,5 +1,5 @@
 ;; std/tool/explain.blsp — teach-the-error + intent→idiom lookup (LLM-native
-;; errors, docs/llm-native.md).
+;; errors, docs/archive/llm-native.md).
 ;;
 ;; Two curated Brood-data catalogues an agent (or a human at the REPL) reads:
 ;;   - `explain/*error-explanations*` — stable error code → {:summary :causes :fix

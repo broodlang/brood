@@ -102,7 +102,7 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<ProvenReceiver> {
         // KI-90: the registry is keyed by NAME, and a registration can outlive the module
         // that made it (KI-89 shows ids whose constructor is no longer bound). Trusting the
         // name alone would then devirtualize a call to whatever that name means NOW —
-        // a silently wrong impl, not a slow path (docs/dispatch-speculation.md). So the
+        // a silently wrong impl, not a slow path (docs/archive/dispatch-speculation.md). So the
         // name is necessary, not sufficient: the constructor must still be BOUND, and the
         // registry's recorded name must still be this one. An unbound id is exactly the
         // orphan shape, and it is refused here rather than devirtualized. A rebinding AFTER

@@ -231,7 +231,7 @@ impl<'a> Parser<'a> {
             // `\c` / `\newline` — Clojure/Scheme character literal. Brood has no
             // char type (a `\` at form start otherwise reads as a stray symbol like
             // `\c`), so catch it with a teaching hint (LLM-native errors,
-            // `docs/llm-native.md`) instead of a confusing "unbound symbol: \c".
+            // `docs/archive/llm-native.md`) instead of a confusing "unbound symbol: \c".
             '\\' => Err(self
                 .err("`\\c` is a Clojure/Scheme character literal, which Brood does not have")
                 .with_hint(
@@ -277,7 +277,7 @@ impl<'a> Parser<'a> {
     /// [`AtomKind::ReservedNumeric`](crate::syntax::atom::AtomKind::ReservedNumeric).
     ///
     /// The Clojure/Scheme/EDN forms Brood does not have get a teaching hint naming
-    /// the Brood idiom (LLM-native errors, `docs/llm-native.md`) instead of a
+    /// the Brood idiom (LLM-native errors, `docs/archive/llm-native.md`) instead of a
     /// confusing downstream failure.
     fn read_hash(&mut self) -> Result<Value, LispError> {
         if self.s.starts_with("#b\"") {

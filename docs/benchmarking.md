@@ -3,6 +3,10 @@
 Two different questions, two different tools. Conflating them wastes afternoons
 (it did — see the devlog 2026-06-07 entry).
 
+**Everything here runs on the test machine or in CI, never on the development desktop**
+(`CLAUDE.md`, "Where tests run"). "This machine" and "this box" below mean the box the
+measurement was taken on.
+
 | Question | Tool | Build |
 |---|---|---|
 | **Is it faster?** (timing) | the VM ÷ tree-walker **ratio** | normal/release, *no* counters |
@@ -80,7 +84,7 @@ that `defseq_map` replaced got caught — its `letrec_loop` predecessor deferred
 The ratio trick assumes your change doesn't move the tree-walker. That holds for
 VM-only work (the common case). If a change touches shared machinery (the reader,
 a builtin, the GC), the TW row moves too and the ratio hides it — then you need a
-genuine before/after, which on this machine means **interleaving**: run baseline
+genuine before/after, which on a loaded box means **interleaving**: run baseline
 and candidate binaries in alternation (not back-to-back blocks) so they share the
 load window, many samples each.
 
@@ -379,7 +383,8 @@ tasks are all answered). Each of these has cost a wrong verdict in this repo.
   data-first reorder made 12 of 31 rows unrunnable against any pre-2026-09-02 commit, and
   brood-benchmarks' CI (built from `main`) cannot notice.
 
-**What a busy box CAN answer.** Deferring to a benchmark box is right for a *magnitude* claim and
+**What a busy box CAN answer.** This is for a loaded test machine or a CI runner; the development
+desktop runs none of it. Deferring to a quiet benchmark box is right for a *magnitude* claim and
 wrong for a *mechanism* one. In order: turn it into a structural question first (did the arm
 lower — `BROOD_JIT_DUMP_IR=1`; refused, and why — `(dev/why-not-native f argc)` in the running
 program, which reads the refusal the arm recorded, or `BROOD_JIT_BAIL_TRACE=1`; lowered then fell

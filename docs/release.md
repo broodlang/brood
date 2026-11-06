@@ -20,14 +20,20 @@ cargo/rustc). The result is an ordinary executable that, on startup, finds the
 appended archive and boots `:main` instead of a REPL.
 
 ```
-nest release [-o PATH] [--runtime PATH] [--target TRIPLE]…
+nest release [-o PATH] [--runtime PATH] [--target TRIPLE]… [--no-smoke]
   -o, --output PATH    output path (default: the manifest's :name); with several
                        --targets it's the stem, each binary gets a suffix
       --runtime PATH   base runtime to append to (default: the runtime embedded
                        in nest); only valid with at most one --target
       --target TRIPLE  repeatable; resolves a prebuilt runtime from the local
                        cache (~/.cache/brood/runtimes/<triple>/brood — see below)
+      --no-smoke       skip the boot check
 ```
+
+Every binary written is run with the reserved `--brood-boot-check` argument: it loads
+every embedded module and resolves `:main` but runs nothing. A binary that does not boot
+fails the release and is deleted. A non-host `--target` cannot be run here, so its check
+is skipped, and the skip is reported.
 
 With `--target`, output names get a friendly per-target suffix (and `.exe` for
 Windows): `app-macos-arm64`, `app-macos-x86_64`, `app-linux-x86_64`,
@@ -57,8 +63,8 @@ The appended archive carries, all baked in:
 `tests/` is **excluded** — a release ships the app, not its tests.
 
 The Brood standard library is **not** in the archive: the prelude and all `std/`
-modules are already compiled into `brood` itself (`include_str!` +
-`EMBEDDED_MODULES`). A release ships only your own code on top of that runtime.
+modules are already compiled into `brood` itself (`include_str!` + the module tables
+in `builtins/modules.rs`). A release ships only your own code on top of that runtime.
 
 It is **code-only**: runtime file reads (`(file/slurp "data.txt")`, `(file/ls …)`)
 still go to the real filesystem on the target — the bundle is not a virtual FS.
@@ -83,17 +89,21 @@ cargo/rustc. (Verified: it runs with an empty `PATH`.)
 The runtime is **lean** — `--no-default-features` strips, so it never compiles in:
 
 - the **test framework** (`test`),
-- the **process observer** + GC debug builtins (`observer`, `gc-stats`,
-  `gc-collect`, `gc-trace`, `runtime-collect`),
-- the **MCP / doc / hot-reload** tooling (`mcp`, `docs`, `reload`),
+- the **process observer** + GC debug builtins (`observer`, and the `%gc-*` kernel
+  behind `dev/gc-stats`, `dev/gc-collect`, `dev/gc-trace`, `dev/runtime-collect`),
+- the **MCP / doc / hot-reload** tooling (`mcp`, `dap`, `docs`, `reload`), plus `audit`,
+  `grammar` and `perf`,
 - the interactive **REPL** (`repl`).
 
-Kept (an app legitimately needs them): the whole prelude, `project` (it boots the
-bundle), and the UI/editor toolkit — `display`, `keymap`, `layers`, `ui`, `pane`,
-`buffer`, `sexp`, `regex`, `face`, `highlight`, **`lineedit`** (an editor's
-minibuffer reuses it), plus `tcp`/`http`/`file`/`json`/`set`/`format`/`task`/
-`hatch`/`supervisor`/`ansi`/`package` — **and the `gui` backend** (it's a single
-variant that includes windowing, so `(gui-open)`/windowed apps just work). Also
+Kept (an app legitimately needs them): the whole prelude, `project` and its `project-*`
+siblings (they boot the bundle), and the UI/editor toolkit — `editor/display`,
+`editor/keymap`, `editor/layers`, `editor/ui`, `editor/pane`, `editor/buffer`, `sexp`,
+`regex`, `editor/face`, `editor/highlight`, **`editor/lineedit`** (an editor's minibuffer
+reuses it), plus `tcp`/`http`/`file`/`json`/`set`/`format`/`task`/`supervisor`/`ansi`/
+`package` — **and the `gui` backend** (it's a single variant that includes windowing, so
+`(gui/open)`/windowed apps just work). The toolchain's own modules (`nest`, `project-check`,
+`scaffold`, `codemod`, `complete`, …) sit behind a separate `toolchain` feature that every
+native binary has; only the browser tab leaves them out. Also
 kept, and the line the split really turns on: **`debug`** and **`eval-server`**.
 Both look like tooling and are not — an app's own features are built on them (the
 editor ships a `C-c d` debugger and eval-on-type tutorial playgrounds), and a module
@@ -116,7 +126,7 @@ from-source fallback below (and an explicit `cargo build --profile release-lean`
 still produce the fully fat-LTO'd `release-lean` runtime when you want the
 smallest/fastest shippable binary.
 
-`gc-stats`/`require 'test`/`require 'observer` etc. are therefore unavailable in a
+`dev/gc-stats`/`require 'test`/`require 'observer` etc. are therefore unavailable in a
 shipped app — that's the point. If you want one back, ship it as a `.blsp` on the
 load-path, or pass a fuller `--runtime`.
 
@@ -134,15 +144,15 @@ no-Rust release.
 
 ## Extending a shipped app at runtime (`init.blsp`)
 
-A bundled binary is a full evaluator — `load`, `file/slurp`, `require`, and
-`eval-string` all read the **real filesystem**, and `def` rebinds globals (live
+A bundled binary is a full evaluator — `reflect/load`, `file/slurp`, `require`, and
+`reflect/eval-string` all read the **real filesystem**, and `def` rebinds globals (live
 hot reload). So a shipped app reads external `.blsp` to extend/reconfigure itself
 exactly like an editor reading `~/.config/app/init.blsp`:
 
 ```lisp
 (defn main ()
   (when (file/exists? (init-path))
-    (load (init-path)))     ; user code redefines/extends the running runtime
+    (reflect/load (init-path)))     ; user code redefines/extends the running runtime
   (app-loop (initial-state)))
 ```
 
@@ -165,8 +175,9 @@ runtime. Only the *stripped* modules above are unavailable to it.
 - A mounted bundle is just *more embedded modules*: the `%builtin-module`
   primitive consults the bundle after the baked-in std modules, so `require` and
   `(:use …)` resolve an app's own modules through the **existing** module path —
-  no load-path-on-disk needed. Modules are keyed by filename **stem** (`foo.blsp`
-  → `foo`), exactly the name `require` searches for.
+  no load-path-on-disk needed. The project's own modules are keyed by their require-name
+  (the path relative to the source dir, sans `.blsp`), and a dependency's by its
+  package-rooted name (`foo/parser`), so two deps may each ship a `parser`.
 - Boot policy is Brood: `brood` calls `(project-release/run-bundle argv)` in
   `std/tool/project-release.blsp`, which applies the embedded manifest, loads every embedded
   module (from the startup image when the archive carries one), and invokes `:main` —
@@ -242,9 +253,11 @@ the payload rather than nesting a second archive.
 - `std/tool/project-release.blsp` — `bundle-collect` (gather sources) + `run-bundle` (boot);
   no load-time `(:use test)` so a lean runtime can load it
 - `crates/cli/src/main.rs` — `brood` boots the app when bundled
-- `crates/nest/src/main.rs` — `nest release`; `resolve_runtime` (`--runtime` →
-  runtime cache per `--target` → embedded → built fallback); `target_suffix` /
-  `runtime_cache_path`; `EMBEDDED_RUNTIME` via `include_bytes!`
+- `crates/nest/src/release.rs` — `nest release`; `resolve_runtime` (`--runtime` →
+  runtime cache per `--target` → embedded → built fallback); `runtime_cache_path`;
+  `EMBEDDED_RUNTIME` via `include_bytes!`. What the binaries are called, which names are
+  refused and what the command prints are Brood (`release-plan`, `release-target-suffix`
+  and `release-report` in `std/tool/project-release.blsp`)
 - `crates/nest/build.rs` — bakes `BROOD_EMBED_RUNTIME` into `nest` (empty if unset)
 - `Makefile` (`install`) — builds the lean+gui runtime, then embeds it in `nest`
 - `crates/cli/tests/release_bundle.rs` — end-to-end boot test

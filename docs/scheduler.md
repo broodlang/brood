@@ -11,8 +11,11 @@
 > native-nested `receive` blocks its worker instead (the dirty carve-out). Sections
 > below that narrate coroutines/pinning are the as-built history of the corosensei
 > era — read `crates/lisp/src/process/scheduler.rs` (and its `pool`/`lifecycle`/
-> `guards` children) for the current engine, and ADR-100 for why it changed. The
-> *rationale* lives in [`concurrency.md`](concurrency.md).
+> `guards`/`quantum` children) for the current engine, and ADR-100 for why it changed.
+> The tree-walker captures too since ADR-416, so a tier-0 process body parks like a VM
+> one; native code preempts by unwinding into interpreter frames (ADR-401) and a receive
+> loop parks from native code (ADR-410). The *rationale* lives in
+> [`concurrency.md`](concurrency.md).
 
 ## Goal & what changes
 
@@ -51,6 +54,11 @@ single-threaded bootstrap eval reads the config first, then the pool starts.
 **Decoupled from this build:** the scheduler reads its thread count through a
 settings accessor (default `nproc`, overridable via `-j`); wiring the *config
 file* is a small, separate follow-up and does not block Stages 1–2.
+
+**As built:** no settings file was wired. `worker_count` (`process/scheduler.rs`)
+takes the `BROOD_J` env override, else what `-j`/`--max-parallel` set
+(`set_max_parallel`), else `available_parallelism`, floored at 2 so a dirty-blocked
+worker always has a peer to drain onto. Here the env var beats the flag.
 
 ## Approach: stackful coroutines (Path A)
 
@@ -135,8 +143,8 @@ RwLock), so concurrent workers reading code is already fine.
    (ADR-100, 2026-06-08).
 4. ✅ **Reduction-counted preemption** (fairness — ADR-027). Scheduling is no
    longer cooperative-only: `eval`'s `'tail:` loop decrements a per-worker
-   *reduction* counter (`process::tick`, budget ≈ 2000) and the process yields its
-   worker when it hits zero — a CPU-bound process with no `receive` (e.g. an
+   *reduction* counter (`process::tick`, now in `process/scheduler/quantum.rs`, budget
+   ≈ 2000) and the process yields its worker when it hits zero — a CPU-bound process with no `receive` (e.g. an
    infinite loop) can no longer monopolise a core. The yield carries a `Suspend`
    reason (`Receive` → park on the mailbox; `Preempt` → re-queue Ready), so a
    preempted process goes to the back of the run queue and peers get a turn. The
@@ -193,8 +201,9 @@ analysis, invariants, and the full design are in ADR-100
 ([`decisions.md`](decisions.md)).
 
 **Placement + stealing (the load-balancing levers today):** spawn placement is
-scan-free — a process spawned from a worker lands on that worker's queue, else
-round-robin (`pick_spawn_worker`); an idle worker steals from the back of a
+scan-free — a process spawned from a worker lands on that worker's queue while that
+queue is empty and spills round-robin once it has a backlog (`pick_spawn_worker`,
+`BROOD_SPAWN_SPILL`, default 1); a spawn from off a worker goes round-robin. An idle worker steals from the back of a
 backed-up peer's queue (`try_steal`, rotating-start `try_lock` scan, gated by a
 relaxed `STEALABLE` counter so a truly-idle pool re-parks cheaply). A *woken*
 process is re-routed to the least-loaded worker (`assign_worker`: queue length

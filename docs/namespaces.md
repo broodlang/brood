@@ -27,7 +27,7 @@
 > never namespaced — are those *declared* with `defdyn` (ADR-151, superseding the
 > original earmuff-spelling rule), which keeps `defdyn` knobs reachable unqualified
 > from any ns. Prelude registries (`*load-path*`, `*features*`, `*module-docs*`) are
-> plain root globals with root setters (`reflect/set-load-path!`, `record-module-doc!`).
+> plain root globals with root setters (`reflect/set-load-path`, `%record-module-doc!`).
 >
 > **Fully complete.** The former cosmetic remainders all landed:
 > namespace-qualified workspace symbols (ns as container), semantic-token ns
@@ -42,7 +42,7 @@
 > cross-namespace private reference is now a **hard load-time error**, not an advisory lint;
 > **ADR-223** multiple modules per file (the region model); and the **ADR-227** stdlib
 > namespacing + **qualified-reference auto-require** (a qualified `mod/name` auto-infers its
-> `(require 'mod)`). Where a section below still describes the pre-2026-05-30 model, the
+> `(require-one 'mod)`). Where a section below still describes the pre-2026-05-30 model, the
 > per-section callouts are authoritative.
 
 This doc is the design backing for namespaces in Brood. It follows the spectrum
@@ -153,7 +153,7 @@ over the existing flat table** — the core never grows a namespace axis:
   modules do not see each other's bare names — they qualify or `:use`. A single-module
   file is the common case and behaves exactly as before. In a **named** (ADR-070 rooted)
   project a co-located secondary module is also reachable *across* files by its own name
-  (`(:use secondary)` / `(require 'pkg/secondary)`) — the file→module scan registers every
+  (`(:use secondary)` / `(require-one 'pkg/secondary)`) — the file→module scan registers every
   declared module, not just the first (ADR-223 Phase 2 MVP).
 - Inside it, `(defn observe …)` defines the full symbol **`observer/observe`** in
   the one shared global table.
@@ -206,7 +206,7 @@ dir) or the embedded table keyed on the full `"gui/window"` stem. Its
 definitions qualify on the **last** `/` — module `gui/window` + def `draw` is the
 single interned symbol `gui/window/draw`. This is the **same flat-table
 machinery one level deeper**, not a new axis: a qualified name is still one
-symbol, `require--find` already path-joins the stem (`gui/window.blsp` resolves
+symbol, `%require-find` already path-joins the stem (`gui/window.blsp` resolves
 in a nested dir), and `qualify_name` formats `{ns}/{name}` regardless of how many
 segments `ns` has. So resolution, `(:use gui/window)` imports, the cross-process
 re-intern, and `nest check` all carry over unchanged.
@@ -281,9 +281,11 @@ Everything LSP Tier 2 wants is blocked by flatness and unlocked by namespaces,
   caller's `tmp`). Pre-existing, *independent* of namespaces. **DONE** — solved by
   Clojure-style **auto-gensym `x#`** (ADR-066): a literal template symbol ending in
   `#` becomes a fresh, per-expansion-consistent gensym, so the binder is
-  uncapturable both directions without a manual `(gensym)`. Landed ahead of
+  uncapturable both directions without a manual `(reflect/gensym)`. Landed ahead of
   namespacing so it's not entangled with it; the advisory hygiene lint
-  (`types/check/hygiene.rs`) now treats a `#`-binder as safe.
+  (`types/check/hygiene.rs`) now treats a `#`-binder as safe. A template's own binders are
+  now renamed without the `#`, at every binding site of the pattern grammar and in the
+  standard binding macros (ADR-500); `x#` stays for a macro author's own binding macro.
 - **Concern #1 — free-reference transparency** (a template's `helper` / `map`
   resolving to the *definition* site's binding, not the use site's). This is the
   one namespacing creates, and it's the open question below.
@@ -295,11 +297,11 @@ Binding capture (#2) is handled (auto-gensym, above). The remaining hazard was t
 use-site expand-time rewriting that breaks across namespaces:
 
 ```clojure fragment
-(ns a)
+(defmodule a)
 (defn helper (x) ...)
 (defmacro m (x) `(helper ~x))   ; emits bare (helper …)
 
-(ns b (:use a))
+(defmodule b (:use a))
 (m 5)   ; output (helper 5) — resolved in b → b/helper?! wrong / unbound.
 ```
 
@@ -452,7 +454,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
 > file loads and `nest check`, but is explicitly not the general mechanism.
 >
 > **Update (ADR-227 follow-up, 2026-08-14):** a **qualified** `mod/name` reference now DOES
-> auto-infer `(require 'mod)` (`crates/lisp/src/eval/derive.rs`) — a narrow, analyzable form
+> auto-infer `(require-one 'mod)` (`crates/lisp/src/eval/derive.rs`) — a narrow, analyzable form
 > of reference-driven load: the module is *named at the reference*, so the dependency stays
 > explicit and statically visible, and it only ever loads code already on the load-path (never
 > fetches). Bare-name autoload — an *unqualified* `foo` conjuring its owning module — remains
@@ -465,9 +467,9 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
   (`std/tool/test.blsp`), `cond`, `when`, … — stay root. Which std *macros* earn a
   root home vs. a prefix is a per-name call.
 - **`defmodule` *is* the namespace form** (inc-3 dropped `ns`). It takes name +
-  optional docstring and understands exactly four header clauses — `(:use …)` (with
-  `:only`/`:exclude`), `(:use-internals …)`, `(:alias … :as …)`, and `(:implements …)` —
-  anything else is a hard error. (The migration-era `:export` clause was never built;
+  optional docstring and understands exactly six header clauses — `(:use …)` (with
+  `:only`/`:exclude`), `(:use-internals …)`, `(:alias … :as …)`, `(:load …)`, `(:shadow …)`
+  and `(:implements …)` — anything else is a hard error. (The migration-era `:export` clause was never built;
   visibility is def-site privacy, `defn-`/`def-`, ADR-146.) `provide`/`require`/
   `*load-path*`/`*features*` are the loader underneath — not replaced.
 - **std modules** get namespaced gradually; **package/user code** is namespaced
@@ -486,7 +488,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
    in the `ns` header; a per-file `imports` table on the `Heap` (bare → qualified)
    the resolver consults after the current namespace, before root; `%refer`
    enumerates a module's public (non-private) names or a subset; `:use` emits a
-   `(require …)` so it auto-loads (loads-but-never-fetches, §9). Own-namespace defs
+   `(require-one …)` so it auto-loads (loads-but-never-fetches, §9). Own-namespace defs
    shadow imports. Tested: refer-all, subset, private excluded, own-ns precedence,
    cross-process.
 3. ✅ **Unify `defmodule` = namespace; migrate `std/` (the big-bang).**
@@ -545,7 +547,7 @@ including package-rooting (ADR-070) and LSP auto-import (ADR-206).
 
 | Language | Unit | Substrate | Privacy | Live-redefinable? | Cross-package collisions | Auto-load on bare ref? | Macro hygiene |
 |---|---|---|---|---|---|---|---|
-| **Brood** | module = namespace = file (`defmodule`) | **flat interned `u32` table; namespacing is an expand-time rewrite (no interner partition)** | **soft but *enforced*** (`defn-`/`def-` def-site privacy; cross-ns private ref is a load error; `:use-internals` grant) | **yes** (`def` rebinds globals; hot reload) | **impossible — package-rooted** (`foo/b`); detect-and-reject was the interim | **no** — rejected (ADR-206); LSP auto-import instead | **auto** (auto-gensym `x#` + auto-qualifying quasiquote) |
+| **Brood** | module = namespace = file (`defmodule`) | **flat interned `u32` table; namespacing is an expand-time rewrite (no interner partition)** | **soft but *enforced*** (`defn-`/`def-` def-site privacy; cross-ns private ref is a load error; `:use-internals` grant) | **yes** (`def` rebinds globals; hot reload) | **impossible — package-rooted** (`foo/b`); detect-and-reject was the interim | **no** — rejected (ADR-206); LSP auto-import instead | **auto** (template binders renamed per expansion, ADR-500; auto-gensym `x#`; auto-qualifying quasiquote) |
 | Clojure | namespace maps symbols→vars | var indirection per ns | soft (`^:private`; `#'ns/sym` bypasses) | yes (REPL) | convention only (reverse-domain `com.foo.parser`) | no (unloaded `foo/bar` errors) | auto (syntax-quote qualifies + `x#`) |
 | Common Lisp | package partitions the interner | interner partition (`pkg:sym`/`pkg::sym`) | soft (`::` reaches internals) | yes | no real answer (flat package names) | no | none (manual `gensym`) |
 | Racket | module, statically linked | static module system | **hard** (unexported invisible) | **no** (sealed) | collections / pkgs | no | full (`syntax-rules`/`syntax-case`) |

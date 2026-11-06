@@ -15,26 +15,24 @@ Brood code, fetch these three resources in order:
 - Loops are tail recursion or processes (`spawn`/`receive`/`send`). No
   `while`, no `set!`.
 - Truthiness: only `nil` and `false` are falsy.
-- Modules: `(provide 'foo)` + `(require 'foo)`; symbols are interned,
-  compare with `=`.
+- Modules: `(defmodule foo …)` in the file, `(:use foo)` or qualified
+  `foo/bar` to reach it; symbols are interned, compare with `=`.
 - **Errors are structured.** A `(try … (catch e …))` on a kernel error
   rebinds `e` to a map: `{:kind :unbound :code "E0010" :message "…"
   :file … :line … :col …}`. Branch on `:kind` (`:parse` / `:unbound` /
   `:arity` / `:type` / `:runtime`) or the stable `:code` (the full list
-  is at `brood://docs/error-codes`). User throws (`(throw v)`) keep
-  `(catch e e) → v` — only kernel errors get the wrapper.
+  is at `brood://docs/error-codes`); `(catch {:kind :type} …)` catches one
+  kind. User throws (`(throw v)`) keep `(catch e e) → v` — only kernel
+  errors get the wrapper.
 
 **MCP tools (use these to interact with the live image)**
 - `eval` — try expressions. State (a `def`, a `spawn`) persists between
-  calls. Avoid `(println …)` inside an eval for now — `print` writes to
-  the dispatcher's stdout and corrupts the JSON-RPC stream; return data
-  via the `:value` field instead. (A `:stdout` field is on the roadmap
-  once the `*out*` dynvar work lands.)
-- `lookup` — `:arglist` + `:doc` + `:source-location` for a name. No
+  calls. Printed output comes back as a second `[captured stdout]` content
+  block, after the `:value`.
+- `lookup` — arglist, docstring, type and source location for a name. No
   quote: `{:name "map"}`.
 - `macroexpand` — see what a macro lowers to. Useful for `when-let`,
-  `cond`, `match`, and anything from `hatch` (`defserver`, `cast`, `!`,
-  `gen-call`).
+  `cond`, `match`, and `gen`'s `defserver`.
 - `format` — reformat source idempotently.
 - `load` — load a `.blsp` file into the live image.
 - `check` — advisory type-check; structured diagnostics back.

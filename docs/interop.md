@@ -3,12 +3,12 @@
 > **Status:** design note (2026-05-30); **slice 1 implemented 2026-07-22
 > (ADR-145)** — the embedded `wasmtime` host (feature `wasm`, default-on),
 > the `%wasm-load`/`%wasm-call`/`%wasm-exports`/`%wasm-close` primitives with
-> WIT-typed marshalling and fuel metering, `std/wasm.blsp` (`wasm-load`,
-> `wasm-call`, `wasm-call-blocking` via the ADR-144 offload pool,
-> `use-native`), and the `:unbound` checker category for runtime-defined
+> WIT-typed marshalling and fuel metering, `std/wasm.blsp` (`wasm/load`,
+> `wasm/call`, `wasm/call-blocking` via the ADR-144 offload pool,
+> `wasm/use-native`), and the `:unbound` checker category for runtime-defined
 > bindings. **Slice 2 (bytes marshalling) landed 2026-07-24:** a `list<u8>`
 > parameter accepts a Brood `bytes` value directly and a non-empty `list<u8>`
-> result lifts back to `bytes` (copy-based; `wasm.rs` `lower`/`lift`) — so the
+> result lifts back to `bytes` (copy-based; `host/wasm.rs` `lower`/`lift`) — so the
 > byte-oriented extensions (hash/compress/codec/parse) round-trip binary data.
 > **Slice 3 (ADR-453, 2026-10-26):** WASI preview 2 by grant (`:dirs`, `:env`, `:args`,
 > `:stdio`; clocks and randomness with any grants; never the network), interface exports,
@@ -148,16 +148,14 @@ instances slot into the existing one.
 
 ## Scheduling: a WASM call never pins a worker
 
-A guest call is synchronous and CPU-bound — left alone it would hold its worker
-(the scheduler pins each process to one worker, no migration). It routes through
-the existing blocking story:
+A guest call is synchronous and CPU-bound — left alone it would hold its worker for
+the whole call. It routes through the existing blocking story:
 
 - **Short, bounded calls** run inline with a **fuel cap**; exceeding it traps to
   a catchable Brood error (an extension can't wedge the scheduler).
-- **Long calls** run on the **Phase-3 blocking offload pool** — `(blocking (fn
-  () (ext/parse …)))` runs the guest off the worker pool, fuel-metered, and
-  **delivers the result to the caller's mailbox**; the process parks in
-  `receive`. Same deliver-to-mailbox principle as TCP (ADR-062), GUI input
+- **Long calls** run on the **ADR-144 offload pool** — `(wasm/call-blocking inst
+  "parse" …)`, over `proc/offload`, runs the guest off the worker pool, fuel-metered,
+  and the process parks until the result comes back. Same deliver-to-mailbox principle as TCP (ADR-062), GUI input
   (ADR-059), and dist. Thousands of processes can each be mid-extension-call
   without starving the pool.
 
@@ -257,42 +255,42 @@ each NIF as a stub the loader replaces. Brood mirrors this:
   **WIT interface** — the typed contract (the Component Model's role, replacing
   Rustler's `init!` registration). In Rust that's a `#[component]` exporting the
   `world` declared in the package's `.wit`.
-- **Brood side (the wrapper module).** A macro — `use-native` — is the `use
-  Rustler` analog. Given the package's component handle + its WIT interface, it
-  binds **every exported function as a Brood function in the namespace**,
+- **Brood side (the wrapper module).** `wasm/use-native` is the `use
+  Rustler` analog. Given an instantiated component, it
+  binds **every exported function as a Brood function**,
   marshalling args/results across the boundary, so callers see ordinary Brood
   functions:
 
   ```lisp fragment
-  (ns fastjson)
+  (defmodule fastjson)
   ;; binds `parse`, `stringify`, … from the instantiated component as
-  ;; namespace functions — the `use Rustler` moment, but driven by the WIT.
-  (use-native 'fastjson)
+  ;; functions — the `use Rustler` moment, but driven by the WIT.
+  (wasm/use-native (wasm/load "native/fastjson.wasm"))
 
   ;; consumers just:
-  (require 'fastjson)
   (fastjson/parse "{\"a\":1}")        ; => {:a 1}  — a normal Brood call
   ```
 
 The wrapper is the right place for *policy* (ADR-006): validate/shape inputs,
 provide idiomatic defaults, wrap opaque guest resources in a Brood API — the same
-role `std/net/tcp.blsp` plays over the net primitives. `use-native` itself is a thin
-macro over the `%wasm-*` primitives below; the WIT interface is what lets it
+role `std/net/tcp.blsp` plays over the net primitives. `wasm/use-native` itself is a thin
+function over the `%wasm-*` primitives below; the WIT interface is what lets it
 generate the bindings instead of the author hand-writing a stub per function (the
 advantage over Rustler's manual stub list).
 
-## Kernel surface (small, à la ADR-037's `%git-clone`/`%sha256`)
+## Kernel surface (small, à la ADR-037's `%git-clone`/`%digest`)
 
 Mechanism in Rust; everything else in Brood.
 
-- Embed `wasmtime` (component model) in the `brood` lib crate.
-- `%wasm-instantiate path caps → handle` — load + instantiate a component with a
-  capability set; returns an opaque resource handle.
-- `%wasm-call handle export args → value` — marshal `Message ↔ WIT`, fuel-capped.
-- `%wasm-build src target toolchain → path` — drive the declared toolchain on
-  fetch (shells out, like `%git-clone` shells out to `git`). May just be Brood
-  over a generic subprocess primitive rather than a dedicated one.
-- Resource-drop wiring so a dropped Brood handle runs the guest destructor.
+- Embed `wasmtime` (component model) in the `brood` lib crate (`host/wasm.rs`).
+- `%wasm-load` — load + instantiate a component with a set of grants; returns an
+  opaque handle. `%wasm-exports`, `%wasm-close`.
+- `%wasm-call handle export args → value` — marshal by the export's WIT types,
+  fuel-capped.
+- `%wasm-release` — drop a guest `resource` by its token.
+- Not built, with the `:native` work: `%wasm-build src target toolchain → path`, to
+  drive the declared toolchain on fetch. It may just be Brood over a generic subprocess
+  primitive rather than a dedicated one.
 
 Manifest `:native` parsing, build orchestration, lock-file fields, cache layout,
 capability grants, and each package's wrapper API — **all Brood**
@@ -343,7 +341,6 @@ ADR-037 (packages — the manifest/lock/cache this extends, and the "no install
 scripts" line this reframes), ADR-041 (blob heap — large byte payloads),
 ADR-045 (opaque immutable resource handle — the rope precedent for the WASM
 handle), ADR-043 (resource backstops — fuel/epoch), ADR-059/062
-(deliver-to-mailbox; the offload pool a long guest call
-uses), ADR-054/055 (moving/generational GC — why the boundary marshals), ADR-006
+(deliver-to-mailbox), ADR-144 (the offload pool a long guest call uses), ADR-054/055 (moving/generational GC — why the boundary marshals), ADR-006
 (write the language in the language — wrapper + policy in Brood), `CLAUDE.md`
 (runtime-crate rule; "mutable state = a process or an opaque handle").

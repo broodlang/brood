@@ -1,14 +1,16 @@
 # Brood types — set-theoretic, gradual, advisory
 
-**Status:** steps 0–4 done; Step 5+ well underway (ADR-078) — function **arrow**
+**Status:** steps 0–4 done; Step 5+ shipped (ADR-078 onward) — function **arrow**
 types, sequence **element** types, **parametric HOF results**
 (`map`/`filter`/`reduce`/`fold` flow element types through), **`(and …)`
 intersections**, **`(map K V)` key/value contracts** (runtime + checker
 refinements for `get`/`keys`/`vals`/`assoc`), and **`?A` type variable
 unification** (user-declared sigs: `SigTerm`/`SigWithVars` resolve return
-types per-call from arg types) all shipped. The
+types per-call from arg types) all shipped. Declarations can be written inline as typed
+parameters (ADR-420) and are runtime contracts under `nest run`/`nest test` (ADR-381). The
 advisory checker (`(check 'form)`)
-is the lattice's first consumer (`crates/lisp/src/types/{mod,check}.rs`). This doc is the
+is the lattice's first consumer (`crates/lisp/src/types.rs`, `crates/lisp/src/types/check.rs`).
+[`type-system-status.md`](type-system-status.md) has the current inventory. This doc is the
 plan *and* the compatibility contract: the staircase says what to build next, the
 [Compatibility contract](#compatibility-contract) says what every other change
 must respect so we never drift off this path. Decision recorded in
@@ -44,10 +46,10 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
 | negation ("not nil") | `¬` | `Ty::negate` (complement) |
 | **subtyping** | `⊆` inclusion | `Ty::is_subtype` — *semantic*, no syntactic rules |
 
-- **Atoms** are the runtime [`Tag`](../crates/lisp/src/core/value.rs)s — 23 today
+- **Atoms** are the runtime [`Tag`](../crates/lisp/src/core/value.rs)s — 25 today
   (`nil bool int float symbol keyword string pair vector fn macro native map ref
-  pid rope socket subprocess table bytes decimal set ratio`); the list has grown
-  since this doc was written, so treat `Tag` itself as the authority. The type
+  pid rope socket subprocess table bytes decimal set ratio failure record`); treat
+  `Tag` itself as the authority. The type
   universe is built from these; `type-of` observes one at runtime. Function members can additionally carry a structured *arrow*
   refinement (Step 5+, ADR-078).
 - `Ty::NEVER` = `⊥` (empty set, subtype of everything); `Ty::ANY` = `⊤` (all
@@ -96,6 +98,12 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   intersection alike — and a tagged union becomes usable: `{ok: int}` asserts `:error`
   is absent, so a field read through `{ok: int} | {error: string}` resolves, and the
   two alternatives are provably disjoint.
+- **A `defrecord` value has its own tag** (ADR-542). A nominal record is `record`, not `map`:
+  the shape rules run over both tags (`SHAPE_BITS`) and the `map<K, V>` rules over `map`
+  alone, so a record is no `(map K V)`. Its identity stays a checker-internal `__id__` slot
+  in the shape, which no runtime operation sees. `record?` narrows both branches, and a
+  keyword-keyed `assoc`/`update` keeps its receiver's kind. A parameter read only by keyword
+  is the unknown keyed value, `map | record`, which `--strict` reads by overlap.
 - **A known failure is its own atom** (ADR-310). `failure` is a tag, so a function that
   can fail on its input has the plain union `(or number failure)` — no parametric
   `(result T)`, which is what sank the tagged-tuple design. Write it in a sig the same way:
@@ -185,16 +193,16 @@ one-step-deep inferencer** that now covers control-flow, recursion, and complex 
   `Sig::any()` lane (`(...any) -> any`) — overlaps every input, so the
   disjointness checker never warns against it.
   Example sigs: `%add: (number,number)→number`, `first: (list|vector)→any`,
-  `string-length: (string)→int`, `string->number: (string)→number|nil`.
-- ✅ **Curated stdlib** — a small hand-written table for the variadic /
-  `reduce`-based / branchy / higher-order Brood closures the checker can't infer
-  but that matter: `+ - * / < <= > >= mod`, `map`, `filter`, `reduce`, `fold`,
-  plus common helpers with branchy or nested-param bodies — `even? odd? abs`
-  (numeric), `not zero?` (any → bool, for the result type), `count length`
-  (string|map|seq → int). Hand-vetted against `std/prelude/*.blsp`, so sound; the
-  domains are kept to the widest type the body accepts so a tighter sig never
-  false-positives. This is what makes `(+ 1 "x")` and `(even? "x")` catchable
-  even though both are plain Brood closures.
+  `string/length: (string)→int`, `string/->number: (string &optional int)→number|failure`.
+- ✅ **Curated stdlib** — a small hand-written table (`CURATED_SIGS` in
+  `check/sigs.rs`) for the variadic / `reduce`-based / branchy / higher-order Brood
+  closures the checker can't infer but that matter: the arithmetic and comparison
+  operators, `map`, `seq/filter`, `reduce`, `fold`, plus common helpers — `not`,
+  `math/zero?` (any → bool, for the result type), `count` (countable → int). Hand-vetted
+  against `std/`, so sound; the domains are kept to the widest type the body accepts so a
+  tighter sig never false-positives. This is what makes `(+ 1 "x")` catchable even though
+  `+` is a plain Brood closure. A declaration in `std/` (`sig` or typed parameters) covers
+  the rest: `(math/even? "x")` is caught from `(defn even? (n:int -> bool) …)`.
 - ✅ **Inference** (`check::infer_sig`) — signatures for a plain (non-macro) closure,
   split into a **parameter** side and a **return** side, each independently sound:
   - **Parameters** come from *unconditional* type demands across the body (the
@@ -246,9 +254,9 @@ its default value.
 > type, so pinning it to its current value's type would false-positive. The
 > convention informs the checker; it does not decide where the name lives.
 
-**Deferred (⬜):** parameter demands from *conditional* positions (needs full
-occurrence typing to stay false-positive-clean); inference through recursion /
-higher-order.
+**Since shipped:** the tier above is what ADR-261 replaced. A parameter's type is now its
+*domain*: a guarded use is credited within its guard and the alternatives union. Inference
+through recursion and call-site specialization followed (ADR-340, ADR-341).
 
 ### Step 4 — the advisory checker 🟡 (v0 shipped; plan below)
 `crates/lisp/src/types/check.rs`: walk a macro-expanded form and **warn when a
@@ -262,9 +270,8 @@ never a false positive.
   `None` (a variable, an unknown call) → stay silent. The gradual machinery
   isn't needed until we check *assignments*; the disjointness checker doesn't, so
   it stays out of the hot path.
-- **Skip inside `try` / `error-of` / `assert-error`** — those forms deliberately
-  exercise failures, so don't flag code within them (keeps `nest test` quiet on
-  error-path tests).
+- **`try` bodies are checked** (KI-67). They were once skipped; a test that provokes an
+  error on purpose now says so with `check-allow`.
 - **Advisory, always** — returns warnings; never raises, never gates (contract #5).
 - ✅ **v0 shipped:** the `(check 'form)` builtin + `brood --check <file>`
   (located warnings).
@@ -282,8 +289,8 @@ never a false positive.
   intersecting (otherwise the outer leaks through the shadow).
 - ✅ **Path narrowing (occurrence typing through a `(get base :key)` access).**
   A type-predicate guard over a record-field path narrows the *path*, not just a
-  bare variable: `(if (int? (get r :age)) (string-length (get r :age)) …)` types
-  `(get r :age)` as `int` in the then-branch, catching the `string-length`
+  bare variable: `(if (int? (get r :age)) (string/length (get r :age)) …)` types
+  `(get r :age)` as `int` in the then-branch, catching the `string/length`
   misuse (`¬int` in the else-branch, for a biconditional predicate). Sound under
   immutability — `r` and the pure `get` can't change between the guard and the
   use. `Ctx` carries `path_types: (base, [keys…]) → Ty` (`narrow_path`/`path_ty`),
@@ -391,25 +398,13 @@ never a false positive.
   g b g))`); `match` through the new let-binding alias + `%eq` guard. The
   whole Step-4 surface is behavioural now — every form a user reaches for
   on a guarded variable narrows it.
-- ✅ **Macro-hygiene lint** (`check/hygiene.rs`). Macros are unhygienic by
-  default (ADR-021/no auto-rename), so a `defmacro` template that introduces a
-  binder with a *literal* symbol can **capture** caller code spliced into that
-  binder's scope — the `(defmacro time (expr) ` `` `(let (start (now) v ~expr) …)) `` ``
-  bug, where the body's `start` binds to the clock instead of the caller's.
-  The lint warns only when **both** hold for a `let`/`fn` binder inside a
-  quasiquote template: (1) the binder is a literal symbol — a gensym'd binder
-  reads as `(unquote g)` and an unquoted caller-name as `(unquote evar)`, so
-  neither trips it; and (2) a macro *parameter* is spliced (`~p`/`~@p`) into
-  that binder's scope (Brood `let` is sequential, so the scope is the body plus
-  *later* bindings' values — not the binder's own value). Both conditions are
-  syntactic, so this is the one pass that runs over the **un-expanded** forms
-  (templates vanish after expansion). Audited over the whole `std/` tree: every
-  macro there gensyms or unquotes its binders, so the lint fires **zero** false
-  positives (contract #5 holds — advisory, never gates). An intentional
-  anaphoric macro (deliberate capture) would be flagged; none exist in-tree, and
-  if one is written the lint should grow an opt-out rather than relax the gate.
+- **Macro-hygiene lint — retired 2026-07-30.** The checker used to warn when a
+  `defmacro` template's literal binder could capture spliced caller code. Binding hygiene
+  is now the default (`eval/macros/hygiene.rs`, ADR-066 amendment, ADR-500): a template's
+  own binders are alpha-renamed at expansion, so the capture this lint looked for can't
+  happen, and `check/hygiene.rs` is gone.
 - ✅ **Ability / behaviour conformance** (`check/protocol.rs`). The *macros* live in
-  `std/ability.blsp` (`(require 'ability)`, ADR-168) and `std/protocol.blsp`
+  the prelude (`std/prelude/abilities.blsp`, ADR-168) and `std/protocol.blsp`
   (`defbehaviour`, ADR-158); this pass predated both by months, back when they were a
   prototype in the `hatch` package. Beyond type misuse, the checker validates the
   `defability` / `impl` / `defbehaviour` / `(:implements …)` family against the
@@ -433,13 +428,13 @@ never a false positive.
   no argument is soundly rejectable on the type; the safety falls to the op call site below.
 - ✅ **Missing-impl warning at ability call sites** (`check/protocol.rs`,
   `check_ability_calls`). Where the checker can determine an argument's dispatch
-  identity *statically* — a literal's `type-of` kind, a direct `defrecord*`
+  identity *statically* — a literal's `type-of` kind, a direct `defrecord`
   constructor call, or a record-typed variable via `expr_ty` — it warns when no impl
   and no `:default` covers it. Kept sound rather than aggressive: an op fn is
-  recognised only by its exact def symbol (fingerprinted by a qualified
-  `ability/impl-for` in its body), an identity is taken only when certain, and the
+  recognised only by its exact def symbol (fingerprinted by the
+  `%dispatch` head in its body), an identity is taken only when certain, and the
   impl set unions this file's `register-impl` forms with the runtime
-  `ability/*impls*` registry so cross-file impls count. Stack-guarded for deep forms.
+  `*impls*` registry so cross-file impls count. Stack-guarded for deep forms.
 - ✅ **Non-tail self-recursion lint** (`check/recursion.rs`). A `defn`, or a `fn` a
   `letrec` binds (since 2026-11-03), whose self-call sits in a non-tail position is flagged — deep non-tail recursion
   exhausts the small green-process stack. Since 2026-06-29 that is a **clean,
@@ -460,24 +455,30 @@ never a false positive.
   that the checker reads, then thrown away at runtime (a pure no-op yielding the
   wrapped body). Categories: `:non-tail-recursion` (skips the subtree in
   `recursion.rs`) and `:unreachable-clause` (threads a `SUPPRESS_*` bit through the
-  `Ctx` so `check_if`'s redundancy lint declines). An unrecognised category
+  `Ctx` so `check_if`'s redundancy lint declines). More categories followed;
+  [`type-annotations.md`](type-annotations.md) lists them all. An unrecognised category
   suppresses nothing (a typo never becomes a silent blanket opt-out). This is what
   keeps `nest check` at **zero** warnings project-wide without weakening a correct
-  lint. See [`type-annotations.md`](type-annotations.md).
-- ✅ **Dead-clause lint** (`walk::newly_dead_sig_param`). When a `(sig …)` pins a
-  parameter's type, a `match` / `cond` clause whose guard narrows that parameter
-  to the empty type (`NEVER`) is provably unreachable and flagged. Sound because
-  it only fires on a *declared* sig type intersected to `⊥` — never on an inferred
-  or unknown type.
+  lint.
+- ✅ **Dead-clause lint** (`Ctx::newly_dead_binding`). When a `(sig …)` pins a
+  parameter's type, or a surface `let`-local has a precise type (ADR-131), a `match` /
+  `cond` clause whose guard narrows that binding to the empty type (`NEVER`) is provably
+  unreachable and flagged. Sound because it only fires on a declared or precise type
+  intersected to `⊥` — never on an unknown one.
+- ✅ **`defmulti` that is single dispatch** (ADR-523). A `defmulti` this file declares
+  whose methods all agree past the first position is single dispatch without an ability's
+  provided ops, so it is reported. `(check-allow :single-dispatch …)` opts out.
+- ✅ **List truthiness** (ADR-620, `check_if`). A truthiness test whose type admits an
+  empty list (`pair` and `nil`) and a vector, map, set or string answers by kind when the
+  value is empty, so it is reported. `(check-allow :list-truthiness …)` opts out.
 
 With everything above, Step 4 is **done**, including the operand-position
 unbound check and a single unified `nest check` path (whole-project *and*
 file-list checks both load the project image first via Brood `project-check/check-files`
 / `check-project`, so cross-namespace imports resolve identically — no second
-code path). The only meaningful next move is the upgrade to Step 5+ (structured
-types) when a real need surfaces.
+code path).
 
-### Step 5+ — structured types 🟡 (arrows + element types shipped; ADR-078)
+### Step 5+ — structured types ✅ (ADR-078 onward)
 Function arrows, vector/list element types, intersections for overloaded fns —
 the fuller set-theoretic algebra. Additive; gated on real need (ADR-011).
 
@@ -485,7 +486,8 @@ the fuller set-theoretic algebra. Additive; gated on real need (ADR-011).
 `{ tags: u32, arrow: Option<Arc<Sig>> }`: the flat tag bitset stays the coarse set
 (the whole pre-Step-5 behaviour, verbatim), and `arrow` refines the function members
 (`Fn`/`Native`) to a specific signature when known — an arrow type *is* a [`Sig`].
-So `(int) -> int` is `{tags: Fn|Native, arrow: Some((int)->int)}`; a bare "any
+(Sketched here with one refinement; `Ty` has grown more slots since — see
+`crates/lisp/src/types.rs`.) So `(int) -> int` is `{tags: Fn|Native, arrow: Some((int)->int)}`; a bare "any
 function" is the same tags with `arrow: None`. This **refines** the bitset rather
 than *replacing* it with the originally-sketched `enum { Set, Arrow, Vec }` — a
 union across kinds (`int ∪ (string -> int)`) is then just the tag union plus a
@@ -493,10 +495,10 @@ per-kind refinement, sidestepping the DNF-of-frames an enum would force (the
 expensive part ADR-011 says to defer). Arrow subtyping is contravariant in
 parameters / covariant in the result (`Sig::is_subtype`); the set ops only ever
 *widen* a refinement toward `None` when they can't represent the exact result, and
-`is_disjoint` ignores arrows entirely — so a refinement can only suppress a warning,
-never raise a false one (contract #5). **The payoff:** `map`/`filter` carry a 1-ary
+`is_disjoint` ignored arrows at this slice — so a refinement could only suppress a
+warning, never raise a false one (contract #5). **The payoff:** `map`/`filter` carry a 1-ary
 callback arrow and `reduce`/`fold` a 2-ary one, so the checker flags a callback of
-the wrong arity — `(map cons xs)`, `(reduce (fn (a) a) 0 xs)` — whenever the
+the wrong arity — `(map xs cons)`, `(reduce xs 0 (fn (a) a))` — whenever the
 callback's arity is knowable (a named global fn, or a simple lambda literal);
 unknown arities are skipped, so zero false positives across `std/` + `tests/`.
 
@@ -508,61 +510,65 @@ element types (any unknown element → unrefined). Sinks: `(first xs)`/`(last xs
 `(nth xs i)` flow the element type out (widened with `nil` for the empty/out-of-range
 case), so `(+ 1 (first ["a" "b"]))` is flagged (`string | nil` is disjoint from
 `number`) while `(first [1 2 3])` stays a number. Element subtyping is covariant
-(sound — Brood sequences are immutable); union widens on a mismatch; `is_disjoint`
-stays tags-only. Surfacing precise sequence types exposed a latent guarded-use gap —
-the `match` compiler's vector-pattern lowering `(if (and (vector? m) …) (… (vector-ref
+(sound — Brood sequences are immutable); union widens on a mismatch (since ADR-262 it keeps
+both terms); `is_disjoint` was tags-only at this slice. Surfacing precise sequence types exposed a latent guarded-use gap —
+the `match` compiler's vector-pattern lowering `(if (and (vector? m) …) (… (%vector-ref
 m i) …) …)` — so `guard_assertion` now narrows through the **`and` short-circuit
 shape** `(let (g E) (if g _ g))` (the first conjunct holds in the then-branch; `or`'s
-`(if g g _)` deliberately does not), which keeps the guarded `vector-ref` quiet. Zero
+`(if g g _)` deliberately does not), which keeps the guarded `%vector-ref` quiet. Zero
 new false positives across `std/` + `tests/`. A set carries the same refinement — `#{1 2}` is `set<1 | 2>`, `#{}` is
 `set<never>`, `conj`/`into` onto a set keep it, and `(set T)` names one in a `sig`.
 
-**✅ Parametric HOF results (third slice).** `map`/`filter` results now carry an
-element type derived from their arguments — `(map f vector<A>) : nil | list<B>`
+**✅ Parametric HOF results (third slice).** `map`/`seq/filter` results now carry an
+element type derived from their arguments — `(map vector<A> f) : nil | list<B>`
 where `B` is the callback's return (a named fn's sig result, or a straight-line
-lambda's body typed with its parameter bound to `A`), and `(filter pred coll)`
+lambda's body typed with its parameter bound to `A`), and `(seq/filter coll pred)`
 preserves `coll`'s element type, and `reduce`/`fold` give an accumulator typed
 `ty(init) | B` (`B` = the 2-arg callback's return, accumulator over-approximated as
 `any`). Done as **per-HOF result rules** in `seq_aware_call_ty` (Option B — no
 lattice change, the same place `first`/`list` derive a refined result), not type
-variables. So `(first (map inc [1 2 3])) : number | nil` and `(reduce + 0 [1 2 3]) :
+variables. So `(first (map [1 2 3] inc)) : number | nil` and `(reduce [1 2 3] 0 +) :
 number` flow through. Uncertain callback / element → flat fallback (sound;
 `is_disjoint` stays tags-only). See [`parametric-result-types.md`](parametric-result-types.md).
 
 **✅ Structural combinators (fourth slice).** Element types now flow through
-`reverse`, `sort`, `sort-by`, `take`, `drop`, `take-while`, `drop-while`, `cons`,
-`append`, and `concat` — the structural combinators that reshape a sequence without
-transforming its elements. `(reverse vector<int>) : nil | list<int>`, `(take 2
-list<string>) : nil | list<string>`, `(cons 1 list<int>) : list<int>` and so on.
-`sort`/`sort-by` treat the sequence as the FIRST argument (both 1-arg `(sort xs)` and
+`reverse`, `sort`, `seq/sort-by`, `take`, `drop`, `seq/take-while`, `seq/drop-while`,
+`cons`, and `append` — the structural combinators that reshape a sequence without
+transforming its elements. `(reverse vector<int>) : nil | list<int>`, `(take
+list<string> 2) : nil | list<string>`, `(cons 1 list<int>) : list<int>` and so on.
+`sort`/`seq/sort-by` treat the sequence as the FIRST argument (both 1-arg `(sort xs)` and
 2-arg `(sort xs f)` forms — ADR-308). `cons` requires both the head type *and* the tail element
-type to be known (either unknown → unrefined `pair`). `append`/`concat` union the
+type to be known (either unknown → unrefined `pair`). `append` unions the
 element types of all arguments; any argument with an unknown element type → flat
 fallback. Zero new false positives across `std/` + `tests/`.
 
 **✅ Structural combinators (fifth slice).** The element-type flow was extended to
 the rest of the element-preserving / element-extracting sequence library:
-`second`/`third` (extract — `A | nil`, like `first`); `rest`/`but-last`/`distinct`/
-`dedupe`/`take-last`/`drop-last`/`remove` (preserve — `nil | list<A>`, like
-`reverse`/`take`); `keep` (`map`-then-drop-`nil` — `nil | list<B>`, like `map`);
-`interpose` (`nil | list<A | type(sep)>`, weaving the separator in); and `range`
+`second`/`third` (extract — `A | nil`, like `first`); `rest` and
+`seq/but-last`/`seq/distinct`/`seq/dedupe`/`seq/take-last`/`seq/drop-last`/`seq/reject`
+(preserve — `nil | list<A>`, like `reverse`/`take`); `seq/keep` (`map`-then-drop-`nil` —
+`nil | list<B>`, like `map`); `seq/interpose` (`nil | list<A | type(sep)>`, weaving the
+separator in); and `range`
 (`nil | list<number>` — always numeric, a sound superset over int/float bounds).
-So `(+ 1 (first (rest ["a" "b"])))` and `(string-length (first (range 5)))` are now
+So `(+ 1 (first (rest ["a" "b"])))` and `(string/length (first (range 5)))` are now
 flagged. Each rule yields the *exact* element type or a sound superset, and
-`is_disjoint` still ignores element refinements, so the additions can only sharpen a
-result — never raise a false positive. Zero new across `std/` + `tests/`.
+`is_disjoint` ignored element refinements at this slice, so the additions could only sharpen
+a result — never raise a false positive. Zero new across `std/` + `tests/`.
 
-**All previously-deferred items shipped (ADR-011).**
+**All previously-deferred items shipped (ADR-011).** The list below is the state at each
+item's landing; later ADRs refined several (see
+[`type-system-status.md`](type-system-status.md)).
 
 - ✅ **Expanded curated sigs** — shipped: predicate group (`number?`/`empty?`/`list?`/
   `contains?`/`includes?`/`any?`/`every?` → `bool`) and string-converter group
   (`string/join`/`string/capitalize`/`string/split` → `string`/`list`).
-  Catches `(+ 1 (number? x))`, `(+ 1 (join …))`, etc.
+  Catches `(+ 1 (number? x))`, `(+ 1 (string/join …))`, etc.
 - ✅ **Rest/variadic in `(sig …)` annotations** — shipped: `(sig f (int & number -> int))`
   wires `Sig::rest` and the `sig!` macro generates a rest-checking wrapper.
 - ✅ **`sig!` runtime enforcement** — shipped: `sig!` wraps the target function with a
   per-argument and per-result runtime check; `BROOD_CONTRACTS=1` enforces every
-  `(sig …)` the same way. See `docs/type-annotations.md`.
+  `(sig …)` the same way, and `nest run`/`nest test` set it by default (ADR-381). See
+  `docs/type-annotations.md`.
 - ✅ **Inference through simple let-aliases** — shipped: `infer_sig` now peels a single
   `(let (alias param) call)` wrapper via `unwrap_let_alias`, so `(defn f (x) (let (y x) (+ y 1)))`
   infers `number -> number`. Multi-binding or computed RHS lets are not peeled (sound).
@@ -576,7 +582,7 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
 - ✅ **Type variables** `?A` — fully shipped: grammar (`parse_type`), runtime
   (`type-matches?` passes unknown names), and static unification
   (`SigWithVars`/`SigTerm` in `ctx.rs`; `parse_sig_decl_with_vars` in
-  `annot.rs`; `expr_ty` resolves return types per-call from arg types).
+  `annot.rs`; `expr_ty` in `infer.rs` resolves return types per-call from arg types).
   See [`docs/type-variables.md`](type-variables.md).
 - ✅ **Record/shape types** `(record :k1 T1 :k2 T2 …)` — fully shipped:
   heterogeneous keyword-keyed map shapes with required-by-default and
@@ -585,8 +591,8 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
   boundary; `Ty` carries a full `fields` refinement with width/depth
   subtyping; `(get r :k)` on a declared or inferred record resolves to the
   exact field type; a `{…}` map literal infers its own record shape with no
-  annotation needed. Closed records and `assoc`/`keys`/`vals` field-precise
-  sinks stay deferred. See [`docs/type-records.md`](type-records.md).
+  annotation needed. Closed records and the `assoc`/`keys`/`vals` field-precise
+  sinks shipped later (ADR-264). See [`docs/type-records.md`](type-records.md).
 - ✅ **Intersection of arrows** `(and (int -> int) (bool -> bool))` — fully
   shipped: an overloaded function's return type depends on which arm's domain
   the call's argument provably matches, instead of the old "two distinct
@@ -596,7 +602,7 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
   alongside `arrow`, with width-conservative subtyping and a per-call
   resolution rule (`resolve_overload_ret`). See
   [`docs/type-arrow-intersection.md`](type-arrow-intersection.md).
-- ✅ **Literal types: keyword, int, bool, string** (ADR-105/117/119) — a bare
+- ✅ **Literal types: keyword, int, bool, string** (ADR-105/117/120) — a bare
   `:ok`/`5`/`true`/`"GET"` in type position is a literal singleton
   (independent `lit`/`lit_int`/`lit_bool`/`lit_str` refinements, each its own
   tag — any combination composes on one `Ty` with zero special-casing, e.g.
@@ -615,9 +621,9 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
   literal type (any combination of keyword/int/bool/string literals plus
   `nil`) is flagged when its clauses don't cover every member (unless a
   catch-all clause is present). No new parser or pass — recognizes the exact
-  compiled shape `match`'s no-catch-all failure already takes
-  (`(throw [:match-error …])`) in the existing macroexpanded walk. `case`
-  doesn't exist in Brood, so this is `match`-only. See
+  compiled shape `match`'s no-catch-all failure takes
+  (`(%raise (%match-error …))`, ADR-501) in the existing macroexpanded walk. `case`
+  lowers to the same `match*`, so it is covered too. See
   [`docs/type-match-exhaustiveness.md`](type-match-exhaustiveness.md).
 - ✅ **Match redundancy / unreachable-clause detection** (ADR-122) — a clause
   whose literal test duplicates one already tried earlier in the same
@@ -642,8 +648,8 @@ evaluation:
   file) pre-checks that file (`check-file`, a single-file check like `brood <file>`).
   So every run path checks first; `BROOD_NO_CHECK=1` opts out.
 - `nest test` — check the project, then run the tests.
-- **Not** in the REPL / `load` / per-form `eval` (maybe later) — so there's no
-  per-eval noise and no suppression machinery beyond the `try`/`error-of` skip.
+- The REPL reports advisory warnings on what you enter (`std/tool/repl.blsp`), and the LSP
+  publishes diagnostics. **Not** in `load` or per-form `eval`, so there's no per-eval noise.
 
 **Checking is upstream of hot reload, never part of it.** "Don't reload code we
 can already see will fail" is a property of the *workflow that orchestrates the
@@ -661,7 +667,8 @@ arbitrary body usage needs control-flow / dominance analysis to avoid false
 positives from *guarded* uses (a param used as a number only inside
 `(if (number? x) …)` doesn't make the param a number). That machinery is the bulk
 of the complexity and the only false-positive source — so parameter inference
-stays limited to the trivially-sound unconditional case.
+stayed limited to the trivially-sound unconditional case until ADR-261 built the domain
+reading on the occurrence typing the checker had by then.
 
 **Return-type inference, though, is sound without any of that** — it doesn't touch
 parameters, so the guarded-use problem can't arise, and `expr_ty` already
@@ -681,7 +688,8 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
 1. **Every value has exactly one tag.** The `Tag`s are the type atoms, and a
    tag's `#[repr(u8)]` discriminant *is* its lattice bit. A new `Value` variant
    must get a `Tag` (in `value::tag`, **enforced** — exhaustive match) and be
-   added to `types::ALL_TAGS`; `TAG_COUNT`/`UNIVERSE` then follow automatically.
+   added to `Tag::ALL`, which `types::ALL_TAGS` reads; `TAG_COUNT`/`UNIVERSE` then follow
+   automatically.
    The `tag_universe_is_consistent` test checks bits are dense and in order, so a
    tag *missing from* or *misordered in* `ALL_TAGS` fails CI (the gap a plain
    match can't catch, since Rust can't enumerate variants). Don't introduce a
@@ -754,7 +762,7 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
    is a gate that cannot fail, and the checker reads declarations *first* — so a
    dropped one silently widens the position it was meant to pin.
 13. **A new special form must be added to the reach gate.** `REACH_CASES`
-   (`types/check/tests.rs`) plants an unresolvable name in each of a form's code
+   (`types/check/tests/reach_gate.rs`) plants an unresolvable name in each of a form's code
    positions and asserts the walk reports it; a companion test requires every
    `SPECIAL_HEAD` entry to have a case, so a form added later cannot inherit
    unwatched coverage (ADR-260, the KI-67/KI-70 class).
@@ -766,19 +774,26 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
 - `crates/lisp/src/types.rs` — the `Ty` lattice (step 1), `GradualTy`
   (step 2), and `tested_by` (the guard-narrowing bridge for step 4).
 - `crates/lisp/src/types/check.rs` — the checker's entry points (`check_form`,
-  `check_file`) + the in-source test suite; the work is split across the
-  `check/` submodules:
-  - `check/walk.rs` — the recursive `check_into`, the per-special-form helpers,
-    `SPECIAL_HEAD` dispatch, the arity / unbound / callback-arity checks.
-  - `check/sigs.rs` — signature + arity sources (primitive / curated / inferred).
-  - `check/guards.rs` — guard recognition, narrowing, `expr_ty`, sequence-aware
-    result types.
+  `check_file`) and the file passes; the tests are under `check/tests/`, and the work is
+  split across the `check/` submodules:
+  - `check/walk.rs` + `check/walk/` — the recursive `check_into`, and under it `binders`
+    (the per-special-form helpers: `check_if`, `check_let`, `check_def`), `calls` (arity,
+    callback and gradual-relation checks), `shape` (`SPECIAL_HEAD` dispatch, `fn_params`),
+    `unbound` and `impls`.
+  - `check/sigs.rs` + `check/sigs/` — signature + arity sources (primitive / curated /
+    declared / inferred), `param_domains`, `specialize` (call-site re-typing) and
+    `caller_derived` (Pass 2.9).
+  - `check/infer.rs` — `expr_ty` and the sequence-aware result types.
+  - `check/guards.rs`, `check/guard_effects.rs` — guard recognition and narrowing.
   - `check/ctx.rs` — the `Ctx` threaded through the walk (narrowings, aliases,
     file-globals, `SigWithVars` type-variable unification).
   - `check/annot.rs` — `(sig …)` declaration parsing (un-expanded tree).
-  - `check/protocol.rs` — protocol / behaviour conformance.
+  - `check/protocol.rs` — ability / multimethod / behaviour conformance.
+  - `check/exhaustive.rs` — record-pattern exhaustiveness.
+  - `check/properties.rs` — `:pure` and `:total` (ADR-351).
   - `check/recursion.rs` — the non-tail self-recursion lint.
-  - `check/hygiene.rs` — the macro-hygiene capture lint.
+  - `check/discarded_catch.rs`, `check/cross_module_def.rs` — two standalone lints.
+  - `check/std_index.rs` — the signature index read from the stdlib image.
   - `check/deps.rs` — dependency capture for the incremental check cache
     (ADR-119 Phase 2).
 - `crates/lisp/src/core/value.rs` — `Tag` (the atoms), `value::tag`, `NativeFn`

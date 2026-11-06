@@ -28,6 +28,22 @@
 > survivors only, plus a rare major over old." See ADR-072 and the 2026-05-30
 > devlog entry.
 >
+> Since that banner: a vector may share its element buffer with vectors `conj`ed from it
+> (ADR-511). The buffer stays LOCAL-only and only slots past every existing vector's length
+> are written, so no value changes; an old buffer can hold a young element past the old
+> vector's length, which only the young vector reads. A table (the one mutable structure)
+> lives in a shared registry, not on a process heap, and dies with the process that created
+> it unless a global holds it (ADR-418). `proc/hibernate` is back, as an opt-in shrink rather
+> than the flush the banners below describe: it takes no function, and `Heap::hibernate`
+> collects, shrinks the slabs and drops the pure caches (`std/proc.blsp`).
+>
+> **Names in the banners below are of their date.** `arena_flip` is now the collector in
+> `core/heap/gc.rs` (`Heap::collect` → `minor_collect` / `major_collect`, tuning in
+> `gc/tuning.rs`); `Heap::flush`, `LispError::Hibernate` and `BlobHeap` are gone, and a
+> shared blob is an `Arc<SharedBlob>` (`core/blob.rs`). `Heap::checkpoint` /
+> `reset_local_to` and the `GC_BLOCK` counter are still there, the latter feeding only the
+> stack-overflow guard.
+>
 > ---
 >
 > **2026-05-30 status — the collector fires at ANY eval depth
@@ -101,9 +117,8 @@
 > the blob heap's plain `Arc` is sound — no `Weak`, no cycle collector.
 >
 > See [`devlog.md`](devlog.md) 2026-05-29 (Phase 1 + Phase 2) for the
-> narrative and rationale, and `crates/lisp/src/core/heap.rs:Heap::flush`
-> for the deep-copy details (per-slab forwarding tables; handles cycles
-> via placeholder-allocate-then-recurse).
+> narrative and rationale. (`Heap::flush`, which held the deep-copy
+> details, has since been replaced by the collector in `core/heap/gc.rs`.)
 >
 > What follows below is the **pre-2026-05-29 design** (mark-sweep + free
 > lists, with the GC-arena alternative survey). Kept as the design path —
@@ -138,9 +153,12 @@ The cheap, safe O(1) reclamation at top-level boundaries:
 - **What it does *not* solve:** a single never-returning loop (no top-level
   boundary) keeps accumulating. That's the niche the tracing GC below fills.
 
-## Implemented: per-process tracing GC (ADR-035)
+## Superseded: per-process tracing GC (ADR-035)
 
-A precise, non-moving mark-sweep that fires at the **outermost-`eval`
+*History: the copying collector replaced this mark-sweep (ADR-055), and the safepoint no
+longer gates on `GC_BLOCK` (ADR-061). See the banners at the top of this file.*
+
+A precise, non-moving mark-sweep that fired at the **outermost-`eval`
 `'tail:` safepoint** — exactly when the rooting surface is minimal and
 statically knowable.
 
@@ -306,6 +324,10 @@ Replace `Rc` with `Arc`, and `RefCell` with `Mutex`/`RwLock` so values are
   recommended.
 
 ## Decision (locked in)
+
+*As taken at the time. The evaluator has since become stepping too (ADR-100, ADR-416) and
+the mark-sweep became a generational copying collector (ADR-055/072); the isolation
+decisions below stand.*
 
 - **Approach B** — a hand-rolled per-process **arena** (handles into a slab),
   keeping the recursive evaluator; staged: reach `Send` first → multi-core

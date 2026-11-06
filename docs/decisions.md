@@ -20,7 +20,7 @@ settled questions. Newest at the bottom.
 
 ## Index
 
-The **in-force** ADRs live in six files by number, each in number order:
+The **in-force** ADRs live in seven files by number, each in number order:
 
 | ADRs | File |
 |------|------|
@@ -42,7 +42,7 @@ focused on current design — their full text (with retrospectives) lives in
 *(superseded by the tracing/copying GC)*, ADR-035 *(superseded/disabled)*,
 ADR-039 *(reverted → ADR-044)*, ADR-057 *(rejected as scoped)*. They're still
 listed (italicised) in the index below so the numbering stays complete.
-**Still proposed, not built:** ADR-071 *(WASM extensions)*. ADR-119
+ADR-071 *(WASM extensions)* is accepted and partly built (ADR-145). ADR-119
 *(incremental `nest check` cache)* has since shipped in full (Phase 1 + Phase
 2) — stale entry, corrected here rather than left to relitigate. ADR-123
 *(whole-program soundness under hot reload)* has shipped in full (ADR-124 +

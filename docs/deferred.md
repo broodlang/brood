@@ -12,9 +12,12 @@ This is a holding pen, not a backlog: items that get picked up land in
 [`decisions.md`](decisions.md). Items here can be edited, merged, or dropped
 as the situation changes.
 
+**Status 2026-11-06.** Still deferred: #7 (lexical half), #11. Shipped or spent: #1 (ADR-060),
+#2 (`seq/iterate`, ADR-431; `lazy-seq` stays refused), #3, #4, #5, #6, #8 (ADR-420), #9, #10.
+
 ---
 
-## 1. First-class set type + `#{…}` literal
+## 1. First-class set type + `#{…}` literal — ✅ SHIPPED 2026-07-24 (ADR-060)
 
 **Why deferred.** Maps-as-sets work today — the Game-of-Life prototype used
 `{cell true}` and the only thing it cost was a useless `true` value and a
@@ -52,7 +55,11 @@ order-independent (XOR-fold of element hashes is the standard trick) so
 
 ---
 
-## 2. Real laziness + `iterate`
+## 2. Real laziness + `iterate` — ✅ `iterate` shipped 2026-10-24 (ADR-431); `lazy-seq` refused
+
+*Status 2026-11-06:* `(seq/iterate x f)` is a source only `seq/transduce` consumes, and
+`std/stream` carries values across a `send`. A lazy value kind stays refused (ADR-170). The
+text below is the original note.
 
 **Why deferred.** Stack-safe tail recursion already covers most "evolving
 state" cases through the `name--at`/`name--loop` accumulator idiom that
@@ -145,7 +152,10 @@ crash — which broke the whole point of the live image's persistent state.
 
 ---
 
-## 4. Cross-module redefinition warning
+## 4. Cross-module redefinition warning — ✅ SHIPPED
+
+*Status 2026-11-06:* the `:cross-module-def` lint (`types/check/cross_module_def.rs`), opted out
+with `check-allow`. The text below is the original note.
 
 **Why deferred.** ADR-019 made the namespace **flat** by deliberate
 choice — names are globals, modules are a load convention, not a barrier.
@@ -189,7 +199,10 @@ Without a clear opt-out the warning becomes noise, not signal.
 
 ---
 
-## 5. `nest format --changed`
+## 5. `nest format --changed` — ✅ SHIPPED
+
+*Status 2026-11-06:* `format/project-changed`, tested by `crates/nest/tests/format_changed.rs`.
+The text below is the original note.
 
 **Why deferred.** `nest format` is whole-tree by default, and `nest format
 <path>` handles single-file. The formatter is **idempotent**, so re-running
@@ -284,6 +297,10 @@ the *static* checker's precision for this one case shape.
 
 ## 7. Lexically-shadowable operators ("Option C") — Lisp-1 without reserved-word cost
 
+*Status 2026-11-06:* the module half shipped: a module's own definition wins over a root macro,
+and macro templates pin their heads to root (ADR-423, `(:shadow name)` silences the warning).
+The lexical half below is still deferred.
+
 **Context.** Brood is a Lisp-1 (ADR-007), so every macro/special form occupies the
 single namespace and becomes a **reserved operator word** — you can't bind a local
 named `when`, `for`, `cond`, `doseq`, etc. and call it in head position, because the
@@ -350,7 +367,10 @@ something — a user (or downstream project) that genuinely wants a local named 
 reserved operator and finds `go`/rename unacceptable — plus appetite for the
 scope-aware expander. Until then, A stands.
 
-## 8. Inline `sig`s — `(defn f ((x int) -> int) …)` — deferred, optionality is the doubt
+## 8. Inline `sig`s — ✅ SHIPPED 2026-10-22 (ADR-420), spelled `(defn f (x:int -> int) …)`
+
+*Status 2026-11-06:* typed parameters; the `((x int) -> int)` spelling below collided with list
+patterns and `&optional` defaults. The text below is the original note.
 
 **Context.** Today a function's signature lives in a *separate* `(sig f (int -> int))`
 form, conventionally below the `defn`, with an ordering constraint that only bites
@@ -494,7 +514,10 @@ in the runtime.
 
 ---
 
-## 10. No pty primitive — a terminal app cannot drive another terminal app
+## 10. No pty primitive — ✅ SHIPPED
+
+*Status 2026-11-06:* `%pty-spawn`, `%pty-resize` and `%pty-mode` behind `std/os`. The text below
+is the original note.
 
 **Why it is wanted.** `proc-spawn` gives a child piped stdio, which is right for a JSON-RPC
 peer or a build tool but not for anything that needs a *terminal*: an editor over

@@ -13,8 +13,8 @@ machine" mode flag.
 > Status: this lands in stages.
 > - **Stage 1 (done):** parseable error output (below).
 > - **Stage 2 (done):** structured test reporter with per-assertion source
->   locations; `form-pos` / `current-file` introspection (below).
-> - **Stage 3 (in progress):** richer introspection (`reflect/arglist`, completions) for
+>   locations; `reflect/form-pos` / `reflect/current-file` introspection (below).
+> - **Stage 3 (done):** richer introspection (`reflect/arglist`, completions) for
 >   eldoc / completion-at-point / xref — generalised across editors by a
 >   language server (`brood-lsp`), wired into Emacs via Eglot. Design:
 >   [`lsp.md`](lsp.md) / ADR-025.
@@ -52,7 +52,7 @@ user `(throw …)` (which prints `error: …`). The process exits non-zero.
   forms inside a `def`'d closure live in the shared RUNTIME region after
   promotion and have no recorded position; an error inside such a closure
   reports the **call site** (the innermost LOCAL combination), not the line
-  inside the body — a stack trace would close that gap (M2+).
+  inside the body. A caught error's `:trace` carries the call stack for that gap.
 
 When the file and position are both known the CLI also prints the offending
 **source line and a caret** under the column:
@@ -78,7 +78,9 @@ multi-line input gets a `LINE:COL:` prefix on the diagnostic.
 type-misuse / arity warnings appear before the run starts. Warnings go to
 **stderr** (so the file's own stdout output stays unmixed) in the same GNU
 `FILE:LINE:COL: warning: msg` format the `brood --check` mode uses. The run
-proceeds regardless — the checker is advisory and never gates.
+proceeds regardless, with one exception: `nest run` over a project's `:main`
+refuses to launch over an unbound symbol in the entry point's require-closure
+(ADR-304; `--no-check` skips the pre-flight, and `--watch` warns and starts anyway).
 
 - `nest check` is the dedicated mode: same walk as the auto-check but no
   eval, warnings to **stdout** (pipeable), **exit non-zero** when any
@@ -95,7 +97,7 @@ when a function calls *itself* outside tail position (e.g. `(* n (fact (- n 1)))
 — `fact` is an argument, so non-tail). Conservative: it stops at nested closures
 (a different frame) and only warns when certain, preferring a miss to a false
 positive. The same diagnostics flow through the LSP (published on every
-keystroke) and the `nest mcp` `check` / `reflect/load` tools.
+keystroke) and the `nest mcp` `check` / `load` tools.
 
 ## Test output: a structured block per failure
 
@@ -117,9 +119,9 @@ flag — this *is* the format.
 
 ### How this is produced
 
-The reader records every list form's `line:col` in a heap side-table; `(form-pos
-form)` returns it (or `nil`), and `(current-file)` returns the file `load` is
-reading. The `is` / `assert=` / `refute` / `assert-error` macros (in
+The reader records every list form's `line:col` in a heap side-table;
+`(reflect/form-pos form)` returns it (or `nil`), and `(reflect/current-file)` returns the
+file `reflect/load` is reading. The `is` / `assert=` / `refute` / `assert-error` macros (in
 `std/tool/test.blsp`) call these at expansion — while the original form still exists,
 before it macro-expands — and embed the `(file line col)` into a structured
 failure record `(loc detail-lines)`. The runner prints those records.
@@ -152,19 +154,23 @@ Extra positional args after `run` are passed to the entry fn as strings, so
 (`(defn main () …)`) or variadic (`(defn main (& args) …)`); a fixed-arity
 mismatch surfaces as a normal Brood error.
 
-`run-project` (in `std/tool/project.blsp`) walks from `file/cwd` up to `project.blsp`,
-loads the manifest (which may override `project/*main*`), puts the project's
-source paths on `*load-path*`, `require`s the entry module — pulling in
-everything it transitively requires — then `apply`s the entry fn to the CLI
-args. A missing project, an unbound entry fn, or a non-callable entry are
-reported as editor-parseable errors and exit non-zero.
+`project-run/run` (in `std/tool/project-run.blsp`) walks from `file/cwd` up to
+`project.blsp`, loads the manifest (which may override `project/*main*`), puts the
+project's source paths on `*load-path*`, `require`s the entry module — pulling in
+everything it transitively requires — checks that require-closure, then `apply`s the
+entry fn to the CLI args. A missing project, an unbound entry fn, or a non-callable
+entry are reported as editor-parseable errors and exit non-zero. `--main MOD[/FN]`
+overrides the entry for one run; `nest run FILE.blsp` runs that file instead; a non-`.blsp`
+FILE inside a project is passed to the entry as an argument (the editor case).
+`--check-boot` loads every module and resolves `:main` but runs nothing (KI-66);
+`--name NAME` starts a local node first; `--watch PATH` (repeatable) re-loads on save.
 
 Before handing off, the run does an advisory **duplicate-global** pass over the
-project's source files (`project--duplicate-def-warnings`): under the flat
-namespace (ADR-019) a name is one binding project-wide, so two files each
-defining e.g. `main` is a bug where the last loaded silently wins. The warning
+project's source files (`project-duplicate-def-warnings` in
+`std/tool/project-check.blsp`): a qualified name bound in more than one source file
+is a bug where the last loaded silently wins. The warning
 goes to stderr (GNU-ish), is never fatal, and honours `BROOD_NO_CHECK=1`. The
-same pass runs in `nest test` (via `check-project`).
+same pass runs in `nest test` (via `project-check/check`).
 
 ### Bounded runs: `nest run --for DURATION`
 
@@ -179,10 +185,11 @@ nest run --for 1500            # bare integer = milliseconds
 ```
 
 `DURATION` is `Ns`, `Nms`, or a bare integer (ms); anything else exits 2 with a
-usage hint. Mechanism: the entry runs in a spawned green process the root
-monitors with a `(receive … (after ms …))` timeout (`std/prelude/process.blsp` over
-`process/timer.rs`); when the cap fires the root prints `[stopped after …]` and
-exits 0, dropping the program where it stood. It composes with `--watch`. Lets a
+usage hint. Mechanism: the entry runs as a linked green process and the root waits
+on its exit with a `(receive … (after ms …))` timeout (`run-wrapped` in
+`std/tool/nest.blsp`); when the cap fires the root prints `[stopped after …]` and
+exits 0, dropping the program where it stood. A program that dies first exits 1. It
+composes with `--watch`. Lets a
 whole loop (not just its pure functions) be exercised, and makes time-based
 behaviour — e.g. a memory-growth check — reproducible in CI without a manual
 `timeout`.
@@ -215,17 +222,18 @@ terminal"). Pairs with a `verify-tui` skill once the entry point exists.
 
 ## Formatting source: `nest format`
 
-`nest format` rewrites every `.blsp` under the project's source + test paths in
-place using a single, opinionated style. `nest format --check` does the same
+`nest format` rewrites every `.blsp` under the project's source + test paths (plus any
+extra `:format-paths`, and the root's own `.blsp` files) in place using a single,
+opinionated style. `--changed` limits it to the files git reports as changed. `nest format --check` does the same
 walk read-only and exits non-zero if anything would change — the CI mode. In a git
 work tree a file git ignores is not the project's and is skipped by both (generated
 output such as a fuzz run's `stress/fuzz_out/`; a tracked file is never skipped). Both
-are policy in Brood (`std/format.blsp`); the only new Rust is the `parse-source`
+are policy in Brood (`std/format.blsp`); the only new Rust is the `reflect/parse-source`
 primitive, which returns the lossless CST as nested vectors so the walker can
 see whitespace and comments.
 
 The layout, in one paragraph: every form is emitted on a single line if it fits
-within the width budget (`*format-width*`, 100 cols by default); otherwise it
+within the width budget (`format/*width*`, 100 cols by default); otherwise it
 breaks across lines with each body argument on its own line at +2 indent. A small
 table of *header counts* (`*format-headers*`) keeps a fixed prefix of args on the
 first line of certain forms — `defn` keeps `name params`, `let` keeps the bindings
@@ -240,9 +248,9 @@ blank.
 proper width-driven pretty-printer, informed by Oppen (1980), Wadler's *A prettier
 printer*, and CL's XP (Waters). Four changes to the canonical layout:
 
-- **Configurable width.** A manifest `:format-width` (e.g. `80`) overrides the
-  built-in 100, read via `format-width` and applied by `project-setup`
-  (`*project-format-width*`). `nest format`, the LSP and the MCP server all honour it.
+- **Configurable width.** A manifest `:width` (e.g. `80`) overrides the built-in 100,
+  stored in `project/*width*` and read via `format/width`. `nest format`, the LSP and
+  the MCP server all honour it.
 - **Linear break for collections-of-collections.** A vector or list whose args are
   *themselves* collections breaks one-per-line (CL `:linear`) instead of fill-packing.
   Fill stays for sequences of atoms, which is the case it exists for.
@@ -255,7 +263,7 @@ printer*, and CL's XP (Waters). Four changes to the canonical layout:
 
 ### Idempotency is a contract
 
-`(= (format-source (format-source s)) (format-source s))` for every input.
+`(= (format/source (format/source s)) (format/source s))` for every input.
 That's the property `tests/format_test.blsp` asserts on a grab-bag of shapes
 *and* on the full prelude — the largest single Brood source in the tree. A
 break of idempotency is a bug, not a stylistic preference.
@@ -272,7 +280,7 @@ like a top-level block: it gets its own line, and blank lines around it survive.
 ### What is *not* in scope (yet)
 
 - **Width is not settable per invocation.** It is configurable per *project* —
-  `:format-width` in `project.blsp` — but there is no CLI flag to override it for
+  `:width` in `project.blsp` — but there is no CLI flag to override it for
   one run.
 - **No "align after head"** for generic calls — every overflow arg goes to
   `+2`, never to `(head)`-column. Simpler, idempotent under rename of the head.
@@ -302,17 +310,20 @@ What completes:
 | `nest test --only\|--exclude\|--include <TAB>` | every tag declared with `:tags [...]`, plus the `test:` / `describe:` prefixes |
 | `nest remove\|update <TAB>` | the dependencies the manifest declares |
 | `nest doc <TAB>` | baked-in std modules plus the project's own |
+| `nest run --main <TAB>` | the project's modules |
+| `nest new --template <TAB>` | the scaffold templates |
 | `nest grammar <TAB>`, `nest completions <TAB>` | the enum's own values |
 
 ### How it is put together
 
 Two halves, split by which side owns the truth:
 
-- **Subcommands and flag names come from clap's own argument model** in `nest`
-  (`Cli::command()`), never a hand-kept list. That is the point: a flag added to
-  the `Cmd` enum is completable immediately, and a renamed flag cannot leave a
-  stale completion behind. `ValueEnum` positionals likewise take their choices from
-  the enum definition.
+- **Subcommands and flag names come from the command table** `*commands*` in
+  `std/tool/nest.blsp` (ADR-322), the same table the argument parser reads, so a flag
+  added there is completable immediately and a renamed flag cannot leave a stale
+  completion behind. The two commands still in Rust (`release`, `stdimage`) are mirrored
+  in `*rust-commands*`, and `crates/nest/tests/complete.rs` asserts that mirror against
+  clap's definition. Positional enums take their choices from the same table.
 - **Project-dependent values come from `std/tool/complete.blsp`** (Brood), and only
   when the cursor is actually at a value position — so completing a subcommand or a
   flag never pays interpreter startup.
@@ -355,7 +366,9 @@ since a completion list is a hint, not a specification.
 
 `nest doc [module]` emits Markdown documentation to stdout: with no operand it
 documents the whole project (every source file under it); with a module name it
-documents that one module (a baked-in std module, or one on `*load-path*`). Each
+documents that one module (a baked-in std module, or one on `*load-path*`); with
+`--all` it is the complete builtin + prelude reference. `nest docs` writes the same
+material as a browsable HTML site (default `doc/`). Each
 module renders as a `# module <name>` heading, the module docstring (the file's
 leading string form, if any), a `## Definitions` section with each function /
 macro as a `### (name args…)` heading plus its docstring, and a `## Variables`
@@ -414,7 +427,7 @@ The engine is `std/tool/doctest.blsp` and the command's policy `docs/run-doctest
 
 ## Editor side (Emacs)
 
-Everything lives in one file, `lisp/progmodes/brood.el` (`brood-mode`, derived
+Everything lives in one file, `brood.el` (`brood-mode`, derived
 from `lisp-data-mode`). It splits its external commands along the same
 brood/nest line as the CLI (ADR-028): **language** commands shell out to
 `brood-program-name`, **project** commands to `nest-program-name`.

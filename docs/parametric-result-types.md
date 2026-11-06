@@ -1,10 +1,12 @@
 # Parametric HOF result types — design note
 
-> Status: **slices 1 + 2 shipped** (`map`/`filter` + `reduce`/`fold`). Branch
-> `parametric-types`. Extends the structured-types work (ADR-078): function arrows
-> + sequence element types. Implemented via Option B (per-HOF result rules in
-> `seq_aware_call_ty`) — no lattice change. Option A (type variables for
-> user-defined generics) remains deferred (no consumer).
+> Status: **slices 1 + 2 shipped** (`map`/`seq/filter` + `reduce`/`fold`). Extends the
+> structured-types work (ADR-078): function arrows + sequence element types. Implemented via
+> Option B (per-HOF result rules in `seq_aware_call_ty`, now in `check/infer.rs`, as is
+> `callback_ret`) — no lattice change. Option A's goal, typed user-defined generics, shipped
+> differently: `?A` variables at the signature level ([type-variables.md](type-variables.md)),
+> not in the lattice. Examples use today's argument order (ADR-308) and names (`filter` is
+> `seq/filter`).
 
 ## Problem
 
@@ -16,13 +18,13 @@ But `map`/`filter`/`reduce`/`fold` are typed with a *flat* result:
 map : (fn|native, seq) -> seq     ; today (curated sig)
 ```
 
-so `(map inc [1 2 3])` is typed plain `list`, and `(first (map inc [1 2 3]))` is
+so `(map [1 2 3] inc)` is typed plain `list`, and `(first (map [1 2 3] inc))` is
 `any` — the element type is lost. The goal is to make it flow:
 
 ```
-(map  inc      vector<int>)  : list<number>     ; B = inc's return
-(filter even?  vector<int>)  : list<int>         ; element type preserved
-(first (map inc [1 2 3]))    : number | nil      ; flows through
+(map vector<int> inc)                  : list<number>   ; B = inc's return
+(seq/filter vector<int> math/even?)    : list<int>      ; element type preserved
+(first (map [1 2 3] inc))              : number | nil   ; flows through
 ```
 
 This is the "result type derived from argument types" step — the only Step 5+ item
@@ -33,7 +35,7 @@ with real payoff, since HOFs are pervasive.
 Two ways to express "the result depends on the arguments":
 
 **Option A — type variables + unification.** Give the lattice a `Ty::Var(n)` and
-write `map : (A->B, seq<A>) -> list<B>`; on a call, unify the actual arg types
+write `map : (seq<A>, A->B) -> list<B>`; on a call, unify the actual arg types
 against the param pattern, bind `A`/`B`, substitute into the result. This is real
 (if lightweight) parametric polymorphism — general enough for *user-defined*
 generic functions later. **Cost:** a new `Ty` kind that ripples through
@@ -42,7 +44,7 @@ plus compatibility-contract scrutiny (a type var isn't a set of values). High
 surface, real FP-risk in the set ops.
 
 **Option B — per-HOF result rules in the checker (CHOSEN for slice 1).** No lattice
-change. Extend the existing `seq_aware_call_ty` (`check/guards.rs`) — the same place
+change. Extend the existing `seq_aware_call_ty` (`check/infer.rs`) — the same place
 `first`/`list`/`vector` already compute a refined result from the args — with cases
 for `map`/`filter`/`reduce`/`fold`. The "dependency" is just Rust that reads the
 arg types (`as_arrow`, `elem_ty`) and builds the result. This is exactly the pattern
@@ -69,21 +71,21 @@ In Brood `map` always returns a list (`(reverse (fold … nil coll))`), empty in
 
 | call | result rule | needs |
 |------|-------------|-------|
-| `(filter pred coll)` | `nil \| list<A>`, `A = elem(coll)` | element of arg2 only — trivial, no callback analysis |
-| `(map f coll)` | `nil \| list<B>`, `B = ret(f applied to A)` | callback return type |
+| `(seq/filter coll pred)` | `nil \| list<A>`, `A = elem(coll)` | element of arg1 only — trivial, no callback analysis |
+| `(map coll f)` | `nil \| list<B>`, `B = ret(f applied to A)` | callback return type |
 | `(reduce coll init f)` / `(fold coll init f)` | `B ∪ ty(init)`, `B = ret(f)` | callback return + init type (slice 2) |
 
 **Slice 1 = `filter` + `map`.** `filter` is the trivial, immediately-useful case
-(`(first (filter even? [1 2 3])) : int`). `reduce`/`fold` (accumulator-typed) are
+(`(first (seq/filter [1 2 3] math/even?)) : int`). `reduce`/`fold` (accumulator-typed) are
 slice 2.
 
 ### Getting `B` (the callback's return type)
 
 A new helper `callback_ret(heap, callback_form, elem_in, ctx) -> Option<Ty>`:
 
-- **Named global fn** (`(map inc xs)`): `B = sig_of(callback).map(|s| s.ret)`. Reuses
+- **Named global fn** (`(map xs inc)`): `B = sig_of(callback).map(|s| s.ret)`. Reuses
   the existing primitive / curated / inferred sig lookup. `inc` → `number`,
-  `even?` → `bool`, etc. (Skip if the name is a local shadow — `ctx.is_local`.)
+  `math/even?` → `bool`, etc. (Skip if the name is a local shadow — `ctx.is_local`.)
 - **Straight-line lambda literal** `(fn (p) body)` (single simple clause, one param,
   one body expression — the same shape `lambda_literal_arity` and `infer_sig`
   already gate on): bind `p -> elem_in` (or `ANY` when the element type is unknown)
@@ -97,22 +99,22 @@ A new helper `callback_ret(heap, callback_form, elem_in, ctx) -> Option<Ty>`:
 
 ## Exact sites to touch
 
-- `crates/lisp/src/types/check/guards.rs`
+- `crates/lisp/src/types/check/infer.rs` (`guards.rs` when written)
   - `seq_aware_call_ty`: add `map` / `filter` arms (and later `reduce`/`fold`).
   - new `fn callback_ret(...)` helper (uses `sig_of`, `ctx.bind`, `expr_ty`).
 - No change to `crates/lisp/src/types.rs` (no new `Ty` kind — the win of Option
   B). `Ty::list_of` / `union` / `elem_ty` / `as_arrow` already exist.
 - `crates/lisp/src/types/check/sigs.rs` — unchanged (the curated `map`/`filter`
   sigs stay as the *flat fallback* / arity+arrow source; the refinement layers on
-  top in `guards.rs`).
+  top in `infer.rs`).
 
 ## Soundness & tests
 
 - **Soundness rule:** uncertain → flat. Empty-input → include `nil`. Element type
   computed as a superset (unknown → unrefined). `is_disjoint` unchanged (tags-only).
-- **Unit tests** (`check.rs`): `(first (map inc [1 2 3])) : number` (no warn against
-  a number sink); `(string-length (first (map inc [1 2 3])))` *warns* (number ≠
-  string); `(first (filter even? [1 2 3])) : int`; identity lambda preserves
+- **Unit tests** (`check/tests/`): `(first (map [1 2 3] inc)) : number` (no
+  warn against a number sink); `(string/length (first (map [1 2 3] inc)))` *warns* (number ≠
+  string); `(first (seq/filter [1 2 3] math/even?)) : int`; identity lambda preserves
   element type; unknown callback / branchy lambda / unknown coll → no refinement, no
   warning.
 - **FP audit:** the gold-standard before/after `brood --check` diff over all project
@@ -121,8 +123,7 @@ A new helper `callback_ret(heap, callback_form, elem_in, ctx) -> Option<Ty>`:
 
 ## Slicing
 
-1. **Slice 1:** `filter` (element-preserving) + `map` (`list<callback-ret>`), with
+1. **Slice 1:** `seq/filter` (element-preserving) + `map` (`list<callback-ret>`), with
    `callback_ret` for named fns + straight-line lambdas. Tests + FP audit.
 2. **Slice 2:** `reduce`/`fold` (accumulator type = `callback-ret ∪ init`).
-3. **Deferred:** Option A (type variables) for user-defined generics — no consumer
-   yet.
+3. **Option A** (type variables in the lattice) was not built; see the Status note.

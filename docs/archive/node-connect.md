@@ -2,7 +2,7 @@
 
 > Status: **implemented** (ADR-068, 2026-05-30). Makes connecting nodes cheap: a
 > default shared secret, a name-addressed local transport, and `nest run --name`.
-> This file is the design rationale; [`distribution.md`](distribution.md) is the
+> This file is the design rationale; [`distribution.md`](../distribution.md) is the
 > as-built reference. The wire protocol, HMAC handshake, pid routing,
 > links/monitors, and ADR-067 cross-node supervision are all unchanged.
 
@@ -16,7 +16,7 @@ editor instances attach (**the Emacs `--daemon` / `emacsclient` model**),"* *"on
 core, multiple attached frontends"* (`ROADMAP.md`).
 
 Name-addressed Unix sockets *are* the emacsclient model for the local case:
-`nest run --name foobar` ≈ `emacs --daemon=foobar`, `(connect "foobar")` ≈
+`nest run --name foobar` ≈ `emacs --daemon=foobar`, `(node/connect "foobar")` ≈
 `emacsclient -s foobar` — and Emacs uses exactly this `$XDG_RUNTIME_DIR`/`/tmp`
 per-user socket convention. It also lands squarely on two guiding principles
 (`ROADMAP.md`):
@@ -38,11 +38,11 @@ now — with a present-day consumer — is consistent, not premature.
 
 ## Why
 
-Today a node is hand-wired:
+Before this, a node was hand-wired:
 
 ```lisp fragment
 (node/start :server "127.0.0.1:9001" "demo-cookie")   ; pick a port, invent a secret
-(connect "client@127.0.0.1:9002")                      ; know the peer's host:port
+(node/connect "client@127.0.0.1:9002")                 ; know the peer's host:port
 ```
 
 Three frictions, all incidental to the share-nothing model:
@@ -65,11 +65,11 @@ Three frictions, all incidental to the share-nothing model:
 (proc/register :echo (self))
 
 (node/start :client)
-(connect "server")              ; dial the local node named "server"
+(node/connect "server")         ; dial the local node named "server"
 
 ;; across machines — explicit, exactly as today
 (node/start :server "0.0.0.0:9001")
-(connect "server@10.0.0.4:9001")
+(node/connect "server@10.0.0.4:9001")
 ```
 
 ```bash
@@ -83,11 +83,11 @@ nest run --name foobar app.blsp     # brings the node up, then runs app.blsp
 - **Resolution at `node/start`** (when no explicit cookie is passed):
   `$BROOD_COOKIE` → the file → **generate + persist**. The generated secret is 32
   bytes from `getrandom` (the same CSPRNG the handshake nonce already uses,
-  `dist/handshake.rs:174`), hex-encoded.
+  `dist/handshake.rs`), hex-encoded.
 - **As built, this lives in Brood, not Rust.** The original plan was a Rust
   `dist::default_cookie()`; the implementation instead made cookie resolution
   *policy in Brood* — `(node/cookie)` in `std/node.blsp` (ADR-068) over the
-  `getenv` / `random-token` / `file/spit-private` primitives (the kernel carries only
+  `os/env` / `rand/token` / `file/spit-private` primitives (the kernel carries only
   bytes). `file/spit-private` is the primitive that does the `0600` write a plain
   `file/spit` can't, so the file-mode mechanism stays in Rust while the resolution
   logic stays in Brood — a per-user cookie file, expressed in the language. There is **no** `dist::default_cookie()` symbol in the tree.
@@ -97,10 +97,10 @@ touching the file.
 
 **As built, the connecting side resolves its cookie at `node/start`, not via a
 handshake fallback.** The original plan was a handshake-time fallback (if
-`NODE.cookie` is empty, use `default_cookie()`), so a bare `(connect "foobar")`
-would work without `node/start`. The implementation took the simpler route: the
-prelude `connect` *requires* a prior `node/start` (it errors `:nonode`
-otherwise), and `node/start` is what calls `(node-cookie)` to populate
+`NODE.cookie` is empty, use `default_cookie()`), so a bare `(node/connect "foobar")`
+would work without `node/start`. The implementation took the simpler route:
+`node/connect` *requires* a prior `node/start` (it errors `:nonode`
+otherwise), and `node/start` is what calls `(node/cookie)` to populate
 `NODE.cookie`. The handshake then reads that `NODE.cookie` as-is
 (`dist/handshake.rs`) with **no empty-cookie fallback**. So the shared secret is
 resolved once, in Brood, at start — not lazily in the Rust handshake.
@@ -117,9 +117,9 @@ To reach it you only need the **name** — the path is derived on both ends. No
 port, no IP, no allocation conflicts, and the `0700` directory is a free first
 auth layer (same-user only).
 
-**Dispatch reuses the existing `@` split** (`dist.rs:536`):
+**Dispatch reuses the existing `@` split** (`dist.rs`):
 
-| `connect` argument | Transport |
+| `node/connect` argument | Transport |
 |---|---|
 | `"foobar"` (no `@`) | Unix socket, by name |
 | `"foobar@host:port"` | TCP, exactly as today |
@@ -129,8 +129,8 @@ auth layer (same-user only).
 
 ### The one real refactor: a transport seam
 
-`establish`/`accept`/the reader+writer threads/`Conn.sock` are currently typed on
-`TcpStream` (`dist.rs:590`, `:646`, `:657`). Introduce:
+`establish`/`accept`/the reader+writer threads/`Conn.sock` were typed on
+`TcpStream`. The seam, as built:
 
 ```rust
 enum Stream { Tcp(TcpStream), Unix(UnixStream) }
@@ -152,10 +152,10 @@ framing, tie-break, and heartbeat are byte-for-byte unchanged.
   though same-user filesystem perms already gate access — belt-and-suspenders, and
   it keeps one protocol.
 
-## 3. `node/start` / `connect` surface
+## 3. `node/start` / `node/connect` surface
 
 Multi-arity, **mostly additive** — the 3-arg TCP form and `name@host:port`
-`connect` are unchanged, so the existing `distribution.rs` TCP suite keeps
+`node/connect` are unchanged, so the existing `distribution.rs` TCP suite keeps
 passing:
 
 | Form | Effect | Status |
@@ -163,37 +163,36 @@ passing:
 | `(node/start name)` | local Unix node, cookie from default source | new |
 | `(node/start name "host:port")` | TCP node, default cookie | new |
 | `(node/start name "host:port" cookie)` | TCP node, explicit cookie | unchanged |
-| `(connect "name")` | dial local peer by name (Unix) | new |
-| `(connect "name@host:port")` | dial peer over TCP | unchanged |
-| `(node-cookie)` | the resolved default cookie (reads/creates the file) | new |
+| `(node/connect "name")` | dial local peer by name (Unix) | new |
+| `(node/connect "name@host:port")` | dial peer over TCP | unchanged |
+| `(node/cookie)` | the resolved default cookie (reads/creates the file) | new |
 
 `node/start` becomes arity `1..3`. Arity-1 = Unix only; an addr = TCP (preserving
-today's behavior). **Dual listen** (a TCP node *also* reachable locally by name)
-is deferred per ADR-011 until the editor needs it.
+the earlier behavior). **Dual listen** (a TCP node *also* reachable locally by name)
+shipped as `node/also-listen` (ADR-074).
 
 ## 4. `nest run --name`
 
-Add `--name NAME` to the `Run` command (`nest/src/main.rs:86`). Before running the
-user's file, nest evals `(node/start 'NAME)`. Pure CLI→Brood glue — no new policy
-in Rust; the app file becomes just `(proc/register :echo (self))` + logic.
+`--name NAME` on `nest run` (`std/tool/nest.blsp`): before running the user's file, nest
+calls `(node/start NAME)`. Pure CLI→Brood glue; the app file becomes just `(proc/register :echo (self))` + logic.
 `nest observe --connect foobar` (bare name) gains Unix support and the cookie-file
 fallback for free.
 
 `--name` is for files that *don't* self-start a node; a file that also calls
-`node/start` would hit the existing double-start guard (`dist.rs:482`). Documented
+`node/start` would hit the existing double-start guard (`dist.rs`). Documented
 as mutually exclusive rather than silently no-op'd.
 
 ## 5. Serving a `ui-run` app — `serve` / `nest attach` (done, ADR-090)
 
 The payoff this design was the local leg of: a daemon **serves a `ui-run` app** and a
 thin client paints it. `std/editor/serve.blsp` is the policy (`(require 'editor/serve)`),
-purely over `node/start`/`connect`/`send`/`monitor` + the M3 display seam:
+purely over `node/start`/`node/connect`/`send`/`monitor` + the M3 display seam:
 
 ```
 ;; daemon — `nest run --name ed app.blsp`, whose main calls:
-(serve (fn () {:n 0}) my-view my-update)   ; register the app under :ui, then park
+(editor/serve/serve (fn () {:n 0}) my-view my-update)   ; register the app under :ui, then park
 ;; client — another terminal / machine:
-(attach "ed")          ; or "ed@host:port";  CLI: `nest attach ed`  ≈  emacsclient -s ed
+(editor/serve/attach "ed")   ; or "ed@host:port";  CLI: `nest attach ed`  ≈  emacsclient -s ed
 ```
 
 The app's *unmodified* `(ui-run model view update display)` runs on the daemon; the
@@ -208,24 +207,21 @@ The session's clipboard is the client's (ADR-539): an app calls
 machine over the link (`[:clipboard-set text]`, `[:clipboard-get session ref]` →
 `[:clipboard ref text]`, which arrives at `update` as an event — answered nil by a timer when
 the client says nothing, so a dead client never stalls the session).
-Deferred (ADR-011): a shared model across clients, live resize, per-client viewports.
+A session can outlive its client (`serve`'s `{:resume-ms N}`, ADR-519: a named client's session
+parks with its state and the next attach under that name takes it over), and a session
+supervises its loop (ADR-593/605). `serve-shared` serves one shared model to every client,
+all on one cursor. Deferred (ADR-011): per-client cursors in a shared session, per-client
+viewports.
 
 ## Rust vs. Brood (ADR-006)
 
-Everything new is **mechanism** — Unix sockets, filesystem paths, `0600`/`0700`
-perms, CSPRNG — which ADR-006 assigns to Rust ("primitives the language can't
-bootstrap: low-level I/O"), and which `nest observe` must reach without a Brood
-image. So the smart-args live in the `node/start`/`connect` builtins, and the
-path/cookie conventions are shared Rust functions rather than a `std/node.blsp`
-wrapper.
+The plan put the smart args and the path/cookie conventions in Rust, because the Rust
+`nest observe` had to reach them without a Brood image. As built the policy went the other
+way: `node/start`, `node/connect` and `node/cookie` are Brood in `std/node.blsp` over thin
+`%node-*` primitives, which became simple once `nest observe` itself moved to Brood. Sockets,
+perms and the CSPRNG stay in Rust, the mechanism ADR-006 assigns there.
 
-*Alternative considered:* push the friendly wrappers + path derivation into a
-`(require 'node)` module over thin `%node-listen`/`%node-dial` primitives. More
-"language in the language," but it duplicates path derivation for the Rust
-`nest observe` path. Rejected for now on that duplication; revisit if a second
-consumer of the path convention appears that *is* Brood.
-
-## Build sequence
+## Build sequence (as planned, 2026-05-30)
 
 1. `Stream` enum + generic `handshake`/`establish` (the transport seam).
 2. `socket_path()` + Unix listen/dial + stale-socket handling.
@@ -238,8 +234,7 @@ Only step 1 is a nontrivial refactor; the rest is additive.
 
 ## Tests
 
-`crates/cli/tests/distribution.rs` spawns real `brood` children (`:45`) — mirror
-that for Unix:
+`crates/cli/tests/distribution.rs` spawns real `brood` children — mirrored for Unix:
 
 - `two_unix_nodes_connect_and_message` — two children, `node/start` by name,
   `connect` by name, echo round-trip.
@@ -252,17 +247,5 @@ rather than the in-language suite.
 
 ## Open questions
 
-- **Rust vs. `std/node.blsp` boundary** — keep it in Rust builtins (recommended),
-  or the module split above?
-- **Dual listen** — should a node serve *both* a local Unix socket (for
-  same-box frontends) and a TCP/TLS endpoint (for remote attach) at once? The
-  emacsclient/daemon end-state in M4 (`ROADMAP.md`) ultimately *wants*
-  this — one editor core, local frontends by name + remote frontends over the
-  network. The current plan defers it (arity-1 = Unix, addr = TCP) per ADR-011
-  and "every milestone usable," shipping the single-transport forms first. Worth
-  deciding whether the daemon goal pulls dual-listen forward, or whether it's
-  cleanly additive later (it is — adding a second listener to an existing node
-  needs no protocol change).
 - **Windows** — Unix sockets exist on modern Windows but the `$XDG_RUNTIME_DIR`
-  path convention doesn't. Out of scope until there's a Windows target; TCP still
-  works everywhere.
+  path convention doesn't. The Unix-socket transport is `cfg(unix)`; TCP works everywhere.

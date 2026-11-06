@@ -7,9 +7,10 @@ day for an unrelated reason); ADR-125 shipped the live-session trigger
 (`nest run --watch` re-checks on every successful reload); ADR-126 fixed a
 related checker gap found along the way. **The batch/CI hard gate this design
 called out as "still unbuilt" turned out to already exist**: `nest check`
-(`crates/nest/src/main.rs::cmd_check`) has exited 1 on any nonzero warning
-count since before this design was written — there was never a `--strict`
-flag to add, because the un-flagged default already gates. A CI pipeline
+(Brood today, `std/tool/nest.blsp`'s `checker-exit-code`, ADR-322) has exited 1 on any
+nonzero warning count since before this design was written — no flag was needed, because
+the un-flagged default already gates. (`--strict`, added later by ADR-298, is a sharper
+reading of a dynamic value, not this gate.) A CI pipeline
 running `nest check` as a build step already gets exactly the hard-reject
 behavior this section was describing as future work.
 
@@ -96,20 +97,15 @@ Instead of a permanent whole-program proof, treat soundness as a claim about
    pair Phase 2 already ships, on whichever files are in scope for the
    current session. The reload still happens unconditionally regardless of
    the result — this never blocks `def`, it only updates what's currently
-   known to be sound. **What's actually still open** is not a data structure
-   but a *trigger*: Phase 2's cache today is consulted only by the batch
-   `nest check` CLI tool, never by a running REPL/eval session, so there's no
-   live analogue of "a `def` just happened, re-check whoever depended on it"
-   yet. The open design question is where that trigger lives — on file save
-   (`nest run --watch` already watches files), on every `def` in a REPL
-   session (finer-grained, more expensive), or purely LSP-driven (the editor
-   asks for fresh diagnostics on its own schedule, and the answer happens to
-   already be fast because of Phase 2). No decision made yet; this is now the
-   entire remaining scope of ADR-123's "hard part."
+   known to be sound. What was left open was not a data structure but a
+   *trigger*: where "a `def` just happened, re-check whoever depended on it" lives —
+   on file save, on every `def` in a REPL session (finer-grained, more expensive),
+   or purely LSP-driven. ADR-125 chose file save (see below); the other two stay
+   open.
 
 4. **Where a real hard gate does make sense: batch/CI tooling, not the live
    image.** `nest check` already treats a nonzero warning count as a failing
-   exit code (`cmd_check` in `crates/nest/src/main.rs` — checked, not
+   exit code (`checker-exit-code` in `std/tool/nest.blsp` — checked, not
    assumed: confirmed unconditional, no flag needed). That gives genuine
    "reject if it doesn't typecheck" semantics for an automated pipeline,
    exactly where a build has always been allowed to fail, without changing a
@@ -131,18 +127,17 @@ surprise: almost none of the mechanism needs to be *built* — it needs to be
   `dynamic()` to a real `Ty`, invalidated and replaced on each `def`. **Slice
   shipped (ADR-124):** a declared `(sig x T)` value type is now visible
   cross-module (not just within its own file), matching what arrow sigs
-  already had. Still missing: an inferred type for a global with *no*
-  declared sig at all (a separate, harder problem — see the type-system
-  gap list's "full type inference" item; not blocking this design).
+  already had. An inferred type for a global with *no* declared sig shipped as
+  Gap A ([type-gating.md](type-gating.md)).
 - ~~The reverse-dependency index~~ — **not needed.** ADR-119 Phase 2 already
   ships the equivalent capability (`check-file-deps`/`check-deps-fp`) via a
   pull-based re-fingerprint check instead of a maintained push-based index.
   Nothing left to build here; see the design section above.
 - **The trigger — shipped (ADR-125).** Went with file-save via `nest run
-  --watch`'s existing watcher: `std/tool/reload.blsp`'s `reload-on-change`
-  now takes an optional `on-reload` callback, invoked after every successful
+  --watch`'s existing watcher: `reload/on-change` (`std/tool/reload.blsp`)
+  takes an optional `on-reload` callback, invoked after every successful
   reload with its own errors caught (never takes the watcher down). `nest
-  run --watch` supplies `(fn (_p) (project/check-project-sources))` inside a
+  run --watch` supplies `(fn (_path) (project-check/check-sources))` inside a
   project. A REPL-level hook on bare `def` and a purely LSP-driven trigger
   are both still open for later, but neither is needed now that the
   file-save path covers the common `nest run --watch` dev loop. Verified
@@ -169,8 +164,7 @@ index" (Step 2, above) is fully superseded by Phase 2's `check-file-deps`/
 `check-deps-fp` pair, built for an unrelated reason (skipping re-check of
 unchanged files in the batch CLI) but structurally identical to what
 reload-soundness needs. There is nothing independent left to design or build
-on that front; the only open work is choosing and wiring a trigger for a live
-session, per above.
+on that front; the only open work is the REPL and LSP triggers, per above.
 
 ## Alternatives rejected
 
@@ -182,5 +176,5 @@ session, per above.
   actual use (a bugfix often *narrows* or *changes the shape* of what a
   function returns) more than the re-check approach costs, for no safety
   benefit (per the load-bearing fact above, nothing crashes either way).
-- **Do nothing / leave globals `dynamic()` forever** — the status quo; this is
-  what's being revised, not what's being chosen.
+- **Do nothing / leave globals `dynamic()` forever** — the status quo when this was
+  written; revised, not chosen.

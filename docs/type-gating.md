@@ -25,15 +25,15 @@ gradual-typing relation (`GradualTy::consistent_with`) that distinguishes
   globals) → checked with `∩ ≠ ⊥` (defers unless *provably* disjoint — never
   over-warns, reload-safe).
 
-Today that relation is consumed in only **three assignment checks** (ADR-110):
+When this was scoped that relation was consumed in only **three assignment checks** (ADR-110):
 `(def x …)` vs a value sig, the body-vs-declared-return check, and declared
 globals in value position. The rest of the checker — most importantly the
-**call-argument check** — still uses raw `Ty::is_disjoint` (the `∩`-only half).
+**call-argument check** — used raw `Ty::is_disjoint` (the `∩`-only half).
 "Gating" = making the argument/operand decisions use the *full* gradual relation,
 and giving globals a real tracked current type to feed it. Two independent gaps,
 below, each verified against the current binary.
 
-## Current state (verified, not assumed)
+## State when scoped (verified then; Gap A and Gap B closed the gaps below)
 
 | Decision point | Declared global (`(sig g T)`) | Undeclared global (`(def g 5)`) | Merely-wider precise (`number` arg → `int` param) |
 |---|---|---|---|
@@ -76,14 +76,15 @@ would be unsound — this exclusion also closed a latent hole in the same-file p
 It shares `infer_sig`'s one narrow, *pre-existing* false-positive class (a
 top-level use that ran at load before a same-name redefinition), which the project
 already accepts for functions; it introduces nothing new. Verified: a `(def g 5)`
-in the image with `(string-length g)` elsewhere warns; a dynvar used
+in the image with `(string/length g)` elsewhere warns; a dynvar used
 polymorphically via `binding` does not; the whole corpus (every cross-module
 reference) stays at zero warnings.
 
-Today a global with no `(sig …)` is `dynamic()` (bound `ANY`), so every use of it
-defers. The reload-soundness doc's "Step 1" (globals get a real current type)
-shipped only for *declared* value sigs (ADR-124); an **inferred** type for an
-undeclared global is the explicitly-noted remainder.
+The rest of this section is the proposal as written, before that shipped.
+
+When this was scoped a global with no `(sig …)` was `dynamic()` (bound `ANY`), so every use
+of it deferred. The reload-soundness doc's "Step 1" (globals get a real current type) had
+shipped only for *declared* value sigs (ADR-124).
 
 **Proposal.** Track each global's current type from its definition, seeded by the
 sources we already have:
@@ -96,7 +97,7 @@ precise `stat`** — an undeclared global has no author-asserted contract and *i
 redefinable, so its inferred type is a current-state observation, not a promise.
 The `dynamic` flag means every decision uses `∩` (defer unless provably disjoint),
 so:
-- `(def g 5)` then `(string-length g)` → `int ∩ string = ⊥` → **warns** (a real
+- `(def g 5)` then `(string/length g)` → `int ∩ string = ⊥` → **warns** (a real
   misuse of the current image);
 - if `g` is later redefined to a string, the reload re-check (ADR-125) re-derives
   and the warning clears — no stale hard proof.
@@ -118,9 +119,10 @@ defined exactly once in the file (simplest, covers the common case). Recommend
 
 ## Gap B — the argument check should use the full gradual relation
 
-The call-argument check (`walk.rs`, the `is_disjoint` loop) fires only when an
-argument is *provably disjoint* from the parameter. It should instead use
-`GradualTy::consistent_with`, exactly as the return check does:
+The call-argument check (`walk.rs`, the `is_disjoint` loop) fired only when an
+argument was *provably disjoint* from the parameter. It should use
+`GradualTy::consistent_with`, exactly as the return check does (shipped: see the status
+below; `check_arg_against_param` is the one per-argument rule today):
 - a **precise** argument (a literal, a `(sig …)`-typed param, integer-closed
   arithmetic) → `⊆`, so a *merely-wider* precise argument is caught
   (`number` sig-param passed where `int` is wanted);
@@ -212,7 +214,7 @@ the main design result here.
 
 ## The invariant this revises
 
-`CLAUDE.md` and `docs/types.md` contract #5 state "checking never rejects a
+`CLAUDE.md` and `docs/types.md` contract #5 stated "checking never rejects a
 runnable program." That stays literally true — nothing here gates the live image;
 `nest check`'s nonzero exit is the only "reject," and only in batch/CI. But the
 *spirit* tightens: the checker will now emit a warning on a **merely-wider precise

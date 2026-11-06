@@ -15,6 +15,12 @@
 > Nothing here changes generated code or runtime behaviour: it changes *where the decisions
 > live* and *how legible the machine is*. Items 1–2 are recorded as **ADR-221**; the narrative
 > and the gate results are in `docs/devlog.md`.
+>
+> **Since then.** `crates/lisp/src/jit/backend.rs` is the contract to read. `JitArmFn` is
+> `(heap, base, out, ctx)` and `JitBackend` gained `lower_arm_hot`; `plan_general_lowering`
+> takes only the arm; `Engine` became `Tier` (ADR-222, §4); `scripts/bench_ratio.py` became
+> `scripts/bench-ratio.sh` + `bench-ratio.awk`; and `run_on_active_engine` is gone. The rest
+> of this file keeps the names it was written with.
 
 ## 0. Why structure and not compute, today
 
@@ -302,8 +308,8 @@ and `bench_ratio.py` pairs by `(bench, size)` regardless of print order. The doc
 - **`brood --debug-flags`** — the `BROOD_*` catalogue (`crates/lisp/src/diagnostics/debug_flags.rs`),
   grouped by attribution / JIT / optimizer opt-outs / GC / scheduler / engine, with a
   dependency's flags (`MIMALLOC_PURGE_DELAY`) marked `[not brood's]`. A curated performance
-  subset on purpose; CLAUDE.md's table stays the long form because it carries the measurement
-  history behind each default.
+  subset then; it has since become exhaustive, and tests gate both directions: every catalogued
+  name exists in the source, and every `BROOD_*` read is catalogued.
 - **`(vm-stats-reset)`** — a new builtin, because the counters had no way to be zeroed from
   Brood at all (`perf::reset` existed and had no caller).
 
@@ -421,7 +427,7 @@ tiering thresholds, bail rules, or the profitability gate.
 ## 8. What this unblocks
 
 The X-register call convention — the `bintree`/`fib` lever, and the one item on the frontier
-that is a redesign rather than a knob — is a rewrite of the per-call protocol described in
-`jit-optimizing-tier.md` §1. That protocol is obligations 2, 3, and 5 of the contract item 1
+that is a redesign rather than a knob, since scoped and partly built in `call-convention.md`
+— is a rewrite of the per-call protocol described in `jit-optimizing-tier.md` §1. That protocol is obligations 2, 3, and 5 of the contract item 1
 makes explicit, and the decisions about *when* a call is worth lowering are what item 2
 hoists. Today's work is the interface that redesign gets to be checked against.

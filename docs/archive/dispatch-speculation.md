@@ -1,9 +1,16 @@
 # Speculative ability dispatch — scope
 
-> **Status:** scoped, not started (2026-08-29). Supersedes the Tier-2 half of
-> [ability-monomorphization.md](ability-monomorphization.md), which framed the problem as
-> "build a checker→compiler channel". The channel is a *data source*, not the mechanism, and
-> building it first is what made Tier 2 look large and dangerous.
+> **Status:** not built, and shelved. Phase 0 shipped 2026-08-29 and the `MapGet` prim it
+> needed shipped as ADR-296. Phase 2a was abandoned the same day (its callback,
+> `brood_rt_dispatch_identity`, is deleted). Phases 1–3 were never started, and perf-handoff
+> Task 5 (2026-09-17, `archive/perf-handoff.md`) found no benchmark row or real program with a
+> site. ADR-542 has since moved a record's id out of its fields, so the text below about
+> reading `:__id__` and about maps with a falsy `:__id__` describes the tree before it.
+>
+> Supersedes the Tier-2 half of [ability-monomorphization.md](../ability-monomorphization.md),
+> which framed the problem as "build a checker→compiler channel". The channel is a *data
+> source*, not the mechanism, and building it first is what made Tier 2 look large and
+> dangerous.
 
 ## The principle this rests on
 
@@ -189,7 +196,7 @@ actually has. Speculation should wait behind it.
 ### The earlier answer: impl fns are anonymous
 
 Point 2 above is not a detail about speculation; it is the constraint
-[ability-monomorphization.md](ability-monomorphization.md) already lists as hard constraint #2
+[ability-monomorphization.md](../ability-monomorphization.md) already lists as hard constraint #2
 and which nothing since has addressed: `impl` registers each method as a bare `(fn …)` value in
 `*impls*`, so **no global symbol names it**. The existing leaf inliner keys on symbols.
 

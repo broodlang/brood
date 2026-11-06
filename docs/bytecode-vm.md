@@ -6,6 +6,19 @@
 > real default is a prologue in its arm's own bytecode (`compile_arm`). The `exec_value` /
 > `exec_node` / `exec_call` names below are history.
 
+> **What this file is at v0.50.0.** The plan and the as-built log of the 2026 rollout, kept
+> for its reasoning. The engine it planned shipped and moved on, so read the code for the
+> current shape, in `crates/lisp/src/eval/compile/`: `lower.rs` builds the `Node` tree
+> (`ir.rs`), `emit.rs` lowers it to an `Inst` chunk, `exec_chunk.rs` runs the chunk and
+> `vm_run_bc.rs` is the outer trampoline; §2's "lower to bytecode later" happened, and
+> `Node::Local` is a flat slot index, not the `(depth, index)` pair §3–§4 sketch. Three
+> things in the text below no longer exist under those names: `Heap::arena_flip` is the
+> collector in `core/heap/gc.rs`; `vm_enabled`, `set_forced_engine` and `BROOD_VM` are
+> `tier_ceiling`, `set_forced_ceiling` and `BROOD_TIER`; `deadline_exceeded` is the
+> `tick`/`tick_nested` family in `process/scheduler/quantum.rs`. The tree-walker of §1 is
+> no longer a `'tail:` recursion: since ADR-416 it is a loop over a frame stack
+> (`eval/machine.rs`). `try` and `binding` bodies run in the driver (ADR-400/402).
+
 > **Status (2026-05-31): Stage 0–3 done — the VM is the default engine (~1.6–2.3×).**
 > The design record is **ADR-076**; this file is the long-form companion. Nothing
 > here changes the language — it is purely an **execution-engine** swap; `std/*.blsp`
@@ -31,8 +44,8 @@
 > stop deferring — **`sort_brood` ~1.0×→1.77×, `cons_build` ~1.15×→1.70×**. This
 > required closing a latent hole: `compile_node` must **defer a call whose head is an
 > unexpanded (forward-referenced) macro** (via `macros::macro_head_id`), or it
-> compiles the macro's argument syntax as calls (the `sleep`→`receive` bug). **Still
-> worth doing (pure perf):** patterns / `match*`. See
+> compiles the macro's argument syntax as calls (the `sleep`→`receive` bug). **Then
+> still worth doing (pure perf):** patterns / `match*`. See
 > [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
 >
 > **ADR-096 perf round (2026-06-06, done):** call-site + global-read **inline
@@ -189,7 +202,7 @@ the last blocker on the Stage-3 default-on cutover.
 
 ---
 
-## 1. Where the time goes today
+## 1. Where the time went (the tree-walker, May 2026)
 
 `eval::eval` (`crates/lisp/src/eval.rs`) is a `'tail:` trampoline. Every
 combination re-pays, *per call*:
@@ -472,9 +485,9 @@ cache; the lexical-addressing deferral this resolves), ADR-061 (collect at any e
 depth — the operand stack the VM frames reuse), ADR-054/055/072 (generational
 copying GC — what `arena_flip` relocates), ADR-047 (multi-arity dispatch), ADR-022
 (the macroexpand-all compile pass), ADR-026 (immutability), ADR-011 (defer power
-features). Key files: `crates/lisp/src/eval.rs` (trampoline, `eval_arguments`,
-`bind_params`), `crates/lisp/src/core/heap.rs` (`arena_flip`, `roots`/`env_roots`,
-`root_at`, `global_lookup_cached`, closure tracer), `crates/lisp/src/eval/macros.rs`
-(`compile`/`resolve` — where `lex_resolve` slots in), `crates/lisp/src/core/value.rs`
-(`Closure`/`ClosureArm`/`select_arm`), `crates/lisp/src/process/scheduler.rs`
-(`tick`/`deadline_exceeded`, coroutine suspend/restore).
+features). Key files today: `crates/lisp/src/eval/compile/` (the VM), `crates/lisp/src/eval.rs`
++ `eval/machine.rs` (the tree-walker, `eval_arguments`, `bind_params`),
+`crates/lisp/src/core/heap.rs` (`roots`/`env_roots`, `root_at`) with `core/heap/gc.rs` (the
+collector) and `core/heap/env_globals.rs` (`global_lookup_cached`), `crates/lisp/src/eval/macros.rs`
+(`compile`/`resolve`), `crates/lisp/src/core/value.rs` (`Closure`/`ClosureArm`/`select_arm`),
+`crates/lisp/src/process/scheduler/quantum.rs` (`tick`).

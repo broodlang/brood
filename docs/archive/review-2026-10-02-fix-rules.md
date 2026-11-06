@@ -1,5 +1,8 @@
 # Shared rules for the fix agents (read fully before starting)
 
+**Status 2026-11-06: a record of the 2026-10-02 review's working rules, not a current
+instruction.** For how to work in this repo, read `CLAUDE.md`.
+
 Repo: /home/wilhelm/src/broodlang/brood (branch main, HEAD 3f3e7732). Read its CLAUDE.md
 sections "Green tree first", "Build uncapped, run capped", "When you add a feature" (esp.
 step 3, SABOTAGE every guard), "Conventions & invariants", and the global rules:

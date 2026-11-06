@@ -8219,7 +8219,7 @@ NAME only — nothing checks that the global still *is* that record's constructo
 
 So a stale id plus a later, same-named non-record function devirtualizes wrongly: under
 `BROOD_MONO=1` the guard compares the identity and then calls an impl directly, which is a
-silently **wrong impl**, not a slow path (`docs/dispatch-speculation.md` names this exact
+silently **wrong impl**, not a slow path (`docs/archive/dispatch-speculation.md` names this exact
 risk). The registry does go stale — see [KI-89](#ki-89), where ids outlived the modules that
 registered them.
 

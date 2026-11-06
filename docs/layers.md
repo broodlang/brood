@@ -83,8 +83,7 @@ A new buffer needs a starting layer set, determined by its **type**:
 - `*type-layers*` maps `type → (layer refs)` (data, `def`-rebindable → hot-reload);
 - `*auto-type-by-file*` maps a filename to a type — an ordered `auto-mode-alist`
   analogue, `[{:match <suffix-or-(fn)> :type …} …]`, first match wins (suffix →
-  `ends-with?`, fn → called on the name). **No regex** in v1 (slots in when M2's
-  regex engine lands).
+  `string/ends-with?`, fn → called on the name). **No regex** in v1.
 
 Resolution: `(buffer-type-for buf)` = match `:file` against `*auto-type-by-file*`;
 **no file → the buffer's explicitly-set `:type`** (default `:fundamental`).
@@ -101,7 +100,7 @@ Layers never learns about "focus" — the app owns it (it already owns the
 window/buffer list). The active set = the **focused** context's layers; switching
 focus switches the active set automatically (the other context's layers go
 dormant). The app composes scope order — `(focused-buffer ++ window)`, buffer
-shadowing window (Emacs local-over-global) — via `active-layer-ctx`; a buffer-less
+shadowing window (Emacs local-over-global) — via `compose-layers`; a buffer-less
 GUI passes just the window. The app fires `:on-blur`/`:on-focus` on focus change
 and `:on-close` (+ deactivate all) on close. `:on-close` is the async-cleanup hook
 (kill a worker a layer spawned).
@@ -127,9 +126,9 @@ So a hook does not reach — it **names**:
 `request-close` records a companion on the closing context (accumulating,
 de-duplicated); `close-requests` reads the list back off `close-context`'s result;
 the app — which does know its own pool — performs the closes and decides what an
-unrecognised name means (myedit ignores it: the mode may have been unloaded, or the
-companion already closed). The same shape as a render op or a keymap command: the
-layer says *what*, the app does it. myedit follows one level only, so two modes
+unrecognised name means (the downstream editor ignores it: the mode may have been unloaded,
+or the companion already closed). The same shape as a render op or a keymap command: the
+layer says *what*, the app does it. That editor follows one level only, so two modes
 naming each other cannot loop.
 
 ## API (Phase 1 — the buffer-free core)
@@ -159,7 +158,7 @@ layer-dispatch (ctx pending key fb)  -> layer-resolve + keymap-run → [ctx' pen
 - ✅ **Phase 2 — buffer-type binding** (`*type-layers*` / `*auto-type-by-file*`,
   `register-type-layers` / `register-file-type` / `layers-for-type`,
   `buffer-type-for` / `set-buffer-type` / `init-buffer-layers`). Filename matching
-  is suffix or predicate, newest-rule-wins. `std/buffer` stays layer-agnostic.
+  is suffix or predicate, newest-rule-wins. `std/editor/buffer` stays layer-agnostic.
 - ✅ **Phase 3 — scopes, focus/close lifecycle, async.** `compose-layers` /
   `scope-keymap` / `scope-binding` / `scope-resolve` / `scope-dispatch` (multi-scope dispatch
   — a keystroke asks the layers for its one key rather than merging them; command runs on the app
@@ -174,14 +173,14 @@ layer-dispatch (ctx pending key fb)  -> layer-resolve + keymap-run → [ctx' pen
 The first real use of layers is editing modes — and it sets the tier line:
 
 - **`std/tool/sexp.blsp` (std).** Structural s-expression navigation over Brood's own
-  `parse-source` CST (a lossless typed tree — our "tree-sitter" for Brood code):
+  `reflect/parse-source` CST (a lossless typed tree — our "tree-sitter" for Brood code):
   annotate positions in one walk, then navigate by structure
   (`point-forward`/`backward`/`up`/`down`/`defun-start`, plus buffer commands).
   Written against an abstract node shape `{:kind :start :end :kids}`, so a
   foreign-language backend (tree-sitter, in the editor) can later produce the same
   shape and reuse these commands. This is *reusable Brood-code tooling* — same tier
   as the formatter / LSP — so it lives in std, not the editor.
-- **The modes live in the editor, not brood** (the downstream `brood-edit` project).
+- **The modes live in the editor, not brood** (the downstream `bedit` project).
   `text-mode` (the default — registered for `:fundamental`) and `brood-mode`
   (`.blsp` → `:brood`; reuses text-mode's motion + `sexp` nav + `eval-command`'s
   `C-x C-e`, stashing the result in `:message`) are *policy* — which keys do what,
@@ -192,10 +191,10 @@ The first real use of layers is editing modes — and it sets the tier line:
   the same shape with a tree-sitter `:parser`/`:grammar` facet — no new concept).
   Tested by that editor project's own `nest test`. (An in-repo `examples/editor`
   demonstrated this until 2026-08-17, when it was deleted as a stale duplicate of
-  `brood-edit` — KI-45.)
+  `bedit` — KI-45.)
 
 ## Deferred (named, not precluded)
 
 `:applies-to` (decentralised type binding) · per-binding `when`-guards ·
 `:commands` manifest + M-x / which-key palette ·
-precedence-as-a-value / nested layers · regex filename matching (M2 engine).
+precedence-as-a-value / nested layers · regex filename matching.

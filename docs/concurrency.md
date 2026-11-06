@@ -42,7 +42,7 @@ Surface (in Brood):
 
 | Form | Meaning |
 |---|---|
-| `(spawn (fn () ...))` | start a new process running the thunk; returns a process handle/id |
+| `(spawn expr)` | start a new process running `expr`; returns a process handle/id |
 | `(send pid msg)` | copy `msg` into `pid`'s mailbox (non-blocking) |
 | `(receive ...)` | take the next matching message from own mailbox; **blocks** (yields) until one arrives |
 | `(self)` | this process's id |
@@ -149,12 +149,12 @@ This is the largest *core* undertaking in the project. Two consequences:
    waiting on a timeout is woken by a dedicated timer thread. Timeouts are
    catchable (`throw` from the `after` body → `try`/`catch`).
 5. ✅ **Work-stealing** — per-worker run queues + steal-on-idle; general since
-   the state-capture cutover (any queued process, ADR-100; `(steal-count)`
+   the state-capture cutover (any queued process, ADR-100; `(dev/steal-count)`
    observes it).
 6. ✅ **Process monitors** — `monitor`/`demonitor`/`ref`: a unidirectional watch
    that delivers `[:down mref pid reason]` to the monitoring process when `pid`
    dies (`:noproc` if already dead), in `process.rs`. The one supervision
-   mechanism that needs a primitive; the rest is Brood (the `hatch` library).
+   mechanism that needs a primitive; the rest is Brood (`std/proc/`).
 7. ✅ Links + `trap-exit` (ADR-067) — including **atomic `spawn-link`**, which links
    the child before it can run so its true exit reason (not a racy `:noproc`) always
    reaches the parent — userland supervision trees
@@ -168,8 +168,9 @@ network is just a longer copy.** Slice 1 is **done** — two runtimes connect ov
 TCP and message each other (ADR-034; full reference in
 [`distribution.md`](distribution.md)). What landed:
 
-- ✅ **Nodes** — named runtimes (`node/start`/`connect`, `name@host`) that link
-  over TCP, authenticated by a shared cookie (a placeholder for real auth/TLS).
+- ✅ **Nodes** — named runtimes (`node/start`/`node/connect`, `name@host`) that link
+  over TCP or a Unix socket, authenticated by a shared cookie (HMAC handshake, then an
+  encrypted session, ADR-034/089).
 - ✅ **Pids carry node identity** — `Value::Pid { node, id }` instead of a bare
   `u64`. `send` is **location-transparent**: local pid → the local registry;
   remote pid → serialize and forward over the link; the peer deserializes into a
@@ -180,15 +181,15 @@ TCP and message each other (ADR-034; full reference in
   interner) and re-intern on arrival.
 - ✅ **Code distribution** — closures travel as data (ADR-033): the wire codec
   ships a closure's code + captured locals (`M_CLOSURE`, `dist/wire.rs`), so
-  `remote-spawn` works.
+  `node/spawn` works.
 - ✅ **Distributed links/monitors and node-down detection** — cross-node
   `monitor`/`link` fire `[:down … :noconnection]`/`[:EXIT pid :noconnection]`
   on link teardown; `node/monitor` delivers `[:nodedown name]`
   (see [`distribution.md`](distribution.md)).
 
-Caveats every distributed runtime learns the hard way, still to address: security (the cookie is a
-placeholder — auth/TLS later), partial failure / net-splits, serialization
-versioning, latency. This fits the project's "backend hosted remotely by a
+Caveats every distributed runtime learns the hard way: partial failure / net-splits and
+latency stay an application's concern; links are authenticated and encrypted (ADR-089), and the
+handshake negotiates the wire version (ADR-492). This fits the project's "backend hosted remotely by a
 frontend" premise — a remote frontend or second backend is just another node that
 links and message-passes.
 
@@ -204,15 +205,17 @@ genuinely still open:
 
 - **A long-running native builtin can't be preempted mid-call** — reductions
   tick only at evaluator/VM safepoints, so a huge regex/map-build holds its
-  worker for the call's duration (the dirty carve-out; the M4 blocking-offload
-  pool is the planned home for genuinely-blocking natives). The process yields as
+  worker for the call's duration (the dirty carve-out; genuinely-blocking natives
+  go to the offload pool, ADR-144, `proc/offload`). The process yields as
   soon as the call returns (an overrun records an *owed* preemption, ADR-403), the
   folds are resumable between elements, and `(proc/system-monitor pid
   {:long-schedule-us n})` reports every quantum that ran long (ADR-404). The same
   holds for a pure numeric recursion in the JIT's unboxed register worker, which
   keeps its whole recursion in registers and cannot be unwound (ADR-401).
-- **No mailbox bounds/backpressure and no per-process heap cap** — a runaway
-  producer or process is only caught by the global ADR-043 memory cap.
+- **Mailbox and heap limits are opt-in** — `(proc/flag :max-heap n)` and
+  `(proc/flag :max-mailbox n)` (ADR-307) bound one process and raise in that process
+  only; senders are never blocked. A process that sets neither is caught only by the
+  global ADR-043 memory cap.
 - **Selective-receive scan cost** — testing a candidate rebuilds it into the
   LOCAL heap; non-matching messages leave short-lived garbage (reclaimed by the
   per-process GC). Negligible when the first message matches; optimisable later

@@ -21,7 +21,7 @@ one with e.g. *"do backlog item W2 from docs/components.md."*
                          └───────────────────────────────┬──────────────────────────────────────┘
                                                           │ embeds
    POLICY (Brood)  ─────────────────────────────────────▼────────────────────────────────────────
-        std/prelude/*.blsp std/tool/test.blsp   std/tool/project*.blsp       ← redefinable at runtime
+        std/prelude/*.blsp std/tool/test.blsp   std/tool/project*.blsp       ← Brood, reserved (ADR-166)
    ───────────────────────────────────────────────────────────────────────────────────────────────
    MECHANISM (Rust)        language pipeline                          advisory types
         reader → macros → eval → printer                              types  ←  check
@@ -76,7 +76,7 @@ before working in any Rust component:
 
 ## Rust kernel — substrate
 
-### `core/value.rs` — the value model · ~305 LOC
+### `core/value.rs` — the value model · ~2,100 LOC
 - **Owns:** `Value`, the first-class type tag `Tag` + `tag(v)`, the handle types
   and their region encoding, the process-wide symbol interner
   (`intern`/`symbol_name`/`symbol_is`), `Closure`, `Arity`, `NativeFn`, and the
@@ -115,15 +115,15 @@ before working in any Rust component:
   [shared-code.md](shared-code.md) are load-bearing — read it before changing
   promotion or the global table.
 
-### `error.rs` — errors & source positions · ~152 LOC
+### `error.rs` — errors & source positions · ~850 LOC
 - **Owns:** `LispError`, `ErrorKind`, `LispResult`, `Pos`, the `wrong_type`
   self-identifying constructor, and the GNU `FILE:LINE:COL:` rendering (`located`).
 - **Depends on:** `value`, `printer` (to render the offending value).
 - **Work here independently:** fully self-contained; the cleanest module to touch.
 
-### `core/alloc.rs` — process byte counter · ~63 LOC
+### `core/alloc.rs` — process byte counter · ~800 LOC
 - **Owns:** the `#[global_allocator]` that tallies live/peak bytes for
-  `(mem-bytes)`/`(mem-peak)`.
+  `(dev/mem-bytes)`/`(dev/mem-peak)`.
 - **Depends on:** nothing (std only).
 - **Work here independently:** isolated; the only coupling is that `lib.rs`
   installs it as the global allocator.
@@ -131,18 +131,31 @@ before working in any Rust component:
 ### `process.rs` + `process/` — the green-process scheduler
 - **Owns:** `spawn`/`send`/`receive`/`self` and `Message` (the `Send` deep-copy
   that crosses heaps), split across the `process/` subsystem: `scheduler.rs` (the
-  work-stealing worker pool), `mailbox.rs`, `monitor.rs`, `links.rs`, `timer.rs`,
-  and `message.rs`. Processes are **state-capture** continuations — plain heap
+  work-stealing worker pool, with `scheduler/{pool,lifecycle,guards,quantum}.rs`),
+  `mailbox.rs`, `monitor.rs`, `links.rs`, `timer.rs`, `message.rs`, and `sysmon`,
+  `pressure`, `cputime`, `io_source` and `receive_spec`. Processes are **state-capture** continuations — plain heap
   data, no coroutines (ADR-100). Counters behind
-  `spawn-count`/`peak-threads`/`worker-threads`.
+  `dev/spawn-count`/`dev/peak-threads`.
 - **Depends on:** `heap`, `eval`, `value`, `error`.
 - **Exposes:** the functions `builtins` wraps, plus `set_max_parallel` (CLI).
 - **Work here independently:** well isolated behind those builtins. The receive/
   park handshake is the subtle part — see [scheduler.md](scheduler.md) / ADR-018.
 
+### `dist.rs` + `dist/` — distributed nodes
+- **Owns:** node identity, links and routing; `dist/{handshake,heartbeat,session,wire,
+  guest}.rs` — the authenticated handshake, node-down detection, the encrypted session
+  (ADR-089), the wire codec and guest links (ADR-415). See [distribution.md](distribution.md).
+- **Depends on:** `process`, `heap`, `value`. `std/node.blsp` is its policy layer.
+
+### `jit.rs` + `jit/` — the JIT ABI and backend
+- **Owns:** the `JitBackend` contract (`jit/backend.rs`, ADR-101/221), the `brood_rt_*`
+  callbacks (`jit/rt.rs`, the only heap/GC interface native code has) and the Cranelift
+  backend (`jit/cranelift.rs`).
+- **Depends on:** `eval::compile` for the lowering decisions, `heap`.
+
 ## Rust kernel — language pipeline
 
-### `syntax/reader.rs` — text → `Value` · ~321 LOC
+### `syntax/reader.rs` — text → `Value` · ~700 LOC
 - **Owns:** the recursive-descent parser; records form source positions into the
   heap for tooling.
 - **Depends on:** `heap`, `value`, `error`.
@@ -150,37 +163,37 @@ before working in any Rust component:
 - **Work here independently:** input side only; round-trips with `printer`, so
   changing surface syntax usually means a matching `printer` change.
 
-### `syntax/printer.rs` — `Value` → text · ~129 LOC
+### `syntax/printer.rs` — `Value` → text · ~465 LOC
 - **Owns:** `print` (readable, REPL) and `display` (human, `str`/`print`).
 - **Depends on:** `heap`, `value`.
 - **Work here independently:** output side only; the inverse contract of `reader`.
 
-### `eval.rs` — the evaluator · ~539 LOC
-- **Owns:** the `'tail: loop` tree-walker, **special forms** (`quote if do def
-  fn/lambda quasiquote defmacro let`), closure application,
-  parameter binding (`&optional`/`& rest`), and the native-call arity gate.
+### `eval.rs` + `eval/` — the evaluator · ~1,750 LOC + `machine.rs` ~2,400 LOC
+- **Owns:** the tree-walker (`eval/machine.rs`, a loop over a heap frame stack, ADR-416),
+  the eight **special forms** (`def fn quote quasiquote if do let letrec`), closure
+  application, parameter binding (`&optional`/`& rest`), and the native-call arity gate.
   Alongside it sits `eval/compile.rs` + `eval/compile/` (`ir.rs`, `jit_lower.rs`, …) — the
-  closure-compiling bytecode VM + tier-1 JIT, the **default engine** (ADR-076);
-  the tree-walker is the legacy/fallback path.
+  closure-compiling bytecode VM + JIT, the **default engine** (ADR-076);
+  `BROOD_TIER=0|1|2` caps the tier (ADR-222).
 - **Depends on:** `heap`, `value`, `macros` (lazy expansion + `fn`/`let` lowering
   fallback), `printer`, `error`.
 - **Exposes:** `eval`, `apply`, `apply_closure`, `truthy`.
 - **Work here independently:** **proper tail calls are an invariant** — a new
-  body-bearing special form must hand its last form back to the loop
-  (`tail_of`), not recurse (guarded by `tail_calls_do_not_overflow`). Keep the
+  body-bearing special form must push a continuation for each non-last sub-form and
+  hand its last form back to the loop, not recurse (guarded by
+  `tail_calls_do_not_overflow`). Keep the
   *core* small (ADR: prefer a prelude macro over a new special form).
 
-### `eval/macros.rs` — expansion & the compile pass · ~294 LOC
-- **Owns:** `quasiquote`, `macroexpand[-1]`, and `macroexpand_all` (the compile
-  pass run at each top-level boundary), including the **pattern lowering** that
-  desugars multi-clause / destructuring `fn` and `let` into the Brood `match*`
-  engine.
+### `eval/macros.rs` + `eval/macros/` — expansion & the compile pass · ~1,400 LOC + children
+- **Owns:** `quasiquote`, `macroexpand_1`/`macroexpand`, and `macroexpand_all` (the
+  compile pass run at each top-level boundary), with `macros/{hygiene,resolve,pipeline,
+  linmap,patterns,typed,template_escape}.rs` beneath it. `macros/patterns.rs` is the
+  **pattern lowering** that desugars multi-clause / destructuring `fn` and `let`.
 - **Depends on:** `heap`, `eval`, `value`, `error`.
-- **Exposes:** `macroexpand_all` (called by `lib`, `builtins::{eval,load,…}`),
-  `quasiquote`, `fn_needs_lowering`.
+- **Exposes:** `macroexpand_all` (called by `lib` and the evaluation builtins),
+  `macroexpand`, `macroexpand_1`.
 - **Work here independently:** the `eval`↔`macros` pair is mutually recursive
-  (eval calls back for the lowering fallback). Pattern-match *policy* is in the
-  prelude; this file only lowers the surface to `match*`.
+  (eval calls back for the lowering fallback).
 
 ### `builtins.rs` + `builtins/` — the primitive kernel (split by domain)
 - **Owns:** every Rust-implemented primitive. One file per domain, and **each domain
@@ -206,18 +219,21 @@ before working in any Rust component:
 
 ## Rust kernel — types (advisory; nothing gates on it)
 
-### `types.rs` — the type lattice · ~491 LOC
+### `types.rs` — the type lattice · ~5,600 LOC
 - **Owns:** `Ty` (a set of `Tag`s; union/intersect/negate; subtyping = inclusion)
   and `GradualTy` (`dynamic()` inside the lattice). Pure algebra + its own tests.
 - **Depends on:** `value` (for `Tag`).
 - **Work here independently:** no runtime path consumes it except `check`. See
   ADR-023/024 and [types.md](types.md).
 
-### `types/check.rs` — the advisory checker · ~212 LOC
-- **Owns:** a walk over macro-expanded forms that warns on *provably* wrong
-  primitive arguments (disjoint types). Never rejects; returns warning strings.
+### `types/check.rs` + `types/check/` — the advisory checker · ~3,300 LOC + children
+- **Owns:** a walk over macro-expanded forms that warns on unbound names, arity and
+  *provably* wrong types, with occurrence typing, inference, `sig` validation, exhaustiveness
+  and the lints under `check/` (`walk`, `sigs`, `infer`, `guards`, `recursion`, …). Never
+  gates the live image; `nest check` is the one batch reject (ADR-123..126).
 - **Depends on:** `types`, `heap`, `value`, `printer`.
-- **Exposes:** `check_form` (behind the `(check 'form)` builtin).
+- **Exposes:** `check_file`, `file_signatures`, `arg_ty_at`, behind `reflect/check-file`
+  and friends, `nest check` and the LSP.
 
 ## Embedding + binary
 
@@ -230,7 +246,7 @@ before working in any Rust component:
   keep it small.
 
 ### `boot.rs` + `boot/` — how a runtime comes to hold the prelude
-- **Owns:** the shared `SHARED` bundle and the three paths that build it — the prelude
+- **Owns:** the shared `SHARED` bundle and the two paths that build it — the prelude
   image (ADR-314) or the full source boot —
   plus `PRELUDE` (the `std/prelude/*.blsp` concatenation, in order), `boot_source()`
   (which path THIS process took) and the cache pruning. `boot/image.rs` is the
@@ -255,39 +271,41 @@ before working in any Rust component:
 
 ### `crates/cli/src/main.rs` — the `brood` language binary
 - **Owns:** arg parsing (`-j`/`--max-parallel`), the file runner, `--test`
-  (single-file in-language suite), `--version`, the `rustyline` interactive REPL
-  + plain piped REPL, and error rendering with a caret. Language only — no
-  project awareness.
-- **Depends on:** only `brood::Interp` (+ `error`, `process::set_max_parallel`)
-  and `rustyline`. Cleanly decoupled from kernel internals.
-- **Work here independently:** the roadmap goal is to move the REPL/CLI into
-  Brood.
+  (single-file in-language suite), `--check`, `--version`, booting a release bundle, and
+  error rendering with a caret. Language only — no project awareness. The REPL is Brood
+  (`std/tool/repl.blsp`, ADR-048).
+- **Depends on:** `brood::Interp` and `cli_support`. Cleanly decoupled from kernel
+  internals.
 
-### `crates/nest/src/main.rs` — the `nest` project-tooling binary
-- **Owns:** the `new` / `test` subcommands and (later) `build`/`check`/config —
-  the `cargo`/`mix` half of the `rustc`/`cargo` split (ADR-027). `brood` runs the
-  language; `nest` runs the project.
-- **Depends on:** only `brood::Interp` (+ `error`, `process::set_max_parallel`).
-  No subprocess — it embeds the lib like `brood` does.
-- **Work here independently:** the subcommands are a *thin* shell that drives
-  Brood by embedding source strings (`(require 'project) …`); the policy lives in
-  `std/tool/project*.blsp`. A deliberate bootstrap — moving the tool into Brood is the
-  roadmap goal.
+### `crates/nest/src/` — the `nest` project-tooling binary
+- **Owns:** the `cargo`/`mix` half of the `rustc`/`cargo` split (ADR-028). `brood` runs
+  the language; `nest` runs the project. `main.rs` routes every subcommand named in
+  `BLSP_SUBCOMMANDS` to `std/tool/nest.blsp` (ADR-322) before clap runs. What stays Rust:
+  `stdimage` (it must build where only the prelude is loaded, KI-112), `release.rs`
+  (the embedded runtime, byte assembly and boot check) and `mcp.rs` (the documents the
+  binary embeds).
+- **Depends on:** `brood::Interp` and `cli_support`. It embeds the lib like `brood` does.
 
-## Brood standard library (policy — redefinable at runtime)
+### `crates/lsp`, `crates/playground`, `crates/tab` — the other front ends
+- **`crates/lsp`:** the `brood-lsp` language server ([lsp.md](lsp.md)).
+- **`crates/playground`:** the wasm-bindgen in-browser playground.
+- **`crates/tab`:** `brood-tab`, the wasm-bindgen shim that runs a bundled program in a
+  browser tab.
 
-### `std/prelude/*.blsp` — the core library · ~7,000 LOC across nine files
-- **Owns:** `defn`; logic; folding (`reduce`/`map`/`filter`); variadic
+## Brood standard library (policy; shipped names are reserved, ADR-166)
+
+### `std/prelude/*.blsp` — the core library · ~9,000 LOC across thirteen files
+- **Owns:** `defn`; logic; folding (`fold`/`reduce`/`map`); variadic
   arithmetic & comparison over the 2-arg primitives; control-flow macros
   (`when`/`unless`/`and`/`or`/`cond`); sequence ops; the threading macro
   (`->`); error handling (`error`, `try`/`catch` over `%try`); the
   **pattern-match compiler** (`match*`/`match`, reused by `let`/`fn`); string &
   path helpers; and the **module system** (`provide`/`require`/`*load-path*`).
-- **Baked into the binary** via `include_str!` in `lib.rs`; frozen into PRELUDE.
+- **Baked into the binary** via `include_str!` in `boot.rs`; frozen into PRELUDE.
 - **Work here independently:** this is where new language features should go by
   default. Add a test in `tests/suite_test.blsp`; document in `language.md`.
 
-### `std/tool/test.blsp` — the test framework · ~395 LOC
+### `std/tool/test.blsp` — the test framework · ~2,000 LOC
 - **Owns:** ExUnit-style `describe`/`test`/`deftest`, the assertions, and the
   parallel-by-default runner with `:serial`/`:isolated` (over `spawn`/`%isolate`).
 - **Loaded on demand** (a `test/…` reference, or `(:use test)`); embedded through `%builtin-module`.
@@ -315,14 +333,14 @@ before working in any Rust component:
 
 ## Tests & benches
 
-- **`crates/lisp/tests/basic.rs`** (~607) — Rust end-to-end language tests
+- **`crates/lisp/tests/basic.rs`** (~2,000) — Rust end-to-end language tests
   (read→eval→print), plus the `Heap: Send` guard.
-- **`crates/lisp/tests/suite.rs`** (~21) — runs the in-language suite via the
+- **`crates/lisp/tests/suite.rs`** (~80) — runs the in-language suite via the
   project runner from the repo root.
 - **`tests/**/*_test.blsp`** — the in-language suite (pattern matching, modules,
   the main `suite_test.blsp`), discovered by `nest test` / the runner.
-- **`crates/lisp/benches/eval.rs`** — `divan` microbenchmarks; each run archived
-  to `docs/benchmarks/<UTC-timestamp>.md` by `scripts/bench.sh`.
+- **`crates/lisp/benches/`** (`eval.rs`, `stdlib.rs`, `library.rs`) — `divan`
+  microbenchmarks; each run archived to `docs/benchmarks/<UTC-timestamp>.md` by `scripts/bench.sh`.
 
 ---
 
@@ -359,10 +377,8 @@ before working in any Rust component:
    relaxed-dependency note (`boxcar`/`rustyline`/`divan`), the `Send`
    handle-heap memory model, and the `nest` + `lsp` crates.
 
-4. **`nest` ↔ Brood string coupling (low priority).** `crates/nest/src/main.rs`
-   embeds Brood snippets for `test`/`new`. This is an acknowledged bootstrap
-   (roadmap: self-host the tooling in Brood); fine to leave until the language
-   can express it.
+4. **`nest` ↔ Brood string coupling — resolved.** *(Resolved.)* The subcommands are
+   Brood (`std/tool/nest.blsp`, ADR-322); `crates/nest` routes to them.
 
 ## Work backlog (dispatchable)
 
@@ -403,7 +419,7 @@ asked and how it landed.
 
 ### W4 — Split `builtins.rs` into `builtins/` by domain · ✅ done
 - **Was:** convert the single `crates/lisp/src/builtins.rs` into a directory,
-  one cohesive file per primitive domain, keeping the full `proc/register` table in
+  one cohesive file per primitive domain, keeping the full `register` table in
   `mod.rs` so every primitive + arity stays visible in one place.
 - **Done:** the split exists on disk as `crates/lisp/src/builtins/`, and since
   2026-09-11 each domain file also owns its registrations (see the card). Includes W1

@@ -4,7 +4,15 @@
 > discussion — *true* shared code (not copy-on-spawn). A runtime's inner
 > processes share its live code + global table; redefining a function reaches a
 > running process on its next lookup (live code reload across running processes).
-> Separate runtimes (future nodes) stay independent; data is never shared.
+> Separate runtimes (nodes) stay independent; data is never shared.
+>
+> This file is the design as it was staged, and "today" in the first sections means
+> before the staged work. What shipped differs from that first sketch in these ways:
+> the prelude region is `SharedCode` and the mutable one `RuntimeCode`
+> (`core/heap/runtime_code.rs`) — `CodeHeap` was the design's name; handles are 64-bit
+> with a 2-bit region tag; the RUNTIME region is no longer forever append-only, since a
+> two-generation collector reclaims it (ADR-091, §"How it's built"); and `spawn` copies a
+> capturing closure's values instead of promoting it (ADR-405).
 
 ## Why
 
@@ -40,10 +48,13 @@ which unlocks three things at once:
 
 ### Handle encoding
 
-Reuse the top bit of the existing `u32` index as the region flag
-(`SHARED = 1 << 31`); the low 31 bits are the slab index (2³¹ objects per region,
-ample). Every handle type (`PairId`/`VecId`/`StrId`/`ClosureId`/`EnvId`/`NativeId`)
-carries it. Local allocation sets it to 0; loading code sets it to 1.
+As designed: reuse the top bit of the then-`u32` index as a region flag. As built
+(`core/value.rs`): every handle type (`PairId`/`VecId`/`StrId`/`ClosureId`/`EnvId`/
+`NativeId`, …) is a `u64` with the region in the top two bits (`REGION_SHIFT` 62), an
+age bit at 61, a generation in bits 32–60 and the slab index in the low 32. A LOCAL
+handle carries the collector's epoch in the generation bits; a RUNTIME handle carries
+its code generation (0 or 1). Region `0b11` is reserved for the `EnvId::GLOBAL`
+sentinel and can never be minted.
 
 ## The hard part: shared reads + mutability + reference lifetimes
 
@@ -84,8 +95,8 @@ mechanics, gives cheap spawn + shared prelude), and add the mutable-shared regio
   region (its body is data — symbols/lists — so it's copied from the defining
   process's local heap into shared), then rebind the global symbol.
 - **Hot-reload:** redefinition adds new shared code and rebinds; because old code
-  is never freed (append-only), a call already running the old closure finishes on
-  it, while every new lookup — in any process — gets the new version. This is the
+  stays until nothing holds it (ADR-091), a call already running the old closure
+  finishes on it, while every new lookup — in any process — gets the new version. This is the
   live-reload semantics we want (Emacs has the same).
 
 ## Closures capture the global env *symbolically*
@@ -99,16 +110,14 @@ own global). Closures that capture a *local* enclosing scope keep `Some(EnvId)`.
 This is what lets one shared closure run correctly in any process. (Done as
 step 2a — behaviour-preserving on its own.)
 
-Note this also means the **global env stays per-process and mutable** (so `def`
-works); it is *not* part of the immutable shared region. The global env's
-*bindings* map symbols to (possibly shared) closure handles; the shared region
-holds the closure *code*, not the global bindings table.
+At this step the global env stayed per-process and mutable, outside the immutable
+shared region. Step 4 below moved the bindings table into the runtime's shared
+`RuntimeCode`: the global scope is now the sentinel `EnvId::GLOBAL`, not a frame.
 
 ## `env_get` across regions
 
-A process's innermost scopes are *local* `EnvId`s; the global env is per-process
-(local). `env_get` dispatches per-frame by region — relevant once any frame is
-shared. Today only the global frame's *contents* point into the shared region.
+A process's innermost scopes are *local* `EnvId`s; `env_get` dispatches per-frame by
+region, and a chain bottoms out at `EnvId::GLOBAL`, which routes to `runtime.globals`.
 
 ## Interaction with processes
 
@@ -116,8 +125,9 @@ shared. Today only the global frame's *contents* point into the shared region.
   code (O(1)) and starts with a fresh, empty data heap. Cheap.
 - **Sending functions becomes easy:** a *top-level* function's code lives in the
   shared region and its env is the shared global, so its `ClosureId` is valid in
-  *every* process — sending it is just sending the (shared) handle. Closures that
-  capture locals still need those captured values copied (free-variable capture),
+  *every* process — sending it is just sending the (shared) handle (shipped for a
+  closure already in RUNTIME, `BROOD_NO_SHARE_FN` turns it off). Closures that
+  capture locals still have those captured values copied (free-variable capture),
   but the global/native-resolution problem disappears.
 
 ## Staged sub-steps (each keeps `cargo test` green)
@@ -156,40 +166,43 @@ The reconciliation is a matter of *scope*:
   cross-process hot reload (shared current code, every call re-dispatches through
   it — and since Brood is a Lisp-1 with late binding, *every* call already
   re-dispatches, no qualified remote call needed).
-- **Separate runtimes (future nodes)** each get their **own** `RuntimeCode`, so
+- **Separate runtimes (nodes)** each get their **own** `RuntimeCode`, so
   updating one never touches another.
 
 ### How it's built
 
-- **Three regions, 2-bit handle tag** (`value.rs`): `LOCAL` (per-process data,
+- **Three regions, 2-bit handle tag** (`core/value.rs`): `LOCAL` (per-process data,
   `Vec` slabs), `PRELUDE` (immutable, `Arc<SharedCode>`, shared by all runtimes),
   `RUNTIME` (mutable, per-runtime, shared by inner processes).
-- **`RuntimeCode`** (`heap.rs`): append-only code slabs (`boxcar::Vec` — lock-free
-  reads return stable references that survive concurrent pushes, so process
-  threads read closure bodies without locking while a `def` appends) + a
-  `RwLock<HashMap<Symbol, Value>>` global bindings table (read on every global
-  lookup, written on `def` — the only mutation, ADR-026).
+- **`RuntimeCode`** (`core/heap/runtime_code.rs`): append-only code slabs (`boxcar::Vec`
+  — lock-free reads return stable references that survive concurrent pushes, so process
+  threads read closure bodies without locking while a `def` appends), two generations of
+  them behind `ArcSwap` so a drained generation can be freed (ADR-091,
+  `core/heap/gc_runtime.rs`), + a `RwLock<SymbolMap<Value>>` global bindings table (read
+  on a global-lookup miss, per-process inline caches in front of it, written on `def` —
+  the only mutation, ADR-026).
 - **The global scope is a sentinel `EnvId::GLOBAL`**, not a frame; the env
   routines route it to `runtime.globals`. A local frame chain bottoms out there;
   a top-level closure captures it symbolically (`Closure.env == None`).
 - **`def` promotes** the bound value's reachable code from `LOCAL` into the
   `RUNTIME` region (deep copy, append-only) before rebinding in the shared table.
   Append-only means a redefinition adds a *new* version while a call already
-  running the old closure finishes on it — correct hot-reload semantics.
-- **`spawn`** clones the parent's `Arc<RuntimeCode>` (shared code) and `promote`s
-  the target function; args are still shipped as `Message`s (data is per-process).
+  running the old closure finishes on it — correct hot-reload semantics. Old code
+  stays live while anything holds it; the collector reclaims it after that (ADR-091).
+- **`spawn`** clones the parent's `Arc<RuntimeCode>` (shared code). A closure that
+  captures locals is copied into the child's heap, sharing its arms and copying its
+  captured values as a message would (`message::copy_closure_into`, ADR-405); anything
+  else is `promote`d, a no-op for a top-level function.
 
 ### Captured environments cross the boundary too
 
 A closure defined *inside a function call* (not at top level) closes over a local
-scope. To run such a closure in another process, `promote` also copies its
-captured environment chain into the `RUNTIME` region (`promote_env`) — without
+scope. When such a closure is promoted (a `def`, or a `spawn` fallback), `promote` also
+copies its captured environment chain into the `RUNTIME` region (`promote_env`) — without
 this, a shared closure with `env = Some(LOCAL …)` would dereference a frame that
 doesn't exist in the other process. (Promoted frames are frozen — sound now that
 bindings are immutable: a `let`/`fn` binding never changes after creation, ADR-026.)
 
-(`send`ing a function — ship a closure handle, now that top-level code is shared —
-remains possible if a concrete need arises.)
 
 ## Risks
 
@@ -202,8 +215,6 @@ remains possible if a concrete need arises.)
 - Lock/append synchronisation on the mutable region; the immutable region (the
   common case, prelude/builtins) stays lock-free.
 
-## Decision / next step
+## Decision
 
-Approach **A** is chosen. Build it in the staged sub-steps above, beginning with
-**step 1** (region-tagged handles, shared region empty — behaviour-preserving).
-Each step lands behind `cargo test` + the Brood suite.
+Approach **A** was chosen and built in the staged sub-steps above.

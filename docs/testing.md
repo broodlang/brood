@@ -12,7 +12,7 @@ only *registers* its cases), and runs the whole suite once:
 
 ```bash
 nest test        # find project.blsp, discover tests/**/*_test.blsp, run them once
-make suite        # the same, via cargo
+make suite        # the same, after building nest with cargo
 cargo test        # Rust tests + the same in-language suite (crates/lisp/tests/suite.rs)
 ```
 
@@ -26,7 +26,7 @@ so it works from anywhere inside a project.
 
 (describe "arithmetic"
   (test "addition"   (assert= (+ 1 2 3) 6))
-  (test "division"   (assert= (/ 12 3) 4) (assert= (/ 7 2) 3.5)))
+  (test "division"   (assert= (/ 12 3) 4) (assert= (/ 7 2) 7/2)))
 
 (describe "errors"
   (test "catches a throw" (assert= (try (throw 42) (catch e e)) 42))
@@ -80,9 +80,21 @@ equality (it shows both the actual expression's value and the expected value) an
 A test can report **several failures** — one per top-level body form. Each operand
 is evaluated once. With no mutable accumulator (data is immutable, ADR-026), an
 assertion signals failure by **throwing** a tagged record; the `test` macro runs
-each top-level body form in its own `try` (`test--run`), so a throw ends only that
+each top-level body form in its own `try` (`test-run`), so a throw ends only that
 form and the next form still runs. The exception: multiple assertions nested inside
 **one** form stop at the first (the throw unwinds the whole form).
+
+### Helpers for concurrent tests
+
+`std/tool/test.blsp` also ships what a test of concurrent code needs, so it need not
+guess at timing:
+
+| form | does |
+|---|---|
+| `(concurrently n f)` | runs `(f i)` for `i` in 0..n-1, each in its own process, and returns their results in completion order |
+| `(eventually what probe)` | polls the zero-argument `probe` until it is truthy; raises naming `what` after `test/*wait-ms*` (20 s) |
+| `(await-parked pid)` | waits until `pid` is parked in a `receive` or a sleep |
+| `(temp-dir prefix)` | a fresh, unique `/tmp` path, not created; `(purge-stale-temp prefix)` at file load clears a crashed run's leftovers |
 
 ### Progress output
 
@@ -207,8 +219,8 @@ window keeps its fixed nominal grid and no font engine, so it cannot be captured
 
 ## Execution model — parallel by default
 
-Every test runs concurrently, **each in its own process** (`spawn`/`receive`),
-on its own OS thread. Two opt-outs, written as a keyword right after the group or
+Every test runs concurrently, **each in its own green process** (`spawn`/`receive`).
+Two opt-outs, written as a keyword right after the group or
 test name:
 
 ```lisp fragment
@@ -242,7 +254,7 @@ itself*, each under the `%isolate` primitive (which snapshots the global binding
 runs the test, then restores them). So every isolated test sees the clean
 post-load baseline (none of the parallel/serial defs) and nothing it defines
 survives. Only `%isolate` rolls back *bindings*; the append-only code slabs and
-the symbol interner still grow (memory, not behaviour — there's no GC yet).
+the symbol interner still grow (memory, not behaviour).
 **Then** the runner spawns all `:parallel` and `:serial` units and runs them
 together. (`%isolate` is sound only because the isolated phase runs alone, with no
 other process mutating globals.)
@@ -258,8 +270,8 @@ Immutability makes this fall out for free — there is *no* shared (or even
 process-local) mutable accumulator to race on:
 
 - An assertion signals failure by **throwing** a tagged failure record
-  (`(:%test-fail loc details)`, via `test--fail`). The `test` macro splits its body
-  into one thunk per top-level form; `test--run` runs each in its own `try`,
+  (`(:%test-fail loc details)`, via `test-fail`). The `test` macro splits its body
+  into one thunk per top-level form; `test-run` runs each in its own `try`,
   collecting the caught failures into a list — so each test **yields its failure
   list as a value** (empty = passed, one record per failing form). An uncaught
   (non-assertion) error is recorded and stops the test.
@@ -344,8 +356,8 @@ Numeric flags are range-checked by the argument parser: `--partitions`,
 ≥ 1, and `--cover-min` must be 0–100. A bad value is rejected before the run
 starts.
 
-**Positive selectors union, they don't intersect.** `--only`, `FILE:LINE`,
-`--failed` and `--names` all *add* candidates, so `--failed --only slow` runs
+**Positive selectors union, they don't intersect.** `--only`, `FILE:LINE` and
+`--failed` all *add* candidates, so `--failed --only slow` runs
 (last run's failures) ∪ (`:slow` tests), not their intersection. To narrow rather
 than widen, pair one positive selector with `--exclude`:
 `nest test --failed --exclude slow`.
@@ -400,35 +412,34 @@ of runs that are gone. A `nest test` started inside a run keeps the user's confi
 
 In a project, run the whole suite with **`nest test`** (or `make suite`, or
 `cargo test`): the runner discovers `tests/**/*_test.blsp`, loads them, and calls
-`run-tests` once (`nest test` passes `:trace`). `run-tests` itself takes the flags
-below — forwarded by the runner, and usable directly if you call it yourself:
+`run-tests` once. `run-tests` itself takes the flags below — forwarded by the runner,
+and usable directly if you call it yourself:
 
 ```lisp fragment
 (run-tests)            ; run all, print failures + a summary
-(run-tests :trace)     ; print `▶ group › name` as each test STARTS (else: progress dots)
+(run-tests :trace)     ; one line per test as it FINISHES (else: progress dots)
 (run-tests :slow)      ; after the summary, list the slowest 5 tests
 (run-tests :slowest 10)     ; ...or the slowest N
 (run-tests :timeout 5000)   ; per-test HARD ceiling in ms — killed+failed (default 120000)
 (run-tests :slow-over 200)  ; list any test over this many ms (informational; default 1000)
 (run-tests :max-failures 1) ; abandon the run once this many tests have failed
 (run-tests :repeat 50)      ; run the suite up to 50 times, stop at the first failure
-(run-tests :filter SPEC)    ; a selection spec — see `test--make-filter`
+(run-tests :filter SPEC)    ; a selection spec — see `test/test-make-filter`
 (run-tests :trace :slow)
 ```
 
 The `nest test` flags map onto these one-for-one: `--max-failures` → `:max-failures`,
 `--repeat-until-failure` → `:repeat`, `--slowest` → `:slowest`, `--timeout` →
-`:timeout`, `--trace` sets `:trace` (opt-in — see below), and the selection flags are lowered
-into one `:filter` spec built by `test--make-filter` (selector *parsing* lives in
+`:timeout`, `--trace` sets `:trace` (opt-in — see above), and the selection flags are lowered
+into one `:filter` spec built by `test/test-make-filter` (selector *parsing* lives in
 Brood, so the grammar has a single definition).
 
 **`--max-failures` granularity.** The budget is checked between scheduling steps
 and between files, not mid-test, so a run can overshoot the cap slightly — the
 batch already in flight still reports. It bounds the run; it isn't an exact stop.
 
-`nest test` shows progress dots by default and `▶ group › name` under `--trace`; the
-`brood --test` path and `run-tests-structured` stay quiet either way, for clean
-machine-parseable output.
+`nest test` shows progress dots by default and one line per test under `--trace`;
+`run-tests-structured` stays quiet either way, for clean machine-parseable output.
 
 **Two thresholds, distinct on purpose** (both per-test wall-clock ms; module vars,
 overridable as above):
@@ -445,8 +456,10 @@ test that exceeds it is **hard-killed** (`(exit worker :kill)`, ADR-063 — so e
 tight infinite loop is stopped, not just a `receive`-blocked one) and reported as a
 `test timed out after Ns` failure, rather than dragging or wedging the whole suite.
 Override per run with `:timeout MS`, or globally by rebinding `test/*timeout-ms*`.
-Tests in a batch start together, so the budget is effectively per-test. Any test
-over **1 s** (passing or not) is also listed automatically under the summary.
+Tests in a batch start together, so the budget is effectively per-test. A batch
+holding a unit tagged `:slow` or `:conformance` gets `test/*slow-timeout-ms*` (900 s)
+instead. Any test over **1 s** (passing or not) is also listed automatically under the
+summary.
 
 ### Reading a failure
 
@@ -457,9 +470,9 @@ compilation-mode/flymake), then its fields indented with the labels dimmed so th
 
 ```
 tests/mix_test.blsp:5:28: test failed: arithmetic › divides
-    assert: (assert= (/ 7 2) 3.6)
-    actual: 3.5
-    expect: 3.6
+    assert: (assert= (/ 7 2) 3)
+    actual: 7/2
+    expect: 3
 ```
 
 When an assertion carries no recorded position — a body form the reader recorded no
@@ -548,7 +561,7 @@ The full inventory — which suites are wired and which are still ahead — is t
 - `crates/lisp/tests/basic.rs` — Rust end-to-end checks of the language
   (including `live_redefinition` and `spawned_process_picks_up_redefinition`).
 - `crates/lisp/tests/suite.rs` — drives the project test runner: it `cd`s to the
-  repo root and evaluates `(require 'project) (run-project-tests)`, which discovers
+  repo root and evaluates `(project-run/run-tests)`, which discovers
   and runs every `tests/**/*_test.blsp`. The suite signals failure by raising, so
   `Ok` means every in-language assertion passed.
 

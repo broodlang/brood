@@ -1,12 +1,13 @@
 # Distribution: connecting two nodes
 
-> Status: **slices 1 + 2 implemented; connect ergonomics per ADR-068.** Two Brood
+> Status: **slices 1 + 2 implemented; connect ergonomics per ADR-068, encryption per
+> ADR-089, guest links per ADR-415.** Two Brood
 > runtimes connect and message each other — on one machine over a Unix-domain
 > socket addressed by name, across machines over TCP. Distribution
 > falls out of share-nothing + copy-on-send — *the network is just a longer copy*
 > (ADR-013, ADR-034). The design intent lives in
 > [`concurrency.md` §Distribution](concurrency.md); the ergonomics rationale in
-> [`node-connect.md`](node-connect.md); this doc is the as-built reference.
+> [`archive/node-connect.md`](archive/node-connect.md); this doc is the as-built reference.
 
 ## What you can do
 
@@ -22,7 +23,7 @@
 
 ;; --- node B (same machine) ------------------------------------------------
 (node/start :b)
-(connect "a")                                 ; dial A by name — no port, no IP
+(node/connect "a")                                 ; dial A by name — no port, no IP
 (send {:name :echo :node :a} [:hi (self)])    ; reach A's :echo by name
 (def remote (receive ([:pong p] p)))          ; p is A's pid — a remote pid
 (send remote [:ping (self)])                  ; now address it directly
@@ -32,7 +33,7 @@
 (node/start :a "0.0.0.0:9001")                ; listen over TCP (advertised as this
                                               ; node's host — the part after `@`, else
                                               ; localhost — with the port actually bound)
-(connect "a@10.0.0.4:9001")                   ; dial a remote peer
+(node/connect "a@10.0.0.4:9001")                   ; dial a remote peer
 ```
 
 The shared cookie authenticating links lives in `~/.config/brood/cookie`
@@ -40,11 +41,32 @@ The shared cookie authenticating links lives in `~/.config/brood/cookie`
 a machine share it — no secret to pass. `nest run --name foo app.blsp` brings a
 local node up before running `app.blsp` (the Emacs `--daemon` model).
 
+## Local nodes: the socket, the cookie, `--name` (ADR-068)
+
+A local node binds a Unix socket at `$XDG_RUNTIME_DIR/brood/<name>.sock` (fallback
+`/tmp/brood-<uid>/<name>.sock`) in a `0700` directory, so a peer needs only the name. Names
+past the ~108-byte `sun_path` limit are hashed. A bind on a used path probes it: a refused
+connect means a stale file from a crashed node, which is unlinked and rebound; a live node
+is the error "name already in use by a live node". The cookie handshake still runs over the
+socket, so there is one protocol.
+
+`node/start` resolves the cookie once, in Brood: `(node/cookie)` reads `$BROOD_COOKIE`, then
+`~/.config/brood/cookie`, then generates one and writes it `0600` with `file/spit-private`.
+`node/connect` needs a prior `node/start` (`:nonode` otherwise); the handshake has no
+empty-cookie fallback.
+
+`nest run --name NAME` calls `(node/start NAME)` before running the file. A file that also
+starts a node hits the double-start guard, so the two are mutually exclusive.
+
+A daemon can serve a `ui-run` app to thin clients: `std/editor/serve.blsp` over these
+primitives, with `nest attach` as the client (ADR-090, and ADR-519/593/605 for a session
+outliving its client).
+
 ## Node names are `name@host` (ADR-073)
 
 A node's identity is `name@host` — globally unique, carried in every
 pid (`#<pid a@whkbus/3>`). `node/start` qualifies a bare name: a **local** node
-takes this machine's short `(hostname)` (`:a@whkbus`); a **TCP** node takes its
+takes this machine's short `(os/hostname)` (`:a@whkbus`); a **TCP** node takes its
 listen address's host (`:a@127.0.0.1`), so peers and `reconnect` derive the same
 name. Pass an explicit `:name@host` for a long/FQDN name. **`connect` returns the
 peer's authoritative `name@host`** — address peers with that value (a `let`/`def`
@@ -54,16 +76,16 @@ binding, or `(node/list)`), not a bare literal.
 
 | Primitive | Meaning |
 |---|---|
-| `(node/start name)` | Start a **local** node (Unix-domain socket, no port). Returns its `name@host`. |
+| `(node/start name)` | Start a **local** node (Unix-domain socket, no port; TCP-only on Windows). Returns its `name@host`. |
 | `(node/start name "host:port")` | Start a node listening over **TCP** for remote peers. |
-| `(node/start name "host:port" cookie)` | …with an explicit cookie (the default is `(node-cookie)`). |
-| `(node-also-listen)` / `(node-also-listen "host:port")` | **Dual-listen** (ADR-074): add another front door to this node — the local Unix socket, or a TCP endpoint — sharing its identity + cookie. |
-| `(connect "name")` | Dial a local peer by name (Unix socket). Returns the peer's `name@host`. |
-| `(connect "name@host:port")` | Dial a remote peer over TCP. Returns its `name@host`. |
-| `(remote-spawn node expr)` | Run `expr` in a fresh process on `node` (fire-and-forget, returns nil). |
-| `(remote-spawn-sync node expr)` | Like `remote-spawn` but returns the child's (node-tagged) pid — `monitor`/`link`-able. |
-| `(node-cookie)` | The shared link secret: `$BROOD_COOKIE` → `~/.config/brood/cookie` → freshly minted. |
-| `(hostname)` | This machine's short hostname (used to qualify a local node name). |
+| `(node/start name "host:port" cookie)` | …with an explicit cookie (the default is `(node/cookie)`). |
+| `(node/also-listen)` / `(node/also-listen "host:port")` | **Dual-listen** (ADR-074): add another front door to this node — the local Unix socket, or a TCP endpoint — sharing its identity + cookie. |
+| `(node/connect "name")` | Dial a local peer by name (Unix socket). Returns the peer's `name@host`. |
+| `(node/connect "name@host:port")` | Dial a remote peer over TCP. Returns its `name@host`. |
+| `(node/spawn node expr)` | Run `expr` in a fresh process on `node` (fire-and-forget, returns nil). |
+| `(node/spawn-sync node expr)` | Like `node/spawn` but returns the child's (node-tagged) pid — `monitor`/`link`-able. |
+| `(node/cookie)` | The shared link secret: `$BROOD_COOKIE` → `~/.config/brood/cookie` → freshly minted. |
+| `(os/hostname)` | This machine's short hostname (used to qualify a local node name). |
 | `(proc/register name pid)` | Bind a local name so peers can address this process. Returns the pid. |
 | `(node/name)` | This runtime's node name (`:nonode` until `node/start`). |
 | `(node/list)` | A list of currently connected peer node names. |
@@ -217,13 +239,13 @@ for testing a mixed cluster.
     receiving node cannot find raises there, naming the module and the fact that
     the closure was shipped. Nothing is asked for that the *sender* does not have
     loaded, and quoted data (`'json/x`) drags nothing along.
-  - **`(remote-spawn node expr)`** macro (`std/prelude/tools.blsp`) — the surface
+  - **`(node/spawn node expr)`** macro (`std/node.blsp`) — the surface
     convenience over the `[:run …]` pattern; ships the closure to a
-    `:remote-spawn` server on `node` (lazily started via `(start-remote-spawn)`).
+    `:remote-spawn` server on `node` (lazily started via `(node/serve-spawns)`).
     See `remote_spawn_runs_a_thunk_on_a_peer`.
   - **Source positions across the wire** — `Message::List` carries an optional
     trailing `Pos`; on rebuild the receiver's `set_form_pos` re-stamps it, so
-    `(form-pos …)` and the eval loop's `or_form_pos` work on remote-shipped
+    `(reflect/form-pos …)` and the eval loop's `or_form_pos` work on remote-shipped
     code. See `source_positions_survive_a_cross_node_send`.
   - **Distributed pid monitors** — `(monitor remote-pid)` ships a
     `Frame::Monitor` to the peer, which routes through the same shared
@@ -278,8 +300,8 @@ for testing a mixed cluster.
 
 Slice 1 was a working trusted-peer link; slice 2 makes it sturdy enough to leave
 running. **De-dup + tie-break**, **node-down detection**, and the
-**generation-checked teardown** they rest on are now implemented. Handshake v2
-(versioning + HMAC challenge–response) landed too — see §3 below.
+**generation-checked teardown** they rest on are implemented, and so is handshake v2
+(§3).
 
 ### 1. Duplicate / crossing connections (de-dup + tie-break) ✅
 
@@ -352,20 +374,18 @@ out of a multi-node group), so an application no longer needs an ad-hoc
 EOF and calls `drop_link` again, but the generation-id guard (§4) makes that a
 no-op — `nodedown` fires exactly once. Returns `true` if a link existed.
 
-### 3. Handshake v2 (versioned + authenticated)
+### 3. Handshake v2 (versioned + authenticated) ✅
 
-**Problem.** The current `Hello` is a plaintext node name + cookie compared
-non-constant-time, with no protocol-version field, so a future wire change can't
-be negotiated and a wrong-version peer fails opaquely.
+**Problem it solved.** The first `Hello` was a plaintext node name + cookie compared
+non-constant-time, with no protocol-version field, so a wire change couldn't
+be negotiated and a wrong-version peer failed opaquely.
 
-**Approach.**
-- Add a **protocol version** to `Hello`; reject or down-negotiate on mismatch with
-  a clear error, so the codec can evolve compatibly.
-- Replace the plaintext cookie with a **challenge–response** (each side sends a
-  nonce; the other returns a MAC of it keyed by the shared cookie), so the secret
-  never crosses the wire and a constant-time MAC compare removes the timing
-  channel. Keep it pluggable for real TLS later.
-- Carry the tie-break nonce from §1 in the same handshake (one round-trip).
+**As built** (*Transport* above; ADR-034 v2, ADR-089).
+- A 4-byte magic+version prefix, so the codec can evolve compatibly; a mismatch aborts
+  with a clear error, and a v11 node down-negotiates to v10 (ADR-492).
+- A **challenge–response** in place of the plaintext cookie: each side sends a nonce and
+  the other returns a MAC of it keyed by the shared cookie, so the secret never crosses
+  the wire and a constant-time compare removes the timing channel.
 
 **Perf.** Handshake is one-time per connection (cold path) — correctness over
 speed. Keep the existing handshake **read timeout** so a stalled/﻿malicious peer
@@ -377,7 +397,7 @@ link threads (slice 1 already does this; preserve it).
 ### 4. Resource cleanup (cross-cutting — no leaks) ✅
 
 Every link funnels through one teardown path. Each `Conn` carries a generation
-id and a shared `Arc<TcpStream>` for `shutdown`. Any trigger — peer close, read
+id and a shared handle to its `Stream` for `shutdown`. Any trigger — peer close, read
 or write error, tie-break eviction (§1), heartbeat down (§2) — `shutdown`s the
 socket; the reader unblocks and calls `drop_link(peer, id)`, which removes the
 `NODES` entry **iff** the stored generation still matches (so an evicted link
@@ -395,9 +415,7 @@ cases; the long-soak test is its own thing).
 
 ### Sequencing
 Built in the planned order: §4 (generation-checked teardown) → §1 (de-dup +
-tie-break) → §2 (node-down + `node/monitor`). §3 (handshake v2: protocol-version
-+ challenge–response) is still future; the existing cookie compare and version
-omission are documented as not-yet-security.
+tie-break) → §2 (node-down + `node/monitor`) → §3 (handshake v2).
 
 ## Cluster mesh — connecting transitively (ADR-088)
 
@@ -440,8 +458,7 @@ to exactly the nodes you dial, with no transitive discovery.
   means only same-cluster nodes ever link).
 - *Trust:* gossip comes from an already-authenticated peer (it holds the cookie),
   so meshing crosses no new trust boundary — it dials with our cookie, and only
-  same-cookie nodes link. Do not expose a TCP node on an untrusted network until
-  channel TLS lands (ADR-081), mesh or not.
+  same-cookie nodes link.
 
 ## Guest links — a credential that is not the machine's (ADR-415)
 
@@ -478,10 +495,13 @@ does NOT make safe is what the processes it can reach do with the data they are 
 guest attached to an editor session can still drive that editor.
 
 ## Where it lives
-- `crates/lisp/src/dist.rs` — node state, transport threads, handshake, routing,
-  wire codec, **cluster-mesh gossip** (`broadcast_peer_table`/`mesh_consider`).
+- `crates/lisp/src/dist.rs` — node state, transport threads, routing,
+  **cluster-mesh gossip** (`broadcast_peer_table`/`mesh_consider`).
+- `crates/lisp/src/dist/` — `handshake.rs`, `heartbeat.rs`, `session.rs` (the encrypted
+  session), `wire.rs` (the codec), `guest.rs` (guest links).
 - `crates/lisp/src/core/value.rs` — `Value::Pid` + `Tag::Pid`.
-- `crates/lisp/src/process.rs` — `Message::Pid`, `send` dispatch, `pid_value`,
-  `deliver` (the shared local-delivery tail).
-- `crates/lisp/src/builtins/` — the primitives above (split by domain).
+- `crates/lisp/src/process.rs` + `process/` — `Message::Pid`, `send` dispatch,
+  `pid_value`, `deliver` (the shared local-delivery tail).
+- `crates/lisp/src/builtins/nodes.rs` — the `%node-*` primitives.
+- `std/node.blsp` — `node/start`, `node/connect`, `node/cookie`, `node/spawn` and the guest API.
 - `std/prelude/predicates.blsp` — `pid?`.

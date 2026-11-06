@@ -2,13 +2,11 @@
 
 **Status: IMPLEMENTED 2026-11-04 — option A, ADR-542.** Step 1 (the kernel kind and its
 `%record` primitives), step 2 (`defrecord` constructs one; every `:__id__` probe is gone; node
-links at protocol v12) and step 3 (the checker types a record by the `record` tag) are in; the
-findings below describe the tree before them. Earlier status: **OPEN — scoped
-2026-10-27.** It has two parts. Of the **leaks** (§2), `into` and
-`merge` were **fixed 2026-10-27**: a record source is read through `seq`, and `merge` is seeded
-with its first map. The `assoc :__id__` forge is still open (see §2). A **`Record` value kind**
-(§4) would reverse ADR-130 and ADR-168 on purpose. It's a larger change, estimated at 50–70
-files.
+links at protocol v12) and step 3 (the checker types a record by the `record` tag) are in, and
+so are the tests and docs of step 4. The forge in §2 is impossible by construction now.
+Reading the printed `#point{…}` form back is still a later step. Everything below is the
+scoping of 2026-10-27, kept as written: it describes the tree before ADR-542, which reverses
+ADR-130 and ADR-168 point 2.
 
 ## The finding
 

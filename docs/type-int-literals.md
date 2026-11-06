@@ -11,7 +11,8 @@
 > and reverted, then shipped as Gap B0 (2026-07-10,
 > [type-gating.md](type-gating.md)) — `Ty::of_value` now returns
 > `Ty::int_lit(n)`; see [Deferred](#deferred) for the history. This slice
-> itself covers declared-sig literal sets only.
+> itself covers declared-sig literal sets only. Since ADR-268 the slot holds a `LitSet` (a
+> set may be negative), not a bare `BTreeSet`; ADR-350 added the interval beside it.
 
 ## Problem
 
@@ -120,8 +121,7 @@ actually check it.
   unrelated misuse-warning messages project-wide (e.g. `"got int"` →
   `"got 5"`), breaking 7 pre-existing, unrelated tests on exact wording
   (`eq_against_a_literal_is_a_guard`, `let_binding_propagates_its_rhs_type`,
-  `match_literal_pattern_narrows_the_scrutinee`, and four others in
-  `types/check.rs`). This slice's scope was **declared-sig literal sets only**
+  `match_literal_pattern_narrows_the_scrutinee`, and four others). This slice's scope was **declared-sig literal sets only**
   — a function's declared return type or parameter type can be an int-literal
   set and that flows to callers correctly (verified,
   `int_literal_return_type_flows_through_checker`). The full design pass
@@ -134,11 +134,12 @@ actually check it.
 ## Soundness
 
 Every new algebra piece has a targeted unit test in
-`crates/lisp/src/types.rs`, mirroring the keyword-literal tests exactly:
+`crates/lisp/src/types/tests.rs`, mirroring the keyword-literal tests exactly:
 `int_literal_renders_as_its_value`, `int_literal_union_is_exact_but_open_int_widens`,
 `int_literal_subtyping`, `int_literal_disjointness_is_precise`,
 `int_literal_intersection`, plus `keyword_and_int_literals_coexist_on_one_ty`
-(the `(or :ok 5)` case). A checker-level test in `crates/lisp/src/types/check.rs`
+(the `(or :ok 5)` case). A checker-level test in
+`crates/lisp/src/types/check/tests/refinement.rs`
 (`int_literal_return_type_flows_through_checker`) proves a declared int-literal-set
 return type flows through `sig_of`/`expr_ty` to a call site correctly.
 
@@ -149,9 +150,8 @@ annotation in the corpus today).
 
 ## Tests
 
-`crates/lisp/src/types.rs`: the 6 unit tests listed above, under "int-literal
-(singleton) types — ADR-117", right after the keyword-literal tests.
-`crates/lisp/src/types/check.rs`: `int_literal_return_type_flows_through_checker`.
+`crates/lisp/src/types/tests.rs`: the 6 unit tests listed above.
+`crates/lisp/src/types/check/tests/refinement.rs`: `int_literal_return_type_flows_through_checker`.
 `tests/contract_test.blsp`: `describe "int-literal type contracts"` — enumerated
 value passes, an int outside the set throws, a non-int throws, a single literal
 matches only that exact value (mirrors the keyword-literal contract block).
