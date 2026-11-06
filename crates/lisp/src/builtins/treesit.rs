@@ -53,7 +53,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(4, 5),
         Sig::with_optional(vec![string, kw, list_ty.union(vec_ty).union(map_ty), any], vec![any], vec_ty),
         &["source", "lang", "table", "keywords?", "&optional", "injections"],
-        "The fontify query: [start end reported] for the OUTERMOST nodes the face `table` colours, in source order, not descending into one that matched. `table` is a list/vector of kind keywords (each reported as itself), or a map from SELECTOR to what a span reports: a selector is a kind keyword, or a context map {:kind :parent :field :nth :text} — the node's kind, its parent (a kind, or a selector map the parent must satisfy in turn, at most 3 maps deep), the field it fills in the parent (tree-sitter's field name), its index among the parent's named children and its exact source text (a string or a set of strings) — whose given constraints must all hold. When several match, the most specific wins: the node's own constraints first (:text over :field over :parent over :nth over :kind), then each ancestor selector's, then the narrower :text set, so any context entry beats the plain kind (ADR-486, ADR-487). With keywords? true, an anonymous token beginning with a letter is also reported, as kind :__keyword__ — the cross-language keyword rule, which no grammar names. Which kinds get which face stays with the caller; what this avoids is projecting every node into a map to read its kind and discard the rest, which is what a windowed fontify did on every keystroke. INJECTIONS (ADR-489): an optional {:rules [rule …] :faces {lang table}} naming the nodes whose text is another language's document — a rule is {:content selector :lang :bash} or {:content selector :lang-from kind :aliases {word lang}} (the language read from the first word of the content's sibling, or child, of that kind) — whose spans, from that language's :faces table, replace the host's over the content; a parent's matching children are ONE document (included ranges, joined by the line breaks between them), a rule's optional :exclude selector cuts the content's descendants it selects out of the document so they keep the host's colours (ADR-496), and a document whose language has no table or no grammar keeps the host's colours.",
+        "The fontify query: [start end reported] for the OUTERMOST nodes the face `table` colours, in source order, not descending into one that matched. `table` is a list/vector of kind keywords (each reported as itself), or a map from SELECTOR to what a span reports: a selector is a kind keyword, or a context map {:kind :parent :field :nth :text :after} — the node's kind, its parent (a kind, or a selector map the parent must satisfy in turn, at most 4 maps deep), the field it fills in the parent (tree-sitter's field name), its index among the parent's named children, its exact source text (a string or a set of strings) and a {:kind :text} map the named sibling right before it must satisfy (ADR-614) — whose given constraints must all hold. When several match, the most specific wins: the node's own constraints first (:after over :text over :field over :parent over :nth over :kind), then each ancestor selector's, then the narrower :text set, so any context entry beats the plain kind (ADR-486, ADR-487). With keywords? true, an anonymous token beginning with a letter is also reported, as kind :__keyword__ — the cross-language keyword rule, which no grammar names; keywords? may instead be a set of the rules wanted, #{:keywords :punctuation}, where :punctuation reports an anonymous token made only of brackets, commas and semicolons as :__punctuation__ (ADR-614). Which kinds get which face stays with the caller; what this avoids is projecting every node into a map to read its kind and discard the rest, which is what a windowed fontify did on every keystroke. INJECTIONS (ADR-489): an optional {:rules [rule …] :faces {lang table}} naming the nodes whose text is another language's document — a rule is {:content selector :lang :bash} or {:content selector :lang-from kind :aliases {word lang}} (the language read from the first word of the content's sibling, or child, of that kind) — whose spans, from that language's :faces table, replace the host's over the content; a parent's matching children are ONE document (included ranges, joined by the line breaks between them), a rule's optional :exclude selector cuts the content's descendants it selects out of the document so they keep the host's colours (ADR-496), and a document whose language has no table or no grammar keeps the host's colours.",
         tree_sitter_spans);
     // Tree HANDLES (ADR-443): a whole document's parse tree, held across edits and
     // reparsed incrementally, queried over a range — what an editor's view keeps per
@@ -77,7 +77,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(5, 6),
         Sig::with_optional(vec![ref_ty, list_ty.union(vec_ty).union(map_ty), any, int, int], vec![any], vec_or_nil),
         &["tree", "table", "keywords?", "from", "to", "&optional", "injections"],
-        "The fontify query over a held tree, for chars [from, to) of its text only: [start end reported] for the OUTERMOST nodes the face table colours (as in %tree-sitter-spans, context selectors included) that reach into the range, in source order, each clipped to the range — so a string opened above it reports its visible part, coloured as a string, because the tree is the whole document's. Walks only the nodes that reach the range. keywords? as in %tree-sitter-spans (an anonymous token beginning with a letter is :__keyword__). Absolute char offsets. nil when the handle is gone (freed, or its owner exited): open a fresh tree. injections as in %tree-sitter-spans: the embedded documents reaching the range are parsed for this call (no injected tree is held), each whole when it fits 32 KB and cut to the range otherwise.",
+        "The fontify query over a held tree, for chars [from, to) of its text only: [start end reported] for the OUTERMOST nodes the face table colours (as in %tree-sitter-spans, context selectors included) that reach into the range, in source order, each clipped to the range — so a string opened above it reports its visible part, coloured as a string, because the tree is the whole document's. Walks only the nodes that reach the range. keywords? as in %tree-sitter-spans (an anonymous token beginning with a letter is :__keyword__; a set #{:keywords :punctuation} adds :__punctuation__). Absolute char offsets. nil when the handle is gone (freed, or its owner exited): open a fresh tree. injections as in %tree-sitter-spans: the embedded documents reaching the range are parsed for this call (no injected tree is held), each whole when it fits 32 KB and cut to the range otherwise.",
         tree_sitter_tree_spans);
     primitives.def(
         "%tree-sitter-tree-changes",
@@ -202,9 +202,9 @@ pub(super) fn tree_sitter_spans(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     let src = expect_string(heap, "%tree-sitter-spans", arg(args, 0))?;
     let lang = ts_lang(heap, "%tree-sitter-spans", arg(args, 1))?;
     let table = ts_table(heap, "%tree-sitter-spans", arg(args, 2))?;
-    let keywords = !matches!(arg(args, 3), Value::Nil | Value::Bool(false));
+    let tokens = ts_tokens(heap, "%tree-sitter-spans", arg(args, 3))?;
     let injections = ts_injections(heap, "%tree-sitter-spans", arg(args, 4))?;
-    crate::host::treesit::spans(heap, &src, &lang, &table, keywords, injections.as_ref())
+    crate::host::treesit::spans(heap, &src, &lang, &table, tokens, injections.as_ref())
 }
 
 /// `(tree-sitter-load-grammar path lang)` — load a grammar shared library at
@@ -250,11 +250,13 @@ fn ts_kinds(heap: &Heap, who: &'static str, v: Value) -> Result<Vec<String>, Lis
 /// {:kind :identifier :text #{"def" "if"}}     ; an identifier spelt `def` or `if`
 /// {:kind :field_identifier
 ///  :parent {:kind :field_expression :field :function}}   ; a method call's name
+/// {:kind :arguments :after {:text "def"}}     ; what follows an Elixir `def`
 /// ```
 ///
 /// `:kind` and `:field` are keywords, `:nth` a non-negative int, `:text` a string or a
-/// non-empty set of strings, and `:parent` a kind keyword or a selector map the parent must
-/// satisfy, nested at most [`MAX_SELECTOR_DEPTH`](crate::host::treesit::MAX_SELECTOR_DEPTH)
+/// non-empty set of strings, `:after` a map of `:kind` and `:text` alone that the named sibling
+/// right before the node must satisfy (ADR-614), and `:parent` a kind keyword or a selector
+/// map the parent must satisfy, nested at most [`MAX_SELECTOR_DEPTH`](crate::host::treesit::MAX_SELECTOR_DEPTH)
 /// maps deep. At least one constraint is given, and nothing else is accepted, so a misspelt
 /// constraint fails at the call rather than quietly matching everything.
 fn ts_table(
@@ -373,9 +375,32 @@ fn ts_selector(
                 }
                 selector.text = Some(TextMatch::new(texts));
             }
+            "after" => {
+                // the named sibling before the node: a kind and/or a text, nothing about
+                // where IT sits (ADR-614)
+                let Value::Map(after_map) = v else {
+                    return Err(LispError::wrong_type(
+                        heap,
+                        who,
+                        "a {:kind :text} selector map for selector :after",
+                        v,
+                    ));
+                };
+                let after = ts_selector(heap, who, after_map, depth)?;
+                if after.parent.is_some()
+                    || after.field.is_some()
+                    || after.nth.is_some()
+                    || after.after.is_some()
+                {
+                    return Err(LispError::runtime(format!(
+                        "{who}: a selector's :after names the sibling's :kind and :text only"
+                    )));
+                }
+                selector.after = Some(Box::new(after));
+            }
             other => {
                 return Err(LispError::runtime(format!(
-                    "{who}: a face-table selector takes :kind :parent :field :nth :text, not :{other}"
+                    "{who}: a face-table selector takes :kind :parent :field :nth :text :after, not :{other}"
                 )));
             }
         }
@@ -480,19 +505,11 @@ pub(super) fn tree_sitter_tree_spans(args: &[Value], _: EnvId, heap: &mut Heap) 
     let who = "%tree-sitter-tree-spans";
     let handle = ts_handle(heap, who, arg(args, 0))?;
     let table = ts_table(heap, who, arg(args, 1))?;
-    let keywords = !matches!(arg(args, 2), Value::Nil | Value::Bool(false));
+    let tokens = ts_tokens(heap, who, arg(args, 2))?;
     let from = expect_int(heap, who, arg(args, 3))?;
     let to = expect_int(heap, who, arg(args, 4))?;
     let injections = ts_injections(heap, who, arg(args, 5))?;
-    crate::host::treesit::tree_spans(
-        heap,
-        handle,
-        &table,
-        keywords,
-        from,
-        to,
-        injections.as_ref(),
-    )
+    crate::host::treesit::tree_spans(heap, handle, &table, tokens, from, to, injections.as_ref())
 }
 
 pub(super) fn tree_sitter_tree_changes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -610,8 +627,45 @@ pub(super) fn tree_sitter_range_spans(args: &[Value], _: EnvId, heap: &mut Heap)
         ranges.push((start, end.max(start)));
     }
     let table = ts_table(heap, who, arg(args, 3))?;
-    let keywords = !matches!(arg(args, 4), Value::Nil | Value::Bool(false));
-    crate::host::treesit::range_spans(heap, text, &lang, &ranges, &table, keywords)
+    let tokens = ts_tokens(heap, who, arg(args, 4))?;
+    crate::host::treesit::range_spans(heap, text, &lang, &ranges, &table, tokens)
+}
+
+/// Which anonymous tokens a span query reports though its table names none (ADR-614): nil or
+/// false none; a set of `:keywords` and `:punctuation`; any other value the keyword rule alone,
+/// which is what the flag meant before punctuation could be asked for.
+fn ts_tokens(
+    heap: &Heap,
+    who: &'static str,
+    v: Value,
+) -> Result<crate::host::treesit::TokenRules, LispError> {
+    use crate::host::treesit::TokenRules;
+    match v {
+        Value::Nil | Value::Bool(false) => Ok(TokenRules::default()),
+        Value::Set(set_id) => {
+            let mut rules = TokenRules::default();
+            for element in heap.set_elems(set_id) {
+                match element {
+                    Value::Keyword(name) if value::symbol_name(name) == "keywords" => {
+                        rules.keywords = true
+                    }
+                    Value::Keyword(name) if value::symbol_name(name) == "punctuation" => {
+                        rules.punctuation = true
+                    }
+                    other => {
+                        return Err(LispError::wrong_type(
+                            heap,
+                            who,
+                            "a token rule, :keywords or :punctuation",
+                            other,
+                        ));
+                    }
+                }
+            }
+            Ok(rules)
+        }
+        _ => Ok(TokenRules::KEYWORDS),
+    }
 }
 
 /// A span query's injections (ADR-489), or None for nil:

@@ -75,22 +75,39 @@ load with the list rather than at the keypress that needed it.
 ;; is a frame, not a load. Checking it here lets a registration refuse it where
 ;; `missing-services` refuses a missing service.
 
-(def- selector-constraints #{:kind :parent :field :nth :text})
+(def- selector-constraints #{:kind :parent :field :nth :text :after})
 
-;; how many selector MAPS one key may nest through `:parent` — the kernel's bound (ADR-487)
-(def- selector-depth-max 3)
+;; how many selector MAPS one key may nest through `:parent` — the kernel's bound (ADR-487,
+;; ADR-614: four reaches the name an Elixir `def` with a guard defines)
+(def- selector-depth-max 4)
 
 (defn- text-constraint-ok? (text)
   ;; a string, or a non-empty set of strings
   (or (string? text) (and (set? text) (not (empty? text)) (every? text string?))))
 
+(defn- after-problem (selector after)
+  ;; what is wrong with `selector`'s `:after` — the named sibling before the node, a map of
+  ;; `:kind` and `:text` alone (ADR-614) — or nil
+  (cond
+    (nil? after) nil
+    (not (map? after)) (str (pr-str selector) ": :after is a {:kind :text} selector map")
+    (or (empty? after) (not (every? (keys after) (fn (k) (contains? #{:kind :text} k)))))
+      (str (pr-str selector) ": :after names the sibling's :kind and :text only")
+    (not (or (nil? (get after :kind)) (keyword? (get after :kind))))
+      (str (pr-str selector) ": :after's :kind is a keyword")
+    (not (or (nil? (get after :text)) (text-constraint-ok? (get after :text))))
+      (str (pr-str selector) ": :after's :text is a string or a non-empty set of strings")
+    else nil))
+
 (defn- selector-shape-problem (selector depth)
   ;; what is wrong with the selector map `selector`, `depth` maps deep, or nil
-  (let (parent (get selector :parent))
+  (let (parent (get selector :parent)
+        after-issue (after-problem selector (get selector :after)))
     (cond
       (empty? selector) "an empty selector {} would colour every node"
       (not (every? (keys selector) (fn (k) (contains? selector-constraints k))))
-        (str (pr-str selector) " names a constraint other than :kind :parent :field :nth :text")
+        (str (pr-str selector)
+          " names a constraint other than :kind :parent :field :nth :text :after")
       ;; the kernel reads every constraint the map has, so one present with no value is refused
       (any? (keys selector) (fn (k) (nil? (get selector k))))
         (str (pr-str selector) ": a constraint with no value — leave the key out instead")
@@ -100,6 +117,7 @@ load with the list rather than at the keypress that needed it.
         (str (pr-str selector) ": :nth is a non-negative int")
       (not (or (nil? (get selector :text)) (text-constraint-ok? (get selector :text))))
         (str (pr-str selector) ": :text is a string or a non-empty set of strings")
+      (not (nil? after-issue)) after-issue
       (or (nil? parent) (keyword? parent)) nil
       (not (map? parent)) (str (pr-str selector) ": :parent is a kind keyword or a selector map")
       (>= depth selector-depth-max)
@@ -116,8 +134,9 @@ load with the list rather than at the keypress that needed it.
 
 (defn face-table-problems (table:any -> list)
   "What is malformed in the face table `table` — one message per bad entry, `()` when every
-key is a node kind or a context selector (`{:kind :parent :field :nth :text}`, ADR-486,
-ADR-487 — a `:parent` itself a kind or a selector map, at most three maps deep) and every
+key is a node kind or a context selector (`{:kind :parent :field :nth :text :after}`, ADR-486,
+ADR-487, ADR-614 — a `:parent` itself a kind or a selector map, at most four maps deep, an
+`:after` the `:kind` and `:text` of the named sibling before the node) and every
 value a face-name keyword. What a registration checks beside `missing-services`, so a
 misspelt selector fails at load rather than at the first frame drawn.
 
@@ -237,8 +256,13 @@ What a registration checks beside `face-table-problems`.
             with-kind (if (keyword? kind) (update acc :kinds (fn (kinds) (conj kinds kind))) acc)
             with-field (if (keyword? field)
                          (update with-kind :fields (fn (fields) (conj fields field)))
-                         with-kind))
-        (names-of-selector parent with-field))))
+                         with-kind)
+            ;; the sibling an `:after` names (ADR-614) is a kind of the grammar too
+            after-kind (get (get selector :after) :kind)
+            with-after (if (keyword? after-kind)
+                         (update with-field :kinds (fn (kinds) (conj kinds after-kind)))
+                         with-field))
+        (names-of-selector parent with-after))))
 
 (defn- names-of-kinds (kinds acc)
   ;; `acc` with every keyword of `kinds` (a set or sequence, or nil) as a node kind
@@ -249,7 +273,7 @@ What a registration checks beside `face-table-problems`.
 (defn language-names (language:map -> map)
   "The node kinds and field names a tree-sitter language's tables refer to, as `{:kinds
 #{…} :fields #{…}}`. `language` holds any of `:faces` (a face table: its kind keys and every
-selector's `:kind`, `:parent` and `:field`), `:injections` (the RULES of an injection spec:
+selector's `:kind`, `:parent`, `:field` and `:after`), `:injections` (the RULES of an injection spec:
 each `:content` and `:exclude` selector, each `:lang-from` kind — the embedded languages'
 faces are their own grammars' business), `:indent` (an `indent-column` spec: its `:blocks`,
 `:brackets` and `:verbatim` kinds; `:dedent` and `:opens` are source text, not kinds) and
@@ -482,13 +506,21 @@ the tree-sitter parse it walks."
 ;;                                               Rust's `s.bar()`, not the read `p.x`: the
 ;;                                               PARENT must satisfy a selector of its own
 ;;
+;; And one reaches a SIBLING (ADR-614):
+;;
+;;   {:kind :identifier :field :target :parent {:kind :call :nth 0 :parent {:kind :arguments
+;;     :after {:text #{"def" "defp"}}}}}        the name an Elixir `def` defines — its
+;;                                               `arguments` come right after an identifier
+;;                                               reading `def`, where a call's follow a name
+;;
 ;; `:kind` and `:field` are keywords (tree-sitter's node and field names), `:nth` an index
 ;; among the parent's NAMED children, `:text` the node's exact source text (a string or a
-;; set of strings), `:parent` a kind or a selector map the parent satisfies in turn — its
-;; own `:field` and `:nth` placing it in the grandparent — at most three maps deep. Every
-;; one given must hold. When several entries match a node the most specific wins: the
-;; node's own constraints decide first — text over field over parent over position over
-;; kind — then the parent selector's by the same rule, then the grandparent's, then the
+;; set of strings), `:after` the `:kind` and `:text` of the named sibling right before the
+;; node, `:parent` a kind or a selector map the parent satisfies in turn — its own `:field`,
+;; `:nth` and `:after` placing it in the grandparent — at most four maps deep. Every one
+;; given must hold. When several entries match a node the most specific wins: the node's
+;; own constraints decide first — after over text over field over parent over position
+;; over kind — then the parent selector's by the same rule, then the grandparent's, then the
 ;; narrower `:text` set. So any context entry beats the plain kind, and the answer never
 ;; depends on the map's order. A coloured node is coloured whole, context or not, so an
 ;; entry can only reach a node whose ancestors the table leaves uncoloured.
@@ -496,9 +528,21 @@ the tree-sitter parse it walks."
 ;; The kernel walk matches the selectors itself (it is standing on the parent when it
 ;; reaches the child), so a context costs the walk nothing and no Brood runs per node.
 
+(defn- token-rules (keywords?)
+  "What a span query is asked to report of the anonymous tokens its table names none of
+(ADR-614): keywords when `keywords?`, and brackets, commas and semicolons when
+`:syntax/punctuation` paints anything — by default it does not, and then a bracket costs no
+span. Read per call, so a theme that dims punctuation takes effect on the next frame."
+  (let (punctuation (face :syntax/punctuation))
+    (cond
+      (or (nil? punctuation) (empty? punctuation)) keywords?
+      keywords? #{:keywords :punctuation}
+      else #{:punctuation})))
+
 (defn- table-spans->faces (raw kind->face-name injections)
   "The `[start end face-name]` spans a span query answers, as `[start end face]` — each
-face name resolved, `:__keyword__` as `:syntax/keyword`. The names come from the host's
+face name resolved, `:__keyword__` as `:syntax/keyword` and `:__punctuation__` as
+`:syntax/punctuation`. The names come from the host's
 table and from every injected language's table in `injections` (ADR-489), since an
 injected span reports its own table's face name."
   ;; Each face resolved ONCE per call — per face name, not per span. A window has a few
@@ -507,7 +551,8 @@ injected span reports its own table's face name."
   ;; measured in bedit) — paid on every keystroke in every tree-sitter language.
   (let (tables (cons kind->face-name (vals (get injections :faces {})))
         resolved (fold tables
-                   {:__keyword__ (face :syntax/keyword)}
+                   {:__keyword__ (face :syntax/keyword)
+                    :__punctuation__ (face :syntax/punctuation)}
                    (fn (acc table)
                      (fold (%map-pairs table)
                        acc
@@ -527,7 +572,9 @@ tree-sitter language keyword `lang` (`:ruby`/`:elixir`), from a face table — `
 `(face-set :syntax/…)` restyles the next frame drawn (under `ui-run`, the next turn that
 changes the model). With `keywords?` (the default), an anonymous alphabetic token is a
 `:syntax/keyword` — the cross-language rule that lets a table name only the handful of
-*named* nodes it colours.
+*named* nodes it colours. And when the `:syntax/punctuation` face paints anything (a theme that
+dims punctuation; by default it does not), an anonymous bracket, comma or semicolon is
+`:syntax/punctuation` (ADR-614).
 
 Takes the TABLE, not a node→face closure. The selection happens inside
 `%tree-sitter-spans`, which walks the tree in Rust and returns spans only for what the
@@ -540,7 +587,11 @@ function itself (plain kinds only).
 `injections` (ADR-489) declares the code EMBEDDED in this language — a fence's body, a
 sigil's, a heredoc's — as `{:rules [rule …] :faces {lang table}}`; see `injection-problems`
 for the shape. Over each embedded document the host's spans give way to its own language's."
-  (table-spans->faces (%tree-sitter-spans text lang kind->face-name keywords? injections)
+  (table-spans->faces (%tree-sitter-spans text
+                        lang
+                        kind->face-name
+                        (token-rules keywords?)
+                        injections)
     kind->face-name injections))
 (sig fontify (string keyword any -> any))
 
@@ -558,7 +609,7 @@ optional, and a caller keeps its own colours there. Bounded: past 256 ranges or 
 rest is left uncoloured.
 
     (editor/treesit/fontify-ranges \"# x\\n\" :no-such-grammar [[0 3]] {:string :syntax/string})   ;=> ()"
-  (let (raw (%tree-sitter-range-spans text lang ranges kind->face-name keywords?))
+  (let (raw (%tree-sitter-range-spans text lang ranges kind->face-name (token-rules keywords?)))
     (if (nil? raw) '() (table-spans->faces raw kind->face-name nil))))
 
 ;; ---- a tree per document: incremental parsing (ADR-443) ----------------------------
@@ -665,7 +716,12 @@ tree — each whole up to 32 KB and cut to the range past that (ADR-489).
 
     (editor/treesit/fontify-tree tree {:string :syntax/string} 0 40)   ;~> [[8 13 :syntax/string] …], nil once tree is freed
     (fn? editor/treesit/fontify-tree)   ;=> true"
-  (let (raw (%tree-sitter-tree-spans tree kind->face-name keywords? from to injections))
+  (let (raw (%tree-sitter-tree-spans tree
+              kind->face-name
+              (token-rules keywords?)
+              from
+              to
+              injections))
     (when raw (into [] (table-spans->faces raw kind->face-name injections)))))
 
 (defn tree-alive? (tree)
