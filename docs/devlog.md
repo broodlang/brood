@@ -1028,9 +1028,7 @@ URIs), with the as-built half of `node-connect.md` now in `distribution.md`. The
 perf threads moved unedited to `archive/perf-handoff.md`. The devlog's "Recent" had grown to 4 200
 lines against its own rule: 241 entries through 2026-11-04 moved to the month files, no line lost
 (`2026-11.md` is new). ROADMAP's design pass is marked done and its open items checked against
-the code. `primitives.md` gained 233 unlisted primitives. Found on the way: v0.49.1 and v0.50.0
-have no git tag or GitHub Release, and `full.yml` has not completed a run since it replaced the
-Nightly on 2026-11-05.
+the code. `primitives.md` gained 233 unlisted primitives. Found on the way: `full.yml` had not completed a run since it replaced the Nightly on 2026-11-05.
 
 2026-11-06 (KI-371, KI-372). The docs audit's one real bug: `brood-lsp`'s project file list called
 a moved name and an empty default hid it, so cross-file references answered from open buffers. A

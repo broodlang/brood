@@ -79,7 +79,8 @@ nothing in it or its requires changed. Two things about it are wrong on their fa
 flagged `nil | pid` into a domain that includes `pid` (overlap reads it consistent), and
 `life_bands` uses nothing from `gui`.
 
-**Not reproduced** in 12 runs on the next builds: full-tree and single-file, imaged and
+**Not reproduced** in 21 more full-tree runs on `db74fde4` (2026-11-06, 20 cached, 1 with
+`BROOD_NO_CHECK_CACHE=1`), nor in 12 runs on the next builds: full-tree and single-file, imaged and
 `BROOD_NO_STDIMAGE=1`, and on a rebuild with the first version of the `image-thumb` sig put
 back (that version was later dropped altogether). Ruled out: the check cache's stamp (it carries `system/build-id`, whose third field is
 the binary's own mtime, so a rebuild drops it).

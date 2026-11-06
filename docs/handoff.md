@@ -14,15 +14,15 @@ to 2026-11-06 moved, unedited, to the end of
 
 - **The front is language features.** Performance, runtime and editor work wait, as ROADMAP's
   design pass set out on 2026-10-28.
-- **Released:** v0.50.0 is the version in `Cargo.toml` and the changelog's newest heading, but
-  **neither v0.49.1 nor v0.50.0 has a git tag or a GitHub Release**. The latest of both is
-  v0.49.0. `CHANGELOG.md`'s "Unreleased" holds ADR-617..620.
-- **Green:** CI passed on `ec4f12af`, the KI-371 and KI-372 fixes. Per-push CI answers
+- **Released:** v0.50.0 (tag on `dc6c775f`, GitHub Release 2026-11-06); v0.49.1's changes went
+  into its changelog section. `CHANGELOG.md`'s "Unreleased" holds ADR-617..620, `file/replace`
+  and the KI-371/372 fixes.
+- **Green:** CI passed on `ec4f12af`, and `make test` 2293/2293 on `db74fde4`. Per-push CI answers
   in about 12 minutes and leaves out the tree-walker differential, the repeat runs, GC stress,
   the stress suite, the tier audit, the soaks and the sanitizers. Those moved to
   `full.yml` (weekly, or `gh workflow run full.yml`; it replaced the Nightly on 2026-11-05)
-  and **`full.yml` had no completed run yet on 2026-11-06**, so the design pass's last commits
-  have had per-push CI only. Run it before the next release.
+  and the first `full.yml` started on `db74fde4` (2026-11-06). Read its verdict with `make green`
+  before the next release.
 - **Known issues:** nothing open. One watch, **KI-370** (`nest check` warned once on
   `examples/life_bands.blsp`; the diagnostic for the next sighting is in its entry).
 - **bedit** is pinned at `df808b2` (`BEDIT_REF`). Smoke with a grammar-enabled
