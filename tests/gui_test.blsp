@@ -232,17 +232,16 @@ and, per row, the rows of its cell the `x` inks."
                   (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0))))))
 
   (test "text whose face names no :fg is drawn in the window's text colour (ADR-613)"
-    (when-gui (fn ()
-                (let (ink [76 79 105]
-                      image (gui/render-frame [[:clear]
-                                                [:text 0 0 "█" {}]
-                                                [:text 0 2 " " {:reverse true}]]
-                              (assoc (capture-spec) :fg ink))
-                      [cell-w cell-h] (:cell image)
-                      middle-y (math/quot cell-h 2))
-                  ;; a full block's middle, and a reversed blank's ground, are the colour
-                  (is (= (gui/pixel image (+ 6 (math/quot cell-w 2)) middle-y) ink))
-                  (is (= (gui/pixel image (+ 6 (* 2 cell-w) (math/quot cell-w 2)) middle-y) ink))))))
+    (when-gui
+      (fn ()
+        (let (ink [76 79 105]
+              image (gui/render-frame [[:clear] [:text 0 0 "█" {}] [:text 0 2 " " {:reverse true}]]
+                      (assoc (capture-spec) :fg ink))
+              [cell-w cell-h] (:cell image)
+              middle-y (math/quot cell-h 2))
+          ;; a full block's middle, and a reversed blank's ground, are the colour
+          (is (= (gui/pixel image (+ 6 (math/quot cell-w 2)) middle-y) ink))
+          (is (= (gui/pixel image (+ 6 (* 2 cell-w) (math/quot cell-w 2)) middle-y) ink))))))
 
   (test "a lowercase letter sits on the same pixels in every row, in its row's middle (ADR-611)"
     (when-gui (fn ()
@@ -445,15 +444,17 @@ the line's ink, and whether this strip was tall enough to show it."
         flat (gui/render-frame (into [[:clear] body] (strip-next-line seam cols))
                (seam-spec h size))
         cell-h (second (:cell phase-1))
-        strip-top (+ (nth (:row-tops phase-1) (dec seam)) cell-h)
+        strip-top (math/round (+ (nth (:row-tops phase-1) (dec seam)) cell-h))
         strip-bottom (nth (:row-tops phase-1) seam)
         ;; the rule: the line shows from half a row of strip; under that, phase 1
         shown (>= (* 2 (- strip-bottom strip-top)) cell-h)
-        pixels (fn (image y) (bytes/slice (:rgba image) (* y 1600) (* (inc y) 1600)))
+        pixels (fn (image y)
+                 (bytes/slice (:rgba image) (math/round (* y 1600)) (math/round (* (inc y) 1600))))
         wrong (seq/filter (range 0 h)
                 (fn (y)
                   (not (= (pixels phase-2 y)
-                         (pixels (if (and shown (>= y strip-top) (< y strip-bottom)) flat phase-1) y))))))
+                         (pixels (if (and shown (>= y strip-top) (< y strip-bottom)) flat phase-1)
+                           y))))))
     [(vec (seq/filter [(when (not (= (:row-tops phase-2) (:row-tops phase-1))) :rows-moved)
                         (when (not (empty? wrong)) [:pixel-row (first wrong)])]
             (fn (failure) (not (nil? failure)))))
