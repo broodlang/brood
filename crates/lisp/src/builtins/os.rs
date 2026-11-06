@@ -1,5 +1,6 @@
 // OS / environment / subprocess builtins — extracted from io.rs (file-organization split).
 use super::args::{arg, expect_int, expect_string};
+use super::bytes::flatten_iolist;
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value, kw};
 use crate::error::{LispError, LispResult};
@@ -317,7 +318,7 @@ pub(super) fn os_type_builtin(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispRe
 /// - `:env` — `{"NAME" "value"}` added to the inherited environment; a nil value UNSETS
 ///   the name. What makes a non-interactive child possible: `GIT_TERMINAL_PROMPT=0` keeps
 ///   a background `git fetch` from asking for a password nobody can see.
-/// - `:stdin` — a string written to the child's stdin, then EOF. Without it the child's
+/// - `:stdin` — a string or bytes (any iolist) written to the child's stdin, then EOF. Without it the child's
 ///   stdin is `/dev/null`, never ours.
 /// - `:timeout-ms` — a deadline over the WHOLE call: the child exiting AND both output
 ///   pipes reaching end-of-file. Past it the child's process group is killed and the call
@@ -353,7 +354,7 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let blocking = crate::process::responsive::enter_blocking(heap, "os/cmd", || {
         crate::process::responsive::command_detail(&prog, &argv)
     })?;
-    let mut stdin_text: Option<String> = None;
+    let mut stdin_bytes: Option<Vec<u8>> = None;
     let mut timeout: Option<std::time::Duration> = None;
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -364,7 +365,9 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         if let Some(v) = heap.map_get(opts, kw("stdin"))
             && !matches!(v, Value::Nil)
         {
-            stdin_text = Some(expect_string(heap, "os/cmd :stdin", v)?);
+            let mut bytes = Vec::new();
+            flatten_iolist(heap, "os/cmd :stdin", v, &mut bytes)?;
+            stdin_bytes = Some(bytes);
         }
         if let Some(v) = heap.map_get(opts, kw("timeout-ms"))
             && !matches!(v, Value::Nil)
@@ -373,7 +376,7 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             timeout = Some(std::time::Duration::from_millis(ms.max(0) as u64));
         }
     }
-    cmd.stdin(if stdin_text.is_some() {
+    cmd.stdin(if stdin_bytes.is_some() {
         Stdio::piped()
     } else {
         Stdio::null()
@@ -403,7 +406,7 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         let child = cmd.spawn().map_err(fail)?;
         os_cmd_collect(
             child,
-            stdin_text,
+            stdin_bytes,
             timeout,
             crate::process::capture_kill_pending,
         )
@@ -470,7 +473,7 @@ fn os_cmd_stop(deadline: Option<std::time::Instant>, killed: fn() -> bool) -> Op
 #[cfg(unix)]
 fn os_cmd_collect(
     mut child: std::process::Child,
-    stdin_text: Option<String>,
+    stdin_bytes: Option<Vec<u8>>,
     timeout: Option<std::time::Duration>,
     killed: fn() -> bool,
 ) -> std::io::Result<OsCmdOutcome> {
@@ -487,7 +490,7 @@ fn os_cmd_collect(
         }
     }
     let deadline = timeout.map(|limit| Instant::now() + limit);
-    let stdin_bytes = stdin_text.unwrap_or_default().into_bytes();
+    let stdin_bytes = stdin_bytes.unwrap_or_default();
     let mut stdin_written = 0usize;
     // An empty `:stdin` is EOF at once: dropping the pipe here closes it.
     let mut stdin_pipe = child.stdin.take().filter(|_| !stdin_bytes.is_empty());
@@ -635,7 +638,7 @@ fn os_cmd_collect(
 #[cfg(not(unix))]
 fn os_cmd_collect(
     mut child: std::process::Child,
-    stdin_text: Option<String>,
+    stdin_bytes: Option<Vec<u8>>,
     timeout: Option<std::time::Duration>,
     killed: fn() -> bool,
 ) -> std::io::Result<OsCmdOutcome> {
@@ -653,11 +656,13 @@ fn os_cmd_collect(
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
     let started_threads = (|| {
-        let writer = match (stdin_pipe, stdin_text) {
-            (Some(mut pipe), Some(text)) => Some(std::thread::Builder::new().spawn(move || {
-                // EPIPE from a child that exits early just ends the write
-                let _ = pipe.write_all(text.as_bytes());
-            })?),
+        let writer = match (stdin_pipe, stdin_bytes) {
+            (Some(mut pipe), Some(bytes)) => {
+                Some(std::thread::Builder::new().spawn(move || {
+                    // EPIPE from a child that exits early just ends the write
+                    let _ = pipe.write_all(&bytes);
+                })?)
+            }
             _ => None,
         };
         let drain = |pipe: Option<Box<dyn Read + Send>>| {

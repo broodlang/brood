@@ -7,6 +7,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## Unreleased
 
 **Added.**
+- **Bytes through a child and through sudo:** `os/cmd`'s `:stdin` and `sudo/write` take any iolist,
+  so a file in another encoding can be written as root.
+- **`revert-buffer` takes text already read** (`contents`, as `buffer-from-file` does), for an
+  editor whose file is in another encoding.
 - **`file/replace`** (ADR-621) replaces a file whole: a crash or a full disk leaves the old file or
   the new one, its mode, owner, group and any symlink kept. `save-buffer` and `nest`'s codemod use
   it. Atomic on Unix; Windows still writes in place.

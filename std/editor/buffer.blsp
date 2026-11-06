@@ -237,18 +237,20 @@ result knows the file and the text agree again.
         (file/replace f (file-text-encode (buffer-text buf) (buffer-eol buf) (buffer-bom? buf)))
         (mark-buffer-saved (buffer-stamp-file buf))))))
 
-(defn revert-buffer (buf:buffer -> buffer)
+(defn revert-buffer (buf:buffer &optional contents -> buffer)
   "`buf` with its file's text read back in — the file as it is NOW, its line ending
 included — as ONE undoable edit, then unmodified and stamped with the file's mtime: a
 single `undo` brings back the text it had, unsaved edits and all (Emacs's `revert-buffer`
 keeps the undo list the same way). What a revert, and an auto-revert picking up another
 writer's change, need so neither costs the history before it. A read-only buffer is
 reverted too, and stays read-only; a file whose text did not change records nothing.
-Raises when `buf` has no file or the file cannot be read.
+`contents` is the file's text when the caller has read it already, as for [[buffer-from-file]]:
+an editor whose file is in another encoding decodes it itself. Raises when `buf` has no file
+or the file cannot be read.
 
     (editor/buffer/revert-buffer buf)   ;~> buf holding its file's text, unmodified — undo gives back what it held"
   (let (f (or (get buf :file) (error "revert-buffer: buffer has no file: " (get buf :name)))
-        {:keys [text eol bom]} (file-text-decode (file/slurp f))
+        {:keys [text eol bom]} (file-text-decode (if (nil? contents) (file/slurp f) contents))
         reread (if (= text (buffer-text buf))
                  buf
                  ;; through the mutators, so markers, the edit log a held parse is updated
