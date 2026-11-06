@@ -213,7 +213,8 @@ a `$` in it is one argument. `prog` is found as [[which]] finds it with these op
 - `:env` — `{\"NAME\" \"value\"}` added to the inherited environment; a nil value unsets
   the name. `{\"GIT_TERMINAL_PROMPT\" \"0\"}` is how a background `git fetch` fails
   instead of asking for a password nobody is there to type.
-- `:stdin` — a string fed to the child's stdin, then EOF (else stdin is empty).
+- `:stdin` — a string or bytes (any iolist) fed to the child's stdin, then EOF (else stdin is
+  empty).
 - `:timeout-ms` — kill the child, and every process it started, after this long.
 
 The child dies with its caller: a process killed while it waits here (`exit`, `task/cancel`)
@@ -226,6 +227,7 @@ once instead of hanging behind a full-screen program; `os/spawn-pty` gives it on
 
     (os/cmd-out (os/cmd \"echo\" [\"a b\"]))   ;=> \"a b\"
     (os/cmd-out (os/cmd \"cat\" [] {:stdin \"piped\"}))   ;=> \"piped\"
+    (:stdout (os/cmd \"cat\" [] {:stdin [104 105]}))   ;=> \"hi\"
     (os/cmd-out (os/cmd \"sh\" [\"-c\" \"echo $X\"] {:env {\"X\" \"set\"}}))   ;=> \"set\"
     (:timed-out (os/cmd \"sleep\" [\"5\"] {:timeout-ms 50}))   ;=> true"
   (%os-cmd prog args opts))

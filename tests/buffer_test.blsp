@@ -671,6 +671,11 @@
           (is (buffer-modified? back))
           ;; and the history before it is still there: the same undo run, one step further
           (assert= (buffer-text (undo-next (undo-next (undo-start reverted)))) "v1\n")))))
+  (test "revert-buffer takes text the caller has decoded"
+    (let (path (path/join (temp-dir "brood-revert-") "a.txt"))
+      (file/mkdir (path/dirname path))
+      (file/spit path "old")
+      (assert= (buffer-text (revert-buffer (buffer-from-file path) "new\n")) "new\n")))
   (test "revert-buffer after typing is its own step, not merged into the typing"
     (let (path (str (temp-dir "brood-buf-") ".txt"))
       (file/spit path "a\n")

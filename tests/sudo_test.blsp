@@ -114,6 +114,12 @@
                    (file/spit (str dir "/nopasswd") "")
                    (assert= (sudo/write (str dir "/new") "fresh" opts) true)
                    (assert= (file/slurp (str dir "/new")) "fresh")))))
+  (test "bytes are written as they are"
+    (with-stub (fn (dir opts)
+                 (do
+                   (file/spit (str dir "/nopasswd") "")
+                   (assert= (sudo/write (str dir "/raw") [99 97 102 233 10] opts) true)
+                   (assert= (vec (file/slurp-bytes (str dir "/raw"))) [99 97 102 233 10])))))
   (test "a file that is not UTF-8 is read byte for byte, and refused as text"
     (with-stub (fn (dir opts)
                  (let (path (str dir "/latin1"))

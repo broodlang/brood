@@ -97,7 +97,7 @@ password, none given when one is required). See the module doc for how a passwor
           password
             (let (once (os/cmd program
                          (append ["-S" "-k" "-p" ""] (user-args opts) ["--"] command)
-                         {:stdin (str password "\n" input) :env sudo-env}))
+                         {:stdin [(str password "\n") (or input "")] :env sudo-env}))
               (if (and (not (contains? own-exits (:exit once))) (sudo-refused? opts once))
                 (failure-of who once)
                 once))
@@ -221,8 +221,8 @@ the file. `:password` is handed to sudo once and kept nowhere; `:program` overri
     "  copying=0; intact=1; if [ -n \"$keep\" ]; then rm -f -- \"$keep.copying\"; fi; exit 0\n"
     "fi\n" "copying=0\n" "put_back 'the file could not be written'\n" "exit 4\n"))
 
-(defn write (path text &optional (opts {}))
-  "Write `text` to the file at `path` as `opts`' `:user` (root by default) through sudo,
+(defn write (path content &optional (opts {}))
+  "Write `content`, text or bytes (any iolist), to the file at `path` as `opts`' `:user` (root by default) through sudo,
 replacing what it held, and creating it when it does not exist. The text is staged and
 checked — its byte count and SHA-256 — before anything is replaced, so a write cut short (the
 caller killed, the pipe closed) leaves the file as it was; it then replaces the file by a
@@ -230,16 +230,17 @@ rename where it can, else by a copy into it that puts the old text back if it do
 whole (see the module doc). True, or a failure as `sudo/read` gives one.
 
     (sudo/write \"/etc/hosts\" text {:password typed})   ;~> true, or a failure"
-  (let (result (run-as opts
+  (let (written (if (string? content) (string/->bytes content) (bytes/concat content))
+        result (run-as opts
                  "write"
                  ["sh"
                    "-c"
                    write-script
                    "sh"
                    path
-                   (str (count (string/->bytes text)))
-                   (hash/sha256 text)]
-                 text
+                   (str (bytes/length written))
+                   (hash/sha256-bytes written)]
+                 written
                  #{0 4}))
     (cond
       (failure? result) result
