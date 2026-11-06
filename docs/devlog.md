@@ -1031,3 +1031,11 @@ lines against its own rule: 241 entries through 2026-11-04 moved to the month fi
 the code. `primitives.md` gained 233 unlisted primitives. Found on the way: v0.49.1 and v0.50.0
 have no git tag or GitHub Release, and `full.yml` has not completed a run since it replaced the
 Nightly on 2026-11-05.
+
+2026-11-06 (KI-371, KI-372). The docs audit's one real bug: `brood-lsp`'s project file list called
+a moved name and an empty default hid it, so cross-file references answered from open buffers. A
+sweep of every Brood name embedded in Rust found no other. Then CI failed that push on a
+retry-passed mesh test: one node's two links to a peer, registered in opposite orders by the two
+ends, each closing the one the other kept. A loop did not show it and a dial-only fault passed;
+holding the loser's close as well made it certain, then the fix cleared it. Two links from one
+connector are now ordered by the initiator's nonce.

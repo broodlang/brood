@@ -29,6 +29,8 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 **Fixed.**
 - A fold over a vector or a range stops on a failed accumulator; steps ran on after it before
   (ADR-315).
+- Two nodes of a cluster no longer stay apart after a mesh dial races the program's own dial;
+  each end could close the link the other kept (KI-372).
 - `brood-lsp`'s cross-file references, rename and `:implements` goto see the project's files
   again; they had been answering from open buffers alone (KI-371).
 - A single clause's `:when` is a guard at runtime; it ran as body forms before.

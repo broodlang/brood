@@ -311,7 +311,10 @@ simultaneous-connect race, `establish` resolves it under the `NODES` write lock
 with a deterministic tie-break: **the link whose connector has the
 lexicographically smaller node name wins** — comparing the *spelling*
 (`value::symbol_name`), not the interned id, since ids differ per process but
-the names match on both ends. The loser's socket is `shutdown` and never
+the names match on both ends. One node can dial a peer twice (a program's
+`node/connect` and a mesh dial started by gossip), so two links with one connector
+are ordered by the initiator's handshake nonce, which both ends hold (KI-372). The
+loser's socket is `shutdown` and never
 registered; the winner replaces any prior entry under a new generation id, and
 the displaced link tears down via the shared path (§4).
 

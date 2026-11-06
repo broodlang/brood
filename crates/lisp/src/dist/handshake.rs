@@ -57,6 +57,9 @@ pub(super) struct Authenticated {
     /// Which life of `peer` this is (`dist::local_incarnation` on its side): a link
     /// whose incarnation differs from the registered one's means the peer restarted.
     pub(super) incarnation: u64,
+    /// The initiator's nonce: unique to this connection and known to both ends, so two
+    /// links with one connector are told apart the same way on each side (KI-372).
+    pub(super) link_nonce: [u8; NONCE_LEN],
     /// The two directional ciphers for the reader and writer (ADR-089).
     pub(super) session: Session,
     /// The guest grant the initiator authenticated with (ADR-415), or `None` for a full
@@ -239,6 +242,7 @@ pub(super) fn handshake<S: Read + Write>(
         peer: peer_name,
         addr: peer_addr,
         incarnation: peer_incarnation,
+        link_nonce: init_nonce,
         session,
         grant,
         lanes,

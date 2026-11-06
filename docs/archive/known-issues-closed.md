@@ -16086,3 +16086,33 @@ then a failed ask is a real failure and says so on stderr.
 **Guard.** `workspace::tests::references_reach_a_project_file_no_editor_has_open` (only `a.blsp`
 open, the call in `b.blsp`). Sabotage-verified: with the old name it failed with `brood: could
 not list the project's files`.
+
+## KI-372 — two nodes stay apart for good after a mesh dial races the program's dial ✅ fixed 2026-11-06
+
+**Symptom.** CI on `4f6a6c59`: `cli::distribution cluster_mesh_converges_to_full_mesh_from_a_chain`
+failed its first try after 25 s and passed its retry: `mesh did not fully converge from a chain
+… a: <none>, b: PARTIAL 2, c: FULL, d: FULL`. Every pair linked except `a` and `b`, the pair
+that dialed first.
+
+**Cause.** `register_link`'s tie-break compared connectors, and on equal connectors kept the
+link registered first. One node can dial a peer twice: `a`'s `node/connect` has finished its
+handshake and not yet registered when gossip through `c` names `b`, and `a` is not yet linked to
+`b`, so a mesh dial starts. If `b` registers the first link first and `a` the second, each end
+keeps a different link and closes the other. Both die, each reader fires a node-down, and the
+mesh has no re-heal (ADR-088).
+
+**Why it survived.** The rule was symmetric only for two connectors. The window needs the
+loser's close to arrive after the held dial registers, so it is rare: a fault that held only the
+dial passed five times of five, and 720 runs of the test in six parallel workers did not show
+this shape.
+
+**Fix.** Two links from one connector are ordered by the initiator's handshake nonce, which both
+ends hold and which is unique to the link (`Authenticated::link_nonce`, `Conn::nonce`). No wire
+change. A cost, accepted: a duplicate can now evict the link already carrying traffic, as a
+crossing dial always could.
+
+**Guard.** `dist::tests::both_ends_keep_the_same_link_of_two_from_one_connector` drives
+`establish` with one pair of links in both orders. Sabotage-verified: with the nonce out of the
+comparison it failed with `left: [1, …]`, `right: [2, …]`. Confirmed end to end by a temporary
+fault holding the dial 1 s and `b`'s close of the loser 2 s: `a` saw 1 peer of 2, three times of
+three before the fix, and 2 of 2 three times of three after. The fault is not kept.

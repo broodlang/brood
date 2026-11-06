@@ -312,6 +312,9 @@ struct Conn {
     /// link initiated by the lexicographically smaller node name, computed
     /// identically on both ends (see `establish`).
     connector: Symbol,
+    /// The initiator's handshake nonce, the tie-break between two links with one
+    /// connector, computed identically on both ends (see `register_link`).
+    nonce: [u8; wire::NONCE_LEN],
     /// The peer's incarnation, from its authenticated `Hello`: which life of the
     /// peer this link reaches. A new link under the same name with a different one
     /// means the peer restarted, and this link is to a process that no longer
@@ -1910,6 +1913,7 @@ fn establish(authenticated: handshake::Authenticated, stream: Stream, role: Role
         peer,
         addr: peer_addr,
         incarnation,
+        link_nonce,
         session,
         grant,
         lanes,
@@ -1941,6 +1945,7 @@ fn establish(authenticated: handshake::Authenticated, stream: Stream, role: Role
         id,
         connector,
         incarnation,
+        nonce: link_nonce,
         addr: peer_addr,
         tx: tx.clone(),
         lanes,
@@ -2014,10 +2019,13 @@ fn register_link(peer: Symbol, link: Conn) -> Option<bool> {
                 continue;
             }
             Some(existing)
-                if value::symbol_name(link.connector) >= value::symbol_name(existing.connector) =>
+                if (value::symbol_name(link.connector), link.nonce)
+                    >= (value::symbol_name(existing.connector), existing.nonce) =>
             {
-                // The existing link to this same life of the peer wins (its connector
-                // sorts first, or it's the same initiator — a plain duplicate).
+                // The existing link to this same life of the peer wins: its connector
+                // sorts first, or one node dialed twice and its nonce does. Which link
+                // came first is no tie-break: the two ends can see them in either order,
+                // and each would close the link the other kept (KI-372).
                 return None;
             }
             other => {
@@ -2597,6 +2605,7 @@ mod tests {
             peer,
             addr: String::new(),
             incarnation,
+            link_nonce: [0; wire::NONCE_LEN],
             grant: None,
             lanes: true,
             session: Session {
@@ -2622,6 +2631,36 @@ mod tests {
             })),
             ..authenticated_as(peer, incarnation)
         }
+    }
+
+    /// KI-372: one node dials a peer twice (a program's `node/connect` and a mesh dial
+    /// started by gossip), and the two ends register the links in opposite orders. Each
+    /// end closing the link it saw second kills both, and nothing dials again, so the
+    /// choice must not depend on the order. Two peer names stand for the two ends here.
+    #[test]
+    fn both_ends_keep_the_same_link_of_two_from_one_connector() {
+        let kept = |name: &str, nonces: [u8; 2]| {
+            let peer = value::intern(name);
+            let far_ends: Vec<TcpStream> = nonces
+                .iter()
+                .map(|&n| {
+                    let (stream, far_end) = stream_pair();
+                    let authenticated = handshake::Authenticated {
+                        link_nonce: [n; wire::NONCE_LEN],
+                        ..authenticated_as(peer, 1)
+                    };
+                    establish(authenticated, stream, Role::Responder);
+                    far_end
+                })
+                .collect();
+            let nonce = crate::core::sync::read(&NODES)[&peer].nonce;
+            drop(far_ends);
+            nonce
+        };
+        assert_eq!(
+            kept("two-dials-seen-one-way@test", [1, 2]),
+            kept("two-dials-seen-the-other@test", [2, 1])
+        );
     }
 
     /// The guest standing of the link now registered for `peer`, if it is a guest link.
