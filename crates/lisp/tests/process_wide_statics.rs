@@ -158,18 +158,18 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // the clipboard's reader, apart from the owner so a wedged read blocks no write, and
     // replaced past a deadline so it blocks no later read for good (ADR-536)
     ("host/clipboard.rs", "READERS", OneMachine),
-    ("host/treesit.rs", "DYNAMIC", OneMachine),
+    ("host/treesit/grammar.rs", "DYNAMIC", OneMachine),
     // Grammars declared and not yet loaded (ADR-481): the same machine-wide table as
     // DYNAMIC, one step earlier.
-    ("host/treesit.rs", "DECLARED", OneMachine),
+    ("host/treesit/grammar.rs", "DECLARED", OneMachine),
     // Where each grammar in DYNAMIC was loaded from (ADR-583): written beside it, as wide.
-    ("host/treesit.rs", "LOADED_FROM", OneMachine),
+    ("host/treesit/grammar.rs", "LOADED_FROM", OneMachine),
     // How many times each language's grammar has loaded, which a held tree's reparse checks
     // (ADR-583): a fact about the machine-wide DYNAMIC table, so as wide as it.
     ("host/treesit.rs", "GRAMMAR_EPOCHS", OneMachine),
     // Serialises the private copies a grammar is dlopened from (ADR-583): the dynamic loader
     // and the temporary directory are the process's, so the lock is too.
-    ("host/treesit.rs", "GRAMMAR_COPY_LOCK", OneMachine),
+    ("host/treesit/grammar.rs", "GRAMMAR_COPY_LOCK", OneMachine),
     // Facts of the binary: the std sources baked into it, and the signatures derived from
     // them (the stdlib id is a build constant).
     ("types/check.rs", "STD_REQUIRES", FactOfTheBinary),

@@ -30,7 +30,7 @@ history=(
 
 prose_paths=(
     std/editor/
-    crates/lisp/src/host/treesit.rs
+    crates/lisp/src/host/treesit
     tests/tree_sitter_test.blsp
     tests/treesit_module_test.blsp
 )
