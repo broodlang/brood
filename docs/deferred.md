@@ -521,7 +521,7 @@ is the original note.
 
 **Why it is wanted.** `proc-spawn` gives a child piped stdio, which is right for a JSON-RPC
 peer or a build tool but not for anything that needs a *terminal*: an editor over
-`editor/ui/*term-display*` puts its tty in raw mode, asks for the window size, and re-renders on
+`editor/frontend/*term-display*` puts its tty in raw mode, asks for the window size, and re-renders on
 SIGWINCH. Piped stdio has none of that, so a Brood program cannot start another Brood
 program's terminal UI and interact with it.
 

@@ -41,6 +41,7 @@ receives the client's input. Many clients may attach at once
 the same client from what it retained (`serve-retain`), after the app's crash hook
 (`:supervise`, ADR-593). Built purely on `ui-run` + the node-link primitives."
   (:use editor/ui)
+  (:use editor/frontend)
   (:use editor/serve-protocol))
 
 (defdyn editor/serve/*served-client* nil)
@@ -90,7 +91,7 @@ before the old link's death was known: see [[remote-claim]]. A session still par
 after it parked ends (exit reason `:client-gone`); `:forever` waits for an adopter.
 
 Any OTHER mailbox message is returned as app input, matching the local displays
-(`gui-display`/`editor/ui/*term-display*` poll the whole mailbox): a served app's async event
+(`gui-display`/`editor/frontend/*term-display*` poll the whole mailbox): a served app's async event
 bus — spawned-task replies, buffer-process pushes (`[:buffer-updated …]`), redirected
 output — reaches its `update` exactly as it would locally. Without the pass-through
 those messages would strand in the session's mailbox (a selective receive never

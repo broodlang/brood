@@ -173,7 +173,7 @@ clock**; gate only the *pacing* on the deadline, never the input read.
 (`std/editor/ui.blsp`) quits on `:close` automatically, so prefer it — it also owns
 pacing and guaranteed teardown (`:leave`/`gui/close` runs even if `view`/`update`
 throws). A hand-rolled `(receive)` loop must match `:close` itself (`(:close :quit)`)
-or use `editor/ui/quit-request?`. If the app binds Esc to cancel/normal-mode, **only**
+or use `editor/frontend/quit-request?`. If the app binds Esc to cancel/normal-mode, **only**
 `:close` can close it — that's the whole reason the two are separate.
 
 **Build/feature gotchas.** The GUI backend is behind the `gui` cargo feature —

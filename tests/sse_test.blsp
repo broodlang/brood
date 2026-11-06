@@ -2,7 +2,11 @@
 ;; functions (unit-tested directly); `with-events` (std/ui.blsp) merges pushed events
 ;; into a ui-run loop; and one end-to-end test streams frames from a loopback server.
 
-(defmodule sse-test (:use-internals sse) (:use test) (:use sse) (:use editor/ui))
+(defmodule sse-test
+  (:use-internals sse)
+  (:use test)
+  (:use sse)
+  (:use editor/frontend))
 
 (describe "sse — pure event-field parsing"
   (test "parses event / data / id, stripping one space after the colon"

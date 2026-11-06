@@ -639,6 +639,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // cursor motion, erases, scroll regions, the alternate screen, SGR colour, the modes
     // and queries an interactive program relies on. `ansi` strips; `vt` emulates.
     embedded_module!("vt", "std/vt.blsp"),
+    embedded_module!("editor/frontend", "std/editor/frontend.blsp"),
     embedded_module!("editor/ui", "std/editor/ui.blsp"),
     // Serve a `ui-run` app to remote frontends — the Emacs `--daemon`/`emacsclient`
     // model (ADR-090): the app runs on the daemon, a thin `attach` client paints

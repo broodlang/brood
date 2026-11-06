@@ -41,7 +41,7 @@
   "An interactive process observer — showing this runtime's node stats and a
 navigable table of live processes (id, name, status, mailbox backlog, memory,
 monitors), built on the display seam (M3, ADR-046) over `proc/info`. Renders to
-a GUI window (`(observe)`) or the terminal (`(observe-attach editor/ui/*term-display*)`).
+a GUI window (`(observe)`) or the terminal (`(observe-attach editor/frontend/*term-display*)`).
 
     (observe)          ; open the observer in a native window (needs --features gui)
     (observe-run)      ; standalone terminal demo app (nest observe)
@@ -63,6 +63,7 @@ attach). Drive the standalone app from the shell with `nest observe`."
   (:use editor/lineedit)
   ;; the reusable app framework — frontends + the `ui-run` loop
   (:use editor/ui)
+  (:use editor/frontend)
   (:use seq))
 
 ; the parent→child forest ordering (shared with myedit's process list)
@@ -621,7 +622,7 @@ body height (`(math/max 1 (- rows 5))`, as in `observe-frame`)."
       else state)))
 
 ;; ---- display frontends + app loop now live in `ui` (std/editor/ui.blsp) ------------
-;; `editor/ui/*term-display*`, `(gui-display)`, `display-broadcast`, and the `ui-run` loop
+;; `editor/frontend/*term-display*`, `(gui-display)`, `display-broadcast`, and the `ui-run` loop
 ;; were extracted into the reusable `ui` module so a new project (the editor) can
 ;; build on the same seam. The `ui/…` references above pull them in; the observer is now
 ;; just a `ui-run` client — see `observe-view` / `observe-update` below.
@@ -803,7 +804,7 @@ nil."
       (seq/repeatedly 4 (fn () (send w :idle))))
     nil))
 
-(defn observe-attach (&optional (display editor/ui/*term-display*))
+(defn observe-attach (&optional (display editor/frontend/*term-display*))
   "Bring up the observer over **this runtime's own live processes** — the inline
 entry point. A running program calls it (e.g. from a key handler or command) to
 inspect itself: it spawns no demo processes, takes over the terminal, and returns
@@ -862,7 +863,7 @@ keys coexist, each unique. Needs a `--features gui` runtime (`./configure --with
     (observer/observe)          ;~> the SAME pid; no second window
     (observer/observe :audit)   ;~> a different pid; an independent second window
 
-For a modal terminal observer instead, call `(observe-attach editor/ui/*term-display*)`."
+For a modal terminal observer instead, call `(observe-attach editor/frontend/*term-display*)`."
   ;; The window process registers under the per-key name. If one is already alive,
   ;; don't re-spawn (the named `spawn` would no-op anyway, ADR-039) — instead send it
   ;; `:focus`, which `ui-run` turns into `gui/focus` on its window, surfacing it to
@@ -988,7 +989,7 @@ freezes on the last snapshot with a DISCONNECTED banner until you quit.
                :backend {:source (fn () (observe-request peer))
                          :eval (fn (src) (observe-remote-eval peer src))
                          :kill (fn (c) (observe-remote-kill peer c))}}
-        observe-view observe-update editor/ui/*term-display*))))
+        observe-view observe-update editor/frontend/*term-display*))))
 
 (defn observe-run (&optional (demo true))
   "Run the interactive process observer as a standalone app — a full-screen TUI

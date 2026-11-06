@@ -1099,7 +1099,7 @@ so a matching local setup needs no flag."
       (get (get options :flags) "--gui")
         (do
           (editor/attach/attach-display spec
-            (editor/ui/gui-display {:title (str "brood — " spec)})
+            (editor/frontend/gui-display {:title (str "brood — " spec)})
             cookie)
           0)
       (require-terminal "attach")

@@ -216,7 +216,7 @@
 ;; form) and a raw-bytes literal — can still be IMAGED, because the image restores bindings in
 ;; the same, binary-keyed runtime: a builtin travels by the name it is bound to and re-resolves
 ;; on read, and bytes copy inline. Without this a single such global forfeits the whole image
-;; (found via bedit: `std/editor/ui`'s `editor/ui/*term-display*` is a map of `term-*` prims, and a
+;; (found via bedit: `std/editor/ui`'s `editor/frontend/*term-display*` is a map of `term-*` prims, and a
 ;; `#b"…"` literal sits in a function body). Guarded here at the primitive level.
 (describe "startup image: builtins by name, bytes inline"
   :isolated (test "a global bound to a builtin restores as the callable primitive"
@@ -226,7 +226,7 @@
       (def si-prim :clobbered)
       (let (idx (%image-index p "fp-prim")) (si-load-all p idx))
       (assert= 4 (si-prim "abcd")))) ; re-resolved to the real primitive, by name
-  (test "a map of builtins round-trips (the editor/ui/*term-display* display-map shape)"
+  (test "a map of builtins round-trips (the editor/frontend/*term-display* display-map shape)"
     (def si-display {:len string/length :up string/upper})
     (let (p (img-tmp "display"))
       (%image-write p [["" ['startup-image-test/si-display]]] "fp-display")

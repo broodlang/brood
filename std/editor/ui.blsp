@@ -1,16 +1,8 @@
 ;; std/editor/ui.blsp — the reusable terminal/GUI app framework.
 ;;
 ;; Extracted from the observer so a *new* project (the coming editor) builds on the
-;; same seam instead of re-inventing it. Two pieces:
+;; same seam instead of re-inventing it. The displays it drives are `editor/frontend`.
 ;;
-;;  - **Frontends** (ADR-046: one render-op protocol, many frontends). A *display*
-;;    is a map of five fns `{:enter :leave :size :draw :poll}`. `editor/ui/*term-display*` is
-;;    the crossterm terminal; `(gui-display)` opens a native window (needs
-;;    `--features gui`); `display-broadcast` fans one frame out to several at once.
-;;    All over the `term-*` / `gui-*` primitives — the same pure `view` frame paints
-;;    to any of them unchanged. A display that sets `:fragments? true` (the GUI window)
-;;    is handed the frame with its `ui-memo` markers in, and reuses what it parsed a
-;;    reused fragment to last frame (ADR-470); every other display gets them spliced.
 ;;  - **The app loop** `(ui-run model view update display)` — a tiny TEA-style loop:
 ;;    enter the frontend, then render `(view model cols rows)`, poll input, fold it
 ;;    with `(update model input cols rows)`, recurse until the model is `:done`, then
@@ -25,452 +17,15 @@
 
 (defmodule editor/ui
   "A small terminal/GUI app framework over the M3 display/input seam (ADR-046): a
-`display` frontend (`editor/ui/*term-display*` / `(gui-display)` / `display-broadcast`) plus a
+`display` frontend (`editor/frontend`) plus a
 TEA-style `(ui-run model view update display)` loop. Build an app by supplying a
 pure `view` (model + cols/rows → a render frame) and an `update` (model + input +
 cols/rows → model); set `:done` in the model to quit, and declare time-driven work
 as `:timers` (named timers, ADR-102) — or, legacy, `:tick-ms` for a single refresh
 beat. The observer and the editor are both `ui-run` clients — see
 `std/tool/observer.blsp`."
-  (:use map))
-
-;; ---- frontends (ADR-046: one render-op protocol, many frontends) ------------
-;;
-;; The same pure `view` frame therefore paints to the terminal, a GUI window, or
-;; several at once. `term-*` / `gui-*` are the two Rust-backed frontends (mechanism
-;; only); the composition below — fan a frame out to every frontend, merge their
-;; keys, render at the smallest common grid — is all Brood, so it stays live-
-;; editable and grows to remote frontends.
-
-(defn display-polls (poll-tagged)
-  "A display's poll entries from its `poll-tagged` (ADR-490): `:poll-tagged`, the `:poll`
-derived from it (the message without its tag), and `:poll-tagged-of`, that same `:poll` —
-the mark that the two agree. A wrapper that replaces `:poll` (`(assoc display :poll …)`, as
-apps did before `:poll-tagged` existed) leaves the mark pointing at the old one, so
-`display-poll-tagged` asks the new `:poll` rather than a `:poll-tagged` that bypasses it.
-Merge the result into the display map.
-
-    (let (d (editor/ui/display-polls (fn (ms) [\"x\" true]))) [((get d :poll) 0) ((get d :poll-tagged) 0)])   ;=> [\"x\" [\"x\" true]]"
-  (let (poll (fn (ms) (display-untag (poll-tagged ms))))
-    {:poll poll :poll-tagged poll-tagged :poll-tagged-of poll}))
-
-(defdyn editor/ui/*term-display*
-  ;; the terminal (crossterm) frontend — always available, and single (one
-  ;; terminal), so it's a fixed display map of the 0-arg `term-*` primitives.
-  ;; `:key-held?` is reported by a terminal speaking the kitty keyboard protocol and
-  ;; inferred from the repeats in any other (`term/held-key`).
-  ;; While it is entered, a reader thread delivers the terminal's keys and mouse to the
-  ;; loop's PRIORITY lane (`term/forward-input`, ADR-491), as a window delivers its input:
-  ;; a key typed while the loop is busy is queued where the kernel's quit key sees it, so a
-  ;; terminal C-g stops a stuck turn. So the terminal polls the mailbox as the window does —
-  ;; input first, and the loop's background messages arrive tagged as such (ADR-490).
-  ;; And it owns the process's job-control and hang-up signals while entered (ADR-586):
-  ;; SIGTSTP gives the terminal back and stops, SIGCONT takes it again and repaints, and
-  ;; SIGTERM / SIGHUP end the loop as `[:hangup sig]` — the app's `:on-hangup` runs (an
-  ;; editor's emergency auto-save) and `:leave` restores the terminal, where the default
-  ;; action would have left it raw and on the alternate screen.
-  (merge
-    {:enter (fn ()
-              (do
-                (term/enter)
-                (term/forward-input (self))
-                (term-trap-signals (self))))
-     :leave (fn ()
-              (do
-                (term-trap-signals nil)
-                (term/forward-input nil)
-                (term/leave)))
-     :size term/size
-     :draw term/draw
-     :poll-input (fn () (ui-take-input))
-     :key-held? (fn () (not (nil? (term/held-key))))
-     ;; the screen was forgotten (a resize, a continue): draw though the model is unchanged
-     :repaint-due? (fn () (term/repaint-due?))
-     ;; a kill reaches the clipboard of the machine the user sits at: the desktop's
-     ;; when there is one, the TERMINAL's (OSC 52) over ssh or on a console (ADR-587)
-     :clipboard-set (fn (text) (term-clipboard-set text))
-     :primary-set (fn (text) (term-clipboard-set text :primary))}
-    (display-polls (fn (ms) (term-signal-input (ui-receive-tagged ms))))))
-
-(def- term-signals [:tstp :cont :term :hup])
-
-;; who had each signal before the terminal display took it, given back on leave
-(def- term-signal-previous (table/new))
-
-(defn- term-trap-signals (pid)
-  "Route the terminal display's signals to `pid` (the loop) — or, nil, give each back to
-whoever had it before. A platform without Unix signals has nothing to route."
-  (check-allow :discarded-catch
-    (try
-      (doseq (sig term-signals)
-        (if (nil? pid)
-          (os/trap sig (table/get term-signal-previous sig nil))
-          (table/put term-signal-previous sig (os/trap sig pid))))
-      (catch _ nil)))
-  nil)
-
-(defn- term-signal-input (tagged)
-  "A poll result `[message input?]` with the terminal display's signals acted on: SIGTSTP
-suspends (`term/suspend`) and SIGCONT refreshes (`term/refresh`) — each answering a
-`[:resize cols rows]`, so the app re-lays out and the loop repaints — and SIGTERM / SIGHUP
-become `[:hangup sig]`, which ends the loop (`ui-run`). Anything else as it came."
-  (let (input (when tagged (term-signal (first tagged))))
-    (if (nil? input) tagged [input true])))
-
-(defn term-signal (message)
-  "The input a terminal display's signal `message` becomes, acted on — or nil when `message`
-is not one: `[:signal :tstp]` suspends (`term/suspend`) and `[:signal :cont]` refreshes
-(`term/refresh`), each answering `[:resize cols rows]` so the app re-lays out and repaints;
-`[:signal :term]` / `[:signal :hup]` become `[:hangup sig]`. What `*term-display*`'s poll
-does, for a loop that receives its mailbox itself (an attached client, std/editor/serve).
-
-    (editor/ui/term-signal [:signal :hup])   ;=> [:hangup :hup]
-    (editor/ui/term-signal \"a\")   ;=> nil"
-  (cond
-    (= message [:signal :tstp]) (do (term/suspend) (term-resize))
-    (= message [:signal :cont]) (do (term/refresh) (term-resize))
-    (or (= message [:signal :term]) (= message [:signal :hup])) [:hangup (second message)]
-    else nil))
-
-(defn- term-resize ()
-  (let ([cols rows] (term/size)) [:resize cols rows]))
-
-(defn display-available? ()
-  "Whether a native window can be opened here: the runtime has the GUI backend
-(`gui/available?`) and the session has a display to put it on — `$WAYLAND_DISPLAY` or
-`$DISPLAY` on Linux and the BSDs, a desktop login (not an ssh session) on macOS, always on
-Windows. A headless GUI runtime (`BROOD_GUI_HEADLESS`) counts as one: its windows open,
-drawing nothing. The question a program that can run in a window OR the terminal asks
-before choosing — Emacs's `-nw` when there is no display (ADR-587).
-
-    (bool? (editor/ui/display-available?))   ;=> true"
-  (let (set? (fn (name) (let (value (os/env name)) (and (string? value) (not (= value ""))))))
-    (and (gui/available?)
-      (or (gui/headless?)
-        (case (os/type)
-          :windows true
-          :macos (not (or (set? "SSH_CONNECTION") (set? "SSH_TTY")))
-          (or (set? "WAYLAND_DISPLAY") (set? "DISPLAY")))))))
-
-(defn term-clipboard-set (text &optional (selection :clipboard))
-  "Put `text` on the clipboard (or, `selection` `:primary`, the PRIMARY selection) of the
-machine the user sits at, from a program in a TERMINAL: the desktop's own when a display is
-reachable (`display-available?`, `os/clipboard-set`), else the terminal's, through the OSC
-52 escape (`editor/ansi/ansi-clipboard`) — what reaches the user's machine from the far end
-of ssh, from tmux, from a console. A terminal without OSC 52 ignores it. Returns nil (ADR-587)
-— or `:too-large` when the text is over `*osc52-max-bytes*` and so was NOT sent to the
-terminal (Emacs's `xterm-max-cut-length`): an escape that size stalls a terminal or a link,
-and many terminals drop it anyway, so the caller can say so (ADR-586).
-
-    (editor/ui/term-clipboard-set \"copied\")   ;~> nil, \"copied\" on the user's clipboard"
-  (cond
-    (display-available?)
-      (do (if (= selection :primary) (os/primary-set text) (os/clipboard-set text)) nil)
-    (not (osc52-fits? text)) :too-large
-    else (do (io/write (editor/ansi/ansi-clipboard text selection)) nil)))
-
-(def *osc52-max-bytes* 100000)
-;; The most text (in UTF-8 bytes) `term-clipboard-set` sends a terminal through OSC 52 —
-;; Emacs's `xterm-max-cut-length`, 100000.
-
-(defn osc52-fits? (text)
-  "Whether `text` is small enough to send a terminal's clipboard through OSC 52: at most
-`*osc52-max-bytes*` UTF-8 bytes (ADR-587).
-
-    (editor/ui/osc52-fits? \"copied\")   ;=> true"
-  (<= (count (string/->bytes text)) *osc52-max-bytes*))
-
-(defn- ui-coalesce-motion (msg)
-  "Collapse a flood of pointer-motion events — a `:drag` or a `:move` — down to the
-latest of its kind. A fast pointer emits one event per cell it crosses (ADR-080), so the
-mailbox backs up and the loop folds and renders every intermediate position: a drag
-visibly lags, filling in cell by cell, and a plain move costs a full turn (fold + view)
-per cell even when nothing on screen depends on it. Only the *final* position matters
-for either gesture (a drag-select region is just `[mark, point]`, a hover just where the
-pointer is now), so when `msg` is one, we pull every further event of the SAME kind
-already queued — a non-blocking selective `receive` that leaves keys / ticks / async
-replies / the other kind untouched — and return the last. A `:move` never swallows a
-`:drag` (nor the reverse): a press between two moves changes what the later one means.
-`msg` unchanged when it isn't motion (incl. nil on timeout)."
-  (if (and (vector? msg)
-        (>= (count msg) 2)
-        (= (nth msg 0) :mouse)
-        (or (= (nth msg 1) :drag) (= (nth msg 1) :move)))
-    (let (kind (nth msg 1))
-      ;; every shape motion comes in: a window adds the pointer's fractional position
-      ;; as `{:at …}` after a nil 7th slot, and a 6-element-only pattern never matched
-      ;; one, so a window's drag was folded and rendered cell by cell (ADR-490)
-      (receive
-        ([:mouse ^kind button row col mods] (ui-coalesce-motion [:mouse kind button row col mods]))
-        ([:mouse ^kind button row col mods extra] (ui-coalesce-motion [:mouse
-                                                                        kind button row col mods
-                                                                        extra]))
-        ([:mouse ^kind button row col mods extra at] (ui-coalesce-motion [:mouse
-                                                                           kind button row col mods
-                                                                           extra at]))
-        (after 0 msg)))
-    msg))
-
-;; ---- what counts as input (ADR-490) -----------------------------------------
-;; A loop's mailbox carries two kinds of message: the USER's input — a key, a mouse
-;; event, typed or composed text, a resize, the close button, focus in or out — and
-;; everything else, the background: task replies, a language server's diagnostics, a
-;; test stream, collab deltas. Folded in arrival order, a flood of background puts the
-;; user's next key behind all of it, and the editor stops answering for as long as the
-;; flood lasts. So input is told apart where it is MADE, not by its shape: a window and a
-;; browser tab deliver everything they send on the mailbox's priority lane
-;; (`proc/send-priority`), the terminal's keys come from the terminal itself, and a
-;; served session's from its thin client's `[:key …]` messages. Each display says which
-;; through two entries:
-;;   :poll-input   a 0-arg fn: the next queued INPUT or nil, at once, touching nothing else
-;;   :poll-tagged  `(fn (ms) …)`: the OLDEST message of any kind, waiting up to `ms`, as
-;;                 `[message input?]` — nil on timeout
-;; `:poll` stays what it always was (`:poll-tagged` without the tag), for callers outside
-;; the loop. The loop asks `display-poll-input` first and parks on `display-poll-tagged`
-;; after, so it serves input before background whatever the display, knows which a
-;; message that woke it was (only input holds idle timers back), and still has an
-;; arrival-order slot that keeps background moving while input never stops
-;; (`ui-drain-input`).
-
-(defn- ui-take-input ()
-  "The oldest input a window delivered to this process's mailbox — its priority lane
-(`proc/take-priority`) — with pointer motion coalesced to its latest (`ui-coalesce-motion`);
-nil when no input is queued, however much else is."
-  (let (taken (proc/take-priority))
-    (if (nil? taken) nil (ui-coalesce-motion (first taken)))))
-
-(defn- ui-receive-tagged (ms)
-  "A window's `:poll-tagged`: the oldest message in this process's mailbox, waiting up to
-`ms`, as `[message input?]` — input when it came on the priority lane, where the window
-delivers (`proc/receive-lane`) — with pointer motion coalesced; nil on timeout."
-  (let (received (proc/receive-lane ms))
-    (if (nil? received)
-      nil
-      [(ui-coalesce-motion (first received)) (= (second received) :priority)])))
-
-(defn- display-untag (tagged)
-  "The message of a `[message input?]` poll result, nil for nil — `:poll` from `:poll-tagged`."
-  (if (nil? tagged) nil (first tagged)))
-
-(defn display-poll-input (display)
-  "The next user input queued for `display`, or nil — at once, and ahead of any
-background message queued before it (ADR-490): its `:poll-input`. A display without one
-answers nil, so the loop folds what its `:poll` returns in arrival order, as before.
-
-    (editor/ui/display-poll-input {:poll-input (fn () \"x\")})   ;=> \"x\"
-    (editor/ui/display-poll-input {})   ;=> nil"
-  (let (poll-input (get display :poll-input))
-    (if poll-input (poll-input) nil)))
-
-(defn display-poll-tagged (display ms)
-  "The oldest message for `display`, waiting up to `ms`, as `[message input?]`, or nil on
-timeout (ADR-490): its `:poll-tagged`. A display without one has its `:poll` asked, and
-what that returns counts as input unless the display has a `:poll-input` — a display that
-cannot tell input apart keeps every message holding idle timers back, as before. So does a
-display whose `:poll` was replaced after `display-polls` made its `:poll-tagged` (its
-`:poll-tagged-of` is no longer its `:poll`): the replacement is what the app meant.
-
-    (editor/ui/display-poll-tagged {:poll (fn (ms) \"x\")} 0)   ;=> [\"x\" true]
-    (editor/ui/display-poll-tagged {:poll (fn (ms) nil)} 0)   ;=> nil"
-  (let (tagged (get display :poll-tagged)
-        of (get display :poll-tagged-of))
-    (if (and tagged (or (nil? of) (= of (get display :poll))))
-      (tagged ms)
-      (let (message ((get display :poll) ms))
-        (if (nil? message) nil [message (nil? (get display :poll-input))])))))
-
-(defn- display-configure-window (id o)
-  "Apply the runtime-switchable window options in `o` to window `id`: `:input`
-(`:pixels` / `:cells`) and `:title`. The subset of `gui/open`'s options an app can still
-ask for after the window exists — which is what an app that attached to a window it did
-not open needs."
-  (when (get o :input) (gui/input id (get o :input)))
-  (when (get o :title) (gui/title id (get o :title)))
-  nil)
-
-(defn display-texture "Upload an image as a texture through `display` — a `gui-display` (the window it owns) or the `remote-display` a served app draws to (the thin client's window, over the wire) — and return its handle, for `gui/sprite`. Either `(display-texture d image)` with the {:width :height :rgba} map `gui/image-thumb` decodes, or `(display-texture d rgba w h)` with raw bytes. The handle comes from `gui/alloc-texture`, so `gui/texture-size` knows it; a display without a `:texture` entry (the terminal) accepts and ignores the upload.
-
-    (gui/texture-size (editor/ui/display-texture {} {:width 2 :height 1 :rgba [0 0 0 0 0 0 0 0]}))   ;=> [2 1]"
-  ((display image) (display-texture display
-                     (get image :rgba)
-                     (get image :width)
-                     (get image :height)))
-  ((display rgba w h) (let (tex (gui/alloc-texture w h))
-                        (when (get display :texture) ((get display :texture) tex rgba w h))
-                        tex)))
-
-(defn display-sound (display pcm rate &optional channels)
-  "Keep a sound through `display` — a `gui-display` or a served app's `remote-display`
-(the thin client's window, over the wire) — and return its handle, for a `[:sound snd vol]`
-or `[:music snd vol]` frame op. `pcm` is interleaved PCM16 little-endian samples at `rate` Hz, `channels` 1
-(default) or 2. The handle comes from `gui/alloc-sound`; a display without a `:sound`
-entry (the terminal) accepts and ignores the upload.
-
-    (gui/sound-seconds (editor/ui/display-sound {} [0 0 0 0] 2))   ;=> 1.0"
-  (let (ch (or channels 1)
-        n (if (bytes? pcm) (bytes/length pcm) (count pcm))
-        snd (gui/alloc-sound (->float (/ (math/quot n 2) (* rate ch)))))
-    (when (get display :sound) ((get display :sound) snd pcm rate ch))
-    snd))
-
-(defn gui-display (&optional (opts nil))
-  "Open a **new** native window and return a display (the `{:enter :leave :size
-:draw :poll}` map) bound to it — each call is a separate window, so several
-observers (or editor windows) can run at once. Unlike `editor/ui/*term-display*` (one
-terminal, a constant), the windowed frontend is a *constructor*: it calls `gui/open`
-for a fresh window id and closes the `gui-*` primitives over it. The window is
-opened eagerly here, so `:enter` is a no-op and `:leave` closes it. Needs the
-runtime built with `--features gui` (`./configure --with-gui && make install`), else
-`gui/open` errors. The map also carries the raw `:window` id.
-
-`opts` is passed through to `gui/open`, so a frontend can ask for a window that
-suits it: `:title` names it, `:width`/`:height` size it (logical pixels), `:input :pixels`
-and `:vsync true` are the game options (ADR-374), `:key-repeat :os` hands a held key's repeat
-to the OS (the user's delay and rate; at most one undelivered, taken back at the
-release), `:ime false` turns the input method off and `:wheel :glide` makes a wheel notch
-glide instead of scrolling its three lines at once (ADR-441), `:option-meta` picks which macOS
-Option key is Meta, the other composing (`:left`, the default, `:right`, `:both`, `:none`;
-ADR-541), and `{:decorations false}`
-drops the OS title bar and frame for an app that draws its own chrome (a browser's tab
-strip and toolbar) and would otherwise sit under a redundant second title. A shipped app
-should also pass `:app-id` — the desktop application id the installed
-`<app-id>.desktop` entry is named after, which is what earns the window its own icon and
-name in a GNOME dash or alt-tab instead of the desktop's generic fallback.
-
-**Create and poll it in the same process.** `:draw`/`:size`/`:leave` act on the
-captured window id, but `:poll` is a `receive` on the *calling* process's mailbox
-(that's where `gui/open` delivers this window's input, ADR-059) — it ignores the
-window id. So a display made here must be polled by the process that made it; don't
-hand it to another process to run. And because the delivered key/mouse messages
-carry no window id, one process should drive **one** window (which is why
-`(observe)` spawns a process per window) — two windows in one process would mix
-their input. Both are deferred trade-offs (ADR-059), fine for the observer.
-
-    (editor/ui/gui-display {:title \"demo\" :width 800 :height 600})   ;~> {:enter … :draw … :poll … :window id}, or an error without the gui feature"
-  (let (id (gui/open (get opts :title) (get opts :width) (get opts :height) opts))
-    (merge
-      {:enter (fn () nil)
-       :leave (fn () (gui/close id))
-       :size (fn () (gui/size id))
-       :draw (fn (f) (gui/draw id f))
-       ;; the window takes `ui-memo` markers: a fragment the loop reused is not parsed
-       ;; again, and is the same allocation as last frame's to its diff (ADR-470)
-       :fragments? true
-       ;; a turn the loop skipped (ADR-444): the window still learns the app is done with
-       ;; it — its wheel glide paces on that, and the latency trace drops the input
-       :settle (fn () (gui/settle id))
-       ;; a thin client's daemon says its loop is busy (ADR-491): the wait cursor, as for
-       ;; this window's own loop
-       :busy (fn (on) (%gui-busy id on))
-       ;; a key is down: the loop holds its idle timers until it comes up
-       :key-held? (fn () (not (nil? (gui/held-key id))))
-       ;; The pixel-space seam (ADR-374), for a game: a texture under a handle the app
-       ;; allocated (`gui/alloc-texture`), released again, and the window told which
-       ;; input unit / title the app wants — the three things that also cross the wire
-       ;; in `editor/serve/remote-display`, so an app written against a display runs
-       ;; unchanged in its own window or in a thin client's.
-       :texture (fn (tex rgba w h) (%gui-texture id tex rgba w h))
-       :texture-free (fn (tex) (%gui-texture-free id tex))
-       :sound (fn (snd pcm rate channels) (%gui-sound id snd rate channels pcm))
-       :sound-free (fn (snd) (%gui-sound-free id snd))
-       :configure (fn (o) (display-configure-window id o))
-       ;; Input arrives as mailbox messages (gui/open delivers to this process), so
-       ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
-       ;; while waiting (ADR-059), unlike a blocking poll. Returns the next key/mouse
-       ;; message, or nil after `ms` (the live-refresh tick) — the OLDEST message, of any
-       ;; kind. The window delivers on the priority lane, so `:poll-input` takes its input
-       ;; ahead of a background backlog (ADR-490).
-       :poll-input ui-take-input
-       ;; Raise this window to the front + focus it (un-minimising) — `ui-run` calls
-       ;; this when a `:focus` control message lands in the mailbox, so another process
-       ;; can surface an already-open singleton window (e.g. a second `(observe)`).
-       :focus (fn () (gui/focus id))
-       :window id}
-      (display-polls ui-receive-tagged))))
-
-(defn display-key-held? (display)
-  "Whether a key is down in `display` — its `:key-held?`, which a GUI window answers from
-the press and release it saw (the terminal too, when it speaks the kitty keyboard protocol);
-false for a display that cannot tell. `ui-run` holds its idle timers while it is true, and a
-thin client (`editor/serve`) ships it with each key so a served app's loop does the same.
-
-    (editor/ui/display-key-held? {:key-held? (fn () true)})   ;=> true
-    (editor/ui/display-key-held? {})   ;=> false"
-  (let (held? (get display :key-held?))
-    (if held? (held?) false)))
-
-(defn- display-min-size (displays)
-  "The smallest cols×rows across all frontends, so one broadcast frame fits every
-screen (a larger frontend just shows it in its top-left)."
-  (fold displays
-    nil
-    (fn (acc d)
-      (let ([c r] ((get d :size)))
-        (if (nil? acc)
-          [c r]
-          (let ([ac ar] acc) [(math/min ac c) (math/min ar r)]))))))
-
-(defn- display-poll-loop (displays slice)
-  (if (empty? displays)
-    nil
-    (let (tagged (display-poll-tagged (first displays) slice))
-      (if (nil? tagged) (display-poll-loop (rest displays) slice) tagged))))
-
-(defn- display-poll-input-any (displays)
-  "The first input any frontend has queued (`display-poll-input`), or nil."
-  (if (empty? displays)
-    nil
-    (let (input (display-poll-input (first displays)))
-      (if (nil? input) (display-poll-input-any (rest displays)) input))))
-
-(defn- display-poll-any (displays ms)
-  "Poll each frontend for a slice of `ms` in turn, returning the first message seen as
-`[message input?]` (or nil) — so a keystroke from *any* attached frontend reaches the
-loop. A frontend's QUEUED input is taken first, from whichever has it, so one member's
-slice is never waited out while another already holds a key."
-  (let (input (display-poll-input-any displays))
-    (if (nil? input)
-      (display-poll-loop displays (math/max 1 (math/quot ms (math/max 1 (count displays)))))
-      [input true])))
-
-(defn display-broadcast (displays)
-  "Compose several displays into one that fans a single frame out to all of them
-and merges their input: update the view and *every* attached frontend updates
-together (a GUI window and the terminal today; remote frontends later — they slot
-in as just another member). The frame renders at the smallest common grid so it
-fits everywhere. Pure Brood over the `term-*`/`gui-*` mechanism.
-
-    (editor/ui/display-broadcast [editor/ui/*term-display* (editor/ui/gui-display)])   ;~> one display map driving both frontends"
-  (merge {:enter (fn () (doseq (d displays) ((get d :enter))))
-          :leave (fn () (doseq (d displays) ((get d :leave))))
-          :size (fn () (display-min-size displays))
-          :draw (fn (f) (doseq (d displays) ((get d :draw) f)))
-          :settle (fn () (doseq (d displays) (when (get d :settle) ((get d :settle)))))
-          :key-held? (fn () (any? displays display-key-held?))
-          :poll-input (fn () (display-poll-input-any displays))}
-    (display-polls (fn (ms) (display-poll-any displays ms)))))
-
-(defn with-events (display)
-  "Wrap `display` so its polls first return any queued `[:sse-open …]` / `[:sse …]` /
-`[:sse-closed …]` mailbox message (from an `sse/connect` whose subscriber is this
-process), tagged as background, else poll `display` as usual. Every std display already
-polls the whole mailbox (the terminal too, since its keys come through it — ADR-491), so
-what this adds is ORDER: the pushed events are taken before whatever else is queued.
-`update` folds an `[:sse ev]` like any other message. The other display ops pass through unchanged.
-The display's `:poll-input` passes through too, so `ui-run` still takes a queued key
-ahead of a flood of pushes (ADR-490). Needs the `sse` module on the producing side
-(loaded by referencing `sse/…`).
-
-    (editor/ui/with-events editor/ui/*term-display*)   ;~> the display, its :poll also yielding [:sse ev] messages"
-  (let (poll-tagged (fn (ms)
-                      (let (event (receive
-                                    ([:sse-open s] [:sse-open s])
-                                    ([:sse e] [:sse e])
-                                    ([:sse-closed r] [:sse-closed r])
-                                    (after 0 nil)))
-                        ;; a pushed event is background, never the user's input
-                        (if (nil? event) (display-poll-tagged display ms) [event false]))))
-    (merge display (display-polls poll-tagged))))
+  (:use map)
+  (:use editor/frontend))
 
 ;; ---- the app loop (TEA: model + view + update) ------------------------------
 
@@ -670,17 +225,6 @@ Only one timer fires per call; simultaneous timers serialize over successive ite
       (let (name (first due))
         [[:timer name] (map/assoc-in clock [:fired name] now)]))))
 
-(defn quit-request? (input)
-  "True if `input` is a window-close request (`:close`) — the frontend (the GUI's X
-button) asking the app to quit, as distinct from the Escape *key* (`:escape`).
-`ui-run` already quits on `:close` for you; reach for this only in a hand-rolled
-`receive` loop (one not built on `ui-run`) so the X button closes the window
-alongside whatever quit keys you bind — e.g. `(:close :quit)` next to your own.
-
-    (editor/ui/quit-request? :close)    ;=> true
-    (editor/ui/quit-request? :escape)   ;=> false"
-  (= input :close))
-
 (defn- ui-close-quits? (model input)
   "Whether `input` is a `:close` the LOOP must act on: the window's X button, for an app
 that has not claimed it. An app sets `:close-is-input? true` on its model to fold `:close`
@@ -689,14 +233,6 @@ through `update` like any key instead — so it can ask about unsaved work befor
 `:done` itself. Without the flag every `ui-run` app stays closeable by its X button with
 no wiring, as before."
   (or (and (quit-request? input) (not (get model :close-is-input?))) (hangup-request? input)))
-
-(defn hangup-request? (input)
-  "True if `input` is `[:hangup sig]` — the terminal display's SIGTERM or SIGHUP (ADR-586).
-`ui-run` ends on it, after the model's `:on-hangup` (`(fn (model sig) …)`, for its side
-effects — an editor's emergency auto-save), and `:leave` restores the terminal.
-
-    (editor/ui/hangup-request? [:hangup :hup])   ;=> true"
-  (and (vector? input) (= (count input) 2) (= (first input) :hangup)))
 
 (defn- ui-quit (model input)
   "The loop's end on a quit it acts on: for a hang-up, the model's `:on-hangup` first —
@@ -721,16 +257,6 @@ whatever it throws is logged, never kept from the exit. nil, so the loop stops."
   ;; the display forgot what it shows (a terminal resized or continued): draw this turn
   ;; even though the model and grid are what was last drawn
   (let (due (get display :repaint-due?)) (and (fn? due) (due))))
-
-(defn focus-request? (input)
-  "True if `input` is a `:focus` control message — a request (delivered to this
-process's mailbox by another process) to raise this app's window to the front.
-`ui-run` handles it by calling the display's `:focus`; a frontend without one (the
-terminal) just ignores it. The seam a singleton launcher uses to surface an
-already-open window instead of opening a duplicate (e.g. a repeated `(observe)`).
-
-    (editor/ui/focus-request? :focus)   ;=> true"
-  (= input :focus))
 
 (defn- ui-log-error (where e)
   "Log a caught `view`/`update` error to stderr (via `*err*`, so it's redirectable)
@@ -1243,7 +769,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                   ;; background keeps moving however fast keys come
                   input (if (get clock1 :jumped) nil (display-poll-input display))
                   tagged (if (nil? input) (display-poll-tagged display poll-ms) [input true])
-                  raw (display-untag tagged)
+                  raw (when tagged (first tagged))
                   clock1 (assoc clock1
                            :jumped (and (not (nil? input)) (not (get model :coalesce-input?)))))
               (cond
@@ -1433,7 +959,7 @@ yet) is fatal, surfacing a genuine startup bug. See `ui-loop`.
 **Teardown is guaranteed.** `:leave` runs on a normal quit *and* if the frontend
 mechanism itself (`:size`/`:draw`/`:poll`) throws, or the first render fails (the
 error is re-raised after) — so a crash never strands the terminal in the alternate
-screen / raw mode; the screen is restored. With `editor/ui/*term-display*` the frontend is raw
+screen / raw mode; the screen is restored. With `editor/frontend/*term-display*` the frontend is raw
 mode + the alternate screen, so `Ctrl-C` arrives as a `:ctrl-c` **key** (have
 `update` quit on it — see the observer's keymap) rather than a SIGINT that kills the
 process mid-draw and leaves stale cells on screen.

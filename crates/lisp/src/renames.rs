@@ -108,6 +108,96 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "editor/serve-protocol/serve-name",
         "ADR-630",
     ),
+    (
+        "editor/ui/*term-display*",
+        "editor/frontend/*term-display*",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/*osc52-max-bytes*",
+        "editor/frontend/*osc52-max-bytes*",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/display-polls",
+        "editor/frontend/display-polls",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/term-signal",
+        "editor/frontend/term-signal",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/display-available?",
+        "editor/frontend/display-available?",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/term-clipboard-set",
+        "editor/frontend/term-clipboard-set",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/osc52-fits?",
+        "editor/frontend/osc52-fits?",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/display-poll-input",
+        "editor/frontend/display-poll-input",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/display-poll-tagged",
+        "editor/frontend/display-poll-tagged",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/display-texture",
+        "editor/frontend/display-texture",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/display-sound",
+        "editor/frontend/display-sound",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/gui-display",
+        "editor/frontend/gui-display",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/display-key-held?",
+        "editor/frontend/display-key-held?",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/display-broadcast",
+        "editor/frontend/display-broadcast",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/with-events",
+        "editor/frontend/with-events",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/quit-request?",
+        "editor/frontend/quit-request?",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/focus-request?",
+        "editor/frontend/focus-request?",
+        "ADR-630",
+    ),
+    (
+        "editor/ui/hangup-request?",
+        "editor/frontend/hangup-request?",
+        "ADR-630",
+    ),
     // ADR-630 block end
     // ADR-506 — the bare namespace is the language: syntax, a measured core and the
     // built-in kinds. Everything else is qualified by its family.
@@ -128,7 +218,11 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     ("*test-last-ran*", "test/*last-ran*", "ADR-506"),
     ("*test-last-failed*", "test/*last-failed*", "ADR-506"),
     ("*test-filter*", "test/*filter*", "ADR-506"),
-    ("*term-display*", "editor/ui/*term-display*", "ADR-506"),
+    (
+        "*term-display*",
+        "editor/frontend/*term-display*",
+        "ADR-630",
+    ),
     ("*stale-temp-age-ms*", "test/*stale-temp-age-ms*", "ADR-506"),
     (
         "*resolver-time-budget-ms*",

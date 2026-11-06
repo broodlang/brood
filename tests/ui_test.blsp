@@ -1,5 +1,5 @@
 ;; The reusable app framework (std/ui.blsp): the `ui-run` loop and the display
-;; composition. The frontends themselves (`editor/ui/*term-display*`/`gui-display`) need a
+;; composition. The frontends themselves (`editor/frontend/*term-display*`/`gui-display`) need a
 ;; real terminal / window, so here we drive `ui-run` with a *scripted* display —
 ;; `:poll` reading the test process's own mailbox, `:draw` echoing frames back —
 ;; which is enough to exercise the loop (render → poll → update → done) and the
@@ -7,8 +7,10 @@
 
 (defmodule ui-test
   (:use-internals editor/ui)
+  (:use-internals editor/frontend)
   (:use test)
   (:use editor/ui)
+  (:use editor/frontend)
   (:use editor/display)
   ;; `:exclude [inspect]` — `io/inspect` WRITES, while the root `inspect` is the `Inspect`
   ;; ability op that RETURNS a string. Referring the writer bare here would shadow the op.
@@ -306,11 +308,11 @@
 ;; per cell crossed, and a hover costs one turn, not one per cell.
 (describe "ui-coalesce-motion"
   (test "non-motion messages pass through untouched (incl. nil on timeout)"
-    (assert= (editor/ui/ui-coalesce-motion "x") "x")
-    (assert= (editor/ui/ui-coalesce-motion :tick) :tick)
-    (assert= (editor/ui/ui-coalesce-motion [:mouse :press :left 3 3 []])
+    (assert= (editor/frontend/ui-coalesce-motion "x") "x")
+    (assert= (editor/frontend/ui-coalesce-motion :tick) :tick)
+    (assert= (editor/frontend/ui-coalesce-motion [:mouse :press :left 3 3 []])
       [:mouse :press :left 3 3 []])
-    (is (nil? (editor/ui/ui-coalesce-motion nil))))
+    (is (nil? (editor/frontend/ui-coalesce-motion nil))))
   (test "queued drags collapse to the latest; other messages stay in the mailbox"
     (let (me (self))
       (send me [:mouse :drag :left 6 6 []])
@@ -318,7 +320,7 @@
       ; a key after the drags — must survive
       (send me "k")
       ;; pass in the first drag (as the poll would); the queued drags drain to the last
-      (assert= (editor/ui/ui-coalesce-motion [:mouse :drag :left 5 5 []])
+      (assert= (editor/frontend/ui-coalesce-motion [:mouse :drag :left 5 5 []])
         [:mouse :drag :left 7 7 []])
       (assert= (receive (m m) (after 200 :none)) "k")))
   (test "queued moves collapse to the latest too"
@@ -326,7 +328,7 @@
       (send me [:mouse :move nil 6 6 []])
       (send me [:mouse :move nil 7 7 []])
       (send me :tick)
-      (assert= (editor/ui/ui-coalesce-motion [:mouse :move nil 5 5 []])
+      (assert= (editor/frontend/ui-coalesce-motion [:mouse :move nil 5 5 []])
         [:mouse :move nil 7 7 []])
       (assert= (receive (m m) (after 200 :none)) :tick)))
   ;; a window adds the pointer's fractional position after a nil 7th slot
@@ -335,14 +337,14 @@
       (send me [:mouse :drag :left 6 6 [] nil {:at [6.5 6.5]}])
       (send me [:mouse :drag :left 7 7 [] nil {:at [7.5 7.5]}])
       (send me "k")
-      (assert= (editor/ui/ui-coalesce-motion [:mouse :drag :left 5 5 [] nil {:at [5.5 5.5]}])
+      (assert= (editor/frontend/ui-coalesce-motion [:mouse :drag :left 5 5 [] nil {:at [5.5 5.5]}])
         [:mouse :drag :left 7 7 [] nil {:at [7.5 7.5]}])
       (assert= (receive (m m) (after 200 :none)) "k")))
   (test "a move never swallows a drag, nor a drag a move — a press between them matters"
     (let (me (self))
       (send me [:mouse :drag :left 6 6 []])
       (send me [:mouse :move nil 7 7 []])
-      (assert= (editor/ui/ui-coalesce-motion [:mouse :move nil 5 5 []])
+      (assert= (editor/frontend/ui-coalesce-motion [:mouse :move nil 5 5 []])
         [:mouse :move nil 7 7 []])
       ;; the drag is still queued, in place
       (assert= (receive (m m) (after 200 :none)) [:mouse :drag :left 6 6 []]))))
@@ -897,9 +899,10 @@
       (assert= (first (editor/ui/ui-fire {:beat {:after 120 :idle? true}} clock 3000))
         [:timer :beat])))
   (test "a broadcast display has a key down when any of its displays does"
-    (is ((get (editor/ui/display-broadcast [{:key-held? (fn () false)} {:key-held? (fn () true)}])
+    (is ((get (editor/frontend/display-broadcast [{:key-held? (fn () false)}
+                                                   {:key-held? (fn () true)}])
            :key-held?)))
-    (refute ((get (editor/ui/display-broadcast [{:key-held? (fn () false)} {}]) :key-held?)))))
+    (refute ((get (editor/frontend/display-broadcast [{:key-held? (fn () false)} {}]) :key-held?)))))
 (describe "ui-run — timers drive the loop"
   (test "a due timer is folded into update as [:timer name] (clock injected via :now-fn)"
     (let (me (self))
@@ -1478,7 +1481,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
       (assert= (receive ([:drew frame] frame) (after 300 :nothing-new)) :nothing-new)
       (proc/send-priority loop :quit))))
 
-;; The terminal's quit key, end to end: a real `ui-run` over `editor/ui/*term-display*` under a
+;; The terminal's quit key, end to end: a real `ui-run` over `editor/frontend/*term-display*` under a
 ;; pseudo-terminal. Its keys reach the loop through the reader thread `term/forward-input`
 ;; starts, on the priority lane, so a C-g typed while `update` loops forever stops it —
 ;; which the terminal, read by the loop itself, could not do before (ADR-491).
@@ -1512,7 +1515,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
             "                          (= input :ctrl-g) (do (mark \"quit-folded\") m)\n"
             "                          (= input \"q\") (assoc m :done true)\n"
             "                          else m))\n"
-            "  editor/ui/*term-display*)\n"
+            "  editor/frontend/*term-display*)\n"
             "(mark \"exited\")\n"))
         (let (nest (sibling-binary "nest")
               p (os/spawn-pty nest ["run" script] {:cols 80 :rows 24}))

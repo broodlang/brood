@@ -73,7 +73,7 @@ thread, as a window delivers its input (ADR-491); nil stops it. While it runs th
 is read for you: a process that is busy still has its keys queued where the kernel's quit
 key (`proc/set-quit-key`) sees them, so a terminal C-g interrupts a stuck `update` as a
 window's does. Take them with `proc/take-priority` / `proc/receive-lane`; `term/poll` sees
-nothing meanwhile. `editor/ui/*term-display*` turns it on for its loop.
+nothing meanwhile. `editor/frontend/*term-display*` turns it on for its loop.
 
     (term/forward-input nil)   ;=> nil"
   (%term-forward-input pid))

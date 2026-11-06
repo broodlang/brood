@@ -209,7 +209,7 @@ test discovery, lints, release, config)."
 ;; client like the observer. The buffer is a list of line strings + a [row col]
 ;; cursor; every edit is a pure `(model -> model)` function (testable without a
 ;; terminal); `view`/`update` plug into `ui-run`, which owns the loop + teardown.
-;; Runs in the terminal (`editor/ui/*term-display*`) or, with `--features gui`, a window.
+;; Runs in the terminal (`editor/frontend/*term-display*`) or, with `--features gui`, a window.
 (defn- project-editor-main-template (nm)
   (str "(defmodule main \""
     nm " — a tiny text editor built on the `ui` framework.\n" "\n"
@@ -217,11 +217,11 @@ test discovery, lints, release, config)."
     "deletes, Ctrl-C quits). The buffer is a list of line strings with a [row col]\n"
     "cursor; every edit is a pure (model -> model) function and `ui-run` drives the\n"
     "loop — render `view`, poll a key, fold it with `update`, repeat. Swap\n"
-    "`editor/ui/*term-display*` for `(gui-display)` (a --features gui build) to run in a window.\"\n"
+    "`editor/frontend/*term-display*` for `(gui-display)` (a --features gui build) to run in a window.\"\n"
     "  ;; the app framework: display frontends + the `ui-run` loop\n" "  (:use editor/ui)\n"
-    "  ;; the render-op constructors (clear / text / cursor / frame)\n" "  (:use editor/display)\n"
-    "  ;; the seq module's sequence helpers (enumerate)\n" "  (:use seq))\n" "\n" "(def *welcome*\n"
-    "  (list \"hello, world\"\n" "        \"\"\n"
+    "  (:use editor/frontend)\n" "  ;; the render-op constructors (clear / text / cursor / frame)\n"
+    "  (:use editor/display)\n" "  ;; the seq module's sequence helpers (enumerate)\n"
+    "  (:use seq))\n" "\n" "(def *welcome*\n" "  (list \"hello, world\"\n" "        \"\"\n"
     "        \"a tiny editor — grow it from here.\"))\n" "\n" "(defn ed-init ()\n"
     "  \"The starting model: the welcome buffer, cursor at the top-left.\"\n"
     "  {:lines *welcome* :row 0 :col 0 :done false :tick-ms 30000})\n" "\n"
@@ -273,8 +273,8 @@ test discovery, lints, release, config)."
     "    (= input :enter)     (ed-newline m)\n" "    (= input :backspace) (ed-backspace m)\n"
     "    (string? input)      (ed-insert m input)\n" "    else m))\n" "\n" "(defn main ()\n"
     "  \"Run the editor in the terminal (Ctrl-C quits). For a window, build with\n"
-    "--features gui and pass `(gui-display)` instead of `editor/ui/*term-display*`.\"\n"
-    "  (ui-run (ed-init) ed-view ed-update editor/ui/*term-display*))\n"))
+    "--features gui and pass `(gui-display)` instead of `editor/frontend/*term-display*`.\"\n"
+    "  (ui-run (ed-init) ed-view ed-update editor/frontend/*term-display*))\n"))
 
 (defn- project-editor-test-template (nm)
   (str ";; `(:use main)` brings the pure edit fns (ed-insert, …); `(:use test)` the macros.\n"
@@ -306,10 +306,11 @@ test discovery, lints, release, config)."
     "`--features brood/gui`). ↑/↓ change the counter, Enter resets, Ctrl-C or the\n"
     "window's close button quits. The model is a plain map; `ui-run` drives the loop\n"
     "— render `view`, poll a key, fold it with `update`, repeat — over a window from\n"
-    "`(gui-display)`. Swap that for `editor/ui/*term-display*` to run in the terminal instead.\"\n"
+    "`(gui-display)`. Swap that for `editor/frontend/*term-display*` to run in the terminal instead.\"\n"
     "  ;; the app framework: display frontends + the `ui-run` loop\n" "  (:use editor/ui)\n"
-    "  ;; the render-op constructors (clear / text / cursor / frame)\n" "  (:use editor/display)\n"
-    "  ;; named text faces — style the sections in one place\n" "  (:use editor/face))\n" "\n"
+    "  (:use editor/frontend)\n" "  ;; the render-op constructors (clear / text / cursor / frame)\n"
+    "  (:use editor/display)\n" "  ;; named text faces — style the sections in one place\n"
+    "  (:use editor/face))\n" "\n"
     ";; Faces: define the look once. Restyle by editing these (or, live, e.g.\n"
     ";; `(face-set :app/count {:fg :magenta})`). On the GUI a face may also carry a\n"
     ";; font `:family` / `:italic`; the terminal honours the colours + bold/reverse.\n"
@@ -339,7 +340,7 @@ test discovery, lints, release, config)."
     "    (or (= input :ctrl-c) (= input :escape)) (assoc m :done true)\n" "    else m))\n" "\n"
     "(defn main ()\n"
     "  \"Open the app in a native window. Needs a --features gui build (see the module\n"
-    "doc); for the terminal instead, pass `editor/ui/*term-display*` for `(gui-display)`.\"\n"
+    "doc); for the terminal instead, pass `editor/frontend/*term-display*` for `(gui-display)`.\"\n"
     "  (ui-run (app-init) app-view app-update (gui-display)))\n"))
 
 (defn- project-gui-test-template (nm)

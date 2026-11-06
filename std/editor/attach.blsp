@@ -11,7 +11,7 @@
 this same runtime. The daemon runs the app; the client paints what it pushes and ships back
 keys, until the app quits or the link drops. The session's clipboard and PRIMARY selection
 are this machine's (ADR-539, ADR-562)."
-  (:use editor/ui)
+  (:use editor/frontend)
   (:use editor/serve-protocol))
 
 (defn- attach-gen-name ()
@@ -73,7 +73,7 @@ and frames (its PRIMARY selection, ADR-562); every daemon since the identity att
   "Attach this terminal to a `ui-run` app served by the peer named in `spec`
 (\"name\" over a local Unix socket, or \"name@host:port\" over TCP) — the
 `emacsclient -nw` to a daemon's `serve`: `attach-display` over the terminal display
-(`editor/ui/*term-display*`), which delivers the terminal's keys to the client's mailbox as
+(`editor/frontend/*term-display*`), which delivers the terminal's keys to the client's mailbox as
 a window delivers its own, writes only the cells a frame changed, and puts what the session
 copies on this machine's clipboard — through the terminal (OSC 52) when no desktop is
 reachable (ADR-587). `cookie` defaults to `(node/cookie)`; `opts` is an optional identity
@@ -82,7 +82,7 @@ Connects *before* taking the terminal, so a refused / wrong-cookie / bad-spec er
 surfaces cleanly without wrecking the screen. The terminal is always restored on exit.
 
     (editor/attach/attach \"editor\")   ;~> returns, terminal restored, once the app quits or the link drops"
-  (attach-display spec editor/ui/*term-display* cookie opts))
+  (attach-display spec editor/frontend/*term-display* cookie opts))
 
 ;; ---- client side (any display: a window, the terminal) ----------------------
 ;; Window input arrives on the *same mailbox* the daemon pushes frames to (ADR-059), and
@@ -125,7 +125,7 @@ so the session learns of every change."
   "Whether the client's own `input` ends its attachment: the window's X button (`:close`),
 or the terminal's SIGTERM / SIGHUP (`[:hangup sig]`, ADR-586) — detached, so a private
 session parks rather than taking a hung-up client for a live one."
-  (or (= input :close) (editor/ui/hangup-request? input)))
+  (or (= input :close) (editor/frontend/hangup-request? input)))
 
 ;; the frame each client loop last painted, by client pid: what a terminal shows again after
 ;; it was resized or continued, before the session has a new frame to send (ADR-586)
@@ -191,7 +191,7 @@ backlog (`attach-display-backlog`), which paints only the newest."
     ;; (ADR-586): C-z / SIGTSTP suspends this client, SIGCONT repaints it — each a resize
     ;; the session re-lays out for — and SIGHUP / SIGTERM detach it, so a private session
     ;; parks rather than shipping `[:signal :hup]` to the session as a key
-    ([:signal sig] (let (input (editor/ui/term-signal [:signal sig]))
+    ([:signal sig] (let (input (editor/frontend/term-signal [:signal sig]))
                      (if (nil? input)
                        (attach-display-loop peer session display)
                        (attach-ship-input peer session display input))))
@@ -363,7 +363,7 @@ seam messages that came `after` it. Returns nil."
 
 (defn attach-display (spec display &optional cookie opts)
   "Attach `display` — any `ui-run` frontend map, e.g. `(gui-display)` (a native window)
-or `editor/ui/*term-display*` (the terminal, which is what `attach` passes) — to a `ui-run`
+or `editor/frontend/*term-display*` (the terminal, which is what `attach` passes) — to a `ui-run`
 app served by `spec` (\"name\", or \"name@host:port\"): the daemon runs the app, this client paints the
 frames it pushes to `display` and ships back its input, until the app quits or the link
 drops. Because window input and daemon frames share this process's mailbox, one receive
@@ -379,7 +379,7 @@ them, else the OS clipboard. Its PRIMARY selection likewise (ADR-562): `client-p
 `client-primary-ask`, through `:primary-set` / `:primary-get`, else `os/primary-set` /
 `os/primary-get`.
 
-    (editor/attach/attach-display \"editor@host:4000\" (editor/ui/gui-display))   ;~> returns when the app quits or the link drops"
+    (editor/attach/attach-display \"editor@host:4000\" (editor/frontend/gui-display))   ;~> returns when the app quits or the link drops"
   (node/start (attach-gen-name) "127.0.0.1:0" (or cookie (node/cookie)))
   (let (peer (node/connect spec))
     (node/monitor peer)
@@ -406,7 +406,7 @@ the one shared model — its own view of the collaborative doc. `opts` is the op
 map (see `attach`) — the host is a participant too. The display is always torn down (`:leave`)
 on exit.
 
-    (editor/attach/attach-display-local (editor/ui/gui-display) {:name \"host\"})   ;~> blocks until the window closes or the app quits"
+    (editor/attach/attach-display-local (editor/frontend/gui-display) {:name \"host\"})   ;~> blocks until the window closes or the app quits"
   ((get display :enter))
   (try
     (let ([cols rows] ((get display :size))

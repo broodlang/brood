@@ -1,6 +1,6 @@
 ;; tests/term_display_test.blsp — the terminal display, end to end (ADR-586, ADR-587).
 ;;
-;; A real `ui-run` over `editor/ui/*term-display*` under a pseudo-terminal, read back through
+;; A real `ui-run` over `editor/frontend/*term-display*` under a pseudo-terminal, read back through
 ;; `std/vt` — the terminal emulator — so what is asserted is what a terminal SHOWS: the frame
 ;; drawn, the cursor where the frame put it, a keystroke's update costing the cells it changed
 ;; and not the screen, a bracketed paste arriving whole as `[:paste text]`, a resize as
@@ -39,7 +39,7 @@
     "      (and (vector? input) (= (first input) :resize))\n"
     "        (assoc m :event (str \"resize \" (nth input 1) \"x\" (nth input 2)))\n"
     "      else m))\n"
-    "  editor/ui/*term-display*)\n"))
+    "  editor/frontend/*term-display*)\n"))
 
 (defn- screen-text (vt)
   (string/join (vt/lines vt) "\n"))
@@ -250,12 +250,12 @@ child exited."
       (str "\e]52;c;" (encoding/base64-encode "héllo") "\x07"))
     (is (string/starts-with? (editor/ansi/ansi-clipboard "x" :primary) "\e]52;p;")))
   (test "the terminal display carries clipboard setters, so an attached session's kills land"
-    (is (fn? (:clipboard-set editor/ui/*term-display*)))
-    (is (fn? (:primary-set editor/ui/*term-display*))))
+    (is (fn? (:clipboard-set editor/frontend/*term-display*)))
+    (is (fn? (:primary-set editor/frontend/*term-display*))))
   (test "OSC 52 carries at most 100000 bytes, as Emacs's xterm-max-cut-length"
-    (is (editor/ui/osc52-fits? (string/repeat "x" 100000)))
-    (is (not (editor/ui/osc52-fits? (string/repeat "x" 100001))))
+    (is (editor/frontend/osc52-fits? (string/repeat "x" 100000)))
+    (is (not (editor/frontend/osc52-fits? (string/repeat "x" 100001))))
     ;; counted in bytes, not characters
-    (is (not (editor/ui/osc52-fits? (string/repeat "é" 50001)))))
+    (is (not (editor/frontend/osc52-fits? (string/repeat "é" 50001)))))
   (test "display-available? answers a boolean"
-    (is (bool? (editor/ui/display-available?)))))
+    (is (bool? (editor/frontend/display-available?)))))

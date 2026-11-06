@@ -887,8 +887,8 @@ code paints to a terminal or a GUI window unchanged.
 - **Frame** = a vector of render ops, built with `editor/display` constructors:
   `(frame (clear) (text row col s face?) (cursor row col))`. A *face* is a style
   map, `{:fg :red :bold true}` (`(:use editor/display)` for the constructors).
-- **Frontend** = a map of five fns `{:enter :leave :size :draw :poll}`. `(:use editor/ui)`
-  gives you `editor/ui/*term-display*` (the terminal) and `(gui-display)` (a native window,
+- **Frontend** = a map of five fns `{:enter :leave :size :draw :poll}`. `(:use editor/frontend)`
+  gives you `editor/frontend/*term-display*` (the terminal) and `(gui-display)` (a native window,
   needs a `--features gui` build); `display-broadcast` fans one frame to several.
 - **The loop** = `(ui-run model view update display)` — a TEA loop: render
   `(view model cols rows)` → poll input → fold it with `(update model input cols
@@ -948,7 +948,7 @@ code paints to a terminal or a GUI window unchanged.
   mouse messages carry pixels. The engine above them is the `b2d` package (ADR-374).
 
 ```lisp
-(defmodule main "a counter app" (:use editor/ui) (:use editor/display))
+(defmodule main "a counter app" (:use editor/ui) (:use editor/frontend) (:use editor/display))
 
 (defn view (m cols rows)
   (frame (clear) (text 0 0 (str "count: " (get m :count)))))
@@ -959,7 +959,7 @@ code paints to a terminal or a GUI window unchanged.
         (= input :ctrl-c) (assoc m :done true)   ; Esc/Ctrl-C → quit
         else m))
 
-(defn main () (ui-run {:count 0 :done false :tick-ms 1000} view update editor/ui/*term-display*))
+(defn main () (ui-run {:count 0 :done false :tick-ms 1000} view update editor/frontend/*term-display*))
 ;; for a window instead: (ui-run … (gui-display))   ; --features gui
 ```
 
@@ -977,7 +977,7 @@ a resize is `[:resize cols rows]`. **A GUI window's close button (the X) is its 
 can still be closed by the X. **`ui-run` quits on `:close` automatically**, so every
 `ui-run` app is closeable for free; you never wire it into `update`. In a hand-rolled
 `(receive)` loop (not on `ui-run`), match it yourself — `(:close :quit)` — or use the
-`editor/ui/quit-request?` predicate. (`nest new --template gui` / `--template editor`
+`editor/frontend/quit-request?` predicate. (`nest new --template gui` / `--template editor`
 scaffold complete `ui-run` apps; `--template tui-loop` a plain stdout animation.)
 
 ## Hot reload (`nest run --watch FILE`)
