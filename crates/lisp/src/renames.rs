@@ -353,6 +353,78 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "editor/frontend/*term-display*",
         "ADR-630",
     ),
+    // ...and the text commands only bedit calls left for it (ADR-417), to its `bufferops`.
+    (
+        "editor/buffer/rectangle-bounds",
+        "bufferops/rectangle-bounds",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/extract-rectangle",
+        "bufferops/extract-rectangle",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/delete-rectangle",
+        "bufferops/delete-rectangle",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/clear-rectangle",
+        "bufferops/clear-rectangle",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/open-rectangle",
+        "bufferops/open-rectangle",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/string-rectangle",
+        "bufferops/string-rectangle",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/insert-rectangle",
+        "bufferops/insert-rectangle",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/whitespace-run-at",
+        "bufferops/whitespace-run-at",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/collapse-whitespace",
+        "bufferops/collapse-whitespace",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/fixup-whitespace",
+        "bufferops/fixup-whitespace",
+        "ADR-630",
+    ),
+    ("editor/buffer/join-line", "bufferops/join-line", "ADR-630"),
+    (
+        "editor/buffer/forward-paragraph",
+        "bufferops/forward-paragraph",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/backward-paragraph",
+        "bufferops/backward-paragraph",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/forward-sentence",
+        "bufferops/forward-sentence",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/backward-sentence",
+        "bufferops/backward-sentence",
+        "ADR-630",
+    ),
     ("*stale-temp-age-ms*", "test/*stale-temp-age-ms*", "ADR-506"),
     (
         "*resolver-time-budget-ms*",

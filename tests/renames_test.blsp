@@ -13,6 +13,9 @@
   (let (slash (string/last-index-of qualified "/"))
     (if (< slash 0) nil (string/substring qualified 0 slash))))
 
+;; A name that left for an application (ADR-417) has a ledger entry and no binding here.
+(def- *modules-outside-brood* #{"bufferops"})
+
 (describe "rename ledger"
   (test "the runtime unbound error names where a renamed name went"
     ;; The bedit shape: the old name in a guard. `error-message` sees the MESSAGE only,
@@ -52,9 +55,11 @@
                   (fn (kv)
                     (let (old (first kv)
                           new (first (string/split (get (second kv) :to) " "))
-                          modname (module-of new))
-                      (when modname (require-one (symbol modname)))
-                      (or (bound? (symbol old)) (not (bound? (symbol new))))))))
+                          modname (module-of new)
+                          left-brood? (contains? *modules-outside-brood* modname))
+                      (when (and modname (not left-brood?)) (require-one (symbol modname)))
+                      (or (bound? (symbol old))
+                        (and (not left-brood?) (not (bound? (symbol new)))))))))
       (is (> (count entries) 10))
       ;; Assert on the entries themselves, so a failure names the stale row.
       (assert= stale nil))))

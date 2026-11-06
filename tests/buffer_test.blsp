@@ -150,60 +150,6 @@
       ; skips '(', ends "foo"
       (assert= (buffer-point (forward-word b)) 4)
       (assert= (buffer-point (forward-word (forward-word b))) 9))))
-;; paragraphs {a,b} {c,d} {e}, blank-line separated.
-;;  offsets: a0 b2  blank4  c5 d7  blank9  e10  (len 11)
-(describe "buffer paragraph motion (M-{ / M-})"
-  ; from inside {c,d}
-  (test "forward-paragraph stops at the start of the next blank line"
-    (let (txt "a\nb\n\nc\nd\n\ne")
-      ; from line 0
-      (assert= (buffer-point (forward-paragraph (make-buffer txt))) 4)
-      (assert= (buffer-point (forward-paragraph (goto-char (make-buffer txt) 8))) 9)))
-  (test "forward-paragraph in the last paragraph lands at end of buffer"
-    (assert= (buffer-point (forward-paragraph (goto-char (make-buffer "a\nb\n\nc\nd\n\ne") 10))) 11))
-  ; from {c,d} start → {a,b}
-  (test "backward-paragraph goes to the current paragraph's start, then the previous"
-    (let (txt "a\nb\n\nc\nd\n\ne")
-      ; from inside {c,d}
-      (assert= (buffer-point (backward-paragraph (goto-char (make-buffer txt) 8))) 5)
-      (assert= (buffer-point (backward-paragraph (goto-char (make-buffer txt) 5))) 0)))
-  (test "backward-paragraph at buffer start stays at 0"
-    (assert= (buffer-point (backward-paragraph (make-buffer "a\nb\n\nc"))) 0)))
-
-(describe "buffer sentence motion (M-a / M-e)"
-  ;; "One. Two? Three!" — terminators at 3, 8, 15; sentence starts at 0, 5, 10.
-  (def sentences "One. Two? Three!")
-  (defn fwd-sentence-at (point)
-    (buffer-point (forward-sentence (goto-char (make-buffer sentences) point))))
-  (defn bwd-sentence-at (point)
-    (buffer-point (backward-sentence (goto-char (make-buffer sentences) point))))
-  (test "forward-sentence lands just past each terminator, then at the buffer's end"
-    (assert= (fwd-sentence-at 0) 4)
-    (assert= (fwd-sentence-at 4) 9)
-    ; no further terminator → paragraph end
-    (assert= (fwd-sentence-at 9) 16)
-    (assert= (fwd-sentence-at 16) 16))
-  (test "backward-sentence goes to the current sentence's start, then the previous one's"
-    ; start of "Three!"
-    (assert= (bwd-sentence-at 16) 10)
-    ; at a start → the previous start
-    (assert= (bwd-sentence-at 12) 10)
-    (assert= (bwd-sentence-at 10) 5)
-    (assert= (bwd-sentence-at 5) 0)
-    (assert= (bwd-sentence-at 0) 0))
-  (test "a closing quote after the terminator is part of the sentence end"
-    ;; `He said "stop." Then left.` — the `.` is at 13, its closing `"` at 14
-    (let (txt "He said \"stop.\" Then left.")
-      (assert= (buffer-point (forward-sentence (make-buffer txt))) 15)))
-  (test "sentence motion is bounded by the paragraph — it never crosses a blank line"
-    ;; "One. Two.\n\nThree." — the blank line starts at 10
-    (let (txt "One. Two.\n\nThree.")
-      (assert= (buffer-point (forward-sentence (goto-char (make-buffer txt) 5))) 9)
-      ; stops at the paragraph boundary, not in "Three."
-      (assert= (buffer-point (forward-sentence (goto-char (make-buffer txt) 9))) 10)
-      ; floors at its own paragraph's start
-      (assert= (buffer-point (backward-sentence (goto-char (make-buffer txt) 14))) 11))))
-
 (describe "back-to-indentation (M-m)"
   (test "point lands on the line's first non-whitespace character"
     (let (b (make-buffer "  hi\nthere"))
@@ -1373,62 +1319,6 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
           b1 (insert (goto-char b0 4) big))
       (assert= (buffer-text (undo-in-region (uir-sel b1 0 (buffer-length b1)))) "seed"))))
 
-(describe "join-line / fixup-whitespace (Emacs M-^ / M-SPC)"
-  (defn at (text n) (goto-char (make-buffer text) n))
-  (defn joined (text n) (buffer-text (join-line (at text n))))
-
-  (test "it pulls THIS line up onto the previous one, not the next one down"
-    ;; the direction is the whole point: Vim's J joins downward, Emacs M-^ joins upward
-    (assert= (joined "foo\n    bar\nbaz" 8) "foo bar\nbaz"))
-
-  (test "the joined line's indentation collapses to a single space"
-    (assert= (joined "one\n\t\t  two" 9) "one two")
-    (assert= (joined "one\ntwo" 4) "one two"))
-
-  (test "no space is inserted before a closing delimiter"
-    ;; (foo bar\n) must not become "(foo bar )"
-    (assert= (joined "(foo bar\n)" 9) "(foo bar)")
-    (assert= (joined "(foo\n  )" 5) "(foo)"))
-
-  (test "…nor after an opening one"
-    (assert= (joined "(\n  foo bar)" 2) "(foo bar)"))
-
-  (test "point ends at the join, ahead of the space"
-    (let (b (join-line (at "foo\n    bar" 8)))
-      (assert= (buffer-point b) 3) ; right after "foo"
-      (assert= (buffer-char-after b) " ")))
-
-  (test "on the first line there is nothing above, so the buffer is untouched"
-    (let (b (at "foo\nbar" 1))
-      (assert= (buffer-text (join-line b)) "foo\nbar")
-      (assert= (buffer-point (join-line b)) 1)))
-
-  (test "joining an empty line just removes it"
-    (assert= (joined "foo\n\nbar" 4) "foo\nbar"))
-
-  (test "repeated joins walk a wrapped paragraph together"
-    (let (once (join-line (at "a\n  b\n  c" 6))
-          twice (join-line (goto-char once (buffer-length once))))
-      (assert= (buffer-text once) "a\n  b c")
-      (assert= (buffer-text twice) "a b c")))
-
-  (test "collapse-whitespace is just-one-space and delete-horizontal-space"
-    (assert= (buffer-text (collapse-whitespace (at "a   \t  b" 4) " ")) "a b")
-    (assert= (buffer-text (collapse-whitespace (at "a   \t  b" 4) "")) "ab"))
-
-  (test "collapse-whitespace never eats across a newline"
-    ;; it squeezes the gap point stands in; line structure is not its business
-    (assert= (buffer-text (collapse-whitespace (at "a  \n  b" 2) "")) "a\n  b"))
-
-  (test "whitespace-run-at is the span collapse replaces — the gap point stands in"
-    ;; the span is public because reading the ORIGINAL text out of it is what a cycling
-    ;; command (Emacs 29's cycle-spacing: one space → none → what was there) needs
-    (assert= (whitespace-run-at (at "a   \t  b" 4)) [1 7])
-    (assert= (whitespace-run-at (at "a b" 1)) [1 2]) ; beside a single space
-    (assert= (whitespace-run-at (at "ab" 1)) [1 1])) ; no whitespace: empty span
-  (test "whitespace-run-at stops at a newline, in both directions"
-    (assert= (whitespace-run-at (at "a  \n  b" 2)) [1 3]) ; before the newline
-    (assert= (whitespace-run-at (at "a  \n  b" 4)) [4 6]))) ; after it
 (describe "buffer: the electric pair ops"
   (test "insert-pair types both delimiters and leaves point between them"
     (let (b (insert-pair (goto-char (make-buffer "ab") 1) "(" ")"))
@@ -1443,68 +1333,6 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
       (assert= b (delete-empty-pair b "(" ")")))
     (let (b (goto-char (make-buffer "a[]b") 2))
       (assert= b (delete-empty-pair b "(" ")")))))
-
-;; ---- rectangles (Emacs C-x r r/k/d/o/c/t/y) --------------------------------------
-
-(describe "rectangles"
-  (defn rect (text point mark)
-    ;; a buffer with point and mark set to make a rectangle
-    (assoc (goto-char (make-buffer text) point) :mark mark))
-  (defn lines-of (b) (string/split (buffer-text b) "\n"))
-  ;; "abcde\nfghij\nklmno": a 3x5 grid; point line0 col1 (=1), mark line2 col3 (=15) → cols [1,3)
-  (def grid "abcde\nfghij\nklmno")
-
-  (test "rectangle-bounds are the line/column corners, ordered"
-    (assert= (rectangle-bounds (rect grid 1 15)) [0 2 1 3])
-    ;; point and mark swapped give the same rectangle
-    (assert= (rectangle-bounds (rect grid 15 1)) [0 2 1 3])
-    (is (nil? (rectangle-bounds (make-buffer grid))))) ; no mark
-  (test "extract-rectangle is the block, each row padded to width"
-    (assert= (extract-rectangle (rect grid 1 15)) (list "bc" "gh" "lm"))
-    (assert= (extract-rectangle (make-buffer grid)) '()))
-
-  (test "delete-rectangle closes the gap; point lands top-left"
-    (let (b (delete-rectangle (rect grid 1 15)))
-      (assert= (lines-of b) (list "ade" "fij" "kno"))
-      (assert= (buffer-point b) 1)))
-
-  (test "clear-rectangle blanks in place, keeping following columns"
-    (assert= (lines-of (clear-rectangle (rect grid 1 15))) (list "a  de" "f  ij" "k  no")))
-
-  (test "open-rectangle shifts the block right by its width"
-    (assert= (lines-of (open-rectangle (rect grid 1 15))) (list "a  bcde" "f  ghij" "k  lmno")))
-
-  (test "string-rectangle replaces each row's block with the same string"
-    (assert= (lines-of (string-rectangle (rect grid 1 15) "XX")) (list "aXXde" "fXXij" "kXXno")))
-
-  (test "insert-rectangle rebuilds a block at point — a kill/yank round-trip"
-    (let (rows (extract-rectangle (rect grid 1 15))
-          gone (delete-rectangle (rect grid 1 15))
-          back (insert-rectangle (goto-char gone 0) rows))
-      (assert= (lines-of back) (list "bcade" "ghfij" "lmkno"))
-      ;; …and point returns to where the yank began
-      (assert= (buffer-point back) 0)))
-
-  (test "short lines: extract pads, delete takes what is there, string/open pad to the left column"
-    ;; "long line"(9) / "x"(1) / "another"(7); point line0 col3 (=3), mark line2 col5 (=17) → cols [3,5)
-    (let (short "long line\nx\nanother")
-      (assert= (extract-rectangle (rect short 3 17)) (list "g " "  " "th"))
-      (assert= (lines-of (delete-rectangle (rect short 3 17))) (list "lonline" "x" "anoer"))
-      (assert= (lines-of (string-rectangle (rect short 3 17) "ZZ"))
-        (list "lonZZline" "x  ZZ" "anoZZer"))
-      (assert= (lines-of (open-rectangle (rect short 3 17)))
-        (list "lon  g line" "x    " "ano  ther"))))
-
-  (test "insert-rectangle past the end grows the buffer, padding to the column"
-    (let (b (goto-char (make-buffer "ab") 2))
-      ; point at end, col 2
-      (assert= (string/split (buffer-text (insert-rectangle b (list "X" "Y"))) "\n")
-        (list "abX" "  Y"))))
-
-  (test "a rectangle op is a no-op without a mark, and honours read-only"
-    (assert= (delete-rectangle (make-buffer grid)) (make-buffer grid))
-    (let (e (try (do (delete-rectangle (set-read-only (rect grid 1 15) true)) nil) (catch e e)))
-      (assert= (:kind e) :read-only))))
 
 ;; A case-insensitive search must report offsets into the REAL text — folding is
 ;; length-preserving (`string/fold-case`), so it does.
