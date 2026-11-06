@@ -369,6 +369,37 @@ mod tests {
     use crate::{Document, Documents};
 
     #[test]
+    fn references_reach_a_project_file_no_editor_has_open() {
+        // Only a.blsp is open, so b.blsp's call can come from nowhere but the project's
+        // file list (KI-371: that list was silently empty, and every open-buffer test
+        // still passed).
+        let dir = std::env::temp_dir().join(format!("brood_ns_refs_{}", std::process::id()));
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(dir.join("project.blsp"), "(project :name foo)\n").unwrap();
+        let a_path = src.join("a.blsp");
+        std::fs::write(&a_path, "(defmodule a)\n(defn greet (x) x)\n").unwrap();
+        std::fs::write(src.join("b.blsp"), "(defmodule b (:use a))\n(greet 1)\n").unwrap();
+
+        let mut interp = Interp::new();
+        introspect::load_tooling_image(&mut interp, &dir.display().to_string()).ok();
+
+        let a_src = std::fs::read_to_string(&a_path).unwrap();
+        let uri_a = crate::path_to_uri(&a_path.display().to_string()).unwrap();
+        let uri_b = crate::path_to_uri(&src.join("b.blsp").display().to_string()).unwrap();
+        let mut docs = Documents::new();
+        docs.insert(uri_a.clone(), Document::new(a_src, 1));
+
+        let found = references(&mut interp, &docs, &uri_a, "greet");
+        assert!(
+            found.iter().any(|l| l.uri == uri_b),
+            "the call in unopened b.blsp must be found; got {found:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn rename_is_namespace_sound_across_files() {
         // Two namespaces each define `observe`. Renaming `a`'s must touch only
         // a.blsp — never `b`'s unrelated `observe` (the §6 "rename is sound" promise).

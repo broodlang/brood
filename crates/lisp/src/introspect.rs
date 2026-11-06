@@ -373,18 +373,19 @@ pub fn source_location(interp: &mut Interp, name: &str) -> Option<SourceLoc> {
 }
 
 /// Every `.blsp` file the bootstrapped project owns — its sources plus its
-/// tests — by asking the Brood side `(project/project-all-files project/*root*)` (the
-/// same set `check` walks). Empty when no project has been set up (e.g.
-/// a bare buffer outside a project, where `project/*root*` is unbound). Feeds
-/// the cross-file reference / rename sweep (ADR-031 §Cross-file): under the flat
-/// module model these files are the whole search space for a global.
+/// tests — by asking the Brood side `(project-check/all-files project/*root*)` (the
+/// same set `check` walks). Empty when no project has been set up (e.g. a bare
+/// buffer outside a project, where `project/*root*` is nil). Feeds the cross-file
+/// reference / rename sweep (ADR-031 §Cross-file): under the flat module model these
+/// files are the whole search space for a global. A failed ask says so: an empty
+/// list here reads as "no project", so a swallowed error hid KI-371.
 pub fn project_files(interp: &mut Interp) -> Vec<String> {
-    eval_owned_list(
-        interp,
-        "(project/project-all-files project/*root*)",
-        string_contents,
-    )
-    .unwrap_or_default()
+    let expr = "(require-one 'project) \
+                (if project/*root* (project-check/all-files project/*root*) nil)";
+    eval_owned_list(interp, expr, string_contents).unwrap_or_else(|| {
+        eprintln!("brood: could not list the project's files: {expr}");
+        Vec::new()
+    })
 }
 
 /// The on-disk file a `require`able feature resolves to, found the same way

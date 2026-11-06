@@ -68,22 +68,6 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
-## KI-371 — `brood-lsp` cross-file references and rename silently see no project files 🔴 open 2026-11-06
-
-**Symptom.** Nothing visible: cross-file references, rename and `:implements` goto get an empty
-file list. Found by reading, during the 2026-11-06 docs audit; not run.
-
-**Cause.** `introspect::project_files` (`crates/lisp/src/introspect.rs:384`) evaluates
-`(project/project-all-files project/*root*)`. That name is gone; the function is
-`project-check/all-files` (`std/tool/project-check.blsp:28`). The call raises and
-`unwrap_or_default` turns the error into an empty list.
-
-**Why it survived.** The default reads as "no project set up", so nothing fails.
-
-**Fix.** Not done yet. Call the real name, and stop treating an unbound name as "no project".
-
-**Guard.** None yet: it needs a test through the LSP entry point, sabotage-verified.
-
 ## KI-370 — `nest check` reported a warning on `examples/life_bands.blsp` once, then never again
 
 **Seen** 2026-11-05, once: a full `nest check std/ tests/ examples/` printed
@@ -111,7 +95,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 | # | What | Status |
 |---|---|---|
 | KI-370 | **`nest check` reported `send: … got nil \| pid` on `examples/life_bands.blsp` once** — a non-strict warning on an overlapping type, in a file that changed nothing, right after a rebuild | ⚠️ **watching 2026-11-05** — 0 of 12 re-runs across three boot paths; diagnostic named in the section |
-| KI-371 | **`brood-lsp` cross-file references and rename silently see no project files** — `introspect::project_files` evaluates a name that no longer exists and defaults the error to empty | 🔴 **OPEN 2026-11-06** — found by reading; not reproduced by a run |
+| KI-371 | **`brood-lsp` cross-file references and rename silently see no project files** — `introspect::project_files` evaluates a name that no longer exists and defaults the error to empty | ✅ **FIXED 2026-11-06** — sabotage-verified: `references_reach_a_project_file_no_editor_has_open` red with the old name. Was: open, found reading the code |
 | KI-360 | **a terminal without the kitty keyboard protocol cannot send `C-;`, `C-.`, `C-'`** — xterm's `modifyOtherKeys` form has no parser in crossterm, so it is not asked for | ✅ **fixed** 2026-11-04 — Brood reads and decodes the tty's bytes itself (`decoder`), `modifyOtherKeys` 2 asked for where kitty is not spoken |
 | KI-369 | **Windows has no pseudo-terminal** — `os/spawn-pty` raises naming ConPTY, so terminal buffers and the line-mode REPL are Unix-only | ✅ **FIXED 2026-11-04** — ConPTY (ADR-597): a raw-handle child type in the subprocess registry, `CreatePseudoConsole` + `CreateProcessW` with an attribute list, the waiter closing the pseudoconsole after the exit; `os/pty-mode` nil there. Was: OPEN — needs ConPTY |
 | KI-365 | **`file/spit-private` is not private on Windows** — a plain create there, so the file takes its directory's ACL; bedit's auto-save sidecars are as private as the file beside them | ✅ **FIXED 2026-11-04** — a protected one-entry DACL (the current user) the file is CREATED with (`CreateFileW` with security attributes, shared with no one while open; a file already there made owner-only through its handle before it is emptied) — private from its first moment, 2026-11-05. Guard: `tests/platform_test.blsp` "owner-only files", the ACL read back with `icacls` on the Windows runner |

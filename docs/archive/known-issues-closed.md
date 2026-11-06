@@ -16064,3 +16064,25 @@ sweep removed (Diagnose 41933986722, "another copy of the latched function staye
 The case itself, primed with a suite run: 0 of 83 845 runs failed with the fix and the bail
 trace armed (run 41933986722), and 0 of 89 076 on the final commits with no trace, after four
 green full suites (run 41939859441) — against 86% without the fix.
+
+## KI-371 — `brood-lsp` cross-file references and rename silently see no project files ✅ fixed 2026-11-06
+
+**Symptom.** Nothing visible: cross-file references, rename and `:implements` goto saw an empty
+project file list, so they answered from open buffers alone. Found reading the code during the
+2026-11-06 docs audit, then confirmed by the guard below.
+
+**Cause.** `introspect::project_files` evaluated `(project/project-all-files project/*root*)`.
+The function had moved to `project-check/all-files`, so the call raised and `unwrap_or_default`
+turned the error into an empty list.
+
+**Why it survived.** An empty list also means "no project", so nothing failed. The LSP's
+cross-file tests open their files, or pass a list by hand (`behaviour_in_files`), and
+`rename_is_namespace_sound_across_files` asserts only that a file is NOT touched, which an empty
+list satisfies. A sweep of every Brood name embedded in Rust found no other dead one.
+
+**Fix.** The real name, with `project` required first so an unset root is `nil`, not an error;
+then a failed ask is a real failure and says so on stderr.
+
+**Guard.** `workspace::tests::references_reach_a_project_file_no_editor_has_open` (only `a.blsp`
+open, the call in `b.blsp`). Sabotage-verified: with the old name it failed with `brood: could
+not list the project's files`.

@@ -26,6 +26,8 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 **Fixed.**
 - A fold over a vector or a range stops on a failed accumulator; steps ran on after it before
   (ADR-315).
+- `brood-lsp`'s cross-file references, rename and `:implements` goto see the project's files
+  again; they had been answering from open buffers alone (KI-371).
 - A single clause's `:when` is a guard at runtime; it ran as body forms before.
 - `&optional` defaults in a macro template are no longer renamed as binders, and a default's
   module-private call resolves.

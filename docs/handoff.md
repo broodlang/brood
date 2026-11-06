@@ -23,10 +23,8 @@ to 2026-11-06 moved, unedited, to the end of
   `full.yml` (weekly, or `gh workflow run full.yml`; it replaced the Nightly on 2026-11-05)
   and **`full.yml` had no completed run yet on 2026-11-06**, so the design pass's last commits
   have had per-push CI only. Run it before the next release.
-- **Known issues:** **KI-371 is open and comes first**: `brood-lsp`'s cross-file references and
-  rename see no project files, because `introspect::project_files` calls a name that no longer
-  exists. One watch, **KI-370** (`nest check` warned once on `examples/life_bands.blsp`; the
-  diagnostic for the next sighting is in its entry).
+- **Known issues:** nothing open. One watch, **KI-370** (`nest check` warned once on
+  `examples/life_bands.blsp`; the diagnostic for the next sighting is in its entry).
 - **bedit** is pinned at `712e730` (`BEDIT_REF`), on brood 0.50.0. Smoke with a grammar-enabled
   `nest`, or its mode tests fail on "no grammar", which is not a regression.
 - **Before pushing:** `make prepush`, and `git merge --ff-only origin/main` first if it moved.
