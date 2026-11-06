@@ -1,0 +1,39 @@
+;; std/editor/serve-protocol.blsp — what a daemon and its thin client agree on.
+;;
+;; `editor/serve` runs the app and `editor/attach` paints it, in different runtimes and
+;; often on different machines, so neither can load the other just to share a constant.
+;; What both ends must say alike lives here: the name a daemon listens under and how a
+;; client says what it can do beyond keys and frames.
+
+(defmodule editor/serve-protocol
+  "What `editor/serve` (the daemon) and `editor/attach` (the thin client) share: the
+registered name a session manager listens under, and the `:can` list in a client's attach
+identity (ADR-562).
+
+    (editor/serve-protocol/identity-capabilities (editor/serve-protocol/client-identity {:name \"alice\"}))   ;=> [:primary]")
+
+(def serve-name
+  ;; The registered name a daemon's session-manager listens under, and an attaching client
+  ;; addresses. A constant so both ends agree; one served app per node (a per-app name is a
+  ;; deferred power feature).
+  :ui)
+
+;; What this runtime's clients say they can do: their machine's PRIMARY selection (ADR-562).
+(def- client-capabilities [:primary])
+
+(defn client-identity (opts)
+  "The identity map a client attaches with: `opts` (e.g. `{:name \"alice\"}`, or nil) with
+`:can` saying what this client can be asked beyond keys and frames. An older daemon's app
+reads the map's other keys and leaves this one.
+
+    (editor/serve-protocol/client-identity nil)   ;=> {:can [:primary]}"
+  (assoc (if (map? opts) opts {}) :can client-capabilities))
+
+(defn identity-capabilities (identity)
+  "What a client's `identity` says it can do beyond keys and frames (`:can`, ADR-562): `[]`
+for one that says nothing, as every client older than the saying.
+
+    (editor/serve-protocol/identity-capabilities {:can (list :primary)})   ;=> [:primary]
+    (editor/serve-protocol/identity-capabilities nil)   ;=> []"
+  (let (can (when (map? identity) (get identity :can)))
+    (if (or (vector? can) (list? can)) (vec can) [])))

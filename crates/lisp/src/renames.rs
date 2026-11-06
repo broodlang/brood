@@ -92,6 +92,22 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "editor/buffer-server/delete-buffer",
         "ADR-630",
     ),
+    ("editor/serve/attach", "editor/attach/attach", "ADR-630"),
+    (
+        "editor/serve/attach-display",
+        "editor/attach/attach-display",
+        "ADR-630",
+    ),
+    (
+        "editor/serve/attach-display-local",
+        "editor/attach/attach-display-local",
+        "ADR-630",
+    ),
+    (
+        "editor/serve/serve-name",
+        "editor/serve-protocol/serve-name",
+        "ADR-630",
+    ),
     // ADR-630 block end
     // ADR-506 — the bare namespace is the language: syntax, a measured core and the
     // built-in kinds. Everything else is qualified by its family.

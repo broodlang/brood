@@ -644,6 +644,8 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // model (ADR-090): the app runs on the daemon, a thin `attach` client paints
     // pushed frames + ships back keys. Pure Brood over `ui-run` + the node link.
     embedded_module!("editor/serve", "std/editor/serve.blsp"),
+    embedded_module!("editor/serve-protocol", "std/editor/serve-protocol.blsp"),
+    embedded_module!("editor/attach", "std/editor/attach.blsp"),
     embedded_module!("editor/web", "std/editor/web.blsp"),
     // Emacs-style tiled window splits: an immutable binary layout tree + pure
     // pane/divider geometry + drag-to-resize over `:drag` mouse events (ADR-077).

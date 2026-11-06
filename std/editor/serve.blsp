@@ -32,22 +32,16 @@
 (defmodule editor/serve
   "Serve a `ui-run` app to remote frontends — the Emacs `--daemon`/`emacsclient`
 model (ADR-090). The app's model/`view`/`update` run on the daemon; a thin client
-(`attach`, or `nest attach NAME`) paints pushed frames and ships back keys. `serve`
-registers the app under the well-known node name `serve-name` (`:ui`); each attaching
+(`editor/attach`, or `nest attach NAME`) paints pushed frames and ships back keys. `serve`
+registers the app under the well-known node name `serve-name` (`:ui`, `editor/serve-protocol`); each attaching
 client gets its own session process running `ui-run` against a `remote-display` —
 the frontend whose `:draw` sends the frame over the node link and whose `:poll`
-receives the client's input. The thin client is frontend-agnostic: `attach` paints to
-the terminal, `attach-display` to any `ui-run` display (e.g. `(gui-display)`, a native
-window) — same protocol, different frontend. Many clients may attach at once
+receives the client's input. Many clients may attach at once
 (independent sessions). Each session supervises its loop: one that dies is restarted for
 the same client from what it retained (`serve-retain`), after the app's crash hook
 (`:supervise`, ADR-593). Built purely on `ui-run` + the node-link primitives."
-  (:use editor/ui))
-
-;; The registered name a daemon's session-manager listens under, and an attaching
-;; client addresses. A constant so both ends agree; one served app per node (a
-;; per-app name is a deferred power feature).
-(def serve-name :ui)
+  (:use editor/ui)
+  (:use editor/serve-protocol))
 
 (defdyn editor/serve/*served-client* nil)
 ;; In a served session's process (`serve`), a 0-arg fn answering the client that session
@@ -59,9 +53,6 @@ the same client from what it retained (`serve-retain`), after the app's crash ho
 ;; manager note as `[:client-can client capabilities]`); `#{}` for a client that said nothing,
 ;; which is every client older than the saying.
 ;; for a client that said nothing, which is every client older than the saying.
-
-;; What this runtime's clients say they can do: their machine's PRIMARY selection (ADR-562).
-(def- attach-capabilities [:primary])
 
 (defdyn editor/serve/*served-session* nil)
 ;; In a served session's loop process (`serve`), the SESSION's pid — its supervisor, which
@@ -571,12 +562,6 @@ client cannot."
       (string? (:as grant)) (assoc claimed :name (:as grant) :guest true)
       else (assoc claimed :guest true))))
 
-(defn- serve-capabilities (identity)
-  "What a client's identity says it can do beyond keys and frames (`:can`, ADR-562) — `[]`
-for one that says nothing, as every client older than the saying."
-  (let (can (when (map? identity) (get identity :can)))
-    (if (or (vector? can) (list? can)) (vec can) [])))
-
 ;; ---- the session: a supervisor over its loop (ADR-593) ---------------------------
 ;; A session is TWO processes. The SESSION — the pid the manager knows, monitors and kills
 ;; — supervises; the LOOP, linked to it, runs the app's `ui-run` and is the pid the client
@@ -634,7 +619,7 @@ loop's death arrives as a message ([[serve-supervise]]) and a `:kill` of this pr
         {:client client
          :size [cols rows]
          :identity identity
-         :capabilities {client (serve-capabilities identity)}
+         :capabilities {client (identity-capabilities identity)}
          :resume (when resume (assoc resume :session (self)))
          :app app
          :retained nil
@@ -989,7 +974,7 @@ a session of its own."
         (do
           (send session [:claim (map/get-in live [:sessions session :token]) client cols rows])
           ;; and what the claimant can do, which the session takes once it is the claimant's
-          (send session [:client-can client (serve-capabilities identity)])
+          (send session [:client-can client (identity-capabilities identity)])
           (map/assoc-in live
             [:pending client]
             {:asking session :others (rest alive) :cols cols :rows rows :identity identity}))))))
@@ -1024,7 +1009,7 @@ session of its own."
       parked
         (do
           (send parked [:adopt (map/get-in live [:sessions parked :token]) client cols rows])
-          (send parked [:client-can client (serve-capabilities identity)])
+          (send parked [:client-can client (identity-capabilities identity)])
           (map/assoc-in live [:sessions parked :parked?] false))
       (not (empty? mine)) (serve-ask live app client cols rows identity mine)
       else (serve-spawn live app client cols rows identity))))
@@ -1115,424 +1100,6 @@ with it, as before supervision. A quit, or a parked session's expiry, is no deat
     (editor/serve/serve (fn () {:n 0}) view update)   ;~> #<pid …> of the session manager, registered as :ui
     (editor/serve/serve (fn () {:n 0}) view update {:resume-ms 3600000})   ;~> the same, a dropped client's session kept an hour"
   (proc/register serve-name (spawn (serve-manager make-model view update opts))))
-
-;; ---- client side (the thin frontend) -----------------------------------------
-
-(defn- attach-gen-name ()
-  "A unique transient node name for a client, so two clients on one box don't collide."
-  (keyword (str "attach-" (os/now))))
-
-(def- attach-selections
-  ;; Per selection a session can reach on its client's machine: the display's entries for
-  ;; it, the OS pair it falls back to, and the tag its answer carries (ADR-539, ADR-562)
-  {:clipboard {:set :clipboard-set :get :clipboard-get :answer :clipboard}
-   :primary {:set :primary-set :get :primary-get :answer :primary}})
-
-(defn- attach-os-set (selection text)
-  ;; the OS side of `selection` — a literal call each, so the checker sees both
-  (if (= selection :primary) (os/primary-set text) (os/clipboard-set text)))
-
-(defn- attach-os-get (selection)
-  (if (= selection :primary) (os/primary-get) (os/clipboard-get)))
-
-(defn- attach-clipboard-set (display text &optional (selection :clipboard))
-  "Put the session's `text` in THIS machine's `selection` — `:clipboard` (ADR-539) or
-`:primary` (ADR-562): through `display`'s `:clipboard-set` / `:primary-set` when it has one,
-else the OS's. A selection that fails costs the copy, never the client loop. Returns nil."
-  (let (setter (get display (:set (get attach-selections selection))))
-    (check-allow :discarded-catch
-      (try (if setter (setter text) (attach-os-set selection text)) (catch _ nil))))
-  nil)
-
-(defn- attach-clipboard-answer (display from asked &optional (selection :clipboard))
-  "Answer the session `from`'s ask for THIS machine's `selection` — `[:clipboard asked text]`
-or `[:primary asked text]`, `text` nil when it is empty or not text: `display`'s
-`:clipboard-get` / `:primary-get` when it has one, else the OS's. Read by a process of its
-own, which answers when the read is done: a selection's owner can be slow to hand its text
-over, and the client loop must go on painting and shipping keys meanwhile — the session never
-waits for the answer anyway (`client-clipboard-ask`). Always answers. Returns nil."
-  (let (row (get attach-selections selection)
-        getter (get display (:get row)))
-    (spawn (let (text (check-allow :discarded-catch
-                        (try (if getter (getter) (attach-os-get selection)) (catch _ nil))))
-             (send from [(:answer row) asked (if (string? text) text nil)]))))
-  nil)
-
-(defn- attach-handshake (peer cols rows &optional opts)
-  "Report our `cols`×`rows` (and, when given, our identity `opts` map — e.g.
-`{:name \"alice\"}`) and ask `peer`'s session manager to attach us; return the
-session pid it replies with, nil if the link drops first (`[:nodedown]`), or error on
-timeout. The connect handshake shared by the terminal (`attach`) and GUI
-(`attach-display`) clients — the only difference between them is the frontend, not the
-protocol. The identity always goes, carrying `:can` — what this client can be asked beyond keys
-and frames (its PRIMARY selection, ADR-562); every daemon since the identity attach reads it."
-  ;; the identity also says what this client can do beyond keys and frames (`:can`, ADR-562):
-  ;; a session asks it of a client that said so, and an older daemon's app reads the map's
-  ;; other keys and leaves this one
-  (send {:name serve-name :node peer}
-    [:attach (self) cols rows (assoc (if (map? opts) opts {}) :can attach-capabilities)])
-  (receive
-    ([:attached session] session)
-    ([:nodedown ^peer] nil)
-    (after 5000 (error "attach: no response from the server (is it serving?)"))))
-
-(defn attach (spec &optional cookie opts)
-  "Attach this terminal to a `ui-run` app served by the peer named in `spec`
-(\"name\" over a local Unix socket, or \"name@host:port\" over TCP) — the
-`emacsclient -nw` to a daemon's `serve`: `attach-display` over the terminal display
-(`editor/ui/*term-display*`), which delivers the terminal's keys to the client's mailbox as
-a window delivers its own, writes only the cells a frame changed, and puts what the session
-copies on this machine's clipboard — through the terminal (OSC 52) when no desktop is
-reachable (ADR-587). `cookie` defaults to `(node/cookie)`; `opts` is an optional identity
-map (e.g. `{:name \"alice\"}`) the daemon hands the session as a `[:client-opts …]` event.
-Connects *before* taking the terminal, so a refused / wrong-cookie / bad-spec error
-surfaces cleanly without wrecking the screen. The terminal is always restored on exit.
-
-    (editor/serve/attach \"editor\")   ;~> returns, terminal restored, once the app quits or the link drops"
-  (attach-display spec editor/ui/*term-display* cookie opts))
-
-;; ---- client side (any display: a window, the terminal) ----------------------
-;; Window input arrives on the *same mailbox* the daemon pushes frames to (ADR-059), and
-;; so does the terminal's, from its input forwarder (ADR-491) — so one unified `receive`
-;; loop serves both, and the client uses the display's `:draw`/`:size`/`:enter`/`:leave`,
-;; but NOT its `:poll` (input is read off the mailbox directly). This makes the thin client
-;; frontend-agnostic, the same way `ui-run` and the daemon-side `remote-display` already
-;; are (ADR-046). The terminal had a client of its own, drain-then-poll over `term/poll`,
-;; until the terminal display could do all a window does (ADR-587).
-
-(defn- attach-display-loop (peer session display)
-  "The any-display client loop: frames, control, and window input all land on THIS
-process's mailbox, so one `receive` serves them. A `[:frame f]` is painted to `display`;
-`[:bye]` (the app quit), `[:nodedown]` (link dropped), or `[:down …]` (the session died)
-ends the loop; `:close` (the window's X button) ships a `[:detach]` and ends; anything
-else is a key/mouse input shipped to the daemon `session` as `[:key input held?]`, `held?`
-whether a key is down in this window. Tail-recursive.
-
-The window's queued input is shipped BEFORE anything else is handled (ADR-490): a burst
-of frames from a daemon that renders faster than this client paints never holds a key
-back, and pointer motion goes coalesced (`display-poll-input`)."
-  (let (input (display-poll-input display))
-    (if (nil? input)
-      (attach-display-receive peer session display)
-      (attach-ship-input peer session display input))))
-
-(defn- attach-ship-input (peer session display input)
-  "Ship one window `input` to the daemon `session` and go on (`attach-display-loop`) — or,
-for `:close` (the window's X button), detach and end. With whether a key is down here,
-read after the window delivered `input`: a press, its key-up and a blur each change it,
-so the session learns of every change."
-  (if (attach-quit-input? input)
-    (send session [:detach])
-    (do
-      (attach-send-input session input (display-key-held? display))
-      (attach-repaint-if-due display)
-      (attach-display-loop peer session display))))
-
-(defn- attach-quit-input? (input)
-  "Whether the client's own `input` ends its attachment: the window's X button (`:close`),
-or the terminal's SIGTERM / SIGHUP (`[:hangup sig]`, ADR-586) — detached, so a private
-session parks rather than taking a hung-up client for a live one."
-  (or (= input :close) (editor/ui/hangup-request? input)))
-
-;; the frame each client loop last painted, by client pid: what a terminal shows again after
-;; it was resized or continued, before the session has a new frame to send (ADR-586)
-(def- attach-frames (table/new))
-
-(defn- attach-repaint-if-due (display)
-  "Paint the last frame again when `display` forgot what it shows (a terminal continued
-after C-z, or resized back to its size) — the session sends a frame only when its model
-changed. Returns nil."
-  (let (due (get display :repaint-due?)
-        frame (table/get attach-frames (self) nil))
-    (when (and (fn? due) (due) frame) ((get display :draw) frame)))
-  nil)
-
-(defn- attach-display-receive (peer session display)
-  "One message for the client loop when no window input was queued: a frame or control
-from the daemon, or the window's next input (`attach-display-loop`). A frame starts a
-backlog (`attach-display-backlog`), which paints only the newest."
-  (receive
-    ([:frame f] (attach-display-backlog peer session display f [] []))
-    ;; The pixel-space seam: applied to the local display when it has the entry (a
-    ;; window), dropped when it does not (a terminal cannot show a sprite anyway).
-    ((and m
-       (or [:texture _ _ _ _] [:texture-free _] [:window _] [:sound-data _ _ _ _] [:sound-free _])) (do
-                                                                                                           (attach-display-apply display
-                                                                                                             m)
-                                                                                                           (attach-display-loop peer
-                                                                                                             session
-                                                                                                             display)))
-    ;; the daemon's loop is busy, or no longer (ADR-491): the window's wait cursor
-    ([:busy on] (do (attach-display-busy display on) (attach-display-loop peer session display)))
-    ;; the session asking whether this window is still here (`remote-claim`, ADR-519) —
-    ;; before the catch-all below, which would ship it to the session as a key
-    ([:ping from asked] (do (send from [:pong asked]) (attach-display-loop peer session display)))
-    ;; the session's kill and yank reach this machine's clipboard (ADR-539) — before the
-    ;; catch-all too
-    ([:clipboard-set text] (do
-                             (attach-clipboard-set display text)
-                             (attach-display-loop peer session display)))
-    ([:clipboard-get from asked] (do
-                                   (attach-clipboard-answer display from asked)
-                                   (attach-display-loop peer session display)))
-    ;; and its highlight this machine's PRIMARY (ADR-562)
-    ([:primary-set text] (do
-                           (attach-clipboard-set display text :primary)
-                           (attach-display-loop peer session display)))
-    ([:primary-get from asked] (do
-                                 (attach-clipboard-answer display from asked :primary)
-                                 (attach-display-loop peer session display)))
-    ;; the session's loop died and was restarted (ADR-593): the input goes to the new one
-    ([:attached next] (attach-display-loop peer next display))
-    ;; …told in one message by a restarted loop: switch to it and send again every key it
-    ;; took none of, before any window input that follows
-    ([:reattached next supervisor taken] (do
-                                           (attach-note-session supervisor)
-                                           (attach-resend-after next taken)
-                                           (attach-display-loop peer next display)))
-    ;; the session itself, which outlives its loop: ITS end ends this client
-    ([:session supervisor] (do
-                             (attach-note-session supervisor)
-                             (attach-display-loop peer session display)))
-    ;; the terminal's own signals, acted on here as the local terminal display acts on them
-    ;; (ADR-586): C-z / SIGTSTP suspends this client, SIGCONT repaints it — each a resize
-    ;; the session re-lays out for — and SIGHUP / SIGTERM detach it, so a private session
-    ;; parks rather than shipping `[:signal :hup]` to the session as a key
-    ([:signal sig] (let (input (editor/ui/term-signal [:signal sig]))
-                     (if (nil? input)
-                       (attach-display-loop peer session display)
-                       (attach-ship-input peer session display input))))
-    ([:bye] nil)
-    ([:nodedown ^peer] nil)
-    ([:down _ who _] (when (attach-survives-down? who) (attach-display-loop peer session display)))
-    (m (attach-ship-input peer session display m))))
-
-;; the session each client loop is attached to, by client pid, once it said so (`[:session
-;; supervisor]`, ADR-593): only that pid's death ends the client, a loop's is a restart
-(def- attach-sessions (table/new))
-
-(defn- attach-note-session (supervisor)
-  "Monitor the session `supervisor` the calling client is attached to and remember it, so a
-death of its loop — restarted under it — no longer ends the client. Returns nil."
-  (when (nil? (table/get attach-sessions (self) nil))
-    (monitor supervisor)
-    (table/put attach-sessions (self) supervisor))
-  nil)
-
-(defn- attach-survives-down? (who)
-  "Whether the calling client goes on after `who` died: when it is attached to a session that
-said so ([[attach-note-session]]) and `who` is not that session — only its loop, which the
-session restarts. A client that was told no session ends on any death, as before."
-  (let (supervisor (table/get attach-sessions (self) nil))
-    (and (not (nil? supervisor)) (not (= who supervisor)))))
-
-(defn- attach-forget-session ()
-  "Forget the calling client's session ([[attach-note-session]]) and the input it kept
-([[attach-send-input]]), its loop over. Returns nil."
-  (table/put attach-sessions (self) nil)
-  (table/put attach-inputs (self) nil)
-  nil)
-
-;; The input each client loop shipped to a supervised session, by client pid: `{:seq n :log
-;; [[seq message] …]}`, the newest `attach-input-log-max` kept — what it sends again to a loop
-;; restarted after one died that never took them (ADR-593)
-(def- attach-inputs (table/new))
-
-;; How many shipped inputs a client keeps for a restart: far more than a restart's gap holds,
-;; and a bound on what a client that never sees one carries.
-(def- attach-input-log-max 256)
-
-(defn- attach-send-input (session input held?)
-  "Ship one window `input` to the loop `session`: `[:key input held?]` — and, when the client
-is attached to a supervised session ([[attach-note-session]]), numbered, `[:key input held?
-seq]`, and kept, so a loop that dies before taking it does not lose it
-([[attach-resend-after]]). Returns nil."
-  (if (nil? (table/get attach-sessions (self) nil))
-    (send session [:key input held?])
-    (let (kept (table/get attach-inputs (self) {:seq 0 :log []})
-          number (inc (:seq kept))
-          message [:key input held? number]
-          log (conj (:log kept) [number message]))
-      (do
-        (table/put attach-inputs
-          (self)
-          {:seq number
-           :log (if (> (count log) attach-input-log-max)
-                  (into [] (drop log (- (count log) attach-input-log-max)))
-                  log)})
-        (send session message))))
-  nil)
-
-(defn- attach-resend-after (session taken)
-  "Send the loop `session` — restarted after one died — every kept input numbered after
-`taken`, the last one the dead loop took (nil: none), in the order it was typed; the ones it
-took are forgotten. Returns nil."
-  (let (kept (table/get attach-inputs (self) {:seq 0 :log []})
-        after (into []
-                (seq/filter (:log kept) (fn (entry) (or (nil? taken) (> (first entry) taken))))))
-    (do
-      (doseq (entry after) (send session (second entry)))
-      (table/put attach-inputs (self) (assoc kept :log after))))
-  nil)
-
-(defn- attach-display-apply (display message)
-  "Apply one of the daemon's seam messages — a texture or its release, a sound or its
-release, window options — to `display` through its entry for it; a display without the
-entry (a terminal) drops it. Returns nil."
-  (match message
-    ([:texture tex rgba w h] (when (get display :texture) ((get display :texture) tex rgba w h)))
-    ([:texture-free tex] (when (get display :texture-free) ((get display :texture-free) tex)))
-    ([:window o] (when (get display :configure) ((get display :configure) o)))
-    ([:sound-data snd pcm rate channels] (when (get display :sound)
-                                           ((get display :sound) snd pcm rate channels)))
-    ([:sound-free snd] (when (get display :sound-free) ((get display :sound-free) snd))))
-  nil)
-
-(defn- attach-display-busy (display on)
-  "Show `display`'s busy cursor while the daemon's loop is busy (`on`), through its `:busy`
-  entry (a window); a display without one drops it. Returns nil."
-  (when (get display :busy) ((get display :busy) on))
-  nil)
-
-(defn- attach-display-apply-all (display messages)
-  "Apply every seam message in `messages` to `display`, in order."
-  (doseq (message messages) (attach-display-apply display message)))
-
-(defn- attach-display-backlog (peer session display latest carried after)
-  "Take the rest of the daemon's backlog without waiting and paint only its NEWEST frame
-(ADR-492): a frame is the whole window, so one painted only to be painted over costs a
-paint while the window's next input waits behind it.
-
-`latest` is the newest frame taken; `after` the seam messages (textures, sounds, window
-options) taken since it, in arrival order; `carried` the one-shot ops (`[:sound …]`,
-`[:burst …]`) of the frames skipped so far. A newer frame applies `after` — everything the
-daemon sent before it — and carries `latest`'s one-shots, unless a seam message came after
-one still to play: then `latest` is painted in its turn, since applying that message first
-(a `[:sound-free …]` of the sound the frame plays, a texture a burst uses) would play a
-freed sound. So the backlog leaves the window as painting every frame in order would: each
-seam message before the painted frame is applied before it, one after it (a texture freed
-once that frame was drawn) only after it is painted, and every skipped sound plays before
-anything sent after it. The daemon's `[:bye]` paints the
-backlog and ends; the link's or the session's end just ends, as in `attach-display-loop`.
-Window input is not taken here: `attach-display-paint` ships it before the paint."
-  (receive
-    ([:frame f]
-      (let (shots (into carried (editor/display/frame-one-shots latest)))
-        (if (or (empty? shots) (empty? after))
-          (do
-            (attach-display-apply-all display after)
-            (attach-display-backlog peer session display f shots []))
-          ;; a seam message follows a one-shot still to play (a sound, then its
-          ;; free): paint `latest` in its turn, so the sound plays first
-          (do
-            (attach-display-show display latest carried after)
-            (attach-display-backlog peer session display f [] [])))))
-    ((and m
-       (or [:texture _ _ _ _] [:texture-free _] [:window _] [:sound-data _ _ _ _] [:sound-free _])) (attach-display-backlog peer
-                                                                                                           session
-                                                                                                           display
-                                                                                                           latest
-                                                                                                           carried
-                                                                                                           (conj after
-                                                                                                             m)))
-    ([:busy on] (do
-                  (attach-display-busy display on)
-                  (attach-display-backlog peer session display latest carried after)))
-    ([:bye] (attach-display-show display latest carried after))
-    ([:nodedown ^peer] nil)
-    ([:down _ who _] (when (attach-survives-down? who)
-                       (attach-display-backlog peer session display latest carried after)))
-    (after 0 (attach-display-paint peer session display latest carried after))))
-
-(defn- attach-display-paint (peer session display latest carried after)
-  "Ship the window's queued input to `session` FIRST (ADR-490), then paint the backlog
-(`attach-display-show`) and go on (`attach-display-loop`) — or, when the input is the
-window's `:close`, detach and end without painting."
-  (let (input (display-poll-input display))
-    (cond
-      (nil? input)
-        (do
-          (attach-display-show display latest carried after)
-          (attach-display-loop peer session display))
-      (attach-quit-input? input) (send session [:detach])
-      else
-        (do
-          (attach-send-input session input (display-key-held? display))
-          (attach-display-paint peer session display latest carried after)))))
-
-(defn- attach-display-show (display latest carried after)
-  "Paint `latest` with the skipped frames' one-shot ops `carried` appended, then apply the
-seam messages that came `after` it. Returns nil."
-  ((get display :draw) (if (empty? carried) latest (into latest carried)))
-  (table/put attach-frames (self) latest)
-  (attach-display-apply-all display after)
-  nil)
-
-(defn attach-display (spec display &optional cookie opts)
-  "Attach `display` — any `ui-run` frontend map, e.g. `(gui-display)` (a native window)
-or `editor/ui/*term-display*` (the terminal, which is what `attach` passes) — to a `ui-run`
-app served by `spec` (\"name\", or \"name@host:port\"): the daemon runs the app, this client paints the
-frames it pushes to `display` and ships back its input, until the app quits or the link
-drops. Because window input and daemon frames share this process's mailbox, one receive
-loop (`attach-display-loop`) serves both. Connects *before* entering the display, so a
-refused / wrong-cookie / bad-spec error surfaces without stranding a window; the display
-is always torn down (`:leave`) on exit. `cookie` defaults to `(node/cookie)`; `opts` is
-the optional identity map (see `attach`).
-
-The session's clipboard is this machine's (ADR-539): what it sets (`client-clipboard-set`)
-lands here and what it asks for (`client-clipboard-ask`) is read here — through `display`'s
-`:clipboard-set` (a 1-arg fn) and `:clipboard-get` (0-arg, the text or nil) when it has
-them, else the OS clipboard. Its PRIMARY selection likewise (ADR-562): `client-primary-set` /
-`client-primary-ask`, through `:primary-set` / `:primary-get`, else `os/primary-set` /
-`os/primary-get`.
-
-    (editor/serve/attach-display \"editor@host:4000\" (editor/ui/gui-display))   ;~> returns when the app quits or the link drops"
-  (node/start (attach-gen-name) "127.0.0.1:0" (or cookie (node/cookie)))
-  (let (peer (node/connect spec))
-    (node/monitor peer)
-    ((get display :enter))
-    (try
-      (let ([cols rows] ((get display :size))
-            session (attach-handshake peer cols rows opts))
-        (when session (monitor session) (attach-display-loop peer session display))
-        (table/put attach-frames (self) nil)
-        (attach-forget-session)
-        ((get display :leave)))
-      (catch e ((get display :leave)) (throw e)))))
-
-(defn attach-display-local (display &optional opts)
-  "Attach `display` (e.g. `(gui-display)`, a native window) to a serve session running in THIS
-SAME runtime — the daemon operator's *own* window, so a host can watch and drive the app it
-serves instead of running blind and headless. No node link is needed (the session manager and
-session pids are in-process): handshake directly with the local manager registered under
-`serve-name`, then run the same unified frame/input loop (`attach-display-loop`, with a nil
-peer — there is no node to go down) until the window closes (`:close`) or the app quits
-(`[:bye]`). Blocks. Precondition: `(serve …)` or `(serve-shared …)` already ran in this runtime.
-Composes with both: under `serve` the host gets its own session; under `serve-shared` it joins
-the one shared model — its own view of the collaborative doc. `opts` is the optional identity
-map (see `attach`) — the host is a participant too. The display is always torn down (`:leave`)
-on exit.
-
-    (editor/serve/attach-display-local (editor/ui/gui-display) {:name \"host\"})   ;~> blocks until the window closes or the app quits"
-  ((get display :enter))
-  (try
-    (let ([cols rows] ((get display :size))
-          manager (proc/whereis serve-name))
-      ;; The documented precondition, said out loud: without it the send below had no
-      ;; addressee, and the failure read as a type error in `send`.
-      (if (nil? manager)
-        (error "attach-display-local: no serve session in this runtime — run `(serve …)` first")
-        (if (and (map? opts) (not (empty? opts)))
-          (send manager [:attach (self) cols rows opts])
-          (send manager [:attach (self) cols rows])))
-      (let (session (receive
-                      ([:attached s] s)
-                      (after 5000
-                        (error "attach-display-local: the local serve manager did not answer"))))
-        (when session (monitor session) (attach-display-loop nil session display))
-        (attach-forget-session))
-      ((get display :leave)))
-    (catch e ((get display :leave)) (throw e))))
 
 ;; ---- shared session (many frontends, ONE model — collaborative) --------------
 ;; `serve` gives each client its OWN model (independent sessions). `serve-shared` runs a

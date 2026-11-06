@@ -1098,12 +1098,12 @@ so a matching local setup needs no flag."
       ;; attaches to tells it what kind of window it wants (`[:window …]`, ADR-374).
       (get (get options :flags) "--gui")
         (do
-          (editor/serve/attach-display spec
+          (editor/attach/attach-display spec
             (editor/ui/gui-display {:title (str "brood — " spec)})
             cookie)
           0)
       (require-terminal "attach")
-        (do (if cookie (editor/serve/attach spec cookie) (editor/serve/attach spec)) 0)
+        (do (if cookie (editor/attach/attach spec cookie) (editor/attach/attach spec)) 0)
       else 2)))
 
 ;; ── entry points ─────────────────────────────────────────────────────────────────────

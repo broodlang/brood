@@ -56,7 +56,7 @@ fn attach_drives_a_served_app_over_the_link() {
   (if (<= n 0)
     :no-attach
     (do
-      (send {{:name editor/serve/serve-name :node peer}} [:attach (self) 80 24])
+      (send {{:name editor/serve-protocol/serve-name :node peer}} [:attach (self) 80 24])
       (receive ([:attached s] s) (after 500 (do (proc/sleep 200) (try-attach (- n 1))))))))
 (def session (try-attach 20))
 (def f0 (receive ([:frame f] (frame-text f)) (after 5000 :no-frame)))

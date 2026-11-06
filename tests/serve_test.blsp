@@ -7,8 +7,11 @@
 
 (defmodule serve-test
   (:use-internals editor/serve)
+  (:use-internals editor/attach)
   (:use test)
   (:use editor/serve)
+  (:use editor/attach)
+  (:use editor/serve-protocol)
   (:use editor/display)
   (:use editor/ui))
 
@@ -68,7 +71,7 @@
   (receive
     ([:attached session] (do
                            (send ready [:ready (self) session])
-                           (editor/serve/attach-display-loop nil session (gui-mock-display ready))))
+                           (editor/attach/attach-display-loop nil session (gui-mock-display ready))))
     (after test/*wait-ms* (send ready [:ready :no-attach :no-attach]))))
 
 ;; A shared-session client played in-process: attach, announce our pid, then loop —
@@ -106,7 +109,7 @@
 (defn drive-backlog (display-of messages)
   (let (me (self)
         [client watch] (spawn-monitor (receive
-                                        (:go (editor/serve/attach-display-loop nil
+                                        (:go (editor/attach/attach-display-loop nil
                                                me
                                                (display-of me))))))
     (doseq (m messages) (if (string? m) (proc/send-priority client m) (send client m)))
@@ -308,7 +311,7 @@
       (send (self) [:window {:input :pixels}])
       (send (self) [:frame [:clear]])
       (send (self) [:bye])
-      (editor/serve/attach-display-loop nil (self) display)
+      (editor/attach/attach-display-loop nil (self) display)
       (assert= (table/get log :texture) [3 1 1])
       (assert= (table/get log :window) {:input :pixels})
       (assert= (table/get log :frame) [:clear])
@@ -317,13 +320,13 @@
       (send (self) [:texture-free 3])
       (send (self) [:window {:input :pixels}])
       (send (self) [:bye])
-      (assert= (editor/serve/attach-display-loop nil (self) bare) nil)))
+      (assert= (editor/attach/attach-display-loop nil (self) bare) nil)))
 
   ;; ADR-490: the client's own window input goes out before it paints a backlog of frames
   (test "attach-display-loop ships a queued key before it paints queued frames"
     (let (me (self)
           client (spawn (receive
-                          (:go (editor/serve/attach-display-loop nil
+                          (:go (editor/attach/attach-display-loop nil
                                  me
                                  {:draw (fn (f) (send me [:drew f]))
                                   :leave (fn () nil)
@@ -506,12 +509,14 @@
       (send (self) [:frame [:clear]])
       (send (self) [:busy false])
       (send (self) [:bye])
-      (editor/serve/attach-display-loop nil (self) display)
+      (editor/attach/attach-display-loop nil (self) display)
       (assert= (table/get log :busy) [true false])
       ;; a display with no :busy (a terminal) drops it
       (send (self) [:busy true])
       (send (self) [:bye])
-      (assert= (editor/serve/attach-display-loop nil (self) {:draw (fn (f) nil) :leave (fn () nil)})
+      (assert= (editor/attach/attach-display-loop nil
+                 (self)
+                 {:draw (fn (f) nil) :leave (fn () nil)})
         nil))))
 
 ;; A session that outlives its client (`serve` given `:resume-ms`): a named client's death
@@ -676,7 +681,7 @@
     (let (display {:draw (fn (f) nil) :leave (fn () nil)})
       (send (self) [:ping (self) :asked])
       (send (self) [:bye])
-      (editor/serve/attach-display-loop nil (self) display)
+      (editor/attach/attach-display-loop nil (self) display)
       (assert= (receive ([:pong r] r) (after 0 :none)) :asked)
       (assert= (receive ([:key k _] k) (after 0 :none)) :none))))
 
@@ -900,7 +905,7 @@
           display {:draw (fn (f) (send me [:drew (frame-text f)]))
                    :leave (fn () nil)
                    :clipboard-get (fn () (receive (after 800 "slow to read")))}
-          client (spawn (editor/serve/attach-display-loop nil me display)))
+          client (spawn (editor/attach/attach-display-loop nil me display)))
       (send client [:clipboard-get me asked])
       (send client [:frame [(text 0 0 "painted meanwhile")]])
       ;; the frame is painted long before the clipboard answers
@@ -948,7 +953,7 @@
     ([:attached loop-process] (do
                                 (monitor loop-process)
                                 (send report [:ready (self)])
-                                (editor/serve/attach-display-loop nil
+                                (editor/attach/attach-display-loop nil
                                   loop-process
                                   (gui-mock-display report))
                                 (send report [:client-ended])))

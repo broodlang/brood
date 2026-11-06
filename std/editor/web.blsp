@@ -38,7 +38,7 @@ Created on first use."
 (defn- attach (cols rows)
   "Attach THIS process (an event-stream handler) to the registered session manager, as
 `nest attach` does, and return the session pid — nil when nothing serves."
-  (let (mgr (proc/whereis editor/serve/serve-name))
+  (let (mgr (proc/whereis editor/serve-protocol/serve-name))
     (if (nil? mgr)
       nil
       (do
