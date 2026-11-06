@@ -31,6 +31,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   failure, not a `{:status 0 :error …}` map (ADR-617).
 
 **Fixed.**
+- **`nest check` sees an unbound name in a function's body or `&optional` default.** Only call
+  operands and `def` / `let` / `if` slots were read as values, so `(defn f (&optional (x moved)) …)`
+  passed the check and failed the first call that left the argument out.
 - A fold over a vector or a range stops on a failed accumulator; steps ran on after it before
   (ADR-315).
 - Two nodes of a cluster no longer stay apart after a mesh dial races the program's own dial;

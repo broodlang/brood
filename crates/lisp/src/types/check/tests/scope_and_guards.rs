@@ -447,6 +447,34 @@ fn flags_unbound_value_in_def_let_if_slots() {
     );
 }
 
+// A function's body form and an `&optional` default are evaluated too: a bare name in
+// either is a value leaf. A default naming a global that had moved to another module passed
+// `nest check` and failed the first call that left the argument out.
+#[test]
+fn flags_unbound_value_in_a_body_form_and_an_optional_default() {
+    let unbound = |src: &str, name: &str| {
+        file_warnings(src)
+            .iter()
+            .any(|m| m.contains(&format!("unbound symbol: {name}")))
+    };
+    assert!(unbound("(defn f () gone-name)", "gone-name"));
+    assert!(unbound(
+        "(defn f (&optional (x moved-default)) x)",
+        "moved-default"
+    ));
+    assert!(unbound(
+        "(defn f (&optional (x (+ 1 moved-call))) x)",
+        "moved-call"
+    ));
+    assert!(unbound("(def g (fn () lost))", "lost"));
+    // …and nothing for what is bound: a parameter, an earlier parameter in a default, a
+    // global of the file, a literal
+    assert!(
+        file_warnings("(def known 1) (defn f (a &optional (b a) (c known)) (+ a b c))").is_empty()
+    );
+    assert!(file_warnings("(defn f (x) x)").is_empty());
+}
+
 #[test]
 fn operand_check_respects_scope_and_forward_refs() {
     // A forward reference to a later top-level def — file-global, not unbound.

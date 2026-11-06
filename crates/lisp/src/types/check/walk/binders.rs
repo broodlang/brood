@@ -49,6 +49,37 @@ pub(in crate::types::check) fn diverging_guard_scope(
     }
     None
 }
+/// A function's evaluated forms, walked in its parameter scope: each `&optional` default
+/// (`params_form`'s) and each body form. A bare name in either is a value leaf
+/// ([`check_value_leaf`]) — `(defn f () name)` answers it, `(defn f (&optional (x name)) …)`
+/// reads it whenever the argument is left out — and every other form is walked. The body
+/// alone was walked before, and only through `check_into`, which a bare symbol passes: a
+/// default naming a global that had moved to another module passed `nest check` and failed
+/// the first call that left the argument out, in a release's start.
+fn check_fn_forms(
+    heap: &Heap,
+    params_form: Option<Value>,
+    body: &[Value],
+    scope: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    // A bare symbol carries no position, so the warning is put on the parameter list, or
+    // the first body form that has one
+    let anchor = params_form
+        .filter(|p| matches!(p, Value::Pair(_) | Value::Vector(_)))
+        .or_else(|| body.iter().copied().find(|f| matches!(f, Value::Pair(_))))
+        .unwrap_or(Value::Nil);
+    if let Some(params_form) = params_form {
+        for default in fn_param_defaults(heap, params_form).into_iter().flatten() {
+            check_value_leaf(heap, default, anchor, scope, out);
+            check_into(heap, default, scope, out);
+        }
+    }
+    for &body_form in body {
+        check_value_leaf(heap, body_form, anchor, scope, out);
+        check_into(heap, body_form, scope, out);
+    }
+}
 
 /// Walk a single-clause `fn` literal with each parameter bound to an INFERRED bound —
 /// a plain binding (`dynamic_within`, never a sig-authoritative type), because an
@@ -131,9 +162,7 @@ pub(super) fn check_fn_bound_indexed(
                     tys.get(i).cloned().flatten(),
                 );
             }
-            for &body_form in &citems[1..] {
-                check_into(heap, body_form, &scope, out);
-            }
+            check_fn_forms(heap, Some(plist), &citems[1..], &scope, out);
         }
         return;
     }
@@ -159,9 +188,7 @@ pub(super) fn check_fn_bound_indexed(
         _ => 2,
     };
     lint_discarded_symbols(heap, &items[body_start..], items[0], &scope, out);
-    for &body_form in &items[body_start..] {
-        check_into(heap, body_form, &scope, out);
-    }
+    check_fn_forms(heap, Some(params_form), &items[body_start..], &scope, out);
 }
 
 /// `(fn (params...) docstring? body...)` (and `lambda` — the same closure
@@ -300,9 +327,7 @@ pub(super) fn check_fn_seeded(
             if let Some(citems) = list_items(heap, clause) {
                 let body = citems.get(1..).unwrap_or(&[]);
                 lint_discarded_symbols(heap, body, clause, &scope, out);
-                for &body_form in body {
-                    check_into(heap, body_form, &scope, out);
-                }
+                check_fn_forms(heap, citems.first().copied(), body, &scope, out);
             }
         }
         return;
@@ -328,9 +353,7 @@ pub(super) fn check_fn_seeded(
         (Some(Value::Str(_)), Some(_)) => 3,
         _ => 2,
     };
-    for &body_form in &items[body_start..] {
-        check_into(heap, body_form, &scope, out);
-    }
+    check_fn_forms(heap, Some(params_form), &items[body_start..], &scope, out);
     // Return-type check (a `GradualTy` consumer): the body's last form is the
     // function's result, which must be *consistent* with the declared return `R`.
     // `gradual_of` makes an over-approximated result (a call) `dynamic`, so the ∩
@@ -512,9 +535,13 @@ pub(super) fn check_def(
                     (Some(Value::Str(_)), Some(_)) => 3,
                     _ => 2,
                 };
-                for &body_form in &fn_items[body_start..] {
-                    check_into(heap, body_form, &scope, out);
-                }
+                check_fn_forms(
+                    heap,
+                    Some(fn_items[1]),
+                    &fn_items[body_start..],
+                    &scope,
+                    out,
+                );
                 return;
             }
         }
@@ -540,9 +567,13 @@ pub(super) fn check_def(
                 (Some(Value::Str(_)), Some(_)) => 3,
                 _ => 2,
             };
-            for &body_form in &fn_items[body_start..] {
-                check_into(heap, body_form, &scope, out);
-            }
+            check_fn_forms(
+                heap,
+                Some(fn_items[1]),
+                &fn_items[body_start..],
+                &scope,
+                out,
+            );
             return;
         }
         // Gradual-assignment check (the first `GradualTy` consumer): when `name`
@@ -619,9 +650,7 @@ pub(super) fn check_defn(
         (Some(Value::Str(_)), Some(_)) => 4,
         _ => 3,
     };
-    for &body_form in &items[body_start..] {
-        check_into(heap, body_form, &scope, out);
-    }
+    check_fn_forms(heap, Some(params_form), &items[body_start..], &scope, out);
 }
 
 /// Is `then_form` a guard — `(if g body fallthrough)` — whose fallthrough is the same code
