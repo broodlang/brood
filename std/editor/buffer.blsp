@@ -1530,6 +1530,13 @@ inside the range collapses to `lo`, one at/after `hi` moves left by the deleted 
           (if (= kind :insert)
             (buffer-markers-insert m a b)
             (buffer-markers-delete m a b))))))
+(defn- buffer-carry-markers (buf:buffer lo:int hi:int length:int -> buffer)
+  "`buf`'s markers carried through `[lo, hi)` replaced by `length` chars — for an op that
+swaps the rope itself rather than going through the editing primitives (a region undo), so
+what points into the text still moves with it. The op sets the text properties itself."
+  (let (cut (if (< lo hi) (buffer-adjust-markers buf :delete lo hi) buf))
+    (if (> length 0) (buffer-adjust-markers cut :insert lo length) cut)))
+
 
 ;; ---- text properties: data that belongs to the characters (ADR-579) ---------------
 ;; A program's colours on its output, a link on a word, a face stamped by whoever produced
@@ -1626,13 +1633,6 @@ none or the edit is after all of them."
       buf
       (let (carried (properties-map-carry property-map kind a b))
         (if (empty? carried) (dissoc buf :properties) (assoc buf :properties carried))))))
-
-(defn- buffer-carry-markers (buf:buffer lo:int hi:int length:int -> buffer)
-  "`buf`'s markers carried through `[lo, hi)` replaced by `length` chars — for an op that
-swaps the rope itself rather than going through the editing primitives (a region undo), so
-what points into the text still moves with it. The op sets the text properties itself."
-  (let (cut (if (< lo hi) (buffer-adjust-markers buf :delete lo hi) buf))
-    (if (> length 0) (buffer-adjust-markers cut :insert lo length) cut)))
 
 (defn- properties-normalize (properties length)
   "`properties` (`{key spans}` relative to an inserted text of `length` chars) as the
@@ -1827,37 +1827,6 @@ into the range — a key with none left kept as `[]`, which clears it."
       (let ([key spans] entry)
         (assoc acc key (or (get (or (properties-normalize {key spans} width) {}) key) []))))))
 
-(defn- buffer-log-edit (after:buffer before:buffer lo:int hi:int repl:string properties -> buffer)
-  "`after` — `before` changed by the edit `[lo hi repl properties]` — with that edit logged.
-A property change (`[:put-properties width changes]`) is stamped: the rope it leaves is the
-rope it found, and ropes compare by text, so the log cannot order it by its rope as it
-orders a text change; its entry carries the buffer's next `:property-stamp`, which a holder's
-walk compares with the stamp its copy was taken at (`buffer-splice-path`)."
-  (let (stamp (when (property-change? properties) (inc (or (get before :property-stamp) 0))))
-    (assoc (if stamp (assoc after :property-stamp stamp) after)
-      :splices
-        (buffer-splice-log-push (or (get before :splices) ())
-          (get before :rope)
-          (get after :rope)
-          lo
-          hi
-          repl
-          (if stamp (conj properties stamp) properties)))))
-
-(defn- buffer-commit-properties (buf:buffer from:int to:int changes:map updated:map -> buffer)
-  "`buf` with its text properties now `updated` — `changes` (`{key spans}` relative to `from`)
-set over `[from, to)` — as an EDIT that leaves the text alone: recorded for undo, logged as a
-property entry ([[buffer-log-edit]]), nothing moved."
-  (let (recorded (buffer-record-change buf))
-    (buffer-log-edit (if (empty? updated)
-                       (dissoc recorded :properties)
-                       (assoc recorded :properties updated))
-      buf
-      from
-      from
-      ""
-      [:put-properties (- to from) changes])))
-
 (defn buffer-property-map (buf:buffer -> map)
   "Every text property of `buf` as `{key [[start end value] …]}` — per key its ascending,
 non-overlapping spans — or `{}` when it has none. What a holder ships with the text (a buffer
@@ -1886,37 +1855,6 @@ painting those characters needs, found by a binary search rather than a walk of 
       (fn (out span)
         (let ([from to value] span)
           (if (< from hi) (conj out [(math/max from lo) (math/min to hi) value]) out))))))
-
-(defn put-properties (buf:buffer key:any lo:int hi:int spans:seqable -> buffer)
-  "`buf` with text property `key` over `[lo, hi)` set to `spans` (`[[start end value] …]` in
-buffer offsets, clipped to the range; `[]` removes `key` there) — Emacs's
-`set-text-properties` for one property. The other keys over the range are kept.
-
-A PROPERTY change, not a text change: the text, point, mark, markers and narrowing stay
-exactly where they were. Still an edit in every other sense — undo takes it back, a read-only
-buffer refuses it (as Emacs's refuses a property change), and the splice log records it as a
-property entry (`[:put-properties width changes]`, ADR-579) that a holder replaying the log
-applies to its own copy without touching its text (`buffer-edits-since`); a text consumer
-never sees it (`buffer-splices-since`). Unchanged properties change nothing.
-
-    (editor/buffer/buffer-properties (editor/buffer/put-properties (editor/buffer/make-buffer \"abcdef\") :face 1 5 [[2 4 :red]]) :face)   ;=> [[2 4 :red]]"
-  (let (length (buffer-length buf)
-        from (buffer-clamp 0 length lo)
-        to (math/max from (buffer-clamp 0 length hi)))
-    (if (= from to)
-      buf
-      (let (relative (map spans
-                       (fn (span)
-                         (let ([start end value] span) [(- start from) (- end from) value])))
-            changes (properties-changes-normalize {key relative} (- to from))
-            current (buffer-property-map buf)
-            updated (properties-with-changes current from to changes))
-        (if (= updated current)
-          buf
-          (do
-            (buffer-barf-if-read-only buf)
-            (buffer-barf-if-protected-delete buf from to)
-            (buffer-commit-properties buf from to changes updated)))))))
 
 ;; ---- the splice log: what an edit DID, not a guess from the text -------------------
 ;; A holder that mirrors this buffer somewhere else — a buffer process, a collaborator, a
@@ -2034,6 +1972,23 @@ past `*splice-log-max*`. `properties` is what the inserted text came with, relat
     (if merged
       (cons merged (rest log))
       (take (cons [before-rope after-rope lo hi repl () properties] log) *splice-log-max*))))
+
+(defn- buffer-log-edit (after:buffer before:buffer lo:int hi:int repl:string properties -> buffer)
+  "`after` — `before` changed by the edit `[lo hi repl properties]` — with that edit logged.
+A property change (`[:put-properties width changes]`) is stamped: the rope it leaves is the
+rope it found, and ropes compare by text, so the log cannot order it by its rope as it
+orders a text change; its entry carries the buffer's next `:property-stamp`, which a holder's
+walk compares with the stamp its copy was taken at (`buffer-splice-path`)."
+  (let (stamp (when (property-change? properties) (inc (or (get before :property-stamp) 0))))
+    (assoc (if stamp (assoc after :property-stamp stamp) after)
+      :splices
+        (buffer-splice-log-push (or (get before :splices) ())
+          (get before :rope)
+          (get after :rope)
+          lo
+          hi
+          repl
+          (if stamp (conj properties stamp) properties)))))
 
 (defn- buffer-apply-edit
   (before:buffer after:buffer kind:keyword a:int b:int repl:string &optional properties -> buffer)
@@ -2579,6 +2534,51 @@ the text, recorded for undo.
                 narrowed (assoc replaced :editable regions)
                 cut (if (< from to) (buffer-adjust-editable narrowed :delete from to) narrowed))
             (if (= repl "") cut (buffer-adjust-editable cut :insert from (string/length repl))))))))
+
+(defn put-properties (buf:buffer key:any lo:int hi:int spans:seqable -> buffer)
+  "`buf` with text property `key` over `[lo, hi)` set to `spans` (`[[start end value] …]` in
+buffer offsets, clipped to the range; `[]` removes `key` there) — Emacs's
+`set-text-properties` for one property. The other keys over the range are kept.
+
+A PROPERTY change, not a text change: the text, point, mark, markers and narrowing stay
+exactly where they were. Still an edit in every other sense — undo takes it back, a read-only
+buffer refuses it (as Emacs's refuses a property change), and the splice log records it as a
+property entry (`[:put-properties width changes]`, ADR-579) that a holder replaying the log
+applies to its own copy without touching its text (`buffer-edits-since`); a text consumer
+never sees it (`buffer-splices-since`). Unchanged properties change nothing.
+
+    (editor/buffer/buffer-properties (editor/buffer/put-properties (editor/buffer/make-buffer \"abcdef\") :face 1 5 [[2 4 :red]]) :face)   ;=> [[2 4 :red]]"
+  (let (length (buffer-length buf)
+        from (buffer-clamp 0 length lo)
+        to (math/max from (buffer-clamp 0 length hi)))
+    (if (= from to)
+      buf
+      (let (relative (map spans
+                       (fn (span)
+                         (let ([start end value] span) [(- start from) (- end from) value])))
+            changes (properties-changes-normalize {key relative} (- to from))
+            current (buffer-property-map buf)
+            updated (properties-with-changes current from to changes))
+        (if (= updated current)
+          buf
+          (do
+            (buffer-barf-if-read-only buf)
+            (buffer-barf-if-protected-delete buf from to)
+            (buffer-commit-properties buf from to changes updated)))))))
+
+(defn- buffer-commit-properties (buf:buffer from:int to:int changes:map updated:map -> buffer)
+  "`buf` with its text properties now `updated` — `changes` (`{key spans}` relative to `from`)
+set over `[from, to)` — as an EDIT that leaves the text alone: recorded for undo, logged as a
+property entry ([[buffer-log-edit]]), nothing moved."
+  (let (recorded (buffer-record-change buf))
+    (buffer-log-edit (if (empty? updated)
+                       (dissoc recorded :properties)
+                       (assoc recorded :properties updated))
+      buf
+      from
+      from
+      ""
+      [:put-properties (- to from) changes])))
 
 ;; ---- redaction: text removed with every trace of it (ADR-581) -------------------------
 ;; A password typed ahead into a shell's input before its prompt was recognised went into the
