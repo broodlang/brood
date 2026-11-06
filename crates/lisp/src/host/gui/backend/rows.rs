@@ -18,9 +18,11 @@
 //! - **A frame may paint the leftover as content** (ADR-615): ops in an `Op::AboveSeam`
 //!   group are laid out on the rows above the seam carried on uniformly ([`RowMap::uniform_rows`])
 //!   and cut off at the seam's row ([`RowMap::seam_top`]), so what they put on the seam's
-//!   row number shows its top in the strip — the next line, partly visible. The map then
-//!   says so ([`RowMap::partial`]): the strip's pixels are that row's to the hit-test,
-//!   flagged ([`RowMap::in_strip`]), rather than the row above's.
+//!   row number shows its top in the strip — the next line, partly visible — when the
+//!   strip is at least half a row tall; under that the group paints on this map, as phase 1
+//!   ([`RowMap::above_seam_rows`]). The map then says so ([`RowMap::partial`]): the strip's
+//!   pixels are that row's to the hit-test, flagged ([`RowMap::in_strip`]), rather than
+//!   the row above's.
 //! - **No seam: the leftover sits under the last row**, which is the layout every frame
 //!   without an `Op::Seam` gets.
 //!
@@ -90,7 +92,9 @@ impl RowMap {
                 ch,
                 seam,
                 gap,
-                partial,
+                // the strip shows the next line only when at least half a row of it is there
+                // (ADR-615): five pixels of a line are specks, twelve read
+                partial: partial && gap * 2 >= ch,
             },
             _ => RowMap::uniform(top, ch),
         }
@@ -116,6 +120,18 @@ impl RowMap {
         RowMap::uniform(self.top, self.ch)
     }
 
+    /// The rows an `Op::AboveSeam` group is painted on: [`RowMap::uniform_rows`] when the strip
+    /// shows the next line ([`RowMap::partial`]), else this map itself — so a strip under half a
+    /// row is phase 1 exactly (ADR-610): the row above's backgrounds reach through it, and the
+    /// group's seam row lands on the bottom-anchored row, where the cut removes it.
+    pub(crate) fn above_seam_rows(&self) -> RowMap {
+        if self.partial {
+            self.uniform_rows()
+        } else {
+            *self
+        }
+    }
+
     /// Where the seam's row begins — the strip's bottom edge, and the line an
     /// `Op::AboveSeam` group is cut off at; `None` without a seam inside the grid.
     pub(crate) fn seam_top(&self) -> Option<isize> {
@@ -129,7 +145,8 @@ impl RowMap {
         (self.gap > 0).then(|| (bottom - self.gap as isize, bottom))
     }
 
-    /// Whether the frame paints the strip as content (`Op::AboveSeam`, ADR-615).
+    /// Whether the strip shows the next line: the frame paints it as content (`Op::AboveSeam`,
+    /// ADR-615) and it is at least half a row tall.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn partial(&self) -> bool {
         self.partial
@@ -415,5 +432,29 @@ mod tests {
         assert_eq!(rows.strip(), None);
         assert!(!rows.in_strip(160.0));
         assert_eq!(rows.y(10), 200);
+    }
+
+    /// Under half a row the strip is phase 1 (ADR-615): five pixels of a line are specks.
+    #[test]
+    fn a_strip_under_half_a_row_stays_phase_one() {
+        // 5 px of leftover under 20 px rows
+        let rows = RowMap::window(0, 20, 10, 6, 211, Some(8), true);
+        assert_eq!(rows.strip(), Some((160, 165)));
+        assert!(!rows.partial());
+        assert!(!rows.in_strip(162.5));
+        assert_eq!(
+            rows.row_of(162.5),
+            7,
+            "the strip is the row above's, stretched"
+        );
+        assert_eq!(
+            rows.above_seam_rows(),
+            rows,
+            "a group paints on the window's rows"
+        );
+        // exactly half a row shows the line
+        let half = RowMap::window(0, 20, 10, 6, 216, Some(8), true);
+        assert!(half.partial());
+        assert_eq!(half.above_seam_rows(), half.uniform_rows());
     }
 }

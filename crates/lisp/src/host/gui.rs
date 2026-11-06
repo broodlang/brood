@@ -964,8 +964,10 @@ pub enum Op {
     ///
     /// A frame that carries one says the strip is CONTENT: the hit-test reports a pointer in
     /// it on the seam's row, flagged `:partial` (`Mouse::partial`), the row its ops were laid
-    /// out on. Without a seam the ops paint as they are; inside a `CellRegion` (another grid)
-    /// too. GUI-only: the terminal draws the ops as they are, having no leftover.
+    /// out on. Only from half a row of strip: under that (a few pixels of a line are specks)
+    /// the group paints on the window's own rows, so the strip is ADR-610's phase 1 and a
+    /// pointer there is the row above's (`RowMap::above_seam_rows`). Without a seam the ops
+    /// paint as they are; inside a `CellRegion` (another grid) too. GUI-only: the terminal draws the ops as they are, having no leftover.
     AboveSeam {
         ops: Vec<Op>,
     },

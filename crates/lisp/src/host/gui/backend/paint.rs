@@ -235,7 +235,7 @@ struct Entry<'a> {
     /// the blink phase as well as on the op (ADR-469).
     caret: bool,
     /// Whether the leaf sits in an `Op::AboveSeam` group: laid out on the rows above the seam
-    /// carried on ([`RowMap::uniform_rows`]) and cut off at the seam (ADR-615).
+    /// carried on ([`RowMap::above_seam_rows`]) and cut off at the seam (ADR-615).
     above_seam: bool,
 }
 
@@ -243,7 +243,7 @@ impl Entry<'_> {
     /// The rows this leaf is laid out on: the window's, or the uniform rows of a group.
     fn rows(&self, rows: &RowMap) -> RowMap {
         if self.above_seam {
-            rows.uniform_rows()
+            rows.above_seam_rows()
         } else {
             *rows
         }
@@ -1177,10 +1177,11 @@ pub(super) fn render_ops(
                 // ADR-615: the rows above the seam carried on with no gap, the band cut off
                 // where the seam's row begins — so what the group puts on the seam's row shows
                 // its top in the leftover strip, and nothing of it reaches the rows below.
+                // Under half a row of strip the window's own rows: phase 1 (`above_seam_rows`).
                 let cut = rows.seam_top().unwrap_or(isize::MAX).max(0) as usize;
                 let mut inner = canvas.narrowed(0, cut);
                 if inner.y1 > inner.y0 {
-                    let uniform = rows.uniform_rows();
+                    let uniform = rows.above_seam_rows();
                     render_ops(ops, &mut inner, r, ox, &uniform, cw, bg0, scroll_dy);
                 }
             }

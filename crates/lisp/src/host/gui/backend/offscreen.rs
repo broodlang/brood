@@ -737,16 +737,19 @@ mod tests {
     }
 
     /// ADR-615, over every window height in one row's span and two font sizes: with the
-    /// body's next line in an `AboveSeam` group, the leftover strip is EXACTLY the top of that
+    /// body's next line in an `AboveSeam` group, a strip under half a row is the phase-1
+    /// picture exactly (and not `:partial` to the hit-test); from half a row up it is EXACTLY the top of that
     /// line as it paints with no seam at all (the same pixel rows, the same pixels — so its
     /// ink is there, clipped, not squashed or moved); everything above the strip and from the
     /// seam's row down is the phase-1 picture (nothing of the group leaks into the mode line
     /// or the echo area); and the hit-test gives the strip to the seam's row, flagged.
     #[test]
-    fn the_strip_shows_the_clipped_top_of_the_next_line_at_every_height() {
+    fn the_strip_shows_the_next_line_from_half_a_row_at_every_height() {
         for px in [15.0f32, 21.0] {
             let cell_h = render_at(vec![Op::Clear], 400, 300, px).cell.1;
             let mut ink_seen = false;
+            // (a height whose strip shows the line, one whose strip is too short to)
+            let mut halves_seen = (false, false);
             for h in 300..300 + cell_h {
                 let (cols, rows) = render_at(vec![Op::Clear], 400, h, px).grid;
                 let seam = rows - 2;
@@ -788,8 +791,13 @@ mod tests {
                     let from = (y * image.width * 4) as usize;
                     image.rgba[from..from + (image.width * 4) as usize].to_vec()
                 };
+                // the rule: the next line shows only in a strip at least half a row tall; under
+                // that the strip is phase 1, pixel for pixel
+                let shown = (strip_bottom - strip_top) * 2 >= cell_h;
+                halves_seen.0 |= shown;
+                halves_seen.1 |= !shown && strip_bottom > strip_top;
                 for y in 0..h {
-                    let in_strip = (strip_top..strip_bottom).contains(&y);
+                    let in_strip = shown && (strip_top..strip_bottom).contains(&y);
                     let want = if in_strip { &flat } else { &one };
                     assert!(
                         row(&two, y) == row(want, y),
@@ -813,14 +821,20 @@ mod tests {
                     let position = winit::dpi::PhysicalPosition::new(50.0, y as f64 + 0.5);
                     let (_, cell_row) =
                         super::super::px_to_cell(position, &renderer, 400, h as usize);
-                    assert_eq!(cell_row, seam, "{what}: strip pixel {y}");
-                    assert!(map.in_strip(y as f64 + 0.5), "{what}: strip pixel {y}");
+                    if shown {
+                        assert_eq!(cell_row, seam, "{what}: strip pixel {y}");
+                        assert!(map.in_strip(y as f64 + 0.5), "{what}: strip pixel {y}");
+                    } else {
+                        assert_eq!(cell_row, seam - 1, "{what}: phase-1 strip pixel {y}");
+                        assert!(!map.in_strip(y as f64 + 0.5), "{what}: strip pixel {y}");
+                    }
                 }
                 let below = strip_bottom as f64 + 0.5;
                 assert!(!map.in_strip(below), "{what}");
                 assert!(!map.in_strip(strip_top as f64 - 0.5), "{what}");
             }
             assert!(ink_seen, "px {px}: some strip showed the next line's ink");
+            assert_eq!(halves_seen, (true, true), "px {px}: both sides of the rule");
         }
     }
 }

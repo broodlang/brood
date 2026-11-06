@@ -207,13 +207,15 @@ the terminal frontend skips it.
 the frame's `seam` carried on past it, as if the grid had no seam, and cut off where the
 seam's row begins. So the row they put at the seam's own row number shows its top in the
 leftover strip — the next line of the text, partly visible, as Emacs shows a window's last
-line — rather than the stretched background of the row above it. Rows above the seam paint
-where they always do. Paint the next row's background too: the strip holds what the frame
-painted there before the block. `ops` is a flat vector of render ops (built with `into []`).
+line — rather than the stretched background of the row above it, once the strip is at least
+half a row tall (under that, a few pixels of a line being specks, the strip stays the row
+above's, exactly as without the block: the renderer decides, knowing the pixels). Rows above
+the seam paint where they always do. Paint the next row's background too: the strip holds
+what the frame painted there before the block. `ops` is a flat vector of render ops (built with `into []`).
 
-A frame with one makes the strip content to the mouse as well: a pointer in it is reported
-on the seam's row, as the block laid it out, with `:partial true` in the event's trailing
-map — not the bottom-anchored row of the same number. GUI-only: without a seam the ops paint
+A frame with one makes a strip showing the line content to the mouse as well: a pointer in it
+is reported on the seam's row, as the block laid it out, with `:partial true` in the event's
+trailing map — not the bottom-anchored row of the same number. GUI-only: without a seam the ops paint
 as they are, and the terminal frontend draws them in place.
 
     (editor/display/above-seam [[:text 30 0 \"next line\"]])   ;=> [:above-seam [[:text 30 0 \"next line\"]]]"
