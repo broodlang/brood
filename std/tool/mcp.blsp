@@ -612,7 +612,7 @@ its own list that conses additional entries onto this one — `def` rebinds
 globals (ADR-013), so the dispatcher sees the project's version on its next
 fetch.
 
-Twenty-three tools work today (in a project context — `write`/`edit` need a root):
+Twenty-four tools work today (in a project context — `write`/`edit` need a root):
 the eight v0 tools, the ability/type introspection trio `abilities` / `ability`
 (describe an ability's ops, sealed members, `:requires`, impls) / `check-source`
 (type-check a snippet string), `callers` (cross-file

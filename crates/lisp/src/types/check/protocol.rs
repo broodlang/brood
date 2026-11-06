@@ -2,12 +2,11 @@
 //! against it — a diagnostic per missing op, arity mismatch, or method the
 //! protocol doesn't declare.
 //!
-//! Read from the **un-expanded** forms. `defprotocol`/`defimpl` lower to `defn`s
-//! plus registry calls, so the protocol structure only survives before macro
-//! expansion — the same reason `sig` (see `annot`) and the hygiene lint read the
-//! un-expanded tree.
+//! Read from the **un-expanded** forms. `defability`/`impl` lower to `defn`s
+//! plus registry calls, so the ability structure only survives before macro
+//! expansion — the same reason `sig` (see `annot`) reads the un-expanded tree.
 //!
-//! The checker keys off the surface syntax (`defprotocol`/`defimpl` as bare heads,
+//! The checker keys off the surface syntax (`defability`/`impl` as bare heads,
 //! op specs `(op (args) …)`); it doesn't need the macros' definitions, so this is a
 //! pure static analysis independent of where the macros live (the std/Hatch prototype).
 

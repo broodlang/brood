@@ -4597,8 +4597,8 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
     }
     // Iterate the tag table rather than isolating set bits: `x & x.wrapping_neg()` draws a
     // clippy lint whose suggested replacement (`isolate_lowest_one`) is unstable below
-    // Rust 1.98, and this crate builds on 1.95 — the two cannot both be satisfied by a bit
-    // trick. `ALL_TAGS` is 23 entries, this is not a hot path, and it is the idiom the
+    // Rust 1.98, and this crate builds on 1.97 — the two cannot both be satisfied by a bit
+    // trick. `ALL_TAGS` is short, this is not a hot path, and it is the idiom the
     // rest of the module already reads by.
     for tag in ALL_TAGS {
         let tag_bit = 1u32 << bit(tag);

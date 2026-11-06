@@ -93,7 +93,7 @@ pub(crate) fn is_special_form(s: Symbol) -> bool {
 }
 
 /// Tree-walker frame bookkeeping for error stack traces. One `eval` invocation
-/// is one logical call frame: the `'tail:` loop below may *enter* a closure body
+/// is one logical call frame: the machine's step loop may *enter* a closure body
 /// (an ordinary call in tail position re-enters the loop without a new Rust
 /// frame), and when an error unwinds out of this frame the wrapper appends one
 /// `:trace` entry — the closure the frame ended up in, at the call site that
@@ -976,7 +976,7 @@ fn unbound_namespace_hint(heap: &Heap, sym: Symbol) -> Option<String> {
 /// caller falls through to a normal call. When it *is* a redirect, this counts the
 /// elided reduction (`tick`) and honours the eval deadline — the watchdog a
 /// self-referential passthrough (`(defn ginf () (ginf))`) once escaped, since it
-/// loops in `dispatch` and never returns to the `'tail:` top where the deadline is
+/// loops in `dispatch` and never returns to the step loop's top where the deadline is
 /// otherwise checked. Returns `Err` if the deadline fired (the caller adds its own
 /// `or_form_pos` / root-stack cleanup), `Ok(true)` to redirect, `Ok(false)` to
 /// fall through. Keeping this one function means the two engines can't drift on

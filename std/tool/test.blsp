@@ -46,10 +46,10 @@
 ;; ─────────────────────────────────────────────────────────────────────────────
 ;; Because processes share the global table, tests must NOT tally into shared
 ;; mutable globals (concurrent tests would clobber one another). Instead each test
-;; collects its own failures into a PROCESS-LOCAL accumulator — `*fails*`, a `let`
-;; binding the `test` macro establishes — and yields them as a value; the runner
+;; collects its own failures into a PROCESS-LOCAL accumulator (`test-run` threads it
+;; through the test's assertion thunks) and yields them as a value; the runner
 ;; aggregates results from returns / messages into its own local state. No shared
-;; counters, no races. (Assertions are macros that push onto `*fails*`, so use
+;; counters, no races. (Assertions are macros the `test` macro splits the body by, so use
 ;; them lexically inside a test body, not from unrelated top-level helpers.)
 ;;
 ;; run-tests prints, once at the end, a structured `FILE:LINE:COL:` block per
@@ -1145,7 +1145,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; see which test is running (and spot the slow/hung one) before it finishes. Off by
 ;; default, and never set by `run-tests-structured` / the `--test` path, so machine-
 ;; parsed and structured output stays clean. `(run-tests :trace)` turns it on, and
-;; `nest test` passes `:trace`. Lines from parallel workers interleave (each is one
+;; `nest test --trace` passes `:trace`. Lines from parallel workers interleave (each is one
 ;; flushed `io/puts`); they come in waves of `test/*parallel-batch*`.
 (defdyn test/*trace* false)
 

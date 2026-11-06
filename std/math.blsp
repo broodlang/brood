@@ -3,17 +3,15 @@
 ;; consumers `(:use math)` to refer them bare, or call them qualified.
 ;;
 ;; The *core* arithmetic stays bare in the prelude — the operators (`+ - * /`),
-;; `inc`/`dec`, `quot`, `mod`, `rem`, and the always-there predicates `zero?`,
-;; `nan?`, `infinite?`. This module is the derived math *library* layered on top:
-;; roots, powers, rounding, aggregation, sign/parity predicates, and the constants.
+;; `inc`/`dec`. This module is the math *library* layered on top: integer division,
+;; roots, powers, rounding, aggregation, the numeric predicates, and the constants.
 (defmodule math
   "The math library — roots, powers, rounding, aggregation, and constants.
 
-Core arithmetic (`+` `-` `*` `/` `inc` `dec` `quot` `mod` `rem` `zero?` `nan?`
-`infinite?`) stays bare in the prelude and needs no import. This module adds the
-derived math functions: `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`,
-`sum`, `product`, the sign/parity predicates (`positive?` `negative?` `even?` `odd?`),
-and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
+Core arithmetic (`+` `-` `*` `/` `inc` `dec`) stays bare in the prelude and needs no
+import. This module adds the rest: `quot`, `mod`, `rem`, `sqrt`, `pow`, `ceil`, `round`,
+`round-to`, `clamp`, `abs`, `sum`, `product`, the numeric predicates (`zero?` `positive?`
+`negative?` `even?` `odd?` `nan?` `infinite?`), and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 
 ;; ---- math constants ---------------------------------------------------------
 (def pi 3.141592653589793)

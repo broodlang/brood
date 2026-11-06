@@ -23,7 +23,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     );
     // A *returned* failure — the other channel. `throw` unwinds (bugs, the
     // unexpected); a failure is handed back as a value (input this function
-    // cannot interpret), is falsy, and carries its own message.
+    // cannot interpret), is truthy, and carries its own message.
     primitives.def(
         "%failure",
         Arity::range(1, 2),

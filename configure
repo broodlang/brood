@@ -19,7 +19,7 @@ usage() {
 Usage: ./configure [options]
 
 Options:
-  --with-gui        Build the native GUI window backend (winit/softbuffer/fontdue),
+  --with-gui        Build the native GUI window backend (winit/softbuffer/cosmic-text),
                     so `(observe)` can open a window. Off by default.
   --without-gui     Disable the GUI backend (the default).
   --with-gui-gpu    Build the GPU render target (wgpu: Vulkan / Metal / DX12) and draw on

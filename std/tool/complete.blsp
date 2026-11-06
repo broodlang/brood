@@ -1,8 +1,8 @@
 ;; std/tool/complete.blsp — project-aware candidates for `nest` shell completion.
 ;;
 ;; Only the VALUE half of completion lives here. Subcommand names and flag names
-;; are derived in `nest` from clap's own argument model, because that is already
-;; their single source of truth: re-listing them in Brood would guarantee drift the
+;; are derived from the command table in `std/tool/nest.blsp`, because that is already
+;; their single source of truth: re-listing them here would guarantee drift the
 ;; first time a flag is added. What Brood owns is the part that depends on the
 ;; project — which tags exist, which deps are declared, which test files there are.
 ;;

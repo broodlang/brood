@@ -12,7 +12,7 @@ impl Heap {
     /// introspection / tests of hot-reload growth (Stage 5 dedup): redefining a
     /// global to *unchanged* code must not increase this; it never decreases
     /// (append-only — old versions stay live for in-flight calls, reclaimed only
-    /// by the future RUNTIME collector, docs/live-editing.md Stage 5).
+    /// by the RUNTIME collector, `runtime_collect`).
     pub fn runtime_closure_count(&self) -> usize {
         self.runtime.cur_code().closures.count()
     }

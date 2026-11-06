@@ -22,8 +22,8 @@
 //!   (`if`/`let`/`fn`/`def`/`defn`) plus `collect_def_names`.
 //! - [`annot`] — reads `(sig …)` declarations off the *un-expanded* tree, so a
 //!   user-declared signature seeds the checks for that name.
-//! - [`protocol`] — protocol / behaviour conformance: `defprotocol` /
-//!   `defbehaviour` / `defimpl` / `(:implements …)` checked for missing or
+//! - [`protocol`] — ability / behaviour conformance: `defability` /
+//!   `defbehaviour` / `impl` / `(:implements …)` checked for missing or
 //!   wrong-arity ops.
 //! - [`recursion`] — the non-tail self-recursion lint (deep non-tail recursion
 //!   overflows the green-process stack).

@@ -9,16 +9,16 @@
 ;; here, and the `let` / `fn` special forms delegate to it for destructuring.
 ;; See docs/pattern-matching.md.
 ;; (Note: the other emitted primitives — `first`/`rest`/`pair?`/… — are still
-;; ordinary names a local binding could shadow; full macro hygiene is deferred.)
+;; ordinary names a local binding could shadow: ADR-500 renames binders, not free names.)
 ;;
 ;; THE ONE TRAP: a bare symbol in a pattern *binds* (and shadows); it does not
 ;; test against a same-named value. Match a known value with a keyword (:ok), a
-;; quoted symbol ('none), or a pin (~x). The grammar:
+;; quoted symbol ('none), or a pin (^x). The grammar:
 ;;   _              wildcard (matches anything, binds nothing)
 ;;   x              binds x  (a repeated x is an equality constraint — non-linear)
 ;;   42 "s" :k nil  a literal, matched by =
 ;;   'sym           the literal symbol sym
-;;   ~expr          the current value of expr (a pin)
+;;   ^expr          the current value of expr (a pin)
 ;;   (p1 p2 ...)    a list of that exact length, element-wise
 ;;   (p1 & rest)    head(s) + tail bound (the & rest marker)
 ;;   (p1 &optional p2 (p3 default) & rest)

@@ -5,7 +5,7 @@
 //! Slice 1 is **checker-facing only**: a declared `Sig` is read by the checker as
 //! an authoritative signature source (ahead of primitive / curated / inferred).
 //! The `sig` form is a runtime no-op (a prelude macro expanding to `nil`), so the
-//! scan runs over the *un-expanded* forms — like the hygiene lint. Nothing here
+//! scan runs over the *un-expanded* forms. Nothing here
 //! enforces the declaration at run time yet; that is slice 2 (the strong arrow).
 
 use std::cell::RefCell;

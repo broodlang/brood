@@ -235,7 +235,7 @@ make help                         # every target
   The JIT is a default feature (ADR-101). The tier ceiling is **`BROOD_TIER=0|1|2`**
   (tree-walker / bytecode VM / native, ADR-222) — the only engine knob.
 - **Measuring performance:** `docs/benchmarking.md` §6 has the rules and why: `make ab
-  --floor`; `make ab-vm` for the VM call path; a base-vs-base control before believing a
+  ARGS=--floor`; `make ab-vm` for the VM call path; a base-vs-base control before believing a
   few-percent delta; re-run a tiering-sensitive row unpinned; measure a short and a long run;
   **count the calls** before optimising anything; attribute with `make perf-brood` +
   `(perf/summary)` (its own profile, `target/release-perf/`, never the timing binary). Run

@@ -5,8 +5,8 @@
 ;; a few constructors/predicates); everything below is ordinary Brood.
 ;;
 ;; Style note: code is made of lists, so parameter lists are written as lists —
-;; (defn f (x y) ...). Vectors [ ] are a *data* type (O(1) indexing); they are
-;; still accepted in parameter/binding positions, but lists are idiomatic.
+;; (defn f (x y) ...). Vectors [ ] are a *data* type (O(1) indexing); one in a
+;; parameter or binding position is an error (ADR-512).
 ;;
 ;; The very first definition is `defn`, a macro. Everything after it is written
 ;; with `defn`, so the library is defined exactly the way you would define your
@@ -769,7 +769,8 @@ top-level definition of a name in one file that is a deliberate override),
 purpose — normally an ability, ADR-523), `:pure` (a
 `ui-memo` thunk, or a `:pure`-declared function, that performs an effect on purpose),
 `:total` (a `:total`-declared function
-the checker cannot see terminate or cover its cases), `:list-truthiness` (a truthiness test on
+the checker cannot see terminate or cover its cases), `:constant-condition` (a test the checker
+can prove always true, where that is the point), `:list-truthiness` (a truthiness test on
 a value that may be a list or another collection, kept on purpose) or `:trusted` (a declared return the
 checker cannot verify — the body's result is a kernel message or a primitive with no
 signature — which `--strict` otherwise reports as trusted, not verified). A runtime
