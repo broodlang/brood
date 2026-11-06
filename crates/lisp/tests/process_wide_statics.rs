@@ -135,7 +135,7 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // event loop hands out — and stamped with the pid that drew them: a draw from any other
     // process, of this runtime or another, finds no entry and parses afresh.
     (
-        "builtins/terminal/native/fragments.rs",
+        "builtins/gui/native/fragments.rs",
         "CACHES",
         ProcessUniqueKeys,
     ),

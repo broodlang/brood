@@ -204,8 +204,8 @@ before working in any Rust component:
   domains; `signature_types.rs` the `Ty` shorthands signatures are spelled in. The
   domains: `numeric`, `sequences`, `string`, `rope`, `io` (console), `filesystem`,
   `sockets`, `table`, `subprocesses`, `os`, `bytes`, `compress`, `crypto`, `clipboard`,
-  `pkg`, `terminal` (one registration table over `terminal/native.rs` and the wasm32
-  stub `terminal/wasm.rs`), `source`, `treesit`, `evaluation`, `modules`, `processes`,
+  `pkg`, `terminal` and `gui` (each one registration table over `native.rs` and a wasm32
+  stub `wasm.rs`), `display` (what the two read alike), `source`, `treesit`, `evaluation`, `modules`, `processes`,
   `nodes`, `dynamic`, `build_info`, `diagnostics`, `offload`, `wasm`,
   `selfhost_macros`, `tooling`, `syntax_scan`, `errors`. The four image primitives are
   registered by `boot/image.rs`, which owns that mechanism.

@@ -1039,3 +1039,15 @@ ends, each closing the one the other kept. The first fix ordered such links by n
 be, and five looped runs had hidden it behind nextest's retries. The fix now is to not
 make the second dial: gossip waits while a program's dial is under way. KI-373, the other reds in
 that run, was a race in `http_keepalive_test`'s own server.
+
+2026-11-06 (ADR-630). The editor toolkit and the frontends split along their seams, reviewed by
+reading calls rather than `:use` clauses. `editor/buffer` is pure: the process is
+`editor/buffer-server`, the disk `editor/buffer-file`, and spans of data over text
+`editor/span-properties`. A thin client loads neither the daemon nor the loop (`editor/attach`,
+`editor/serve-protocol`, `editor/frontend`), `editor/lexer` no longer loads the Brood highlighter
+(`editor/line-cache`, and the `:syntax/*` faces in `editor/face`), and `editor/treesit` touches no
+git or compiler (`editor/grammar-install`). In Rust, `builtins/gui` leaves `terminal/native.rs`
+over a shared `builtins/display`, which is one reading of a face where there were three, and
+`host/treesit` and the renderer split by what each part knows. Every public name that moved is in
+the ledger. Found by reading on the way: three CSI scanners disagreed, and `ansi/render` took
+letters only, so `ESC[3~` ate the text behind it; all of them now ask `ansi/csi-scan`.

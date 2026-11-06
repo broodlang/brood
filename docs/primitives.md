@@ -753,7 +753,7 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `%table-free` | 2 | Internal: drop the private table t the linear-map rewrite built, then return v. |
 | `%table-sub` | 3 | Store (- (get t k 0) v) at key k in table t and return the new value: table-add's subtracting sibling, which the linear-map rewrite fuses `(assoc m k (- (get m k 0) v))` and … |
 
-### `builtins/terminal.rs`
+### `builtins/gui.rs`
 
 | Primitive | Arity | Purpose |
 |---|---|---|
@@ -762,6 +762,11 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `%gui-drag-move` | 1 | Hand window `id` to the window manager for an interactive move, for the rest of the currently-held press. |
 | `%gui-drag-resize` | 2 | Hand window `id` to the window manager for an interactive resize from `dir` — :north :south :east :west :north-east :north-west :south-east :south-west. |
 | `%gui-minimize!` | 1 | Iconify window `id`. |
+
+### `builtins/terminal.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
 | `%term-forward-input` | 1 | Deliver every terminal input event — what term-poll would answer — to pid's PRIORITY lane from now on, from a reader thread, as a window delivers its input; nil stops it and … |
 
 ### `builtins/text_search.rs`

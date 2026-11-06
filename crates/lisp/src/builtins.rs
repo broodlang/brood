@@ -44,6 +44,8 @@ mod compress;
 pub(crate) mod contracts;
 mod crypto;
 mod diagnostics;
+#[cfg(not(target_arch = "wasm32"))]
+mod display;
 mod dynamic;
 mod pubkey;
 pub(crate) use dynamic::{binding_enter, push_bindings};
@@ -52,6 +54,7 @@ mod errors;
 mod evaluation;
 mod filesystem;
 mod fuzzy;
+mod gui;
 mod gui_fonts;
 mod image;
 mod io;
@@ -171,6 +174,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     table::register(&mut primitives);
     subprocesses::register(&mut primitives);
     terminal::register(&mut primitives);
+    gui::register(&mut primitives);
     evaluation::register(&mut primitives);
     source::register(&mut primitives);
     syntax_scan::register(&mut primitives);

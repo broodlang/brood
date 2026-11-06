@@ -3,7 +3,7 @@
 //! an installed name resolved to, or that it was not found — and the fallback fonts
 //! loaded so far) and `%gui-ligatures!` (shape punctuation runs together, so a
 //! programming font's ligatures form). `%gui-font-register`'s `:family-name` form lives
-//! with the rest of that primitive in `terminal/native.rs`.
+//! with the rest of that primitive in `gui/native.rs`.
 
 use super::args::arg;
 use crate::core::heap::Heap;

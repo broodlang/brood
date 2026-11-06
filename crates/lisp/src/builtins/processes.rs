@@ -1152,7 +1152,7 @@ pub(super) fn list_processes(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 // Kernel-internal per-process state an observer needs but Brood can't reach:
 // `mailbox-size` and the `process-info` snapshot, assembled here from the
 // registry / scheduler / name / monitor tables. `std/tool/observer.blsp` builds
-// everything else on top. (The terminal/GUI frontend lives in terminal.rs.)
+// everything else on top. (The frontends live in terminal.rs and gui.rs.)
 
 pub(super) fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
