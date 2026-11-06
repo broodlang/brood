@@ -1,0 +1,360 @@
+;; tests/line_cache_test.blsp — the line-state cache, with a lexer of the test's own.
+
+(defmodule line-cache-test (:use test) (:use-internals editor/line-cache))
+
+;; ---- the line-state cache (ADR-471) -----------------------------------------
+;; A toy stateful lexer: a line of ``` toggles a fence, and every line inside one is
+;; :code. It records each line it lexes, so a test can see what an edit re-lexed.
+
+(defn lc-fence-lexer (me)
+  (line-lexer (fn (line state)
+                (do
+                  (send me [:lexed line])
+                  (cond
+                    (= line "```") [[[0 3 :fence]] (if (= state :code) :text :code)]
+                    (= state :code) [[[0 (string/length line) :code]] :code]
+                    else [[] :text])))
+    :text))
+
+(defn lc-lexed ()
+  "The lines lexed since the last call, in order."
+  (letrec (go (fn (acc) (receive ([:lexed l] (go (cons l acc))) (after 0 (reverse acc))))) (go '())))
+
+(defn lc-all (cache lexer rope)
+  "`[cache spans]` over every line of `rope`."
+  (line-cache-update cache lexer rope 0 (text/line-count rope)))
+
+(defn lc-fresh (lexer rope)
+  "The spans a cold cache gives for every line — the ground truth an update must match."
+  (second (lc-all (line-cache) lexer rope)))
+
+(describe "line-cache-update — a stateful lexer"
+  (test "colours a fence opened above the window, exactly as a lex from the top does"
+    (let (lexer (lc-fence-lexer (self))
+          rope (text/from-string "a\n```\nx\ny\n```\nz")
+          [_ spans] (line-cache-update (line-cache) lexer rope 3 4))
+      (lc-lexed)
+      ;; line 3 ("y") sits inside the fence opened on line 1
+      (assert= spans (list [8 9 :code]))))
+
+  (test "an edit inside a line re-lexes that line and stops when the state is back in step"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          old (text/from-string "a\n```\nx\ny\n```\nz\nw")
+          [cache _] (lc-all (line-cache) lexer old)
+          _ (lc-lexed)
+          new (text/insert old 6 "X")
+          [cache2 spans] (lc-all cache lexer new))
+      (assert= (lc-lexed) (list "Xx"))
+      (assert= spans (lc-fresh lexer new))))
+
+  (test "opening a fence re-lexes until the old lines agree again, and the rest moves"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          old (text/from-string "a\nb\nc\n```\nd\n```\ne")
+          [cache _] (lc-all (line-cache) lexer old)
+          _ (lc-lexed)
+          ;; a new fence line after "a": everything below flips until it closes
+          new (text/insert old 2 "```\n")
+          [cache2 spans] (lc-all cache lexer new))
+      (lc-lexed)
+      (assert= spans (lc-fresh lexer new))
+      ;; and the cache it left is whole: the same text again lexes nothing
+      (lc-lexed)
+      (lc-all cache2 lexer new)
+      (assert= (lc-lexed) '())))
+
+  (test "deleting lines shifts the lines after them without lexing them again"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          old (text/from-string "a\nb\nc\nd\ne\nf")
+          [cache _] (lc-all (line-cache) lexer old)
+          _ (lc-lexed)
+          new (text/delete old 2 6)
+          [cache2 spans] (lc-all cache lexer new))
+      ;; "b\nc\n" went; line 1 is now "d" (re-lexed: it holds the edit), "e" and "f" are reused
+      (assert= (lc-lexed) (list "d"))
+      (assert= spans (lc-fresh lexer new))))
+
+  (test "the same text in a new rope lexes nothing"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          [cache _] (lc-all (line-cache) lexer (text/from-string "```\nq"))
+          _ (lc-lexed)
+          [_ spans] (lc-all cache lexer (text/from-string "```\nq")))
+      (assert= (lc-lexed) '())
+      (assert= spans (list [0 3 :fence] [4 5 :code])))))
+
+;; ---- a lean cache (ADR-483) ---------------------------------------------------------
+;; The cache keeps no line text, moves the lines after an edit as one subtree, and keeps
+;; spans only near the last few windows (a state every few dozen lines elsewhere). Each
+;; test compares against the ground truth — a cold cache, which lexes from the top — and
+;; counts the lines a step lexed, since that is the work that must not grow with the
+;; document.
+
+(defn lc-doc (n)
+  "`n` lines, `l0` … with a fence opened at every 50th line and closed 10 lines later."
+  (text/from-string (string/join (map (range n)
+                                   (fn (i)
+                                     (if (or (= (math/mod i 50) 7) (= (math/mod i 50) 17))
+                                       "```"
+                                       (str "l" i))))
+                      "\n")))
+
+(defn lc-insert-at (line text)
+  "An edit: insert `text` at the start of `line`."
+  (fn (rope) (text/insert rope (text/line->char rope line) text)))
+
+(defn lc-delete-lines (from to)
+  "An edit: delete lines `[from, to)`."
+  (fn (rope) (text/delete rope (text/line->char rope from) (text/line->char rope to))))
+
+(defn lc-truth (lexer rope lo hi)
+  "What a cold cache says for lines `[lo, hi)` — exact by construction. Drains its lexing."
+  (let (spans (second (line-cache-update (line-cache) lexer rope lo hi)))
+    (lc-lexed)
+    spans))
+
+(defn lc-stored (cache)
+  "`[entries shown]`: how many lines the cache holds anything for, and how many of those
+keep spans."
+  (let (entries (editor/line-cache/lc-entries (:tree cache) 0 0 1000000 '()))
+    [(count entries) (count (seq/filter entries (fn ([_ entry]) (= (count entry) 3))))]))
+
+(defn lc-edit-cost (n)
+  "Lines lexed by an edit near the top of an `n`-line document whose bottom window is
+cached: a line inserted at line 10, then the window (moved down one) shown again."
+  (let (me (self)
+        lexer (lc-fence-lexer me)
+        rope (lc-doc n)
+        [cache _] (line-cache-update (line-cache) lexer rope (- n 40) n)
+        _ (lc-lexed)
+        edited (text/insert rope (text/line->char rope 10) "new\n")
+        [_ spans] (line-cache-update cache lexer edited (- n 39) (inc n))
+        lexed (lc-lexed))
+    [(count lexed) (= spans (lc-truth lexer edited (- n 39) (inc n)))]))
+
+(defn lc-depth-lexer ()
+  ;; a state that changes on every line it touches: the running count of `(` minus `)`
+  (line-lexer (fn (line state)
+                [[]
+                  (+ state
+                    (count (seq/filter (string/->list line) (fn (c) (= c "("))))
+                    (- 0 (count (seq/filter (string/->list line) (fn (c) (= c ")"))))))])
+    0))
+
+(describe "line-cache-state — the state a line starts in (syntax-ppss's question)"
+  (test "a line's state is the lex from the top, cold and from a checkpoint"
+    (let (lexer (lc-depth-lexer)
+          rope (text/from-string (string/join (map (range 200) (fn (_) "(a")) "\n"))
+          [cache state] (line-cache-state (line-cache) lexer rope 150))
+      (assert= state 150)
+      (assert= (second (line-cache-state cache lexer rope 170)) 170)
+      (assert= (second (line-cache-state cache lexer rope 0)) 0)
+      ;; past the end: the state the last line ends in
+      (assert= (second (line-cache-state cache lexer rope 999)) 200)))
+  (test "after an edit, exact: the lines below it are re-lexed, not trusted"
+    (let (lexer (lc-depth-lexer)
+          rope (text/from-string (string/join (map (range 100) (fn (_) "(a")) "\n"))
+          [cache _] (line-cache-state (line-cache) lexer rope 90)
+          edited (text/insert rope 0 "((")
+          [cache2 state] (line-cache-state cache lexer edited 90))
+      (assert= state 92)
+      (assert= (second (line-cache-state cache2 lexer edited 95)) 97)))
+  (test "an edit that changes no state is back in step at once, and the colours agree"
+    (let (lexer (lc-fence-lexer (self))
+          rope (text/from-string (string/join (map (range 300) (fn (_) "x")) "\n"))
+          [cache _] (line-cache-state (line-cache) lexer rope 290)
+          _ (lc-lexed)
+          edited (text/insert rope 2 "y")
+          [cache2 state] (line-cache-state cache lexer edited 290))
+      (assert= state :text)
+      ;; the edited line and one more to see the state agree, never the 290 lines
+      (is (< (count (lc-lexed)) 40))
+      (assert= (second (line-cache-update cache2 lexer edited 280 300))
+        (second (line-cache-update (line-cache) lexer edited 280 300))))))
+
+(describe "line-cache-state-within — the same question with a budget"
+  (test "in reach it answers as line-cache-state; out of reach it says so, keeping its progress"
+    (let (lexer (lc-depth-lexer)
+          rope (text/from-string (string/join (map (range 200) (fn (_) "(a")) "\n"))
+          [_ known? state] (line-cache-state-within (line-cache) lexer rope 150 1000)
+          [cache far? none] (line-cache-state-within (line-cache) lexer rope 150 40))
+      (assert= [known? state] [true 150])
+      ;; where the walk stopped, and the exact state that line starts in
+      (assert= [far? none] [false [40 40]])
+      ;; asking again goes on from the checkpoints the last walk left
+      (letrec (ask (fn (c tries)
+                     (let ([c2 found? value] (line-cache-state-within c lexer rope 150 40))
+                       (if found? [tries value] (ask c2 (inc tries))))))
+        (let ([tries value] (ask cache 1)) (assert= value 150) (is (<= tries 5)))))))
+
+(describe "line-cache-update — a lean cache"
+  (test "an edit inside a fence re-lexes that line only, however deep the fence"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          rope (lc-doc 300)
+          [cache _] (line-cache-update (line-cache) lexer rope 250 300)
+          _ (lc-lexed)
+          ;; line 260 sits inside the fence opened at 257
+          at (+ (text/line->char rope 260) 1)
+          edited (text/insert rope at "Z")
+          [_ spans] (line-cache-update cache lexer edited 250 300))
+      (assert= (lc-lexed) (list "lZ260"))
+      (assert= spans (lc-truth lexer edited 250 300))))
+
+  (test "opening a fence inside a fence region, then closing it, stays exact"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          rope (lc-doc 300)
+          [cache _] (line-cache-update (line-cache) lexer rope 200 260)
+          opened (text/insert rope (text/line->char rope 230) "```\n")
+          [cache2 spans2] (line-cache-update cache lexer opened 200 260)
+          closed (text/insert opened (text/line->char opened 235) "```\n")
+          [cache3 spans3] (line-cache-update cache2 lexer closed 200 260)
+          [_ far] (line-cache-update cache3 lexer closed 270 302))
+      (lc-lexed)
+      (assert= spans2 (lc-truth lexer opened 200 260))
+      (assert= spans3 (lc-truth lexer closed 200 260))
+      (assert= far (lc-truth lexer closed 270 302))))
+
+  (test "lines inserted or deleted above the window move the cache instead of re-lexing it"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          rope (lc-doc 400)
+          [cache _] (line-cache-update (line-cache) lexer rope 300 350)
+          _ (lc-lexed)
+          ;; three lines gone at line 120, two inserted at line 40
+          cut (text/delete rope (text/line->char rope 120) (text/line->char rope 123))
+          [cache2 spans2] (line-cache-update cache lexer cut 297 347)
+          lexed2 (lc-lexed)
+          grown (text/insert cut (text/line->char cut 40) "x\ny\n")
+          [_ spans3] (line-cache-update cache2 lexer grown 299 349)
+          lexed3 (lc-lexed))
+      ;; each re-lexes from the checkpoint above the edit to the next one below it — never
+      ;; the window, whose lines are the cached ones moved
+      (is (<= (count lexed2) 64))
+      (is (<= (count lexed3) 64))
+      (refute (includes? lexed2 "l300"))
+      (refute (includes? lexed3 "l300"))
+      (assert= spans2 (lc-truth lexer cut 297 347))
+      (assert= spans3 (lc-truth lexer grown 299 349))))
+
+  (test "an edit costs the same lexing in a document ten times longer"
+    (let ([small small-exact?] (lc-edit-cost 300)
+          [large large-exact?] (lc-edit-cost 3000))
+      (is small-exact?)
+      (is large-exact?)
+      (assert= small large)
+      (is (<= large 64))))
+
+  (test "a far window shown again re-lexes from its checkpoint, exactly"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          rope (lc-doc 1000)
+          windows [[0 40] [200 240] [400 440] [600 640] [800 840]]
+          cache (fold windows
+                  (line-cache)
+                  (fn (c [lo hi]) (first (line-cache-update c lexer rope lo hi))))
+          _ (lc-lexed)
+          ;; the first window's spans were evicted: only checkpoints remain up there
+          [cache2 back] (line-cache-update cache lexer rope 205 245)
+          lexed-back (lc-lexed)
+          [_ top] (line-cache-update cache2 lexer rope 10 50)
+          lexed-top (lc-lexed))
+      (is (<= (count lexed-back) 73))
+      (is (<= (count lexed-top) 73))
+      (assert= back (lc-truth lexer rope 205 245))
+      (assert= top (lc-truth lexer rope 10 50))))
+
+  (test "what the cache keeps is bounded: a state every few dozen lines, spans near recent windows"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          rope (lc-doc 2000)
+          ;; scroll through the whole document a window at a time
+          cache (fold (range 0 2000 40)
+                  (line-cache)
+                  (fn (c lo) (first (line-cache-update c lexer rope lo (+ lo 40)))))
+          [entries shown] (lc-stored cache))
+      (lc-lexed)
+      (is (<= shown 160))
+      (is (<= entries (+ shown (/ 2000 16))))))
+
+  (test "a run of edits and windows agrees with a cold cache at every step"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          ;; each step is [edit lo hi]: the edit as a function of the rope, then the window
+          steps [[(lc-insert-at 5 "```\n") 0 40]
+                  [(lc-insert-at 30 "q\n") 100 140]
+                  [(lc-delete-lines 2 4) 20 60]
+                  [(lc-insert-at 120 "```\n") 110 150]
+                  [(lc-delete-lines 100 160) 0 60]
+                  [(lc-insert-at 0 "```\n```\n") 150 190]
+                  [(lc-insert-at 70 "w") 60 100]]
+          [_ _ agreed] (fold steps
+                         [(line-cache) (lc-doc 220) true]
+                         (fn ([cache rope ok] step)
+                           (let ([edit lo hi] step
+                                 edited (edit rope)
+                                 [next spans] (line-cache-update cache lexer edited lo hi))
+                             [next edited (and ok (= spans (lc-truth lexer edited lo hi)))]))))
+      (lc-lexed)
+      (is agreed))))
+
+;; An editor knows what it changed — its buffer's splice log — and can hand that to the cache
+;; instead of having it compare two whole ropes. Told or found, the answer is the same.
+(describe "line-cache-update — told what changed"
+  (test "a change from the splice log gives what the compare gives, edit after edit"
+    (let (me (self)
+          lexer (lc-fence-lexer me)
+          start (editor/buffer/make-buffer (text/->string (lc-doc 300)))
+          ;; typing in a fence, opening one, a run of deletions, a paste of several lines
+          edits [(fn (b) (editor/buffer/insert (editor/buffer/goto-char b 1300) "Z"))
+                  (fn (b) (editor/buffer/insert (editor/buffer/goto-char b 900) "```\n"))
+                  (fn (b) (editor/buffer/replace-region b 400 460 ""))
+                  (fn (b) (editor/buffer/insert (editor/buffer/goto-char b 20) "a\nb\n```\nc\n"))]
+          [cache0 _] (line-cache-update (line-cache)
+                       lexer
+                       (editor/buffer/buffer-rope start)
+                       200
+                       260)
+          [_ _ _ results] (fold edits
+                            [start cache0 cache0 '()]
+                            (fn (state edit)
+                              (let ([before told found acc] state
+                                    after (edit before)
+                                    rope (editor/buffer/buffer-rope after)
+                                    change (editor/buffer/buffer-splices-cover (editor/buffer/buffer-splices-since before
+                                                                                 after))
+                                    [told2 told-spans] (line-cache-update told
+                                                         lexer rope 200 260 change)
+                                    [found2 found-spans] (line-cache-update found
+                                                           lexer rope 200 260))
+                                [after
+                                  told2
+                                  found2
+                                  (cons [told-spans found-spans (lc-truth lexer rope 200 260)] acc)]))))
+      (lc-lexed)
+      (assert= 4 (count results))
+      (assert= []
+        (vec (seq/filter results
+               (fn ([told found truth]) (not (and (= told found) (= told truth))))))))))
+
+(describe "line-cache-update — a stateless lexer"
+  (test "lexes only the window, and a line whose text it has seen not at all"
+    (let (me (self)
+          lexer (stateless-lexer (fn (line)
+                                   (do (send me [:lexed line]) (if (= line "#") [[0 1 :c]] []))))
+          rope (text/from-string "a\n#\nb\n#")
+          [cache spans] (line-cache-update (line-cache) lexer rope 1 3))
+      (assert= (lc-lexed) (list "#" "b"))
+      (assert= spans (list [2 3 :c]))
+      (let (edited (text/insert rope 4 "c")
+            [_ spans2] (line-cache-update cache lexer edited 1 3))
+        (assert= (lc-lexed) (list "cb"))
+        (assert= spans2 (list [2 3 :c]))))))
+
+;; ---- the Lisp line lexer --------------------------------------------------------------
+;; `lisp-line-lexer` must colour every line as `highlight-spans` over the whole source
+;; does, through the line cache, from any window. The bug it fixes: a window lexed from a
+;; lead-in that began inside a multi-line docstring paired every later `"` the wrong way.

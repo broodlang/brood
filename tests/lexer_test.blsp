@@ -68,7 +68,7 @@
     (let (g (lexer-grammar {:structured [["#.*" :comment] ["\\d+" :number]]})
           src "a 1\n# two\nb 3 # x"
           rope (text/from-string src)
-          [_ spans] (editor/highlight/line-cache-update (editor/highlight/line-cache)
+          [_ spans] (editor/line-cache/line-cache-update (editor/line-cache/line-cache)
                       (lexer-line-lexer g)
                       rope
                       0

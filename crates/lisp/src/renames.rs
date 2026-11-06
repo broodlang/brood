@@ -198,6 +198,36 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "editor/frontend/hangup-request?",
         "ADR-630",
     ),
+    (
+        "editor/highlight/line-lexer",
+        "editor/line-cache/line-lexer",
+        "ADR-630",
+    ),
+    (
+        "editor/highlight/stateless-lexer",
+        "editor/line-cache/stateless-lexer",
+        "ADR-630",
+    ),
+    (
+        "editor/highlight/line-cache",
+        "editor/line-cache/line-cache",
+        "ADR-630",
+    ),
+    (
+        "editor/highlight/line-cache-update",
+        "editor/line-cache/line-cache-update",
+        "ADR-630",
+    ),
+    (
+        "editor/highlight/line-cache-state",
+        "editor/line-cache/line-cache-state",
+        "ADR-630",
+    ),
+    (
+        "editor/highlight/line-cache-state-within",
+        "editor/line-cache/line-cache-state-within",
+        "ADR-630",
+    ),
     // ADR-630 block end
     // ADR-506 — the bare namespace is the language: syntax, a measured core and the
     // built-in kinds. Everything else is qualified by its family.

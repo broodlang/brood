@@ -610,6 +610,8 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // A line-oriented lexer from a table of rules (the format tables over it live in
     // bedit, ADR-417).
     embedded_module!("editor/lexer", "std/editor/lexer.blsp"),
+    // The line-state cache incremental highlighters share (ADR-471, ADR-483).
+    embedded_module!("editor/line-cache", "std/editor/line-cache.blsp"),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
     // shared by the line editor and the observer; `observer` is a process-viewer
