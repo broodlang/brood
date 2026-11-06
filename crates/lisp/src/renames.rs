@@ -228,6 +228,46 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "editor/line-cache/line-cache-state-within",
         "ADR-630",
     ),
+    (
+        "editor/treesit/grammar-library-name",
+        "editor/grammar-install/grammar-library-name",
+        "ADR-630",
+    ),
+    (
+        "editor/treesit/grammar-fetch",
+        "editor/grammar-install/grammar-fetch",
+        "ADR-630",
+    ),
+    (
+        "editor/treesit/grammar-build",
+        "editor/grammar-install/grammar-build",
+        "ADR-630",
+    ),
+    (
+        "editor/treesit/grammar-manifest-path",
+        "editor/grammar-install/grammar-manifest-path",
+        "ADR-630",
+    ),
+    (
+        "editor/treesit/grammar-manifest",
+        "editor/grammar-install/grammar-manifest",
+        "ADR-630",
+    ),
+    (
+        "editor/treesit/grammar-file-hash",
+        "editor/grammar-install/grammar-file-hash",
+        "ADR-630",
+    ),
+    (
+        "editor/treesit/grammar-install",
+        "editor/grammar-install/grammar-install",
+        "ADR-630",
+    ),
+    (
+        "editor/treesit/grammar-identity",
+        "editor/grammar-install/grammar-identity",
+        "ADR-630",
+    ),
     // ADR-630 block end
     // ADR-506 — the bare namespace is the language: syntax, a measured core and the
     // built-in kinds. Everything else is qualified by its family.

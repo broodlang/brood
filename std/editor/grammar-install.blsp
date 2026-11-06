@@ -1,0 +1,244 @@
+;; std/editor/grammar-install.blsp — from where a grammar lives to a library the runtime loads.
+;;
+;; `%tree-sitter-load-grammar` takes a shared library; a grammar starts life as a repository
+;; (or a checkout) holding `src/parser.c` and, often, a `src/scanner.c` or `scanner.cc`. The
+;; steps between (fetch, compile, name the library the way a loader expects) are the same for
+;; every grammar, so they are here as a recipe a mode can run from a declaration of WHERE the
+;; grammar is, rather than a README the user follows. This is the module that touches git, a C
+;; compiler and the disk; `editor/treesit` only asks the runtime.
+
+(defmodule editor/grammar-install
+  "Getting a tree-sitter grammar: `grammar-fetch` a repository at a revision, `grammar-build`
+its parser into `grammar-library-name`, and `grammar-install` both, with a manifest beside the
+library saying what it was built from (`grammar-manifest`, ADR-583). `grammar-identity` says
+which grammar the runtime parses a language with, as far as that can be told."
+  (:use editor/treesit))
+
+(defn grammar-library-name (lang)
+  "The file name a grammar for `lang` is loaded from: `libtree-sitter-<lang>.so`.
+
+    (editor/grammar-install/grammar-library-name :elixir)   ;=> \"libtree-sitter-elixir.so\""
+  (str "libtree-sitter-" (->string lang) ".so"))
+
+(defn- grammar-scanner (src-dir)
+  "The scanner source beside `parser.c`, if the grammar has one: `[path c++?]` or nil."
+  (cond
+    (file/exists? (path/join src-dir "scanner.c")) [(path/join src-dir "scanner.c") false]
+    (file/exists? (path/join src-dir "scanner.cc")) [(path/join src-dir "scanner.cc") true]
+    else nil))
+
+(defn- git-in (dir args)
+  ;; `git -C dir args…`, never prompting for a password nobody is there to type
+  (os/cmd "git" (append ["-C" dir] args) {:env {"GIT_TERMINAL_PROMPT" "0"}}))
+
+(defn- git-failure (what result)
+  {:error (str what ": " (string/trim (or (get result :stderr) "")))})
+
+(defn- checkout-commit (dir)
+  ;; the commit a checkout is at, or nil when `dir` is not one
+  (let (result (git-in dir ["rev-parse" "HEAD"]))
+    (when (os/cmd-ok? result) (string/trim (get result :stdout)))))
+
+(defn- sha-like? (revision)
+  ;; a revision spelled as a full commit hash, which the fetched commit must then be — a tag
+  ;; or branch name is whatever the remote says it is
+  (regex/matches? "[0-9a-f]{40}" revision))
+
+(defn- abbreviated-hash? (revision)
+  ;; a commit hash cut short: git's protocol fetches a full one only, so it cannot be a pin
+  (and (string? revision) (regex/matches? "[0-9a-f]{7,39}" revision)))
+
+(defn- ensure-repository (source dest)
+  ;; `dest` a git repository whose `origin` is `source`: made, or re-pointed
+  (if (file/dir? (path/join dest ".git"))
+    (git-in dest ["remote" "set-url" "origin" source])
+    (let (made (do (file/mkdir dest) (git-in dest ["init" "-q"])))
+      (if (os/cmd-ok? made) (git-in dest ["remote" "add" "origin" source]) made))))
+
+(defn- checkout-fetched (source dest revision)
+  ;; one shallow fetch of `revision` (nil: the default branch) into the repository at `dest`,
+  ;; then a detached checkout of it — `{:ok dest :commit sha}` or `{:error text}`
+  (let (wanted (or revision "HEAD")
+        fetched (git-in dest ["fetch" "-q" "--depth=1" "origin" wanted]))
+    (if (not (os/cmd-ok? fetched))
+      (git-failure (str "git fetch " source " " wanted) fetched)
+      (let (checked (git-in dest ["checkout" "-q" "--detach" "--force" "FETCH_HEAD"])
+            commit (checkout-commit dest))
+        (cond
+          (not (os/cmd-ok? checked)) (git-failure (str "git checkout " wanted) checked)
+          (nil? commit) {:error (str dest " has no commit after fetching " wanted)}
+          (and revision (sha-like? revision) (not (= commit revision)))
+            {:error (str "fetched " revision " from " source " but the checkout is at " commit)}
+          else {:ok dest :commit commit})))))
+
+(defn- fetch-revision (source dest revision)
+  ;; `dest` made a checkout of `source` at `revision` (nil: its default branch)
+  (if (abbreviated-hash? revision)
+    {:error (str revision
+              " is an abbreviated commit hash — git fetches a commit by its full"
+              " hash only, so pin all forty digits")}
+    (let (initialised (ensure-repository source dest))
+      (if (os/cmd-ok? initialised)
+        (checkout-fetched source dest revision)
+        (git-failure (str "git init " dest) initialised)))))
+
+(defn grammar-fetch (source:string dest:string &optional (revision nil) -> map)
+  "Bring the grammar at `source` to the directory `dest`, at `revision` — a full commit hash or
+a tag; nil is the repository's default branch as it is today. A git URL is fetched shallow
+(one commit, so a language costs seconds, not a history) into a repository kept at `dest`,
+and checked out detached at that revision; a `dest` that already holds a checkout is moved to
+it, so the same call installs, updates and pins back (ADR-583). A hash names its commit: a
+checkout at any other is an error, and an abbreviated hash is refused up front, since git
+fetches a commit by its full hash only. A local directory is used as it is. Returns `{:ok dir :commit sha}` — `:commit` nil for a directory that is not a git
+checkout — or `{:error text}`.
+
+    (editor/grammar-install/grammar-fetch \"nowhere\" \"unused\")   ;=> {:error \"no grammar at nowhere (a git URL or a directory)\"}"
+  (cond
+    (file/dir? source) {:ok source :commit (checkout-commit source)}
+    (seq/find ["http" "git@" "file://"] (fn (scheme) (string/starts-with? source scheme)))
+      (fetch-revision source dest revision)
+    else {:error (str "no grammar at " source " (a git URL or a directory)")}))
+
+(defn grammar-build (checkout lang out-dir &optional (subdir nil))
+  "Compile the grammar in `checkout` (its `src/parser.c`, plus `src/scanner.c` /
+`scanner.cc` when present — the latter with the C++ compiler) into
+`<out-dir>/libtree-sitter-<lang>.so`, the library `%tree-sitter-load-grammar` takes.
+`subdir` names the grammar's directory inside a repository that holds several —
+tree-sitter-typescript keeps `typescript/src` and `tsx/src`. A `src/` a grammar generator
+has not produced yet (a repository shipping only `grammar.js`) is reported, not
+generated: that needs the tree-sitter CLI. Returns `{:ok path}` or `{:error text}`.
+
+    (contains? (editor/grammar-install/grammar-build \".\" :none \".\") :error)   ;=> true"
+  (let (root (if (nil? subdir) checkout (path/join checkout subdir))
+        src (path/join root "src")
+        parser (path/join src "parser.c")
+        out (path/join out-dir (grammar-library-name lang)))
+    (if (not (file/exists? parser))
+      {:error (str root " has no src/parser.c — run `tree-sitter generate` in it first")}
+      (let (scanner (grammar-scanner src)
+            cxx? (and scanner (second scanner))
+            compiler (if cxx? "c++" "cc")
+            args (append ["-shared" "-fPIC" "-O2" (str "-I" src) "-o" out parser]
+                   (if scanner [(first scanner)] [])
+                   (if cxx? ["-lstdc++"] []))
+            _ (file/mkdir out-dir)
+            r (os/cmd compiler args))
+        (if (os/cmd-ok? r)
+          {:ok out}
+          {:error (str compiler " failed: " (string/trim (get r :stderr "")))})))))
+(sig grammar-build (string any string &optional (or nil string) -> map))
+
+;; ---- what was installed: the manifest beside the library (ADR-583) -------------------
+;; A library says what it CONTAINS (`grammar-info`) but not where it came from: two builds
+;; of different revisions are just two files of the same name. So an install writes down what
+;; it fetched next to what it built — the revision asked for, the commit it resolved to, the
+;; library's hash — and anything that later asks "which grammar is this" reads that, and
+;; knows the library was swapped by hand when the hash no longer matches.
+
+(defn grammar-manifest-path (library:string -> string)
+  "Where the manifest of the grammar library `library` lives: beside it,
+`libtree-sitter-<lang>.manifest` — not a `.so`, so a directory scan for libraries passes it by.
+
+    (editor/grammar-install/grammar-manifest-path \"/g/libtree-sitter-go.so\")   ;=> \"/g/libtree-sitter-go.manifest\""
+  (str (if (string/ends-with? library ".so")
+         (string/substring library 0 (- (string/length library) 3))
+         library)
+    ".manifest"))
+
+(defn grammar-file-hash (library:string)
+  "The SHA-256 of the file `library`, as lowercase hex — nil when it cannot be read.
+
+    (editor/grammar-install/grammar-file-hash \"/nonexistent/libtree-sitter-x.so\")   ;=> nil"
+  (when (file/exists? library)
+    (let (bytes (check-allow :discarded-catch (try (file/slurp-bytes library) (catch _ nil))))
+      (when (not (nil? bytes)) (hash/sha256-bytes bytes)))))
+
+(defn- parser-abi (parser)
+  ;; the ABI `parser.c` was generated for — its `#define LANGUAGE_VERSION N` — or nil
+  (let (result (os/cmd "grep" ["-m1" "-E" "^#define LANGUAGE_VERSION " parser]))
+    (when (os/cmd-ok? result)
+      (let (number (string/->number (string/trim (string/substring (string/trim (get result :stdout))
+                                                   (string/length "#define LANGUAGE_VERSION")))))
+        (when (int? number) number)))))
+
+(defn grammar-manifest (library:string)
+  "The manifest an install wrote beside the grammar library `library` (`grammar-install`):
+`{:lang :source :subdir :revision :commit :abi :sha256}` — where it was fetched from, the
+revision asked for (nil: the default branch), the commit that resolved to, the ABI its
+`parser.c` was generated for and the hash of the library built — or nil when there is none
+(a library built by hand) or it does not read as one map.
+
+    (editor/grammar-install/grammar-manifest \"/nonexistent/libtree-sitter-x.so\")   ;=> nil"
+  (let (path (grammar-manifest-path library))
+    (when (file/exists? path)
+      (let (value (check-allow :discarded-catch
+                    (try (reflect/read-string (file/slurp path)) (catch _ nil))))
+        (when (map? value) value)))))
+
+(defn- write-manifest (library manifest)
+  ;; `manifest` beside `library`, as one re-readable map; `{:ok library}` or `{:error text}`
+  (let (written (try
+                  (do
+                    (file/spit (grammar-manifest-path library)
+                      (str ";; written by editor/grammar-install/grammar-install — what this library was built from\n"
+                        (pr-str manifest)
+                        "\n"))
+                    true)
+                  (catch e (error-message e))))
+    (if (= written true)
+      {:ok library}
+      {:error (str "built " library " but could not write its manifest: " written)})))
+
+(defn grammar-install (source lang out-dir work-dir &optional (options nil))
+  "`grammar-fetch` then `grammar-build`: from where a grammar lives (`source` — a git URL or a
+directory) to `<out-dir>/libtree-sitter-<lang>.so`, fetching into `<work-dir>/<lang>`.
+`options` is `{:subdir :revision}`: the grammar's directory when the repository holds
+several, and the revision to build — a commit hash or tag, nil for the default branch as it
+is today. Beside the library it writes the MANIFEST (`grammar-manifest`): the source, the
+revision asked for, the commit it resolved to, the ABI and the library's hash — so which
+grammar a user has is a file to read, not a guess (ADR-583). The one call a mode's grammar
+declaration needs to become a loadable library. `{:ok path :commit sha}` or `{:error text}`.
+
+    (contains? (editor/grammar-install/grammar-install \"nowhere\" :none \".\" \".\") :error)   ;=> true"
+  (let (subdir (get options :subdir)
+        revision (get options :revision)
+        fetched (grammar-fetch source (path/join work-dir (->string lang)) revision))
+    (if (:error fetched)
+      fetched
+      (let (built (grammar-build (:ok fetched) lang out-dir subdir))
+        (if (:error built)
+          built
+          (let (library (:ok built)
+                root (if (nil? subdir) (:ok fetched) (path/join (:ok fetched) subdir))
+                written (write-manifest library
+                          {:lang lang
+                           :source source
+                           :subdir subdir
+                           :revision revision
+                           :commit (:commit fetched)
+                           :abi (parser-abi (path/join root "src" "parser.c"))
+                           :sha256 (grammar-file-hash library)}))
+            (if (:error written) written (assoc written :commit (:commit fetched)))))))))
+(sig grammar-install (string any string string &optional (or nil map) -> map))
+
+(defn grammar-identity (lang:keyword -> map)
+  "Which grammar the runtime parses `lang` with, as far as it can be told (ADR-583): its
+`:abi`, `:version` and `:source` (`grammar-info`), its shape's `:fingerprint`
+(`grammar-fingerprint`), and — for a library an install wrote a manifest beside — that
+install's `:revision` and `:commit`, with `:manifest-current?` saying whether the library is
+still the one it built (false: it was replaced since, and the revision is no longer known).
+Loads a declared grammar; raises when there is none, as `grammar-info` does.
+
+    (try (editor/grammar-install/grammar-identity :no-grammar-has-this-name) (catch _ :none))   ;=> :none"
+  (let (info (grammar-info lang)
+        source (get info :source)
+        manifest (when (string? source) (grammar-manifest source)))
+    {:lang lang
+     :abi (get info :abi)
+     :version (get info :version)
+     :source source
+     :fingerprint (grammar-fingerprint info)
+     :revision (get manifest :revision)
+     :commit (get manifest :commit)
+     :manifest-current? (and (not (nil? manifest))
+                          (= (get manifest :sha256) (grammar-file-hash source)))}))

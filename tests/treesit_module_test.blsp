@@ -1,13 +1,13 @@
 ;; std/editor/treesit.blsp (ROADMAP §C): the language-agnostic services over
 ;; `tree-sitter-parse`'s positioned CST — `fontify` (kind→face colour spans) and
-;; the pure structural motions. Requires `editor/highlight` for the shared
-;; `:syntax/*` face registry (the editor always loads it).
+;; the pure structural motions.
 ;;
 ;; Register-only — discovered and run by `nest test` (and `brood --test`).
 
 (defmodule treesit-module-test
   (:use test)
-  (:use editor/treesit))
+  (:use editor/treesit)
+  (:use editor/grammar-install))
 
 ;; `editor/highlight` must be loaded for effect — it registers the `:syntax/*`
 ;; faces the fontify comparisons below resolve against. The file references none

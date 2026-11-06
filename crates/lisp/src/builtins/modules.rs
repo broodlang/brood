@@ -735,6 +735,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // analogue of `sexp`+`highlight`. Pure UI a shipped editor `require`s for its
     // ruby/elixir/… modes (ROADMAP §C), so it stays in CORE; opt-in, never prelude.
     embedded_module!("editor/treesit", "std/editor/treesit.blsp"),
+    embedded_module!("editor/grammar-install", "std/editor/grammar-install.blsp"),
     // A supervised evaluation session in a child process: spawn, a line protocol,
     // queue-until-ready, id-matched replies, a watchdog, generations, respawn. The
     // supervision is language-agnostic — a backend supplies how to spawn its child
