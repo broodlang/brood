@@ -3481,6 +3481,26 @@ impl GpuWindow {
                     fb.nested -= 1;
                     fb.clip = saved_clip;
                 }
+                Op::AboveSeam { ops } => {
+                    // ADR-615, `render_ops`' arm: the rows above the seam carried on with no
+                    // gap, clipped where the seam's row begins — what the group puts on the
+                    // seam's row shows its top in the leftover strip.
+                    // Under half a row of strip, the window's own rows: phase 1.
+                    let saved_clip = fb.clip;
+                    if let Some(cut) = g.rows.seam_top() {
+                        fb.clip[3] = fb.clip[3].min(cut as f32);
+                    }
+                    if fb.clip[3] > fb.clip[1] {
+                        let inner = Grid {
+                            rows: g.rows.above_seam_rows(),
+                            ..g
+                        };
+                        fb.nested += 1;
+                        self.expand(fb, renderer, ops, inner);
+                        fb.nested -= 1;
+                    }
+                    fb.clip = saved_clip;
+                }
                 Op::CellRegion {
                     x, y, h, px, ops, ..
                 } => {

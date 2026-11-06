@@ -416,6 +416,65 @@ descriptions, empty when the rule holds."
                       (vec (map (range (math/round (inc (second (:grid image)))))
                              (fn (k) (* k cell-h))))))))))
 
+;; --- the strip as content (ADR-615): the next line laid out past the seam, cut off there --
+
+(def- strip-next [230 120 30])
+(def- strip-ink [250 250 250])
+
+(defn- strip-next-line (seam cols)
+  "The body's next line, on the seam's row: its background and ink reaching the cell's top."
+  [[:rect seam 0 cols 1 {:bg strip-next}] [:text seam 2 "Ég|ÉÉ|Ég" {:fg strip-ink}]])
+
+(defn- strip-failures (h size)
+  "What breaks the strip rule for a window `h` px tall at font `size`: the strip's pixel rows
+must be exactly the next line's top as it paints with no seam at all when the strip is at
+least half a row tall, and every other pixel row (all of them, under half a row) the phase-1
+picture. A vector of descriptions, empty when it holds; with whether any strip row showed
+the line's ink, and whether this strip was tall enough to show it."
+  (let ([cols rows] (:grid (gui/render-frame [[:clear] [:seam nil]] (seam-spec h size)))
+        seam (- rows 2)
+        body [:rect 0 0 cols seam {:bg seam-body}]
+        chrome [[:rect seam 0 cols 1 {:bg seam-mode}] [:rect (dec rows) 0 cols 1 {:bg seam-echo}]]
+        phase-1 (gui/render-frame (into [[:clear] [:seam seam] body] chrome) (seam-spec h size))
+        phase-2 (gui/render-frame (into [[:clear]
+                                          [:seam seam]
+                                          body
+                                          [:above-seam (strip-next-line seam cols)]]
+                                    chrome)
+                  (seam-spec h size))
+        flat (gui/render-frame (into [[:clear] body] (strip-next-line seam cols))
+               (seam-spec h size))
+        cell-h (second (:cell phase-1))
+        strip-top (+ (nth (:row-tops phase-1) (dec seam)) cell-h)
+        strip-bottom (nth (:row-tops phase-1) seam)
+        ;; the rule: the line shows from half a row of strip; under that, phase 1
+        shown (>= (* 2 (- strip-bottom strip-top)) cell-h)
+        pixels (fn (image y) (bytes/slice (:rgba image) (* y 1600) (* (inc y) 1600)))
+        wrong (seq/filter (range 0 h)
+                (fn (y)
+                  (not (= (pixels phase-2 y)
+                         (pixels (if (and shown (>= y strip-top) (< y strip-bottom)) flat phase-1) y))))))
+    [(vec (seq/filter [(when (not (= (:row-tops phase-2) (:row-tops phase-1))) :rows-moved)
+                        (when (not (empty? wrong)) [:pixel-row (first wrong)])]
+            (fn (failure) (not (nil? failure)))))
+      (any? (range strip-top strip-bottom)
+        (fn (y) (any? (range 0 400) (fn (x) (= (gui/pixel phase-2 x y) strip-ink)))))
+      (if shown :shown (if (> strip-bottom strip-top) :too-short :none))]))
+
+(describe "gui/render-frame — the strip shows the next line (ADR-615)"
+  (test "from half a row the strip shows the next line clipped; under it, phase 1"
+    (when-gui
+      (fn ()
+        (doseq (size [15 21])
+          (let (cell-h (second (:cell (gui/render-frame [[:clear]] (seam-spec 300 size))))
+                results (map (range 300 (+ 300 cell-h))
+                          (fn (h) [h (strip-failures h size)])))
+            (doseq ([h [failures _ _]] results)
+              (is (= [size h failures] [size h []])))
+            ;; some height's strip is tall enough to show the line's ink, and some is too short
+            (is (any? results (fn ([_ [_ inked _]]) inked)))
+            (is (any? results (fn ([_ [_ _ kind]]) (= kind :too-short))))))))))
+
 (describe "gui/render-frame — what bleeds into a top margin (ADR-610)"
   (test "a one-row band on row 0 stays out of it; a taller band reaches the top edge"
     (when-gui (fn ()

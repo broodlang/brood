@@ -28,6 +28,8 @@
 ;;   [:seam row]                    rows from `row` down anchored to the window's bottom, the
 ;;                                  leftover pixels at the seam (ADR-610); GUI-only
 ;;   [:seam row {:top-band false}]  …and row 0 not a band: the top gets the inset too
+;;   [:above-seam ops]              ops on the rows above the seam carried on past it, cut off
+;;                                  at it: their seam row shows in the leftover (ADR-615)
 ;; A FACE is a map of style attributes, any subset of:
 ;;   {:fg <colour> :bg <colour> :bold <truthy> :reverse <truthy>}
 ;; where a colour is either a palette keyword — :black :red :green :yellow :blue
@@ -199,6 +201,25 @@ the terminal frontend skips it.
     (editor/display/seam 38)                     ;=> [:seam 38]
     (editor/display/seam 38 {:top-band false})   ;=> [:seam 38 {:top-band false}]"
   (if (empty? opts) [:seam row] [:seam row opts]))
+
+(defn above-seam (ops)
+  "A render block for the text ABOVE the seam (ADR-615): `ops` are laid out on the rows above
+the frame's `seam` carried on past it, as if the grid had no seam, and cut off where the
+seam's row begins. So the row they put at the seam's own row number shows its top in the
+leftover strip — the next line of the text, partly visible, as Emacs shows a window's last
+line — rather than the stretched background of the row above it, once the strip is at least
+half a row tall (under that, a few pixels of a line being specks, the strip stays the row
+above's, exactly as without the block: the renderer decides, knowing the pixels). Rows above
+the seam paint where they always do. Paint the next row's background too: the strip holds
+what the frame painted there before the block. `ops` is a flat vector of render ops (built with `into []`).
+
+A frame with one makes a strip showing the line content to the mouse as well: a pointer in it
+is reported on the seam's row, as the block laid it out, with `:partial true` in the event's
+trailing map — not the bottom-anchored row of the same number. GUI-only: without a seam the ops paint
+as they are, and the terminal frontend draws them in place.
+
+    (editor/display/above-seam [[:text 30 0 \"next line\"]])   ;=> [:above-seam [[:text 30 0 \"next line\"]]]"
+  [:above-seam ops])
 
 (defn frect (x y w h face &optional (opacity 1.0) (radius 0.0))
   "A **sub-cell** rounded-rectangle render op: like `rect`, but `x`/`y` (top-left) and

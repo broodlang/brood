@@ -1300,7 +1300,9 @@ impl CaretBlink {
 fn blinking_caret(ops: &[Op]) -> Option<&Op> {
     ops.iter().find_map(|op| match op {
         Op::Cursor { blink: Some(_), .. } => Some(op),
-        Op::ScrollRegion { ops, .. } | Op::CellRegion { ops, .. } => blinking_caret(ops),
+        Op::ScrollRegion { ops, .. } | Op::CellRegion { ops, .. } | Op::AboveSeam { ops } => {
+            blinking_caret(ops)
+        }
         Op::Fragment(fragment) => blinking_caret(&fragment.0),
         _ => None,
     })
@@ -1517,6 +1519,9 @@ struct Win {
     /// and cell as `cursor` — what a mouse message carries as `{:at [row col]}` so a zoomed
     /// region can hit-test inside a window cell (`Mouse::at`).
     cursor_at: (f64, f64),
+    /// Whether the pointer is in the leftover strip of a frame that paints its next line
+    /// there (ADR-615): `cursor`'s row is then the seam's, the strip's own (`Mouse::partial`).
+    cursor_partial: bool,
     /// The button currently held down (set on press, cleared on release), so a
     /// `CursorMoved` while it's held can be reported as a `:drag` carrying that
     /// button. Deliberately one button at a time — all a drag gesture needs: a
@@ -1776,6 +1781,7 @@ fn build_window(
         cursor: (0, 0),
         cursor_px: (0, 0),
         cursor_at: (0.0, 0.0),
+        cursor_partial: false,
         held: None,
         last_click: None,
         keyboard: Keyboard::new(spec.key_repeat),
@@ -2510,7 +2516,14 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     let (col, row) = w.cursor;
                     deliver(
                         w.subscriber,
-                        mouse_message(&release_of(b, col, row, w.pointer_at(), &w.mods)),
+                        mouse_message(&release_of(
+                            b,
+                            col,
+                            row,
+                            w.pointer_at(),
+                            w.pointer_partial(),
+                            &w.mods,
+                        )),
                     );
                 }
             }
@@ -2565,7 +2578,14 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     let (col, row) = w.cursor;
                     deliver(
                         w.subscriber,
-                        mouse_message(&release_of(b, col, row, w.pointer_at(), &w.mods)),
+                        mouse_message(&release_of(
+                            b,
+                            col,
+                            row,
+                            w.pointer_at(),
+                            w.pointer_partial(),
+                            &w.mods,
+                        )),
                     );
                 }
             }
@@ -2583,15 +2603,22 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     psz.height as usize,
                 );
                 let px = px_clamped(position);
+                // the strip a frame paints its next line into is a cell of its own (ADR-615): the
+                // seam's row number, but not the row bottom-anchored on it
+                let partial = w
+                    .renderer
+                    .rows(psz.width as usize, psz.height as usize)
+                    .in_strip(position.y);
                 // A pixel-input window (a game) reports every pixel of motion — that IS
                 // the grain it asked for, and winit already coalesces motion per frame —
                 // where a cell-grid window reports only a cell crossing.
                 let moved = if w.pixel_input {
                     px != w.cursor_px
                 } else {
-                    cell != w.cursor
+                    cell != w.cursor || partial != w.cursor_partial
                 };
                 w.cursor = cell;
+                w.cursor_partial = partial;
                 w.cursor_px = px;
                 w.cursor_at = px_to_cell_frac(
                     position,
@@ -2624,6 +2651,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             count: 0,
                             scroll_dy: 0.0,
                             at: w.pointer_at(),
+                            partial: w.pointer_partial(),
                         }),
                     );
                 }
@@ -2691,6 +2719,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             count,
                             scroll_dy: 0.0,
                             at: w.pointer_at(),
+                            partial: w.pointer_partial(),
                         }),
                     );
                 }
@@ -2716,6 +2745,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             count: 0,
                             scroll_dy: 0.0,
                             at: w.pointer_at(),
+                            partial: w.pointer_partial(),
                         }),
                     );
                 }
@@ -3205,6 +3235,12 @@ impl Win {
         } else {
             Some(self.cursor_at)
         }
+    }
+
+    /// Whether the pointer is in a painted leftover strip (ADR-615, `Mouse::partial`): never
+    /// for a pixel-input window, whose pointer is pixels.
+    fn pointer_partial(&self) -> bool {
+        !self.pixel_input && self.cursor_partial
     }
 }
 

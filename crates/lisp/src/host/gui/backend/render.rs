@@ -758,6 +758,9 @@ pub(crate) struct Renderer {
     /// Whether row 0 is a band (no margin above it) — `Op::Seam`'s `top_band`, true for a
     /// frame without one.
     top_band: bool,
+    /// Whether the frame paints the leftover strip as content (`Op::AboveSeam`, ADR-615):
+    /// the hit-test gives the strip to the seam's row ([`RowMap::in_strip`]).
+    partial: bool,
     bg: Option<[u8; 3]>, // window background (clear/inset-margin fill); None = DEFAULT_BG
     fg: Option<[u8; 3]>, // default text colour (a face with no :fg); None = DEFAULT_FG
     line_height: f32,    // cell height as a multiple of the font px (`gui-line-height!`)
@@ -839,6 +842,7 @@ impl Renderer {
             base_inset: 0.0,
             seam: None,
             top_band: true,
+            partial: false,
             bg: None,
             fg: None,
             line_height: LINE_HEIGHT,
@@ -1005,6 +1009,7 @@ impl Renderer {
             self.inset(),
             h_px,
             self.seam,
+            self.partial,
         )
     }
 
@@ -1017,11 +1022,12 @@ impl Renderer {
     /// true when the GRID changed — row 0 became or stopped being a band, which moves the top
     /// margin and so the row count — so the caller re-publishes the window's size; a new seam
     /// alone moves pixels, not cells. Either change invalidates the retained frame.
-    pub(crate) fn set_layout(&mut self, (seam, top_band): (Option<u16>, bool)) -> bool {
-        let grid_changed = top_band != self.top_band;
-        if seam != self.seam || grid_changed {
-            self.seam = seam;
-            self.top_band = top_band;
+    pub(crate) fn set_layout(&mut self, layout: super::rows::Layout) -> bool {
+        let grid_changed = layout.top_band != self.top_band;
+        if layout.seam != self.seam || grid_changed || layout.partial != self.partial {
+            self.seam = layout.seam;
+            self.top_band = layout.top_band;
+            self.partial = layout.partial;
             self.invalidate();
         }
         grid_changed

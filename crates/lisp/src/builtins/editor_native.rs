@@ -30,7 +30,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 2),
         Sig::with_optional(vec![any], vec![any], vec_ty),
         &["frame", "keep-markers?"],
-        "[frame' table]: frame (a vector or list of render ops) with every [:ui/memo key deps ops] (or [:ui/memo key deps ops reused?]) marker replaced by its ops — or, when keep-markers? is truthy, frame itself, markers and all (for a display that takes them: the GUI window parses a reused fragment once, ADR-470) — and a map key -> [deps ops] of the markers. Recurses into a marker's ops and into the ops a block op carries — [:scroll-region frac ops] and [:cell-region x y w h px ops] (whose ops come back as a vector, as they went in). The pass behind editor/ui's memoised view fragments (ADR-336), native because it runs once per frame over every op.",
+        "[frame' table]: frame (a vector or list of render ops) with every [:ui/memo key deps ops] (or [:ui/memo key deps ops reused?]) marker replaced by its ops — or, when keep-markers? is truthy, frame itself, markers and all (for a display that takes them: the GUI window parses a reused fragment once, ADR-470) — and a map key -> [deps ops] of the markers. Recurses into a marker's ops and into the ops a block op carries — [:scroll-region frac ops], [:cell-region x y w h px ops] and [:above-seam ops] (whose ops come back as a vector, as they went in). The pass behind editor/ui's memoised view fragments (ADR-336), native because it runs once per frame over every op.",
         ui_harvest,
     );
     // The text contrast exponent (`gui-text-contrast!`, ADR-337): partial glyph coverage
@@ -116,16 +116,19 @@ struct Tags {
     memo: value::Symbol,
     scroll_region: value::Symbol,
     cell_region: value::Symbol,
+    above_seam: value::Symbol,
 }
 
-/// Where an op that CARRIES ops keeps them — `Some(index)` for `[:scroll-region frac ops]`
-/// and `[:cell-region x y w h px ops]`, `None` for a leaf. The harvest has to recurse into
-/// those (a memo marker nested in one is still a marker) and rebuild them around the result.
+/// Where an op that CARRIES ops keeps them — `Some(index)` for `[:scroll-region frac ops]`,
+/// `[:cell-region x y w h px ops]` and `[:above-seam ops]`, `None` for a leaf. The harvest has
+/// to recurse into those (a memo marker nested in one is still a marker) and rebuild them around the result.
 fn nested_ops_at(tag: value::Symbol, tags: &Tags, len: usize) -> Option<usize> {
     if tag == tags.scroll_region && len == 3 {
         Some(2)
     } else if tag == tags.cell_region && len == 7 {
         Some(6)
+    } else if tag == tags.above_seam && len == 2 {
+        Some(1)
     } else {
         None
     }
@@ -206,6 +209,7 @@ fn ui_harvest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         memo: value::intern("ui/memo"),
         scroll_region: value::intern("scroll-region"),
         cell_region: value::intern("cell-region"),
+        above_seam: value::intern("above-seam"),
     };
     let mut table = Vec::new();
     let keep_markers = crate::eval::truthy(arg(args, 1));

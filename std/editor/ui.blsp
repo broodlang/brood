@@ -807,8 +807,8 @@ frontend paints), and the table of this turn's fragments — what `editor/ui/*me
 for the next turn. With `keep-markers?` the frame comes back as it is, markers and all,
 for a display whose `:fragments?` says it takes them: the GUI window parses a fragment the
 loop reused once, and shares it with the frame before (ADR-470). The loop calls it on every rendered frame; a frame without markers
-comes back as it went in, with an empty table. Recurses into a marker's ops and a
-`:scroll-region`'s. Native (`%ui-harvest`): it walks every op of every frame, where a
+comes back as it went in, with an empty table. Recurses into a marker's ops and the ops a
+`:scroll-region`, `:cell-region` or `:above-seam` carries. Native (`%ui-harvest`): it walks every op of every frame, where a
 Brood-level walk cost about a millisecond — more than the paint the memo saves.
 
     (first (editor/ui/ui-harvest [[:ui/memo :k [] [[:clear]] false]]))   ;=> [[:clear]]
