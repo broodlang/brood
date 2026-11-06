@@ -53,6 +53,7 @@ mod evaluation;
 mod filesystem;
 mod fuzzy;
 mod gui_fonts;
+mod image;
 mod io;
 mod json;
 mod line_diff;
@@ -165,6 +166,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     bytes::register(&mut primitives);
     io::register(&mut primitives);
     filesystem::register(&mut primitives);
+    image::register(&mut primitives);
     sockets::register(&mut primitives);
     table::register(&mut primitives);
     subprocesses::register(&mut primitives);

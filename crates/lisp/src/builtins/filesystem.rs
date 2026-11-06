@@ -6,7 +6,7 @@ use crate::core::value::{EnvId, Value, kw};
 use crate::error::{LispError, LispResult};
 
 use super::args::{arg, expect_int, expect_string};
-use super::bytes::{bytes_to_value, collect_bytes, flatten_iolist};
+use super::bytes::{bytes_to_value, flatten_iolist};
 
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.
 pub(super) fn register(primitives: &mut super::Primitives) {
@@ -166,20 +166,6 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["path"],
         "Metadata for path in ONE stat as a map {:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}, or nil if missing. :symlink? reads the link itself (lstat); the rest follow it. :mtime/:atime are epoch-ms last-modified/last-access (nil if unreadable; :atime may be coarse under relatime/noatime mounts); :exec? is the owner-execute bit; :mode is the unix permission bits (0 off-unix); :nlink the hard-link count; :uid/:gid the numeric ids; :owner/:group their resolved names (the numeric id as a string if unresolved). Everything an `ls -l` row + a recency sort needs in one syscall.\n\n    (file/stat \"notes.txt\")   ;~> {:dir? false, :size 5, :mtime 1761213600000, …}",
         file_stat);
-    primitives.def(
-        "%image-thumb",
-        Arity::exact(3),
-        Sig::new(vec![any, int, int], map_ty.union(nil_ty)),
-        &["bytes", "max-w", "max-h"],
-        "Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). nil when the bytes aren't a decodable image or the dims are non-positive. Per-call decode limits bound a decompression bomb. The one image primitive; rendering (half-block cells, a GUI texture) is Brood policy over the decoded buffer.",
-        image_thumb);
-    primitives.def(
-        "%image-write-png",
-        Arity::range(2, 3),
-        Sig::with_optional(vec![map_ty, string], vec![map_ty.union(nil_ty)], string),
-        &["image", "path", "opts"],
-        "Write image — a {:width :height :rgba} map (what gui/image-thumb, gui/render-frame and gui/capture return; :rgba width*height*4 bytes) — to path as a PNG, and return path. opts: :crop [x y w h] keeps that rectangle (clipped to the image), :scale n (1..16) enlarges it n times by repeating pixels, so a few pixels of spacing can be looked at. Errors when :rgba is not width*height*4 bytes or the file cannot be written.",
-        image_write_png);
     primitives.def(
         "file/rm",
         Arity::exact(1),
@@ -745,141 +731,6 @@ pub(super) fn copy_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::nil())
-}
-
-/// The largest side, in pixels, of an image a primitive will decode or accept.
-pub(super) const IMAGE_MAX_SIDE: u32 = 16384;
-/// The largest buffer, in bytes, an image primitive will allocate for one image.
-pub(super) const IMAGE_MAX_ALLOC: u64 = 512 * 1024 * 1024;
-
-/// Decode an encoded image (any format the `image` build reads: PNG, and JPEG / GIF /
-/// WebP / BMP with `image-formats`) from bytes nobody vouches for — a file, the clipboard.
-/// Per-call `Limits` bound a decompression bomb (`IMAGE_MAX_SIDE` a side, `IMAGE_MAX_ALLOC`
-/// in all), and anything that is not a decodable image within them is `None`, never an
-/// error.
-pub(super) fn decode_untrusted_image(bytes: &[u8]) -> Option<image::DynamicImage> {
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(IMAGE_MAX_SIDE);
-    limits.max_image_height = Some(IMAGE_MAX_SIDE);
-    limits.max_alloc = Some(IMAGE_MAX_ALLOC);
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    reader.limits(limits);
-    reader.decode().ok()
-}
-
-/// Downscale `image` to fit within `max_width`×`max_height`, aspect ratio preserved.
-/// Downscale-only: a source already within the box keeps its native size (never
-/// upscaled — `thumbnail`/`resize` would blow a small image up to fill the box). The
-/// one resize path the image primitives share (`image-thumb`, `clipboard-image`).
-pub(super) fn fit_within(
-    image: image::DynamicImage,
-    max_width: u32,
-    max_height: u32,
-) -> image::DynamicImage {
-    if image.width() <= max_width && image.height() <= max_height {
-        image
-    } else {
-        image.thumbnail(max_width, max_height)
-    }
-}
-
-/// `(image-thumb bytes max-w max-h)` — decode an encoded image (PNG / JPEG / GIF /
-/// WebP / BMP) from a byte sequence and downscale it to fit within `max-w`×`max-h`
-/// pixels (aspect ratio preserved), returning `{:width :height :rgba}` where `:rgba`
-/// is a `width*height*4` bytes value (row-major RGBA8). Returns nil when the bytes
-/// aren't a decodable image or the dims are non-positive — untrusted input degrades
-/// to "not an image" rather than throwing. Per-call decode `Limits` bound a
-/// decompression bomb (≤ 16384² px, ≤ 512 MB alloc). The one image primitive;
-/// rendering (half-block cells, a GUI texture, …) is Brood policy over this buffer.
-pub(super) fn image_thumb(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let bytes = collect_bytes("gui/image-thumb", arg(args, 0), heap)?;
-    let max_w = expect_int(heap, "gui/image-thumb", arg(args, 1))?;
-    let max_h = expect_int(heap, "gui/image-thumb", arg(args, 2))?;
-    if max_w <= 0 || max_h <= 0 {
-        return Ok(Value::nil());
-    }
-    let Some(img) = decode_untrusted_image(&bytes) else {
-        return Ok(Value::nil());
-    };
-    let thumb = fit_within(img, max_w as u32, max_h as u32).to_rgba8();
-    let (w, h) = (thumb.width(), thumb.height());
-    // GC-safe: no eval between this alloc and map_from_pairs (a builtin never fires
-    // GC mid-execution), mirroring file_stat holding its string handles.
-    let rgba = bytes_to_value(thumb.as_raw(), heap);
-    let pairs = vec![
-        (kw("width"), Value::int(w as i64)),
-        (kw("height"), Value::int(h as i64)),
-        (kw("rgba"), rgba),
-    ];
-    Ok(heap.map_from_pairs(pairs))
-}
-
-/// `(image-write-png image path [opts])` — encode a `{:width :height :rgba}` map as a
-/// PNG at `path` (ADR-609): the other half of `gui/render-frame` and `gui/capture`, and
-/// of `image-thumb` (whatever it decodes writes back). `opts` `:crop [x y w h]` keeps a
-/// rectangle and `:scale n` enlarges it by repeating pixels — nearest neighbour, so a
-/// one-pixel gap stays a sharp n-pixel one rather than a blur.
-pub(super) fn image_write_png(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let who = "gui/write-png";
-    let Value::Map(image) = arg(args, 0) else {
-        return Err(LispError::wrong_type(
-            heap,
-            who,
-            "map {:width :height :rgba}",
-            arg(args, 0),
-        ));
-    };
-    let field = |name: &str| heap.map_get(image, kw(name)).unwrap_or(Value::Nil);
-    let (width_value, height_value, rgba_value) = (field("width"), field("height"), field("rgba"));
-    let width = expect_int(heap, who, width_value)?;
-    let height = expect_int(heap, who, height_value)?;
-    let rgba = collect_bytes("gui/write-png", rgba_value, heap)?;
-    let path = expect_string(heap, who, arg(args, 1))?;
-    if width <= 0 || height <= 0 || (width * height * 4) as usize != rgba.len() {
-        return Err(LispError::runtime(format!(
-            "{who}: :rgba is {} bytes, not {width}*{height}*4",
-            rgba.len()
-        )));
-    }
-    let Some(mut picture) = image::RgbaImage::from_raw(width as u32, height as u32, rgba) else {
-        return Err(LispError::runtime(format!("{who}: not an image")));
-    };
-    if let Value::Map(opts) = arg(args, 2) {
-        if let Some(Value::Vector(crop)) = heap.map_get(opts, kw("crop")) {
-            let parts: Vec<i64> = heap
-                .vector(crop)
-                .iter()
-                .map(|v| match v {
-                    Value::Int(n) => *n,
-                    _ => 0,
-                })
-                .collect();
-            if let [x, y, w, h] = parts[..] {
-                let (x, y) = (x.clamp(0, width - 1), y.clamp(0, height - 1));
-                let (w, h) = (w.clamp(1, width - x), h.clamp(1, height - y));
-                picture =
-                    image::imageops::crop_imm(&picture, x as u32, y as u32, w as u32, h as u32)
-                        .to_image();
-            }
-        }
-        if let Some(Value::Int(scale)) = heap.map_get(opts, kw("scale")) {
-            let scale = scale.clamp(1, 16) as u32;
-            if scale > 1 {
-                picture = image::imageops::resize(
-                    &picture,
-                    picture.width() * scale,
-                    picture.height() * scale,
-                    image::imageops::FilterType::Nearest,
-                );
-            }
-        }
-    }
-    picture
-        .save_with_format(&path, image::ImageFormat::Png)
-        .map_err(|e| LispError::runtime(format!("{who}: {path}: {e}")))?;
-    Ok(arg(args, 1))
 }
 
 /// `(file-mtime path)` — last-modified time of `path` as epoch-milliseconds, or

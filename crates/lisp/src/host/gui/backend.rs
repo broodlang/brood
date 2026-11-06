@@ -5,10 +5,12 @@
 //! child modules.
 
 mod bleed;
+mod fonts;
 #[cfg(all(test, feature = "gui-gpu"))]
 mod gpu_ink;
 #[cfg(all(test, feature = "gui-gpu"))]
 mod gpu_replay;
+mod ink;
 mod input;
 mod keyboard;
 mod offscreen;
@@ -16,6 +18,8 @@ mod paint;
 mod render;
 mod rows;
 
+use fonts::*;
+use ink::*;
 use input::*;
 use keyboard::*;
 use paint::*;
@@ -25,8 +29,8 @@ use render::*;
 // The GPU render target (`gpu.rs`) paints with the same text metric and hairline snap.
 #[cfg(feature = "gui-gpu")]
 pub(crate) use {
-    paint::holds_blinking_caret, paint::paint_stall_ms, paint::text_px_width, render::caret_cells,
-    render::caret_glyph, render::cursor_rim, render::luminance, render::snap_hairline,
+    ink::luminance, paint::holds_blinking_caret, paint::paint_stall_ms, paint::text_px_width,
+    render::caret_cells, render::caret_glyph, render::cursor_rim, render::snap_hairline,
     render::text_units, render::unit_cells, rows::RowMap,
 };
 

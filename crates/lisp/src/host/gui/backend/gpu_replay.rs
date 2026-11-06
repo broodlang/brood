@@ -12,7 +12,8 @@
 //! A machine without a GPU (CI) has no hardware adapter: the test says so and passes.
 //! Software adapters (llvmpipe, lavapipe) are left out, as the window leaves them out.
 
-use super::render::{Renderer, TextAa, default_families};
+use super::fonts::default_families;
+use super::render::{Renderer, TextAa};
 use crate::host::gui::gpu::{GpuWindow, hardware_adapters};
 use crate::host::gui::{CursorBlink, CursorStyle, Face, FragmentOps, Op};
 use std::sync::Arc;

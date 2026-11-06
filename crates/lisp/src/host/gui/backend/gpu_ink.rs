@@ -9,8 +9,10 @@
 //!
 //! A machine without a GPU (CI) runs the CPU half, and says it skipped the GPU one.
 
+use super::fonts::default_families;
+use super::ink::luminance;
 use super::offscreen::picture;
-use super::render::{Renderer, TextAa, default_families, luminance};
+use super::render::{Renderer, TextAa};
 use crate::host::gui::gpu::{GpuWindow, hardware_adapters};
 use crate::host::gui::{Face, Op};
 

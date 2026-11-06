@@ -9,7 +9,7 @@ use crate::error::{LispError, LispResult};
 
 use super::args::{arg, expect_int, expect_string};
 use super::bytes::{bytes_to_value, collect_bytes};
-use super::filesystem::{IMAGE_MAX_ALLOC, IMAGE_MAX_SIDE, decode_untrusted_image, fit_within};
+use super::image::{IMAGE_MAX_ALLOC, IMAGE_MAX_SIDE, decode_untrusted_image, fit_within};
 
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.
 pub(super) fn register(primitives: &mut super::Primitives) {

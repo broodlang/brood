@@ -97,8 +97,9 @@ The runtime is **lean** — `--no-default-features` strips, so it never compiles
 
 Kept (an app legitimately needs them): the whole prelude, `project` and its `project-*`
 siblings (they boot the bundle), and the UI/editor toolkit — `editor/display`,
-`editor/keymap`, `editor/layers`, `editor/ui`, `editor/pane`, `editor/buffer`, `sexp`,
-`regex`, `editor/face`, `editor/highlight`, **`editor/lineedit`** (an editor's minibuffer
+`editor/keymap`, `editor/layers`, `editor/ui`, `editor/frontend`, `editor/pane`, `editor/buffer` and
+`editor/buffer-file`, `editor/buffer-server`, `editor/span-properties`, `sexp`, `regex`, `editor/face`,
+`editor/highlight`, `editor/line-cache`, **`editor/lineedit`** (an editor's minibuffer
 reuses it), plus `tcp`/`http`/`file`/`json`/`set`/`format`/`task`/`supervisor`/`ansi`/
 `package` — **and the `gui` backend** (it's a single variant that includes windowing, so
 `(gui/open)`/windowed apps just work). The toolchain's own modules (`nest`, `project-check`,

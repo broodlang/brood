@@ -58,7 +58,7 @@ empty-cookie fallback.
 `nest run --name NAME` calls `(node/start NAME)` before running the file. A file that also
 starts a node hits the double-start guard, so the two are mutually exclusive.
 
-A daemon can serve a `ui-run` app to thin clients: `std/editor/serve.blsp` over these
+A daemon can serve a `ui-run` app to thin clients: `std/editor/serve.blsp` (the client is `std/editor/attach.blsp`) over these
 primitives, with `nest attach` as the client (ADR-090, and ADR-519/593/605 for a session
 outliving its client).
 

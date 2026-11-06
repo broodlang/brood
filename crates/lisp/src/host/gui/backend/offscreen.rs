@@ -26,8 +26,9 @@
 //!   font engine, as before.
 
 use super::bleed::{self, Margins};
+use super::fonts::default_families;
 use super::paint::raster_frame;
-use super::render::{CpuTexture, Renderer, default_families};
+use super::render::{CpuTexture, Renderer};
 use super::rows;
 use super::{DEFAULT_FAMILY, Families, RenderDefaults, TextAa, deliver, resize_message};
 use crate::core::sync::lock;
@@ -434,7 +435,7 @@ pub(super) fn raster(r: &mut Renderer, frame: &[Op], w: usize, h: usize) -> Fram
     r.caret_hidden = caret_hidden;
     r.invalidate();
     let mut rgba = Vec::with_capacity(w * h * 4);
-    for &pixel in &r.canvas[..w * h] {
+    for &pixel in &r.retained.canvas[..w * h] {
         rgba.extend_from_slice(&[(pixel >> 16) as u8, (pixel >> 8) as u8, pixel as u8, 255]);
     }
     let (origin_x, origin_y) = r.grid_origin(w, h);
