@@ -250,7 +250,7 @@ fn ts_kinds(heap: &Heap, who: &'static str, v: Value) -> Result<Vec<String>, Lis
 /// {:kind :identifier :text #{"def" "if"}}     ; an identifier spelt `def` or `if`
 /// {:kind :field_identifier
 ///  :parent {:kind :field_expression :field :function}}   ; a method call's name
-/// {:kind :arguments :after {:text "def"}}     ; what follows an Elixir `def`
+/// {:kind :arguments :after {:text "def"}}     ; what follows a `def` head: a grammar's definition form
 /// ```
 ///
 /// `:kind` and `:field` are keywords, `:nth` a non-negative int, `:text` a string or a
