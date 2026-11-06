@@ -95,11 +95,25 @@ devlog entries of the same dates.
 
 ### DONE (2026-11-06): the language design pass
 
-A–D of ROADMAP's language design pass are done. The last two decisions: `()` stays `nil` with a
-`:list-truthiness` lint (ADR-620), and one grammar for every `fn` head with in-order clauses
-and a compile error for a shadowed clause (ADR-619). Also landed: fields on `failure`
-(ADR-617), macro errors at the call or the named sub-form (ADR-618), and folds over vectors
-and ranges stopping on a failure (ADR-315 finished).
+A–D of ROADMAP's language design pass are done (commit `7252319a`, merged as `490a3641`). The
+last two decisions: `()` stays `nil` with a `:list-truthiness` lint (ADR-620), and one grammar
+for every `fn` head with in-order clauses and a compile error for a shadowed clause (ADR-619).
+Also landed: fields on `failure` (ADR-617), macro errors at the call or the named sub-form
+(ADR-618), and folds over vectors and ranges stopping on a failure (ADR-315 finished).
+
+Loose ends from that session, for whoever picks up:
+- **ADR numbers collided once:** the UI round took 613–616 upstream while this work was
+  uncommitted, so it was renumbered 617–620 at merge. `git fetch` and read the newest ADR file
+  on `origin/main` before numbering a new one.
+- **pfib at tier 1 (`make ab-vm`) read +3–10% wall** across runs. Instruction counts (one
+  worker, `BROOD_TIER=1 BROOD_J=1 BENCH_N=27`) settled it: every code change applied to HEAD is
+  0.5% *under* a comment-only control build, and the working tree's +1.3% over that control
+  comes from non-code content baked into the binary (std files pfib never runs, docs) — the
+  same effect that lets one prelude comment move the count 1.9%. Not a regression; worth
+  knowing when the next A/B shows pfib tier 1 moving.
+- `target/ab-ctl/` (≈0.7 GB) is that control build — safe to delete.
+- Not done: moving more of the prelude's hand-rolled macro checks onto pattern clauses (most
+  check a list's contents, which a clause head cannot say) — move them as they are touched.
 
 ### DONE (2026-10-21): a wait for another process's module load parks, at every tier
 
