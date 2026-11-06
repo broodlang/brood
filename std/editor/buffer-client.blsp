@@ -53,6 +53,7 @@ The fold is pure (no sends, no receives) — the merge matrix is testable with
 hand-fed pushes. Start a link with `link-init` (version -1, so the subscription
 seed always applies); compute minimal splices with `text-splice`."
   (:use editor/buffer)
+  (:use editor/buffer-server)
   (:use editor/span-properties))
 ;; ---- the single positional splice diff ---------------------------------------
 

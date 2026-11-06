@@ -972,7 +972,7 @@
 ;; of its one document, read from the document's process — which outlives the loop.
 (defn registry-notes (registry)
   (let (entries (editor/buffer-registry/registry-entries registry))
-    (editor/buffer/buffer-query (:proc (first entries)) editor/buffer/buffer-text)))
+    (editor/buffer-server/buffer-query (:proc (first entries)) editor/buffer/buffer-text)))
 
 (defn registry-mk ()
   (let (registry (editor/buffer-registry/registry-start {:owner (served-session)}))
@@ -993,7 +993,7 @@
         (let (path (str directory "/" (:name entry)))
           (do
             (file/spit path
-              (editor/buffer/buffer-query (:proc entry) editor/buffer/buffer-text))
+              (editor/buffer-server/buffer-query (:proc entry) editor/buffer/buffer-text))
             path))))))
 
 (describe "serve: a session supervises its loop (ADR-593)"

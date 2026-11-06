@@ -36,7 +36,8 @@ buffer to a new file or name, `registry-remove` kills one everywhere, and a
 `registry-watch`er is told of every buffer created, renamed, killed or died. The seam under
 a second frame, a remote session or a mirror sharing one buffer set — every holder links
 its own copy to the same process."
-  (:use editor/buffer) ; spawn-buffer / make-buffer / stop-buffer — the processes it directs
+  (:use editor/buffer) ; make-buffer
+  (:use editor/buffer-server) ; spawn-buffer / stop-buffer: the processes it directs
   (:use editor/buffer-client)) ; link-init / link-fold / buffer-apply-action / content-view — the optional mirror
 (defn registry-key (name:string meta:map -> string)
   "The identity a buffer is shared under: `:key` in `meta` when the app names one (one file

@@ -3,6 +3,7 @@
 (defmodule buffer-registry-test
   (:use test)
   (:use editor/buffer)
+  (:use editor/buffer-server)
   (:use editor/buffer-registry)
   (:use-internals editor/buffer-registry))
 

@@ -1,0 +1,509 @@
+;; std/editor/buffer-server.blsp — a buffer as a process.
+;;
+;; `editor/buffer` is a pure value; a rope is process-local, so a buffer cannot cross a
+;; process boundary. This module is what serves one: `spawn-buffer` makes a process that OWNS
+;; a buffer and replies only with derived views, and the functions below it are the client's
+;; side of that protocol. The fold a subscriber keeps over its pushes is `editor/buffer-client`.
+
+(defmodule editor/buffer-server
+  "A process that owns an `editor/buffer`: `spawn-buffer` starts one, `buffer-edit` and
+`buffer-query` send it closures (a buffer never leaves it, only views do), `buffer-splice`
+sends a positional edit, `subscribe-buffer` asks for a push of every change, and
+`stop-buffer` ends it. A buffer process is also an `io` sink: it answers `[:write s]` by
+appending `s`, so a log backend can stream straight into one.
+
+    (def pid (editor/buffer-server/create-buffer \"*log*\"))
+    (editor/buffer-server/buffer-query pid editor/buffer/buffer-text)   ; => \"\"
+    (editor/buffer-server/delete-buffer pid)"
+  (:use editor/buffer)
+  (:use editor/span-properties))
+
+;; ---- the actor shell (buffer-as-process) ------------------------------------
+;;
+;; A buffer process OWNS its buffer (and thus its process-local rope). Clients
+;; never receive the buffer — only derived views. Edits and reads cross as
+;; *closures* (`buffer -> buffer` and `buffer -> view`), shipped by closure-as-
+;; data (ADR-033); the read closure must return a non-rope value.
+;;
+;; A buffer process is also a first-class **`io` sink**: it answers `[:write s]`
+;; by appending `s` (the same message `std/io`'s `process-port` and thus `std/log`'s
+;; `process-backend` send), so `(add-backend (process-backend a-buffer-pid))` streams
+;; log output straight into a buffer — async, share-nothing, no glue. The append is
+;; applied as a structured SPLICE (delta push, transform-ring recorded), so a streamed
+;; log line costs its subscribers O(line) and never invalidates concurrent based splices.
+
+(defn- buffer-push (subs version buf &optional origin)
+  "Notify every subscriber of an edit: send each its `[:buffer-updated <bufpid> version
+view origin]`, where `view` is `(proj buf)` for its registered projection `proj` (a nil
+projection pushes a nil view — a bare change notification) and `origin` is whatever the
+edit carried (nil when untagged). An origin lets a subscriber recognise its OWN edit
+coming back — the echo-suppression seam: a collaborative client that already applied its
+edit locally can fold its own push as a version bump instead of a content rebuild, so
+fast typing never flickers under its round-trip. Runs in the buffer process, so `(self)`
+is the buffer pid the subscriber keys on."
+  (doseq (s subs)
+    (send (get s :pid)
+      [:buffer-updated
+        (self)
+        version
+        (let (proj (get s :proj)) (if (nil? proj) nil (proj buf)))
+        origin])))
+
+(defn- buffer-push-view (subs version view origin)
+  "Push a ready-made `view` (a delta — see the `:splice` / `:marker-set` arms) to every
+subscriber verbatim, bypassing projections: one small value, fanned as-is."
+  (doseq (s subs)
+    (send (get s :pid) [:buffer-updated (self) version view origin])))
+
+(defn- buffer-serve-property-change (buf:buffer lo:int properties foreign -> any)
+  "`[lo lo \"\" change next-buf]`: the property change `properties` (`[:put-properties width
+changes]`, computed at `lo` against text without the `foreign` splices) applied to `buf` on
+what is left of its range ([[property-change-transform]]: a foreign insert inside it splits
+it, and keeps its own properties), and `change` the ONE property change a holder in step with
+`buf` applies for the same result — over the pieces' whole extent, each changed key set to what
+`next-buf` now has there. A range the foreign edits took out entirely changes nothing (an
+empty change, still pushed: its sender waits for the echo)."
+  (let ([_ width changes] properties
+        normalized (properties-changes-normalize changes (math/max 0 width))
+        pieces (fold foreign [[lo (+ lo (math/max 0 width)) normalized]] property-change-transform)
+        next-buf (fold pieces
+                   buf
+                   (fn (acc piece)
+                     (let ([from to piece-changes] piece)
+                       (apply-splice acc from from "" [:put-properties (- to from) piece-changes]))))
+        from (if (empty? pieces)
+               (first (splice-transform-all [lo lo ""] foreign))
+               (first (first pieces)))
+        to (if (empty? pieces) from (second (last pieces))))
+    [from
+      from
+      ""
+      [:put-properties
+        (- to from)
+        (properties-changes (buffer-property-map next-buf) from to (keys normalized))]
+      next-buf]))
+
+(defn- buffer-serve-splice (buf subs version recent lo hi repl origin base properties)
+  "One structured splice in a buffer process, then back to `buffer-serve`. With a `base`
+(the version the sender computed it against) it is first TRANSFORMED over every splice
+applied since (the `recent` ring, oldest first) — two people typing in different places
+inside one round-trip window both land where they meant to. Entries from the SAME origin
+are skipped: the sender's local copy already contained them when it computed these
+positions (local-apply-first), so shifting over them again would land a pipelined second
+keystroke one column too far. `properties` (`{key spans}` relative to `repl`, ADR-579) are
+laid on the new text. Two edits are not text splices and are not transformed as one, whose
+overlap degrades to an insert after the other's text: a REDACTION (`:redact`, which the
+holders redact too) keeps its range and GROWS over a foreign edit inside it
+(`redaction-transform` — a character typed into the secret from another frame is redacted
+with it, never left behind), and a PROPERTY CHANGE (`[:put-properties width changes]`, no
+text changed) is laid on what is left of its range, not on text inserted inside it
+(`property-change-transform`); it stays out of the ring, which holds only what moved text.
+The push carries the edit AS APPLIED, with its properties — exactly one push per splice
+received, the echo its sender counts on."
+  (let (since (if (nil? base) () (reverse (seq/take-while recent (fn (e) (> (first e) base)))))
+        foreign (map (seq/filter since (fn (e) (or (nil? origin) (not (= (nth e 4 nil) origin)))))
+                  (fn (e) [(nth e 1) (nth e 2) (nth e 3)]))
+        property-change (property-change? properties)
+        ;; a redaction leaves no trace here either; this process keeps no history
+        ;; (`spawn-buffer`) and no splice log (`buffer-serve`)
+        [applied-lo applied-hi applied-repl applied-properties next-buf] (cond
+                                                                           property-change
+                                                                             (buffer-serve-property-change buf
+                                                                               lo properties foreign)
+                                                                           (= properties :redact)
+                                                                             (let ([redact-lo
+                                                                                     redact-hi] (fold foreign
+                                                                                                                                                                                                [lo
+                                                                                                                                                                                                  hi]
+                                                                                                                                                                                                redaction-transform))
+                                                                               [redact-lo
+                                                                                 redact-hi
+                                                                                 ""
+                                                                                 :redact (apply-splice buf
+                                                                                   redact-lo
+                                                                                   redact-hi ""
+                                                                                   :redact)])
+                                                                           else
+                                                                             (let ([splice-lo
+                                                                                     splice-hi
+                                                                                     splice-repl] (splice-transform-all [lo
+                                                                                                                                                                                                                                                                                                                       hi
+                                                                                                                                                                                                                                                                                                                       repl]
+                                                                                                                                                                                                                                                                                                 foreign))
+                                                                               [splice-lo
+                                                                                 splice-hi
+                                                                                 splice-repl
+                                                                                 properties
+                                                                                 (apply-splice buf
+                                                                                   splice-lo
+                                                                                   splice-hi
+                                                                                   splice-repl
+                                                                                   properties)]))
+        next-version (inc version)
+        view {:splice [applied-lo applied-hi applied-repl]
+              :markers (buffer-markers next-buf)
+              :participants (get next-buf :participants {})})
+    (do
+      (buffer-push-view subs
+        next-version
+        (if (nil? applied-properties) view (assoc view :properties applied-properties))
+        origin)
+      (buffer-serve next-buf
+        subs
+        next-version
+        (if property-change
+          recent
+          (take (cons [next-version applied-lo applied-hi (string/length applied-repl) origin]
+                  recent)
+            64))))))
+
+(defn- buffer-serve (buf subs version &optional recent)
+  "The receive loop of a buffer process over its immutable `buf`, tracking `subs` (subscriber
+`{:pid :proj}` records) and a monotonic `version`. `:edit` applies a change, bumps the
+version, and **pushes** the new projection to every subscriber — the collaboration seam:
+two panes or sessions subscribed to one buffer both see every edit. `:write` is an
+end-append expressed as a structured splice (delta push, ring-recorded). `:get` replies a
+derived view synchronously; `:subscribe`/`:unsubscribe` manage the push set (a new
+subscriber is seeded with the current state at once, and monitored); `:stop` ends. The
+rope never leaves this process — pushes and replies carry only derived, non-rope values
+(`proj`/`f` must return such).
+
+`recent` is the ring of the last 64 APPLIED splices (`[version lo hi replen origin]`,
+newest first) — what a based `[:splice … base]` transforms over. A based splice is
+transformed only over entries from OTHER origins: the sender's own earlier splices
+are already part of the basis its positions were computed against (its local copy
+applied them first — local-apply-first), so transforming over them would double-shift
+a second keystroke sent before the first's echo folded. Every content path records
+in the ring except CLOSURE edits, which are invisible to it — so on a
+transform-collaborated buffer, content changes should arrive as splices or `:write`
+(closure edits are for markers/metadata).
+
+**Subscriber lifecycle:** every subscriber is monitored, so a dead one (crash, detach, link
+drop) is removed rather than lingering. A marker keyed by the dead subscriber's *pid* is
+deleted too — the convention for transient per-subscriber state (a participant's cursor on a
+shared buffer: key your marker by your pid and it is cleaned up with you) — and when that
+changed the buffer, survivors get a push (they see the cursor vanish)."
+  ;; The process keeps no splice log: nobody reads it here, and every entry pins the texts it
+  ;; spans — a redacted password among them (ADR-581)
+  (let (rec (or recent ())
+        buf (if (contains? buf :splices) (dissoc buf :splices) buf))
+    (receive
+      ;; one arm for both tagged and untagged closure edits (origin nil when untagged) —
+      ;; simpler than two; there is no receive-arm budget (KI-10 no longer reproduces).
+      ([:edit f origin] (let (nb (f buf) v (inc version))
+                          (do (buffer-push subs v nb origin) (buffer-serve nb subs v rec))))
+      ;; A read-then-decide edit in ONE round-trip: `f` returns `[new-buf value]` — the
+      ;; buffer is replaced AND the extracted value (killed text, a popped mark, …) goes
+      ;; back to the caller, totally ordered with every other edit (no read-modify-write
+      ;; race against a concurrent splice). The kill-region shape: delete the region and
+      ;; get the deleted text back, atomically. Same closure-edit caveats as `:edit`
+      ;; (invisible to the transform ring; `value` must be non-rope).
+      ([:edit-reply f origin from r] (let ([nb value] (f buf) v (inc version))
+                                       (do
+                                         (send from [:reply r value])
+                                         (buffer-push subs v nb origin)
+                                         (buffer-serve nb subs v rec))))
+      ;; A structured edit: the change arrives as DATA (a positional splice), so the push
+      ;; can carry the DELTA — {:splice [lo hi repl] :markers … :participants …} — instead
+      ;; of each subscriber's full projection. O(change), not O(document): the seam that
+      ;; makes collaborative typing on a large buffer cheap. Structured ops push this light
+      ;; view to EVERY subscriber regardless of its projection (document accordingly);
+      ;; closure edits (:edit) and the seed keep the full projection contract. A BASED
+      ;; splice is transformed first, and one with text PROPERTIES lays them on its text
+      ;; (`buffer-serve-splice`).
+      ([:splice lo hi repl origin] (buffer-serve-splice buf
+                                     subs version rec lo hi repl origin nil nil))
+      ([:splice lo hi repl origin base] (buffer-serve-splice buf
+                                          subs version rec lo hi repl origin base nil))
+      ([:splice lo hi repl origin base properties] (buffer-serve-splice buf
+                                                     subs version rec lo hi repl origin base
+                                                     properties))
+      ;; A cursor move as data: no text change at all — the push carries markers + names
+      ;; only, so presence traffic on a large document never ships its text.
+      ([:marker-set id pos origin] (let (nb (buffer-marker-set buf id pos) v (inc version))
+                                     (do
+                                       (buffer-push-view subs
+                                         v
+                                         {:markers (buffer-markers nb)
+                                          :participants (get nb :participants {})}
+                                         origin)
+                                       (buffer-serve nb subs v rec))))
+      ;; An appended line is a positional splice like any other: apply it at end-of-buffer,
+      ;; RECORD it in the ring (a based splice computed before the append still transforms
+      ;; correctly over it), and push the DELTA — so a log-backed buffer is as cheap to
+      ;; subscribe to as a collaborative one (O(line), not O(document), per line).
+      ([:write s] (let (n (buffer-length buf)
+                        nb (replace-region buf n n s)
+                        v (inc version))
+                    (do
+                      (buffer-push-view subs
+                        v
+                        {:splice [n n s]
+                         :markers (buffer-markers nb)
+                         :participants (get nb :participants {})}
+                        nil)
+                      (buffer-serve nb
+                        subs
+                        v
+                        (take (cons [v n n (string/length s) nil] rec) 64)))))
+      ([:get f from r] (do (send from [:reply r (f buf)]) (buffer-serve buf subs version rec)))
+      ;; An atomic [version view] snapshot — the RESYNC primitive: a client rebuilding
+      ;; its copy after an ambiguous collision needs the text AND the version it
+      ;; corresponds to in ONE reply, or edits applied between its query and the
+      ;; answer replay onto the rebuilt copy (their queued pushes pass the version
+      ;; check) and double themselves.
+      ([:sync proj from r] (do
+                             (send from [:reply r [version (proj buf)]])
+                             (buffer-serve buf subs version rec)))
+      ([:subscribe pid proj] (do
+                               (monitor pid)
+                               (send pid
+                                 [:buffer-updated
+                                   (self)
+                                   version
+                                   (if (nil? proj) nil (proj buf))
+                                   nil])
+                               (buffer-serve buf (cons {:pid pid :proj proj} subs) version rec)))
+      ([:unsubscribe pid] (buffer-serve buf
+                            (seq/reject subs (fn (s) (= (get s :pid) pid)))
+                            version
+                            rec))
+      ([:down _ pid _]
+        (let (ns (seq/reject subs (fn (s) (= (get s :pid) pid)))
+              ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)
+              ;; or by a vector containing it (e.g. [pid :mark] — its selection anchor)
+              nb (fold (seq/filter (keys (buffer-markers buf))
+                         (fn (k) (or (= k pid) (and (vector? k) (includes? k pid)))))
+                   buf
+                   (fn (b k) (buffer-marker-delete b k))))
+          (if (= nb buf)
+            ; no marker for it — just drop the subscriber
+            (buffer-serve buf ns version rec)
+            (let (v (inc version)) (do (buffer-push ns v nb) (buffer-serve nb ns v rec))))))
+      ([:stop from r] (send from [:reply r :stopped])))))
+
+(defn spawn-buffer (buf)
+  "Spawn a process that owns a copy of `buf` and serves edits/queries; return its
+pid. The rope can't cross a process boundary, so this ships `buf`'s *text* (plus
+name/file/point/mark and its text properties — plain data) and rebuilds the rope inside
+the new process, with no undo history (holders undo in their own copies). Drive it with
+`buffer-edit` and `buffer-query`.
+
+    (editor/buffer-server/spawn-buffer (editor/buffer/make-buffer \"hi\"))   ;~> #<pid …the new buffer process…>"
+  (let (text (buffer-text buf)
+        name (buffer-name buf)
+        file (buffer-file buf)
+        point (buffer-point buf)
+        mark (buffer-mark buf)
+        properties (get buf :properties))
+    (spawn
+      (do
+        ;; every holder of this document waits on this process: a breakpoint must never
+        ;; park it (`proc/flag :no-break`), or the editor asking it anything freezes
+        (%process-flag :no-break true)
+        ;; no undo history here: every holder undoes in its own copy and sends the splice, and
+        ;; a history in the process would keep what a redaction took out (ADR-581)
+        (let (made (disable-undo (assoc (make-buffer text name file) :point point :mark mark)))
+          (buffer-serve (if (nil? properties) made (assoc made :properties properties)) () 0))))))
+
+;; The `buffer-edit` family takes its transform LAST and its optional slots before it, one
+;; arity each (ADR-507), as `reduce` takes `(coll f)` and `(coll init f)`: a multi-line `fn`
+;; with a tag dangling after it read as the call's last argument, and nothing caught a swap.
+(defn buffer-edit "Apply pure transform `f` (a `buffer -> buffer` fn) inside buffer process `bp`.
+With `origin` (any value — conventionally the sender's pid), the resulting push is
+tagged with it, so subscribers can recognise their own edit coming back (see
+`buffer-push` — the echo-suppression seam). Asynchronous — returns nil.
+
+    (editor/buffer-server/buffer-edit pid (fn (b) (editor/buffer/insert b \"x\")))   ;~> nil — the insert lands in the process
+    (editor/buffer-server/buffer-edit pid (self) (fn (b) (editor/buffer/insert b \"x\")))   ;~> nil — the push is tagged with the caller"
+  ((bp f) (send bp [:edit f nil]))
+  ((bp origin f) (send bp [:edit f origin])))
+(sig buffer-edit (and (any fn -> any) (any any fn -> any)))
+
+(defn buffer-edit-reply "Apply `f` — a `buffer -> [new-buf value]` fn — inside buffer process `bp` and have
+the extracted `value` sent back: the READ-THEN-DECIDE edit (kill-region's shape —
+delete the region *and* learn what was deleted) as one atomic, totally-ordered
+round-trip; no concurrent splice can land between the read and the write. `value`
+must be non-rope (the rope never leaves the process); `origin` tags the push as for
+`buffer-edit`. Asynchronous — returns a ref `r`; the caller receives `[:reply r
+value]` (or use `buffer-edit-value` to block for it).
+
+    (editor/buffer-server/buffer-edit-reply pid (fn (b) [b (editor/buffer/buffer-point b)]))   ;~> #<ref …> — then [:reply r 0] arrives"
+  ((bp f) (buffer-edit-reply bp nil f))
+  ((bp origin f) (let (r (ref)) (send bp [:edit-reply f origin (self) r]) r)))
+(sig buffer-edit-reply (and (any fn -> any) (any any fn -> any)))
+
+(defn buffer-edit-value "`buffer-edit-reply`, blocking for the extracted value: apply `f` (`buffer ->
+[new-buf value]`) in buffer process `bp` and return `value`. Throws after `timeout`
+ms (default 5000) — the bounded-sync form for callers that need the answer to
+proceed (an interactive command deciding on what it read). `origin` tags the push as
+for `buffer-edit`.
+
+    (editor/buffer-server/buffer-edit-value pid (fn (b) [b (editor/buffer/buffer-point b)]))   ;~> 0 — the point inside process `pid`"
+  ((bp f) (buffer-edit-value bp nil 5000 f))
+  ((bp origin f) (buffer-edit-value bp origin 5000 f))
+  ((bp origin timeout f) (let (r (buffer-edit-reply bp origin f))
+                           (receive
+                             ([:reply ^r v] v)
+                             (after timeout
+                               (error "buffer-edit-value: no reply after " timeout "ms"))))))
+(sig buffer-edit-value (and (any fn -> any) (any any fn -> any) (any any int fn -> any)))
+
+;; Two edits are not text splices, and transforming them as one is wrong: an overlap
+;; degrades a splice to an insert after the other's text, which shrank a REDACTION racing a
+;; character typed into its range in another frame to nothing — dropped, the password kept
+;; whole in the process and every copy that resynced from it. A redaction's range only ever
+;; grows over a foreign edit inside it; a property change's range is cut around one, as a
+;; text property is around text inserted inside it (ADR-579's Emacs semantics). An edit at
+;; either EDGE is outside both, as it is outside a text property.
+
+(defn- redaction-transform (range:any applied:splice-cover -> any)
+  "The redacted range `[lo hi]` — computed against text that did NOT yet contain `applied`
+`[alo ahi alen]` — on the text that does: shifted past an edit before it, kept for one after,
+and for one that overlaps it (an insert inside it, a replace across an edge) WIDENED to cover
+the overlapping edit's text as well, so nothing of the secret survives the race."
+  (let ([lo hi] range
+        [applied-lo applied-hi applied-length] applied
+        delta (- applied-length (- applied-hi applied-lo)))
+    (cond
+      (<= applied-hi lo) [(+ lo delta) (+ hi delta)]
+      (>= applied-lo hi) range
+      else
+        [(math/min lo applied-lo)
+          (if (<= applied-hi hi) (+ hi delta) (+ applied-lo applied-length))])))
+
+;; One piece of a property change in flight: `[lo hi changes]`, `changes` relative to `lo`.
+(deftype property-piece (tuple int int any))
+
+(defn- property-change-transform (pieces:any applied:splice-cover -> any)
+  "The pieces `[[lo hi changes] …]` of a property change (each `changes` normalized and
+relative to its `lo`) — computed against text that did NOT yet contain `applied` `[alo ahi
+alen]` — on the text that does: a piece before the edit shifts, one after it stays, and one
+the edit cuts keeps only what is left of it on either side, `changes` cut to match — the
+edit's own text is not in it, as inserted text is in no span it lands inside."
+  (fold pieces [] (fn (out piece) (into out (property-piece-transform piece applied)))))
+
+(defn- property-piece-transform (piece:property-piece applied:splice-cover -> vector)
+  "What is left of one piece of [[property-change-transform]] after `applied`: none, one or
+two pieces."
+  (let ([lo hi changes] piece
+        [applied-lo applied-hi applied-length] applied
+        delta (- applied-length (- applied-hi applied-lo))
+        slice (fn (from:int to:int) (properties-changes changes from to (keys changes))))
+    (cond
+      (<= applied-hi lo) [[(+ lo delta) (+ hi delta) changes]]
+      (>= applied-lo hi) [piece]
+      else
+        (let (left (if (< lo applied-lo) [[lo applied-lo (slice 0 (- applied-lo lo))]] []))
+          (if (< applied-hi hi)
+            (conj left
+              [(+ applied-lo applied-length) (+ hi delta) (slice (- applied-hi lo) (- hi lo))])
+            left)))))
+
+(defn buffer-splice (bp lo hi repl &optional origin base properties)
+  "Replace `[lo, hi)` with `repl` inside buffer process `bp` — the structured-edit
+counterpart of `buffer-edit` for a change already expressed positionally. Because the
+change is data, the resulting push carries only the DELTA (`{:splice … :markers …
+:participants …}`) instead of each subscriber's full projection — O(change) per
+keystroke on a shared buffer, whatever the document's size. `origin` tags the push as
+for `buffer-edit`. With `base` (the version this splice was computed against), the
+process TRANSFORMS it over every splice applied since (`splice-transform`) before
+applying — so two people typing in different places inside one round-trip window both
+land exactly where they meant to, no CRDT. `properties` (`{key spans}` relative to `repl`)
+are the text properties the new text comes with (ADR-579); the push carries them as
+`:properties`, so every subscriber's copy gets them too. Asynchronous — returns nil.
+
+    (editor/buffer-server/buffer-splice pid 0 2 \"hey\")   ;~> nil — the process replaces [0, 2) with \"hey\""
+  (cond
+    (not (nil? properties)) (send bp [:splice lo hi repl origin base properties])
+    (nil? base) (send bp [:splice lo hi repl origin])
+    else (send bp [:splice lo hi repl origin base])))
+
+(defn buffer-marker-move (bp id pos &optional origin)
+  "Set marker `id` to `pos` inside buffer process `bp`, pushing only `{:markers …
+:participants …}` — a cursor move never ships the document. `origin` tags the push.
+Asynchronous — returns nil.
+
+    (editor/buffer-server/buffer-marker-move pid :cursor 4)   ;~> nil — the process moves marker :cursor to 4"
+  (send bp [:marker-set id pos origin]))
+
+(defn buffer-query (bp: (or map pid) f:any -> any)
+  "Synchronously read a derived view from buffer process `bp` via pure fn `f` (a
+`buffer -> view`). `f` must return a non-rope value — e.g. `buffer-text`,
+`buffer-point`, `(fn (b) (buffer-line-at b 0))`. Blocks for the reply.
+
+    (editor/buffer-server/buffer-query pid editor/buffer/buffer-text)   ;~> \"…the text buffer process `pid` holds…\""
+  (let (r (ref))
+    (send bp [:get f (self) r])
+    (receive ([:reply ^r v] v))))
+
+(defn subscribe-buffer (bp: (or map pid) proj:any -> nil)
+  "Subscribe the calling process to buffer process `bp`. It immediately receives — and then
+gets on every edit — `[:buffer-updated bp version view]`, where `view` is `(proj buffer)`, a
+derived non-rope value (a viewport projection, the text, a marker set), or nil when `proj` is
+nil (a bare change notification). The push side of buffers-as-processes: a pane subscribes
+with its viewport projection and re-renders from each pushed frame instead of polling. Many
+processes may subscribe to one buffer — that is what lets several sessions see each edit.
+
+    (editor/buffer-server/subscribe-buffer pid editor/buffer/buffer-text)   ;~> nil — then [:buffer-updated pid version text] per edit"
+  (send bp [:subscribe (self) proj]))
+
+(defn unsubscribe-buffer (bp: (or map pid) -> nil)
+  "Stop the calling process receiving `[:buffer-updated …]` pushes from buffer process `bp`.
+
+    (editor/buffer-server/unsubscribe-buffer pid)   ;~> nil — no further pushes from `pid`"
+  (send bp [:unsubscribe (self)]))
+
+(defn buffer-sync (bp proj &optional (timeout 2000))
+  "An ATOMIC `[version view]` snapshot of buffer process `bp` through projection
+`proj` — the resync primitive: unlike `buffer-query`, the reply pairs the view with
+the version it corresponds to, so a client rebuilding its copy can set its link
+version to exactly the snapshot and let queued pushes sort themselves (≤ snapshot →
+stale-dropped, > → applied once). `:no-reply` after `timeout` ms (a dead process —
+the caller's monitor will deal with it)."
+  (let (r (ref))
+    (send bp [:sync proj (self) r])
+    (receive ([:reply ^r v] v) (after timeout :no-reply))))
+
+(defn stop-buffer (bp: (or map pid) -> any)
+  "Stop buffer process `bp` (it leaves its loop). Synchronous; returns :stopped —
+or :no-reply after 2s (an already-dead process: sending [:stop] to a corpse would
+otherwise park the caller forever, e.g. killing a buffer whose process just
+crashed, before the [:down] has been folded).
+
+    (editor/buffer-server/stop-buffer pid)   ;~> :stopped — or :no-reply when `pid` is already dead"
+  ;; The process replies to [:stop] and THEN leaves its loop, so the reply alone arrives a
+  ;; moment before the process is gone — `registry-stop`'s callers read the pid as still alive
+  ;; (a flaky `buffer_registry_test`). Monitoring makes "stopped" mean ended: wait for the
+  ;; reply and then the [:down]; a [:down] first is a process that was already dead, answered
+  ;; at once instead of after the 2 s timeout.
+  (if (pid? bp)
+    (let (r (ref)
+          m (monitor bp))
+      (send bp [:stop (self) r])
+      (receive
+        ([:reply ^r v] (receive ([:down ^m _ _] v) (after 2000 (do (demonitor m) v))))
+        ([:down ^m _ _] :no-reply)
+        (after 2000 (do (demonitor m) :no-reply))))
+    (let (r (ref))
+      (send bp [:stop (self) r])
+      (receive ([:reply ^r v] v) (after 2000 :no-reply)))))
+
+;; ---- create / delete (the buffer-process lifecycle) -------------------------
+
+(defn create-buffer (&optional (name "*scratch*"))
+  "Spawn a fresh, empty buffer process named `name` and return its **pid**. The
+process serves `buffer-edit` / `buffer-query` and accepts `[:write s]`, so it is a
+valid `io`/logger sink — `(add-backend (process-backend (create-buffer \"*log*\")))`
+streams log output straight into it. Tear it down with `delete-buffer`. It records no undo
+history (`spawn-buffer`), so appends never grow one.
+
+    (editor/buffer-server/create-buffer \"*log*\")   ;~> #<pid …the new, empty buffer process…>"
+  (spawn-buffer (make-buffer "" name)))
+
+(defn delete-buffer (bp)
+  "Stop buffer process `bp` and free it — the symmetric name for `stop-buffer`.
+Synchronous; returns :stopped.
+
+    (editor/buffer-server/delete-buffer pid)   ;~> :stopped"
+  (stop-buffer bp))

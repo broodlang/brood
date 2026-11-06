@@ -11,6 +11,7 @@
 (defmodule buffer-client-test
   (:use test)
   (:use editor/buffer)
+  (:use editor/buffer-server)
   (:use editor/buffer-client))
 
 ;; ---- text-splice --------------------------------------------------------------

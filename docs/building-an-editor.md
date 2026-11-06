@@ -98,7 +98,7 @@ you with aliasing. A command is just a function `buffer -> buffer`.
 > **Process-local rope.** A buffer holds a rope, and ropes never cross a process
 > boundary (they're owned by one process). For a single-window editor you don't
 > notice this; for multiple buffers/windows you either keep them all in one
-> process, or use `spawn-buffer` (the actor shell) and talk to each buffer
+> process, or use `editor/buffer-server`'s `spawn-buffer` and talk to each buffer
 > process with `buffer-edit`/`buffer-query`, which reply only with *derived
 > views* (text, line strings, positions) — never the buffer itself.
 

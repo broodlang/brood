@@ -24,6 +24,75 @@
 
 /// `(old, new, adr)` for every deliberate public rename still worth pointing at.
 pub const RENAMES: &[(&str, &str, &str)] = &[
+    // ADR-630 — the editor toolkit split along its real seams: a module that claims to be pure
+    // is pure, and a thin client does not load the loop. Every public name that left its module
+    // points at its new home, so bedit's `nest check` names where it went.
+    (
+        "editor/buffer/spawn-buffer",
+        "editor/buffer-server/spawn-buffer",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-edit",
+        "editor/buffer-server/buffer-edit",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-edit-reply",
+        "editor/buffer-server/buffer-edit-reply",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-edit-value",
+        "editor/buffer-server/buffer-edit-value",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-splice",
+        "editor/buffer-server/buffer-splice",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-marker-move",
+        "editor/buffer-server/buffer-marker-move",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-query",
+        "editor/buffer-server/buffer-query",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/subscribe-buffer",
+        "editor/buffer-server/subscribe-buffer",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/unsubscribe-buffer",
+        "editor/buffer-server/unsubscribe-buffer",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/buffer-sync",
+        "editor/buffer-server/buffer-sync",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/stop-buffer",
+        "editor/buffer-server/stop-buffer",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/create-buffer",
+        "editor/buffer-server/create-buffer",
+        "ADR-630",
+    ),
+    (
+        "editor/buffer/delete-buffer",
+        "editor/buffer-server/delete-buffer",
+        "ADR-630",
+    ),
+    // ADR-630 block end
     // ADR-506 — the bare namespace is the language: syntax, a measured core and the
     // built-in kinds. Everything else is qualified by its family.
     ("*units*", "test/*units*", "ADR-506"),

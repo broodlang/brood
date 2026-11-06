@@ -1,6 +1,6 @@
 ;; The editor framework's buffer model (M2 Phase 1, ADR-045): the immutable
 ;; buffer value + pure point/mark/region/movement/editing ops, plus the thin
-;; `spawn-buffer` actor shell. Pure Brood over the rope primitives — opt-in
+;; `spawn-buffer` actor shell (`editor/buffer-server`). Pure Brood over the rope primitives — opt-in
 ;; (`require 'buffer`), never in the prelude.
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test, via
@@ -8,7 +8,7 @@
 ;; process); the final :isolated block adds explicit spawn/send/receive coverage
 ;; of the actor shell — and proves a buffer's rope stays inside its process.
 
-(defmodule buffer-test (:use test) (:use-internals editor/buffer))
+(defmodule buffer-test (:use test) (:use-internals editor/buffer) (:use editor/buffer-server))
 
 ;; The buffer-as-log-sink integration test drives a real logger; `log` and
 ;; `gen` (for `call`, to flush the logger's casts before asserting) are
