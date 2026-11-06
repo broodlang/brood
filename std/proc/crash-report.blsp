@@ -229,3 +229,91 @@ Returns nil.
 
     (crash-report/running?)   ;~> true while the reporter is armed"
   (not (nil? (proc/whereis crash-report-name))))
+
+;; ---- a report as data: what a program sends somewhere --------------------------------
+;; `render` is text for stderr, for a process that died. A program that CATCHES its errors —
+;; an editor's command, a server's handler — has nothing to print to and wants to send the
+;; error to whoever fixes it: as data, its private details gone, under a signature that is
+;; the same for the same bug on every machine, so a collector can count it once.
+
+(def- crash-report-max-message 500)
+
+(defn- crash-report-error-map (error)
+  "The error map inside `error`: a caught error map, a process exit reason `[:error m]`, or
+anything else as a message."
+  (match error
+    ([:error (and m {:keys [kind]})] m)
+    ([:error other] {:kind :error :message (pr-str other)})
+    ({:keys [kind]} error)
+    (_ {:kind :error :message (if (string? error) error (pr-str error))})))
+
+(defn- crash-report-relative-file (file)
+  "`file` as the same on every machine: from its project's `src/`, `std/` or `tests/` on,
+else its name alone — never the home directory it was built in."
+  (if (not (string? file))
+    nil
+    (let (found (regex/find "(?:^|/)((?:src|std|tests|tools)/.*)$" file))
+      (if found (:text (first (:groups found))) (path/basename file)))))
+
+(defn- crash-report-frame (frame)
+  {:fn (when (get frame :fn) (->string (get frame :fn)))
+   :file (crash-report-relative-file (get frame :file))
+   :line (get frame :line)})
+
+(defn redact (text:any -> string)
+  "`text` with what must not leave the machine taken out: the home directory as `~`, a
+bearer token, a `password=` / `token=` / `secret=` value, a PEM block. A message can quote
+anything the program held, so a report's text goes through here before it is shown or sent.
+
+    (crash-report/redact \"open /home/ann/x: no such file\")   ;~> \"open ~/x: no such file\""
+  (let (text (if (string? text) text (pr-str text))
+        home (path/home)
+        homed (if (and (string? home) (> (string/length home) 1)) (string/replace text home "~") text)
+        bearer (regex/replace "(?i)(bearer\\s+)[A-Za-z0-9._~+/=-]+" homed "$1[redacted]")
+        assigned (regex/replace "(?i)((?:password|passwd|token|secret|api[_-]?key|cookie)\\s*[=:]\\s*)[^\\s,;&\"']+" bearer "$1[redacted]"))
+    (regex/replace "-----BEGIN [A-Z ]+-----[\\s\\S]*?-----END [A-Z ]+-----" assigned "[redacted key]")))
+
+(defn signature (report:map -> string)
+  "The report's identity across machines and runs: its error kind, where it was raised and
+the functions above that — no message, no value, no path outside the project. The same bug
+hit twice, or by two people, has one signature; a collector groups by it.
+
+    (crash-report/signature (crash-report/describe-error {:kind :type-error :file \"src/a.blsp\" :line 3}))   ;~> \"9f2c…\" (16 hex digits)"
+  (let (site (:site report)
+        frames (map (take (or (:frames report) []) 4) (fn (frame) [(:fn frame) (:file frame)])))
+    (string/substring (hash/sha256 (pr-str [(:kind report) (:file site) (:line site) frames])) 0 16)))
+
+(defn describe-error (error:any &optional context: (or map nil) -> map)
+  "`error` — a caught error map, a process's exit reason, or any value — as a report: its
+`:kind`, `:code`, `:message` (redacted, capped), `:hint`, `:site` `{:file :line}` and the
+innermost `:frames` with project-relative paths, the `:brood` version, the `:os`, its
+`:signature` ([[signature]]), and the caller's `context` map merged under `:context`
+(the program's name and version, what it was doing). Pure but for reading the version.
+
+    (crash-report/describe-error (try (/ 1 0) (catch e e)) {:program \"bedit\"})   ;~> {:kind :arith-error :site {…} :signature \"…\" …}"
+  (let (m (crash-report-error-map error)
+        trace (or (get m :trace) [])
+        at (if (get m :file) m (or (seq/find trace (fn (frame) (get frame :file))) {}))
+        message (redact (or (get m :message) ""))
+        report {:kind (get m :kind)
+                :code (get m :code)
+                :message (if (> (string/length message) crash-report-max-message)
+                           (str (string/substring message 0 crash-report-max-message) "…")
+                           message)
+                :hint (when (get m :hint) (redact (get m :hint)))
+                :site {:file (crash-report-relative-file (get at :file)) :line (get at :line)}
+                :frames (into [] (map (take trace crash-report-max-frames) crash-report-frame))
+                :brood (system/brood-version)
+                :os (os/type)
+                :context (or context {})})
+    (assoc report :signature (signature report))))
+
+(defn post (url:string report:map -> any)
+  "Send `report` ([[describe-error]]'s, perhaps with a note the user added) to the collector at
+`url` as JSON: the response map, or a failure saying why. Blocking, under `net/http`'s own
+timeouts — call it off a loop that must stay responsive (a task).
+
+    (crash-report/post \"https://brood.fly.dev/api/v1/reports\" report)   ;~> {:status 201 …}"
+  (net/http/post url
+    (json/encode report)
+    {:headers {"Content-Type" "application/json"}}))

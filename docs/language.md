@@ -2817,6 +2817,14 @@ reading.
 - The kernel's one-liner yields while any abnormal-exit subscriber is armed
   (see `proc/system-monitor` above), so opting out restores it: nothing is ever
   reported twice, and nothing goes unreported.
+- A program that CATCHES its errors (an editor's command, a server's handler) sends them
+  somewhere instead: `(crash-report/describe-error error [context])` turns a caught error map,
+  an exit reason or any value into a report map — `:kind`, `:code`, `:message` (redacted,
+  capped), `:site` and `:frames` with project-relative paths, `:brood`, `:os`, `:context` —
+  under a `:signature` that is the same for the same bug on every machine (its kind, site and
+  calling functions; no message, value or home path). `(crash-report/redact text)` takes the
+  home directory, bearer tokens, `password=`-style values and PEM keys out of text, and
+  `(crash-report/post url report)` sends a report as JSON (blocking: call it from a task).
 
 ### Applications and shutdown signals
 

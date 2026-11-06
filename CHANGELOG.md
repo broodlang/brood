@@ -7,6 +7,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## Unreleased
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - **Bytes through a child and through sudo:** `os/cmd`'s `:stdin` and `sudo/write` take any iolist,
   so a file in another encoding can be written as root.
 - **`revert-buffer` takes text already read** (`contents`, as `buffer-from-file` does), for an
@@ -48,6 +51,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## v0.50.0 — a window you can look at, a seam for the leftover pixels, and quiet chrome
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - **A frame can declare a seam row** (ADR-610). `[:seam row]` (`editor/display/seam`) anchors
   the rows above `row` to the window's top and the rows from it down to its bottom, so the last
   row ends exactly on the bottom inset at every window height; the leftover pixels lie at the
@@ -138,6 +144,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   line on the top row stays centred on its text (ADR-508).
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - `os/primary-get` / `os/primary-set`: the X11 / Wayland PRIMARY selection (what is
   highlighted, pasted by a middle click), beside the clipboard pair, which it leaves alone
   (ADR-553). nil and a no-op off Linux.
@@ -172,6 +181,9 @@ edge backgrounds, filters LCD text and draws coloured and wavy underlines.
   changes.
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - `editor/highlight`: `lisp-line-lexer` colours a Lisp a line at a time from the state the line
   above ended in, so a window starting inside a multi-line docstring no longer colours its code
   as string; `{:rainbow true}` colours brackets by depth (ADR-510).
@@ -280,6 +292,9 @@ cranelift to 0.137, which raises the minimum Rust to 1.97. The narrative is the 
   process. `%tcp-send` returns whether to wait for the new `[:tcp-drained sock]` message.
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - `tcp/set-stall-timeout`: how long queued output may make no progress before the
   connection is dropped (60 s by default, 0 disarms), which ends a send waiting on a peer that
   stopped reading.
@@ -327,6 +342,9 @@ Several changes break callers (see **Changed**). The narrative is the devlog's 2
   (ADR-310).
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - `catch` takes a pattern with an optional `:when` guard, and a `try` may have several; the
   first that matches runs, and an error none matches is raised again from where it was
   first raised (ADR-501).
@@ -392,6 +410,9 @@ image rebuilds, and a long run of VM, heap, process and JIT work. Two changes br
 (see **Changed**). The narrative is the devlog's 2026-10-22 to 2026-10-26 entries.
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - WASI preview 2 by grant (ADR-453): `(%wasm-load src grants)` gives a component the
   directories (`:dirs` `[host guest]`, `[host guest :write]`), environment (`:env`),
   arguments (`:args`) and stdio (`:stdio`) it is granted — clocks and randomness come with
@@ -529,6 +550,9 @@ loading, and the JIT no longer starts a module load in the middle of another. Th
 the devlog's 2026-10-21 entries.
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - `hash/blake3` and `(%digest :blake3 bytes)`: BLAKE3 digests beside the existing ones.
 - Reloading a wasm component from the same bytes reuses its compiled module instead of
   compiling it again.
@@ -608,6 +632,9 @@ children and names nested modules. At tier 0 the tree-walker now runs on a heap 
   480 -> 338 MB.
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - The regex dialect reads `\D`, `\W` and `\S` as the negations of `\d`, `\w` and `\s`, standing
   alone and inside a set. They used to be the letters D, W and S (an unknown escape is its
   character), so a pattern written in every other dialect — `brood\s+(\S+)` — matched nothing
@@ -638,6 +665,9 @@ loads the std modules it calls from an in-memory image, and the tab's wasm is a 
 The narrative is the devlog's 2026-10-18 and 2026-10-19 entries.
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - `BROOD_TIER0_AUDIT=<file>`: under a tier-0 ceiling, record each distinct call path by which
   bytecode started anyway (ADR-416 stage 1).
 
@@ -686,6 +716,9 @@ starts from. In a browser tab, `json/encode` runs natively and the prelude boots
 image. The narrative is the devlog's 2026-10-18 entries.
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - `std/mime`: RFC 5322 headers (unfolded, looked up case-insensitively), RFC 2045 parameters
   with RFC 2231 continuations and encoded values, RFC 2047 encoded words, quoted-printable
   and base64 bodies, ISO-8859-1 / -15 and windows-1252 beside UTF-8, multipart trees and
@@ -723,6 +756,9 @@ broken down — and costs less: a parked process is 2 763 bytes, and `receive` m
 patterns in the kernel. The narrative is the devlog's 2026-10-17 and 2026-10-18 entries.
 
 **Added.**
+- **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
+  program that catches its errors can send them to a collector as data, redacted, under a
+  signature that is the same for the same bug on every machine.
 - Guest links (ADR-415): `node/grant-guest` accepts peers that authenticate with a SECOND
   cookie as guests. A guest link reaches only the grant's `:names` and the pids this node has
   sent it — a pid on a node is a small integer anyone can guess, so being told one is what
