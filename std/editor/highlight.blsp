@@ -37,62 +37,6 @@ as pure functions over a source string (ADR-052):
 
 Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently testable."
   (:use editor/face))
-;; ---- faces: the :syntax/* theme seam ----------------------------------------
-;; Syntax faces live in the shared face registry (`std/editor/face.blsp`) under
-;; `:syntax/*` names, resolved once per lexing pass (`hl-faces`) — so an
-;; app restyles the whole highlighter by redefining ONE face
-;; (`(face-set :syntax/keyword {:fg \"#cba6f7\"})`), the same late-bound seam the
-;; `:ui/*` faces and keymaps use. The DEFAULTS are the original palette keywords, so
-;; the terminal REPL / observer are unchanged and keyword colours still honour the
-;; user's terminal theme; only an app that opts in (the GUI editor) sees a richer
-;; palette. (`def-face` returns the name; the registrations run at module load.)
-
-(def-face :syntax/comment {:fg :dark-grey})
-(def-face :syntax/string {:fg :green})
-;; A DOCSTRING — the string a `def…` form documents itself with, as opposed to one it
-;; returns. Distinct from `:syntax/string` on purpose: the two are the same token to a
-;; lexer and completely different things to a reader (`(defn greeting () "doc" "hi")`
-;; colours the prose and the value apart). Grey + italic reads as prose without
-;; disappearing the way a comment does; a terminal that can't do italic still shows the
-;; hue difference.
-(def-face :syntax/doc {:fg :grey :italic true})
-(def-face :syntax/number {:fg :yellow})
-;; A language KEYWORD — Python's `def` / `return`, Rust's `fn` / `let`, Elixir's `do` / `end`: what a
-;; tree-sitter table's anonymous keyword tokens report (`face-of-syntax`) and a lexer table's
-;; `:keyword` role names. The Lisps' keywords are their special forms (`:syntax/special`); a Lisp
-;; `:keyword` LITERAL is `:syntax/symbol`, below (ADR-616).
-(def-face :syntax/keyword {:fg :magenta})
-;; A SYMBOL used as a value (ADR-616): a Lisp `:keyword`, and `nil` / `true` / `false`, which the
-;; reader classifies with them — and a data format's KEY (JSON, YAML, TOML, INI), a name written
-;; as data. Apart from `:syntax/keyword` so a theme can leave a language's keywords plain and
-;; colour its literals (Tonsky's rule); by default it IS the keyword face, the colour these
-;; tokens always had.
-(def-face :syntax/symbol {:inherit :syntax/keyword})
-;; A CONSTANT a language names (ADR-616): `true` / `false` / `nil` / `None` / `null`, an Elixir
-;; atom, a Ruby symbol — what tree-sitter and lexer tables coloured as specials. By default it IS
-;; the special face, the colour they always had; a theme that colours literals names it.
-(def-face :syntax/constant {:inherit :syntax/special})
-; special forms / core macros
-(def-face :syntax/special {:fg :blue :bold true})
-; a call head
-(def-face :syntax/function {:fg :cyan})
-;; The NAME a definition binds — `f` in `(defn f …)`, `def f():`, `fn f()` — apart from a
-;; call's head (ADR-614). By default it IS the call face, so a theme that names neither sees
-;; no difference; one that colours definitions and leaves calls plain (Tonsky's rule) restyles
-;; the two apart.
-(def-face :syntax/definition {:inherit :syntax/function})
-;; Brackets, commas and semicolons (ADR-614). Empty by default — the plain text colour — and
-;; a lexer paints nothing for a face with no attributes, so only a theme that dims
-;; punctuation pays a span per bracket.
-(def-face :syntax/punctuation {})
-; the matched bracket pair (REPL)
-(def-face :syntax/match {:reverse true})
-; a lone unmatched bracket (REPL)
-(def-face :syntax/error {:fg :red :bold true})
-;; Brackets coloured by DEPTH (Emacs's rainbow-delimiters), `:syntax/delimiter-1` the outermost,
-;; cycling past the ninth — painted only by a lexer asked to (`lisp-line-lexer`'s `:rainbow`).
-;; No colour of their own here: an app that wants the rainbow names its colours.
-(doseq (depth (range 1 10)) (def-face (keyword (str "syntax/delimiter-" depth)) {}))
 ;; Resolved snapshots of the defaults, kept under the original `hl-face-*` names for
 ;; consumers that read a face directly rather than re-resolving each frame: the REPL
 ;; line editor's bracket match/error (`std/editor/lineedit.blsp`) and the highlighter's own
