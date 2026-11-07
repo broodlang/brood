@@ -5,7 +5,6 @@
 //! **un-expanded** CST, so it never sees through macros (the deliberate limit
 //! `tooling.md` also accepts for runtime positions).
 //!
-//! First cut (ADR-011 — ship the simple shape): **plain-symbol binders only**.
 //! - Globals: `def` / `defn` / `defmacro` names (global wherever they appear —
 //!   `def` always defines in the global env).
 //! - Locals: `fn` / `defn` / `defn-` / `defmacro` params (incl. `&optional`
@@ -13,11 +12,9 @@
 //!   that arm alone), `let` binding names (sequential: a binder is visible from
 //!   itself on, never in its own or an earlier init), and `letrec` names (every
 //!   name in every init and the body).
+//! - The pattern grammar at every site that takes it (ADR-021): parameters, `let`,
+//!   `if-let` / `when-let`, `doseq` / `for`, `match` and `receive` clauses, `catch`.
 //!
-//! **Deferred:** destructuring *pattern* binders (ADR-021 — `(let ([a b] v) …)`,
-//! `(fn ((h & t)) …)`, `match` clause patterns). Non-symbol binder targets are
-//! skipped, not bound, until that walk is added.
-
 use std::collections::HashSet;
 
 use crate::core::keywords as kw;
@@ -319,7 +316,22 @@ impl ScopeTree {
 /// Pass 2: descend, opening a child scope at each binding form.
 fn build(node: &Node, src: &str, current: usize, tree: &mut ScopeTree) {
     let params_at = match node.head_symbol(src) {
-        Some(kw::LET) => return build_let(node, src, current, tree),
+        Some(kw::LET | "if-let" | "when-let" | "doseq" | "for") => {
+            return build_let(node, src, current, tree);
+        }
+        Some("match") => return build_clauses(node, src, 2, current, tree),
+        Some("receive") => return build_clauses(node, src, 1, current, tree),
+        Some("catch") => {
+            let names = node
+                .forms()
+                .nth(1)
+                .map_or_else(Vec::new, |pattern| pattern_binders(pattern, src));
+            let scope = tree.open(node.span, None, current, names);
+            for child in &node.children {
+                build(child, src, scope, tree);
+            }
+            return;
+        }
         // `letrec` makes every name visible in every init and in the body — one scope
         // over the whole form. (Without an arm here its names resolved Free, so renaming
         // a global `go` rewrote a local `letrec` `go` too.)
@@ -365,6 +377,95 @@ fn build(node: &Node, src: &str, current: usize, tree: &mut ScopeTree) {
     let scope = tree.open(node.span, None, current, param_names(node, src, params_at));
     for child in &node.children {
         build(child, src, scope, tree);
+    }
+}
+
+/// `match` and `receive`: from form-index `first` on, each clause `(pattern body…)` binds its
+/// pattern's names over that clause alone. Anything else there (`receive`'s `(after …)` has a
+/// symbol head that binds nothing a body reads) is walked in the enclosing scope.
+fn build_clauses(node: &Node, src: &str, first: usize, current: usize, tree: &mut ScopeTree) {
+    let clauses: Vec<&Node> = node.forms().skip(first).collect();
+    for child in &node.children {
+        let clause = clauses
+            .iter()
+            .find(|clause| std::ptr::eq(**clause, child))
+            .filter(|clause| {
+                clause.kind == NodeKind::List && clause.head_symbol(src) != Some("after")
+            });
+        let Some(clause) = clause else {
+            build(child, src, current, tree);
+            continue;
+        };
+        let names = clause
+            .forms()
+            .next()
+            .map_or_else(Vec::new, |pattern| pattern_binders(pattern, src));
+        let scope = tree.open(clause.span, None, current, names);
+        for inner in &clause.children {
+            build(inner, src, scope, tree);
+        }
+    }
+}
+
+/// The names a pattern binds, one grammar at every binding site (`docs/language.md`
+/// § Pattern matching). A bare symbol binds; a literal, a quoted symbol and a pin `^x` do not.
+fn pattern_binders(pattern: &Node, src: &str) -> Vec<Binding> {
+    let mut out = Vec::new();
+    collect_pattern_binders(pattern, src, &mut out);
+    out
+}
+
+fn collect_pattern_binders(pattern: &Node, src: &str, out: &mut Vec<Binding>) {
+    match pattern.kind {
+        NodeKind::Symbol => {
+            let name = pattern.text(src);
+            if !matches!(name, "_" | kw::AMP | kw::AMP_OPTIONAL) {
+                out.push(Binding {
+                    name: name.to_string(),
+                    def: pattern.span,
+                    kind: BindingKind::Local,
+                });
+            }
+        }
+        NodeKind::Vector => {
+            for item in pattern.forms() {
+                collect_pattern_binders(item, src, out);
+            }
+        }
+        NodeKind::List => {
+            let forms = pattern.forms();
+            match pattern.head_symbol(src) {
+                Some("quote") => {}
+                Some("or" | "and" | "bytes") => {
+                    for item in forms.skip(1) {
+                        collect_pattern_binders(item, src, out);
+                    }
+                }
+                // `(record name {…})`: the name is a type's, the map is the pattern
+                Some("record") => {
+                    for item in forms.skip(2) {
+                        collect_pattern_binders(item, src, out);
+                    }
+                }
+                _ => {
+                    for item in forms {
+                        collect_pattern_binders(item, src, out);
+                    }
+                }
+            }
+        }
+        NodeKind::Map => {
+            let items: Vec<&Node> = pattern.forms().collect();
+            for pair in items.chunks(2) {
+                // `:or` holds defaults, which are values
+                if let [key, value] = pair
+                    && key.text(src) != ":or"
+                {
+                    collect_pattern_binders(value, src, out);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -417,14 +518,10 @@ fn build_let(node: &Node, src: &str, current: usize, tree: &mut ScopeTree) {
                 build(init, src, scope, tree);
             }
             build(target, src, scope, tree);
-            if target.kind == NodeKind::Symbol {
-                let binding = Binding {
-                    name: target.text(src).to_string(),
-                    def: target.span,
-                    kind: BindingKind::Local,
-                };
+            let binders = pattern_binders(target, src);
+            if !binders.is_empty() {
                 let span = Span::new(target.span.start as usize, node.span.end as usize);
-                scope = tree.open(span, init.map(|init| init.span), scope, vec![binding]);
+                scope = tree.open(span, init.map(|init| init.span), scope, binders);
             }
         }
     }
@@ -450,9 +547,9 @@ fn let_names(node: &Node, src: &str) -> Vec<Binding> {
     out
 }
 
-/// The symbol names bound by a parameter list at form-index `idx`. Skips the
-/// `&optional` / `&` markers; for an `(name default)` optional group, binds
-/// `name`. Non-symbol pattern targets are skipped (deferred).
+/// The names bound by a parameter list at form-index `idx`. Skips the `&optional` / `&`
+/// markers; for an `(name default)` optional group, binds `name`; a pattern binds what it
+/// binds anywhere else ([`pattern_binders`]).
 fn param_names(node: &Node, src: &str, idx: usize) -> Vec<Binding> {
     let mut out = Vec::new();
     let Some(params) = node.forms().nth(idx) else {
@@ -486,6 +583,7 @@ fn param_names(node: &Node, src: &str, idx: usize) -> Vec<Binding> {
         }
     };
     let mut skip_type_form = false;
+    let mut optional = false;
     for item in params.forms() {
         if std::mem::take(&mut skip_type_form) {
             continue;
@@ -496,6 +594,7 @@ fn param_names(node: &Node, src: &str, idx: usize) -> Vec<Binding> {
                 if t == super::typed::ARROW {
                     break;
                 }
+                optional |= t == kw::AMP_OPTIONAL;
                 if t != kw::AMP_OPTIONAL && t != kw::AMP {
                     skip_type_form = matches!(
                         super::typed::split(t),
@@ -505,14 +604,14 @@ fn param_names(node: &Node, src: &str, idx: usize) -> Vec<Binding> {
                 }
             }
             // An `&optional` group `(name default)` — the binder is the head.
-            NodeKind::List => {
+            NodeKind::List if optional => {
                 if let Some(n) = item.forms().next()
                     && n.kind == NodeKind::Symbol
                 {
                     out.push(binder(n));
                 }
             }
-            _ => {} // a vector/other pattern target — deferred
+            _ => collect_pattern_binders(item, src, &mut out),
         }
     }
     out
@@ -624,6 +723,62 @@ mod tests {
                 ),
                 "{name} should be a local param"
             );
+        }
+    }
+
+    /// How `name` resolves at its LAST occurrence in `src`, the body it is read in.
+    fn resolves_local_at_last(src: &str, name: &str) -> bool {
+        let root = cst::parse(src);
+        let tree = analyze(&root, src);
+        let at = src.rfind(name).unwrap() as u32;
+        matches!(
+            tree.resolve_at(&root, src, at),
+            Resolution::Defined {
+                kind: BindingKind::Local,
+                ..
+            }
+        )
+    }
+
+    #[test]
+    fn every_binding_site_takes_the_one_pattern_grammar() {
+        for src in [
+            "(defn g ({:keys [f]}) (f))",
+            "(defn g ({:k f}) (f))",
+            "(defn g ([a f]) (f))",
+            "(defn g ((h & f)) (f))",
+            "(let ({:keys [f]} m) (f))",
+            "(let ((a f) xs) (f))",
+            "(match x ((and f {:keys [k]}) (f)))",
+            "(match x ((or [1 f] [2 f]) (f)))",
+            "(match x ((record point {:x f}) (f)))",
+            "(receive ([:ok f] (f)))",
+            "(try 1 (catch f (f)))",
+            "(when-let (f m) (f))",
+            "(if-let ({:keys [f]} m) (f) 2)",
+            "(doseq (f xs) (f))",
+            "(for (a xs f ys) (f))",
+        ] {
+            assert!(resolves_local_at_last(src, "f"), "{src}");
+        }
+    }
+
+    #[test]
+    fn a_pattern_binds_only_where_it_binds() {
+        for src in [
+            // a clause binds over itself, not the next one
+            "(match x (f 1) (_ (f)))",
+            // literal, pin and quoted symbol bind nothing
+            "(match x (^f (f)))",
+            "(match x ('f (f)))",
+            // the init is read outside its binder
+            "(doseq (a (f)) a)",
+            // a default is a value, and `(record name …)` names a type
+            "(defn g ({:keys [a] :or {a f}}) (f))",
+            "(match x ((record f {:x a}) (f)))",
+            "(receive (after 10 (f)))",
+        ] {
+            assert!(!resolves_local_at_last(src, "f"), "{src}");
         }
     }
 

@@ -175,3 +175,75 @@
   (test "a file reaching the internals keeps its bare names and gains the new module's"
     (assert= (move-references-text "(defmodule t\n  (:use-internals a))\n(f 1)" "a" "b" ["f"])
       "(defmodule t\n  (:use-internals a)\n  (:use-internals b))\n(f 1)")))
+
+(describe "move-references-text: what a name means in the file it is in"
+  (test "a parameter, a pattern or a local that shadows a moved name stays"
+    (doseq (form ["(defn g (f) (f 1))"
+                   "(defn g ({:keys [f]}) (f))" "(let (f 1) (f))" "(match x (f (f)))"
+                   "(doseq (f xs) (f))" "(try 1 (catch f (f)))"])
+      (let (text (str "(defmodule z (:use a))\n" form "\n"))
+        (assert= (move-references-text text "a" "b" ["f"]) text))))
+
+  (test "beside a shadow, the global still moves, whatever comes before it on the line"
+    (assert= (move-references-text "(defmodule z (:use a))\n\"é\" (f) (let (f 1) f) (f)\n"
+               "a"
+               "b"
+               ["f"])
+      "(defmodule z (:use a))\n\"é\" (b/f) (let (f 1) f) (b/f)\n"))
+
+  (test "a name this file defines is its own, and so is one `:only` left out"
+    (let (own "(defmodule z (:use a))\n(defn f () 1)\n(f)\n")
+      (assert= (move-references-text own "a" "b" ["f"]) own))
+    (let (only "(defmodule z (:use a :only [g]))\n(f)\n(g)\n")
+      (assert= (move-references-text only "a" "b" ["f"]) only)))
+
+  (test "an alias follows"
+    (assert= (move-references-text "(defmodule z (:alias a :as m))\n(m/f)\n" "a" "b" ["f"])
+      "(defmodule z (:alias a :as m))\n(b/f)\n"))
+
+  (test "a name in a template is code, and in quoted data a value"
+    (assert= (move-references-text "(defmodule z (:use a))\n`(f ~x)\n'f\n" "a" "b" ["f"])
+      "(defmodule z (:use a))\n`(b/f ~x)\n'f\n"))
+
+  (test "prose follows a qualified name; a longer name, a keyword and a string do not"
+    (let (text "(defmodule z)\n;; see a/f, and a/f.\n(defn g () \"a/f is here\" [shop/a/f :a/f \"/a/f\"])\n")
+      (assert= (move-references-text text "a" "b" ["f"])
+        "(defmodule z)\n;; see b/f, and b/f.\n(defn g () \"b/f is here\" [shop/a/f :a/f \"/a/f\"])\n")))
+
+  (test "a def's string is its value, not a docstring"
+    (let (text "(defmodule z)\n(def route \"a/f\")\n")
+      (assert= (move-references-text text "a" "b" ["f"]) text))))
+
+(describe "move-text: the moved code and what stays"
+  (test "a parameter named like a moved name or a helper stays"
+    (let (moved (move-text "(defmodule a)\n(defn helper () 1)\n(defn f (helper) (helper))\n(defn g (f) (f))\n"
+                  "(defmodule b)"
+                  ["f"]))
+      (is (includes? (:destination moved) "(defn f (helper) (helper))"))
+      (is (includes? (:source moved) "(defn g (f) (f))"))
+      (assert= (:helpers moved) [])))
+
+  (test "a helper a moved macro's template calls is reached through its module"
+    (let (moved (move-text "(defmodule a)\n(defn helper (x) x)\n(defmacro m (x) `(helper ~x))\n"
+                  "(defmodule b)"
+                  ["m"]))
+      (is (includes? (:destination moved) "`(a/helper ~x)"))))
+
+  (test "a sig! goes with its definition"
+    (let (moved (move-text "(defmodule a)\n(sig! f (int -> int))\n(defn f (x) x)\n"
+                  "(defmodule b)"
+                  ["f"]))
+      (is (includes? (:destination moved) "(sig! f (int -> int))"))
+      (refute (includes? (:source moved) "sig!"))))
+
+  (test "a definition sharing a check-allow is named, not moved blind"
+    (let (moved (move-text "(defmodule a)\n(check-allow :t (defn x () 1) (defn y () (x)))\n"
+                  "(defmodule b)"
+                  ["y"]))
+      (assert= (:bundled moved) ["y"])))
+
+  (test "blank lines inside a string survive taking a form out"
+    (let (moved (move-text "(defmodule a)\n(defn f () 1)\n\n\n\n(def s \"one\n\n\n\ntwo\")\n"
+                  "(defmodule b)"
+                  ["f"]))
+      (is (includes? (:source moved) "\"one\n\n\n\ntwo\"")))))
