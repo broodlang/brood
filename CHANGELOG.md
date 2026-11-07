@@ -7,6 +7,8 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## Unreleased
 
 **Added.**
+- **`editor/treesit/node-chain`**: the nodes containing an offset, outermost first, from a held tree or
+  the text — what a structural question about a place walks (a fold's extent, the string at point).
 - **`nest move FROM.blsp TO.blsp NAME…`**: moves definitions between modules (each with its `sig`,
   comments and `check-allow`) and points every reference at the new module, quoted ones included.
 - **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a

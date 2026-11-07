@@ -1475,3 +1475,15 @@
             (is (contains? (:named info) :object))))
         (os/cmd "chmod" ["755" locked])
         (file/rmdir root)))))
+
+(when tsm-grammars?
+  (describe "node-chain"
+    (test "the nodes containing an offset, outermost first, from the text or a held tree"
+      (let (text "defmodule A do\n  def f(x) do\n    x\n  end\nend\n"
+            chain (node-chain text :elixir 17)
+            tree (open-tree text :elixir))
+        (assert= (:kind (first chain)) :source)
+        (assert= (:kind (last chain)) :identifier)
+        (is (any? chain (fn (node) (and (= (:start node) 17) (= (:end node) 40)))))
+        (assert= (map (node-chain text :elixir 17 tree) :kind) (map chain :kind))
+        (free-tree tree)))))
