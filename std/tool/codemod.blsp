@@ -366,7 +366,7 @@ scope analysis decides, so a parameter or a pattern that shadows one is left unm
         offsets (sort (mapcat names
                         (fn (name)
                           (map (reflect/references-in-source name text)
-                            (fn (at) (+ (nth starts (dec (first at))) (dec (second at))))))))
+                            (fn (at) (+ (nth starts (dec (first at)) 0) (dec (second at))))))))
         cut (fold offsets
               [[] 0]
               (fn (acc offset)
