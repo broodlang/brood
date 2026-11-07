@@ -483,7 +483,7 @@ fn has_extended_attributes(_: &std::path::Path) -> bool {
 fn replace_temp(
     target: &std::path::Path,
     mode: u32,
-) -> Option<(std::fs::File, std::path::PathBuf)> {
+) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
     use std::os::unix::fs::OpenOptionsExt;
     let directory = target
         .parent()
@@ -492,20 +492,36 @@ fn replace_temp(
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.subsec_nanos());
-    (0..64).find_map(|attempt| {
+    let mut last_error = std::io::ErrorKind::AlreadyExists.into();
+    for attempt in 0..64 {
         let temp = directory.join(format!(
             ".brood-replace-{}-{}",
             std::process::id(),
             stamp.wrapping_add(attempt)
         ));
-        std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(mode)
             .open(&temp)
-            .ok()
-            .map(|file| (file, temp))
-    })
+        {
+            Ok(file) => return Ok((file, temp)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last_error = error,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error)
+}
+
+/// A directory that takes no new entries is why a temp file could not be made and the one
+/// reason to go on in place. Anything else, a full disk above all, would meet the same
+/// failure there, after the truncate has destroyed the only copy.
+#[cfg(unix)]
+fn directory_refuses_entries(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    )
 }
 
 /// Give `file` the owner, group and mode of `old`: chown first, since it clears the
@@ -539,9 +555,18 @@ fn replace_file(
     if in_place {
         return std::fs::write(&target, content);
     }
+    // a rename needs only the directory's permission: a file this user may not write stays
+    // refused, as a write to it would be
+    if old.is_some() {
+        std::fs::OpenOptions::new().write(true).open(&target)?;
+    }
     let mode = if old.is_some() { 0o600 } else { 0o666 };
-    let Some((mut file, temp)) = replace_temp(&target, mode) else {
-        return std::fs::write(&target, content);
+    let (mut file, temp) = match replace_temp(&target, mode) {
+        Ok(temp) => temp,
+        Err(error) if directory_refuses_entries(&error) => {
+            return std::fs::write(&target, content);
+        }
+        Err(error) => return Err(error),
     };
     if let Some(meta) = &old
         && !replace_keep_identity(&file, meta)
@@ -1133,7 +1158,7 @@ mod windows_path_text_tests {
 
 #[cfg(all(test, unix))]
 mod replace_tests {
-    use super::replace_file;
+    use super::{directory_refuses_entries, replace_file};
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     fn write_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
@@ -1155,6 +1180,40 @@ mod replace_tests {
             .collect();
         found.sort();
         found
+    }
+
+    #[test]
+    fn a_file_this_user_may_not_write_stays_refused() {
+        let directory = scratch("read-only");
+        let path = directory.join("keep.txt");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let outcome = replace_file(&path, b"new", write_all);
+        assert_eq!(
+            outcome.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_directory_that_takes_no_entries_is_written_in_place() {
+        let directory = scratch("closed-directory");
+        let path = directory.join("keep.txt");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let outcome = replace_file(&path, b"new", write_all);
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        outcome.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn no_room_for_the_temp_file_is_no_reason_to_write_in_place() {
+        let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert!(!directory_refuses_entries(&full));
+        let quota = std::io::Error::from(std::io::ErrorKind::QuotaExceeded);
+        assert!(!directory_refuses_entries(&quota));
     }
 
     #[test]

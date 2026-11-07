@@ -583,12 +583,46 @@ static NODE_MONITORS: LazyLock<RwLock<HashMap<Symbol, Vec<u64>>>> =
 /// Read by [`advertised_addr`] to tell a peer how others should dial us.
 static LISTEN_ADDRS: LazyLock<RwLock<Vec<String>>> = LazyLock::new(|| RwLock::new(Vec::new()));
 
-/// Peer node-names we're *currently dialing* because cluster gossip named them
-/// (ADR-088). Entered before a mesh dial thread spawns and cleared when it
-/// finishes, so two gossip frames naming the same not-yet-connected peer don't
-/// race into two redundant dials. A peer already in `NODES` is never re-dialed.
+/// Peer node-names we're *currently dialing*, by gossip (ADR-088) or by a program
+/// ([`DialClaim`]). Entered before a dial starts and cleared when it finishes, so one
+/// node never has two dials to a peer under way. A peer already in `NODES` is never
+/// re-dialed.
 static PENDING_DIALS: LazyLock<RwLock<HashSet<Symbol>>> =
     LazyLock::new(|| RwLock::new(HashSet::new()));
+
+/// The longest a dial can take: its connect, and a handshake and the older-version retry.
+const DIAL_CEILING: Duration =
+    Duration::from_secs(CONNECT_TIMEOUT.as_secs() + 2 * HANDSHAKE_TIMEOUT.as_secs());
+
+/// A program's claim on dialing one peer. [`ProgramDial`] holds back gossip that arrives
+/// during a dial, but not a dial gossip already started, nor another program's dial: this
+/// waits those out, so the second dial finds the first one's link and makes none (KI-372).
+/// Nothing is left to wait for past [`DIAL_CEILING`], so a claim that outlives it, which
+/// nothing here should, is dialed through rather than hung on.
+struct DialClaim(Option<Symbol>);
+
+impl DialClaim {
+    fn wait_for(peer: Symbol) -> Self {
+        let deadline = Instant::now() + DIAL_CEILING;
+        loop {
+            if crate::core::sync::write(&PENDING_DIALS).insert(peer) {
+                return DialClaim(Some(peer));
+            }
+            if Instant::now() >= deadline {
+                return DialClaim(None);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl Drop for DialClaim {
+    fn drop(&mut self) {
+        if let Some(peer) = self.0 {
+            crate::core::sync::write(&PENDING_DIALS).remove(&peer);
+        }
+    }
+}
 
 /// The dials a program has under way, and the gossip held until they finish
 /// ([`ProgramDial`]).
@@ -1785,6 +1819,7 @@ fn dial_and_greet(addr: &str, offer: Offer) -> io::Result<(Stream, handshake::Au
 /// `node-start`). Returns the peer's authoritative node name on success.
 pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     let _dial = ProgramDial::begin();
+    let _claim = DialClaim::wait_for(peer);
     connect_to(peer, addr)
 }
 
@@ -1830,10 +1865,10 @@ fn connect_to(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     }
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
     // Always pass to `establish` — even when we already have a link under the
-    // authenticated name. `establish` has its own symmetric tie-break (both sides
-    // compare connectors by name and reach the same decision). The losing side
-    // closes its own socket and returns; the winning side replaces the link. A
-    // short-circuit `stream.shutdown` here would skip the tie-break on our end
+    // authenticated name. `establish` has its own tie-break: two nodes dialing each
+    // other compare connectors by name and reach the same decision, the losing side
+    // closing its own socket; links from ONE connector tie, which [`DialClaim`] keeps
+    // from arising. A short-circuit `stream.shutdown` here would skip the tie-break on our end
     // while the peer still runs `establish` on theirs — they might win, register
     // our doomed socket, and later fire a spurious `[:nodedown]` when the reader
     // hits the EOF our shutdown sent.
@@ -1945,8 +1980,9 @@ fn accept_link(mut stream: Stream) -> io::Result<()> {
 ///   brand-new peer.
 /// - **A second link to the same live peer** (same incarnation: two dials crossing,
 ///   or two dials from one side racing). Both reach the live peer, so tearing either
-///   down must not reach a monitor: the symmetric connector tie-break picks one, and
-///   an equal connector keeps the registered link.
+///   down must not reach a monitor: the connector tie-break picks one of two crossing
+///   dials, and an equal connector keeps the registered link, which is not symmetric, so
+///   this node makes one dial to a peer at a time ([`DialClaim`]).
 ///
 /// A GUEST link (ADR-415) stands outside both: its name is only its claim, so it is never
 /// registered under it. It gets a name this node mints in the guest namespace
@@ -2396,7 +2432,7 @@ fn mesh_consider(peers: Vec<(Symbol, String)>) {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Best-effort: a peer may be unreachable or a simultaneous dial
                 // from the other side may win the tie-break — either way we just
-                // stop. `node_connect` re-checks `NODES` and handles the self/dup
+                // stop. `connect_to` re-checks `NODES` and handles the self/dup
                 // guards; `establish` does the tie-break.
                 let _ = connect_to(name, &addr);
             }));
@@ -2701,6 +2737,30 @@ mod tests {
         assert!(!dialed(), "gossip dialed during a program's dial");
         drop(dial);
         assert!(dialed(), "the held gossip was never considered");
+    }
+
+    /// A program's dial to a peer gossip is already dialing waits for that dial, which is
+    /// what lets it find the link instead of making a second one. Gossip's claim stands in
+    /// for the dial; the address refuses, so the program's dial ends as soon as it starts.
+    #[test]
+    fn a_programs_dial_waits_for_a_dial_already_under_way() {
+        let peer = value::intern("claimed@test");
+        crate::core::sync::write(&PENDING_DIALS).insert(peer);
+        let (finished, dial_ended) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = node_connect(peer, "tcp:127.0.0.1:1");
+            finished.send(()).unwrap();
+        });
+        assert!(
+            dial_ended.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the program dialed alongside the dial under way"
+        );
+        crate::core::sync::write(&PENDING_DIALS).remove(&peer);
+        dial_ended.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(
+            !crate::core::sync::read(&PENDING_DIALS).contains(&peer),
+            "the claim outlived the dial"
+        );
     }
 
     /// The guest standing of the link now registered for `peer`, if it is a guest link.

@@ -1060,3 +1060,12 @@ runtime under load lost an entry 19 times in 300. Reading `telemetry` for the sa
 second bug: `reset-metrics` swapped the table out from under the handlers holding it. `full.yml`'s
 ASan failure was budget, not memory: the differential had passed at 1111 s of 1200 s the run before.
 
+2026-11-07 (KI-377..380). A review of everything since v0.50.0, by area, each finding reproduced
+before it was fixed. The editor split and the Rust moves came back clean, which was the expected
+risk ruled out. The new features did not: `redact` knew one spelling of a secret, and `nest move`
+rewrote locals and could lose the definition it moved. Fixing the second put the pattern grammar
+into `scope.rs` at last, so the LSP gains it as well; the fix's own test then found a third way to
+lose the definition, through an absolute path. KI-372's fix was half of one: the hold covered gossip
+arriving during a dial, not a dial already under way. `.brood_crash_dump` is bounded now too, after
+reaching 183 MB in this checkout.
+

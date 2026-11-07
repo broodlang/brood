@@ -295,7 +295,7 @@ fn encode_section(
         // is far worse than failing loudly. The caller reports it and loads from source
         // instead. A *builtin* is the exception — `to_message_image` carries it by name (the
         // image restores bindings in the same, binary-keyed runtime), so a global holding a
-        // primitive (e.g. `std/editor/ui`'s `editor/frontend/*term-display*`, a map of `term-*` prims) no
+        // primitive (e.g. `editor/frontend/*term-display*`, a map of `term-*` prims) no
         // longer forfeits the whole image.
         let msg = to_message_image(heap, v).map_err(|e| {
             LispError::type_err(format!(

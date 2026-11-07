@@ -294,7 +294,7 @@ fn luminance(linear: vec3<f32>) -> f32 {
     return dot(linear, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
-// render.rs `text_alpha`: the linear-light alpha whose result has the luminance an encoded
+// ink.rs `text_alpha`: the linear-light alpha whose result has the luminance an encoded
 // lerp at `cov` would — hue mixed in linear light, weight the encoded blend's.
 fn text_alpha(cov: f32, fg: f32, bg: f32) -> f32 {
     if (abs(fg - bg) <= 0.001) {

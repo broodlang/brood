@@ -2,7 +2,7 @@
 //!
 //! An unchanged memo fragment's quads are pushed whole from last frame's expansion rather
 //! than expanded again (`gpu::FragmentCache`). The CPU painter's column-limited repaint
-//! is checked pixel for pixel by `paint.rs`'s tests; the replay can only be checked where
+//! is checked pixel for pixel by `paint/strips.rs`'s tests; the replay can only be checked where
 //! the quads are drawn, on a GPU. So each hardware adapter on the machine draws one
 //! sequence of frames into an offscreen texture of a window's size and format, three
 //! ways — replay on, fragment replay alone off, every reuse off (`BROOD_GUI_DAMAGE=0`) —

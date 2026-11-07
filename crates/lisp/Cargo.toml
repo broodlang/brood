@@ -129,7 +129,7 @@ jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "de
 # language grammar — the kernel deliberately knows no specific language. A grammar
 # is opt-in: `--features treesit-ruby` (or `treesit-grammars` for the lot) links
 # its vendored C parser and lights up `:ruby` in `tree-sitter-parse`. Add a
-# language = a `treesit-<lang>` feature here + one cfg'd arm in `src/host/treesit.rs`.
+# language = a `treesit-<lang>` feature here + one cfg'd arm in `src/host/treesit/grammar.rs`.
 # (Dynamic runtime grammar loading — no compile-time enum at all — is the planned
 # end state; see ROADMAP.md.)
 treesit = ["dep:tree-sitter", "dep:tree-sitter-language", "dep:libloading"]

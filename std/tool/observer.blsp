@@ -621,7 +621,7 @@ body height (`(math/max 1 (- rows 5))`, as in `observe-frame`)."
             (observe-select cleared procs idx)))
       else state)))
 
-;; ---- display frontends + app loop now live in `ui` (std/editor/ui.blsp) ------------
+;; ---- display frontends live in `editor/frontend`, the app loop in `editor/ui` ------
 ;; `editor/frontend/*term-display*`, `(gui-display)`, `display-broadcast`, and the `ui-run` loop
 ;; were extracted into the reusable `ui` module so a new project (the editor) can
 ;; build on the same seam. The `ui/…` references above pull them in; the observer is now

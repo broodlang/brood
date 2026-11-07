@@ -21,8 +21,9 @@ to 2026-11-06 moved, unedited, to the end of
   minutes and leaves out the tree-walker differential, the repeat runs, GC stress, the stress
   suite, the tier audit, the soaks and the sanitizers. Those are in `full.yml` (weekly, or
   `gh workflow run full.yml`). Read its verdict with `make green` before the next release.
-- **Known issues:** nothing open. One watch, **KI-370** (`nest check` warned once on
-  `examples/life_bands.blsp`; the diagnostic for the next sighting is in its entry).
+- **Known issues:** one open, **KI-380** (a low-impact checker gap, the fix sketched in its entry).
+  One watch, **KI-370** (`nest check` warned once on `examples/life_bands.blsp`; the diagnostic for
+  the next sighting is in its entry).
 - **bedit** is pinned by `BEDIT_REF` in `.github/workflows/ci.yml`, which moves often. Smoke with a
   grammar-enabled `nest`, or its mode tests fail on "no grammar", which is not a regression.
 - **Before pushing:** `make prepush`, and `git merge --ff-only origin/main` first if it moved.

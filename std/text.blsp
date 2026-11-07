@@ -74,7 +74,7 @@ is read only where it is sliced.
 `[start, new-end)`, and everything around it is common to both. Found natively from each
 end, chunk by chunk, with no string built, so asking costs little more than the edit did:
 exact for one contiguous change (a keystroke, a paste, an undo), correct but wider for a
-scattered one. What lets a cache keyed on a rope (`editor/highlight`'s line cache) keep
+scattered one. What lets a cache keyed on a rope (`editor/line-cache`) keep
 everything the edit did not touch.
 
     (text/changed-range (text/from-string \"abcd\") (text/from-string \"abXcd\"))   ;=> [2 2 3]

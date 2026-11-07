@@ -405,7 +405,7 @@ pub struct RuntimeCode {
     /// namespace-less load was reading, for every entry a `%registry-update!` set. A
     /// registration is data about the module that made it, and the startup image has to
     /// carry it with THAT module: attributing by the key's qualifier credited
-    /// `:syntax/comment` — a face `editor/highlight` declares — to the registry's own
+    /// `:syntax/comment` — a face `editor/highlight` declared then — to the registry's own
     /// module, so materialising `editor/face` registered twenty-six faces where its source
     /// load registers six. Written ONLY under `registry_lock` (lock order: `registry_lock`
     /// → this), read by `%registry-writer`. A write with no writer (a prelude or run-time

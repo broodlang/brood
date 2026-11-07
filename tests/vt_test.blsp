@@ -209,6 +209,10 @@
     (assert= (lines-of (fed 20 1 "a\e[?u\e[>4;2m\e(B\e=\e[?1004hb")) ["ab"]))
   (test "a DCS / APC string is swallowed to its terminator"
     (assert= (lines-of (fed 20 1 "a\ePq...\e\\b\e_G...\e\\c")) ["abc"]))
+  (test "an ESC inside a CSI ends it and opens the next sequence"
+    (assert= (vt/lines (fed 10 1 "ab\e[3\e[1mcd")) ["abcd"])
+    (assert= (vt/lines (fed 10 1 "ab\e[\e[1mcd")) ["abcd"]))
+
   (test "an incomplete final ESC is carried, not printed"
     (let (v (fed 10 1 "ab\e"))
       (assert= (lines-of v) ["ab"])

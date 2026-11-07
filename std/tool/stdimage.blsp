@@ -109,7 +109,7 @@ has written — and each entry's owner is the module that wrote it, which the ke
 at the write (KI-136). Ownership used to be read off the KEY's qualifier, and a key names
 its owner only sometimes: `:syntax/comment` in `editor/face/*faces*` names no module and landed in the
 registry's own module's section, so materialising `editor/face` registered the eight faces
-`editor/highlight` declares, and a module that resolved them through `editor/face` worked
+`editor/highlight` declared then, and a module that resolved them through `editor/face` worked
 from the image and not from source. A two-level registry (`*methods*`: `{k1 {k2 v}}`) is
 attributed per inner entry when its outer key has no writer."
   (fold (%registry-names)

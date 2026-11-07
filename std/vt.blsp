@@ -557,8 +557,9 @@ inside it."
     (let (scan (ansi/csi-scan v i n))
       (case (first scan)
         :final (second scan)
-        ;; a control byte inside a CSI aborts it (xterm executes it; we drop the sequence)
-        :abort (inc (second scan))
+        ;; a control byte inside a CSI aborts it (xterm executes it; we drop the sequence), and
+        ;; an ESC is not dropped with it: it opens the next sequence
+        :abort (if (= (nth v (second scan)) "\e") (second scan) (inc (second scan)))
         nil))))
 
 (defn- string-end (v:vector i:int n:int -> (or nil int))
@@ -588,11 +589,17 @@ inside it."
 (defn- text-of (v:vector from:int to:int -> string)
   (string/join (seq/subvec v from to) ""))
 
+(defn- csi-finished? (v:vector i:int end:int -> bool)
+  "Did the CSI at `v[i..end)` reach its final byte, rather than being aborted ([[csi-end]])?"
+  (and (> end (inc i)) (<= 0x40 (code-of (nth v (dec end))) 0x7e)))
+
 (defn- escape (vt:terminal v:vector i:int end:int -> terminal)
   "Apply the escape sequence `v[i..end)` (the bytes after ESC)."
   (let (c (nth v i))
     (cond
-      (= c "[") (csi vt (text-of v (inc i) (dec end)) (nth v (dec end)))
+      (= c "[") (if (csi-finished? v i end)
+                  (csi vt (text-of v (inc i) (dec end)) (nth v (dec end)))
+                  vt)
       (= c "]")
         (let (stop (if (= (nth v (dec end)) "\x07") (dec end) (- end 2)))
           (osc vt (text-of v (inc i) (max (inc i) stop))))

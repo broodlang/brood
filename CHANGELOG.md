@@ -29,6 +29,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   another collection. `()` stays `nil`.
 
 **Changed.**
+- **Breaking:** the `editor/*` toolkit split along its seams (ADR-630). `editor/buffer` is pure:
+  its process is `editor/buffer-server`, its disk edge `editor/buffer-file`, spans of data over
+  text `editor/span-properties`. A thin client loads `editor/attach`, `editor/serve-protocol` and
+  `editor/frontend`; `editor/line-cache` and `editor/grammar-install` left the highlighter and
+  `editor/treesit`. Fifteen text commands moved to bedit. Every moved public name is in the rename
+  ledger, so `nest check` names its new home and `--fix-renames` applies it.
 - **`.brood_crash_dump` is bounded:** at 16 MiB it moves to `.brood_crash_dump.old`, replacing the
   last one, so a program restarting crashing workers cannot fill a disk. The newest 16 to 32 MiB
   of crashes are kept.
@@ -39,6 +45,16 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   failure, not a `{:status 0 :error …}` map (ADR-617).
 
 **Fixed.**
+- **`crash-report/redact` catches a secret however its name is spelled,** URL credentials, whole
+  `Authorization` and `Cookie` values and a key cut short, and `describe-error` redacts `:context`.
+  A report's paths and signature no longer depend on what the checkout is called (KI-377).
+- **`nest move` reads scope:** a parameter or pattern named like a moved name stays, `:only`, `:as`
+  and a file's own definitions are honoured, and it cannot lose the definition on a failed write
+  (KI-378). The language server's references and rename gain the same pattern awareness.
+- **`file/replace` refuses a file this user may not write,** and a full disk no longer falls back to
+  writing in place (ADR-621's promise).
+- **Clusters:** one node makes one dial to a peer at a time (KI-379).
+- **`vt`:** an ESC inside a CSI opens the next sequence rather than being dropped.
 - **`telemetry/reset-metrics` no longer stops attached aggregators:** they go on counting from
   zero, as its docstring said (KI-375).
 - **Two browser tabs connecting first to `editor/web`** can no longer lose a tab or share an id

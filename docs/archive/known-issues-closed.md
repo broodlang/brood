@@ -16198,3 +16198,71 @@ deadline is 30 minutes on an ASan build. Nothing was taken out of the job.
 **Guard.** None can fail on demand: a budget has no sabotage worth running. The evidence is the next
 `full.yml`; if the differential nears 3000 s, the test needs splitting, not another raise.
 
+## KI-377 — `crash-report/redact` let secrets through and left `:context` alone ✅ fixed 2026-11-07
+
+**Symptom.** Found by review. `password="hunter2"`, `{"password":"hunter2"}`, `{:password "hunter2"}`,
+`AWS_SECRET_ACCESS_KEY=x`, `https://bob:pw@host`, `Authorization: Basic …` and a PEM with no END all
+came back unchanged, `cookie: a=1; sid=abc` kept `sid`, and a `:context` holding `--password=hunter2`
+went out verbatim. `/home/whk/src/acme-secret/app/src/w.blsp` reported as
+`src/acme-secret/app/src/w.blsp`, so the signature differed per checkout and a directory name left
+the machine.
+
+**Cause.** The patterns knew one spelling, `name=value` with no quotes, and an exact name. The site
+regex took the leftmost `src/`.
+
+**Why it survived.** The tests used the spellings the patterns knew, and a checkout path with no
+second `src/`.
+
+**Fix.** A name in any common spelling (quoted, JSON, keyword, flag, prefixed) with a quoted or bare
+value; URL credentials; whole `Authorization` and `Cookie` values; a key cut short; every home;
+`:context` walked; the LAST `src/`. It is pattern matching: the docstring says a secret with no
+telling name or shape gets through. An error with no position and no frames still shares one
+signature per kind, as the message cannot be hashed without its values.
+
+**Guard.** `tests/crash_report_test.blsp` "what a report must not carry". Each input was run against
+the old code first and came back unredacted.
+
+## KI-378 — `nest move` corrupted locals and could lose the definition it moved ✅ fixed 2026-11-07
+
+**Symptom.** Found by review. `(defn g (f) (f 1))` became `(defn g (b/f) (b/f 1))`, in the source and
+in other files. `nest move src/a.blsp src/sub/b.blsp f` with no `src/sub` wrote the source, then
+raised, and `f` existed nowhere. An absolute destination was rewritten again from its stale text,
+which also lost `f`. `shop/a/f`, `:a/f` and a `"/a/f"` route changed; a template's bare name did not.
+
+**Cause.** Rewrites compared spellings with no notion of scope; the source was written first, with
+no check that the rest could be; `path/absolute` keeps a `./`, so the destination was not recognised
+in the project's file list; the prose pass ran over the whole text, and a template counted as data.
+
+**Why it survived.** The tests were text-level, on fixtures with no shadowing, and could not see the
+order of the writes. The third loss came up only in this fix's own test.
+
+**Fix.** `syntax/scope.rs` learned the pattern grammar at every binding site, deferred until now, so
+the LSP's rename and references gain it too; `nest move` asks it which symbols read a global.
+`:only`, `:as` and a file's own definitions are honoured. Prose follows in comments and docstrings,
+whole tokens. Everything is computed first, then written with `file/replace`, source last, so a
+failed write can duplicate a definition but not lose it. A file that does not parse, a missing
+`defmodule` and a `check-allow` holding several definitions are refused or reported.
+
+**Guard.** `tests/codemod_test.blsp`, `crates/nest/tests/move_command.rs`,
+`syntax::scope::tests::every_binding_site_takes_the_one_pattern_grammar`. Sabotage-verified: the
+source written first fails `a_destination_that_cannot_be_written_leaves_the_source_whole`, and
+ignoring shadows fails three codemod tests.
+
+## KI-379 — a program's dial could run beside a dial already under way to the same peer, KI-372's other half ✅ fixed 2026-11-07
+
+**Symptom.** Found by review, reading: `(node/connect "c@…")` right after gossip started a mesh dial
+to C, or two concurrent program dials, make two dials from one node. Not reproduced on demand; the
+result would be KI-372's, two links closed by opposite ends.
+
+**Cause.** KI-372's hold stops gossip arriving during a program's dial. `node_connect` never read
+`PENDING_DIALS`, so a dial begun before it, or beside it, went unseen.
+
+**Why it survived.** The hold's test covers the order it was written for.
+
+**Fix.** `DialClaim`: a program's dial claims the peer in `PENDING_DIALS`, waiting out a dial under
+way, and then finds its link. Deliberate non-fix: the hold is still global, so a dial to a dead
+address delays all gossip by up to its timeouts; nothing strands it.
+
+**Guard.** `dist::tests::a_programs_dial_waits_for_a_dial_already_under_way`, sabotage-verified: red
+with the claim removed.
+

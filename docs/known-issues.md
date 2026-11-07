@@ -68,6 +68,22 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-380 — `nest check` passes an `&optional` default that names a later parameter
+
+**Symptom.** `(defn f7 (a &optional (b later) (later 1)) b)` passes `brood --check`, and `(f7 1)`
+raises `unbound symbol: later`.
+
+**Cause.** `check_fn_forms` (`types/check/walk/binders.rs`) walks every default in the whole
+parameter scope, while a default sees only the parameters before it.
+
+**Why it survived.** 1acc691a began reading defaults at all, and took the scope the body uses.
+
+**Fix.** Open. `Ctx` has no way to hide a binding, and there are seven callers, so this wants a
+scope built parameter by parameter rather than a filter. Low impact: the checker is advisory and the
+shape is rare.
+
+**Guard.** None yet.
+
 ## KI-370 — `nest check` reported a warning on `examples/life_bands.blsp` once, then never again
 
 **Seen** 2026-11-05, once: a full `nest check std/ tests/ examples/` printed
@@ -96,6 +112,10 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 | # | What | Status |
 |---|---|---|
 | KI-370 | **`nest check` reported `send: … got nil \| pid` on `examples/life_bands.blsp` once** — a non-strict warning on an overlapping type, in a file that changed nothing, right after a rebuild | ⚠️ **watching 2026-11-05** — 0 of 12 re-runs across three boot paths; diagnostic named in the section |
+| KI-380 | **`nest check` passes an `&optional` default that names a later parameter** — walked in the whole parameter scope | **OPEN 2026-11-07** — advisory and rare; the fix wants a scope built parameter by parameter |
+| KI-379 | **a program's dial could run beside a dial already under way to the same peer** — KI-372's other half | ✅ **FIXED 2026-11-07** — sabotage-verified: `DialClaim`, one dial to a peer at a time |
+| KI-378 | **`nest move` corrupted locals and could lose the definition it moved** — no scope, and the source written first | ✅ **FIXED 2026-11-07** — sabotage-verified: scope analysis, source written last, `file/replace` |
+| KI-377 | **`crash-report/redact` let secrets through and left `:context` alone** — one spelling of a secret's name | ✅ **FIXED 2026-11-07** — every input run unredacted against the old code first |
 | KI-376 | **`full.yml`'s AddressSanitizer job ran out of time on a slow runner** — the image differential at 1111 s of 1200 s on a pass, doc-example batches at 600 s; no memory error | ✅ **FIXED 2026-11-07** — real margin in both budgets, nothing removed from the job |
 | KI-375 | **`telemetry/reset-metrics` silently stopped every attached aggregator** — handlers kept writing to the table it replaced | ✅ **FIXED 2026-11-07** — sabotage-verified: "reset-metrics" red with the rebinding back. One table, emptied |
 | KI-374 | **a tab's posted input answered 404** — `editor/web`'s table was made on first use, and two first users could each make one; 19 of 300 fresh runtimes lost an entry | ✅ **FIXED 2026-11-07** — sabotage-verified: "the tab table" red with the lazy init back. Bound at load, 0 of 1000 |
