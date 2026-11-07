@@ -597,9 +597,10 @@ inside it."
   "Apply the escape sequence `v[i..end)` (the bytes after ESC)."
   (let (c (nth v i))
     (cond
-      (= c "[") (if (csi-finished? v i end)
-                  (csi vt (text-of v (inc i) (dec end)) (nth v (dec end)))
-                  vt)
+      (= c "[")
+        (if (csi-finished? v i end)
+          (csi vt (text-of v (inc i) (dec end)) (nth v (dec end)))
+          vt)
       (= c "]")
         (let (stop (if (= (nth v (dec end)) "\x07") (dec end) (- end 2)))
           (osc vt (text-of v (inc i) (max (inc i) stop))))

@@ -757,7 +757,10 @@ be made (nothing is written then).
                       (let (stem (path/stem destination-file)
                             uses (map (regex/find-all "\\(:use [^()]*\\)" source)
                                    (fn (found) (:text found))))
-                        (str "(defmodule " stem (apply str (map uses (fn (use) (str "\n  " use)))) ")\n"))
+                        (str "(defmodule "
+                          stem
+                          (apply str (map uses (fn (use) (str "\n  " use))))
+                          ")\n"))
                       (file/slurp destination-file))
         to (module-name destination)
         result (when (and from to (lossless? source) (lossless? destination))
