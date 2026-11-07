@@ -236,7 +236,8 @@ reported by the default crash reporter (pid, reason, trace) under `brood file` /
 `nest run`, and deep recursion is a catchable `recursion too deep` error — both are
 *your* code. A Rust **panic** (a use-after-GC tripwire, a heap index, a runtime
 invariant) is the runtime's: it is appended to **`.brood_crash_dump`** in the working
-directory (append-only — read the **last** `=== brood crash dump ===` block). A
+directory (read the **last** `=== brood crash dump ===` block; at 16 MiB it rotates to
+`.brood_crash_dump.old`). A
 `SIGSEGV` leaves no dump. (Inside the Brood repo, the `brood-debug` skill is the
 full playbook.)
 

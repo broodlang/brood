@@ -27,7 +27,7 @@ pub const VERSION_LINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("BR
 
 /// Format a Unix-epoch milliseconds value as a human-readable UTC timestamp
 /// (`YYYY-MM-DD HH:MM:SS UTC`) so a crash-dump entry tells you *when* the run
-/// was at a glance — `.brood_crash_dump` is append-only, so several runs pile up
+/// was at a glance — several runs pile up in `.brood_crash_dump`
 /// and the raw epoch-ms is hard to tell apart. Pure std (Hinnant's
 /// civil-from-days), no `chrono`.
 fn fmt_utc_ms(ms: u128) -> String {
@@ -83,6 +83,33 @@ pub fn args_lossy() -> Vec<String> {
         .collect()
 }
 
+/// The durable crash record, in the working directory of the run.
+const CRASH_DUMP: &str = ".brood_crash_dump";
+/// Where [`CRASH_DUMP`] goes when it reaches [`CRASH_DUMP_MAX_BYTES`], replacing the last one.
+const CRASH_DUMP_OLD: &str = ".brood_crash_dump.old";
+/// A program that restarts crashing workers writes a record for every death, for as long as
+/// it runs, so the record needs a bound: this checkout's reached 183 MB. Rotating keeps the
+/// newest 16..32 MiB and two files at most.
+const CRASH_DUMP_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Append `record` to [`CRASH_DUMP`], rotating it first if it is full. True if it was written.
+///
+/// Best-effort, as both callers need: a failed rotation still appends, and nothing here can
+/// panic. Two runs sharing a directory can both rotate at once, which at worst replaces the
+/// `.old` file sooner than it had to; the record being written is not lost.
+fn append_crash_record(record: &str) -> bool {
+    use std::io::Write;
+    if std::fs::metadata(CRASH_DUMP).is_ok_and(|m| m.len() >= CRASH_DUMP_MAX_BYTES) {
+        let _ = std::fs::rename(CRASH_DUMP, CRASH_DUMP_OLD);
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(CRASH_DUMP)
+        .and_then(|mut f| f.write_all(record.as_bytes()))
+        .is_ok()
+}
+
 /// Install a panic hook that appends a full crash report (message + location +
 /// backtrace) to `.brood_crash_dump` in the working directory, *in addition* to
 /// the normal stderr output. A Rust panic in these binaries is almost always a
@@ -90,8 +117,9 @@ pub fn args_lossy() -> Vec<String> {
 /// — and the one-line stderr message often scrolls past (especially under a TUI /
 /// `nest run` animation). The dump captures it durably with a backtrace
 /// (`force_capture`, so it works even without `RUST_BACKTRACE`). Appends, so a
-/// burst of worker-thread panics all land. Best-effort: a write failure is
-/// swallowed (we never want the crash handler to itself panic).
+/// burst of worker-thread panics all land, up to the bound [`append_crash_record`]
+/// keeps. Best-effort: a write failure is swallowed (we never want the crash
+/// handler to itself panic).
 ///
 /// **Caveat:** this catches Rust *panics*, not `SIGSEGV` (e.g. a coroutine
 /// stack overflow) — a signal handler writing from an async-signal context is a
@@ -101,7 +129,6 @@ pub fn install_crash_dump() {
     std::panic::set_hook(Box::new(move |info| {
         // Preserve the normal behaviour first (stderr message / default trace).
         prior(info);
-        use std::io::Write;
         let bt = std::backtrace::Backtrace::force_capture();
         let when = web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)
@@ -125,15 +152,10 @@ pub fn install_crash_dump() {
         ));
         body.push_str(&format!("panic:   {info}\n"));
         body.push_str(&format!("backtrace:\n{bt}\n"));
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(".brood_crash_dump")
-            && f.write_all(body.as_bytes()).is_ok()
-        {
+        if append_crash_record(&body) {
             // Point the user at the dump (the panic message itself already
             // went to stderr via `prior`).
-            eprintln!("brood: crash report appended to .brood_crash_dump");
+            eprintln!("brood: crash report appended to {CRASH_DUMP}");
         }
     }));
 }
@@ -153,7 +175,6 @@ pub fn install_crash_dump() {
 /// Best-effort and never fatal: a process that cannot write its own death notice must
 /// still die quietly rather than take the runtime with it.
 pub fn dump_process_death(pid_descr: &str, reason: &str) {
-    use std::io::Write;
     let when = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -164,13 +185,7 @@ pub fn dump_process_death(pid_descr: &str, reason: &str) {
         env!("BROOD_GIT_SHA"),
         fmt_utc_ms(when),
     );
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(".brood_crash_dump")
-    {
-        let _ = f.write_all(body.as_bytes());
-    }
+    append_crash_record(&body);
 }
 
 /// Print a one-line stderr notice if any non-default GC env knob is active, so a

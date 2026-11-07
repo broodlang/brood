@@ -49,6 +49,7 @@ tests/corpus/gabriel/reference/
 
 # Local debug artifacts (never commit)
 .brood_crash_dump
+.brood_crash_dump.old
 .brood-skip-blsp-check
 erl_crash.dump
 

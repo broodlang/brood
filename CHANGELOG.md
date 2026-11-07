@@ -29,6 +29,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   another collection. `()` stays `nil`.
 
 **Changed.**
+- **`.brood_crash_dump` is bounded:** at 16 MiB it moves to `.brood_crash_dump.old`, replacing the
+  last one, so a program restarting crashing workers cannot fill a disk. The newest 16 to 32 MiB
+  of crashes are kept.
 - **Breaking:** clauses of a `fn` run in order and the first match wins, arity clauses too
   (ADR-047's most-specific choice is gone). A clause an earlier one shadows is a compile error
   (ADR-619).

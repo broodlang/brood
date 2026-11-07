@@ -27,7 +27,8 @@ failures. `brood --debug-flags` is the index of every `BROOD_*` knob below.
   work no scheduler worker picks up. Keep the binary and the log; it is a runtime bug.
 - **`.brood_crash_dump`** in the cwd: `brood`/`nest` append every Rust **panic** +
   backtrace there (and to stderr) — durable when a TUI scrolls the message away.
-  Append-only: read the **last** block. `RUST_BACKTRACE` defaults to `1`; `full` for
+  Read the **last** block. At 16 MiB it rotates to `.brood_crash_dump.old`, replacing the
+  last one, so look there too. `RUST_BACKTRACE` defaults to `1`; `full` for
   verbose.
 
 ## 2. Is it non-tail recursion? (the #1 cause of "recursion too deep")
