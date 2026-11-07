@@ -778,6 +778,16 @@ ends)."
   ;; the held tree's chain when there is one alive, else the text's
   (or (when tree (%tree-sitter-tree-chain tree at)) (%tree-sitter-chain (ts-string text) lang at)))
 
+(defn node-chain (text lang offset &optional (tree nil))
+  "The nodes of `text`'s `lang` parse that contain char `offset`, OUTERMOST first (the root, then
+each node inside it down to the deepest), each `{:kind :start :end :named :container}` in char
+offsets. Read from `tree`, a held parse of exactly `text`, when one is given and alive, else from
+`text` parsed (cached by text). What a structural question about a place walks: the string or
+comment it is in, the block a fold there would cover.
+
+    (map (editor/treesit/node-chain \"x = [1,\\n 2]\" :ruby 5) :kind)   ;~> (:program :assignment :array …)"
+  (ts-chain-at text lang offset tree))
+
 (defn node-children (text lang offset &optional (all? false) (tree nil))
   "The children of the deepest node STRICTLY containing char `offset` of `text` (a string or a
 rope) parsed as `lang`, each `{:kind :start :end :named :container}` without its own
