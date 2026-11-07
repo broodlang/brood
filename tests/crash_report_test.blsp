@@ -298,6 +298,45 @@ passes. A report that does not match belongs to another test — drop it and kee
     (assert= (redact "password: hunter2, then") "password: [redacted], then")
     (assert= (redact "a -----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY----- b")
       "a [redacted key] b"))
+  (test "a secret is redacted however its name is spelled"
+    (doseq (text ["password=\"hunter2\""
+                   "password='hunter2'" "{\"password\":\"hunter2\"}" "{:password \"hunter2\"}"
+                   "AWS_SECRET_ACCESS_KEY=hunter2" "--db-password=hunter2" "\"apiKey\": \"hunter2\""
+                   "api_key => hunter2" "password=\"a \\\"quoted\\\" hunter2\""])
+      (assert= (includes? (redact text) "hunter2") false)))
+
+  (test "what a connection carries is redacted"
+    (assert= (redact "https://bob:hunter2@host/x") "https://[redacted]@host/x")
+    (assert= (redact "Authorization: Basic Zm9vOmJhcg==") "Authorization: Basic [redacted]")
+    (assert= (redact "Authorization: token ghp_abc") "Authorization: token [redacted]")
+    (assert= (redact "cookie: a=1; sid=abc\nnext") "cookie: [redacted]\nnext"))
+
+  (test "a key cut short is redacted to the end"
+    (assert= (redact "a -----BEGIN PRIVATE KEY-----\nMIIE") "a [redacted key]"))
+
+  (test "every home is a home, and a neighbour of ours is not ours"
+    (assert= (redact "/home/annabel/x and /Users/bob/y") "~/x and ~/y")
+    (assert= (redact "C:\\Users\\bob\\y") "~\\y"))
+
+  (test "an ordinary word that names no secret stays"
+    (assert= (redact "unexpected token: )") "unexpected token: )")
+    (assert= (redact "open src/a.blsp: no such file") "open src/a.blsp: no such file"))
+
+  (test "the context is redacted, however deep"
+    (let (context (:context (describe-error {:kind :error :message "x"}
+                              {:argv ["--password=hunter2"]
+                               :nested {:cwd "/home/ann/x" :n 3}})))
+      (assert= (includes? (pr-str context) "hunter2") false)
+      (assert= (map/get-in context [:nested :cwd]) "~/x")
+      (assert= (map/get-in context [:nested :n]) 3)))
+
+  (test "a file is the same from every checkout, whatever the checkout is called"
+    (let (at (fn (root)
+               (map/get-in (describe-error {:kind :error :file (str root "/src/w.blsp") :line 1})
+                 [:site :file])))
+      (assert= (at "/home/ann/src/acme-secret/app") "src/w.blsp")
+      (assert= (at "/opt/build") "src/w.blsp")))
+
   (test "a described message is redacted"
     (assert= (:message (describe-error {:kind :error :message "secret=xyz"})) "secret=[redacted]")))
 

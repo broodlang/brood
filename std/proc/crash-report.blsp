@@ -248,11 +248,11 @@ anything else as a message."
     (_ {:kind :error :message (if (string? error) error (pr-str error))})))
 
 (defn- crash-report-relative-file (file)
-  "`file` as the same on every machine: from its project's `src/`, `std/` or `tests/` on,
-else its name alone — never the home directory it was built in."
+  "`file` as the same on every machine: from the LAST `src/`, `std/` or `tests/` in it on, as
+the directories above that are the checkout's, else its name alone."
   (if (not (string? file))
     nil
-    (let (found (regex/find "(?:^|/)((?:src|std|tests|tools)/.*)$" file))
+    (let (found (regex/find "^(?:.*/)?((?:src|std|tests|tools)/.*)$" file))
       (if found (:text (first (:groups found))) (path/basename file)))))
 
 (defn- crash-report-frame (frame)
@@ -260,22 +260,58 @@ else its name alone — never the home directory it was built in."
    :file (crash-report-relative-file (get frame :file))
    :line (get frame :line)})
 
-(defn redact (text:any -> string)
-  "`text` with what must not leave the machine taken out: the home directory as `~`, a
-bearer token, a `password=` / `token=` / `secret=` value, a PEM block. A message can quote
-anything the program held, so a report's text goes through here before it is shown or sent.
+;; A value after a secret's name: a quoted string, escapes and all, or a bare word.
+(def- crash-report-secret-value "(\"(?:[^\"\\\\]|\\\\.)*\"|'[^']*'|[^\\s,;&\"'})\\]]+)")
 
-    (crash-report/redact \"open /home/ann/x: no such file\")   ;~> \"open ~/x: no such file\""
+;; A name that holds a secret, as it is spelled in an env var, a flag, JSON or a keyword:
+;; `AWS_SECRET_ACCESS_KEY`, `--db-password`, `"apiKey"`, `:password`.
+(def- crash-report-secret-name
+  "[A-Za-z0-9_-]*(?:password|passwd|pwd|passphrase|token|secret|credential|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_-]*")
+
+(def- crash-report-redactions
+  [["/(?:home|Users)/[^/\\s\"':,]+" "~"]
+    ["[A-Za-z]:\\\\Users\\\\[^\\\\\\s\"':,]+" "~"]
+    ["(?i)([a-z][a-z0-9+.-]*://)[^/\\s@]+@" "$1[redacted]@"]
+    ["(?i)(authorization[\"']?\\s*[=:]\\s*[\"']?(?:[a-z]+\\s+)?)[^\r\n\"']+" "$1[redacted]"]
+    ["(?i)(bearer\\s+)[A-Za-z0-9._~+/=-]+" "$1[redacted]"]
+    ["(?i)((?:set-)?cookie[\"']?\\s*[=:]\\s*[\"']?)[^\r\n\"']+" "$1[redacted]"]
+    [(str "(?i)(" crash-report-secret-name "[\"']?\\s*(?:=>|=|:)\\s*)" crash-report-secret-value)
+      "$1[redacted]"]
+    [(str "(?i)(:" crash-report-secret-name "\\s+)" crash-report-secret-value) "$1[redacted]"]
+    ["-----BEGIN [A-Z ]+-----[\\s\\S]*?(?:-----END [A-Z ]+-----|$)" "[redacted key]"]])
+
+(defn redact (text:any -> string)
+  "`text` with what must not leave the machine taken out: home directories as `~`, URL
+credentials, `Authorization` and `Cookie` values, a bearer token, the value of anything named
+like a password, token, secret or key, however it is spelled, and a PEM block, whole or cut
+short. A message can quote anything the program held, so a report's text goes through here
+before it is shown or sent. It recognises names and shapes, so a secret with neither gets
+through: a caller holding one should not put it in an error.
+
+    (crash-report/redact \"open /home/ann/x: no such file\")   ;=> \"open ~/x: no such file\"
+    (crash-report/redact \"{\\\"password\\\":\\\"hunter2\\\"}\")   ;=> \"{\\\"password\\\":[redacted]}\""
   (let (text (if (string? text) text (pr-str text))
         home (path/home)
         homed (if (and (string? home) (> (string/length home) 1))
-                (string/replace text home "~")
-                text)
-        bearer (regex/replace "(?i)(bearer\\s+)[A-Za-z0-9._~+/=-]+" homed "$1[redacted]")
-        assigned (regex/replace "(?i)((?:password|passwd|token|secret|api[_-]?key|cookie)\\s*[=:]\\s*)[^\\s,;&\"']+"
-                   bearer "$1[redacted]"))
-    (regex/replace "-----BEGIN [A-Z ]+-----[\\s\\S]*?-----END [A-Z ]+-----"
-      assigned "[redacted key]")))
+                (string/replace text (str home "/") "~/")
+                text))
+    (fold crash-report-redactions
+      homed
+      (fn (redacted rule) (regex/replace (first rule) redacted (second rule))))))
+
+(defn- crash-report-redact-value (value)
+  "`value` with every string in it, however deep, through [[redact]]."
+  (cond
+    (string? value) (redact value)
+    (map? value)
+      (fold (%map-pairs value)
+        {}
+        (fn (acc pair)
+          (assoc acc
+            (first pair) (crash-report-redact-value (second pair)))))
+    (vector? value) (into [] (map value crash-report-redact-value))
+    (list? value) (map value crash-report-redact-value)
+    else value))
 
 (defn signature (report:map -> string)
   "The report's identity across machines and runs: its error kind, where it was raised and
@@ -291,7 +327,7 @@ hit twice, or by two people, has one signature; a collector groups by it.
   "`error` — a caught error map, a process's exit reason, or any value — as a report: its
 `:kind`, `:code`, `:message` (redacted, capped), `:hint`, `:site` `{:file :line}` and the
 innermost `:frames` with project-relative paths, the `:brood` version, the `:os`, its
-`:signature` ([[signature]]), and the caller's `context` map merged under `:context`
+`:signature` ([[signature]]), and the caller's `context` map under `:context`, redacted
 (the program's name and version, what it was doing). Pure but for reading the version.
 
     (crash-report/describe-error (try (/ 1 0) (catch e e)) {:program \"bedit\"})   ;~> {:kind :arith-error :site {…} :signature \"…\" …}"
@@ -309,7 +345,7 @@ innermost `:frames` with project-relative paths, the `:brood` version, the `:os`
                 :frames (into [] (map (take trace crash-report-max-frames) crash-report-frame))
                 :brood (system/brood-version)
                 :os (os/type)
-                :context (or context {})})
+                :context (crash-report-redact-value (or context {}))})
     (assoc report :signature (signature report))))
 
 (defn post (url:string report:map -> any)
