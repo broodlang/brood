@@ -175,3 +175,9 @@
   (test "a file reaching the internals keeps its bare names and gains the new module's"
     (assert= (move-references-text "(defmodule t\n  (:use-internals a))\n(f 1)" "a" "b" ["f"])
       "(defmodule t\n  (:use-internals a)\n  (:use-internals b))\n(f 1)")))
+
+(describe "missing-uses"
+  (test "the source's imports the destination lacks"
+    (assert= (missing-uses "(defmodule a\n  (:use x)\n  (:use y :only [f]))"
+               "(defmodule b (:use x))")
+      '("(:use y :only [f])"))))

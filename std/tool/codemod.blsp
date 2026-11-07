@@ -600,6 +600,16 @@ reaches `from`'s internals (`:use-internals`) keeps its bare names and gains
         (str "$1\n  (:use-internals " to ")"))
       trimmed)))
 
+(defn missing-uses (source destination)
+  "The `(:use …)` clauses of module source `source` naming a module `destination` does not
+:use — what code moved from one to the other may need there.
+
+    (codemod/missing-uses \"(defmodule a (:use x) (:use y :only [f]))\" \"(defmodule b (:use x))\")   ;=> (\"(:use y :only [f])\")"
+  (seq/reject (map (regex/find-all "\\(:use [^()]*\\)" source) (fn (found) (:text found)))
+    (fn (clause)
+      (let (module (:text (first (:groups (regex/find "^\\(:use\\s+([^\\s()]+)" clause)))))
+        (regex/find (str "\\(:use\\s+" (regex/escape module) "[\\s)]") destination)))))
+
 (defn move (source-file destination-file names)
   "Move the definitions `names` from the module in `source-file` to the one in
 `destination-file` ([[move-text]]) and point every other project source at their new home
@@ -656,6 +666,16 @@ returns 0, or 1 when a name was not found (nothing is written then).
                        to
                        (if new? (str " (new file " destination-file ")") "")))
             (for (f changed) (io/puts (str "  references: " f)))
+            ;; an existing module keeps its own imports: say which of the source's it lacks
+            (when (not new?)
+              (let (missing (missing-uses source destination))
+                (when (not (empty? missing))
+                  (io/puts (str "  "
+                             to
+                             " may need what "
+                             from
+                             " imports: "
+                             (string/join missing " "))))))
             (when (not (empty? (:helpers result)))
               (io/puts (str "  "
                          to
