@@ -542,6 +542,12 @@ order — move the helpers too. Other files are [[move-references-text]]'s.
                     "\n")
      :moved (vec (seq/filter names moved?))
      :missing (vec (seq/reject names moved?))
+     ;; a moved name `to` already defines would be defined twice there
+     :clashing (vec (seq/filter (keys moved-heads)
+                      (fn (name)
+                        (any? (node-payload (reflect/parse-source destination))
+                          (fn (node)
+                            (let (form (defining-form node)) (and form (= (second form) name))))))))
      :helpers (vec helpers)
      :cycle? (and (not (empty? helpers)) (not (empty? reached-later)))}))
 
@@ -574,12 +580,15 @@ reaches `from`'s internals (`:use-internals`) keeps its bare names and gains
         trimmed (regex/replace (str "(\\(:use\\s+" module "\\s+:only\\s+\\[)([^\\]]*)(\\])")
                   rewritten
                   (fn (found)
-                    (let ([open listed close] (vec (map (:groups found) (fn (group) (:text group)))))
-                      (str open
-                        (string/join (seq/reject (regex/split "\\s+" (string/trim listed))
-                                       (fn (name) (contains? moved name)))
-                          " ")
-                        close))))
+                    (let ([open listed close] (vec (map (:groups found) (fn (group) (:text group))))
+                          listed-names (regex/split "\\s+" (string/trim listed)))
+                      ;; a list naming nothing moved stays as it was written
+                      (if (any? listed-names (fn (name) (contains? moved name)))
+                        (str open
+                          (string/join (seq/reject listed-names (fn (name) (contains? moved name)))
+                            " ")
+                          close)
+                        (:text found)))))
         reaches-moved? (any? (symbols-in (reflect/parse-source trimmed))
                          (fn (name)
                            (or (contains? moved name) (contains? moved (unqualified-in name to))))))
@@ -617,6 +626,14 @@ returns 0, or 1 when a name was not found (nothing is written then).
                      source-file
                      ": "
                      (string/join (:missing result) ", ")))
+          1)
+      (not (empty? (:clashing result)))
+        (do
+          (io/puts (str "nest move: "
+                     destination-file
+                     " already defines "
+                     (string/join (:clashing result) ", ")
+                     " — rename one first"))
           1)
       else
         (do
