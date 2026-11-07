@@ -140,6 +140,13 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
                           ["--text" "--defs-only"]
                           ["--text" "--in-quote"]]
              :run (fn (options) (run-rename options))}
+   "move" {:about "Move definitions to another module: `nest move FROM.blsp TO.blsp NAME…` takes each NAME's top-level definition (with its `sig`, the comments above it and any `check-allow` around it) out of FROM and appends it to TO (created, `:use`-ing what FROM does, when missing), then points every reference at TO — `from/NAME` in code and quoted data, a bare NAME in a file that `:use`s FROM. The moved code reaches what it left behind as `from/HELPER`; a private name reached across is made public. Says when the two modules would reach each other."
+           :flags {}
+           :positional ["from" nil]
+           :names ["from" "to" "names"]
+           :arity [3 nil]
+           :trailing true
+           :run (fn (options) (run-move options))}
    "fetch" {:about "Resolve the project's dependencies and write project.lock.blsp (ADR-037): a `:path` dep must exist and records its content hash."
             :flags {}
             :run (fn (options) (run-fetch options))}
@@ -911,16 +918,18 @@ parsed command line."
       ;; The context-blind whole-token replace, for a rename that must touch prose.
       (get flags "--text") (codemod/rename (list (list old new)))
       else
-        (codemod/cst-rename old
-          new
-          (cond
-            ;; A reversed-args rename: every 2-arg call `(OLD a b)` → `(NEW b a)`.
-            (get flags "--swap") :swap
-            (get flags "--refs-only") :refs-only
-            (get flags "--defs-only") :defs-only
-            (get flags "--in-quote") :in-quote
-            else :all)))
+      ;; the flags compose: `--refs-only --in-quote` renames the references, quoted ones too
+        (let (modes (seq/keep [["--swap" :swap]
+                                ["--refs-only" :refs-only]
+                                ["--defs-only" :defs-only]
+                                ["--in-quote" :in-quote]]
+                      (fn ([flag mode]) (when (get flags flag) mode))))
+          (codemod/cst-rename old new (if (empty? modes) :all modes))))
     0))
+
+(defn- run-move (options)
+  (let (positionals (vec (get options :positionals)))
+    (codemod/move (first positionals) (second positionals) (vec (drop positionals 2)))))
 
 ;; The package manager (ADR-037) ------------------------------------------------------
 

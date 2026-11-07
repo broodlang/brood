@@ -246,6 +246,7 @@ const BLSP_SUBCOMMANDS: &[&str] = &[
     "update-tooling",
     "update-brood",
     "rename",
+    "move",
     "fetch",
     "update",
     "tree",

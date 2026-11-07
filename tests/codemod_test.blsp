@@ -93,3 +93,77 @@
   (test "quoted data is left alone"
     (let (text "'(member? a b)")
       (assert= (cst-rename-text text "member?" "includes?" :swap) text))))
+
+(describe "rename modes compose"
+  (test "--refs-only with --in-quote renames quoted references and leaves the definition"
+    (let (out (cst-rename-text "(defn foo (x) x) (foo 1) '(foo 2)"
+                "foo"
+                "zap"
+                [:refs-only :in-quote]))
+      (assert= out "(defn foo (x) x) (zap 1) '(zap 2)"))))
+
+;; `nest move`: a definition leaves its module with its sig, its comments and its
+;; check-allow, and every reference follows it.
+(def move-source
+  (str "(defmodule a (:use x))\n\n"
+    ";; helps\n(defn- helper (n) n)\n\n"
+    ";; the mover\n;; two lines\n(sig mover (int -> int))\n(defn mover (n) (helper n)) ; trailing\n\n"
+    "(check-allow :t (defn- quiet (n) (a/mover n)))\n\n" "(defn stays (n) (mover n))\n"))
+
+(describe "move-text"
+  (test "the definition goes with its sig and the comments above it; the source keeps the rest"
+    (let (moved (move-text move-source "(defmodule b)" ["mover"]))
+      (is (includes? (:destination moved) ";; the mover\n;; two lines\n(sig mover (int -> int))"))
+      (is (includes? (:destination moved) "(defn mover (n) (a/helper n))"))
+      (refute (includes? (:source moved) "(defn mover"))
+      (refute (includes? (:source moved) "two lines"))
+      (is (includes? (:source moved) ";; helps\n(defn helper (n) n)"))))
+  (test "what stays reaches the moved name in its new module"
+    (let (moved (move-text move-source "(defmodule b)" ["mover"]))
+      (is (includes? (:source moved) "(defn stays (n) (b/mover n))"))
+      (is (includes? (:source moved) "(b/mover n)"))))
+  (test "a check-allow wrapper moves with its definition, its own references bare"
+    (let (moved (move-text move-source "(defmodule b)" ["mover" "quiet"]))
+      (is (includes? (:destination moved) "(check-allow :t (defn- quiet (n) (mover n)))"))))
+  (test "the helpers left behind are named, and a two-way reach is flagged"
+    (let (moved (move-text move-source "(defmodule b)" ["mover"]))
+      (assert= (:helpers moved) ["helper"])
+      (is (:cycle? moved))))
+  (test "a private name the source still reaches is made public"
+    (let (moved (move-text "(defmodule a)\n(defn- f (n) n)\n(defn g (n) (f n))\n"
+                  "(defmodule b)"
+                  ["f"]))
+      (is (includes? (:destination moved) "(defn f (n) n)"))))
+  (test "the destination's own references to a moved name become bare"
+    (let (moved (move-text move-source "(defmodule b)\n(defn user (n) (a/mover n))" ["mover"]))
+      (is (includes? (:destination moved) "(defn user (n) (mover n))"))))
+  (test "a quoted qualified name — a value a keymap holds — follows the move but stays qualified"
+    (let (moved (move-text "(defmodule a)\n(defn f (m) (= (:last m) 'a/f))\n(defn g (m) 'f)"
+                  "(defmodule b)"
+                  ["f" "g"]))
+      (is (includes? (:destination moved) "(defn f (m) (= (:last m) 'b/f))"))
+      (is (includes? (:destination moved) "(defn g (m) 'f)"))))
+  (test "a comment ending the definition's line goes with it"
+    (let (moved (move-text "(defmodule a)\n(defn f (n) n) ; why\n(defn g (n) n)\n"
+                  "(defmodule b)"
+                  ["f"]))
+      (is (includes? (:destination moved) "(defn f (n) n) ; why"))
+      (refute (includes? (:source moved) "why"))))
+  (test "a name not defined at the top is reported missing"
+    (assert= (:missing (move-text move-source "(defmodule b)" ["nope"])) ["nope"])))
+
+(describe "move-references-text"
+  (test "qualified references follow, quoted ones too; bare ones where the file :uses the module"
+    (assert= (move-references-text "(:use a) (f 1) (a/f 2) '(a/f) (g 3)" "a" "b" ["f"])
+      "(:use a) (b/f 1) (b/f 2) '(b/f) (g 3)"))
+  (test "prose that names it qualified follows too"
+    (assert= (move-references-text "(defn h () \"see \\\\[a/f]\") ; a/f here" "a" "b" ["f"])
+      "(defn h () \"see \\\\[b/f]\") ; b/f here"))
+  (test "a file that does not :use the module keeps its bare names"
+    (assert= (move-references-text "(f 1) (a/f 2)" "a" "b" ["f"]) "(f 1) (b/f 2)"))
+  (test "a moved name leaves an :only list"
+    (assert= (move-references-text "(:use a :only [f g]) (f 1)" "a" "b" ["f"])
+      "(:use a :only [g]) (b/f 1)"))
+  (test "a file reaching the internals keeps its bare names and gains the new module's"
+    (assert= (move-references-text "(defmodule t\n  (:use-internals a))\n(f 1)" "a" "b" ["f"])
+      "(defmodule t\n  (:use-internals a)\n  (:use-internals b))\n(f 1)")))

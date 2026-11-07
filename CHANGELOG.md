@@ -7,6 +7,8 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## Unreleased
 
 **Added.**
+- **`nest move FROM.blsp TO.blsp NAME…`**: moves definitions between modules (each with its `sig`,
+  comments and `check-allow`) and points every reference at the new module, quoted ones included.
 - **A caught error as a report** (`crash-report/describe-error`, `redact`, `signature`, `post`): a
   program that catches its errors can send them to a collector as data, redacted, under a
   signature that is the same for the same bug on every machine.
@@ -38,6 +40,8 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   zero, as its docstring said (KI-375).
 - **Two browser tabs connecting first to `editor/web`** can no longer lose a tab or share an id
   (KI-374).
+- **`nest rename`**: its flags compose (`--refs-only --in-quote` used to apply only the first), and
+  it no longer rewrites a nested checkout under the project (a worktree an agent left there).
 - **`nest check` sees an unbound name in a function's body or `&optional` default.** Only call
   operands and `def` / `let` / `if` slots were read as values, so `(defn f (&optional (x moved)) …)`
   passed the check and failed the first call that left the argument out.
