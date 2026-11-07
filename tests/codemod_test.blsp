@@ -149,6 +149,14 @@
                   ["f"]))
       (is (includes? (:destination moved) "(defn f (n) n) ; why"))
       (refute (includes? (:source moved) "why"))))
+  (test "a name the destination already defines is reported, not defined twice"
+    (assert= (:clashing (move-text "(defmodule a)\n(defn f (n) n)"
+                          "(defmodule b)\n(defn f (n) (a/f n))"
+                          ["f"]))
+      ["f"]))
+  (test "an :only list naming nothing moved stays as written"
+    (assert= (move-references-text "(:use a\n  :only [g\n    h])" "a" "b" ["f"])
+      "(:use a\n  :only [g\n    h])"))
   (test "a name not defined at the top is reported missing"
     (assert= (:missing (move-text move-source "(defmodule b)" ["nope"])) ["nope"])))
 
