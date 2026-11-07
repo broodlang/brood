@@ -58,13 +58,27 @@
       nil
       (do (file/replace f after) f))))
 
+(defn- nested-checkouts (files)
+  "The directories under the current one that are checkouts of their own — a `.git` file or
+directory below the top (a git worktree an agent or a tool left there, a vendored repo): their
+sources are another tree's, which a rename here must not rewrite."
+  (seq/distinct (seq/keep files
+                  (fn (f)
+                    (let (at (index-of f "/.git"))
+                      (when (and (>= at 0) (not (= (string/substring f 0 at) ".")))
+                        (str (string/substring f 0 at) "/")))))))
+
 (defn- project-blsp ()
-  "Every .blsp file under the current directory, skipping .git and vendored _deps."
-  (seq/filter (walk-files ".")
-    (fn (f)
-      (and (string/ends-with? f ".blsp")
-        (not (includes? f "/.git/"))
-        (not (includes? f "/_deps/"))))))
+  "Every .blsp file under the current directory, skipping .git, vendored _deps and any nested
+checkout ([[nested-checkouts]])."
+  (let (files (walk-files ".")
+        nested (nested-checkouts files))
+    (seq/filter files
+      (fn (f)
+        (and (string/ends-with? f ".blsp")
+          (not (includes? f "/.git/"))
+          (not (includes? f "/_deps/"))
+          (not (any? nested (fn (dir) (string/starts-with? f dir)))))))))
 
 (defn rename (pairs)
   "Apply `[[old new] …]` token renames across the project's own .blsp sources. Prints each
@@ -116,6 +130,11 @@
 (def- *wrapper-sigils*
   {:quote "'" :quasi "`" :unquote "~" :splice "~@" :pin "^"})
 
+(defn- mode? (mode wanted)
+  ;; whether `mode` (one keyword, or a vector of them that compose — `[:refs-only :in-quote]`)
+  ;; includes `wanted`
+  (if (keyword? mode) (= mode wanted) (includes? mode wanted)))
+
 (defn- node-kind (node) (first node))
 (defn- node-payload (node) (second node))
 
@@ -140,7 +159,7 @@ rewritten text."
         ;; `:swap` — a two-argument CALL `(old a b)` becomes `(new b a)`: the head renamed
         ;; and the two argument nodes exchanged, the whitespace and comments between them
         ;; left where they were.
-        swap? (and (= mode :swap)
+        swap? (and (mode? mode :swap)
                 (= container :list)
                 (not in-quote?)
                 (= head-name old)
@@ -180,11 +199,11 @@ rewritten text."
         ;; swaps; every other mention stays.
         (= kind :symbol)
           (if (and (= payload old)
-                (or (not in-quote?) (= mode :in-quote))
+                (or (not in-quote?) (mode? mode :in-quote))
                 (cond
-                  (= mode :swap) false
-                  (= mode :defs-only) is-def-name?
-                  (= mode :refs-only) (not is-def-name?)
+                  (mode? mode :swap) false
+                  (mode? mode :defs-only) is-def-name?
+                  (mode? mode :refs-only) (not is-def-name?)
                   else true))
             new
             payload)
@@ -261,3 +280,373 @@ counterpart to `rename`. Prints each changed file and returns the count.
     (for (f changed) (io/puts "  changed: " f))
     (io/puts (count changed) " file(s) changed")
     (count changed)))
+
+;; ---- moving definitions between modules (`nest move`) ------------------------------
+;; Splitting a large module by hand is a rename wave in disguise: every definition cut out
+;; of `from` and pasted into `to` leaves `from/NAME` (and `'from/NAME` in a keymap or a
+;; registry table) pointing at nothing, every file that `:use`s `from` calling a name it no
+;; longer has, and the moved code calling helpers it left behind. `move-text` does the
+;; moving as data over the lossless CST, and `move` applies it across the project:
+;;   - each named definition leaves `from` with its `sig`, the comments above it and any
+;;     `check-allow` around it, and lands at the end of `to`;
+;;   - the moved code's own references come back bare, and the helpers it still needs from
+;;     `from` become `from/HELPER` (made public if they were private);
+;;   - what is left of `from`, and every other file — quoted data included, since a keymap
+;;     binds `'from/NAME` — reaches a moved name as `to/NAME`;
+;;   - a moved private name another module now reaches is made public.
+
+(defn- significant-kids (kids)
+  (seq/reject kids (fn (k) (includes? [:whitespace :comment] (node-kind k)))))
+
+(defn- node-text (node)
+  "The source text of a CST node, byte for byte."
+  (map-symbols node (fn (name _) name) false))
+
+;; check-allow: a CST walk recurses to the source's nesting depth, not its length.
+(check-allow :non-tail-recursion
+  (defn- map-symbols (node f quoted?)
+    "The source text of `node` with every symbol token passed through `(f name quoted?)` — a
+name in, a name out; `quoted?` when the token is quoted DATA (`'x`, `(quote x)`), where a
+qualified name is a value rather than a reference and must stay qualified. Strings, comments
+and every other leaf come back byte for byte. A `(:use …)` clause is left as it is: a name in
+its `:only` list names what the module had."
+    (let (kind (node-kind node)
+          payload (node-payload node)
+          head (when (= kind :list) (first (significant-kids payload))))
+      (cond
+        (= kind :symbol) (f payload quoted?)
+        (and head (= (node-kind head) :keyword) (= (node-payload head) ":use"))
+          (str "("
+            (apply str (map payload (fn (kid) (map-symbols kid (fn (name _) name) quoted?))))
+            ")")
+        (includes? *container-kinds* kind)
+          (let (inner (or quoted?
+                        (and head (= (node-kind head) :symbol) (= (node-payload head) "quote"))))
+            (str (open-delim kind)
+              (apply str (map payload (fn (kid) (map-symbols kid f inner))))
+              (close-delim kind)))
+        (string? payload) payload
+        else
+          (let (sigil (get *wrapper-sigils* kind))
+            (if (nil? sigil)
+              (error "codemod: unknown CST node kind "
+                (pr-str kind)
+                " — add it to *wrapper-sigils*")
+              (str sigil
+                (map-symbols payload
+                  f
+                  (cond
+                    (includes? [:unquote :splice] kind) false
+                    (includes? [:quote :quasi] kind) true
+                    else quoted?)))))))))
+
+(defn rewrite-symbols-text (text f)
+  "`text` with every symbol token passed through `(f name quoted?)` ([[map-symbols]]):
+lossless otherwise.
+
+    (codemod/rewrite-symbols-text \"(a/x \\\"a/x\\\" 'a/x) ; a/x\" (fn (s _) (if (= s \"a/x\") \"b/x\" s)))   ;=> \"(b/x \\\"a/x\\\" 'b/x) ; a/x\""
+  (map-symbols (reflect/parse-source text) f false))
+
+(defn- defining-form (node)
+  "`[head name]` of the definition a top-level form makes — `(defX NAME …)`, seen through a
+`(check-allow … FORM)` wrapper — or `[\"sig\" NAME]` for a signature, or nil."
+  (when (= (node-kind node) :list)
+    (let (kids (significant-kids (node-payload node))
+          head (first kids)
+          named (second kids))
+      (when (and head (= (node-kind head) :symbol))
+        (let (head-name (node-payload head))
+          (cond
+            (= head-name "check-allow") (defining-form (last kids))
+            (and named
+              (= (node-kind named) :symbol)
+              (or (= head-name "sig")
+                (and (string/starts-with? head-name "def") (not (= head-name "defmodule")))))
+              [head-name (node-payload named)]
+            else nil))))))
+
+(defn- private-head? (head) (string/ends-with? head "-"))
+
+(defn module-name (text)
+  "The module a source text declares (`(defmodule NAME …)`), or nil.
+
+    (codemod/module-name \"(defmodule shop/cart (:use x))\")   ;=> \"shop/cart\""
+  (let (found (regex/find "\\(defmodule\\s+([^\\s()]+)" text))
+    (when found (:text (first (:groups found))))))
+
+(defn- attached-comments (kids index)
+  "The indices of the comment lines directly above `kids[index]` — a run of `;` lines each
+starting its own line, with no blank line between them and the form."
+  (letrec (walk (fn (at found)
+                  (let (before (dec at))
+                    (cond
+                      (< before 0) found
+                      (= (node-kind (nth kids before)) :comment)
+                        (let (earlier (when (> before 0) (nth kids (dec before))))
+                          ;; a comment that ends the line of the form above is that form's
+                          (if (or (nil? earlier)
+                                (= (node-kind earlier) :comment)
+                                (and (= (node-kind earlier) :whitespace)
+                                  (includes? (node-payload earlier) "\n")))
+                            (walk before (cons before found))
+                            found))
+                      ;; indentation before a comment, never a line break
+                      (and (= (node-kind (nth kids before)) :whitespace)
+                        (not (includes? (node-payload (nth kids before)) "\n"))
+                        (> before 0)
+                        (= (node-kind (nth kids (dec before))) :comment))
+                        (walk before found)
+                      else found))))
+    (walk index '())))
+
+(defn- trailing-comment (kids index)
+  "The indices of a comment that ends the line of `kids[index]` (`(defn f …) ; why`) and the
+spaces before it, which go wherever the form goes."
+  (let (space (nth kids (inc index) nil)
+        comment (nth kids (+ index 2) nil))
+    (cond
+      (and space (= (node-kind space) :comment)) [(inc index)]
+      (and space
+        comment
+        (= (node-kind space) :whitespace)
+        (not (includes? (node-payload space) "\n"))
+        (= (node-kind comment) :comment))
+        [(inc index) (+ index 2)]
+      else [])))
+
+(defn- squeeze-blank-lines (text)
+  ;; at most one blank line between forms, once forms have been taken out
+  (regex/replace "\n[ \t]*\n(?:[ \t]*\n)+" text "\n\n"))
+
+;; check-allow: a CST walk recurses to the source's nesting depth, not its length.
+(check-allow :non-tail-recursion
+  (defn- symbols-in (node)
+    "Every symbol token in `node`, quoted data included, as a vector of names."
+    (let (kind (node-kind node)
+          payload (node-payload node))
+      (cond
+        (= kind :symbol) [payload]
+        (includes? *container-kinds* kind) (into [] (mapcat payload symbols-in))
+        (string? payload) []
+        else (symbols-in payload)))))
+
+(defn- unqualified-in (name module)
+  ;; `name` without `module/` in front, or nil when it is not that module's
+  (let (prefix (str module "/"))
+    (when (string/starts-with? name prefix) (string/substring name (string/length prefix)))))
+
+(defn- publicized (text names heads)
+  "`text` with the definition of each of `names` whose head (in `heads`, name -> head) is
+private — `defn-`, `def-` — made public: another module reaches it now."
+  (fold names
+    text
+    (fn (acc name)
+      (let (head (get heads name))
+        (if (and head (private-head? head))
+          (regex/replace (str "\\(" (regex/escape head) "(\\s+)" (regex/escape name) "([\\s)])")
+            acc
+            (str "(" (string/substring head 0 (dec (string/length head))) "$1" name "$2"))
+          acc)))))
+
+(defn- prose-follows (text from to names)
+  ;; what docstrings and comments say of a moved name, qualified (`\\[from/cmd-x]`, a
+  ;; `from/NAME` in prose), follows it too — a whole-token replace, which a qualified name
+  ;; makes exact
+  (fold names text (fn (acc name) (token-replace acc (str from "/" name) (str to "/" name)))))
+
+(defn move-text (source destination names)
+  "Move the top-level definitions of `names` (strings) from the module source `source` to the
+module source `destination`, as data: `{:source :destination :moved :missing :helpers :cycle?}`
+— the two texts rewritten, the names found and not found, and the names left in `source` the
+moved code still calls (now `from/NAME`). `:cycle?` when it calls back into `source` while
+`source` calls the moved code: the two modules would reach each other, which the checker cannot
+order — move the helpers too. Other files are [[move-references-text]]'s.
+
+    (:destination (codemod/move-text \"(defmodule a)\\n(defn f (x) x)\\n(defn g (x) (f x))\" \"(defmodule b)\" [\"f\"]))   ;=> \"(defmodule b)\\n\\n(defn f (x) x)\\n\""
+  (let (from (module-name source)
+        to (module-name destination)
+        wanted (into #{} names)
+        kids (node-payload (reflect/parse-source source))
+        indices (range 0 (count kids))
+        chosen (seq/filter indices
+                 (fn (i)
+                   (let (form (defining-form (nth kids i)))
+                     (and form (contains? wanted (second form))))))
+        taken (into #{}
+                (mapcat chosen
+                  (fn (i) (into (into [i] (attached-comments kids i)) (trailing-comment kids i)))))
+        staying (seq/reject indices (fn (i) (contains? taken i)))
+        heads-of (fn (selected)
+                   (fold selected
+                     {}
+                     (fn (acc i)
+                       (let (form (defining-form (nth kids i)))
+                         (if (and form (not (= (first form) "sig")))
+                           (assoc acc (second form) (first form))
+                           acc)))))
+        moved-heads (heads-of chosen)
+        staying-heads (heads-of staying)
+        moved? (fn (name) (contains? moved-heads name))
+        moved-in (fn (name module)
+                   (let (bare (unqualified-in name module)) (when (and bare (moved? bare)) bare)))
+        rest-text (squeeze-blank-lines (apply str (map staying (fn (i) (node-text (nth kids i))))))
+        ;; what is left of `source` reaches a moved name in `to`
+        remaining (rewrite-symbols-text rest-text
+                    (fn (name quoted?)
+                      ;; a bare name in quoted data is a value of its own, left alone
+                      (let (bare (or (moved-in name from)
+                                   (when (and (moved? name) (not quoted?)) name)))
+                        (if bare (str to "/" bare) name))))
+        reached-later (seq/filter (keys moved-heads)
+                        (fn (name)
+                          (any? (symbols-in (reflect/parse-source rest-text))
+                            (fn (symbol) (or (= symbol name) (= symbol (str from "/" name)))))))
+        ;; the moved code: its own names bare, the helpers it leaves behind `from/NAME`
+        helper? (fn (name) (and (contains? staying-heads name) (not (moved? name))))
+        moved-forms (map chosen
+                      (fn (i)
+                        (str (apply str
+                               (map (attached-comments kids i) (fn (c) (node-text (nth kids c)))))
+                          (string/trimr (str (node-text (nth kids i))
+                                          (apply str
+                                            (map (trailing-comment kids i)
+                                              (fn (c) (node-text (nth kids c))))))))))
+        moved-source (string/join moved-forms "\n\n")
+        helpers (sort (seq/distinct (seq/filter (symbols-in (reflect/parse-source moved-source))
+                                      helper?)))
+        moved-text (rewrite-symbols-text moved-source
+                     (fn (name quoted?)
+                       (cond
+                         ;; quoted, a qualified name is the value a keymap or a dispatcher holds:
+                         ;; it follows the move but stays qualified
+                         (and quoted? (moved-in name from)) (str to "/" (moved-in name from))
+                         quoted? name
+                         (moved-in name from) (moved-in name from)
+                         (moved-in name to) (moved-in name to)
+                         (helper? name) (str from "/" name)
+                         else name))))
+    {:source (prose-follows (publicized remaining helpers staying-heads) from to (keys moved-heads))
+     ;; what the destination already said of a moved name (`from/NAME`) is its own name now
+     :destination (str (string/trimr (rewrite-symbols-text destination
+                                       (fn (name quoted?)
+                                         (cond
+                                           (and quoted? (moved-in name from))
+                                             (str to "/" (moved-in name from))
+                                           quoted? name
+                                           else (or (moved-in name from) (moved-in name to) name)))))
+                    "\n\n"
+                    (prose-follows (publicized moved-text reached-later moved-heads)
+                      from
+                      to
+                      (keys moved-heads))
+                    "\n")
+     :moved (vec (seq/filter names moved?))
+     :missing (vec (seq/reject names moved?))
+     :helpers (vec helpers)
+     :cycle? (and (not (empty? helpers)) (not (empty? reached-later)))}))
+
+(defn move-references-text (text from to names)
+  "Another file's `text` with its references to the moved `names` (strings, moved from module
+`from` to `to`) pointed at `to`: every `from/NAME` — in quoted data too — and, when the file
+`:use`s `from`, every bare NAME; a moved name leaves a `(:use from :only […])` list. A file that
+reaches `from`'s internals (`:use-internals`) keeps its bare names and gains
+`(:use-internals to)`, since a moved private name is still one.
+
+    (codemod/move-references-text \"(:use a) (f 1) '(a/f)\" \"a\" \"b\" [\"f\"])   ;=> \"(:use a) (b/f 1) '(b/f)\"
+    (codemod/move-references-text \"(:use a :only [f g]) (f 1)\" \"a\" \"b\" [\"f\"])   ;=> \"(:use a :only [g]) (b/f 1)\""
+  (let (moved (into #{} names)
+        module (regex/escape from)
+        internals? (regex/find (str "\\(:use-internals\\s+" module "[\\s)]") text)
+        uses-from? (regex/find (str "\\(:use\\s+" module "[\\s)]") text)
+        prefix (str from "/")
+        rewritten (rewrite-symbols-text text
+                    (fn (name quoted?)
+                      (cond
+                        (and (string/starts-with? name prefix)
+                          (contains? moved (string/substring name (string/length prefix))))
+                          (str to "/" (string/substring name (string/length prefix)))
+                        (and uses-from? (not internals?) (not quoted?) (contains? moved name))
+                          (str to "/" name)
+                        else name)))
+        ;; prose follows a qualified name too
+        rewritten (prose-follows rewritten from to names)
+        ;; a moved name leaves the `:only` list that named it
+        trimmed (regex/replace (str "(\\(:use\\s+" module "\\s+:only\\s+\\[)([^\\]]*)(\\])")
+                  rewritten
+                  (fn (found)
+                    (let ([open listed close] (vec (map (:groups found) (fn (group) (:text group)))))
+                      (str open
+                        (string/join (seq/reject (regex/split "\\s+" (string/trim listed))
+                                       (fn (name) (contains? moved name)))
+                          " ")
+                        close))))
+        reaches-moved? (any? (symbols-in (reflect/parse-source trimmed))
+                         (fn (name)
+                           (or (contains? moved name) (contains? moved (unqualified-in name to))))))
+    (if (and internals?
+          reaches-moved?
+          (nil? (regex/find (str "\\(:use-internals\\s+" (regex/escape to) "[\\s)]") trimmed)))
+      (regex/replace (str "(\\(:use-internals\\s+" module "\\))")
+        trimmed
+        (str "$1\n  (:use-internals " to ")"))
+      trimmed)))
+
+(defn move (source-file destination-file names)
+  "Move the definitions `names` from the module in `source-file` to the one in
+`destination-file` ([[move-text]]) and point every other project source at their new home
+([[move-references-text]]). A destination that does not exist yet is created as a module named
+after its file, `:use`-ing what the source does. Prints what changed and what needs a look;
+returns 0, or 1 when a name was not found (nothing is written then).
+
+    (codemod/move \"src/commands.blsp\" \"src/motion.blsp\" [\"cmd-forward-word\"])   ;~> 0"
+  (let (source (file/slurp source-file)
+        from (module-name source)
+        new? (not (file/exists? destination-file))
+        destination (if new?
+                      (let (stem (path/stem destination-file)
+                            uses (map (regex/find-all "\\(:use [^()]*\\)" source)
+                                   (fn (found) (:text found))))
+                        (str "(defmodule " stem "\n  \"\"\n  " (string/join uses "\n  ") ")\n"))
+                      (file/slurp destination-file))
+        to (module-name destination)
+        result (move-text source destination names))
+    (cond
+      (not (empty? (:missing result)))
+        (do
+          (io/puts (str "nest move: not defined at the top of "
+                     source-file
+                     ": "
+                     (string/join (:missing result) ", ")))
+          1)
+      else
+        (do
+          (file/spit source-file (:source result))
+          (file/spit destination-file (:destination result))
+          (let (others (seq/reject (project-blsp)
+                         (fn (f)
+                           (or (= (path/normalize f) (path/normalize source-file))
+                             (= (path/normalize f) (path/normalize destination-file)))))
+                changed (seq/filter others
+                          (fn (f)
+                            (let (before (file/slurp f)
+                                  after (move-references-text before from to (:moved result)))
+                              (when (not (= before after)) (file/spit f after) true)))))
+            (io/puts (str "moved "
+                       (count (:moved result))
+                       " definition(s) "
+                       from
+                       " -> "
+                       to
+                       (if new? (str " (new file " destination-file ")") "")))
+            (for (f changed) (io/puts (str "  references: " f)))
+            (when (not (empty? (:helpers result)))
+              (io/puts (str "  "
+                         to
+                         " now calls back into "
+                         from
+                         ": "
+                         (string/join (:helpers result) ", "))))
+            (when (:cycle? result)
+              (io/puts (str "  warning: "
+                         from " and " to " now reach each other — move those helpers too")))
+            0)))))

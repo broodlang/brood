@@ -74,6 +74,14 @@ cd ../hatch && nest rename to-str ->string       # one rename, across this repo'
 `nest rename` is pure Brood (`std/tool/codemod.blsp`) — it rewrites whole identifiers
 only, so `map/get` never corrupts `multimap/get`. Run it per repo.
 
+Splitting a module is `nest move FROM.blsp TO.blsp NAME…`: each definition leaves with its `sig`,
+the comments above it and any `check-allow`, lands at the end of TO (made, `:use`-ing what FROM
+does, when missing), and every reference follows it — `from/NAME` in code and in quoted data (a
+keymap's `'from/cmd-x`), and a bare NAME in a file that `:use`s FROM. The moved code reaches what
+it left behind as `from/HELPER`; the tool says so, and warns when the two modules would then
+reach each other (move those helpers too). The flags of `nest rename` compose
+(`--refs-only --in-quote`), and neither command rewrites a nested checkout (an agent's worktree).
+
 Then drive every repo at once with the **workspace runner** (auto-discovers the sibling
 Brood repos):
 
