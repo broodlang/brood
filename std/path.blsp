@@ -148,26 +148,26 @@ UNC share's `//server/share/` (kept with its two slashes)."
                (>= (string/length root) (string/length p)) ""
                else (string/substring p (string/length root) (string/length p)))
         parts (seq/filter (string/split tail "/") (fn (s) (not (or (= s "") (= s ".")))))
-        resolved (normalize-reduce parts nil absolute))
+        resolved (collapse-dots parts nil absolute))
     (cond
       (nil? resolved) (or root ".")
       absolute (str root (path-glue (first resolved) (rest resolved)))
       else (path-glue (first resolved) (rest resolved)))))
 
-(defn- normalize-reduce (parts stack absolute)
+(defn- collapse-dots (parts stack absolute)
   (if (nil? parts)
     (reverse stack)
     (let (p (first parts))
       (cond
         ;; `..` pops a resolved segment off the stack
         (and (= p "..") (not (nil? stack)) (not (= (first stack) "..")))
-          (normalize-reduce (rest parts)
+          (collapse-dots (rest parts)
             (rest stack)
             absolute)
         ;; `..` that would climb above an absolute root is discarded — there is no
         ;; parent of `/`. (For a relative path it is kept, so `a/../..` → `..`.)
-        (and (= p "..") absolute (nil? stack)) (normalize-reduce (rest parts) stack absolute)
-        else (normalize-reduce (rest parts) (cons p stack) absolute)))))
+        (and (= p "..") absolute (nil? stack)) (collapse-dots (rest parts) stack absolute)
+        else (collapse-dots (rest parts) (cons p stack) absolute)))))
 
 ;; ---- relative-to ------------------------------------------------------------
 
