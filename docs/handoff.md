@@ -10,23 +10,21 @@ option book in [`runtime-frontier.md`](runtime-frontier.md) and
 to 2026-11-06 moved, unedited, to the end of
 [`archive/perf-handoff.md`](archive/perf-handoff.md).
 
-## State (2026-11-06)
+## State (2026-11-07)
 
 - **The front is language features.** Performance, runtime and editor work wait, as ROADMAP's
   design pass set out on 2026-10-28.
 - **Released:** v0.50.0 (tag on `dc6c775f`, GitHub Release 2026-11-06); v0.49.1's changes went
   into its changelog section. `CHANGELOG.md`'s "Unreleased" holds ADR-617..620, `file/replace`
   and the KI-371/372 fixes.
-- **Green:** CI passed on `ec4f12af`, and `make test` 2293/2293 on `db74fde4`. Per-push CI answers
-  in about 12 minutes and leaves out the tree-walker differential, the repeat runs, GC stress,
-  the stress suite, the tier audit, the soaks and the sanitizers. Those moved to
-  `full.yml` (weekly, or `gh workflow run full.yml`; it replaced the Nightly on 2026-11-05)
-  and the first `full.yml` started on `db74fde4` (2026-11-06). Read its verdict with `make green`
-  before the next release.
+- **Green:** per-push CI passed on `f3ae911c` (2026-11-07). Per-push CI answers in about 12
+  minutes and leaves out the tree-walker differential, the repeat runs, GC stress, the stress
+  suite, the tier audit, the soaks and the sanitizers. Those are in `full.yml` (weekly, or
+  `gh workflow run full.yml`). Read its verdict with `make green` before the next release.
 - **Known issues:** nothing open. One watch, **KI-370** (`nest check` warned once on
   `examples/life_bands.blsp`; the diagnostic for the next sighting is in its entry).
-- **bedit** is pinned at `1d132cc3` (`BEDIT_REF`). Smoke with a grammar-enabled
-  `nest`, or its mode tests fail on "no grammar", which is not a regression.
+- **bedit** is pinned by `BEDIT_REF` in `.github/workflows/ci.yml`, which moves often. Smoke with a
+  grammar-enabled `nest`, or its mode tests fail on "no grammar", which is not a regression.
 - **Before pushing:** `make prepush`, and `git merge --ff-only origin/main` first if it moved.
 - **Is the tree green?** `make green`, never by reading the run list.
 - **Don't build the debug profile while a suite runs:** `cargo build` relinks

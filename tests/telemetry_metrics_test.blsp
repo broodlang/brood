@@ -20,6 +20,29 @@
   "Emit `event` with measurements `m`, `n` times (tail-recursive)."
   (when (> n 0) (emit event m) (tmm-emit-n event m (- n 1))))
 
+;; First in the file: a table made on first use is nil until a metric is touched (KI-375).
+(describe "telemetry metrics: the table"
+  (test "is there before the first metric, so no two processes can make it"
+    (assert= (table? *telemetry-metrics*) true)))
+
+(describe "telemetry metrics: reset-metrics"
+  :isolated (test "a counter still attached goes on counting from zero"
+    (start)
+    (detach-all)
+    (reset-metrics)
+    (counter :reset-c [:tmm :reset])
+    (emit [:tmm :reset] {})
+    (sync)
+    (reset-metrics)
+    (let (cleared (metric :reset-c))
+      (emit [:tmm :reset] {})
+      (sync)
+      (let (counted (metric :reset-c))
+        (detach-all)
+        (stop)
+        (assert= cleared nil)
+        (assert= counted {:kind :counter :count 1})))))
+
 (describe "telemetry metrics: counter / sum / gauge"
   :isolated (test "counter tallies each emit of its event"
     (start)

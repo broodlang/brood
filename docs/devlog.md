@@ -1051,3 +1051,12 @@ over a shared `builtins/display`, which is one reading of a face where there wer
 `host/treesit` and the renderer split by what each part knows. Every public name that moved is in
 the ledger. Found by reading on the way: three CSI scanners disagreed, and `ansi/render` took
 letters only, so `ESC[3~` ate the text behind it; all of them now ask `ansi/csi-scan`.
+
+2026-11-07 (KI-374, KI-375, KI-376). Getting the tree back to green. The per-push CI had been red
+since `crash-report` landed unformatted, which also stopped the examples job before its corpora and
+stress gates; those were clean. The `editor_web_test` flake, passed by retry on `d105a615`, was a
+real race: `tabs` made its table on first use, so two first users could each make one, and a fresh
+runtime under load lost an entry 19 times in 300. Reading `telemetry` for the same shape found a
+second bug: `reset-metrics` swapped the table out from under the handlers holding it. `full.yml`'s
+ASan failure was budget, not memory: the differential had passed at 1111 s of 1200 s the run before.
+

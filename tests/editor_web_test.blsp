@@ -3,6 +3,12 @@
 ;; tab) — a test that bound a port would fight other suites for it.
 (defmodule editor-web-test (:use editor/web) (:use-internals editor/web) (:use test))
 
+;; First in the file, so nothing here has touched the table: a table made on first use is nil
+;; until then, and two connections arriving together would each make one (KI-374).
+(describe "the tab table"
+  (test "is there before the first connection, so no two of them can make it"
+    (assert= (table? *web-tabs*) true)))
+
 (describe "frame-json"
   (test "a frame's ops become JSON arrays, keywords as strings"
     (assert= (frame-json [[:clear] [:quad 0 0 1 1 :red 0.0]])
@@ -61,10 +67,7 @@
           tab (spawn (editor/web/tab-run nil id old-loop)))
       (send tab [:session supervisor])
       ;; the post waits for the stream to know the tab: it answers 404 until then
-      (letrec (await-tab (fn (left)
-                           (when (and (> left 0) (not (= (table/get (editor/web/tabs) id nil) tab)))
-                             (receive (after 10 (await-tab (dec left)))))))
-        (await-tab 200))
+      (eventually "the stream knows the tab" (fn () (= (table/get *web-tabs* id nil) tab)))
       (assert= (:status (web-post id "\"a\"")) 204)
       (assert= (web-next :old) [:key "a" false 1])
       ;; the dead loop took none; the restart and a post race to the stream

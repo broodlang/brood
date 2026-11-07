@@ -34,6 +34,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   failure, not a `{:status 0 :error …}` map (ADR-617).
 
 **Fixed.**
+- **`telemetry/reset-metrics` no longer stops attached aggregators:** they go on counting from
+  zero, as its docstring said (KI-375).
+- **Two browser tabs connecting first to `editor/web`** can no longer lose a tab or share an id
+  (KI-374).
 - **`nest check` sees an unbound name in a function's body or `&optional` default.** Only call
   operands and `def` / `let` / `if` slots were read as values, so `(defn f (&optional (x moved)) …)`
   passed the check and failed the first call that left the argument out.

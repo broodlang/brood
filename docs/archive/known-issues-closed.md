@@ -16137,3 +16137,64 @@ the handler could answer and the client ask for the count before that send. Not 
 
 **Guard.** By construction, as a test of a race this narrow cannot go red on demand: `:accepted`
 is sent before the handler can run, and the client's question follows the handler's answer.
+
+## KI-374 — a tab's posted input answered 404: two first users of `editor/web`'s table each made one ✅ fixed 2026-11-07
+
+**Symptom.** CI on `d105a615`, passed on retry: `tests/editor_web_test.blsp:68: … an input posted
+while the stream takes in a restart …`, `(assert= (:status (web-post id "\"a\"")) 204)`, actual 404.
+
+**Cause.** `tabs` created its table on first use: `(when (nil? *web-tabs*) (def *web-tabs*
+(table/new)))`. Two processes could both read nil and both `def`, and a tab registered in the table
+that lost was gone. Every `/events` connection is its own process, so two tabs opening first could
+do the same in production: a tab whose input answers 404, or two tabs with one id. Measured with 64
+fresh processes in a fresh runtime under load: 19 of 300 runtimes lost an entry.
+
+**Why it survived.** It takes the first use in a runtime, so it can happen once per run, and
+nextest's retry passes it. The test's own wait gave up silently after 2 s and posted anyway, which
+read as a slow machine. `telemetry` had the same shape (KI-375) under a comment calling it
+single-threaded.
+
+**Fix.** `(defonce *web-tabs* (table/new))`, bound at load, like the tables in `editor/attach` and
+`gen`. The `tabs` function went. The test waits through `test/eventually`, which raises naming what
+it waited for. 0 of 1000 runtimes lost an entry after it.
+
+**Guard.** `tests/editor_web_test.blsp` "the tab table", first in the file so nothing has touched
+it: sabotage-verified, with the lazy init back it fails `actual: false`, and the ADR-605 test fails
+beside it. The race itself has no on-demand test inside one runtime, whose table exists already;
+the argument is by construction: nothing writes the binding after load.
+
+## KI-375 — `telemetry/reset-metrics` silently stopped every attached aggregator ✅ fixed 2026-11-07
+
+**Symptom.** After `(telemetry/counter :c [:ev])` and `(telemetry/reset-metrics)`, emits no longer
+counted: `(telemetry/metric :c)` stayed nil, while the docstring said handlers stay attached.
+
+**Cause.** Each aggregator's handler closes over the table it found at attach time, and
+`reset-metrics` rebound the global to a fresh table, so handlers wrote to one that no reader saw.
+Found reading `telemetry` for KI-374's pattern. The lazy first-use `def` had KI-374's race too.
+
+**Why it survived.** Every test resets before it attaches, so none reset under a live handler.
+
+**Fix.** One table, bound at load with `defonce`; `reset-metrics` empties it.
+
+**Guard.** `tests/telemetry_metrics_test.blsp` "reset-metrics": sabotage-verified, with the rebinding
+back it fails `actual: nil`, `expect: {:kind :counter, :count 1}`. "the table" fails `actual: false`
+with the nil-until-first-use binding back.
+
+## KI-376 — `full.yml`'s AddressSanitizer job ran out of time on a slow runner ✅ fixed 2026-11-07
+
+**Symptom.** `full.yml` on `e9cf9bf8`: `TIMEOUT [1200.262s] brood::image_matches_source
+an_imaged_module_binds_what_its_source_binds`, and `brood_suite_passes` FLAKY 2/2, four doc-example
+and surface-audit tests `timed out after 600s — hard-killed`, their workers computing.
+
+**Cause.** Budgets with no margin, no memory error: ASan reported nothing. The same job on
+`db74fde4` passed with the differential at 1111 s of its 1200 s, over the same 146 modules. That
+test loads every std module twice, so it grows with `std/`, now 154 modules.
+
+**Why it survived.** A pass does not show how close it came, and `full.yml` was new that day.
+
+**Fix.** `image_matches_source` gets 3000 s under the `asan` nextest profile, and `suite.rs`'s batch
+deadline is 30 minutes on an ASan build. Nothing was taken out of the job.
+
+**Guard.** None can fail on demand: a budget has no sabotage worth running. The evidence is the next
+`full.yml`; if the differential nears 3000 s, the test needs splitting, not another raise.
+
