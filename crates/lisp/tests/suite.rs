@@ -75,10 +75,14 @@ fn run_suite() {
     //
     // If this wrapper ever needs shrinking again, re-read that paragraph first: sampling here
     // is how coverage quietly diverged between `make test` and `nest test` in the first place.
-    if let Err(e) = interp.eval_str(
-        "(require-one 'test) (def test/*timeout-ms* 600000) \
-         (project-run/run-tests)",
-    ) {
+    //
+    // Under AddressSanitizer one batch of the doc-example and surface-audit tests needed more
+    // than 600 s on a slow runner while still computing (KI-376), so that build gets 30 minutes.
+    let batch_budget_ms = if cfg!(brood_asan) { 1_800_000 } else { 600_000 };
+    if let Err(e) = interp.eval_str(&format!(
+        "(require-one 'test) (def test/*timeout-ms* {batch_budget_ms}) \
+         (project-run/run-tests)"
+    )) {
         panic!("Brood test suite failed: {}", e);
     }
 }

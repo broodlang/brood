@@ -406,6 +406,14 @@ slow-timeout = { period = "120s", terminate-after = 10 }
 filter = 'binary(suite)'
 slow-timeout = { period = "120s", terminate-after = 45 }
 
+# `image_matches_source` loads every std module twice, so it grows with `std/`, and it took 1111 s
+# of the 1200 s the `all()` rule below gives it on a run that passed, then timed out on the next
+# with the same 146 modules: the margin was one slow runner (KI-376). The first matching
+# override wins, so this stands above `all()`.
+[[profile.asan.overrides]]
+filter = 'binary(image_matches_source)'
+slow-timeout = { period = "120s", terminate-after = 25 }
+
 # The default profile's per-binary caps (`image_matches_source` at 6 min, …) are sized for an
 # uninstrumented build and would otherwise win: this profile's overrides are read first.
 [[profile.asan.overrides]]
