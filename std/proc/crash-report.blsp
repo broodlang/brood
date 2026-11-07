@@ -268,10 +268,14 @@ anything the program held, so a report's text goes through here before it is sho
     (crash-report/redact \"open /home/ann/x: no such file\")   ;~> \"open ~/x: no such file\""
   (let (text (if (string? text) text (pr-str text))
         home (path/home)
-        homed (if (and (string? home) (> (string/length home) 1)) (string/replace text home "~") text)
+        homed (if (and (string? home) (> (string/length home) 1))
+                (string/replace text home "~")
+                text)
         bearer (regex/replace "(?i)(bearer\\s+)[A-Za-z0-9._~+/=-]+" homed "$1[redacted]")
-        assigned (regex/replace "(?i)((?:password|passwd|token|secret|api[_-]?key|cookie)\\s*[=:]\\s*)[^\\s,;&\"']+" bearer "$1[redacted]"))
-    (regex/replace "-----BEGIN [A-Z ]+-----[\\s\\S]*?-----END [A-Z ]+-----" assigned "[redacted key]")))
+        assigned (regex/replace "(?i)((?:password|passwd|token|secret|api[_-]?key|cookie)\\s*[=:]\\s*)[^\\s,;&\"']+"
+                   bearer "$1[redacted]"))
+    (regex/replace "-----BEGIN [A-Z ]+-----[\\s\\S]*?-----END [A-Z ]+-----"
+      assigned "[redacted key]")))
 
 (defn signature (report:map -> string)
   "The report's identity across machines and runs: its error kind, where it was raised and

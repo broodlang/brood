@@ -253,28 +253,39 @@ passes. A report that does not match belongs to another test — drop it and kee
       (assert= (:signature (describe-error (raise 3))) (:signature (describe-error (raise 4))))))
 
   (test "a different kind is a different signature"
-    (is (not (= (:signature (describe-error {:kind :type-error :message "x" :file "src/a.blsp" :line 3}))
-            (:signature (describe-error {:kind :arith-error :message "x" :file "src/a.blsp" :line 3}))))))
+    (is (not (= (:signature (describe-error {:kind :type-error
+                                             :message "x"
+                                             :file "src/a.blsp"
+                                             :line 3}))
+               (:signature (describe-error {:kind :arith-error
+                                            :message "x"
+                                            :file "src/a.blsp"
+                                            :line 3}))))))
 
   (test "paths are the project's, never the machine's"
     (let (report (describe-error {:kind :type-error
-                            :message "bad"
-                            :file "/home/ann/code/app/src/worker.blsp"
-                            :line 14
-                            :trace [{:fn 'worker/step :file "/home/ann/code/app/src/worker.blsp" :line 14}]}))
+                                  :message "bad"
+                                  :file "/home/ann/code/app/src/worker.blsp"
+                                  :line 14
+                                  :trace [{:fn 'worker/step
+                                           :file "/home/ann/code/app/src/worker.blsp"
+                                           :line 14}]}))
       (assert= (map/get-in report [:site :file]) "src/worker.blsp")
       (assert= (:file (first (:frames report))) "src/worker.blsp")
       (assert= (:fn (first (:frames report))) "worker/step")
       ;; …and so two machines agree
       (assert= (:signature report)
         (:signature (describe-error {:kind :type-error
-                               :message "other"
-                               :file "/Users/bo/app/src/worker.blsp"
-                               :line 14
-                               :trace [{:fn 'worker/step :file "/Users/bo/app/src/worker.blsp" :line 14}]})))))
+                                     :message "other"
+                                     :file "/Users/bo/app/src/worker.blsp"
+                                     :line 14
+                                     :trace [{:fn 'worker/step
+                                              :file "/Users/bo/app/src/worker.blsp"
+                                              :line 14}]})))))
 
   (test "an exit reason and a bare value are described too"
-    (assert= (:kind (describe-error [:error {:kind :arith-error :message "division by zero"}])) :arith-error)
+    (assert= (:kind (describe-error [:error {:kind :arith-error :message "division by zero"}]))
+      :arith-error)
     (assert= (:message (describe-error "plain")) "plain")
     (is (string/ends-with? (:message (describe-error (string/repeat "x" 900))) "…"))))
 
@@ -285,7 +296,8 @@ passes. A report that does not match belongs to another test — drop it and kee
     (assert= (redact "Authorization: Bearer abc.DEF-123") "Authorization: Bearer [redacted]")
     (assert= (redact "url?token=s3cr3t&x=1") "url?token=[redacted]&x=1")
     (assert= (redact "password: hunter2, then") "password: [redacted], then")
-    (assert= (redact "a -----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY----- b") "a [redacted key] b"))
+    (assert= (redact "a -----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY----- b")
+      "a [redacted key] b"))
   (test "a described message is redacted"
     (assert= (:message (describe-error {:kind :error :message "secret=xyz"})) "secret=[redacted]")))
 
