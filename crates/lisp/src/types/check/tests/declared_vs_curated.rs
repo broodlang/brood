@@ -605,6 +605,35 @@ fn ordered_and_numeric_are_named_covers() {
     );
 }
 
+// A same-file function whose inferred return is a registry cover answers a call under
+// that call's arguments, as a `number` return already did. `(< i n)` makes the index
+// `digits` hands back `ordered`; once a loaded record has a `compare-to` method that cover
+// is wider than `number`, and an escape (`keep-it`) keeps the callers from deriving `i`.
+// Read flat, an int caller's `(+ acc (digits xs 0 9))` warned that `+` wants a number —
+// the verdict depended on which modules happened to be loaded (`test` loads `datetime`).
+#[test]
+fn a_cover_return_is_specialized_under_the_call_like_a_number_return() {
+    let src = "\
+         (defmodule t)\n\
+         (defrecord date (d))\n\
+         (defmethod compare-to [date date] (a b) 0)\n\
+         (defn digits (xs i n) (if (< i n) (digits xs (+ i 1) n) i))\n\
+         (def keep-it (fn () digits))\n\
+         (defn run (acc) (+ acc (digits [1 2] 0 9)))\n\
+         (defn bad () (digits [] \"a\" 1))";
+    let ws = file_warnings_mode(src, true);
+    assert!(
+        !ws.iter().any(|w| w.contains("+: argument 2")),
+        "an int call's result is an int, whatever compare-to covers: {ws:?}"
+    );
+    // the demand still stands at a call that breaks it
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("t/digits: argument 2 expects number | t/date, got \"a\"")),
+        "{ws:?}"
+    );
+}
+
 // Strict mode reads a bound by inclusion only when the bound is POSITIVELY known. The
 // `(not nil)` a `when` guard leaves on an untyped parameter says nothing about what the
 // value is, so it stays consistent by overlap — else every guarded use of every untyped

@@ -1163,3 +1163,13 @@ broken a redaction rule written during KI-377. The set parser reads an escaped c
 character now, so it can end a range (`[\x00-\x7F]`, `[\--/]`). Before, an escaped range end was
 dropped, or became the range's backslash. Four Fowler cases moved off the divergence list, and the
 list's both-ways check proves they now agree.
+
+2026-11-08 (ADR-299 refinement). A checker verdict no longer depends on which modules happen to be
+loaded through the `ordered` cover. A same-file function whose inferred return is a registry
+cover (`ordered`, `numeric`) is now re-typed under each call's arguments, as one returning `number`
+already was. `(< i n)` makes a returned index `ordered`, and once `datetime` is in scope that cover
+also holds its records. So when the function also escaped as a value, an int caller's
+`(+ acc (digits xs 0 9))` warned. `test` loading `datetime` reddened `count_nth_inline_test`, and
+its `check-allow` is gone. Checked here: `declared_vs_curated::a_cover_return_is_specialized_under_the_call_like_a_number_return`
+(red with the fix disabled), the `types::` unit tests, CI's two checker gates, `sig_adoption` and
+`checker_pass_agreement`.

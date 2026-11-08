@@ -516,8 +516,16 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                             // 1))`, a file global inside `core.blsp`, so the by-name rule
                             // stands aside there, read `(inc slash)` as `number` for an int
                             // `slash`. The meet with the flat answer keeps it
-                            // sound.
-                            if sg.ret.is_unrefined_collection() || sg.ret == Ty::NUMBER {
+                            // sound. A registry cover (`ordered`, `numeric` — ADR-299) is
+                            // the same demand-only answer, widened by whatever records the
+                            // LOADED modules gave `compare-to`/`num/*` methods: an index
+                            // bounded by `(< i n)` read `ordered`, so with `datetime` in
+                            // scope an int caller's `(+ acc (digits codes 0 9))` warned —
+                            // the verdict moved with what happened to be loaded.
+                            if sg.ret.is_unrefined_collection()
+                                || sg.ret == Ty::NUMBER
+                                || super::sigs::cover_name_of(&sg.ret).is_some()
+                            {
                                 // The body says nothing — or only "a collection" — about its
                                 // result from its own parameters (a pass-through, an
                                 // unconstrained accumulator, a recursive list builder whose
