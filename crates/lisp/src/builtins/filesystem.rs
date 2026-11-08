@@ -8,6 +8,26 @@ use crate::error::{LispError, LispResult};
 use super::args::{arg, expect_int, expect_string};
 use super::bytes::{bytes_to_value, flatten_iolist};
 
+/// The native `body`, named `native`, as a file call a responsive process is told of when
+/// it held the process (ADR-517's file addendum, `process::responsive::file_call`): a read,
+/// write, stat or listing can wait on a network mount or a spun-down disk. `paths` is how
+/// many leading arguments are paths, for the report's detail.
+macro_rules! watched {
+    ($native:literal, $body:path, $paths:literal) => {{
+        fn watched(
+            args: &[crate::core::value::Value],
+            env: crate::core::value::EnvId,
+            heap: &mut crate::core::heap::Heap,
+        ) -> crate::error::LispResult {
+            crate::process::responsive::file_call(heap, $native, args, $paths, |heap| {
+                $body(args, env, heap)
+            })
+        }
+        watched
+    }};
+}
+pub(super) use watched;
+
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.
 pub(super) fn register(primitives: &mut super::Primitives) {
     use super::signature_types::*;
@@ -37,7 +57,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string], bool_ty),
         &["path"],
         "Whether path exists.\n\n    (file/exists? \"/nonexistent-brood-xyz\")   ;=> false",
-        file_exists,
+        watched!("file/exists?", file_exists, 1),
     );
     primitives.def(
         "%canonicalize",
@@ -45,14 +65,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string], string.union(nil_ty)),
         &["path"],
         "The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. Use it to make path sandboxing symlink-escape-proof.",
-        path_canonicalize);
+        watched!("%canonicalize", path_canonicalize, 1));
     primitives.def(
         "file/dir?",
         Arity::exact(1),
         Sig::new(vec![string], bool_ty),
         &["path"],
         "Whether path is a directory.\n\n    (file/dir? \"/tmp\")   ;=> true",
-        is_dir,
+        watched!("file/dir?", is_dir, 1),
     );
     primitives.def(
         "file/ls",
@@ -60,7 +80,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string], Ty::list_of(string)),
         &["path"],
         "The entry names directly under directory path, sorted.\n\n    (file/ls \"src\")   ;~> (\"main.blsp\" \"util.blsp\")",
-        list_dir,
+        watched!("file/ls", list_dir, 1),
     );
     primitives.def(
         "file/mkdir",
@@ -68,7 +88,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string], nil_ty),
         &["path"],
         "Create a directory and any missing parents (like mkdir -p).\n\n    (file/mkdir \"build/out\")   ;~> nil, with build/ and build/out/ created",
-        make_dir,
+        watched!("file/mkdir", make_dir, 1),
     );
     primitives.def(
         "file/mkdir-private",
@@ -76,7 +96,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string], nil_ty),
         &["path"],
         "Create a directory and any missing parents (like mkdir -p), the directory itself owner-only whether it was made now or was already there — where an app keeps what other users must not read (an editor's sidecars of files edited as root, ADR-588), as file/spit-private is for a file. On Unix that is mode 0700, and no one else can reach anything inside, whatever its own mode. On Windows it is NOT the same guard: the directory gets a protected one-entry DACL (the current user) that what is made inside afterwards inherits, but every user holds the bypass-traverse-checking right, so a directory's DACL does not stop a file inside being opened by its path — a file that keeps entries of its own (made there before, or moved in) stays as open as they say. Write each secret with file/spit-private, which makes the file itself owner-only.\n\n    (file/mkdir-private \"state/auto-save\")   ;~> nil, state/auto-save made owner-only (mode 0700 on Unix)",
-        make_private_dir,
+        watched!("file/mkdir-private", make_private_dir, 1),
     );
     primitives.def(
         "file/spit",
@@ -84,21 +104,21 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string, iolist], nil_ty),
         &["path", "s"],
         "Write s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, replacing any existing file.\n\n    (file/spit \"notes.txt\" \"hello\")   ;~> nil",
-        spit);
+        watched!("file/spit", spit, 1));
     primitives.def(
         "file/replace",
         Arity::exact(2),
         Sig::new(vec![string, iolist], nil_ty),
         &["path", "s"],
         "Replace the file at path with s (any iolist) so that a crash, a power cut or a full disk leaves the old file or the whole new one, never a torn file: s goes to a sibling temp file, is flushed to the disk, and is renamed over path. It keeps what the rename would lose: the file's mode, owner and group; a symlink stays a symlink, its TARGET replaced. It writes in place, as file/spit does and with the same risk, when a rename cannot keep the file as it was: a file with other hard links, one this user cannot give the same owner, extended attributes, a device, or a directory that takes no new entries. A full disk raises and leaves the old file. Atomic on Unix; on Windows it writes in place. For the file a person keeps (an editor's save, a tool rewriting source); file/spit-atomic is for a file other programs read while it changes.\n\n    (file/replace \"notes.txt\" \"text\\n\")   ;~> nil, notes.txt holds the text, its mode kept",
-        replace);
+        watched!("file/replace", replace, 1));
     primitives.def(
         "file/spit-append",
         Arity::exact(2),
         Sig::new(vec![string, iolist], nil_ty),
         &["path", "s"],
         "Append s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, creating it if absent (unlike file/spit, which truncates). Returns nil. Opens in append mode so each write lands at end-of-file — the OS-atomic append that makes a log safe to write from several processes at once. The string sibling of append-bytes.\n\n    (file/spit-append \"app.log\" [\"started\" 10])   ;~> nil, the line appended",
-        spit_append);
+        watched!("file/spit-append", spit_append, 1));
     // Atomic compare-and-swap of a file's whole contents, serialised across
     // processes. The mechanism a safe read-modify-write needs when the "modify" is
     // Brood code (`nest add` editing project.blsp) — see `io::file_swap`.
@@ -108,56 +128,56 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string, string, string, string], bool_ty),
         &["lock-path", "data-path", "expected", "new"],
         "Replace the entire contents of data-path with new, but ONLY if they currently equal expected; returns true when swapped, false when they differ (re-read, recompute, retry). Serialised across processes by a blocking exclusive lock on lock-path (a separate file — the data file is replaced by rename, so a lock on it would exclude nobody), and crash-atomic (temp file + rename, so a crash leaves the old contents intact). A missing data-path reads as \"\", so the same call creates it. The mechanism behind a safe read-modify-write whose modify step is Brood code.",
-        file_swap);
+        watched!("%file-swap", file_swap, 1));
     primitives.def(
         "file/slurp",
         Arity::exact(1),
         Sig::new(vec![string], string),
         &["path"],
         "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use file/slurp-bytes for binary.\n\n    (file/slurp \"notes.txt\")   ;~> \"hello\"",
-        slurp);
+        watched!("file/slurp", slurp, 1));
     primitives.def(
         "file/slurp-bytes",
         Arity::exact(1),
         Sig::new(vec![string], bytes_ty),
         &["path"],
         "Read the whole file at path as a bytes value. The byte-faithful read file/slurp can't be (file/slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset.\n\n    (file/slurp-bytes \"logo.png\")   ;~> the file's bytes",
-        slurp_bytes);
+        watched!("file/slurp-bytes", slurp_bytes, 1));
     primitives.def(
         "file/spit-bytes",
         Arity::exact(2),
         Sig::new(vec![string, any], nil_ty),
         &["path", "bytes"],
         "Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. The binary write-side counterpart to file/slurp-bytes (file/spit is UTF-8 string-only) — materialises a received image / archive / any binary asset to disk.\n\n    (file/spit-bytes \"copy.png\" (file/slurp-bytes \"logo.png\"))   ;~> nil",
-        spit_bytes);
+        watched!("file/spit-bytes", spit_bytes, 1));
     primitives.def(
         "file/spit-bytes-append",
         Arity::exact(2),
         Sig::new(vec![string, any], nil_ty),
         &["path", "bytes"],
         "Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) — to the file at path, byte-faithfully, creating it if absent. Returns nil. The append counterpart of file/spit-bytes (which truncates), as file/spit-append is to file/spit: lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory.\n\n    (file/spit-bytes-append \"upload.bin\" chunk)   ;~> nil, chunk appended",
-        append_bytes);
+        watched!("file/spit-bytes-append", append_bytes, 1));
     primitives.def(
         "file/mtime",
         Arity::exact(1),
         Sig::new(vec![string], int.union(nil_ty)),
         &["path"],
         "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader.\n\n    (file/mtime \"project.blsp\")   ;~> 1761213600000, or nil when missing",
-        file_mtime);
+        watched!("file/mtime", file_mtime, 1));
     primitives.def(
         "file/set-mtime",
         Arity::exact(2),
         Sig::new(vec![string, int], nil_ty),
         &["path", "ms"],
         "Set the last-modified time of the file at path to ms epoch-milliseconds — what `file/mtime` then answers. Returns nil; throws if the file is missing or cannot be changed. The portable `touch -t`: a test that needs a file older than another (an auto-save sidecar, a stale cache) on every OS, with no `touch` program.\n\n    (file/set-mtime \"notes.txt\" 1577836800000)   ;~> nil, notes.txt now dated 2020-01-01",
-        set_file_mtime);
+        watched!("file/set-mtime", set_file_mtime, 1));
     primitives.def(
         "file/size",
         Arity::exact(1),
         Sig::new(vec![string], int.union(nil_ty)),
         &["path"],
         "Size of the file at path in bytes, or nil if it is missing.\n\n    (file/size \"notes.txt\")   ;~> 5, or nil when missing",
-        file_size,
+        watched!("file/size", file_size, 1),
     );
     primitives.def(
         "file/stat",
@@ -165,28 +185,28 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string], map_ty.union(nil_ty)),
         &["path"],
         "Metadata for path in ONE stat as a map {:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}, or nil if missing. :symlink? reads the link itself (lstat); the rest follow it. :mtime/:atime are epoch-ms last-modified/last-access (nil if unreadable; :atime may be coarse under relatime/noatime mounts); :exec? is the owner-execute bit; :mode is the unix permission bits (0 off-unix); :nlink the hard-link count; :uid/:gid the numeric ids; :owner/:group their resolved names (the numeric id as a string if unresolved). Everything an `ls -l` row + a recency sort needs in one syscall.\n\n    (file/stat \"notes.txt\")   ;~> {:dir? false, :size 5, :mtime 1761213600000, …}",
-        file_stat);
+        watched!("file/stat", file_stat, 1));
     primitives.def(
         "file/rm",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
         &["path"],
         "Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure.\n\n    (file/rm \"notes.txt\")   ;~> nil",
-        delete_file);
+        watched!("file/rm", delete_file, 1));
     primitives.def(
         "file/rmdir",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
         &["path"],
         "Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure.\n\n    (file/rmdir \"build\")   ;~> nil",
-        delete_dir);
+        watched!("file/rmdir", delete_dir, 1));
     primitives.def(
         "file/rename",
         Arity::exact(2),
         Sig::new(vec![string, string], nil_ty),
         &["from", "to"],
         "Rename/move file `from` to `to`. Returns nil; errors on failure.\n\n    (file/rename \"draft.txt\" \"final.txt\")   ;~> nil",
-        rename_file,
+        watched!("file/rename", rename_file, 2),
     );
     // The recycle bin (Windows): the one trash `file/trash` cannot reach from Brood, since
     // it is the shell's, not a directory. Everywhere else `file/trash` moves the file itself.
@@ -196,7 +216,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string], nil_ty),
         &["path"],
         "Move the file or directory at absolute path into the Windows recycle bin (the shell's own operation, so Explorer can restore it), silently: no confirmation, no progress, no error dialog. Returns nil; errors on failure, and on every other system, which has no recycle bin — `file/trash` is the portable call.\n\n    (%file-recycle \"C:\\\\Users\\\\me\\\\old.txt\")   ;~> nil on Windows",
-        recycle_path,
+        watched!("%file-recycle", recycle_path, 1),
     );
     primitives.def(
         "file/cp",
@@ -204,7 +224,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string, string], nil_ty),
         &["from", "to"],
         "Copy file `from` to `to` (replacing `to`), preserving contents and permissions. Binary-safe (unlike slurp+spit). Returns nil; errors on failure.\n\n    (file/cp \"logo.png\" \"logo-copy.png\")   ;~> nil",
-        copy_file);
+        watched!("file/cp", copy_file, 2));
 }
 
 // ---------- filesystem ----------

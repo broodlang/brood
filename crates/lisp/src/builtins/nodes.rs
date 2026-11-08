@@ -50,7 +50,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Sig::new(vec![string, string], nil_ty),
         &["path", "s"],
         "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (file/spit leaves a world-readable file).\n\n    (file/spit-private \"secrets/token\" \"s3cr3t\")   ;~> nil, the file readable by its owner only",
-        spit_private);
+        super::filesystem::watched!("file/spit-private", spit_private, 1));
     // `node/name` is the keyword `:nonode` until `node/start` sets it to a symbol.
     primitives.def(
         "%node-name",
