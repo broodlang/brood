@@ -107,6 +107,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Whether pid is BUSY (ADR-491): true while it has been running in one open interrupt window (`proc/interruptible`) for at least its quit key's busy-ms (300 without one), false while its window is open but younger, nil when none is open — it is idle, gone, or remote. What a frontend's busy cursor asks of the loop it feeds: nil says stop asking until the next input.\n\n    (proc/busy? (self))   ;=> nil\n    (proc/interruptible nil (fn () (proc/busy? (self))))   ;=> [:ok false]",
         busy_proc);
     primitives.def(
+        "proc/gc-us",
+        Arity::exact(0),
+        Sig::nullary(int),
+        &[],
+        "The calling process's cumulative garbage-collection time in µs: the wall time its own LOCAL heap's collections took, since it started. Two reads around a step say how much of it was GC — what a UI loop's slow-turn report carries as `:gc-ms`, telling a collection from slow code (ADR-490). Two counter reads, no allocation: cheap enough to take around every turn.\n\n    (>= (proc/gc-us) 0)   ;=> true",
+        gc_us);
+    primitives.def(
         "proc/set-quit-key",
         Arity::range(2, 3),
         Sig::with_optional(
@@ -498,6 +505,11 @@ pub(super) fn interrupt_proc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 }
 
 /// `(proc/busy? pid)` — is a local process past its busy-ms in one interrupt window (ADR-491)?
+/// `(proc/gc-us)` — the calling process's cumulative GC pause time, µs.
+pub(super) fn gc_us(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(Value::int((heap.gc_pause_ns().0 / 1_000) as i64))
+}
+
 pub(super) fn busy_proc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {

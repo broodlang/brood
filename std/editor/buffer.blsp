@@ -1196,8 +1196,10 @@ ranges.
 ;; tracks the same logical spot across edits (the buffers-as-processes / collaboration
 ;; foundation). Markers live under `:markers` ({id -> pos}); a buffer with none carries no
 ;; `:markers` key and is byte-identical to before this facility (the adjust step is a no-op
-;; then). Gravity is left: an insert exactly AT a marker leaves it put, so text typed at one
-;; cursor lands after another user's cursor sitting at the same spot.
+;; then). Gravity is left by default: an insert exactly AT a marker leaves it put, so text typed
+;; at one cursor lands after another user's cursor sitting at the same spot. A marker set with
+;; `:advance` (Emacs's insertion type t) moves past text inserted at it instead — a snippet
+;; field's end, an output mark — and its id is kept in the `:marker-advance` set.
 
 ;; Both shifts assoc only the markers that MOVE, starting from `markers` itself: an edit
 ;; after every marker — most keystrokes — returns the same map, where rebuilding every
@@ -1207,19 +1209,23 @@ ranges.
     markers
     (fn (acc entry)
       (let ([id pos] entry
-            moved (moved-to pos))
+            moved (moved-to id pos))
         (if (= moved pos) acc (assoc acc id moved))))))
 
-(defn- buffer-markers-insert (markers p n)
+(defn- buffer-markers-insert (markers p n advancing)
   "Shift `markers` for an insert of `n` chars at `p`: a marker strictly after `p` moves
-right by `n` (left-gravity — a marker exactly at `p` stays put)."
-  (buffer-markers-shift markers (fn (pos) (if (> pos p) (+ pos n) pos))))
+right by `n`; one exactly at `p` stays put (left gravity) unless its id is in `advancing`
+(the `:marker-advance` set, nil for none), when it moves past the insert."
+  (buffer-markers-shift markers
+    (fn (id pos)
+      (if (or (> pos p) (and (= pos p) advancing (contains? advancing id))) (+ pos n) pos))))
 
 (defn- buffer-markers-delete (markers lo hi)
   "Shift `markers` for a delete of `[lo, hi)`: a marker at/before `lo` is unchanged, one
 inside the range collapses to `lo`, one at/after `hi` moves left by the deleted width."
   (let (d (- hi lo))
-    (buffer-markers-shift markers (fn (pos) (cond (<= pos lo) pos (< pos hi) lo else (- pos d))))))
+    (buffer-markers-shift markers
+      (fn (_id pos) (cond (<= pos lo) pos (< pos hi) lo else (- pos d))))))
 
 (defn- buffer-adjust-markers (buf:buffer kind:keyword a:int b:int -> buffer)
   "Return `buf` with its markers shifted for an edit — `:insert` (a=pos, b=len) or `:delete`
@@ -1230,7 +1236,7 @@ inside the range collapses to `lo`, one at/after `hi` moves left by the deleted 
       (assoc buf
         :markers
           (if (= kind :insert)
-            (buffer-markers-insert m a b)
+            (buffer-markers-insert m a b (get buf :marker-advance))
             (buffer-markers-delete m a b))))))
 (defn- buffer-carry-markers (buf:buffer lo:int hi:int length:int -> buffer)
   "`buf`'s markers carried through `[lo, hi)` replaced by `length` chars — for an op that
@@ -2138,15 +2144,43 @@ the text out of the buffer in the first place.
 
 ;; ---- public marker API ------------------------------------------------------
 
-(defn buffer-marker-set (buf:buffer id:any pos:int -> buffer)
+(defn buffer-marker-set (buf:buffer id:any pos:int &optional advance -> buffer)
   "Set marker `id` (any value — a keyword, a participant pid) to char position `pos`
 (clamped into the buffer). The marker then survives edits: text inserted or deleted before
 it shifts it, so it tracks the same logical spot. The basis for overlays, diagnostics, and
 remote participants' cursors on a shared buffer.
 
-    (editor/buffer/buffer-marker (editor/buffer/insert (editor/buffer/buffer-marker-set (editor/buffer/make-buffer \"abc\") :m 2) \"zz\") :m)   ;=> 4"
-  (assoc buf
-    :markers (assoc (or (get buf :markers) {}) id (buffer-clamp 0 (buffer-length buf) pos))))
+Text inserted exactly AT the marker leaves it before that text (left gravity) unless
+`advance` is true, when the marker moves past it — Emacs's marker insertion type: the end of
+a region that should grow as it is typed at (a snippet field, an output mark). `advance` is
+the marker's own from then on, kept when it is moved; false makes it stay put again, and
+omitted (nil) keeps what it was (left gravity for a new marker).
+
+    (editor/buffer/buffer-marker (editor/buffer/insert (editor/buffer/buffer-marker-set (editor/buffer/make-buffer \"abc\") :m 2) \"zz\") :m)   ;=> 4
+    (editor/buffer/buffer-marker (editor/buffer/insert (editor/buffer/buffer-marker-set (editor/buffer/goto-char (editor/buffer/make-buffer \"abc\") 2) :m 2 true) \"zz\") :m)   ;=> 4
+    (editor/buffer/buffer-marker (editor/buffer/insert (editor/buffer/buffer-marker-set (editor/buffer/goto-char (editor/buffer/make-buffer \"abc\") 2) :m 2) \"zz\") :m)   ;=> 2"
+  (let (placed (assoc buf
+                 :markers
+                   (assoc (or (get buf :markers) {}) id (buffer-clamp 0 (buffer-length buf) pos)))
+        advancing (get buf :marker-advance))
+    (cond
+      (nil? advance) placed
+      advance (assoc placed :marker-advance (conj (or advancing #{}) id))
+      (nil? advancing) placed
+      else (buffer-marker-stays placed id))))
+
+(defn- buffer-marker-stays (buf id)
+  ;; `buf` with marker `id` back to left gravity: out of the `:marker-advance` set, which goes
+  ;; when it empties, so a buffer with no advancing marker carries no key
+  (let (advancing (set/disj (or (get buf :marker-advance) #{}) id))
+    (if (empty? advancing) (dissoc buf :marker-advance) (assoc buf :marker-advance advancing))))
+
+(defn buffer-marker-advances? (buf:buffer id:any -> bool)
+  "Whether marker `id` moves past text inserted at it (set with `advance`, [[buffer-marker-set]]).
+
+    (editor/buffer/buffer-marker-advances? (editor/buffer/buffer-marker-set (editor/buffer/make-buffer \"abc\") :m 2 true) :m)   ;=> true"
+  (let (advancing (get buf :marker-advance))
+    (if (and advancing (contains? advancing id)) true false)))
 
 (defn buffer-marker (buf:buffer id:any -> (or nil int))
   "The char position of marker `id` (clamped to the current length), or nil if unset.
@@ -2160,7 +2194,7 @@ remote participants' cursors on a shared buffer.
 
     (editor/buffer/buffer-markers (editor/buffer/buffer-marker-delete (editor/buffer/buffer-marker-set (editor/buffer/make-buffer \"abc\") :m 2) :m))   ;=> {}"
   (let (m (get buf :markers))
-    (if (nil? m) buf (assoc buf :markers (dissoc m id)))))
+    (if (nil? m) buf (buffer-marker-stays (assoc buf :markers (dissoc m id)) id))))
 
 (defn buffer-markers (buf)
   "The marker map `{id -> pos}` (positions clamped to the current length), or `{}` if none.

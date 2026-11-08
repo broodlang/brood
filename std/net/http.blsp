@@ -814,7 +814,7 @@ transport failure (no connection, a dropped read, a timeout) is a `failure` whos
 message says why, since no response exists to answer with. Adds Host / User-Agent /
 Connection: close, and (with a body) Content-Length as the body's byte count —
 each overridable via `:headers`. Over `https://`, `opts` may also carry `:ca` —
-a PEM certificate replacing the Mozilla roots as the trust anchor (private CAs,
+a PEM certificate replacing the system's trust store as the trust anchor (private CAs,
 `tls/self-signed` dev servers). Must run in a process (it `receive`s the
 response); the root process counts."
   (let (u (parse-url url)
@@ -1051,7 +1051,7 @@ nothing but its close.
 (defn connection (url &optional (opts {}))
   "A connection to `url`'s origin (http or https; the path is ignored) that stays open
 across requests, HTTP/1.1 — a process; send requests on it with `request-on` and close it
-with `close-connection`. `opts`: `:ca` a PEM certificate replacing the Mozilla roots. It
+with `close-connection`. `opts`: `:ca` a PEM certificate replacing the system's trust store. It
 opens its socket on the first request, replaces one the server closed, and ends when the
 process that made it does.
 

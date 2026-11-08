@@ -1,0 +1,65 @@
+;; A bare type name in a `sig` or a `deftype` body means what it means in the module that
+;; wrote it — its own `deftype` / `defrecord`, then a `(:use …)`d module's, then the global
+;; meaning — wherever the contract checks the value (builtins/type_scope.rs). The fixtures
+;; declare with `sig!` so the contracts hold whatever the mode.
+(defmodule type-scope-test (:use test))
+
+;; Two modules declare `conn` differently: one as an open record SHAPE, one as a record.
+(%load-string
+  "(defmodule type-scope-pg)
+(deftype conn (record &open :buf bytes :off int))
+(deftype pt (record :x int))
+(deftype box (record :p pt))
+(sig! take-pt (pt -> int))
+(defn take-pt (p) (:x p))
+(sig! take-box (box -> int))
+(defn take-box (b) (:x (:p b)))")
+
+(%load-string
+  "(defmodule type-scope-web)
+(defrecord conn [path])
+(deftype pt (record :x string))
+(sig! parse-body (conn -> conn))
+(defn parse-body (c) c)
+(sig! take-pt (pt -> string))
+(defn take-pt (p) (:x p))")
+
+;; The `sig` stands ABOVE the `defrecord` it names: scoped again when the record arrives.
+(%load-string
+  "(defmodule type-scope-late)
+(sig! open-conn (conn -> conn))
+(defn open-conn (c) c)
+(defrecord conn [fd])")
+
+;; No `pt` of its own: the one it `:use`s answers.
+(%load-string
+  "(defmodule type-scope-user (:use type-scope-pg))
+(sig! via-used (pt -> int))
+(defn via-used (p) (:x p))")
+
+(defn- contract-error? (thunk)
+  (= :contract (try (do (thunk) :no-error) (catch e (get e :kind)))))
+
+(describe "a bare type name resolves in the module that wrote the sig"
+  (test "the module's own record beats another module's deftype of the same name"
+    (let (c (type-scope-web/conn "/"))
+      (assert= c (type-scope-web/parse-body c))
+      (is (contract-error? (fn () (type-scope-web/parse-body {:buf (bytes []) :off 0})))))
+    (let (c (type-scope-late/conn 3))
+      (assert= c (type-scope-late/open-conn c))
+      (is (contract-error? (fn () (type-scope-late/open-conn (type-scope-web/conn "/")))))))
+  (test "two modules' deftypes of one name each mean their own"
+    (assert= 1 (type-scope-pg/take-pt {:x 1}))
+    (is (contract-error? (fn () (type-scope-pg/take-pt {:x "a"}))))
+    (assert= "a" (type-scope-web/take-pt {:x "a"}))
+    (is (contract-error? (fn () (type-scope-web/take-pt {:x 1})))))
+  (test "a deftype body's bare names mean what they mean in its module"
+    (assert= 1 (type-scope-pg/take-box {:p {:x 1}}))
+    (is (contract-error? (fn () (type-scope-pg/take-box {:p {:x "a"}})))))
+  (test "a name the module lacks comes from the module it uses"
+    (assert= 2 (type-scope-user/via-used {:x 2}))
+    (is (contract-error? (fn () (type-scope-user/via-used {:x "b"})))))
+  (test "an editor still reads each declaration as its author wrote it"
+    (assert= '(conn -> conn) (%declared-sig 'type-scope-web/parse-body))
+    (assert= '(conn -> conn) (%declared-sig 'type-scope-late/open-conn))
+    (assert= '(pt -> int) (%declared-sig 'type-scope-user/via-used))))

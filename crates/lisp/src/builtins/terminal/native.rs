@@ -332,8 +332,16 @@ pub(in crate::builtins) fn key_to_value(heap: &mut Heap, k: crossterm::event::Ke
         KeyCode::Enter => named_kw("enter", &k),
         KeyCode::Esc => value::kw("escape"),
         KeyCode::Backspace => named_kw("backspace", &k),
-        KeyCode::Tab => value::kw("tab"),
-        KeyCode::BackTab => value::kw("back-tab"),
+        // Tab spells as the GUI spells it (`crate::host::gui::tab_key`): `:ctrl-tab` and
+        // `:ctrl-shift-tab` reach the app from a terminal that reports them — the kitty
+        // keyboard protocol or xterm's `modifyOtherKeys`, both of which `term-enter` asks
+        // for. A legacy terminal sends Ctrl+Tab as a bare Tab byte, which nothing can tell
+        // apart. BackTab is Shift+Tab whether or not the terminal said Shift.
+        KeyCode::Tab => value::kw(crate::host::gui::tab_key(term_modifiers(&k))),
+        KeyCode::BackTab => value::kw(crate::host::gui::tab_key(crate::host::gui::KeyModifiers {
+            shift: true,
+            ..term_modifiers(&k)
+        })),
         KeyCode::Delete => named_kw("delete", &k),
         KeyCode::Home => named_kw("home", &k),
         KeyCode::End => named_kw("end", &k),
@@ -353,16 +361,18 @@ pub(in crate::builtins) fn key_to_value(heap: &mut Heap, k: crossterm::event::Ke
 
 /// A named key's keyword under the event's modifiers (`named_key`'s spelling).
 fn named_kw(base: &'static str, k: &crossterm::event::KeyEvent) -> Value {
+    value::kw(crate::host::gui::named_key(base, term_modifiers(k)))
+}
+
+/// The event's modifiers in the frontend-neutral form `named_key` and `tab_key` spell.
+fn term_modifiers(k: &crossterm::event::KeyEvent) -> crate::host::gui::KeyModifiers {
     use crossterm::event::KeyModifiers;
-    value::kw(crate::host::gui::named_key(
-        base,
-        crate::host::gui::KeyModifiers {
-            ctrl: k.modifiers.contains(KeyModifiers::CONTROL),
-            alt: k.modifiers.contains(KeyModifiers::ALT),
-            shift: k.modifiers.contains(KeyModifiers::SHIFT),
-            super_key: k.modifiers.contains(KeyModifiers::SUPER),
-        },
-    ))
+    crate::host::gui::KeyModifiers {
+        ctrl: k.modifiers.contains(KeyModifiers::CONTROL),
+        alt: k.modifiers.contains(KeyModifiers::ALT),
+        shift: k.modifiers.contains(KeyModifiers::SHIFT),
+        super_key: k.modifiers.contains(KeyModifiers::SUPER),
+    }
 }
 
 /// Write rendered terminal bytes (escape sequences) to stdout — unless an MCP
@@ -1302,6 +1312,17 @@ mod key_to_value_tests {
             "ctrl-backspace"
         );
         assert_eq!(kw_of(KeyCode::BackTab, KeyModifiers::SHIFT), "back-tab");
+        // Ctrl+Tab and Ctrl+Shift+Tab, from a terminal that reports them (kitty / modifyOtherKeys)
+        assert_eq!(kw_of(KeyCode::Tab, KeyModifiers::NONE), "tab");
+        assert_eq!(kw_of(KeyCode::Tab, KeyModifiers::CONTROL), "ctrl-tab");
+        assert_eq!(
+            kw_of(
+                KeyCode::BackTab,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            "ctrl-shift-tab"
+        );
+        assert_eq!(kw_of(KeyCode::BackTab, KeyModifiers::NONE), "back-tab");
         assert_eq!(kw_of(KeyCode::Esc, KeyModifiers::CONTROL), "escape");
     }
 

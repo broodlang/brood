@@ -38,7 +38,8 @@ screen, disable raw mode. The normal-path teardown for `term/enter`.
   "Wait up to `ms` milliseconds for an input event; return a key (a 1-char string for
 printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace
 :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt
-combos like :alt-f), a mouse event as a vector [:mouse action button row col mods]
+combos like :alt-f, and :ctrl-tab / :ctrl-shift-tab from a terminal that reports them —
+the kitty keyboard protocol or xterm modifyOtherKeys; elsewhere Ctrl+Tab arrives as :tab), a mouse event as a vector [:mouse action button row col mods]
 (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button
 held, reported once per cell crossed; button: :left :right :middle or nil for scroll;
 row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order,

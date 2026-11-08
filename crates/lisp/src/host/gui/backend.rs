@@ -490,6 +490,9 @@ struct OpenReply {
 /// just the shared cell size for `gui-size`. Input arrives as mailbox messages,
 /// so there is no receiver to keep here (ADR-059).
 struct WinHandle {
+    /// The process its input is delivered to — told `[:hangup :display-lost]` when the
+    /// display goes away under it (ADR-631).
+    subscriber: u64,
     size: Arc<Mutex<(u16, u16)>>,
     /// The window's inner size in PHYSICAL pixels, republished on every resize, for
     /// `gui-size-px` — the frame a pixel-space app lays itself out in.
@@ -523,6 +526,154 @@ fn windows() -> &'static Mutex<HashMap<u64, WinHandle>> {
     static W: OnceLock<Mutex<HashMap<u64, WinHandle>>> = OnceLock::new();
     W.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+// ---- the display doing less than it was asked (ADR-636) ---------------------------------
+// A fallback that keeps the window up — the CPU painter for a GPU that would not start, the
+// bundled DejaVu for a font that is not installed, grey text for a driver that rejects
+// subpixel text — used to say so only on stderr, which a desktop launch throws away. Now the
+// app is told, as `[:display-degraded {:what :gpu :reason "…"}]` in its mailbox like any
+// other input, so an editor can say it. A window's own fallback goes to its app; a
+// runtime-wide one (a font) to every open window's, or, with none open yet, to the next
+// window opened — fonts are registered before the first window.
+
+/// What has degraded and nobody has been told yet: no window was open when it happened.
+fn undelivered_degradations() -> &'static Mutex<Vec<Message>> {
+    static D: OnceLock<Mutex<Vec<Message>>> = OnceLock::new();
+    D.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// `[:display-degraded {:what :<what> :reason "<reason>"}]`.
+fn degraded_message(what: &str, reason: &str) -> Message {
+    Message::Vector(vec![
+        Message::Keyword(value::intern("display-degraded")),
+        Message::Map(vec![
+            (
+                Message::Keyword(value::intern("what")),
+                Message::Keyword(value::intern(what)),
+            ),
+            (
+                Message::Keyword(value::intern("reason")),
+                Message::Str(reason.to_string()),
+            ),
+        ]),
+    ])
+}
+
+/// The display could not do `what` as asked and fell back (`reason` says to what). Tell
+/// `to` (the window's app), or with `None` every open window's app, or the next window's.
+/// Also logged to stderr, as before. Safe from any thread.
+pub(super) fn report_degraded(what: &str, reason: &str, to: Option<u64>) {
+    eprintln!("brood: gui: {what} degraded: {reason}");
+    if let Some(pid) = to {
+        deliver(pid, degraded_message(what, reason));
+        return;
+    }
+    // Under the undelivered list's lock, so a window opening now either is in `windows()`
+    // already or drains the list after this pushes to it (`open` inserts, then drains).
+    let mut undelivered = lock(undelivered_degradations());
+    let pids = lost_subscribers(&lock(windows()));
+    if pids.is_empty() {
+        undelivered.push(degraded_message(what, reason));
+    }
+    for pid in pids {
+        deliver(pid, degraded_message(what, reason));
+    }
+}
+
+/// A window just opened for `subscriber`: hand it what degraded before any window was open.
+fn deliver_undelivered_degradations(subscriber: u64) {
+    let pending = std::mem::take(&mut *lock(undelivered_degradations()));
+    for message in pending {
+        deliver(subscriber, message);
+    }
+}
+
+// ---- the display going away (ADR-631) ---------------------------------------------------
+// When the compositor or X server dies, the event loop cannot go on. Without this, an app
+// was told nothing: on Wayland winit's `run_app` returned an error nobody read and the
+// window's app waited for input forever; on X11 Xlib's default I/O error handler called
+// `exit(1)` on the GUI thread, ending the whole runtime mid-turn. Either way an editor lost
+// every unsaved buffer. Now every open window's app is sent `[:hangup :display-lost]` —
+// the terminal's hang-up vocabulary (ADR-586), so `ui-run` runs the app's `:on-hangup` and
+// ends the loop — and a draw to the lost display is a no-op, so the loop reaches it.
+
+/// Set once the display connection is gone; never cleared (winit cannot restart a loop).
+static DISPLAY_LOST: AtomicBool = AtomicBool::new(false);
+
+/// Whether the display this runtime's windows were on is gone.
+fn display_lost() -> bool {
+    DISPLAY_LOST.load(Ordering::SeqCst)
+}
+
+/// What every window's app is sent when its display goes away: `[:hangup :display-lost]`.
+fn display_lost_message() -> Message {
+    Message::Vector(vec![
+        Message::Keyword(value::intern("hangup")),
+        Message::Keyword(value::intern("display-lost")),
+    ])
+}
+
+/// The processes to tell: each open window's subscriber, once each, in pid order.
+fn lost_subscribers(windows: &HashMap<u64, WinHandle>) -> Vec<u64> {
+    let mut pids: Vec<u64> = windows.values().map(|w| w.subscriber).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// The display is gone (`why` says how): tell every open window's app, once. Safe from
+/// any thread, including the GUI thread inside Xlib's I/O error handler.
+pub fn lose_display(why: &str) {
+    if DISPLAY_LOST.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let pids = lost_subscribers(&lock(windows()));
+    eprintln!(
+        "brood: gui: the display is gone ({why}); {} window app(s) told [:hangup :display-lost]",
+        pids.len()
+    );
+    for pid in pids {
+        deliver(pid, display_lost_message());
+    }
+}
+
+/// Xlib's I/O error handler — the X server connection is gone. Xlib calls `exit` when a
+/// handler RETURNS, so this one does not: it tells the apps and parks the GUI thread for
+/// good, leaving the rest of the runtime to save and end on its own terms.
+#[cfg(all(unix, not(target_os = "macos")))]
+extern "C" fn x_io_error(_display: *mut std::ffi::c_void) -> std::ffi::c_int {
+    lose_display("the X server connection was lost");
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Install [`x_io_error`] if winit's X11 backend loaded libX11 (it opens it lazily, only on
+/// an X11 session). Looked up with `RTLD_NOLOAD`, so a Wayland session loads nothing.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn install_x_io_error_handler() {
+    type Handler = extern "C" fn(*mut std::ffi::c_void) -> std::ffi::c_int;
+    for name in [c"libX11.so.6", c"libX11.so"] {
+        // SAFETY: dlopen/dlsym with NUL-terminated names; RTLD_NOLOAD only returns a
+        // handle to a library already loaded, which winit keeps loaded for the process.
+        unsafe {
+            let lib = libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_NOLOAD);
+            if lib.is_null() {
+                continue;
+            }
+            let set = libc::dlsym(lib, c"XSetIOErrorHandler".as_ptr());
+            if !set.is_null() {
+                let set: extern "C" fn(Option<Handler>) -> Option<Handler> =
+                    std::mem::transmute(set);
+                set(Some(x_io_error));
+            }
+            return;
+        }
+    }
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn install_x_io_error_handler() {}
 
 fn next_id() -> u64 {
     static N: AtomicU64 = AtomicU64::new(1);
@@ -785,6 +936,9 @@ fn start_thread() -> Result<EventLoopProxy<UserEvent>, String> {
 /// delivered to process `subscriber`'s mailbox; return the window id. Starts the
 /// GUI thread on the first call. Each call is an independent window.
 pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
+    if display_lost() {
+        return Err("gui: the display is gone; no window can open".into());
+    }
     // Headless: register a fake window (fixed cell grid, no input) without ever
     // starting winit, so nothing pops up.
     if headless() {
@@ -805,6 +959,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
         lock(windows()).insert(
             id,
             WinHandle {
+                subscriber,
                 size,
                 size_px: Arc::new(Mutex::new(size_px)),
                 keys: Arc::default(),
@@ -812,6 +967,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
                 latency: Arc::default(),
             },
         );
+        deliver_undelivered_degradations(subscriber);
         return Ok(id);
     }
     let (reply_tx, reply_rx) = mpsc::channel();
@@ -839,6 +995,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
     lock(windows()).insert(
         id,
         WinHandle {
+            subscriber,
             size,
             size_px,
             keys,
@@ -846,6 +1003,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
             latency,
         },
     );
+    deliver_undelivered_degradations(subscriber);
     Ok(id)
 }
 
@@ -875,7 +1033,7 @@ fn dispatch(id: u64, event: UserEvent) -> Result<(), String> {
     if !lock(windows()).contains_key(&id) {
         return Err("gui window not open".into());
     }
-    if headless() {
+    if headless() || display_lost() {
         return Ok(());
     }
     lock(gui()?)
@@ -1029,6 +1187,10 @@ pub fn draw(id: u64, ops: Vec<Op>) -> Result<(), String> {
             return Err("gui window not open".into());
         }
     }
+    // nothing to paint on once the display is gone: the app is ending (`[:hangup …]`)
+    if display_lost() {
+        return Ok(());
+    }
     if headless() {
         return headless_send(|| offscreen::Request::Draw { id, ops });
     }
@@ -1041,7 +1203,7 @@ pub fn draw(id: u64, ops: Vec<Op>) -> Result<(), String> {
 
 /// `(gui-settle id)` — window `id`'s app finished a turn with nothing to draw (ADR-444).
 pub fn settle(id: u64) -> Result<(), String> {
-    if headless() {
+    if headless() || display_lost() {
         return Ok(());
     }
     gui()?
@@ -1742,9 +1904,18 @@ fn build_window(
     #[cfg(feature = "gui-gpu")]
     let backend = if gpu_enabled() {
         match crate::host::gui::gpu::GpuWindow::new(window.clone(), spec.vsync) {
-            Ok(gpu) => Backend::Gpu(Box::new(gpu)),
+            Ok(gpu) => {
+                for (what, reason) in gpu.degradations(spec.vsync) {
+                    report_degraded(what, &reason, Some(subscriber));
+                }
+                Backend::Gpu(Box::new(gpu))
+            }
             Err(e) => {
-                eprintln!("brood gui: GPU render target unavailable ({e}); using the CPU painter");
+                report_degraded(
+                    "gpu",
+                    &format!("GPU render target unavailable ({e}); drawing with the CPU painter"),
+                    Some(subscriber),
+                );
                 cpu_backend(&window)?
             }
         }
@@ -2567,7 +2738,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     // composition that just ended counts as composed too.
                     let composed = w.composition != Composition::Idle;
                     w.composition = Composition::Idle;
-                    if let Some(message) = commit_message(&text, composed) {
+                    if let Some(message) = commit_message(&text, composed, w.chord_modifiers()) {
                         deliver(w.subscriber, message);
                     }
                 }
@@ -3059,6 +3230,8 @@ fn run_gui(ready: Sender<Result<EventLoopProxy<UserEvent>, String>>) {
         }
     };
     let _ = ready.send(Ok(event_loop.create_proxy()));
+    // The X server dying would otherwise `exit(1)` the runtime from inside Xlib (ADR-631).
+    install_x_io_error_handler();
 
     let mut app = GuiApp {
         wins: HashMap::new(),
@@ -3068,7 +3241,18 @@ fn run_gui(ready: Sender<Result<EventLoopProxy<UserEvent>, String>>) {
         resumed: false,
         pending_open: Vec::new(),
     };
-    let _ = event_loop.run_app(&mut app);
+    // `run_app` returns only when the loop cannot go on: nothing here asks it to exit, so
+    // an error (a Wayland compositor gone, a protocol error) or a panic inside winit is the
+    // display going away. Tell every window's app rather than leave it waiting for input.
+    let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        event_loop.run_app(&mut app)
+    }));
+    let why = match ended {
+        Ok(Ok(())) => "the event loop ended".to_string(),
+        Ok(Err(e)) => format!("the event loop failed: {e}"),
+        Err(_) => "the event loop panicked".to_string(),
+    };
+    lose_display(&why);
 }
 
 /// A family was (re-)registered: every window drops the glyphs baked from the old

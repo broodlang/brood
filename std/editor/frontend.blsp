@@ -472,7 +472,8 @@ alongside whatever quit keys you bind — e.g. `(:close :quit)` next to your own
   (= input :close))
 
 (defn hangup-request? (input)
-  "True if `input` is `[:hangup sig]` — the terminal display's SIGTERM or SIGHUP (ADR-586).
+  "True if `input` is `[:hangup sig]` — the terminal display's SIGTERM or SIGHUP (ADR-586), or a
+window's `[:hangup :display-lost]` when the compositor or X server went away (ADR-631).
 `ui-run` ends on it, after the model's `:on-hangup` (`(fn (model sig) …)`, for its side
 effects — an editor's emergency auto-save), and `:leave` restores the terminal.
 

@@ -64,6 +64,19 @@ pub(super) fn unbound_msg(nm: &str) -> String {
     msg
 }
 
+/// [`unbound_msg`] for a reference walked under `ctx`: a qualified name whose module does
+/// not exist anywhere says so, since that — not the name — is what to fix.
+pub(super) fn unbound_msg_in(ctx: &Ctx, nm: &str) -> String {
+    let mut msg = unbound_msg(nm);
+    if let Some(slash) = nm.rfind('/')
+        && slash > 0
+        && ctx.module_is_absent(&nm[..=slash])
+    {
+        msg.push_str(&format!(" — no module `{}` exists", &nm[..slash]));
+    }
+    msg
+}
+
 /// The debug-only primitives (registered under `#[cfg(debug_assertions)]`, see
 /// `builtins/diagnostics.rs` / `builtins/evaluation.rs`): they exist in a dev build but not a
 /// release one, so a `nest check` running in a release binary would flag every
@@ -147,7 +160,10 @@ pub(in crate::types::check) fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> 
         // Record the known-ns query for the Phase-2 cache (heap-resident recorder):
         // this file's unbound verdict depends on whether the prefix is known.
         crate::types::check::deps::obs_known_ns(heap, &nm[..=slash]);
-        if !ctx.module_is_known(&nm[..=slash]) {
+        // ...unless no module of that name could be loaded at all: then nothing defines
+        // it dynamically either, and the reference is a misspelt module (`net/http/post`
+        // for `http/post`), unbound at run time.
+        if !ctx.module_is_known(&nm[..=slash]) && !ctx.module_is_absent(&nm[..=slash]) {
             return false;
         }
     }

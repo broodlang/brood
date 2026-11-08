@@ -3472,6 +3472,7 @@ Every operation whose **subject is a string** lives in the `string` module
 `string/pad-left`  `string/pad-right`  `string/->graphemes`
 `string/grapheme-count`  `string/grapheme-at`  `string/substring-graphemes`
 `string/normalize`  `string/fill`  `string/fill-prefixes`  `string/fill-prefix`
+`string/break-opportunities`
 
 Bare in the prelude — these operate on *any* collection, so they are **not**
 string-library ops: `str`  `pr-str`  `index-of`  `includes?`
@@ -3530,6 +3531,15 @@ Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
   the correct spelling is also the fast one: `(nth (string/->graphemes s) i)` was the
   only way to read one cluster, and it materialised every cluster in the string on
   every keystroke (ADR-159).
+- **Where a line may break** (UAX #14): `(string/break-opportunities s)` is the ascending
+  character indices a line of `s` may end just before — after a space or a hyphen, between
+  two CJK ideographs or kana (CJK has no spaces to break at), never before closing
+  punctuation (`)` `」` `。` `，`) nor after opening punctuation (`(` `「`), after a URL's `/`
+  but not before it. The break after a newline is mandatory and listed too; the end of the
+  text is not. A word wrap fits what the width allows and ends the line at the last index
+  that fits; a space-only wrap cuts CJK text anywhere and can strand a `」` at a line's
+  start. The table and pair rules are `unicode-linebreak`'s, which cosmic-text already
+  breaks lines with.
 - **`=` is byte-structural, so text that reads identically can compare unequal**:
   `"é"` is U+00E9 *or* U+0065 U+0301. `(string/normalize s form)` normalises, with
   `form` one of `:nfc` `:nfd` `:nfkc` `:nfkd`. Canonical (`:nfc`/`:nfd`) preserves
@@ -4118,7 +4128,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 
 | Module | name | What it provides |
 |--------|---------------|-----------------|
-| `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `spit-atomic`, `regular?`, `list-files`, `list-dirs`, `walk-files`. Pure path-string ops (`path/extension`, `path/stem`, …) live in `path` (ADR-234). All Brood (ADR-006), no new Rust |
+| `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `spit-atomic`, `regular?`, `list-files`, `list-dirs`, `walk-files`, `copy-tree`, `move` (across filesystems too) and `trash` (the freedesktop.org trash, `~/.Trash` on macOS, the Windows recycle bin through `%file-recycle`). Pure path-string ops (`path/extension`, `path/stem`, …) live in `path` (ADR-234). Brood (ADR-006) but the recycle bin |
 | `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`emit`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of a fixed stdout. Also the writers themselves: `io/write`, `io/puts`, `io/inspect`, each taking an optional trailing `:to <port>` (see also `std/log.blsp`) |
 | `std/text.blsp` | `'text` | The rope text surface over the `%rope-*` primitives: `from-string`, `->string`, `insert`, `delete`, `slice`, `length`, `line`, `line-count`, `char->line`, `line->char`, the grapheme motions `next-grapheme`/`prev-grapheme`, `skip-forward`/`skip-backward`. (Greedy word-wrap is `string/fill`.) |
 | `std/seq.blsp` | `'seq` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. Also `filter`/`reject`/`keep`/`filterv`/`rejectv`/`distinct`/`zip`/`find`/`flatten` and the transducer + lazy stages. The core ops (`map`/`reduce`/`fold`/`take`/`drop`/`sort`) stay bare in the prelude, and `take-while`/`partition`/`repeat`/`sort-by`/`mapv` are here (ADR-506); `(:use seq)` for bare access or call qualified |

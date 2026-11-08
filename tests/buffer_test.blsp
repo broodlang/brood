@@ -910,6 +910,30 @@
   (test "left-gravity: an insert exactly at a marker leaves it put"
     (let (b (buffer-marker-set (make-buffer "abc") :m 1))
       (assert= (buffer-marker (insert (goto-char b 1) "Z") :m) 1)))
+  (test "an advancing marker moves past text inserted exactly at it"
+    (let (b (buffer-marker-set (make-buffer "abc") :m 1 true))
+      (is (buffer-marker-advances? b :m))
+      (assert= (buffer-marker (insert (goto-char b 1) "ZZ") :m) 3)
+      ;; anywhere else it moves as any marker does
+      (assert= (buffer-marker (insert (goto-char b 0) "Z") :m) 2)
+      (assert= (buffer-marker (insert (goto-char b 2) "Z") :m) 1)
+      (assert= (buffer-marker (delete-char (goto-char b 0) 1) :m) 0)))
+  (test "an advancing marker beside a left one: a field's start stays, its end grows"
+    (let (b (buffer-marker-set (buffer-marker-set (make-buffer "f()") :start 2) :end 2 true)
+          typed (insert (insert (goto-char b 2) "x") "y"))
+      (assert= (buffer-text typed) "f(xy)")
+      (assert= [(buffer-marker typed :start) (buffer-marker typed :end)] [2 4])))
+  (test "the insertion type is the marker's: kept when it moves, changed only when asked"
+    (let (b (buffer-marker-set (make-buffer "abcdef") :m 1 true)
+          moved (buffer-marker-set b :m 4))
+      (is (buffer-marker-advances? moved :m))
+      (assert= (buffer-marker (insert (goto-char moved 4) "Z") :m) 5)
+      (let (left (buffer-marker-set moved :m 4 false))
+        (is (not (buffer-marker-advances? left :m)))
+        (assert= (buffer-marker (insert (goto-char left 4) "Z") :m) 4)
+        ;; the last one back to left gravity leaves no trace on the buffer
+        (is (nil? (get left :marker-advance))))
+      (is (not (buffer-marker-advances? (buffer-marker-delete moved :m) :m)))))
   ; delete [0,3)
   (test "a delete before a marker shifts it left by the deleted width"
     (let (b (buffer-marker-set (make-buffer "hello world") :m 8))

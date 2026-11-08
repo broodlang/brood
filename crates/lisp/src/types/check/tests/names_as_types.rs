@@ -99,17 +99,32 @@ fn a_base_type_name_outranks_a_record_that_claimed_it() {
 #[test]
 fn an_ambiguous_bare_record_name_declines_rather_than_guessing() {
     // Two modules may each define `pt`. Choosing between them would produce a WRONG type
-    // where declining produces a missing one — the ADR-181 "sound, not complete" rule.
-    let ws = file_warnings(
+    // where declining produces a missing one — the ADR-181 "sound, not complete" rule. The
+    // module naming it defines no `pt` of its own (its own would be the one it means).
+    let ws = file_warnings_after(
+        "(%load-string \"(defmodule amb-a) (defrecord pt (x y))\")\n\
+         (%load-string \"(defmodule amb-b) (defrecord pt (m n))\")",
         "\
-         (defmodule a)\n\
-         (defrecord pt (x y))\n\
-         (defmodule b)\n\
-         (defrecord pt (m n))\n\
+         (defmodule amb-c)\n\
          (sig amb (pt -> int))\n\
          (defn amb (p) 1)",
     );
     assert!(ws.iter().any(|w| w.contains("unknown type `pt`")), "{ws:?}");
+}
+
+/// [`file_warnings`] for a file checked once `loads` has loaded other modules into the
+/// runtime it shares.
+fn file_warnings_after(loads: &str, src: &str) -> Vec<String> {
+    let mut interp = crate::Interp::new();
+    interp.eval_str(loads).expect("load the other modules");
+    let mut heap =
+        crate::core::heap::Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    heap.set_global(crate::core::value::EnvId::GLOBAL);
+    let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
+    check_file_mode(&mut heap, &forms, &[], false)
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect()
 }
 
 #[test]
@@ -460,4 +475,30 @@ fn a_non_contractive_recursive_type_is_not_built() {
     );
     assert_eq!(ws.len(), 1, "{ws:?}");
     assert!(ws[0].contains("expects tree"), "{ws:?}");
+}
+
+#[test]
+fn a_bare_type_name_means_its_own_modules_type_before_any_other_modules() {
+    // `web`'s `(sig parse-body (conn -> conn))` means `web`'s record `conn`. With a second
+    // record `conn` loaded the global record rule declines, and the global alias rule then
+    // found ANOTHER module's `(deftype conn …)` — an open record shape `web`'s own record
+    // does not have — so the module's own constructor call was reported as a mismatch. The
+    // runtime contract had the same fault (builtins/type_scope.rs).
+    let ws = file_warnings_after(
+        "(%load-string \"(defmodule scope-pg) (deftype conn (record &open :buf bytes :off int))\")\n\
+         (%load-string \"(defmodule scope-other) (defrecord conn (fd))\")",
+        "\
+         (defmodule scope-web)\n\
+         (defrecord conn (path))\n\
+         (defrecord other (x))\n\
+         (sig parse-body (conn -> conn))\n\
+         (defn parse-body (c) c)\n\
+         (defn ok () (parse-body (conn \"/\")))\n\
+         (defn bad () (parse-body (other 1)))",
+    );
+    assert_eq!(
+        ws.iter().filter(|w| w.contains("argument 1")).count(),
+        1,
+        "only `bad` passes a value that is not `web`'s conn — {ws:?}"
+    );
 }

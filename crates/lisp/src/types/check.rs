@@ -2064,9 +2064,10 @@ fn check_file_passes(
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
     let file_started = std::time::Instant::now();
-    let (forms, expanded, import_scope) = expand_and_load(heap, forms, roots_base, out);
+    let (forms, expanded, import_scope, absent_ns) = expand_and_load(heap, forms, roots_base, out);
     let (mut ctx, visible) =
         collect_file_scope(heap, &forms, &expanded, extra_required, strict, file_ns);
+    ctx.set_absent_ns(absent_ns);
     let file_ns_name: Option<String> = file_ns.map(value::symbol_name);
     let multi_info =
         std::sync::Arc::new(protocol::build_multi_info(heap, &expanded, Some(&visible)));
@@ -2146,8 +2147,9 @@ fn check_file_passes(
 /// Macroexpand and namespace-resolve every form, so the analysed tree matches what `eval`
 /// will see, and make the file's imports and required modules resolvable for the rest of
 /// the check. Returns the forms and their expansions re-read from the root stack (a
-/// module load can collect at any depth and relocate them), plus the header's import
-/// scope.
+/// module load can collect at any depth and relocate them), the header's import scope,
+/// and the prefixes of the qualified references no module could satisfy
+/// ([`absent_module_prefixes`]).
 ///
 /// A `(defmodule … (:use …))` header populates the import table directly from its
 /// clauses (`setup_check_imports`) rather than evaluating the expanded header, which
@@ -2160,7 +2162,7 @@ fn expand_and_load(
     forms: &[Value],
     roots_base: usize,
     out: &mut Vec<(Option<Pos>, String)>,
-) -> (Vec<Value>, Vec<Value>, ImportScope) {
+) -> (Vec<Value>, Vec<Value>, ImportScope, HashSet<String>) {
     let root = heap.global();
     for &f in forms {
         heap.push_root(f);
@@ -2210,9 +2212,18 @@ fn expand_and_load(
     // a loaded body all the way down to the leaf that declares its type.
     materialise_referenced_modules(heap);
     // Layout on the root stack: `forms` at `roots_base..+n`, expansions at `+n..+2n`.
-    let forms: Vec<Value> = (0..n).map(|j| heap.root_at(roots_base + j)).collect();
-    let expanded: Vec<Value> = (0..n).map(|j| heap.root_at(roots_base + n + j)).collect();
-    (forms, expanded, import_scope)
+    let read_rooted = |heap: &Heap| -> (Vec<Value>, Vec<Value>) {
+        (
+            (0..n).map(|j| heap.root_at(roots_base + j)).collect(),
+            (0..n).map(|j| heap.root_at(roots_base + n + j)).collect(),
+        )
+    };
+    // Which modules the file names that nothing could load. Asked HERE, before the final
+    // re-read, because asking evaluates the loader's probe, which may collect.
+    let (forms, expanded) = read_rooted(heap);
+    let absent = absent_module_prefixes(heap, &forms, &expanded);
+    let (forms, expanded) = read_rooted(heap);
+    (forms, expanded, import_scope, absent)
 }
 
 /// The file's scope on a fresh `Ctx`: every name it defines (top level or nested — a
@@ -2273,6 +2284,182 @@ fn collect_file_scope(
         collect_def_names(heap, form, &mut ctx);
     }
     (ctx, visible)
+}
+
+/// The prefixes (`mod/`) of the file's qualified references whose module no `require` could
+/// find — see `Ctx::absent_ns`. Only a module the image does not know is asked about, so a
+/// file whose references all resolve pays one scan of its forms and nothing else; the
+/// question itself is the loader's (`%module-findable?`), so "could be required" means
+/// exactly what `require` means by it: a baked-in std module, a dependency's, a project
+/// source on the load path, a named project's registered module, an image section.
+///
+/// Quoted and quasiquoted data are not scanned (`'commands/cmd-x` in a keymap is a symbol,
+/// not a reference); an alias prefix is not a module name. The file's OWN modules are
+/// skipped — the ones it declares, and the ones whose source it carries as text (a string
+/// holding `(defmodule name …)`, which it `%load-string`s or writes out to load: the test
+/// suite's fixture modules). So is a `name.blsp` beside the file, which a script loads by
+/// path (`examples/hot-reload` `reflect/load`s its `greeter.blsp`).
+///
+/// Asking evaluates Brood, which may collect: every handle is read before the first probe
+/// and only symbols are held across it, and the caller re-reads its forms afterwards.
+fn absent_module_prefixes(heap: &mut Heap, forms: &[Value], expanded: &[Value]) -> HashSet<String> {
+    let known = heap.known_ns_prefixes();
+    let mut own: HashSet<String> = heap
+        .compile_ns()
+        .map(|ns| value::symbol_name(ns).to_string())
+        .into_iter()
+        .collect();
+    for &form in forms {
+        if let Some(module) = crate::eval::macros::defmodule_form_name(heap, form) {
+            own.insert(value::symbol_name(module).to_string());
+            own.insert(value::symbol_name(heap.root_module_name(module)).to_string());
+        }
+        collect_module_texts(heap, form, &mut own);
+    }
+    // `prefix/` → the module a `require` of it would ask for (rooted, ADR-070).
+    let mut candidates: HashMap<String, Symbol> = HashMap::new();
+    for &form in forms.iter().chain(expanded) {
+        collect_unknown_qualified(heap, form, &known, &own, &mut candidates);
+    }
+    if candidates.is_empty() {
+        return HashSet::new();
+    }
+    let probe = value::intern("%module-findable?");
+    if heap.env_get(heap.global(), probe).is_none() {
+        return HashSet::new();
+    }
+    let beside = heap
+        .current_file()
+        .and_then(|file| std::path::Path::new(file).parent())
+        .map(|dir| dir.to_string_lossy().into_owned());
+    let root = heap.global();
+    let mut probed: HashMap<Symbol, bool> = HashMap::new();
+    let mut absent = HashSet::new();
+    let mut candidates: Vec<(String, Symbol)> = candidates.into_iter().collect();
+    candidates.sort(); // probe order is report-independent, but keep it deterministic
+    for (prefix, module) in candidates {
+        let findable = *probed.entry(module).or_insert_with(|| {
+            // Evaluated as a form, as `expand_and_load` evaluates a file's `(require …)`:
+            // a nested eval, so the check's GC block holds across it. A probe that fails
+            // says nothing either way: stay silent, as before.
+            let quoted = heap.list(vec![
+                Value::symbol(value::intern(crate::core::keywords::QUOTE)),
+                Value::symbol(module),
+            ]);
+            let dir = match &beside {
+                Some(dir) => heap.alloc_string(dir),
+                None => Value::nil(),
+            };
+            let call = heap.list(vec![Value::symbol(probe), quoted, dir]);
+            !matches!(
+                crate::eval::eval(heap, call, root),
+                Ok(Value::Bool(false) | Value::Nil)
+            )
+        });
+        if !findable {
+            absent.insert(prefix);
+        }
+    }
+    absent
+}
+
+/// Add to `out` the name of every module whose source `form` carries as text: each
+/// `(defmodule name` inside a string literal, anywhere in the form, quoted data included.
+fn collect_module_texts(heap: &Heap, form: Value, out: &mut HashSet<String>) {
+    const OPENER: &str = "(defmodule ";
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || match form {
+        Value::Str(id) => {
+            let text = heap.string(id);
+            let mut rest = text;
+            while let Some(at) = rest.find(OPENER) {
+                rest = rest[at + OPENER.len()..].trim_start();
+                let end = rest
+                    .find(|c: char| c.is_whitespace() || c == ')' || c == '"')
+                    .unwrap_or(rest.len());
+                if end > 0 {
+                    out.insert(rest[..end].to_string());
+                }
+            }
+        }
+        Value::Pair(_) => {
+            for item in list_items(heap, form).unwrap_or_default() {
+                collect_module_texts(heap, item, out);
+            }
+        }
+        Value::Vector(id) => {
+            for item in heap.vector(id).to_vec() {
+                collect_module_texts(heap, item, out);
+            }
+        }
+        Value::Map(id) => {
+            for (key, val) in heap.map_entries(id) {
+                collect_module_texts(heap, key, out);
+                collect_module_texts(heap, val, out);
+            }
+        }
+        _ => {}
+    })
+}
+
+/// Add to `out` every qualified symbol in `form` (outside quoted data) whose `mod/` prefix
+/// the image does not know, keyed by that prefix, with the module a load would ask for.
+fn collect_unknown_qualified(
+    heap: &Heap,
+    form: Value,
+    known: &HashSet<String>,
+    own: &HashSet<String>,
+    out: &mut HashMap<String, Symbol>,
+) {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || match form {
+        Value::Sym(s) => {
+            let name = value::symbol_name_ref(s);
+            let Some(slash) = name.rfind('/') else {
+                return;
+            };
+            if slash == 0 || slash + 1 == name.len() {
+                return;
+            }
+            let prefix = &name[..=slash];
+            if known.contains(prefix) || out.contains_key(prefix) {
+                return;
+            }
+            let Some(module) = crate::eval::derive::module_to_require(heap, s) else {
+                return;
+            };
+            let module_name = value::symbol_name_ref(module);
+            // A package roots its modules (ADR-070): `pkg/shapes` is the `shapes` it declares.
+            let last_segment = module_name.rsplit('/').next().unwrap_or(module_name);
+            if !own.contains(module_name) && !own.contains(last_segment) {
+                out.insert(prefix.to_string(), module);
+            }
+        }
+        Value::Pair(_) => {
+            let Some(items) = list_items(heap, form) else {
+                return;
+            };
+            if let Some(Value::Sym(head)) = items.first()
+                && (value::symbol_is(*head, crate::core::keywords::QUOTE)
+                    || value::symbol_is(*head, crate::core::keywords::QUASIQUOTE))
+            {
+                return;
+            }
+            for item in items {
+                collect_unknown_qualified(heap, item, known, own, out);
+            }
+        }
+        Value::Vector(id) => {
+            for item in heap.vector(id).to_vec() {
+                collect_unknown_qualified(heap, item, known, own, out);
+            }
+        }
+        Value::Map(id) => {
+            for (key, val) in heap.map_entries(id) {
+                collect_unknown_qualified(heap, key, known, own, out);
+                collect_unknown_qualified(heap, val, known, own, out);
+            }
+        }
+        _ => {}
+    })
 }
 
 /// The type vocabulary a `sig` may name, installed before any sig is parsed: sealed

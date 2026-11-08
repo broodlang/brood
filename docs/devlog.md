@@ -1070,6 +1070,36 @@ arriving during a dial, not a dial already under way. `.brood_crash_dump` is bou
 reaching 183 MB in this checkout.
 
 
+2026-11-08 (ADR-633). A bare type name in a `sig` means its own module's type. hatch's
+`(sig parse-body (conn -> conn))` over its record `conn` failed its contract under `nest test`:
+`%type-alias` looked `conn` up as an alias across every module first and found `store-postgres`'s
+`(deftype conn …)`. A declaration is now scoped where it is stored (`builtins/type_scope.rs`):
+names its module declares, or the one module it `:use`s, are written qualified, a name declared
+later in the module rescopes it, and a changed `sig` rebuilds its shim. The checker resolves in
+the same order (`annot::scoped_ty`). `%declared-sig` shows the declaration as written. Checked
+here: `tests/type_scope_test`, `contract`, `contract_memo`, `record`, `introspection`, `docs`,
+`modules`, the checker's `types::` unit tests; the full suite on CI.
+
+2026-11-08. `string/break-opportunities`: where a line may break, by UAX #14, over
+`unicode-linebreak` (already in the tree under cosmic-text). bedit's word wrap broke after an
+ASCII space or else anywhere, so CJK was cut mid-run and a `」` could start a line (its audit's
+row 20). A Rust builtin because the line-break class table is Unicode data, as the grapheme and
+normalisation tables are. Checked here: `tests/strings_test`, `doc_examples`.
+
+2026-11-08 (ADR-635). A runtime that dies on SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT writes
+a record under `$XDG_STATE_HOME/brood/crashes/` from its signal handler, prepared at startup so
+the handler only formats integers and calls `open`/`write`; `crash-report/previous-crashes`
+reads it at the next start (bedit's report-bug, row 27 of its audit). The panic hook now keeps
+the last panic's message for it, so an abort after a panic is named. Checked here:
+`tests/crash_report_test` (a child killed with SIGSEGV, a second child reading the record), by
+hand with SIGABRT; the unit test of the literal escaping.
+
+2026-11-08 (ADR-636). A display fallback reaches the app as `[:display-degraded {:what :reason}]`:
+the GPU target not starting (CPU painter), a font not installed or not readable, grey text, vsync
+that cannot be turned off. Fonts are registered before the first window, so one reported with no
+window open waits for the next one opened. bedit can now say why its text looks wrong. Checked
+here: `tests/gui_display_degraded_test` under the offscreen painter, `gui_display_lost_test`.
+
 2026-11-08 (ADR-637). Regex escapes now read as other engines read them: `\n \t \r \f \v`, and the
 hex forms `\xHH`, `\x{…}`, `\uHHHH`, `\u{…}`. The old reading, where an escaped letter was the
 letter, was documented and consistent, and it still broke two patterns in the tree, each carried

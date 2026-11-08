@@ -58,7 +58,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(5),
         Sig::variadic(any, socket_ty),
         &["host", "port", "ca-pem", "alpn", "binary"],
-        "Start a TLS connection to host:port and return the socket at once. When the handshake completes the calling process gets [:tcp-connected sock]; then tcp-send, [:tcp sock data] and tcp-close work as on a plaintext stream. ca-pem (a PEM certificate, or nil for the Mozilla roots) is the trust anchor; alpn (a list of protocol names, or nil) is offered to the server, and tls-protocol reads its choice; a truthy binary delivers bytes. A failure before the handshake completes arrives as [:tcp-error sock msg] or [:tcp-closed sock]. Low-level — tls/connect waits for the outcome.",
+        "Start a TLS connection to host:port and return the socket at once. When the handshake completes the calling process gets [:tcp-connected sock]; then tcp-send, [:tcp sock data] and tcp-close work as on a plaintext stream. ca-pem (a PEM certificate, or nil for the system's trust store, the bundled Mozilla roots where it has none) is the trust anchor; alpn (a list of protocol names, or nil) is offered to the server, and tls-protocol reads its choice; a truthy binary delivers bytes. A failure before the handshake completes arrives as [:tcp-error sock msg] or [:tcp-closed sock]. Low-level — tls/connect waits for the outcome.",
         tls_connect);
     primitives.def(
         "%tls-protocol",
@@ -72,7 +72,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(3, 5),
         Sig::variadic(any, socket_ty),
         &["host", "port", "request", "ca-pem", "binary"],
-        "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). request is any iolist (a string, bytes, or nested tree — ADR-141). A truthy binary starts the response in binary mode; a later tcp-set-binary can lose the race with the first response chunk, because the request goes out without the caller. Optional ca-pem (a PEM certificate) replaces the Mozilla roots as the trust anchor — for private CAs and tls-self-signed dev servers. Returns a socket id; pair with tcp-drain. Low-level — prefer http-get.",
+        "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). request is any iolist (a string, bytes, or nested tree — ADR-141). A truthy binary starts the response in binary mode; a later tcp-set-binary can lose the race with the first response chunk, because the request goes out without the caller. Optional ca-pem (a PEM certificate) replaces the system's trust store as the trust anchor — for private CAs and tls-self-signed dev servers. Returns a socket id; pair with tcp-drain. Low-level — prefer http-get.",
         tls_request);
     primitives.def(
         "%tls-listen",
@@ -261,7 +261,7 @@ pub(super) fn tls_request(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     // tree — flattened once here, so binary https request bodies work.
     let mut request = Vec::new();
     flatten_iolist(heap, "%tls-request", arg(args, 2), &mut request)?;
-    // Optional 4th arg: a PEM trust anchor replacing the Mozilla roots for
+    // Optional 4th arg: a PEM trust anchor replacing the system's trust store for
     // this request (private CAs, tls-self-signed dev servers).
     let ca = match args.get(3) {
         Some(v) if !matches!(v, Value::Nil) => Some(expect_string(heap, "%tls-request", *v)?),

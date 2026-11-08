@@ -90,7 +90,9 @@ rec    ::= (rec name type)                     ; recursive: `name` in `type` is 
 ```
 
 A bare name also resolves to an ability (ADR-181/186), a `defrecord` name, or a `deftype`
-alias (ADR-327). `record` alone is any nominal record value (ADR-542), which is not a `map`.
+alias (ADR-327) — in the module that wrote the `sig` first (its own `deftype` or `defrecord`),
+then the one `(:use …)`d module declaring it, then globally (ADR-633). A base name is never
+rebound. `record` alone is any nominal record value (ADR-542), which is not a `map`.
 
 **The complement `(not T)` (ADR-263).** Every value that is *not* a `T`. The
 lattice has computed complements since ADR-023 — the else-branch of a `(string?
@@ -252,11 +254,15 @@ refining drops the members that do not match.
 What a `defrecord` gives a *nominal* value, this gives a shape that stays a plain map:
 the toolkit's panes, dividers and layouts are documented-in-prose maps, and every
 function over them either spelt the shape or left the parameter `any`. Module-scoped
-like a `sig` — declared in `m`, it is `m/name` everywhere; a bare `name` resolves in
-the file's own namespace first, then through the file's header — the one `(:use …)`d
-module declaring it, or `short/name` via `(:alias mod :as short)` — then to the one
-loaded module that declares it (two candidates at any step decline, and the sig reports
-an unknown type, as a record name does). A declaration only: `name` is not bound at
+like a `sig` — declared in `m`, it is `m/name` everywhere. A bare type name in a `sig` or
+an alias body means what it means in the module that WROTE it (ADR-633): that module's own
+`deftype` or `defrecord` of the name, then the one `(:use …)`d module declaring it (or
+`short/name` via `(:alias mod :as short)`), then the one loaded module that declares it (two
+candidates at any step decline, and the sig reports an unknown type, as a record name does).
+The checker and the runtime contract resolve alike: the contract checks a value wherever the
+call happens, so the declaration is stored with those names qualified (`web/conn/conn`) —
+scoped again when a name it uses is declared later in its module, or when the module
+finishes loading — and `%declared-sig` / `reflect/declared-signature` show it as written. A declaration only: `name` is not bound at
 runtime, so a stray reference to it is unbound rather than a type-turned-value; `nest
 doc` lists a module's aliases under **Types**, and `(reflect/type-aliases 'm)` answers
 them as data. A self-referential alias is a recursive type, exact at every depth (ADR-369),

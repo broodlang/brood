@@ -1100,8 +1100,8 @@ pub struct KeyModifiers {
 /// (`C-M-S-s-`), so a label is the prefixes translated one by one. Character chords
 /// already spell their modifiers this way (`:ctrl-x`, `:ctrl-meta-f`); a character chord
 /// that has Super (`:super-x`, `:ctrl-super-x`) goes through here too, with its Shift
-/// already folded into the glyph (`:super->`, not `:shift-super-.`). Tab keeps its own
-/// spelling (Shift+Tab is `:back-tab`) and Escape carries none.
+/// already folded into the glyph (`:super->`, not `:shift-super-.`). Tab spells through
+/// [`tab_key`] (Shift+Tab is `:back-tab`) and Escape carries none.
 ///
 /// Returns a `&'static str` — the vocabulary is closed (the named keys and the printable
 /// characters × sixteen modifier sets), so each spelling is built once and kept for the
@@ -1129,6 +1129,17 @@ pub fn named_key(base: &str, modifiers: KeyModifiers) -> &'static str {
     let leaked: &'static str = Box::leak(name.into_boxed_str());
     names.insert(leaked);
     leaked
+}
+
+/// The name of the Tab key under modifiers — ONE rule for both frontends, and the one
+/// std's `editor/keymap` spells (`key-build`): Shift alone is `:back-tab`, no modifier is
+/// `:tab`, and any chord spells through [`named_key`] — Ctrl+Tab `:ctrl-tab`,
+/// Ctrl+Shift+Tab `:ctrl-shift-tab`, `:alt-tab`, `:super-tab`.
+pub fn tab_key(modifiers: KeyModifiers) -> &'static str {
+    if !(modifiers.ctrl || modifiers.alt || modifiers.super_key) {
+        return if modifiers.shift { "back-tab" } else { "tab" };
+    }
+    named_key("tab", modifiers)
 }
 
 /// The name of function key F`number` — `"f1"` … `"f24"` — or `None` past F24. Both
@@ -1199,7 +1210,7 @@ mod under_caret_tests {
 
 #[cfg(test)]
 mod named_key_tests {
-    use super::{KeyModifiers, function_key, named_key};
+    use super::{KeyModifiers, function_key, named_key, tab_key};
     fn mods(ctrl: bool, alt: bool, shift: bool, super_key: bool) -> KeyModifiers {
         KeyModifiers {
             ctrl,
@@ -1232,6 +1243,15 @@ mod named_key_tests {
             named_key("delete", mods(false, true, true, false)),
             "alt-shift-delete"
         );
+    }
+    #[test]
+    fn tab_is_back_tab_with_shift_alone_and_a_named_chord_otherwise() {
+        assert_eq!(tab_key(mods(false, false, false, false)), "tab");
+        assert_eq!(tab_key(mods(false, false, true, false)), "back-tab");
+        assert_eq!(tab_key(mods(true, false, false, false)), "ctrl-tab");
+        assert_eq!(tab_key(mods(true, false, true, false)), "ctrl-shift-tab");
+        assert_eq!(tab_key(mods(false, true, false, false)), "alt-tab");
+        assert_eq!(tab_key(mods(false, false, false, true)), "super-tab");
     }
     #[test]
     fn super_comes_last_in_emacs_order() {
@@ -1346,18 +1366,18 @@ pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 pub use disabled::{
     TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font,
     font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
-    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, maximize,
-    minimize, next_texture_id, open, register_family, register_installed_family, render_frame,
-    settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture, texture_free, title,
-    window_ids,
+    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, lose_display,
+    maximize, minimize, next_texture_id, open, register_family, register_installed_family,
+    render_frame, settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture,
+    texture_free, title, window_ids,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
     TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font,
     font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
-    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, maximize,
-    minimize, next_texture_id, open, register_family, register_installed_family, render_frame,
-    settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture, texture_free, title,
-    window_ids,
+    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, lose_display,
+    maximize, minimize, next_texture_id, open, register_family, register_installed_family,
+    render_frame, settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture,
+    texture_free, title, window_ids,
 };
