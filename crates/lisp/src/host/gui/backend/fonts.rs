@@ -53,6 +53,17 @@ pub(super) struct FontShared {
     pub(super) generation: u64,
 }
 
+/// Who draws a cluster (`FontShared::glyph_source`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum GlyphSource {
+    /// The asked-for family, or a bundled face cosmic-text's fallback reaches.
+    Family,
+    /// An installed family found by coverage (ADR-442).
+    Installed(String),
+    /// No font this runtime can reach has a glyph for it.
+    Missing,
+}
+
 /// Where a registered family's faces came from — the backend side of
 /// `super::super::FontInfo`.
 #[derive(Clone, Debug)]
@@ -287,6 +298,7 @@ impl FontShared {
     /// installed font can — a CJK ideograph under DejaVu, a symbol a programming font
     /// lacks. `None` leaves the cluster to cosmic-text exactly as before, which is what
     /// keeps every glyph the bundled fonts already drew (emoji included) unchanged.
+    #[cfg(test)]
     pub(super) fn fallback_family(
         &mut self,
         text: &str,
@@ -294,25 +306,45 @@ impl FontShared {
         bold: bool,
         italic: bool,
     ) -> Option<String> {
+        match self.glyph_source(text, family, bold, italic) {
+            GlyphSource::Installed(name) => Some(name),
+            GlyphSource::Family | GlyphSource::Missing => None,
+        }
+    }
+
+    /// Who draws cluster `text` under `family`: the family itself or a bundled face
+    /// (cosmic-text's own fallback reaches both), an installed family (`fallback_family`),
+    /// or nothing installed at all — a code point no font has, which the renderer draws as
+    /// a box holding its hex code (ADR-650) rather than a font's `.notdef` or nothing.
+    pub(super) fn glyph_source(
+        &mut self,
+        text: &str,
+        family: &str,
+        bold: bool,
+        italic: bool,
+    ) -> GlyphSource {
         if text.is_ascii() && family == MONO_FAMILY {
-            return None; // DejaVu covers all of printable ASCII: the hot path asks nothing
+            return GlyphSource::Family; // DejaVu covers all of printable ASCII: the hot path asks nothing
         }
         let chars: Vec<char> = text.chars().filter(|c| !rides_along(*c)).collect();
         if chars.is_empty() {
-            return None;
+            return GlyphSource::Family;
         }
         let weight = if bold { Weight::BOLD } else { Weight::NORMAL };
         let style = if italic { Style::Italic } else { Style::Normal };
         if let Some(primary) = query_face(self.fs.db(), family, weight, style)
             && self.covers(primary, &chars)
         {
-            return None;
+            return GlyphSource::Family;
         }
         let bundled = self.bundled.clone();
         if bundled.into_iter().any(|id| self.covers(id, &chars)) {
-            return None;
+            return GlyphSource::Family;
         }
-        self.system_fallback(&chars)
+        match self.system_fallback(&chars) {
+            Some(name) => GlyphSource::Installed(name),
+            None => GlyphSource::Missing,
+        }
     }
 
     /// An installed family that draws `chars` (one cluster), loading it into the shaping

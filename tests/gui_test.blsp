@@ -231,6 +231,45 @@ and, per row, the rows of its cell the `x` inks."
                   (is (= (ink-in image x 0 cell-w cell-h) 0))
                   (is (= (ink-in image x (* 2 cell-h) cell-w cell-h) 0))))))
 
+  ;; ADR-650: a character no font has is a box holding its code in hex, in the cells the
+  ;; layout gave it. U+3FFFD (unassigned, wide) and U+10FFFD (private use, narrow) — not an
+  ;; unassigned BMP code point, which GNU Unifont draws a glyph of its own for. Linux only:
+  ;; macOS ships a last-resort font that draws every code point its own way.
+  (test "a character no font has is a box in its own cells"
+    (when-gui
+      (fn ()
+        (when (= (os/type) :linux)
+          (let (white [255 255 255]
+                image (gui/render-frame [[:clear]
+                                          [:text 1 1 "\u{3FFFD}" {:fg white}]
+                                          [:text 1 4 "\u{10FFFD}" {:fg white}]]
+                        (capture-spec))
+                [cell-w cell-h] (:cell image)
+                x (+ 6 cell-w)
+                width (* 2 cell-w)
+                line? (fn (from to y)
+                        (every? (range (math/round (- to from)))
+                          (fn (dx) (= (gui/pixel image (+ from dx) y) white)))))
+            ;; the wide box: its four lines across its two cells, a pixel in from the top and bottom
+            (is (line? x (+ x width) (+ cell-h 1)))
+            (is (line? x (+ x width) (+ cell-h (- cell-h 2))))
+            (is (every? (range 1 (dec cell-h))
+                  (fn (dy)
+                    (and (= (gui/pixel image x (+ cell-h dy)) white)
+                      (= (gui/pixel image (+ x (dec width)) (+ cell-h dy)) white)))))
+            ;; digits inside it, more ink than the lines alone
+            (is (> (ink-in image x cell-h width cell-h) (* 2 (+ width cell-h))))
+            ;; nothing outside its cells: the cell after and the row above stay clear
+            (is (= (ink-in image (+ x width) cell-h cell-w cell-h) 0))
+            (is (= (ink-in image x 0 width cell-h) 0))
+            ;; the narrow one: its top and bottom lines across its one cell, digits between
+            ;; (six digits in one narrow cell leave no room for the side lines)
+            (let (narrow (+ 6 (* 4 cell-w)))
+              (is (line? narrow (+ narrow cell-w) (+ cell-h 1)))
+              (is (line? narrow (+ narrow cell-w) (+ cell-h (- cell-h 2))))
+              (is (> (ink-in image narrow cell-h cell-w cell-h) (* 2 cell-w)))
+              (is (= (ink-in image (+ narrow cell-w) cell-h cell-w cell-h) 0))))))))
+
   (test "text whose face names no :fg is drawn in the window's text colour (ADR-613)"
     (when-gui
       (fn ()

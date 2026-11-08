@@ -711,7 +711,25 @@ impl Renderer {
         let fam = shared.name_of(fid);
         // A glyph neither the family nor a bundled face has is drawn from an installed
         // font that has it, on the same baseline and in the same cell span (ADR-442).
-        let fam = shared.fallback_family(g, &fam, bold, italic).unwrap_or(fam);
+        let fam = match shared.glyph_source(g, &fam, bold, italic) {
+            GlyphSource::Family => fam,
+            GlyphSource::Installed(name) => name,
+            // A character no font has is a box holding its code in hex, in the cells the
+            // layout gave it (ADR-650). One with no width (a stray joiner or format
+            // character) or a control character keeps the old path: it draws nothing.
+            GlyphSource::Missing => match missing_glyph_char(g) {
+                Some(missing) => {
+                    return CachedGlyph {
+                        color: false,
+                        subpixel: false,
+                        width: cw,
+                        height: ch,
+                        rgba: hex_box(missing, cw, ch),
+                    };
+                }
+                None => fam,
+            },
+        };
         // A ligature unit (several clusters, `text_units`) puts each cluster's glyph at
         // its own cell, not at the font's fractional pen position.
         let grid = is_ligature_unit(g).then_some((self.cell_w * scale) as i32);
@@ -891,6 +909,146 @@ pub(super) fn canvas_over(
     rgba[idx + 1] = mix(sg, rgba[idx + 1]);
     rgba[idx + 2] = mix(sb, rgba[idx + 2]);
     rgba[idx + 3] = out_a as u8;
+}
+
+/// The character a cluster no font draws is shown by (ADR-650): its first, when the cluster
+/// takes a cell. A zero-width cluster (a stray joiner, a format character the glyphless
+/// display left alone) or a control character is not boxed — it drew nothing before and
+/// takes no cell to hold a box.
+fn missing_glyph_char(g: &str) -> Option<char> {
+    let first = g.chars().next()?;
+    (unit_cells(g) > 0 && !first.is_control()).then_some(first)
+}
+
+/// The hex digits 0–F as 3×5 bitmaps, row-major from the top-left (bit 14) — the tiny face
+/// a missing glyph's box writes its code point in, so the box never needs a font itself.
+const HEX_DIGIT_BITMAPS: [u16; 16] = [
+    0b111_101_101_101_111, // 0
+    0b010_110_010_010_111, // 1
+    0b111_001_111_100_111, // 2
+    0b111_001_111_001_111, // 3
+    0b101_101_111_001_001, // 4
+    0b111_100_111_001_111, // 5
+    0b111_100_111_101_111, // 6
+    0b111_001_001_001_001, // 7
+    0b111_101_111_101_111, // 8
+    0b111_101_111_001_111, // 9
+    0b111_101_111_101_101, // A
+    0b110_101_110_101_110, // B
+    0b111_100_100_100_111, // C
+    0b110_101_101_101_110, // D
+    0b111_100_111_100_111, // E
+    0b111_100_111_100_100, // F
+];
+
+/// How a missing glyph's hex digits fit its box: each bitmap pixel `scale` px square,
+/// `gap` px between digits, `pad` px between the digits and the box's lines, and whether
+/// the box keeps its side lines (dropped only when a cell is too narrow for them and three
+/// digits).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HexBoxLayout {
+    scale: usize,
+    gap: usize,
+    pad: usize,
+    sides: bool,
+}
+
+impl HexBoxLayout {
+    /// The roomiest layout of two rows of `per_row` digits in a `width`×`height` cell — the
+    /// largest whole scale with a pixel of air round the digits, then tighter ones at the
+    /// bitmap's own size — or `None` when not even that fits (the box is drawn empty). The
+    /// box's top and bottom lines sit a pixel inside the cell, so stacked boxes stay apart.
+    fn fit(per_row: usize, width: usize, height: usize) -> Option<Self> {
+        let rows_width = |layout: &Self| per_row * 3 * layout.scale + (per_row - 1) * layout.gap;
+        let room_height = height.saturating_sub(4);
+        let scaled = (1..=8).rev().map(|scale| Self {
+            scale,
+            gap: scale,
+            pad: 1,
+            sides: true,
+        });
+        let tight = [(1, 0, true), (0, 0, true), (0, 0, false)].map(|(gap, pad, sides)| Self {
+            scale: 1,
+            gap,
+            pad,
+            sides,
+        });
+        scaled.chain(tight).find(|layout| {
+            rows_width(layout) + 2 * layout.pad + if layout.sides { 2 } else { 0 } <= width
+                && 11 * layout.scale + 2 * layout.pad <= room_height
+        })
+    }
+}
+
+/// A `width`×`height` coverage canvas (white, alpha 255 where inked) for a character no font
+/// draws (ADR-650): a box filling its cells, a pixel in from the top and bottom, holding its
+/// code point in hex on two rows — `03`/`78` for U+0378, `03F`/`FFD` for U+3FFFD — as Emacs
+/// draws one and many terminals do. The caller recolours it with the face's foreground.
+pub(super) fn hex_box(character: char, width: usize, height: usize) -> Vec<u8> {
+    fn ink(rgba: &mut [u8], width: usize, height: usize, x: usize, y: usize) {
+        if x < width && y < height {
+            let index = (y * width + x) * 4;
+            rgba[index..index + 4].copy_from_slice(&[255; 4]);
+        }
+    }
+    let mut rgba = vec![0u8; width * height * 4];
+    if width == 0 || height == 0 {
+        return rgba;
+    }
+    let code = character as u32;
+    let (digits, per_row) = if code <= 0xFFFF {
+        (format!("{code:04X}"), 2)
+    } else {
+        (format!("{code:06X}"), 3)
+    };
+    let layout = HexBoxLayout::fit(per_row, width, height);
+    let (top, bottom) = if height >= 6 {
+        (1, height - 2)
+    } else {
+        (0, height - 1)
+    };
+    for x in 0..width {
+        ink(&mut rgba, width, height, x, top);
+        ink(&mut rgba, width, height, x, bottom);
+    }
+    if layout.is_none_or(|layout| layout.sides) {
+        for y in top..=bottom {
+            ink(&mut rgba, width, height, 0, y);
+            ink(&mut rgba, width, height, width - 1, y);
+        }
+    }
+    let Some(layout) = layout else {
+        return rgba;
+    };
+    let scale = layout.scale;
+    let block_width = per_row * 3 * scale + (per_row - 1) * layout.gap;
+    let block_height = 11 * scale;
+    let left = (width - block_width) / 2;
+    let upper = top + (bottom + 1 - top - block_height) / 2;
+    for (index, digit) in digits.chars().enumerate() {
+        let bitmap = HEX_DIGIT_BITMAPS[digit.to_digit(16).unwrap_or(0) as usize];
+        let digit_left = left + (index % per_row) * (3 * scale + layout.gap);
+        let digit_top = upper + (index / per_row) * 6 * scale;
+        for bit_row in 0..5 {
+            for bit_column in 0..3 {
+                if bitmap & (1 << (14 - (bit_row * 3 + bit_column))) == 0 {
+                    continue;
+                }
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        ink(
+                            &mut rgba,
+                            width,
+                            height,
+                            digit_left + bit_column * scale + dx,
+                            digit_top + bit_row * scale + dy,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    rgba
 }
 
 /// Whether cluster `g` is a geometric MARK rather than text: one character from Unicode's
@@ -1932,5 +2090,112 @@ mod centred_symbol_tests {
         let (_, g_bottom) = glyph_ink(&g).expect("g drew no ink");
         assert!(g_bottom > x_bottom, "g's descender no longer drops below x");
         assert!(x_top > 0);
+    }
+}
+
+#[cfg(test)]
+mod missing_glyph_tests {
+    //! ADR-650: a character no font has is a box holding its code point in hex.
+    use super::*;
+
+    fn inked(rgba: &[u8], width: usize, x: usize, y: usize) -> bool {
+        rgba[(y * width + x) * 4 + 3] == 255
+    }
+
+    /// The digits drawn, read back from the canvas: each 3×5 cell of the layout compared
+    /// with every bitmap.
+    fn read_digits(rgba: &[u8], width: usize, height: usize, per_row: usize) -> String {
+        let layout = HexBoxLayout::fit(per_row, width, height).expect("no layout fits");
+        let scale = layout.scale;
+        let block_width = per_row * 3 * scale + (per_row - 1) * layout.gap;
+        let (top, bottom) = (1, height - 2);
+        let left = (width - block_width) / 2;
+        let upper = top + (bottom + 1 - top - 11 * scale) / 2;
+        (0..2 * per_row)
+            .map(|index| {
+                let digit_left = left + (index % per_row) * (3 * scale + layout.gap);
+                let digit_top = upper + (index / per_row) * 6 * scale;
+                let mut bitmap = 0u16;
+                for bit in 0..15 {
+                    if inked(
+                        rgba,
+                        width,
+                        digit_left + (bit % 3) * scale,
+                        digit_top + (bit / 3) * scale,
+                    ) {
+                        bitmap |= 1 << (14 - bit);
+                    }
+                }
+                let value = HEX_DIGIT_BITMAPS
+                    .iter()
+                    .position(|known| *known == bitmap)
+                    .expect("a drawn digit matches no bitmap");
+                char::from_digit(value as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_box_holds_the_code_point_two_rows_of_two_or_three_digits() {
+        // a one-cell char at a 15 px font (a 9×21 cell): the box's lines on all four sides
+        let narrow = hex_box('\u{0378}', 9, 21);
+        assert!((0..9).all(|x| inked(&narrow, 9, x, 1) && inked(&narrow, 9, x, 19)));
+        assert!((1..=19).all(|y| inked(&narrow, 9, 0, y) && inked(&narrow, 9, 8, y)));
+        assert!(
+            !inked(&narrow, 9, 4, 0),
+            "the box keeps a pixel clear above it"
+        );
+        assert_eq!(read_digits(&narrow, 9, 21, 2), "0378");
+        // a two-cell char beyond the BMP: six digits, three a row
+        let wide = hex_box('\u{3FFFD}', 18, 21);
+        assert_eq!(read_digits(&wide, 18, 21, 3), "03FFFD");
+        // HiDPI: the digits grow with the cell
+        let large = HexBoxLayout::fit(2, 18, 42).unwrap();
+        assert!(large.scale >= 2);
+        assert_eq!(read_digits(&hex_box('\u{E000}', 18, 42), 18, 42, 2), "E000");
+    }
+
+    #[test]
+    fn a_cell_too_small_for_digits_still_gets_its_box() {
+        assert_eq!(HexBoxLayout::fit(2, 4, 8), None);
+        let tiny = hex_box('\u{0378}', 4, 8);
+        assert!((0..4).all(|x| inked(&tiny, 4, x, 1)));
+        assert!(!inked(&tiny, 4, 2, 3), "an empty box has nothing inside");
+        // three digits in one narrow cell keep the top and bottom lines, not the sides
+        let squeezed = HexBoxLayout::fit(3, 9, 21).unwrap();
+        assert!(!squeezed.sides);
+    }
+
+    #[test]
+    fn only_a_cluster_that_takes_a_cell_is_boxed() {
+        assert_eq!(missing_glyph_char("\u{0378}"), Some('\u{0378}'));
+        assert_eq!(missing_glyph_char("\u{200B}"), None);
+        assert_eq!(missing_glyph_char("\u{7}"), None);
+    }
+
+    /// The renderer's own bake: a character no font reaches comes back as the box, in its
+    /// layout width. U+10FFFD is private use (GNU Unifont draws even unassigned BMP code
+    /// points); skipped where some installed font covers it anyway (a last-resort font).
+    #[test]
+    fn the_renderer_bakes_a_missing_glyph_as_its_box() {
+        let r = Renderer::new(1.0, default_families(), 15.0);
+        let name = r.families.borrow().name_of(r.default_family);
+        let source = r
+            .families
+            .borrow_mut()
+            .glyph_source("\u{10FFFD}", &name, false, false);
+        if source != GlyphSource::Missing {
+            eprintln!("skipped: an installed font draws U+10FFFD ({source:?})");
+            return;
+        }
+        let baked = r.build_cluster("\u{10FFFD}", r.default_family, false, false, 1, false);
+        assert_eq!(baked.width, r.cell_w);
+        assert_eq!(
+            baked.rgba,
+            hex_box('\u{10FFFD}', baked.width, baked.height),
+            "the bake is not the hex box"
+        );
     }
 }
