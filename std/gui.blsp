@@ -244,6 +244,72 @@
              :kde (when (file/exists? kdeglobals) (file/slurp kdeglobals))})))
       (catch _ false))))
 
+;; ---- the desktop's light or dark preference ---------------------------------------
+;; The same shape as reduced motion: each desktop keeps the choice in its own settings store,
+;; read through its own tool, and the readers are pure over what each tool printed.
+
+(defn color-scheme-from (os answers)
+  "The colour scheme `answers` ask for on `os` (an `os/type` keyword) — `:dark`, `:light`, or nil
+when no source states one. `answers` maps each source to what it said (a string, or nil for a
+source that said nothing): `:gnome` is `gsettings get org.gnome.desktop.interface color-scheme`
+(`'prefer-dark'` asks dark, `'prefer-light'` light, `'default'` nothing), `:gtk-theme` the
+`gtk-theme` beside it (a name ending `-dark` asks dark, the older desktops' only signal), `:kde`
+the text of kdeglobals (a `ColorScheme=` naming Dark), `:macos` `defaults read -g
+AppleInterfaceStyle` (`Dark`; the key is absent in light mode), `:windows` `reg query` of
+`AppsUseLightTheme` (0 dark, 1 light).
+
+    (gui/color-scheme-from :linux {:gnome \"'prefer-dark'\"})   ;=> :dark
+    (gui/color-scheme-from :linux {:gnome \"'default'\" :gtk-theme \"'Adwaita-dark'\"})   ;=> :dark
+    (gui/color-scheme-from :linux {:kde \"[General]\\nColorScheme=BreezeLight\\n\"})   ;=> :light
+    (gui/color-scheme-from :macos {:macos \"Dark\"})   ;=> :dark
+    (gui/color-scheme-from :windows {:windows \"    AppsUseLightTheme    REG_DWORD    0x1\"})   ;=> :light"
+  (let (said (fn (k) (string/trim (or (get answers k) ""))))
+    (case os
+      :macos (if (= (said :macos) "Dark") :dark :light)
+      :windows
+        (cond
+          (regex/find "AppsUseLightTheme\\s+REG_DWORD\\s+0x0+(\\s|$)" (said :windows)) :dark
+          (regex/find "AppsUseLightTheme\\s+REG_DWORD\\s+0x0*1(\\s|$)" (said :windows)) :light
+          else nil)
+      (let (gnome (said :gnome)
+            kde (seq/find (string/split (said :kde) "\n")
+                  (fn (line) (regex/matches? "\\s*ColorScheme\\s*=.*" line))))
+        (cond
+          (includes? gnome "prefer-dark") :dark
+          (includes? gnome "prefer-light") :light
+          kde (if (regex/find "(?i)dark" kde) :dark :light)
+          (regex/find "(?i)-dark'?\\s*$" (said :gtk-theme)) :dark
+          else nil)))))
+
+(defn color-scheme ()
+  "The desktop's light or dark preference — `:dark`, `:light`, or nil when it states none: GNOME's
+Style setting, KDE's colour scheme, macOS's Appearance, Windows' app mode (`gui/color-scheme-from`
+reads each). Best-effort and synchronous — it runs the platform's settings tool, a few
+milliseconds — so an app re-reading it to follow a change does so off its UI loop; a source
+that is missing or fails says nothing, and so does any error. Needs no window and no GUI build.
+
+    (includes? [:dark :light nil] (gui/color-scheme))   ;=> true"
+  (check-allow :discarded-catch
+    (try
+      (let (os (os/type)
+            kdeglobals (path/join (or (os/env "XDG_CONFIG_HOME")
+                                    (path/join (or (os/env "HOME") "") ".config"))
+                         "kdeglobals"))
+        (color-scheme-from os
+          (case os
+            :macos {:macos (desktop-answer "defaults" ["read" "-g" "AppleInterfaceStyle"])}
+            :windows
+              {:windows (desktop-answer "reg"
+                          ["query"
+                            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
+                            "/v" "AppsUseLightTheme"])}
+            {:gnome (desktop-answer "gsettings"
+                      ["get" "org.gnome.desktop.interface" "color-scheme"])
+             :gtk-theme (desktop-answer "gsettings"
+                          ["get" "org.gnome.desktop.interface" "gtk-theme"])
+             :kde (when (file/exists? kdeglobals) (file/slurp kdeglobals))})))
+      (catch _ nil))))
+
 (defn settle (id)
   "Tell window id the app finished a turn with nothing new to draw; returns nil. What a `gui/draw` would have told the window about the app's progress, without a frame: the next wheel-glide step may fire, and the input the turn answered is dropped from `gui/latency` instead of being pinned on the next unrelated frame. `ui-run` sends it on every turn it skips (ADR-444), through the display's `:settle`. No-op headless.
 

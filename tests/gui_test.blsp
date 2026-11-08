@@ -495,3 +495,24 @@ the line's ink, and whether this strip was tall enough to show it."
                   (is (= (gui/pixel image line-x 6) seam-above))
                   (is (= (gui/pixel image gutter-x 0) seam-body))
                   (is (= (gui/pixel image 0 0) seam-body)))))))
+
+(describe "gui/color-scheme-from: the desktop's light or dark preference"
+  (test "GNOME's color-scheme, then the GTK theme's name"
+    (assert= (gui/color-scheme-from :linux {:gnome "'prefer-dark'"}) :dark)
+    (assert= (gui/color-scheme-from :linux {:gnome "'prefer-light'"}) :light)
+    (assert= (gui/color-scheme-from :linux {:gnome "'default'" :gtk-theme "'Adwaita-dark'"}) :dark)
+    (assert= (gui/color-scheme-from :linux {:gnome "'default'" :gtk-theme "'Adwaita'"}) nil))
+  (test "KDE's colour scheme"
+    (assert= (gui/color-scheme-from :linux {:kde "[General]\nColorScheme=BreezeDark\n"}) :dark)
+    (assert= (gui/color-scheme-from :linux {:kde "[General]\nColorScheme=BreezeLight\n"}) :light))
+  (test "macOS's AppleInterfaceStyle, absent in light mode"
+    (assert= (gui/color-scheme-from :macos {:macos "Dark"}) :dark)
+    (assert= (gui/color-scheme-from :macos {:macos nil}) :light))
+  (test "Windows' AppsUseLightTheme"
+    (assert= (gui/color-scheme-from :windows {:windows "    AppsUseLightTheme    REG_DWORD    0x0"})
+      :dark)
+    (assert= (gui/color-scheme-from :windows {:windows "    AppsUseLightTheme    REG_DWORD    0x1"})
+      :light)
+    (assert= (gui/color-scheme-from :windows {:windows nil}) nil))
+  (test "the live reading is one of the three answers"
+    (is (includes? [:dark :light nil] (gui/color-scheme)))))
