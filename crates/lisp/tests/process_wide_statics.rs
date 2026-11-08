@@ -173,6 +173,8 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // Serialises the private copies a grammar is dlopened from (ADR-583): the dynamic loader
     // and the temporary directory are the process's, so the lock is too.
     ("host/treesit/grammar.rs", "GRAMMAR_COPY_LOCK", OneMachine),
+    // The crash mark of each grammar in DYNAMIC (ADR-660): written beside it, as wide.
+    ("host/treesit/vet.rs", "GRAMMAR_MARKS", OneMachine),
     // Facts of the binary: the std sources baked into it, and the signatures derived from
     // them (the stdlib id is a build constant).
     ("types/check.rs", "STD_REQUIRES", FactOfTheBinary),
@@ -185,6 +187,8 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // like CACHES beside it — the same pattern gives the same engine in every runtime.
     ("builtins/rope_regex.rs", "ENGINES", PureCache),
     ("host/treesit.rs", "TREE_CACHE", PureCache),
+    // A grammar library's SHA-256 by its path, length and mtime (ADR-660): the file decides it.
+    ("host/treesit/vet.rs", "LIBRARY_HASHES", PureCache),
     ("host/treesit.rs", "PARSER_POOL", PureCache),
     ("host/gui.rs", "NAMES", PureCache),
     // Diagnostics.

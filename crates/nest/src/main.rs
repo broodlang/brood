@@ -215,6 +215,7 @@ fn ensure_stdimage(interp: &mut Interp) {
 }
 
 fn main() {
+    brood::cli_support::grammar_vetting_entry();
     brood::cli_support::install_panic_reporting();
     // A subcommand implemented in Brood (`std/tool/nest.blsp`, ADR-322) is routed there
     // BEFORE clap sees argv: clap would reject its flags, which it no longer knows. The list

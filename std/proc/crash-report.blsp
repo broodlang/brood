@@ -358,6 +358,13 @@ innermost `:frames` with project-relative paths, the `:brood` version, the `:os`
   (str "fatal "
     (:signal record)
     (if (:thread record) (str " on thread " (:thread record)) "")
+    (if (:grammar record)
+      (str " in the :"
+        (->string (:lang (:grammar record)))
+        " tree-sitter grammar ("
+        (:library (:grammar record))
+        "), now quarantined")
+      "")
     (if (:panic record) (str " after a panic: " (:panic record)) "")))
 
 (defn- crash-report-read-record (dir name)
@@ -377,7 +384,9 @@ on SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT (a Rust panic that aborted, a stac
 writes one from its signal handler, where no Brood code runs. Each is a map — `:kind
 :fatal-signal`, `:signal` (\"SIGSEGV\"), `:signo`, `:time` (epoch ms), `:pid`, `:version` and
 `:sha` of the runtime, its `:argv`, the `:thread` it died on, the fault `:address`, the signal's
-`:code`, the `:panic` message when a panic led to it — plus `:file` (where it is) and a
+`:code`, the `:panic` message when a panic led to it, the `:grammar` (`{:lang :library
+:sha256}`) when it died in a tree-sitter grammar's code — which the crash also quarantined,
+so it is not loaded again (ADR-660) — plus `:file` (where it is) and a
 `:message`. [[describe-error]] makes a report of one; [[forget-crash]] removes it once offered.
 A record can be any brood program's: `:argv` says which.
 

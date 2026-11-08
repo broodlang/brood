@@ -221,6 +221,70 @@ declaration needs to become a loadable library. `{:ok path :commit sha}` or `{:e
             (if (:error written) written (assoc written :commit (:commit fetched)))))))))
 (sig grammar-install (string any string string &optional (or nil map) -> map))
 
+;; ---- vetting what was built, with the grammar's own tests (ADR-660) -------------------
+;; A tree-sitter grammar ships its tests as a corpus: `test/corpus/*.txt`, each case a
+;; `===` header, its input, a `---` divider and the tree expected. The inputs are what its
+;; authors thought worth parsing, the best corpus a vetting child can be given.
+
+(def- corpus-max-inputs 2000)
+(def- corpus-max-input-length 65536)
+
+(defn- corpus-rule? (line)
+  ;; a header's `===` line (a suffix after the `=`s is allowed)
+  (string/starts-with? line "==="))
+
+(defn- corpus-divider? (line)
+  ;; the `---` line between an input and its expected tree
+  (and (string/starts-with? line "---") (string/blank? (string/replace line "-" ""))))
+
+(defn- corpus-step (state line)
+  ;; one line of a corpus file through header → input → expected
+  (let ({:keys [stage lines inputs]} state)
+    (case stage
+      :header (if (corpus-rule? line) {:stage :input :lines [] :inputs inputs} state)
+      :input
+        (if (corpus-divider? line)
+          {:stage :expected
+           :lines []
+           :inputs (conj inputs (string/trim (string/join lines "\n")))}
+          (assoc state :lines (conj lines line)))
+      (if (corpus-rule? line) {:stage :header :lines [] :inputs inputs} state))))
+
+(defn corpus-inputs (text:string -> vector)
+  "The inputs of one tree-sitter corpus file `text`: each case's text between its `===`
+header and its `---` divider, trimmed.
+
+    (editor/grammar-install/corpus-inputs \"===\\nnumber\\n===\\n\\n1\\n\\n---\\n\\n(number)\\n\")   ;=> [\"1\"]"
+  (:inputs (fold (string/split text "\n") {:stage :outside :lines [] :inputs []} corpus-step)))
+
+(defn grammar-corpus (root:string -> vector)
+  "Every input of the grammar's own test corpus under `root` (`test/corpus/*.txt`, else
+`corpus/*.txt`), at most 2000 of them, each at most 64 KB — the `:corpus` `vet-grammar`
+takes. [] when the grammar has none.
+
+    (editor/grammar-install/grammar-corpus \"/nonexistent\")   ;=> []"
+  (let (dir (seq/find [(path/join root "test" "corpus") (path/join root "corpus")] file/dir?))
+    (if (nil? dir)
+      []
+      (let (files (sort (seq/filter (file/ls dir) (fn (name) (string/ends-with? name ".txt"))))
+            texts (seq/keep files
+                    (fn (name)
+                      ;; check-allow :discarded-catch — an unreadable file adds no inputs
+                      (check-allow :discarded-catch
+                        (try (file/slurp (path/join dir name)) (catch _ nil)))))
+            inputs (mapcat texts corpus-inputs))
+        (into []
+          (take (seq/filter inputs (fn (input) (<= (string/length input) corpus-max-input-length)))
+            corpus-max-inputs))))))
+
+(defn grammar-vet (library:string lang:keyword &optional (root nil) (options nil) -> map)
+  "Vet the grammar library `library` (just built from the checkout `root`) in a child, with
+the grammar's own test corpus (`grammar-corpus`) — `editor/treesit/vet-grammar`'s verdict.
+Blocking; run it off a loop. `options` passes `:timeout-ms` and `:force` on.
+
+    (try (editor/grammar-install/grammar-vet \"/nonexistent/libtree-sitter-x.so\" :x) (catch _ :none))   ;=> :none"
+  (vet-grammar library lang (assoc (or options {}) :corpus (if root (grammar-corpus root) []))))
+
 (defn grammar-identity (lang:keyword -> map)
   "Which grammar the runtime parses `lang` with, as far as it can be told (ADR-583): its
 `:abi`, `:version` and `:source` (`grammar-info`), its shape's `:fingerprint`

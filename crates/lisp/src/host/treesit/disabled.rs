@@ -115,6 +115,33 @@ pub fn grammar_status(_heap: &mut crate::core::heap::Heap, _lang: &str) -> LispR
     Ok(crate::core::value::Value::Nil)
 }
 
+/// The vetting child's entry (ADR-660): nothing to vet without tree-sitter.
+pub fn vetting_entry() {}
+
+pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
+
+pub fn vet_grammar(
+    _heap: &mut crate::core::heap::Heap,
+    _path: &str,
+    lang: &str,
+    _corpus: &[Vec<u8>],
+    _timeout: std::time::Duration,
+    _force: bool,
+) -> LispResult {
+    Err(LispError::runtime(format!(
+        "%tree-sitter-vet-grammar::{lang}: this runtime was built without tree-sitter \
+         (rebuild with --features treesit)"
+    )))
+}
+
+pub fn grammar_verdict(_heap: &mut crate::core::heap::Heap, _path: &str) -> LispResult {
+    Ok(crate::core::value::Value::Nil)
+}
+
+pub fn forget_grammar_verdict(_path: &str) -> LispResult {
+    Ok(crate::core::value::Value::Bool(false))
+}
+
 pub fn languages(heap: &mut crate::core::heap::Heap) -> LispResult {
     Ok(heap.alloc_vector(Vec::new()))
 }

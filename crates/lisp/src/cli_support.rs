@@ -12,6 +12,8 @@ use std::path::Path;
 
 mod fatal_signal;
 pub use fatal_signal::crash_record_dir;
+pub(crate) use fatal_signal::literal_safe;
+pub use fatal_signal::{ForeignCode, ForeignGuard, current_foreign_code, enter_foreign_code};
 
 /// The version line both binaries report from `--version`: `"<semver> (<git sha>)"`.
 ///
@@ -64,6 +66,15 @@ pub fn install_panic_reporting() {
     }
     install_crash_dump();
     fatal_signal::install();
+}
+
+/// The very first call in `brood`'s and `nest`'s `main`, before [`install_panic_reporting`]:
+/// a grammar-vetting child (this binary started by itself to try a tree-sitter grammar library,
+/// ADR-660) vets and exits here, with no panic hook or crash record — its death is the answer.
+/// Any other run is noted as able to start one, which is what lets it vet a grammar before
+/// loading it.
+pub fn grammar_vetting_entry() {
+    crate::host::treesit::vetting_entry();
 }
 
 /// The process-wide setup every run shares, before any interpreter exists: the worker cap,

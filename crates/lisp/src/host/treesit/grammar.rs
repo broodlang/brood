@@ -157,20 +157,17 @@ unsafe fn open_copy_at(copy: &std::path::Path, bytes: &[u8]) -> Option<libloadin
 /// As `libloading::Library::new`: the library's initialisers run, with the process's
 /// privileges.
 unsafe fn open_library(
-    who: &str,
     path: &str,
-) -> Result<(Result<libloading::Library, libloading::Error>, LoadedVia), LispError> {
-    use std::hash::{Hash, Hasher};
-    let bytes =
-        std::fs::read(path).map_err(|e| LispError::runtime(format!("{who}:{path}: {e}")))?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
+    bytes: &[u8],
+    hash: &str,
+) -> (Result<libloading::Library, libloading::Error>, LoadedVia) {
     let original = std::path::Path::new(path);
     let stem = original
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("grammar");
-    let name = format!(".{stem}.{:016x}.{}.so", hasher.finish(), std::process::id());
+    let short_hash = hash.get(..16).unwrap_or(hash);
+    let name = format!(".{stem}.{short_hash}.{}.so", std::process::id());
     let _held = crate::core::sync::lock(&GRAMMAR_COPY_LOCK);
     let beside = original.parent().map(|dir| {
         if dir.as_os_str().is_empty() {
@@ -181,19 +178,19 @@ unsafe fn open_library(
     });
     // SAFETY: the caller's, for each attempt.
     if let Some(dir) = beside
-        && let Some(library) = unsafe { open_copy_at(&dir.join(&name), &bytes) }
+        && let Some(library) = unsafe { open_copy_at(&dir.join(&name), bytes) }
     {
-        return Ok((Ok(library), LoadedVia::Beside));
+        return (Ok(library), LoadedVia::Beside);
     }
     if let Some(dir) = grammar_cache_dir()
-        && let Some(library) = unsafe { open_copy_at(&dir.join(&name), &bytes) }
+        && let Some(library) = unsafe { open_copy_at(&dir.join(&name), bytes) }
     {
-        return Ok((Ok(library), LoadedVia::Cache));
+        return (Ok(library), LoadedVia::Cache);
     }
-    Ok((
+    (
         unsafe { libloading::Library::new(path) },
         LoadedVia::InPlace,
-    ))
+    )
 }
 
 /// dlopen `path`, check the grammar's ABI and register it under `lang` — the work of
@@ -211,6 +208,15 @@ fn load_library(
     // grammar rather than being a nickname for it; there is no aliasing here and shouldn't
     // be, since the mode that asks to parse `:c-sharp` is the same name on both sides.
     let symbol = format!("tree_sitter_{}", lang.replace('-', "_"));
+    let bytes =
+        std::fs::read(path).map_err(|e| LispError::runtime(format!("{who}:{path}: {e}")))?;
+    // The gate (ADR-660): a quarantined library is refused here, before any of its code runs
+    // in this process, and one never vetted is vetted first, in a child.
+    let hash = super::vet::admit(path, lang, &bytes)?;
+    // From here the library's code runs (its initialisers, its entry point, set_language's
+    // scanner set-up): a crash in it names it, and quarantines it for the next start.
+    let mark = super::vet::build_mark(lang, path, &hash);
+    let _marked = crate::cli_support::enter_foreign_code(Some(mark));
     // SAFETY: dlopen'ing a caller-chosen library and calling the grammar constructor it
     // exports. The symbol type is tree-sitter's documented grammar entry point, and the
     // Language it yields is validated against the host's ABI range below before any use.
@@ -218,7 +224,7 @@ fn load_library(
     // itself: the dynamic loader hands back the object it already has for a name it has
     // seen, so a grammar rebuilt in place and loaded again from the same path would go on
     // parsing with the old one (ADR-583). See `open_library`.
-    let (opened, via) = unsafe { open_library(who, path)? };
+    let (opened, via) = unsafe { open_library(path, &bytes, &hash) };
     let language = unsafe {
         let lib = opened.map_err(|e| LispError::runtime(format!("{who}:{path}: {e}")))?;
         let entry: libloading::Symbol<unsafe extern "C" fn() -> *const ()> = lib
@@ -242,12 +248,19 @@ fn load_library(
             ))
         })?;
     let abi = language.abi_version() as i64;
+    let previous_mark = super::vet::mark_of(lang);
     crate::core::sync::lock(&DYNAMIC).insert(lang.to_string(), language.clone());
     crate::core::sync::lock(&LOADED_FROM).insert(lang.to_string(), (path.to_string(), via));
+    super::vet::set_mark(lang, mark);
     // A re-load replaces the entry, so a grammar can be swapped without restarting; the
     // parser pool is keyed by language name and holds parsers bound to the OLD language, so
-    // it is cleared for this one rather than left to hand out stale parsers.
-    crate::core::sync::lock(&PARSER_POOL).remove(lang);
+    // it is cleared for this one rather than left to hand out stale parsers. Dropping one
+    // runs the old library's scanner clean-up, under the old library's mark.
+    let stale_parsers = crate::core::sync::lock(&PARSER_POOL).remove(lang);
+    {
+        let _old = crate::cli_support::enter_foreign_code(previous_mark);
+        drop(stale_parsers);
+    }
     // The tree cache is keyed by language name too, and holds trees SHAPED BY the old
     // grammar. An exact hit would hand one back for the new one, and an incremental
     // reparse would hand it to the new grammar's parser as the tree to edit from — which
@@ -360,7 +373,7 @@ pub(super) enum Declared {
     Pending { path: String },
     /// Asked for, and the load failed. Kept, not retried: a parse per keystroke would
     /// otherwise dlopen the same broken library per keystroke. A new declaration replaces it.
-    Failed { message: String },
+    Failed { path: String, message: String },
 }
 
 /// Grammars DECLARED by [`declare_grammar`] and not yet loaded (ADR-481), keyed by language
@@ -404,7 +417,7 @@ fn declared_language(lang: &str) -> Result<Option<tree_sitter::Language>, LispEr
     let mut declared = crate::core::sync::lock(&DECLARED);
     let path = match declared.get(lang) {
         None => return Ok(None),
-        Some(Declared::Failed { message }) => {
+        Some(Declared::Failed { message, .. }) => {
             return if has_grammar_without_declaration(lang) {
                 Ok(None)
             } else {
@@ -418,6 +431,9 @@ fn declared_language(lang: &str) -> Result<Option<tree_sitter::Language>, LispEr
             declared.remove(lang);
             Ok(Some(language))
         }
+        // the caller was killed while the library was being vetted: no verdict, and the
+        // declaration stays pending for the next use
+        Err(error) if error.is_kill_signal() => Err(error),
         Err(error) => {
             let message = format!(
                 "the :{lang} grammar declared at {path} did not load: {}",
@@ -426,6 +442,7 @@ fn declared_language(lang: &str) -> Result<Option<tree_sitter::Language>, LispEr
             declared.insert(
                 lang.to_string(),
                 Declared::Failed {
+                    path: path.clone(),
                     message: message.clone(),
                 },
             );
@@ -445,17 +462,38 @@ fn has_grammar_without_declaration(lang: &str) -> bool {
 
 /// `(%tree-sitter-grammar-status lang)` — where `lang`'s grammar stands: `:declared`
 /// (declared, not loaded yet), `:loaded` (loaded at runtime), `:built-in`, a failure value
-/// carrying the load's message when the last declaration did not load, or `nil` when the
-/// runtime has no grammar for it. Asks; never loads.
+/// carrying the load's message when the last declaration did not load, `{:quarantined reason
+/// :library :sha256 :by}` when the declared library is quarantined (ADR-660: it crashed or hung
+/// a vetting child, or crashed a runtime), or `nil` when the runtime has no grammar for it.
+/// Asks; never loads.
 pub fn grammar_status(heap: &mut Heap, lang: &str) -> LispResult {
     let keyword = |name: &str| Value::keyword(value::intern(name));
-    let failed = match crate::core::sync::lock(&DECLARED).get(lang) {
-        Some(Declared::Pending { .. }) => return Ok(keyword("declared")),
-        Some(Declared::Failed { message }) => Some(message.clone()),
-        None => None,
+    let (path, failed) = match crate::core::sync::lock(&DECLARED).get(lang) {
+        Some(Declared::Pending { path }) => (Some(path.clone()), None),
+        Some(Declared::Failed { path, message }) => (Some(path.clone()), Some(message.clone())),
+        None => (None, None),
     };
+    if let Some(path) = &path
+        && let Some(verdict) = super::vet::quarantine_of(path)
+    {
+        let reason = heap.alloc_string(&verdict.reason());
+        let library = heap.alloc_string(path);
+        let mut pairs = vec![
+            (keyword("quarantined"), reason),
+            (keyword("library"), library),
+        ];
+        for key in ["sha256", "by", "signal"] {
+            if let Some(field) = verdict.field_value(heap, key) {
+                pairs.push((keyword(key), field));
+            }
+        }
+        return Ok(heap.map_from_pairs(pairs));
+    }
     if let Some(message) = failed {
         return Ok(heap.alloc_failure(&message));
+    }
+    if path.is_some() {
+        return Ok(keyword("declared"));
     }
     if dynamic_language(lang).is_some() {
         return Ok(keyword("loaded"));
@@ -475,11 +513,19 @@ pub fn grammar_status(heap: &mut Heap, lang: &str) -> LispResult {
 pub fn languages(heap: &mut Heap) -> LispResult {
     #[allow(unused_mut)] // a build with no grammar feature never pushes a built-in
     let mut names: Vec<String> = crate::core::sync::lock(&DYNAMIC).keys().cloned().collect();
+    let pending: Vec<(String, String)> = crate::core::sync::lock(&DECLARED)
+        .iter()
+        .filter_map(|(name, declared)| match declared {
+            Declared::Pending { path } => Some((name.clone(), path.clone())),
+            Declared::Failed { .. } => None,
+        })
+        .collect();
+    // a quarantined library will not load, so its language is not one this runtime parses
     names.extend(
-        crate::core::sync::lock(&DECLARED)
-            .iter()
-            .filter(|(_, declared)| matches!(declared, Declared::Pending { .. }))
-            .map(|(name, _)| name.clone()),
+        pending
+            .into_iter()
+            .filter(|(_, path)| super::vet::quarantine_of(path).is_none())
+            .map(|(name, _)| name),
     );
     #[cfg(feature = "treesit-ruby")]
     names.push("ruby".to_string());
