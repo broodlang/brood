@@ -477,32 +477,16 @@ pub fn stall_report(_what: &str) -> String {
 /// because the evaluation RECORDS them rather than binding them, each of which has been
 /// omitted at least once and found late.
 pub const STATE_DUMP: &str = r#"
-;; Load the prelude's expansion closure BEFORE measuring anything, so the two cells are
-;; compared with the same modules in place (ADR-335). They do not arrive there by the same
-;; route and no longer arrive there at the same TIME: expanding any program walks prelude
-;; macro bodies, whose expansions carry qualified heads, and `require_qualified_head` loads
-;; such a head at expansion unless something vouches it a function. The stdlib image's kind
-;; index is that voucher, so an IMAGED boot defers all of them and a SOURCE boot loads six
-;; modules — a ~129-global, 19-fact difference in what is bound when the dump runs, with
-;; nothing lost on either side. That is the lazy-load win, not a defect, and comparing the
-;; two mid-flight measures which cell got there first instead of whether they agree.
-;;
-;; Requiring them here is what keeps the comparison honest rather than weakening it: every
-;; binding, fact, sig and def-site below is still compared in full, so an image that RESTORES
-;; a module wrongly — KI-105's stale section directory, KI-106's lost registry names — fails
-;; exactly as before. Only "has not been loaded yet" is taken out of the diff. A drift in this
-;; list is a loud test failure, not a silent hole, which is why it is spelled out.
-;; `regex` and `table` since 2026-09-23: `string/fill-prefix` names `regex/find` (whose
-;; memos are tables), so a source load of `string` loads both at expansion and an imaged
-;; one defers them to the first call. `encoding` since 2026-10-12, the same way: `path/temp`
-;; names `encoding/hex-encode-bytes`. `url` and `bytes` since 2026-11-05: `path/to-file-uri`
-;; and `path/from-file-uri` name `url/percent-encode` / `url/percent-decode`. `datetime` and
-;; `tz` since 2026-11-08: `file/trash` dates its `.trashinfo` with `tz/local-zone` and
-;; `datetime/format` — and `datetime`'s `defmethod`s are what fill `*methods*`/`*method-from*` —
-;; and those two name `os/…` (`os/now`, `os/env`), which names `set/…`, so `os` and `set` too.
-(doseq (m ['map 'seq 'io 'string 'math 'reflect 'path 'file 'regex 'table 'encoding 'url 'bytes
-           'datetime 'tz 'os 'set])
-  (require-one m))
+;; No module is loaded here before measuring. The two cells reach the same module set by the
+;; same route since 2026-11-08 (ADR-335 addendum). Until then a SOURCE boot loaded, at
+;; expansion, every module a prelude macro's expansion named (`path`, `file`, `regex`,
+;; `datetime`, `tz`, `os`, `set` and more), while an IMAGED boot deferred them to first use, and
+;; this dump began with a hand-kept `require-one` list that grew each time `path` or `file`
+;; named a new module. A source boot now reads which names are macros from the embedded
+;; source, as the image's kind index records them, so both defer the same heads. If this test
+;; starts to differ on a whole module's bindings, find the load one boot does and the other
+;; does not (`BROOD_IMAGE_TRACE=1`, or `*features*` after a one-line program on each boot) and
+;; fix THAT. Restoring a list here would hide it.
 
 (defn- dyn? (n)
   "Is `n` a dynamic variable? Asked behaviourally, through the primitive `binding` uses,

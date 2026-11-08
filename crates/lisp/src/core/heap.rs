@@ -2047,6 +2047,11 @@ impl Heap {
         )
     }
 
+    /// Has this runtime's kind index described `module`, from an image or its source?
+    pub(crate) fn image_indexes(&self, module: Symbol) -> bool {
+        crate::core::sync::read(&self.runtime.image_modules).contains(&module)
+    }
+
     /// Does an image this runtime indexed vouch that `qualified` (in `module`) is NOT a
     /// macro? True only for a module such an image holds whose macros do not include the name.
     pub(crate) fn image_says_function(&self, module: Symbol, qualified: Symbol) -> bool {

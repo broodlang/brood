@@ -1173,3 +1173,16 @@ also holds its records. So when the function also escaped as a value, an int cal
 its `check-allow` is gone. Checked here: `declared_vs_curated::a_cover_return_is_specialized_under_the_call_like_a_number_return`
 (red with the fix disabled), the `types::` unit tests, CI's two checker gates, `sig_adoption` and
 `checker_pass_agreement`.
+
+2026-11-08 (ADR-335 addendum). A boot with no stdlib image now loads the same modules as an
+imaged boot. With no image, the runtime reads an embedded std module's macros from its baked-in
+source (its top-level `defmacro` forms, `derive::index_embedded_kinds`), so a function head into
+`file`, `path`, `datetime` and the rest is deferred to first use, as the image's kind index already
+allowed. `defrecord`'s generated docstring joins with `%string-join`, so expanding a record no
+longer loads `string`. `(io/puts …)` now leaves `(io)` loaded on both boots, where a source boot
+loaded eight modules. `STATE_DUMP`'s hand-kept preload list is gone. Checked here:
+`std_macro_kinds_match_the_loaded_modules` (red with the scan broken), `artifact_matrix` in all
+four cells, `make test` (2319 passed), `nest test` imaged and with no image (8227 each), the
+contracts suite from source, both checker gates and clippy. `make smoke-bedit` reds one test in
+bedit's suite, and the same flake reds on the c03d6a4e binary too (`userkeys_test.blsp:122`,
+order-dependent).

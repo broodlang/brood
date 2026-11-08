@@ -51,8 +51,11 @@ evaluated**, and the load is inferred at the latest point that keeps the promise
 - a **macro** head still loads at expansion (it has to — it expands now);
 - a **function** head into a module the startup image describes defers: the image's v6
   footer carries every imaged macro's name, so the kind is known without materialising
-  anything (`image_says_function`). A head into an un-imaged module stays eager, because
-  its kind is unknowable;
+  anything (`image_says_function`). With no image open, an embedded std module's kind is read
+  from its baked-in source, from its top-level `defmacro` forms (`index_embedded_kinds`,
+  2026-11-08), so a source boot defers the same heads an imaged one does. A test loads every
+  std module and checks the scan against the result. A head into any other un-indexed module
+  (a project's, a dependency's) stays eager, because its kind is unknowable without loading it;
 - a **value** reference only records its module; `drain_pending` loads nothing under the
   default lazy policy;
 - the load itself happens on the **global-lookup miss** — `derive::global_miss`, the one

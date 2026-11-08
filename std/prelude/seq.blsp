@@ -476,14 +476,18 @@ prelude declares one, so `:derives` always names an ability from your own code."
         ;; public surface, and one with no `(doc …)` at all is a hole in `nest doc`,
         ;; the LSP and `(audit/undocumented)` alike. The record's own docstring, when it
         ;; wrote one, follows.
+        ;; Joined with the native `%string-join`, not `string/join`: this runs at every
+        ;; `defrecord` EXPANSION, and calling into `string` there loaded that module
+        ;; whenever a source boot expanded a module with a record (`io`'s ports) — where an
+        ;; imaged boot, which never expands it, did not.
         ctor `(defn ~rec (~@fnames)
                 ~(str "Construct a `"
                    (->string rec)
                    "` record"
-                   (if (empty? fnames) "" (str " from " (string/join (map fnames ->string) ", ")))
+                   (if (empty? fnames) "" (str " from " (%string-join ", " (map fnames ->string))))
                    ".\n\n    ("
                    (->string id)
-                   (string/join (map fnames (fn (n) (str " " (->string n)))) "")
+                   (%string-join "" (map fnames (fn (n) (str " " (->string n)))))
                    ")   ;~> a "
                    (->string rec)
                    " record"

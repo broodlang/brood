@@ -173,12 +173,59 @@ pub fn require_qualified_head(heap: &mut Heap, env: EnvId, s: Symbol) -> Result<
     }
     // Lazy policy (ADR-335): a head an image vouches is a FUNCTION waits for its first call
     // — the miss path (`global_miss`) loads it then. Only a macro, or a head into a module
-    // no image describes, must load before expansion.
-    if lazy_loads() && heap.image_says_function(module, rooted) {
-        return Ok(false);
+    // no index describes, must load before expansion. With no image open, an embedded std
+    // module's own source is the index: what it defines with a top-level `defmacro`.
+    if lazy_loads() {
+        index_embedded_kinds(heap, module);
+        if heap.image_says_function(module, rooted) {
+            return Ok(false);
+        }
     }
     ensure_required(heap, env, module)?;
     Ok(true)
+}
+
+/// Give the kind index an EMBEDDED std module no image has indexed, read from the source the
+/// binary carries: the module, and the names its top-level `defmacro`/`defmacro-` forms
+/// define. A std module always loads from that embedded source, so this is what an image
+/// built from it would say. Without it a source boot loaded, at expansion, every module a
+/// prelude macro's expansion names (`file`, `path`, `regex`, `datetime`, `tz`, `os`, …) where
+/// an imaged boot deferred them to first use. The two boots then disagreed about what was
+/// loaded, and every test comparing them carried a hand-kept list of modules to load first.
+///
+/// The scan sees only top-level `defmacro` forms. `std_macro_kinds_match_the_loaded_modules`
+/// (crates/lisp/tests) loads every std module and fails if a macro arrives any other way.
+fn index_embedded_kinds(heap: &Heap, module: Symbol) {
+    if heap.image_indexes(module) {
+        return;
+    }
+    let name = value::symbol_name_ref(module);
+    let Some(src) = crate::builtins::modules::embedded_module_source(name) else {
+        return;
+    };
+    let macros = embedded_macro_names(name, src);
+    heap.register_image_kinds([module], macros);
+}
+
+/// The qualified names `src` (the source of module `module`) defines with a top-level
+/// `defmacro` or `defmacro-`. A name already qualified is kept as written.
+pub fn embedded_macro_names(module: &str, src: &str) -> Vec<Symbol> {
+    let root = crate::syntax::cst::parse(src);
+    root.forms()
+        .filter(|form| matches!(form.head_symbol(src), Some("defmacro" | "defmacro-")))
+        .filter_map(|form| {
+            let name = form.forms().nth(1)?;
+            if name.kind != crate::syntax::cst::NodeKind::Symbol {
+                return None;
+            }
+            let name = name.text(src);
+            Some(if name.contains('/') {
+                value::intern(name)
+            } else {
+                value::intern(&format!("{module}/{name}"))
+            })
+        })
+        .collect()
 }
 
 /// Load the embedded std module a `def` TARGET names, if it is not loaded yet, so the
@@ -1025,4 +1072,74 @@ pub fn image_sig_entries(heap: &Heap) -> Vec<(String, String, u32, u32)> {
         .collect();
     out.sort();
     out
+}
+
+#[cfg(test)]
+mod kind_index_tests {
+    use super::*;
+
+    /// Every macro a std module defines once LOADED, and the names its SOURCE scan reports,
+    /// as sorted text. Read from a runtime that loaded every embedded module.
+    fn loaded_and_scanned_macros() -> (Vec<String>, Vec<String>) {
+        let mut interp = crate::Interp::new();
+        let macros_now = "(%string-join \" \" (sort (map (seq/filter (reflect/global-names) \
+             (fn (s) (try (= :macro (type-of (reflect/eval s))) (catch _ false)))) ->string)))";
+        let read = |interp: &mut crate::Interp| -> Vec<String> {
+            let v = interp.eval_str(macros_now).expect("list the macros");
+            let Value::Str(id) = v else {
+                panic!("the macro listing is not a string")
+            };
+            interp
+                .heap
+                .string(id)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect()
+        };
+        let before = read(&mut interp);
+        let mut scanned: Vec<String> = Vec::new();
+        for (key, src) in crate::builtins::modules::embedded_modules() {
+            // A module this build cannot load (a feature it was built without) defines
+            // nothing here, so its scan is left out as well.
+            if interp.eval_str(&format!("(require-one '{key})")).is_err() {
+                continue;
+            }
+            scanned.extend(
+                embedded_macro_names(key, src)
+                    .into_iter()
+                    .map(value::symbol_name),
+            );
+        }
+        let mut loaded: Vec<String> = read(&mut interp)
+            .into_iter()
+            .filter(|name| !before.contains(name))
+            .collect();
+        loaded.sort();
+        loaded.dedup();
+        scanned.sort();
+        scanned.dedup();
+        (loaded, scanned)
+    }
+
+    /// The source boot's kind index (`index_embedded_kinds`) reads a std module's macros off
+    /// its top-level `defmacro` forms. A macro that arrives any other way (made by another
+    /// macro, defined inside a `do` or a `when`) would be deferred past expansion as though
+    /// it were a function, and its call would expand as a function call. Loading every std
+    /// module and comparing is what keeps the scan honest.
+    #[test]
+    fn std_macro_kinds_match_the_loaded_modules() {
+        let (loaded, scanned) = loaded_and_scanned_macros();
+        assert!(
+            !loaded.is_empty(),
+            "loading every std module defined no macro: the comparison proves nothing"
+        );
+        let missed: Vec<&String> = loaded.iter().filter(|m| !scanned.contains(m)).collect();
+        let extra: Vec<&String> = scanned.iter().filter(|m| !loaded.contains(m)).collect();
+        assert!(
+            missed.is_empty() && extra.is_empty(),
+            "the source scan disagrees with the loaded std modules. Macros it does not see \
+             (define them with a top-level `defmacro`, or teach `embedded_macro_names` the \
+             form): {missed:?}. Names it calls macros that are not: {extra:?}"
+        );
+    }
 }
