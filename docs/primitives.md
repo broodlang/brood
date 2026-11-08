@@ -158,6 +158,7 @@ arg silently becoming `nil`.
 | | `%canonicalize` | 1 | The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. |
 | | `file/cp` | 2 | Copy file `from` to `to` (replacing `to`), preserving contents and permissions. Binary-safe (unlike slurp+spit). Returns nil; errors on failure. |
 | | `file/rename` | 2 | Rename/move file `from` to `to`. Returns nil; errors on failure. |
+| | `%file-recycle` | 1 | Move the file or directory at an absolute path into the Windows recycle bin (`SHFileOperationW`, every dialog off); an error elsewhere. The one call `file/trash` makes into Rust. |
 | | `file/rm` | 1 | Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure. |
 | | `file/rmdir` | 1 | Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure. |
 | **System** | `%getenv` | 1 | environment-variable value, or nil if unset |
