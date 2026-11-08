@@ -855,22 +855,96 @@ fn declared_global_type_flows_into_value_position() {
 }
 
 #[test]
-fn unknown_module_qualified_name_is_not_unbound() {
-    // A qualified reference whose module isn't loaded — defined dynamically
-    // (`%load-string`, a required temp module) or in a file a single-file check
-    // didn't load — can't be proven unbound, so it's left alone.
+fn a_qualified_name_into_a_module_nothing_could_load_is_unbound() {
+    // `std/proc/crash-report.blsp` once called `net/http/post` — the module is `http`. No
+    // module `net/http` exists anywhere `require` looks, so the name can never be bound:
+    // it is flagged, and the message names the module, since that is what to fix.
+    for (src, module) in [
+        ("(defn post (u) (net/http/post u))", "net/http"),
+        ("(some-unloaded-mod/thing 1)", "some-unloaded-mod"),
+        ("(a/b/c/deep-thing 1)", "a/b/c"),
+        ("(defn v (x) (+ x other-mod/value))", "other-mod"),
+    ] {
+        let w = file_warnings(src);
+        let qualified = src
+            .split(|c: char| c == '(' || c == ')' || c.is_whitespace())
+            .find(|word| word.starts_with(&format!("{module}/")))
+            .expect("the source names the module");
+        assert!(
+            w.iter()
+                .any(|m| m.contains(&format!("unbound symbol: {qualified}"))
+                    && m.contains(&format!("no module `{module}` exists"))),
+            "a reference into a module that does not exist is flagged ({src}): {w:?}"
+        );
+    }
+}
+
+#[test]
+fn a_qualified_name_whose_module_could_be_loaded_is_left_alone() {
+    // What stays silent: data, and every module that a load could still supply.
     for src in [
-        "(some-unloaded-mod/thing 1)",
-        "(a/b/c/deep-thing 1)",
-        "(+ 1 other-mod/value)",
+        // Quoted data is a symbol, not a reference (a keymap's `'commands/cmd-x`).
+        "(def keys ['commands/cmd-x 'other/cmd-y])",
+        "(defn tmpl (u) `(gone/thing ~u))",
+        // A module whose source the file carries, `%load-string`ed at run time.
+        "(%load-string \"(defmodule dynmod) (defn f () 1)\") (defn g () (dynmod/f))",
+        // The file's own module, which a single-file check need not find on the load path.
+        "(defmodule selfmod) (defn g () (selfmod/h)) (defn h () 1)",
+        // A `bound?` guard, and an explicit opt-out.
+        "(defn g () (when (bound? 'gone/thing) (gone/thing)))",
+        "(defn g () (check-allow :unbound (gone/thing)))",
     ] {
         let w = file_warnings(src);
         assert!(
             w.iter().all(|m| !m.contains("unbound symbol")),
-            "an unknown-module qualified name must not be flagged ({src}): {w:?}"
+            "nothing here is provably unbound ({src}): {w:?}"
         );
     }
-    // But a typo in a *known* module (some `mod/*` is loaded) is still flagged:
+}
+
+#[test]
+fn a_module_beside_the_checked_file_counts_as_findable() {
+    // A script loads its siblings by path (`examples/hot-reload` `reflect/load`s its
+    // `greeter.blsp`), so a `name.blsp` next to the checked file is a module that exists —
+    // and taking it away makes the same reference a finding.
+    let dir = std::env::temp_dir().join(format!("brood-check-beside-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let sibling = dir.join("besidemod.blsp");
+    std::fs::write(&sibling, "(defmodule besidemod)\n(defn greet () 1)\n").expect("sibling");
+    let warnings_at = |path: &std::path::Path| {
+        let interp = crate::Interp::new();
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let forms = crate::syntax::reader::read_all(&mut heap, "(defn tick () (besidemod/greet))")
+            .expect("parse");
+        heap.set_current_file(Some(path.to_string_lossy().into_owned()));
+        crate::types::check::check_file_ext(&mut heap, &forms, &[])
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect::<Vec<_>>()
+    };
+    let beside = warnings_at(&dir.join("main.blsp"));
+    std::fs::remove_file(&sibling).expect("remove sibling");
+    let alone = warnings_at(&dir.join("main.blsp"));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        beside.iter().all(|m| !m.contains("unbound symbol")),
+        "a sibling module is findable: {beside:?}"
+    );
+    assert!(
+        alone
+            .iter()
+            .any(|m| m.contains("no module `besidemod` exists")),
+        "without the sibling the module does not exist: {alone:?}"
+    );
+}
+
+#[test]
+fn a_typo_in_a_known_module_is_unbound() {
+    // A typo in a *known* module (some `mod/*` is loaded) is still flagged:
     // requiring `io` makes `io/` a known prefix. `io` and not `test`, deliberately — a
     // lean (`--no-default-features`) runtime embeds no dev modules, so `(require-one 'test)`
     // resolves to nothing there and the assertion vanished with it. A CORE module keeps

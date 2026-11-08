@@ -9,6 +9,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 **Added.**
 - **`gui/color-scheme`**: the desktop's light or dark preference (`:dark`, `:light`, nil) — GNOME,
   KDE, macOS, Windows — beside `gui/reduce-motion?`, so an app can follow the system theme.
+- **`nest check` flags a qualified name into a module that does not exist**: `net/http/post`
+  (the module is `http`) is reported as `unbound symbol: net/http/post`, adding that no
+  module `net/http` exists, when nothing on the load path, in std or among the dependencies could be required as
+  `net/http`. It used to pass, and raise unbound at run time. Quoted data and a module whose
+  source the file carries are left alone; one written at run time takes `check-allow :unbound`.
 - **`editor/treesit/node-chain`**: the nodes containing an offset, outermost first, from a held tree or
   the text — what a structural question about a place walks (a fold's extent, the string at point).
 - **`nest move FROM.blsp TO.blsp NAME…`**: moves definitions between modules (each with its `sig`,
