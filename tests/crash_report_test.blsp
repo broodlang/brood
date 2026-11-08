@@ -3,7 +3,10 @@
 ;; reporter registers a global name and holds a runtime-global subscription; every test
 ;; uses a `:sink` so nothing reaches stderr and the report text can be asserted on.
 
-(defmodule crash-report-test (:use test :exclude [running?]) (:use crash-report))
+(defmodule crash-report-test
+  (:use test :exclude [running?])
+  (:use crash-report)
+  (:use suite-helpers))
 
 (defn- crash-report-collect (me)
   "A sink that forwards each report to the test process."
@@ -347,3 +350,34 @@ passes. A report that does not match belongs to another test — drop it and kee
   (test "a collector that is not there answers a failure, not an error"
     (let (answer (post "http://127.0.0.1:9/reports" (describe-error {:kind :probe :message "x"})))
       (is (failure? answer)))))
+
+(describe "a runtime that died on a signal (the fatal-signal record)"
+  ;; A SIGSEGV runs no Brood code, so the record is the kernel's, written from its signal
+  ;; handler. The crashing runtime is a child with a state home of its own; a second child
+  ;; started on that home reads what the first left.
+  (test "the next start finds the record, describes it and forgets it"
+    (let (nest (sibling-binary "nest"))
+      (when (and nest (not (= (os/type) :windows)))
+        (let (dir (temp-dir "fatal-signal-")
+              state (path/join dir "state")
+              env {"XDG_STATE_HOME" state "BROOD_TEST_HOME" "keep"}
+              crash (path/join dir "crash.blsp")
+              read (path/join dir "read.blsp"))
+          (file/mkdir dir)
+          (file/spit crash
+            "(os/cmd \"sh\" [\"-c\" \"kill -SEGV $PPID; sleep 5\"])\n(io/puts \"survived\")\n")
+          (file/spit read
+            (str "(let (records (crash-report/previous-crashes) record (first records))\n"
+              "  (io/puts (pr-str [(count records) (:signal record) (:signo record) (:version record)\n"
+              "                    (int? (:time record)) (string? (:thread record))\n"
+              "                    (includes? (:file record) \"/brood/crashes/crash-\")\n"
+              "                    (:kind (crash-report/describe-error record))\n"
+              "                    (crash-report/forget-crash record)\n"
+              "                    (count (crash-report/previous-crashes))])))\n"))
+          (let (crashed (os/cmd nest ["run" crash] {:env env :dir dir})
+                out (str (os/cmd-out crashed) (get crashed :stderr "")))
+            (is (not (includes? out "survived")))
+            (is (includes? out "fatal SIGSEGV; crash record written to")))
+          (let (result (os/cmd nest ["run" read] {:env env :dir dir}))
+            (assert= (string/trim (os/cmd-out result))
+              (pr-str [1 "SIGSEGV" 11 (system/brood-version) true true true :fatal-signal true 0]))))))))

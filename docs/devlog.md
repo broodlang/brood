@@ -1085,3 +1085,11 @@ here: `tests/type_scope_test`, `contract`, `contract_memo`, `record`, `introspec
 ASCII space or else anywhere, so CJK was cut mid-run and a `」` could start a line (its audit's
 row 20). A Rust builtin because the line-break class table is Unicode data, as the grapheme and
 normalisation tables are. Checked here: `tests/strings_test`, `doc_examples`.
+
+2026-11-08 (ADR-635). A runtime that dies on SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT writes
+a record under `$XDG_STATE_HOME/brood/crashes/` from its signal handler, prepared at startup so
+the handler only formats integers and calls `open`/`write`; `crash-report/previous-crashes`
+reads it at the next start (bedit's report-bug, row 27 of its audit). The panic hook now keeps
+the last panic's message for it, so an abort after a panic is named. Checked here:
+`tests/crash_report_test` (a child killed with SIGSEGV, a second child reading the record), by
+hand with SIGABRT; the unit test of the literal escaping.

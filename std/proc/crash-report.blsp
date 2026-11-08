@@ -348,6 +348,56 @@ innermost `:frames` with project-relative paths, the `:brood` version, the `:os`
                 :context (crash-report-redact-value (or context {}))})
     (assoc report :signature (signature report))))
 
+;; ---- a runtime's own death: the fatal-signal record ----
+;; A runtime that dies on SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT runs no Brood code and no
+;; panic hook, so the kernel writes a record from its signal handler instead
+;; (`cli_support/fatal_signal.rs`): one map literal per crashed process, under
+;; `(%crash-record-dir)`. The next start reads them here.
+
+(defn- crash-report-record-message (record)
+  (str "fatal "
+    (:signal record)
+    (if (:thread record) (str " on thread " (:thread record)) "")
+    (if (:panic record) (str " after a panic: " (:panic record)) "")))
+
+(defn- crash-report-read-record (dir name)
+  "The record in `dir`/`name` with its `:file` and a `:message`, or nil when it is not one."
+  (let (file (path/join dir name)
+        text (try (file/slurp file) (catch _ nil))
+        record (when (string? text) (try (reflect/read-string text) (catch _ nil))))
+    (when (and (map? record) (= (get record :kind) :fatal-signal))
+      (assoc record :file file :message (crash-report-record-message record)))))
+
+(defn previous-crashes (-> vector)
+  "The fatal-signal records earlier runs left on this machine, oldest first: a runtime that died
+on SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT (a Rust panic that aborted, a stack overflow)
+writes one from its signal handler, where no Brood code runs. Each is a map — `:kind
+:fatal-signal`, `:signal` (\"SIGSEGV\"), `:signo`, `:time` (epoch ms), `:pid`, `:version` and
+`:sha` of the runtime, its `:argv`, the `:thread` it died on, the fault `:address`, the signal's
+`:code`, the `:panic` message when a panic led to it — plus `:file` (where it is) and a
+`:message`. [[describe-error]] makes a report of one; [[forget-crash]] removes it once offered.
+A record can be any brood program's: `:argv` says which.
+
+    (crash-report/previous-crashes)   ;~> [{:kind :fatal-signal :signal \"SIGSEGV\" :time 1762560000000 …}]"
+  (let (dir (%crash-record-dir))
+    (if (or (nil? dir) (not (file/dir? dir)))
+      []
+      (let (names (seq/filter (file/ls dir)
+                    (fn (name)
+                      (and (string/starts-with? name "crash-") (string/ends-with? name ".blsp"))))
+            records (seq/keep names (fn (name) (crash-report-read-record dir name))))
+        (into [] (seq/sort-by records (fn (record) (or (get record :time) 0))))))))
+
+(defn forget-crash (record:map -> any)
+  "Remove `record` (one of [[previous-crashes]]) from disk, so the next start does not offer it
+again. True when it was removed.
+
+    (crash-report/forget-crash (first (crash-report/previous-crashes)))   ;~> true"
+  (let (file (get record :file))
+    (and (string? file)
+      (= (path/dirname file) (%crash-record-dir))
+      (do (try (file/rm file) (catch _ nil)) (not (file/exists? file))))))
+
 (defn post (url:string report:map -> any)
   "Send `report` ([[describe-error]]'s, perhaps with a note the user added) to the collector at
 `url` as JSON: the response map, or a failure saying why. Blocking, under `http`'s own
