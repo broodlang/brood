@@ -38,6 +38,10 @@ fn run_suite() {
         brood::core::alloc::TEST_DEFAULT_HARD,
         brood::core::alloc::TEST_DEFAULT_SOFT,
     );
+    // And arm a test run as `nest test` does (ADR-602): `test/running?` is true and program
+    // state (config, state, data — the trash among it) goes to a scratch home, never the real
+    // one. Without it `file/trash-location` here is the real home's trash.
+    brood::cli_support::arm_test_run(false);
     let mut interp = Interp::new();
     // `test/*timeout-ms*` is a wall deadline for an ENTIRE BATCH of parallel workers
     // (`collect-units` computes `(+ (now) test/*timeout-ms*)` once per chunk), not a
@@ -79,10 +83,12 @@ fn run_suite() {
     // Under AddressSanitizer one batch of the doc-example and surface-audit tests needed more
     // than 600 s on a slow runner while still computing (KI-376), so that build gets 30 minutes.
     let batch_budget_ms = if cfg!(brood_asan) { 1_800_000 } else { 600_000 };
-    if let Err(e) = interp.eval_str(&format!(
+    let result = interp.eval_str(&format!(
         "(require-one 'test) (def test/*timeout-ms* {batch_budget_ms}) \
          (project-run/run-tests)"
-    )) {
+    ));
+    brood::cli_support::remove_test_scratch_home();
+    if let Err(e) = result {
         panic!("Brood test suite failed: {}", e);
     }
 }

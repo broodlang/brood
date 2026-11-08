@@ -334,9 +334,15 @@ fn check_one_file(interp: &mut Interp, path: &str, src: &str, for_run: bool) -> 
             entry.warnings
         }
         None => {
+            // The file is CURRENT for the check as it is for a load: the checker resolves a
+            // qualified `name/…` against a `name.blsp` beside it (`%module-findable?`'s
+            // `beside`), which a script loads by path — `examples/hot-reload` and its
+            // `greeter.blsp`. Without it a sibling module reads as one that does not exist.
+            let prev = interp.heap.set_current_file(Some(path.to_string()));
             let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, src) {
                 Ok(forms) => forms,
                 Err(e) => {
+                    interp.heap.set_current_file(prev);
                     report_error(&e.clone().or_file(path.to_string()));
                     return true;
                 }
@@ -348,6 +354,7 @@ fn check_one_file(interp: &mut Interp, path: &str, src: &str, for_run: bool) -> 
                 Vec::new()
             };
             let w = brood::types::check::check_file(&mut interp.heap, &just_forms);
+            interp.heap.set_current_file(prev);
             if for_run {
                 brood::cli_support::run_check_cache_write(&interp.heap, src, &before, &w);
             }

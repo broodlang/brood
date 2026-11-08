@@ -496,8 +496,12 @@ pub const STATE_DUMP: &str = r#"
 ;; memos are tables), so a source load of `string` loads both at expansion and an imaged
 ;; one defers them to the first call. `encoding` since 2026-10-12, the same way: `path/temp`
 ;; names `encoding/hex-encode-bytes`. `url` and `bytes` since 2026-11-05: `path/to-file-uri`
-;; and `path/from-file-uri` name `url/percent-encode` / `url/percent-decode`.
-(doseq (m ['map 'seq 'io 'string 'math 'reflect 'path 'file 'regex 'table 'encoding 'url 'bytes])
+;; and `path/from-file-uri` name `url/percent-encode` / `url/percent-decode`. `datetime` and
+;; `tz` since 2026-11-08: `file/trash` dates its `.trashinfo` with `tz/local-zone` and
+;; `datetime/format` — and `datetime`'s `defmethod`s are what fill `*methods*`/`*method-from*` —
+;; and those two name `os/…` (`os/now`, `os/env`), which names `set/…`, so `os` and `set` too.
+(doseq (m ['map 'seq 'io 'string 'math 'reflect 'path 'file 'regex 'table 'encoding 'url 'bytes
+           'datetime 'tz 'os 'set])
   (require-one m))
 
 (defn- dyn? (n)
