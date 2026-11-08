@@ -11,16 +11,13 @@
 
 (def- app-source
   (str "(defmodule display-lost-app (:use editor/ui))\n"
-    "(if (not (gui/available?))\n"
-    "  (io/puts \"no-gui\")\n"
-    "  (let (me (self)\n"
+    "(if (not (gui/available?))\n" "  (io/puts \"no-gui\")\n" "  (let (me (self)\n"
     "        _ (spawn (let (display (editor/frontend/gui-display {:title \"lost\"}))\n"
     "                     (send me [:opened (:window display)])\n"
     "                     (ui-run {:text \"x\" :on-hangup (fn (m sig) (send me [:hangup sig]))}\n"
     "                       (fn (m cols rows) [[:clear] [:text 0 0 (:text m)]])\n"
     "                       (fn (m input cols rows) (assoc m :text (str input)))\n"
-    "                       display)\n"
-    "                     (send me [:ended]))))\n"
+    "                       display)\n" "                     (send me [:ended]))))\n"
     "    (do (receive ([:opened _] nil) (after 10000 nil))\n"
     "      (%gui-lose-display \"a test\")\n"
     "      (io/puts (receive ([:hangup sig] (str \"hangup \" sig)) (after 10000 \"no-hangup\")))\n"
