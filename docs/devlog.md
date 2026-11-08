@@ -1069,3 +1069,13 @@ lose the definition, through an absolute path. KI-372's fix was half of one: the
 arriving during a dial, not a dial already under way. `.brood_crash_dump` is bounded now too, after
 reaching 183 MB in this checkout.
 
+
+2026-11-08 (ADR-633). A bare type name in a `sig` means its own module's type. hatch's
+`(sig parse-body (conn -> conn))` over its record `conn` failed its contract under `nest test`:
+`%type-alias` looked `conn` up as an alias across every module first and found `store-postgres`'s
+`(deftype conn …)`. A declaration is now scoped where it is stored (`builtins/type_scope.rs`):
+names its module declares, or the one module it `:use`s, are written qualified, a name declared
+later in the module rescopes it, and a changed `sig` rebuilds its shim. The checker resolves in
+the same order (`annot::scoped_ty`). `%declared-sig` shows the declaration as written. Checked
+here: `tests/type_scope_test`, `contract`, `contract_memo`, `record`, `introspection`, `docs`,
+`modules`, the checker's `types::` unit tests; the full suite on CI.

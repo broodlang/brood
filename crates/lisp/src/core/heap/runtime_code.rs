@@ -612,6 +612,14 @@ pub struct RuntimeCode {
     /// Bumped on every `declared_sigs` insert. What a per-process cache over the store
     /// (`Heap::type_alias_cache`, the contract's alias lookup) checks before trusting itself.
     pub(super) declared_sigs_version: AtomicU64,
+    /// Which modules each module `(:use …)`s, by namespace: recorded by `%refer` while the
+    /// using module compiles. A bare type name in a `sig` resolves in its own module, then
+    /// in these (`builtins::type_scope`); nothing else reads it.
+    pub(super) module_uses: RwLock<SymbolMap<Vec<Symbol>>>,
+    /// Declarations whose bare type name had no meaning in their module yet, by namespace:
+    /// `(name, declaration key)`. A `deftype` or `defrecord` of `ns/name` arriving later
+    /// scopes them again (`builtins::type_scope`).
+    pub(super) type_scope_pending: RwLock<SymbolMap<Vec<(Symbol, Symbol)>>>,
     /// The stdlib/project image files this runtime has indexed, by path, each held open
     /// (KI-119, KI-224): a directory `%image-index` read and every section `%image-load-section`
     /// later reads for it must come from the same inode, and the pairing is per RUNTIME —
@@ -898,6 +906,8 @@ impl Default for RuntimeCode {
             suspend_latches: Mutex::new(SuspendLatches::default()),
             declared_sigs: RwLock::new(SymbolMap::default()),
             declared_sigs_version: AtomicU64::new(0),
+            module_uses: RwLock::new(SymbolMap::default()),
+            type_scope_pending: RwLock::new(SymbolMap::default()),
             image_files: Mutex::new(HashMap::new()),
             image_modules: RwLock::new(HashSet::new()),
             image_macros: RwLock::new(HashSet::new()),
@@ -1050,6 +1060,8 @@ impl RuntimeCode {
             suspend_latches: Mutex::new(SuspendLatches::default()),
             declared_sigs: RwLock::new(SymbolMap::default()),
             declared_sigs_version: AtomicU64::new(0),
+            module_uses: RwLock::new(SymbolMap::default()),
+            type_scope_pending: RwLock::new(SymbolMap::default()),
             image_files: Mutex::new(HashMap::new()),
             image_modules: RwLock::new(HashSet::new()),
             image_macros: RwLock::new(HashSet::new()),

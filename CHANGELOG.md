@@ -54,6 +54,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   failure, not a `{:status 0 :error …}` map (ADR-617).
 
 **Fixed.**
+- **A bare type name in a `sig` means its own module's type** (ADR-633). Under contracts, a
+  `(sig parse-body (conn -> conn))` over a module's own record `conn` was checked against another
+  module's `(deftype conn …)` and rejected the record. A bare name now resolves in the module that
+  wrote the `sig` or `deftype` (its own type, then a `(:use …)`d module's, then globally), at
+  runtime and in `nest check` alike.
 - **`crash-report/redact` catches a secret however its name is spelled,** URL credentials, whole
   `Authorization` and `Cookie` values and a key cut short, and `describe-error` redacts `:context`.
   A report's paths and signature no longer depend on what the checkout is called (KI-377).

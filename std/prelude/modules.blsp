@@ -301,6 +301,9 @@ for the re-read; the resolution is what keeps those two naming the same global."
     ;; declarations this module owns are offered to `%contract-wrap` here, once. A name
     ;; whose binding is already a shim is left alone. Armed only: the sweep walks every
     ;; declaration in the runtime, and an unarmed process has nothing to install.
+    ;; First the bare type names still waiting on the module to finish: a used module's
+    ;; may be taken now that the module cannot declare its own (`builtins/type_scope.rs`).
+    (%scope-types! key)
     (when (%contracts-armed?) (%contracts-sweep! key))
     key))
 
