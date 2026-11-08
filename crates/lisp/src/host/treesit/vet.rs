@@ -18,7 +18,8 @@
 //! Where the verdicts live: a quarantine is STATE (`$XDG_STATE_HOME/brood/grammar-verdicts`,
 //! beside ADR-635's crash records), a pass is a CACHE (`$XDG_CACHE_HOME/brood/grammar-verdicts`)
 //! — it follows from the library's bytes, and losing it costs one more vetting. One file per
-//! library, `<sha256>.blsp`, a flat Brood map literal.
+//! library, `<sha256>.blsp`, a flat Brood map literal. A test run keeps both under its scratch
+//! home ([`VerdictDirs::from`]): it never writes the user's cache.
 
 use super::*;
 use std::path::{Path, PathBuf};
@@ -69,10 +70,15 @@ pub fn vetting_entry() {
 
 // ---- where verdicts live, and a library's hash ------------------------------------------
 
-/// `$<variable>/brood/grammar-verdicts`, else `$HOME/<fallback…>/brood/grammar-verdicts`.
-fn verdict_dir(variable: &str, fallback: &[&str]) -> Option<PathBuf> {
+/// `<base>/brood/grammar-verdicts`, the base `$<variable>`, else `$HOME/<fallback…>` — an
+/// absolute path only, read through `environment`.
+fn verdict_dir(
+    environment: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    variable: &str,
+    fallback: &[&str],
+) -> Option<PathBuf> {
     let set = |name: &str| {
-        std::env::var_os(name)
+        environment(name)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
@@ -86,7 +92,7 @@ fn verdict_dir(variable: &str, fallback: &[&str]) -> Option<PathBuf> {
 
 /// The two verdict directories, read from the environment each time — a test run moves the
 /// state directory to its scratch home after startup.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct VerdictDirs {
     /// Quarantines: state, beside the crash records.
     quarantined: Option<PathBuf>,
@@ -96,9 +102,33 @@ pub(super) struct VerdictDirs {
 
 impl VerdictDirs {
     fn from_env() -> VerdictDirs {
+        VerdictDirs::from(&|name: &str| std::env::var_os(name))
+    }
+
+    /// The directories `environment` gives. A TEST RUN (`BROOD_TEST_RUN=1`, ADR-602) writes
+    /// nothing under the user's home: its passes go under the run's scratch home
+    /// (`BROOD_TEST_SCRATCH`) beside its quarantines — `XDG_CACHE_HOME` stays the user's, as
+    /// the stdlib image wants it shared — and a run that kept the real home
+    /// (`BROOD_TEST_HOME=keep`) keeps its passes with its quarantines, never in the cache.
+    fn from(environment: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> VerdictDirs {
+        let quarantined = verdict_dir(environment, "XDG_STATE_HOME", &[".local", "state"]);
+        if environment("BROOD_TEST_RUN").is_some_and(|value| value == "1") {
+            let scratch = environment("BROOD_TEST_SCRATCH")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute());
+            let passed = match scratch {
+                Some(scratch) => Some(scratch.join("cache").join("brood").join("grammar-verdicts")),
+                None => quarantined.clone(),
+            };
+            return VerdictDirs {
+                quarantined,
+                passed,
+            };
+        }
         VerdictDirs {
-            quarantined: verdict_dir("XDG_STATE_HOME", &[".local", "state"]),
-            passed: verdict_dir("XDG_CACHE_HOME", &[".cache"]),
+            quarantined,
+            passed: verdict_dir(environment, "XDG_CACHE_HOME", &[".cache"]),
         }
     }
 }
@@ -1152,6 +1182,57 @@ mod tests {
             quarantined: Some(root.join("state")),
             passed: Some(root.join("cache")),
         }
+    }
+
+    #[test]
+    fn a_test_run_keeps_every_verdict_out_of_the_user_s_home() {
+        let environment = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| std::ffi::OsString::from(value))
+            }
+        };
+        let ordinary = VerdictDirs::from(&environment(&[("HOME", "/home/u")]));
+        assert_eq!(
+            ordinary,
+            VerdictDirs {
+                quarantined: Some(PathBuf::from("/home/u/.local/state/brood/grammar-verdicts")),
+                passed: Some(PathBuf::from("/home/u/.cache/brood/grammar-verdicts")),
+            }
+        );
+        // armed: the state home is the scratch's, and the passes go under the scratch too,
+        // though XDG_CACHE_HOME is still the user's
+        let armed = VerdictDirs::from(&environment(&[
+            ("HOME", "/home/u"),
+            ("XDG_CACHE_HOME", "/home/u/.cache"),
+            ("BROOD_TEST_RUN", "1"),
+            ("BROOD_TEST_SCRATCH", "/tmp/brood-test-home-1"),
+            ("XDG_STATE_HOME", "/tmp/brood-test-home-1/state"),
+        ]));
+        assert_eq!(
+            armed,
+            VerdictDirs {
+                quarantined: Some(PathBuf::from(
+                    "/tmp/brood-test-home-1/state/brood/grammar-verdicts"
+                )),
+                passed: Some(PathBuf::from(
+                    "/tmp/brood-test-home-1/cache/brood/grammar-verdicts"
+                )),
+            }
+        );
+        // armed with the real home kept: passes stay with the quarantines, not in the cache
+        let kept = VerdictDirs::from(&environment(&[
+            ("HOME", "/home/u"),
+            ("BROOD_TEST_RUN", "1"),
+            ("XDG_STATE_HOME", "/tmp/t/state"),
+        ]));
+        assert_eq!(kept.passed, kept.quarantined);
+        assert_eq!(
+            kept.passed,
+            Some(PathBuf::from("/tmp/t/state/brood/grammar-verdicts"))
+        );
     }
 
     #[test]

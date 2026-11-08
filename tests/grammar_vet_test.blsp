@@ -119,16 +119,54 @@
   (str (or (os/env "BROOD_TEST_GRAMMARS") (str (or (os/env "HOME") "") "/.config/bedit/grammars"))
     "/"))
 
+(defn- gvt-json-shim (dir)
+  ;; a library exporting the installed JSON grammar as `tree_sitter_vetjson`
+  (gvt-build dir
+    :vetjson "extern const void *tree_sitter_json(void);\nconst void *tree_sitter_vetjson(void) { return tree_sitter_json(); }\n"
+    [(str "-L" gvt-grammar-dir) "-l:libtree-sitter-json.so" (str "-Wl,-rpath," gvt-grammar-dir)]))
+
+(defn- gvt-real-cache-verdicts ()
+  ;; where a pass would go outside a test run: the user's cache, normalized
+  (let (cache (os/env "XDG_CACHE_HOME")
+        base (if (and (string? cache) (not (= cache "")))
+               cache
+               (path/join (or (os/env "HOME") "") ".cache")))
+    (path/normalize (path/join base "brood" "grammar-verdicts"))))
+
+(defn- gvt-listing (dir)
+  (if (file/dir? dir) (sort (file/ls dir)) []))
+
+(when (and gvt-cc? (file/exists? (str gvt-grammar-dir "libtree-sitter-json.so")))
+  (describe "a test run's verdicts stay in its scratch home"
+    ;; the stdlib image keeps XDG_CACHE_HOME shared, so the pass a vetting keeps under test
+    ;; must go somewhere else
+    (test "a pass is written under the scratch home and nothing under the real cache"
+      (let (scratch (test/scratch-dir))
+        (when scratch
+          (let (dir (temp-dir "brood-grammarvet-")
+                _ (file/mkdir dir)
+                library (gvt-json-shim dir)
+                real (gvt-real-cache-verdicts)
+                before (gvt-listing real)
+                verdict (vet-grammar library :vetjson {:force true})
+                kept (path/normalize (path/join scratch
+                                       "cache"
+                                       "brood"
+                                       "grammar-verdicts"
+                                       (str (grammar-file-hash library) ".blsp"))))
+            (assert= (:verdict verdict) :passed)
+            (is (file/exists? kept))
+            (refute (string/starts-with? kept (str real "/")))
+            (refute (file/exists? (path/join real (str (grammar-file-hash library) ".blsp"))))
+            (assert= (gvt-listing real) before)
+            (file/rmdir dir)))))))
+
 (when (and gvt-cc? (file/exists? (str gvt-grammar-dir "libtree-sitter-json.so")))
   (describe "a healthy grammar"
     (test "passes once, with its corpus, and loads"
       (let (dir (temp-dir "brood-grammarvet-")
             _ (file/mkdir dir)
-            library (gvt-build dir
-                      :vetjson "extern const void *tree_sitter_json(void);\nconst void *tree_sitter_vetjson(void) { return tree_sitter_json(); }\n"
-                      [(str "-L" gvt-grammar-dir)
-                        "-l:libtree-sitter-json.so"
-                        (str "-Wl,-rpath," gvt-grammar-dir)])
+            library (gvt-json-shim dir)
             verdict (vet-grammar library
                       :vetjson {:corpus ["{\"a\": [1, 2]}" "[" "\"\\u"] :force true}))
         (assert= (:verdict verdict) :passed)
