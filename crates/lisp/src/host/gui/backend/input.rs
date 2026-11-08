@@ -560,9 +560,9 @@ pub(super) fn translate_key(
         // `C-SPC` set-mark → :ctrl- , `C-M-SPC` mark-sexp → :ctrl-meta- , matching
         // crossterm) rather than collapsing to a self-inserted space.
         WKey::Named(NamedKey::Space) => Some(character_chord(' ', modifiers)),
-        // Shift+Tab is back-tab — match the crossterm frontend's :back-tab.
-        WKey::Named(NamedKey::Tab) if modifiers.shift => Some(Key::Named("back-tab")),
-        WKey::Named(NamedKey::Tab) => Some(Key::Named("tab")),
+        // Tab as both frontends spell it (`tab_key`): Shift+Tab `:back-tab`, Ctrl+Tab
+        // `:ctrl-tab`, Ctrl+Shift+Tab `:ctrl-shift-tab`.
+        WKey::Named(NamedKey::Tab) => Some(Key::Named(crate::host::gui::tab_key(modifiers))),
         WKey::Named(NamedKey::Escape) => Some(Key::Named("escape")),
         // The named keys carry their modifiers in the name (`crate::host::gui::named_key`,
         // the rule both frontends share): `:ctrl-left`, `:alt-shift-up`, `:super-f5`, … —
@@ -1185,6 +1185,21 @@ mod adr_541_tests {
         assert_eq!(
             delivered(&space_key, held(true, false, false), true),
             "ctrl- "
+        );
+        let tab = WKey::Named(NamedKey::Tab);
+        let tab_key = press(&tab, Some("\t"), WKey::Named(NamedKey::Tab), KeyCode::Tab);
+        assert_eq!(delivered(&tab_key, held(false, false, false), false), "tab");
+        assert_eq!(
+            delivered(&tab_key, held(false, false, true), false),
+            "back-tab"
+        );
+        assert_eq!(
+            delivered(&tab_key, held(true, false, false), false),
+            "ctrl-tab"
+        );
+        assert_eq!(
+            delivered(&tab_key, held(true, false, true), false),
+            "ctrl-shift-tab"
         );
     }
 
