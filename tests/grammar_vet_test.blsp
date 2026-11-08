@@ -97,6 +97,18 @@
         (forget-grammar-verdict library)
         (file/rmdir dir)))
 
+    ;; Every runtime that runs this suite — `nest test`, and the cargo harness
+    ;; (crates/lisp/tests/suite.rs) — starts ITSELF as the vetting child, through the hook at
+    ;; the top of its main or its one test. One that cannot answers `:unvetted` with why.
+    (test "this runtime can start a vetting child"
+      (let (dir (temp-dir "brood-grammarvet-")
+            _ (file/mkdir dir)
+            library (gvt-build dir :vetnone "int not_a_grammar = 1;\n")
+            verdict (vet-grammar library :vetnone))
+        (assert= [(:verdict verdict) (:reason verdict)]
+          [:refused (:reason verdict)])
+        (file/rmdir dir)))
+
     (test "a library with no entry point is refused, as a load would be, and nothing is kept"
       (let (dir (temp-dir "brood-grammarvet-")
             _ (file/mkdir dir)

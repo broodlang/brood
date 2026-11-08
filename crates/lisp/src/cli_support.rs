@@ -68,7 +68,9 @@ pub fn install_panic_reporting() {
     fatal_signal::install();
 }
 
-/// The very first call in `brood`'s and `nest`'s `main`, before [`install_panic_reporting`]:
+/// The very first call in `brood`'s and `nest`'s `main` (and so every release bundle's, whose
+/// executable is `brood`), before [`install_panic_reporting`] — and in any other binary that
+/// hosts a runtime and should vet grammars (the cargo suite harness calls it first too):
 /// a grammar-vetting child (this binary started by itself to try a tree-sitter grammar library,
 /// ADR-660) vets and exits here, with no panic hook or crash record — its death is the answer.
 /// Any other run is noted as able to start one, which is what lets it vet a grammar before

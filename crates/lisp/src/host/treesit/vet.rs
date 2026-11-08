@@ -49,7 +49,10 @@ const EXIT_NOT_RUN: i32 = 4;
 /// as it always did.
 static VET_COMMAND: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-/// The first call in `brood`'s and `nest`'s `main`. In a vetting child (this binary started by
+/// The first call in `brood`'s and `nest`'s `main` — so in every `nest release` bundle, whose
+/// executable is the `brood` (`cli`) runtime with the app appended — and the first line of the
+/// cargo suite harness's one test (`crates/lisp/tests/suite.rs`), which re-run as a child runs
+/// that test and so reaches it first. In a vetting child (this binary started by
 /// [`run_vet`]) it vets and EXITS, before any runtime, panic hook or signal handler exists — a
 /// child's crash is the verdict, not a crash record. Any other run notes that it can start such
 /// a child.
@@ -856,19 +859,40 @@ mod child {
 
     /// One stage reached, for the parent's watchdog and its account of where things stopped.
     fn progress(line: &str) {
+        // the stream itself, never a print macro a test harness would capture
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{line}");
         let _ = stdout.flush();
     }
 
     pub(super) fn run() -> i32 {
+        // a crash here is the expected answer, not a fault worth a core dump
+        #[cfg(unix)]
+        {
+            let none = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: setrlimit with a valid struct; failing leaves the limit as it was
+            unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) };
+        }
+        // a piped core pattern (systemd-coredump) is not bound by the limit; undumpable is
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        // SAFETY: PR_SET_DUMPABLE takes a plain integer and touches nothing else
+        unsafe {
+            libc::prctl(libc::PR_SET_DUMPABLE, 0);
+        }
         match vet() {
             Ok(inputs) => {
                 progress(&format!("ok {inputs}"));
                 0
             }
             Err((code, message)) => {
-                eprintln!("{message}");
+                // straight to the stream, not `eprintln!`: in a test harness acting as the
+                // child, the print macros are captured and lost at the exit below
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "{message}");
+                let _ = stderr.flush();
                 code
             }
         }
