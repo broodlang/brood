@@ -33,6 +33,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   another collection. `()` stays `nil`.
 
 **Changed.**
+- **Breaking:** in a regex, `\n \t \r \f \v` are the control characters and `\xHH`, `\x{H…}`,
+  `\uHHHH`, `\u{H…}` name a code point, as in every other engine (ADR-637). They read as the
+  letter before, so `[ \t]*` matched the letter `t`. An escaped character in a set can end a range:
+  `[\x00-\x7F]`.
 - **Breaking:** the `editor/*` toolkit split along its seams (ADR-630). `editor/buffer` is pure:
   its process is `editor/buffer-server`, its disk edge `editor/buffer-file`, spans of data over
   text `editor/span-properties`. A thin client loads `editor/attach`, `editor/serve-protocol` and

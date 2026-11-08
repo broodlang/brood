@@ -1069,3 +1069,12 @@ lose the definition, through an absolute path. KI-372's fix was half of one: the
 arriving during a dial, not a dial already under way. `.brood_crash_dump` is bounded now too, after
 reaching 183 MB in this checkout.
 
+
+2026-11-08 (ADR-637). Regex escapes now read as other engines read them: `\n \t \r \f \v`, and the
+hex forms `\xHH`, `\x{…}`, `\uHHHH`, `\u{…}`. The old reading, where an escaped letter was the
+letter, was documented and consistent, and it still broke two patterns in the tree, each carried
+over from another dialect: `std/tool/grammar.blsp`'s `[ \t]*` and bedit's `[^…\n]`. It had also
+broken a redaction rule written during KI-377. The set parser reads an escaped character as one
+character now, so it can end a range (`[\x00-\x7F]`, `[\--/]`). Before, an escaped range end was
+dropped, or became the range's backslash. Four Fowler cases moved off the divergence list, and the
+list's both-ways check proves they now agree.
