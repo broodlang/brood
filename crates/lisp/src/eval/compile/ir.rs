@@ -599,11 +599,16 @@ pub struct CompiledArm {
     /// `dbg_site_pos` table (debug builds) so the JIT stale-operand diagnostics can
     /// name a site's `.blsp` file:line. Empty for synthetic/test arms.
     pub site_pos: Box<[Option<(crate::error::Pos, Option<std::sync::Arc<str>>)>]>,
-    /// The call position of each STAGED head (KI-19), keyed by the head's global-read
-    /// site: a staged head resolves through its own `GlobalIc`, which carries no position,
-    /// so an unbound operator reports its call's position from here. Cold — read only when
-    /// that resolution fails. Empty for an arm with no staged call.
+    /// Where each global read is written, keyed by its global-read site: a `GlobalIc`
+    /// carries no position, so an unbound name reports from here — a STAGED head (KI-19) its
+    /// call's position, any other read the innermost positioned form around it (an unbound
+    /// name in argument position used to report at whatever call reached the arm). Cold —
+    /// read only when that resolution fails.
     pub staged_head_pos: Box<[(u32, crate::error::Pos)]>,
+    /// The head of each call whose head is a LOCAL, keyed by the call's position: the
+    /// bytecode calls a slot, which carries no name, so `cannot call non-function` names the
+    /// local from here (`eval::name_local_callee`). Cold — read only on that error.
+    pub local_call_heads: Box<[(crate::error::Pos, crate::core::value::Symbol)]>,
     /// The arm receives at its head (`jit_plan::receive_at_head`, ADR-410): its one `%receive`
     /// follows only loads, so re-running it from ip 0 re-runs just that `%receive`. A park
     /// then rewinds the frame to ip 0 (the wake re-tiers into native code), and only the
@@ -914,6 +919,7 @@ impl Default for CompiledArm {
             uid: next_arm_uid(),
             site_pos: Box::new([]),
             staged_head_pos: Box::new([]),
+            local_call_heads: Box::new([]),
             receive_at_head: false,
             body: Node::Const(ConstVal::new(Value::Nil)),
             chunk: None,
@@ -1046,6 +1052,14 @@ pub(crate) fn gsite_reservation(gsites: u32, sites: u32) -> u32 {
 }
 
 impl CompiledArm {
+    /// The local the call at `pos` calls, when its head is a local (`local_call_heads`).
+    pub(crate) fn local_call_head(&self, pos: crate::error::Pos) -> Option<Symbol> {
+        self.local_call_heads
+            .iter()
+            .find(|(at, _)| *at == pos)
+            .map(|&(_, head)| head)
+    }
+
     /// The global-read slot native code resolves call site `call_site`'s head through when
     /// it makes that call in tail position — past every slot the body's own global reads
     /// use (see [`gsite_reservation`]).

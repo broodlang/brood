@@ -709,6 +709,15 @@ impl Heap {
         (tail.as_ptr(), tail.len())
     }
 
+    /// Take the local head a native arm's tail call left before it exited (see
+    /// [`Heap::jit_tail_local_head`]), resetting it. EVERY consumer of a native tail exit takes
+    /// it first, so a name is read only for the call that stored it.
+    #[inline]
+    pub(crate) fn take_jit_tail_local_head(&mut self) -> Option<crate::core::value::Symbol> {
+        let local = std::mem::replace(&mut self.jit_tail_local_head, u32::MAX);
+        (local != u32::MAX).then_some(local)
+    }
+
     /// The current activation's IC block bases (see [`Self::set_ic_bases`]).
     #[inline]
     pub fn ic_bases(&self) -> (u32, u32) {

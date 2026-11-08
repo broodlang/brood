@@ -1339,7 +1339,8 @@ pub(super) fn vector_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 /// the cloned handles stay valid across `alloc_vector`.
 pub(super) fn vector_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
-    let i = expect_int(heap, "%vector-assoc", arg(args, 1))?;
+    // Errors name `assoc`, the function the caller wrote: this primitive is its vector half.
+    let i = expect_int(heap, "assoc", arg(args, 1))?;
     let x = arg(args, 2);
     match v {
         Value::Vector(id) if i >= 0 && (i as usize) < heap.vector(id).len() => {
@@ -1348,12 +1349,12 @@ pub(super) fn vector_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             Ok(heap.alloc_vector(items))
         }
         Value::Vector(id) => Err(LispError::runtime(format!(
-            "%vector-assoc: index {} out of range [0, {})",
+            "assoc: index {} out of range [0, {})",
             i,
             heap.vector(id).len()
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)),
-        _ => Err(LispError::wrong_type(heap, "%vector-assoc", "vector", v)),
+        _ => Err(LispError::wrong_type(heap, "assoc", "vector", v)),
     }
 }
 

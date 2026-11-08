@@ -364,7 +364,7 @@ one call site is inside `defmodule`'s template — see the note there."
           ;; context. The same rooting form goes in both positions so require and refer
           ;; agree on the target (it is idempotent — evaluating it twice is harmless).
           rooted (list '%root-module-name (list 'quote mod)))
-      (list (list 'require-one rooted)
+      (list (list '/require-one rooted)
         (list '%refer rooted (list 'quote subset) (list 'quote exclude))))))
 
 ;; All forms for the `(head …)` clauses in a `defmodule` header — `f` turns one clause into
@@ -394,7 +394,7 @@ one call site is inside `defmodule`'s template — see the note there."
           rooted (list '%root-module-name (list 'quote mod)))
       ;; Grant BEFORE refer: a `--` name in the `:only` subset is a privacy breach
       ;; unless the internals grant is already recorded when `%refer` checks it.
-      (list (list 'require-one rooted)
+      (list (list '/require-one rooted)
         (list '%grant-internals rooted)
         (list '%refer rooted (list 'quote subset))))))
 
@@ -413,7 +413,7 @@ one call site is inside `defmodule`'s template — see the note there."
         ;; Root an intra-package target to `foo/mod` (ADR-070); the local `short` alias
         ;; is unchanged — you still write `short/name` in this file.
         rooted (list '%root-module-name (list 'quote mod)))
-    (list (list 'require-one rooted)
+    (list (list '/require-one rooted)
       (list '%alias rooted (list 'quote short)))))
 
 ;; A file declares itself a **module = namespace** at the top with `defmodule`
@@ -439,7 +439,7 @@ one call site is inside `defmodule`'s template — see the note there."
 ;; rolled back with it, and a bystander (the test runner's driver) that started depending
 ;; on it meanwhile dies on `unbound symbol`. `std/tool/test.blsp` declares its closure this way, and a gate pins the list.
 (defn- %defmodule-load-clause (clause)
-  (map (rest clause) (fn (m) (list 'require-one (list '%root-module-name (list 'quote m))))))
+  (map (rest clause) (fn (m) (list '/require-one (list '%root-module-name (list 'quote m))))))
 
 ;; The only clauses the header understands; anything else is a hard error. Ignoring it
 ;; would let a misspelled `(:use-internal m)` or a Clojure-style `(:require m)` look like it

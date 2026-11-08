@@ -78,3 +78,28 @@ fn arity_error_format_matches_across_engines() {
 fn thrown_error_format_matches_across_engines() {
     assert_parity("(defn g (n) (if (< n 0) (throw [:neg n]) n))\n(io/puts (g -5))\n");
 }
+
+/// An error raised INSIDE the standard library is reported at the program's own code, naming
+/// the library function the program called — `std/math.blsp:167:7: <: expected number` named
+/// a line the reader never wrote and an operator they never called (ADR-638 review). The std
+/// raise site stays in the trace. The same on every engine.
+#[test]
+fn an_error_inside_std_is_reported_at_the_program() {
+    let src = "(defn k (v)\n  (let (r (math/abs v))\n    (+ r 1)))\n(io/puts (k \"x\"))\n";
+    assert_parity(src);
+    let dir = std::env::temp_dir();
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!("brood_stdreloc_{}_{n}.blsp", std::process::id()));
+    std::fs::write(&path, src).expect("write temp program");
+    let stderr = run_stderr(&path, &[]);
+    let _ = std::fs::remove_file(&path);
+    let headline = stderr.lines().next().unwrap_or("");
+    assert!(
+        headline.contains(".blsp:2:11: type error: math/abs: "),
+        "the headline is the program's call of math/abs, named: {stderr}"
+    );
+    assert!(
+        stderr.contains("std/math.blsp:"),
+        "the std raise site stays in the trace: {stderr}"
+    );
+}

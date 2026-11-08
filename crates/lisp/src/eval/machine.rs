@@ -814,7 +814,23 @@ impl<'e> Machine<'e> {
         tag: bool,
         env: EnvId,
     ) -> Result<Step, LispError> {
-        let within = self.save(heap, marks, kind, tag.then_some(form));
+        self.push_tagging(heap, marks, kind, form, tag.then_some(form), env)
+    }
+
+    /// [`push`](Self::push), with the form an error from the new frame is tagged with given
+    /// separately: an argument that has no position of its own (a bare symbol) is tagged with
+    /// its call, so an unbound name there reports at the call — as the VM does — rather than
+    /// at whatever enclosing form has a position.
+    fn push_tagging(
+        &mut self,
+        heap: &mut Heap,
+        marks: Marks,
+        kind: KontKind,
+        form: Value,
+        tag: Option<Value>,
+        env: EnvId,
+    ) -> Result<Step, LispError> {
+        let within = self.save(heap, marks, kind, tag);
         eval_trace(heap, form);
         if !within {
             // Raised by the new frame, as the old nested `eval` raised it on entry.
@@ -1728,7 +1744,21 @@ impl<'e> Machine<'e> {
                     let next = cdr(heap, heap.read_root(st.spine_r));
                     st.spine_r = heap.advance_root(st.spine_r, next);
                 }
-                None => return self.push(heap, marks, KontKind::Args(st), form, true, env),
+                None => {
+                    let tag = if heap.form_pos_only(form).is_some() {
+                        form
+                    } else {
+                        heap.read_root(st.call_form_r)
+                    };
+                    return self.push_tagging(
+                        heap,
+                        marks,
+                        KontKind::Args(st),
+                        form,
+                        Some(tag),
+                        env,
+                    );
+                }
             }
         }
         let argv: SmallVec<[Value; 8]> = st.args.iter().map(|&r| heap.read_root(r)).collect();
@@ -1792,8 +1822,9 @@ impl<'e> Machine<'e> {
                     last
                 };
                 cur_argv.extend(
-                    heap.seq_items(last)
-                        .map_err(|e| e.or_form_pos(heap, call_form))?,
+                    heap.seq_items(last).map_err(|e| {
+                        crate::eval::named_by("apply", e).or_form_pos(heap, call_form)
+                    })?,
                 );
                 cur_callee = real;
             }
@@ -1935,7 +1966,21 @@ impl<'e> Machine<'e> {
                         .map_err(|e| e.or_form_pos(heap, call_form));
                 }
                 other => {
-                    return Err(not_a_function_error(heap, other).or_form_pos(heap, call_form));
+                    // A local head is named — only at a call with a source position, as the
+                    // VM can (it keys the name by position), so the tiers agree on positionless
+                    // code: the prelude's, or a form built at run time.
+                    let mut err = not_a_function_error(heap, other);
+                    if heap.form_pos(call_form).is_none() {
+                        // library code calling a value the caller handed in
+                        err = crate::eval::from_library_code(err);
+                    } else if let Some(ValueRef::Sym(head)) = heap
+                        .list_items(call_form)
+                        .and_then(|items| items.first().map(|h| h.unpack()))
+                        && heap.is_lexically_bound(env, head)
+                    {
+                        err = crate::eval::name_local_callee(heap, err, head);
+                    }
+                    return Err(err.or_form_pos(heap, call_form));
                 }
             }
         }

@@ -63,6 +63,9 @@ pub(super) fn emit_call(
     tail: bool,
     site: u32,
     head: Option<Symbol>,
+    // The local a computed head reads, when it is one (`CompiledArm::local_call_heads`): the
+    // name `cannot call non-function` gives the call. Cold — read only on that error.
+    local_head: Option<Symbol>,
     // The global-read slot a tail call by name resolves its head through
     // (`CompiledArm::tail_head_gsite`); unused otherwise.
     head_gsite: u32,
@@ -208,6 +211,15 @@ pub(super) fn emit_call(
         if !stack.is_empty() {
             return super::bail("tail-nonempty-stack");
         }
+        // The shared exit carries no site, so a local head is left where the dispatcher
+        // looks for it (`Heap::jit_tail_local_head`). Only a local-headed call pays the store.
+        if head.is_none()
+            && let Some(local) = local_head
+        {
+            let offset = crate::core::heap::jit_ceremony_offsets().jit_tail_local_head as i32;
+            let local = b.ins().iconst(types::I32, local as i64);
+            b.ins().store(MemFlagsData::trusted(), local, heap, offset);
+        }
         b.ins().jump(tailcall, &[]);
         return Some(Flow::Break);
     }
@@ -268,7 +280,13 @@ pub(super) fn emit_call(
     let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
     let argc_v = b.ins().iconst(types::I32, argc as i64);
     let site_v = b.ins().iconst(types::I32, call_site as i64);
-    let head_v = b.ins().iconst(types::I32, call_head as i64);
+    // A computed head has no symbol to resolve, so the slot carries its local's name instead
+    // (`u32::MAX` when it is not a local) — what `jit_dispatch_call` names on its error.
+    let slow_head = match (head, local_head) {
+        (None, Some(local)) => local,
+        _ => call_head,
+    };
+    let head_v = b.ins().iconst(types::I32, slow_head as i64);
     // The shared slow-dispatch tail: call `brood_rt_call_slow`, re-fetch the roots base
     // (the callee may have relocated `roots`), and branch to `error` on a nonzero status
     // or `cont` on success. Used as the only path (icall off / computed head) and as the

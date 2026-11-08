@@ -149,17 +149,20 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 (defn- %spy-walk-if (form depth)
   ;; Instrument test + both branches in place; the branches stay lazy, so only the
   ;; taken one ever traces.
+  ;; Each instrumented form is the user's form rebuilt, so it keeps the original's position:
+  ;; an error under `spy` reports where it was written.
   (let (parts (rest form) test (first parts) then (second parts) d (inc depth))
-    (if (> (count parts) 2)
-      `(if ~(%spy-walk test d) ~(%spy-walk then d) ~(%spy-walk (nth parts 2) d))
-      `(if ~(%spy-walk test d) ~(%spy-walk then d)))))
+    (%copy-form-pos (if (> (count parts) 2)
+                      `(if ~(%spy-walk test d) ~(%spy-walk then d) ~(%spy-walk (nth parts 2) d))
+                      `(if ~(%spy-walk test d) ~(%spy-walk then d)))
+      form)))
 (defn- %spy-walk-let (form depth)
   (let (head (first form) binds (second form) body (rest (rest form)) d (inc depth))
-    `(~head ~(%spy-walk-binds binds d) ~@(%spy-walk-seq body d))))
+    (%copy-form-pos `(~head ~(%spy-walk-binds binds d) ~@(%spy-walk-seq body d)) form)))
 (defn- %spy-walk-call (form depth)
   ;; (f a…) — every operand is eager, unconditional, once; instrument them all and
   ;; trace this call node's value.
-  `(%spy-node '~form (~@(%spy-walk-seq form (inc depth))) ~depth))
+  `(%spy-node '~form ~(%copy-form-pos (%spy-walk-seq form (inc depth)) form) ~depth))
 (defn- %spy-walk (form depth)
   (if (not (pair? form))
     form

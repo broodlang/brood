@@ -369,7 +369,7 @@ pub(super) fn string_join(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let sep: &str = match arg(args, 0) {
         // A string displays as its raw text, so the separator is read in place.
         Value::Str(id) => heap.string(id),
-        v => return Err(LispError::wrong_type(heap, "%string-join", "string", v)),
+        v => return Err(LispError::wrong_type(heap, "string/join", "string", v)),
     };
     // Streaming fast path for a lazy int range (`(string/join (range n) ",")`): format
     // each integer straight into the buffer in one pass — no intermediate Vec of
@@ -396,7 +396,10 @@ pub(super) fn string_join(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         }
         return Ok(heap.alloc_string_owned(s));
     }
-    let items = heap.seq_items(arg(args, 1))?;
+    // Named `string/join`, the function the caller wrote: this primitive is its body.
+    let items = heap
+        .seq_items(arg(args, 1))
+        .map_err(|e| crate::eval::named_by("string/join", e))?;
     // Rough pre-size (separators + a small per-element allowance) to avoid most
     // re-grows without a second display pass just to compute the exact length.
     let mut s = String::with_capacity(sep.len() * items.len().saturating_sub(1) + items.len() * 8);

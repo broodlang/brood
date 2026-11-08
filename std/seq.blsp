@@ -526,7 +526,9 @@ or an `n` of zero or less.
       (vector? form) (seq/mapv form inner)
       (map? form) (into {} (map (seq form) inner))
       (set? form) (into #{} (map (seq form) inner))
-      (list? form) (map form inner)
+      ;; a rebuilt list keeps the original's source position: a macro that rewrites code
+      ;; with `postwalk`/`prewalk` still reports where its forms were written
+      (list? form) (%copy-form-pos (map form inner) form)
       else form)))
 (check-allow :non-tail-recursion
   (defn postwalk (form f)

@@ -1,0 +1,177 @@
+;; A local binder never captures code a macro generated around it.
+;;
+;; The pattern compiler walks a list with `first`/`rest` and tests it with `pair?`/`nil?`,
+;; and that walk runs inside the binders the CALLER's pattern names. A pattern variable
+;; spelled like one of those names used to capture the generated call:
+;;
+;;     ((fn (((x y & rest) op) …)) stack "+")   ; cannot call non-function: nil
+;;
+;; Two halves fix it. The generated code writes its root names `/rest` (the root escape,
+;; ADR-236), and the compile pass renames any local that would capture an escape, so
+;; `/name` reaches the root binding under every local (`escape_capture.rs`).
+(defmodule escape-capture-test
+  (:use test))
+
+;; The playground report's shape: clauses over (stack token), so the walk to `token` runs
+;; inside the first argument's `rest`.
+(defn- rpn-step
+  (((x y & rest) "+") (conj rest (+ y x)))
+  ((stack token) (conj stack token)))
+
+(defn- rpn (tokens) (first (reduce tokens () rpn-step)))
+
+(describe "a pattern variable named like a root function"
+  (test "list patterns: rest, first, pair?, nil? as pattern variables"
+    (assert= ((fn (((x & rest) y) [x rest y])) (list 1 2) 3) [1 (list 2) 3])
+    (assert= (match (list (list 1 2) 3) (((first & r) y) [first r y])) [1 (list 2) 3])
+    (assert= (match (list (list 1 2) 3) (((_x & pair?) y) [pair? y])) [(list 2) 3])
+    (assert= (match (list (list 1 2) 3) (((_x & nil?) y) [nil? y])) [(list 2) 3]))
+
+  (test "vector, map and record patterns: vector?, get, contains? as pattern variables"
+    (assert= (match [1 [2 3]] ([vector? [a b]] [vector? a b])) [1 2 3])
+    (assert= (match [1 {:a 2}] ([get {:a a}] [get a])) [1 2])
+    (assert= (match [1 {:a 2}] ([contains? {:a a}] [contains? a])) [1 2]))
+
+  (test "destructuring let and multi-clause fn"
+    (assert= (let ((a & rest) (list 1 2 3) (b c) (list 4 5)) [a rest b c])
+      [1 (list 2 3) 4 5])
+    (assert= (rpn [1 1 "+"]) 2)
+    (assert= (rpn [1 2 "+" 4 "+"]) 7))
+
+  (test "receive binds a pattern variable named nth"
+    (send (self) [7 8])
+    (assert= (receive ([nth b] [nth b])) [7 8])))
+
+(describe "a root escape under a local of the same name"
+  (test "/name reaches the root function under let, fn, &optional and letrec locals"
+    (assert= (let (first 5) [first (/first (list 1 2))]) [5 1])
+    (assert= ((fn (rest) [rest (/rest (list 1 2))]) :mine) [:mine (list 2)])
+    (assert= ((fn (x &optional (rest x)) [rest (/rest (list 1 2))]) :a) [:a (list 2)])
+    (assert= (letrec (first (fn (n) (if (= n 0) (/first (list 9)) (first (- n 1))))) (first 3))
+      9))
+
+  (test "in an arity clause, and in a template hole"
+    (assert= ((fn ((x) x) ((first _y) [first (/first (list 7))])) 1 2) [1 7])
+    (assert= (let (first 5) `(a ~first ~(/first (list 3)))) (list 'a 5 3))))
+
+;; Each `(if (pair? tl) …)` step of a list pattern's walk, with where it is located.
+(defn- walk-steps (form acc)
+  (cond
+    (not (pair? form)) acc
+    (and (= (first form) 'if) (pair? (second form)) (= (first (second form)) '/pair?))
+      (fold form (conj acc (%form-pos form)) (fn (a x) (walk-steps x a)))
+    else (fold form acc (fn (a x) (walk-steps x a)))))
+
+(describe "the code a pattern compiles to is located at that pattern"
+  ;; An error the walk raises reports the pattern the user wrote — not the nearest user form
+  ;; the expander found, which was a guard or a body clauses away. The fail-splice rebuilds
+  ;; the walk, so this also proves a rebuilt form keeps its position.
+  (test "a list pattern's walk, and a nested one's, each at its own pattern"
+    (let (form (reflect/read-first "(match xs\n  ((a (b c)) b)\n  (_ 0))")
+          pattern (first (nth form 2)))
+      (assert= (%form-pos pattern) [2 4])
+      (assert= (%form-pos (second pattern)) [2 7])
+      (assert= (walk-steps (reflect/macroexpand form) []) [[2 4] [2 4] [2 7] [2 7]]))))
+
+(describe "pattern variables named like root functions across processes"
+  :isolated (test "workers matching with a `rest` variable fan their results back in"
+    (let (me (self)
+          workers (map (range 4)
+                    (fn (n)
+                      (spawn (send me [n (rpn [n 10 "+" 1 "+"])]))))
+          ;; a worker whose match raised never answers: time out rather than wait forever
+          results (map workers (fn (_) (receive ([n total] [n total]) (after 5000 :no-answer)))))
+      (assert= (sort results) (list [0 11] [1 12] [2 13] [3 14])))))
+
+;; The same capture, in the other code builders a review of ADR-638 found: each emitted a
+;; bare root name into code a caller's binder — or a module's own definition — could capture.
+(describe "other code builders are not captured"
+  :serial (test "a defserver clause's pattern variable or state named `nth`/`send`"
+    (assert=
+      (%load-string
+        "(defmodule capture-gen (:use gen))
+         (defserver cap-s1 (state) (call [:get nth] [nth state]))
+         (defserver cap-s2 (send) (query :get send))
+         [(gen/call-timeout (gen/start cap-s1 0) [:get 5] 1000)
+          (gen/call-timeout (gen/start cap-s2 9) :get 1000)]")
+      [5 9]))
+
+  (test "string/interp under a local or module `str`"
+    (assert= (let (str "S") (string/interp "a={str}")) "a=S")
+    (assert= (%load-string "(defmodule capture-interp) (defn str (& xs) :CAPTURED) (string/interp \"a={1}\")")
+      "a=1"))
+
+  (test "a method parameter named `empty?` keeps next-impl's arguments"
+    (assert=
+      (%load-string
+        "(defmodule capture-impl)
+         (defrecord cap-person ((name string)))
+         (defability CapGreet (cap-greet (self x) :-> string))
+         (%register-impl 'CapGreet 'cap-greet :capture-impl/cap-person
+           (fn (p x) (str \"hello \" (get p :name) x)) 'stranger)
+         (impl CapGreet capture-impl/cap-person (cap-greet (p empty?) (str (next-impl) \"!\")))
+         (cap-greet (cap-person \"ann\") \"?\")")
+      "hello ann?!"))
+
+  (test "a module defining `list` does not capture a sealed ability's members"
+    (assert=
+      (%load-string
+        "(defmodule capture-sealed)
+         (defn list (& xs) :CAPTURED)
+         (defrecord cap-circle (r))
+         (defrecord cap-rect (w h))
+         (defability CapShape :sealed [cap-circle cap-rect] (cap-area (self) :-> float))
+         (%sealed-members 'CapShape)")
+      (list :capture-sealed/cap-circle :capture-sealed/cap-rect)))
+
+  (test "the fold rewrites under a module's own nth, failure?, type-of or ="
+    (assert=
+      (%load-string
+        "(defmodule capture-fold)
+         (defn nth (c i) 1)
+         (defn failure? (x) true)
+         (defn type-of (x) :other)
+         (defn = (a b) false)
+         [(fold (range 5) 0 (fn (acc x) (+ acc x)))
+          (fold [:a :b :a] {} (fn (m x) (assoc m x (inc (get m x 0)))))]")
+      [10 {:a 2 :b 1}]))
+
+  (test "a module defining its own `match*` keeps its pattern fns and destructuring lets"
+    (assert=
+      (%load-string
+        "(defmodule capture-match-star (:shadow match*))
+         (defmacro match* (& xs) :CAPTURED)
+         [((fn ([a b]) (+ a b)) [1 2]) (let ((c d) (list 3 4)) (+ c d))]")
+      [3 7]))
+
+  (test "a parameter named `type-of` under a tally fold"
+    (let (tally (fn (xs type-of) (fold xs {} (fn (m x) (assoc m x (inc (get m x 0)))))))
+      (assert= (tally [:a :b :a] 1) {:a 2 :b 1})))
+
+  (test "a failed guard reports the match, not a captured `list` parameter"
+    (let (f (fn (list) :when (> list 0) list))
+      (assert= (try (f -1) (catch e (:kind e))) :match))))
+
+;; The first call in `form` whose head is `head`, depth first, or nil.
+(defn- find-call (form head)
+  (cond
+    (not (pair? form)) nil
+    (= (first form) head) form
+    else (fold form nil (fn (found x) (or found (find-call x head))))))
+
+(describe "rebuilt forms keep the position they were written at"
+  (test "a threaded step and a catch clause"
+    (let (form (reflect/read-first "(cond-> 1\n  true (inc)\n  true (/ 0))"))
+      (assert= (%form-pos (find-call (reflect/macroexpand form) '/)) [3 8]))
+    (let (where (fn (src)
+                  (let (r (eval-server/eval-capturing src)) [(get r :line) (get r :col)])))
+      (assert= (where "(try (f)\n  (catch [a] a)\n  (catch e :when))") [3 3]))))
+
+(describe "a scalar where a collection belongs"
+  (test "is a type error with a position, and a function there gets the argument-order hint"
+    ;; check-allow: the scalar and the swapped arguments are the point of the test
+    (check-allow :type-mismatch
+      (let (e (try (for (x 5) x) (catch e e)))
+        (assert= [(:kind e) (:code e)] [:type "E0030"])
+        (is (int? (:line e))))
+      (is (includes? (try (map inc [1 2]) (catch e (:hint e))) "collection first")))))

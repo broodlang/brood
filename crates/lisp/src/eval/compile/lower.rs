@@ -78,6 +78,12 @@ pub(crate) struct Scope {
     /// `(global-read site, call position)` for each staged head — moved into
     /// `CompiledArm::staged_head_pos`.
     pub(crate) staged_head_pos: Vec<(u32, crate::error::Pos)>,
+    /// `(call position, head)` for each call whose head is a LOCAL — moved into
+    /// `CompiledArm::local_call_heads`.
+    pub(crate) local_call_heads: Vec<(crate::error::Pos, Symbol)>,
+    /// The innermost positioned form being compiled — where a global read below it is
+    /// located (see `compile_node`).
+    pub(crate) read_pos: Option<crate::error::Pos>,
 }
 
 impl Scope {
@@ -97,6 +103,8 @@ impl Scope {
             module: None,
             stage_calls: false,
             staged_head_pos: Vec::new(),
+            local_call_heads: Vec::new(),
+            read_pos: None,
         }
     }
     /// Allocate the next arm-relative call-site id (see the `sites` field).
@@ -972,9 +980,17 @@ pub(crate) fn compile_node(
     // compound step grows the native stack when it is near its end. An atom pays
     // nothing. Compile-time only: the compiled arm is cached and shared.
     if matches!(form.unpack(), ValueRef::Pair(_)) {
-        crate::stack::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+        // The innermost positioned form encloses every global read below it: an unbound
+        // name in argument position reports there, not at whatever call reached this arm.
+        let enclosing = scope.read_pos;
+        if let Some(pos) = heap.form_pos_only(form) {
+            scope.read_pos = Some(pos);
+        }
+        let node = crate::stack::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
             compile_node_inner(heap, form, scope, tail)
-        })
+        });
+        scope.read_pos = enclosing;
+        node
     } else {
         compile_node_inner(heap, form, scope, tail)
     }
@@ -1007,10 +1023,17 @@ fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -
         // read IC (ADR-096) — through the module boundary (ADR-383).
         ValueRef::Sym(s) => match scope.lookup(s) {
             Some(slot) => Some(Node::Local(slot)),
-            None => Some(Node::GlobalIc {
-                sym: module_boundary_ref(heap, scope, s),
-                site: scope.gsite_alloc(),
-            }),
+            None => {
+                let site = scope.gsite_alloc();
+                // Where the read is written, for its miss (`staged_head_pos`, keyed by site).
+                if let Some(pos) = scope.read_pos {
+                    scope.staged_head_pos.push((site, pos));
+                }
+                Some(Node::GlobalIc {
+                    sym: module_boundary_ref(heap, scope, s),
+                    site,
+                })
+            }
         },
 
         // A combination — a special form we handle (`if`/`do`) or a function call.
@@ -1367,8 +1390,12 @@ fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -
             // A free-symbol head compiles to a plain `Node::Global` (not a
             // `GlobalIc`): the call's own site IC below caches the head's full
             // resolution, so a read IC there would be redundant (and waste a site).
+            let local_head = match head.unpack() {
+                ValueRef::Sym(h) if scope.lookup(h).is_some() => Some(h),
+                _ => None,
+            };
             let mut callee = match head.unpack() {
-                ValueRef::Sym(h) if scope.lookup(h).is_none() => {
+                ValueRef::Sym(h) if local_head.is_none() => {
                     Node::Global(module_boundary_ref(heap, scope, h))
                 }
                 _ => compile_node(heap, head, scope, false)?,
@@ -1424,6 +1451,9 @@ fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -
                 && staged
             {
                 scope.staged_head_pos.push((*gsite, p));
+            }
+            if let (Some(h), Some(p)) = (local_head, pos) {
+                scope.local_call_heads.push((p, h));
             }
             if site != NO_SITE {
                 // Arm-relative: accumulate on the scope; `compile_arm` moves the vec

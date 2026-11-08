@@ -407,10 +407,19 @@ does not parse — or `:ok false` with `:error` when the checker itself raised. 
       {:ok true :diagnostics (or (reflect/check-string-structured src) ()) :ms (- (os/now) started)}
       (catch e {:ok false :error (error-message e) :ms (- (os/now) started)}))))
 
+(defn- eval-server-error-reply (e)
+  "The reply for an evaluation that raised `e`: its message, and — when the raise has them —
+where in the evaluated source it happened (`:line`/`:col`, 1-based within `src`) and the
+`:hint` naming the likely fix. A client that shows only the message leaves the reader to
+guess where the error lies; these say."
+  (merge {:ok false :error (error-message e)}
+    (if (map? e) (map/select-keys e [:line :col :hint]) {})))
+
 (defn eval-capturing (src &optional trace-names)
   "Evaluate source string `src` (all its forms, in order) with stdout captured;
 return `{:ok true :value <pr-str-bounded> :output <string> :ms <int>}` or
-`{:ok false :error <message> :output <string> :ms <int>}`. Never throws, and pops
+`{:ok false :error <message> :output <string> :ms <int>}` — plus `:line`/`:col`/`:hint` when
+the raise carries them ([[eval-server-error-reply]]). Never throws, and pops
 the capture buffer on every path, so a failed eval can't leave a dangling capture.
 Keeps BOTH halves a REPL shows — the value and what was printed — which
 `with-out-str` can't (it discards the value). `:value` is display-bounded and
@@ -463,7 +472,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
                  :value (debug/pr-str-bounded (if acc
                                                 (eval-server-eval-traced src trace-names acc)
                                                 (reflect/eval-string src)))}
-                (catch e {:ok false :error (error-message e)})))
+                (catch e (eval-server-error-reply e))))
         _ (%capture-begin)
         r (if traced (binding (*spy-sink* sink) (run)) (run))
         out (eval-server-bound-output (or (%capture-take) ""))

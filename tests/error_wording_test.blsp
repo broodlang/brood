@@ -1,0 +1,76 @@
+;; Errors that say where they happened and what was called (ADR-638's follow-ups).
+;;
+;; Each case is one a review of error locations found leaving the reader to guess: a helper's
+;; name instead of the function they called, the enclosing form instead of the call, a thrown
+;; string with no kind or place, a pattern error for an arity mistake.
+(defmodule error-wording-test
+  (:use test))
+
+;; `[line col]` of the error evaluating `src` raised, or the reply when it did not raise.
+(defn- where (src)
+  (let (r (eval-server/eval-capturing src)) [(get r :line) (get r :col)]))
+
+(defn- message-of (thunk) (try (thunk) (catch e (error-message e))))
+
+(describe "an error is placed at the code that raised it"
+  (test "a macro that returns the user's own form keeps that form's position"
+    (assert= (where "(defmacro ew-identity (f) f)\n(ew-identity\n  (+ 1 \"x\"))") [3 3])
+    (assert= (where "(defn ew-go ()\n  (-> 10\n    (inc)\n    (+ \"x\")))\n(ew-go)") [4 5]))
+
+  (test "an unbound name in argument position is placed at its call, not the caller's"
+    (assert= (where "(defn ew-f (x)\n  (str x ew-not-bound))\n(ew-f 1)") [2 3])))
+
+(describe "a message names the function that was called"
+  ;; check-allow: the wrong arguments are the point of every case here
+  (check-allow :type-mismatch
+    (test "collection arguments name sort, take, assoc, apply and string/join"
+      (assert= (message-of (fn () (sort 5))) "sort: expected a collection, got :int (5)")
+      (assert= (message-of (fn () (take 5 2))) "take: expected a collection, got :int (5)")
+      (assert= (message-of (fn () (assoc [1 2] :a 1))) "assoc: expected int, got keyword (:a)")
+      (assert= (message-of (fn () (apply + 5)))
+        "apply: expected a list, vector or set, got int (5)")
+      (assert= (message-of (fn () (string/join 5 ",")))
+        "string/join: expected a list, vector or set, got int (5)"))
+
+    (test "a string where a sequence belongs says a string is not one"
+      (is (includes? (try (reduce "abc" +) (catch e (:hint e))) "string/->list"))
+      (is (includes? (try (fold "abc" 0 +) (catch e (:hint e))) "string/->list")))
+
+    (test "a non-function passed where library code calls one gets the argument-order hint"
+      (let (e (try (fold [1 2] + 0) (catch e e)))
+        (assert= (:message e) "cannot call non-function: 0")
+        (is (includes? (:hint e) "callback argument in the wrong position"))))))
+
+(defn- ew-pf
+  ((0) :zero)
+  ((n) n))
+
+(defn- ew-ph
+  ((0) :zero)
+  ((n) :when (> n 0) n))
+
+(describe "a pattern function's no-match names it, and an arity mistake says so"
+  (test "the wrong number of arguments is said in arity terms, with the function's name"
+    (assert= (message-of (fn () (ew-pf 1 2))) "ew-pf: no clause accepts 2 argument(s) (arities: 1)"))
+  (test "a value no clause matches names the function"
+    (is (string/starts-with? (message-of (fn () (ew-ph -1))) "ew-ph: no clause matches (-1)"))))
+
+(describe "a definition the language cannot read raises a located error map"
+  (test "defn, sig, case and spawn shape errors carry a kind and a code"
+    (doseq (src ["(defn (x) x)" "(sig ew-f 5)" "(case 1 x 2)" "(spawn (defn ew-g () 1) (ew-g))"])
+      (let (e (try (reflect/eval-string src) (catch e e)))
+        (assert= [(:kind e) (:code e)] [:error "E0090"]))))
+  (test "an ability with no impl is a raised map, still caught by its kind"
+    (defability EwZap (ew-zap (self)))
+    ;; `identity` hides the literal from the checker, which would otherwise flag the call
+    (let (e (try (ew-zap (identity 5)) (catch e e)))
+      (assert= [(:kind e) (:code e)] [:%no-impl "E0090"]))))
+
+(describe "a module's own fold is its own"
+  :serial (test "the fold rewrites leave a call to a module's own fold alone"
+    (assert=
+      (%load-string
+        "(defmodule ew-own-fold)
+         (defn fold (c init f) :MINE)
+         (fold (range 5) 0 (fn (acc x) (+ acc x)))")
+      :MINE)))

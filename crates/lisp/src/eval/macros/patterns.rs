@@ -15,6 +15,13 @@ fn make_do(heap: &mut Heap, body: &[Value]) -> Value {
     heap.list(v)
 }
 
+/// The head every lowering here emits: the prelude's `match*`, as a root escape (ADR-638), so
+/// a module that defines a `match*` of its own does not capture the destructuring `let`s and
+/// pattern `fn`s written in it.
+fn match_star() -> Value {
+    value::sym("/match*")
+}
+
 /// `(match* :ctx valexpr (pattern inner))` — a single-clause refutable bind.
 fn refutable_bind(
     heap: &mut Heap,
@@ -24,12 +31,7 @@ fn refutable_bind(
     inner: Value,
 ) -> Value {
     let clause = heap.list(vec![pattern, inner]);
-    heap.list(vec![
-        value::sym(kw::MATCH_STAR),
-        value::kw(ctx),
-        valexpr,
-        clause,
-    ])
+    heap.list(vec![match_star(), value::kw(ctx), valexpr, clause])
 }
 
 /// Lower a `let` whose bindings include a non-symbol (pattern) target into
@@ -254,8 +256,8 @@ pub(crate) fn shadowed_clause_error(heap: &Heap, clauses: &[Value]) -> Option<Li
 /// `(%raise (%match-error :fn ARGS '(HEAD)))` for a single clause whose guard failed: ARGS
 /// the arguments as a list, rebuilt from the native parameters (`(append (list a b) rest)`
 /// with a rest), as the `match*` a clause `fn` lowers to would report them.
-fn guard_failure(heap: &mut Heap, params: &[Value], head: Value) -> Value {
-    let mut fixed = vec![value::sym("list")];
+fn guard_failure(heap: &mut Heap, params: &[Value], head: Value, context: Value) -> Value {
+    let mut fixed = vec![value::sym("/list")];
     let mut rest = None;
     let mut section = 0; // 0 required, 1 &optional, 2 rest
     for &p in params {
@@ -277,17 +279,14 @@ fn guard_failure(heap: &mut Heap, params: &[Value], head: Value) -> Value {
     }
     let fixed = heap.list(fixed);
     let args = match rest {
-        Some(r) => heap.list(vec![value::sym("append"), fixed, r]),
+        Some(r) => heap.list(vec![value::sym("/append"), fixed, r]),
         None => fixed,
     };
     let quoted_head = heap.list(vec![head]);
     let patterns = heap.list(vec![value::sym(kw::QUOTE), quoted_head]);
-    let error = heap.list(vec![
-        value::sym("%match-error"),
-        value::kw("fn"),
-        args,
-        patterns,
-    ]);
+    // quoted: a definition's name is a symbol, which would otherwise be evaluated
+    let context = heap.list(vec![value::sym(kw::QUOTE), context]);
+    let error = heap.list(vec![value::sym("%match-error"), context, args, patterns]);
     heap.list(vec![value::sym("%raise"), error])
 }
 
@@ -381,12 +380,54 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
     params[..required_end].iter().any(|&p| !is_sym(p))
 }
 
+thread_local! {
+    /// The global a `(def NAME (fn …))` is defining, set while its `fn` is expanded so the
+    /// lowering can name it: a pattern `fn`'s no-match error then reads `pf: no clause
+    /// matches …`, not `fn: …`. Taken by the first `lower_fn` to run, so a nested `fn`
+    /// never inherits it.
+    static DEFINING: std::cell::Cell<Option<value::Symbol>> = const { std::cell::Cell::new(None) };
+}
+
+/// Note that the `fn` about to be expanded is the value of `(def name …)`.
+pub(super) fn defining_fn(name: value::Symbol) {
+    DEFINING.with(|cell| cell.set(Some(name)));
+}
+
+/// Forget a name [`defining_fn`] set that no lowering took.
+pub(super) fn end_defining() {
+    DEFINING.with(|cell| cell.set(None));
+}
+
+/// The `context` a lowered pattern `fn` gives `match*` — its name, when it is a definition's
+/// value, else `:fn`.
+fn fn_context(name: Option<value::Symbol>) -> Value {
+    match name {
+        Some(name) => {
+            let spelling = value::symbol_name(value::source_symbol(name));
+            // A namespaced definition reads as written, not `ns/name`.
+            let short = spelling.rsplit('/').next().unwrap_or(&spelling).to_string();
+            value::sym(&short)
+        }
+        None => value::kw("fn"),
+    }
+}
+
 /// Lower a `fn` that is multi-clause, or single-clause with pattern(s) in its
 /// required parameters, into a plain `fn` plus the Brood `match*` engine.
 /// `Ok(None)` for an ordinary single-clause `fn` (left as-is); an error for a
 /// **vector** where a parameter list belongs (ADR-010, item 1 of the syntax
 /// finalisation) — rejected rather than misread.
 pub(super) fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>, LispError> {
+    let name = DEFINING.with(|cell| cell.take());
+    let context = fn_context(name);
+    lower_fn_named(heap, items, context)
+}
+
+fn lower_fn_named(
+    heap: &mut Heap,
+    items: &[Value],
+    context: Value,
+) -> Result<Option<Value>, LispError> {
     let forms = &items[1..];
 
     // Multi-clause: an optional leading docstring, then every form a clause. The
@@ -426,7 +467,7 @@ pub(super) fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>
             // takes the same head grammar as an arity clause.
             let g = value::gensym("args");
             let params = heap.list(vec![value::sym(kw::AMP), g]);
-            let mut mexpr = vec![value::sym(kw::MATCH_STAR), value::kw("fn"), g];
+            let mut mexpr = vec![match_star(), context, g];
             mexpr.extend_from_slice(clauses); // fn clauses are already match* clauses
             let body = heap.list(mexpr);
             let mut lowered = vec![value::sym(kw::FN), params];
@@ -473,7 +514,7 @@ pub(super) fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>
         let mut clause = vec![param_form];
         clause.extend_from_slice(body);
         let clause = heap.list(clause);
-        let dispatch = heap.list(vec![value::sym(kw::MATCH_STAR), value::kw("fn"), g, clause]);
+        let dispatch = heap.list(vec![match_star(), context, g, clause]);
         let mut lowered = vec![value::sym(kw::FN), rest_params];
         if let Some(doc) = doc {
             lowered.push(doc);
@@ -508,7 +549,7 @@ pub(super) fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>
     let mut acc = match guard {
         Some((test, rest)) => {
             let then = make_do(heap, rest);
-            let fail = guard_failure(heap, &new_params, param_form);
+            let fail = guard_failure(heap, &new_params, param_form, context);
             heap.list(vec![value::sym(kw::IF), test, then, fail])
         }
         None => make_do(heap, body),

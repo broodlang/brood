@@ -301,7 +301,7 @@ fn a_stage_chain_under_reduce_fuses_into_one_literal_and_a_range_base_into_a_loo
     for w in [
         "%range-bounds",
         "letrec",
-        "(range? ",
+        "(/range? ",
         "(mult35? pipe-e",
         "(* pipe-e",
         ":generated",
@@ -318,7 +318,7 @@ fn a_stage_chain_under_reduce_fuses_into_one_literal_and_a_range_base_into_a_loo
     // the ordinary fold).
     let out = expansion("(defn go (xs) (reduce (seq/lmap xs (fn (i) (* i i))) 0 +))");
     assert!(
-        out.contains("(fold ") && out.contains("(* pipe-e") && out.contains("(range? "),
+        out.contains("(fold ") && out.contains("(* pipe-e") && out.contains("(/range? "),
         "{out}"
     );
     assert!(!out.contains("seq/lmap"), "{out}");
@@ -354,28 +354,28 @@ fn a_fold_over_a_range_with_a_literal_is_a_counted_loop() {
     for w in [
         "%range-bounds",
         "letrec",
-        "(range? ",
+        "(/range? ",
         "(fold ",
         ":generated",
-        "(>= rng-i",
+        "(/>= rng-i",
     ] {
         assert!(out.contains(w), "expected `{w}` in:\n{out}");
     }
     // `(reduce coll init f)` is `(fold coll init f)`, and takes the same loop — the
     // spelling the docs teach, which `nqueens` writes.
     let out = expansion("(defn go (n) (reduce (range n) 0 (fn (acc x) (+ acc x))))");
-    for w in ["%range-bounds", "letrec", "(range? ", "(>= rng-i"] {
+    for w in ["%range-bounds", "letrec", "(/range? ", "(/>= rng-i"] {
         assert!(out.contains(w), "expected `{w}` in:\n{out}");
     }
     // Any collection: the range check and the range loop ride along, the ordinary fold
     // behind them. (The vector and list loops are parked — `FOLD_LOOP_SMALL_ATOMS` — so a
     // vector or list fold pays no copies beyond the range loop's.)
     let out = expansion("(defn go (xs) (fold xs 0 (fn (acc x) (+ acc x))))");
-    for w in ["(range? ", "%range-bounds", ":generated"] {
+    for w in ["(/range? ", "%range-bounds", ":generated"] {
         assert!(out.contains(w), "expected `{w}` in:\n{out}");
     }
     assert!(
-        !out.contains("(vector? "),
+        !out.contains("(/vector? "),
         "the vector loop is parked:\n{out}"
     );
     // Not a literal reducer, a shadowed `range`, or a body over the copy budget: the

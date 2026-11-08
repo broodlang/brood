@@ -15,9 +15,11 @@
 //!
 //! The compile pass's other jobs live in children: [`hygiene`] (template binders),
 //! [`resolve`] (namespace resolution and `compile`), [`template_escape`] (a macro
-//! template's call heads pinned to root, ADR-423), [`pipeline`] and [`linmap`] (the
+//! template's call heads pinned to root, ADR-423), [`escape_capture`] (a local never
+//! captures a `/name` escape), [`pipeline`] and [`linmap`] (the
 //! compile-time loop rewrites) and [`patterns`] (pattern-binder lowering).
 
+mod escape_capture;
 mod hygiene;
 mod linmap;
 mod patterns;
@@ -26,6 +28,7 @@ mod resolve;
 mod template_escape;
 mod typed;
 
+use escape_capture::*;
 use hygiene::*;
 use linmap::*;
 pub(crate) use patterns::*;
@@ -545,12 +548,35 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     // literal `fn` becomes a counted `letrec` loop (§7).
     // All three fire only under a four-item `fold`/`reduce` call: one walk answers "none
     // here" for the three, which is nearly every top-level form.
-    if !form_has_fold_call(heap, expanded) {
+    if !form_has_fold_call(heap, expanded) || namespace_rebinds_rewrite_names(heap) {
         return Ok(expanded);
     }
     let fused = pipeline_fuse_rewrite(heap, expanded);
     let tallied = linmap_fold_rewrite(heap, fused);
     Ok(range_fold_rewrite(heap, tallied))
+}
+
+/// Does the namespace being compiled give one of the names the source rewrites read a meaning
+/// of its own — a definition, or a `(:use …)` import? The rewrites run before namespaces
+/// resolve and read `fold`, `reduce`, `get`, `+`, … by spelling, so in a module that defines
+/// its own `fold` they would replace that module's call with the root fold's loop. Their own
+/// emitted names are root escapes (ADR-638) and need no such check; a local binder is caught
+/// per form by `form_binds_any`.
+fn namespace_rebinds_rewrite_names(heap: &Heap) -> bool {
+    /// The names the rewrites READ from user code — the calls they recognise, and the
+    /// operators of a tally literal they lower. Everything they emit is a root escape.
+    static READ: std::sync::LazyLock<Vec<Symbol>> = std::sync::LazyLock::new(|| {
+        [
+            "fold", "reduce", "range", "get", "assoc", "+", "-", "inc", "dec",
+        ]
+        .iter()
+        .map(|name| value::intern(name))
+        .collect()
+    });
+    heap.compile_ns().is_some()
+        && READ
+            .iter()
+            .any(|&name| resolve_reference(heap, name) != name)
 }
 
 thread_local! {
@@ -675,8 +701,17 @@ fn macroexpand_all_depth_step_inner(
     }
     let _gc_block = crate::process::GcBlockGuard::enter();
     let _macro_block = crate::process::MacroBlockGuard::enter();
-    let original = form;
+    let call = form;
     let form = macroexpand(heap, form, env)?;
+    // The record a rebuild of this form copies: the expansion's own when it has one — a
+    // form the user wrote that the macro returned, or one it located (`%copy-form-pos`) —
+    // else the macro call's, as an expansion built from nothing is located at its call.
+    // Copying the call's unconditionally put `(w (+ 1 "x"))`'s error on the `w`.
+    let original = if form.as_pair() != call.as_pair() && heap.form_pos_only(form).is_some() {
+        form
+    } else {
+        call
+    };
     match form.unpack() {
         ValueRef::Pair(_) => {
             let items = match heap.list_items(form) {
@@ -778,15 +813,45 @@ fn macroexpand_all_depth_step_inner(
                     return expand_tail(heap, original, &items, 3, env, depth + 1);
                 }
             }
+            // `(def NAME (fn …))`: the `fn`'s lowering names its no-match error `NAME`.
+            let defined_fn = match (items.first(), items.get(1), items.get(2)) {
+                (Some(&head), Some(&name), Some(&value)) if items.len() == 3 => {
+                    match (head.unpack(), name.unpack(), heap.list_items(value)) {
+                        (ValueRef::Sym(h), ValueRef::Sym(name), Some(value_items))
+                            if value::symbol_is(h, kw::DEF)
+                                && value_items.first().is_some_and(|v| {
+                                    matches!(v.unpack(), ValueRef::Sym(f) if value::symbol_is(f, kw::FN))
+                                }) =>
+                        {
+                            Some(name)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
             let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                out.push(macroexpand_all_depth(heap, item, env, depth + 1)?);
+            for (index, item) in items.into_iter().enumerate() {
+                if index == 2
+                    && let Some(name) = defined_fn
+                {
+                    defining_fn(name);
+                }
+                let expanded = macroexpand_all_depth(heap, item, env, depth + 1);
+                if index == 2 {
+                    end_defining(); // never left for an unrelated `fn`
+                }
+                out.push(expanded?);
             }
             // Wrapper-split a linear immutable-map fold into an in-place table loop
             // (ADR-112, ADR-360 in docs/decisions.md); applies to a qualifying
             // `(def NAME (fn …))` that passes the `linmap_probe` reachability gate.
             // On by default; opt out with `BROOD_LINMAP=0`.
-            if let Some(split) = linmap_split_def(heap, &out) {
+            // Like the fold rewrites, it reads `get`/`assoc`/`+` by spelling: not in a module
+            // that gives one of them its own meaning.
+            if !namespace_rebinds_rewrite_names(heap)
+                && let Some(split) = linmap_split_def(heap, &out)
+            {
                 return Ok(split);
             }
             Ok(rebuild_list(heap, original, out))
@@ -830,7 +895,7 @@ fn macroexpand_all_depth_step_inner(
 /// one (the user's own sub-forms, or a finished inner expansion) are left exactly as they
 /// are and not descended into. An explicit stack, so a large expansion cannot overflow the
 /// Rust stack; quoted data inside is stamped too, harmlessly (a position on data is unused).
-fn stamp_synthetic(
+pub(crate) fn stamp_synthetic(
     heap: &mut Heap,
     form: Value,
     pos: crate::error::Pos,

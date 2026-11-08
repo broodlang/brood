@@ -126,8 +126,8 @@ pub(super) fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value
     // (never deopts) and the comparison is against an interned keyword, so this costs one
     // tag read on the way out of a fold — and only on the way out, not per element.
     let r_val = value::gensym("linmap-out");
-    let type_of = heap.list(vec![value::sym("type-of"), r_val]);
-    let is_table = heap.list(vec![value::sym("="), value::kw("table"), type_of]);
+    let type_of = heap.list(vec![value::sym("/type-of"), r_val]);
+    let is_table = heap.list(vec![value::sym("/="), value::kw("table"), type_of]);
     let snap_call = heap.list(vec![value::sym(kw::TABLE_SNAPSHOT), r_val]);
     let cond = heap.list(vec![value::sym(kw::IF), is_table, snap_call, r_val]);
     // Then free the private table: its loop has returned, so nothing holds it, and
@@ -315,8 +315,8 @@ fn linmap_fold_call(heap: &mut Heap, form: Value, items: &[Value]) -> Option<Val
     let t_val = value::gensym("linmap-table");
     let r_val = value::gensym("linmap-out");
     let fast_call = rebuild_list(heap, form, vec![items[0], c_val, t_val, fast_fn]);
-    let type_of = heap.list(vec![value::sym("type-of"), r_val]);
-    let is_table = heap.list(vec![value::sym("="), value::kw("table"), type_of]);
+    let type_of = heap.list(vec![value::sym("/type-of"), r_val]);
+    let is_table = heap.list(vec![value::sym("/="), value::kw("table"), type_of]);
     let snap_call = heap.list(vec![value::sym(kw::TABLE_SNAPSHOT), r_val]);
     let cond = heap.list(vec![value::sym(kw::IF), is_table, snap_call, r_val]);
     // Free the private table once the fold has returned — see `linmap_split_def`.

@@ -95,8 +95,19 @@ fn warnings_with(mods: &[&str], src: &str) -> Vec<String> {
 fn warnings_expanded(src: &str) -> Vec<String> {
     let mut interp = crate::Interp::new();
     let form = reader::read_one(&mut interp.heap, src).expect("parse");
-    let form = crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
+    let form = expanded_for_check(&mut interp.heap, form, interp.root);
     check_form(&interp.heap, form)
+}
+
+/// What the checker reads: the form expanded and resolved, as the compile pass and the
+/// `check` builtin hand it over — root escapes stripped (ADR-638).
+pub(super) fn expanded_for_check(
+    heap: &mut crate::core::heap::Heap,
+    form: Value,
+    root: crate::core::value::EnvId,
+) -> Value {
+    let form = crate::eval::macros::macroexpand_all(heap, form, root).unwrap();
+    crate::eval::macros::resolve(heap, form)
 }
 
 /// Whole-file checking — what `nest check` runs. Unlike [`warnings`] (a bare
@@ -140,7 +151,7 @@ fn ty_str(src: &str) -> String {
 fn recursion_warnings(src: &str) -> Vec<String> {
     let mut interp = crate::Interp::new();
     let form = reader::read_one(&mut interp.heap, src).expect("parse");
-    let form = crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
+    let form = expanded_for_check(&mut interp.heap, form, interp.root);
     let mut out = Vec::new();
     recursion::check_recursion(&interp.heap, form, &mut out);
     out.into_iter().map(|(_, m)| m).collect()
@@ -160,7 +171,7 @@ fn check_with_defs(defs: &[&str], src: &str) -> Vec<String> {
     let form = crate::syntax::reader::read_one(&mut interp.heap, src).expect("parse expression");
     // Macro-expand so any prelude wrappers (defn → fn, etc.) are gone, like
     // `brood --check`/the `check` builtin do before calling check_form.
-    let form = crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
+    let form = expanded_for_check(&mut interp.heap, form, interp.root);
     check_form(&interp.heap, form)
 }
 

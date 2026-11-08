@@ -419,7 +419,7 @@ fn pipeline_fuse_call(heap: &mut Heap, form: Value, items: &[Value]) -> Option<V
             Stage::Reject(_) => heap.list(vec![value::sym(kw::IF), applied, acc, body]),
             Stage::Keep(_) => {
                 let bind = heap.list(vec![e_out, applied]);
-                let is_nil = heap.list(vec![value::sym("nil?"), e_out]);
+                let is_nil = heap.list(vec![value::sym("/nil?"), e_out]);
                 let test = heap.list(vec![value::sym(kw::IF), is_nil, acc, body]);
                 heap.list(vec![value::sym(kw::LET), bind, test])
             }
@@ -522,11 +522,11 @@ fn counted_range_loop(
     let loop_name = value::gensym("rng-loop");
     let i = value::gensym("rng-i");
     let acc = value::gensym("rng-acc");
-    let up = heap.list(vec![value::sym(">"), step, Value::int(0)]);
-    let done_up = heap.list(vec![value::sym(">="), i, hi]);
-    let done_down = heap.list(vec![value::sym("<="), i, hi]);
+    let up = heap.list(vec![value::sym("/>"), step, Value::int(0)]);
+    let done_up = heap.list(vec![value::sym("/>="), i, hi]);
+    let done_down = heap.list(vec![value::sym("/<="), i, hi]);
     let done = heap.list(vec![value::sym(kw::IF), up, done_up, done_down]);
-    let next_i = heap.list(vec![value::sym("+"), i, step]);
+    let next_i = heap.list(vec![value::sym("/+"), i, step]);
     let rebind = heap.list(vec![
         Value::symbol(acc_name),
         acc,
@@ -548,9 +548,9 @@ fn counted_range_loop(
     let start = heap.list(vec![loop_name, lo, init]);
     let letrec = heap.list(vec![value::sym(kw::LETREC), loop_binds, start]);
     let get_bounds = heap.list(vec![value::sym("%range-bounds"), r]);
-    let nth0 = heap.list(vec![value::sym("nth"), bounds, Value::int(0)]);
-    let nth1 = heap.list(vec![value::sym("nth"), bounds, Value::int(1)]);
-    let nth2 = heap.list(vec![value::sym("nth"), bounds, Value::int(2)]);
+    let nth0 = heap.list(vec![value::sym("/nth"), bounds, Value::int(0)]);
+    let nth1 = heap.list(vec![value::sym("/nth"), bounds, Value::int(1)]);
+    let nth2 = heap.list(vec![value::sym("/nth"), bounds, Value::int(2)]);
     let b_binds = heap.list(vec![bounds, get_bounds, lo, nth0, hi, nth1, step, nth2]);
     heap.list(vec![value::sym(kw::LET), b_binds, letrec])
 }
@@ -561,7 +561,7 @@ fn stop_on_failure(heap: &mut Heap, acc: Value, done: Value, recur: Value) -> Va
     // `failure?`, not `(= (type-of acc) :failure)`: the predicate lowers to one tag test
     // (`PrimOp1::TypeIs`), where the spelled-out compare reads the type as a keyword and
     // compares it — +2-4% on `nqueens`, whose `reduce` over a range is this loop.
-    let failed = heap.list(vec![value::sym("failure?"), acc]);
+    let failed = heap.list(vec![value::sym("/failure?"), acc]);
     let inner = heap.list(vec![value::sym(kw::IF), done, acc, recur]);
     heap.list(vec![value::sym(kw::IF), failed, acc, inner])
 }
@@ -579,9 +579,9 @@ fn counted_vector_loop(
     let loop_name = value::gensym("vec-loop");
     let i = value::gensym("vec-i");
     let acc = value::gensym("vec-acc");
-    let done = heap.list(vec![value::sym(">="), i, n]);
-    let next_i = heap.list(vec![value::sym("+"), i, Value::int(1)]);
-    let elem = heap.list(vec![value::sym("nth"), r, i]);
+    let done = heap.list(vec![value::sym("/>="), i, n]);
+    let next_i = heap.list(vec![value::sym("/+"), i, Value::int(1)]);
+    let elem = heap.list(vec![value::sym("/nth"), r, i]);
     let rebind = heap.list(vec![
         Value::symbol(acc_name),
         acc,
@@ -602,7 +602,7 @@ fn counted_vector_loop(
     let loop_binds = heap.list(vec![loop_name, loop_fn]);
     let start = heap.list(vec![loop_name, Value::int(0), init]);
     let letrec = heap.list(vec![value::sym(kw::LETREC), loop_binds, start]);
-    let count = heap.list(vec![value::sym("count"), r]);
+    let count = heap.list(vec![value::sym("/count"), r]);
     let n_binds = heap.list(vec![n, count]);
     heap.list(vec![value::sym(kw::LET), n_binds, letrec])
 }
@@ -620,9 +620,9 @@ fn list_loop(
     let loop_name = value::gensym("list-loop");
     let xs = value::gensym("list-xs");
     let acc = value::gensym("list-acc");
-    let done = heap.list(vec![value::sym("empty?"), xs]);
-    let next_xs = heap.list(vec![value::sym("rest"), xs]);
-    let elem = heap.list(vec![value::sym("first"), xs]);
+    let done = heap.list(vec![value::sym("/empty?"), xs]);
+    let next_xs = heap.list(vec![value::sym("/rest"), xs]);
+    let elem = heap.list(vec![value::sym("/first"), xs]);
     let rebind = heap.list(vec![
         Value::symbol(acc_name),
         acc,
@@ -679,14 +679,14 @@ fn coll_or_fold(
     let rest = if want_more {
         let vectored = counted_vector_loop(heap, r, init, acc_name, elem_name, body);
         let listed = list_loop(heap, r, init, acc_name, elem_name, body);
-        let is_pair = heap.list(vec![value::sym("pair?"), r]);
+        let is_pair = heap.list(vec![value::sym("/pair?"), r]);
         let c3 = heap.list(vec![value::sym(kw::IF), is_pair, listed, slow]);
-        let is_vec = heap.list(vec![value::sym("vector?"), r]);
+        let is_vec = heap.list(vec![value::sym("/vector?"), r]);
         heap.list(vec![value::sym(kw::IF), is_vec, vectored, c3])
     } else {
         slow
     };
-    let is_range = heap.list(vec![value::sym("range?"), r]);
+    let is_range = heap.list(vec![value::sym("/range?"), r]);
     heap.list(vec![value::sym(kw::IF), is_range, ranged, rest])
 }
 

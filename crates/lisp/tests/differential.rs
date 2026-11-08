@@ -36,6 +36,9 @@ const EXPECTED_TO_ERROR: &[&str] = &[
     "(/ 1 0)",
     "(+ 1 \"x\")",
     "(1 2 3)",
+    "(defn lc (list) (list 1 2)) (lc [1])",
+    "(defn lt (k n) (if (= n 0) (k n) (lt k (- n 1)))) (lt 7 3)",
+    "(defn lm (h f) (h [1 2] f)) (lm map nil)",
     "(defn boom (x) (first x)) (boom 5)",
     "(defn dz (a b) (/ a b)) (dz 1 0)",
     "(defn add1 (x) (+ x 1)) (def + (fn (a b) (* a b))) (add1 5)",
@@ -203,6 +206,11 @@ const CORPUS: &[&str] = &[
     "(/ 1 0)",
     "(+ 1 \"x\")",
     "(1 2 3)", // calling a non-function — both engines: "cannot call non-function: 1"
+    // a LOCAL head names itself, and says when it shadows a root function — both engines
+    "(defn lc (list) (list 1 2)) (lc [1])",
+    "(defn lt (k n) (if (= n 0) (k n) (lt k (- n 1)))) (lt 7 3)", // tail call to the local
+    // a callable local whose own callee failed is not blamed: `map` is fine, `nil` is not
+    "(defn lm (h f) (h [1 2] f)) (lm map nil)",
     // try/catch — body and handler thunks route through apply_engine (builtins
     // `try_catch`). Both the success and the error path must agree across engines.
     "(defn safe-div (a b) (try (/ a b) (catch _ :div-zero))) [(safe-div 10 2) (safe-div 1 0)]",

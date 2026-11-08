@@ -282,8 +282,15 @@ all — in which case the caller treats the `{` as the literal character it look
 (defn- regex-repeat (atom lo hi greedy)
   "`atom{lo,hi}` as a counted piece; `hi` is nil for an open end."
   (when (> (or hi lo) *max-repeat*)
-    (throw {:kind :parse
-            :message (str "regex: {" lo "," (or hi "") "} repeats more than " *max-repeat* " times")}))
+    (%raise {:kind :parse
+             :code "E0090"
+             :message (str "regex: {"
+                        lo
+                        ","
+                        (or hi "")
+                        "} repeats more than "
+                        *max-repeat*
+                        " times")}))
   {:q :count :lo lo :hi hi :a atom :greedy greedy})
 
 (defn- regex-lazy? (pcs i)

@@ -360,6 +360,9 @@ impl ProgramState {
             Some(f) => e.or_file(f.clone()),
             None => e,
         };
+        // Raised inside the standard library: report it at the program's own code.
+        let form_pos = self.positions.get(self.cursor).copied();
+        e = e.relocated_out_of_std(self.file.as_deref(), form_pos);
         // The payload `Value` is a handle into THIS process's heap — dead once the
         // root thread reads the slot. Everything else (message, pos, hint, trace)
         // is plain data and crosses intact.

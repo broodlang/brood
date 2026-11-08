@@ -1085,3 +1085,38 @@ lets the main lint exempts. A surface pass now reads each as written, by the one
 (pins, quotes, `or`/`and`/`bytes`/`record`, map `:or` defaults; a repeated name is a read). Its
 first finds included `fold-for` accumulators the body never read. Roughly 1300 binders across brood
 and bedit took the `_` prefix.
+
+
+2026-11-08. What a new project tells its agent. `nest new`'s `CLAUDE.md` named the MCP tools
+`reflect/eval` and `reflect/load`, which a rename wave had made of the tools `eval` and `load`;
+`mcp.blsp`'s own docs had the same rewrite in a dozen places. The `brood-task` prompt named nine of
+the server's twenty-four tools and told a project's agent to read and append to `incarnations.md`,
+a note about developing Brood that the project does not have; the server also served that note and
+two archived ones. The prompt and the `writing-brood` skill now name every tool, and a test in
+`crates/nest/tests/mcp.rs` fails when a listed tool is missing from either. It caught the prompt
+missing `abilities` on its first run.
+
+2026-11-08 (ADR-638). A playground report about reverse Polish: `(((x y & rest) "+") …)` raised
+`cannot call non-function: nil` at the guard. The pattern compiler walks the argument list with
+`first`/`rest`, inside the binders the user's pattern names, so a variable called `rest` captured
+the walk; `first`, `pair?`, `nil?`, `vector?`, `get` and `contains?` did the same, in `match`,
+pattern `fn`, destructuring `let` and `receive`. `/name` now means the root binding under any
+local: the compile pass renames a local that would capture an escape, and lazily expanded code
+reads the escape from the global table. Reading for the same shape found eight more prelude code
+builders emitting bare root names, outside a gate that scanned only `defmacro`; the gate now
+scans every prelude function. The error itself named only the value, so a local callee is now
+named on every tier, JIT included, with a hint when it shadows a root function. Generated
+pattern code is located at its pattern, and the playground shows where in the form an error was
+raised and its hint.
+A review of the same shape afterwards found eight more capture sites (gen's `defserver`,
+`string/interp`, `next-impl`, `defability`, and the Rust fold and linmap rewrites, where a
+module's own `type-of` leaked the live in-place table), position loss in the static-quasiquote
+pass and five rebuilding macros, and `seq`'s collection check throwing a bare string. All fixed;
+what remains is listed in `todo.md`.
+The follow-ups the review left, same day: the fold rewrites step aside in a module that
+defines `fold`/`get`/`+`/…; an expansion that is the user's own form keeps its position; an
+unbound name in argument position reports at its call; an error inside std reports at the
+program's call and names the library function; `sort`/`take`/`assoc`/`apply`/`string/join`
+name themselves; library code calling a non-function gets an argument-order hint; a pattern
+function names itself and calls an arity mismatch one; eight thrown strings became located
+error maps; and the `check` builtin reads resolved code, so a `/vector?` guard narrows.

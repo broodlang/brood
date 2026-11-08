@@ -1388,9 +1388,22 @@ pub unsafe extern "C" fn brood_rt_trace_push(
 ) {
     unsafe {
         let h = &mut *heap;
+        // An unbound global read raised by this arm's callback: locate it from the arm's own
+        // read sites, now that the arm is known (`park_unbound`). Taken once, by the innermost
+        // arm — the one that made the read.
+        let miss_site = std::mem::replace(&mut h.jit_miss_gsite, u32::MAX);
         let Some(e) = h.jit_pending_error.as_mut() else {
             return;
         };
+        if miss_site != u32::MAX && e.pos.is_none() {
+            let arm = &*arm;
+            if let Some(&(_, pos)) = arm.staged_head_pos.iter().find(|(s, _)| *s == miss_site) {
+                e.pos = Some(pos);
+                if e.file.is_none() {
+                    e.file = arm.src_file.as_deref().map(str::to_string);
+                }
+            }
+        }
         // `push_trace` drops the frame once the trace is capped or the error is a control
         // signal — but only AFTER we have built one, and building one clones the arm's file
         // name. A 50-frame unwind therefore paid 50 allocations to keep 32. The VM's own

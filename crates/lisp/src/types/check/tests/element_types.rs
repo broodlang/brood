@@ -310,7 +310,7 @@ fn an_inferred_return_sees_the_truthy_half_of_an_or_default() {
         );
         heap.set_global(crate::core::value::EnvId::GLOBAL);
         let form = reader::read_one(&mut heap, src).expect("parse");
-        let expanded = crate::eval::macros::macroexpand_all(&mut heap, form, interp.root).unwrap();
+        let expanded = super::expanded_for_check(&mut heap, form, interp.root);
         super::infer::expr_ty(&heap, expanded, &Ctx::default())
             .and_then(|t| t.as_arrow().map(|s| s.ret.clone()))
     };

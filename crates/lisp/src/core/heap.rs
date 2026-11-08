@@ -1318,6 +1318,16 @@ pub struct Heap {
     /// gateway (a Rust-native shape, `map`/`try` callbacks) records 0 and latches nothing.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))] // only JIT gateways bump it
     pub(crate) native_gateway_seq: u64,
+    /// The local a native arm's tail call is about to call, stored by the arm just before it
+    /// exits for the driver to make that call — only at a call whose head is a local, the one
+    /// fact the shared tail exit cannot carry. `jit_dispatch_tail` takes it (resetting it to
+    /// `u32::MAX`, none) on every tail call, so it names the local in a `cannot call
+    /// non-function` from THIS call and is never left over for the next.
+    pub(crate) jit_tail_local_head: u32,
+    /// The global-read site of the unbound read a native arm's callback just raised for
+    /// (`jit_resolve_global_ic`), `u32::MAX` when none. The callback has no arm to locate the
+    /// read with; the arm's own error block does (`brood_rt_trace_push`), and takes it there.
+    pub(crate) jit_miss_gsite: u32,
     pub(crate) cur_native_gateway: u64,
     pub(crate) blocked_under_gateway: u64,
     /// Overflow sentinel for the unboxed-`i64` fast path (the register calling convention for
@@ -1486,6 +1496,8 @@ pub(crate) struct JitCeremonyOffsets {
     pub blocked_under_gateway: usize,
     /// `Heap::jit_call_budget` — the entry reduction poll's countdown (ADR-401).
     pub jit_call_budget: usize,
+    /// `Heap::jit_tail_local_head` — a local-headed tail call's head, stored before the exit.
+    pub jit_tail_local_head: usize,
 }
 
 #[cfg(feature = "jit")]
@@ -1498,6 +1510,7 @@ pub(crate) fn jit_ceremony_offsets() -> JitCeremonyOffsets {
         native_gateway_seq: std::mem::offset_of!(Heap, native_gateway_seq),
         blocked_under_gateway: std::mem::offset_of!(Heap, blocked_under_gateway),
         jit_call_budget: std::mem::offset_of!(Heap, jit_call_budget),
+        jit_tail_local_head: std::mem::offset_of!(Heap, jit_tail_local_head),
     }
 }
 
@@ -1970,6 +1983,8 @@ impl Heap {
             vm_handlers: Vec::new(),
             jit_call_budget: 0,
             native_gateway_seq: 0,
+            jit_tail_local_head: u32::MAX,
+            jit_miss_gsite: u32::MAX,
             cur_native_gateway: 0,
             blocked_under_gateway: 0,
             jit_i64_overflow: false,
@@ -2807,7 +2822,13 @@ impl Heap {
             // work on it (Clojure-like). Order is the CHAMP's deterministic-per-shape
             // order, matching how `#{…}` prints.
             ValueRef::Set(id) => Ok(self.set_elems(id)),
-            _ => Err(LispError::type_err("expected a list or vector")),
+            // No `who` here — the primitive calling it is named by `call_native` — but the
+            // value is: "expected a list or vector" alone left you to find which argument.
+            _ => Err(LispError::type_err(format!(
+                "expected a list, vector or set, got {} ({})",
+                crate::core::value::tag(v).name(),
+                crate::syntax::printer::print(self, v)
+            ))),
         }
     }
 }

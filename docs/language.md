@@ -1907,6 +1907,24 @@ matches nothing — a `match` or `case` without a catch-all, a refutable `let`, 
 — kind `:match`, which also carries `:context` (`:match`, `:let`, `:fn`, …), `:value` and
 the `:patterns` tried:
 
+Calling a value that is not a function names what was called when the head is a local, and
+says so when that local shadows a root function — the reflex worth naming, since the local
+won and the function was never called. Every tier gives the same message:
+
+A value that is not a function, called from library code — `(fold [1 2] + 0)` hands `fold` a
+`0` where the reducer belongs — gets a hint about argument order (the collection first, the
+function last) rather than the `f(x)` one. A pattern function names itself when nothing
+matches, and a call no clause takes by count says so in arity terms:
+`pf: no clause accepts 2 argument(s) (arities: 1)`. An error a program's run raises inside the
+standard library is reported at the program's own call, naming the library function
+(`math/abs: <: expected number …`), with the library's line kept in the trace.
+
+```clojure
+(defn f (list) (list 1 2))
+(try (f [1]) (catch e (:message e)))   ;=> "cannot call non-function: `list` is [1]"
+(try (f [1]) (catch e (:hint e)))      ;=> "`list` here is a local binding, which shadows the function `list`. Rename the local to call the function (or write `/list`, which always means the root binding)."
+```
+
 ```clojure
 (try (match 3 (1 :one)) (catch e (:message e)))   ;=> "match: no clause matches 3 — tried 1"
 (try (match 3 (1 :one)) (catch e (:value e)))     ;=> 3
@@ -3936,6 +3954,18 @@ every call head in its quasiquote templates that names a root binding is written
 never captures what a prelude or library macro emits. Only call heads are escaped, and
 never one spelled like a binder of the same template; an argument naming a root function
 (`(map ~xs first)`) is written `/first` by hand.
+
+**`/name` is the root binding under any local, too.** A macro places code the CALLER wrote
+around code of its own — `match` binds your pattern variables around the walk that reads the
+rest of the list — so a local the caller named `rest` used to capture the walk's `rest`
+(`((x y & rest) op)` raised `cannot call non-function: nil`). The compile pass now renames any
+local binder that would capture a `/name` in its scope (the renamed local still reads as
+written in arglists and errors), so a pattern variable may be named `first`, `rest`, `get` or
+anything else, and `(let (first 5) (/first xs))` calls the root `first`. Code that never passes
+through the compile pass — a form a macro expanded lazily — reads `/name` from the global
+table directly, which no local can shadow either. The prelude's code builders (the pattern
+compiler, `for`, `receive`, `with`) write their root names `/name`, and
+`tests/prelude_capture_test.blsp` holds every prelude function that builds code to it.
 
 Import other namespaces' names with `(:use …)` clauses in the header. `(:use mod)`
 refers all of `mod`'s public names bare; `(:use mod :only [a b])` refers just

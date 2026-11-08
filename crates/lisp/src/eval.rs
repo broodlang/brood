@@ -333,7 +333,8 @@ fn apply_keyword(heap: &mut Heap, kw: Value, argv: &[Value]) -> LispResult {
             argv.len()
         ))
         .with_hint(format!(
-            "`({shown} coll)` is the value at {shown}, `({shown} coll default)`              substitutes `default` when it is absent."
+            "`({shown} coll)` is the value at {shown}, `({shown} coll default)` \
+             substitutes `default` when it is absent."
         )));
     }
     let default = argv.get(1).copied().unwrap_or(Value::nil());
@@ -356,7 +357,9 @@ fn apply_keyword(heap: &mut Heap, kw: Value, argv: &[Value]) -> LispResult {
                 "{shown}: expected a map, record, set or nil to look up in, got {tag} ({got})"
             ))
             .with_hint(format!(
-                "a keyword reads a KEY, so the argument has to be keyed. If that is a                  collection OF maps, you want one element of it (or `(map {shown} coll)`                  for all of them); for a nested key use `(map/get-in coll [{shown} …])`."
+                "a keyword reads a KEY, so the argument has to be keyed. If that is a \
+                 collection OF maps, you want one element of it (or `(map {shown} coll)` \
+                 for all of them); for a nested key use `(map/get-in coll [{shown} …])`."
             )))
         }
     }
@@ -370,7 +373,8 @@ fn apply_keyword(heap: &mut Heap, kw: Value, argv: &[Value]) -> LispResult {
 /// can't drift apart.
 pub(crate) fn not_a_function_error(heap: &Heap, v: Value) -> LispError {
     let shown = crate::syntax::printer::print(heap, v);
-    let err = LispError::type_err(format!("cannot call non-function: {}", shown));
+    let mut err = LispError::type_err(format!("cannot call non-function: {}", shown));
+    err.uncalled = Some(shown);
     match v.unpack() {
         // (A keyword never lands here — it is callable, ADR-165.)
         // `({:a 1} :a)` — Clojure's map-as-function.
@@ -396,6 +400,82 @@ pub(crate) fn not_a_function_error(heap: &Heap, v: Value) -> LispError {
             ),
         _ => err,
     }
+}
+
+/// Name the callee of a [`not_a_function_error`] whose call head is the LOCAL `head`:
+/// `cannot call non-function: \`rest\` is nil`. The value alone does not say which name
+/// held it — and a local spelled like a root function (`(fn (list) (list 1 2))`) is the
+/// reflex worth naming, so when the root binding of that name is callable, the hint says
+/// the local shadows it. Any other error passes through unchanged. Both engines call this
+/// (the tree-walker with its call form, the VM from the arm's `local_call_heads`), so the
+/// message cannot depend on the tier.
+pub(crate) fn name_local_callee(heap: &Heap, mut err: LispError, head: Symbol) -> LispError {
+    let Some(shown) = err.uncalled.take() else {
+        return err;
+    };
+    // A renamed binder (hygiene, an escape-capture rename) reads as written.
+    let name = value::source_symbol(head);
+    let spelled = value::symbol_name_ref(name);
+    err.message = format!("cannot call non-function: `{spelled}` is {shown}");
+    let shadows_function = matches!(
+        heap.env_get(EnvId::GLOBAL, name).map(|v| v.unpack()),
+        Some(ValueRef::Fn(_) | ValueRef::Native(_))
+    );
+    if shadows_function {
+        err.hint = Some(format!(
+            "`{spelled}` here is a local binding, which shadows the function `{spelled}`. \
+             Rename the local to call the function (or write `/{spelled}`, which always \
+             means the root binding)."
+        ));
+    }
+    err
+}
+
+/// The compiled engines' entry to [`name_local_callee`]: a call dispatched `callee` and
+/// raised `err`. Named only when `head` (the call's local head, if it has one) is known and
+/// `callee` ITSELF cannot be called — a callable local whose own callee failed inside it
+/// (`(h f xs)` with `h` = `map`, `f` = nil) raises the same message at the same call, and
+/// must not be blamed. Cold: an error path.
+#[cold]
+pub(crate) fn name_uncallable_local(
+    heap: &Heap,
+    err: LispError,
+    callee: Value,
+    head: Option<Symbol>,
+) -> LispError {
+    let callable = matches!(
+        callee.unpack(),
+        ValueRef::Fn(_) | ValueRef::Native(_) | ValueRef::Keyword(_)
+    );
+    match head {
+        _ if callable => err,
+        Some(POSITIONLESS_CALL) => from_library_code(err),
+        Some(head) => name_local_callee(heap, err, head),
+        None => err,
+    }
+}
+
+/// What a compiled call with no source position passes as its "local head": the call is in
+/// code nobody wrote by hand — the prelude's, generated code — so `cannot call non-function`
+/// there is about a value the CALLER handed in (see [`from_library_code`]). Not a symbol any
+/// interner hands out.
+pub(crate) const POSITIONLESS_CALL: Symbol = u32::MAX - 1;
+
+/// A `cannot call non-function` raised by a call in library code: `(fold [1 2] + 0)` calls
+/// `0` from inside `fold`, where "write (f x), not f(x)" — the hint for a value in head
+/// position of code you wrote — is wrong. What went wrong is the argument passed where a
+/// function was expected, and the usual reason is Brood's argument order. Every tier raises
+/// it through here, so the hint does not depend on which ran the library code.
+pub(crate) fn from_library_code(mut err: LispError) -> LispError {
+    if err.uncalled.take().is_some() {
+        err.hint = Some(
+            "a function was expected here, from a value you passed in: is a callback argument \
+             in the wrong position? Brood takes the collection first and the function last — \
+             `(map xs f)`, `(fold xs init f)`, `(reduce xs init f)`."
+                .to_string(),
+        );
+    }
+    err
 }
 
 /// How many tree-walker→VM re-entries may be live at once — see
@@ -699,8 +779,20 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
             name_rejected_argument(heap.native(id), argv, &mut error);
             Err(error)
         }
+        // A shared reader's type error names no primitive — `seq_items`' "expected a list,
+        // vector or set" reaches 47 of them — so it is named here, by the one being called.
+        Err(error) => Err(named_by(heap.native(id).name.as_str(), error)),
         result => result,
     }
+}
+
+/// Name `who` in a type error a shared reader raised without one (`expected a list, …`).
+/// Any other error passes through.
+pub(crate) fn named_by(who: &str, mut error: LispError) -> LispError {
+    if error.kind == crate::error::ErrorKind::Type && error.message.starts_with("expected ") {
+        error.message = format!("{who}: {}", error.message);
+    }
+    error
 }
 
 /// Say which argument a primitive's wrong-type error is about. The `expect_*` readers know

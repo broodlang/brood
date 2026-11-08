@@ -545,7 +545,7 @@ the item.
 (defmacro string/interp (template)
   "Build a string from a template, splicing each `{expr}` hole's value between the literal text: `(string/interp \"x={x} sum={(+ a b)}\")`. `{{`/`}}` are literal braces; braces nest inside a hole. Expands to a plain `(str …)`."
   (if (string? template)
-    (cons 'str (interp-lit (string/->list template) nil nil))
+    (cons '/str (interp-lit (string/->list template) nil nil))
     (error "string/interp: template must be a string literal, got " (pr-str template))))
 
 ;; ---- string formatting ------------------------------------------------------

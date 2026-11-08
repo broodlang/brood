@@ -49,6 +49,22 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         form_pos,
     );
     primitives.def(
+        "%stamp-form-pos",
+        Arity::exact(2),
+        Sig::new(vec![any, any], any),
+        &["code", "origin"],
+        "Locate generated `code` at the source form `origin`, and return `code`.\n\nA code generator calls it on a template it built for one piece of a user's form — the pattern compiler, for a list pattern's walk — so an error the template's code raises reports where that piece is written, not wherever the expander's fallback lands. Its unpositioned pairs take a position the way an expansion's do: from the user's own forms inside, else `origin`'s. Positions are metadata about forms; no value changes. A no-op when `origin` has no position.",
+        stamp_form_pos,
+    );
+    primitives.def(
+        "%copy-form-pos",
+        Arity::exact(2),
+        Sig::new(vec![any, any], any),
+        &["rebuilt", "original"],
+        "Give `rebuilt` the source position record of `original` — the list it is a rebuild of — and return `rebuilt`.\n\nA code rewriter that rebuilds a generated form (the pattern compiler's fail-splice) calls it so the rebuilt form answers \"where are you\" exactly as the original did; the expander does the same for every list it rebuilds. Positions are metadata about forms; no value changes. A no-op when `original` has no position.",
+        copy_form_pos,
+    );
+    primitives.def(
         "%current-file",
         Arity::exact(0),
         Sig::nullary(string.union(nil_ty)),
@@ -263,6 +279,22 @@ pub(super) fn form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResu
         Some(p) => Ok(heap.alloc_vector2(Value::int(p.line as i64), Value::int(p.col as i64))),
         None => Ok(Value::nil()),
     }
+}
+
+/// `(%stamp-form-pos code origin)` — see its registration.
+pub(super) fn stamp_form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let code = arg(args, 0);
+    if let Some((pos, file)) = heap.form_pos(arg(args, 1)) {
+        crate::eval::macros::stamp_synthetic(heap, code, pos, file);
+    }
+    Ok(code)
+}
+
+/// `(%copy-form-pos rebuilt original)` — see its registration.
+pub(super) fn copy_form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let rebuilt = arg(args, 0);
+    heap.copy_form_pos(arg(args, 1), rebuilt);
+    Ok(rebuilt)
 }
 
 /// `(current-file)` — the path of the file currently being `load`ed, or `nil`

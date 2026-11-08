@@ -146,6 +146,32 @@ fn deopt_on_non_int_operand_matches_vm() {
 }
 
 #[test]
+fn a_local_callee_is_named_after_tiering() {
+    // Native code calls a slot, which has no name: the lowering carries a local head's name
+    // to the slow call (non-tail) and leaves it for the tail-call dispatcher (tail), so a
+    // warmed arm reports `cannot call non-function` exactly as the VM does — the local named,
+    // and the root function it shadows. `pass` blames the failing callback, not `h` (= map).
+    is(
+        "(defn sum-with (list n acc)
+           (if (= n 0) acc (sum-with list (- n 1) (+ acc (* 2 (list n))))))
+         (defn walk (k n acc) (if (= n 0) (k acc) (walk k (- n 1) (+ acc (* n 3)))))
+         (defn pass (h f n acc) (if (= n 0) (h [1] f) (pass h f (- n 1) (+ acc n))))
+         (defn warm (i) (if (= i 0) :ok
+                          (do (sum-with inc 50 0) (walk inc 50 0) (pass map inc 50 0) (warm (- i 1)))))
+         (warm 20000)
+         (map [(fn () (sum-with 5 3 0)) (fn () (walk nil 3 0)) (fn () (pass map nil 3 0))]
+           (fn (thunk) (try (thunk) (catch e [(:message e) (:hint e)]))))",
+        "([\"cannot call non-function: `list` is 5\" \
+          \"`list` here is a local binding, which shadows the function `list`. Rename the local \
+          to call the function (or write `/list`, which always means the root binding).\"] \
+          [\"cannot call non-function: `k` is nil\" nil] \
+          [\"cannot call non-function: nil\" \"a function was expected here, from a value you \
+          passed in: is a callback argument in the wrong position? Brood takes the collection \
+          first and the function last — `(map xs f)`, `(fold xs init f)`, `(reduce xs init f)`.\"])",
+    );
+}
+
+#[test]
 fn redefining_a_sealed_operator_is_refused_after_tiering() {
     // Was `redefining_an_operator_after_tiering_is_honored`: it warmed `f` until the
     // JIT inlined `+` as a raw machine add, then redefined `+` to prove the epoch

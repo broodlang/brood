@@ -262,33 +262,37 @@ loop fn (so a clause tail-recurses with the next state); `from`/`rf`/`res` are t
 gensyms a `call`/`query` clause uses for the sender pid, reply ref, and the
 [reply state] tuple; `state-sym` is the closed-over state parameter (so `query`
 and `info` can tail-recurse with it unchanged)."
+  ;; the receive clause stands for the user's clause `c`, and is located there: an error the
+  ;; inner `receive`/`match` reports about it names the clause's line
   (let (kind (first c) pat (second c) body (rest (rest c)))
-    (cond
-      (= kind 'cast) `([:$cast ~pat] (~loop (do ~@body)))
-      ; body => next state
-      (= kind 'call)
-        `([:$call ~from ~rf ~pat] (let (~res (do ~@body))
-                                    (send ~from [:reply ~rf (nth ~res 0)])
-                                    (~loop (nth ~res 1))))
-      ; query — like call but the body is just the reply; state is untouched.
-      ; Removes the [x s] boilerplate from the common "read a field" case.
-      (= kind 'query)
-        `([:$call ~from ~rf ~pat] (send ~from [:reply ~rf (do ~@body)])
-           (~loop ~state-sym))
-      ; defer — a CALL the server will answer later. The body returns the next state
-      ; (like a cast) and binds `reply`, an opaque token, so the answer can be sent from
-      ; anywhere once it exists: a worker process, a later message, a timer. Without this
-      ; a `call` clause had to produce its reply synchronously, so a server could not hand
-      ; work off without blocking its own loop — the one gap that limited what could be
-      ; built rather than merely what was convenient. `~'reply` injects the literal symbol
-      ; (the `%defseq` escape hatch) so the body can name it.
-      (= kind 'defer) `([:$call ~from ~rf ~pat] (let (~'reply [~from ~rf]) (~loop (do ~@body))))
-      ; info — a raw message (no envelope): a monitor [:down …], a link [:EXIT …],
-      ; a timer tick, a plain send. Body => next state, like a cast.
-      (= kind 'info) `(~pat (~loop (do ~@body)))
-      else
-        (error "defserver: a message clause must start with `cast`, `call`, `query`, `defer`, or `info`, got "
-          (pr-str kind)))))
+    (%copy-form-pos
+      (cond
+        (= kind 'cast) `([:$cast ~pat] (~loop (do ~@body)))
+        ; body => next state
+        (= kind 'call)
+          `([:$call ~from ~rf ~pat] (let (~res (do ~@body))
+                                      (/send ~from [:reply ~rf (/nth ~res 0)])
+                                      (~loop (/nth ~res 1))))
+        ; query — like call but the body is just the reply; state is untouched.
+        ; Removes the [x s] boilerplate from the common "read a field" case.
+        (= kind 'query)
+          `([:$call ~from ~rf ~pat] (/send ~from [:reply ~rf (do ~@body)])
+             (~loop ~state-sym))
+        ; defer — a CALL the server will answer later. The body returns the next state
+        ; (like a cast) and binds `reply`, an opaque token, so the answer can be sent from
+        ; anywhere once it exists: a worker process, a later message, a timer. Without this
+        ; a `call` clause had to produce its reply synchronously, so a server could not hand
+        ; work off without blocking its own loop — the one gap that limited what could be
+        ; built rather than merely what was convenient. `~'reply` injects the literal symbol
+        ; (the `%defseq` escape hatch) so the body can name it.
+        (= kind 'defer) `([:$call ~from ~rf ~pat] (let (~'reply [~from ~rf]) (~loop (do ~@body))))
+        ; info — a raw message (no envelope): a monitor [:down …], a link [:EXIT …],
+        ; a timer tick, a plain send. Body => next state, like a cast.
+        (= kind 'info) `(~pat (~loop (do ~@body)))
+        else
+          (error "defserver: a message clause must start with `cast`, `call`, `query`, `defer`, or `info`, got "
+            (pr-str kind)))
+      c)))
 
 ;; `defserver`, not `defprocess`: it defines a **gen server** — clauses `cast`/`call`/
 ;; `query`/`info`, code speaking the gen envelope (`[:$call from ref …]`) — not a process.

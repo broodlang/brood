@@ -175,6 +175,9 @@ pub(super) fn check_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
     let root = heap.env_root(env);
     let _plain = crate::eval::macros::NoSourceRewrites::enter();
     let form = crate::eval::macros::macroexpand_all(heap, arg(args, 0), root)?;
+    // …and resolved, as the compile pass does: the expansion's `/name` root escapes are
+    // stripped, so the checker reads `(vector? x)` — the guard it narrows on — not `/vector?`.
+    let form = crate::eval::macros::resolve(heap, form);
     let warnings = crate::types::check::check_form(heap, form);
     let mut out = Vec::with_capacity(warnings.len());
     for w in &warnings {

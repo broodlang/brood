@@ -88,7 +88,7 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
      (receive
        ([:spawned got# child#] :when (= got# r#) child#)
        (after 5000
-         (throw "node/spawn-sync: no reply (is node/serve-spawns running on the peer?)")))))
+         (error "node/spawn-sync: no reply (is node/serve-spawns running on the peer?)")))))
 
 ;; ---- node identity: name-addressing + the shared cookie (ADR-068) ----------
 ;; A node is addressed by NAME on the local machine (a Unix-domain socket — no

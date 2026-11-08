@@ -220,6 +220,7 @@ pub(crate) fn compile_arm(
     let uid = next_arm_uid();
     let site_pos = std::mem::take(&mut scope.site_pos).into_boxed_slice();
     let staged_head_pos = std::mem::take(&mut scope.staged_head_pos).into_boxed_slice();
+    let local_call_heads = std::mem::take(&mut scope.local_call_heads).into_boxed_slice();
     let receive_at_head = chunk
         .as_ref()
         .is_some_and(|c| super::jit_plan::receive_at_head(&c.code));
@@ -310,6 +311,7 @@ pub(crate) fn compile_arm(
                                     uid,
                                     site_pos: site_pos.clone(),
                                     staged_head_pos: staged_head_pos.clone(),
+                                    local_call_heads: local_call_heads.clone(),
                                     body: d.body,
                                     chunk: Some(d.chunk),
                                     has_runtime_handles,
@@ -377,6 +379,7 @@ pub(crate) fn compile_arm(
         uid,
         site_pos,
         staged_head_pos,
+        local_call_heads,
         receive_at_head,
         body,
         chunk,

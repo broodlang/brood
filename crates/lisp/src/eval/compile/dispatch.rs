@@ -153,7 +153,10 @@ fn dispatch_once(
             } else {
                 list
             };
-            cur_argv.extend(heap.seq_items(list)?);
+            cur_argv.extend(
+                heap.seq_items(list)
+                    .map_err(|e| crate::eval::named_by("apply", e))?,
+            );
             cur_callee = real;
             continue 'apply;
         }
@@ -258,11 +261,16 @@ fn dispatch_once(
                             // the native's safepoints, so they are current-epoch — unlike
                             // `cur_argv`. The frame here is `push_frame`'s, which ALWAYS sizes
                             // to `arm.nslots` (KI-48: never re-derive it).
+                            let local = heap.take_jit_tail_local_head();
                             let (callee, args) = read_staged_tail(heap, &arm, base, arm.nslots);
                             let callee_env2 = heap.read_root_env(env_root);
                             heap.truncate_roots(base);
                             heap.truncate_env_roots(env_base);
-                            return Ok(Step::Done(apply_value(heap, callee, &args, callee_env2)?));
+                            return Ok(Step::Done(
+                                apply_value(heap, callee, &args, callee_env2).map_err(|e| {
+                                    crate::eval::name_uncallable_local(heap, e, callee, local)
+                                })?,
+                            ));
                         }
                         _ => {
                             crate::perf_bump!(jit_fast_deopt);

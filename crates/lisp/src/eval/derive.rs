@@ -567,6 +567,21 @@ pub(crate) fn module_of_resolved(s: Symbol) -> Option<Symbol> {
     Some(value::intern(&name[..last]))
 }
 
+/// The root binding a `/name` escape (ADR-236) names, read from the GLOBAL environment, or
+/// `None` when `sym` is not an escape or `name` is unbound. The compile pass strips an escape
+/// before code runs (renaming any local that would capture it); this is the escape's meaning
+/// for code that never passed through it — a form a macro expanded lazily, a pattern lowered
+/// at run time. No local can be named `/name`, so a lookup of one always misses its way here,
+/// and reading only the global table keeps it immune to any local `name`.
+pub(crate) fn root_escape_value(heap: &Heap, sym: Symbol) -> Option<Value> {
+    let spelling = value::symbol_name_ref(sym);
+    if spelling.len() < 2 || !spelling.starts_with('/') {
+        return None;
+    }
+    let name = value::intern_existing(&spelling[1..])?;
+    heap.env_get(EnvId::GLOBAL, name)
+}
+
 /// The global-lookup MISS path for every engine: a lookup of `sym` in `env` found nothing.
 /// A *requireable* name — one with a module prefix, after the same exclusions
 /// [`module_to_require`] applies — loads its module and is looked up again; only if it is
@@ -586,6 +601,9 @@ pub(crate) fn module_of_resolved(s: Symbol) -> Option<Symbol> {
 /// are [`ensure_required`]'s: a module that cannot be found, or a `still loading` cycle,
 /// falls through to the plain unbound error; an error inside a found module propagates.
 pub(crate) fn global_miss(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispResult {
+    if let Some(value) = root_escape_value(heap, sym) {
+        return Ok(value);
+    }
     // An UNCONTRACTED alias (ADR-383) with no binding: the arm was compiled while its
     // module's sibling held a contract shim, and the globals have since been rolled back
     // under it (an `%isolate` restore keeps the shared body cache). The public name is

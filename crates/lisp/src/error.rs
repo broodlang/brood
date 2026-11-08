@@ -23,6 +23,23 @@ pub(crate) fn display_path(path: &str) -> String {
     path.to_string()
 }
 
+/// Is `file` standard-library source — an embedded std module (`std/math.blsp`), or one
+/// read from this checkout's `std/`? What [`LispError::relocated_out_of_std`] moves an error
+/// out of.
+pub(crate) fn is_std_source(file: &str) -> bool {
+    file.starts_with("std/")
+        || Path::new(file).starts_with(concat!(env!("CARGO_MANIFEST_DIR"), "/../../std"))
+        || Path::new(file)
+            .canonicalize()
+            .ok()
+            .zip(
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../std"))
+                    .canonicalize()
+                    .ok(),
+            )
+            .is_some_and(|(file, std)| file.starts_with(std))
+}
+
 /// A 1-based source position (line and column), used for editor-parseable
 /// error reporting (see `docs/tooling.md`). Columns count characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -236,6 +253,12 @@ pub struct LispErrorData {
     /// type does not admit, and names it in the message: `string/->number: radix
     /// (argument 2) expected int, …`. `None` once named, and for every other error.
     pub rejected_tag: Option<crate::core::value::Tag>,
+    /// The printed value a call tried to invoke, while a `cannot call non-function` message
+    /// does not yet say WHAT was called. The engines raise it where only the value is known;
+    /// a call site that knows its head is a local (`eval::name_local_callee`) names it and,
+    /// when the local shadows a root function, says so. `None` once named, and for every
+    /// other error.
+    pub uncalled: Option<String>,
 }
 
 /// `LispError` is a thin newtype over a **boxed** [`LispErrorData`]. It's returned
@@ -356,8 +379,11 @@ pub mod error_codes {
     /// The codes a Brood-built error map may be raised with (`%raise`, `%contract-raise`):
     /// a catch binds such a map enriched with position and trace. A user `throw` carries
     /// no code, so a map a program throws itself comes back exactly as thrown.
+    /// `TYPE_MISMATCH` is here for the prelude's own argument checks (`seq`'s "expected a
+    /// collection"), which are the type error a Rust primitive would raise, written in Brood.
     pub fn raised_map_code(code: &str) -> Option<&'static str> {
         [
+            TYPE_MISMATCH,
             CONTRACT_VIOLATION,
             RAISED_ERROR,
             ASSERTION_FAILED,
@@ -381,6 +407,7 @@ impl LispError {
             code: None,
             hint: None,
             rejected_tag: None,
+            uncalled: None,
         }))
     }
 
@@ -398,6 +425,7 @@ impl LispError {
             code: None,
             hint: None,
             rejected_tag: None,
+            uncalled: None,
         }))
     }
 
@@ -546,6 +574,76 @@ impl LispError {
         self
     }
 
+    /// Re-locate an error a program's run raised INSIDE the standard library at the program's
+    /// own code. `std/math.blsp:167:7: <: expected number` names a line the reader never wrote
+    /// and an operator they never called; what they need is the call of theirs that led there,
+    /// and which library function it was. So, when the error's file is std source and not the
+    /// program itself:
+    /// - the headline position becomes the innermost trace frame in `program_file`, else
+    ///   `form_pos` — the top-level form that was running (a tail call keeps no caller);
+    /// - the message is prefixed with the library function the program called — the
+    ///   outermost std frame of the trace (`math/abs: <: expected number …`) — unless it
+    ///   already names it;
+    /// - the std raise site stays visible as the innermost trace line.
+    pub fn relocated_out_of_std(
+        mut self,
+        program_file: Option<&str>,
+        form_pos: Option<Pos>,
+    ) -> Self {
+        let Some(raised_in) = self.file.clone() else {
+            return self;
+        };
+        if !is_std_source(&raised_in) || program_file == Some(raised_in.as_str()) {
+            return self;
+        }
+        let in_program = |frame: &TraceFrame| {
+            frame.pos.is_some()
+                && frame
+                    .file
+                    .as_deref()
+                    .is_some_and(|f| Some(f) == program_file)
+        };
+        let user_site = self.trace.iter().find(|f| in_program(f)).map(|f| f.pos);
+        // The library function the program called: the frame its code entered (whose call
+        // site is in the program), else the outermost std frame the trace kept.
+        let entry = match self.trace.iter().find(|f| in_program(f)) {
+            Some(frame) => frame.name,
+            None => self
+                .trace
+                .iter()
+                .filter_map(|f| f.name)
+                .rfind(|name| !name.starts_with('%')),
+        };
+        let raised_at = self.pos;
+        self.pos = user_site.flatten().or(form_pos);
+        self.file = program_file.map(str::to_string);
+        if let Some(entry) = entry
+            && !self.message.starts_with(&format!("{entry}:"))
+        {
+            self.message = format!("{entry}: {}", self.message);
+        }
+        // The raise site, on the innermost frame — the library function it is in — when that
+        // frame has no call site of its own (a tail call), else as a frame of its own.
+        let site = (Some(std::sync::Arc::from(raised_in.as_str())), raised_at);
+        let shown = self
+            .trace
+            .iter()
+            .any(|f| f.pos == raised_at && f.file.as_deref() == Some(raised_in.as_str()));
+        match self.trace.first_mut() {
+            _ if shown => {}
+            Some(frame) if frame.pos.is_none() => (frame.file, frame.pos) = site,
+            _ => self.trace.insert(
+                0,
+                TraceFrame {
+                    name: None,
+                    file: site.0,
+                    pos: site.1,
+                },
+            ),
+        }
+        self
+    }
+
     /// A one-line GNU diagnostic: `[FILE:][LINE:COL: ]kind error: message`, the
     /// form editors parse (see `docs/tooling.md`). Falls back gracefully when
     /// the file or position is unknown (e.g. at the REPL). The file is shown as
@@ -613,6 +711,7 @@ impl LispError {
             code: None,
             hint: None,
             rejected_tag: None,
+            uncalled: None,
         }))
     }
 
@@ -715,6 +814,7 @@ impl LispError {
             code: None,
             hint: string_of(key("hint")),
             rejected_tag: None,
+            uncalled: None,
         })))
     }
 

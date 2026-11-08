@@ -82,9 +82,10 @@ plumbing for the `spawn` special forms."
       ;; running). Naming a process after a definition form is never meaningful, so
       ;; refuse it at expansion rather than run one process and look like a hundred.
       (if (and (pair? head) (contains? #{'def 'def- 'defn 'defn- 'defmacro} (first head)))
-        (throw "spawn: a definition form cannot be a process name. (spawn name expr) is the NAMED, idempotent form, so (spawn (defn f ...) (f ...)) registers every spawn under the same name and only the first one runs. Move the definition out of the spawn, or wrap the body in (do ...).")
+        (reflect/error-at head
+          "spawn: a definition form cannot be a process name. (spawn name expr) is the NAMED, idempotent form, so (spawn (defn f ...) (f ...)) registers every spawn under the same name and only the first one runs. Move the definition out of the spawn, or wrap the body in (do ...).")
         `(%spawn-named ~head ~(%spawn-body-thunk (first more))))
-      (throw "spawn: expected (spawn expr) or (spawn name expr)"))))
+      (error "spawn: expected (spawn expr) or (spawn name expr)"))))
 
 (defmacro spawn-link (expr)
   "Spawn a new green process running `expr` and `link` it to the caller **atomically**
@@ -217,7 +218,7 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
     (if (empty? vars)
       nil
       (cons (first vars)
-        (cons `(nth ~r ~i) (%receive-binds (rest vars) r (+ i 1)))))))
+        (cons `(/nth ~r ~i) (%receive-binds (rest vars) r (+ i 1)))))))
 
 ;; One clause's call-site code: rebind its pattern variables from the result vector,
 ;; then run its body.
@@ -238,7 +239,7 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
   (defn- %receive-dispatch (preps r)
     (if (empty? (rest preps))
       (%receive-body-code (first preps) r)
-      `(if (= (nth ~r 0) ~(nth (first preps) 2))
+      `(if (/= (/nth ~r 0) ~(nth (first preps) 2))
          ~(%receive-body-code (first preps) r)
          ~(%receive-dispatch (rest preps) r)))))
 

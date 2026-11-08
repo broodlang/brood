@@ -66,15 +66,19 @@
   (fn (who name)
     (if (%eq (type-of name) :symbol)
       nil
-      (throw (str who
-               ": the name must be a symbol, got "
-               (pr-str name)
-               (if (%eq (type-of name) :pair)
-                 " — that is a parameter list where the name belongs; the shape is "
-                 " — the shape is ")
-               "("
-               who
-               " NAME (params...) body...)")))))
+      ;; raised, located at the offending form — not a thrown string with no kind or place
+      (%raise {:kind :error
+               :code "E0090"
+               :at name
+               :message (str who
+                          ": the name must be a symbol, got "
+                          (pr-str name)
+                          (if (%eq (type-of name) :pair)
+                            " — that is a parameter list where the name belongs; the shape is "
+                            " — the shape is ")
+                          "("
+                          who
+                          " NAME (params...) body...)")}))))
 
 ;; `defn` itself: forwards everything after the name to `fn`, so it inherits
 ;; both single-clause — (defn f (x) ...) => (def f (fn (x) ...)) — and the
@@ -233,24 +237,55 @@ this by implementing the `Display` ability, which takes over this name below.
 ;; the value, rather than dying later in the caller under another name. Everything else (a
 ;; set, a string, a socket handle, a kind a later impl may cover) passes through. `throw` + `str` only — this is line
 ;; ~230 of the prelude and `error` lives in control.blsp.
-(defn- %seq-passthrough (coll t)
-  (if (if (%eq t :int)
+;; A scalar's type tag — what no collection walker can take.
+(defn- %scalar-tag? (t)
+  (if (%eq t :int)
+    true
+    (if (%eq t :float)
+      true
+      (if (%eq t :keyword)
         true
-        (if (%eq t :float)
+        (if (%eq t :symbol)
           true
-          (if (%eq t :keyword)
+          (if (%eq t :bool)
             true
-            (if (%eq t :symbol)
+            (if (%eq t :fn)
               true
-              (if (%eq t :bool)
+              (if (%eq t :native)
                 true
-                (if (%eq t :fn)
-                  true
-                  (if (%eq t :native)
-                    true
-                    (if (%eq t :macro) true (if (%eq t :ratio) true (%eq t :decimal))))))))))
-    (throw (str "seq: expected a collection, got " t " (" (pr-str coll) ")"))
-    coll))
+                (if (%eq t :macro) true (if (%eq t :ratio) true (%eq t :decimal)))))))))))
+
+;; `who: expected a collection, got …`, raised. A raised error map, not a thrown string: it
+;; carries a kind, a code and the position of the call that passed the scalar, so
+;; `(catch {:kind :type} …)` sees it. A function where the collection belongs is the
+;; argument-order reflex, and the hint says so.
+(defn- %not-a-collection (who coll t)
+  (%raise {:kind :type
+           :code "E0030"
+           :message (str who ": expected a collection, got " t " (" (pr-str coll) ")")
+           :hint (if (if (%eq t :fn) true (%eq t :native))
+                   "Brood takes the collection first and the function last: `(map xs f)`, `(fold xs init f)`, `(seq/filter xs pred)`."
+                   nil)}))
+
+(defn- %seq-passthrough (coll t) (if (%scalar-tag? t) (%not-a-collection "seq" coll t) coll))
+
+(defn %expect-collection (who coll)
+  "`coll`, when it is one — else raise `who: expected a collection` naming the public
+function `who` the caller called, rather than the helper deep inside it that met the scalar
+(`(sort 5)` once said `empty?: …`). Strings pass, as they do through `seq`.
+
+    (%expect-collection \"sort\" [3 1])   ;=> [3 1]"
+  (let (t (type-of coll)) (if (%scalar-tag? t) (%not-a-collection who coll t) coll)))
+
+;; The list a fold walks: `seq`'s view, except a string — which `seq` passes through, for
+;; `count` and `empty?`, but which has no elements to fold — is refused here, by name.
+(defn- %fold-source (coll)
+  (if (%eq (type-of coll) :string)
+    (%raise {:kind :type
+             :code "E0030"
+             :message (str "expected a sequence, got string (" (pr-str coll) ")")
+             :hint "a string is not a sequence: walk its characters with `(string/->list s)`, or what a reader calls characters with `(string/->graphemes s)`."})
+    (seq coll)))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 
@@ -324,7 +359,7 @@ this by implementing the `Display` ability, which takes over this name below.
         ;; `cond`/`second`.
         (let (parts (%seqview-parts coll))
           (fold (%vector-ref parts 0) acc ((%vector-ref parts 1) f)))
-        (%fold-loop f acc (seq coll))))))
+        (%fold-loop f acc (%fold-source coll))))))
 (defn- %fold-loop (f acc coll)
   ;; ADR-315: a fold STOPS once the accumulator is a failure. Neither `with` nor `ok->`
   ;; can reach this case — the accumulator is threaded by the combinator, not by the
@@ -425,7 +460,7 @@ fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own co
 
 With no start, an empty collection has no value to give and raises (ADR-521): a `nil`
 there was a result nobody asked for."
-  ((coll f) (let (s (seq coll))
+  ((coll f) (let (s (%fold-source coll))
               (if (empty? s)
                 (error "reduce: an empty collection and no start value, so there is nothing to "
                   "return — give one: (reduce coll start f)")
@@ -721,10 +756,13 @@ self-call decreases an argument, and no `match` in the body can fail).
         nil
         (if (%eq (type-of type) :symbol)
           nil
-          (throw (str "sig "
-                   name
-                   ": expected a type like (int -> int) or a type name, got "
-                   (pr-str type)))))
+          (%raise {:kind :error
+                   :code "E0090"
+                   :at type
+                   :message (str "sig "
+                              name
+                              ": expected a type like (int -> int) or a type name, got "
+                              (pr-str type))})))
       nil)
     `(do
        ~(if typed `(%register-sig '~name '~type) nil)

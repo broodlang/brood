@@ -138,5 +138,5 @@ are ordinary `def`s (hot-reloadable); each calls the export inline — wrap with
     (fn (e)
       (let (name (str (first e))
             symbol (string/->symbol (native-name name)))
-        (reflect/eval (list 'defn symbol '(& args) (list '%wasm-call inst name '(into [] args))))
+        (reflect/eval (list 'defn symbol '(& args) (list '%wasm-call inst name '(/into [] args))))
         symbol))))

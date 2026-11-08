@@ -350,7 +350,10 @@ pub(crate) fn jit_dispatch_call(
                 Some((v, _)) => v,
                 None => {
                     let cenv = heap.read_root_env(heap.jit_call_env);
-                    match heap.env_get(cenv, head) {
+                    match heap
+                        .env_get(cenv, head)
+                        .or_else(|| crate::eval::derive::root_escape_value(heap, head))
+                    {
                         Some(v) => v,
                         None => {
                             heap.jit_pending_error = Some(crate::eval::unbound_error(heap, head));
@@ -392,22 +395,24 @@ pub(crate) fn jit_dispatch_call(
     });
     let result = match direct_arm {
         Some((arm, cenv)) => vm_apply(heap, arm, &argv, cenv),
-        None => match dispatch(
-            heap,
-            callee.expect("resolved whenever no arm was ready"),
-            argv,
-            false,
-            env,
-        ) {
-            Ok(Step::Done(v)) => Ok(v),
-            Ok(Step::Tail {
-                compiled,
-                args,
-                genv,
-                bases: _,
-            }) => vm_apply(heap, compiled, &args, genv),
-            Err(e) => Err(e),
-        },
+        None => {
+            let callee = callee.expect("resolved whenever no arm was ready");
+            match dispatch(heap, callee, argv, false, env) {
+                Ok(Step::Done(v)) => Ok(v),
+                Ok(Step::Tail {
+                    compiled,
+                    args,
+                    genv,
+                    bases: _,
+                }) => vm_apply(heap, compiled, &args, genv),
+                // A computed head's `head` slot carries its local's name, if it is one
+                // (`emit_call`'s `slow_head`).
+                Err(e) => {
+                    let local = (!elided && head != u32::MAX).then_some(head);
+                    Err(crate::eval::name_uncallable_local(heap, e, callee, local))
+                }
+            }
+        }
     };
     if let Some(prev) = saved_force {
         heap.jit_force_vm = prev;
@@ -525,12 +530,14 @@ pub(crate) fn jit_dispatch_tail(
 ) -> Result<ChunkExit, LispError> {
     let (callee, argv) = read_staged_tail(heap, arm, base, frame_nslots);
     let env_id = heap.read_root_env(env);
+    let local = heap.take_jit_tail_local_head();
     // `dispatch(.., tail = true, ..)` resolves a VM-closure callee to a `Step::Tail`
     // **without running it** (no native recursion) and runs a native/tree-walked callee
     // to a `Step::Done`. An error (incl. a control/suspend from a directly tail-called
     // suspending native — unreachable from surface `receive`, whose match closure puts
     // the arm out of subset) propagates; `vm_run_bc` unwinds the staged operands.
-    let step = dispatch(heap, callee, argv, true, env_id)?;
+    let step = dispatch(heap, callee, argv, true, env_id)
+        .map_err(|e| crate::eval::name_uncallable_local(heap, e, callee, local))?;
     // Success: drop the staged operands. The driver next truncates to `base` and rebuilds
     // the frame for the callee (reuse), so leaving them would be harmless — but truncating
     // keeps the root stack tight if the callee turned out native (`Done`).

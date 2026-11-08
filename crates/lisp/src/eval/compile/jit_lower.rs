@@ -885,7 +885,7 @@ fn jit_lower_arm_inner(
                     site,
                     head,
                     staged,
-                    pos: _,
+                    pos,
                 } => {
                     // KI-19: a staged head is already on the operand stack, resolved before
                     // the args. The JIT must consume it and call *that* value — re-resolving
@@ -912,6 +912,10 @@ fn jit_lower_arm_inner(
                         *tail,
                         *site,
                         *head,
+                        match pos {
+                            Some(p) => arm.local_call_head(*p),
+                            None => Some(crate::eval::POSITIONLESS_CALL),
+                        },
                         head_gsite,
                         spill_base,
                         reserve,

@@ -93,6 +93,23 @@ impl Heap {
         EnvId::local_gen(idx, self.local_epoch)
     }
 
+    /// Is `sym` bound in a LEXICAL frame of `env`'s chain — a local, not a global? Cold:
+    /// an error path names a local callee with it.
+    pub(crate) fn is_lexically_bound(&self, env: EnvId, sym: Symbol) -> bool {
+        let mut cur = Some(env);
+        while let Some(e) = cur {
+            if e == EnvId::GLOBAL {
+                return false;
+            }
+            let frame = self.env_frame(e);
+            if frame.vars.iter().any(|&(s, _)| s == sym) {
+                return true;
+            }
+            cur = frame.parent;
+        }
+        false
+    }
+
     pub fn env_get(&self, env: EnvId, sym: Symbol) -> Option<Value> {
         crate::perf_bump!(env_get);
         let mut cur = Some(env);

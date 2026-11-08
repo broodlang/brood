@@ -497,7 +497,15 @@ fn expand_qq_rec(heap: &mut Heap, form: Value, depth: u32) -> (Value, bool) {
             return match expand_quasiquote(heap, template) {
                 // Recurse into the builder code so a quasiquote in an unquoted
                 // sub-form is expanded too; on expander error keep the runtime form.
-                Ok(builder) => (expand_qq_rec(heap, builder, depth + 1).0, true),
+                // The builder is located at the backquote it replaces, so an error in
+                // it — a bad `~@` splice — reports there, not at the enclosing call.
+                Ok(builder) => {
+                    let builder = expand_qq_rec(heap, builder, depth + 1).0;
+                    if let Some((pos, file)) = heap.form_pos(form) {
+                        super::stamp_synthetic(heap, builder, pos, file);
+                    }
+                    (builder, true)
+                }
                 Err(_) => (form, false),
             };
         }
@@ -510,7 +518,9 @@ fn expand_qq_rec(heap: &mut Heap, form: Value, depth: u32) -> (Value, bool) {
         out.push(e);
     }
     if changed {
-        (heap.list(out), true)
+        // Runs after the expander's stamp, so a plain rebuild would leave every enclosing
+        // form — up to the top-level `def` — without its position.
+        (rebuild_list(heap, form, out), true)
     } else {
         (form, false)
     }
@@ -673,6 +683,9 @@ fn defines_by_convention(hn: &str) -> bool {
 
 /// Resolve `form` against `heap.compile_ns`. Identity when at root.
 pub fn resolve(heap: &mut Heap, form: Value) -> Value {
+    // Before anything strips a `/name` to a bare name: rename the locals that would
+    // capture it, so the escape reaches the root binding under any local.
+    let form = rename_escape_captures(heap, form);
     let ns = match heap.compile_ns() {
         Some(ns) => ns,
         // At ROOT there is no namespace to qualify against, but the `/name` root escape
@@ -1047,64 +1060,90 @@ pub(super) fn is_root_escape(s: value::Symbol) -> bool {
     name.len() > 1 && name.starts_with('/')
 }
 
-/// A `quote`/`quasiquote` subtree is DATA, not code to resolve — the same rule the main
-/// resolver follows. It is load-bearing here rather than merely consistent: the prelude is
-/// itself root code, so a `defrecord`/`for` template containing `/get` passes through this
-/// pass at *definition* time. Stripping the escape there would hand the expansion a bare
-/// `get` and reinstate exactly the capture the escape exists to prevent — which it did, for
-/// one build. The escape must survive in the template and be stripped when the EXPANSION is
-/// resolved, at the call site.
-fn skips_as_data(heap: &Heap, form: Value) -> bool {
-    matches!(form.unpack(), ValueRef::Pair(_))
-        && heap
-            .list_or_vector_items(form)
-            .and_then(|items| items.first().map(|h| h.unpack()))
-            .map(|h| match h {
-                ValueRef::Sym(s) => {
-                    value::symbol_is(s, kw::QUOTE) || value::symbol_is(s, kw::QUASIQUOTE)
-                }
-                _ => false,
-            })
-            .unwrap_or(false)
-}
+// Only CODE is rewritten — quasiquote `level` 0. A `quote` is data, and so is a template,
+// the same rule the main resolver follows. That is load-bearing here rather than merely
+// consistent: the prelude is itself root code, so a `defrecord`/`for` template containing
+// `/get` passes through this pass at *definition* time. Stripping the escape there would hand
+// the expansion a bare `get` and reinstate exactly the capture the escape exists to prevent —
+// which it did, for one build. The escape must survive in the template and be stripped when
+// the EXPANSION is resolved, at the call site. A `~` hole back to level 0 is code again (a
+// macro's own computation, or a value spliced into a template built at run time) and is
+// stripped like any other code.
 
 fn has_root_escape(heap: &Heap, form: Value) -> bool {
-    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
-        if skips_as_data(heap, form) {
-            return false;
-        }
-        match form.unpack() {
-            ValueRef::Sym(s) => is_root_escape(s),
-            ValueRef::Pair(_) | ValueRef::Vector(_) => heap
-                .list_or_vector_items(form)
-                .map(|items| items.iter().any(|v| has_root_escape(heap, *v)))
-                .unwrap_or(false),
-            _ => false,
-        }
+    has_root_escape_at(heap, form, 0)
+}
+
+fn has_root_escape_at(heap: &Heap, form: Value, level: u32) -> bool {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || match form.unpack() {
+        ValueRef::Sym(s) => level == 0 && is_root_escape(s),
+        ValueRef::Pair(_) => match heap.list_items(form) {
+            Some(items) => match nesting(&items, level) {
+                Nesting::Data => false,
+                Nesting::Enter(inner) => has_root_escape_at(heap, items[1], inner),
+                Nesting::Same => items.iter().any(|&v| has_root_escape_at(heap, v, level)),
+            },
+            None => false,
+        },
+        ValueRef::Vector(_) | ValueRef::Map(_) | ValueRef::Set(_) => elements(heap, form)
+            .into_iter()
+            .any(|v| has_root_escape_at(heap, v, level)),
+        _ => false,
     })
 }
 
 fn rewrite_root_escapes(heap: &mut Heap, form: Value) -> Value {
-    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
-        if skips_as_data(heap, form) {
-            return form;
+    rewrite_root_escapes_at(heap, form, 0)
+}
+
+fn rewrite_root_escapes_at(heap: &mut Heap, form: Value, level: u32) -> Value {
+    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || match form.unpack() {
+        ValueRef::Sym(s) if level == 0 && is_root_escape(s) => {
+            Value::symbol(value::intern(&value::symbol_name(s)[1..]))
         }
-        match form.unpack() {
-            ValueRef::Sym(s) if is_root_escape(s) => {
-                Value::symbol(value::intern(&value::symbol_name(s)[1..]))
-            }
-            ValueRef::Pair(_) | ValueRef::Vector(_) => match heap.list_or_vector_items(form) {
-                Some(items) => {
-                    let out: Vec<Value> = items
-                        .into_iter()
-                        .map(|v| rewrite_root_escapes(heap, v))
-                        .collect();
-                    rebuild_seq_like(heap, form, out)
+        ValueRef::Pair(_) => {
+            let Some(items) = heap.list_items(form) else {
+                return form;
+            };
+            let out: Vec<Value> = match nesting(&items, level) {
+                Nesting::Data => return form,
+                Nesting::Enter(inner) => {
+                    vec![items[0], rewrite_root_escapes_at(heap, items[1], inner)]
                 }
-                None => form,
-            },
-            _ => form,
+                Nesting::Same => items
+                    .into_iter()
+                    .map(|v| rewrite_root_escapes_at(heap, v, level))
+                    .collect(),
+            };
+            rebuild_seq_like(heap, form, out)
         }
+        ValueRef::Vector(id) => {
+            let items = heap.vector(id).to_vec();
+            let out = items
+                .into_iter()
+                .map(|v| rewrite_root_escapes_at(heap, v, level))
+                .collect();
+            heap.alloc_vector(out)
+        }
+        ValueRef::Map(id) => {
+            let entries = heap.map_entries(id);
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (key, val) in entries {
+                let key = rewrite_root_escapes_at(heap, key, level);
+                let val = rewrite_root_escapes_at(heap, val, level);
+                pairs.push((key, val));
+            }
+            heap.map_from_pairs(pairs)
+        }
+        ValueRef::Set(id) => {
+            let items = heap.set_elems(id);
+            let out = items
+                .into_iter()
+                .map(|v| rewrite_root_escapes_at(heap, v, level))
+                .collect();
+            heap.set_from_elems(out)
+        }
+        _ => form,
     })
 }
 
@@ -1197,7 +1236,7 @@ fn resolve_walk_inner(
     match form.unpack() {
         // Inside a template a `/name` is the root escape the EXPANSION needs, resolved at the
         // call site — stripping it here, at definition, would hand every caller a bare name
-        // to capture (ADR-423; the root half is `skips_as_data`).
+        // to capture (ADR-423; the root half is `rewrite_root_escapes_at`'s levels).
         ValueRef::Sym(s) if is_root_escape(s) && TemplateDepth::inside() => form,
         ValueRef::Sym(s) => Value::symbol(resolve_sym(heap, s, ns_name, locals)),
         ValueRef::Pair(_) => resolve_list(heap, form, ns_name, locals),
@@ -1294,7 +1333,8 @@ fn resolve_list(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Sy
         if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LETREC) {
             return resolve_let(heap, form, &items, ns_name, locals);
         }
-        if value::symbol_is(h, kw::MATCH_STAR) {
+        // `/match*` is the form the pattern lowerings emit (ADR-638)
+        if value::symbol_is(h, kw::MATCH_STAR) || value::symbol_is(h, "/match*") {
             return resolve_match(heap, form, &items, ns_name, locals);
         }
     }

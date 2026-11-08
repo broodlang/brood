@@ -15,6 +15,24 @@ pub(crate) fn tag_pos(e: LispError, pos: Option<Pos>) -> LispError {
     }
 }
 
+/// The call at `pos` dispatched `callee` and raised `e`: name the call's local head, if it
+/// has one (`eval::name_uncallable_local`), as the tree-walker does from its call form. Asked
+/// at the dispatch, where the failing value is known to be this call's callee.
+#[cold]
+fn name_vm_local_callee(
+    heap: &Heap,
+    e: LispError,
+    arm: &CompiledArm,
+    callee: Value,
+    pos: Option<Pos>,
+) -> LispError {
+    let head = match pos {
+        Some(p) => arm.local_call_head(p),
+        None => Some(crate::eval::POSITIONLESS_CALL),
+    };
+    crate::eval::name_uncallable_local(heap, e, callee, head)
+}
+
 /// The call position of a staged head read at global-read `site`, or `None` for a read that
 /// is not one (see `CompiledArm::staged_head_pos`). Cold: an unbound operator's error path.
 #[cold]
@@ -1186,6 +1204,7 @@ pub(crate) fn exec_chunk(
                                 // this call's frame push (the frame the native callee
                                 // would have reused — same depth, same base); a native
                                 // or tree-walked callee ran to `Done`, as it would there.
+                                let local = heap.take_jit_tail_local_head();
                                 let n2 = heap.roots_len();
                                 let tail_callee = heap.root_at(top);
                                 let mut tail_argv: SmallVec<[Value; 4]> =
@@ -1204,7 +1223,15 @@ pub(crate) fn exec_chunk(
                                             debug_assert!(e.is_kill_signal());
                                             return Err(e);
                                         }
-                                        Err(e) => return Err(tag_pos(e, pos)),
+                                        Err(e) => {
+                                            let e = crate::eval::name_uncallable_local(
+                                                heap,
+                                                e,
+                                                tail_callee,
+                                                local,
+                                            );
+                                            return Err(tag_pos(e, pos));
+                                        }
                                     };
                                 heap.truncate_roots(drop_base);
                                 match step {
@@ -1359,7 +1386,10 @@ pub(crate) fn exec_chunk(
                             };
                             return Ok(ChunkExit::Suspend { deadline });
                         }
-                        Err(e) => return Err(tag_pos(e, pos)),
+                        Err(e) => {
+                            let e = name_vm_local_callee(heap, e, arm, callee, pos);
+                            return Err(tag_pos(e, pos));
+                        }
                     },
                 };
                 if *tail {

@@ -261,24 +261,24 @@ NON-LINEAR patterns (the same name twice) work.
         (cond
           ;; (_ :u32) — skip the segment's width
           (%match-wildcard? s)
-            `(if (<= (+ ~off ~w) (%byte-length ~target))
-               (let (~noff (+ ~off ~w))
+            `(if (/<= (/+ ~off ~w) (%byte-length ~target))
+               (let (~noff (/+ ~off ~w))
                  ~(%match-bytes-segs more target noff bound success fail))
                ~fail)
           ;; non-linear: an already-bound binder requires an equal value
           (%match-member? s bound)
-            `(if (and (<= (+ ~off ~w) (%byte-length ~target)) (%eq (~reader ~target ~off ~w) ~s))
-               (let (~noff (+ ~off ~w))
+            `(if (and (/<= (/+ ~off ~w) (%byte-length ~target)) (%eq (~reader ~target ~off ~w) ~s))
+               (let (~noff (/+ ~off ~w))
                  ~(%match-bytes-segs more target noff bound success fail))
                ~fail)
           else
-            `(if (<= (+ ~off ~w) (%byte-length ~target))
-               (let (~s (~reader ~target ~off ~w) ~noff (+ ~off ~w))
+            `(if (/<= (/+ ~off ~w) (%byte-length ~target))
+               (let (~s (~reader ~target ~off ~w) ~noff (/+ ~off ~w))
                  ~(%match-bytes-segs more target noff (append bound (list s)) success fail))
                ~fail))))))
 
 (defn- %match-compile-bytes (segs target bound success fail)
-  `(if (bytes? ~target)
+  `(if (/bytes? ~target)
      ~(%match-bytes-segs segs target 0 bound success fail)
      ~fail))
 
@@ -304,11 +304,11 @@ NON-LINEAR patterns (the same name twice) work.
       (pair? seg)
         (let (s (first seg) szv (reflect/gensym "sz"))
           `(let (~szv ~(second seg))
-             (if (and (>= ~szv 0) (<= (+ ~off ~szv) (%byte-length ~target)))
+             (if (and (/>= ~szv 0) (/<= (/+ ~off ~szv) (%byte-length ~target)))
                (let (~@(if (%match-wildcard? s)
                          []
-                         (list s `(%subbytes ~target ~off (+ ~off ~szv)))) ~noff
-                     (+ ~off ~szv))
+                         (list s `(%subbytes ~target ~off (/+ ~off ~szv)))) ~noff
+                     (/+ ~off ~szv))
                  ~(%match-bytes-segs more
                     target
                     noff
@@ -318,20 +318,20 @@ NON-LINEAR patterns (the same name twice) work.
                ~fail)))
       ;; _ — skip one byte
       (%match-wildcard? seg)
-        `(if (< ~off (%byte-length ~target))
-           (let (~noff (+ ~off 1))
+        `(if (/< ~off (%byte-length ~target))
+           (let (~noff (/+ ~off 1))
              ~(%match-bytes-segs more target noff bound success fail))
            ~fail)
       ;; symbol — bind one byte as an int (or, if already bound, require equality —
       ;; non-linear patterns, consistent with the vector/list matchers)
       (%match-bind-sym? seg)
         (if (%match-member? seg bound)
-          `(if (and (< ~off (%byte-length ~target)) (%eq (%byte-at ~target ~off) ~seg))
-             (let (~noff (+ ~off 1))
+          `(if (and (/< ~off (%byte-length ~target)) (%eq (%byte-at ~target ~off) ~seg))
+             (let (~noff (/+ ~off 1))
                ~(%match-bytes-segs more target noff bound success fail))
              ~fail)
-          `(if (< ~off (%byte-length ~target))
-             (let (~seg (%byte-at ~target ~off) ~noff (+ ~off 1))
+          `(if (/< ~off (%byte-length ~target))
+             (let (~seg (%byte-at ~target ~off) ~noff (/+ ~off 1))
                ~(%match-bytes-segs more
                   target
                   noff
@@ -342,15 +342,15 @@ NON-LINEAR patterns (the same name twice) work.
       ;; #b"…" literal — match those exact bytes (count known at expand time)
       (bytes? seg)
         (let (n (%byte-length seg))
-          `(if (and (<= (+ ~off ~n) (%byte-length ~target))
-                 (%eq (%subbytes ~target ~off (+ ~off ~n)) ~seg))
-             (let (~noff (+ ~off ~n))
+          `(if (and (/<= (/+ ~off ~n) (%byte-length ~target))
+                 (%eq (%subbytes ~target ~off (/+ ~off ~n)) ~seg))
+             (let (~noff (/+ ~off ~n))
                ~(%match-bytes-segs more target noff bound success fail))
              ~fail))
       ;; int literal — match one exact byte
       (int? seg)
-        `(if (and (< ~off (%byte-length ~target)) (%eq (%byte-at ~target ~off) ~seg))
-           (let (~noff (+ ~off 1)) ~(%match-bytes-segs more target noff bound success fail))
+        `(if (and (/< ~off (%byte-length ~target)) (%eq (%byte-at ~target ~off) ~seg))
+           (let (~noff (/+ ~off 1)) ~(%match-bytes-segs more target noff bound success fail))
            ~fail)
       else (error (str "match: invalid bytes-pattern segment " (pr-str seg))))))
 
@@ -391,7 +391,8 @@ NON-LINEAR patterns (the same name twice) work.
 (defn- %match-compile-list (pat target bound success fail)
   ;; plain `nth`, not a destructuring `let`: that lowers to the `match*` this file defines
   (let (parts (%match-split pat))
-    (%match-compile-seq (nth parts 0)
+    (%match-compile-seq pat
+      (nth parts 0)
       (nth parts 1)
       (nth parts 2)
       (nth parts 3)
@@ -437,53 +438,61 @@ NON-LINEAR patterns (the same name twice) work.
           fail)
         fail))))
 
+;; The walk is located at the list pattern it walks, `origin`: each level stamps its code
+;; before handing it on, so an element's own pattern (compiled around the rest of the walk)
+;; finds that code already located and leaves it. An error the walk raises then reports the
+;; pattern the user wrote, not whatever user form the expander finds nearest.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-compile-seq (pats optionals rest-pat has-rest target bound success fail)
-    (cond
-      (not (empty? pats))
-        (let (p (first pats)
-              hd (reflect/gensym "hd")
-              tl (reflect/gensym "tl")
-              inner (%match-compile-seq (rest pats)
-                      optionals
-                      rest-pat
-                      has-rest
-                      tl
-                      (append bound (%pattern-vars p))
-                      success
-                      fail)
-              head (%match-compile p hd bound inner fail))
-          `(if (pair? ~target) (let (~hd (first ~target) ~tl (rest ~target)) ~head) ~fail))
-      ;; an optional element: the next one if there is one, else the slot's default —
-      ;; computed once as a value rather than by duplicating `success` per branch
-      (not (empty? optionals))
-        (let (p (nth (first optionals) 0)
-              default (nth (first optionals) 1)
-              hd (reflect/gensym "opt")
-              tl (reflect/gensym "tl")
-              inner (%match-compile-seq nil
-                      (rest optionals)
-                      rest-pat
-                      has-rest
-                      tl
-                      (append bound (%pattern-vars p))
-                      success
-                      fail))
-          `(let (~hd (if (pair? ~target) (first ~target) ~default)
-                 ~tl (if (pair? ~target) (rest ~target) nil))
-             ~(%match-compile p hd bound inner fail)))
-      ; bind the rest to what remains
-      has-rest (%match-compile rest-pat target bound success fail)
-      ; require the list exhausted
-      else `(if (nil? ~target) ~success ~fail))))
+  (defn- %match-compile-seq (origin pats optionals rest-pat has-rest target bound success fail)
+    (%stamp-form-pos
+      (cond
+        (not (empty? pats))
+          (let (p (first pats)
+                hd (reflect/gensym "hd")
+                tl (reflect/gensym "tl")
+                inner (%match-compile-seq origin
+                        (rest pats)
+                        optionals
+                        rest-pat
+                        has-rest
+                        tl
+                        (append bound (%pattern-vars p))
+                        success
+                        fail)
+                head (%match-compile p hd bound inner fail))
+            `(if (/pair? ~target) (let (~hd (/first ~target) ~tl (/rest ~target)) ~head) ~fail))
+        ;; an optional element: the next one if there is one, else the slot's default —
+        ;; computed once as a value rather than by duplicating `success` per branch
+        (not (empty? optionals))
+          (let (p (nth (first optionals) 0)
+                default (nth (first optionals) 1)
+                hd (reflect/gensym "opt")
+                tl (reflect/gensym "tl")
+                inner (%match-compile-seq origin
+                        nil
+                        (rest optionals)
+                        rest-pat
+                        has-rest
+                        tl
+                        (append bound (%pattern-vars p))
+                        success
+                        fail))
+            `(let (~hd (if (/pair? ~target) (/first ~target) ~default)
+                   ~tl (if (/pair? ~target) (/rest ~target) nil))
+               ~(%match-compile p hd bound inner fail)))
+        ; bind the rest to what remains
+        has-rest (%match-compile rest-pat target bound success fail)
+        ; require the list exhausted
+        else `(if (/nil? ~target) ~success ~fail))
+      origin)))
 
 ;; vector pattern: a fixed-length tuple, matched element-wise by index.
 (defn- %match-compile-vector (pat target bound success fail)
   (let (elems (%match-vec->list pat) n (count elems))
     (when (%match-member? '& elems)
       (error "match: '&' (rest) is not allowed in a vector pattern — vectors are fixed-length"))
-    `(if (and (vector? ~target) (%eq (%vector-length ~target) ~n))
+    `(if (and (/vector? ~target) (%eq (%vector-length ~target) ~n))
        ~(%match-compile-velems elems target 0 bound success fail)
        ~fail)))
 
@@ -572,8 +581,8 @@ NON-LINEAR patterns (the same name twice) work.
             k (first kv)
             sub (second kv)
             v (reflect/gensym "mval"))
-        `(if (contains? ~target (quote ~k))
-           (let (~v (get ~target (quote ~k)))
+        `(if (/contains? ~target (quote ~k))
+           (let (~v (/get ~target (quote ~k)))
              ~(%match-compile sub
                 v
                 bound
@@ -598,8 +607,8 @@ NON-LINEAR patterns (the same name twice) work.
             ;; nil stays nil — which is the `:or` contract in one lookup, and the shape the
             ;; checker reads exactly (an `(if (contains? …) …)` around it typed `40 | nil`).
             getter (if (and ors (contains? ors k))
-                     `(get ~target ~kw ~(get ors k))
-                     `(get ~target ~kw)))
+                     `(/get ~target ~kw ~(get ors k))
+                     `(/get ~target ~kw)))
         `(let (~k ~getter) ~(%match-map-binds (rest keys) ors target success))))))
 
 ;; `(record name {map-pattern}?)` — assert the target is a `defrecord` value of nominal id
@@ -621,7 +630,7 @@ NON-LINEAR patterns (the same name twice) work.
                " pattern like {:field p} or {:keys [f]}, got "
                (pr-str mappat))))
     (let (id (%ability-id-kw name))
-      `(if (%eq (record-id ~target) ~id)
+      `(if (%eq (/record-id ~target) ~id)
          ~(if mappat (%match-compile mappat target bound success fail) success)
          ~fail))))
 
@@ -694,6 +703,42 @@ NON-LINEAR patterns (the same name twice) work.
 ;; The no-match failure: an error map (ADR-501) carrying the context (:match / :case / :let / a
 ;; fn name), the value, and the patterns tried. The lowered form is `(%raise (%match-error …))`,
 ;; whose arguments sit where the checker looks for them (`guards::match_coverage`).
+;; `[min max]` arguments a list pattern takes (`max` nil with a `&` rest), or nil for a
+;; pattern that takes any list (a bare binder, `_`).
+(defn- %match-arity-range (pat)
+  (if (and (pair? pat) (not (= (first pat) 'quote)))
+    (let (parts (%match-split pat) required (count (nth parts 0)))
+      [required (if (nth parts 3) nil (+ required (count (nth parts 1))))])
+    nil))
+
+(defn- %match-arity-text (range)
+  (let (low (nth range 0) high (nth range 1))
+    (cond
+      (nil? high) (str low "+")
+      (= low high) (str low)
+      else (str low "-" high))))
+
+;; A pattern FUNCTION's no-match that is about the argument COUNT — no clause takes as many
+;; as were passed — said as that, in the words an arity-only multi-clause function uses
+;; (`eval::arity_error_for`): `pf: no clause accepts 2 argument(s) (arities: 1)`, not
+;; `fn: no clause matches (1 2) — tried (0), (n)`, which reads as a pattern problem.
+(defn- %match-arity-message (context target patterns)
+  (when (and (or (symbol? context) (= context :fn)) (list? target))
+    (let (ranges (map patterns %match-arity-range) n (count target))
+      (when (and (not (empty? ranges))
+              (every? ranges (fn (r) (not (nil? r))))
+              (not (any? ranges
+                     (fn (r) (and (>= n (nth r 0)) (or (nil? (nth r 1)) (<= n (nth r 1))))))))
+        (str (->string context)
+          ": no clause accepts "
+          n
+          " argument(s) (arities: "
+          (string/join (reverse (fold (map ranges %match-arity-text)
+                                  ()
+                                  (fn (seen text) (if (includes? seen text) seen (cons text seen)))))
+            ", ")
+          ")")))))
+
 (defn %match-error (context target patterns)
   "The error map a failed pattern raises: `{:kind :match :message … :context … :value …
 :patterns …}`, with code `E0092`. Built by the `throw` every non-total `match`, `case`,
@@ -702,11 +747,12 @@ refutable `let` and pattern `fn` lowers its no-match branch to.
     (:message (%match-error :match 3 '(1 2)))   ;=> \"match: no clause matches 3 — tried 1, 2\""
   {:kind :match
    :code "E0092"
-   :message (str (->string context)
-              ": no clause matches "
-              (debug/pr-str-bounded target)
-              " — tried "
-              (string/join (map patterns debug/pr-str-bounded) ", "))
+   :message (or (%match-arity-message context target patterns)
+              (str (->string context)
+                ": no clause matches "
+                (debug/pr-str-bounded target)
+                " — tried "
+                (string/join (map patterns debug/pr-str-bounded) ", ")))
    :context context
    :value target
    :patterns patterns})
@@ -748,8 +794,9 @@ refutable `let` and pattern `fn` lowers its no-match branch to.
       (pair? form)
         (let (head (%match-splice-fail-in (first form) k code)
               tail (%match-splice-fail-in (rest form) k code))
+          ;; the rebuilt pair is the same form: it keeps the original's position
           (if (or (first head) (first tail))
-            [true (cons (second head) (second tail))]
+            [true (%copy-form-pos (cons (second head) (second tail)) form)]
             [false form]))
       else [false form])))
 (defn- %match-splice-fail (form k code)
@@ -866,15 +913,17 @@ the surface the special forms target directly when they need their own context."
   (cond
     (or (keyword? t) (int? t) (float? t) (decimal? t) (ratio? t) (string? t) (bool? t) (nil? t)) t
     (and (pair? t) (= (first t) 'quote)) t
+    ;; located at the test, where `reflect/error-at` can: a list test has a position
     (symbol? t)
-      (throw (str "case: the bare symbol test `"
-               t "` would BIND, not compare" " — write `'" t
-               "` for the literal symbol, or use `match`" " if you meant to bind it"))
+      (reflect/error-at t
+        "case: the bare symbol test `" t "` would BIND, not compare" " — write `'" t
+        "` for the literal symbol, or use `match`" " if you meant to bind it")
     else
-      (throw (str "case: each test must be a literal (keyword/int/float/decimal/"
-               "string/bool/nil, or 'symbol), got "
-               (pr-str t)
-               " — use `match` for destructuring, guards, or alternatives"))))
+      (reflect/error-at t
+        "case: each test must be a literal (keyword/int/float/decimal/"
+        "string/bool/nil, or 'symbol), got "
+        (pr-str t)
+        " — use `match` for destructuring, guards, or alternatives")))
 
 ;; Flat `test result …` pairs → wrapped match clauses; a lone trailing form is the
 ;; default (an `_` clause). Flat pairs match `cond`'s shape, which is where a

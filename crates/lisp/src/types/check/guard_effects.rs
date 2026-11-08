@@ -116,7 +116,12 @@ fn walk(heap: &Heap, form: Value, scope: &HashSet<String>, out: &mut Vec<(Option
             Some(&Value::Sym(h)) => Some(value::symbol_name(h)),
             _ => None,
         };
-        let head_name = head_name.as_deref();
+        // a root escape (`/match*`, ADR-638) is the form it escapes
+        let head_name = head_name.as_deref().map(|name| {
+            name.strip_prefix('/')
+                .filter(|n| !n.is_empty())
+                .unwrap_or(name)
+        });
         // The names this form binds for its children.
         let mut inner = scope.clone();
         match head_name {

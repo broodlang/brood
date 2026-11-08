@@ -67,7 +67,8 @@
 (defn- quoted-heads-in (form acc)
   (if (not (pair? form))
     acc
-    (let (acc (if (and (= (first form) 'list)
+    ;; `(cons 'head …)` builds a call too: `string/interp` emitted `(cons 'str …)`
+    (let (acc (if (and (includes? ['list 'cons] (first form))
                     (pair? (rest form))
                     (pair? (second form))
                     (= (first (second form)) 'quote)
@@ -76,6 +77,27 @@
                 (conj acc (->string (second (second form))))
                 acc))
       (fold form acc (fn (a f) (quoted-heads-in f a))))))
+
+;; The same shape built from a quoted LIST: `(list 'if '(empty? next-args) …)` — the `next-impl`
+;; default once spliced a quoted `(empty? next-args)` into a method body, where a parameter
+;; named `empty?` captured it. A quoted list handed to `list`/`cons`/`append` is code being
+;; assembled, so its head is a call head like any other.
+(defn- quoted-lists-in (form acc)
+  (if (not (pair? form))
+    acc
+    (let (acc (if (includes? ['list 'cons 'append] (first form))
+                (fold (rest form)
+                  acc
+                  (fn (a arg)
+                    (if (and (pair? arg)
+                          (= (first arg) 'quote)
+                          (pair? (second arg))
+                          (symbol? (first (second arg)))
+                          (contains? capturable (->string (first (second arg)))))
+                      (conj a (->string (first (second arg))))
+                      a)))
+                acc))
+      (if (= (first form) 'quote) acc (fold form acc (fn (a f) (quoted-lists-in f a)))))))
 
 ;; The third shape: a capturable root name in ARGUMENT position — `(map ~xs first)`. ADR-423's
 ;; definition-time pass writes a template's call HEADS as `/name`, never its arguments (an
@@ -107,7 +129,29 @@
 (defn- offenders ()
   (macro-offenders (reflect/read-all prelude-source)
     (fn (form) (->string (second form)))
-    (fn (form) (args-in form false (quoted-heads-in form (heads-in form false #{}))))))
+    (fn (form)
+      (quoted-lists-in form (args-in form false (quoted-heads-in form (heads-in form false #{})))))))
+
+;; The prelude's FUNCTIONS that build code for a macro — the pattern compiler's
+;; `%match-compile-seq`, `for`'s `%for-fold`, `receive`'s `%receive-binds` — emit into the
+;; caller's code too, and ADR-423's pass never sees them: it escapes templates inside a
+;; macro's own function only. Their output often lands inside a binder the CALLER named (a
+;; pattern variable), so a bare `rest` there was captured by `(x & rest)` as well as by a
+;; module defining `rest`. Held to the same three shapes; a `check-allow` wrapper is opened.
+(defn- defn-forms (form)
+  (cond
+    (not (pair? form)) []
+    (includes? ['defn 'defn-] (first form)) [form]
+    (= (first form) 'check-allow) (mapcat (rest (rest form)) defn-forms)
+    else []))
+
+(defn- builder-offenders (source)
+  (fold (mapcat (reflect/read-all source) defn-forms)
+    {}
+    (fn (acc form)
+      (let (hits (seq (quoted-lists-in form
+                        (args-in form false (quoted-heads-in form (heads-in form false #{}))))))
+        (if (empty? hits) acc (assoc acc (->string (second form)) (sort hits)))))))
 
 ;; Every std module's macros, not only the prelude's: a module macro expands in the module
 ;; that USES it, where — since ADR-423 — that module's own `first` wins a bare reference.
@@ -131,12 +175,30 @@
   (test "no std macro passes a capturable root name as a template argument"
     (assert= (std-arg-offenders) {}))
 
+  ;; Every std file, not only the prelude: `gen`'s `defserver` clause builder emitted a bare
+  ;; `send`/`nth` inside the caller's pattern variables, and the prelude-only scan missed it.
+  (test "no std function that builds code emits a bare capturable name"
+    (assert= (fold (seq/filter (file/walk-files "std") (fn (f) (string/ends-with? f ".blsp")))
+               {}
+               (fn (acc f)
+                 (let (hits (builder-offenders (file/slurp f)))
+                   (if (empty? hits) acc (assoc acc f hits)))))
+      {}))
+
+  (test "the builder scan opens a check-allow wrapper"
+    (assert= (builder-offenders "(check-allow :non-tail-recursion (defn- f (t) `(if (pair? ~t) (first ~t) nil)))")
+      {"f" (list "first" "pair?")}))
+
   ;; The scans above pass on an empty result, so prove each shape is SEEN.
   (test "the scans see each shape they gate"
     (assert= (args-in (reflect/read-string "(defmacro m (x) `(map ~x first))") false #{})
       #{"first"})
     (assert= (heads-in (reflect/read-string "(defmacro m (x) `(first ~x))") false #{})
-      #{"first"}))
+      #{"first"})
+    (assert= (quoted-heads-in (reflect/read-string "(defn f (xs) (cons 'str xs))") #{})
+      #{"str"})
+    (assert= (quoted-lists-in (reflect/read-string "(defn f (b) (list 'if '(empty? xs) b))") #{})
+      #{"empty?"}))
 
   ;; The gate above is a static scan; this is the behaviour it stands for. If someone
   ;; drops the escape, this fails with a wrong VALUE, which is what a user would see.

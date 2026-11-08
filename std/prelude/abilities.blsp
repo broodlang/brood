@@ -334,7 +334,14 @@ which is meaningless for a rope, so falling through unconditionally would swap a
         message (if (empty? known)
                   (str "ability " aname "/" op ": no impl for " key)
                   (str "ability " aname "/" op ": no impl for " key " — have " known)))
-    (throw {:kind :%no-impl :message message :ability aname :op op :id key :have known})))
+    ;; raised, not thrown: the map gets a code, the position of the call and a trace
+    (%raise {:kind :%no-impl
+             :code "E0090"
+             :message message
+             :ability aname
+             :op op
+             :id key
+             :have known})))
 
 (defn satisfies? (aname x)
   "True if ability `aname` is implemented for `x`'s identity — every declared op
@@ -512,7 +519,9 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                               (list 'quote ops)
                               (list '/reflect/current-ns))
                         (if sealed-ids
-                          (list (list '%register-sealed (list 'quote aname) (cons 'list sealed-ids)))
+                          (list (list '%register-sealed
+                                  (list 'quote aname)
+                                  (cons '/list sealed-ids)))
                           nil))
                 ; the `:derive-record` recipe is emitted UNQUOTED — evaluated to a closure at
                 ; load, so `defrecord`'s `:derives` can call it at expansion (ADR-185).
@@ -525,7 +534,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
               (if requires-vec
                 (list (list '%register-ability-requires
                         (list 'quote aname)
-                        (cons 'list (map requires-vec (fn (r) (list 'quote r))))))
+                        (cons '/list (map requires-vec (fn (r) (list 'quote r))))))
                 nil))
         ; A provided op (one with a default body) becomes a `:default` impl, registered from
         ; the declaring ns (ability-owner tier) so an app/type impl can still override it. Its
@@ -681,8 +690,8 @@ error is a `:blame :callee` contract error, like a function's own result mismatc
         tail (rest (seq/drop-while params (fn (p) (not (= p '&))))))
     (cond
       (not (every? (append fixed tail) symbol?)) nil
-      (empty? tail) (cons 'list fixed)
-      else (list 'append (cons 'list fixed) (first tail)))))
+      (empty? tail) (cons '/list fixed)
+      else (list '/append (cons '/list fixed) (first tail)))))
 
 ;; A method body that calls `next-impl` runs inside a binding of it (ADR-432): a local fn
 ;; calling `%next-impl` with this method's ability, op, id and namespace. Built with `list`,
@@ -703,9 +712,9 @@ error is a `:blame :callee` contract error, like a function's own result mismatc
                       id-kw
                       (list 'quote (reflect/current-ns))
                       (list 'if
-                        '(empty? next-args)
+                        '(/empty? next-args)
                         (or args-expr
-                          (list 'error
+                          (list '/error
                             "next-impl: a method with pattern parameters must pass its arguments"))
                         'next-args))))
             body))))
@@ -851,7 +860,7 @@ error is a `:blame :callee` contract error, like a function's own result mismatc
         message (if (empty? known)
                   (str "multimethod " mname ": no method for " key)
                   (str "multimethod " mname ": no method for " key " — have " known)))
-    (throw {:kind :%no-method :message message :multi mname :key key :have known})))
+    (%raise {:kind :%no-method :code "E0090" :message message :multi mname :key key :have known})))
 
 (defn- %register-method-store (mname key f)
   "Store method `f` at EXACT `key` for `mname` (overwrites — an authored method always wins)."

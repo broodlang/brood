@@ -665,6 +665,8 @@ fn correct_programs_draw_no_type_disjointness_warning() {
         let form = crate::syntax::reader::read_one(&mut interp.heap, src).expect("parse");
         let form =
             crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
+        // resolved too, as the real pre-flight is: root escapes stripped (ADR-638)
+        let form = crate::eval::macros::resolve(&mut interp.heap, form);
         let bad: Vec<String> = super::check_form(&interp.heap, form)
             .into_iter()
             .filter(|w| w.contains("expects") || w.contains("callback called with"))

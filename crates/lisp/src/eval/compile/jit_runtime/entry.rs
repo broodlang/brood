@@ -286,6 +286,7 @@ pub(crate) fn finish_nested(
         // the callee had returned its value, rather than re-running the callee on the VM
         // (both JIT and VM cost for every thin delegator).
         4 => {
+            let local = heap.take_jit_tail_local_head();
             let staged = frame.base + frame.nslots;
             let end = heap.roots_len();
             if end <= staged {
@@ -300,6 +301,7 @@ pub(crate) fn finish_nested(
             let g = heap.global();
             let r = jit_native_reenter(heap, frame.native_depth, |h| {
                 apply_value(h, target, &args, g)
+                    .map_err(|e| crate::eval::name_uncallable_local(h, e, target, local))
             });
             reenter_result(heap, r)
         }

@@ -93,7 +93,13 @@ fn walk(
             return;
         };
         if let Value::Sym(h) = head {
-            match value::symbol_name(h).as_str() {
+            let name = value::symbol_name(h);
+            // `/match*` (a root escape, ADR-638) is the same form as `match*`
+            match name
+                .strip_prefix('/')
+                .filter(|n| !n.is_empty())
+                .unwrap_or(&name)
+            {
                 "quote" | "quasiquote" => return,
                 "defn" | "defmacro" => {
                     walk_defn(heap, &items, ctx, namespace, out);

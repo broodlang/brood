@@ -27,7 +27,7 @@
     (take [1 2 3 4] 2)  ;=> (1 2)
     (take [1 2] 9)      ;=> (1 2)
     (take [1 2] 0)      ;=> nil"
-  (%take-acc n coll nil))
+  (%take-acc n (%expect-collection "take" coll) nil))
 (defn- %take-acc (n coll acc)
   (if (or (<= n 0) (empty? coll))
     (reverse acc)
@@ -189,6 +189,7 @@ Always true for `n` <= 0.
     (sort [3 1 2])              ;=> (1 2 3)
     (sort [\"b\" \"a\"])            ;=> (\"a\" \"b\")
     (sort [3 1 2] >)            ;=> (3 2 1)"
+  (%expect-collection "sort" coll)
   (cond
     (not (empty? more)) (%merge-sort (first more) coll)
     (empty? coll) nil
@@ -774,7 +775,7 @@ iterating for side effects.
       (empty? binds) leaf
       (= (first binds) :when) `(if ~(second binds) ~(%for-fold acc (rest (rest binds)) leaf) ~acc)
       else
-        `(fold ~(second binds)
+        `(/fold ~(second binds)
            ~acc
            (fn (~acc ~(first binds)) ~(%for-fold acc (rest (rest binds)) leaf))))))
 

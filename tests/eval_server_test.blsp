@@ -58,6 +58,15 @@
       (is (includes? (get r :error) "boom"))
       (assert= (get r :output) "before")))
 
+  ;; A client that shows only the message leaves the reader to guess where the error lies:
+  ;; the reply says where in the evaluated source it was raised, and what the hint names.
+  (test "an error reply carries the raise's line, column and hint"
+    (let (r (eval-capturing "(defn lc (list)\n  (list 1))\n(lc [1])"))
+      (assert= (get r :ok) false)
+      (assert= (get r :error) "cannot call non-function: `list` is [1]")
+      (assert= [(get r :line) (get r :col)] [2 3])
+      (is (includes? (get r :hint) "shadows the function `list`"))))
+
   (test "an unreadable source is an error reply, not a raise"
     (assert= (get (eval-capturing "(unclosed") :ok) false))
 
