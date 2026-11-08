@@ -111,7 +111,12 @@
 (def- cn-digit-codes (string/->codepoints "12345678x"))
 
 (defn- run-digits (k acc)
-  (if (= k 0) acc (run-digits (- k 1) (+ acc (cn-digits cn-digit-codes 0 9)))))
+  ;; check-allow :type-mismatch — `cn-digits` returns the index `(< i n)` bounded, which the
+  ;; checker reads as `ordered`; with `datetime` loaded that cover holds its records too
+  ;; (ADR-299), though every caller here passes integers
+  (if (= k 0)
+    acc
+    (run-digits (- k 1) (check-allow :type-mismatch (+ acc (cn-digits cn-digit-codes 0 9))))))
 
 (describe "a staged call before a join"
   (test "computes the same index on every engine"

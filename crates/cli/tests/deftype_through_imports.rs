@@ -120,7 +120,8 @@ fn two_used_declarers_still_decline() {
 /// were read from the CHECKED file's namespace, where the two are ambiguous: once a file
 /// referenced the other declarer, `terminal` widened to `any` (a bad `(vt/lines 7)` went
 /// unreported) and `row` to a bare vector — so `nest check`'s verdict on a file depended
-/// on which files it had reached before (the order differential found it).
+/// on which files it had reached before (the order differential found it). Since ADR-631
+/// a stored sig names its module's types qualified, so the warning says `vt/row`.
 #[test]
 fn a_loaded_modules_alias_means_what_it_meant_where_it_was_declared() {
     let dir = write_fixture();
@@ -142,11 +143,11 @@ fn a_loaded_modules_alias_means_what_it_meant_where_it_was_declared() {
     .unwrap();
     let text = check(&dir.path, "vt-beside-rows.blsp");
     assert!(
-        text.contains("vt/line: argument 1 expects row, got 5"),
+        text.contains("vt/line: argument 1 expects vt/row, got 5"),
         "`vt`'s `row` must stay vt's with another `row` loaded:\n{text}"
     );
     assert!(
-        text.contains("vt/lines: argument 1 expects terminal, got 7"),
+        text.contains("vt/lines: argument 1 expects vt/terminal, got 7"),
         "`vt`'s `terminal` must not widen to any with another `row` loaded:\n{text}"
     );
 }

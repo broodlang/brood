@@ -239,7 +239,7 @@ fn an_imaged_start_keeps_what_loading_registered() {
          (defn main ()\n\
         \x20 (io/puts (str \"multi: \" (combine 2 3)))\n\
         \x20 (io/puts (str \"ability: \" (size (box 3 4))))\n\
-        \x20 (io/puts (str \"provenance: \" (count *method-from*)))\n\
+        \x20 (io/puts (str \"provenance: \" (count (seq/filter (vals *method-from*) (fn (ns) (= (->string ns) \"demo/shapes\"))))))\n\
         \x20 (io/puts (str \"docs: \" (contains? *module-docs* \"demo/shapes\"))))\n",
     );
 
@@ -260,12 +260,13 @@ fn an_imaged_start_keeps_what_loading_registered() {
         );
     }
 
-    // `*method-from*` is asserted as cold == warm rather than against a literal. It is a
-    // GLOBAL registry, so its size counts the prelude's own methods too and grows whenever
-    // the stdlib gains one: this line read `provenance: 1` when written and reads 4 today,
-    // which failed the test for a reason that has nothing to do with what it checks. What
-    // it checks is that an imaged start does not LOSE the registry — a property the two
-    // runs agreeing states exactly, and stdlib growth cannot rot.
+    // `*method-from*` is counted for `demo/shapes`'s own entries only, and asserted as cold ==
+    // warm. The registry is GLOBAL: it also holds the stdlib's methods, and WHEN those arrive
+    // depends on the boot path, not on the image keeping anything — a source load of `file`
+    // loads `datetime` (three `compare-to` methods) when a macro expands a qualified head, an
+    // imaged one defers it to first call (ADR-335), so the whole registry read 4 cold and 1
+    // warm with nothing lost. What this checks is that an imaged start does not LOSE the
+    // app's provenance — the two runs agreeing on the app's entries states exactly that.
     let provenance = |out: &str| -> usize {
         out.lines()
             .find_map(|l| l.strip_prefix("provenance: "))
