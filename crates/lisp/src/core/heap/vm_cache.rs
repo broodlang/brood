@@ -713,6 +713,7 @@ impl Heap {
     /// [`Heap::jit_tail_local_head`]), resetting it. EVERY consumer of a native tail exit takes
     /// it first, so a name is read only for the call that stored it.
     #[inline]
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))] // native tail exits only
     pub(crate) fn take_jit_tail_local_head(&mut self) -> Option<crate::core::value::Symbol> {
         let local = std::mem::replace(&mut self.jit_tail_local_head, u32::MAX);
         (local != u32::MAX).then_some(local)

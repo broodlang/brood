@@ -1323,10 +1323,12 @@ pub struct Heap {
     /// fact the shared tail exit cannot carry. `jit_dispatch_tail` takes it (resetting it to
     /// `u32::MAX`, none) on every tail call, so it names the local in a `cannot call
     /// non-function` from THIS call and is never left over for the next.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))] // only native code stores it
     pub(crate) jit_tail_local_head: u32,
     /// The global-read site of the unbound read a native arm's callback just raised for
     /// (`jit_resolve_global_ic`), `u32::MAX` when none. The callback has no arm to locate the
     /// read with; the arm's own error block does (`brood_rt_trace_push`), and takes it there.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))] // only native code's callbacks set it
     pub(crate) jit_miss_gsite: u32,
     pub(crate) cur_native_gateway: u64,
     pub(crate) blocked_under_gateway: u64,
