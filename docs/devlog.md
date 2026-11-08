@@ -1093,3 +1093,9 @@ reads it at the next start (bedit's report-bug, row 27 of its audit). The panic 
 the last panic's message for it, so an abort after a panic is named. Checked here:
 `tests/crash_report_test` (a child killed with SIGSEGV, a second child reading the record), by
 hand with SIGABRT; the unit test of the literal escaping.
+
+2026-11-08 (ADR-636). A display fallback reaches the app as `[:display-degraded {:what :reason}]`:
+the GPU target not starting (CPU painter), a font not installed or not readable, grey text, vsync
+that cannot be turned off. Fonts are registered before the first window, so one reported with no
+window open waits for the next one opened. bedit can now say why its text looks wrong. Checked
+here: `tests/gui_display_degraded_test` under the offscreen painter, `gui_display_lost_test`.

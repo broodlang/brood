@@ -2550,6 +2550,27 @@ impl GpuWindow {
         ))
     }
 
+    /// What this window does less well than asked, as `(what, reason)` for
+    /// `report_degraded` (ADR-636): text drawn grey because the driver rejected subpixel
+    /// text, and frames held to vsync when `:vsync false` asked for the work-bound rate and
+    /// the compositor offers only FIFO.
+    pub fn degradations(&self, vsync: Option<bool>) -> Vec<(&'static str, String)> {
+        let mut found = Vec::new();
+        if self.lcd.is_none() {
+            found.push((
+                "lcd-text",
+                "the GPU driver rejected subpixel text; text is drawn grey".to_string(),
+            ));
+        }
+        if vsync == Some(false) && self.config.present_mode == wgpu::PresentMode::Fifo {
+            found.push((
+                "vsync",
+                "the display offers only FIFO presentation; frames wait for vsync".to_string(),
+            ));
+        }
+        found
+    }
+
     /// The pipelines, buffers and caches over a device whose target is ready.
     fn assemble(
         target: Target,
