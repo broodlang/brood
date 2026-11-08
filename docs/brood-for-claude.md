@@ -911,8 +911,8 @@ code paints to a terminal or a GUI window unchanged.
   `*ui-fold-budget-ms*` (8) per turn before rendering. State that matters only at its newest value goes out with
   `(proc/send-latest pid key msg)`: a queued older message with that key is replaced. Both
   lanes cross a node link (ADR-492), and a served window client paints only its newest frame. An
-  `update`/`view` slower than `*ui-slow-ms*` (50) is reported with the input's tag — to the
-  model's `:on-slow` `(fn (report) …)`, else stderr.
+  `update`/`view` slower than `*ui-slow-ms*` (50) is reported with the input's tag and how much of it was GC
+  (`:gc-ms`, from `proc/gc-us`) — to the model's `:on-slow` `(fn (report) …)`, else stderr.
 - **Quit** (ADR-491) = `update` and `view` run in an interrupt window, and `ui-run` arms the
   kernel's quit key: C-g (`:ctrl-g` — a window and the terminal deliver it on the priority
   lane, a served session as `[:key :ctrl-g]`) arriving while a turn has run past

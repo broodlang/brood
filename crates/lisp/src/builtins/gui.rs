@@ -258,6 +258,14 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
         "The ids of the windows open in this runtime, oldest first — empty without --features gui.",
         gui_windows,
     );
+    primitives.def(
+        "%gui-lose-display",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        &["why"],
+        "Act as if the display went away (`why` says how, for the log line): every open window's app is sent [:hangup :display-lost], once, and from then on a draw is a no-op and a new window fails. The GUI thread does this itself when its event loop ends — the Wayland compositor or the X server gone — so ui-run runs the app's :on-hangup and ends the loop; this primitive exists so that path runs headless (a test). Returns nil; a no-op without --features gui. ADR-631.",
+        gui_lose_display,
+    );
     // The font seam: a global default cell font (`gui-font!`) and runtime family
     // registration (`gui-font-register`); a face's `:family`/`:italic` then select
     // per-section, within the fixed cell grid. (gui feature; error without it.)

@@ -1,0 +1,40 @@
+;; tests/gui_display_degraded_test.blsp — a display that falls back tells the app (ADR-636).
+;;
+;; A fallback that keeps the window up (the CPU painter for a GPU that would not start, the
+;; bundled font for one not installed, grey text) reaches the app as
+;; `[:display-degraded {:what … :reason …}]`. A font is registered before any window, so what
+;; degraded then waits for the first window opened; once one is open it is told at once. The
+;; offscreen painter (`BROOD_GUI_HEADLESS=paint`, ADR-609) registers fonts as a window does,
+;; so it runs with no display, in a child runtime of its own.
+(defmodule gui-display-degraded-test
+  (:use test)
+  (:use suite-helpers))
+
+(purge-stale-temp "display-degraded-")
+
+(def- app-source
+  (str "(defn told ()\n"
+    "  (receive ([:display-degraded m] (str (:what m) \" \" (:reason m))) (after 10000 \"untold\")))\n"
+    "(if (not (gui/available?))\n" "  (io/puts \"no-gui\")\n"
+    "  (do (gui/font-register :missing {:family-name \"No Such Font For Brood Tests\"})\n"
+    "    (gui/open \"degraded\")\n" "    (io/puts (str \"before \" (told)))\n"
+    "    (gui/font-register :also {:family-name \"Another Missing Font\"})\n"
+    "    (io/puts (str \"after \" (told)))\n" "    (gui/open \"second\")\n"
+    "    (io/puts (str \"again \" (receive ([:display-degraded m] \"told twice\") (after 300 \"once\"))))))\n"))
+
+(describe "a degraded display (ADR-636)"
+  (test "a font not installed is told to the app: the next window's, then the open one's"
+    (let (nest (sibling-binary "nest"))
+      (when nest
+        (let (dir (temp-dir "display-degraded-")
+              script (path/join dir "app.blsp"))
+          (file/mkdir dir)
+          (file/spit script app-source)
+          (let (result (os/cmd nest ["run" script] {:env {"BROOD_GUI_HEADLESS" "paint"} :dir dir})
+                out (str (os/cmd-out result) (get result :stderr "")))
+            (when (not (includes? out "no-gui"))
+              (is (includes? out
+                    "before :font no installed font is called \"No Such Font For Brood Tests\""))
+              (is (includes? out "after :font no installed font is called \"Another Missing Font\""))
+              (is (includes? out "again once"))
+              (is (includes? out "brood: gui: font degraded:")))))))))

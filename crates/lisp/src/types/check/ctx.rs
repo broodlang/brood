@@ -575,6 +575,14 @@ struct FileFacts {
     /// `Arc` so per-scope `Ctx` clones don't copy the set. Populated by
     /// [`check_file`]; empty in fragment mode (so any qualified name is left alone).
     known_ns: Arc<HashSet<String>>,
+    /// The prefixes (`mod/`) of this file's qualified references whose module is not
+    /// loaded AND could not be: `require` would find no module of that name — no std
+    /// module, no project or dependency source on the load path, no image section. Such a
+    /// reference is a misspelt module (`net/http/post` for `http/post`), unbound at run
+    /// time whatever else loads, so it is flagged where [`known_ns`](Self::known_ns) alone
+    /// would stay silent. Probed once per file (`check::collect_file_scope`, through the
+    /// prelude's `%module-findable?`); empty in fragment mode.
+    absent_ns: Arc<HashSet<String>>,
     /// Names the top-level form currently being walked guards with an explicit
     /// `(bound? 'name)` test. Such a reference is *correct code for an image that
     /// doesn't define the name* — the whole point of the guard — so the unbound
@@ -1170,6 +1178,16 @@ impl Ctx {
     /// a real unbound reference or a dynamically/elsewhere-defined one.
     pub(super) fn module_is_known(&self, prefix: &str) -> bool {
         self.file.known_ns.contains(prefix)
+    }
+    /// Adopt the prefixes of this file's qualified references that no module could
+    /// satisfy (see [`absent_ns`](FileFacts::absent_ns)).
+    pub(super) fn set_absent_ns(&mut self, prefixes: HashSet<String>) {
+        self.file_mut().absent_ns = Arc::new(prefixes);
+    }
+    /// Is `prefix` (a `mod/` segment, trailing slash included) a module that nothing on
+    /// the load path provides — so `prefix…` can never be bound?
+    pub(super) fn module_is_absent(&self, prefix: &str) -> bool {
+        self.file.absent_ns.contains(prefix)
     }
     /// Record the `(bound? 'name)`-guarded names of the top-level form about to be
     /// walked (see [`bound_guarded`](Ctx::bound_guarded)).

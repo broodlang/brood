@@ -15,7 +15,7 @@ outbound — so code above the transport is unchanged. Policy is Brood; only the
 crypto/syscalls are Rust.")
 
 (defn request (host port request &optional ca-pem binary)
-  "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as `[:tcp sock data]` … `[:tcp-closed sock]` messages (or `[:tcp-error sock msg]`). request is any iolist (a string, bytes, or nested tree — ADR-141). Optional ca-pem (a PEM certificate) replaces the Mozilla roots as the trust anchor — for private CAs and `tls/self-signed` dev servers. A truthy `binary` delivers the response as byte-faithful `bytes` from its first chunk; pass it rather than calling `tcp/set-binary` afterwards, which can lose the race with a fast response because the request goes out on its own. Returns a socket id; pair with `tcp/drain`. Low-level — prefer `http/get`.
+  "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as `[:tcp sock data]` … `[:tcp-closed sock]` messages (or `[:tcp-error sock msg]`). request is any iolist (a string, bytes, or nested tree — ADR-141). Optional ca-pem (a PEM certificate) replaces the system's trust store as the trust anchor — for private CAs and `tls/self-signed` dev servers. A truthy `binary` delivers the response as byte-faithful `bytes` from its first chunk; pass it rather than calling `tcp/set-binary` afterwards, which can lose the race with a fast response because the request goes out on its own. Returns a socket id; pair with `tcp/drain`. Low-level — prefer `http/get`.
 
     (tls/request \"example.com\" 443 \"GET / HTTP/1.0\\r\\nHost: example.com\\r\\n\\r\\n\")   ;~> #<socket …>; the reply arrives as [:tcp sock data] messages"
   (%tls-request host port request ca-pem binary))
@@ -35,7 +35,7 @@ crypto/syscalls are Rust.")
 ;; contract failed every `tls/self-signed` call under BROOD_CONTRACTS=1 (KI-113).
 
 (defn connect (host port &optional (opts {}))
-  "A TLS connection to host:port that stays open (ADR-451): returns the socket once the handshake has completed, raising if it fails. Then it is an ordinary stream — `tcp/send`, `[:tcp sock data]`, `tcp/close` — so it carries as many requests as the protocol wants (HTTP keep-alive, a WebSocket). `opts`: `:ca` a PEM certificate replacing the Mozilla roots, `:alpn` the protocols to offer (`[\"h2\" \"http/1.1\"]`; `protocol` reads the server's choice), `:binary` (default true) bytes rather than text, `:timeout-ms` (default 30000) for the handshake.
+  "A TLS connection to host:port that stays open (ADR-451): returns the socket once the handshake has completed, raising if it fails. Then it is an ordinary stream — `tcp/send`, `[:tcp sock data]`, `tcp/close` — so it carries as many requests as the protocol wants (HTTP keep-alive, a WebSocket). `opts`: `:ca` a PEM certificate replacing the system's trust store, `:alpn` the protocols to offer (`[\"h2\" \"http/1.1\"]`; `protocol` reads the server's choice), `:binary` (default true) bytes rather than text, `:timeout-ms` (default 30000) for the handshake.
 
     (tls/connect \"example.com\" 443 {:alpn [\"http/1.1\"]})   ;~> #<socket …>, connected"
   (let (sock (%tls-connect host

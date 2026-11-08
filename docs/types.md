@@ -370,6 +370,24 @@ never a false positive.
   'form)` / a REPL snippet) keeps free operand variables ambiguous and flags only
   the head. Both checks reuse the one `is_unbound` predicate, so they can't drift.
   Audited over the whole `std/` + `tests/` tree: **zero** false positives.
+- ✅ **Qualified names into a module that does not exist.** A qualified `mod/name` whose
+  module the image has not loaded was once left alone: it might be defined dynamically. That
+  let `net/http/post` (the module is `http`) through `nest check` and every test, to raise
+  unbound at run time. Now a whole-file check asks the loader whether `require` could find
+  `mod` at all — `%module-findable?` (`std/prelude/modules.blsp`): a module provided or
+  loading, a baked-in std module or a dependency's, an image section, a named project's
+  `*module-files*`, `mod.blsp` on `*load-path*` or beside the checked file, a file there
+  declaring it — WITHOUT loading it. When nothing could, the reference is flagged
+  `unbound symbol: net/http/post`, the message adding that no module `net/http` exists,
+  and gating as any unbound symbol does. The module is everything before the last `/` (`editor/buffer/insert` names
+  `editor/buffer`), rooted for a package (ADR-070); an alias prefix (`(:alias m :as x)`'s
+  `x/`) is not a module name. Not flagged: quoted data (`'commands/cmd-x` in a keymap is a
+  symbol, not a reference), the file's own modules, and a module whose source the file
+  carries as text (`(%load-string "(defmodule tmp …)")`, a fixture written out). A module
+  that only exists once the file runs — written by code, added to the load path at run
+  time — is invisible to the check: say so with `(check-allow :unbound …)` or a
+  `(bound? 'mod/name)` guard. Only a module the image does not know is asked about, once
+  per file.
 - ✅ **Auto-running at file boundaries.** The checker now fires automatically:
   `brood <file>` and `brood --test <file>` pre-check before evaluating (CLI
   wiring through `check_one_file`); `nest run` and `nest test` pre-check the

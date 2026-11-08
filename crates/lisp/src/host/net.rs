@@ -2633,19 +2633,33 @@ pub fn udp_send(id: u64, host: &str, port: u16, data: &[u8]) -> std::io::Result<
 
 // ---- TLS configuration + entry points ----
 
-/// The shared client TLS config (Mozilla roots via webpki-roots), built once.
+/// The shared client TLS config, built once: the PLATFORM's trust store — the system CA
+/// bundle (`SSL_CERT_FILE` / `SSL_CERT_DIR` when set), the macOS keychain, Windows'
+/// certificate store — so a CA the machine trusts (a company's, a distribution's update)
+/// is trusted here too; the bundled Mozilla roots (webpki-roots) when that store yields no
+/// certificate. Reading the store can take a while (the keychain), so a caller builds this
+/// off the scheduler, on its dialler thread.
 fn tls_config() -> Arc<ClientConfig> {
     static CFG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     CFG.get_or_init(|| {
-        let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Arc::new(
             ClientConfig::builder()
-                .with_root_certificates(roots)
+                .with_root_certificates(trust_roots(rustls_native_certs::load_native_certs().certs))
                 .with_no_client_auth(),
         )
     })
     .clone()
+}
+
+/// The roots a client trusts given the platform's certificates: every one rustls can parse,
+/// else — none found, or none usable — the bundled Mozilla roots.
+fn trust_roots(platform: Vec<CertificateDer<'static>>) -> RootCertStore {
+    let mut roots = RootCertStore::empty();
+    roots.add_parsable_certificates(platform);
+    if roots.is_empty() {
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+    roots
 }
 
 /// A client config trusting exactly the given PEM CA/certificate — for private
@@ -2694,10 +2708,9 @@ pub fn tls_request(
     subscriber: u64,
 ) -> std::io::Result<u64> {
     reactor_up()?;
-    let config = match ca_pem {
-        Some(pem) => tls_config_with_ca(&pem)?,
-        None => tls_config(),
-    };
+    // a private CA is read (and refused) here; the default trust store is read on the
+    // dialler thread (`tls_config`)
+    let private = ca_pem.map(|pem| tls_config_with_ca(&pem)).transpose()?;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let binary = Arc::new(AtomicBool::new(binary));
     let owner = SocketOwner::new(subscriber);
@@ -2726,6 +2739,7 @@ pub fn tls_request(
             Ok(name) => name,
             Err(_) => return fail_dial(id, &owner, "tls: invalid server name"),
         };
+        let config = private.unwrap_or_else(tls_config);
         let connected = dial_tcp(&host, port, TLS_CONNECT_TIMEOUT).and_then(|stream| {
             prepare_dialled(&stream)?;
             Ok(stream)
@@ -2770,16 +2784,16 @@ pub fn tls_connect(
     subscriber: u64,
 ) -> std::io::Result<u64> {
     reactor_up()?;
-    let base = match ca_pem {
-        Some(pem) => tls_config_with_ca(&pem)?,
-        None => tls_config(),
-    };
-    let config = if alpn.is_empty() {
-        base
-    } else {
-        let mut config = (*base).clone();
-        config.alpn_protocols = alpn.into_iter().map(String::into_bytes).collect();
-        Arc::new(config)
+    // as in `tls_request`: a private CA here, the default trust store on the dialler thread
+    let private = ca_pem.map(|pem| tls_config_with_ca(&pem)).transpose()?;
+    let with_alpn = move |base: Arc<ClientConfig>| {
+        if alpn.is_empty() {
+            base
+        } else {
+            let mut config = (*base).clone();
+            config.alpn_protocols = alpn.into_iter().map(String::into_bytes).collect();
+            Arc::new(config)
+        }
     };
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let binary = Arc::new(AtomicBool::new(binary));
@@ -2810,6 +2824,7 @@ pub fn tls_connect(
             Ok(name) => name,
             Err(_) => return fail_dial(id, &owner, "tls: invalid server name"),
         };
+        let config = with_alpn(private.unwrap_or_else(tls_config));
         let connected = dial_tcp(&host, port, TLS_CONNECT_TIMEOUT).and_then(|stream| {
             prepare_dialled(&stream)?;
             Ok(stream)
@@ -2968,5 +2983,27 @@ mod backlog_tests {
             failed, 0,
             "{failed} of 600 connects did not complete: the backlog is too small"
         );
+    }
+}
+
+#[cfg(test)]
+mod trust_store_tests {
+    use super::*;
+
+    #[test]
+    fn the_platforms_certificates_are_trusted_and_the_bundle_is_the_fallback() {
+        let bundled = webpki_roots::TLS_SERVER_ROOTS.len();
+        // none from the platform: the bundled Mozilla roots
+        assert_eq!(trust_roots(Vec::new()).len(), bundled);
+        // the platform's alone when it has any: a CA the machine added is trusted, one the
+        // machine removed is not brought back by the bundle
+        let (pem, _key) = tls_self_signed(vec!["localhost".to_string()]).expect("a cert");
+        let platform: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .expect("PEM");
+        assert_eq!(trust_roots(platform).len(), 1);
+        // unparsable certificates count as none
+        let garbage = vec![CertificateDer::from(vec![0u8, 1, 2, 3])];
+        assert_eq!(trust_roots(garbage).len(), bundled);
     }
 }

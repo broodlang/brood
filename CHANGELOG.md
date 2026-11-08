@@ -9,6 +9,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 **Added.**
 - **`gui/color-scheme`**: the desktop's light or dark preference (`:dark`, `:light`, nil) — GNOME,
   KDE, macOS, Windows — beside `gui/reduce-motion?`, so an app can follow the system theme.
+- **`nest check` flags a qualified name into a module that does not exist**: `net/http/post`
+  (the module is `http`) is reported as `unbound symbol: net/http/post`, adding that no
+  module `net/http` exists, when nothing on the load path, in std or among the dependencies could be required as
+  `net/http`. It used to pass, and raise unbound at run time. Quoted data and a module whose
+  source the file carries are left alone; one written at run time takes `check-allow :unbound`.
 - **`editor/treesit/node-chain`**: the nodes containing an offset, outermost first, from a held tree or
   the text — what a structural question about a place walks (a fold's extent, the string at point).
 - **`nest move FROM.blsp TO.blsp NAME…`**: moves definitions between modules (each with its `sig`,
@@ -33,6 +38,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   another collection. `()` stays `nil`.
 
 **Changed.**
+- **Breaking:** in a regex, `\n \t \r \f \v` are the control characters and `\xHH`, `\x{H…}`,
+  `\uHHHH`, `\u{H…}` name a code point, as in every other engine (ADR-637). They read as the
+  letter before, so `[ \t]*` matched the letter `t`. An escaped character in a set can end a range:
+  `[\x00-\x7F]`.
 - **Breaking:** the `editor/*` toolkit split along its seams (ADR-630). `editor/buffer` is pure:
   its process is `editor/buffer-server`, its disk edge `editor/buffer-file`, spans of data over
   text `editor/span-properties`. A thin client loads `editor/attach`, `editor/serve-protocol` and
@@ -49,6 +58,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   failure, not a `{:status 0 :error …}` map (ADR-617).
 
 **Fixed.**
+- **A bare type name in a `sig` means its own module's type** (ADR-633). Under contracts, a
+  `(sig parse-body (conn -> conn))` over a module's own record `conn` was checked against another
+  module's `(deftype conn …)` and rejected the record. A bare name now resolves in the module that
+  wrote the `sig` or `deftype` (its own type, then a `(:use …)`d module's, then globally), at
+  runtime and in `nest check` alike.
 - **`crash-report/redact` catches a secret however its name is spelled,** URL credentials, whole
   `Authorization` and `Cookie` values and a key cut short, and `describe-error` redacts `:context`.
   A report's paths and signature no longer depend on what the checkout is called (KI-377).

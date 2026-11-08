@@ -6,8 +6,7 @@
 ;; a POSIX-vs-Perl judgement. Each case names a pattern, a haystack and the spans of the
 ;; first match and of every group in it (`[]` for a group that did not take part).
 ;;
-;; Brood's pattern dialect is not upstream's: `\n`/`\xHH` mean the letters `n`/`x`, never a byte,
-;; and a `]` first in a set closes it. (A case-insensitive case runs with `:fold? true`, and
+;; Brood's pattern dialect is not upstream's in one way: a `]` first in a set closes it. (A case-insensitive case runs with `:fold? true`, and
 ;; the POSIX `[[:class:]]` sets are read since ADR-573.) Those cases
 ;; are listed in `rx-divergent` with the reason, and the list is checked both ways: a
 ;; listed case that starts agreeing fails too, so the list cannot outlive its reason.
@@ -19,11 +18,7 @@
 (defmodule conformance-regex-test (:use test) (:use corpus))
 
 (def- rx-divergent
-  {"basic65" "\\n in a pattern is the letter n"
-   "basic66" "\\n in a pattern is the letter n"
-   "basic68" "\\n in a pattern is the letter n"
-   "basic171" "\\xHH in a pattern is the letter x"
-   "basic120" "a ] first in a set closes it ([] is the empty set)"
+  {"basic120" "a ] first in a set closes it ([] is the empty set)"
    "basic123" "a ] first in a set closes it ([^] is any character)"})
 
 ;; ---- reading the TOML subset ----------------------------------------------------

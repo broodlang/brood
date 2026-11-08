@@ -10,6 +10,9 @@ use crate::Interp;
 use crate::error::LispError;
 use std::path::Path;
 
+mod fatal_signal;
+pub use fatal_signal::crash_record_dir;
+
 /// The version line both binaries report from `--version`: `"<semver> (<git sha>)"`.
 ///
 /// The sha matters more than the semver on a dev box, because **a stale binary fails by
@@ -51,7 +54,7 @@ fn fmt_utc_ms(ms: u128) -> String {
 /// The first thing `brood`'s and `nest`'s `main` do: default to a backtrace on panic (an
 /// explicit `RUST_BACKTRACE=0` still wins) — a bare panic from a heap index or a
 /// use-after-GC tripwire is far easier to triage with one — and append every panic to
-/// `.brood_crash_dump` ([`install_crash_dump`]). Call before any thread spawns: setting an
+/// `.brood_crash_dump` ([`install_crash_dump`]). A fatal signal (SIGSEGV, SIGBUS, an abort) leaves a record under the state directory for the next start ([`fatal_signal`]). Call before any thread spawns: setting an
 /// environment variable is only sound while the process is single-threaded.
 pub fn install_panic_reporting() {
     if std::env::var_os("RUST_BACKTRACE").is_none() {
@@ -60,6 +63,7 @@ pub fn install_panic_reporting() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
     install_crash_dump();
+    fatal_signal::install();
 }
 
 /// The process-wide setup every run shares, before any interpreter exists: the worker cap,
@@ -121,12 +125,14 @@ fn append_crash_record(record: &str) -> bool {
 /// keeps. Best-effort: a write failure is swallowed (we never want the crash
 /// handler to itself panic).
 ///
-/// **Caveat:** this catches Rust *panics*, not `SIGSEGV` (e.g. a coroutine
-/// stack overflow) — a signal handler writing from an async-signal context is a
-/// separate, much hairier mechanism, deliberately not done here.
+/// This catches Rust *panics*, not `SIGSEGV` (e.g. a coroutine stack overflow): those
+/// leave the fatal-signal record ([`fatal_signal`]), which a signal handler can write
+/// only because it was prepared here, at startup.
 pub fn install_crash_dump() {
     let prior = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // Kept for the fatal-signal record, should this panic go on to abort the runtime.
+        fatal_signal::note_panic(&info.to_string());
         // Preserve the normal behaviour first (stderr message / default trace).
         prior(info);
         let bt = std::backtrace::Backtrace::force_capture();
@@ -532,6 +538,8 @@ pub fn arm_test_run(keep_home: bool) {
     }
     let _ = TEST_SCRATCH_LOCK.set(lock);
     let _ = TEST_SCRATCH_HOME.set(scratch);
+    // the fatal-signal record follows XDG_STATE_HOME into the scratch home
+    fatal_signal::install();
 }
 
 /// Make `scratch`'s lock file and take its exclusive lock — the run's proof of life, released

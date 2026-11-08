@@ -14,8 +14,9 @@
   "The file & filesystem library: whole-file and line read/write
 (`file/slurp`/`file/spit`/`read-lines`/`write-lines`/`spit-atomic`/`file/spit-append`), predicates
 (`regular?`/`file/dir?`/`file/exists?`), and directory listing (`list-files`/`list-dirs`/
-`walk-files`). Pure path-string manipulation (extension, stem, basename, join) is the
-`path` module's job — `file` only touches the filesystem. Pure Brood over the fs
+`walk-files`), whole trees copied and moved (`copy-tree`, `move` across filesystems too) and
+the desktop trash (`trash`: freedesktop.org, macOS, the Windows recycle bin). Pure path-string
+manipulation (extension, stem, basename, join) is the `path` module's job — `file` only touches the filesystem. Pure Brood over the fs
 primitives. The kernel also provides the always-available file primitives
 `file/slurp`/`file/spit`/`file/mkdir`/`file/exists?`/`file/dir?`/`file/ls`/`file/mtime`/`file/size`/
 `file/rm`/`file/rmdir`/`file/rename`/`file/cp`/`file/cwd`.")
@@ -113,3 +114,169 @@ rewritten: a cache, a record beside an image, a config another tool polls.
 
 ;; Pure path-string helpers (extension, stem, basename, …) live in the `path`
 ;; module — `path/extension`, `path/stem`. `file` is filesystem I/O only (ADR-234).
+
+;; --- trees: copy and move ---------------------------------------------------
+;; `file/cp` copies one file and `file/rename` cannot cross filesystems (EXDEV); these two
+;; are what a file manager, an installer or a script moving a build output wants instead.
+
+(defn- symlinked-dir? (stat)
+  ;; a symlink to a directory: copied or removed as the link, never followed (following one
+  ;; copies or deletes what it points at, and a link to an ancestor never ends)
+  (and stat (get stat :dir?) (get stat :symlink?)))
+
+(check-allow :non-tail-recursion
+  (defn copy-tree (from:string to:string -> nil)
+    "Copy the file or directory `from` to `to`: a file as `file/cp` copies it, a directory
+made at `to` with everything under it copied in. Throws when `from` is missing, and on a
+symlinked directory inside it — copying what it points at can loop.
+
+    (file/copy-tree \"assets\" \"build/assets\")   ;~> nil; build/assets holds the whole tree"
+    (let (stat (file/stat from))
+      (cond
+        (nil? stat) (error (str "file/copy-tree: no such file: " from))
+        (symlinked-dir? stat) (error (str "file/copy-tree: a symlinked directory: " from))
+        (get stat :dir?)
+          (do
+            (file/mkdir to)
+            (doseq (name (file/ls from)) (copy-tree (path/join from name) (path/join to name)))
+            nil)
+        else (file/cp from to)))))
+
+(defn- remove-tree (path)
+  ;; `path` removed for good: a directory with everything under it, a file, or a symlink
+  ;; (to a directory too: the link goes, not what it points at)
+  (let (stat (file/stat path))
+    (if (and stat (get stat :dir?) (not (get stat :symlink?))) (file/rmdir path) (file/rm path))))
+
+(defn- cross-device? (e)
+  ;; whether a failed `file/rename` failed because the two paths are on different
+  ;; filesystems — EXDEV on Unix (`os error 18`), ERROR_NOT_SAME_DEVICE on Windows — which a
+  ;; copy and a delete get round
+  (let (text (string/lower (str (error-message e))))
+    (or (includes? text "cross-device")
+      (includes? text "os error 18")
+      (includes? text "different disk drive"))))
+
+(defn move (from:string to:string -> nil)
+  "Move `from` (a file or a whole directory) to `to` as `file/rename` does, and across
+filesystems too, where a rename fails: the tree copied ([[copy-tree]]), then the original
+removed — only once the copy is whole, so a failure leaves `from` as it was. Throws as
+`file/rename` does otherwise.
+
+    (file/move \"/tmp/out.tar\" \"/mnt/backup/out.tar\")   ;~> nil, across filesystems too"
+  (try
+    (file/rename from to)
+    (catch e
+      (if (and (cross-device? e) (file/exists? from))
+        (do (copy-tree from to) (remove-tree from) nil)
+        (throw e)))))
+
+;; --- the trash ----------------------------------------------------------------
+;; A delete the user can take back (Emacs's `move-file-to-trash`). freedesktop.org's trash
+;; specification on Linux and the BSDs: the file goes to `$XDG_DATA_HOME/Trash/files` under a
+;; name not taken there, with `info/NAME.trashinfo` saying where it came from (`Path=`,
+;; percent-encoded) and when (`DeletionDate=`, local time) — what a file manager's Restore
+;; reads. macOS's Finder keeps `~/.Trash`, with no info file. Windows' recycle bin belongs to
+;; the shell, so it is the one kernel call here (`%file-recycle`).
+
+(defdyn file/*trash-home* nil)
+;; A directory standing in for the desktop's trash, a freedesktop one — what a test binds, so
+;; it never touches the user's own.
+
+(defn trash-location ()
+  "Where [[trash]] puts a file, `{:kind :dir}`: `:freedesktop` (the `Trash` directory under
+`$XDG_DATA_HOME`, else `~/.local/share`), `:macos` (`~/.Trash`) or `:recycle-bin` (Windows,
+`:dir` nil) — or a failure saying why there is none. [[*trash-home*]], when bound, is a
+freedesktop trash. A test run (`BROOD_TEST_RUN`) gets the trash of its scratch home on
+every system, and none when it kept the real home: a test never trashes into the user's.
+
+    (:kind (binding (file/*trash-home* \"/tmp/t\") (file/trash-location)))   ;=> :freedesktop"
+  (let (home (path/home)
+        data (or (os/env "XDG_DATA_HOME") (when home (path/join home ".local" "share"))))
+    (cond
+      (not (nil? *trash-home*)) {:kind :freedesktop :dir *trash-home*}
+      (= (os/env "BROOD_TEST_RUN") "1")
+        (let (data-home (os/env "XDG_DATA_HOME"))
+          (if (and (os/env "BROOD_TEST_SCRATCH") (string? data-home))
+            {:kind :freedesktop :dir (path/join data-home "Trash")}
+            (failure "file/trash: a test run that kept the real home has no trash; bind file/*trash-home*")))
+      (= (os/type) :windows) {:kind :recycle-bin :dir nil}
+      (= (os/type) :macos)
+        (if home
+          {:kind :macos :dir (path/join home ".Trash")}
+          (failure "file/trash: no home directory"))
+      data {:kind :freedesktop :dir (path/join data "Trash")}
+      else (failure "file/trash: no XDG_DATA_HOME and no home directory"))))
+
+(defn trash-info (path:string date:string -> string)
+  "The `.trashinfo` text for `path` (absolute) trashed at `date` (local time,
+`YYYY-MM-DDThh:mm:ss`): its `Path=` percent-encoded a segment at a time, the slashes kept.
+
+    (file/trash-info \"/tmp/a b\" \"2026-11-08T09:15:00\")   ;=> \"[Trash Info]\\nPath=/tmp/a%20b\\nDeletionDate=2026-11-08T09:15:00\\n\""
+  (str "[Trash Info]\nPath="
+    (string/join (map (string/split path "/") url/percent-encode) "/")
+    "\nDeletionDate="
+    date
+    "\n"))
+
+(defn- trash-date ()
+  ;; the deletion date in local time, as the spec asks; UTC when the zone cannot be read
+  (let (zone (tz/local-zone)
+        now (datetime/epoch-ms-> (os/now)))
+    (datetime/format (if (failure? zone) now (tz/->local zone now)) "%Y-%m-%dT%H:%M:%S")))
+
+(defn- free-trash-name (files-dir info-dir name)
+  ;; `name`, else `name.2`, `name.3`… — the first taken by neither a trashed file nor an info
+  ;; file (an info file without its file still claims the name, as the spec says)
+  (letrec (try-name (fn (n)
+                      (let (candidate (if (= n 1) name (str name "." n)))
+                        (if (or (file/exists? (path/join files-dir candidate))
+                              (file/stat (path/join files-dir candidate))
+                              (and info-dir
+                                (file/exists? (path/join info-dir (str candidate ".trashinfo")))))
+                          (try-name (inc n))
+                          candidate))))
+    (try-name 1)))
+
+(defn- trash-into (path location)
+  ;; `path` (absolute) moved into the freedesktop or macOS trash `location`; where it went
+  (let (freedesktop? (= (:kind location) :freedesktop)
+        dir (:dir location)
+        files-dir (if freedesktop? (path/join dir "files") dir)
+        info-dir (when freedesktop? (path/join dir "info"))
+        _ (file/mkdir-private dir)
+        _ (file/mkdir files-dir)
+        _ (when info-dir (file/mkdir info-dir))
+        name (free-trash-name files-dir info-dir (path/basename path))
+        target (path/join files-dir name)
+        info (when info-dir (path/join info-dir (str name ".trashinfo"))))
+    (do
+      ;; the info file first, as the spec orders it: a crash between the two leaves an info
+      ;; file naming nothing, never a trashed file nobody can restore
+      (when info (file/spit info (trash-info path (trash-date))))
+      (try
+        (move path target)
+        (catch e (do (when info (file/rm info)) (throw e))))
+      target)))
+
+(defn trash (path:string -> any)
+  "Move `path` — a file, a directory with everything under it, or a symlink (the link, not
+what it points at) — to the desktop's trash, where the user can restore it: answers where it
+went (the path in the trash; `:recycle-bin` on Windows), or a failure saying why it did not
+go (no such file, no trash on this system, a refused move). The freedesktop.org trash on
+Linux and the BSDs (`$XDG_DATA_HOME/Trash`, with the `.trashinfo` a file manager restores
+from; a clash gets a numbered name), `~/.Trash` on macOS, the recycle bin on Windows. Across
+filesystems the file is copied, then removed. Where it goes is [[trash-location]].
+
+    (binding (file/*trash-home* \"/tmp/t\") (file/trash \"old.txt\"))   ;~> \"/tmp/t/files/old.txt\""
+  (let (absolute (path/normalize (path/absolute path))
+        location (trash-location))
+    (cond
+      (failure? location) location
+      (nil? (file/stat absolute)) (failure "file/trash: no such file: " path)
+      else
+        (try
+          (if (= (:kind location) :recycle-bin)
+            (do (%file-recycle absolute) :recycle-bin)
+            (trash-into absolute location))
+          (catch e (failure "file/trash: " (error-message e)))))))

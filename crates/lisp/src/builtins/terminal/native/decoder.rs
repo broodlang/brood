@@ -705,6 +705,17 @@ mod tests {
             decode(b"\x1b[27;5;127~"),
             vec![pressed(KeyCode::Backspace, CONTROL)]
         );
+        // C-<tab> and C-S-<tab>, which the legacy bytes send as a bare Tab
+        assert_eq!(
+            decode(b"\x1b[27;5;9~"),
+            vec![pressed(KeyCode::Tab, CONTROL)]
+        );
+        assert_eq!(
+            decode(b"\x1b[27;6;9~"),
+            vec![pressed(KeyCode::BackTab, CONTROL | SHIFT)]
+        );
+        // and under the kitty keyboard protocol
+        assert_eq!(decode(b"\x1b[9;5u"), vec![pressed(KeyCode::Tab, CONTROL)]);
     }
 
     #[test]

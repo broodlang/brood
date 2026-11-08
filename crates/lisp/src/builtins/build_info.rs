@@ -39,6 +39,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Brood's cache directory — `$XDG_CACHE_HOME/brood`, else `$HOME/.cache/brood` (a relative or empty `XDG_CACHE_HOME` ignored, as the XDG spec says) — or nil when neither gives one. The same rule the kernel's own caches use, so the stdlib image is written where every process looks for it.",
         cache_dir);
     primitives.def(
+        "%crash-record-dir",
+        Arity::exact(0),
+        Sig::nullary(string.union(nil_ty)),
+        &[],
+        "Where this runtime writes its fatal-signal record should it die on SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT — `$XDG_STATE_HOME/brood/crashes`, else `~/.local/state/brood/crashes`, as chosen when the binary started — or nil off Unix, with no state directory, or in a runtime embedded without the `brood`/`nest` startup. `crash-report/previous-crashes` reads the records left there.",
+        crash_record_dir);
+    primitives.def(
         "system/stdlib-id",
         Arity::exact(0),
         Sig::nullary(string),
@@ -260,6 +267,14 @@ fn binary_mtime() -> Option<std::time::Duration> {
 pub(super) fn build_time(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
     Ok(match binary_mtime() {
         Some(d) => Value::int(d.as_millis() as i64),
+        None => Value::Nil,
+    })
+}
+
+/// `(%crash-record-dir)` — see the registration; the directory `cli_support` chose.
+pub(super) fn crash_record_dir(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(match crate::cli_support::crash_record_dir() {
+        Some(dir) => heap.alloc_string(&dir),
         None => Value::Nil,
     })
 }

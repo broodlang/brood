@@ -2271,6 +2271,66 @@ impl Heap {
             .or_else(|| self.prelude.declared_sigs.get(&sym).copied())
     }
 
+    /// Record that module `ns` `(:use …)`s module `used` (idempotent).
+    pub fn note_module_use(&self, ns: Symbol, used: Symbol) {
+        let mut uses = self
+            .runtime
+            .module_uses
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let list = uses.entry(ns).or_default();
+        if !list.contains(&used) {
+            list.push(used);
+        }
+    }
+
+    /// The modules `ns` `(:use …)`s, in the order its header named them.
+    pub fn module_uses(&self, ns: Symbol) -> Vec<Symbol> {
+        self.runtime
+            .module_uses
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ns)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Remember that declaration `key` in module `ns` names the bare type `name`, which
+    /// means nothing in `ns` yet (idempotent).
+    pub fn note_type_scope_pending(&self, ns: Symbol, name: Symbol, key: Symbol) {
+        let mut pending = self
+            .runtime
+            .type_scope_pending
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let list = pending.entry(ns).or_default();
+        if !list.contains(&(name, key)) {
+            list.push((name, key));
+        }
+    }
+
+    /// Take the declarations of module `ns` waiting on the bare type `name` — on every name
+    /// when `name` is `None` — out of the pending set, as their keys.
+    pub fn take_type_scope_pending(&self, ns: Symbol, name: Option<Symbol>) -> Vec<Symbol> {
+        let mut pending = self
+            .runtime
+            .type_scope_pending
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(list) = pending.get_mut(&ns) else {
+            return Vec::new();
+        };
+        let mut keys = Vec::new();
+        list.retain(|&(waiting, key)| {
+            let taken = name.is_none_or(|n| n == waiting);
+            if taken && !keys.contains(&key) {
+                keys.push(key);
+            }
+            !taken
+        });
+        keys
+    }
+
     /// Restore the runtime's global bindings from a [`Heap::snapshot_globals`]
     /// snapshot, discarding every `def` made since it was taken — so a name `def`'d
     /// since the snapshot becomes unbound again, and a rebound name returns to its

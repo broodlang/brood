@@ -384,10 +384,34 @@
     (is (matches? "a.b" "a\nb"))
     (is (not (match? "^b" "a\nb")))
     (is (not (match? "a$" "a\nb"))))
-  (test "an escaped letter is that letter, and a newline is written as one"
-    (is (matches? "\\n" "n"))
-    (is (not (match? "\\n" "\n")))
-    (is (matches? "a\nb" "a\nb")))
+  (test "\\n \\t \\r \\f \\v are the control characters, as every other engine reads them"
+    (is (matches? "a\\nb" "a\nb"))
+    (is (not (match? "\\n" "n")))
+    (is (matches? "\\t\\r\\f\\v" "\t\r\u{c}\u{b}"))
+    (is (matches? "a\nb" "a\nb"))
+    ;; the pattern a carried-over `[ \t]*` was written to be: it matched the letter t
+    (assert= (regex/replace "^[ \\t]*" "\t  x" "") "x")
+    (is (not (match? "^[ \\t]+$" "t")))
+    (is (matches? "[^\\n]+" "abc"))
+    (is (not (match? "[^\\n]" "\n"))))
+  (test "a hex escape is the character with that code point; a malformed one is the letter"
+    (is (matches? "\\x41\\x{42}\\u0043\\u{1F600}" "ABC😀"))
+    (is (matches? "[\\x00-\\x7F]+" "plain ASCII ~"))
+    (is (not (match? "[\\x00-\\x7F]" "é")))
+    (is (matches? "[a-\\x{7A}]+" "az"))
+    (is (matches? "\\xg" "xg"))
+    (is (matches? "\\x4" "x4"))
+    ;; past Unicode, or a surrogate: the letter, and the braces after it are themselves
+    (is (matches? "[\\u{110000}]+" "u{10}"))
+    (is (matches? "\\u{D800}" "u{D800}")))
+  (test "any other escaped letter is that letter"
+    (is (matches? "\\q\\y" "qy"))
+    (is (matches? "[\\q]" "q")))
+  (test "an escaped character is the low or high end of a range like a plain one"
+    (is (matches? "[\\--/]+" "-./"))
+    (is (matches? "[\\]-a]+" "]^_`a"))
+    ;; a `-` before a class is a member, as it is last in the set
+    (is (matches? "[a-\\d]+" "a-1")))
   (test "a character the engine reads as syntax is a literal where the dialect says so"
     (is (matches? "a&&b" "a&&b"))
     (is (matches? "[a&&b]+" "a&b"))

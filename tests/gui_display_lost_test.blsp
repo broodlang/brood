@@ -1,0 +1,43 @@
+;; tests/gui_display_lost_test.blsp — a window whose display goes away tells its app (ADR-631).
+;;
+;; When the compositor or the X server dies, every open window's app is sent
+;; `[:hangup :display-lost]`, so `ui-run` runs the app's `:on-hangup` (an editor's emergency
+;; auto-save) and ends; a draw after that is a no-op and a new window fails. The GUI thread does
+;; it when its event loop ends; `%gui-lose-display` runs the same path, so it runs here headless.
+;; The display is lost for good, runtime-wide, so the app runs in a CHILD runtime of its own.
+(defmodule gui-display-lost-test
+  (:use test)
+  (:use suite-helpers))
+
+(purge-stale-temp "display-lost-")
+
+(def- app-source
+  (str "(defmodule display-lost-app (:use editor/ui))\n"
+    "(if (not (gui/available?))\n" "  (io/puts \"no-gui\")\n" "  (let (me (self)\n"
+    "        _ (spawn (let (display (editor/frontend/gui-display {:title \"lost\"}))\n"
+    "                     (send me [:opened (:window display)])\n"
+    "                     (ui-run {:text \"x\" :on-hangup (fn (m sig) (send me [:hangup sig]))}\n"
+    "                       (fn (m cols rows) [[:clear] [:text 0 0 (:text m)]])\n"
+    "                       (fn (m input cols rows) (assoc m :text (str input)))\n"
+    "                       display)\n" "                     (send me [:ended]))))\n"
+    "    (do (receive ([:opened _] nil) (after 10000 nil))\n"
+    "      (%gui-lose-display \"a test\")\n"
+    "      (io/puts (receive ([:hangup sig] (str \"hangup \" sig)) (after 10000 \"no-hangup\")))\n"
+    "      (io/puts (receive ([:ended] \"ended\") (after 10000 \"no-end\")))\n"
+    "      (io/puts (str \"open-after \" (try (do (gui/open \"again\") \"opened\")\n"
+    "                                    (catch e (error-message e))))))))\n"))
+
+(describe "a lost display (ADR-631)"
+  (test "every window's app is told [:hangup :display-lost], runs :on-hangup and ends"
+    (let (nest (sibling-binary "nest"))
+      (when nest
+        (let (dir (temp-dir "display-lost-")
+              script (path/join dir "app.blsp"))
+          (file/mkdir dir)
+          (file/spit script app-source)
+          (let (result (os/cmd nest ["run" script] {:env {"BROOD_GUI_HEADLESS" "1"} :dir dir})
+                out (str (os/cmd-out result) (get result :stderr "")))
+            (when (not (includes? out "no-gui"))
+              (is (includes? out "hangup :display-lost"))
+              (is (includes? out "ended"))
+              (is (includes? out "the display is gone")))))))))

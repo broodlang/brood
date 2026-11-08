@@ -240,7 +240,8 @@
     (assert= (checker-messages "(defrecord int (n)) (sig f (int -> int)) (defn f (n) (+ n 1)) (defn ok () (f 42))")
       (list)))
   (test "an ambiguous bare name declines rather than guessing"
-    (let (w (checker-messages "(defmodule a) (defrecord pt (x y)) (defmodule b) (defrecord pt (m n)) (sig amb (pt -> int)) (defn amb (p) 1)"))
+    ;; The module naming it defines no `pt` of its own, which would be the one it means.
+    (let (w (checker-messages "(defmodule c) (sig amb (pt -> int)) (defn amb (p) 1) (defmodule a) (defrecord pt (x y)) (defmodule b) (defrecord pt (m n))"))
       (is (any? w (fn (m) (includes? m "unknown type")))))))
 
 (describe "defrecord: the field list"
