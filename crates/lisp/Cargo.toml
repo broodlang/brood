@@ -398,6 +398,9 @@ crossterm = "0.29"
 # aws-lc-rs crypto provider is a C build with no wasm target.
 rustls = "0.23"
 webpki-roots = "1"
+# The platform's own trust store (the system CA bundle, the macOS keychain, Windows'
+# certificate store), which `https` trusts before the bundled Mozilla roots above.
+rustls-native-certs = "0.8"
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 # ECDSA (P-256/P-384) and RSA signatures for `std/crypto` (ADR-448): the provider rustls
 # already links here, so no new crate — and, like rustls, native only.
