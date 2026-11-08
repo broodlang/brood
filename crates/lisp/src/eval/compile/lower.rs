@@ -81,6 +81,10 @@ pub(crate) struct Scope {
     /// `(call position, head)` for each call whose head is a LOCAL — moved into
     /// `CompiledArm::local_call_heads`.
     pub(crate) local_call_heads: Vec<(crate::error::Pos, Symbol)>,
+    /// The position of every positioned call, to tell a position one call owns from one
+    /// several share (generated code is stamped with its origin's) — see
+    /// [`Scope::take_local_call_heads`].
+    pub(crate) call_positions: Vec<crate::error::Pos>,
     /// The innermost positioned form being compiled — where a global read below it is
     /// located (see `compile_node`).
     pub(crate) read_pos: Option<crate::error::Pos>,
@@ -104,8 +108,21 @@ impl Scope {
             stage_calls: false,
             staged_head_pos: Vec::new(),
             local_call_heads: Vec::new(),
+            call_positions: Vec::new(),
             read_pos: None,
         }
+    }
+
+    /// The arm's `local_call_heads`: each local-headed call keyed by its position — only
+    /// where that position is the one call's. Generated code shares its origin's position, so
+    /// `(do (~f 1) (~g 2))` puts a local `h` and a global at one place, and a lookup by
+    /// position would blame `h` for the global's failure; such a position names nothing.
+    pub(crate) fn take_local_call_heads(&mut self) -> Box<[(crate::error::Pos, Symbol)]> {
+        let positions = std::mem::take(&mut self.call_positions);
+        std::mem::take(&mut self.local_call_heads)
+            .into_iter()
+            .filter(|(at, _)| positions.iter().filter(|p| *p == at).count() == 1)
+            .collect()
     }
     /// Allocate the next arm-relative call-site id (see the `sites` field).
     pub(crate) fn site_alloc(&mut self) -> u32 {
@@ -1452,8 +1469,11 @@ fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -
             {
                 scope.staged_head_pos.push((*gsite, p));
             }
-            if let (Some(h), Some(p)) = (local_head, pos) {
-                scope.local_call_heads.push((p, h));
+            if let Some(p) = pos {
+                scope.call_positions.push(p);
+                if let Some(h) = local_head {
+                    scope.local_call_heads.push((p, h));
+                }
             }
             if site != NO_SITE {
                 // Arm-relative: accumulate on the scope; `compile_arm` moves the vec

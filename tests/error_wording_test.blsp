@@ -41,6 +41,16 @@
         (assert= (:message e) "cannot call non-function: 0")
         (is (includes? (:hint e) "callback argument in the wrong position"))))))
 
+;; Two generated calls share their macro call's position: a failure in the global one must not
+;; be blamed on the local one (the compiled tiers look a local up by position).
+(defmacro ew-both (f g) `(do (~f 1) (~g 2)))
+(def ew-not-a-fn nil)
+(defn- ew-uses (h) (ew-both h ew-not-a-fn))
+
+(describe "a call is not blamed on a local that shares its position"
+  (test "the global's failure is not named after the local beside it"
+    (assert= (message-of (fn () (ew-uses inc))) "cannot call non-function: nil")))
+
 (defn- ew-pf
   ((0) :zero)
   ((n) n))

@@ -849,7 +849,15 @@ fn macroexpand_all_depth_step_inner(
             // On by default; opt out with `BROOD_LINMAP=0`.
             // Like the fold rewrites, it reads `get`/`assoc`/`+` by spelling: not in a module
             // that gives one of them its own meaning.
-            if !namespace_rebinds_rewrite_names(heap)
+            // (the shape test first: it is cheap, and the namespace check is not)
+            let defines_fn = out.len() == 3
+                && matches!(out[0].unpack(), ValueRef::Sym(d) if value::symbol_is(d, kw::DEF))
+                && heap.list_items(out[2]).is_some_and(|value| {
+                    matches!(value.first().map(|v| v.unpack()),
+                        Some(ValueRef::Sym(f)) if value::symbol_is(f, kw::FN))
+                });
+            if defines_fn
+                && !namespace_rebinds_rewrite_names(heap)
                 && let Some(split) = linmap_split_def(heap, &out)
             {
                 return Ok(split);

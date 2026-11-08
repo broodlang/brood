@@ -47,6 +47,12 @@ pub(crate) fn jit_dispatch_call(
     // `stage_base` is where the callee frame starts — directly at the args for an elided
     // head, one slot lower (over the staged callee) for a computed one.
     let elided = site != NO_SITE;
+    // A computed head's slot carries its local's name (or `POSITIONLESS_CALL`) for the error
+    // path only (`emit_call`'s `slow_head`). Split it off here, so `head` below keeps its one
+    // meaning — the symbol of an elided head, else `u32::MAX` — for the ICs, the fast links
+    // and `dbg_fn`, where a profiler sample reads it as a function's name.
+    let local_head = (!elided && head != u32::MAX).then_some(head);
+    let head = if elided { head } else { u32::MAX };
     let stage_base = if elided { n - argc } else { n - argc - 1 };
 
     #[cfg(debug_assertions)]
@@ -407,10 +413,9 @@ pub(crate) fn jit_dispatch_call(
                 }) => vm_apply(heap, compiled, &args, genv),
                 // A computed head's `head` slot carries its local's name, if it is one
                 // (`emit_call`'s `slow_head`).
-                Err(e) => {
-                    let local = (!elided && head != u32::MAX).then_some(head);
-                    Err(crate::eval::name_uncallable_local(heap, e, callee, local))
-                }
+                Err(e) => Err(crate::eval::name_uncallable_local(
+                    heap, e, callee, local_head,
+                )),
             }
         }
     };

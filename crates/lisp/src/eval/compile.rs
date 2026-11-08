@@ -559,7 +559,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 ngsites: ir::gsite_reservation(scope.gsites, scope.sites),
                 site_pos: std::mem::take(&mut scope.site_pos).into_boxed_slice(),
                 staged_head_pos: std::mem::take(&mut scope.staged_head_pos).into_boxed_slice(),
-                local_call_heads: std::mem::take(&mut scope.local_call_heads).into_boxed_slice(),
+                local_call_heads: scope.take_local_call_heads(),
                 has_runtime_handles: node_has_rt_handles(&node),
                 chunk,
                 body: node,
