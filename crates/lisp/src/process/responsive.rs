@@ -83,15 +83,66 @@ impl BlockingCall {
 /// The detail a subprocess call reports: the program and its arguments, as a shell would
 /// show them, cut to a readable length.
 pub(crate) fn command_detail(program: &str, arguments: &[String]) -> String {
+    cut_detail(
+        std::iter::once(program)
+            .chain(arguments.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// A report's detail cut to a readable length.
+fn cut_detail(text: String) -> String {
     const MAX: usize = 200;
-    let mut text = std::iter::once(program)
-        .chain(arguments.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join(" ");
     if text.chars().count() > MAX {
-        text = text.chars().take(MAX).collect::<String>() + "…";
+        text.chars().take(MAX).collect::<String>() + "…"
+    } else {
+        text
     }
-    text
+}
+
+/// How long a file call must hold a responsive process before it is reported: more than a
+/// frame at 60 Hz. A local read or stat takes microseconds, and a responsive process makes
+/// them on purpose (an editor reads a small file or its state inside a key), so reporting
+/// every one would bury the slow mount among thousands of instant calls.
+pub(crate) const SLOW_FILE_CALL_MS: u128 = 20;
+
+/// Run `body`, a file native (`native` its name, its first `paths` arguments the paths it
+/// touches), as a call that MAY wait on the world (ADR-517's file addendum): a network
+/// mount, a disk spun down, a FIFO with no writer. Unlike a subprocess it is usually
+/// instant, so it is never refused, and it is reported only when it held the process at
+/// least [`SLOW_FILE_CALL_MS`]: `[:blocking-call {:native "file/slurp" :detail PATH :ms N}]`,
+/// two paths reading `from -> to`. For an ordinary process the cost is one read of the
+/// heap's per-process flags before `body` runs.
+pub(crate) fn file_call(
+    heap: &mut Heap,
+    native: &'static str,
+    args: &[Value],
+    paths: usize,
+    body: impl FnOnce(&mut Heap) -> crate::error::LispResult,
+) -> crate::error::LispResult {
+    if heap.proc_responsive() == Responsive::Off {
+        return body(heap);
+    }
+    let started = Instant::now();
+    let value = body(heap);
+    if started.elapsed().as_millis() >= SLOW_FILE_CALL_MS {
+        let detail = args
+            .iter()
+            .take(paths)
+            .map(|path| {
+                crate::builtins::args::expect_string(heap, native, *path).unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        BlockingCall {
+            native,
+            detail: cut_detail(detail),
+            started,
+        }
+        .report(heap);
+    }
+    value
 }
 
 #[cfg(test)]

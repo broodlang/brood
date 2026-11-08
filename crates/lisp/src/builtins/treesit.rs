@@ -905,3 +905,93 @@ pub(super) fn tree_sitter_grammar_info(args: &[Value], _: EnvId, heap: &mut Heap
     let lang = ts_lang(heap, "%tree-sitter-grammar-info", arg(args, 0))?;
     crate::host::treesit::grammar_info(heap, &lang)
 }
+
+// ---- vetting a grammar library before this process loads it (ADR-660) -------------------
+
+/// Vetting a grammar in a child and the verdicts kept on libraries — registered LAST from
+/// `builtins::register`, for the intern-table order reason `register_tree_queries` gives.
+pub(super) fn register_grammar_vetting(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    primitives.def(
+        "%tree-sitter-vet-grammar",
+        Arity::range(2, 3),
+        Sig::with_optional(vec![string, kw], vec![map_or_nil], map_ty),
+        &["path", "lang", "&optional", "opts"],
+        "Vet the grammar library at `path` as the language `lang` in a CHILD runtime, loading nothing into this one (ADR-660): the child loads it and parses `opts`' :corpus (a vector of strings — a grammar's own test corpus) and inputs made to reach a scanner's corners (its tokens in every arrangement, deep nesting, a 64 KB line, invalid UTF-8, NULs, unterminated strings), each reparsed after edits. Answers the verdict, {:verdict :passed|:quarantined|:refused|:unvetted :reason :by :vet|:crash :lang :library :sha256 :time :inputs :cached}: :quarantined when the child crashed, failed or reported nothing for :timeout-ms (default 10000) — kept by the library's SHA-256, so no load of it is attempted again; :passed kept likewise, so a healthy library is vetted once; :refused when it failed to load as an ordinary load would (no tree_sitter_<lang>, an ABI out of range); :unvetted when no child could run. A kept verdict is answered (:cached true) unless :force is true. Errors on a missing file, or in a build without feature `treesit`.",
+        tree_sitter_vet_grammar,
+    );
+    primitives.def(
+        "%tree-sitter-grammar-verdict",
+        Arity::exact(1),
+        Sig::new(vec![string], map_or_nil),
+        &["path"],
+        "The verdict kept on the grammar library at `path` as its bytes are now — {:verdict :passed|:quarantined :reason :by :vet|:crash :lang :library :sha256 :time …}, a quarantine written by a vetting child's death or by a runtime that crashed in the grammar's code (with its :signal and :pid) — or nil when it was never vetted (or was vetted as other bytes) (ADR-660). Never loads it. nil in a build without feature `treesit`.",
+        tree_sitter_grammar_verdict,
+    );
+    primitives.def(
+        "%tree-sitter-forget-grammar-verdict",
+        Arity::exact(1),
+        Sig::new(vec![string], bool_ty),
+        &["path"],
+        "Drop every verdict kept on the grammar library at `path` (ADR-660): a quarantined library may then be loaded, and is vetted again first. True when there was one. A reinstalled library has new bytes and so no verdict, and needs none of this. false in a build without feature `treesit`.",
+        tree_sitter_forget_grammar_verdict,
+    );
+}
+
+/// `(%tree-sitter-vet-grammar path lang opts)` — `crate::host::treesit::vet_grammar`.
+pub(super) fn tree_sitter_vet_grammar(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "%tree-sitter-vet-grammar";
+    let path = expect_string(heap, who, arg(args, 0))?;
+    let lang = ts_lang(heap, who, arg(args, 1))?;
+    let mut corpus: Vec<Vec<u8>> = Vec::new();
+    let mut timeout_ms = crate::host::treesit::DEFAULT_TIMEOUT_MS;
+    let mut force = false;
+    let key = |name: &str| Value::keyword(value::intern(name));
+    match arg(args, 2) {
+        Value::Nil => {}
+        Value::Map(opts) => {
+            if let Some(inputs) = heap.map_get(opts, key("corpus"))
+                && !matches!(inputs, Value::Nil)
+            {
+                for input in heap.seq_items(inputs)? {
+                    corpus.push(expect_string(heap, who, input)?.into_bytes());
+                }
+            }
+            if let Some(ms) = heap.map_get(opts, key("timeout-ms"))
+                && !matches!(ms, Value::Nil)
+            {
+                timeout_ms = expect_int(heap, who, ms)?.max(1) as u64;
+            }
+            if let Some(flag) = heap.map_get(opts, key("force")) {
+                force = !matches!(flag, Value::Nil | Value::Bool(false));
+            }
+        }
+        other => return Err(LispError::wrong_type(heap, who, "map or nil", other)),
+    }
+    crate::host::treesit::vet_grammar(
+        heap,
+        &path,
+        &lang,
+        &corpus,
+        std::time::Duration::from_millis(timeout_ms),
+        force,
+    )
+}
+
+/// `(%tree-sitter-grammar-verdict path)` — `crate::host::treesit::grammar_verdict`.
+pub(super) fn tree_sitter_grammar_verdict(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "%tree-sitter-grammar-verdict", arg(args, 0))?;
+    crate::host::treesit::grammar_verdict(heap, &path)
+}
+
+/// `(%tree-sitter-forget-grammar-verdict path)` — `crate::host::treesit::forget_grammar_verdict`.
+pub(super) fn tree_sitter_forget_grammar_verdict(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let path = expect_string(heap, "%tree-sitter-forget-grammar-verdict", arg(args, 0))?;
+    crate::host::treesit::forget_grammar_verdict(&path)
+}

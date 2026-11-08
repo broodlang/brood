@@ -43,6 +43,116 @@ pub fn note_panic(message: &str) {
     let _ = message;
 }
 
+/// Native code this thread is running that is not the runtime's own — a tree-sitter grammar
+/// loaded from a library (ADR-660) — named so a crash inside it says whose code it was.
+///
+/// Built once per library, before its code first runs, and leaked: the handler can only read
+/// what already exists. `record_fragment` is spliced into the crash record's map (` :grammar
+/// {…}`); the optional crash file is written beside the record, so the next start can act on
+/// it without reading crash records (a grammar quarantined by the crash that it caused).
+pub struct ForeignCode {
+    record_fragment: Vec<u8>,
+    crash_file: Option<CrashFile>,
+}
+
+/// What [`ForeignCode::with_crash_file`] asks the handler to write.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct CrashFile {
+    /// Each directory to `mkdir` before opening the file, outermost first.
+    mkdirs: Vec<std::ffi::CString>,
+    file: std::ffi::CString,
+    /// Written before the signal's own fields, and after them.
+    head: Vec<u8>,
+    tail: Vec<u8>,
+}
+
+/// The longest fragment a crash record carries: the record is a fixed buffer on the signal
+/// stack, and a fragment that did not fit would cut the map before its closing brace.
+const FOREIGN_FRAGMENT_MAX: usize = 768;
+
+impl ForeignCode {
+    /// Code named by `record_fragment`: text inside a Brood map, starting with a space (` :grammar
+    /// {:lang :json}`). One longer than [`FOREIGN_FRAGMENT_MAX`] is dropped, not cut.
+    pub fn new(record_fragment: String) -> ForeignCode {
+        let record_fragment = if record_fragment.len() <= FOREIGN_FRAGMENT_MAX {
+            record_fragment.into_bytes()
+        } else {
+            Vec::new()
+        };
+        ForeignCode {
+            record_fragment,
+            crash_file: None,
+        }
+    }
+
+    /// Also write `path` when the runtime dies in this code: `head`, then ` :signal "SIGSEGV"
+    /// :time <ms> :pid <pid>`, then `tail` — so `head` opens a map literal and `tail` closes it.
+    /// The directories above `path` are made first. Ignored when `path` cannot be a C string.
+    pub fn with_crash_file(mut self, path: &std::path::Path, head: String, tail: String) -> Self {
+        let cstring = |path: &std::path::Path| {
+            std::ffi::CString::new(path.to_string_lossy().into_owned().into_bytes()).ok()
+        };
+        if let Some(file) = cstring(path) {
+            let mut mkdirs: Vec<std::ffi::CString> = path
+                .parent()
+                .map(|dir| dir.ancestors().filter_map(cstring).collect())
+                .unwrap_or_default();
+            mkdirs.reverse();
+            self.crash_file = Some(CrashFile {
+                mkdirs,
+                file,
+                head: head.into_bytes(),
+                tail: tail.into_bytes(),
+            });
+        }
+        self
+    }
+
+    /// The fragment a crash record gets while this code runs.
+    pub fn record_fragment(&self) -> &[u8] {
+        &self.record_fragment
+    }
+}
+
+thread_local! {
+    /// The foreign code this thread is in, or null. Const-initialised and without a destructor,
+    /// so reading it is a plain thread-local load — what lets the signal handler read it.
+    static FOREIGN: std::cell::Cell<*const ForeignCode> =
+        const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+/// Restores the foreign code the thread was in before [`enter_foreign_code`].
+pub struct ForeignGuard {
+    previous: *const ForeignCode,
+}
+
+impl Drop for ForeignGuard {
+    fn drop(&mut self) {
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        let _ = FOREIGN.try_with(|cell| cell.set(self.previous));
+    }
+}
+
+/// Mark this thread as running `code` (or nothing, for `None`) until the guard drops: a crash
+/// meanwhile names it in the record and writes its crash file. Two thread-local writes, cheap
+/// enough to wrap every parse.
+pub fn enter_foreign_code(code: Option<&'static ForeignCode>) -> ForeignGuard {
+    let next = code.map_or(std::ptr::null(), |code| code as *const ForeignCode);
+    let previous = FOREIGN
+        .try_with(|cell| cell.replace(next))
+        .unwrap_or(std::ptr::null());
+    // the mark must be in place before the foreign call it brackets, not moved past it
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    ForeignGuard { previous }
+}
+
+/// The foreign code this thread is in now, if any.
+pub fn current_foreign_code() -> Option<&'static ForeignCode> {
+    let pointer = FOREIGN.try_with(|cell| cell.get()).ok()?;
+    // SAFETY: only ever a `&'static ForeignCode` (see `enter_foreign_code`), or null.
+    unsafe { pointer.as_ref() }
+}
+
 /// Prepare the record and install the handlers; a no-op off Unix or with no state directory.
 /// Called early in `main`, after the panic hook, and again when a test run has pointed
 /// `XDG_STATE_HOME` at its scratch home (`arm_test_run`), which moves the record there: a
@@ -73,7 +183,7 @@ fn record_dir_from_env() -> Option<std::path::PathBuf> {
 
 /// `text` safe inside a Brood string literal and on one line: a quote or backslash becomes
 /// `'` or `/`, a control character a space, and it is cut to `max` bytes on a char boundary.
-fn literal_safe(text: &str, max: usize) -> String {
+pub(crate) fn literal_safe(text: &str, max: usize) -> String {
     let mut out = String::new();
     for character in text.chars() {
         let character = match character {
@@ -239,23 +349,28 @@ mod unix {
 
         fn push_int(&mut self, value: i128) {
             let mut digits = [0u8; 40];
-            let mut at = digits.len();
-            let negative = value < 0;
-            let mut rest = value.unsigned_abs();
-            loop {
-                at -= 1;
-                digits[at] = b'0' + (rest % 10) as u8;
-                rest /= 10;
-                if rest == 0 {
-                    break;
-                }
-            }
-            if negative {
-                at -= 1;
-                digits[at] = b'-';
-            }
-            self.push(&digits[at..]);
+            self.push(format_int(value, &mut digits));
         }
+    }
+
+    /// `value` in decimal, written into the end of `digits`; the slice that holds it.
+    fn format_int(value: i128, digits: &mut [u8; 40]) -> &[u8] {
+        let mut at = digits.len();
+        let negative = value < 0;
+        let mut rest = value.unsigned_abs();
+        loop {
+            at -= 1;
+            digits[at] = b'0' + (rest % 10) as u8;
+            rest /= 10;
+            if rest == 0 {
+                break;
+            }
+        }
+        if negative {
+            at -= 1;
+            digits[at] = b'-';
+        }
+        &digits[at..]
     }
 
     fn signal_name(signal: libc::c_int) -> &'static [u8] {
@@ -318,6 +433,14 @@ mod unix {
             record.push_int(unsafe { (*info).si_code } as i128);
         }
         let len = PANIC_NOTE_LEN.load(Ordering::SeqCst);
+        // the foreign code this thread died in (a grammar, ADR-660), when it fits with the
+        // panic note and the closing brace — a fragment cut short would leave no map at all
+        if let Some(code) = super::current_foreign_code() {
+            let fragment = code.record_fragment();
+            if record.len + fragment.len() + len + 16 <= record.bytes.len() {
+                record.push(fragment);
+            }
+        }
         if len > 0 {
             record.push(b" :panic \"");
             for slot in PANIC_NOTE.iter().take(len) {
@@ -337,6 +460,40 @@ mod unix {
                 return;
             }
             bytes = &bytes[wrote as usize..];
+        }
+    }
+
+    /// Write the crash file of the foreign code the runtime died in: its head, the signal, the
+    /// time and the pid, its tail. Async-signal-safe: `mkdir`, `open`, `write`, `close`,
+    /// `clock_gettime`, `getpid`, and integers formatted on the stack.
+    unsafe fn write_crash_file(crash_file: &super::CrashFile, signal: libc::c_int) {
+        // written piece by piece, no second record buffer: the record's is still on this
+        // stack, the alternate signal stack, which has only a few kilobytes
+        let mut now: libc::timespec = unsafe { std::mem::zeroed() };
+        unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
+        let time = now.tv_sec as i128 * 1000 + now.tv_nsec as i128 / 1_000_000;
+        let pid = unsafe { libc::getpid() } as i128;
+        let mut digits = [0u8; 40];
+        unsafe {
+            for dir in &crash_file.mkdirs {
+                libc::mkdir(dir.as_ptr(), 0o700);
+            }
+            let fd = libc::open(
+                crash_file.file.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            );
+            if fd >= 0 {
+                write_all(fd, &crash_file.head);
+                write_all(fd, b" :signal \"");
+                write_all(fd, signal_name(signal));
+                write_all(fd, b"\" :time ");
+                write_all(fd, format_int(time, &mut digits));
+                write_all(fd, b" :pid ");
+                write_all(fd, format_int(pid, &mut digits));
+                write_all(fd, &crash_file.tail);
+                libc::close(fd);
+            }
         }
     }
 
@@ -370,6 +527,11 @@ mod unix {
                     write_all(2, prepared.file.as_bytes());
                     write_all(2, b"\n");
                 }
+                if let Some(code) = super::current_foreign_code()
+                    && let Some(crash_file) = &code.crash_file
+                {
+                    write_crash_file(crash_file, signal);
+                }
             }
             // Give the signal back. A fault (si_code > 0) re-raises itself when the handler
             // returns, so the prior handler (Rust's stack-overflow check) sees it as it would
@@ -392,6 +554,36 @@ mod unix {
 #[cfg(test)]
 mod tests {
     use super::literal_safe;
+
+    #[test]
+    fn foreign_code_is_marked_per_thread_and_a_long_fragment_is_dropped() {
+        use super::{ForeignCode, current_foreign_code, enter_foreign_code};
+        let code: &'static ForeignCode = Box::leak(Box::new(
+            ForeignCode::new(" :grammar {:lang :x}".to_string()).with_crash_file(
+                std::path::Path::new("/state/brood/grammar-verdicts/ab.blsp"),
+                "{:verdict :quarantined".to_string(),
+                "}\n".to_string(),
+            ),
+        ));
+        assert_eq!(code.record_fragment(), b" :grammar {:lang :x}");
+        let crash_file = code.crash_file.as_ref().expect("a crash file");
+        assert_eq!(
+            crash_file.mkdirs.len(),
+            4,
+            "/, /state, /state/brood, …/grammar-verdicts"
+        );
+        {
+            let _marked = enter_foreign_code(Some(code));
+            assert!(current_foreign_code().is_some_and(|current| std::ptr::eq(current, code)));
+            // another thread is not in it
+            std::thread::spawn(|| assert!(current_foreign_code().is_none()))
+                .join()
+                .unwrap();
+        }
+        assert!(current_foreign_code().is_none());
+        let long = ForeignCode::new(format!(" :grammar {{:library \"{}\"}}", "x".repeat(900)));
+        assert!(long.record_fragment().is_empty());
+    }
 
     #[test]
     fn a_literal_keeps_no_quote_backslash_or_newline_and_is_cut_on_a_char_boundary() {

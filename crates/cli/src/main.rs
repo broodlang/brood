@@ -92,6 +92,7 @@ struct Cli {
 }
 
 fn main() {
+    brood::cli_support::grammar_vetting_entry();
     brood::cli_support::install_panic_reporting();
     // A release bundle (`nest release`, ADR-038): this binary carries an app's
     // source appended to it. Boot the app and pass argv straight through to its

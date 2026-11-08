@@ -6,6 +6,7 @@
 ;;   - :refuse raises a catchable E0048 naming the call, and the command never runs
 ;;   - :report lets the call through and then sends [:blocking-call {:native :detail :ms}]
 ;;   - an ordinary process gets no message
+;;   - a file call is reported only when it held the process, and never refused
 ;; Each case runs in its own process, so the flag never reaches the test runner.
 
 (defmodule responsive-process-test (:use test))
@@ -73,3 +74,31 @@
                            (proc/flag :responsive :refuse)
                            (os/clipboard-set "brood responsive test")))
       "brood responsive test")))
+
+;; A file call waits on the world too — a network mount, a spun-down disk, a FIFO no one
+;; writes — but almost always it is instant, and a responsive process makes local reads on
+;; purpose. So it is reported only when it held the process (`SLOW_FILE_CALL_MS`, 20 ms), and
+;; never refused (ADR-517's file addendum). A FIFO stands in for the slow mount: its read
+;; waits until a writer, here a shell 100 ms later, opens it.
+(describe "a responsive process and the disk"
+  (test "a file read that held the process is reported with its path"
+    (when (not (= (os/type) :windows))
+      (let (fifo (path/temp (str "brood-responsive-fifo-" (rand/token 8)))
+            _ (os/cmd "mkfifo" [fifo])
+            _ (os/spawn "sh" ["-c" (str "sleep 0.1; printf slow > '" fifo "'")])
+            [text facts] (in-process (fn ()
+                                       (proc/flag :responsive true)
+                                       [(file/slurp fifo) (blocking-reports)])))
+        (file/rm fifo)
+        (assert= text "slow")
+        (assert= (into [] (map facts :native)) ["file/slurp"])
+        (assert= (:detail (first facts)) fifo)
+        (is (>= (:ms (first facts)) 20)))))
+  (test "a quick file call is not reported, and a refusing process is never refused one"
+    (let (path (path/temp (str "brood-responsive-file-" (rand/token 8))))
+      (assert= (in-process (fn ()
+                             (proc/flag :responsive :refuse)
+                             (file/spit path "quick")
+                             [(file/slurp path) (file/exists? path) (blocking-reports)]))
+        ["quick" true []])
+      (file/rm path))))

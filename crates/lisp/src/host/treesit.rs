@@ -40,12 +40,18 @@ mod disabled;
 #[cfg(feature = "treesit")]
 mod grammar;
 mod injections;
+#[cfg(feature = "treesit")]
+mod vet;
 
 #[cfg(not(feature = "treesit"))]
 pub use disabled::*;
 #[cfg(feature = "treesit")]
 pub use grammar::*;
 pub use injections::*;
+#[cfg(feature = "treesit")]
+pub use vet::{
+    DEFAULT_TIMEOUT_MS, forget_grammar_verdict, grammar_verdict, vet_grammar, vetting_entry,
+};
 
 /// `(tree-sitter-parse source lang)` — parse `source` (a string) with the
 /// grammar named by keyword `lang` (`:ruby`, `:elixir`) into a positioned CST: a
@@ -174,6 +180,8 @@ fn parse_cached(src: &str, lang: &str) -> Result<tree_sitter::Tree, LispError> {
                 (i, t)
             })
     };
+    // the grammar's lexer and scanner run from here: a crash names it (ADR-660)
+    let marked = vet::grammar_mark(lang);
     let mut parser = checkout_parser(lang, &language)?;
     let bytes = src.as_bytes();
     let tree = parser.parse_with_options(
@@ -188,6 +196,7 @@ fn parse_cached(src: &str, lang: &str) -> Result<tree_sitter::Tree, LispError> {
         Some(tree_sitter::ParseOptions::new().progress_callback(&mut interruptible)),
     );
     return_parser(lang, parser);
+    drop(marked);
     let tree = tree.ok_or_else(|| parse_failed(lang))?;
     {
         let mut cache = crate::core::sync::lock(&TREE_CACHE);
@@ -1172,6 +1181,7 @@ fn parse_rope(
     old: Option<&tree_sitter::Tree>,
 ) -> Result<tree_sitter::Tree, LispError> {
     let language = language_for(lang)?;
+    let _marked = vet::grammar_mark(lang); // a crash in the grammar names it (ADR-660)
     let mut parser = checkout_parser(lang, &language)?;
     let length = text.len_bytes();
     let tree = parser.parse_with_options(

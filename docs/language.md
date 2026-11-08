@@ -3003,6 +3003,12 @@ The report arrives in the process's own mailbox behind whatever it already has, 
 handles it as one more event (bedit keeps it in its slow-turn log). The fix it points at is
 always the same: move the call off the process, into a task, a port or a worker.
 
+A file call (`file/slurp`, `file/spit`, `file/replace`, `file/ls`, `file/stat`,
+`file/exists?` and the other `file/` natives) may wait too, on a network mount or a disk spun
+down, but almost never does, so it is reported only when it held the process 20 ms or more,
+and never refused (ADR-517's addendum): `[:blocking-call {:native "file/slurp" :detail
+"/mnt/share/notes.txt" :ms 840}]`.
+
 ### Going idle (`proc/hibernate`)
 
 `(proc/hibernate)` tells the runtime this process is about to wait a long time, so it

@@ -1,0 +1,248 @@
+;; A grammar library vetted in a child before this process loads it, and a crash in one
+;; attributed to it (ADR-660). The grammars are a few lines of C compiled here: one whose
+;; tables are zeros (it loads, then crashes the first parse), one whose entry point aborts,
+;; one whose entry point never returns, one with no entry point at all — and, when an editor's
+;; JSON grammar is installed, a healthy one forwarding to it. Skipped without a C compiler.
+
+(defmodule grammar-vet-test
+  (:use test :exclude [running?])
+  (:use editor/treesit)
+  (:use editor/grammar-install)
+  (:use suite-helpers))
+
+(purge-stale-temp "brood-grammarvet-")
+
+(def gvt-cc? (and (os/which "cc") (not (= (os/type) :windows))))
+
+(defn- gvt-build (dir lang source &optional (link []))
+  ;; compile `source` into `dir`/libtree-sitter-`lang`.so; answers the library's path
+  (let (c-file (path/join dir (str (->string lang) ".c"))
+        library (path/join dir (str "libtree-sitter-" (->string lang) ".so")))
+    (file/spit c-file source)
+    (let (result (os/cmd "cc" (append ["-shared" "-fPIC" "-o" library c-file] link)))
+      (when (not (os/cmd-ok? result))
+        (error "gvt-build: cc failed: " (get result :stderr)))
+      library)))
+
+(def- gvt-zero-tables
+  ;; an ABI-14 language with a lexer and every table null: it passes the ABI and parseable
+  ;; checks (tree-sitter's TSLanguage up to `lex_fn`), and the first parse reads through a null
+  ;; pointer — or, should it get as far, its lexer writes through one
+  (str "#include <stdint.h>\n"
+    "struct fake_language { uint32_t counts[9]; uint16_t max_alias_sequence_length;\n"
+    "  const void *tables[13]; int (*lex_fn)(void *, uint16_t); const void *rest[32]; };\n"
+    "static int crash_lex(void *lexer, uint16_t state) { *(volatile int *)0 = 1; return 0; }\n"
+    "static const struct fake_language language = {{14}, 0, {0}, crash_lex, {0}};\n"
+    "const void *tree_sitter_vetcrash(void) { return &language; }\n"))
+
+(when gvt-cc?
+  (describe "vetting a grammar library in a child"
+    (test "a grammar that crashes the parse is quarantined, and never loaded here"
+      (let (dir (temp-dir "brood-grammarvet-")
+            _ (file/mkdir dir)
+            library (gvt-build dir :vetcrash gvt-zero-tables)
+            verdict (vet-grammar library :vetcrash {:timeout-ms 5000}))
+        (assert= (:verdict verdict) :quarantined)
+        (assert= (:by verdict) :vet)
+        (is (includes? (:reason verdict) "crashed (SIG"))
+        (is (includes? (:reason verdict) "parsing input 0 (empty)"))
+        (assert= (:sha256 verdict) (grammar-file-hash library))
+        (assert= (:cached verdict) false)
+        ;; kept by its hash: asked again, the verdict is the kept one
+        (assert= (:verdict (grammar-verdict library)) :quarantined)
+        (assert= (:cached (vet-grammar library :vetcrash)) true)
+        ;; a load refuses it, saying why — an error, not a crash
+        (let (refused (check-allow :discarded-catch
+                        (try
+                          (%tree-sitter-load-grammar library :vetcrash)
+                          (catch e (error-message e)))))
+          (is (includes? refused "quarantined"))
+          (is (includes? refused "crashed")))
+        ;; declared, its standing says so, and it is not a language this runtime parses
+        (declare-grammar library :vetcrash)
+        (let (status (grammar-status :vetcrash))
+          (is (map? status))
+          (is (includes? (:quarantined status) "crashed"))
+          (assert= (:library status) library))
+        (refute (includes? (languages) :vetcrash))
+        (is (check-allow :discarded-catch
+              (try
+                (do (%tree-sitter-parse "x" :vetcrash) false)
+                (catch e (includes? (error-message e) "quarantined")))))
+        ;; forgotten, the verdict is gone (the next load would vet it again)
+        (is (forget-grammar-verdict library))
+        (assert= (grammar-verdict library) nil)
+        (refute (forget-grammar-verdict library))
+        (file/rmdir dir)))
+
+    (test "an entry point that aborts is quarantined at its load"
+      (let (dir (temp-dir "brood-grammarvet-")
+            _ (file/mkdir dir)
+            library (gvt-build dir
+                      :vetabort "#include <stdlib.h>\nconst void *tree_sitter_vetabort(void) { abort(); }\n")
+            verdict (vet-grammar library :vetabort {:timeout-ms 5000}))
+        (assert= (:verdict verdict) :quarantined)
+        (is (includes? (:reason verdict) "crashed (SIGABRT) while loading"))
+        (forget-grammar-verdict library)
+        (file/rmdir dir)))
+
+    (test "a grammar that never returns is quarantined when it goes quiet"
+      (let (dir (temp-dir "brood-grammarvet-")
+            _ (file/mkdir dir)
+            library (gvt-build dir
+                      :vethang "const void *tree_sitter_vethang(void) { volatile unsigned long spin = 0; for (;;) spin++; }\n")
+            verdict (vet-grammar library :vethang {:timeout-ms 600}))
+        (assert= (:verdict verdict) :quarantined)
+        (is (includes? (:reason verdict) "stopped answering for 600 ms while loading"))
+        (forget-grammar-verdict library)
+        (file/rmdir dir)))
+
+    ;; Every runtime that runs this suite — `nest test`, and the cargo harness
+    ;; (crates/lisp/tests/suite.rs) — starts ITSELF as the vetting child, through the hook at
+    ;; the top of its main or its one test. One that cannot answers `:unvetted` with why.
+    (test "this runtime can start a vetting child"
+      (let (dir (temp-dir "brood-grammarvet-")
+            _ (file/mkdir dir)
+            library (gvt-build dir :vetnone "int not_a_grammar = 1;\n")
+            verdict (vet-grammar library :vetnone))
+        (assert= [(:verdict verdict) (:reason verdict)]
+          [:refused (:reason verdict)])
+        (file/rmdir dir)))
+
+    (test "a library with no entry point is refused, as a load would be, and nothing is kept"
+      (let (dir (temp-dir "brood-grammarvet-")
+            _ (file/mkdir dir)
+            library (gvt-build dir :vetnone "int not_a_grammar = 1;\n")
+            verdict (vet-grammar library :vetnone))
+        (assert= (:verdict verdict) :refused)
+        (is (includes? (:reason verdict) "tree_sitter_vetnone"))
+        (assert= (grammar-verdict library) nil)
+        (file/rmdir dir)))
+
+    (test "a missing library is an error"
+      (is (check-allow :discarded-catch
+            (try
+              (do (vet-grammar "/nonexistent/libtree-sitter-vetx.so" :vetx) false)
+              (catch _ true)))))))
+
+;; The healthy case needs a real grammar: an editor's installed JSON grammar, behind a shim
+;; exporting it under a name of this test's own.
+(def- gvt-grammar-dir
+  (str (or (os/env "BROOD_TEST_GRAMMARS") (str (or (os/env "HOME") "") "/.config/bedit/grammars"))
+    "/"))
+
+(defn- gvt-json-shim (dir)
+  ;; a library exporting the installed JSON grammar as `tree_sitter_vetjson`
+  (gvt-build dir
+    :vetjson "extern const void *tree_sitter_json(void);\nconst void *tree_sitter_vetjson(void) { return tree_sitter_json(); }\n"
+    [(str "-L" gvt-grammar-dir) "-l:libtree-sitter-json.so" (str "-Wl,-rpath," gvt-grammar-dir)]))
+
+(defn- gvt-real-cache-verdicts ()
+  ;; where a pass would go outside a test run: the user's cache, normalized
+  (let (cache (os/env "XDG_CACHE_HOME")
+        base (if (and (string? cache) (not (= cache "")))
+               cache
+               (path/join (or (os/env "HOME") "") ".cache")))
+    (path/normalize (path/join base "brood" "grammar-verdicts"))))
+
+(defn- gvt-listing (dir)
+  (if (file/dir? dir) (sort (file/ls dir)) []))
+
+(when (and gvt-cc? (file/exists? (str gvt-grammar-dir "libtree-sitter-json.so")))
+  (describe "a test run's verdicts stay in its scratch home"
+    ;; the stdlib image keeps XDG_CACHE_HOME shared, so the pass a vetting keeps under test
+    ;; must go somewhere else
+    (test "a pass is written under the scratch home and nothing under the real cache"
+      (let (scratch (test/scratch-dir))
+        (when scratch
+          (let (dir (temp-dir "brood-grammarvet-")
+                _ (file/mkdir dir)
+                library (gvt-json-shim dir)
+                real (gvt-real-cache-verdicts)
+                before (gvt-listing real)
+                verdict (vet-grammar library :vetjson {:force true})
+                kept (path/normalize (path/join scratch
+                                       "cache"
+                                       "brood"
+                                       "grammar-verdicts"
+                                       (str (grammar-file-hash library) ".blsp"))))
+            (assert= (:verdict verdict) :passed)
+            (is (file/exists? kept))
+            (refute (string/starts-with? kept (str real "/")))
+            (refute (file/exists? (path/join real (str (grammar-file-hash library) ".blsp"))))
+            (assert= (gvt-listing real) before)
+            (file/rmdir dir)))))))
+
+(when (and gvt-cc? (file/exists? (str gvt-grammar-dir "libtree-sitter-json.so")))
+  (describe "a healthy grammar"
+    (test "passes once, with its corpus, and loads"
+      (let (dir (temp-dir "brood-grammarvet-")
+            _ (file/mkdir dir)
+            library (gvt-json-shim dir)
+            verdict (vet-grammar library
+                      :vetjson {:corpus ["{\"a\": [1, 2]}" "[" "\"\\u"] :force true}))
+        (assert= (:verdict verdict) :passed)
+        (is (> (:inputs verdict) 20))
+        (assert= (:cached (vet-grammar library :vetjson)) true)
+        (%tree-sitter-load-grammar library :vetjson)
+        (assert= (:kind (%tree-sitter-parse "{\"a\": 1}" :vetjson)) :document)
+        (file/rmdir dir)))))
+
+(describe "a grammar's own test corpus"
+  (test "the inputs between each header and its divider"
+    (assert= (corpus-inputs (str "==================\nnumbers\n==================\n\n1\n2\n\n---\n\n(document)\n\n"
+                              "===|||\nstring\n===|||\n\n\"a\"\n---\n(string)\n"))
+      ["1\n2" "\"a\""]))
+  (test "read from test/corpus, capped"
+    (let (root (temp-dir "brood-grammarvet-")
+          corpus (path/join root "test" "corpus"))
+      (file/mkdir corpus)
+      (file/spit (path/join corpus "a.txt") "===\none\n===\nx\n---\n(x)\n")
+      (file/spit (path/join corpus "b.txt") "===\ntwo\n===\ny\n---\n(y)\n")
+      (file/spit (path/join corpus "notes.md") "=== not a corpus\n")
+      (assert= (grammar-corpus root) ["x" "y"])
+      (assert= (grammar-corpus (path/join root "nowhere")) [])
+      (file/rmdir root))))
+
+;; A crash the corpus did not cover: a runtime that loaded the grammar UNVETTED
+;; (`BROOD_GRAMMAR_VET=0`) dies in its parse; its crash record names the grammar, and the
+;; quarantine its signal handler wrote is what the next start reads.
+(when gvt-cc?
+  (describe "a runtime that crashes in a grammar's code"
+    (test "names the grammar in its crash record and quarantines it for the next start"
+      (let (nest (sibling-binary "nest"))
+        (when nest
+          (let (dir (temp-dir "brood-grammarvet-")
+                _ (file/mkdir dir)
+                library (gvt-build dir :vetcrash gvt-zero-tables)
+                state (path/join dir "state")
+                env {"XDG_STATE_HOME" state "BROOD_TEST_HOME" "keep"}
+                crash (path/join dir "crash.blsp")
+                read (path/join dir "read.blsp"))
+            (file/spit crash
+              (str "(%tree-sitter-load-grammar "
+                (pr-str library)
+                " :vetcrash)\n"
+                "(%tree-sitter-parse \"x\" :vetcrash)\n(io/puts \"survived\")\n"))
+            (file/spit read
+              (str "(let (record (first (crash-report/previous-crashes))\n"
+                "      verdict (editor/treesit/grammar-verdict "
+                (pr-str library)
+                "))\n"
+                "  (editor/treesit/declare-grammar "
+                (pr-str library)
+                " :vetcrash)\n"
+                "  (io/puts (pr-str [(:lang (:grammar record)) (:library (:grammar record))\n"
+                "                    (:verdict verdict) (:by verdict) (:signal verdict)\n"
+                "                    (map? (editor/treesit/grammar-status :vetcrash))\n"
+                "                    (includes? (:message record) \"in the :vetcrash tree-sitter grammar\")])))\n"))
+            (let (crashed (os/cmd nest
+                            ["run" crash]
+                            {:env (assoc env "BROOD_GRAMMAR_VET" "0") :dir dir})
+                  out (str (os/cmd-out crashed) (get crashed :stderr "")))
+              (refute (includes? out "survived"))
+              (is (includes? out "crash record written to")))
+            (let (result (os/cmd nest ["run" read] {:env env :dir dir}))
+              (assert= (string/trim (os/cmd-out result))
+                (pr-str [:vetcrash library :quarantined :crash "SIGSEGV" true true])))
+            (file/rmdir dir)))))))

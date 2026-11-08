@@ -567,6 +567,36 @@ pub const FLAGS: &[DebugFlag] = &[
         "the user's real config home, kept by `nest test` while XDG_CONFIG_HOME points at the scratch home, so nest's own config (registry, token) still reads from it; a run inside a run keeps the outer run's value (ADR-602, ADR-608)",
     ),
     f(
+        "BROOD_GRAMMAR_VET",
+        HOST,
+        "`=0`: load a tree-sitter grammar library that has no verdict without vetting it in a child first — an embedder's choice, or a test that wants one loaded unvetted; a quarantined library is still refused (ADR-660)",
+    ),
+    f(
+        "BROOD_GRAMMAR_VET_CHILD",
+        HOST,
+        "set by the runtime on the child it starts to vet a grammar library: the binary's first line (`cli_support::grammar_vetting_entry`) vets and exits instead of running — not for hand use (ADR-660)",
+    ),
+    f(
+        "BROOD_GRAMMAR_VET_LIBRARY",
+        HOST,
+        "the grammar library a vetting child loads, set beside BROOD_GRAMMAR_VET_CHILD by the runtime that starts it (ADR-660)",
+    ),
+    f(
+        "BROOD_GRAMMAR_VET_LANG",
+        HOST,
+        "the language a vetting child loads its library as (its `tree_sitter_<lang>` entry point), set by the runtime that starts it (ADR-660)",
+    ),
+    f(
+        "BROOD_GRAMMAR_VET_SHA256",
+        HOST,
+        "the SHA-256 the parent hashed a vetting child's library to; the child refuses to vet bytes that differ (ADR-660)",
+    ),
+    f(
+        "BROOD_GRAMMAR_VET_PARSE_MS",
+        HOST,
+        "a vetting child's budget per parse, a quarter of its watchdog: a parse past it is slow, not a fault, and is cut short (ADR-660)",
+    ),
+    f(
         "BROOD_GUI_GPU",
         HOST,
         "`=0`: paint on the CPU (softbuffer) in a `--with-gui-gpu` build instead of the GPU (wgpu) render target it selects by default — the A/B lever, and the escape hatch for a misbehaving GPU driver; the pixel-space `:quad` / `:sprite` ops draw on both (in software here)",

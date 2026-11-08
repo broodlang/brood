@@ -278,6 +278,7 @@ fn parse_pieces<T: SpanText>(
     pieces: &[(usize, usize)],
 ) -> Option<tree_sitter::Tree> {
     let language = language_for(lang).ok()?;
+    let _marked = super::vet::grammar_mark(lang); // a crash in the grammar names it (ADR-660)
     let mut parser = checkout_parser(lang, &language).ok()?;
     let bytes: Vec<usize> = pieces
         .iter()

@@ -12,6 +12,11 @@ use brood::Interp;
 
 #[test]
 fn brood_suite_passes() {
+    // This binary is a brood runtime too, so it vets grammar libraries as `brood` and `nest`
+    // do (ADR-660): a load starts THIS executable again as the vetting child. Re-run, the
+    // harness runs its one test — this one — and this first line vets and exits before
+    // anything else. Without it the suite could not vet at all (every verdict `:unvetted`).
+    brood::cli_support::grammar_vetting_entry();
     // Run on a large, explicitly-sized stack — like the `brood`/`nest` binaries
     // (see `crates/cli/src/main.rs`). The in-language suite runs its `:isolated`
     // units *on the runner thread*, and some legitimately recurse non-tail a few

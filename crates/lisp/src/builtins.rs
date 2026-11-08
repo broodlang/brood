@@ -230,6 +230,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     gui_fonts::register_headless(&mut primitives);
     // And again: what a loaded grammar contains (ADR-583).
     treesit::register_grammar_info(&mut primitives);
+    // And again: vetting a grammar in a child before this process loads it (ADR-660).
+    treesit::register_grammar_vetting(&mut primitives);
 }
 
 #[cfg(test)]

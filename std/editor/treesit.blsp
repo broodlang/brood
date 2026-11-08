@@ -1404,11 +1404,50 @@ declaration.
 (defn grammar-status (lang:keyword)
   "Where `lang`'s grammar stands, loading nothing: `:declared` (declared, not used yet),
 `:loaded`, `:built-in`, a failure carrying the load's message when the last declaration
-did not load, or nil when the runtime has no grammar for it. What a grammar list shows
+did not load, `{:quarantined reason :library :sha256 :by}` when the declared library is
+quarantined (it crashed or hung a vetting child, or crashed a runtime — ADR-660, see
+`vet-grammar`), or nil when the runtime has no grammar for it. What a grammar list shows
 without opening every library to ask.
 
     (editor/treesit/grammar-status :no-grammar-has-this-name)   ;=> nil"
   (%tree-sitter-grammar-status lang))
+
+;; ---- a grammar library vetted before this process loads it (ADR-660) -----------------
+;; A grammar is native code: one that crashes takes the process with it. The runtime vets a
+;; library in a CHILD before its first load (a crash there is a verdict, not a lost editor),
+;; keeps the verdict by the library's hash, refuses a quarantined one, and names the grammar
+;; in the crash record should one crash a runtime anyway — which quarantines it too.
+
+(defn vet-grammar (path:string lang:keyword &optional (options nil) -> map)
+  "Vet the grammar library at `path` as `lang`'s in a child runtime, loading nothing here:
+the child parses `options`' `:corpus` (strings — `editor/grammar-install/grammar-corpus` reads
+a grammar's own test corpus) and inputs made to reach a scanner's corners. The verdict:
+`{:verdict :passed|:quarantined|:refused|:unvetted :reason :lang :library :sha256 :time
+:inputs :cached}` — `:quarantined` when the child crashed, failed or went quiet for
+`:timeout-ms` (10000), and every later load of these bytes is refused; `:passed` likewise
+kept, so it is vetted once; `:refused` when it does not load at all (no entry point, an ABI
+out of range); `:unvetted` when no child could run. A kept verdict comes back `:cached
+true` unless `:force`. A load vets on its own (without a corpus) when there is no verdict;
+call this after an install to vet with one, off any loop that must stay responsive.
+
+    (try (editor/treesit/vet-grammar \"/nonexistent/libtree-sitter-x.so\" :x) (catch _ :none))   ;=> :none"
+  (%tree-sitter-vet-grammar path lang options))
+
+(defn grammar-verdict (path:string)
+  "The verdict kept on the grammar library at `path` as its bytes are now (see
+`vet-grammar`; a quarantine a crashed runtime wrote has `:by :crash`, its `:signal` and
+`:pid`), or nil when it was never vetted. Loads nothing.
+
+    (editor/treesit/grammar-verdict \"/nonexistent/libtree-sitter-x.so\")   ;=> nil"
+  (%tree-sitter-grammar-verdict path))
+
+(defn forget-grammar-verdict (path:string -> bool)
+  "Drop the verdict kept on the grammar library at `path`, so its next load vets it again
+— the way to give a quarantined library another chance. A reinstalled library has new bytes
+and no verdict, and needs none of this. True when there was one.
+
+    (editor/treesit/forget-grammar-verdict \"/nonexistent/libtree-sitter-x.so\")   ;=> false"
+  (%tree-sitter-forget-grammar-verdict path))
 
 (defn grammar-info (lang:keyword -> map)
   "What the grammar `lang` parses with contains (ADR-583): `{:lang :abi :version :name
