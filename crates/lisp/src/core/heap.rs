@@ -1584,7 +1584,7 @@ use self::slabs::{
 pub(crate) use self::slabs::{INLINE_VEC_CAP, VecStore};
 pub(crate) use self::small_map::SmallMap;
 mod type_verdicts;
-pub(crate) use self::type_verdicts::{KnownVerdict, TypeVerdictCache};
+pub(crate) use self::type_verdicts::{KnownVerdict, TypeVerdictCache, is_base_type_name};
 mod vm_cache;
 /// The per-process compiled-body cache's type — see [`Heap::vm_cache`].
 pub(crate) type VmCache = SmallMap<

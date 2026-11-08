@@ -341,3 +341,109 @@
 
   (test "it creates nothing — the caller decides file or directory"
     (is (not (file/exists? (path/temp "unmade-"))))))
+
+(describe "file: copy-tree and move"
+  (test "copy-tree copies a whole directory, leaving the original"
+    (let (dir (ftmp)
+          from (path/join dir "src")
+          to (path/join dir "dst"))
+      (file/mkdir (path/join from "sub"))
+      (file/spit (path/join from "a.txt") "a")
+      (file/spit (path/join from "sub" "b.txt") "b")
+      (file/copy-tree from to)
+      (assert= (file/slurp (path/join to "a.txt")) "a")
+      (assert= (file/slurp (path/join to "sub" "b.txt")) "b")
+      (is (file/exists? (path/join from "sub" "b.txt")))))
+  (test "copy-tree of a single file is a copy"
+    (let (dir (ftmp) from (path/join dir "f") to (path/join dir "g"))
+      (file/spit from "x")
+      (file/copy-tree from to)
+      (assert= (file/slurp to) "x")))
+  (test "copy-tree throws on a missing source"
+    (assert-error (file/copy-tree (path/join (ftmp) "nothing") (path/join (ftmp) "dst"))))
+  (test "move renames a directory within one filesystem"
+    (let (dir (ftmp) from (path/join dir "d") to (path/join dir "e"))
+      (file/mkdir from)
+      (file/spit (path/join from "a") "1")
+      (file/move from to)
+      (is (not (file/exists? from)))
+      (assert= (file/slurp (path/join to "a")) "1")))
+  (test "move crosses filesystems: copied, then the original removed"
+    ;; /dev/shm is its own tmpfs mount on Linux, so a rename from /tmp into it is EXDEV
+    ;; (where both are one filesystem the rename simply succeeds — the outcome is the same)
+    (if (not (file/dir? "/dev/shm"))
+      (is true)
+      (let (dir (ftmp)
+            from (path/join dir "tree")
+            to (path/join "/dev/shm" (path/basename (temp-dir "brood-file-move-"))))
+        (file/mkdir (path/join from "sub"))
+        (file/spit (path/join from "sub" "a") "moved")
+        (file/move from to)
+        (let (text (file/slurp (path/join to "sub" "a")))
+          (file/rmdir to)
+          (assert= text "moved")
+          (is (not (file/exists? from)))))))
+  (test "move throws what rename throws when the source is missing"
+    (assert-error (file/move (path/join (ftmp) "nothing") (path/join (ftmp) "x")))))
+
+(describe "file: trash"
+  (test "trash-info percent-encodes Path= a segment at a time"
+    (assert= (file/trash-info "/tmp/a b/c%d.txt" "2026-11-08T09:15:00")
+      "[Trash Info]\nPath=/tmp/a%20b/c%25d.txt\nDeletionDate=2026-11-08T09:15:00\n"))
+  (test "a bound trash home is a freedesktop trash"
+    (binding (file/*trash-home* "/x/Trash")
+      (assert= (file/trash-location) {:kind :freedesktop :dir "/x/Trash"})))
+  (test "a test run never trashes into the real home"
+    ;; nest test points XDG_DATA_HOME into its scratch home
+    (let (location (file/trash-location))
+      (when (not (failure? location))
+        (let (scratch (os/env "BROOD_TEST_SCRATCH"))
+          (is (and (string? scratch) (string/starts-with? (:dir location) scratch)))))))
+  (test "a file goes to files/ with its .trashinfo beside it"
+    (let (dir (ftmp)
+          trash (path/join dir "Trash")
+          victim (path/join dir "old notes.txt"))
+      (file/spit victim "keep me")
+      (let (went (binding (file/*trash-home* trash) (file/trash victim))
+            info (file/slurp (path/join trash "info" "old notes.txt.trashinfo")))
+        (assert= went (path/join trash "files" "old notes.txt"))
+        (is (not (file/exists? victim)))
+        (assert= (file/slurp went) "keep me")
+        (is (string/starts-with? info "[Trash Info]\nPath="))
+        (is (includes? info "old%20notes.txt\n"))
+        (is (regex/match? "DeletionDate=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\n"
+              info)))))
+  (test "a clash takes a numbered name"
+    (let (dir (ftmp) trash (path/join dir "Trash") victim (path/join dir "a"))
+      (file/spit victim "1")
+      (binding (file/*trash-home* trash) (file/trash victim))
+      (file/spit victim "2")
+      (let (second (binding (file/*trash-home* trash) (file/trash victim)))
+        (assert= second (path/join trash "files" "a.2"))
+        (assert= (file/slurp second) "2")
+        (is (file/exists? (path/join trash "info" "a.2.trashinfo"))))))
+  (test "a directory goes whole"
+    (let (dir (ftmp) trash (path/join dir "Trash") victim (path/join dir "d"))
+      (file/mkdir (path/join victim "sub"))
+      (file/spit (path/join victim "sub" "f") "x")
+      (let (went (binding (file/*trash-home* trash) (file/trash victim)))
+        (is (not (file/exists? victim)))
+        (assert= (file/slurp (path/join went "sub" "f")) "x"))))
+  (test "a missing file is a failure, and nothing is written"
+    (let (dir (ftmp) trash (path/join dir "Trash"))
+      (let (result (binding (file/*trash-home* trash) (file/trash (path/join dir "nope"))))
+        (is (failure? result))
+        (is (includes? (error-message result) "no such file"))
+        (is (not (file/exists? trash))))))
+  (test "a refused move takes its info file back"
+    ;; a trash INSIDE the directory trashed: no rename moves a directory into itself
+    (let (dir (ftmp) victim (path/join dir "v") trash (path/join victim "Trash"))
+      (file/mkdir victim)
+      (file/spit (path/join victim "keep") "x")
+      (let (result (binding (file/*trash-home* trash) (file/trash victim)))
+        (is (failure? result))
+        (is (file/exists? victim))
+        (is (empty? (file/ls (path/join trash "info")))))))
+  (test "the recycle bin is Windows' alone"
+    (when (not (= (os/type) :windows))
+      (assert-error (%file-recycle "/tmp/whatever")))))

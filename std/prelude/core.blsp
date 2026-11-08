@@ -773,7 +773,10 @@ self-call decreases an argument, and no `match` in the body can fail).
 — so a signature can say `(pane -> int)` instead of spelling the shape at every use.
 Structural: `name` IS `type`, exactly as written, wherever a `sig` names it — a record
 shape, a union, a tuple, another alias. Module-scoped like a `sig`: declared in module
-`m`, it is `m/name` everywhere and `name` where that is unambiguous. A declaration only —
+`m`, it is `m/name` everywhere. A bare type name in a `sig` or an alias body means what it
+means in the module that wrote it — that module's own `deftype` or `defrecord`, then the one
+`(:use …)`d module declaring it, then the one loaded module that does (ADR-633); the checker
+and the runtime contract agree. A base type name (`int`, `map`, …) is never rebound. A declaration only —
 `name` is not bound at runtime, and a bare reference to it is unbound as it should be
 (types are not values). Read by the advisory checker (ADR-327)."
   `(%register-type '~name '~type))

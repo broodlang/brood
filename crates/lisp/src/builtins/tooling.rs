@@ -413,15 +413,22 @@ pub(super) fn declared_sig(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lisp
     let rooted = rooted_name(heap, sym);
     // The type-form alone: the properties a `(sig f T :pure)` stores beside it are
     // `%declared-sig-props`'s (ADR-351).
-    let Some(form) = crate::builtins::modules::sig_type_of(heap, heap.declared_sig_value(rooted))
-        .or_else(|| crate::builtins::modules::sig_type_of(heap, heap.declared_sig_value(sym)))
-    else {
+    let found = [rooted, sym].into_iter().find_map(|key| {
+        crate::builtins::modules::sig_type_of(heap, heap.declared_sig_value(key))
+            .map(|form| (key, form))
+    });
+    let Some((key, form)) = found else {
         return Ok(Value::nil());
     };
     let is_alias = heap.list_to_vec(form).ok().is_some_and(|items| {
         matches!(items.first(), Some(Value::Sym(h)) if value::symbol_is(*h, crate::builtins::modules::TYPE_ALIAS_MARKER))
     });
-    Ok(if is_alias { Value::nil() } else { form })
+    // As written: the module-scoping of its type names (`type_scope`) undone.
+    Ok(if is_alias {
+        Value::nil()
+    } else {
+        super::type_scope::unscope_form(heap, key, form)
+    })
 }
 
 /// `(%function-effect name)` — the effect a call to the loaded global `name` reaches, or
@@ -482,7 +489,7 @@ pub(crate) fn alias_expansion(heap: &Heap, sym: value::Symbol) -> Option<Value> 
 /// The type expression of the alias stored under exactly `key`, or `None`. An alias rides
 /// the declared-sig store wrapped as `(%type T)` so no reader can mistake it for a
 /// signature (ADR-327); this unwraps that marker and nothing else.
-fn alias_form_at(heap: &Heap, key: value::Symbol) -> Option<Value> {
+pub(crate) fn alias_form_at(heap: &Heap, key: value::Symbol) -> Option<Value> {
     let form = heap.declared_sig_value(key)?;
     let items = heap.list_to_vec(form).ok()?;
     match items.as_slice() {
@@ -513,8 +520,8 @@ pub(super) fn type_aliases(_args: &[Value], _env: EnvId, heap: &mut Heap) -> Lis
         if !value::symbol_is(*head, crate::builtins::modules::TYPE_ALIAS_MARKER) {
             continue;
         }
+        let inner = super::type_scope::unscope_form(heap, sym, *inner);
         let name = heap.alloc_string(&value::symbol_name(sym));
-        let inner = *inner;
         out.push(heap.alloc_vector2(name, inner));
     }
     Ok(heap.list(out))

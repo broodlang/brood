@@ -88,6 +88,7 @@ mod table;
 mod terminal;
 mod tooling;
 mod treesit;
+mod type_scope;
 #[cfg(feature = "wasm")]
 mod wasm;
 
@@ -193,6 +194,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     records::register(&mut primitives);
     dynamic::register(&mut primitives);
     contracts::register(&mut primitives);
+    type_scope::register(&mut primitives);
     processes::register(&mut primitives);
     offload::register(&mut primitives);
     #[cfg(feature = "wasm")]

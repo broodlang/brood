@@ -57,7 +57,7 @@ fn check_value_leaf(
     }
     if let Value::Sym(s) = form {
         if is_unbound(heap, ctx, s) && !ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
-            out.push((heap.form_pos_only(parent), unbound_msg(&name_of(s))));
+            out.push((heap.form_pos_only(parent), unbound_msg_in(ctx, &name_of(s))));
         }
         if !ctx.is_suppressed(super::ctx::SUPPRESS_DEPRECATED)
             && let Some(msg) = stability_msg(heap, s)
@@ -748,7 +748,7 @@ fn check_named_call(
         out.push((heap.form_pos_only(form), msg));
     }
     if is_unbound(heap, ctx, s) && !ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
-        out.push((heap.form_pos_only(form), unbound_msg(&name_of(s))));
+        out.push((heap.form_pos_only(form), unbound_msg_in(ctx, &name_of(s))));
         // Still recurse into args below — they may carry their own issues.
     }
 

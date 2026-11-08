@@ -196,6 +196,12 @@ impl std::hash::Hasher for IdentityHasher {
     }
 }
 
+/// Whether `name` is a BASE type name — one `%type-match` answers by tag before any alias
+/// or record lookup, so no module can rebind it (`builtins::type_scope` leaves it alone).
+pub(crate) fn is_base_type_name(name: Symbol) -> bool {
+    base_type_verdict(Value::symbol(name), Value::nil()).is_some()
+}
+
 /// The verdict a BASE type gives `value` with no walk and no memo: a base name is a set of
 /// runtime tags — the tags `type-of` reports, which every Brood type predicate reads — so
 /// it is answered from the value's tag alone. `%type-match` answers these names the same

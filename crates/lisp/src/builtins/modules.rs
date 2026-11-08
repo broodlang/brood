@@ -1322,6 +1322,9 @@ pub(super) fn register_sig(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     // call site resolves to (intra-module misses the bare file-local ctx; cross-module
     // the sig isn't in the caller's ctx at all).
     let qualified = crate::eval::macros::resolve_reference(heap, name);
+    // The bare type names it uses mean what they mean in ITS module (`type_scope`).
+    let type_value =
+        super::type_scope::scope_form(heap, qualified, type_value, false).unwrap_or(type_value);
     // Properties already registered for the name (a `(sig f :pure)` above the typed one)
     // ride along in the wrapped entry; a name with none keeps the bare type-form, so
     // nothing that never asked for a property sees a wrapper.
@@ -1372,7 +1375,7 @@ pub(super) fn register_sig_props(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     Ok(Value::symbol(qualified))
 }
 
-fn wrap_sig(heap: &mut Heap, type_value: Value, props: &[Symbol]) -> Value {
+pub(super) fn wrap_sig(heap: &mut Heap, type_value: Value, props: &[Symbol]) -> Value {
     let mut items = vec![Value::symbol(value::intern(SIG_PROPS_MARKER)), type_value];
     items.extend(props.iter().map(|&k| Value::Keyword(k)));
     heap.list(items)
@@ -1435,11 +1438,16 @@ pub(super) fn register_type(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     let name = expect_symbol(heap, "%register-type", arg(args, 0))?;
     let type_value = arg(args, 1);
     let qualified = crate::eval::macros::resolve_reference(heap, name);
+    // Its body names types as its module does (`type_scope`), wherever it is expanded.
+    let type_value =
+        super::type_scope::scope_form(heap, qualified, type_value, false).unwrap_or(type_value);
     let wrapped = heap.list(vec![
         Value::symbol(value::intern(TYPE_ALIAS_MARKER)),
         type_value,
     ]);
     heap.set_declared_sig(qualified, wrapped);
+    // Declarations of this module that named it before it existed mean it now.
+    super::type_scope::type_name_arrived(heap, qualified)?;
     Ok(Value::symbol(qualified))
 }
 
@@ -1647,7 +1655,7 @@ pub(crate) fn every_provided_feature_is_embedded(heap: &Heap) -> bool {
 /// marker alone would call that window a spurious circular `:use` when two processes load
 /// the same module concurrently. Under lazy loading
 /// (ADR-335) a load starting in a spawned process is the ordinary case, not a race to fix.
-fn module_is_loading(heap: &mut Heap, mod_name: &str) -> bool {
+pub(crate) fn module_is_loading(heap: &mut Heap, mod_name: &str) -> bool {
     let map_id = match heap
         .env_get(value::EnvId::GLOBAL, value::intern(reg::FEATURES_LOADING))
         .map(|v| v.unpack())
@@ -1673,6 +1681,12 @@ fn module_is_loading(heap: &mut Heap, mod_name: &str) -> bool {
 /// prelude shadows are policed by [`refer_add`].
 pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let mod_sym = expect_symbol(heap, "%refer", arg(args, 0))?;
+    // Remembered beside the import table, which is per FILE and gone once it compiles: a
+    // `sig`'s bare type names resolve through the modules its own module uses, and a
+    // contract asks that long after the load (`builtins::type_scope`).
+    if let Some(ns) = heap.compile_ns() {
+        heap.note_module_use(ns, mod_sym);
+    }
     let mod_name = value::symbol_name(mod_sym);
     let prefix = format!("{}/", mod_name);
     // The `:exclude` set (bare symbols to skip in a refer-all).

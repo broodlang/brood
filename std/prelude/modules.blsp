@@ -301,6 +301,9 @@ for the re-read; the resolution is what keeps those two naming the same global."
     ;; declarations this module owns are offered to `%contract-wrap` here, once. A name
     ;; whose binding is already a shim is left alone. Armed only: the sweep walks every
     ;; declaration in the runtime, and an unarmed process has nothing to install.
+    ;; First the bare type names still waiting on the module to finish: a used module's
+    ;; may be taken now that the module cannot declare its own (`builtins/type_scope.rs`).
+    (%scope-types! key)
     (when (%contracts-armed?) (%contracts-sweep! key))
     key))
 
@@ -1191,6 +1194,29 @@ not a header, or does not read: the load itself reports a malformed one."
             (do (%with-header-deps-of path (fn () (reflect/load path))) (provide key))
             (error "require: cannot find module '" key "'"))))
     key))
+
+(defn- %module-findable? (mod beside)
+  "Could `require-one` find module `mod` — WITHOUT loading it? Every place
+`%require-force-in` looks, in its order: a module already provided or loading, a baked-in
+std module (or a dependency's, by its bare name), an installed image's section, a named
+project's `*module-files*`, `<mod>.blsp` on the load path, and a file on the load path that
+declares it. `beside` (a directory, or nil) is searched as the load path is: a script loads
+its siblings by path. The checker asks this of a qualified reference `mod/name` whose module
+is not loaded: a module nothing could ever load is a misspelling (`net/http/post` for
+`http/post`), not a module defined dynamically."
+  (let (key (->string mod)
+        dirs (if beside (cons beside *load-path*) *load-path*))
+    (or (contains? *features* key)
+      (contains? *features-loading* key)
+      (%builtin-module? key)
+      (not (nil? (%bundle-resolve-bare key)))
+      (not (nil? (%image-section-for key)))
+      (contains? *module-files* key)
+      (not (nil? (%require-find (str key ".blsp") dirs)))
+      ;; Two files declaring it is an error at load, but the module is there to find.
+      ;; check-allow :discarded-catch — a probe: the duplicate is `require`'s to report
+      (check-allow :discarded-catch
+        (try (not (nil? (%require-find-colocated key))) (catch _ true))))))
 
 ;; A package (dependency or root project) may not take a name the standard library
 ;; already owns. Its name becomes a load-time package prefix (ADR-070), so a package

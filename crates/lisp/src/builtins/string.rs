@@ -114,6 +114,16 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["s"],
         "The extended grapheme clusters of s as a vector of strings — the unit a human means by \"character\". \"é\" spelled e + U+0301 is two codepoints but one grapheme; a flag emoji is four codepoints and one grapheme. Step a cursor by this, not by codepoint (which splits clusters and corrupts text). The sibling of string/->codepoints; (apply str (string/->graphemes s)) is s.\n\n    (string/->graphemes \"Hi there\")   ;=> [\"H\" \"i\" \" \" \"t\" \"h\" \"e\" \"r\" \"e\"]",
         string_to_graphemes);
+    // Line-break opportunities: UAX #14's classes and pair rules, a table lookup like the
+    // two above — where a wrapper may end a line. A space-only wrapper cuts CJK text, which
+    // has no spaces, at the pane edge mid-word, and can break before a closing bracket.
+    primitives.def(
+        "string/break-opportunities",
+        Arity::exact(1),
+        Sig::new(vec![string], Ty::vector_of(int)),
+        &["s"],
+        "The character indices at which a line of s may break, ascending, by Unicode's line-breaking algorithm (UAX #14): a line may end just before each index. After a space or a hyphen; between two CJK ideographs or kana; never before closing punctuation (`)` `」` `。` `,`) or after opening punctuation (`(` `「`); after a `/` but not before one. A line terminator's break is mandatory and is in the list too: index i is one when s[i-1] is a newline. The end of the text is not listed. A wrapper fits as much of a line as the width allows and ends it at the last index that fits.\n\n    (string/break-opportunities \"ab cd\")   ;=> [3]\n    (string/break-opportunities \"日本語\")   ;=> [1 2]\n    (string/break-opportunities \"a (b)\")   ;=> [2]",
+        string_break_opportunities);
     // The indexed grapheme accessors (ADR-159). `string->graphemes` alone made the
     // *documented-correct* cursor step — read the cluster at an index — cost a vector
     // of every cluster in the string, per keystroke. These walk to the index instead.
@@ -1239,4 +1249,24 @@ pub(super) fn utf8_bytes_to_string(args: &[Value], _: EnvId, heap: &mut Heap) ->
             e
         ))),
     }
+}
+
+/// `(string/break-opportunities s)` — see the registration. `unicode-linebreak` answers in
+/// byte offsets, the end of the text included; the list is character indices, without it.
+pub(super) fn string_break_opportunities(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string_ref(heap, "string/break-opportunities", arg(args, 0))?;
+    let mut poll = InterruptPoll::new();
+    let mut indices: Vec<i64> = Vec::new();
+    let (mut byte, mut chars) = (0usize, 0i64);
+    for (offset, _) in unicode_linebreak::linebreaks(s) {
+        poll.tick()?;
+        if offset >= s.len() {
+            break;
+        }
+        chars += s[byte..offset].chars().count() as i64;
+        byte = offset;
+        indices.push(chars);
+    }
+    let values: Vec<Value> = indices.into_iter().map(Value::int).collect();
+    Ok(heap.alloc_vector(values))
 }

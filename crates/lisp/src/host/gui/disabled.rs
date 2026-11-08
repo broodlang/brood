@@ -159,3 +159,4 @@ pub fn capture(_id: u64) -> Result<super::FrameImage, String> {
 pub fn window_ids() -> Vec<u64> {
     Vec::new()
 }
+pub fn lose_display(_why: &str) {}

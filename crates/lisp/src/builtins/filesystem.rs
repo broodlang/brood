@@ -188,6 +188,16 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Rename/move file `from` to `to`. Returns nil; errors on failure.\n\n    (file/rename \"draft.txt\" \"final.txt\")   ;~> nil",
         rename_file,
     );
+    // The recycle bin (Windows): the one trash `file/trash` cannot reach from Brood, since
+    // it is the shell's, not a directory. Everywhere else `file/trash` moves the file itself.
+    primitives.def(
+        "%file-recycle",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        &["path"],
+        "Move the file or directory at absolute path into the Windows recycle bin (the shell's own operation, so Explorer can restore it), silently: no confirmation, no progress, no error dialog. Returns nil; errors on failure, and on every other system, which has no recycle bin — `file/trash` is the portable call.\n\n    (%file-recycle \"C:\\\\Users\\\\me\\\\old.txt\")   ;~> nil on Windows",
+        recycle_path,
+    );
     primitives.def(
         "file/cp",
         Arity::exact(2),
@@ -742,6 +752,54 @@ pub(super) fn rename_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::nil())
+}
+
+/// `(%file-recycle path)` — move `path` into the recycle bin: `SHFileOperationW`'s delete
+/// with `FOF_ALLOWUNDO`, the documented way to recycle (the shell restores it), with every
+/// dialog off. `IFileOperation` is its successor but needs COM set up on the calling
+/// thread; this needs nothing. Not Windows: an error, as there is no recycle bin.
+pub(super) fn recycle_path(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "%file-recycle", arg(args, 0))?;
+    recycle(&path).map_err(|reason| {
+        LispError::runtime(format!("%file-recycle: {}: {}", path, reason))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    Ok(Value::nil())
+}
+
+#[cfg(windows)]
+fn recycle(path: &str) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW,
+        SHFileOperationW,
+    };
+    if !std::path::Path::new(path).is_absolute() {
+        // the shell resolves a relative path against ITS idea of the directory
+        return Err("not an absolute path".to_string());
+    }
+    // pFrom is a LIST of paths, each NUL-terminated, the list ended by a second NUL
+    let from: Vec<u16> = path.encode_utf16().chain([0, 0]).collect();
+    let mut operation = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as u16,
+        ..Default::default()
+    };
+    // SAFETY: `operation` is a valid SHFILEOPSTRUCTW whose `pFrom` is the double-NUL
+    // terminated list above, alive for the call; the other pointers are null, as allowed.
+    let status = unsafe { SHFileOperationW(&mut operation) };
+    if status != 0 {
+        Err(format!("the shell refused it (code {status:#x})"))
+    } else if operation.fAnyOperationsAborted != 0 {
+        Err("the shell aborted it".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn recycle(_: &str) -> Result<(), String> {
+    Err("no recycle bin on this system (file/trash moves to the desktop trash)".to_string())
 }
 
 /// `(copy-file from to)` — copy the file `from` to `to` (replacing `to` if it

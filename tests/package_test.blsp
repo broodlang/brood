@@ -1456,7 +1456,7 @@
         (reflect/set-load-path (append *load-path* dirs))
         (require-one 'greeter)
         ;; greeter is a `(defmodule greeter)`, so its `greet` is `greeter/greet`
-        (assert= (greeter/greet "you") "hi you")))))
+        (assert= (check-allow :unbound (greeter/greet "you")) "hi you")))))
 
 ;; The git equivalent: a :git dep is cloned into _deps/, its src/ joins *load-path*,
 ;; and its module becomes require-able. :isolated for the same load-path reason.
@@ -1473,7 +1473,7 @@
                      (list (dep-git 'salutation url "v1.0.0" nil))))
           (reflect/set-load-path (append *load-path* dirs))
           (require-one 'salutation)
-          (assert= (salutation/hi "you") "yo you")
+          (assert= (check-allow :unbound (salutation/hi "you")) "yo you")
           ;; and the clone + lock landed under the app
           (is (file/dir? (path/join (path/join app-dir "_deps") "salutation")))
           (is (file/exists? (path/join app-dir "project.lock.blsp"))))))))

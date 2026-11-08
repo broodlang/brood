@@ -159,6 +159,15 @@ impl FontShared {
                     faces: paths,
                 },
             );
+        } else {
+            super::report_degraded(
+                "font",
+                &format!(
+                    "{} is not a font this can read; the family is not registered and its text uses the default font",
+                    paths[0]
+                ),
+                None,
+            );
         }
     }
 
@@ -183,6 +192,13 @@ impl FontShared {
             resolution.requested = Some(wanted.to_string());
             resolution.origin = "not-found";
             self.resolutions.insert(id, resolution);
+            super::report_degraded(
+                "font",
+                &format!(
+                    "no installed font is called {wanted:?}; the bundled DejaVu Sans Mono stands in"
+                ),
+                None,
+            );
             return;
         };
         // what `gui-font-info` reports: the file each style resolves to, by the same CSS

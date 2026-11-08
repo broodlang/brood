@@ -26,8 +26,10 @@
 ;;   \D \W \S            the negations: not an ASCII digit / not a word character / not
 ;;                       whitespace
 ;;   \b \B               a word boundary / not one, by `\w`
-;;   \x                  any other escaped character is that character: `\.` `\*`, and
-;;                       `\n` is an `n` (write a newline as a newline)
+;;   \n \t \r \f \v      newline, tab, carriage return, form feed, vertical tab
+;;   \xHH \x{H…}         the character with that code point, as other engines read them;
+;;   \uHHHH \u{H…}       a malformed one is the letter, as any other unknown escape is
+;;   \x                  any other escaped character is that character: `\.` `\*` `\\`
 ;;   |                   alternation
 ;;   (...)  (?:...)      a capturing group, and a non-capturing one
 ;;   [[:alpha:]] …       a POSIX class inside a set, Emacs's (Unicode-aware) meanings:
@@ -61,7 +63,7 @@ finished yet.
 
 The dialect: literals, `.`, `* + ?` (and their lazy `*? +? ??` forms), `{m,n}`,
 `^ $`, `[...]`/`[^...]` sets with ranges, classes and POSIX classes (`[[:alpha:]]`), `\\d \\w \\s
-\\D \\W \\S \\b \\B`, escapes, `|`, capturing `(...)` and non-capturing `(?:...)`, and case folding —
+\\D \\W \\S \\b \\B`, the character escapes `\\n \\t \\r \\f \\v \\xHH \\u{…}`, `|`, capturing `(...)` and non-capturing `(?:...)`, and case folding —
 `(?i)`, `(?i:...)`, or `{:fold? true}` on any search. No backreferences or lookaround. Each
 pattern is parsed once and compiled once, then cached.")
 
@@ -75,34 +77,110 @@ pattern is parsed once and compiled once, then cached.")
 (defn- regex-peek (pcs: (vector string) i:int -> (or nil string))
   (if (< i (count pcs)) (nth pcs i) nil))
 
+;; The class escapes, in a set or out of one. The negations are here because without them
+;; `\S` read as the letter S (an unknown escape is its character), so a pattern written in
+;; every other dialect matched nothing and said nothing.
+(def- regex-class-escapes
+  {"d" :digit "w" :word "s" :space "D" :not-digit "W" :not-word "S" :not-space})
+
+;; The escapes that name a control character, as every other engine reads them. They once
+;; read as the letter (`\n` an `n`), which silently broke a pattern carried over from any
+;; other dialect: `[ \t]*` matched spaces and the letter t.
+(def- regex-control-escapes {"n" "\n" "t" "\t" "r" "\r" "f" "\u{c}" "v" "\u{b}"})
+
+(defn- regex-hex-run (pcs: (vector string) i:int limit:int acc:string -> string)
+  "The hex digits from `i`, at most `limit` of them."
+  (let (c (regex-peek pcs i))
+    (if (and (> limit 0) (string? c) (includes? "0123456789abcdefABCDEF" c))
+      (regex-hex-run pcs (inc i) (dec limit) (str acc c))
+      acc)))
+
+(defn- regex-code-point (digits:string -> (or nil string))
+  "The character the hex `digits` name, or nil — for none, or a number past Unicode or in
+the surrogate range, which name no character."
+  (let (n (if (= digits "") nil (string/->number digits 16)))
+    (if (and (int? n) (<= n 0x10FFFF) (not (and (>= n 0xD800) (<= n 0xDFFF))))
+      (string/int->char n)
+      nil)))
+
+(defn- regex-coded-length (pcs: (vector string) i:int -> int)
+  "How many pattern characters from `i` (just past a backslash) an escape that names one
+character by its code spans — `\\n \\t \\r \\f \\v`, `\\xHH`, `\\x{H…}`, `\\uHHHH`,
+`\\u{H…}` — or 0 when it names none. A malformed hex escape names none: its letter then
+stands for itself, as any other unknown escape does."
+  (let (c (regex-peek pcs i))
+    (cond
+      (contains? regex-control-escapes c) 1
+      (not (or (= c "x") (= c "u"))) 0
+      (= (regex-peek pcs (inc i)) "{")
+        (let (digits (regex-hex-run pcs (+ i 2) 8 "")
+              close (+ i 2 (string/length digits)))
+          (if (and (regex-code-point digits) (= (regex-peek pcs close) "}"))
+            (+ 3 (string/length digits))
+            0))
+      else
+        (let (width (if (= c "x") 2 4)
+              digits (regex-hex-run pcs (inc i) width ""))
+          (if (and (regex-code-point digits) (= (string/length digits) width)) (inc width) 0)))))
+
+(defn- regex-coded-char (pcs: (vector string) i:int -> (or nil string))
+  "The character the escape at `i` (just past a backslash) names by its code
+([[regex-coded-length]]), or nil."
+  (let (c (regex-peek pcs i)
+        n (regex-coded-length pcs i))
+    (cond
+      (= n 0) nil
+      (contains? regex-control-escapes c) (get regex-control-escapes c)
+      (= (regex-peek pcs (inc i)) "{") (regex-code-point (regex-hex-run pcs (+ i 2) 8 ""))
+      else (regex-code-point (regex-hex-run pcs (inc i) (dec n) "")))))
+
 ; \. \* \\ … → that char, literal
 (defn- regex-escape (pcs i)
   "Parse the atom after a backslash at `i`; returns [atom next]."
-  (let (c (regex-peek pcs i))
+  (let (c (regex-peek pcs i)
+        coded (regex-coded-char pcs i))
     (cond
-      (= c "d") [{:t :class :k :digit} (inc i)]
-      (= c "w") [{:t :class :k :word} (inc i)]
-      (= c "s") [{:t :class :k :space} (inc i)]
-      ;; the negated classes: what `\d` `\w` `\s` do not match. Without them `\S` read as
-      ;; the letter S (an unknown escape is its character), so a pattern written in
-      ;; every other dialect matched nothing and said nothing.
-      (= c "D") [{:t :class :k :not-digit} (inc i)]
-      (= c "W") [{:t :class :k :not-word} (inc i)]
-      (= c "S") [{:t :class :k :not-space} (inc i)]
+      (contains? regex-class-escapes c) [{:t :class :k (get regex-class-escapes c)} (inc i)]
       ;; word-boundary assertions: zero-width, like the anchors
       (= c "b") [{:t :wordb} (inc i)]
       (= c "B") [{:t :nwordb} (inc i)]
+      coded [{:t :lit :c coded} (+ i (regex-coded-length pcs i))]
       (nil? c) [{:t :lit :c "\\"} i]
       ; trailing backslash → literal
       else [{:t :lit :c c} (inc i)])))
-(defn- regex-set-range-end (pcs i)
-  "The upper character of an `a-z` range starting at `i`, or nil when there is none. A
-`-` LAST in the set (`[a-]`) is a literal member, which is why the character after it
-has to exist and not be `]`. Answers the character rather than a bool so the caller reads
-it once, as the string the guard proved it is."
-  (let (d (regex-peek pcs (inc i))
-        hi (regex-peek pcs (+ i 2)))
-    (if (and (= d "-") (not (nil? hi)) (not (= hi "]"))) hi nil)))
+
+(defn- regex-set-char-length (pcs: (vector string) i:int -> int)
+  "How many pattern characters the set member at `i` spans when it names one character: a
+plain character, an escape that names one by its code ([[regex-coded-length]]), an escaped
+character standing for itself (`\\]`, `\\-`, `\\\\`), or a trailing backslash, itself.
+0 at the end of the pattern, or at a class escape (`\\d` …), which names no one character."
+  (let (c (regex-peek pcs i)
+        e (regex-peek pcs (inc i)))
+    (cond
+      (nil? c) 0
+      (not (= c "\\")) 1
+      (nil? e) 1
+      (contains? regex-class-escapes e) 0
+      else (let (n (regex-coded-length pcs (inc i))) (if (> n 0) (inc n) 2)))))
+
+(defn- regex-set-char (pcs: (vector string) i:int -> (or nil string))
+  "The one character the set member at `i` names ([[regex-set-char-length]]), or nil."
+  (let (c (regex-peek pcs i)
+        e (regex-peek pcs (inc i)))
+    (cond
+      (= (regex-set-char-length pcs i) 0) nil
+      (not (= c "\\")) c
+      (nil? e) "\\"
+      else (or (regex-coded-char pcs (inc i)) e))))
+
+(defn- regex-set-range-end (pcs: (vector string) i:int -> (or nil string))
+  "The upper end of a range whose `-` would be at `i`, or nil when there is none. A `-` LAST
+in the set (`[a-]`) is a literal member, which is why the character after it has to exist
+and not be `]`; one before a class (`[a-\\d]`) is a literal member too."
+  (let (hi (regex-peek pcs (inc i)))
+    (if (and (= (regex-peek pcs i) "-") (not (nil? hi)) (not (= hi "]")))
+      (regex-set-char pcs (inc i))
+      nil)))
 
 ;; The POSIX bracket classes, written INSIDE a set (`[[:alpha:]]`, `[^[:space:]x]`), and what
 ;; each is in the engine's syntax. Emacs's meanings, which are Unicode-aware where POSIX's are
@@ -166,28 +244,25 @@ the classes — `\\d`/`\\w`/`\\s` and the POSIX `[:alpha:]` kind ([[regex-posix-
           chars
           ranges
           (cons (regex-posix-name pcs i posix-end) classes))
-      (= c "\\")
-        (let (e (regex-peek pcs (inc i)))
-          (cond
-            (= e "d") (regex-set-body pcs (+ i 2) chars ranges (cons :digit classes))
-            (= e "w") (regex-set-body pcs (+ i 2) chars ranges (cons :word classes))
-            (= e "s") (regex-set-body pcs (+ i 2) chars ranges (cons :space classes))
-            (= e "D") (regex-set-body pcs (+ i 2) chars ranges (cons :not-digit classes))
-            (= e "W") (regex-set-body pcs (+ i 2) chars ranges (cons :not-word classes))
-            (= e "S") (regex-set-body pcs (+ i 2) chars ranges (cons :not-space classes))
-            ; a trailing backslash is itself
-            (nil? e) (regex-set-body pcs (inc i) (cons "\\" chars) ranges classes)
-            ; `\]`, `\-`, `\\` → that char, literally
-            else (regex-set-body pcs (+ i 2) (cons e chars) ranges classes)))
+      (and (= c "\\") (contains? regex-class-escapes (regex-peek pcs (inc i))))
+        (regex-set-body pcs
+          (+ i 2)
+          chars
+          ranges
+          (cons (get regex-class-escapes (regex-peek pcs (inc i))) classes))
+      ;; one character — plain or escaped — alone, or the low end of a range: `a-z`,
+      ;; `\x00-\x7F`, `\--z`
       else
-        (let (hi (regex-set-range-end pcs i))
-          (if hi
+        (let (lo (regex-set-char pcs i)
+              after (+ i (regex-set-char-length pcs i))
+              hi (regex-set-range-end pcs after))
+          (if (and (string? lo) (string? hi))
             (regex-set-body pcs
-              (+ i 3)
+              (+ after 1 (regex-set-char-length pcs (inc after)))
               chars
-              (cons [(string/char->int c) (string/char->int hi)] ranges)
+              (cons [(string/char->int lo) (string/char->int hi)] ranges)
               classes)
-            (regex-set-body pcs (inc i) (cons c chars) ranges classes))))))
+            (regex-set-body pcs after (cons lo chars) ranges classes))))))
 
 (defn- regex-set (pcs i)
   "Parse a `[...]` set whose body starts at `i` (just past `[`); returns [atom next]."

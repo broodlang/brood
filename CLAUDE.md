@@ -275,7 +275,9 @@ handle held across a collection without re-rooting goes stale):
 **Crash artifacts.** `brood`/`nest` install a panic hook (`cli_support::install_crash_dump`)
 that appends the panic + backtrace to **`.brood_crash_dump`** in the cwd — durable when a TUI
 scrolls the message away; at 16 MiB it rotates to `.brood_crash_dump.old`, replacing the last
-one. It catches Rust *panics*, **not** `SIGSEGV`; for those use
+one. It catches Rust *panics*, **not** `SIGSEGV`: a fatal signal (SIGSEGV, SIGBUS, an abort)
+leaves a one-line record under `$XDG_STATE_HOME/brood/crashes/` instead (ADR-635,
+`crash-report/previous-crashes`), with no backtrace; for the stack use
 `gdb --batch -ex run -ex bt <test-binary>` (`rr` isn't installed, and `valgrind` won't see a
 *logical* use-after-GC over safe `Vec` slabs).
 

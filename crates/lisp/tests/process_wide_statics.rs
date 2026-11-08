@@ -126,6 +126,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("host/gui/backend.rs", "G", OneMachine),
     ("host/gui/backend.rs", "S", OneMachine),
     ("host/gui/backend.rs", "W", OneMachine),
+    // what degraded before any window was open (ADR-636): the one GUI's, handed to the next
+    // window opened
+    ("host/gui/backend.rs", "D", OneMachine),
     // The GUI thread's exit gate: one GUI thread per OS process, shut once at its exit.
     ("host/gui/backend.rs", "EXIT_GATE", OneMachine),
     // the offscreen painter's one thread (gui/render-frame, ADR-609): text shaping cannot

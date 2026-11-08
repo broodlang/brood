@@ -309,7 +309,7 @@ for the refusal."
 `\"GET\"`), extra request headers (over `Accept: text/event-stream`, `Cache-Control:
 no-cache`, Host / User-Agent / Connection, any of them overridable), a body (string,
 `bytes` or iolist — Content-Length is its byte count), and for https a PEM `:ca`
-replacing the Mozilla roots (a private CA, a `tls/self-signed` dev server).
+replacing the system's trust store (a private CA, a `tls/self-signed` dev server).
 
 The subscriber receives, in order:
 - `[:sse-open status]` once a 2xx response head arrives;

@@ -15,6 +15,8 @@
 (file/mkdir *dir*)
 (reflect/add-load-path *dir*)
 
+;; The fixtures exist only once this file RUNS, so `nest check` finds no module of their
+;; names; a reference to one says so with `check-allow :unbound`.
 (defn- fixture (name body)
   (file/spit (path/join *dir* (str name ".blsp")) (str "(defmodule " name ")\n" body)))
 
@@ -51,7 +53,7 @@
 ;; A hot function whose cold branch holds the only reference to `lazyprobe-jit`. The entry
 ;; hoist resolves every global the arm mentions, so without the tier-up pre-load this arm
 ;; would deopt on every activation (interpreted for good) and never load anything.
-(defn- hot-pick (n) (if (< n 0) (apply lazyprobe-jit/answer nil) (+ n 1)))
+(defn- hot-pick (n) (if (< n 0) (apply (check-allow :unbound lazyprobe-jit/answer) nil) (+ n 1)))
 (defn- hot-drive (i n acc)
   (if (= i n) acc (hot-drive (+ i 1) n (+ acc (hot-pick i)))))
 
@@ -102,13 +104,19 @@
         (is (includes? out "cold=42 after-call=true")))))
 
   (test "the unbound error is unchanged for a typo, in a module that exists or not"
-    (let (in-module (try (let (f lazyprobe-plain/nope) f) (catch e (error-message e)))
-          no-module (try (let (f nomod-xyz/thing) f) (catch e (error-message e))))
+    (let (in-module (try
+                      (let (f (check-allow :unbound lazyprobe-plain/nope)) f)
+                      (catch e (error-message e)))
+          no-module (try
+                      (let (f (check-allow :unbound nomod-xyz/thing)) f)
+                      (catch e (error-message e))))
       (is (includes? in-module "unbound symbol: lazyprobe-plain/nope"))
       (is (includes? no-module "unbound symbol: nomod-xyz/thing"))))
 
   (test "an error inside the module surfaces at first use rather than being hidden"
-    (let (msg (try (let (f lazyprobe-broken/anything) f) (catch e (error-message e))))
+    (let (msg (try
+                (let (f (check-allow :unbound lazyprobe-broken/anything)) f)
+                (catch e (error-message e))))
       (is (includes? msg "deliberately broken")))))
 
 (describe "lazy loading under concurrency"
@@ -119,7 +127,7 @@
         (spawn (send me
                  [:race
                    (try
-                     (let (f lazyprobe-race/answer) (f))
+                     (let (f (check-allow :unbound lazyprobe-race/answer)) (f))
                      (catch e [:err (error-message e)]))])))
       (let (results (map (range 16)
                       (fn (_) (receive ([:race r] r) (after test/*wait-ms* :timeout)))))

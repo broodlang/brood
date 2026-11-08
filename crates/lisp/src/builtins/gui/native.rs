@@ -1919,3 +1919,16 @@ mod gui_music_op_tests {
         );
     }
 }
+
+/// `(%gui-lose-display why)` — act as if the display went away (ADR-631): every open
+/// window's app is sent `[:hangup :display-lost]`, and draws become no-ops. What the GUI
+/// thread does itself when its event loop ends; exposed so the path is testable headless.
+pub(in crate::builtins) fn gui_lose_display(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let why = expect_string(heap, "%gui-lose-display", arg(args, 0))?;
+    crate::host::gui::lose_display(&why);
+    Ok(Value::nil())
+}

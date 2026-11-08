@@ -420,6 +420,8 @@ record built at root and an impl for it at root must land on the same dispatch i
 (defn %record-register (id nm)
   "Record that `id` (a `:module/name` keyword) is a `defrecord`'s nominal identity."
   (%registry-update! '*record-ids* :assoc [id] nm)
+  ;; A `sig` of its module that named it before it existed means it now (`type_scope`).
+  (%type-name-arrived! id)
   nil)
 
 (defmacro defrecord (rec fields & opts)

@@ -530,6 +530,51 @@ fn record_ty(heap: &Heap, name: &str) -> Option<Ty> {
     Some(Ty::record_of_open(fields))
 }
 
+/// A bare type `name` as the module that wrote it means it: that module's own alias or
+/// record (`ns/name`), else the ONE `(:use …)`d module's — `None` to leave it to the global
+/// rules. The module is the one whose sig or alias is being read (a loaded module's, see
+/// [`in_declaring_scope`]), else the checked file's; the file's `:use` list answers only
+/// for the file's own declarations, being the only list the checker holds.
+fn scoped_ty(heap: &Heap, name: &str) -> Option<Ty> {
+    if name.contains('/') {
+        return None;
+    }
+    let file_ns = ALIAS_FILE_NS.with(|n| n.borrow().clone());
+    let declaring = ALIASES_EXPANDING
+        .with(|v| v.borrow().last().cloned())
+        .or_else(|| DECLARING.with(|d| d.borrow().last().cloned()))
+        .and_then(|q| q.rsplit_once('/').map(|(ns, _)| ns.to_string()));
+    let ns = declaring.clone().or_else(|| file_ns.clone())?;
+    let names_a_type = |qualified: &str| {
+        TYPE_ALIASES.with(|m| m.borrow().contains_key(qualified))
+            || RECORD_IDS.with(|ids| ids.borrow().contains(qualified))
+    };
+    let qualified = format!("{ns}/{name}");
+    let found = if names_a_type(&qualified) {
+        Some(qualified)
+    } else if declaring.is_none() || declaring == file_ns {
+        let mut hits = ALIAS_IMPORTS.with(|i| {
+            i.borrow()
+                .used
+                .iter()
+                .map(|module| format!("{module}/{name}"))
+                .filter(|q| names_a_type(q))
+                .collect::<Vec<_>>()
+        });
+        if hits.len() == 1 { hits.pop() } else { None }
+    } else {
+        None
+    }?;
+    // An alias is read by its bare name: [`alias_ty`] resolves it in the same order (the
+    // module's own, then the one used module's), and keys the display name and a
+    // self-reference's binder on the name as written. A record by its qualified id.
+    if TYPE_ALIASES.with(|m| m.borrow().contains_key(&found)) {
+        alias_ty(heap, name)
+    } else {
+        record_ty(heap, &found)
+    }
+}
+
 /// The registered record id `name` denotes — `name` itself when registered, else the one
 /// registered id ending in `/name` (two candidates decline: see [`record_ty`]).
 fn record_id_for(name: &str) -> Option<String> {
@@ -652,7 +697,14 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
             // is the opposite precedence to `sealed_members_ty`, and for the opposite
             // reason — there the members are `impl` dispatch keys, here they are type
             // syntax.
+            //
+            // Before any of those, the name as its MODULE means it (`scoped_ty`): its own
+            // `deftype` or `defrecord`, then a `(:use …)`d module's — as the runtime contract
+            // resolves it (`builtins/type_scope.rs`). The global rules below pick ONE
+            // candidate across every loaded module, which let another module's `(deftype
+            // conn …)` stand for this module's record `conn`.
             base_ty(&name)
+                .or_else(|| scoped_ty(heap, &name))
                 .or_else(|| ability_type(&name))
                 .or_else(|| record_ty(heap, &name))
                 .or_else(|| alias_ty(heap, &name))
@@ -1176,6 +1228,7 @@ fn parse_type_term(heap: &Heap, form: Value, vars: &mut HashMap<String, u32>) ->
                 return Some(SigTerm::Var(idx));
             }
             base_ty(&name)
+                .or_else(|| scoped_ty(heap, &name))
                 .or_else(|| ability_type(&name))
                 .or_else(|| record_ty(heap, &name))
                 .or_else(|| alias_ty(heap, &name))

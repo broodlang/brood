@@ -684,8 +684,41 @@
       (let (report (receive ([:slow report] report) (after 5000 :none)))
         (assert= (:phase report) "update")
         (assert= (:tag report) :sleepy)
-        (is (>= (:ms report) 10)))
+        (is (>= (:ms report) 10))
+        ;; asleep, not collecting: the report says how little of it was GC
+        (is (<= 0 (:gc-ms report) (:ms report))))
       (assert= (receive ([:slow report] report) (after 100 :none)) :none)))
+  (test "a slow update says how much of it was garbage collection"
+    (let (me (self)
+          step (fn (model input _cols _rows)
+                 (cond
+                   (= input :quit) (assoc model :done true)
+                   ;; allocates enough to collect several times, and keeps none of it
+                   (= (lane-tag input) :garbage)
+                     (do (count (fold (range 400000) () (fn (acc n) (cons [n (str n)] acc)))) model)
+                   else model))
+          loop (lane-start me
+                 {:slow-ms 0 :on-slow (fn (report) (send me [:slow report]))}
+                 step))
+      (send loop [:garbage 1])
+      (send loop :quit)
+      (send loop :go)
+      (let (report (letrec (next (fn ()
+                                   ;; the view may be reported too, at a 0 ms line
+                                   (let (report (receive
+                                                  ([:slow report] report)
+                                                  (after 10000 :none)))
+                                     (if (and (map? report) (not (= (:tag report) :garbage)))
+                                       (next)
+                                       report))))
+                     (next)))
+        (assert= (:tag report) :garbage)
+        (is (> (:gc-ms report) 0))
+        (is (<= (:gc-ms report) (:ms report))))))
+  (test "proc/gc-us counts the calling process's collections"
+    (let (before (proc/gc-us))
+      (count (fold (range 400000) () (fn (acc n) (cons [n (str n)] acc))))
+      (is (> (proc/gc-us) before))))
   (test "a run of slow updates is reported once per quiet period, an interrupted one always"
     (let (me (self)
           step (fn (model input _cols _rows)
