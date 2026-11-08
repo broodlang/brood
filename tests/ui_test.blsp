@@ -690,7 +690,7 @@
       (assert= (receive ([:slow report] report) (after 100 :none)) :none)))
   (test "a slow update says how much of it was garbage collection"
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (assoc model :done true)
                    ;; allocates enough to collect several times, and keeps none of it
