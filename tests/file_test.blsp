@@ -397,7 +397,8 @@
     ;; nest test points XDG_DATA_HOME into its scratch home
     (let (location (file/trash-location))
       (when (not (failure? location))
-        (is (string/starts-with? (:dir location) (os/env "BROOD_TEST_SCRATCH"))))))
+        (let (scratch (os/env "BROOD_TEST_SCRATCH"))
+          (is (and (string? scratch) (string/starts-with? (:dir location) scratch)))))))
   (test "a file goes to files/ with its .trashinfo beside it"
     (let (dir (ftmp)
           trash (path/join dir "Trash")

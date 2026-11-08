@@ -9,6 +9,8 @@
   (:use test)
   (:use suite-helpers))
 
+(purge-stale-temp "display-lost-")
+
 (def- app-source
   (str "(defmodule display-lost-app (:use editor/ui))\n"
     "(if (not (gui/available?))\n" "  (io/puts \"no-gui\")\n" "  (let (me (self)\n"

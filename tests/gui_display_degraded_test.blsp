@@ -10,6 +10,8 @@
   (:use test)
   (:use suite-helpers))
 
+(purge-stale-temp "display-degraded-")
+
 (def- app-source
   (str "(defn told ()\n"
     "  (receive ([:display-degraded m] (str (:what m) \" \" (:reason m))) (after 10000 \"untold\")))\n"

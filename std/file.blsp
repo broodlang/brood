@@ -196,9 +196,10 @@ every system, and none when it kept the real home: a test never trashes into the
     (cond
       (not (nil? *trash-home*)) {:kind :freedesktop :dir *trash-home*}
       (= (os/env "BROOD_TEST_RUN") "1")
-        (if (and (os/env "BROOD_TEST_SCRATCH") (os/env "XDG_DATA_HOME"))
-          {:kind :freedesktop :dir (path/join (os/env "XDG_DATA_HOME") "Trash")}
-          (failure "file/trash: a test run that kept the real home has no trash; bind file/*trash-home*"))
+        (let (data-home (os/env "XDG_DATA_HOME"))
+          (if (and (os/env "BROOD_TEST_SCRATCH") (string? data-home))
+            {:kind :freedesktop :dir (path/join data-home "Trash")}
+            (failure "file/trash: a test run that kept the real home has no trash; bind file/*trash-home*")))
       (= (os/type) :windows) {:kind :recycle-bin :dir nil}
       (= (os/type) :macos)
         (if home

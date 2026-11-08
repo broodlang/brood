@@ -362,11 +362,14 @@ innermost `:frames` with project-relative paths, the `:brood` version, the `:os`
 
 (defn- crash-report-read-record (dir name)
   "The record in `dir`/`name` with its `:file` and a `:message`, or nil when it is not one."
-  (let (file (path/join dir name)
-        text (try (file/slurp file) (catch _ nil))
-        record (when (string? text) (try (reflect/read-string text) (catch _ nil))))
-    (when (and (map? record) (= (get record :kind) :fatal-signal))
-      (assoc record :file file :message (crash-report-record-message record)))))
+  ;; check-allow :discarded-catch — a record that cannot be read or parsed is not one, and
+  ;; nil is that answer
+  (check-allow :discarded-catch
+    (let (file (path/join dir name)
+          text (try (file/slurp file) (catch _ nil))
+          record (when (string? text) (try (reflect/read-string text) (catch _ nil))))
+      (when (and (map? record) (= (get record :kind) :fatal-signal))
+        (assoc record :file file :message (crash-report-record-message record))))))
 
 (defn previous-crashes (-> vector)
   "The fatal-signal records earlier runs left on this machine, oldest first: a runtime that died
@@ -396,7 +399,9 @@ again. True when it was removed.
   (let (file (get record :file))
     (and (string? file)
       (= (path/dirname file) (%crash-record-dir))
-      (do (try (file/rm file) (catch _ nil)) (not (file/exists? file))))))
+      ;; check-allow :discarded-catch — whether the file is gone afterwards is the answer
+      (check-allow :discarded-catch
+        (do (try (file/rm file) (catch _ nil)) (not (file/exists? file)))))))
 
 (defn post (url:string report:map -> any)
   "Send `report` ([[describe-error]]'s, perhaps with a note the user added) to the collector at

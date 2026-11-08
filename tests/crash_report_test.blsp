@@ -8,6 +8,8 @@
   (:use crash-report)
   (:use suite-helpers))
 
+(purge-stale-temp "fatal-signal-")
+
 (defn- crash-report-collect (me)
   "A sink that forwards each report to the test process."
   (fn (text) (send me [:report text])))
