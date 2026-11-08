@@ -1346,18 +1346,18 @@ pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 pub use disabled::{
     TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font,
     font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
-    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, maximize,
-    minimize, next_texture_id, open, register_family, register_installed_family, render_frame,
-    settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture, texture_free, title,
-    window_ids,
+    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, lose_display,
+    maximize, minimize, next_texture_id, open, register_family, register_installed_family,
+    render_frame, settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture,
+    texture_free, title, window_ids,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
     TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font,
     font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
-    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, maximize,
-    minimize, next_texture_id, open, register_family, register_installed_family, render_frame,
-    settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture, texture_free, title,
-    window_ids,
+    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, lose_display,
+    maximize, minimize, next_texture_id, open, register_family, register_installed_family,
+    render_frame, settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture,
+    texture_free, title, window_ids,
 };

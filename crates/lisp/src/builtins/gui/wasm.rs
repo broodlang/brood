@@ -23,6 +23,7 @@ macro_rules! wasm_unsupported_builtins {
 
 wasm_unsupported_builtins!(
     gui_open,
+    gui_lose_display,
     gui_close,
     gui_title,
     gui_icon,
