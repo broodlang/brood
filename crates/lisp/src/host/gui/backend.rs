@@ -2666,7 +2666,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     // composition that just ended counts as composed too.
                     let composed = w.composition != Composition::Idle;
                     w.composition = Composition::Idle;
-                    if let Some(message) = commit_message(&text, composed) {
+                    if let Some(message) = commit_message(&text, composed, w.chord_modifiers()) {
                         deliver(w.subscriber, message);
                     }
                 }

@@ -641,13 +641,19 @@ pub(super) fn preedit_message(text: &str, cursor: Option<(usize, usize)>) -> Mes
 /// What an IME commit becomes. A single character typed with NO composition shown is a
 /// keystroke an input method passed through (some IMEs commit every key they do not
 /// compose), so it is the 1-char key string a keyboard would have sent — the keymap
-/// cannot tell the difference, and must not. Anything that ended a composition, or is
-/// longer than one character, is `[:text "…"]`.
-pub(super) fn commit_message(text: &str, after_preedit: bool) -> Option<Message> {
+/// cannot tell the difference, and must not. So it keeps the chord `modifiers` held as it
+/// came through (`character_chord`, the keyboard path's rule): an IME that passes Alt+f or
+/// Ctrl+a on as a commit of `f` / `a` delivers `:alt-f` / `:ctrl-a`, not a typed letter.
+/// Anything that ended a composition, or is longer than one character, is `[:text "…"]`.
+pub(super) fn commit_message(
+    text: &str,
+    after_preedit: bool,
+    modifiers: KeyModifiers,
+) -> Option<Message> {
     let mut chars = text.chars();
     let first = chars.next()?;
     if !after_preedit && chars.next().is_none() && !first.is_control() {
-        Some(key_message(&Key::Char(first)))
+        Some(key_message(&character_chord(first, modifiers)))
     } else {
         Some(text_message(text))
     }
@@ -888,12 +894,42 @@ mod adr_431_tests {
 
     #[test]
     fn a_passed_through_character_is_a_key_and_a_composition_is_text() {
-        assert!(matches!(&commit_message("a", false), Some(Message::Str(s)) if s == "a"));
-        let composed = vector_of(commit_message("é", true).expect("a commit"));
+        let none = KeyModifiers::default();
+        assert!(matches!(&commit_message("a", false, none), Some(Message::Str(s)) if s == "a"));
+        let composed = vector_of(commit_message("é", true, none).expect("a commit"));
         assert!(matches!(&composed[1], Message::Str(s) if s == "é"));
-        let several = vector_of(commit_message("啊不", false).expect("a commit"));
+        let several = vector_of(commit_message("啊不", false, none).expect("a commit"));
         assert!(matches!(&several[1], Message::Str(s) if s == "啊不"));
-        assert!(commit_message("", true).is_none());
+        assert!(commit_message("", true, none).is_none());
+    }
+
+    #[test]
+    fn a_passed_through_character_keeps_the_modifiers_held() {
+        let keyword = |text, modifiers| match commit_message(text, false, modifiers) {
+            Some(Message::Keyword(k)) => value::symbol_name(k),
+            _ => panic!("a chord"),
+        };
+        let ctrl = KeyModifiers {
+            ctrl: true,
+            ..KeyModifiers::default()
+        };
+        let alt = KeyModifiers {
+            alt: true,
+            ..KeyModifiers::default()
+        };
+        let alt_shift = KeyModifiers { shift: true, ..alt };
+        assert_eq!(keyword("a", ctrl), "ctrl-a");
+        assert_eq!(keyword("f", alt), "alt-f");
+        assert_eq!(keyword("O", alt_shift), "alt-O");
+        // Shift alone is in the glyph already: a typed capital, not a chord
+        let shift = KeyModifiers {
+            shift: true,
+            ..KeyModifiers::default()
+        };
+        assert!(matches!(&commit_message("A", false, shift), Some(Message::Str(s)) if s == "A"));
+        // a composition that ended stays text, whatever is held
+        let composed = vector_of(commit_message("é", true, alt).expect("a commit"));
+        assert!(matches!(&composed[1], Message::Str(s) if s == "é"));
     }
 }
 
