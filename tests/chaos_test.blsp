@@ -112,7 +112,7 @@
       (is (includes? (str (get caught :message)) "zero"))))
 
   (test "try with no error returns its body value"
-    (assert= :ok (try :ok (catch e :error))))
+    (assert= :ok (try :ok (catch _e :error))))
 
   (test "try with a throw skips the body result"
     (assert= :caught
@@ -122,12 +122,12 @@
 
 (describe "function arity errors"
   (test "too few arguments raises arity error"
-    (let (msg (error-of ((fn (a b c) a) 1 2)))
+    (let (msg (error-of ((fn (a _b _c) a) 1 2)))
       (is (string? msg))
       (is (includes? msg "3"))))
 
   (test "too many arguments raises arity error"
-    (let (msg (error-of ((fn (a b) a) 1 2 3)))
+    (let (msg (error-of ((fn (a _b) a) 1 2 3)))
       (is (string? msg))
       (is (includes? msg "2"))))
 
@@ -203,10 +203,10 @@
     (is (not (nil? (expand-error '(match 42 (99 :nope) (100 :nope)))))))
 
   (test "match with guard — passes when guard is true"
-    (assert= :even (match 8 (n :when (even? n) :even) (n :odd))))
+    (assert= :even (match 8 (n :when (even? n) :even) (_n :odd))))
 
   (test "match with guard — falls through when guard is false"
-    (assert= :odd (match 7 (n :when (even? n) :even) (n :odd))))
+    (assert= :odd (match 7 (n :when (even? n) :even) (_n :odd))))
 
   (test "match nested vector destructure"
     (assert= 6 (match [1 [2 3]] ([a [b c]] (+ a b c)))))
@@ -241,7 +241,7 @@
 
   (test "spawning 50 processes that each crash does not affect parent"
     (let (_me (self))
-      (dotimes (i 50)
+      (dotimes (_i 50)
         (spawn (fn () (/ 1 0))))
       (assert= :alive (receive (after 200 :alive)))))
 
@@ -250,7 +250,7 @@
   ;; Capture the parent PID with `me=(self)` first.
   (test "20 spawned senders deliver :done to parent — all received without timeout"
     (let (me (self))
-      (dotimes (i 20)
+      (dotimes (_i 20)
         (spawn (send me :done))))
     (assert= :ok (await-done 20))))
 

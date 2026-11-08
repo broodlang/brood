@@ -289,10 +289,10 @@
 (describe "remove / keep"
   (test "remove is the complement of filter"
     (assert= (seq/reject (range 8) even?) (list 1 3 5 7))
-    (assert= (seq/reject (range 3) (fn (x) true)) nil))
+    (assert= (seq/reject (range 3) (fn (_x) true)) nil))
   (test "keep takes the non-nil results of f (map+filter fused)"
     (assert= (seq/keep (range 6) (fn (x) (if (even? x) (* x x) nil))) (list 0 4 16))
-    (assert= (seq/keep (range 3) (fn (x) nil)) nil)))
+    (assert= (seq/keep (range 3) (fn (_x) nil)) nil)))
 
 (describe "distinct / dedupe"
   (test "distinct drops duplicates, keeping first occurrence (order-preserving)"
@@ -375,7 +375,8 @@
 
 (describe "sequences across processes"
   :isolated (test "a sorted list round-trips through a worker unchanged (deep copy)"
-    (let (me (self) _w (spawn (seq-emit me 5))) (assert= (receive ([:r n xs] xs)) (list 1 2 3 4 5))))
+    (let (me (self) _w (spawn (seq-emit me 5)))
+      (assert= (receive ([:r _n xs] xs)) (list 1 2 3 4 5))))
 
   (test "fan-out / fan-in: each worker builds+sorts a list, parent folds a map"
     (seq-spawn (self) (range 1 16))

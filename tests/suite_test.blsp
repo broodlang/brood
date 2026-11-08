@@ -164,7 +164,7 @@
     (assert= (reverse loop-acc) (list 0 1 2 3 4)))
   (test "dotimes with n=0 is a no-op"
     (def- loop-acc :untouched)
-    (dotimes (i 0) (def- loop-acc :touched))
+    (dotimes (_i 0) (def- loop-acc :touched))
     (assert= loop-acc :untouched))
   (test "dotimes returns nil" (assert= (dotimes (i 3) i) nil))
   (test "dolist walks each item"
@@ -173,7 +173,7 @@
     (assert= (reverse loop-acc) (list :a :b :c)))
   (test "dolist on empty is a no-op"
     (def- loop-acc :untouched)
-    (dolist (x nil) (def- loop-acc :touched))
+    (dolist (_x nil) (def- loop-acc :touched))
     (assert= loop-acc :untouched))
   (test "dolist returns nil" (assert= (dolist (x (list 1 2)) x) nil)))
 
@@ -245,7 +245,7 @@
   (test "built-in errors are catchable" (is (try (/ 1 0) (catch e (map? e)))))
   ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
   (test "no error -> body value"
-    (assert= (try (+ 1 2) (catch e :nope)) 3))
+    (assert= (try (+ 1 2) (catch _e :nope)) 3))
   (test "assert-error" (assert-error (/ 1 0)) (assert-error (throw :boom))))
 
 ;; Pin the exact message each kind of error produces, so a change to user-facing
@@ -268,11 +268,24 @@
     (assert= (error-of (string/length :k))
       "type error: string/length: expected string, got keyword (:k)")
     (assert= (error-of (1 2 3)) "type error: cannot call non-function: 1"))
+  (test "a primitive's type error names WHICH argument when the call passed several"
+    ;; `(reduce strings string/->number)` calls `(string/->number acc x)`, and the radix
+    ;; check said `string/->number: expected int, got string ("1")` — which reads as if
+    ;; parsing "1" wanted an int. The parameter comes from the registration.
+    (assert= (error-of (reduce ["1" "1"] string/->number))
+      "type error: string/->number: radix (argument 2) expected int, got string (\"1\")")
+    (assert= (error-of (string/substring 1 2))
+      "type error: string/substring: s (argument 1) expected string, got int (1)")
+    (assert= (error-of (string/substring "abc" 0 "y"))
+      "type error: string/substring: end (argument 3) expected int, got string (\"y\")")
+    ;; Two arguments the declared types reject with the same tag: not guessed.
+    (assert= (error-of (string/substring "abc" "x" "y"))
+      "type error: string/substring: expected int, got string (\"x\")"))
   (test "arity errors name the fn, the expected count, and what arrived"
     (defn one-arg (x) x)
     (assert= (error-of (one-arg 1 2))
       "arity error: suite-test/one-arg: expected 1 argument (x), got 2")
-    (assert= (error-of ((fn (a b) a) 1)) "arity error: fn: expected 2 arguments (a b), got 1")
+    (assert= (error-of ((fn (a b) [a b]) 1)) "arity error: fn: expected 2 arguments (a b), got 1")
     (assert= (error-of (cons 1)) "arity error: cons: expected 2 arguments (x xs), got 1"))
   (test "built-ins enforce their declared arity (no silent extra/missing args)"
     (assert= (error-of (type-of)) "arity error: type-of: expected 1 argument (x), got 0")

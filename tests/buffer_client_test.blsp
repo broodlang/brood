@@ -142,9 +142,9 @@
             (assert= (get l2 :pending) ())
             ;; a foreign edit (unknown origin): folds to an applicable splice
             (buffer-splice bp 0 0 ">" :someone-else)
-            (let ([l3 a3] (receive
-                            ([:buffer-updated _bp v w o] (link-fold l2 v w o))
-                            (after test/*wait-ms* (error "no push arrived"))))
+            (let ([_l3 a3] (receive
+                             ([:buffer-updated _bp v w o] (link-fold l2 v w o))
+                             (after test/*wait-ms* (error "no push arrived"))))
               (assert= a3 [:splice [0 0 ">"] nil])
               (assert= (buffer-query bp buffer-text) ">hello!")))))
       (stop-buffer bp))))

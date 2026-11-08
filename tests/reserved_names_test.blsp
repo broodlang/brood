@@ -117,8 +117,8 @@
 (describe "the escapes the error names"
   (test "a local `let` may still shadow a reserved name"
     ;; lexical shadowing is not a redefinition — it binds a local
-    (assert= :local (let (get (fn (a b) :local)) (get {} :k)))
-    (assert= 99 (let (count (fn (c) 99)) (count [1 2 3]))))
+    (assert= :local (let (get (fn (_a _b) :local)) (get {} :k)))
+    (assert= 99 (let (count (fn (_c) 99)) (count [1 2 3]))))
   (test "a module-scoped defn is a DIFFERENT name, so it is allowed"
     ;; `(defn get …)` inside module `m` defines `m/get` — this is why the blast
     ;; radius of the rule is tiny: the namespace system already did the work.
@@ -135,7 +135,7 @@
                [:result
                  (try
                    (do (reflect/eval-string "(def get (fn (a b) :x))") :allowed)
-                   (catch e :refused))]))
+                   (catch _e :refused))]))
       (assert= :refused (receive ([:result r] r)))))
   (test "and a spawned process can still redefine its own names"
     (let (me (self))
@@ -143,5 +143,5 @@
                [:result
                  (try
                    (do (reflect/eval-string "(def rn-child (fn () 1))") :allowed)
-                   (catch e :refused))]))
+                   (catch _e :refused))]))
       (assert= :allowed (receive ([:result r] r))))))

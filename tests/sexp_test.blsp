@@ -65,7 +65,7 @@
     (let (src "(defmodule m\n\"doc\n(x)\nend\")\n(def y 1)"
           dp (index-of src "(def y"))
       ; not the in-docstring (x)
-      (let ([base sub] (narrow src dp))
+      (let ([base _sub] (narrow src dp))
         (assert= base 0))
       (assert= (point-forward src dp) (string/length src)))))
 ;; Structural motion narrows to the forms around point (`sexp/narrow`) so it's

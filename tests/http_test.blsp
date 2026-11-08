@@ -53,7 +53,7 @@
           b (bytes/concat (render-response {:status 200 :body (bytes 1 2 3)})))
       (is (includes? s "Content-Length: 10"))
       ;; a binary bytes body rides the plain-response path verbatim
-      (is (= (match b ((bytes _ & r) (bytes/slice b (- (count b) 3))) (_ :no)) (bytes 1 2 3)))))
+      (is (= (match b ((bytes _ & _r) (bytes/slice b (- (count b) 3))) (_ :no)) (bytes 1 2 3)))))
   (test "not-found renders a 404"
     (is (includes? (string/bytes-> (bytes/concat (render-response (not-found)))) "404 Not Found"))))
 
@@ -150,7 +150,7 @@
 
 (describe "http: routing + mime"
   (test "router dispatches by path and falls back to 404"
-    (let (h (router {"/" (fn (req) (text-response "home"))}))
+    (let (h (router {"/" (fn (_req) (text-response "home"))}))
       (assert= (get (h {:path "/"}) :body) "home")
       (assert= (get (h {:path "/missing"}) :status) 404)))
   (test "mime-type guesses by extension"
@@ -166,7 +166,7 @@
   (test "no query reads as the empty string"
     (assert= (get (parse-request "GET / HTTP/1.1\r\n\r\n") :query) ""))
   (test "the router matches a path that arrived with a query"
-    (let (h (router {"/events" (fn (req) (text-response "ev"))}))
+    (let (h (router {"/events" (fn (_req) (text-response "ev"))}))
       (assert= (get (h (parse-request "GET /events?token=t HTTP/1.1\r\n\r\n")) :body) "ev"))))
 
 (defn- guard-req (host origin)
@@ -183,7 +183,7 @@
     (is (not (loopback-host? "evil.example:5000")))
     (is (not (loopback-host? "localhost.evil.example")))
     (is (not (loopback-host? nil))))
-  (let (h (loopback-only (fn (req) (text-response "in"))))
+  (let (h (loopback-only (fn (_req) (text-response "in"))))
     (test "a same-origin request passes"
       (assert= (get (h (guard-req "localhost:5000" "http://localhost:5000")) :status) 200)
       (assert= (get (h (guard-req "127.0.0.1:5000" nil)) :status) 200))
@@ -197,7 +197,7 @@
       (assert= (get (h {:path "/" :query "" :headers {}}) :status) 403))))
 
 (describe "http: require-token"
-  (let (h (require-token "s3cret" (fn (req) (text-response "in"))))
+  (let (h (require-token "s3cret" (fn (_req) (text-response "in"))))
     (test "the token as a query parameter or an X-Token header passes"
       (assert= (get (h {:query "token=s3cret" :headers {}}) :status) 200)
       (assert= (get (h {:query "" :headers {"x-token" "s3cret"}}) :status) 200))
@@ -220,7 +220,7 @@
       (is (includes? h "\r\n\r\n"))
       (refute (includes? h "Content-Length"))))
   (test "streaming? distinguishes a stream-response from a plain response"
-    (is (streaming? (stream-response 200 {} (fn (sock) nil))))
+    (is (streaming? (stream-response 200 {} (fn (_sock) nil))))
     (refute (streaming? (ok "hi"))))
   (test "a stream-response keeps the connection open and pushes frames"
     (let (me (self))
@@ -230,7 +230,7 @@
                (let (ls (listen 0))
                  (send me [:port (tcp/local-port ls)])
                  (serve-loop ls
-                   (fn (req)
+                   (fn (_req)
                      (stream-response 200
                        {"Content-Type" "text/event-stream"}
                        (fn (sock)
@@ -268,16 +268,16 @@
 (describe "http: responses are records with a Response impl"
   (test "the two stock kinds have distinct identities"
     (assert= (record-id (ok "hi")) :http/response)
-    (assert= (record-id (stream-response 200 {} (fn (sock) nil)))
+    (assert= (record-id (stream-response 200 {} (fn (_sock) nil)))
       :http/stream-response))
   (test "streaming? is an identity check, not a key sniff"
-    (is (streaming? (stream-response 200 {} (fn (sock) nil))))
+    (is (streaming? (stream-response 200 {} (fn (_sock) nil))))
     (refute (streaming? (ok "hi")))
     ;; a plain map carrying a :stream key is NOT a stream-response
-    (refute (streaming? {:status 200 :headers {} :stream (fn (sock) nil)})))
+    (refute (streaming? {:status 200 :headers {} :stream (fn (_sock) nil)})))
   (test "every response kind satisfies Response"
     (is (satisfies? 'Response (ok "hi")))
-    (is (satisfies? 'Response (stream-response 200 {} (fn (sock) nil))))
+    (is (satisfies? 'Response (stream-response 200 {} (fn (_sock) nil))))
     (is (satisfies? 'Response (probe-response (self))))
     (is (not (satisfies? 'Response {:status 200}))))
   (test "the constructors still build the documented fields"
@@ -336,7 +336,7 @@
       (spawn (do
                (let (ls (listen 0))
                  (send me [:port (tcp/local-port ls)])
-                 (serve-loop ls (router {"/" (fn (req) (ok "<h1>brood</h1>"))})))))
+                 (serve-loop ls (router {"/" (fn (_req) (ok "<h1>brood</h1>"))})))))
       (let (port (receive ([:port p] p) (after test/*wait-ms* :timeout)))
         (let (c (tcp/connect "127.0.0.1" port))
           (tcp/send c "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
@@ -485,7 +485,7 @@
                (let (ck (tls/self-signed "localhost")
                      ls (tls/listen "127.0.0.1" 0 (first ck) (second ck)))
                  (send me [:ready (tcp/local-port ls) (first ck)])
-                 (serve-loop ls (router {"/" (fn (req) (ok "<h1>secure brood</h1>"))})))))
+                 (serve-loop ls (router {"/" (fn (_req) (ok "<h1>secure brood</h1>"))})))))
       (let (pc (receive ([:ready p ct] [p ct]) (after test/*wait-ms* :timeout)))
         (let (resp (answered (fetch (str "https://localhost:" (first (served pc)) "/")
                                {:ca (second (served pc))})))
@@ -498,7 +498,7 @@
                      ls (tls/listen "127.0.0.1" 0 (first ck) (second ck)))
                  (send me [:ready (tcp/local-port ls) (first ck)])
                  (serve-loop ls
-                   (fn (req)
+                   (fn (_req)
                      (response 200
                        {"Content-Type" "application/octet-stream"}
                        (bytes 255 128 0 7)))))))
@@ -531,7 +531,7 @@
       (spawn (do
                (let (ls (listen 0))
                  (send me [:port (tcp/local-port ls)])
-                 (serve-loop ls (fn (req) (text-response "never"))))))
+                 (serve-loop ls (fn (_req) (text-response "never"))))))
       (let (port (receive ([:port p] p) (after test/*wait-ms* :timeout)))
         (let (c (tcp/connect "127.0.0.1" port)
               ;; 70 KiB of header-ish bytes, never a blank line
@@ -553,7 +553,7 @@
                (let (ls (listen 0))
                  (send me [:port (tcp/local-port ls)])
                  (serve-loop ls
-                   (fn (req)
+                   (fn (_req)
                      (response 200
                        {"Content-Type" "application/octet-stream"}
                        (bytes 255 128 65 0 7)))))))
@@ -567,7 +567,7 @@
       (spawn (do
                (let (ls (listen 0))
                  (send me [:port (tcp/local-port ls)])
-                 (serve-loop ls (fn (req) (text-response "héllo ☃"))))))
+                 (serve-loop ls (fn (_req) (text-response "héllo ☃"))))))
       (let (port (receive ([:port p] p) (after test/*wait-ms* :timeout)))
         (let (resp (answered (fetch (str "http://127.0.0.1:" port "/"))))
           (assert= (get resp :status) 200)
@@ -657,7 +657,7 @@
     (let (port (start-test-server (require-token "t" echo-body)))
       (is (includes? (exchange port "GET /?token=%FF HTTP/1.0\r\n\r\n") "403 Forbidden"))))
   (test "a response that cannot be rendered answers 500"
-    (let (port (start-test-server (fn (req) (response 200 {"X" "a\r\nEvil: 1"} "x"))))
+    (let (port (start-test-server (fn (_req) (response 200 {"X" "a\r\nEvil: 1"} "x"))))
       (is (includes? (exchange port "GET / HTTP/1.0\r\n\r\n") "500 Internal Server Error")))))
 
 (describe "http: refusals and answers under concurrent connections"

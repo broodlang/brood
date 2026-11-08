@@ -76,7 +76,7 @@ are known.
   ;; dev-tools; a GUI module needs a display) is simply not part of the surface to audit.
   ;; The failure IS the answer, so there is nothing in `e` to inspect.
   (each (reflect/builtin-modules)
-    (fn (m) (check-allow :discarded-catch (try (require-one m) (catch e nil)))))
+    (fn (m) (check-allow :discarded-catch (try (require-one m) (catch _e nil)))))
   (count (reflect/builtin-modules)))
 
 (defn public-names (-> seqable)

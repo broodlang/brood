@@ -105,7 +105,7 @@
   (test "no clause matches falls through to the catch-all"
     (is (= (match #b"hi" ((bytes #b"GET " & p) p) (_ :fallthrough)) :fallthrough)))
   (test "a non-bytes value never matches a bytes pattern"
-    (is (= (match [1 2 3] ((bytes a & r) a) (_ :not-bytes)) :not-bytes)))
+    (is (= (match [1 2 3] ((bytes a & _r) a) (_ :not-bytes)) :not-bytes)))
   (test "non-linear: a repeated binder requires equal bytes"
     (is (= (match (bytes 5 5) ((bytes a a) :equal) (_ :diff)) :equal))
     (is (= (match (bytes 5 6) ((bytes a a) :equal) (_ :diff)) :diff))))
@@ -150,7 +150,7 @@
              (_ :no))
           [2 5 "hello" (bytes 33)])))
   (test "an unknown spec keyword is a clean expand-time error"
-    (is (= (try (reflect/eval '(match (bytes 1) ((bytes (x :u3)) x) (_ :no))) (catch e :bad-spec))
+    (is (= (try (reflect/eval '(match (bytes 1) ((bytes (x :u3)) x) (_ :no))) (catch _e :bad-spec))
           :bad-spec))))
 
 (describe "bytes: integer decode/encode helpers"
@@ -169,8 +169,8 @@
     (is (= (bytes/int-> 256 1) (bytes 0)))
     (is (= (bytes/int-> 511 1) (bytes 255))))
   (test "width outside 1–8 is a clean error"
-    (is (= (try (bytes/uint (bytes 1) 0 0) (catch e :bad-width)) :bad-width))
-    (is (= (try (bytes/int-> 1 9) (catch e :bad-width)) :bad-width)))
+    (is (= (try (bytes/uint (bytes 1) 0 0) (catch _e :bad-width)) :bad-width))
+    (is (= (try (bytes/int-> 1 9) (catch _e :bad-width)) :bad-width)))
   (test "a :u64 read past the i64 range widens to a big integer, never wraps negative"
     (is (= (bytes/uint (bytes 255 0 0 0 0 0 0 0) 0 8) 18374686479671623680))
     (is (= (match (bytes 255 255 255 255 255 255 255 255) ((bytes (x :u64)) x) (_ :no))
@@ -195,9 +195,9 @@
   (test "an improper tail is a final leaf of the iolist"
     (is (= (bytes/concat (cons "x" "y")) #b"xy")))
   (test "a non-leaf value is rejected"
-    (is (= (try (bytes/concat [1.5]) (catch e :rejected)) :rejected))
-    (is (= (try (bytes/concat [999]) (catch e :rejected)) :rejected))
-    (is (= (try (bytes/concat [:kw]) (catch e :rejected)) :rejected)))
+    (is (= (try (bytes/concat [1.5]) (catch _e :rejected)) :rejected))
+    (is (= (try (bytes/concat [999]) (catch _e :rejected)) :rejected))
+    (is (= (try (bytes/concat [:kw]) (catch _e :rejected)) :rejected)))
   (test "spit/slurp round-trips an iolist tree; spit-append appends one"
     (let (path (str "/tmp/brood-iolist-" (rand/token 8) ".txt"))
       (file/spit path ["a" ["b" nil "c"] (bytes 100) 101])

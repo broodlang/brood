@@ -18,7 +18,7 @@
     nil
     (do
       (table/incr t i 1)
-      (let ([s2 tag] (mk s))
+      (let ([s2 _tag] (mk s))
         (spin t s2 (- n 1) (+ i 1))))))
 
 (defn dup-count (t i n acc)

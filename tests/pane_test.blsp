@@ -185,7 +185,7 @@
   (test "many workers each lay out a sent tree and report the same pane count"
     (let (me (self) t (wt-tree3))
       ;; spawn is a macro: pass the work expression directly (it captures me + t)
-      (doseq (i (range 8))
+      (doseq (_i (range 8))
         (spawn (send me (count (get (pane-layout t [0 0 80 24]) :panes)))))
       ;; fold the 8 replies; every worker must see 3 panes
       (assert= (fold (range 8) 0 (fn (acc _) (+ acc (receive)))) 24))))
@@ -198,7 +198,7 @@
 
   (test "pane-swap exchanges two payloads and leaves selection where it was"
     (let (t (wt-tree3)
-          [pa pb pc] (into [] (pane-leaf-paths t))
+          [pa _pb pc] (into [] (pane-leaf-paths t))
           s (pane-swap t pa pc))
       (assert= (payloads s) (list 2 1 0))
       (assert= (pane-selected-path s) pa) ; the marker stayed on the position

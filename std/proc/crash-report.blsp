@@ -242,9 +242,9 @@ Returns nil.
   "The error map inside `error`: a caught error map, a process exit reason `[:error m]`, or
 anything else as a message."
   (match error
-    ([:error (and m {:keys [kind]})] m)
+    ([:error (and m {})] m)
     ([:error other] {:kind :error :message (pr-str other)})
-    ({:keys [kind]} error)
+    ({} error)
     (_ {:kind :error :message (if (string? error) error (pr-str error))})))
 
 (defn- crash-report-relative-file (file)

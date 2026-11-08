@@ -38,7 +38,7 @@
 (defn- try-load (src)
   (try
     (let (i (instantiate src)) (close i) :loaded)
-    (catch e :denied)))
+    (catch _e :denied)))
 
 (describe "wasm sandbox: the space budget is whole-store, not per-object"
   (test "one memory just under the cap still loads"

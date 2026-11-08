@@ -44,7 +44,7 @@
     ;; REPLACES the old name-authoritative behavior, which rejected it at load.
     (is (= (try
              (do (%load-string "(defmodule priv-nl) (defn c () (never-loaded/thing))") :loaded)
-             (catch e :errored))
+             (catch _e :errored))
           :loaded)))
 
   (test "(:use-internals mod) grants access — loud, explicit, greppable"
@@ -57,12 +57,12 @@
   (test "an aliased qualified private is still blocked (the alias resolves first)"
     (is (= (try
              (%load-string "(defmodule priv-al (:alias priv-vault :as pv)) (defn s () (pv/secret))")
-             (catch e :blocked))
+             (catch _e :blocked))
           :blocked)))
   (test "(:use mod :only [...]) refuses a private name without a grant"
     (is (= (try
              (%load-string "(defmodule priv-only (:use priv-vault :only [secret]))")
-             (catch e :refused))
+             (catch _e :refused))
           :refused)))
   (test "top-level (no module) code may reach privates — the live-hacking hatch"
     (assert= (reflect/eval (reflect/read-string "(priv-vault/secret)")) 41))
@@ -71,7 +71,7 @@
     ;; so wrapping it in a quasiquote is not a bypass (ADR-146 level-aware walk).
     (is (= (try
              (%load-string "(defmodule priv-qq) (defn f () `(x ~(priv-vault/secret)))")
-             (catch e :blocked))
+             (catch _e :blocked))
           :blocked)))
   (test "a quasiquote TEMPLATE (data, not unquoted) may name another module — data, not a ref"
     ;; `(priv-vault/secret) with NO unquote is just a quoted symbol list.
@@ -83,7 +83,7 @@
     ;; level-aware walk must not treat `quote` as terminal data inside a quasiquote.
     (is (= (try
              (%load-string "(defmodule priv-qq2) (defn f () `(quote ~(priv-vault/secret)))")
-             (catch e :blocked))
+             (catch _e :blocked))
           :blocked)))
   (test "a macro template referencing its OWN module's private still works"
     (%load-string "(defmodule priv-mac) (defn- mac-h (x) (* x 2)) (defmacro dbl (x) `(mac-h ~x)) (defn use () (dbl 21))")

@@ -1036,7 +1036,7 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
             (if (= (%map-get data :stamp nil) (project-cache-stamp))
               (%map-get data :entries {})
               {}))
-          (catch e {}))
+          (catch _e {}))
         {}))))
 
 ;; Write the merged cache for manifest `name`. Best-effort — a write failure just
@@ -1049,7 +1049,7 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
         (check-allow :discarded-catch
           (try
             (file/spit f (pr-str {:stamp (project-cache-stamp) :entries entries}))
-            (catch e nil)))))))
+            (catch _e nil)))))))
 
 ;; Parse `files` in parallel (`:scan-entries`), returning a list of
 ;; `[path [mtime counts privs def-names]]`. A dead worker's chunk is re-scanned in

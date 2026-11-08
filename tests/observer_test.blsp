@@ -554,7 +554,7 @@
                  :link :ok
                  :mode :nav
                  :confirm {:pid 1 :id 1 :name "x"}
-                 :backend {:kill (fn (c) "killed")}})
+                 :backend {:kill (fn (_c) "killed")}})
       (assert= (observer/observe-update model [:eval-reply "late"] 80 24) model)
       (assert= (observer/observe-update model [:observe-reply {}] 80 24) model)
       (assert= (observer/observe-update model [:kill-reply "late"] 80 24) model))))

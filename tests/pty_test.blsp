@@ -22,7 +22,7 @@
   "Everything `child` writes until its handle closes or it falls quiet."
   (receive
     ([:proc ^child data] (pty-drain child (str acc data)))
-    ([:proc-closed ^child code] (screen-text acc))
+    ([:proc-closed ^child _code] (screen-text acc))
     (after test/*wait-ms* (screen-text acc))))
 
 (defn- console-field (out name)
@@ -38,7 +38,7 @@
     (screen-text acc)
     (receive
       ([:proc ^child data] (pty-await child (str acc data) want))
-      ([:proc-closed ^child code] (screen-text acc))
+      ([:proc-closed ^child _code] (screen-text acc))
       (after test/*wait-ms* (screen-text acc)))))
 
 ;; A line that pauses about `seconds`, then runs `then`, in the platform's shell.
@@ -151,4 +151,4 @@
       (receive (after 200 nil))
       (os/close child)
       (is (not (= :timeout
-                 (receive ([:proc-closed ^child code] :closed) (after test/*wait-ms* :timeout))))))))
+                 (receive ([:proc-closed ^child _code] :closed) (after test/*wait-ms* :timeout))))))))

@@ -2322,14 +2322,25 @@ behaviour; opting into *enforcement* does. Full design:
 `nest check` / `brood --check` emit several additional warnings beyond type
 misuse — all advisory, zero false positives:
 
-**Unused `let` bindings** — a name bound in `let`/`letrec` that never
-appears in its visible scope (subsequent binding RHSs + body). Names prefixed
-with `_` are exempt (intentional don't-care). Compiler-generated `let`s from
-match/pattern expansion are also exempt.
+**Unused bindings** — a name a binding form introduces that never appears in its
+visible scope. Every binding form is covered, with the same pattern grammar each uses:
+`let`/`letrec` (including destructuring), `with`, `if-let`/`when-let`/`if-some`/
+`when-some`, `as->`, `match` and `receive` clauses, `catch`, the loop forms
+(`dolist`, `doseq`, `dotimes`, `for`, `fold-for`) and anonymous `fn` parameters in
+either spelling. A definition's own parameters (`defn`, `(def f (fn …))`) are its
+published arglist and are not reported. Exempt: names prefixed with `_` (intentional
+don't-care), a name that shadows a global, and a name the pattern itself reads (a
+repeat `[x x]`, or a `bytes` size naming an earlier segment). A pin `^x` and a
+quoted `'sym` bind nothing.
 
 ```clojure
-(let (x 1 y 2) x)   ; warning: unused let binding: y
-(let (_y 1) 2)       ; silent — _-prefix means intentional
+(let (x 1 y 2) x)                  ; warning: unused let binding: y
+(let ([c r] (term/size)) c)        ; warning: unused let binding: r
+(match msg ([:attach c rows] c))   ; warning: unused pattern binding: rows
+(try (f) (catch e nil))            ; warning: unused catch binding: e
+(fold-for (acc 0 x xs) x)          ; warning: unused loop binding: acc — it never folds
+(map xs (fn (acc x) acc))          ; warning: unused parameter: x
+(let (_y 1) 2)                     ; silent — _-prefix means intentional
 ```
 
 **Unused `:use` imports** — a `(:use mod)` clause whose contributed public names

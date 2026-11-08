@@ -44,8 +44,8 @@
     (assert= 7 (cbg-late -1)))
 
   (test "an unbound global on the live path still raises, catchably"
-    (assert= :caught (try (cbg-boom 1) (catch e :caught)))
+    (assert= :caught (try (cbg-boom 1) (catch _e :caught)))
     ;; And still raises after the arm has been driven hot.
     (let (n (cbg-drive 0 20000 0))
       (is (> n 0))
-      (assert= :caught (try (cbg-boom 2) (catch e :caught))))))
+      (assert= :caught (try (cbg-boom 2) (catch _e :caught))))))

@@ -132,7 +132,7 @@ cost of ~three forms, not the whole buffer.
         p (math/max 0 (math/min point n))
         ;; ONE lexical pass for both offsets — two `scan-form-start` calls would re-walk
         ;; the same prefix, the dominant cost of every structural motion.
-        [base start] (reflect/scan-form-start-2 text (math/min p (math/max 0 (dec n))))
+        [base _start] (reflect/scan-form-start-2 text (math/min p (math/max 0 (dec n))))
         ;; The window END: the lexical scan (strings/comments skipped, bracket depth
         ;; tracked) in one native byte pass.
         end (reflect/scan-form-end text base 3))
@@ -359,7 +359,7 @@ form before it (paredit `forward-barf-sexp`); point stays inside the list.
   (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
-      (let ([tr enc] ctx
+      (let ([_tr enc] ctx
             es (sexp-start enc)
             ee (sexp-end enc)
             fs (forms-of enc))
@@ -407,7 +407,7 @@ form after it (paredit `backward-barf-sexp`); point stays inside the list.
   (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
-      (let ([tr enc] ctx
+      (let ([_tr enc] ctx
             es (sexp-start enc)
             ee (sexp-end enc)
             fs (forms-of enc))
@@ -430,7 +430,7 @@ form's siblings (paredit `raise-sexp`).
   (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
-      (let ([tr enc] ctx
+      (let ([_tr enc] ctx
             current (seq/find (forms-of enc)
                       (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))))
         (if (nil? current)
@@ -451,7 +451,7 @@ form's siblings (paredit `raise-sexp`).
   (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
-      (let ([tr enc] ctx
+      (let ([_tr enc] ctx
             es (sexp-start enc)
             ee (sexp-end enc))
         [(str (string/substring text 0 es)

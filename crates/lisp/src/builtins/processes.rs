@@ -434,10 +434,12 @@ fn optional_ms(heap: &Heap, who: &str, value: Value) -> Result<Option<u64>, Lisp
     match value {
         Value::Int(n) if n >= 0 => Ok(Some(n as u64)),
         Value::Nil => Ok(None),
-        other => Err(LispError::type_err(format!(
-            "{who}: expected a non-negative number of ms or nil, got {}",
-            crate::syntax::printer::print(heap, other)
-        ))),
+        other => Err(LispError::wrong_type(
+            heap,
+            who,
+            "a non-negative number of ms or nil",
+            other,
+        )),
     }
 }
 
@@ -490,10 +492,7 @@ pub(super) fn interrupt_proc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
             Ok(Value::boolean(crate::process::interrupt_process(id)))
         }
         Value::Pid { .. } => Ok(Value::boolean(false)),
-        other => Err(LispError::type_err(format!(
-            "proc/interrupt: expected a pid, got {}",
-            crate::syntax::printer::print(heap, other)
-        ))),
+        other => Err(LispError::wrong_type(heap, "proc/interrupt", "pid", other)),
     }
 }
 
@@ -504,10 +503,7 @@ pub(super) fn busy_proc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             Ok(crate::process::interrupt_busy(id).map_or(Value::nil(), Value::boolean))
         }
         Value::Pid { .. } => Ok(Value::nil()),
-        other => Err(LispError::type_err(format!(
-            "proc/busy?: expected a pid, got {}",
-            crate::syntax::printer::print(heap, other)
-        ))),
+        other => Err(LispError::wrong_type(heap, "proc/busy?", "pid", other)),
     }
 }
 
@@ -532,10 +528,12 @@ pub(super) fn set_quit_key(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
         Value::Nil => None,
         Value::Pid { node, .. } => Some(node),
         other => {
-            return Err(LispError::type_err(format!(
-                "proc/set-quit-key: expected the client pid a key may come from, or nil, got {}",
-                crate::syntax::printer::print(heap, other)
-            )));
+            return Err(LispError::wrong_type(
+                heap,
+                "proc/set-quit-key",
+                "the client pid a key may come from, or nil",
+                other,
+            ));
         }
     };
     crate::process::set_quit_key(key.map(|key| (key, busy_ms)), from);

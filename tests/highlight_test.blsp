@@ -391,7 +391,7 @@
   (test "a call deep below many top-level forms is found (scan starts at the defun, not 0)"
     ;; the enclosing-bracket scan begins at the nearest column-0 form start (safe-restart),
     ;; so cost is O(enclosing form), not O(pos) — but the answer must still be exact.
-    (let (lead (string/join (map (range 500) (fn (i) "(defn f ())\n")) "")
+    (let (lead (string/join (map (range 500) (fn (_i) "(defn f ())\n")) "")
           src (str lead "(map g "))
       (assert= (enclosing-call src (+ (string/length lead) 7)) ["map" 1]))))
 
@@ -501,7 +501,7 @@ reader sees, which a multi-line string's one span and its per-line spans agree o
           [first-spans state] (lex "(a [b" [nil nil])
           [second-spans _] (lex " c] d)" state)
           bracket-face (fn (spans at)
-                         (seq/find (map spans (fn ([s e f]) (when (= s at) f))) (fn (f) f))))
+                         (seq/find (map spans (fn ([s _e f]) (when (= s at) f))) (fn (f) f))))
       ;; `(` depth 1, `[` depth 2 on the first line; `]` closes depth 2, `)` depth 1 below
       (assert= (bracket-face first-spans 0) (nth faces 0))
       (assert= (bracket-face first-spans 3) (nth faces 1))

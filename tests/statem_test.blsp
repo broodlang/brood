@@ -130,7 +130,7 @@
   (test "an action of the wrong shape raises in the machine"
     (send (self) :poke)
     (assert-error "a clause returned"
-      (gen/run-statem (fn (state event data) [:bogus]) nil [:a nil]))))
+      (gen/run-statem (fn (_state _event _data) [:bogus]) nil [:a nil]))))
 
 (describe "defstatem across processes"
   (test "workers each drive their own machine"

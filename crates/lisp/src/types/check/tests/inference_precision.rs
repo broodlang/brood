@@ -373,18 +373,34 @@ fn expanded_code_carries_the_position_of_the_form_it_came_from_and_is_marked_syn
 // Under `(defmodule …)` every form is rebuilt for namespace rooting, and a rebuild must carry
 // the synthetic mark with the position — it once copied the position alone, and every
 // destructured name in every module of a project read as an "unused let binding".
+// The surface pass reports a destructured binder nothing reads, once, as written; a lost
+// mark would make the main lint report the generated let's copy a second time.
 #[test]
 fn a_generated_let_stays_exempt_from_the_unused_lint_inside_a_module() {
-    for src in [
-        "(defmodule zz)\n(defn h3 (v) (let ([a b] v) a))",
-        "(defmodule zz)\n(defn h2 (r) (let ([x y w h] r s 1) (+ w h)))",
-        "(defmodule zz)\n(defn h1 (m) (match m ([:ok v] 1) (_ 2)))",
+    for (src, expected) in [
+        (
+            "(defmodule zz)\n(defn h3 (v) (let ([a b] v) a))",
+            &["unused let binding: b"][..],
+        ),
+        (
+            "(defmodule zz)\n(defn h2 (r) (let ([x y w h] r spare 1) (+ w h)))",
+            &[
+                "unused let binding: spare",
+                "unused let binding: x",
+                "unused let binding: y",
+            ][..],
+        ),
+        (
+            "(defmodule zz)\n(defn h1 (m) (match m ([:ok v] 1) (_ 2)))",
+            &["unused pattern binding: v"][..],
+        ),
     ] {
-        let ws = file_warnings(src);
-        assert!(
-            !ws.iter().any(|w| w.contains("unused let binding")),
-            "{src}: {ws:?}"
-        );
+        let mut unused: Vec<String> = file_warnings(src)
+            .into_iter()
+            .filter(|w| w.starts_with("unused "))
+            .collect();
+        unused.sort();
+        assert_eq!(unused, expected, "{src}");
     }
     // …while a plain unused binding the user wrote is still reported, module or not
     let ws = file_warnings("(defmodule zz)\n(defn g (v) (let (x 1) 2))");
@@ -1001,7 +1017,7 @@ fn a_stable_union_of_tuples_keeps_its_shapes_through_the_fixpoint() {
            (let (idx (get m path))\n\
              (if idx [m idx] [(assoc m :extra path) (dec (count (get m :buffers)))])))\n\
          (sig use-it ((record &open :buffers (vector any)) string -> int))\n\
-         (defn use-it (m path) (let ([m1 idx] (ensure m path)) (want-map m1)))";
+         (defn use-it (m path) (let ([m1 _idx] (ensure m path)) (want-map m1)))";
     let ws = file_warnings_mode(src, true);
     assert!(ws.is_empty(), "{ws:?}");
 }

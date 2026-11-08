@@ -212,7 +212,7 @@
       (detach-all)
       (reset-metrics)
       ;; the wrapped handler forwards `:fired` only on every 3rd emit
-      (attach :s [:hot] (sample-every :s 3 (fn (e m md) (send me :fired))))
+      (attach :s [:hot] (sample-every :s 3 (fn (_e _m _md) (send me :fired))))
       ; 10 emits → the 3rd/6th/9th fire = 3
       (tmm-emit-n [:hot] {} 10)
       (sync)
@@ -264,8 +264,8 @@
     (let (me (self))
       (start)
       (detach-all)
-      (attach :up [:runtime :nodeup] (fn (e m md) (send me [:up (get md :node)])))
-      (attach :down [:runtime :nodedown] (fn (e m md) (send me [:down (get md :node)])))
+      (attach :up [:runtime :nodeup] (fn (_e _m md) (send me [:up (get md :node)])))
+      (attach :down [:runtime :nodedown] (fn (_e _m md) (send me [:down (get md :node)])))
       ;; poll 1 — known {:a}, current {:a :b}: :b appears (up = current∖known)
       (dolist (n (telemetry/telemetry-absent '(:a :b) '(:a)))
         (emit [:runtime :nodeup] {} {:node n}))
@@ -285,7 +285,7 @@
     (let (me (self))
       (start)
       (detach-all)
-      (attach :any [:runtime :nodeup] (fn (e m md) (send me :spurious)))
+      (attach :any [:runtime :nodeup] (fn (_e _m _md) (send me :spurious)))
       (let (w (watch-nodes 20))
         (check-allow :type-mismatch
           (is (not (nil? w))))
@@ -363,7 +363,7 @@
     (start)
     (last-value :vproc [:runtime :vitals] :processes)
     (let (me (self))
-      (attach :vitals-seen [:runtime :vitals] (fn (e m md) (send me :vitals-sampled))))
+      (attach :vitals-seen [:runtime :vitals] (fn (_e _m _md) (send me :vitals-sampled))))
     (let (w (watch-vitals 15))
       (assert= :sampled (receive (:vitals-sampled :sampled) (after test/*wait-ms* :timeout)))
       ;; the sample's whole dispatch, the gauge fold included, has run
@@ -386,7 +386,7 @@
     (detach-all)
     (start)
     (let (me (self))
-      (attach :remote-cap [:remote :hits] (fn (e m md) (send me [:remote-hit m md])))
+      (attach :remote-cap [:remote :hits] (fn (_e m md) (send me [:remote-hit m md])))
       (let (agent (spawn (telemetry/telemetry-serve-loop nil))
             watcher (telemetry/telemetry-subscribe-to agent [:app :hit] [:remote :hits]))
         ;; the forwarder is installed once a probe emit comes back through it

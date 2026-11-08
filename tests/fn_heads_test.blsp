@@ -80,13 +80,13 @@
   (test "match takes &optional in a list pattern, the default seeing earlier names"
     (assert= [1 11] (match '(1) ((a &optional (b (+ a 10))) [a b])))
     (assert= [1 2] (match '(1 2) ((a &optional (b (+ a 10))) [a b])))
-    (assert= :longer (match '(1 2 3) ((a &optional b) :fits) (_ :longer)))
+    (assert= :longer (match '(1 2 3) ((_a &optional _b) :fits) (_ :longer)))
     (assert= [1 nil nil] (match '(1) ((a &optional b & r) [a b r])))
     (assert= [1 2 (list 3 4)] (match '(1 2 3 4) ((a &optional b & r) [a b r]))))
   (test "a default runs only when its argument is absent"
     (assert= "" (with-out-str (mixed 2 3)))
-    (assert= "" (with-out-str (match '(1 2) ((a &optional (b (io/write "d"))) b))))
-    (assert= "d" (with-out-str (match '(1) ((a &optional (b (do (io/write "d") 0))) b))))))
+    (assert= "" (with-out-str (match '(1 2) ((_a &optional (b (io/write "d"))) b))))
+    (assert= "d" (with-out-str (match '(1) ((_a &optional (b (do (io/write "d") 0))) b))))))
 
 (defmacro local-native () `(fn (a &optional (b (+ a 10))) [a b]))
 (defmacro local-clauses () `(fn ((0) :z) ((a &optional (b (* a 3))) [a b])))

@@ -683,16 +683,85 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
     // (~1 ms of Brood work) — the un-preemptible time *inside* a long native
     // is only fixed by the M4 dirty-CPU offload pool. When the tracer is off
     // (the default), this is one TLS bool + one cached-env load.
-    if crate::core::heap::stall_threshold_ms().is_some() && crate::process::in_capture_run() {
-        let t0 = web_time::Instant::now();
-        let r = func(argv, env, heap);
-        if let Some(ms) = crate::process::charge_native(t0) {
-            eprintln!("[stall] native {} took {}ms", heap.native(id).name, ms);
+    let result =
+        if crate::core::heap::stall_threshold_ms().is_some() && crate::process::in_capture_run() {
+            let t0 = web_time::Instant::now();
+            let r = func(argv, env, heap);
+            if let Some(ms) = crate::process::charge_native(t0) {
+                eprintln!("[stall] native {} took {}ms", heap.native(id).name, ms);
+            }
+            r
+        } else {
+            func(argv, env, heap)
+        };
+    match result {
+        Err(mut error) if error.rejected_tag.is_some() => {
+            name_rejected_argument(heap.native(id), argv, &mut error);
+            Err(error)
         }
-        r
-    } else {
-        func(argv, env, heap)
+        result => result,
     }
+}
+
+/// Say which argument a primitive's wrong-type error is about. The `expect_*` readers know
+/// the primitive's name and the value, not the parameter, so `(string/->number "1" "1")`
+/// raised `string/->number: expected int, got string ("1")`, which reads as if parsing "1"
+/// wanted an int. The registration knows the rest: the declared type at each position and
+/// the parameter names. The argument named is the ONE whose tag is the rejected value's and
+/// which its declared type does not admit; when no argument or several fit that, the
+/// message is left as it was rather than guessed, and so is a one-argument call, where there
+/// is nothing to tell apart. The same goes for an error whose `who` is
+/// not this primitive, because the parameter names belong to this primitive only.
+fn name_rejected_argument(native: &value::NativeFn, argv: &[Value], error: &mut LispError) {
+    let Some(rejected) = error.rejected_tag.take() else {
+        return;
+    };
+    // One argument is the only one it can be about: naming it adds nothing.
+    if argv.len() < 2 {
+        return;
+    }
+    let prefix_length = native.name.len() + 2;
+    if !error
+        .message
+        .strip_prefix(native.name.as_str())
+        .is_some_and(|rest| rest.starts_with(": "))
+    {
+        return;
+    }
+    let mut candidates = argv.iter().enumerate().filter(|(position, argument)| {
+        value::tag(**argument) == rejected
+            && native
+                .sig
+                .param(*position)
+                .is_some_and(|declared| !declared.contains_tag(rejected))
+    });
+    let (Some((position, _)), None) = (candidates.next(), candidates.next()) else {
+        return;
+    };
+    let label = match parameter_name(native.params, position) {
+        Some(name) => format!("{name} (argument {}) ", position + 1),
+        None => format!("argument {} ", position + 1),
+    };
+    error.message.insert_str(prefix_length, &label);
+}
+
+/// The name of the parameter at argument `position` in a primitive's arglist, which spells
+/// its optional and rest parameters with `&optional` and `&` markers: `["s", "&optional",
+/// "radix"]` names position 1 `radix`, and `["f", "&", "xs"]` names every position from 1
+/// `xs`.
+fn parameter_name(params: &[&'static str], position: usize) -> Option<&'static str> {
+    let mut index = 0;
+    let mut names = params.iter().copied().filter(|name| *name != "&optional");
+    while let Some(name) = names.next() {
+        if name == "&" {
+            return names.next();
+        }
+        if index == position {
+            return Some(name);
+        }
+        index += 1;
+    }
+    None
 }
 
 /// [`call_native`] from an engine that can make the call a builtin hands back (ADR-505): the

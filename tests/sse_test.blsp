@@ -120,7 +120,7 @@
 
 (describe "with-events — merges [:sse …] into ui-run input"
   (test "a queued sse message is returned by :poll before the underlying display"
-    (let (fake {:poll (fn (ms) :keyboard) :size (fn () [80 24])}
+    (let (fake {:poll (fn (_ms) :keyboard) :size (fn () [80 24])}
           wrapped (with-events fake))
       ;; empty mailbox → delegate to the wrapped display's poll
       (assert= ((get wrapped :poll) 0) :keyboard)
@@ -136,7 +136,7 @@
       ;; mailbox drained → back to delegating
       (assert= ((get wrapped :poll) 0) :keyboard)))
   (test "non-poll ops pass through unchanged"
-    (let (wrapped (with-events {:poll (fn (ms) nil) :size (fn () [120 40])}))
+    (let (wrapped (with-events {:poll (fn (_ms) nil) :size (fn () [120 40])}))
       (assert= ((get wrapped :size)) [120 40]))))
 
 (describe "sse — end-to-end over a loopback event-stream server"

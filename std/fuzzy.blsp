@@ -463,7 +463,7 @@ keystroke, so everything that depends only on the query happens out here, once.
   (let (terms (fuzzy-terms query)
         file? (fuzzy-file? options))
     (if (empty? terms)
-      (fn (cand) 0)
+      (fn (_cand) 0)
       (fn (cand) (let (run (fuzzy-run-terms terms cand file?)) (if (nil? run) nil (first run)))))))
 
 (defdyn fuzzy/*scorer* :default)

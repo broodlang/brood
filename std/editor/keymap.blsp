@@ -54,7 +54,7 @@ testable without a terminal.
   (let (sym (get keymap key))
     (if (or (nil? sym) (map? sym))
       (fallback state key)
-      (try ((reflect/eval sym) state key) (catch e state)))))
+      (try ((reflect/eval sym) state key) (catch _e state)))))
 
 (defn keymap-resolve (keymap:map pending:any key:any -> vector)
   "One keystroke through a (possibly chorded) `keymap`, resolved to its BINDING and
@@ -131,7 +131,7 @@ hand — `editor/layers/layer-dispatch` — steps through this.
         (if (nil? pending)
           [(fallback state key) nil]
           [state nil])
-      else [(try ((reflect/eval binding) state key) (catch e state)) nil])))
+      else [(try ((reflect/eval binding) state key) (catch _e state)) nil])))
 
 ;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
 (check-allow :non-tail-recursion

@@ -35,8 +35,8 @@
   {:enter (fn () nil)
    :leave (fn () :left)
    :size (fn () [80 24])
-   :draw (fn (f) nil)
-   :poll (fn (ms) (receive ([:input i] i) (after 0 :tick)))})
+   :draw (fn (_f) nil)
+   :poll (fn (_ms) (receive ([:input i] i) (after 0 :tick)))})
 
 (describe "ui-run — the TEA app loop"
   (test "loops until the model is :done, then returns the :leave result"
@@ -46,14 +46,14 @@
       (assert=
         (ui-run {:done false}
           ; view: empty frame
-          (fn (m c r) [])
+          (fn (_m _c _r) [])
           ; first input quits
-          (fn (m input c r) (assoc m :done true))
+          (fn (m _input _c _r) (assoc m :done true))
           {:enter (fn () nil)
            :leave (fn () :left)
            :size (fn () [80 24])
-           :draw (fn (f) nil)
-           :poll (fn (ms) (receive (m m) (after 0 :tick)))})
+           :draw (fn (_f) nil)
+           :poll (fn (_ms) (receive (m m) (after 0 :tick)))})
         :left)))
 
   ;; An app asks "is there a loop to send my answer back to?" before it fires work at
@@ -64,13 +64,13 @@
       (is (nil? editor/ui/*loop*))
       (send me "x")
       (ui-run {:done false}
-        (fn (m c r) [])
-        (fn (m input c r) (do (send me [:loop editor/ui/*loop*]) (assoc m :done true)))
+        (fn (_m _c _r) [])
+        (fn (m _input _c _r) (do (send me [:loop editor/ui/*loop*]) (assoc m :done true)))
         {:enter (fn () nil)
          :leave (fn () nil)
          :size (fn () [80 24])
-         :draw (fn (f) nil)
-         :poll (fn (ms) (receive (m m) (after 0 :tick)))})
+         :draw (fn (_f) nil)
+         :poll (fn (_ms) (receive (m m) (after 0 :tick)))})
       (assert= (receive ([:loop p] p) (after 200 :none)) me)
       (is (nil? editor/ui/*loop*))))
 
@@ -78,26 +78,26 @@
     (let (me (self))
       ; nil ⇒ :tick
       (ui-run {:done false}
-        (fn (m c r) [])
-        (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
+        (fn (_m _c _r) [])
+        (fn (m input _c _r) (do (send me [:saw input]) (assoc m :done true)))
         {:enter (fn () nil)
          :leave (fn () nil)
          :size (fn () [80 24])
-         :draw (fn (f) nil)
-         :poll (fn (ms) nil)})
+         :draw (fn (_f) nil)
+         :poll (fn (_ms) nil)})
       (assert= (receive ([:saw x] x) (after 200 :none)) :tick)))
 
   (test "view gets the model + size, and its frame is what gets drawn"
     (let (me (self))
       (ui-run {:done false :label "hi"}
         (fn (m c r) [(text 0 0 (str (get m :label) " " c "x" r))])
-        (fn (m input c r) (assoc m :done true))
+        (fn (m _input _c _r) (assoc m :done true))
         {:enter (fn () nil)
          :leave (fn () nil)
          :size (fn () [40 10])
          ; echo the drawn frame
          :draw (fn (f) (send me [:frame f]))
-         :poll (fn (ms) nil)})
+         :poll (fn (_ms) nil)})
       (let (f (receive ([:frame fr] fr) (after 200 :none)))
         (is (includes? (nth (first f) 3) "hi 40x10")))))
 
@@ -111,15 +111,15 @@
       (send me :close)
       (assert=
         (ui-run {:done false}
-          (fn (m c r) [])
+          (fn (_m _c _r) [])
           ;; update NEVER sets :done — only :close can stop this loop,
           ;; proving ui-run quits on :close without update's help.
-          (fn (m input c r) (do (send me [:update-saw input]) m))
+          (fn (m input _c _r) (do (send me [:update-saw input]) m))
           {:enter (fn () nil)
            :leave (fn () :left)
            :size (fn () [80 24])
-           :draw (fn (f) nil)
-           :poll (fn (ms) (receive (m m) (after 0 :tick)))})
+           :draw (fn (_f) nil)
+           :poll (fn (_ms) (receive (m m) (after 0 :tick)))})
         :left)
       ;; update is bypassed entirely for :close (the loop quits before calling it).
       (assert= (receive ([:update-saw x] x) (after 100 :never-called)) :never-called)))
@@ -131,8 +131,8 @@
       (send me :close)
       (send me :close)
       (assert= (ui-run {:done false :close-is-input? true :closes 0}
-                 (fn (m c r) [])
-                 (fn (m input c r)
+                 (fn (_m _c _r) [])
+                 (fn (m input _c _r)
                    (if (= input :close)
                      (let (n (inc (:closes m)))
                        (do
@@ -142,8 +142,8 @@
                  {:enter (fn () nil)
                   :leave (fn () :left)
                   :size (fn () [80 24])
-                  :draw (fn (f) nil)
-                  :poll (fn (ms) (receive (m m) (after 0 :tick)))})
+                  :draw (fn (_f) nil)
+                  :poll (fn (_ms) (receive (m m) (after 0 :tick)))})
         :left)
       ;; update saw BOTH closes: the first did not end the loop
       (assert= (receive ([:update-saw x] x) (after 100 :never)) 1)
@@ -163,12 +163,12 @@
               :leave (fn () nil)
               :size (fn () [80 24])
               :draw (fn (f) (send me [:d1 f]))
-              :poll (fn (ms) nil)}
+              :poll (fn (_ms) nil)}
           d2 {:enter (fn () nil)
               :leave (fn () nil)
               :size (fn () [60 30])
               :draw (fn (f) (send me [:d2 f]))
-              :poll (fn (ms) nil)}
+              :poll (fn (_ms) nil)}
           b (display-broadcast [d1 d2]))
       ; min cols (60), min rows (24)
       (assert= ((get b :size)) [60 24])
@@ -188,13 +188,13 @@
       (send me [:input :quit])
       (assert=
         (ui-run {:tag :a}
-          (fn (m c r)
+          (fn (m _c _r)
             ; the wedged model can't render
             (when (get m :boom) (throw "view boom"))
             ; announce a clean render
             (send me [:saw (get m :tag)])
             [])
-          (fn (m input c r)
+          (fn (m input _c _r)
             (cond
               (= input :go-b) {:tag :b}
               (= input :go-boom) {:tag :bad :boom true}
@@ -217,8 +217,8 @@
       (send me [:input :inc])
       (send me [:input :quit])
       (ui-run {:n 0}
-        (fn (m c r) (send me [:saw (get m :n)]) [])
-        (fn (m input c r)
+        (fn (m _c _r) (send me [:saw (get m :n)]) [])
+        (fn (m input _c _r)
           (cond
             (= input :inc) (assoc m :n (+ (get m :n) 1))
             (= input :boom) (throw "update boom")
@@ -234,14 +234,14 @@
         (try
           (ui-run {}
             ; first render throws, no last-good yet
-            (fn (m c r) (throw :startup-boom))
-            (fn (m input c r) m)
+            (fn (_m _c _r) (throw :startup-boom))
+            (fn (m _input _c _r) m)
             {:enter (fn () nil)
              ; teardown must still happen
              :leave (fn () (send me [:left]))
              :size (fn () [80 24])
-             :draw (fn (f) nil)
-             :poll (fn (ms) :tick)})
+             :draw (fn (_f) nil)
+             :poll (fn (_ms) :tick)})
           (catch e e))
         :startup-boom)
       ;; the outer try restored the terminal (ran :leave) before re-raising
@@ -253,8 +253,8 @@
       (send me [:input :quit])
       (let (logged (with-err (fn-port (fn (s) (send me [:err s])))
                      (ui-run {:n 0}
-                       (fn (m c r) [])
-                       (fn (m input c r)
+                       (fn (_m _c _r) [])
+                       (fn (m input _c _r)
                          (cond
                            (= input :boom) (throw "kaboom!")
                            (= input :quit) (assoc m :done true)
@@ -356,7 +356,7 @@
   ; a display whose :poll(0) returns the next queued message (any shape), nil when empty —
   ; like a real frontend at timeout, so the drain terminates on the empty queue.
   (defn- di-display (me)
-    {:poll (fn (ms) (receive (m m) (after 0 nil)))})
+    {:poll (fn (_ms) (receive (m m) (after 0 nil)))})
   (defn- di-count (m i c r) (update m :acc (fn (a) (conj a i))))
   ;; a drain with a budget no test outlasts, starting a turn whose first fold was background
   (defn- di-drain (model me fuel)
@@ -396,9 +396,9 @@
   {:enter (fn () nil)
    :leave (fn () :left)
    :size (fn () [80 24])
-   :draw (fn (f) nil)
+   :draw (fn (_f) nil)
    ; selective on [:input] so the view's [:saw] / update's [:folded] echoes survive to drain
-   :poll (fn (ms) (receive ([:input i] i) (after 0 nil)))})
+   :poll (fn (_ms) (receive ([:input i] i) (after 0 nil)))})
 
 (describe "ui-run — input coalescing (:coalesce-input?)"
   (test "a queued burst folds into ONE render, but every input is still processed"
@@ -408,8 +408,8 @@
       (send me [:input :inc])
       (send me [:input :quit])
       (ui-run {:n 0 :coalesce-input? true :fold-budget-ms 60000}
-        (fn (m c r) (do (send me [:saw (get m :n)]) []))
-        (fn (m input c r)
+        (fn (m _c _r) (do (send me [:saw (get m :n)]) []))
+        (fn (m input _c _r)
           (do
             (send me [:folded input])
             (cond
@@ -425,8 +425,8 @@
       (send me [:input :inc])
       (send me [:input :quit])
       (ui-run {:n 0}
-        (fn (m c r) (do (send me [:saw (get m :n)]) []))
-        (fn (m input c r)
+        (fn (m _c _r) (do (send me [:saw (get m :n)]) []))
+        (fn (m input _c _r)
           (cond
             (= input :inc) (assoc m :n (+ (get m :n) 1))
             (= input :quit) (assoc m :done true)
@@ -444,14 +444,14 @@
   {:enter (fn () nil)
    :leave (fn () nil)
    :size (fn () [80 24])
-   :draw (fn (frame) nil)
+   :draw (fn (_frame) nil)
    :poll-input (fn ()
                  (let (taken (proc/take-priority))
                    (if (nil? taken) nil (first taken))))
-   :poll-tagged (fn (ms)
+   :poll-tagged (fn (_ms)
                   (let (received (proc/receive-lane 0))
                     (if (nil? received) nil [(first received) (= (second received) :priority)])))
-   :poll (fn (ms) (receive (message message) (after 0 nil)))})
+   :poll (fn (_ms) (receive (message message) (after 0 nil)))})
 
 (defn- lane-tag (input)
   (if (vector? input) (first input) input))
@@ -460,7 +460,7 @@
   (update model :seen (fn (seen) (conj seen input))))
 
 (defn- lane-update (parent)
-  (fn (model input cols rows)
+  (fn (model input _cols _rows)
     (cond
       (= input :tick) model
       (= input :quit)
@@ -471,7 +471,7 @@
   "The loop's process, parked until `:go` so the test can queue its backlog first."
   (spawn (receive
            (:go (ui-run (assoc model :seen [])
-                  (fn (model cols rows) (do (send parent [:rendered]) []))
+                  (fn (_model _cols _rows) (do (send parent [:rendered]) []))
                   step
                   (lane-display))))))
 
@@ -486,17 +486,17 @@
 
 (describe "display-poll-tagged — a wrapper that replaces :poll"
   (test "a display's own :poll-tagged answers while its :poll is the one it was made with"
-    (let (display (display-polls (fn (ms) ["queued" false])))
+    (let (display (display-polls (fn (_ms) ["queued" false])))
       (assert= (display-poll-tagged display 0) ["queued" false])
       (assert= ((get display :poll) 0) "queued")))
   (test "a :poll replaced over a std display is what the loop asks, not the bypassed :poll-tagged"
     ;; the pre-ADR-490 wrapping idiom: `(assoc display :poll …)` to see a message first
     (let (display (assoc (merge {:poll-input (fn () nil)}
-                           (display-polls (fn (ms) ["queued" false])))
-                    :poll (fn (ms) "the wrapper's")))
+                           (display-polls (fn (_ms) ["queued" false])))
+                    :poll (fn (_ms) "the wrapper's")))
       (assert= (display-poll-tagged display 0) ["the wrapper's" false])))
   (test "with-events over a std display still sees its events first"
-    (let (display (with-events (display-polls (fn (ms) nil))))
+    (let (display (with-events (display-polls (fn (_ms) nil))))
       (send (self) [:sse "pushed"])
       (assert= (display-poll-tagged display 0) [[:sse "pushed"] false]))))
 
@@ -544,7 +544,7 @@
   (for (coalesce? [true false])
     (test (str "background still moves while input never stops (coalesce " coalesce? ")")
       (let (me (self)
-            step (fn (model input cols rows)
+            step (fn (model input _cols _rows)
                    (cond
                      (= input :tick) model
                      (= input "k") (do (proc/send-priority (self) "k") (update model :keys inc))
@@ -571,7 +571,7 @@
     (test (str "an idle timer fires during a background flood (coalesce " coalesce? ")")
       (let (me (self)
             started (os/now)
-            step (fn (model input cols rows)
+            step (fn (model input _cols _rows)
                    (cond
                      (= (lane-tag input) :timer)
                        (do (send me [:seen [:fired (:background model)]]) (assoc model :done true))
@@ -669,7 +669,7 @@
 (describe "ui-run — the watchdog (ADR-490)"
   (test "a slow update is reported once, naming the input's tag"
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (assoc model :done true)
                    (= (lane-tag input) :sleepy) (do (proc/sleep 30) model)
@@ -688,7 +688,7 @@
       (assert= (receive ([:slow report] report) (after 100 :none)) :none)))
   (test "a run of slow updates is reported once per quiet period, an interrupted one always"
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (assoc model :done true)
                    (= (lane-tag input) :sleepy) (do (proc/sleep 30) model)
@@ -717,8 +717,8 @@
                         (:go (ui-run {:n 0
                                       :slow-ms 10
                                       :on-slow (fn (report) (send me [:slow report]))}
-                               (fn (model cols rows) (do (proc/sleep 20) []))
-                               (fn (model input cols rows)
+                               (fn (_model _cols _rows) (do (proc/sleep 20) []))
+                               (fn (model input _cols _rows)
                                  (if (= input :quit) (assoc model :done true) (update model :n inc)))
                                (lane-display))))))
       (send loop [:a])
@@ -741,8 +741,8 @@
       (send me [:input :inc])
       (send me [:input :quit])
       (ui-run {:n 0}
-        (fn (m c r) (do (send me [:saw (get m :n)]) []))
-        (fn (m input c r)
+        (fn (m _c _r) (do (send me [:saw (get m :n)]) []))
+        (fn (m input _c _r)
           (cond
             (= input :inc) (assoc m :n (+ (get m :n) 1))
             (= input :quit) (assoc m :done true)
@@ -754,8 +754,8 @@
       (send me [:input :rebuild])
       (send me [:input :quit])
       (ui-run {:n 0}
-        (fn (m c r) (do (send me [:saw (get m :n)]) []))
-        (fn (m input c r)
+        (fn (m _c _r) (do (send me [:saw (get m :n)]) []))
+        (fn (m input _c _r)
           (cond
             (= input :rebuild) {:n (get m :n)}
             (= input :quit) (assoc m :done true)
@@ -770,14 +770,14 @@
       (send me [:input :inc])
       (send me [:input :quit])
       (ui-run {:n 0}
-        (fn (m c r) [])
-        (fn (m input c r)
+        (fn (_m _c _r) [])
+        (fn (m input _c _r)
           (cond
             (= input :inc) (assoc m :n (+ (get m :n) 1))
             (= input :quit) (assoc m :done true)
             else m))
         (assoc (ci-display me)
-          :draw (fn (f) (send me [:saw :draw]))
+          :draw (fn (_f) (send me [:saw :draw]))
           :settle (fn () (send me [:saw :settle]))))
       (assert= (drain-saw []) (list :draw :draw :settle :settle :draw)))))
 ;; ---- named timers (ADR-102) ------------------------------------------------
@@ -910,26 +910,26 @@
       ;; update quits on the first firing so the loop can't spin.
       ; nil ⇒ timeout ⇒ ui-fire
       (ui-run {:done false :timers {:beat {:after 0}} :now-fn (fn () 1000)}
-        (fn (m c r) [])
-        (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
+        (fn (_m _c _r) [])
+        (fn (m input _c _r) (do (send me [:saw input]) (assoc m :done true)))
         {:enter (fn () nil)
          :leave (fn () nil)
          :size (fn () [80 24])
-         :draw (fn (f) nil)
-         :poll (fn (ms) nil)})
+         :draw (fn (_f) nil)
+         :poll (fn (_ms) nil)})
       (assert= (receive ([:saw x] x) (after 200 :none)) [:timer :beat])))
 
   (test "a real input still folds normally when timers are present"
     (let (me (self))
       (send me [:input "z"])
       (ui-run {:done false :timers {:beat {:every 100000}} :now-fn (fn () 1000)}
-        (fn (m c r) [])
-        (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
+        (fn (_m _c _r) [])
+        (fn (m input _c _r) (do (send me [:saw input]) (assoc m :done true)))
         {:enter (fn () nil)
          :leave (fn () nil)
          :size (fn () [80 24])
-         :draw (fn (f) nil)
-         :poll (fn (ms) (receive ([:input i] i) (after 0 nil)))})
+         :draw (fn (_f) nil)
+         :poll (fn (_ms) (receive ([:input i] i) (after 0 nil)))})
       (assert= (receive ([:saw x] x) (after 200 :none)) "z"))))
 
 (describe "ui-memo — memoised view fragments (ADR-336)"
@@ -947,7 +947,7 @@
           ;; the view counts every real computation of the fragment
           ;; The thunk sends on purpose — that IS the count — which is exactly what the
           ;; checker's memo lint exists to flag (ADR-351), so it is opted out here.
-          view (fn (m c r)
+          view (fn (m _c _r)
                  (append [(clear)]
                    (check-allow :pure
                      (ui-memo [:frag]
@@ -956,7 +956,7 @@
                          (do
                            (send me [:computed (get m :n)])
                            (list (text 0 0 (str "n" (get m :n))))))))))
-          update (fn (m input c r)
+          update (fn (m input _c _r)
                    (case input
                      :same (assoc m :n (inc (get m :n)))
                      :change (assoc m :n (inc (get m :n)) :deps [:b])
@@ -973,7 +973,7 @@
          :leave (fn () nil)
          :size (fn () [40 10])
          :draw (fn (f) (send me [:frame f]))
-         :poll (fn (ms) (receive ([:input i] i) (after 0 :quit)))})
+         :poll (fn (_ms) (receive ([:input i] i) (after 0 :quit)))})
       ;; computed at n=0 (first turn), reused at n=1 (same deps), recomputed at n=2
       ;; (deps changed), reused at n=3
       (assert= (receive ([:computed x] x) (after 100 :none)) 0)
@@ -1039,9 +1039,9 @@
     ;; ADR-470: the GUI window reuses its parse of a fragment the loop reused, so the flag
     ;; must be exactly "these ops are last turn's value": false on a recompute
     (let (me (self)
-          view (fn (m c r)
+          view (fn (m _c _r)
                  (append [(clear)] (ui-memo [:frag] (get m :deps) (fn () (list (text 0 0 "x"))))))
-          update (fn (m input c r)
+          update (fn (m input _c _r)
                    (case input
                      :same (assoc m :n 1)
                      :change (assoc m :deps [:b])
@@ -1058,7 +1058,7 @@
          :size (fn () [40 10])
          :draw (fn (f) (send me [:frame f]))
          :fragments? true
-         :poll (fn (ms) (receive ([:input i] i) (after 0 :quit)))})
+         :poll (fn (_ms) (receive ([:input i] i) (after 0 :quit)))})
       (let (flags (letrec (go (fn (acc)
                                 (receive
                                   ([:frame f] (go (cons (nth (second f) 4) acc)))
@@ -1088,8 +1088,8 @@
   (let (me (self))
     (doseq (_ (range 10)) (send me [:input "a"]))
     (ui-run {:timers {:paced spec} :done false :now-fn (fn () 1000)}
-      (fn (m c r) [])
-      (fn (m input c r)
+      (fn (_m _c _r) [])
+      (fn (m input _c _r)
         (cond
           (and (vector? input) (= (first input) :timer)) (do (send me [:saw :tick]) m)
           (= input :more) (assoc m :done true) ; the queue is empty: stop
@@ -1097,9 +1097,9 @@
       {:enter (fn () nil)
        :leave (fn () nil)
        :size (fn () [80 24])
-       :draw (fn (f) nil)
+       :draw (fn (_f) nil)
        ;; never nil — a timeout is the one thing this test must not rely on
-       :poll (fn (ms) (receive ([:input i] i) (after 0 :more)))})))
+       :poll (fn (_ms) (receive ([:input i] i) (after 0 :more)))})))
 
 (describe "timers under continuous input"
   (test "a non-idle timer fires while input keeps arriving"
@@ -1125,7 +1125,7 @@
 
   (test "the image-map form unpacks width, height and rgba"
     (let (log (table/new)
-          display {:texture (fn (tex rgba w h) (table/put log :upload [w h]))}
+          display {:texture (fn (_tex _rgba w h) (table/put log :upload [w h]))}
           tex (display-texture display {:width 2 :height 1 :rgba [0 0 0 0 0 0 0 0]}))
       (assert= (gui/texture-size tex) [2 1])
       (assert= (table/get log :upload) [2 1])))
@@ -1137,7 +1137,7 @@
 (describe "editor/ui — display-sound (a sound through a display map)"
   (test "the handle knows the sound's length and the upload goes through the display"
     (let (log (table/new)
-          display {:sound (fn (snd pcm rate ch) (table/put log :upload [snd rate ch]))}
+          display {:sound (fn (snd _pcm rate ch) (table/put log :upload [snd rate ch]))}
           snd (display-sound display [0 0 0 0 0 0 0 0] 4))
       ;; four PCM16 mono samples at 4 Hz: one second
       (assert= (gui/sound-seconds snd) 1.0)
@@ -1161,7 +1161,7 @@
   "Work that catches EVERY error, an interrupt too, and goes on: Emacs's quit is not an
 error a catch-all sees, so the kernel keeps raising it (sticky) until the window closes."
   (do
-    (check-allow :discarded-catch (try (quit-spin 0) (catch e nil)))
+    (check-allow :discarded-catch (try (quit-spin 0) (catch _e nil)))
     (quit-stubborn (inc swallowed))))
 
 (defn- quit-count-to (n limit)
@@ -1191,7 +1191,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
                              (fn ()
                                (do
                                  (send me [:spinning true])
-                                 (try (quit-spin 0) (catch e :swallowed))
+                                 (try (quit-spin 0) (catch _e :swallowed))
                                  ;; swallowed — but it is sticky: the first safepoint after
                                  ;; the handler raises it again, long before this ends
                                  (quit-count-to 0 1000000000)
@@ -1235,7 +1235,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
 (describe "ui-run — quit (ADR-491)"
   (test "C-g on the priority lane stops an update looping forever; the model is the old one"
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (do (send me [:seen (:seen model)]) (assoc model :done true))
                    (= input :spin) (do (send me [:spinning true]) (quit-spin 0))
@@ -1258,7 +1258,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
       (assert= (lane-await-seen) [:ctrl-g])))
   (test "an update that catches everything in a loop is still stopped, and the loop runs on"
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (do (send me [:seen (:seen model)]) (assoc model :done true))
                    (= input :stubborn) (do (send me [:spinning true]) (quit-stubborn 0))
@@ -1282,7 +1282,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
     ;; second key of a coalesced burst is folded by the drain's budget branch, which must
     ;; pass that on, or the background ceiling stops the user's own command.
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (do (send me [:seen (:seen model)]) (assoc model :done true))
                    (= input "slow")
@@ -1294,7 +1294,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
                                       :coalesce-input? true
                                       :event-ceiling-ms 50
                                       :on-slow (fn (report) (send me [:slow report]))}
-                               (fn (model cols rows) [])
+                               (fn (_model _cols _rows) [])
                                step
                                (dissoc (lane-display) :poll-input :poll-tagged))))))
       (send loop "a")
@@ -1305,7 +1305,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
       (is (not (:interrupted (receive ([:slow report] report) (after 0 {})))))))
   (test "a background event past the ceiling is interrupted by the loop and reported"
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (do (send me [:seen (:seen model)]) (assoc model :done true))
                    (= (lane-tag input) :stuck) (quit-spin 0)
@@ -1329,7 +1329,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
     ;; a step past the ceiling, on a repeating timer that drops itself when the step is
     ;; done: stopped at the ceiling it would keep the model it began from and run again
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (assoc model :done true)
                    (= input [:timer :step])
@@ -1347,7 +1347,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
       (send loop :quit)))
   (test "a plain timer's fold past the ceiling is stopped, as any background fold"
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (assoc model :done true)
                    (= input [:timer :step])
@@ -1375,7 +1375,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
       (assert= (receive ([:slow report] report) (after 50 :none)) :none)))
   (test "with no quit key a C-g stops nothing: a long user command runs to its end"
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (do (send me [:seen (:seen model)]) (assoc model :done true))
                    (= input :long)
@@ -1393,7 +1393,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
       (assert= (lane-await-seen) [[:long 3000000] :ctrl-g])))
   (test "a display that ships keys as [:key k] (a served session) gets its C-g in that shape"
     (let (me (self)
-          step (fn (model input cols rows)
+          step (fn (model input _cols _rows)
                  (cond
                    (= input :quit) (do (send me [:seen (:seen model)]) (assoc model :done true))
                    (= input :spin) (do (send me [:spinning true]) (quit-spin 0))
@@ -1404,7 +1404,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
                         (:go (ui-run {:seen []
                                       :quit-busy-ms 0
                                       :on-slow (fn (report) (send me [:slow report]))}
-                               (fn (model cols rows) [])
+                               (fn (_model _cols _rows) [])
                                step
                                display)))))
       (proc/send-priority loop :spin)
@@ -1423,11 +1423,11 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
                         (:go (ui-run {:slow false
                                       :quit-busy-ms 0
                                       :on-slow (fn (report) (send me [:slow report]))}
-                               (fn (model cols rows)
+                               (fn (model _cols _rows)
                                  (if (:slow model)
                                    (do (send me [:viewing true]) (quit-spin 0))
                                    [[:clear]]))
-                               (fn (model input cols rows)
+                               (fn (model input _cols _rows)
                                  (cond
                                    (= input :slow) (assoc model :slow true)
                                    (= input :ctrl-g) (assoc model :slow false :quit-seen true)
@@ -1454,7 +1454,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
           spun (table/new)
           loop (spawn (receive
                         (:go (ui-run {:n 0 :quit-busy-ms 0}
-                               (fn (model cols rows)
+                               (fn (model _cols _rows)
                                  (cond
                                    (and (= (:n model) 1) (not (table/get spun :once false)))
                                      (do
@@ -1463,7 +1463,7 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
                                        (quit-spin 0))
                                    (= (:n model) 2) (error "view: a model that cannot be drawn")
                                    else [[:text 0 0 (str (:n model))]]))
-                               (fn (model input cols rows)
+                               (fn (model input _cols _rows)
                                  (cond
                                    (= input :inc) (assoc model :n 1)
                                    (= input :ctrl-g) (assoc model :n 2)

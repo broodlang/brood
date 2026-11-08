@@ -140,7 +140,7 @@
 ;; to `deopt`, every one of the five reads `:bailed` with 16 deopts.
 (defn- drive (f v n) (if (= n 0) nil (do (f v) (drive f v (- n 1)))))
 
-(defn- lit-destructure (v) (let ([a b] v) a))
+(defn- lit-destructure (v) (let ([a _b] v) a))
 (defn- lit-ref (v) (%vector-ref v 0))
 (defn- lit-ref-eq (v) (= (%vector-ref v 0) "("))
 (defn- lit-nth (v) (nth v 1))

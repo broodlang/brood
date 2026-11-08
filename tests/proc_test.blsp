@@ -60,7 +60,7 @@
     (let (p (os/spawn "sleep" ["30"])
           chunk (string/repeat "x" 8192))
       ;; ~1.6 MB, far beyond any pipe buffer. Pre-fix this never returned.
-      (dotimes (i 200) (os/write p chunk))
+      (dotimes (_i 200) (os/write p chunk))
       ;; Still alive and still scheduling — the point of the whole exercise.
       (assert= (type-of p) :subprocess)
       (assert= (+ 1 1) 2)
@@ -208,7 +208,7 @@
         (assert= (receive ([:down ^watch _ _] :down) (after test/*wait-ms* :timeout)) :down)
         ;; The handle must be dead: a write to it errors ("no such subprocess").
         (assert= (eventually "the dead owner's handle closing"
-                   (fn () (try (do (os/write p "x") nil) (catch e :closed))))
+                   (fn () (try (do (os/write p "x") nil) (catch _e :closed))))
           :closed)))))
 
 ;; ---- pseudo-terminals --------------------------------------------------------
@@ -220,8 +220,8 @@
 (defn- pty-drain (acc)
   "Everything the child writes until it exits or falls quiet."
   (receive
-    ([:proc p d] (pty-drain (str acc d)))
-    ([:proc-closed p code] acc)
+    ([:proc _p d] (pty-drain (str acc d)))
+    ([:proc-closed _p _code] acc)
     (after test/*wait-ms* acc)))
 
 (describe "proc: a pty child is in a terminal, a piped one is not"
@@ -271,7 +271,7 @@
 
   :isolated (test "resizing a piped child is refused rather than silently ignored"
     (let (p (os/spawn "cat" []))
-      (assert= :refused (try (do (os/resize-pty p 80 24) :resized) (catch e :refused)))
+      (assert= :refused (try (do (os/resize-pty p 80 24) :resized) (catch _e :refused)))
       (os/close p))))
 
 ;; ADR-570: a program reading a password turns its terminal's ECHO off and keeps line
@@ -315,7 +315,7 @@
 
   :isolated (test "a piped child is refused: it has no terminal"
     (let (p (os/spawn "cat" []))
-      (assert= :refused (try (do (os/pty-mode p) :answered) (catch e :refused)))
+      (assert= :refused (try (do (os/pty-mode p) :answered) (catch _e :refused)))
       (os/close p))))
 
 ;; A pty costs a descriptor, and a descriptor that is never closed is a leak that only
@@ -372,8 +372,8 @@ twice — for a test whose answer arrived in milliseconds."
   (if (includes? acc want)
     acc
     (receive
-      ([:proc p d] (pty-await (str acc d) want))
-      ([:proc-closed p code] acc)
+      ([:proc _p d] (pty-await (str acc d) want))
+      ([:proc-closed _p _code] acc)
       (after test/*wait-ms* acc))))
 
 (describe "proc: an interactive REPL under a pty"
@@ -440,7 +440,7 @@ twice — for a test whose answer arrived in milliseconds."
       ;; never been lost (0 of 300). A resend may find the child already reaped (the first
       ;; one worked; its close is still in flight), which `os/signal` rightly refuses.
       (letrec (interrupt (fn (tries)
-                           (check-allow :discarded-catch (try (os/signal p :int) (catch e nil)))
+                           (check-allow :discarded-catch (try (os/signal p :int) (catch _e nil)))
                            (receive
                              ([:proc ^p out] [:printed out])
                              ([:proc-closed ^p _] :closed)

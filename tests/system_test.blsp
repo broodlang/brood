@@ -152,7 +152,7 @@
       (assert= (os/shell-split line)
         (seq/reject (string/split (os/cmd-out (os/cmd "sh" ["-c" (str "printf '%s\\n' " line)]))
                       "\n")
-          (fn (w) false)))))
+          (fn (_w) false)))))
   (test "nothing is expanded"
     (assert= (os/shell-split "$HOME ~ *.txt") (list "$HOME" "~" "*.txt")))
   (test "it is the inverse of shell-quote"

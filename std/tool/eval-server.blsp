@@ -826,21 +826,21 @@ anything arriving while a run is in flight waits its turn."
   (receive
     ([:evsrv-line line] (let (req (evsrv-decode-request line))
                           (eval-server-loop (if req (evsrv-drain (evsrv-handle state req)) state))))
-    ([:evsrv-test-done id reply] (do
-                                   (when (:run state) (demonitor (get (:run state) :ref)))
-                                   (io/puts (evsrv-encode-reply reply))
-                                   (eval-server-loop (evsrv-drain (assoc state :run nil)))))
+    ([:evsrv-test-done _id reply] (do
+                                    (when (:run state) (demonitor (get (:run state) :ref)))
+                                    (io/puts (evsrv-encode-reply reply))
+                                    (eval-server-loop (evsrv-drain (assoc state :run nil)))))
     ;; the runner died without answering — a crash, or the kill in `evsrv-stop-run` racing
     ;; its own demonitor. Either way the id is owed a reply, and only if it is still ours.
-    ([:down ref child reason] (if (and (:run state) (= ref (get (:run state) :ref)))
-                                (do
-                                  (evsrv-clear-sinks)
-                                  (io/puts (evsrv-encode-reply {:id (get (:run state) :id)
-                                                                :ok false
-                                                                :error (str "the test runner died: "
-                                                                         (pr-str reason))}))
-                                  (eval-server-loop (evsrv-drain (assoc state :run nil))))
-                                (eval-server-loop state)))
+    ([:down ref _child reason] (if (and (:run state) (= ref (get (:run state) :ref)))
+                                 (do
+                                   (evsrv-clear-sinks)
+                                   (io/puts (evsrv-encode-reply {:id (get (:run state) :id)
+                                                                 :ok false
+                                                                 :error (str "the test runner died: "
+                                                                          (pr-str reason))}))
+                                   (eval-server-loop (evsrv-drain (assoc state :run nil))))
+                                 (eval-server-loop state)))
     ;; nil from read-line = EOF: the parent closed stdin — done
     ([:evsrv-eof] nil)))
 

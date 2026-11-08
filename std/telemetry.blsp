@@ -621,7 +621,7 @@ zero — call `detach`/`detach-all` for that. Returns nil.
   (let (t *telemetry-metrics*)
     (attach id
       event
-      (fn (e m md)
+      (fn (_e _m _md)
         (let (cur (table/get t id {:kind :counter :count 0}))
           (table/put t id (assoc cur :count (+ (get cur :count) 1))))))))
 
@@ -631,7 +631,7 @@ zero — call `detach`/`detach-all` for that. Returns nil.
   (let (t *telemetry-metrics*)
     (attach id
       event
-      (fn (e m md)
+      (fn (_e m _md)
         (let (v (get m key 0) cur (table/get t id {:kind :sum :sum 0}))
           (table/put t id (assoc cur :sum (+ (get cur :sum) v))))))))
 
@@ -641,7 +641,7 @@ zero — call `detach`/`detach-all` for that. Returns nil.
   (let (t *telemetry-metrics*)
     (attach id
       event
-      (fn (e m md)
+      (fn (_e m _md)
         (table/put t id {:kind :gauge :value (get m key)})))))
 
 (defn summary (id event key)
@@ -652,7 +652,7 @@ read). Returns `id`."
   (let (t *telemetry-metrics*)
     (attach id
       event
-      (fn (e m md)
+      (fn (_e m _md)
         (let (v (get m key)
               cur (table/get t id nil))
           (if (nil? cur)
@@ -693,7 +693,7 @@ no samples). `(metric id)` → `{:kind :distribution :count :sum :min :max :mean
         bounds (into [] (sort buckets)))
     (attach id
       event
-      (fn (e m md)
+      (fn (_e m _md)
         (let (v (get m key)
               cur (table/get t id nil)
               cur (if (nil? cur)

@@ -229,6 +229,13 @@ pub struct LispErrorData {
     /// `"scheduler race under -j 0 — try -j 1"`. Set by raise sites that
     /// know the common gotcha; omitted otherwise.
     pub hint: Option<String>,
+    /// The tag of the value a [`LispError::wrong_type`] rejected, while the message does
+    /// not yet say WHICH argument it was. `who: expected int, got string ("1")` is
+    /// unreadable when the call passed two strings, so the primitive gate
+    /// (`eval::call_native`) takes this, finds the one argument of that tag its declared
+    /// type does not admit, and names it in the message: `string/->number: radix
+    /// (argument 2) expected int, …`. `None` once named, and for every other error.
+    pub rejected_tag: Option<crate::core::value::Tag>,
 }
 
 /// `LispError` is a thin newtype over a **boxed** [`LispErrorData`]. It's returned
@@ -373,6 +380,7 @@ impl LispError {
             file: None,
             code: None,
             hint: None,
+            rejected_tag: None,
         }))
     }
 
@@ -389,6 +397,7 @@ impl LispError {
             file: None,
             code: None,
             hint: None,
+            rejected_tag: None,
         }))
     }
 
@@ -572,13 +581,15 @@ impl LispError {
         expected: &str,
         got: Value,
     ) -> Self {
-        Self::type_err(format!(
+        let mut error = Self::type_err(format!(
             "{}: expected {}, got {} ({})",
             who,
             expected,
             crate::core::value::tag(got).name(),
             crate::syntax::printer::print(heap, got),
-        ))
+        ));
+        error.rejected_tag = Some(crate::core::value::tag(got));
+        error
     }
     pub fn runtime(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Runtime, message).with_code(error_codes::RUNTIME_GENERIC)
@@ -601,6 +612,7 @@ impl LispError {
             file: None,
             code: None,
             hint: None,
+            rejected_tag: None,
         }))
     }
 
@@ -702,6 +714,7 @@ impl LispError {
             file: string_of(key("file")),
             code: None,
             hint: string_of(key("hint")),
+            rejected_tag: None,
         })))
     }
 

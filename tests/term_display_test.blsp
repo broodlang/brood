@@ -124,7 +124,7 @@ child exited."
                                                                20000)))
                                   "key :ctrl-_"))))
                         (os/write p "q")
-                        (let (closed (read-until p resized (fn (vt) false) 20000))
+                        (let (closed (read-until p resized (fn (_vt) false) 20000))
                           (do
                             (is (:closed closed))
                             ;; the terminal is given back
@@ -170,11 +170,11 @@ child exited."
                     ;; a resize there and back between two looks still repaints the screen
                     (os/resize-pty p 60 14)
                     (os/resize-pty p 40 10)
-                    (let (bounced (read-until p (assoc back :bytes 0) (fn (vt) false) 1500))
+                    (let (bounced (read-until p (assoc back :bytes 0) (fn (_vt) false) 1500))
                       (is (> (:bytes bounced) 280)))
                     ;; SIGTERM: the app's :on-hangup runs, the terminal is restored, it exits
                     (os/signal p :term)
-                    (let (ended (read-until p back (fn (vt) false) 20000))
+                    (let (ended (read-until p back (fn (_vt) false) 20000))
                       (do
                         (is (:closed ended))
                         (is (not (vt/mode (:vt ended) :alt-screen)))
@@ -202,7 +202,7 @@ child exited."
               (is (await 10000)))
             ;; the hook hangs; the loop does not end; the second SIGTERM is the default action
             (os/signal p :term)
-            (is (:closed (read-until p up (fn (vt) false) 5000)))))
+            (is (:closed (read-until p up (fn (_vt) false) 5000)))))
         (file/rmdir dir)))))
 
 (describe "a frame the terminal never received (ADR-586)"

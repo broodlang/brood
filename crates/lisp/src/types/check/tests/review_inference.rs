@@ -242,6 +242,8 @@ fn rule_heads_are_bound() {
         "quote",
         "load",
         "%pin",
+        // `receive`'s timeout clause word, matched by the unused-binder lint to skip it
+        "after",
         "%contract-check-args",
         "%contract-check-rest",
     ];

@@ -623,4 +623,4 @@ user code; reach for `table/new` instead."
     (check-allow :discarded-catch
       (try
         (reduce (%map-pairs m) (%table) (fn (t kv) (%table-put t (first kv) (second kv))))
-        (catch e nil)))))
+        (catch _e nil)))))

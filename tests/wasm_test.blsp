@@ -124,7 +124,7 @@
       (close inst)))
   (test "an s32 out-of-range argument is a clean error, not a wrap"
     (let (inst (instantiate *scalars-wat*))
-      (is (= (try (call inst "add" 5000000000 1) (catch e :range)) :range))
+      (is (= (try (call inst "add" 5000000000 1) (catch _e :range)) :range))
       (close inst))))
 
 (describe "wasm: strings and lists cross the canonical ABI"
@@ -165,19 +165,19 @@
 (describe "wasm: the sandbox holds"
   (test "a runaway guest is stopped by the fuel meter — a catchable error"
     (let (inst (instantiate *spin-wat*))
-      (is (= (try (call inst "spin") (catch e :trapped)) :trapped))
+      (is (= (try (call inst "spin") (catch _e :trapped)) :trapped))
       ;; the instance survives the trap for further (well-behaved) use? A
       ;; trapped store is poisoned — a later call errors cleanly, not UB.
       (close inst)))
   (test "an unknown export and a closed instance are clean errors"
     (let (inst (instantiate *scalars-wat*))
-      (is (= (try (call inst "nope" 1) (catch e :no-export)) :no-export))
+      (is (= (try (call inst "nope" 1) (catch _e :no-export)) :no-export))
       (close inst)
       ; idempotent
       (close inst)
-      (is (= (try (call inst "add" 1 2) (catch e :closed)) :closed))))
+      (is (= (try (call inst "add" 1 2) (catch _e :closed)) :closed))))
   (test "garbage source is a clean load error"
-    (is (= (try (instantiate "(component (bogus") (catch e :bad)) :bad)))
+    (is (= (try (instantiate "(component (bogus") (catch _e :bad)) :bad)))
   (test "a component demanding memory past the 256 MiB cap fails to load (not OOM)"
     ;; 5000 pages * 64 KiB = ~327 MiB initial memory > the per-instance limiter
     ;; cap — instantiation must be denied cleanly (fuel bounds instructions, the
@@ -185,7 +185,7 @@
     (let (huge "(component
                   (core module $m (memory (export \"m\") 5000))
                   (core instance $i (instantiate $m)))")
-      (is (= (try (do (instantiate huge) :loaded) (catch e :denied)) :denied))))
+      (is (= (try (do (instantiate huge) :loaded) (catch _e :denied)) :denied))))
   (test "an instance dies with the process that loaded it"
     ;; It used to outlive its loader for the runtime's life: twenty processes that each
     ;; loaded a 3200-page memory and exited left 10 GB mapped and every handle callable.
@@ -198,7 +198,7 @@
           (assert= (call inst "add" 2 3) 5)
           (send loader :go)
           (receive ([:down ^watch _ _] :ok) (after 10000 (is false)))
-          (is (= (try (call inst "add" 2 3) (catch e :closed)) :closed)))
+          (is (= (try (call inst "add" 2 3) (catch _e :closed)) :closed)))
         (after 10000 (is false)))))
   (test "a handle is an unguessable token, not a counter"
     (let (first-inst (instantiate *scalars-wat*)
@@ -222,14 +222,14 @@
       (close first-inst)))
   (test "a reload after a trap gives a working instance"
     (let (trapped (instantiate *spin-wat*))
-      (is (= (try (call trapped "spin") (catch e :trapped)) :trapped))
+      (is (= (try (call trapped "spin") (catch _e :trapped)) :trapped))
       (close trapped))
     (let (reloaded (instantiate *spin-wat*))
       (assert= (exports reloaded) [["spin" 0]])
       (close reloaded)))
   (test "garbage source fails the same way twice (failures are not cached)"
-    (is (= (try (instantiate "(component (bogus") (catch e :bad)) :bad))
-    (is (= (try (instantiate "(component (bogus") (catch e :bad)) :bad))))
+    (is (= (try (instantiate "(component (bogus") (catch _e :bad)) :bad))
+    (is (= (try (instantiate "(component (bogus") (catch _e :bad)) :bad))))
 
 (describe "wasm: use-native binds exports as Brood functions"
   (test "bound names call straight through"

@@ -120,7 +120,7 @@
 
   (test "a single random draw round-trips intact across heaps"
     (let (me (self) _w (spawn (prng-emit me 42)))
-      (assert= (receive ([:r seed draws] draws)) (prng-draws 42 5 nil)))))
+      (assert= (receive ([:r _seed draws] draws)) (prng-draws 42 5 nil)))))
 
 ;; ---- shuffle is Fisher–Yates, and therefore O(n) ----------------------------
 ;; The docstring always claimed Fisher–Yates; the implementation was not it. Each

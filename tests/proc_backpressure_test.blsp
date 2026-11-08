@@ -93,7 +93,7 @@
       (os/close p)
       ;; The close must reach the reader blocked on its budget, or the handle never
       ;; finishes and [:proc-closed …] never comes. The unread output stays queued.
-      (assert= (receive ([:proc-closed ^p c] :closed) (after 20000 :timeout)) :closed)))
+      (assert= (receive ([:proc-closed ^p _c] :closed) (after 20000 :timeout)) :closed)))
   (test "os/close releases a reader fed by a descendant that escaped the kill"
     ;; `setsid` takes the `yes` out of the child's process group, so no kill reaches it
     ;; and it keeps the pipe full after `sh` has exited. That exit woke the reader once
@@ -103,7 +103,7 @@
       (assert= (receive ([:proc-exit ^p c] c) (after 20000 :timeout)) 0)
       (is (>= (await-paused) 1))
       (os/close p)
-      (assert= (receive ([:proc-closed ^p c] :closed) (after 20000 :timeout)) :closed)))
+      (assert= (receive ([:proc-closed ^p _c] :closed) (after 20000 :timeout)) :closed)))
   (test "the owner dying while its reader waits frees the reader thread"
     (let (before (reader-thread-count)
           me (self)
@@ -123,7 +123,7 @@
                       (spawn (send me [:result k (paused-then-drained 300000)]))))
           results (map (range 4)
                     (fn (_)
-                      (receive ([:result k r] r) (after 60000 :timeout)))))
+                      (receive ([:result _k r] r) (after 60000 :timeout)))))
       (assert= (count workers) 4)
       (doseq (r results)
         (is (vector? r))

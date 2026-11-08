@@ -777,7 +777,7 @@ image), or nil if it isn't a bound symbol. A bare-symbol `reflect/eval` is just 
       (when (string? callee)
         (let (sym (reflect/read-string callee))
           (if (and (symbol? sym) (bound? sym)) (reflect/arglist (reflect/eval sym)) nil)))
-      (catch e nil))))
+      (catch _e nil))))
 
 ;; check-allow: deliberately non-tail — depth = the signature hint's argument count.
 (check-allow :non-tail-recursion
@@ -835,7 +835,7 @@ matched pair reversed, or a lone unmatched bracket in the error face.
 (defn- lineedit-cols (-> int)
   "The terminal width in columns, with a sane fallback when the terminal reports no
 size (e.g. a pty with no winsize), so layout never collapses to a 1-column window."
-  (let ([c r] (term/size)) (if (< c 1) 80 c)))
+  (let ([c _r] (term/size)) (if (< c 1) 80 c)))
 
 (defn lineedit-display-prompt (state)
   "The prompt to show for `state`: the `(reverse-i-search)\`query':` prompt while

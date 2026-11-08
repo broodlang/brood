@@ -133,12 +133,12 @@
     (do
       (assert= (conj {:a 1} [:b 2]) {:a 1 :b 2})
       (assert= (conj {:a 1} {:b 2 :c 3}) {:a 1 :b 2 :c 3})
-      (assert= (try (conj {:a 1} 5) (catch e :err)) :err)
+      (assert= (try (conj {:a 1} 5) (catch _e :err)) :err)
       true))
   (test "non-collection errors"
     ;; check-allow: conj on a non-collection is the failure under test.
     (check-allow :type-mismatch
-      (assert= (try (conj 42 1) (catch e :err)) :err))))
+      (assert= (try (conj 42 1) (catch _e :err)) :err))))
 
 ;; Constant folding of vector literals (compile.rs). An all-constant literal is
 ;; folded to a single shared instance — sound only because Brood data is immutable.

@@ -106,7 +106,7 @@ A build of an app that runs in the tab copies these beside its bundle.
 
 (defn- static (name mime)
   "A handler serving the built-in page file `name`."
-  (fn (req)
+  (fn (_req)
     (let (body (page name))
       (if (nil? body)
         (not-found)

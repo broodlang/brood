@@ -37,7 +37,7 @@
 
 ;; `hl-head?`'s shape: a string compared per activation, an int compared beside it.
 (defn ej-streq (v) (let ([open n] v) (and (= open "(") (= n 0))))
-(defn ej-str-ne (v) (let ([open n] v) (= open "[")))
+(defn ej-str-ne (v) (let ([open _n] v) (= open "[")))
 (defn ej-float-eq (v) (let ([a b] v) (= a b)))
 (defn ej-vec-eq (v) (let ([a b] v) (= a b)))
 (defn ej-nil-eq (v) (let ([a b] v) (= a b)))
@@ -73,9 +73,9 @@
 
 ;; `hl-advance`'s shape: `(or p X)` with `p` a boxed slot (false on most frames) and `X`
 ;; a scalar — the two edges into the `or`'s join disagree.
-(defn ej-or-bool (v) (let ([open n head p] v) (or p (= n 2))))
-(defn ej-or-int (v) (let ([open n head p] v) (or p 7)))
-(defn ej-or-nil (v) (let ([open n head p] v) (or head (= n 2))))
+(defn ej-or-bool (v) (let ([_open n _head p] v) (or p (= n 2))))
+(defn ej-or-int (v) (let ([_open _n _head p] v) (or p 7)))
+(defn ej-or-nil (v) (let ([_open n head _p] v) (or head (= n 2))))
 ;; The join's value flowing on: into a vector, a call argument, a truthiness test.
 (defn ej-if-live (c x) (let (r (if c x 7)) [r x]))
 (defn ej-if-arg (c) (list (if c "s" 7) 1))

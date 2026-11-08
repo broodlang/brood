@@ -1041,7 +1041,7 @@ monitor fire and closes cleanly. Tail-recursive."
       ([:parked session token] (again (if (= token (map/get-in state [:sessions session :token]))
                                         (map/assoc-in state [:sessions session :parked?] true)
                                         state)))
-      ([:claimed session client] (again (serve-forget state :pending client)))
+      ([:claimed _session client] (again (serve-forget state :pending client)))
       ([:declined session client] (again (if (= session
                                                (map/get-in state [:pending client :asking]))
                                            (serve-ask-next state app client)
@@ -1188,16 +1188,16 @@ has no per-participant state, so opts are accepted and ignored), add the client 
 and tell it the shared session pid (so it ships keys there); monitor it so its death drops
 it from the hub. Tail-recursive."
   (receive
-    ([:attach client cols rows] (do
-                                  (monitor client)
-                                  (send hub [:add client])
-                                  (send client [:attached session])
-                                  (serve-shared-manager session hub)))
-    ([:attach client cols rows _opts] (do
-                                        (monitor client)
-                                        (send hub [:add client])
-                                        (send client [:attached session])
-                                        (serve-shared-manager session hub)))
+    ([:attach client _cols _rows] (do
+                                    (monitor client)
+                                    (send hub [:add client])
+                                    (send client [:attached session])
+                                    (serve-shared-manager session hub)))
+    ([:attach client _cols _rows _opts] (do
+                                          (monitor client)
+                                          (send hub [:add client])
+                                          (send client [:attached session])
+                                          (serve-shared-manager session hub)))
     ([:down _ client _] (do (send hub [:remove client]) (serve-shared-manager session hub)))
     ;; serve-stop: tell every client goodbye (the hub fans [:bye]), end the session
     ([:shutdown from r] (do (send hub [:shutdown]) (exit session :kill) (send from [:reply r 1])))

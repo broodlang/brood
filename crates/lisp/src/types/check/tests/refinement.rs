@@ -404,7 +404,7 @@ fn a_match_clause_on_a_tagged_tuple_binds_the_positions_of_its_own_arm() {
              (sig use (int -> any))\n\
              (defn use (n)\n\
                (match (step n)\n\
-                 ([:ok got conn] {ok_body})\n\
+                 ([:ok got _conn] {ok_body})\n\
                  ([:error code msg] {err_body})))"
         )
     };
@@ -480,8 +480,8 @@ fn a_re_tagged_match_result_keeps_each_arm_apart_through_inference() {
          (sig use (int -> any))\n\
          (defn use (n)\n\
            (match (complete n 1)\n\
-             ([:ok got conn] (get got :email))\n\
-             ([:error code msg cc] (str code msg))))",
+             ([:ok got _conn] (get got :email))\n\
+             ([:error code msg _cc] (str code msg))))",
         true,
     );
     assert!(ws.is_empty(), "{ws:?}");

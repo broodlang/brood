@@ -201,7 +201,7 @@
   :isolated (test "workers decode the same payload; results agree after crossing heaps"
     (let (me (self)
           src "{\"id\":7,\"tags\":[\"a\",\"b\"],\"ok\":true}")
-      (doseq (i (range 8))
+      (doseq (_i (range 8))
         (spawn (send me [:r (decode src)])))
       (let (results (map (range 8) (fn (_) (receive ([:r m] m) (after test/*wait-ms* :timeout)))))
         (is (every? results

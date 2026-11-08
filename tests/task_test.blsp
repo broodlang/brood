@@ -15,7 +15,7 @@
   (test "re-raises a thrown error"
     (assert= (try (await (fn () (error "boom")) 1000) (catch e (error-message e))) "boom"))
   (test "throws on timeout"
-    (is (try (await (fn () (receive (:never x))) 30) false (catch e true)))))
+    (is (try (await (fn () (receive (:never x))) 30) false (catch _e true)))))
 
 (describe "task (asynchronous)"
   :isolated (test "delivers [:task-done handle value] to the caller"
@@ -34,7 +34,7 @@
     (let (me (self)
           relay (spawn (receive (msg (send me [:relayed msg])))))
       (task (fn () :ok) {:reply-to relay})
-      (assert= (receive ([:relayed [:task-done t v]] v)) :ok)))
+      (assert= (receive ([:relayed [:task-done _t v]] v)) :ok)))
   (test "the handle tags the reply, so a stale reply is distinguishable"
     ;; start two tasks; each reply carries its own handle
     (let (h1 (task (fn () :one))
@@ -51,11 +51,11 @@
     (let (h (task (fn () (receive (:never x))) {:timeout 5000}))
       (cancel h)
       ;; nothing should arrive; a short selective wait falls through to :clear
-      (assert= (receive ([:task-done t v] :got) ([:task-timeout t] :got) (after 60 :clear))
+      (assert= (receive ([:task-done _t _v] :got) ([:task-timeout _t] :got) (after 60 :clear))
         :clear)))
   (test "cancel on an already-finished task is a harmless no-op"
     (let (h (task (fn () 1)))
-      (assert= (receive ([:task-done t v] v)) 1)
+      (assert= (receive ([:task-done _t v] v)) 1)
       (cancel h)
       :ok))
   (test "latest supersedes the prior job: only the new reply arrives"
@@ -65,7 +65,8 @@
           h (latest prev (fn () :fresh)))
       (refute (= h prev))
       (assert= (receive ([:task-done t v] [t v])) [h :fresh])
-      (assert= (receive ([:task-done t v] :got) ([:task-timeout t] :got) (after 60 :clear)) :clear)))
+      (assert= (receive ([:task-done _t _v] :got) ([:task-timeout _t] :got) (after 60 :clear))
+        :clear)))
   (test "latest with nil prev is just task"
     (let (h (latest nil (fn () :first)))
       (assert= (receive ([:task-done t v] [t v])) [h :first]))))

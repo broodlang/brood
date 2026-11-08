@@ -102,7 +102,7 @@
   (test "a custom scorer decides the ranking, native pass or not"
     ;; rank by length alone — shortest first — which the built-in rules would never do, and
     ;; which no candidate here even matches under them (`q` is in none of them)
-    (let (by-length (fn (q options) (fn (cand) (- 0 (string/length cand)))))
+    (let (by-length (fn (_q _options) (fn (cand) (- 0 (string/length cand)))))
       (assert= (list "z" "yy" "xxx")
         (binding (fuzzy/*scorer* by-length) (top "q" ["xxx" "z" "yy"] 3)))
       (assert= '() (top "q" ["xxx" "z" "yy"] 3))))

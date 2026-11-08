@@ -1069,3 +1069,19 @@ lose the definition, through an absolute path. KI-372's fix was half of one: the
 arriving during a dial, not a dial already under way. `.brood_crash_dump` is bounded now too, after
 reaching 183 MB in this checkout.
 
+2026-11-08. Two playground reports, each read as a family. `(reduce strings string/->number)` said
+`string/->number: expected int, got string ("1")`, which reads as if parsing "1" wanted an int: the
+`expect_*` readers know the primitive and the value but not the parameter. A wrong-type error now
+carries the rejected tag, and `call_native` names the one argument of that tag its registered `Sig`
+rejects (`radix (argument 2) expected int, …`); a one-argument call, an ambiguous pair, or an error
+raised under another name is left as it was. The unused-parameter lint fired on
+`(fn ((acc x) acc))` and never on `(fn (acc x) acc)`, the same function; both spellings now go
+through one check. Reading for the same shape found three more: a typed parameter was checked under
+its spelling (`position:int`, never readable), a parameter read by a later `&optional` default
+counted as unused, and a `fn` inside a map or set literal was never linted. Then the rest of the
+binding forms: only a plain symbol in `let`/`letrec` had ever been reported, because a destructured
+`let`, `match`, `receive`, `catch`, the loop forms and the `if-let` family all lower to synthetic
+lets the main lint exempts. A surface pass now reads each as written, by the one pattern grammar
+(pins, quotes, `or`/`and`/`bytes`/`record`, map `:or` defaults; a repeated name is a read). Its
+first finds included `fold-for` accumulators the body never read. Roughly 1300 binders across brood
+and bedit took the `_` prefix.

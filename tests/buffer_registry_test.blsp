@@ -10,7 +10,7 @@
 (defn- drain (acc)
   "Every `[:registry-…]` notification already in the mailbox, oldest first."
   (receive
-    ([:registry-added k n p meta] (drain (cons [:added k meta] acc)))
+    ([:registry-added k _n _p meta] (drain (cons [:added k meta] acc)))
     ([:registry-renamed old k n meta] (drain (cons [:renamed old k n] acc)))
     ([:registry-removed k why] (drain (cons [:removed k why] acc)))
     (after 0 (reverse acc))))

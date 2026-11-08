@@ -30,7 +30,7 @@
     (assert= (try (throw :boom) (catch e e)) :boom))
 
   (test "body value returned when no error"
-    (assert= (try (+ 1 2) (catch e :nope)) 3))
+    (assert= (try (+ 1 2) (catch _e :nope)) 3))
 
   (test "catch is not entered when body succeeds"
     ;; If catch were entered, result would be :nope; body value proves it wasn't.
@@ -190,14 +190,14 @@
       :escapes))
 
   (test "rethrowing inside catch propagates to the next handler"
-    (assert= (try (try (throw :original) (catch e (throw :rethrown))) (catch e e))
+    (assert= (try (try (throw :original) (catch _e (throw :rethrown))) (catch e e))
       :rethrown))
 
   (test "try can be nested three levels deep"
     (assert= (try
                (try
-                 (try (throw :deep) (catch e (throw :level2)))
-                 (catch e (throw :level3)))
+                 (try (throw :deep) (catch _e (throw :level2)))
+                 (catch _e (throw :level3)))
                (catch e e))
       :level3))
 
@@ -470,7 +470,7 @@
     ;; read a runtime race that was only ever its own (flaked once in a full run,
     ;; 2026-09-20, passed on retry). The atomic form establishes the monitor before the
     ;; child can run.
-    (let ([p m] (spawn-monitor (try (error "worker failed") (finally nil))))
+    (let ([_p m] (spawn-monitor (try (error "worker failed") (finally nil))))
       (assert= "worker failed"
         (receive ([:down ^m _ [:error e]] (get e :message)) (after test/*wait-ms* :timeout)))))
 
@@ -513,7 +513,7 @@
 (describe "the failure contract holds for every function that returns one"
   (test "bad input yields a failure — never nil, never a raise"
     (doseq (c (fc-bad-inputs))
-      (let (r (try ((second c)) (catch e :raised)))
+      (let (r (try ((second c)) (catch _e :raised)))
         (is (failure? r))
         (refute (nil? r))
         (refute (= r :raised)))))

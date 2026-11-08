@@ -166,11 +166,15 @@ fn unused_let_binding_lint() {
             .any(|s| s.contains("unused let binding")),
         "a non-gensym `__` name should still be flagged"
     );
-    // match pattern variables (compiler-generated let, no source position)
-    // must be exempt — a common pattern: match on shape, ignore values.
+    // match pattern variables lower to compiler-generated lets the main lint exempts; the
+    // surface pass reports them as written, once each, and `_`-prefixing silences them
+    assert_eq!(
+        file_warnings("(match (list 1 2) ([a b] :vec) (_ :other))"),
+        ["unused pattern binding: a", "unused pattern binding: b"],
+    );
     assert!(
-        file_warnings("(match (list 1 2) ([a b] :vec) (_ :other))").is_empty(),
-        "match pattern variables should be exempt (no FP)"
+        file_warnings("(match (list 1 2) ([_a _b] :vec) (_ :other))").is_empty(),
+        "`_`-prefixed match pattern variables are exempt"
     );
     // Nested let: inner binding used only in inner body.
     assert!(

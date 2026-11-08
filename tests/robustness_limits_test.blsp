@@ -13,9 +13,9 @@
 
 (defmodule robustness-limits-test (:use test))
 
-(defn nest-vec (n) (fold (range 0 n) 'x (fn (acc i) [acc])))
-(defn nest-map (n) (fold (range 0 n) 'x (fn (acc i) {:k acc})))
-(defn deep-qq (n) (fold (range 0 n) 1 (fn (acc i) (list 'quasiquote (list 'unquote acc)))))
+(defn nest-vec (n) (fold (range 0 n) 'x (fn (acc _i) [acc])))
+(defn nest-map (n) (fold (range 0 n) 'x (fn (acc _i) {:k acc})))
+(defn deep-qq (n) (fold (range 0 n) 1 (fn (acc _i) (list 'quasiquote (list 'unquote acc)))))
 (defn message (thunk) (try (do (thunk) :no-error) (catch e (error-message e))))
 
 (describe "a quasiquote chain built at runtime"
@@ -142,7 +142,7 @@
   (test "the depth and size caps read `max`, the English word, not `math/max`"
     ;; The `max` -> `math/max` rename wave rewrote these user-facing strings; each is
     ;; pinned whole, the way the reader's own cap message already was.
-    (assert= (message (fn () (reflect/eval (fold (range 0 1100) 1 (fn (acc i) (list '+ 1 acc))))))
+    (assert= (message (fn () (reflect/eval (fold (range 0 1100) 1 (fn (acc _i) (list '+ 1 acc))))))
       "macro expansion nested too deeply (max 1024 levels)")
     (assert= (message (fn () (reflect/eval (list 'quasiquote (nest-vec 1100)))))
       "quasiquote template nested too deeply (max 1024 levels)")
@@ -282,8 +282,8 @@
                                (list '(after 0 :none)))))
       :hit))
   (test "a 900-level if chain and let chain evaluate"
-    (assert= (reflect/eval (fold (range 0 900) 1 (fn (acc i) (list 'if true acc 0)))) 1)
-    (assert= (reflect/eval (fold (range 0 900) 1 (fn (acc i) (list 'let (list 'x acc) 'x)))) 1)))
+    (assert= (reflect/eval (fold (range 0 900) 1 (fn (acc _i) (list 'if true acc 0)))) 1)
+    (assert= (reflect/eval (fold (range 0 900) 1 (fn (acc _i) (list 'let (list 'x acc) 'x)))) 1)))
 
 (describe "the reader's first line and its odd bytes"
   (test "a shebang line is skipped, and positions after it stay right"
@@ -401,8 +401,8 @@
           worker (fn (parent n) (send parent [:leaks (round n 0)])))
       ;; Full scale on purpose: 80 000 rounds take a third of a second, and at a sixteenth of
       ;; that the one-in-three-thousand race went unseen with the fix removed.
-      (map (range 0 40) (fn (i) (spawn (worker me 2000))))
-      (assert= (fold (range 0 40) 0 (fn (acc i) (receive ([:leaks k] (+ acc k))))) 0))))
+      (map (range 0 40) (fn (_i) (spawn (worker me 2000))))
+      (assert= (fold (range 0 40) 0 (fn (acc _i) (receive ([:leaks k] (+ acc k))))) 0))))
 
 (describe "the project source collector and a symlink to a directory"
   ;; The same rule as `file/walk-files`: a symlinked directory is listed by the walk it

@@ -205,7 +205,7 @@
     (assert= [] (seq/transduce [] (seq/xtake-while (fn (_) false)) [] conj))
     ;; A throw that is NOT a reduced exit still propagates.
     (assert= :boom
-      (try (seq/transduce (range 3) (fn (rf) (fn (acc x) (throw :boom))) [] conj) (catch e e)))
+      (try (seq/transduce (range 3) (fn (_rf) (fn (_acc _x) (throw :boom))) [] conj) (catch e e)))
     ;; The payload is recognisable and nothing else is.
     (is (seq/reduced? (try (seq/reduced 1) (catch e e))))
     (is (not (seq/reduced? {:value 1}))))
@@ -267,12 +267,12 @@
     ;; (1+10)+(1+20)+(2+10)+(2+20): the inner binding varies fastest and the
     ;; accumulator threads through every step.
     (assert= 66 (fold-for (s 0 x [1 2] y [10 20]) (+ s x y)))
-    (assert= 10 (fold-for (s 0 [k v] {:a 4 :b 6}) (+ s v)))
+    (assert= 10 (fold-for (s 0 [_k v] {:a 4 :b 6}) (+ s v)))
     (let (t (table/new))
       (assert= 3 (fold-for (n 0 x [:a :b :c]) (table/put t x n) (+ n 1)))
       (assert= 2 (table/get t :c))))
   (test "an empty source is the initial value"
-    (assert= :start (fold-for (acc :start x []) :never)))
+    (assert= :start (fold-for (_acc :start _x []) :never)))
   (test "a malformed head or a stray :into is a clear expansion error"
     (assert-error (reflect/macroexpand '(fold-for (0 x xs) x)))
     (assert-error (reflect/macroexpand '(fold-for (acc) acc)))

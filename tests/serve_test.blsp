@@ -62,7 +62,7 @@
    :leave (fn () (send report [:drew :left]))
    :size (fn () [80 24])
    :draw (fn (f) (send report [:drew (frame-text f)]))
-   :poll (fn (ms) nil)})
+   :poll (fn (_ms) nil)})
 
 ;; A GUI client played in-process: attach to `mgr`, tell the test our pid + session, then
 ;; run the unified any-display loop. The test drives it by `send`ing keys to our pid.
@@ -303,10 +303,10 @@
     ;; the loop, as the app quitting does.
     (let (log (table/new)
           display {:draw (fn (f) (table/put log :frame f))
-                   :texture (fn (tex rgba w h) (table/put log :texture [tex w h]))
+                   :texture (fn (tex _rgba w h) (table/put log :texture [tex w h]))
                    :configure (fn (o) (table/put log :window o))
                    :leave (fn () nil)}
-          bare {:draw (fn (f) nil) :leave (fn () nil)})
+          bare {:draw (fn (_f) nil) :leave (fn () nil)})
       (send (self) [:texture 3 [0 0 0 0] 1 1])
       (send (self) [:window {:input :pixels}])
       (send (self) [:frame [:clear]])
@@ -344,7 +344,7 @@
   (test "attach-display-loop paints only the newest of a backlog, every texture uploaded"
     (let (seen (drive-backlog (fn (me)
                                 {:draw (fn (f) (send me [:drew f]))
-                                 :texture (fn (tex rgba w h) (send me [:uploaded tex]))
+                                 :texture (fn (tex _rgba _w _h) (send me [:uploaded tex]))
                                  :leave (fn () nil)})
                  (mapcat (range 20)
                    (fn (i) [[:texture i [0 0 0 0] 1 1] [:frame [[:sprite i 0 0 1 1]]]]))))
@@ -356,7 +356,7 @@
       (assert= (last seen) [:drew [[:sprite 19 0 0 1 1]]])))
 
   (test "a hung-up terminal client detaches — its SIGHUP is not shipped to the session as a key"
-    (let (seen (drive-backlog (fn (me) {:draw (fn (f) nil) :leave (fn () nil)})
+    (let (seen (drive-backlog (fn (_me) {:draw (fn (_f) nil) :leave (fn () nil)})
                  [[:signal :hup] [:frame [[:text 0 0 "after"]]]]))
       (do
         (assert= (first seen) [:detach])
@@ -502,7 +502,7 @@
 
   (test "the window client shows the daemon's busy word through its display's :busy"
     (let (log (table/new)
-          display {:draw (fn (f) nil)
+          display {:draw (fn (_f) nil)
                    :busy (fn (on) (table/put log :busy (conj (table/get log :busy []) on)))
                    :leave (fn () nil)})
       (send (self) [:busy true])
@@ -516,7 +516,7 @@
       (send (self) [:bye])
       (assert= (editor/attach/attach-display-loop nil
                  (self)
-                 {:draw (fn (f) nil) :leave (fn () nil)})
+                 {:draw (fn (_f) nil) :leave (fn () nil)})
         nil))))
 
 ;; A session that outlives its client (`serve` given `:resume-ms`): a named client's death
@@ -678,7 +678,7 @@
       (send session [:key "q"])))
 
   (test "a window client answers the session's ping, and does not ship it as a key"
-    (let (display {:draw (fn (f) nil) :leave (fn () nil)})
+    (let (display {:draw (fn (_f) nil) :leave (fn () nil)})
       (send (self) [:ping (self) :asked])
       (send (self) [:bye])
       (editor/attach/attach-display-loop nil (self) display)
@@ -868,7 +868,7 @@
     (let (me (self)
           asked (ref))
       (let (seen (drive-backlog (fn (me)
-                                  {:draw (fn (f) nil)
+                                  {:draw (fn (_f) nil)
                                    :leave (fn () nil)
                                    :primary-set (fn (text) (send me [:set-primary text]))
                                    :primary-get (fn () "highlighted on the client")})
@@ -884,7 +884,7 @@
     (let (me (self)
           asked (ref))
       (let (seen (drive-backlog (fn (me)
-                                  {:draw (fn (f) nil)
+                                  {:draw (fn (_f) nil)
                                    :leave (fn () nil)
                                    :clipboard-set (fn (text) (send me [:set text]))
                                    :clipboard-get (fn () "on the client")})
@@ -941,7 +941,7 @@
                                            (send report
                                              [:saved retained (:restarting? death) (:reason death)])
                                            :saved))
-                             :restart (fn (retained death) {:n (or retained 0)})}
+                             :restart (fn (retained _death) {:n (or retained 0)})}
                        supervise)}
     extra))
 
@@ -1058,7 +1058,7 @@
     ;; took "crash" and none after it, so the restarted loop is sent c d e again, in order,
     ;; and folds them after its start events — and never "crash", which would kill it again
     (let (me (self)
-          opts {:supervise {:restart (fn (retained death) {:typed (or retained "")})}}
+          opts {:supervise {:restart (fn (retained _death) {:typed (or retained "")})}}
           mgr (spawn (editor/serve/serve-manager (fn () {:typed ""}) typing-vw typing-up opts)))
       (spawn (supervised-window-client mgr me))
       (let (client (receive ([:ready c] c) (after test/*wait-ms* :no-attach)))
@@ -1088,7 +1088,7 @@
                                             (send me
                                               [:saved (:registry retained) (:restarting? death)])
                                             saved)))
-                            :restart (fn (retained death)
+                            :restart (fn (retained _death)
                                        {:n 0
                                         :registry (:registry retained)
                                         :notes (registry-notes (:registry retained))})}}
@@ -1300,7 +1300,7 @@
 
   (test "a client that adopts a session starts a fresh ledger: a restart resends all its keys"
     (let (me (self)
-          opts {:resume-ms :forever :supervise {:restart (fn (retained death) {:n 0})}}
+          opts {:resume-ms :forever :supervise {:restart (fn (_retained _death) {:n 0})}}
           mgr (spawn (editor/serve/serve-manager (fn () {:n 0 :first true}) vw back-crash-up opts))
           old (spawn (numbered-client mgr me {:name "ann"}))
           first-loop (receive ([:numbered-client s] s) (after test/*wait-ms* nil))

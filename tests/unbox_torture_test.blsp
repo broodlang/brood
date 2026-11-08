@@ -127,11 +127,11 @@
   ;; returned `inf` where every other engine raised — a JIT-only wrong answer, and the
   ;; float sibling of the ÷0 guard the integer path always had.
   (test "float division by zero raises, like the VM"
-    (assert= :div0 (try (ut-fdiv0 6.0 0.0) (catch e :div0))))
+    (assert= :div0 (try (ut-fdiv0 6.0 0.0) (catch _e :div0))))
 
   ;; `b == 0.0` is true for negative zero too, so the guard must catch it.
   (test "float division by negative zero also raises"
-    (assert= :div0 (try (ut-fdiv0 6.0 -0.0) (catch e :div0))))
+    (assert= :div0 (try (ut-fdiv0 6.0 -0.0) (catch _e :div0))))
 
   (test "a nonzero divisor still divides in registers"
     ;; 1.0/2.0 at the base, then +1.0 once per level for x = 6.0 down to 1.0.

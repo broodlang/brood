@@ -177,8 +177,8 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
     ;; Was: `code as i32` truncated, so `(%halt 4294967296)` exited 0 — a
     ;; script's "fail" silently became "success". If this regresses, the whole
     ;; test run simply stops here with status 0, which is itself the symptom.
-    (assert= :raised (try (%halt 4294967296) (catch e :raised))))
+    (assert= :raised (try (%halt 4294967296) (catch _e :raised))))
 
   (test "a negative code raises rather than wrapping"
-    (assert= :raised (try (%halt -1) (catch e :raised)))))
+    (assert= :raised (try (%halt -1) (catch _e :raised)))))
 (sig grow (string int -> string))

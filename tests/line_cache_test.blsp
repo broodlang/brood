@@ -44,7 +44,7 @@
           [cache _] (lc-all (line-cache) lexer old)
           _ (lc-lexed)
           new (text/insert old 6 "X")
-          [cache2 spans] (lc-all cache lexer new))
+          [_cache2 spans] (lc-all cache lexer new))
       (assert= (lc-lexed) (list "Xx"))
       (assert= spans (lc-fresh lexer new))))
 
@@ -71,7 +71,7 @@
           [cache _] (lc-all (line-cache) lexer old)
           _ (lc-lexed)
           new (text/delete old 2 6)
-          [cache2 spans] (lc-all cache lexer new))
+          [_cache2 spans] (lc-all cache lexer new))
       ;; "b\nc\n" went; line 1 is now "d" (re-lexed: it holds the edit), "e" and "f" are reused
       (assert= (lc-lexed) (list "d"))
       (assert= spans (lc-fresh lexer new))))

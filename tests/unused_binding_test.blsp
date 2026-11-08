@@ -58,9 +58,65 @@
       (assert= (count-of src "unused pattern binding: a") 1)
       (assert= (count-of src "unused pattern binding: b") 1))))
 
+(describe "checker: an unused binder at every other binding form"
+  (test "each binding form reports the binder nothing reads"
+    ;; before, only a plain symbol in `let`/`letrec` was ever reported: a destructured
+    ;; `let` and every macro binding form lower to synthetic lets the main lint exempts
+    (assert= (count-of "(let ([p q] v) p)" "unused let binding: q") 1)
+    (assert= (count-of "(match v ([p q] p) (_ 0))" "unused pattern binding: q") 1)
+    (assert= (count-of "(receive ([:x p q] p) (after 10 :t))" "unused pattern binding: q") 1)
+    (assert= (count-of "(try (v) (catch e 1))" "unused catch binding: e") 1)
+    (assert= (count-of "(dotimes (i 3) (f))" "unused loop binding: i") 1)
+    (assert= (count-of "(for (x xs) 1)" "unused loop binding: x") 1)
+    (assert= (count-of "(fold-for (acc 0 x xs) x)" "unused loop binding: acc") 1)
+    (assert= (count-of "(when-let (x v) 1)" "unused let binding: x") 1)
+    (assert= (count-of "(with (x v y 2) y)" "unused let binding: x") 1))
+
+  (test "a plain let symbol is reported once, by the main lint"
+    (assert= (count-of "(defn f (v) (let (x 1) v))" "unused let binding: x") 1)
+    ;; one destructured pattern lowers the whole list, so the plain name is the surface
+    ;; pass's to report, and it was reported by neither
+    (assert= (count-of "(defn f (v) (let ([p _q] v spare 1) p))" "unused let binding: spare") 1))
+
+  (test "the pattern grammar's non-binders and self-reads are silent"
+    ;; a pin compares, a quote is a literal, `or` alternatives bind the same names, a
+    ;; repeat is an equality test, a bytes size reads an earlier segment, `:or` holds
+    ;; defaults, `record` names a type, and a :when guard reads its clause's binders
+    (each
+      [(str "(match v ([:down ^r reason] reason) ('none 0) ((or [1 a] [2 a]) a) "
+         "([x x] 1) ((record point {:x px}) px) ({:keys [a b] :or {a 0}} (+ a b)) "
+         "(n :when (> n 0) :pos) (_ 2))")
+        "(match f ((bytes (len :u16) (payload len) & rest) [payload rest]))"
+        ;; an &optional slot's default is an expression: `do` here is no binder
+        "(match xs ((_a &optional (b (do (io/write \"d\") 0))) b))"
+        "(for (x v :when (> x 1) y [1 2]) [x y])" "(letrec ([a b] [1 2]) [a b])"
+        "(try (v) (catch {:kind :type} 1) (catch _e 2))"]
+      (fn (src) (assert= (unused-count src) 0)))))
+
 (describe "checker: an unused PARAMETER in an anonymous fn arity clause"
   (test "an arity clause that never reads its parameter is reported"
     (assert= (count-of "(map xs (fn ((x) 1) ((x y) y)))" "unused parameter: x") 2))
+
+  (test "the single-arm spelling is the same function and gets the same answer"
+    ;; `(fn (acc x) acc)` was never linted while `(fn ((acc x) acc))` was
+    (assert= (count-of "(reduce xs (fn (acc x) acc))" "unused parameter: x") 1)
+    (assert= (count-of "(reduce xs (fn ((acc x) acc)))" "unused parameter: x") 1)
+    (assert= (unused-count "(reduce xs (fn (acc _x) acc))") 0)
+    (assert= (count-of "(map xs (fn ([k v]) k))" "unused pattern binding: v") 1))
+
+  (test "a typed parameter binds its NAME, and the result type is not a binder"
+    ;; read as written, `position:int` was a binder no body could ever read
+    (assert= (unused-count "(map xs (fn (p:int) (+ p 1)))") 0)
+    (assert= (unused-count "(map xs (fn (p: int -> int) (+ p 1)))") 0)
+    (assert= (count-of "(map xs (fn (p:int k:int) p))" "unused parameter: k") 1))
+
+  (test "a fn inside a map or set literal is linted like one in a vector"
+    ;; the walk skipped `{…}` and `#{…}`, so callback specs were never checked
+    (assert= (count-of "(f {:on-complete (fn (mm text) mm)})" "unused parameter: text") 1)
+    (assert= (count-of "(f #{(fn (mm text) mm)})" "unused parameter: text") 1))
+
+  (test "a parameter read by a later parameter's default is used"
+    (assert= (unused-count "(map xs (fn (a &optional (b (fn () a))) (b)))") 0))
 
   (test "a parameter used only in a :when guard is NOT unused"
     ;; the guard is part of the clause — `n` is read by `(< n 0)`

@@ -21,7 +21,7 @@
     (is (= :raised
           (try
             (do (zlib/gunzip (string/->bytes "definitely not gzip")) :ok)
-            (catch e :raised))))))
+            (catch _e :raised))))))
 
 (describe "zlib compress/uncompress (RFC 1950)"
   (test "round-trips"
@@ -55,8 +55,8 @@
       (is (> (bytes/length (zlib/zip s 0)) (bytes/length (zlib/zip s 9))))))
   (test "an out-of-range level raises"
     ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
-    (is (= :raised (try (do (zlib/gzip "x" 10) :ok) (catch e :raised))))
-    (is (= :raised (try (do (zlib/gzip "x" -1) :ok) (catch e :raised))))))
+    (is (= :raised (try (do (zlib/gzip "x" 10) :ok) (catch _e :raised))))
+    (is (= :raised (try (do (zlib/gzip "x" -1) :ok) (catch _e :raised))))))
 
 (describe "brotli / unbrotli (RFC 7932, Content-Encoding: br)"
   (test "round-trips a string"
@@ -81,11 +81,11 @@
     (is (= :raised
           (try
             (do (zlib/unbrotli (string/->bytes "definitely not brotli xyz")) :ok)
-            (catch e :raised)))))
+            (catch _e :raised)))))
   (test "an out-of-range quality raises"
     ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
-    (is (= :raised (try (do (zlib/brotli "x" 12) :ok) (catch e :raised))))
-    (is (= :raised (try (do (zlib/brotli "x" -1) :ok) (catch e :raised))))))
+    (is (= :raised (try (do (zlib/brotli "x" 12) :ok) (catch _e :raised))))
+    (is (= :raised (try (do (zlib/brotli "x" -1) :ok) (catch _e :raised))))))
 
 (describe "decompression output cap (max-bytes)"
   ;; A few hundred compressed bytes can expand to gigabytes, gathered in Rust below the

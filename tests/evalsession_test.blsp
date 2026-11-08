@@ -215,7 +215,7 @@
   (test "a spawn is told which attempt it is, and a respawn is a later one"
     ;; the attempts this backend was asked for, in order, collected in a table
     (let (seen (%table)
-          record-attempt (fn (root attempt)
+          record-attempt (fn (_root attempt)
                            (do
                              (%table-put seen :n (append (%table-get seen :n []) [attempt]))
                              :a-child))
@@ -235,7 +235,7 @@
   ;; optimistic way is broken — so both start again at attempt 0.
   (test "a user-initiated reset goes back to the optimistic attempt"
     (let (seen (%table)
-          record-attempt (fn (root attempt)
+          record-attempt (fn (_root attempt)
                            (do
                              (%table-put seen :n (append (%table-get seen :n []) [attempt]))
                              :a-child))
@@ -245,7 +245,7 @@
       (assert= (:attempt st) 0)))
 
   (test "a reroot to another project starts optimistic there too"
-    (let (spec (merge es-spec {:spawn (fn (root attempt) :a-child)})
+    (let (spec (merge es-spec {:spawn (fn (_root _attempt) :a-child)})
           st (editor/evalsession/session-step (es-state {:spec spec :ready true :attempt 4})
                [:reroot "/somewhere/else"]))
       (assert= (:attempt st) 0)
@@ -263,9 +263,9 @@ client whose mail can be told from the first's."
     (spawn (fn ()
              (letrec (loop (fn ()
                              (receive
-                               ([:event kind payload gen name] (do
-                                                                 (send me [:via tag kind payload])
-                                                                 (loop))))))
+                               ([:event kind payload _gen _name] (do
+                                                                   (send me [:via tag kind payload])
+                                                                   (loop))))))
                (loop))))))
 
 (defn- es-via (tag)

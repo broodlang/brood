@@ -674,7 +674,7 @@ modules it embeds, its size, and the target triple when there was one.
 (defn- project-source-stamp (root)
   ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
   (let (result (check-allow :discarded-catch
-                 (try (os/cmd "git" ["-C" root "log" "-1" "--format=%ct %h"]) (catch e nil)))
+                 (try (os/cmd "git" ["-C" root "log" "-1" "--format=%ct %h"]) (catch _e nil)))
         line (if (and result (os/cmd-ok? result)) (os/cmd-out result) "")
         parts (if (= line "") nil (string/split line " "))
         secs (and parts (string/->number (first parts))))
@@ -726,7 +726,7 @@ it is asked. See [[build-info-report]] for the printed form.
           (let (form (check-allow :discarded-catch
                        (try
                          (reflect/read-first (file/slurp (path/join root "project.blsp")))
-                         (catch e nil)))
+                         (catch _e nil)))
                 opts (if (and (pair? form) (= (first form) 'project)) (rest form) nil)
                 [head-at commit] (project-source-stamp root)
                 edited-at (project-source-mtime root)

@@ -45,7 +45,7 @@
   ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
   (if (= i 0)
     nil
-    (do (check-allow :discarded-catch (try (eo-bump2 t v) (catch e nil))) (eo-drive2 t (- i 1) v))))
+    (do (check-allow :discarded-catch (try (eo-bump2 t v) (catch _e nil))) (eo-drive2 t (- i 1) v))))
 
 ;; --- 3. a small calls-free callee holding the effect: the leaf-inline candidate ---
 (def eo-t3 (table/new))
@@ -122,7 +122,7 @@
     nil
     (do
       (eo-bump7 t 0 big)
-      (check-allow :discarded-catch (try 0 (catch e nil)))
+      (check-allow :discarded-catch (try 0 (catch _e nil)))
       (eo-drive7 t (- i 1) big))))
 
 ;; --- 8. a deopt-feedback RE-LOWERING of a leaf-spliced arm (KI-189). The loop tiers on

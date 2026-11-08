@@ -26,12 +26,12 @@
   (test "an error inside the offloaded native rethrows here, catchable"
     (is (= (try
              (proc/offload file/slurp "/definitely/not/a/file/brood-offload-test")
-             (catch e :caught))
+             (catch _e :caught))
           :caught)))
   (test "a native outside the allow list is refused"
-    (is (= (try (%offload bytes/concat [[]]) (catch e :refused)) :refused)))
+    (is (= (try (%offload bytes/concat [[]]) (catch _e :refused)) :refused)))
   (test "a Brood closure is not a native — wrong type"
-    (is (= (try (%offload includes? [(list 1) 1]) (catch e :not-native)) :not-native))))
+    (is (= (try (%offload includes? [(list 1) 1]) (catch _e :not-native)) :not-native))))
 
 (describe "offload: concurrency & selectivity"
   (test "waiting for the pool is a selective receive — other mail stays queued"
@@ -51,5 +51,5 @@
                    (send parent [:done i (= pooled direct)])))))
       (dotimes (_ n)
         (receive
-          ([:done i ok] (is ok))
+          ([:done _i ok] (is ok))
           (after 10000 (is false)))))))

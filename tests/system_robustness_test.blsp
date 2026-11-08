@@ -229,7 +229,7 @@ the write never comes, which is what these cases actually test."
     (is (= :caught
           (try
             (%isolate (fn () (reflect/eval-string "(defdyn *isolate-leak-throw* 1)") (throw :x)))
-            (catch e :caught))))
+            (catch _e :caught))))
     (is (not (reflect/dynamic? '*isolate-leak-throw*))))
 
   :isolated (test "a dynamic mark made OUTSIDE an isolate survives it"

@@ -665,11 +665,11 @@
         (assert= (buffer-text reverted) "a\nb\nc\n")
         (assert= (buffer-eol reverted) :crlf))))
   (test "revert-buffer raises for a buffer with no file, or a file that is gone"
-    (assert= :raised (try (revert-buffer (make-buffer "x")) (catch e :raised)))
+    (assert= :raised (try (revert-buffer (make-buffer "x")) (catch _e :raised)))
     (assert= :raised
       (try
         (revert-buffer (make-buffer "x" "gone" "/no/such/dir/brood-revert.txt"))
-        (catch e :raised))))
+        (catch _e :raised))))
   (test "buffer-from-file takes text already read, decoded and stamped as a read is"
     (let (path (str (temp-dir "brood-buf-") ".txt"))
       (file/spit path "on disk\r\n")
@@ -1064,9 +1064,9 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
       (receive ([:buffer-updated _bp _ _ _] nil) (after test/*wait-ms* nil))
       ;; a structured splice: the push carries [lo hi repl] + markers, not the text
       (buffer-splice bp 5 5 "!" :alice)
-      (let ([v view o] (receive
-                         ([:buffer-updated _bp v view o] [v view o])
-                         (after test/*wait-ms* [:none :none :none])))
+      (let ([_v view o] (receive
+                          ([:buffer-updated _bp v view o] [v view o])
+                          (after test/*wait-ms* [:none :none :none])))
         (assert= (get view :splice) [5 5 "!"])
         (assert= o :alice))
       (assert= (buffer-query bp buffer-text) "hello!")
@@ -1314,7 +1314,7 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
 
   (test "a huge rewrite degrades to whole-span undo instead of hanging"
     ;; past the char budget the span is treated as one change — bounded, not frozen
-    (let (big (apply str (map (range (+ 10 *undo-region-char-budget*)) (fn (i) "x")))
+    (let (big (apply str (map (range (+ 10 *undo-region-char-budget*)) (fn (_i) "x")))
           b0 (make-buffer "seed")
           b1 (insert (goto-char b0 4) big))
       (assert= (buffer-text (undo-in-region (uir-sel b1 0 (buffer-length b1)))) "seed"))))

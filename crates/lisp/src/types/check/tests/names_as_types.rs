@@ -262,7 +262,7 @@ fn deftype_names_a_structural_type_for_sigs() {
          (deftype maybe-cell (or nil cell))\n\
          (deftype loopy (or nil (vector loopy)))\n\
          (sig rows (pane -> int))\n\
-         (defn rows (p) (let ([x y w h] (:rect p)) (math/quot (dec h) 2)))\n\
+         (defn rows (p) (let ([_x _y _w h] (:rect p)) (math/quot (dec h) 2)))\n\
          (sig bad-field (pane -> int))\n\
          (defn bad-field (p) (string/length (:rect p)))\n\
          (sig first-of (maybe-cell -> int))\n\

@@ -248,7 +248,7 @@ primitive — `activate-layer` is the hook-firing version.
 (defn- layers-run-hook (hook ctx)
   "Run one hook — a fn symbol resolved late and applied as `(ctx) -> ctx`. A throw
 leaves `ctx` unchanged, so a bad hook can't crash the loop."
-  (try ((reflect/eval hook) ctx) (catch e ctx)))
+  (try ((reflect/eval hook) ctx) (catch _e ctx)))
 
 (defn- layers-run-hooks (ctx hooks)
   "Thread `ctx` through a list of hooks (each `(ctx) -> ctx`)."

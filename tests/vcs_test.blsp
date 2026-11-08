@@ -156,7 +156,7 @@
          :files (fn (root) (fake-files root))
          :changed (fn (root) (list "changed-in" (path/basename root)))
          :base-text (fn (root path) (fake-base-text root path))
-         :id (fn (root) {:id "fn-id" :dirty? false})})
+         :id (fn (_root) {:id "fn-id" :dirty? false})})
       (assert= (files dir) (list (str "listed-under-" (path/basename dir))))
       (assert= (changed dir) (list "changed-in" (path/basename dir)))
       (assert= (base-text (path/join dir "y.txt")) "before:y.txt")

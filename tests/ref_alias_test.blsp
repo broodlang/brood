@@ -133,7 +133,7 @@
           _ (spawn
               (let (outcome (try
                               (gen/call-timeout srv [:slow 250] 30)
-                              (catch e :timed-out)))
+                              (catch _e :timed-out)))
                 ;; a second call is a barrier: the server is serial and its replies to
                 ;; this process arrive in order, so the late reply has been posted
                 (gen/call-timeout srv [:slow 0] test/*wait-ms*)

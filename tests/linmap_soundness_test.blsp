@@ -133,7 +133,7 @@
 (defn lm-fold-read (xs seed) (fold xs seed (fn (m x) (assoc m x (+ (get m x 0) (get m :w 0))))))
 (check-allow :type-mismatch
   (defn lm-fold-shadowed (xs)
-    (let (fold (fn (c i f) :mine)) (fold xs {} (fn (m x) (assoc m x (inc (get m x 0))))))))
+    (let (fold (fn (_c _i _f) :mine)) (fold xs {} (fn (m x) (assoc m x (inc (get m x 0))))))))
 
 ;; 6. (2026-10-23, KI-288) A body that OPENS with a quoted form. Both rewrites rebuilt every list
 ;; but returned a `(quote …)` as it was, so the in-place copy and the unrewritten one had the

@@ -329,7 +329,7 @@
   (test "the built-ins are registered and register-test-formatter adds more"
     (is (not (nil? (get test/*test-formatters* "tap"))))
     (is (not (nil? (get test/*test-formatters* "json"))))
-    (register-test-formatter "tsel-custom" (fn (r e) nil))
+    (register-test-formatter "tsel-custom" (fn (_r _e) nil))
     (is (not (nil? (get test/*test-formatters* "tsel-custom"))))))
 
 (describe "test formatters: TAP"

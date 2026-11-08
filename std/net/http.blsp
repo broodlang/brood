@@ -501,7 +501,7 @@ missing. The body is the file's raw bytes, so an image or an archive is served a
 ;; ---- routing ----------------------------------------------------------------
 (defn router (routes & fallback)
   "A handler that dispatches on the request's `:path` through `routes` (a map of path string → handler). An unmatched path goes to `fallback` (a handler) or a 404."
-  (let (miss (if (empty? fallback) (fn (req) (not-found)) (first fallback)))
+  (let (miss (if (empty? fallback) (fn (_req) (not-found)) (first fallback)))
     (fn (req)
       (let (h (/get routes (/get req :path)))
         (if (nil? h) (miss req) (h req))))))

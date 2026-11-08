@@ -29,7 +29,7 @@
   (if (= i 0)
     acc
     (xr-throwy (- i 1)
-      (+ acc (try (xr-thrower (if (= (math/rem i 1000) 0) -1 1)) (catch e 0))))))
+      (+ acc (try (xr-thrower (if (= (math/rem i 1000) 0) -1 1)) (catch _e 0))))))
 
 (def xr-t (table/new))
 (defn xr-effect (k) (do (table/put xr-t :n (+ 1 (table/get xr-t :n 0))) k))

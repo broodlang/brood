@@ -112,10 +112,10 @@
 (describe "impl conflict detection"
   :serial (test "a cross-module re-register overrides — last wins"
     (defability Ping (ping (self) :-> any))
-    (%register-impl 'Ping 'ping :int (fn (n) :a) 'lib-a)
+    (%register-impl 'Ping 'ping :int (fn (_n) :a) 'lib-a)
     (assert= (ping 1) :a)
     ;; a DIFFERENT module claims the same [ability op id] — warns, last wins
-    (%register-impl 'Ping 'ping :int (fn (n) :b) 'lib-b)
+    (%register-impl 'Ping 'ping :int (fn (_n) :b) 'lib-b)
     (assert= (ping 1) :b))
   (test "a same-module re-register (hot reload) overrides silently"
     ;; the `impl` macro tags both with THIS module — same provenance → no warning
@@ -209,13 +209,13 @@
   :serial (test "type-owner beats ability-owner regardless of registration order"
     ;; PaintA/PaintB owned by 'artlib; the record shapes/circle owned by 'shapes.
     (%register-ability 'PaintA '((paint (self))) 'artlib)
-    (%register-impl 'PaintA 'paint :shapes/circle (fn (x) :ability) 'artlib)
-    (%register-impl 'PaintA 'paint :shapes/circle (fn (x) :type) 'shapes)
+    (%register-impl 'PaintA 'paint :shapes/circle (fn (_x) :ability) 'artlib)
+    (%register-impl 'PaintA 'paint :shapes/circle (fn (_x) :type) 'shapes)
     (assert= ((%impl-for '[PaintA paint] :shapes/circle) nil) :type)
     ;; reverse order — same winner (the point: order-independent)
     (%register-ability 'PaintB '((paint (self))) 'artlib)
-    (%register-impl 'PaintB 'paint :shapes/circle (fn (x) :type) 'shapes)
-    (%register-impl 'PaintB 'paint :shapes/circle (fn (x) :ability) 'artlib)
+    (%register-impl 'PaintB 'paint :shapes/circle (fn (_x) :type) 'shapes)
+    (%register-impl 'PaintB 'paint :shapes/circle (fn (_x) :ability) 'artlib)
     (assert= ((%impl-for '[PaintB paint] :shapes/circle) nil) :type))
   ; owns neither
   (test "%impl-rank orders type-owner > ability-owner > other"
@@ -227,7 +227,7 @@
     (assert= (%impl-rank 'Ranked :m/rec 'stranger) 1))
   (test "the ability owner may impl for a built-in id"
     (%register-ability 'Sized '((sz (self))) 'sizelib)
-    (%register-impl 'Sized 'sz :int (fn (n) :int-sz) 'sizelib)
+    (%register-impl 'Sized 'sz :int (fn (_n) :int-sz) 'sizelib)
     (assert= ((%impl-for '[Sized sz] :int) nil) :int-sz))
   (test "%ability-owner-ns records the defining namespace"
     (%register-ability 'Owned '((op (self))) 'mymod)
@@ -237,7 +237,7 @@
   ;; path — `%register-impl` with a nil `from`, then dispatch — which reproduces the crash.
   (test "a nil `from` (root/REPL impl) doesn't crash — dispatch round-trips"
     (%register-ability 'RootAb '((op (self))) 'somens)
-    (%register-impl 'RootAb 'op :int (fn (n) :root-impl) nil)
+    (%register-impl 'RootAb 'op :int (fn (_n) :root-impl) nil)
     (assert= ((%impl-for '[RootAb op] :int) nil) :root-impl))
   ;; a NESTED-namespace module (e.g. editor/display) owns its record's id — the split is
   ;; on the LAST `/` (the record name), so all leading segments stay in the owner name.
@@ -264,15 +264,15 @@
   (test "an app/root impl (from=nil) is not displaced by a later lower tier"
     (%register-ability 'HoldAb '((op (self))) 'holdlib)
     ;; app (nil) first, then ability-owner, type-owner, and 'other — none may displace it.
-    (%register-impl 'HoldAb 'op :h/rec (fn (x) :app) nil)
-    (%register-impl 'HoldAb 'op :h/rec (fn (x) :ability) 'holdlib)
-    (%register-impl 'HoldAb 'op :h/rec (fn (x) :type) 'h)
-    (%register-impl 'HoldAb 'op :h/rec (fn (x) :other) 'stranger)
+    (%register-impl 'HoldAb 'op :h/rec (fn (_x) :app) nil)
+    (%register-impl 'HoldAb 'op :h/rec (fn (_x) :ability) 'holdlib)
+    (%register-impl 'HoldAb 'op :h/rec (fn (_x) :type) 'h)
+    (%register-impl 'HoldAb 'op :h/rec (fn (_x) :other) 'stranger)
     (assert= ((%impl-for '[HoldAb op] :h/rec) nil) :app)
     ;; and for a built-in id, app-first then the ability owner: app still wins.
     (%register-ability 'HoldB '((op (self))) 'hblib)
-    (%register-impl 'HoldB 'op :int (fn (n) :app) nil)
-    (%register-impl 'HoldB 'op :int (fn (n) :ability) 'hblib)
+    (%register-impl 'HoldB 'op :int (fn (_n) :app) nil)
+    (%register-impl 'HoldB 'op :int (fn (_n) :ability) 'hblib)
     (assert= ((%impl-for '[HoldB op] :int) nil) :app)))
 
 ;; ---- variadic ops: a `&`-rest op dispatches on the first arg, passes the rest ----
@@ -390,7 +390,7 @@
     (let (n 120)
       (dotimes (i n) (abt-conc-declare i))
       (concurrently n
-        (fn (i) (%register-impl (abt-conc-name i) (abt-conc-op i) :int (fn (x) i) nil)))
+        (fn (i) (%register-impl (abt-conc-name i) (abt-conc-op i) :int (fn (_x) i) nil)))
       ;; before the fix this lost roughly 40% of them
       (assert= (count (seq/reject (range n) abt-conc-registered?)) 0))))
 

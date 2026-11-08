@@ -102,11 +102,11 @@
     (repl/register-repl-command {:names '("rt-dup")
                                  :usage ",rt-dup"
                                  :summary "one"
-                                 :handler (fn (r) nil)})
+                                 :handler (fn (_r) nil)})
     (repl/register-repl-command {:names '("rt-dup")
                                  :usage ",rt-dup"
                                  :summary "two"
-                                 :handler (fn (r) nil)})
+                                 :handler (fn (_r) nil)})
     (assert= 1
       (count (seq/filter repl/*repl-commands*
                (fn (c) (repl/repl-has-name? (get c :names) "rt-dup")))))
@@ -117,7 +117,7 @@
                                  :usage ",rt-hidden"
                                  :summary "quiet"
                                  :hidden true
-                                 :handler (fn (r) nil)})
+                                 :handler (fn (_r) nil)})
     (is (not (nil? (repl/repl-command-for "rt-hidden"))))))
 
 ;; Cross-process: the error map crosses a heap boundary (send deep-copies it)

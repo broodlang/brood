@@ -188,7 +188,7 @@
         ; cast: leaves a message queued…
         (send p [:get (self)])
         ; …so the server handles both without suspending
-        (receive (v nil))
+        (receive (_v nil))
         (tco-hammer p (- k 1))))
     (let (p (spawn (tco-srv 0)))
       (tco-hammer p 500)

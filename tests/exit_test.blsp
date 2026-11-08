@@ -17,11 +17,11 @@
 ; parks forever on an empty mailbox
 (defn ex-park () (receive (x x)))
 ; a receive loop (one iteration per message)
-(defn ex-echo () (receive (m (ex-echo))))
+(defn ex-echo () (receive (_m (ex-echo))))
 ;; native-nested receives — a `receive` reached through a native frame (`try`/HOF), so
 ;; it BLOCKS the worker on the mailbox condvar instead of capturing (§7.4). An exit must
 ;; still reach it (unwind with `Control::Kill`); the `catch` must NOT swallow the signal.
-(defn ex-park-try () (try (receive (x x)) (catch e :caught)))
+(defn ex-park-try () (try (receive (x x)) (catch _e :caught)))
 (defn ex-park-map () (map [1] (fn (_) (receive (x x)))))
 
 ;; A body that signals itself and then simply ENDS — it never reaches another `receive`,
@@ -122,7 +122,7 @@
 ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
 (defn ex-spin-eval-try (parent)
   (binding (*exit-test-announce-to* parent)
-    (try (reflect/eval-string ex-spin-source) (catch e :caught))))
+    (try (reflect/eval-string ex-spin-source) (catch _e :caught))))
 (defn ex-await-spinning ()
   (receive (:spinning :spinning) (after test/*wait-ms* :timeout)))
 
@@ -164,7 +164,7 @@
   (if (empty? ps) nil (do (exit (first ps) :bye) (ex-kill-all (rest ps)))))
 (defn ex-collect-downs (k)
   ; tail-recursive via the receive trampoline
-  (if (= k 0) :all-down (receive ([:down a b c] (ex-collect-downs (- k 1))))))
+  (if (= k 0) :all-down (receive ([:down _a _b _c] (ex-collect-downs (- k 1))))))
 
 (describe "exit under load"
   :isolated (test "mass kill: spawn 100 parked processes, exit all, collect every :down"

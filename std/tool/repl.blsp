@@ -249,7 +249,7 @@ forms into the eval rather than fail cleanly."
               a (reflect/eval-string (str "(reflect/arglist " name ")")))
           (io/puts (str "\e[36m(" name (if a (str " " (string/join (map a str) " ")) "") ")\e[0m"))
           (io/puts (if d (str "\e[90m" d "\e[0m") "\e[90m(no documentation)\e[0m")))
-        (catch e (io/puts (str "\e[90m(no such name: " name ")\e[0m")))))))
+        (catch _e (io/puts (str "\e[90m(no such name: " name ")\e[0m")))))))
 
 ;; `,type` and `,time` EVALUATE user code, so they run through `repl-call` — the same
 ;; interruptible runner as ordinary forms. `,time` exists precisely for expressions
@@ -665,7 +665,7 @@ read error — a missing or unreadable history file must never stop the REPL sta
   (try
     (let (path (repl-history-path))
       (if (file/exists? path) (repl-history<-text (file/slurp path)) '()))
-    (catch e '())))
+    (catch _e '())))
 
 (defn- repl-save-history (history)
   "Write the most recent `*repl-history-max*` entries to the history file (oldest
@@ -673,7 +673,7 @@ first, one per line). Best-effort: a write failure is swallowed, never breaking 
 loop."
   ;; check-allow :discarded-catch — best-effort history / rc / cwd / half-typed input: nothing to report yet
   (check-allow :discarded-catch
-    (try (file/spit (repl-history-path) (repl-history->text history)) (catch e nil))))
+    (try (file/spit (repl-history-path) (repl-history->text history)) (catch _e nil))))
 
 ;; ---- I/O loop ---------------------------------------------------------------
 

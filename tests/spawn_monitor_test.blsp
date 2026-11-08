@@ -55,7 +55,7 @@
 
   (test "a zero-arg lambda body is passed through, not re-wrapped"
     ;; Same contract as `spawn`/`spawn-link`: `(fn () …)` is the thunk, not a value to wrap.
-    (let ([p r] (spawn-monitor (fn () (error "from a lambda"))))
+    (let ([_p r] (spawn-monitor (fn () (error "from a lambda"))))
       (let (reason (receive ([:down ^r _ reason] reason) (after test/*wait-ms* :lost)))
         (assert= :error (first reason))
         (assert= "from a lambda" (:message (second reason))))))

@@ -180,7 +180,7 @@
     (assert= (path/substitute "/tmp/~brood-surely-no-such-user/x")
       "/tmp/~brood-surely-no-such-user/x"))
   (test "keep? claims a ~ component as a file of the directory before it"
-    (let (seen (path/substitute "/srv/$$a/~/x" (fn (directory component) (= directory "/srv/$a/"))))
+    (let (seen (path/substitute "/srv/$$a/~/x" (fn (directory _component) (= directory "/srv/$a/"))))
       (assert= seen "/srv/$a/~/x")))
   (test "a variable that holds an absolute path starts over too"
     (assert= (path/substitute "/tmp/$HOME/a") (str (%getenv "HOME") "/a")))

@@ -34,7 +34,7 @@
   "`:ok` if `path` parses as JSON, `:rejected` if anything refuses it."
   (try
     (do (json/decode (file/slurp path)) :ok)
-    (catch e :rejected)))
+    (catch _e :rejected)))
 
 (defn- js-kind (path) (string/substring (path/basename path) 0 1))
 

@@ -46,7 +46,7 @@
       (check-allow :discarded-catch
         (try
           (seq/transduce [1 2]
-            (comp (run-spy seen) (seq/xmap (fn (x) (error "boom"))))
+            (comp (run-spy seen) (seq/xmap (fn (_x) (error "boom"))))
             []
             conj)
           (catch _ nil)))

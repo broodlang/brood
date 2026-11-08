@@ -105,7 +105,7 @@
     ;; private fails to COMPILE at load (it used to be reachable — "soft privacy")
     (is (= (try
              (%load-string "(defmodule iappC2 (:use ilibC)) (defn peek () (ilibC/hidden))")
-             (catch e :blocked))
+             (catch _e :blocked))
           :blocked))
     ;; …unless it declares the grant — the explicit @testable seam
     (%load-string "(defmodule iappC3 (:use-internals ilibC)) (defn peek () (ilibC/hidden))")
@@ -271,7 +271,7 @@
     (%load-string (str "(defmodule mm-i1) (defn secret () 1)"
                     " (defmodule mm-i2) (defn peek () (secret))"))
     ;; `secret` is mm-i1's; a bare reference from mm-i2 is not mm-i2's own → unbound.
-    (is (= (try (mm-i2/peek) (catch e :unbound)) :unbound)))
+    (is (= (try (mm-i2/peek) (catch _e :unbound)) :unbound)))
 
   (test "a forward reference within a later module's region resolves"
     (%load-string (str "(defmodule mm-f1) (defn f () 1)"
@@ -295,7 +295,7 @@
 (defn- ns-loads? (src)
   "True if `src` loads without error — the clash, if any, never fired."
   ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
-  (check-allow :discarded-catch (try (do (%load-string src) true) (catch e false))))
+  (check-allow :discarded-catch (try (do (%load-string src) true) (catch _e false))))
 
 (defn- ns-load-error (src)
   (try (do (%load-string src) "") (catch e (str (error-message e)))))

@@ -91,7 +91,7 @@ be silent: `read-warnings` says what this left out and why.
             {}
             (fn (acc pair) (if (= (count pair) 2) (assoc acc (first pair) (second pair)) acc)))
           {}))
-      (catch e {}))))
+      (catch _e {}))))
 
 (defn read-file (file:string head:symbol -> map)
   "`read-form` over the contents of `file` — `{}` when the file is missing or unreadable.
@@ -99,7 +99,7 @@ be silent: `read-warnings` says what this left out and why.
     (settings/read-file \"/no/such/settings-file.blsp\" 'config)   ;=> {}"
   (check-allow :discarded-catch
     (if (file/exists? file)
-      (try (read-form (file/slurp file) head) (catch e {}))
+      (try (read-form (file/slurp file) head) (catch _e {}))
       {})))
 
 (defn- head-form? (form head)
@@ -115,7 +115,7 @@ it reads."
   "`[form]` when the first form of `text` reads, else nil — a vector, so a first form that is
 itself nil still counts as read."
   (check-allow :discarded-catch
-    (try [(reflect/read-first text)] (catch e nil))))
+    (try [(reflect/read-first text)] (catch _e nil))))
 
 (defn read-warnings (text:string head:symbol label:string -> vector)
   "What `read-form` could not take from `text`, as readable strings that start with `label`

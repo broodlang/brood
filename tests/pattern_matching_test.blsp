@@ -99,8 +99,8 @@
   (test "fixed length, element-wise"
     (assert= (match (list 1 2 3) ((a b c) (list c b a))) (list 3 2 1)))
   (test "length mismatch falls through"
-    (assert= (match (list 1 2) ((a b c) :three) (_ :other)) :other)
-    (assert= (match (list 1 2 3 4) ((a b c) :three) (_ :other)) :other))
+    (assert= (match (list 1 2) ((_a _b _c) :three) (_ :other)) :other)
+    (assert= (match (list 1 2 3 4) ((_a _b _c) :three) (_ :other)) :other))
   (test "head + & rest"
     (assert= (match (list 1 2 3 4) ((h & t) (list h t))) (list 1 (list 2 3 4)))
     (assert= (match (list 9) ((h & t) (list h t))) (list 9 nil)))
@@ -109,7 +109,7 @@
     (assert= (match (list 1 2 3 4 5) ((a b & rest) (list a b rest))) (list 1 2 (list 3 4 5))))
   (test "& binds the whole list" (assert= (match (list 1 2 3) ((& all) all)) (list 1 2 3)))
   (test "(h & t) requires at least one element"
-    (assert= (match nil ((h & t) :nonempty) (_ :empty)) :empty))
+    (assert= (match nil ((_h & _t) :nonempty) (_ :empty)) :empty))
   (test "literal heads (list-tagged data)"
     (assert= (match (list :ok 42) ((:ok v) v) (_ :no)) 42)
     (assert= (match (list :err 1) ((:ok v) v) (_ :no)) :no))
@@ -124,10 +124,11 @@
     (assert= (match [] ([] :empty) (_ :no)) :empty)
     (assert= (match [1] ([] :empty) (_ :no)) :no))
   (test "fixed length" (assert= (match [1 2 3] ([a b c] (+ a b c))) 6))
-  (test "length mismatch falls through" (assert= (match [1 2] ([a b c] :three) (_ :other)) :other))
+  (test "length mismatch falls through"
+    (assert= (match [1 2] ([_a _b _c] :three) (_ :other)) :other))
   (test "a list is not a vector (and vice versa)"
-    (assert= (match (list 1 2) ([a b] :vec) (_ :not-vec)) :not-vec)
-    (assert= (match [1 2] ((a b) :lst) (_ :not-lst)) :not-lst))
+    (assert= (match (list 1 2) ([_a _b] :vec) (_ :not-vec)) :not-vec)
+    (assert= (match [1 2] ((_a _b) :lst) (_ :not-lst)) :not-lst))
   (test "tagged vector — the idiom"
     (assert= (match [:ok 42] ([:ok v] v) ([:err e] (list :e e))) 42)
     (assert= (match [:err 99] ([:ok v] v) ([:err e] (list :e e))) (list :e 99)))
@@ -142,7 +143,7 @@
   (test ":or supplies a default for an absent key"
     (assert= (match {:a 1} ({:keys [a b] :or {b 9}} (list a b))) (list 1 9)))
   (test ":or is ignored when the key is present"
-    (assert= (match {:a 1 :b 2} ({:keys [a b] :or {b 9}} b)) 2))
+    (assert= (match {:a 1 :b 2} ({:keys [b] :or {b 9}} b)) 2))
   (test "a non-map falls through"
     (assert= (match 5 ({:keys [a]} a) (_ :not-a-map)) :not-a-map)
     (assert= (match [1 2] ({:keys [a]} a) (_ :not-a-map)) :not-a-map))
@@ -211,8 +212,8 @@
     (assert= (match [2 2] ([x x] :when (> x 0) :pos-eq) (_ :no)) :pos-eq)
     (assert= (match [2 3] ([x x] :when (> x 0) :pos-eq) (_ :no)) :no))
   (test "guard on a destructured tag"
-    (assert= (match [:n 5] ([:n v] :when (> v 0) :pos) ([:n v] :nonpos)) :pos)
-    (assert= (match [:n 0] ([:n v] :when (> v 0) :pos) ([:n v] :nonpos)) :nonpos)))
+    (assert= (match [:n 5] ([:n v] :when (> v 0) :pos) ([:n _v] :nonpos)) :pos)
+    (assert= (match [:n 0] ([:n v] :when (> v 0) :pos) ([:n _v] :nonpos)) :nonpos)))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
 ;; FUNCTION-HEAD GUARDS — :when on fn/defn clause heads (ADR-226). A guarded clause
@@ -330,7 +331,7 @@
   (test "a guarded irrefutable clause is NOT unreachable"
     (assert= (try
                (do (reflect/macroexpand '(match 1 (x :when (> x 0) :pos) (_ :np))) :ok)
-               (catch e :err))
+               (catch _e :err))
       :ok))
   (test "malformed & — must be followed by exactly one tail pattern"
     (assert-error (reflect/macroexpand '(match (list 1) ((a & b c) :x))))
@@ -397,8 +398,8 @@
     (assert= (match [1 2] ((and w [a b]) [w a b])) [[1 2] 1 2]))
   (test "later patterns see the names earlier ones bound"
     ;; a repeated name is an equality constraint, as everywhere else
-    (assert= (match [7 7] ((and [a b] [_ ^a]) a) (_ :no)) 7)
-    (assert= (match [7 8] ((and [a b] [_ ^a]) a) (_ :no)) :no)))
+    (assert= (match [7 7] ((and [a _b] [_ ^a]) a) (_ :no)) 7)
+    (assert= (match [7 8] ((and [a _b] [_ ^a]) a) (_ :no)) :no)))
 
 (describe "general map sub-patterns"
   (test "{key subpattern} matches the value at that key"
@@ -528,8 +529,8 @@
   (test "multi-clause fn inside a quasiquote unquote"
     (assert= `(r ~((fn ((0) :z) ((n) :nz)) 5)) (list 'r :nz)))
   (test "shadowing = does not break a match (the matcher emits %eq)"
-    (assert= (let (= (fn (a b) false)) (match 1 (1 :one) (_ :other))) :one)
-    (assert= (let (= (fn (a b) true)) (match 1 (2 :two) (_ :other))) :other)))
+    (assert= (let (= (fn (_a _b) false)) (match 1 (1 :one) (_ :other))) :one)
+    (assert= (let (= (fn (_a _b) true)) (match 1 (2 :two) (_ :other))) :other)))
 
 ;; :serial — these define a macro/global, like the fn/defn group above.
 (describe "lowering fallback via same-form macros"
@@ -560,13 +561,13 @@
     (assert= (match (pm-circle 9) ((record pm-circle) :yes)) :yes))
   (test "a non-matching record id falls through to the next clause"
     (assert= (match (pm-rect 1 1)
-               ((record pm-circle {:r r}) :circle)
-               ((record pm-rect {:w w :h h}) :rect))
+               ((record pm-circle {:r _r}) :circle)
+               ((record pm-rect {:w _w :h _h}) :rect))
       :rect))
   (test "a plain map with the same fields is NOT a record match"
-    (assert= (match {:r 5} ((record pm-circle {:r r}) :circle) (_ :map)) :map))
+    (assert= (match {:r 5} ((record pm-circle {:r _r}) :circle) (_ :map)) :map))
   (test "a non-map value is NOT a record match"
-    (assert= (match 42 ((record pm-circle {:r r}) :circle) (_ :other)) :other))
+    (assert= (match 42 ((record pm-circle {:r _r}) :circle) (_ :other)) :other))
   (test "a record pattern composes with a :when guard"
     (assert= (match (pm-circle 10)
                ((record pm-circle {:r r}) :when (> r 5) :big)

@@ -60,7 +60,7 @@ text — no state to carry, so no line above the window is ever lexed, and an un
 line is never lexed twice. Every `editor/lexer` grammar is one: `lexer-line-lexer`.
 
     (:stateless? (editor/line-cache/stateless-lexer (fn (line) [])))   ;=> true"
-  {:lex (fn (line state) [(spans-of line) nil]) :initial nil :stateless? true})
+  {:lex (fn (line _state) [(spans-of line) nil]) :initial nil :stateless? true})
 
 (defn line-cache ()
   "An empty line-state cache: what `line-cache-update` takes the first time, and what a
@@ -267,7 +267,7 @@ at or before `i` with an entry; `acc` the window's absolute spans so far, last f
 below it and so not yet known to be true."
   (let (tree (:tree cache)
         verified (:verified cache)
-        [key entry] (lc-floor tree 0 (:lo job) [0 nil])
+        [key _entry] (lc-floor tree 0 (:lo job) [0 nil])
         from (if (and (not (nil? verified)) (> key verified)) verified key))
     (lc-walk cache job from (first (lc-get tree 0 from)) from acc)))
 

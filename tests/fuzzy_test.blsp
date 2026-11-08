@@ -168,11 +168,11 @@
           _ (fuzzy/top "view_9" big-corpus 5)
           strays (fold (range 40)
                    0
-                   (fn (n _) (receive ([:fuzzy-ranked t i r] (inc n)) (after 50 n)))))
+                   (fn (n _) (receive ([:fuzzy-ranked _t _i _r] (inc n)) (after 50 n)))))
       (assert= timed-out answer) ; the answer is whole either way
       (assert= strays 0)))
   (test "a scorer that throws does not hang the ranking"
-    (assert-error (binding (fuzzy/*scorer* (fn (q options) (fn (c) (throw :boom)))
+    (assert-error (binding (fuzzy/*scorer* (fn (_q _options) (fn (_c) (throw :boom)))
                             fuzzy/*worker-timeout-ms* 200)
                     (fuzzy/top "view" big-corpus 5)))))
 
@@ -181,7 +181,7 @@
 ;; including the sharded one, whose workers must be HANDED the scorer rather than inheriting
 ;; a dynamic binding (they don't — bindings are per-process).
 
-(def- shortest-first (fn (q options) (fn (c) (if (includes? c q) (- 0 (string/length c)) nil))))
+(def- shortest-first (fn (q _options) (fn (c) (if (includes? c q) (- 0 (string/length c)) nil))))
 
 (describe "fuzzy/*scorer*"
   (test "a custom scorer replaces the rules"

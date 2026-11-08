@@ -23,7 +23,7 @@
 ;; ---- the lower tier registered AFTER the override: order does not matter --------------
 (defability Late (late (self) :-> string))
 (impl Late next-impl-test/person (late (p) (str "<" (next-impl) ">")))
-(%register-impl 'Late 'late :next-impl-test/person (fn (p) "lib") 'stranger)
+(%register-impl 'Late 'late :next-impl-test/person (fn (_p) "lib") 'stranger)
 
 ;; ---- nothing below the id's impl: the ability's :default ------------------------------
 (defability Shout (shout (self) :-> string))
@@ -37,7 +37,7 @@
 (%register-ability 'Chain '((chain (self))) 'chainlib)
 (defn- chain-middle (p)
   (conj (%next-impl 'Chain 'chain :next-impl-test/person 'chainlib [p]) :mid))
-(%register-impl 'Chain 'chain :next-impl-test/person (fn (p) [:other]) 'stranger)
+(%register-impl 'Chain 'chain :next-impl-test/person (fn (_p) [:other]) 'stranger)
 (%register-impl 'Chain 'chain :next-impl-test/person chain-middle 'chainlib)
 (impl Chain next-impl-test/person (chain (p) (conj (next-impl) :top)))
 (defn- chain (p) ((%impl-for '[Chain chain] :next-impl-test/person) p))

@@ -144,7 +144,7 @@
                       (spawn (send me [:result k (paused-then-drained 64)]))))
           results (map (range 4)
                     (fn (_)
-                      (receive ([:result k r] r) (after 60000 :timeout)))))
+                      (receive ([:result _k r] r) (after 60000 :timeout)))))
       (assert= (count workers) 4)
       (doseq (r results)
         (is (vector? r))

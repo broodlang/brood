@@ -242,7 +242,7 @@
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
         (tcp/set-binary s true)
-        (dotimes (i 200) (send (self) [:tcp s (bytes/concat "0123456789")]))
+        (dotimes (_i 200) (send (self) [:tcp s (bytes/concat "0123456789")]))
         (send (self) [:tcp s (bytes/concat "END\r\n\r\nrest")])
         (let (r (read-until s "\r\n\r\n"))
           (tcp/close c)

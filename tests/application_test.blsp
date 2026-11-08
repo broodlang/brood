@@ -113,7 +113,7 @@
         (after test/*wait-ms* (assert= :back :timeout)))))
   (test "workers each start and stop their own copy"
     (let (me (self))
-      (doseq (i (range 0 4)) (spawn (send me [:checked (check top)])))
+      (doseq (_i (range 0 4)) (spawn (send me [:checked (check top)])))
       (assert= (seq/repeat 4 (list 'base 'left 'right 'top))
         (map (range 0 4)
           (fn (_) (receive ([:checked names] names) (after test/*wait-ms* :timeout))))))))

@@ -109,7 +109,7 @@
     ;; a map folds as its [k v] pairs, through the ordinary fold
     (assert= 3 (fold {:a 1 :b 2} 0 (fn (acc kv) (+ acc (nth kv 1)))))
     ;; a string is not seqable here either way
-    (assert-error "expected" (fold "abc" 0 (fn (acc x) (+ acc 1)))))
+    (assert-error "expected" (fold "abc" 0 (fn (acc _x) (+ acc 1)))))
 
   (test "a list fold stops at a failure accumulator (ADR-315), a vector fold does not"
     (let (f (failure "stop"))
@@ -120,7 +120,7 @@
         (assert= nil (table/get seen 3)))))
 
   (test "a shadowed name anywhere in the form declines the rewrite, and the shadow wins"
-    (assert= 9 (let (range (fn (n) (list 9))) (fold (range 3) 0 (fn (acc x) x))))))
+    (assert= 9 (let (range (fn (_n) (list 9))) (fold (range 3) 0 (fn (_acc x) x))))))
 
 ;; `(reduce coll init f)` is `(fold coll init f)` and takes the same counted loop.
 (describe "a reduce over a range with a literal is the same loop"
@@ -131,7 +131,8 @@
     (assert= [2 4 6 8] (reduce (range 2 9 2) [] (fn (acc x) (conj acc x)))))
 
   (test "nested, with the outer element captured — the nqueens shape"
-    (assert= 285 (reduce (range 10) 0 (fn (acc i) (+ acc (reduce (range i) 0 (fn (a j) (+ a i))))))))
+    (assert= 285
+      (reduce (range 10) 0 (fn (acc i) (+ acc (reduce (range i) 0 (fn (a _j) (+ a i))))))))
 
   (test "the body's effects run once per element; its error is its own"
     (let (seen (table/new))
@@ -144,7 +145,7 @@
     (assert= 6 (reduce [1 2 3] 0 (fn (acc x) (+ acc x))))
     (assert= 6 (reduce '(1 2 3) 0 (fn (acc x) (+ acc x))))
     (assert= 6 (reduce (range 4) (fn (acc x) (+ acc x))))
-    (assert= :mine (let (reduce (fn (c i f) :mine)) (reduce (range 3) 0 (fn (acc x) x))))))
+    (assert= :mine (let (reduce (fn (_c _i _f) :mine)) (reduce (range 3) 0 (fn (_acc x) x))))))
 
 (describe "across processes: a rewritten reduce in many processes at once"
   :isolated (test "eight workers each fold their own range and agree"

@@ -91,7 +91,7 @@
   (test "a non-empty collection starts from its first item"
     (assert= 6 (reduce [1 2 3] +))
     (assert= 7 (reduce [7] +))
-    (assert= [:a 1] (reduce {:a 1} (fn (acc kv) acc))))
+    (assert= [:a 1] (reduce {:a 1} (fn (acc _kv) acc))))
   (test "an empty collection with no start raises instead of answering nil"
     (is (includes? (error-of (reduce [] +)) "reduce: an empty collection and no start value"))
     (is (includes? (error-of (reduce (list) +)) "give one: (reduce coll start f)"))
@@ -108,15 +108,15 @@
   (test "all :cont behaves like fold"
     (assert= 15 (reduce-while [1 2 3 4 5] 0 (fn (a x) [:cont (+ a x)]))))
   (test "halts on the first element"
-    (assert= :seed (reduce-while [1 2 3] :seed (fn (a x) [:halt a]))))
+    (assert= :seed (reduce-while [1 2 3] :seed (fn (a _x) [:halt a]))))
   (test "empty collection yields the init unchanged"
-    (assert= :init (reduce-while [] :init (fn (a x) [:cont x]))))
+    (assert= :init (reduce-while [] :init (fn (_a x) [:cont x]))))
   (test "finds the first element over a threshold"
     (assert= 4 (reduce-while [1 2 3 4 5] nil (fn (a x) (if (> x 3) [:halt x] [:cont a])))))
   (test "folds a map's [k v] pairs"
-    (assert= 6 (reduce-while {:a 1 :b 2 :c 3} 0 (fn (a [k v]) [:cont (+ a v)]))))
+    (assert= 6 (reduce-while {:a 1 :b 2 :c 3} 0 (fn (a [_k v]) [:cont (+ a v)]))))
   (test "errors on a return that is neither [:cont acc] nor [:halt acc]"
-    (assert-error (reduce-while [1] 0 (fn (a x) 42))))
+    (assert-error (reduce-while [1] 0 (fn (_a _x) 42))))
   (test "across processes: the reduced value round-trips through send"
     :isolated (let (me (self)
           n 6

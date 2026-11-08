@@ -86,7 +86,7 @@
           me (self))
       (file/spit path src)
       (reflect/set-load-path (cons "/tmp" *load-path*))
-      (doseq (k (range 8))
+      (doseq (_k (range 8))
         (spawn (send me
                  [:req-race
                    (try
@@ -103,7 +103,7 @@
   ;; loading (the later mod/fn call dies unbound with no pointer to the real error),
   ;; while every other process stalls out the full await window per attempt.
   (test "a failed require clears its loading marker; the retry re-raises the real error"
-    (let (_ (try (require-one 'no-such-module-xyz) (catch e :expected)))
+    (let (_ (try (require-one 'no-such-module-xyz) (catch _e :expected)))
       (refute (contains? *features-loading* "no-such-module-xyz"))
       ;; the retry must fail the SAME way — not fake success via a stale marker
       (assert-error (require-one 'no-such-module-xyz))))
@@ -240,7 +240,7 @@
   (test "a genuinely unrecognised clause is still a hard error"
     ;; The tightening this restores an exception to must keep working — a misspelled
     ;; clause that silently does nothing is the failure mode it exists to prevent.
-    (is (= (try (%load-string "(defmodule impl-d (:require foo))") (catch e :rejected)) :rejected)))
+    (is (= (try (%load-string "(defmodule impl-d (:require foo))") (catch _e :rejected)) :rejected)))
   (test "the error names :implements among the accepted clauses"
     (let (message (try
                     (%load-string "(defmodule impl-e (:nonsense x))")
@@ -261,7 +261,7 @@
     (is (check-allow :discarded-catch
           (try
             (do (%load-string "(defmodule clcons (:use clpa) (:use clpb))") true)
-            (catch e false))))
+            (catch _e false))))
     ;; referencing the shared bare name -> use-site ambiguity error naming both candidates
     (let (msg (try
                 (do

@@ -64,7 +64,7 @@
     (let (edge (str (string/repeat "[" 2000) (string/repeat "]" 2000))
           outcome (try
                     (if (vector? (json/decode edge)) :parsed :not-a-vector)
-                    (catch e :rejected)))
+                    (catch _e :rejected)))
       (is (or (= outcome :parsed) (= outcome :rejected))))
     ;; Well inside the envelope on any thread: a valid document MUST parse, so the depth
     ;; cap cannot be silently rejecting well-formed input.

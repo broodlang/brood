@@ -9,7 +9,7 @@
 (defn- spans-of (spans src role)
   "The texts of the spans painted in `role`'s face, in order."
   (let (f (face (get lexer-roles role)))
-    (map (seq/filter spans (fn ([s e face]) (= face f)))
+    (map (seq/filter spans (fn ([_s _e face]) (= face f)))
       (fn ([s e _]) (string/substring src s e)))))
 
 (defn- ordered? (spans)

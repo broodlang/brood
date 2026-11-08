@@ -41,7 +41,7 @@
   (test "a vector INSIDE a binding position still destructures"
     (assert= (let ([a b] [1 2]) (+ a b)) 3)
     (assert= ((fn ([x y]) (* x y)) [3 4]) 12)
-    (assert= (map [[:a 1] [:b 2]] (fn ([k v]) v)) '(1 2)))
+    (assert= (map [[:a 1] [:b 2]] (fn ([_k v]) v)) '(1 2)))
 
   (test "the list spellings all work"
     (assert= (let (a 1 b 2) (+ a b)) 3)
@@ -64,7 +64,7 @@
   (test "a bare symbol still BINDS (the trap the pin exists for)"
     (let (k :ok)
       ;; `k` here shadows and binds — it does not compare against :ok
-      (assert= (match [:nope 1] ([k v] k) (_ :other)) :nope)))
+      (assert= (match [:nope 1] ([k _v] k) (_ :other)) :nope)))
 
   (test "~expr in pattern position is an error naming ^"
     (is (includes? (err-of "(let (k 1) (match 1 (~k :hit) (_ :miss)))") "a pin is written `^k`")))
@@ -130,7 +130,7 @@
 
   (test "the one-binder forms still work"
     (assert= (try (throw :x) (catch e e)) :x)
-    (assert= (try (throw :x) (catch e (str "got") :recovered)) :recovered)))
+    (assert= (try (throw :x) (catch _e (str "got") :recovered)) :recovered)))
 
 (describe "ADR-619: one head grammar for every clause"
   (test "an &optional marker in a pattern-dispatched fn takes optional arguments"

@@ -30,7 +30,7 @@
       (assert= '(1 2) (:patterns e))
       (assert= "match: no clause matches 3 — tried 1, 2" (:message e))))
   (test "a refutable let and a pattern fn raise the same kind"
-    (assert= :let (:context (caught (fn () (let ([a b] [1]) a)))))
+    (assert= :let (:context (caught (fn () (let ([a _b] [1]) a)))))
     (assert= :match (:kind (caught (fn () (check-allow :type-mismatch ((fn ([a]) a) 5)))))))
   (test "throw raises its argument as it is"
     (assert= :found (caught (fn () (throw :found))))
