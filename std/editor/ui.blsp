@@ -362,14 +362,18 @@ snapshotted into the startup image (ADR-218) and the env var never consulted aga
     [(:cpu-us (%process-info (self)) 0) (:pause-total-us gc 0) (:collections gc 0)]))
 
 (defn- ui-timed (thunk)
-  "`[result elapsed-ms cost]` for `(thunk)` — the wall time a float in ms, off `os/now-ns`,
+  "`[result elapsed-ms cost gc-ms]` for `(thunk)` — the wall time a float in ms, off
+`os/now-ns`; the part of it this process spent in garbage collection, a float in ms
+(`proc/gc-us`, read always: two counter reads, what a slow-turn report carries as `:gc-ms`);
 and, when tracing, what it cost this process as trace text (nil otherwise): the CPU time
 it actually used, and how much of that was garbage collection (pause ms / collections)."
   (let (tracing (ui-trace?)
         before (when tracing (ui-cost-snapshot))
+        gc-before (proc/gc-us)
         started (os/now-ns)
         r (thunk)
-        ms (/ (- (os/now-ns) started) 1000000.0))
+        ms (/ (- (os/now-ns) started) 1000000.0)
+        gc-ms (/ (- (proc/gc-us) gc-before) 1000.0))
     [r
       ms
       (when tracing
@@ -378,7 +382,8 @@ it actually used, and how much of that was garbage collection (pause ms / collec
           (string/format "cpu=%.2fms gc=%.2fms/%d"
             (/ (- cpu1 cpu0) 1000.0)
             (/ (- pause1 pause0) 1000.0)
-            (- runs1 runs0))))]))
+            (- runs1 runs0))))
+      gc-ms]))
 
 (defn- ui-trace (phase ms detail &optional (cost nil))
   "One `ui-run: <phase>=<ms> cpu=<ms> gc=<ms>/<n> <detail>` line to stderr when
@@ -436,9 +441,11 @@ window's C-g) stops it once the turn is past `*ui-quit-busy-ms*`, and the fold o
 BACKGROUND message (`input?` false) is stopped by the loop itself past
 `ui-event-ceiling-ms`. An interrupted fold drops its input like a throwing one, keeps the
 previous model, and is reported through the watchdog with `:interrupted true`."
-  (let ([outcome ms cost] (ui-timed (fn ()
-                                      (ui-interruptible (if input? nil (ui-event-ceiling-ms model))
-                                        (fn () (update model input cols rows)))))
+  (let ([outcome ms cost gc-ms] (ui-timed (fn ()
+                                            (ui-interruptible (if input?
+                                                                nil
+                                                                (ui-event-ceiling-ms model))
+                                              (fn () (update model input cols rows)))))
         [how value] outcome)
     (do
       (when (= how :threw) (ui-log-error "update" value))
@@ -447,9 +454,10 @@ previous model, and is reported through the watchdog with `:interrupted true`."
       ;; reply, a diagnostics batch — with tracing off.
       (when (not (nil? cost)) (ui-trace "update" ms (ui-abbrev (pr-str input)) cost))
       (cond
-        (= how :interrupted) (ui-report-slow model "update" (ui-input-tag input) ms true input?)
+        (= how :interrupted)
+          (ui-report-slow model "update" (ui-input-tag input) ms gc-ms true input?)
         (and (> ms (ui-slow-ms model)) (ui-slow-update-due?))
-          (ui-report-slow model "update" (ui-input-tag input) ms false input?))
+          (ui-report-slow model "update" (ui-input-tag input) ms gc-ms false input?))
       (if (= how :ok) value model))))
 
 ;; ---- the watchdog (ADR-490) ---------------------------------------------------
@@ -481,12 +489,14 @@ itself, a vector by its leading keyword — and its second, when that is one too
         (first input))
     else (type-of input)))
 
-(defn- ui-report-slow (model phase tag ms interrupted? input?)
-  "Report one slow `phase` (\"update\" / \"view\") of `ms` on `tag` — or one the loop
-INTERRUPTED (ADR-491, `interrupted?`): to the model's `:on-slow` hook — `(fn (report) …)`,
-`report` a `{:phase :tag :ms :input}` map, with `:interrupted true` for an interrupted one,
-its result ignored — or, without one, a line on stderr. `:input` (`input?`) is true when
-the fold was the USER's input (a key, a click: what came on the priority lane, or what
+(defn- ui-report-slow (model phase tag ms gc-ms interrupted? input?)
+  "Report one slow `phase` (\"update\" / \"view\") of `ms` on `tag`, `gc-ms` of it spent
+collecting garbage — or one the loop INTERRUPTED (ADR-491, `interrupted?`): to the model's
+`:on-slow` hook — `(fn (report) …)`, `report` a `{:phase :tag :ms :gc-ms :input}` map
+(`:gc-ms` the part of `:ms` the loop's process spent in GC: a turn that was mostly a
+collection is fixed by what the process keeps alive, not by the code that ran), with
+`:interrupted true` for an interrupted one, its result ignored — or, without one, a line
+on stderr. `:input` (`input?`) is true when the fold was the USER's input (a key, a click: what came on the priority lane, or what
 `:poll-tagged` called input) and false for a background message or a timer — an editor
 says \"Quit\" for an interrupted INPUT turn only, and a tag alone cannot tell `:up` from
 `:lsp-diagnostics`. A view's report is `:input true`: only the quit key, the user, stops a
@@ -495,14 +505,20 @@ its echo area); one that throws is logged and dropped, since the watchdog must n
 crash of its own. nil."
   (let (hook (get model :on-slow)
         report (if interrupted?
-                 {:phase phase :tag tag :ms ms :input (if input? true false) :interrupted true}
-                 {:phase phase :tag tag :ms ms :input (if input? true false)}))
+                 {:phase phase
+                  :tag tag
+                  :ms ms
+                  :gc-ms gc-ms
+                  :input (if input? true false)
+                  :interrupted true}
+                 {:phase phase :tag tag :ms ms :gc-ms gc-ms :input (if input? true false)}))
     (do
       (if (nil? hook)
-        (io/puts (string/format "ui-run: %s %s %.1fms on %s"
+        (io/puts (string/format "ui-run: %s %s %.1fms (gc %.1fms) on %s"
                    (if interrupted? "interrupted" "slow")
                    phase
                    ms
+                   gc-ms
                    (pr-str tag))
           :to *err*)
         (try (hook report) (catch e (ui-log-error "on-slow" e))))
@@ -519,14 +535,14 @@ outside a loop (`editor/ui/*slow-reports*` nil)."
       (do (when reports (table/put reports :update-at now)) true)
       false)))
 
-(defn- ui-watch-view (model clock ms)
-  "The watchdog on a `view` of `ms`: report it when it is slow and no view report was
-made in the last `*ui-slow-view-quiet-ms*` (wall clock, `os/now`), stamping the report
-time on `clock` (`:slow-view-at`). The clock, unchanged when nothing was reported."
+(defn- ui-watch-view (model clock ms gc-ms)
+  "The watchdog on a `view` of `ms` (`gc-ms` of it collecting): report it when it is slow and
+no view report was made in the last `*ui-slow-view-quiet-ms*` (wall clock, `os/now`),
+stamping the report time on `clock` (`:slow-view-at`). The clock, unchanged when nothing was reported."
   (let (now (os/now)
         last (get clock :slow-view-at))
     (if (and (> ms (ui-slow-ms model)) (or (nil? last) (>= (- now last) *ui-slow-view-quiet-ms*)))
-      (do (ui-report-slow model "view" :view ms false true) (assoc clock :slow-view-at now))
+      (do (ui-report-slow model "view" :view ms gc-ms false true) (assoc clock :slow-view-at now))
       clock)))
 
 (defn- ui-fold-budget-ns (model)
@@ -649,30 +665,31 @@ the ceiling on any one turn, and `:done` stops it early."
             else [model nil state]))))))
 
 (defn- ui-render (model last-good clock view display cols rows)
-  "`(view model cols rows)` for one turn, as `[:frame ops memo-table ms]`; `:failed` when
+  "`(view model cols rows)` for one turn, as `[:frame ops memo-table ms gc-ms]`; `:failed` when
 `view` threw (logged), unless there is no `last-good` frame to fall back to (the first
-render), when the error re-raises; `[:interrupted nil nil ms]` when the quit key stopped it
+render), when the error re-raises; `[:interrupted nil nil ms gc-ms]` when the quit key stopped it
 (ADR-491) — reported through the watchdog, and the screen keeps its last frame. The
 previous turn's memoised fragments are in scope for `ui-memo` (ADR-336) — nil outside a
 loop, `{}` on the first turn."
-  (let ([outcome ms cost] (ui-timed
-                            (fn ()
-                              (ui-interruptible nil
-                                (fn ()
-                                  ;; the harvest walks every op too: inside the window
-                                  (ui-harvest (binding (editor/ui/*memo* (or (get clock :memo) {}))
-                                                (view model cols rows))
-                                    (get display :fragments?))))))
+  (let ([outcome ms cost gc-ms] (ui-timed
+                                  (fn ()
+                                    (ui-interruptible nil
+                                      (fn ()
+                                        ;; the harvest walks every op too: inside the window
+                                        (ui-harvest (binding (editor/ui/*memo* (or (get clock :memo)
+                                                                                 {}))
+                                                      (view model cols rows))
+                                          (get display :fragments?))))))
         [how value] outcome)
     (if (= how :interrupted)
-      (do (ui-report-slow model "view" :view ms true true) [:interrupted nil nil ms])
+      (do (ui-report-slow model "view" :view ms gc-ms true true) [:interrupted nil nil ms gc-ms])
       (try
         (if (= how :threw)
           (throw value)
           (let ([flat table] value)
             (do
               (ui-trace "view" ms (str (count flat) " ops, " (count table) " memo") cost)
-              [:frame flat table ms])))
+              [:frame flat table ms gc-ms])))
         (catch e
           (if (nil? last-good)
             ; first render failed — a real startup bug, not a wedge
@@ -739,7 +756,9 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                        clock
                        (assoc clock :memo (nth rendered 2) :shown [model cols rows]))
               ;; the watchdog on the view: rate-limited, its last report on the clock
-              clock (if (not drawn) clock0 (ui-watch-view model clock0 (nth rendered 3))))
+              clock (if (not drawn)
+                      clock0
+                      (ui-watch-view model clock0 (nth rendered 3) (nth rendered 4))))
           (do
             (if (not drawn)
               ;; nothing to draw, but a display that paces on its frames (the GUI's

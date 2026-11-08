@@ -625,6 +625,7 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `%spawn-named` | 2 | — |
 | `proc/alive?` | 1 | Is `pid` a live process on this node? |
 | `proc/busy?` | 1 | Whether pid is BUSY (ADR-491): true while it has been running in one open interrupt window (`proc/interruptible`) for at least its quit key's busy-ms (300 without one), false … |
+| `proc/gc-us` | 0 | The calling process's cumulative GC pause time in µs (its LOCAL heap's collections). Two reads around a step say how much of it was GC — a UI loop's slow-turn `:gc-ms` (ADR-490). |
 | `proc/interrupt` | 1 | Interrupt pid at its next safepoint (ADR-491) — Emacs's quit, from outside: its running computation raises a catchable `{:kind :interrupted …}` there. |
 | `proc/interruptible` | 2 | Run `(thunk)` in an INTERRUPT WINDOW (ADR-491): `[:ok value]`, or `[:interrupted e]` when it was stopped mid-computation — by `proc/interrupt`, by the process's quit key … |
 | `proc/receive-lane` | 1 | Take the oldest message of any kind, waiting up to ms (nil: forever), and say which lane it came on: `[msg :priority]` for one sent with `proc/send-priority` (a window's … |
