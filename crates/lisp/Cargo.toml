@@ -362,6 +362,10 @@ unicode-segmentation = "1"
 # makes that true — "é" as U+00E9 and as U+0065 U+0301 are different strings until
 # one of them is normalised. Same tier as the two above: tiny tables, always linked.
 unicode-normalization = "0.1"
+# Line-break opportunities (`string/break-opportunities`, UAX #14): the line-break class
+# table and pair rules a word wrap needs for CJK and punctuation. Already in the tree
+# (cosmic-text breaks lines with it); tiny, no dependencies, so always linked.
+unicode-linebreak = "0.1"
 cranelift-jit = { version = "0.137", optional = true }
 cranelift-module = { version = "0.137", optional = true }
 cranelift-codegen = { version = "0.137", optional = true }

@@ -540,6 +540,7 @@ dependencies = [
  "tree-sitter-elixir",
  "tree-sitter-language",
  "tree-sitter-ruby",
+ "unicode-linebreak",
  "unicode-normalization",
  "unicode-segmentation",
  "unicode-width",

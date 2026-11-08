@@ -1079,3 +1079,9 @@ later in the module rescopes it, and a changed `sig` rebuilds its shim. The chec
 the same order (`annot::scoped_ty`). `%declared-sig` shows the declaration as written. Checked
 here: `tests/type_scope_test`, `contract`, `contract_memo`, `record`, `introspection`, `docs`,
 `modules`, the checker's `types::` unit tests; the full suite on CI.
+
+2026-11-08. `string/break-opportunities`: where a line may break, by UAX #14, over
+`unicode-linebreak` (already in the tree under cosmic-text). bedit's word wrap broke after an
+ASCII space or else anywhere, so CJK was cut mid-run and a `」` could start a line (its audit's
+row 20). A Rust builtin because the line-break class table is Unicode data, as the grapheme and
+normalisation tables are. Checked here: `tests/strings_test`, `doc_examples`.

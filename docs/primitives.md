@@ -726,6 +726,7 @@ docstring. `crates/lisp/src/` is the root of every path.
 |---|---|---|
 | `%str-splice-diff` | 2 | — |
 | `%string-join` | 2 | — |
+| `string/break-opportunities` | 1 | The character indices at which a line of s may break, ascending, by Unicode's line-breaking algorithm (UAX #14). |
 | `string/->graphemes` | 1 | The extended grapheme clusters of s as a vector of strings — the unit a human means by "character". |
 | `string/grapheme-at` | 2–3 | The i-th grapheme cluster of s as a string, or default (else nil) when i is out of range. |
 | `string/grapheme-count` | 1 | How many extended grapheme clusters s has — the length a human means, and the exclusive upper bound for grapheme-at. |

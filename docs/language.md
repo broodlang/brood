@@ -3472,6 +3472,7 @@ Every operation whose **subject is a string** lives in the `string` module
 `string/pad-left`  `string/pad-right`  `string/->graphemes`
 `string/grapheme-count`  `string/grapheme-at`  `string/substring-graphemes`
 `string/normalize`  `string/fill`  `string/fill-prefixes`  `string/fill-prefix`
+`string/break-opportunities`
 
 Bare in the prelude — these operate on *any* collection, so they are **not**
 string-library ops: `str`  `pr-str`  `index-of`  `includes?`
@@ -3530,6 +3531,15 @@ Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
   the correct spelling is also the fast one: `(nth (string/->graphemes s) i)` was the
   only way to read one cluster, and it materialised every cluster in the string on
   every keystroke (ADR-159).
+- **Where a line may break** (UAX #14): `(string/break-opportunities s)` is the ascending
+  character indices a line of `s` may end just before — after a space or a hyphen, between
+  two CJK ideographs or kana (CJK has no spaces to break at), never before closing
+  punctuation (`)` `」` `。` `，`) nor after opening punctuation (`(` `「`), after a URL's `/`
+  but not before it. The break after a newline is mandatory and listed too; the end of the
+  text is not. A word wrap fits what the width allows and ends the line at the last index
+  that fits; a space-only wrap cuts CJK text anywhere and can strand a `」` at a line's
+  start. The table and pair rules are `unicode-linebreak`'s, which cosmic-text already
+  breaks lines with.
 - **`=` is byte-structural, so text that reads identically can compare unequal**:
   `"é"` is U+00E9 *or* U+0065 U+0301. `(string/normalize s form)` normalises, with
   `form` one of `:nfc` `:nfd` `:nfkc` `:nfkd`. Canonical (`:nfc`/`:nfd`) preserves

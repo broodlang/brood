@@ -916,3 +916,32 @@
     (assert= (string/fill "日本 日本 日本" 10) "日本 日本\n日本"))
   (test "a tab in a prefix reaches its tab stop"
     (assert= (binding (*tab-width* 8) (string/fill "aa bb cc" 13 "\t")) "\taa bb\n\tcc")))
+
+(describe "string/break-opportunities: UAX #14 line breaking"
+  (test "after a space, one opportunity for a run of spaces"
+    (assert= (string/break-opportunities "ab cd") [3])
+    (assert= (string/break-opportunities "ab  cd") [4]))
+  (test "no opportunity in one word, nor in an empty string; the end is never listed"
+    (assert= (string/break-opportunities "a") [])
+    (assert= (string/break-opportunities "") [])
+    (assert= (string/break-opportunities "100%") []))
+  (test "CJK breaks between ideographs and kana, with no spaces to break at"
+    (assert= (string/break-opportunities "日本語") [1 2])
+    (assert= (string/break-opportunities "テキスト") [1 2 3]))
+  (test "never before closing punctuation nor after opening punctuation"
+    ;; 「 at 4 may start a line (break before it), テ at 5 may not; 」 at 9 and 。 at 12
+    ;; may not start one
+    (assert= (string/break-opportunities "日本語の「テキスト」です。次")
+      [1 2 3 4 6 7 8 10 11 13])
+    (assert= (string/break-opportunities "中文，英文。") [1 3 4])
+    (assert= (string/break-opportunities "a (b)") [2])
+    (assert= (string/break-opportunities "x, y") [3]))
+  (test "mixed Latin and CJK: a CJK character breaks on either side"
+    (assert= (string/break-opportunities "hello世界abc") [5 6 7]))
+  (test "after a hyphen and after a URL's slashes, not before them"
+    (assert= (string/break-opportunities "well-known") [5])
+    (assert= (string/break-opportunities "https://example.com/a/b") [8 20 22]))
+  (test "a newline's break is mandatory and listed, in character indices"
+    (assert= (string/break-opportunities "a\nb") [2])
+    ;; é as one code point, then e + U+0301: the indices count code points
+    (assert= (string/break-opportunities "é éx y") [2 6])))
