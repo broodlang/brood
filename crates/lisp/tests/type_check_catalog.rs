@@ -130,8 +130,8 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(reduce (list 1 2 3) 0 +)",           // right-arity, numeric
     "(reduce (list 1 2 3) 0 (fn (acc x) (+ acc x)))", // 2-ary lambda for reduce
     "(map (list 1 2 3) (fn (& xs) (apply + xs)))", // variadic lambda (math/min 0) accepts 1
-    "(map (list 1 2 3) (fn (x &optional y) x))", // 1 required + optional accepts 1
-    "(reduce (list 1 2 3) 0 (fn (acc x & more) (+ acc x)))", // variadic min 2 == reduce's 2
+    "(map (list 1 2 3) (fn (x &optional _y) x))", // 1 required + optional accepts 1
+    "(reduce (list 1 2 3) 0 (fn (acc x & _more) (+ acc x)))", // variadic min 2 == reduce's 2
     // ---- parametric results used correctly (number element is fine for +) ----
     "(+ 1 (first (map (list 1 2 3) inc)))",
     "(+ 1 (reduce (list 1 2 3) 0 +))",
@@ -160,7 +160,7 @@ const SHOULD_NOT_WARN: &[&str] = &[
     r#"(fn (m) (if (%eq m "x") :yes (string/length m)))"#,
     // match: a list value against a vector pattern lowers to a guarded vector-ref
     // that must stay quiet (the scrutinee narrows to a vector inside the guard).
-    "(match (list 1 2) ([a b] :vec) (_ :not-vec))",
+    "(match (list 1 2) ([_a _b] :vec) (_ :not-vec))",
     // ---- correct occurrence typing (then-branch narrowing is sound) ----
     "(fn (x) (if (int? x) (+ x 1) 0))",
     // ---- expanded curated sigs: correct uses stay silent ----

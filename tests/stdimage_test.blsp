@@ -264,7 +264,7 @@
           prog (path/temp "stdimage-race-")
           _ (file/spit prog
               (string/join ["(require-one 'stdimage) (stdimage/ensure)"
-                             "(let (me (self)" "      ps (map (range 0 24) (fn (i)"
+                             "(let (me (self)" "      ps (map (range 0 24) (fn (_i)"
                              "                (spawn (fn () (send me [:r (try [:ok (reflect/eval-string \"(uuid/v7)\")]"
                              "                                                 (catch e [:err (get e :message)]))]))))"
                              "           ))" "  (let (bad (fold ps [] (fn (acc _)"
