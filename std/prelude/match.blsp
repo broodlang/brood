@@ -722,13 +722,17 @@ NON-LINEAR patterns (the same name twice) work.
 ;; as were passed — said as that, in the words an arity-only multi-clause function uses
 ;; (`eval::arity_error_for`): `pf: no clause accepts 2 argument(s) (arities: 1)`, not
 ;; `fn: no clause matches (1 2) — tried (0), (n)`, which reads as a pattern problem.
+;; Does an arity range `[low high]` (`high` nil for a rest) admit `n` arguments?
+(defn- %match-arity-admits? (n range)
+  (let (low (nth range 0) high (nth range 1))
+    (and (int? low) (>= n low) (or (not (int? high)) (<= n high)))))
+
 (defn- %match-arity-message (context target patterns)
   (when (and (or (symbol? context) (= context :fn)) (list? target))
     (let (ranges (map patterns %match-arity-range) n (count target))
       (when (and (not (empty? ranges))
               (every? ranges (fn (r) (not (nil? r))))
-              (not (any? ranges
-                     (fn (r) (and (>= n (nth r 0)) (or (nil? (nth r 1)) (<= n (nth r 1))))))))
+              (not (any? ranges (fn (r) (%match-arity-admits? n r)))))
         (str (->string context)
           ": no clause accepts "
           n
@@ -744,18 +748,23 @@ NON-LINEAR patterns (the same name twice) work.
 :patterns …}`, with code `E0092`. Built by the `throw` every non-total `match`, `case`,
 refutable `let` and pattern `fn` lowers its no-match branch to.
 
-    (:message (%match-error :match 3 '(1 2)))   ;=> \"match: no clause matches 3 — tried 1, 2\""
-  {:kind :match
-   :code "E0092"
-   :message (or (%match-arity-message context target patterns)
-              (str (->string context)
-                ": no clause matches "
-                (debug/pr-str-bounded target)
-                " — tried "
-                (string/join (map patterns debug/pr-str-bounded) ", ")))
-   :context context
-   :value target
-   :patterns patterns})
+    (:message (%match-error :match 3 '(1 2)))   ;=> \"match: no clause matches 3 — tried 1, 2\"
+
+A pattern function that is a definition's value passes its NAME as `context` (ADR-638): the
+message names it, the map keeps `:context :fn` — the kind of form, as for every other `fn` —
+and carries the name as `:name`."
+  (let (error {:kind :match
+               :code "E0092"
+               :message (or (%match-arity-message context target patterns)
+                          (str (->string context)
+                            ": no clause matches "
+                            (debug/pr-str-bounded target)
+                            " — tried "
+                            (string/join (map patterns debug/pr-str-bounded) ", ")))
+               :context (if (symbol? context) :fn context)
+               :value target
+               :patterns patterns})
+    (if (symbol? context) (assoc error :name context) error)))
 
 (defn- %match-no-match (context target patterns)
   `(%raise (%match-error (quote ~context) ~target (quote ~patterns))))
