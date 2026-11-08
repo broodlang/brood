@@ -317,7 +317,19 @@
     (assert= (bracket-match "abc" 1) nil))
   (test "brackets inside a string are ignored"
     ;; (str ")" 1) — the ) inside the string must not match the leading (
-    (assert= (bracket-match "(str \")\" 1)" 1) [0 10])))
+    (assert= (bracket-match "(str \")\" 1)" 1) [0 10]))
+  ;; Emacs's order: just outside a pair (a closer left of the cursor, an opener under it)
+  ;; before just inside one (an opener left of it, a closer under it)
+  (test "the cursor on an inner opener lights the inner pair, not the outer one"
+    (assert= (bracket-match "((x) y)" 1) [1 3]))
+  (test "a closer left of the cursor wins over an opener under it"
+    (assert= (bracket-match "(a)(b)" 3) [0 2]))
+  (test "a closer left of the cursor wins over a closer under it"
+    (assert= (bracket-match "((a))" 4) [1 3]))
+  (test "just inside a pair: the opener left of the cursor, else the closer under it"
+    (assert= (bracket-match "(a b)" 1) [0 4])
+    (assert= (bracket-match "(a b)" 4) [0 4])
+    (assert= (bracket-match "()" 1) [0 1])))
 
 (describe "symbol-at — what the cursor is ON"
   ;; `symbol-prefix-at`'s sibling and a different question: that one stops dead at the cursor

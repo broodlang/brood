@@ -623,16 +623,26 @@ is read from a rope.
 
 (defn bracket-match (full:string pos:int -> (or nil (vector any)))
   "Given source `full` and cursor offset `pos`, return `[a b]` (the offsets of the
-matched bracket pair, `a` the opener) when the bracket adjacent to the cursor (the
-one just left of it, else the one under it) has a match, `[p :unmatched]` when it
-has none, or nil when the cursor isn't next to a bracket. Brackets inside strings
-and comments are ignored.
+matched bracket pair, `a` the opener) when the bracket adjacent to the cursor has a
+match, `[p :unmatched]` when it has none, or nil when the cursor isn't next to a
+bracket. Brackets inside strings and comments are ignored.
 
-    (editor/highlight/bracket-match \"(a (b))\" 3)   ;=> [3 5]"
+Which bracket is Emacs's order (`show-paren--locate-near-paren`): point just OUTSIDE a
+pair first — a closer just left of the cursor, else an opener under it — and only then
+just inside one — an opener just left, else a closer under it. So in `((x) y)` with the
+cursor on the inner `(`, the inner pair lights, not the outer one the `(` left of the
+cursor opens.
+
+    (editor/highlight/bracket-match \"(a (b))\" 3)   ;=> [3 5]
+    (editor/highlight/bracket-match \"((x) y)\" 1)   ;=> [1 3]"
   (let (n (string/length full)
+        before (when (> pos 0) (string/char-at full (dec pos)))
+        after (when (< pos n) (string/char-at full pos))
         bi (cond
-             (and (> pos 0) (hl-bracket? (string/char-at full (dec pos)))) (dec pos)
-             (and (< pos n) (hl-bracket? (string/char-at full pos))) pos
+             (and before (hl-close? before)) (dec pos)
+             (and after (hl-open? after)) pos
+             (and before (hl-open? before)) (dec pos)
+             (and after (hl-close? after)) pos
              else -1))
     (if (< bi 0)
       nil
