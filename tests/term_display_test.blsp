@@ -258,4 +258,17 @@ child exited."
     ;; counted in bytes, not characters
     (is (not (editor/frontend/osc52-fits? (string/repeat "é" 50001)))))
   (test "display-available? answers a boolean"
-    (is (bool? (editor/frontend/display-available?)))))
+    (is (bool? (editor/frontend/display-available?))))
+  (test "an ssh login has no display on Linux or macOS, even with X forwarded"
+    (let (display? (fn (os-type env)
+                     (editor/frontend/session-display? os-type (fn (name) (get env name)))))
+      (is (display? :linux {"DISPLAY" ":0"}))
+      (is (display? :linux {"WAYLAND_DISPLAY" "wayland-0"}))
+      (is (not (display? :linux {})))
+      (is (not (display? :linux {"DISPLAY" ""})))
+      (is (not (display? :linux
+                 {"DISPLAY" "localhost:10.0" "SSH_CONNECTION" "10.0.0.2 5000 10.0.0.1 22"})))
+      (is (not (display? :linux {"WAYLAND_DISPLAY" "wayland-0" "SSH_TTY" "/dev/pts/3"})))
+      (is (display? :macos {}))
+      (is (not (display? :macos {"SSH_TTY" "/dev/pts/3"})))
+      (is (display? :windows {"SSH_TTY" "/dev/pts/3"})))))

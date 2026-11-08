@@ -121,22 +121,33 @@ does, for a loop that receives its mailbox itself (an attached client, std/edito
 (defn- term-resize ()
   (let ([cols rows] (term/size)) [:resize cols rows]))
 
+(defn session-display? (os-type env)
+  "Whether a session on `os-type` (`os/type`'s answer) whose environment is `env` (a name ->
+value function, as `os/env`) has a display to put a window on: always on Windows; never in an
+ssh login (`$SSH_CONNECTION` or `$SSH_TTY` set) on any other system, so a program run over ssh
+takes the terminal it was run from even when ssh forwards X (`$DISPLAY` is then set, and the
+window would open on the far machine or fail there); else a desktop login on macOS and
+`$WAYLAND_DISPLAY` or `$DISPLAY` on Linux and the BSDs (ADR-587).
+
+    (editor/frontend/session-display? :linux (fn (name) (get {\"DISPLAY\" \":0\"} name)))   ;=> true
+    (editor/frontend/session-display? :linux (fn (name) (get {\"SSH_TTY\" \"/dev/pts/3\"} name)))   ;=> false"
+  (let (set? (fn (name) (let (value (env name)) (and (string? value) (not (= value ""))))))
+    (cond
+      (= os-type :windows) true
+      (or (set? "SSH_CONNECTION") (set? "SSH_TTY")) false
+      (= os-type :macos) true
+      else (or (set? "WAYLAND_DISPLAY") (set? "DISPLAY")))))
+
 (defn display-available? ()
   "Whether a native window can be opened here: the runtime has the GUI backend
-(`gui/available?`) and the session has a display to put it on — `$WAYLAND_DISPLAY` or
-`$DISPLAY` on Linux and the BSDs, a desktop login (not an ssh session) on macOS, always on
-Windows. A headless GUI runtime (`BROOD_GUI_HEADLESS`) counts as one: its windows open,
-drawing nothing. The question a program that can run in a window OR the terminal asks
-before choosing — Emacs's `-nw` when there is no display (ADR-587).
+(`gui/available?`) and the session has a display to put it on ([[session-display?]]: not an
+ssh login, then `$WAYLAND_DISPLAY` or `$DISPLAY` on Linux and the BSDs, a desktop login on
+macOS, always on Windows). A headless GUI runtime (`BROOD_GUI_HEADLESS`) counts as one: its
+windows open, drawing nothing. The question a program that can run in a window OR the
+terminal asks before choosing — Emacs's `-nw` when there is no display (ADR-587).
 
     (bool? (editor/frontend/display-available?))   ;=> true"
-  (let (set? (fn (name) (let (value (os/env name)) (and (string? value) (not (= value ""))))))
-    (and (gui/available?)
-      (or (gui/headless?)
-        (case (os/type)
-          :windows true
-          :macos (not (or (set? "SSH_CONNECTION") (set? "SSH_TTY")))
-          (or (set? "WAYLAND_DISPLAY") (set? "DISPLAY")))))))
+  (and (gui/available?) (or (gui/headless?) (session-display? (os/type) os/env))))
 
 (defn term-clipboard-set (text &optional (selection :clipboard))
   "Put `text` on the clipboard (or, `selection` `:primary`, the PRIMARY selection) of the

@@ -1086,6 +1086,11 @@ ASCII space or else anywhere, so CJK was cut mid-run and a `」` could start a l
 row 20). A Rust builtin because the line-break class table is Unicode data, as the grapheme and
 normalisation tables are. Checked here: `tests/strings_test`, `doc_examples`.
 
+2026-11-08 (ADR-587 addendum). `editor/frontend/display-available?` is false in an ssh login on
+every Unix, as it was on macOS: bedit run over ssh with X forwarded tried to open a window and
+died when the forwarding failed. The rule moved into `session-display?`, pure over the OS and an
+environment function. Checked here: `tests/term_display_test`.
+
 2026-11-08 (ADR-635). A runtime that dies on SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT writes
 a record under `$XDG_STATE_HOME/brood/crashes/` from its signal handler, prepared at startup so
 the handler only formats integers and calls `open`/`write`; `crash-report/previous-crashes`
