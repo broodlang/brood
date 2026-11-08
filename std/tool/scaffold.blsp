@@ -127,10 +127,7 @@ test discovery, lints, release, config)."
       mod " \"The " nm " project's library module — `main` does\n" "`(:use " mod
       ")` to call `greeting`. Showcases the module/namespace system\n"
       "(ADR-065): this defines `greeting` as `" mod "/greeting`; `(:use " mod ")`\n"
-      "imports it so `main` can call it bare.\n" "\n"
-      "Named after the package on purpose: a dependency should provide a module named\n"
-      "for itself, so two projects can depend on each other without a name clash\n"
-      "(namespaces aren't package-rooted yet — ADR-070).\")\n" "\n" "(defn greeting ()\n"
+      "imports it so `main` can call it bare.\")\n" "\n" "(defn greeting ()\n"
       "  \"Return the project's greeting string.\"\n" "  \"hello " nm "\")\n")))
 
 (defn- project-main-test-template (nm)
@@ -386,15 +383,17 @@ test discovery, lints, release, config)."
     "`docs/brood-for-claude.md` is the language reference geared for AI assistants\n"
     "— syntax, idioms, and the patterns that aren't shared with other Lisps. Read\n"
     "it before generating Brood code. The `.claude/skills/writing-brood` skill\n"
-    "carries the short version and auto-loads when Claude Code edits `.blsp` files.\n" "\n"
-    "Brood ships randomness (`rand/int`/`rand/float`/`shuffle`/`sample` — pure and\n"
-    "seedable, thread the seed), bitwise ops (`bit/and`/`bit/or`/`bit/xor`/...),\n"
-    "and discovery (`apropos`, `all-globals`, `doc-search`) — use the last three to\n"
-    "find what exists instead of guessing names.\n" "\n" "## MCP integration\n" "\n"
-    "`.mcp.json` points Claude Code at this project's `nest mcp` server, so `cd " nm " && claude`\n"
-    "auto-attaches an agent that can `reflect/eval`, `reflect/load`, `lookup`, `macroexpand`, `format`,\n"
-    "and discover the image with `apropos` / `all-globals` / `doc-search`, against the\n"
-    "live image (ADR-036, `docs/mcp.md` upstream).\n"))
+    "carries the short list of traps; Claude Code loads it for Brood work.\n"
+    "`nest doc --all` prints every builtin and prelude function with its signature —\n"
+    "read it instead of guessing names. After upgrading Brood, `nest update-tooling`\n"
+    "refreshes the guide and the skill.\n" "\n" "## MCP integration\n" "\n"
+    "`.mcp.json` registers this project's `nest mcp` server (approve it when Claude\n"
+    "Code asks; `nest` must be on `PATH`). It serves the live image: `eval` to try an\n"
+    "expression, `write`/`edit` to change a file (a `.blsp` file is loaded and checked\n"
+    "in the same call), `load`, `check`, `run-tests`, `lookup` for a function's real\n"
+    "argument order, `apropos`/`doc-search`/`find-pattern` to find what exists, and\n"
+    "`error` to explain an error code. A project `mcp.blsp` defining `mcp-tools` adds\n"
+    "tools of its own.\n"))
 
 ;; `.mcp.json` for a fresh project — points Claude Code (and other MCP-aware
 ;; agents) at this project's `nest mcp` server. The dispatcher runs from the

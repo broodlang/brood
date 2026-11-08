@@ -323,10 +323,10 @@
   (test "resources/list names every document"
     (let (uris (map (map/get-in (mcpt-request "resources/list" {}) [:result :resources])
                  (fn (r) (get r :uri))))
-      (doseq (uri ["brood://docs/brood-for-claude"
-                    "brood://docs/incarnations" "brood://docs/llm-native"
-                    "brood://docs/claude-demo-findings" "brood://docs/error-codes" "brood://prelude"])
-        (is (includes? uris uri)))))
+      (assert= (sort uris)
+        (sort (list "brood://docs/brood-for-claude"
+                "brood://docs/language" "brood://docs/decisions" "brood://docs/types"
+                "brood://docs/error-codes" "brood://prelude")))))
   (test "resources/read serves the bound document text"
     (binding (mcp/*documents* {"prelude" "(def x 1)"})
       (assert= (map/get-in (mcpt-request "resources/read" {:uri "brood://prelude"})

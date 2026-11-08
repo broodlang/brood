@@ -205,15 +205,6 @@ URI-addressed read-only blobs, served directly by the dispatcher (no eval):
 - `brood://docs/brood-for-claude` — the AI pocket reference (already
   `%builtin-doc`-baked, commit `d650bcb`); the *primary* resource the agent
   fetches at session start.
-- `brood://docs/incarnations` — the self-improving findings index
-  (`docs/incarnations.md`, [`archive/llm-native.md`](archive/llm-native.md) §3). Agents
-  append a one-paragraph entry + a full writeup at the end of a non-trivial
-  session; the next agent reads it first.
-- `brood://docs/claude-demo-findings` — the first incarnation
-  (`docs/archive/claude-demo-findings.md`, Claude Opus 4.7 building a concurrent
-  Mandelbrot). 511 lines of real notes on what bit a real agent.
-- `brood://docs/llm-native` — the forward-looking plan for making Brood
-  LLM-native; the status block at the bottom maps what's done vs open.
 - `brood://docs/error-codes` — stable error codes (`E0010`/`E0030`/etc.)
   and the structured `catch` shape (`{:kind :code :message :file :line
   :col :hint :trace}`). Agents branch on `:code` / `:kind` for programmatic
@@ -224,6 +215,10 @@ URI-addressed read-only blobs, served directly by the dispatcher (no eval):
 - `brood://docs/types` — the type system contract.
 - `brood://prelude` — the prelude source.
 
+Notes about developing Brood itself (`docs/incarnations.md`, the archived LLM-native plan
+and demo findings) are not served: the server runs in a user's project, and an agent there
+should read the language reference, not the repo's working notes (2026-11-08).
+
 ## Prompts
 
 A single `brood-task` prompt template that orients a fresh agent. Sourced
@@ -232,9 +227,8 @@ file is `include_str!`'d into `nest` (`crates/nest/src/mcp.rs`), so the maintain
 edits it as a document, *and* other agent harnesses (Cursor,
 Aider, Continue per [`archive/llm-native.md`](archive/llm-native.md) §14) can copy the
 file into their system prompts and get the same content. Points the agent
-at the three reads-first resources: `brood-for-claude`, `incarnations`,
-and the project's `CLAUDE.md`. Optional and additive — the agent can do
-everything via tools alone.
+at `brood-for-claude` and the project's `CLAUDE.md`, lists the language traps, and
+names every tool. Optional and additive — the agent can do everything via tools alone.
 
 ## Session model & hot reload
 

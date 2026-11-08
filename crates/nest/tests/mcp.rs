@@ -306,14 +306,14 @@ fn the_embedded_documents_are_served_as_resources_and_the_prompt() {
         .collect();
     for expected in [
         "brood://docs/brood-for-claude",
-        "brood://docs/incarnations",
-        "brood://docs/llm-native",
-        "brood://docs/claude-demo-findings",
         "brood://docs/error-codes",
         "brood://prelude",
     ] {
         assert!(uris.contains(&expected), "missing {expected}: {uris:?}");
     }
+    // The six reference docs and nothing else: notes about developing Brood itself are not
+    // served to a project's agent.
+    assert_eq!(uris.len(), 6, "{uris:?}");
     let prelude = &reply(&session, 2)["result"]["contents"][0];
     assert_eq!(prelude["uri"], "brood://prelude");
     assert_eq!(prelude["text"].as_str().unwrap(), brood::boot::PRELUDE);
@@ -558,5 +558,46 @@ fn bignum_churn_through_many_calls_leaves_the_heap_sound() {
         let body = tool_body(&session, id);
         assert!(body["value"].is_string(), "call {id}: {body}");
         assert!(body.get("error").is_none(), "call {id}: {body}");
+    }
+}
+
+/// The orientation an agent gets — the `brood-task` prompt and the `writing-brood` skill
+/// `nest new` drops into every project — names every tool the server lists. Both are prose
+/// written by hand, so a tool added or renamed without them is invisible to the agent (they
+/// once named nine of twenty-four, and called `eval` `reflect/eval`).
+#[test]
+fn the_prompt_and_the_skill_name_every_listed_tool() {
+    let directory = project("tool-docs", &[]);
+    let session = serve(
+        &directory.path,
+        &[
+            request(1, "tools/list", json!({})),
+            request(2, "prompts/get", json!({ "name": "brood-task" })),
+        ],
+    );
+    assert_eq!(session.code, Some(0), "stderr: {}", session.stderr);
+    let names: Vec<String> = reply(&session, 1)["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(names.len() > 20, "{names:?}");
+    let prompt = reply(&session, 2)["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let skill = include_str!("../../../docs/writing-brood-skill.md");
+    for (document, text) in [("brood-task prompt", prompt.as_str()), ("skill", skill)] {
+        for name in &names {
+            assert!(
+                text.contains(&format!("`{name}`")),
+                "the {document} does not name the `{name}` tool"
+            );
+        }
+        assert!(
+            !text.contains("`reflect/eval`") && !text.contains("`reflect/load`"),
+            "the {document} names a tool by a function's name"
+        );
     }
 }

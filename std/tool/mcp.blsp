@@ -4,7 +4,7 @@ the JSON-RPC loop, its dispatch and error mapping, and the tool catalogue it ser
 
 `(main)` bootstraps the project image and serves until the client hangs up. The
 dispatcher reads `(tools)` on every `tools/list` *and* `tools/call`, so a `def` in a
-previous `reflect/eval` (hot reload, ADR-013) reshapes the surface immediately — and a
+previous `eval` (hot reload, ADR-013) reshapes the surface immediately — and a
 project's own `mcp.blsp`, loaded at startup, can rebind the catalogue.
 
 Each catalogue entry is a map: `:name` (string, the MCP tool name),
@@ -24,7 +24,7 @@ map, pid, ref). Closures, tables, bytes etc. can't be JSON-ified and surface as 
 ;; ---- handlers --------------------------------------------------------------
 ;; Each handler is `(handler args-map) -> result-map`. Handlers `throw` on
 ;; argument-shape problems (the dispatcher renders the throw as a JSON-RPC
-;; error); soft failures (an unbound name in `lookup`, a parse error in `reflect/eval`)
+;; error); soft failures (an unbound name in `lookup`, a parse error in `eval`)
 ;; become a typed field in the returned map so the agent can branch on it
 ;; without re-parsing an error string.
 
@@ -46,7 +46,7 @@ carries the position and trace whatever was thrown."
   (%try-described thunk (fn (caught error) (on-error (error-shape caught error)))))
 
 (defn eval-tool (args)
-  "`reflect/eval` — evaluate `:source` in the session's global env. State persists
+  "`eval` — evaluate `:source` in the session's global env. State persists
 across calls (hot reload, ADR-013): a `def` here is visible to the next call
 and to spawned processes. Returns `{:value pr-str-of-result}` on success and
 `{:error msg}` on failure; the dispatcher catches `throw`s, but a parse/eval
@@ -83,7 +83,7 @@ process's OS user can; that process is the trust boundary.
 (defn- load-checked (file)
   "Load `file` into the session image and report the result as `{:ok true
 :diagnostics [...] :shadows [...]}` (or `{:ok false :error ...}` on failure) —
-the shared body of the `reflect/load`/`write`/`edit` tools. `def`s persist (hot reload,
+the shared body of the `load`/`write`/`edit` tools. `def`s persist (hot reload,
 ADR-013); `diagnostics` are `check-file-structured` warnings, `shadows` the
 cross-file flat-namespace collisions."
   (attempt (fn ()
@@ -94,7 +94,7 @@ cross-file flat-namespace collisions."
     (fn (shape) {:ok false :error shape})))
 
 (defn load-tool (args)
-  "`reflect/load` — load a `.blsp` file into the session and check it. Side-effects
+  "`load` — load a `.blsp` file into the session and check it. Side-effects
 (`def`, `defn`, `defmacro`) persist. Returns `{:ok true :diagnostics [...]
 :shadows [...]}` — `diagnostics` are advisory `{:file :line :col :message}`
 type/arity/unbound/non-tail-recursion warnings from `check-file-structured`;
@@ -104,7 +104,7 @@ defines (the silent flat-namespace collision). On a load error:
 
 `:file` is **not** run through the `write`/`edit` project sandbox — any path this
 process can read, it will load (and loading executes the file's top-level forms).
-Like `reflect/eval`, this tool is bounded by the `nest mcp` process, not by the project.
+Like `eval`, this tool is bounded by the `nest mcp` process, not by the project.
 
     (mcp/load-tool {:file \"src/app.blsp\"})   ;~> {:ok true :diagnostics [] :shadows []}"
   (let (file (get args :file))
@@ -120,16 +120,16 @@ Like `reflect/eval`, this tool is bounded by the `nest mcp` process, not by the 
 ;;
 ;; **This is an ergonomic guardrail on `write`/`edit`, NOT a containment boundary
 ;; for the server.** Do not read it as one, and do not build a trust decision on
-;; it. `reflect/eval` sits beside these tools and runs arbitrary Brood source with the
+;; it. `eval` sits beside these tools and runs arbitrary Brood source with the
 ;; **full builtin set** — including `file/spit`, `run-process` and `%os-cmd` — and
-;; `reflect/load` takes an unsandboxed path; neither goes through `project-path`. So an
+;; `load` takes an unsandboxed path; neither goes through `project-path`. So an
 ;; agent driving `nest mcp` can already write anywhere the *process* can, and the
 ;; sandbox only keeps `write`/`edit` from doing it by accident.
 ;;
 ;; The security boundary that actually holds is therefore the one around the whole
 ;; `nest mcp` process — who may connect to it, and what that OS user can reach —
-;; exactly as for any other tool that offers an eval endpoint. Sandboxing `reflect/eval`
-;; and `reflect/load` would be a deliberate design change (and gutting `reflect/eval` would break
+;; exactly as for any other tool that offers an eval endpoint. Sandboxing `eval`
+;; and `load` would be a deliberate design change (and gutting `eval` would break
 ;; the tool), not a bug fix; it is the owner's call, not something this comment
 ;; should pretend has already happened.
 
@@ -162,8 +162,8 @@ the tree through a symlink)."
 or no project root), OR a **symlink** whose real target is outside the tree.
 
 Shared by `write` and `edit`, and by **only** those two: it is a guardrail on the
-file-writing tools, not a containment boundary for the server (`reflect/eval` runs
-arbitrary code with full filesystem access, and `reflect/load` takes an unsandboxed
+file-writing tools, not a containment boundary for the server (`eval` runs
+arbitrary code with full filesystem access, and `load` takes an unsandboxed
 path). See the section comment above."
   (when (nil? project/*root*)
     (throw "no project root — nest mcp must run inside a Brood project"))
@@ -178,7 +178,7 @@ path). See the section comment above."
 
 (defn- write-result (rel abs)
   "The shared tail of `write`/`edit`: a `.blsp` file at absolute `abs` is loaded
-+ checked (so the result mirrors `reflect/load`'s `:diagnostics`/`:shadows`) and tagged
++ checked (so the result mirrors the `load` tool's `:diagnostics`/`:shadows`) and tagged
 with its project-relative `:path`; any other file just confirms the write."
   (if (string/ends-with? rel ".blsp")
     (assoc (load-checked abs) :path rel)
@@ -190,15 +190,15 @@ is **project-relative** (sandboxed under the project root — an absolute path,
 `~`, or any `..` segment is rejected); `:content` is the full new file contents.
 Missing parent directories are created. A `.blsp` file is then loaded into the
 session and checked, so the result carries `:diagnostics` and `:shadows` exactly
-like the `reflect/load` tool — closing the edit→load→check loop in one call; any other
+like the `load` tool — closing the edit→load→check loop in one call; any other
 file is written verbatim. Returns `{:ok true :path rel :diagnostics [...]
 :shadows [...]}` or `{:ok false :error ...}`. This is the intended way for an
 agent to write code — through nest mcp, so the session image stays in sync with
 disk.
 
 The project-relative restriction is a **guardrail, not a containment
-guarantee**: the `reflect/eval` tool beside it runs arbitrary Brood with the full builtin
-set (`file/spit` included) and `reflect/load` takes an unsandboxed path, so the server as
+guarantee**: the `eval` tool beside it runs arbitrary Brood with the full builtin
+set (`file/spit` included) and `load` takes an unsandboxed path, so the server as
 a whole can already reach the wider filesystem. Treat the `nest mcp` process
 itself as the trust boundary."
   (let (rel (get args :path)
@@ -217,7 +217,7 @@ itself as the trust boundary."
 `:path` is **project-relative** (the same sandbox as `write`); `:old` must occur
 **exactly once** in the file (so the edit is unambiguous) and is replaced by
 `:new`. A `.blsp` file is reloaded and checked afterwards (result carries
-`:diagnostics`/`:shadows`, like `reflect/load`). Returns `{:ok true :path rel ...}`, or
+`:diagnostics`/`:shadows`, like `load`). Returns `{:ok true :path rel ...}`, or
 `{:ok false :error msg}` when the file is missing, or `:old` is absent or not
 unique. The editor's exact-replace Edit, routed through nest mcp so the session
 image stays in sync with disk.
@@ -510,7 +510,7 @@ Clojure/Scheme reflex."
 :per-iter-ms float :value pr-str-of-last-result}`. Resolution is the
 millisecond `now` clock, so time a sub-millisecond expression with a larger
 `:iterations` to amortise it. Side effects persist — it really runs the code,
-like `reflect/eval`. Returns `{:error msg}` on failure.
+like `eval`. Returns `{:error msg}` on failure.
 
     (mcp/bench-tool {:source \"(sort (range 1000))\" :iterations 100})   ;~> {:ms 12 :iterations 100 :per-iter-ms 0.12 :value \"(0 1 2 …)\"}"
   (let (src (get args :source)
@@ -607,10 +607,10 @@ doesn't parse (incomplete input). Backed by `check-string-structured`.
 
 (defn tools ()
   "The tool catalogue `nest mcp` reads on every `tools/list`/`tools/call`.
-A project's own `mcp.blsp` (loaded after this) can replace `tools` with
-its own list that conses additional entries onto this one — `def` rebinds
-globals (ADR-013), so the dispatcher sees the project's version on its next
-fetch.
+A project's own `mcp.blsp` (loaded after this) extends it by defining `mcp-tools` —
+typically `(defn mcp-tools () (cons {…} (mcp/tools)))` — which the dispatcher serves in
+its place, re-reading it on every fetch, so a `def` takes effect on the next call
+(ADR-013).
 
 Twenty-four tools work today (in a project context — `write`/`edit` need a root):
 the eight v0 tools, the ability/type introspection trio `abilities` / `ability`
@@ -619,7 +619,7 @@ the eight v0 tools, the ability/type introspection trio `abilities` / `ability`
 find-references), the three discovery tools `apropos` / `all-globals` /
 `doc-search` (search the flat namespace by name or docstring rather than
 looking up a name you already know), `bench` (time an expression in the
-live image), the runtime-introspection pair `proc/info` (one process's
+live image), the runtime-introspection pair `process-info` (one process's
 stats by id) and `node` (runtime-wide stats) plus `watch-runtime` (the
 runtime-event STREAM — GC/spawn/exit/deopt over an interval, a trace not a
 snapshot) — which, with the now-enriched
@@ -643,7 +643,7 @@ Brood pattern, `std/tool/explain.blsp`)."
               :required ["file"]}
      :handler load-tool}
     {:name "write"
-     :description "Create or overwrite a project file (the way to write code through nest mcp, not the raw filesystem). :path is project-relative and sandboxed under the project root — absolute paths, '~', and '..' are rejected. A .blsp file is loaded into the session and checked, so the result carries :diagnostics + :shadows like `reflect/load`. Returns {:ok true :path :diagnostics :shadows} or {:ok false :error}."
+     :description "Create or overwrite a project file (the way to write code through nest mcp, not the raw filesystem). :path is project-relative and sandboxed under the project root — absolute paths, '~', and '..' are rejected. A .blsp file is loaded into the session and checked, so the result carries :diagnostics + :shadows like `load`. Returns {:ok true :path :diagnostics :shadows} or {:ok false :error}."
      :schema {:type "object"
               :properties {:path {:type "string"
                                   :description "Project-relative file path (no leading '/' or '~', no '..')"}
@@ -679,7 +679,7 @@ Brood pattern, `std/tool/explain.blsp`)."
               :required ["name"]}
      :handler ability-tool}
     {:name "check-source"
-     :description "Advisory type-check a source STRING (not the whole project) — for iterating on a snippet before writing it to a file. Returns {:diagnostics [{:line :col :message} ...]}, empty when clean. Complements `check` (whole project) and `reflect/eval` (which runs code without type advice)."
+     :description "Advisory type-check a source STRING (not the whole project) — for iterating on a snippet before writing it to a file. Returns {:diagnostics [{:line :col :message} ...]}, empty when clean. Complements `check` (whole project) and `eval` (which runs code without type advice)."
      :schema {:type "object"
               :properties {:source {:type "string" :description "Brood source to type-check"}}
               :required ["source"]}
@@ -816,15 +816,6 @@ Brood pattern, `std/tool/explain.blsp`)."
   [{:uri "brood://docs/brood-for-claude"
     :name "Brood for Claude (pocket reference)"
     :document "brood-for-claude"}
-    {:uri "brood://docs/incarnations"
-     :name "Incarnations — what tripped up prior agents"
-     :document "incarnations"}
-    {:uri "brood://docs/llm-native"
-     :name "Making Brood LLM-native (forward-looking plan)"
-     :document "llm-native"}
-    {:uri "brood://docs/claude-demo-findings"
-     :name "Claude Opus 4.7 — concurrent Mandelbrot findings (2026-05-28)"
-     :document "claude-demo-findings"}
     {:uri "brood://docs/language" :name "Brood language reference" :document "language"}
     {:uri "brood://docs/decisions" :name "Architecture decision records" :document "decisions"}
     {:uri "brood://docs/types" :name "Type system contract" :document "types"}

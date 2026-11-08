@@ -1,6 +1,6 @@
 ---
 name: writing-brood
-description: Use when writing or editing Brood Lisp (`.blsp`) source — generating new code, modifying std/prelude, or scaffolding a project. Brood is a small immutable Lisp implemented in Rust; it differs from Clojure/Scheme/CL in ways an LLM will get wrong by default (no mutation, no loops, collection-first argument order, lists-for-code/vectors-for-data, binding patterns, failures as values, runtime-enforced `sig`s). Load this before producing Brood code.
+description: Use when writing, editing, debugging or testing Brood Lisp (`.blsp`) source — generating new code, changing a Brood project's modules or tests, or scaffolding a project. Brood is a small immutable Lisp implemented in Rust; it differs from Clojure/Scheme/CL in ways an LLM will get wrong by default (no mutation, no loops, collection-first argument order, lists-for-code/vectors-for-data, binding patterns, failures as values, runtime-enforced `sig`s). Load this before producing Brood code.
 ---
 
 # Writing Brood
@@ -162,23 +162,33 @@ reach a `defn` qualified: `(life/step …)`.
 ## Use the MCP server as your coding loop
 
 A Brood project scaffolds `.mcp.json` pointing at `nest mcp` — a Model Context
-Protocol server over the **live image**. When it's attached, prefer it over
-guessing: it's how you check that the code you're about to write actually works.
-Its tools:
+Protocol server over the **live image** (the tools appear as `mcp__brood__eval` and
+so on). When it's attached, prefer it over guessing: it's how you check that the
+code you're about to write actually works. Its tools:
 
-- **`eval`** — evaluate a Brood expression in the running image. Use it to test a
-  function before committing it to a file, or to reproduce a bug. `(io/puts …)` is
-  safe — stdout is captured and returned as a separate block.
-- **`load`** — load a file into the image (re-`def`s its globals, hot-reload).
-  The image is a separate world from disk: after editing a file, `eval` sees the
-  *old* defs until you `load` it. Reflex: edit → `load` → `eval`.
-- **`lookup`** — a global's arglist, docstring, and source location. Check a
+- **`eval`** — evaluate Brood source in the running image (every form; the last
+  value comes back). Use it to try a function before committing it to a file, or to
+  reproduce a bug. `(io/puts …)` is safe — stdout comes back as a separate block.
+- **`write`** / **`edit`** — create a project file, or replace one exact, unique
+  string in it. A `.blsp` file is then loaded and checked in the same call, so the
+  result carries its diagnostics and the image matches disk.
+- **`load`** — load a file into the image (re-`def`s its globals, hot reload). The
+  image is a separate world from disk: after changing a file any other way, `eval`
+  sees the *old* defs until you `load` it.
+- **`check`** (the whole project) / **`check-source`** (a snippet string) — the
+  advisory checker's diagnostics. **`run-tests`** — the suite, per-test pass/fail.
+- **`lookup`** — a global's arglist, docstring, type and source location. Check a
   function's real argument order here instead of assuming (trap #3).
-- **`macroexpand`** — see what a macro expands to.
-- **`format`** — format a snippet/file the way `nest format` would.
-- **`callers`** — every reference to a global across the project (rename impact).
-- **`apropos`** / **`all-globals`** / **`doc-search`** — does X exist, and what is it
-  called?
+- **`apropos`** / **`doc-search`** / **`all-globals`** — does X exist, and what is
+  it called? **`find-pattern`** — the Brood idiom for a task (`"loop"`,
+  `"mutable state"`, `"build a string"`). **`error`** — what an error code
+  (`E0030`) means and the idiomatic fix.
+- **`macroexpand`**, **`format`**, **`callers`** (every reference to a global),
+  **`bench`**, **`abilities`** / **`ability`**, and the runtime views
+  **`processes`** / **`process-info`** / **`node`** / **`vitals`** / **`watch-runtime`**.
+
+A project can add tools of its own: a root `mcp.blsp` defining `(defn mcp-tools ()
+(cons {:name … :description … :schema … :handler …} (mcp/tools)))`.
 
 ## Don't guess the standard library
 

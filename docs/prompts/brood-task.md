@@ -1,47 +1,52 @@
 You're working in a Brood project (a `.blsp` Lisp). Before generating
-Brood code, fetch these three resources in order:
+Brood code, read:
 
 1. `brood://docs/brood-for-claude` — the pocket reference for the idioms
-   that differ from other Lisps.
-2. `brood://docs/incarnations` — short index of what tripped up prior
-   agents. Read the most recent entry's "What I'd tell next-me" before
-   starting; full findings linked from each entry.
-3. `CLAUDE.md` at the project root — project-specific conventions
+   that differ from other Lisps (the project also has it on disk as
+   `docs/brood-for-claude.md`).
+2. `CLAUDE.md` at the project root — project-specific conventions
    (commands, gotchas, code style).
 
 **Brood essentials**
 - Data is immutable; `def` is the only mutation (rebinds globals,
-  live code reload across running processes).
-- Loops are tail recursion or processes (`spawn`/`receive`/`send`). No
-  `while`, no `set!`.
-- Truthiness: only `nil` and `false` are falsy.
+  live code reload across running processes). State that changes lives in
+  a process or a `table`.
+- No loops: tail recursion, `fold`/`reduce`/`map`, or a `letrec` local
+  loop. No `while`, no `set!`, no `loop`/`recur`.
+- The collection comes first, the callback last: `(map xs f)`,
+  `(reduce xs init f)`.
+- Lists for code, vectors for data: `(let (a 1 b 2) …)`, `(fn (x y) …)`.
+- Truthiness: only `nil` and `false` are falsy — and `()` is `nil`.
+- A known failure (`string/->number "x"`) is a returned, truthy
+  `failure` value; test it with `failure?`.
 - Modules: `(defmodule foo …)` in the file, `(:use foo)` or qualified
-  `foo/bar` to reach it; symbols are interned, compare with `=`.
+  `foo/bar` to reach it. Output is `io/puts`; there is no `println`.
 - **Errors are structured.** A `(try … (catch e …))` on a kernel error
-  rebinds `e` to a map: `{:kind :unbound :code "E0010" :message "…"
-  :file … :line … :col …}`. Branch on `:kind` (`:parse` / `:unbound` /
-  `:arity` / `:type` / `:runtime`) or the stable `:code` (the full list
-  is at `brood://docs/error-codes`); `(catch {:kind :type} …)` catches one
-  kind. User throws (`(throw v)`) keep `(catch e e) → v` — only kernel
-  errors get the wrapper.
+  binds `e` to a map: `{:kind :unbound :code "E0010" :message "…"
+  :file … :line … :col …}`. Branch on `:kind` or the stable `:code`
+  (the `error` tool explains one; the full list is
+  `brood://docs/error-codes`); `(catch {:kind :type} …)` catches one
+  kind. A user `(throw v)` keeps `(catch e e) → v`.
 
-**MCP tools (use these to interact with the live image)**
+**MCP tools (use these against the live image instead of guessing)**
 - `eval` — try expressions. State (a `def`, a `spawn`) persists between
-  calls. Printed output comes back as a second `[captured stdout]` content
-  block, after the `:value`.
-- `lookup` — arglist, docstring, type and source location for a name. No
-  quote: `{:name "map"}`.
-- `macroexpand` — see what a macro lowers to. Useful for `when-let`,
-  `cond`, `match`, and `gen`'s `defserver`.
-- `format` — reformat source idempotently.
+  calls. Printed output comes back as a second `[captured stdout]` block.
+- `write` / `edit` — create or change a project file; a `.blsp` file is
+  then loaded and checked, so the result carries its diagnostics. Editing
+  a file another way leaves the image stale until you `load` it.
 - `load` — load a `.blsp` file into the live image.
-- `check` — advisory type-check; structured diagnostics back.
-- `run-tests` — structured runner result with per-test pass/fail.
-- `processes` — live pids.
-- `callers` — every reference to a global across the project (rename
-  impact / use sites; complements `lookup`'s definition site).
-
-**When you finish a non-trivial session**, append a one-paragraph entry
-to `docs/incarnations.md` (the format is at the top of that file) and
-drop your full findings into `docs/<your-slug>.md`. The next agent
-reads what you wrote first — make it count.
+- `check` (the project) / `check-source` (a snippet) — advisory
+  type-check, structured diagnostics back.
+- `run-tests` — the project suite, per-test pass/fail.
+- `lookup` — arglist, docstring, type and source location for a name
+  (no quote: `{"name": "reduce"}`). Check argument order here.
+- `apropos` / `doc-search` / `all-globals` — does it exist, and what is
+  it called?
+- `find-pattern` — the Brood idiom for a task ("loop", "mutable state",
+  "build a string") before you reach for another Lisp's habit.
+- `error` — what an error code means and the idiomatic fix.
+- `abilities` / `ability` — the generic-function interfaces and who
+  implements them, before you write an `impl`.
+- `macroexpand`, `format`, `callers` (every use of a global), `bench`,
+  and the runtime views `processes` / `process-info` / `node` / `vitals` /
+  `watch-runtime`.
