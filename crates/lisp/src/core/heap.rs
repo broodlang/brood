@@ -496,6 +496,17 @@ pub(crate) struct ColdHeap {
 /// another error while cleaning up before its rethrow does not lose the first.
 const CAUGHT_KEPT: usize = 4;
 
+/// One `defmemo` store of one process ([`HeapExtras::memo_stores`], ADR-670).
+pub(crate) struct MemoStore {
+    /// The memoised definition's qualified name.
+    pub(crate) slot: Symbol,
+    /// The definition's version — a symbol minted each time the `defmemo` form runs, so a
+    /// redefinition finds its predecessor's entries stale rather than reusing them.
+    pub(crate) version: Symbol,
+    /// The `[key value]` entries, newest first: a LOCAL (or shared) list, traced as a root.
+    pub(crate) entries: Value,
+}
+
 /// [`Heap::extras`]: the per-process fields almost no process writes, boxed at the first
 /// write so a process that never collects or sets a flag pays one pointer for them.
 #[derive(Default)]
@@ -604,6 +615,11 @@ pub(crate) struct HeapExtras {
     /// GC-traced where `dynamics` is, so no other value can come to share the handle while
     /// it is kept.
     pub(crate) caught: Vec<crate::error::CaughtOrigin>,
+    /// This process's `defmemo` stores (ADR-670): one per memoised definition this process
+    /// has called, its remembered `[key value]` entries kept IN THIS HEAP — never promoted —
+    /// so a remembered key is the very cell the caller passed and `=` on the next call with
+    /// it answers by identity, without a walk. GC-traced where `dynamics` is.
+    pub(crate) memo_stores: Vec<MemoStore>,
     /// The top-level form scan's safepoint tables for the last few ropes this process
     /// scanned, most recent first (ADR-488). A string's table is cached on the string, but
     /// an editor's document is a new rope per keystroke; keeping the recent ones lets the
@@ -1821,6 +1837,39 @@ impl Heap {
         Some(caught.remove(at))
     }
 
+    /// The entries this process's `defmemo` store `slot` holds (ADR-670): nil when it has
+    /// none, or when `version` is given and the store was kept by another version of the
+    /// definition (a redefinition starts empty).
+    pub(crate) fn memo_store(&self, slot: Symbol, version: Option<Symbol>) -> Option<Value> {
+        let store = self
+            .extras()?
+            .memo_stores
+            .iter()
+            .find(|store| store.slot == slot)?;
+        match version {
+            Some(version) if version != store.version => None,
+            _ => Some(store.entries),
+        }
+    }
+
+    /// Keep `entries` as this process's `defmemo` store `slot` at `version`, replacing what
+    /// it held under any version. The value is held as it is — no copy — so its cells stay
+    /// the caller's (ADR-670).
+    pub(crate) fn set_memo_store(&mut self, slot: Symbol, version: Symbol, entries: Value) {
+        let stores = &mut self.extras_mut().memo_stores;
+        match stores.iter_mut().find(|store| store.slot == slot) {
+            Some(store) => {
+                store.version = version;
+                store.entries = entries;
+            }
+            None => stores.push(MemoStore {
+                slot,
+                version,
+                entries,
+            }),
+        }
+    }
+
     /// The tables this process created and may still own — for its exit to drop.
     pub(crate) fn owned_tables(&self) -> &[u64] {
         self.extras().map_or(&[], |e| &e.owned_tables)
@@ -2176,6 +2225,13 @@ impl Heap {
         // The truncated slots are minted again at the same epoch, so a verdict about one
         // would answer for whatever is allocated there next (ADR-480).
         self.type_verdicts_forget_nursery();
+        // A `defmemo` store is the one per-process root that may point into the nursery
+        // across a top-level boundary (ADR-670): what the form just evaluated remembered
+        // may sit in the slots reclaimed above. Forget every store — a cache, so this only
+        // costs the next call a recomputation.
+        if let Some(extras) = self.extras.as_deref_mut() {
+            extras.memo_stores.clear();
+        }
         // The threshold is relative to live count; reclamation here is so cheap
         // that we let the next `gc_due` check recompute against the smaller heap.
     }

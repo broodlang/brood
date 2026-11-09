@@ -240,6 +240,10 @@ impl Heap {
             for origin in extras.caught.iter_mut() {
                 origin.payload = flush_value(source, dest, forward, origin.payload);
             }
+            // `defmemo` stores (ADR-670): held uncopied in this heap, so they relocate here.
+            for store in extras.memo_stores.iter_mut() {
+                store.entries = flush_value(source, dest, forward, store.entries);
+            }
         }
         for v in self.roots.iter_mut() {
             *v = flush_value(source, dest, forward, *v);
@@ -602,6 +606,12 @@ impl Heap {
         }
         if let Some(extras) = self.extras() {
             work.extend(extras.caught.iter().map(|o| Pending::Value(o.payload, 0)));
+            work.extend(
+                extras
+                    .memo_stores
+                    .iter()
+                    .map(|store| Pending::Value(store.entries, 0)),
+            );
         }
         for &frame_id in &self.remembered {
             if frame_id.is_old()

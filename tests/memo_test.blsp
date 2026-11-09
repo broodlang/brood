@@ -1,6 +1,12 @@
 ;; std/memo — `defmemo`: a function that remembers its last few calls, compared by `=`.
 ;; The cases are the ones a render path depends on: a hit skips the body, the store is
-;; bounded, a rope argument matches by handle, and a docstring survives.
+;; bounded, a rope argument matches by handle, and a docstring survives — and the store
+;; keeps the caller's own cells (ADR-670), so the same big value hits without being
+;; walked or copied.
+;;
+;; "Without a walk" is measured without a clock: a key that holds a NaN is `=` to itself
+;; only by identity (`=` reports NaN equal to nothing), so a store that walked its key — or
+;; kept a copy of it, as a `def`'d store did — misses it every time.
 ;;
 ;; Register-only — discovered and run by `nest test`.
 
@@ -18,6 +24,13 @@
 (defmemo text-length 2 (rope)
   (do (def *calls* (inc *calls*)) (text/length rope)))
 
+(defmemo wrapped 4 (value)
+  (do (def *calls* (inc *calls*)) [value]))
+
+(defn- nan-rows (n)
+  "A vector of `n` rows, each holding a NaN: `=` to itself only as the same cell."
+  (into [] (map (range n) (fn (i) [i nan {:line i}]))))
+
 (describe "defmemo"
   :isolated (test "a repeated call returns the remembered value without running the body"
     (def *calls* 0)
@@ -31,7 +44,7 @@
     (squared 3) ; capacity 2: `1` is gone
     (squared 1)
     (assert= *calls* 4)
-    (assert= (count memo-test/squared-recent) 2))
+    (assert= (count (memo/entries 'memo-test/squared)) 2))
   :isolated (test "an optional parameter's default is part of the key"
     (def *calls* 0)
     (assert= (scaled 3) 30)
@@ -48,3 +61,53 @@
       (assert= *calls* 2)))
   (test "a docstring stays the function's"
     (is (includes? (or (reflect/doc squared) "") "squared"))))
+
+(describe "defmemo keeps identity (ADR-670)"
+  :isolated (test "the same big value is a hit, though walking it could never match"
+    (def *calls* 0)
+    (let (rows (nan-rows 20000))
+      (is (not (= rows (nan-rows 20000)))) ; equal only as the same cell, never by a walk
+      (let (first-answer (wrapped rows)
+            second-answer (wrapped rows))
+        (assert= *calls* 1)
+        ;; the hit hands back the remembered answer itself, holding the caller's rows
+        (is (= second-answer first-answer))
+        (is (= (first second-answer) rows)))))
+  :isolated (test "the store holds the caller's own value, not a copy of it"
+    (let (rows (nan-rows 1000))
+      (wrapped rows)
+      (let (key (first (first (memo/entries (quote memo-test/wrapped)))))
+        (is (= (first key) rows)))))
+  :isolated (test "a value only equal to a remembered one still hits"
+    (def *calls* 0)
+    (wrapped [1 2 {:a [3]}])
+    (wrapped [1 2 {:a [3]}])
+    (assert= *calls* 1))
+  :isolated (test "a remembered value survives a collection and still hits by identity"
+    (def *calls* 0)
+    (let (rows (nan-rows 2000))
+      (wrapped rows)
+      (%gc-collect)
+      (%gc-collect)
+      (wrapped rows)
+      (assert= *calls* 1)
+      (is (= (first (first (first (memo/entries 'memo-test/wrapped)))) rows))))
+  :isolated (test "each process keeps its own store"
+    (def *calls* 0)
+    (wrapped :here)
+    (let (parent (self))
+      (spawn (do
+               (wrapped :here)
+               (send parent [:child-store (count (memo/entries 'memo-test/wrapped))])))
+      (receive
+        ([:child-store n] (assert= n 1))
+        (after 5000 (assert= :answer :none)))
+      ;; the child ran the body for a call the parent had made: its store is its own
+      (assert= *calls* 2)
+      (assert= (count (memo/entries 'memo-test/wrapped)) 1)))
+  :isolated (test "a redefinition starts empty"
+    (def *calls* 0)
+    (squared 9)
+    (reflect/eval-string "(memo/defmemo memo-test/squared 2 (n) (do (def memo-test/*calls* (inc memo-test/*calls*)) (* n n)))")
+    (squared 9)
+    (assert= *calls* 2)))

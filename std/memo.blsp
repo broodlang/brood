@@ -8,17 +8,24 @@
 ;;    made a new table each time. `defmemo` is now the only memoisation.
 ;;  - What those paths want is the answer to "the same call as a moment ago?": keep the
 ;;    last few calls and compare arguments with `=`, which answers at once for the same
-;;    rope handle (an edit mints a new rope; a cursor move keeps it). Bounded, so it cannot
-;;    grow; no copy on a hit.
-;;  - bedit carried three of these by hand, each a global `def` re-bound on a miss. This is
-;;    that pattern once. The store is a global, like theirs: shared by the processes that
-;;    call it, and a race between two of them costs a recomputation, never a wrong answer.
+;;    cell (`=` tests identity before it walks). Bounded, so it cannot grow; no copy on a
+;;    hit.
+;;  - The store is PER PROCESS, kept in the calling process's own heap by the kernel
+;;    (`%memo-store` / `%memo-store!`, ADR-670). It was a global `def` once, and `def`
+;;    deep-copies what it stores into the shared region: a remembered key was never the
+;;    caller's cell, so every lookup walked it element by element and every miss copied it
+;;    whole (and into an append-only region). A memo keyed on a buffer cost the buffer's
+;;    size per call — 4.6 s a frame over a 150,000-line diff in bedit. Held uncopied, the
+;;    caller's own value hits by identity whatever its size.
+;;  - Each `defmemo` form mints a VERSION symbol when it runs, so a redefinition (a hot
+;;    reload) finds the stores its predecessor left stale and starts empty, in every process.
 
 (defmodule memo
   "Bounded memoisation for hot paths: `defmemo` defines a function that remembers its
 last few calls, compared by `=` — for arguments like a buffer's rope, where hashing would
 read the whole text on every call. Memoisation lives at a definition, so a cache cannot be
-made per call (ADR-522).")
+made per call (ADR-522); each process keeps its own store, uncopied, so the same value
+passed again is a hit by identity, whatever its size (ADR-670).")
 
 (defn- param-names (params)
   "The names a parameter list binds, in order — `&optional`/`&` markers dropped, a
@@ -28,6 +35,14 @@ made per call (ADR-522).")
       (cond
         (list? p) (first p)
         (and (symbol? p) (not (string/starts-with? (->string p) "&"))) p))))
+
+(defn- slot-name (name)
+  "The store's name for a `defmemo` of `name`: `name` qualified with the module being
+loaded, as the definition itself is — so two modules' memos of one name never share."
+  (let (ns (reflect/current-ns))
+    (if (or (nil? ns) (includes? (str name) "/"))
+      name
+      (symbol (str (->string ns) "/" (str name))))))
 
 (defn recent-lookup (store key)
   "The `[key value]` entry of `store` whose key is `=` to `key`, or nil. The lookup half
@@ -43,28 +58,46 @@ The remember half of `defmemo`.
     (count (memo/recent-remember (list [[1] :a] [[2] :b]) [3] :c 2))   ;=> 2"
   (take (cons [key value] store) capacity))
 
+(defn entries (name)
+  "The `[key value]` entries the CALLING process keeps for the `defmemo` named `name` (its
+qualified symbol), newest first — `()` when it keeps none. What a test asserts about a
+store; each process has its own. After a redefinition the old entries show here until the
+next call replaces them; they never hit.
+
+    (memo/entries 'memo/no-such-memo)   ;=> ()"
+  (or (%memo-store name nil) '()))
+
 (defmacro defmemo (name capacity params & body)
   "`defn` that remembers its last `capacity` calls: a call whose arguments are `=` to a
 remembered call's returns that call's value without running the body. Compared with `=`,
-not hashed — `=` on the SAME rope handle is immediate, where hashing a rope reads its text
-— and bounded, so the cache never grows. A docstring, if the body starts with one, stays
-the function's.
+not hashed — `=` on the SAME cell (the same rope handle, the same vector, map or buffer)
+answers at once, where hashing a rope reads its text — and bounded, so the cache never
+grows. A docstring, if the body starts with one, stays the function's.
 
 For a function called over and over with the same big arguments while nothing changes:
-a render path asked twice a frame about the same buffer. The store is a global (`name`
-plus `-recent`), so every process calling the function shares it.
+a render path asked twice a frame about the same buffer. The store is PER PROCESS and
+holds the arguments UNCOPIED (ADR-670): the very value passed again is a hit by identity,
+whatever its size, and remembering it costs one cons, never a copy. A value only `=` to a
+remembered one — built afresh, or sent from another process — still hits, after a walk of
+it. A MISS still compares the arguments with every remembered call's, and `=` on two
+different big values walks them until they differ (a rope by its text): key a memo on
+what its answer reads, not on a whole buffer that changes every keystroke. A process's first
+call fills its own store, so work spread over short-lived processes does not share one;
+`memo/entries` reads the caller's. Redefining the memo empties every process's store.
 
     (defmemo rows-of 8 (rope width) \"…\" (expensive rope width))"
   (let (doc? (string? (first body))
-        store (symbol (str (->string name) "-recent")))
+        version (symbol (str (->string name) "--memo-version"))
+        slot (slot-name name))
     `(do
-       (def ~store '())
+       (def ~version (/reflect/gensym "memo"))
        (defn ~name ~params
          ~@(if doc? (list (first body)) '())
          (let (key# [~@(param-names params)]
-               hit# (memo/recent-lookup ~store key#))
+               store# (or (%memo-store '~slot ~version) '())
+               hit# (memo/recent-lookup store# key#))
            (if hit#
              (second hit#)
              (let (value# (do ~@(if doc? (rest body) body)))
-               (def ~store (memo/recent-remember ~store key# value# ~capacity))
+               (%memo-store! '~slot ~version (memo/recent-remember store# key# value# ~capacity))
                value#)))))))

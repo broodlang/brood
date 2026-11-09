@@ -775,6 +775,8 @@ impl Heap {
         work.extend(self.trace_context());
         if let Some(extras) = self.extras() {
             work.extend(extras.caught.iter().map(|o| o.payload));
+            // `defmemo` stores (ADR-670) may hold a shared handle, a registry's table say.
+            work.extend(extras.memo_stores.iter().map(|store| store.entries));
         }
         // --- Live VM arms mid-execution: RUNTIME literals baked into Const/MakeClosure
         // (the one holder off the GC root graph, mirroring compaction's step 3b). Read
@@ -1321,6 +1323,9 @@ impl Heap {
         if let Some(extras) = self.extras.as_mut() {
             for origin in extras.caught.iter_mut() {
                 origin.payload = flush_rt_value(&old_code, &new, &mut forward, origin.payload);
+            }
+            for store in extras.memo_stores.iter_mut() {
+                store.entries = flush_rt_value(&old_code, &new, &mut forward, store.entries);
             }
         }
         // ...and the caller's extra live roots (the auto path's `expr`/`env`).

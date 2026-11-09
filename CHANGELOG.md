@@ -38,6 +38,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   another collection. `()` stays `nil`.
 
 **Changed.**
+- **A `defmemo` store is per process and keeps the caller's own values** (ADR-670): the same big
+  argument passed again is a hit by identity, where the `def`'d store held a deep copy that every
+  lookup walked and every miss copied (4.6 s a frame for a memo keyed on a large editor buffer).
+  Processes no longer share a memo's answers; `memo/entries` reads the caller's store, and the
+  `NAME-recent` globals are gone.
 - **Breaking:** in a regex, `\n \t \r \f \v` are the control characters and `\xHH`, `\x{H…}`,
   `\uHHHH`, `\u{H…}` name a code point, as in every other engine (ADR-637). They read as the
   letter before, so `[ \t]*` matched the letter `t`. An escaped character in a set can end a range:

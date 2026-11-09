@@ -1236,3 +1236,56 @@ fn a_buffer_the_collector_holds_alone_is_cut_back_to_its_vector() {
     expected.push(42);
     assert_eq!(ints(&h, next), expected);
 }
+
+/// ADR-670: a `defmemo` store is a root of its process's heap. Its entries are held
+/// uncopied, so the collector must relocate them — through a minor collection that keeps
+/// them young, one that tenures them, and a major one that compacts the old generation —
+/// and a `reset_local_to` that may reclaim them must forget the store.
+#[test]
+fn a_memo_store_is_relocated_by_every_collection_and_forgotten_by_a_reset() {
+    let mut h = Heap::new();
+    h.gc_enabled = true;
+    let slot = crate::core::value::intern("memo-test/rows-of");
+    let version = crate::core::value::intern("memo__1");
+    let other_version = crate::core::value::intern("memo__2");
+
+    // Garbage around the store, so a collection that skipped it would hand its slots on.
+    let _dead = h.alloc_vector(vec![Value::int(-1); 8]);
+    let key = h.alloc_vector(vec![Value::int(1), Value::int(2), Value::int(3)]);
+    let value = Value::int(42);
+    let entry = h.alloc_vector2(key, value);
+    let entries = h.alloc_pair(entry, Value::nil());
+    h.set_memo_store(slot, version, entries);
+
+    let check = |h: &Heap| {
+        let entries = h
+            .memo_store(slot, Some(version))
+            .expect("the store survives");
+        let (entry, rest) = match entries.unpack() {
+            ValueRef::Pair(id) => h.pair(id),
+            _ => panic!("the entries are no longer a list"),
+        };
+        assert!(matches!(rest.unpack(), ValueRef::Nil));
+        let fields = h.vector(vector_id(entry)).to_vec();
+        assert_eq!(ints(h, fields[0]), vec![1, 2, 3]);
+        assert!(matches!(fields[1].unpack(), ValueRef::Int(42)));
+    };
+
+    h.minor_collect(false, &mut [], &mut []);
+    check(&h);
+    h.minor_collect(true, &mut [], &mut []);
+    check(&h);
+    h.major_collect(&mut [], &mut []);
+    check(&h);
+
+    // Another version of the definition reads nothing; a nil version reads what is kept.
+    assert!(h.memo_store(slot, Some(other_version)).is_none());
+    assert!(h.memo_store(slot, None).is_some());
+
+    // A nursery store from a form a tooling eval then rolls back is forgotten.
+    let checkpoint = h.checkpoint();
+    let young = h.alloc_pair(Value::int(7), Value::nil());
+    h.set_memo_store(slot, version, young);
+    h.reset_local_to(checkpoint);
+    assert!(h.memo_store(slot, None).is_none());
+}

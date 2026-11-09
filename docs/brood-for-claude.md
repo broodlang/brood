@@ -1097,7 +1097,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   · memoisation is `defmemo` from the `memo` module — there is no `memoize` function
   (ADR-522), so a cache exists only at a definition (`(:use memo)`, then
   `(defmemo rows-of 8 (rope width) …)`: a `defn` that remembers its last N calls compared
-  by `=` — bounded, and immediate for the same big value such as a rope) ·
+  by `=` — bounded, and immediate for the same big value: each process keeps its store
+  uncopied, so the caller's own vector or map hits by identity, ADR-670) ·
   `registry` for tables your modules fill as they load (`(registry/put! :app/hooks :save
   'app/on-save)`, read with `registry/entries` / `registry/lookup` / `registry/ranked` — by an
   entry's `:rank`): atomic across processes and carried by the image, which a `defonce` + `def`

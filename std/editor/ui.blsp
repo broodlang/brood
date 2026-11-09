@@ -308,6 +308,11 @@ just `(thunk)` — as is a nil `key`, the way a caller opts a fragment out (a pa
 ops are transformed after this). Omit from `deps` nothing the thunk reads, or a stale
 fragment is painted.
 
+The table is the loop process's own value, never a global, so last turn's `deps` are the
+very cells the view passed: a dep the model kept between turns compares by identity at
+once, whatever its size — the property `memo/defmemo` keeps with a per-process store
+(ADR-670). A dep built afresh each turn is walked.
+
 `reused?` is true when the ops are last turn's value itself (the deps matched): a display
 that takes the markers (`:fragments?`, the GUI window) then reuses what it parsed them to
 last frame instead of parsing them again (ADR-470).

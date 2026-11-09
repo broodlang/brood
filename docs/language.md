@@ -3442,8 +3442,11 @@ error re-raised in the caller (ADR-379).
 There is no `memoize` function (ADR-522): a cache made by a call could be made per call, and
 inside a loop each one was a table nothing dropped. Memoisation lives at a definition —
 `(defmemo name capacity (params…) body…)` from the `memo` module defines a function that
-remembers its last `capacity` calls, compared with `=`, in a global store: bounded, and
-there is one per definition by construction.
+remembers its last `capacity` calls, compared with `=`: bounded, and there is one per
+definition by construction. Each process keeps its own store, holding the arguments
+uncopied (ADR-670), so passing the very same value again is a hit by identity whatever its
+size — a buffer, a 100,000-span vector — and a value only `=` to a remembered one still
+hits after a walk. `memo/entries` reads the calling process's store.
 
 ```clojure
 (map (list 1 2 3) inc)                      ;=> (2 3 4)

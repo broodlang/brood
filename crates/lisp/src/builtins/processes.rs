@@ -345,6 +345,40 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["pid"],
         "A snapshot map of a live local process: {:id :pid :node :name :status :mailbox :monitored-by :parent :memory :collections :reductions} (:pid the process's pid value, for acting on it with exit/send/monitor; :status is :running or :waiting; :name nil if unregistered; :parent the spawner's id, nil for the root; :memory the LOCAL heap bytes and :collections the cumulative GC count, both as of the process's last receive; :reductions the cumulative reduction count — the scheduling unit, updated every quantum; exact for spawned processes, coarse for the root). nil for a remote/dead pid. The introspection the observer reads; see std/tool/observer.blsp.",
         process_info);
+    // `defmemo`'s store (ADR-670): per process, held without a copy.
+    primitives.def(
+        "%memo-store",
+        Arity::exact(2),
+        Sig::new(vec![sym, sym.union(nil_ty)], any),
+        &["slot", "version"],
+        "The `[key value]` entries the CALLING process keeps for the `defmemo` named `slot` — nil when it keeps none, or when `version` is a symbol other than the one they were kept under (a redefinition starts empty); a nil `version` reads whatever is kept. Use `defmemo` / `memo/entries`.",
+        memo_store);
+    primitives.def(
+        "%memo-store!",
+        Arity::exact(3),
+        Sig::new(vec![sym, sym, any], any),
+        &["slot", "version", "entries"],
+        "Keep `entries` as the calling process's store for the `defmemo` named `slot` at `version`, replacing what it held. Held in this process's heap as it is — not copied, unlike a `def` — so a remembered key stays the caller's own cell and the next `=` against it answers by identity. Returns `entries`. Use `defmemo`.",
+        memo_store_set);
+}
+
+/// `(%memo-store slot version)` — see the registration (ADR-670).
+pub(super) fn memo_store(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let slot = super::args::expect_symbol(heap, "%memo-store", arg(args, 0))?;
+    let version = match arg(args, 1) {
+        Value::Nil => None,
+        v => Some(super::args::expect_symbol(heap, "%memo-store", v)?),
+    };
+    Ok(heap.memo_store(slot, version).unwrap_or(Value::Nil))
+}
+
+/// `(%memo-store! slot version entries)` — see the registration (ADR-670).
+pub(super) fn memo_store_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let slot = super::args::expect_symbol(heap, "%memo-store!", arg(args, 0))?;
+    let version = super::args::expect_symbol(heap, "%memo-store!", arg(args, 1))?;
+    let entries = arg(args, 2);
+    heap.set_memo_store(slot, version, entries);
+    Ok(entries)
 }
 
 pub(super) fn spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
