@@ -78,14 +78,17 @@
 ;; A file call waits on the world too — a network mount, a spun-down disk, a FIFO no one
 ;; writes — but almost always it is instant, and a responsive process makes local reads on
 ;; purpose. So it is reported only when it held the process (`SLOW_FILE_CALL_MS`, 20 ms), and
-;; never refused (ADR-517's file addendum). A FIFO stands in for the slow mount: its read
-;; waits until a writer, here a shell 100 ms later, opens it.
+;; never refused (ADR-517's file addendum). A FIFO stands in for the slow mount. The shell
+;; opens it FIRST (`exec 3>`, which blocks until the reader has opened it too), and only
+;; then waits 100 ms and writes, so the read is held for those 100 ms however late the
+;; reading process starts. Sleeping before the open made the hold depend on the reader
+;; arriving within 100 ms of the spawn; a loaded run started it later and read instantly.
 (describe "a responsive process and the disk"
   (test "a file read that held the process is reported with its path"
     (when (not (= (os/type) :windows))
       (let (fifo (path/temp (str "brood-responsive-fifo-" (rand/token 8)))
             _ (os/cmd "mkfifo" [fifo])
-            _ (os/spawn "sh" ["-c" (str "sleep 0.1; printf slow > '" fifo "'")])
+            _ (os/spawn "sh" ["-c" (str "exec 3> '" fifo "'; sleep 0.1; printf slow >&3")])
             [text facts] (in-process (fn ()
                                        (proc/flag :responsive true)
                                        [(file/slurp fifo) (blocking-reports)])))
