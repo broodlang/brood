@@ -76,6 +76,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   (KI-378). The language server's references and rename gain the same pattern awareness.
 - **`file/replace` refuses a file this user may not write,** and a full disk no longer falls back to
   writing in place (ADR-621's promise).
+- **`file/replace` is atomic on Windows** (ADR-671): a flushed temp file put in the file's place by
+  `ReplaceFileW`, which keeps its ACL, attributes and creation time (`MoveFileExW` for a new file).
+  It was a write in place there, so a crash mid-save could leave the file empty. A file another
+  program holds open is waited on for about a second, then refused with that reason, unchanged.
 - **Clusters:** one node makes one dial to a peer at a time (KI-379).
 - **`vt`:** an ESC inside a CSI opens the next sequence rather than being dropped.
 - **`telemetry/reset-metrics` no longer stops attached aggregators:** they go on counting from

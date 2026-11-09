@@ -122,6 +122,32 @@
       (file/spit (path/join directory "f") "y")
       (assert= (file/slurp (path/join directory "f")) "y"))))
 
+;; file/replace: a temp file renamed over the file on Unix, ReplaceFileW on Windows (ADR-621,
+;; ADR-671). Either way the directory holds the one file afterwards, no temp beside it. A file
+;; another program holds open is Rust's to test (windows_replace_tests): nothing here can open
+;; one without sharing.
+(describe "files: file/replace"
+  (test "replaces an existing file, the whole new text and no temp file left"
+    (let (directory (fresh-dir)
+          file (path/join directory "notes.txt"))
+      (file/spit file "old text, longer than the new")
+      (file/replace file "new")
+      (assert= (file/slurp file) "new")
+      (assert= (vec (file/ls directory)) ["notes.txt"])))
+  (test "makes a file that is not there"
+    (let (directory (fresh-dir)
+          file (path/join directory "made — été.txt"))
+      (file/replace file "new\r\n")
+      (assert= (file/slurp file) "new\r\n")
+      (assert= (vec (file/ls directory)) ["made — été.txt"])))
+  (test "replaces a file twice in a row"
+    (let (directory (fresh-dir)
+          file (path/join directory "twice.txt"))
+      (file/replace file "one")
+      (file/replace file "two")
+      (assert= (file/slurp file) "two")
+      (assert= (vec (file/ls directory)) ["twice.txt"]))))
+
 (describe "processes"
   (test "os/which finds the platform's shell — cmd as cmd.exe on Windows"
     (let (found (os/which (if (windows?) "cmd" "sh")))

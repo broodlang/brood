@@ -110,7 +110,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![string, iolist], nil_ty),
         &["path", "s"],
-        "Replace the file at path with s (any iolist) so that a crash, a power cut or a full disk leaves the old file or the whole new one, never a torn file: s goes to a sibling temp file, is flushed to the disk, and is renamed over path. It keeps what the rename would lose: the file's mode, owner and group; a symlink stays a symlink, its TARGET replaced. It writes in place, as file/spit does and with the same risk, when a rename cannot keep the file as it was: a file with other hard links, one this user cannot give the same owner, extended attributes, a device, or a directory that takes no new entries. A full disk raises and leaves the old file. Atomic on Unix; on Windows it writes in place. For the file a person keeps (an editor's save, a tool rewriting source); file/spit-atomic is for a file other programs read while it changes.\n\n    (file/replace \"notes.txt\" \"text\\n\")   ;~> nil, notes.txt holds the text, its mode kept",
+        "Replace the file at path with s (any iolist) so that a crash, a power cut or a full disk leaves the old file or the whole new one, never a torn file: s goes to a sibling temp file, is flushed to the disk, and is renamed over path. It keeps what the rename would lose: the file's mode, owner and group; a symlink stays a symlink, its TARGET replaced. It writes in place, as file/spit does and with the same risk, when a rename cannot keep the file as it was: a file with other hard links, one this user cannot give the same owner, extended attributes, a device, or a directory that takes no new entries. A full disk raises and leaves the old file. On Windows the temp file takes the old one's place by ReplaceFileW, which keeps its ACL and attributes; a file another program holds open is waited on for about a second, then refused with that reason, the file unchanged (ADR-671). For the file a person keeps (an editor's save, a tool rewriting source); file/spit-atomic is for a file other programs read while it changes.\n\n    (file/replace \"notes.txt\" \"text\\n\")   ;~> nil, notes.txt holds the text, its mode kept",
         watched!("file/replace", replace, 1));
     primitives.def(
         "file/spit-append",
@@ -507,14 +507,41 @@ fn has_extended_attributes(_: &std::path::Path) -> bool {
 
 /// A new file beside `target`, its name fixed-length so a name at the filesystem's limit
 /// still has a sibling. Owner-only while it waits for an old file's mode (`mode` 0600); a new
-/// file's is `open`'s own, 0666 under the umask. `None` when the
-/// directory takes no new entries.
+/// file's is `open`'s own, 0666 under the umask.
 #[cfg(unix)]
 fn replace_temp(
     target: &std::path::Path,
     mode: u32,
 ) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
     use std::os::unix::fs::OpenOptionsExt;
+    replace_temp_with(target, |temp| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(temp)
+    })
+}
+
+/// A new file beside `target`, its name fixed-length. It takes the directory's inherited
+/// ACL, as any new file there would; `ReplaceFileW` then gives it the old file's.
+#[cfg(windows)]
+fn replace_temp(target: &std::path::Path) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
+    replace_temp_with(target, |temp| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temp)
+    })
+}
+
+/// The name a temp file beside `target` gets, tried until `open` makes one that was not
+/// there: `.brood-replace-PID-N`. A crash before the replace leaves one behind.
+#[cfg(any(unix, windows))]
+fn replace_temp_with(
+    target: &std::path::Path,
+    open: impl Fn(&std::path::Path) -> std::io::Result<std::fs::File>,
+) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
     let directory = target
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -529,12 +556,7 @@ fn replace_temp(
             std::process::id(),
             stamp.wrapping_add(attempt)
         ));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&temp)
-        {
+        match open(&temp) {
             Ok(file) => return Ok((file, temp)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last_error = error,
             Err(error) => return Err(error),
@@ -546,7 +568,7 @@ fn replace_temp(
 /// A directory that takes no new entries is why a temp file could not be made and the one
 /// reason to go on in place. Anything else, a full disk above all, would meet the same
 /// failure there, after the truncate has destroyed the only copy.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn directory_refuses_entries(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
@@ -624,7 +646,282 @@ fn replace_file(
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// How long a Windows replace waits for another program to let go of the file, between
+/// tries: about a second in all. A virus scanner, an indexer or a backup tool holds a file
+/// just written for a moment; a program that keeps it open is told so instead.
+#[cfg(windows)]
+const REPLACE_RETRY_DELAYS_MS: [u64; 8] = [10, 20, 40, 80, 160, 250, 250, 250];
+
+#[cfg(windows)]
+fn wide_path(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(windows)]
+fn win32_code(error: &std::io::Error) -> Option<u32> {
+    error.raw_os_error().map(|code| code as u32)
+}
+
+/// Another program has the file open in a way that refuses this step. `replace_step` is
+/// whether the step is the replace itself, where `ERROR_ACCESS_DENIED` is also what a file
+/// open without `FILE_SHARE_DELETE`, or one pending deletion, answers.
+#[cfg(windows)]
+fn held_by_another_program(error: &std::io::Error, replace_step: bool) -> bool {
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
+        ERROR_UNABLE_TO_MOVE_REPLACEMENT, ERROR_UNABLE_TO_REMOVE_REPLACED,
+    };
+    match win32_code(error) {
+        Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION) => true,
+        Some(
+            ERROR_UNABLE_TO_REMOVE_REPLACED
+            | ERROR_UNABLE_TO_MOVE_REPLACEMENT
+            | ERROR_ACCESS_DENIED,
+        ) => replace_step,
+        _ => false,
+    }
+}
+
+/// `step` tried again while another program holds the file, for about a second; the last
+/// answer when it never lets go.
+#[cfg(windows)]
+fn with_sharing_retry<T>(
+    replace_step: bool,
+    mut step: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut outcome = step();
+    for delay in REPLACE_RETRY_DELAYS_MS {
+        match &outcome {
+            Err(error) if held_by_another_program(error, replace_step) => {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                outcome = step();
+            }
+            _ => break,
+        }
+    }
+    outcome
+}
+
+/// The error a replace that another program never allowed ends with: the reason, and that
+/// the file is as it was.
+#[cfg(windows)]
+fn held_open_error(error: std::io::Error) -> std::io::Error {
+    let waited: u64 = REPLACE_RETRY_DELAYS_MS.iter().sum();
+    std::io::Error::new(
+        error.kind(),
+        format!(
+            "another program has the file open and will not let it be replaced \
+             (waited {} ms); the file is unchanged: {}",
+            waited, error
+        ),
+    )
+}
+
+/// How many names the file has (hard links), through the handle the write check opened;
+/// one when Windows does not say.
+#[cfg(windows)]
+fn replace_link_count(file: &std::fs::File) -> u32 {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let answered = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if answered == 0 {
+        1
+    } else {
+        information.nNumberOfLinks
+    }
+}
+
+/// A write in place: the file truncated and written, as `file/spit` does. An existing file
+/// is opened as it is (`TRUNCATE_EXISTING`), so a hidden or system file, which
+/// `CREATE_ALWAYS` refuses, is written too. Another program holding the file makes the open
+/// fail before anything is truncated.
+#[cfg(windows)]
+fn replace_in_place(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(path).is_err() {
+        return std::fs::write(path, content);
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    std::io::Write::write_all(&mut file, content)
+}
+
+/// `MoveFileExW`: the temp file renamed over `target`, the rename on the disk before it
+/// returns.
+#[cfg(windows)]
+fn replace_by_move(temp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let from = wide_path(temp);
+    let to = wide_path(target);
+    let moved = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// `ReplaceFileW`: the temp file takes `target`'s place and keeps what the old file had —
+/// its ACL, attributes, creation time, short name and alternate streams.
+#[cfg(windows)]
+fn replace_by_replace_file(
+    temp: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW};
+    let replaced = wide_path(target);
+    let replacement = wide_path(temp);
+    let done = unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(),
+            replacement.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if done == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// A filesystem with no `ReplaceFileW` (FAT, some network shares) answers one of these.
+#[cfg(windows)]
+fn replace_file_unsupported(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{
+        ERROR_CALL_NOT_IMPLEMENTED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
+        ERROR_NOT_SUPPORTED,
+    };
+    matches!(
+        win32_code(error),
+        Some(
+            ERROR_INVALID_FUNCTION
+                | ERROR_NOT_SUPPORTED
+                | ERROR_INVALID_PARAMETER
+                | ERROR_CALL_NOT_IMPLEMENTED
+        )
+    )
+}
+
+/// What [`replace`] does on Windows (ADR-671): a synced temp file beside the file, put in
+/// its place by `ReplaceFileW`, which keeps the old file's ACL, attributes and creation
+/// time; `MoveFileExW` for a file that is not there yet, or a filesystem without
+/// `ReplaceFileW`. Another program holding the file is waited on for about a second, then
+/// the replace fails with that reason, the old file and no temp file left.
+#[cfg(windows)]
+fn replace_file(
+    path: &std::path::Path,
+    content: &[u8],
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_UNABLE_TO_MOVE_REPLACEMENT_2};
+    // a symlink stays one: its target is what gets replaced; a dangling one is written
+    // through, which creates what it names
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => match std::fs::canonicalize(path) {
+            Ok(target) => target,
+            Err(_) => return std::fs::write(path, content),
+        },
+        _ => path.to_path_buf(),
+    };
+    let old = std::fs::metadata(&target).ok();
+    if old.as_ref().is_some_and(|meta| !meta.is_file()) {
+        return replace_in_place(&target, content);
+    }
+    if old.is_some() {
+        // a replace needs only DELETE on the file and the directory's permission: a file this
+        // user may not write (read-only, or its ACL) stays refused, as a write to it would be
+        let check = with_sharing_retry(false, || {
+            std::fs::OpenOptions::new().write(true).open(&target)
+        })
+        .map_err(|error| {
+            if held_by_another_program(&error, false) {
+                held_open_error(error)
+            } else {
+                error
+            }
+        })?;
+        // a file with other hard links would lose them to a replace: they keep the old text
+        if replace_link_count(&check) > 1 {
+            drop(check);
+            return replace_in_place(&target, content);
+        }
+    }
+    let (mut file, temp) = match replace_temp(&target) {
+        Ok(temp) => temp,
+        Err(error) if directory_refuses_entries(&error) => {
+            return replace_in_place(&target, content);
+        }
+        Err(error) => return Err(error),
+    };
+    // A failure here (a full disk) must leave the old file: no fallback to a write in place.
+    // `sync_all` is FlushFileBuffers.
+    let written = write(&mut file, content).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    let outcome = if old.is_none() {
+        with_sharing_retry(true, || replace_by_move(&temp, &target))
+    } else {
+        match with_sharing_retry(true, || replace_by_replace_file(&temp, &target)) {
+            Err(error) if replace_file_unsupported(&error) => {
+                with_sharing_retry(true, || replace_by_move(&temp, &target))
+            }
+            Err(error) if win32_code(&error) == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) => {
+                // the old file was moved aside and the new one could not take its name: the
+                // temp file is the only whole copy, so it is finished by a move or kept
+                return with_sharing_retry(true, || replace_by_move(&temp, &target)).map_err(
+                    |error| {
+                        std::io::Error::new(
+                            error.kind(),
+                            format!(
+                                "the old file was moved aside and the new text could not take \
+                                 its name; the new text is in {}: {}",
+                                temp.display(),
+                                error
+                            ),
+                        )
+                    },
+                );
+            }
+            other => other,
+        }
+    };
+    let Err(error) = outcome else {
+        return Ok(());
+    };
+    let _ = std::fs::remove_file(&temp);
+    if old.is_some() && win32_code(&error) == Some(ERROR_ACCESS_DENIED) {
+        // the write check passed, so this user may write the file but not replace it (its
+        // ACL grants no DELETE): a write in place, as on Unix for a file whose owner cannot
+        // be kept. Another program holding the file would fail that open, truncating nothing.
+        return replace_in_place(&target, content);
+    }
+    if held_by_another_program(&error, true) {
+        return Err(held_open_error(error));
+    }
+    Err(error)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn replace_file(
     path: &std::path::Path,
     content: &[u8],
@@ -1364,6 +1661,190 @@ mod replace_tests {
                 .is_symlink()
         );
         assert_eq!(std::fs::read(directory.join("target.txt")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn a_hard_linked_file_is_written_in_place_so_the_link_sees_it() {
+        let directory = scratch("hard");
+        let path = directory.join("one");
+        let other = directory.join("two");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::hard_link(&path, &other).unwrap();
+        replace_file(&path, b"new", write_all).unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"new");
+    }
+}
+
+// Run by CI's windows-smoke job (the `windows_replace_tests` filter on the brood lib tests):
+// the ADR-671 replace over an existing file, a missing one, and one another program holds open.
+#[cfg(all(test, windows))]
+mod windows_replace_tests {
+    use super::replace_file;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_HIDDEN, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileAttributesW, GetFileInformationByHandle, SetFileAttributesW,
+    };
+
+    fn write_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+        std::io::Write::write_all(file, bytes)
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("brood-replace-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn names(directory: &std::path::Path) -> Vec<String> {
+        let mut found: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    }
+
+    fn attributes(path: &std::path::Path) -> u32 {
+        unsafe { GetFileAttributesW(super::wide_path(path).as_ptr()) }
+    }
+
+    /// The file's index on its volume: what a write in place keeps and a replace changes.
+    fn file_index(path: &std::path::Path) -> u64 {
+        let file = std::fs::File::open(path).unwrap();
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        assert_ne!(
+            unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) },
+            0
+        );
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow)
+    }
+
+    /// `path` opened by "another program" that shares only what `share` says.
+    fn hold(path: &std::path::Path, share: u32) -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(share)
+            .open(path)
+            .unwrap()
+    }
+
+    #[test]
+    fn an_existing_file_is_replaced_and_keeps_its_attributes() {
+        let directory = scratch("existing");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "old").unwrap();
+        let wide = super::wide_path(&path);
+        assert_ne!(
+            unsafe { SetFileAttributesW(wide.as_ptr(), attributes(&path) | FILE_ATTRIBUTE_HIDDEN) },
+            0
+        );
+        let before = file_index(&path);
+        replace_file(&path, b"new", write_all).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_ne!(
+            attributes(&path) & FILE_ATTRIBUTE_HIDDEN,
+            0,
+            "ReplaceFileW keeps attributes"
+        );
+        assert_ne!(file_index(&path), before, "a replace, not a write in place");
+        assert_eq!(names(&directory), ["notes.txt"]);
+    }
+
+    #[test]
+    fn a_missing_file_is_made() {
+        let directory = scratch("missing");
+        let path = directory.join("made.txt");
+        replace_file(&path, b"new", write_all).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(names(&directory), ["made.txt"]);
+    }
+
+    #[test]
+    fn a_file_held_open_is_refused_with_a_reason_and_left_whole() {
+        let directory = scratch("held");
+        let path = directory.join("busy.txt");
+        std::fs::write(&path, "old").unwrap();
+        let holder = hold(&path, FILE_SHARE_READ);
+        let started = std::time::Instant::now();
+        let error = replace_file(&path, b"new", write_all).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(
+            error
+                .to_string()
+                .contains("another program has the file open"),
+            "{error}"
+        );
+        drop(holder);
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(names(&directory), ["busy.txt"]);
+    }
+
+    #[test]
+    fn a_file_let_go_of_within_the_wait_is_replaced() {
+        let directory = scratch("released");
+        let path = directory.join("busy.txt");
+        std::fs::write(&path, "old").unwrap();
+        let holder = hold(&path, FILE_SHARE_READ);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            drop(holder);
+        });
+        replace_file(&path, b"new", write_all).unwrap();
+        releaser.join().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(names(&directory), ["busy.txt"]);
+    }
+
+    #[test]
+    fn a_file_a_reader_shares_fully_is_replaced_under_it() {
+        let directory = scratch("shared");
+        let path = directory.join("log.txt");
+        std::fs::write(&path, "old").unwrap();
+        let reader = hold(
+            &path,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        );
+        replace_file(&path, b"new", write_all).unwrap();
+        drop(reader);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(names(&directory), ["log.txt"]);
+    }
+
+    #[test]
+    fn a_read_only_file_stays_refused() {
+        let directory = scratch("read-only");
+        let path = directory.join("keep.txt");
+        std::fs::write(&path, "old").unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions.clone()).unwrap();
+        let outcome = replace_file(&path, b"new", write_all);
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert_eq!(
+            outcome.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(names(&directory), ["keep.txt"]);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_old_file_and_no_temp() {
+        let directory = scratch("full");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "old").unwrap();
+        let outcome = replace_file(&path, b"new", |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+        });
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::StorageFull);
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(names(&directory), ["notes.txt"]);
     }
 
     #[test]
