@@ -60,6 +60,7 @@ fn check_fn_forms(
     heap: &Heap,
     params_form: Option<Value>,
     body: &[Value],
+    outer: &Ctx,
     scope: &Ctx,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
@@ -70,14 +71,96 @@ fn check_fn_forms(
         .or_else(|| body.iter().copied().find(|f| matches!(f, Value::Pair(_))))
         .unwrap_or(Value::Nil);
     if let Some(params_form) = params_form {
-        for default in fn_param_defaults(heap, params_form).into_iter().flatten() {
-            check_value_leaf(heap, default, anchor, scope, out);
-            check_into(heap, default, scope, out);
-        }
+        check_param_defaults(heap, params_form, anchor, outer, scope, out);
     }
     for &body_form in body {
         check_value_leaf(heap, body_form, anchor, scope, out);
         check_into(heap, body_form, scope, out);
+    }
+}
+
+/// Walk each `&optional` default in the scope it is EVALUATED in: `outer`, the scope the
+/// `fn` is written in, plus the parameters before it — each with the type `scope` (the
+/// body's, every parameter bound) gives it. A default runs before the later parameters
+/// exist, so `(defn f (a &optional (b later) (later 1)) b)` reads an unbound `later` at
+/// `(f 1)`, and walking the default in the body's scope passed it (KI-380). A name the
+/// enclosing scope binds stays visible, as at runtime. Only a `(name default)` form AFTER
+/// `&optional` is a default: before it a list is a destructuring pattern (a clause head
+/// such as `((x y & rest) "+")`), and every name in it is bound.
+fn check_param_defaults(
+    heap: &Heap,
+    params_form: Value,
+    anchor: Value,
+    outer: &Ctx,
+    scope: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    use crate::syntax::typed::{self as typed, TypedName};
+    let items = heap.list_or_vector_items(params_form).unwrap_or_default();
+    let has_optional = items
+        .iter()
+        .any(|i| matches!(i, Value::Sym(s) if value::symbol_is(*s, kw::AMP_OPTIONAL)));
+    if !has_optional {
+        return; // no defaults to walk
+    }
+    let bind = |c: Ctx, name: Symbol| {
+        let ty = scope.get(name);
+        c.bind(name, ty)
+    };
+    let mut here = outer.clone();
+    let mut optional = false;
+    let mut skip_type_form = false;
+    for item in items {
+        if std::mem::take(&mut skip_type_form) {
+            continue;
+        }
+        match item {
+            Value::Sym(s) => {
+                if value::symbol_is(s, kw::AMP_OPTIONAL) {
+                    optional = true;
+                    continue;
+                }
+                if value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_REST) {
+                    continue;
+                }
+                if value::symbol_is(s, typed::ARROW) {
+                    break;
+                }
+                let name = match typed::split(value::symbol_name_ref(s)) {
+                    Some(TypedName::Inline(name, _)) => value::intern(name),
+                    Some(TypedName::Next(name)) => {
+                        skip_type_form = true;
+                        value::intern(name)
+                    }
+                    None => s,
+                };
+                here = bind(here, name);
+            }
+            Value::Pair(_) | Value::Vector(_) if optional => {
+                let inner = match item {
+                    Value::Vector(id) => heap.vector(id).to_vec(),
+                    _ => list_items(heap, item).unwrap_or_default(),
+                };
+                let Some(&Value::Sym(binder)) = inner.first() else {
+                    continue;
+                };
+                if let Some(&default) = inner.get(1) {
+                    check_value_leaf(heap, default, anchor, &here, out);
+                    check_into(heap, default, &here, out);
+                }
+                let name = match typed::split(value::symbol_name_ref(binder)) {
+                    Some(t) => value::intern(t.name()),
+                    None => binder,
+                };
+                here = bind(here, name);
+            }
+            pattern @ (Value::Pair(_) | Value::Vector(_)) => {
+                for name in pattern_syms(heap, pattern) {
+                    here = bind(here, name);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -162,7 +245,7 @@ pub(super) fn check_fn_bound_indexed(
                     tys.get(i).cloned().flatten(),
                 );
             }
-            check_fn_forms(heap, Some(plist), &citems[1..], &scope, out);
+            check_fn_forms(heap, Some(plist), &citems[1..], ctx, &scope, out);
         }
         return;
     }
@@ -188,7 +271,14 @@ pub(super) fn check_fn_bound_indexed(
         _ => 2,
     };
     lint_discarded_symbols(heap, &items[body_start..], items[0], &scope, out);
-    check_fn_forms(heap, Some(params_form), &items[body_start..], &scope, out);
+    check_fn_forms(
+        heap,
+        Some(params_form),
+        &items[body_start..],
+        ctx,
+        &scope,
+        out,
+    );
 }
 
 /// `(fn (params...) docstring? body...)` (and `lambda` — the same closure
@@ -327,7 +417,7 @@ pub(super) fn check_fn_seeded(
             if let Some(citems) = list_items(heap, clause) {
                 let body = citems.get(1..).unwrap_or(&[]);
                 lint_discarded_symbols(heap, body, clause, &scope, out);
-                check_fn_forms(heap, citems.first().copied(), body, &scope, out);
+                check_fn_forms(heap, citems.first().copied(), body, ctx, &scope, out);
             }
         }
         return;
@@ -353,7 +443,14 @@ pub(super) fn check_fn_seeded(
         (Some(Value::Str(_)), Some(_)) => 3,
         _ => 2,
     };
-    check_fn_forms(heap, Some(params_form), &items[body_start..], &scope, out);
+    check_fn_forms(
+        heap,
+        Some(params_form),
+        &items[body_start..],
+        ctx,
+        &scope,
+        out,
+    );
     // Return-type check (a `GradualTy` consumer): the body's last form is the
     // function's result, which must be *consistent* with the declared return `R`.
     // `gradual_of` makes an over-approximated result (a call) `dynamic`, so the ∩
@@ -539,6 +636,7 @@ pub(super) fn check_def(
                     heap,
                     Some(fn_items[1]),
                     &fn_items[body_start..],
+                    ctx,
                     &scope,
                     out,
                 );
@@ -571,6 +669,7 @@ pub(super) fn check_def(
                 heap,
                 Some(fn_items[1]),
                 &fn_items[body_start..],
+                ctx,
                 &scope,
                 out,
             );
@@ -650,7 +749,14 @@ pub(super) fn check_defn(
         (Some(Value::Str(_)), Some(_)) => 4,
         _ => 3,
     };
-    check_fn_forms(heap, Some(params_form), &items[body_start..], &scope, out);
+    check_fn_forms(
+        heap,
+        Some(params_form),
+        &items[body_start..],
+        ctx,
+        &scope,
+        out,
+    );
 }
 
 /// Is `then_form` a guard — `(if g body fallthrough)` — whose fallthrough is the same code

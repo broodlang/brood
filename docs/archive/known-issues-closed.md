@@ -16266,3 +16266,24 @@ address delays all gossip by up to its timeouts; nothing strands it.
 **Guard.** `dist::tests::a_programs_dial_waits_for_a_dial_already_under_way`, sabotage-verified: red
 with the claim removed.
 
+## KI-380 — `nest check` passed an `&optional` default that names a later parameter ✅ fixed 2026-11-09
+
+**Symptom.** `(defn f7 (a &optional (b later) (later 1)) b)` passes `brood --check`, and `(f7 1)`
+raises `unbound symbol: later`.
+
+**Cause.** `check_fn_forms` (`types/check/walk/binders.rs`) walks every default in the whole
+parameter scope, while a default sees only the parameters before it.
+
+**Why it survived.** 1acc691a began reading defaults at all, and took the scope the body uses.
+
+**Fix.** `check_fn_forms` takes the enclosing scope as well as the body's, and
+`check_param_defaults` builds each default's scope from the enclosing one, binding the parameters
+in order with the types the body's scope gives them. So no binding has to be hidden. A name the
+enclosing scope binds stays visible, as at runtime: `(def n 5) (defn f (&optional (b n) (n 1)) …)`
+reads the global. Only a `(name default)` form after `&optional` counts as a default. Before it,
+a list is a destructuring clause head (`((x y & r) "+")`), which the old walk read as a name and a
+"default".
+
+**Guard.** `types::check::tests::scope_and_guards::an_optional_default_sees_only_the_parameters_before_it`:
+a later parameter, the parameter's own name, a `fn` literal, and the forms that must stay quiet.
+Red with the body's scope put back.

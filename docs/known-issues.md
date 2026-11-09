@@ -68,22 +68,6 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
-## KI-380 — `nest check` passes an `&optional` default that names a later parameter
-
-**Symptom.** `(defn f7 (a &optional (b later) (later 1)) b)` passes `brood --check`, and `(f7 1)`
-raises `unbound symbol: later`.
-
-**Cause.** `check_fn_forms` (`types/check/walk/binders.rs`) walks every default in the whole
-parameter scope, while a default sees only the parameters before it.
-
-**Why it survived.** 1acc691a began reading defaults at all, and took the scope the body uses.
-
-**Fix.** Open. `Ctx` has no way to hide a binding, and there are seven callers, so this wants a
-scope built parameter by parameter rather than a filter. Low impact: the checker is advisory and the
-shape is rare.
-
-**Guard.** None yet.
-
 ## KI-370 — `nest check` reported a warning on `examples/life_bands.blsp` once, then never again
 
 **Seen** 2026-11-05, once: a full `nest check std/ tests/ examples/` printed
@@ -101,6 +85,17 @@ flagged `nil | pid` into a domain that includes `pid` (overlap reads it consiste
 back (that version was later dropped altogether). Ruled out: the check cache's stamp (it carries `system/build-id`, whose third field is
 the binary's own mtime, so a rebuild drops it).
 
+**2026-11-09: the warning is STRICT mode's.** `nest check --strict examples/life_bands.blsp`
+prints exactly it, every time, and it is strict's only warning over `examples/`. Outside strict
+mode an overlapping `nil | pid` is reported only when the argument reads PRECISE rather than
+dynamic (`check_arg_against_param`: `consistent_with_mode`). So the sighting either ran strict, or
+typed `(nth pids k)` as precise. `k` indexes `slices`, not `pids`, so `nth` stays `nil | pid`. One
+plausible way it read precise: a sig the tree carried that day (the dropped `gui` image sigs) made
+`spawn`/`map`/`vec`'s result precise. Not a cache leak: a strict run followed by a plain one, over
+the file and over the whole tree, leaves the plain run quiet. Not reproduced in 12 more runs
+(6 full-tree, cached and `BROOD_NO_CHECK_CACHE=1`, plus 6 single-file runs, imaged and
+`BROOD_NO_STDIMAGE=1`).
+
 **Diagnostic for the next sighting:** keep the binary, re-run the same command with
 `BROOD_NO_CHECK_CACHE=1` (cache or checker?) and then on the one file alone (cross-file
 inference or not), and save the stdlib image named in the run's footer.
@@ -111,8 +106,8 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
-| KI-370 | **`nest check` reported `send: … got nil \| pid` on `examples/life_bands.blsp` once** — a non-strict warning on an overlapping type, in a file that changed nothing, right after a rebuild | ⚠️ **watching 2026-11-05** — 0 of 12 re-runs across three boot paths; diagnostic named in the section |
-| KI-380 | **`nest check` passes an `&optional` default that names a later parameter** — walked in the whole parameter scope | **OPEN 2026-11-07** — advisory and rare; the fix wants a scope built parameter by parameter |
+| KI-370 | **`nest check` reported `send: … got nil \| pid` on `examples/life_bands.blsp` once** — a non-strict warning on an overlapping type, in a file that changed nothing, right after a rebuild | ⚠️ **watching 2026-11-05** — the warning is strict mode's own (2026-11-09); 0 of 24 non-strict re-runs; diagnostic named in the section |
+| KI-380 | **`nest check` passed an `&optional` default that names a later parameter** — walked in the whole parameter scope | ✅ **FIXED 2026-11-09** — each default is walked in the enclosing scope plus the parameters before it (`check_param_defaults`). Guard: `scope_and_guards::an_optional_default_sees_only_the_parameters_before_it` (red with the body's scope put back) |
 | KI-379 | **a program's dial could run beside a dial already under way to the same peer** — KI-372's other half | ✅ **FIXED 2026-11-07** — sabotage-verified: `DialClaim`, one dial to a peer at a time |
 | KI-378 | **`nest move` corrupted locals and could lose the definition it moved** — no scope, and the source written first | ✅ **FIXED 2026-11-07** — sabotage-verified: scope analysis, source written last, `file/replace` |
 | KI-377 | **`crash-report/redact` let secrets through and left `:context` alone** — one spelling of a secret's name | ✅ **FIXED 2026-11-07** — every input run unredacted against the old code first |

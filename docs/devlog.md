@@ -1209,3 +1209,14 @@ the write end for 100 ms before writing. With a 300 ms delay injected before the
 form fails (`facts` = `[]`) and the new one passes. An empty read (`text` = `""`) seen once on
 2026-11-08 did not reproduce on current binaries in about 250 runs, idle, 8-way parallel, beside
 a full suite and with every core busy.
+
+2026-11-09 (KI-380). `nest check` now flags an `&optional` default that names a later parameter.
+`(defn f (a &optional (b later) (later 1)) b)` raised `unbound symbol: later` at `(f 1)`, and the
+checker walked the default in the body's scope, where every parameter is bound. Each default is
+now walked in the enclosing scope plus the parameters before it, with their body types
+(`check_param_defaults`). A global that a later parameter shadows stays visible, as at runtime.
+Only a `(name default)` form after `&optional` counts as a default, so a destructuring clause head
+is no longer read as one. CI's two checker gates stay at zero. Guard:
+`scope_and_guards::an_optional_default_sees_only_the_parameters_before_it` (red with the body's
+scope put back). KI-370 is still on watch: its warning is strict mode's own, so the sighting ran
+strict or read `(nth pids k)` as precise. The check cache does not carry it across modes.

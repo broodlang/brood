@@ -475,6 +475,40 @@ fn flags_unbound_value_in_a_body_form_and_an_optional_default() {
     assert!(file_warnings("(defn f (x) x)").is_empty());
 }
 
+// KI-380: a default runs before the parameters after it are bound, so a default naming a
+// LATER parameter reads an unbound name at the first call that leaves the argument out. The
+// default was walked in the body's scope, where every parameter is bound, and passed.
+#[test]
+fn an_optional_default_sees_only_the_parameters_before_it() {
+    let unbound = |src: &str, name: &str| {
+        file_warnings(src)
+            .iter()
+            .any(|m| m.contains(&format!("unbound symbol: {name}")))
+    };
+    assert!(unbound(
+        "(defn f (a &optional (b later) (later 1)) b)",
+        "later"
+    ));
+    // the parameter's own name, in its own default
+    assert!(unbound("(defn f (&optional (b (inc b))) b)", "b"));
+    assert!(unbound(
+        "(def g (fn (a &optional (b (+ a after)) (after 2)) b))",
+        "after"
+    ));
+    // …and nothing for what a default may name: an earlier parameter, typed or not; a
+    // global a LATER parameter shadows in the body (the default reads the global); a
+    // destructuring clause head, which has no defaults at all
+    assert!(file_warnings("(defn f (a &optional (b a) (c b)) [a b c])").is_empty());
+    assert!(file_warnings("(defn f (x:int &optional (y (+ x 1))) y)").is_empty());
+    assert!(
+        file_warnings(
+            "(def shadowed 5) (defn f (a &optional (b shadowed) (shadowed 1)) [a b shadowed])"
+        )
+        .is_empty()
+    );
+    assert!(file_warnings("(defn f (((x y & r) \"+\") [x y r]))").is_empty());
+}
+
 #[test]
 fn operand_check_respects_scope_and_forward_refs() {
     // A forward reference to a later top-level def — file-global, not unbound.
