@@ -302,6 +302,62 @@ fn an_imaged_start_keeps_what_loading_registered() {
 ///
 /// Verified by sabotage: with the `*require-edges*` replay removed, the warm run dies with
 /// `unbound symbol: libdep/helper/triple`.
+/// A declared sig reads back AS WRITTEN after an imaged start, as after a source load. The
+/// sig is stored with its type names scoped to the module that means them (`shape` becomes
+/// `demo/shape/shape`), and `reflect/declared-signature` makes them bare again through the
+/// declaring module's `(:use …)` list. That list was recorded only by evaluating the header,
+/// which an imaged start never does, so a warm run answered the scoped spelling: bedit's M-x
+/// showed `bedit/model/model any → bedit/model/model` beside every command whose module had
+/// not loaded from source, and its marginalia test failed whenever no other test had loaded
+/// `commands` first.
+#[test]
+fn an_imaged_start_reads_a_declared_sig_back_as_written() {
+    let dir = scratch("declared-sig");
+    write(
+        &dir,
+        "project.blsp",
+        "(project\n  :name demo\n  :main app)\n",
+    );
+    write(
+        &dir,
+        "src/shape.blsp",
+        "(defmodule shape)\n(deftype shape (or int string))\n",
+    );
+    write(
+        &dir,
+        "src/lib.blsp",
+        "(defmodule lib (:use shape))\n\
+         (io/puts \"SOURCE-LOAD: lib\")\n\
+         (sig grow (shape -> shape))\n\
+         (defn grow (x) x)\n",
+    );
+    write(
+        &dir,
+        "src/app.blsp",
+        "(defmodule app (:use lib))\n\
+         (defn main () (io/puts (str \"DECLARED: \" (reflect/declared-signature 'lib/grow))))\n",
+    );
+
+    let cold = nest_run(&dir);
+    assert!(cold.contains("SOURCE-LOAD: lib"), "cold run:\n{cold}");
+    assert!(
+        cold.contains("DECLARED: (shape -> shape)"),
+        "a source load must read the sig back as written:\n{cold}"
+    );
+
+    let warm = nest_run(&dir);
+    assert!(
+        !warm.contains("SOURCE-LOAD: lib"),
+        "the second run loaded lib from source, so it says nothing about the image:\n{warm}"
+    );
+    assert!(
+        warm.contains("DECLARED: (shape -> shape)"),
+        "an imaged start read the sig back scoped, not as written:\n{warm}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn an_imaged_start_follows_transitive_require_edges() {
     let dep = scratch("edge-lib");

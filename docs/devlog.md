@@ -1186,3 +1186,26 @@ four cells, `make test` (2319 passed), `nest test` imaged and with no image (822
 contracts suite from source, both checker gates and clippy. `make smoke-bedit` reds one test in
 bedit's suite, and the same flake reds on the c03d6a4e binary too (`userkeys_test.blsp:122`,
 order-dependent).
+
+2026-11-09 (ADR-633 addendum). An imaged start now reads a declared sig back as written.
+`(sig cmd (model any -> model))` is stored with `model` scoped to the module that declares it
+(`bedit/model/model`), and `reflect/declared-signature` makes the name bare again through the
+declaring module's `(:use …)` list. Only evaluating the module header recorded that list, and a
+startup image never evaluates it, so a module that was materialised, or whose sigs came from the
+root section before it loaded, answered the scoped spelling. bedit's M-x showed
+`bedit/model/model any → bedit/model/model` beside every command. Its marginalia test
+(`minibuffer_commands_test.blsp:558`) failed 8 of 8 on its own, and in the full suite whenever no
+earlier test had loaded `commands` from source. The image now carries each module's uses as a
+`KIND_USES` entry, on the same rule as the sigs (every module's in the root section, a named
+section's own), and restores them as `%refer` records them. Image format v9, prelude image v6.
+Checked here: `startup_image::an_imaged_start_reads_a_declared_sig_back_as_written` (red with the
+restore disabled), and bedit's minibuffer test 6 of 6.
+
+2026-11-09. `responsive_process_test`'s FIFO case no longer depends on when the reading process
+starts. The shell slept 100 ms and then opened the FIFO, so the read was held only if the reader
+was already waiting by then. A process started late under load read instantly and was not
+reported. The shell now opens the FIFO first (`exec 3>`, which waits for the reader), then holds
+the write end for 100 ms before writing. With a 300 ms delay injected before the reader, the old
+form fails (`facts` = `[]`) and the new one passes. An empty read (`text` = `""`) seen once on
+2026-11-08 did not reproduce on current binaries in about 250 runs, idle, 8-way parallel, beside
+a full suite and with every core busy.

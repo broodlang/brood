@@ -117,7 +117,9 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
 /// v8 (ADR-383): the closure record — the wire codec's, shared with `dist` — carries the
 /// closure's authoring module, its contract boundary. A v7 reader would take the extra
 /// optional symbol for the next entry's kind byte.
-const MAGIC: &[u8] = b"brood-image-v8\n";
+/// v9 adds `KIND_USES`. A v8 reader would decode its list as a value and bind the module's
+/// name to it.
+const MAGIC: &[u8] = b"brood-image-v9\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
@@ -147,6 +149,15 @@ const KIND_PRIVATE: u8 = 4;
 /// same fact through `Heap::side_facts` (ADR-320); its root section holds it twice,
 /// idempotently.
 const KIND_DEF_SITE: u8 = 5;
+/// The modules a module `(:use …)`s, in header order. Recorded by *evaluating* the header
+/// (`%refer`), which materialising never does, and read whenever a declared sig is shown as
+/// written: `(sig cmd (model any -> model))` is stored scoped as
+/// `bedit/model/model`, and `reflect/declared-signature` makes it bare again only through
+/// the declaring module's uses (`type_scope::unscope_form`). Without this entry an imaged
+/// project answered `(bedit/model/model any -> bedit/model/model)` for a module that had
+/// not loaded from source yet, and `model any -> model` once it had. Written beside the sigs,
+/// on the same rule: every module's in the root section, a named section's own.
+const KIND_USES: u8 = 6;
 
 /// `BROOD_IMAGE_TRACE=1` — report where image time goes, split by phase. Both sides run
 /// through an intermediate `process::Message` tree before or after the byte codec, and the
@@ -204,6 +215,16 @@ fn put_def_site(out: &mut Vec<u8>, loc: &crate::core::heap::SourceLoc) {
     put_str(out, &loc.file);
     put_u32(out, loc.pos.line);
     put_u32(out, loc.pos.col);
+}
+
+/// The payload of a `KIND_USES` entry (after its module name), recorded as `%refer` records
+/// it when the header is evaluated.
+fn restore_uses(heap: &Heap, ns: &str, r: &mut Cursor<Vec<u8>>) -> Option<()> {
+    let ns = value::intern(ns);
+    for _ in 0..get_u32(r)? {
+        heap.note_module_use(ns, value::intern(&get_str(r)?));
+    }
+    Some(())
 }
 
 /// The payload of a `KIND_DEF_SITE` entry (after its name): file, line, column.
@@ -349,6 +370,26 @@ fn encode_section(
         put_str(&mut entries, &value::symbol_name(sym));
         encode_msg(&mut entries, &msg)
             .map_err(|e| LispError::runtime(format!("%image-write: sig encode: {e}")))?;
+        count += 1;
+    }
+    // Uses, on the sigs' rule: the root section carries every module's, a named section its
+    // own module's — so the uses arrive with the sigs that read them.
+    let uses: Vec<(value::Symbol, Vec<value::Symbol>)> = if all_sigs {
+        heap.module_uses_snapshot()
+    } else {
+        let ns = value::intern(section);
+        vec![(ns, heap.module_uses(ns))]
+    };
+    for (ns, used) in uses {
+        if used.is_empty() {
+            continue;
+        }
+        entries.push(KIND_USES);
+        put_str(&mut entries, &value::symbol_name(ns));
+        put_u32(&mut entries, used.len() as u32);
+        for u in used {
+            put_str(&mut entries, &value::symbol_name(u));
+        }
         count += 1;
     }
     // Privacy, for every name in this section the image records as private. Written after
@@ -1048,6 +1089,14 @@ fn load_section_entries(
             done += 1;
             continue;
         }
+        // …and a uses entry: the module names it `(:use …)`s.
+        if kind == KIND_USES {
+            let Some(()) = restore_uses(heap, &name, r) else {
+                return Ok(None);
+            };
+            done += 1;
+            continue;
+        }
         let t0 = web_time::Instant::now();
         let Ok(msg) = decode_msg(r) else {
             return Ok(None);
@@ -1325,7 +1374,8 @@ fn temp_suffix() -> String {
 /// v3: the header carries the gensym floor.
 /// v4 (ADR-383): the closure record carries its authoring module (the wire's v8 field).
 /// v5: the header carries the number of source positions the load re-stamps (KI-302).
-const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v5\n";
+/// v6: a section may carry `KIND_USES` entries.
+const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v6\n";
 
 /// The image header: magic, the build fingerprint, the gensym counter the writing boot
 /// reached, and how many source positions the load re-stamps. A reader must start its own
@@ -1380,6 +1430,11 @@ pub(crate) fn load_prelude_image_bytes(
         }
         if kind == KIND_DEF_SITE {
             heap.set_def_site(value::intern(&name), get_def_site(&mut r)?);
+            done += 1;
+            continue;
+        }
+        if kind == KIND_USES {
+            restore_uses(heap, &name, &mut r)?;
             done += 1;
             continue;
         }

@@ -2312,6 +2312,19 @@ impl Heap {
             .unwrap_or_default()
     }
 
+    /// Every module's `(:use …)` list, `(ns, used)` — what a startup image carries so a
+    /// module it materialises, whose header it never evaluates, still resolves its sigs'
+    /// type names as a source load would (`builtins::type_scope`).
+    pub fn module_uses_snapshot(&self) -> Vec<(Symbol, Vec<Symbol>)> {
+        self.runtime
+            .module_uses
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(ns, used)| (*ns, used.clone()))
+            .collect()
+    }
+
     /// Remember that declaration `key` in module `ns` names the bare type `name`, which
     /// means nothing in `ns` yet (idempotent).
     pub fn note_type_scope_pending(&self, ns: Symbol, name: Symbol, key: Symbol) {
