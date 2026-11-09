@@ -566,6 +566,19 @@ pub(super) fn register_grammar_declarations(primitives: &mut super::Primitives) 
         "Where the grammar for the language keyword `lang` stands, without loading anything: :declared (declared by %tree-sitter-declare-grammar, not used yet), :loaded (loaded at runtime), :built-in, a failure value carrying the load's message when the last declaration did not load, or nil when this runtime has no grammar for it.",
         tree_sitter_grammar_status,
     );
+    primitives.def(
+        "%tree-sitter-declared-grammars",
+        Arity::exact(0),
+        Sig::new(vec![], map_ty),
+        &[],
+        "Every grammar declared by %tree-sitter-declare-grammar and not loaded yet, as a map of language keyword to library path; a declaration whose load failed is left out. What a host vets ahead of first use, off its loop (%tree-sitter-vet-grammar, ADR-672), so the first parse of each language does not pay for its vetting child. {} in a build without feature `treesit`.",
+        tree_sitter_declared_grammars,
+    );
+}
+
+/// `(%tree-sitter-declared-grammars)` — `crate::host::treesit::declared_grammars`.
+pub(super) fn tree_sitter_declared_grammars(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    crate::host::treesit::declared_grammars(heap)
 }
 
 /// `(%tree-sitter-declare-grammar path lang)` — `crate::host::treesit::declare_grammar`.

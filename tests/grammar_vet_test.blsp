@@ -119,6 +119,33 @@
         (assert= (grammar-verdict library) nil)
         (file/rmdir dir)))
 
+    ;; ADR-672: a host vets its declared grammars ahead of their first use, in a process of
+    ;; its own, so the first parse finds the verdict waiting instead of starting a child
+    (test "declared grammars are vetted ahead of their first use, and the verdict is kept"
+      (let (dir (temp-dir "brood-grammarvet-")
+            _ (file/mkdir dir)
+            library (gvt-build dir :vetahead (string/replace gvt-zero-tables "vetcrash" "vetahead")))
+        (declare-grammar library :vetahead)
+        (assert= (get (declared-grammars) :vetahead) library)
+        (let (verdicts (vet-declared-grammars {:timeout-ms 5000})
+              verdict (get verdicts :vetahead))
+          (assert= (:verdict verdict) :quarantined)
+          (assert= (:cached verdict) false)
+          ;; asked again, it is the kept one: no second child
+          (assert= (:cached (get (vet-declared-grammars) :vetahead)) true)
+          ;; the first use refuses it without vetting, and it is not a language here
+          (is (map? (grammar-status :vetahead)))
+          (refute (includes? (languages) :vetahead))
+          ;; kept in the run's scratch home, never the user's
+          (when-let (scratch (test/scratch-dir))
+            (is (file/exists? (path/join scratch
+                                "state"
+                                "brood"
+                                "grammar-verdicts"
+                                (str (:sha256 verdict) ".blsp"))))))
+        (forget-grammar-verdict library)
+        (file/rmdir dir)))
+
     (test "a missing library is an error"
       (is (check-allow :discarded-catch
             (try

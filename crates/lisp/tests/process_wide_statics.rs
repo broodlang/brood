@@ -175,6 +175,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("host/treesit/grammar.rs", "GRAMMAR_COPY_LOCK", OneMachine),
     // The crash mark of each grammar in DYNAMIC (ADR-660): written beside it, as wide.
     ("host/treesit/vet.rs", "GRAMMAR_MARKS", OneMachine),
+    // The grammar vettings in flight, by library hash (ADR-672): one child per library in the
+    // OS process, whichever runtime asked — the verdict follows from the bytes alone.
+    ("host/treesit/vet.rs", "VETTING", OneMachine),
     // Facts of the binary: the std sources baked into it, and the signatures derived from
     // them (the stdlib id is a build constant).
     ("types/check.rs", "STD_REQUIRES", FactOfTheBinary),

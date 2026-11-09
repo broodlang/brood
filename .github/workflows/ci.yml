@@ -352,6 +352,8 @@ jobs:
       # another program holds open (refused, left whole) or lets go of within the wait.
       - name: file/replace unit tests (ReplaceFileW, a file held open)
         run: cargo test -p brood --features gui --lib builtins::filesystem::windows_replace_tests
+      - name: grammar vetting and the crash mark unit tests (ADR-672)
+        run: cargo test -p brood --features gui --lib -- host::treesit::vet cli_support::fatal_signal
 
   build-test:
     name: test (${{ matrix.partition }}/2)

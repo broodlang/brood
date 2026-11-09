@@ -39,10 +39,12 @@ const OPT_OUT_ENV: &str = "BROOD_GRAMMAR_VET";
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
 /// A child that could not be loaded the way the parent would refuse it too (no entry point,
-/// an ABI out of range, not a library): an ordinary load error, not a verdict.
-const EXIT_REFUSED: i32 = 3;
+/// an ABI out of range, not a library): an ordinary load error, not a verdict. Clear of 3,
+/// which is what a C `abort()` exits with on Windows — a grammar that aborts is a fault there
+/// too, never a refusal (ADR-672).
+const EXIT_REFUSED: i32 = 73;
 /// A child that could not vet at all (its corpus unreadable, the library changed under it).
-const EXIT_NOT_RUN: i32 = 4;
+const EXIT_NOT_RUN: i32 = 74;
 
 /// The executable a vetting child is started from — this binary — set by [`vetting_entry`].
 /// Unset in a host that never called it (an embedder, `cargo test`): it cannot vet, and loads
@@ -88,7 +90,18 @@ fn verdict_dir(
     };
     set(variable)
         .or_else(|| {
-            set("HOME").map(|home| fallback.iter().fold(home, |path, part| path.join(part)))
+            // Windows: a native shell sets no HOME; the profile directory is the home there,
+            // as `boot::cache_dir` reads it (ADR-592) — else a crash on Windows would have
+            // nowhere to write its quarantine
+            set("HOME")
+                .or_else(|| {
+                    if cfg!(windows) {
+                        set("USERPROFILE")
+                    } else {
+                        None
+                    }
+                })
+                .map(|home| fallback.iter().fold(home, |path, part| path.join(part)))
         })
         .map(|base| base.join("brood").join("grammar-verdicts"))
 }
@@ -104,8 +117,22 @@ pub(super) struct VerdictDirs {
 }
 
 impl VerdictDirs {
+    #[cfg(not(test))]
     fn from_env() -> VerdictDirs {
         VerdictDirs::from(&|name: &str| std::env::var_os(name))
+    }
+
+    /// The crate's own unit tests are not an armed test run (nothing sets `BROOD_TEST_RUN`
+    /// in `cargo test`), so read from the environment they would keep their passes in the
+    /// user's cache. They never read it: every verdict they keep goes under a directory of
+    /// this test process's own (ADR-672).
+    #[cfg(test)]
+    fn from_env() -> VerdictDirs {
+        let root = std::env::temp_dir().join(format!("brood-unit-verdicts-{}", std::process::id()));
+        VerdictDirs {
+            quarantined: Some(root.join("state")),
+            passed: Some(root.join("cache")),
+        }
     }
 
     /// The directories `environment` gives. A TEST RUN (`BROOD_TEST_RUN=1`, ADR-602) writes
@@ -570,7 +597,34 @@ fn signal_of(status: &std::process::ExitStatus) -> Option<String> {
     })
 }
 
-#[cfg(not(unix))]
+/// On Windows a process that dies of an unhandled exception exits with its NTSTATUS, and one
+/// that called the C runtime's `abort()` with 3: named, so a vetting child that crashed reads
+/// as a crash, not as a failure with a negative status (ADR-672).
+#[cfg(windows)]
+fn signal_of(status: &std::process::ExitStatus) -> Option<String> {
+    exception_name(status.code()? as u32).map(str::to_string)
+}
+
+/// The name of the NTSTATUS `code` a crashed Windows process exits with, or of `abort()`'s 3.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn exception_name(code: u32) -> Option<&'static str> {
+    Some(match code {
+        3 => "abort",
+        0xC000_0005 => "EXCEPTION_ACCESS_VIOLATION",
+        0xC000_0006 => "EXCEPTION_IN_PAGE_ERROR",
+        0xC000_001D => "EXCEPTION_ILLEGAL_INSTRUCTION",
+        0xC000_0094 => "EXCEPTION_INT_DIVIDE_BY_ZERO",
+        0xC000_008C => "EXCEPTION_ARRAY_BOUNDS_EXCEEDED",
+        0xC000_0096 => "EXCEPTION_PRIV_INSTRUCTION",
+        0xC000_00FD => "EXCEPTION_STACK_OVERFLOW",
+        0xC000_0409 => "STATUS_STACK_BUFFER_OVERRUN",
+        0xC000_0374 => "STATUS_HEAP_CORRUPTION",
+        0x8000_0003 => "EXCEPTION_BREAKPOINT",
+        _ => return None,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn signal_of(_status: &std::process::ExitStatus) -> Option<String> {
     None
 }
@@ -765,29 +819,137 @@ fn automatic_vetting() -> bool {
         && std::env::var(OPT_OUT_ENV).map_or(true, |value| value.trim() != "0")
 }
 
+// ---- one vetting per library at a time ----------------------------------------------------
+
+/// A vetting in flight in this process: the verdict it reached, once it has, for every thread
+/// that asked for the same library meanwhile. `Some(None)` is a vetting that ended without one
+/// (its caller was killed), which sends a waiter to vet for itself.
+struct InFlight {
+    done: Mutex<Option<Option<Verdict>>>,
+    ready: std::sync::Condvar,
+}
+
+/// The vettings in flight, by library hash (ADR-672). A vetting holds no other lock — not the
+/// declared-grammar table, which every parse and status question reads — so a second thread
+/// that needs the same library joins this one instead of starting a second child or racing it
+/// to the verdict file.
+static VETTING: LazyLock<Mutex<HashMap<String, std::sync::Arc<InFlight>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The end of a leader's flight, on drop: a verdict-less end unless one was published, the
+/// flight out of the table, every waiter woken.
+struct Finished<'a> {
+    hash: &'a str,
+    flight: &'a InFlight,
+}
+
+impl Drop for Finished<'_> {
+    fn drop(&mut self) {
+        crate::core::sync::lock(&self.flight.done).get_or_insert(None);
+        crate::core::sync::lock(&VETTING).remove(self.hash);
+        self.flight.ready.notify_all();
+    }
+}
+
+/// How a [`vet_once`] call came by its verdict.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Came {
+    /// It was kept already (on disk), or another thread's vetting in flight reached it.
+    Kept,
+    /// This call's own child reached it.
+    Vetted,
+}
+
+/// The verdict on the library with `hash`: the one kept, else the one a vetting already in
+/// flight in this process reaches, else `vet`'s — run here, with every other thread asking
+/// for the same library waiting on it. `vet` answers the verdict (and keeps it); it errs only
+/// when the caller is killed, and then the next waiter vets in its place. A waiter killed while
+/// it waits errs the same way. Holds no lock while `vet` runs.
+pub(super) fn vet_once(
+    hash: &str,
+    vet: impl FnOnce() -> Result<Verdict, LispError>,
+) -> Result<(Verdict, Came), LispError> {
+    let mut vet = Some(vet);
+    loop {
+        if let Some(verdict) = stored_verdict(hash) {
+            return Ok((verdict, Came::Kept));
+        }
+        let (flight, leader) = {
+            let mut vetting = crate::core::sync::lock(&VETTING);
+            match vetting.get(hash) {
+                Some(flight) => (std::sync::Arc::clone(flight), false),
+                None => {
+                    let flight = std::sync::Arc::new(InFlight {
+                        done: Mutex::new(None),
+                        ready: std::sync::Condvar::new(),
+                    });
+                    vetting.insert(hash.to_string(), std::sync::Arc::clone(&flight));
+                    (flight, true)
+                }
+            }
+        };
+        if leader {
+            // ends the flight however the vetting ends — a panic in it included, which would
+            // otherwise leave every waiter waiting
+            let finished = Finished {
+                hash,
+                flight: &flight,
+            };
+            // the closure is taken once: a leader returns, and only a waiter loops
+            let result = vet.take().map_or_else(
+                || Err(LispError::runtime("vet_once: the vetting ran twice")),
+                |vet| vet(),
+            );
+            *crate::core::sync::lock(&flight.done) = Some(result.as_ref().ok().cloned());
+            drop(finished);
+            return result.map(|verdict| (verdict, Came::Vetted));
+        }
+        let _dirty = crate::process::dirty_block();
+        let mut done = crate::core::sync::lock(&flight.done);
+        let reached = loop {
+            if let Some(reached) = done.as_ref() {
+                break reached.clone();
+            }
+            if crate::process::capture_kill_pending() {
+                return Err(LispError::kill_signal());
+            }
+            done = flight
+                .ready
+                .wait_timeout(done, Duration::from_millis(20))
+                .map(|(guard, _)| guard)
+                .unwrap_or_else(|poisoned| poisoned.into_inner().0);
+        };
+        drop(done);
+        if let Some(verdict) = reached {
+            return Ok((verdict, Came::Kept));
+        }
+        // the leader was killed before a verdict: ask again, and vet if no one else is
+    }
+}
+
 /// The gate in front of every dlopen of a grammar library in this process: `bytes` are the
 /// library's at `path`. A quarantined library is refused with its reason; one with no verdict
-/// is vetted first (when this binary can), and a pass or quarantine kept. Answers the hash.
+/// is vetted first (when this binary can), once however many threads ask ([`vet_once`]), and a
+/// pass or quarantine kept. Answers the hash. Takes no lock of the caller's: a declared
+/// grammar's first use calls it before it takes the declared-grammar table (ADR-672).
 pub(super) fn admit(path: &str, lang: &str, bytes: &[u8]) -> Result<String, LispError> {
     let hash = remember_hash(Path::new(path), bytes);
-    if let Some(verdict) = stored_verdict(&hash) {
-        return if verdict.quarantined() {
-            Err(quarantine_error(lang, path, &verdict))
-        } else {
-            Ok(hash)
+    if !automatic_vetting() {
+        return match stored_verdict(&hash) {
+            Some(verdict) if verdict.quarantined() => Err(quarantine_error(lang, path, &verdict)),
+            _ => Ok(hash),
         };
     }
-    if !automatic_vetting() {
-        return Ok(hash);
-    }
-    let outcome = run_vet(
-        path,
-        lang,
-        &hash,
-        &[],
-        Duration::from_millis(DEFAULT_TIMEOUT_MS),
-    )?;
-    let verdict = outcome_verdict(outcome, lang, path, &hash);
+    let (verdict, _) = vet_once(&hash, || {
+        run_vet(
+            path,
+            lang,
+            &hash,
+            &[],
+            Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        )
+        .map(|outcome| outcome_verdict(outcome, lang, path, &hash))
+    })?;
     if verdict.quarantined() {
         Err(quarantine_error(lang, path, &verdict))
     } else {
@@ -807,7 +969,10 @@ pub(super) fn quarantine_of(path: &str) -> Option<Verdict> {
 /// `(%tree-sitter-vet-grammar path lang opts)` — vet the library at `path` as `lang`'s grammar
 /// in a child (ADR-660) and answer the verdict: `{:verdict :passed|:quarantined|:refused
 /// |:unvetted :reason … :by :vet|:crash :lang :library :sha256 :time :inputs :cached}`. A kept
-/// verdict is answered (`:cached true`) unless `force`. Loads nothing into this process.
+/// verdict is answered (`:cached true`) unless `force`, and so is one a vetting of the same
+/// library already in flight in this process reaches (a load's, or another caller's) — one
+/// child per library at a time (ADR-672). `force` always starts its own. Loads nothing into
+/// this process.
 pub fn vet_grammar(
     heap: &mut Heap,
     path: &str,
@@ -820,12 +985,16 @@ pub fn vet_grammar(
         .map_err(|e| LispError::runtime(format!("%tree-sitter-vet-grammar:{path}: {e}")))?;
     let hash = remember_hash(Path::new(path), &bytes);
     let cached = Value::keyword(value::intern("cached"));
-    if !force && let Some(verdict) = stored_verdict(&hash) {
-        return Ok(verdict.to_value_with(heap, vec![(cached, Value::Bool(true))]));
-    }
-    let outcome = run_vet(path, lang, &hash, corpus, timeout)?;
-    Ok(outcome_verdict(outcome, lang, path, &hash)
-        .to_value_with(heap, vec![(cached, Value::Bool(false))]))
+    let vet = || {
+        run_vet(path, lang, &hash, corpus, timeout)
+            .map(|outcome| outcome_verdict(outcome, lang, path, &hash))
+    };
+    let (verdict, came) = if force {
+        (vet()?, Came::Vetted)
+    } else {
+        vet_once(&hash, vet)?
+    };
+    Ok(verdict.to_value_with(heap, vec![(cached, Value::Bool(came == Came::Kept))]))
 }
 
 /// `(%tree-sitter-grammar-verdict path)` — the verdict kept on the library at `path` as it is
@@ -1208,6 +1377,26 @@ mod tests {
         }
     }
 
+    /// Windows: no HOME in a native shell, so the profile directory is the home — or a crash
+    /// there would have nowhere to write its quarantine (ADR-672).
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_profile_directory_is_the_home() {
+        let environment =
+            |name: &str| (name == "USERPROFILE").then(|| std::ffi::OsString::from(r"C:\Users\u"));
+        assert_eq!(
+            VerdictDirs::from(&environment),
+            VerdictDirs {
+                quarantined: Some(PathBuf::from(
+                    r"C:\Users\u\.local\state\brood\grammar-verdicts"
+                )),
+                passed: Some(PathBuf::from(r"C:\Users\u\.cache\brood\grammar-verdicts")),
+            }
+        );
+    }
+
+    // Unix-style absolute paths, which are not absolute on Windows
+    #[cfg(unix)]
     #[test]
     fn a_test_run_keeps_every_verdict_out_of_the_user_s_home() {
         let environment = |pairs: &'static [(&'static str, &'static str)]| {
@@ -1393,5 +1582,91 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A unique library hash per test, so no kept verdict answers for it.
+    fn unique_hash(name: &str) -> String {
+        sha256_hex(format!("{name}-{}-{}", std::process::id(), now_ms()).as_bytes())
+    }
+
+    #[test]
+    fn two_threads_vetting_one_library_share_one_child() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        let hash = unique_hash("shared");
+        let (entered, started) = std::sync::mpsc::channel();
+        let leader = {
+            let hash = hash.clone();
+            std::thread::spawn(move || {
+                vet_once(&hash, || {
+                    RUNS.fetch_add(1, Ordering::SeqCst);
+                    entered.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(150));
+                    Ok(verdict_about("x", "/g/x.so", &hash).keyword("verdict", "passed"))
+                })
+            })
+        };
+        started.recv().unwrap();
+        // the leader's child is running: this one waits for its verdict, starting none
+        let (verdict, came) = vet_once(&hash, || {
+            RUNS.fetch_add(1, Ordering::SeqCst);
+            Ok(Verdict::new())
+        })
+        .expect("a verdict");
+        assert_eq!(came, Came::Kept);
+        assert!(verdict.passed());
+        let (led, led_came) = leader.join().unwrap().expect("a verdict");
+        assert_eq!(led_came, Came::Vetted);
+        assert_eq!(led, verdict);
+        assert_eq!(RUNS.load(Ordering::SeqCst), 1);
+        assert!(!crate::core::sync::lock(&VETTING).contains_key(&hash));
+    }
+
+    #[test]
+    fn a_vetting_that_ends_without_a_verdict_sends_its_waiter_to_vet() {
+        let hash = unique_hash("unfinished");
+        let (entered, started) = std::sync::mpsc::channel();
+        let leader = {
+            let hash = hash.clone();
+            std::thread::spawn(move || {
+                vet_once(&hash, || {
+                    entered.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(100));
+                    Err(LispError::runtime("the caller went away"))
+                })
+            })
+        };
+        started.recv().unwrap();
+        let (verdict, came) = vet_once(&hash, || {
+            Ok(verdict_about("x", "/g/x.so", &hash).keyword("verdict", "passed"))
+        })
+        .expect("its own verdict");
+        assert_eq!(came, Came::Vetted);
+        assert!(verdict.passed());
+        assert!(leader.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn a_unit_test_keeps_no_verdict_in_the_user_s_home() {
+        let dirs = VerdictDirs::from_env();
+        let temp = std::env::temp_dir();
+        for dir in [&dirs.quarantined, &dirs.passed] {
+            assert!(
+                dir.as_ref().is_some_and(|dir| dir.starts_with(&temp)),
+                "{dir:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_windows_crash_is_named_by_its_exit_status() {
+        assert_eq!(
+            exception_name(0xC000_0005),
+            Some("EXCEPTION_ACCESS_VIOLATION")
+        );
+        assert_eq!(exception_name(3), Some("abort"));
+        assert_eq!(exception_name(1), None);
+        // the child's own refusals are clear of abort()'s 3
+        assert!(![EXIT_REFUSED, EXIT_NOT_RUN].contains(&3));
     }
 }

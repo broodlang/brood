@@ -1433,6 +1433,32 @@ call this after an install to vet with one, off any loop that must stay responsi
     (try (editor/treesit/vet-grammar \"/nonexistent/libtree-sitter-x.so\" :x) (catch _ :none))   ;=> :none"
   (%tree-sitter-vet-grammar path lang options))
 
+(defn declared-grammars (-> map)
+  "Every grammar declared (`declare-grammar`) and not loaded yet, as `{lang path}`; a
+declaration whose load failed is left out. Loads nothing.
+
+    (map? (editor/treesit/declared-grammars))   ;=> true"
+  (%tree-sitter-declared-grammars))
+
+(defn vet-declared-grammars (&optional (options nil) -> map)
+  "Vet every grammar declared and not loaded yet (`declared-grammars`) that has no verdict,
+one after another, and answer `{lang verdict}` (`vet-grammar`'s verdict, `:cached true` for
+one kept already). Blocks while each child runs, so call it OFF any loop that must stay
+responsive — in a spawned process at startup — and the first parse of each language finds its
+verdict waiting instead of starting a child (ADR-672). A parse that needs a language while it
+is being vetted here waits for this vetting rather than starting a second. `options` go to
+`vet-grammar` (`:timeout-ms`). A library that cannot be read answers its error as a failure.
+
+    (map? (editor/treesit/vet-declared-grammars))   ;=> true"
+  (into {}
+    (map (declared-grammars)
+      (fn ([lang path])
+        [lang
+          (check-allow :discarded-catch
+            (try
+              (vet-grammar path lang options)
+              (catch e (failure (error-message e)))))]))))
+
 (defn grammar-verdict (path:string)
   "The verdict kept on the grammar library at `path` as its bytes are now (see
 `vet-grammar`; a quarantine a crashed runtime wrote has `:by :crash`, its `:signal` and

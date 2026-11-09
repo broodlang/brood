@@ -55,12 +55,31 @@ pub struct ForeignCode {
     crash_file: Option<CrashFile>,
 }
 
+/// A path as the crash handler hands it to the OS, made beforehand: a C string for `open` on
+/// Unix, a NUL-terminated UTF-16 string for `CreateFileW` on Windows.
+#[cfg(not(windows))]
+type NativePath = std::ffi::CString;
+#[cfg(windows)]
+type NativePath = Vec<u16>;
+
+#[cfg(not(windows))]
+fn native_path(path: &std::path::Path) -> Option<NativePath> {
+    std::ffi::CString::new(path.to_string_lossy().into_owned().into_bytes()).ok()
+}
+
+#[cfg(windows)]
+fn native_path(path: &std::path::Path) -> Option<NativePath> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    (!wide.contains(&0)).then(|| wide.into_iter().chain([0]).collect())
+}
+
 /// What [`ForeignCode::with_crash_file`] asks the handler to write.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 struct CrashFile {
-    /// Each directory to `mkdir` before opening the file, outermost first.
-    mkdirs: Vec<std::ffi::CString>,
-    file: std::ffi::CString,
+    /// Each directory to make before opening the file, outermost first.
+    mkdirs: Vec<NativePath>,
+    file: NativePath,
     /// Written before the signal's own fields, and after them.
     head: Vec<u8>,
     tail: Vec<u8>,
@@ -89,13 +108,10 @@ impl ForeignCode {
     /// :time <ms> :pid <pid>`, then `tail` — so `head` opens a map literal and `tail` closes it.
     /// The directories above `path` are made first. Ignored when `path` cannot be a C string.
     pub fn with_crash_file(mut self, path: &std::path::Path, head: String, tail: String) -> Self {
-        let cstring = |path: &std::path::Path| {
-            std::ffi::CString::new(path.to_string_lossy().into_owned().into_bytes()).ok()
-        };
-        if let Some(file) = cstring(path) {
-            let mut mkdirs: Vec<std::ffi::CString> = path
+        if let Some(file) = native_path(path) {
+            let mut mkdirs: Vec<NativePath> = path
                 .parent()
-                .map(|dir| dir.ancestors().filter_map(cstring).collect())
+                .map(|dir| dir.ancestors().filter_map(native_path).collect())
                 .unwrap_or_default();
             mkdirs.reverse();
             self.crash_file = Some(CrashFile {
@@ -157,9 +173,192 @@ pub fn current_foreign_code() -> Option<&'static ForeignCode> {
 /// Called early in `main`, after the panic hook, and again when a test run has pointed
 /// `XDG_STATE_HOME` at its scratch home (`arm_test_run`), which moves the record there: a
 /// test that crashes a runtime never writes the user's state directory.
+///
+/// On Windows there is no record (ADR-635 is Unix-only), but a crash in foreign code still
+/// writes its crash file — a grammar that crashed the process is quarantined for the next start
+/// there too ([`windows`], ADR-672).
 pub fn install() {
     #[cfg(unix)]
     unix::install();
+    #[cfg(windows)]
+    windows::install();
+}
+
+/// Windows: an unhandled-exception filter (and the C runtime's `SIGABRT` handler) that writes
+/// the crash file of the foreign code the faulting thread was in — the quarantine of the grammar
+/// that crashed the process (ADR-672). No crash record: ADR-635's is Unix-only.
+///
+/// The filter runs on the faulting thread, so the thread-local mark ([`current_foreign_code`])
+/// names whose code it was, exactly as the Unix handler reads it. It runs only for an exception
+/// nothing else handled, never a first-chance one, so a library that raises and catches its
+/// own exceptions is not mistaken for a crash; it allocates nothing, makes the directories and
+/// writes the file with `CreateDirectoryW` / `CreateFileW` / `WriteFile` over paths made at
+/// load, then hands the exception on to the filter before it, so the process dies as it would
+/// have (Windows Error Reporting included). A `__fastfail` (Rust's own abort) bypasses every
+/// filter, and is never a grammar's.
+#[cfg(windows)]
+mod windows {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, FILETIME, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_ALWAYS, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL, WriteFile,
+    };
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        EXCEPTION_POINTERS, SetUnhandledExceptionFilter,
+    };
+    use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+
+    /// Set once the filter is in place: `install` runs again when a test run moves the state
+    /// directory, and the crash file's path is read from the mark, not from here.
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    /// The filter before ours, as an address (0 for none), handed every exception after.
+    static PREVIOUS: AtomicUsize = AtomicUsize::new(0);
+    /// Set by the first crash written, so a second exception on the way down writes nothing.
+    static WRITTEN: AtomicBool = AtomicBool::new(false);
+
+    type Filter = unsafe extern "system" fn(*const EXCEPTION_POINTERS) -> i32;
+    /// What a filter answers to let the search go on: the previous filter, else the default.
+    const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+
+    pub(super) fn install() {
+        if INSTALLED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // SAFETY: installing a filter function and a C runtime signal handler, both of which
+        // live for the life of the process.
+        unsafe {
+            let previous = SetUnhandledExceptionFilter(Some(filter));
+            PREVIOUS.store(
+                previous.map_or(0, |filter| filter as usize),
+                Ordering::SeqCst,
+            );
+            libc::signal(
+                libc::SIGABRT,
+                abort_handler as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            );
+        }
+    }
+
+    /// The name of an exception code, as the vetting parent names a child's exit status.
+    fn exception_name(code: u32) -> &'static [u8] {
+        match code {
+            0xC000_0005 => b"EXCEPTION_ACCESS_VIOLATION",
+            0xC000_0006 => b"EXCEPTION_IN_PAGE_ERROR",
+            0xC000_001D => b"EXCEPTION_ILLEGAL_INSTRUCTION",
+            0xC000_0094 => b"EXCEPTION_INT_DIVIDE_BY_ZERO",
+            0xC000_008C => b"EXCEPTION_ARRAY_BOUNDS_EXCEEDED",
+            0xC000_0096 => b"EXCEPTION_PRIV_INSTRUCTION",
+            0xC000_00FD => b"EXCEPTION_STACK_OVERFLOW",
+            0xC000_0409 => b"STATUS_STACK_BUFFER_OVERRUN",
+            0xC000_0374 => b"STATUS_HEAP_CORRUPTION",
+            0x8000_0003 => b"EXCEPTION_BREAKPOINT",
+            _ => b"EXCEPTION",
+        }
+    }
+
+    unsafe extern "system" fn filter(info: *const EXCEPTION_POINTERS) -> i32 {
+        // SAFETY: the system hands the filter valid exception pointers; checked for null anyway.
+        let code = unsafe {
+            if info.is_null() || (*info).ExceptionRecord.is_null() {
+                0
+            } else {
+                (*(*info).ExceptionRecord).ExceptionCode as u32
+            }
+        };
+        // SAFETY: reads the thread's mark and writes a file through paths made at load.
+        unsafe { write_crash_file(exception_name(code)) };
+        let previous = PREVIOUS.load(Ordering::SeqCst);
+        if previous == 0 {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        // SAFETY: `previous` is the filter `SetUnhandledExceptionFilter` returned, as an address.
+        let previous: Filter = unsafe { std::mem::transmute::<usize, Filter>(previous) };
+        unsafe { previous(info) }
+    }
+
+    /// A C `abort()` in foreign code raises `SIGABRT` in this C runtime before it ends the
+    /// process (a grammar built against another C runtime raises it in that one, unseen).
+    /// Returning lets the runtime go on and end the process as it would have.
+    extern "C" fn abort_handler(_signal: libc::c_int) {
+        // SAFETY: as the filter.
+        unsafe { write_crash_file(b"abort") };
+    }
+
+    unsafe fn write_all(handle: windows_sys::Win32::Foundation::HANDLE, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let mut wrote: u32 = 0;
+            let asked = bytes.len().min(u32::MAX as usize) as u32;
+            // SAFETY: a live handle, a buffer of `asked` bytes, no overlapped I/O.
+            let ok = unsafe {
+                WriteFile(
+                    handle,
+                    bytes.as_ptr(),
+                    asked,
+                    &mut wrote,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 || wrote == 0 {
+                return;
+            }
+            bytes = &bytes[wrote as usize..];
+        }
+    }
+
+    /// Write the crash file of the foreign code this thread is in, if it has one: its head,
+    /// ` :signal "<name>" :time <ms> :pid <pid>`, its tail. Allocates nothing.
+    unsafe fn write_crash_file(name: &[u8]) {
+        let Some(code) = super::current_foreign_code() else {
+            return;
+        };
+        let Some(crash_file) = &code.crash_file else {
+            return;
+        };
+        if WRITTEN.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let mut now = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        // SAFETY: plain Win32 calls over NUL-terminated wide paths made at load, and a
+        // stack-allocated FILETIME.
+        unsafe {
+            GetSystemTimeAsFileTime(&mut now);
+            // 100 ns ticks since 1601 to milliseconds since 1970
+            let ticks = ((now.dwHighDateTime as u64) << 32) | now.dwLowDateTime as u64;
+            let time = (ticks.saturating_sub(116_444_736_000_000_000) / 10_000) as i128;
+            let pid = GetCurrentProcessId() as i128;
+            for dir in &crash_file.mkdirs {
+                CreateDirectoryW(dir.as_ptr(), std::ptr::null());
+            }
+            let handle = CreateFileW(
+                crash_file.file.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            );
+            if handle == INVALID_HANDLE_VALUE {
+                return;
+            }
+            let mut digits = [0u8; 40];
+            write_all(handle, &crash_file.head);
+            write_all(handle, b" :signal \"");
+            write_all(handle, name);
+            write_all(handle, b"\" :time ");
+            write_all(handle, super::format_int(time, &mut digits));
+            write_all(handle, b" :pid ");
+            write_all(handle, super::format_int(pid, &mut digits));
+            write_all(handle, &crash_file.tail);
+            CloseHandle(handle);
+        }
+    }
 }
 
 /// Where the record would go, from the environment: an absolute `XDG_STATE_HOME`, else
@@ -179,6 +378,27 @@ fn record_dir_from_env() -> Option<std::path::PathBuf> {
                 .map(|home| home.join(".local").join("state"))
         })
         .map(|base| base.join("brood").join("crashes"))
+}
+
+#[cfg(any(unix, windows))]
+/// `value` in decimal, written into the end of `digits`; the slice that holds it.
+pub(crate) fn format_int(value: i128, digits: &mut [u8; 40]) -> &[u8] {
+    let mut at = digits.len();
+    let negative = value < 0;
+    let mut rest = value.unsigned_abs();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    if negative {
+        at -= 1;
+        digits[at] = b'-';
+    }
+    &digits[at..]
 }
 
 /// `text` safe inside a Brood string literal and on one line: a quote or backslash becomes
@@ -202,6 +422,7 @@ pub(crate) fn literal_safe(text: &str, max: usize) -> String {
 
 #[cfg(unix)]
 mod unix {
+    use super::format_int;
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
@@ -351,26 +572,6 @@ mod unix {
             let mut digits = [0u8; 40];
             self.push(format_int(value, &mut digits));
         }
-    }
-
-    /// `value` in decimal, written into the end of `digits`; the slice that holds it.
-    fn format_int(value: i128, digits: &mut [u8; 40]) -> &[u8] {
-        let mut at = digits.len();
-        let negative = value < 0;
-        let mut rest = value.unsigned_abs();
-        loop {
-            at -= 1;
-            digits[at] = b'0' + (rest % 10) as u8;
-            rest /= 10;
-            if rest == 0 {
-                break;
-            }
-        }
-        if negative {
-            at -= 1;
-            digits[at] = b'-';
-        }
-        &digits[at..]
     }
 
     fn signal_name(signal: libc::c_int) -> &'static [u8] {

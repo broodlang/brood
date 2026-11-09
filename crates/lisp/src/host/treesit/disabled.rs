@@ -115,6 +115,10 @@ pub fn grammar_status(_heap: &mut crate::core::heap::Heap, _lang: &str) -> LispR
     Ok(crate::core::value::Value::Nil)
 }
 
+pub fn declared_grammars(heap: &mut crate::core::heap::Heap) -> LispResult {
+    Ok(heap.map_from_pairs(Vec::new()))
+}
+
 /// The vetting child's entry (ADR-660): nothing to vet without tree-sitter.
 pub fn vetting_entry() {}
 

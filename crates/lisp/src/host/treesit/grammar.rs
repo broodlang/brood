@@ -193,14 +193,38 @@ unsafe fn open_library(
     )
 }
 
-/// dlopen `path`, check the grammar's ABI and register it under `lang` — the work of
-/// [`load_grammar`], shared with the lazy load of a declared grammar
-/// ([`declared_language`]). `who` is the primitive the caller's errors name. Answers the ABI
-/// version and the registered language.
+/// Read `path`, vet it (ADR-660), dlopen it, check the grammar's ABI and register it under
+/// `lang` — the work of [`load_grammar`]. `who` is the primitive the caller's errors name.
+/// Answers the ABI version and the registered language.
 fn load_library(
     who: &str,
     path: &str,
     lang: &str,
+) -> Result<(i64, tree_sitter::Language), LispError> {
+    let (bytes, hash) = read_and_admit(who, path, lang)?;
+    load_admitted(who, path, lang, &bytes, &hash)
+}
+
+/// The library at `path` read and through the gate (ADR-660): a quarantined library is refused
+/// here, before any of its code runs in this process, and one never vetted is vetted first, in
+/// a child — once however many threads ask. Its bytes and their hash. Holds no lock of its own
+/// while a child runs, so a caller must not hold one either (ADR-672).
+fn read_and_admit(who: &str, path: &str, lang: &str) -> Result<(Vec<u8>, String), LispError> {
+    let bytes =
+        std::fs::read(path).map_err(|e| LispError::runtime(format!("{who}:{path}: {e}")))?;
+    let hash = super::vet::admit(path, lang, &bytes)?;
+    Ok((bytes, hash))
+}
+
+/// dlopen the library `bytes` (read from `path`, admitted as `hash`), check the grammar's ABI
+/// and register it under `lang`. Fast — the vetting is behind it — so the lazy load of a
+/// declared grammar ([`declared_language`]) runs it under the declared-grammar lock.
+fn load_admitted(
+    who: &str,
+    path: &str,
+    lang: &str,
+    bytes: &[u8],
+    hash: &str,
 ) -> Result<(i64, tree_sitter::Language), LispError> {
     // Brood keywords are spelled with hyphens and C identifiers cannot be, so `:c-sharp`
     // asks for `tree_sitter_c_sharp` — which is exactly what the tree-sitter-c-sharp grammar
@@ -208,14 +232,9 @@ fn load_library(
     // grammar rather than being a nickname for it; there is no aliasing here and shouldn't
     // be, since the mode that asks to parse `:c-sharp` is the same name on both sides.
     let symbol = format!("tree_sitter_{}", lang.replace('-', "_"));
-    let bytes =
-        std::fs::read(path).map_err(|e| LispError::runtime(format!("{who}:{path}: {e}")))?;
-    // The gate (ADR-660): a quarantined library is refused here, before any of its code runs
-    // in this process, and one never vetted is vetted first, in a child.
-    let hash = super::vet::admit(path, lang, &bytes)?;
     // From here the library's code runs (its initialisers, its entry point, set_language's
     // scanner set-up): a crash in it names it, and quarantines it for the next start.
-    let mark = super::vet::build_mark(lang, path, &hash);
+    let mark = super::vet::build_mark(lang, path, hash);
     let _marked = crate::cli_support::enter_foreign_code(Some(mark));
     // SAFETY: dlopen'ing a caller-chosen library and calling the grammar constructor it
     // exports. The symbol type is tree-sitter's documented grammar entry point, and the
@@ -224,7 +243,7 @@ fn load_library(
     // itself: the dynamic loader hands back the object it already has for a name it has
     // seen, so a grammar rebuilt in place and loaded again from the same path would go on
     // parsing with the old one (ADR-583). See `open_library`.
-    let (opened, via) = unsafe { open_library(path, &bytes, &hash) };
+    let (opened, via) = unsafe { open_library(path, bytes, hash) };
     let language = unsafe {
         let lib = opened.map_err(|e| LispError::runtime(format!("{who}:{path}: {e}")))?;
         let entry: libloading::Symbol<unsafe extern "C" fn() -> *const ()> = lib
@@ -381,7 +400,8 @@ pub(super) enum Declared {
 /// which moves it to [`DYNAMIC`]; a failed load stays here as the reason.
 ///
 /// Lock order: this before [`DYNAMIC`] (and the pool and cache a load clears) — a lazy load
-/// holds this lock across the dlopen, which is what makes it happen once.
+/// holds this lock across the dlopen, which is what makes it happen once, but never across the
+/// vetting before it (ADR-672).
 pub(super) static DECLARED: LazyLock<Mutex<HashMap<String, Declared>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -411,47 +431,67 @@ pub fn declare_grammar(path: &str, lang: &str) -> LispResult {
 /// The grammar a DECLARATION of `lang` supplies, loading it if this is its first use:
 /// `Ok(None)` when there is no declaration to honour (none, or one that failed while an
 /// older grammar still serves), `Err` when the declared library failed and nothing else can
-/// parse `lang`. The lock is held across the load, so two processes asking at once load it
-/// once — the second finds it loaded.
+/// parse `lang`.
+///
+/// The library is read and VETTED (a child, 0.1–0.4 s the first time — ADR-660) with no lock
+/// held, so a parse of another language or a status question never waits for it; two threads
+/// vetting the same library share one child ([`super::vet::vet_once`]). Only the dlopen runs
+/// under the lock, after checking the declaration is still the one vetted — so it happens once:
+/// a second thread finds the language loaded and the declaration gone, and a declaration
+/// replaced meanwhile is vetted afresh (ADR-672).
 fn declared_language(lang: &str) -> Result<Option<tree_sitter::Language>, LispError> {
-    let mut declared = crate::core::sync::lock(&DECLARED);
-    let path = match declared.get(lang) {
-        None => return Ok(None),
-        Some(Declared::Failed { message, .. }) => {
-            return if has_grammar_without_declaration(lang) {
-                Ok(None)
-            } else {
-                Err(LispError::runtime(message.clone()))
-            };
-        }
-        Some(Declared::Pending { path }) => path.clone(),
-    };
-    match load_library("%tree-sitter-declare-grammar", &path, lang) {
-        Ok((_, language)) => {
-            declared.remove(lang);
-            Ok(Some(language))
-        }
-        // the caller was killed while the library was being vetted: no verdict, and the
-        // declaration stays pending for the next use
-        Err(error) if error.is_kill_signal() => Err(error),
-        Err(error) => {
-            let message = format!(
-                "the :{lang} grammar declared at {path} did not load: {}",
-                error.message
-            );
-            declared.insert(
-                lang.to_string(),
-                Declared::Failed {
-                    path: path.clone(),
-                    message: message.clone(),
-                },
-            );
-            if has_grammar_without_declaration(lang) {
-                Ok(None)
-            } else {
-                Err(LispError::runtime(message))
+    const WHO: &str = "%tree-sitter-declare-grammar";
+    loop {
+        let path = match crate::core::sync::lock(&DECLARED).get(lang) {
+            None => return Ok(None),
+            Some(Declared::Failed { message, .. }) => {
+                return if has_grammar_without_declaration(lang) {
+                    Ok(None)
+                } else {
+                    Err(LispError::runtime(message.clone()))
+                };
             }
+            Some(Declared::Pending { path }) => path.clone(),
+        };
+        let admitted = match read_and_admit(WHO, &path, lang) {
+            // the caller was killed while the library was being vetted: no verdict, and the
+            // declaration stays pending for the next use
+            Err(error) if error.is_kill_signal() => return Err(error),
+            other => other,
+        };
+        let mut declared = crate::core::sync::lock(&DECLARED);
+        let still_declared =
+            matches!(declared.get(lang), Some(Declared::Pending { path: now }) if *now == path);
+        if !still_declared {
+            // loaded by another thread meanwhile, failed there, or declared anew: ask again
+            continue;
         }
+        let loaded =
+            admitted.and_then(|(bytes, hash)| load_admitted(WHO, &path, lang, &bytes, &hash));
+        return match loaded {
+            Ok((_, language)) => {
+                declared.remove(lang);
+                Ok(Some(language))
+            }
+            Err(error) => {
+                let message = format!(
+                    "the :{lang} grammar declared at {path} did not load: {}",
+                    error.message
+                );
+                declared.insert(
+                    lang.to_string(),
+                    Declared::Failed {
+                        path: path.clone(),
+                        message: message.clone(),
+                    },
+                );
+                if has_grammar_without_declaration(lang) {
+                    Ok(None)
+                } else {
+                    Err(LispError::runtime(message))
+                }
+            }
+        };
     }
 }
 
@@ -502,6 +542,27 @@ pub fn grammar_status(heap: &mut Heap, lang: &str) -> LispResult {
         return Ok(keyword("built-in"));
     }
     Ok(Value::Nil)
+}
+
+/// `(%tree-sitter-declared-grammars)` — every grammar declared and not yet loaded, as `{lang
+/// path}`: what a host vets ahead of the first use, off its loop (ADR-672). A declaration whose
+/// load failed is not pending, and is left out.
+pub fn declared_grammars(heap: &mut Heap) -> LispResult {
+    let pending: Vec<(String, String)> = crate::core::sync::lock(&DECLARED)
+        .iter()
+        .filter_map(|(lang, declared)| match declared {
+            Declared::Pending { path } => Some((lang.clone(), path.clone())),
+            Declared::Failed { .. } => None,
+        })
+        .collect();
+    let pairs = pending
+        .into_iter()
+        .map(|(lang, path)| {
+            let path = heap.alloc_string(&path);
+            (Value::keyword(value::intern(&lang)), path)
+        })
+        .collect();
+    Ok(heap.map_from_pairs(pairs))
 }
 
 /// `(%tree-sitter-languages)` — the languages this runtime can parse right now: every
