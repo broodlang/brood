@@ -542,6 +542,19 @@ fmt: ## Format all Rust code
 prepush: ## Run the pre-push hook's gates by hand (rustfmt, the BROOD_* flag catalogue; with a .blsp involved: nest format --check + the tests naming what changed, the surface audit and the doc examples)
 	@sh scripts/git-hooks/pre-push && echo "prepush: clean"
 
+affected-tests: ## Print (don't run) the tests that name what this change touches: .blsp files for `nest test`, `cargo:` lines for nextest
+	@sh scripts/affected-tests.sh
+
+check-desktop: ## The static gates CI runs, safe on a workstation (fmt, nest format, nest check + --strict, clippy), plus TEST=tests/x_test.blsp if given; push after it with --no-verify
+	cargo fmt --all --check
+	cargo build -p nest
+	$(RUN_CAP) target/debug/nest format --check
+	$(RUN_CAP) target/debug/nest check $$(find std tests examples -name '*.blsp' | sort)
+	$(RUN_CAP) target/debug/nest check --strict $$(find std tests -name '*.blsp' | sort)
+	cargo clippy --all-targets --all-features -- -D warnings
+	$(if $(TEST),$(RUN_CAP) target/debug/nest test $(TEST))
+	@echo "check-desktop: clean"
+
 hooks: ## Install the local git pre-push hook (`make prepush` on every push, before CI sees it)
 	# Opt-in and local: the hook lives in scripts/git-hooks/ so it is version-controlled
 	# and survives a fresh clone, but nothing installs it for you. Always: `cargo fmt

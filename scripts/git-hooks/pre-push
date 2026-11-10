@@ -185,27 +185,11 @@ if [ "$blsp_touched" -gt 0 ]; then
 fi
 
 # ---- 6. the tests that name what changed ------------------------------------------
-tests=""
-add_test() { [ -f "$1" ] && case " $tests " in *" $1 "*) ;; *) tests="$tests $1" ;; esac; }
+# The selection lives in scripts/affected-tests.sh (`make affected-tests` prints it).
+tests=$(printf '%s\n' "$changed" | sh scripts/affected-tests.sh --files | grep '\.blsp$' | tr '\n' ' ')
+tests=${tests:+ $tests}
 std_changed=0
-for f in $(printf '%s\n' "$changed" | grep -E '\.blsp$'); do
-    case "$f" in
-        std/*)
-            std_changed=1
-            name=$(basename "$f" .blsp | tr '-' '_')
-            add_test "tests/${name}_test.blsp" ;;
-        tests/*_test.blsp)
-            add_test "$f" ;;
-    esac
-done
-if [ "$std_changed" -eq 1 ]; then
-    add_test tests/audit_test.blsp
-    add_test tests/doc_examples_test.blsp
-fi
-if printf '%s\n' "$changed" | grep -q '^std/prelude/'; then
-    add_test tests/bare_names_test.blsp
-    add_test tests/prelude_capture_test.blsp
-fi
+printf '%s\n' "$changed" | grep -q '^std/.*\.blsp$' && std_changed=1
 # The checker's rule heads (CI: rule_heads_are_bound): each new `symbol_is(_, "name")` must
 # name a bound function, a special form, or a word NOT_CALLEES lists.
 not_callees=$(sed -n '/const NOT_CALLEES/,/];/p' crates/lisp/src/types/check/tests/review_inference.rs | grep -oE '"[^"]+"' | tr -d '"')
@@ -226,10 +210,6 @@ rm -f /tmp/brood-prepush-head.$$.blsp
 [ -n "$unbound_heads" ] && fail "a checker rule keys on a name that is not bound:$unbound_heads
   rename it to the live spelling, or — a clause word, not a callee — add it to NOT_CALLEES in
   crates/lisp/src/types/check/tests/review_inference.rs (CI's rule_heads_are_bound)"
-if [ "$types_touched" -gt 0 ]; then
-    add_test tests/sig_adoption_test.blsp
-    add_test tests/checker_pass_agreement_test.blsp
-fi
 if [ "$types_touched" -gt 0 ] || [ "$std_changed" -eq 1 ]; then
     # CI's checker gates, as CI runs them (ci.yml): the file-list form, since the repo root
     # is not a nest project. `nest check` exits 1 on any warning.
