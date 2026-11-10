@@ -34,6 +34,13 @@ what state a line starts in (Emacs's syntax-ppss question). Pure data over a rop
 ;;    `lc-checkpoint-every` lines: a far region shown again is re-lexed from the
 ;;    checkpoint above it, at most that many lines of lead-in.
 ;;
+;; A first jump far into a document still lexes every line between the last checkpoint and the
+;; window, only for the state they leave (20k lines of Markdown, ~270 ms). A lexer whose state
+;; changes only on lines a search can find (markdown's fences, org's #+BEGIN_ / #+END_, a
+;; heredoc's opener) says so with a SKIP (`line-lexer`'s `skip`): the walks above a window and
+;; `line-cache-state` jump straight to the next such line, a native rope search instead of a
+;; lex per line (the same jump, ~16 ms), and land on a checkpoint there.
+;;
 ;; An entry is `[state-in]` (a checkpoint) or `[state-in spans state-out]` (a shown line,
 ;; spans line-relative so a line that moved keeps them). Entries at or above `:verified`
 ;; are exact; those below it are the old lines' entries after an edit whose re-lex has not
@@ -43,15 +50,22 @@ what state a line starts in (Emacs's syntax-ppss question). Pure data over a rop
 (def- lc-checkpoint-every 32)
 (def- lc-retained-windows 3)
 
-(defn line-lexer (lex &optional (initial nil))
+(defn line-lexer (lex &optional (initial nil) (skip nil))
   "A line lexer for `line-cache-update`: `(lex line state)` returns `[spans state-out]` —
 the `[start end face]` spans of `line` (its text without the newline, offsets relative to
 it) and the state the next line starts in, given the `state` this one starts in. `initial`
 is the state of the first line. States are compared with `=`, so keep them small values:
 a keyword, a short vector (`[:fence \"```\"]`).
 
+`skip`, when given, is `(skip rope line state)`: the first line at or after `line` whose lex
+could END in a state other than `state` (the line count when none) — every line before it
+ends in the state it starts in. A line nobody is shown is then never lexed for its state: the
+walk jumps to that line. Markdown's: outside a fence or in its body, the next line that is a
+fence, found by `regex/rope-find`; answering `line` itself means \"lex this one\", which is
+always right. The map key `:skip` is the same thing, for a caller building the map itself.
+
     (:initial (editor/line-cache/line-lexer (fn (line state) [[] state]) :text))   ;=> :text"
-  {:lex lex :initial initial :stateless? false})
+  {:lex lex :initial initial :stateless? false :skip skip})
 
 (defn stateless-lexer (spans-of)
   "A line lexer whose lines colour on their own: `(spans-of line)` returns the line's
@@ -225,42 +239,51 @@ the old entry there agrees, there is no seam left at all."
 (defn- lc-walk (cache job i state last-key acc)
   "Colour on from line `i`, which starts in `state` (exact), to the window's end: reuse a
 shown line whose state-in agrees, lex any other; keep a shown line's spans, and a
-checkpoint every `lc-checkpoint-every` lines above the window. `last-key` is the last line
-at or before `i` with an entry; `acc` the window's absolute spans so far, last first."
+checkpoint every `lc-checkpoint-every` lines above the window. Above the window, a lexer's
+`:skip` passes over the lines it says cannot change the state, never into the window or past
+the tentative seam. `last-key` is the last line at or before `i` with an entry; `acc` the
+window's absolute spans so far, last first."
   (let (lo (:lo job)
         tree (:tree cache)
         verified (:verified cache)
-        tentative? (and (not (nil? verified)) (> i verified)))
+        tentative? (and (not (nil? verified)) (> i verified))
+        skip (:skip job)
+        skip-to (when (and skip (< i lo) (not tentative?))
+                  (math/min (if (nil? verified) lo (math/min lo verified))
+                    (skip (:rope job) i state))))
     (if (>= i (:hi job))
       (lc-walk-end cache i state acc)
       (let (entry (lc-get tree 0 i))
-        (if (and tentative? entry (= (first entry) state))
+        (cond
+          (and skip-to (> skip-to i)) (lc-walk cache job skip-to state last-key acc)
+          (and tentative? entry (= (first entry) state))
           ;; back in step: the old chain is true from here on, and a line above the window
           ;; jumps to the window's own checkpoint
-          (let (exact (assoc cache :verified nil))
-            (if (< i lo) (lc-start exact job acc) (lc-walk exact job i state i acc)))
-          (let (reuse? (and entry (= (count entry) 3) (= (first entry) state))
-                [spans out] (if reuse?
-                              [(nth entry 1) (nth entry 2)]
-                              ((:lex job) (lc-line-text (:rope job) i) state))
-                shown? (>= i lo)
-                write (cond
-                        reuse? nil
-                        shown? [state spans out]
-                        (and entry (not (= (first entry) state))) [state]
-                        entry nil
-                        (>= (- i last-key) lc-checkpoint-every) [state]
-                        else nil)
-                next-acc (if shown?
-                           (let (base (text/line->char (:rope job) i))
-                             (fold spans acc (fn (a [s e f]) (cons [(+ base s) (+ base e) f] a))))
-                           acc))
-            (lc-walk (if write (assoc cache :tree (lc-put tree i write)) cache)
-              job
-              (inc i)
-              out
-              (if (or entry write) i last-key)
-              next-acc)))))))
+            (let (exact (assoc cache :verified nil))
+              (if (< i lo) (lc-start exact job acc) (lc-walk exact job i state i acc)))
+          else
+            (let (reuse? (and entry (= (count entry) 3) (= (first entry) state))
+                  [spans out] (if reuse?
+                                [(nth entry 1) (nth entry 2)]
+                                ((:lex job) (lc-line-text (:rope job) i) state))
+                  shown? (>= i lo)
+                  write (cond
+                          reuse? nil
+                          shown? [state spans out]
+                          (and entry (not (= (first entry) state))) [state]
+                          entry nil
+                          (>= (- i last-key) lc-checkpoint-every) [state]
+                          else nil)
+                  next-acc (if shown?
+                             (let (base (text/line->char (:rope job) i))
+                               (fold spans acc (fn (a [s e f]) (cons [(+ base s) (+ base e) f] a))))
+                             acc))
+              (lc-walk (if write (assoc cache :tree (lc-put tree i write)) cache)
+                job
+                (inc i)
+                out
+                (if (or entry write) i last-key)
+                next-acc)))))))
 
 (defn- lc-start (cache job acc)
   "Walk from the entry at or above the window — or from the seam, when that entry is
@@ -358,14 +381,16 @@ compares them.
           moved (if (nil? (:tree cache))
                   (assoc cache :rope rope :tree (lc-put nil 0 [(:initial lexer)]))
                   (lc-edited cache rope change))
-          [walked acc] (lc-start moved {:lex (:lex lexer) :rope rope :lo bottom :hi top} '()))
+          [walked acc] (lc-start moved
+                         {:lex (:lex lexer) :skip (:skip lexer) :rope rope :lo bottom :hi top}
+                         '()))
       [(lc-retain walked bottom top) (reverse acc)])))
 
 (def- lc-far
   ;; what the walk answers when it ran out of lines to lex before the target
   :editor.highlight/far)
 
-(defn- lc-state-walk (cache lex rope i state last-key target budget)
+(defn- lc-state-walk (cache lexer rope i state last-key target budget)
   "Lex from line `i`, which starts in `state` (exact), down to line `target`, answering
 `[cache state-at-target]`: a checkpoint every `lc-checkpoint-every` lines and where an old
 entry disagrees, and back in step with a tentative chain the moment its entry agrees. `budget`
@@ -375,26 +400,33 @@ the checkpoints it made."
   (let (tree (:tree cache)
         verified (:verified cache)
         tentative? (and (not (nil? verified)) (> i verified))
-        entry (lc-get tree 0 i))
+        entry (lc-get tree 0 i)
+        skip (:skip lexer)
+        skip-to (when (and skip (< i target) (not tentative?))
+                  (math/min (if (nil? verified) target (math/min target verified))
+                    (skip rope i state))))
     (cond
       (>= i target) (lc-walk-end cache i state state)
+      ;; lines the lexer says cannot change the state are passed over, unlexed
+      (and skip-to (> skip-to i))
+        (lc-state-walk cache lexer rope skip-to state last-key target budget)
       ;; back in step: the old chain is exact from here, so resume from its entry nearest the target
       (and tentative? entry (= (first entry) state))
         (let (exact (assoc cache :verified nil)
               [key found] (lc-floor (:tree exact) 0 target [i entry]))
-          (lc-state-walk exact lex rope key (first found) key target budget))
+          (lc-state-walk exact lexer rope key (first found) key target budget))
       (and (not (nil? budget)) (<= budget 0))
         [(first (lc-walk-end cache i state state)) [lc-far i state]]
       else
         (let (reuse? (and entry (= (count entry) 3) (= (first entry) state))
-              out (if reuse? (nth entry 2) (second (lex (lc-line-text rope i) state)))
+              out (if reuse? (nth entry 2) (second ((:lex lexer) (lc-line-text rope i) state)))
               write (cond
                       (and entry (not (= (first entry) state))) [state]
                       entry nil
                       (>= (- i last-key) lc-checkpoint-every) [state]
                       else nil))
           (lc-state-walk (if write (assoc cache :tree (lc-put tree i write)) cache)
-            lex
+            lexer
             rope
             (inc i)
             out
@@ -414,7 +446,7 @@ the checkpoints it made."
           verified (:verified moved)
           [key _] (lc-floor tree 0 target [0 nil])
           from (if (and (not (nil? verified)) (> key verified)) verified key))
-      (lc-state-walk moved (:lex lexer) rope from (first (lc-get tree 0 from)) from target budget))))
+      (lc-state-walk moved lexer rope from (first (lc-get tree 0 from)) from target budget))))
 
 (defn line-cache-state (cache lexer rope line &optional (change nil))
   "`[cache' state]`: the state line `line` of `rope` starts in, by a stateful `lexer`, and the

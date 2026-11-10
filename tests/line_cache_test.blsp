@@ -301,6 +301,71 @@ cached: a line inserted at line 10, then the window (moved down one) shown again
       (lc-lexed)
       (is agreed))))
 
+;; A lexer whose state changes only on lines a search finds says so with a skip: the lines in
+;; between are never lexed for their state, and every answer stays the one without it.
+(defn lc-fence-skip (rope line state)
+  ;; the toy lexer's state changes only on a "```" line
+  (let (hit (regex/rope-find "^```$" rope (text/line->char rope line)))
+    (if hit (text/char->line rope (:start hit)) (text/line-count rope))))
+
+(defn lc-skipping-lexer (me)
+  (assoc (lc-fence-lexer me) :skip lc-fence-skip))
+
+(describe "line-cache-update — a lexer that can skip"
+  (test "a far window lexes the fences above it and itself, and colours as a lex from the top"
+    (let (me (self)
+          rope (lc-doc 2000)
+          truth (lc-truth (lc-fence-lexer me) rope 1960 2000)
+          [_ spans] (line-cache-update (line-cache) (lc-skipping-lexer me) rope 1960 2000)
+          lexed (lc-lexed))
+      (assert= spans truth)
+      ;; 39 fence pairs above the window, then the window's 40 lines (and its fence)
+      (is (< (count lexed) 140))))
+
+  (test "a line's state, cold and in reach of a budget, is the one without a skip"
+    (let (me (self)
+          rope (lc-doc 2000)
+          lines [0 7 8 12 17 18 1000 1007 1010 1999 2000]
+          plain (map lines
+                  (fn (line) (second (line-cache-state (line-cache) (lc-fence-lexer me) rope line))))
+          skipped (map lines
+                    (fn (line)
+                      (second (line-cache-state (line-cache) (lc-skipping-lexer me) rope line))))
+          _ (lc-lexed)
+          [_ known? state] (line-cache-state-within (line-cache)
+                             (lc-skipping-lexer me)
+                             rope
+                             1010
+                             200))
+      (lc-lexed)
+      (assert= skipped plain)
+      ;; 1010 lines away, but only the fences are lexed: well inside a budget of 200
+      (is known?)
+      (assert= state (nth plain 8))))
+
+  (test "a run of edits and windows agrees with a cold cache at every step"
+    (let (me (self)
+          lexer (lc-skipping-lexer me)
+          steps [[(lc-insert-at 5 "```\n") 0 40]
+                  [(lc-insert-at 30 "q\n") 100 140]
+                  [(lc-delete-lines 2 4) 20 60]
+                  [(lc-insert-at 120 "```\n") 110 150]
+                  [(lc-delete-lines 100 160) 0 60]
+                  [(lc-insert-at 0 "```\n```\n") 150 190]
+                  [(lc-insert-at 70 "w") 60 100]
+                  [(lc-insert-at 12 "```\n") 190 210]]
+          [_ _ agreed] (fold steps
+                         [(line-cache) (lc-doc 220) true]
+                         (fn ([cache rope ok] step)
+                           (let ([edit lo hi] step
+                                 edited (edit rope)
+                                 [next spans] (line-cache-update cache lexer edited lo hi))
+                             [next
+                               edited
+                               (and ok (= spans (lc-truth (lc-fence-lexer me) edited lo hi)))]))))
+      (lc-lexed)
+      (is agreed))))
+
 ;; An editor knows what it changed — its buffer's splice log — and can hand that to the cache
 ;; instead of having it compare two whole ropes. Told or found, the answer is the same.
 (describe "line-cache-update — told what changed"
