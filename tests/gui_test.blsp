@@ -291,6 +291,83 @@ and, per row, the rows of its cell the `x` inks."
                     (is (every? rows (fn (inked) (= inked (first rows)))))
                     (is (<= (math/abs (- middle (/ cell-h 2.0))) 1.0))))))))
 
+;; --- [:image …] (ADR-686): a picture at pixel resolution in a cell block ---------------
+
+(def- stripe-red [250 0 0])
+(def- stripe-blue [0 0 250])
+
+(defn- striped-picture (side)
+  "A side×side {:width :height :rgba} picture whose columns alternate red and blue, one pixel
+each — detail two pixels a cell (the half blocks a terminal shows) cannot keep."
+  {:width side
+   :height side
+   :rgba (bytes/concat (for (index (range 0 (* side side)))
+                         (conj (if (math/even? index) stripe-red stripe-blue) 255)))})
+
+(defn- stripes-at (image x0 y count)
+  "The colours of `count` pixels of row `y` from `x0`."
+  (vec (map (range 0 count) (fn (dx) (gui/pixel image (+ x0 dx) y)))))
+
+(describe "editor/display/image — a picture painted at pixel resolution (ADR-686)"
+  (test "encoded bytes paint every pixel of the picture inside the block, and nothing outside it"
+    (when-gui (fn ()
+                (let (path (str (path/temp "brood-image-op-") ".png")
+                      _ (gui/write-png (striped-picture 32) path)
+                      png (file/slurp-bytes path)
+                      image (gui/render-frame [[:clear]
+                                                (editor/display/image 1
+                                                  1
+                                                  3
+                                                  2
+                                                  png
+                                                  {:fit :none :align :top-left})]
+                              (capture-spec))
+                      [cell-w _] (:cell image)
+                      left (+ 6 cell-w)
+                      top (nth (:row-tops image) 1)
+                      bottom (nth (:row-tops image) 3))
+                  (file/rm path)
+                  (is (= (stripes-at image left (inc top) 8)
+                        [stripe-red
+                          stripe-blue stripe-red stripe-blue stripe-red stripe-blue stripe-red
+                          stripe-blue]))
+                  (is (= (gui/pixel image (dec left) (inc top)) capture-bg))
+                  (is (= (gui/pixel image left bottom) capture-bg))
+                  (is (= (gui/pixel image (+ left (* 3 cell-w)) (inc top)) capture-bg))))))
+
+  (test "an image-thumb map is a source too, and :contain scales it to fit the block"
+    (when-gui
+      (fn ()
+        ;; one green pixel in a block 2 cells wide and 2 rows tall: contain makes it a square
+        ;; the block's width on a side, centred, so the block's top and bottom stay empty
+        (let (image (gui/render-frame [[:clear]
+                                        (editor/display/image 1
+                                          1
+                                          2
+                                          2
+                                          {:width 1
+                                           :height 1
+                                           :rgba (bytes/concat [0 200 0 255])})]
+                      (capture-spec))
+              [cell-w _] (:cell image)
+              left (+ 6 cell-w)
+              top (nth (:row-tops image) 1)
+              bottom (nth (:row-tops image) 3)
+              middle (nth (:row-tops image) 2))
+          (is (> (- bottom top) (* 2 cell-w)))
+          (is (= (gui/pixel image left middle) [0 200 0]))
+          (is (= (gui/pixel image (+ left (* 2 cell-w) -1) middle) [0 200 0]))
+          (is (= (gui/pixel image (+ left (* 2 cell-w)) middle) capture-bg))
+          (is (= (gui/pixel image left (inc top)) capture-bg))
+          (is (= (gui/pixel image left (dec bottom)) capture-bg))))))
+
+  (test "a source that is not a picture paints nothing"
+    (when-gui (fn ()
+                (let (image (gui/render-frame [[:clear]
+                                                (editor/display/image 0 0 4 2 (bytes/concat "no"))]
+                              (capture-spec)))
+                  (is (= (gui/pixel image 10 5) capture-bg)))))))
+
 (describe "gui/write-png and gui/pixel"
   (test "a picture written as PNG decodes back to the same pixels, cropped and scaled"
     (when-gui (fn ()

@@ -72,6 +72,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // Compiled components keyed by the BLAKE3 of their source bytes: the bytes decide the code,
     // and each load still gets a store and instance of its own.
     ("host/wasm.rs", "COMPILED", PureCache),
+    // Decoded pictures for the display's `[:image …]` op, keyed by a BLAKE3 hash of the
+    // source bytes (ADR-686): the key determines the pixels.
+    ("host/picture.rs", "DECODED", PureCache),
     // The scheduler, timer and stdin are one per machine; sysmon observes them.
     ("process/timer.rs", "TIMERS", OneMachine),
     ("process/sysmon.rs", "MONITORS", OneMachine),

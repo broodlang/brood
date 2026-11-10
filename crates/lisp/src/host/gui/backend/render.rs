@@ -221,6 +221,9 @@ pub(crate) struct Renderer {
     /// `[:sprite …]`: straight-alpha RGBA rows. The GPU target keeps its own copies on
     /// the device; a window has one or the other.
     pub(super) textures: HashMap<u32, CpuTexture>,
+    /// The pictures `[:image …]` ops drew, resampled to the sizes this window drew them at
+    /// (ADR-686) — what both painters sample, so a repaint resamples nothing.
+    pub(crate) pictures: crate::host::picture::ScaledPictures,
     /// The window's particle emitters (`[:emitter …]`), stepped once per paint by whichever
     /// target paints, and the CPU painter's own copy of their particles.
     pub(crate) emitters: crate::host::gui::effects::EmitterBook,
@@ -262,6 +265,7 @@ impl Renderer {
             retained: RetainedFrame::default(),
             caret_hidden: false,
             textures: HashMap::new(),
+            pictures: crate::host::picture::ScaledPictures::new(),
             emitters: Default::default(),
             cpu_particles: Default::default(),
         };

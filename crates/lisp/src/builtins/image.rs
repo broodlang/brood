@@ -30,27 +30,9 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         image_write_png);
 }
 
-/// The largest side, in pixels, of an image a primitive will decode or accept.
-pub(super) const IMAGE_MAX_SIDE: u32 = 16384;
-/// The largest buffer, in bytes, an image primitive will allocate for one image.
-pub(super) const IMAGE_MAX_ALLOC: u64 = 512 * 1024 * 1024;
-
-/// Decode an encoded image (any format the `image` build reads: PNG, and JPEG / GIF /
-/// WebP / BMP with `image-formats`) from bytes nobody vouches for — a file, the clipboard.
-/// Per-call `Limits` bound a decompression bomb (`IMAGE_MAX_SIDE` a side, `IMAGE_MAX_ALLOC`
-/// in all), and anything that is not a decodable image within them is `None`, never an
-/// error.
-pub(super) fn decode_untrusted_image(bytes: &[u8]) -> Option<image::DynamicImage> {
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(IMAGE_MAX_SIDE);
-    limits.max_image_height = Some(IMAGE_MAX_SIDE);
-    limits.max_alloc = Some(IMAGE_MAX_ALLOC);
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    reader.limits(limits);
-    reader.decode().ok()
-}
+// The limits and the bounded decode live with the display's pictures (ADR-686), which decode
+// the same untrusted bytes.
+pub(super) use crate::host::picture::{IMAGE_MAX_ALLOC, IMAGE_MAX_SIDE, decode_untrusted_image};
 
 /// Downscale `image` to fit within `max_width`×`max_height`, aspect ratio preserved.
 /// Downscale-only: a source already within the box keeps its native size (never

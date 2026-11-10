@@ -530,6 +530,28 @@ pub(super) fn render_ops(
                     }
                 }
             }
+            Op::Image {
+                row,
+                col,
+                w,
+                h,
+                picture,
+                fit,
+                anchor,
+            } => {
+                // A picture in a cell block (ADR-686): the block through the same map as a
+                // `Rect`, the picture placed and resampled to its pixels, clipped to the block
+                // and to the grid top a scrolled op stops at.
+                let top = rows.y(*row as isize).saturating_sub(scroll_dy);
+                let block = PixelBlock {
+                    left: (ox + *col as usize * cw) as isize,
+                    top,
+                    width: *w as usize * cw,
+                    height: rows.span(*row as isize, *h as isize).max(0) as usize,
+                    clip_top: oy as isize,
+                };
+                paint_image(canvas, r, &picture.0, *fit, *anchor, block);
+            }
             Op::FRect {
                 x,
                 y,
@@ -835,6 +857,83 @@ pub(super) fn render_ops(
 /// its rotated bounding box can reach in y, whatever the angle.
 fn quad_extent(y: f32, w: f32, h: f32) -> (f32, f32) {
     (y + h / 2.0, (w * w + h * h).sqrt() / 2.0)
+}
+
+/// The pixel block an `[:image …]` op's cells cover: its top-left, its size, and the row
+/// above which nothing of it is painted (the grid top a scrolled op is clipped at).
+#[derive(Clone, Copy)]
+pub(super) struct PixelBlock {
+    pub(super) left: isize,
+    pub(super) top: isize,
+    pub(super) width: usize,
+    pub(super) height: usize,
+    pub(super) clip_top: isize,
+}
+
+/// An `[:image …]` op's picture (ADR-686): placed in its block by `fit` and `anchor`,
+/// resampled to the size it is drawn at (cached on the renderer, so a repaint resamples
+/// nothing), and blended over the canvas with its straight alpha, clipped to the block and
+/// the canvas band.
+fn paint_image(
+    canvas: &mut Canvas,
+    r: &mut Renderer,
+    picture: &crate::host::picture::Picture,
+    fit: crate::host::picture::Fit,
+    anchor: crate::host::picture::Anchor,
+    block: PixelBlock,
+) {
+    use crate::host::picture::{MAX_DRAWN_PIXELS, place};
+    let (Ok(box_w), Ok(box_h)) = (u32::try_from(block.width), u32::try_from(block.height)) else {
+        return;
+    };
+    let Some((dx, dy, drawn_w, drawn_h)) =
+        place(fit, anchor, picture.width(), picture.height(), box_w, box_h)
+    else {
+        return;
+    };
+    if drawn_w as u64 * drawn_h as u64 > MAX_DRAWN_PIXELS {
+        return;
+    }
+    // the visible part: the drawn picture ∩ the block ∩ the canvas band, in canvas pixels
+    let picture_left = block.left.saturating_add(dx as isize);
+    let picture_top = block.top.saturating_add(dy as isize);
+    let x0 = picture_left.max(block.left).max(canvas.x0 as isize).max(0);
+    let x1 = picture_left
+        .saturating_add(drawn_w as isize)
+        .min(block.left.saturating_add(block.width as isize))
+        .min(canvas.x1.min(canvas.w) as isize);
+    let y0 = picture_top
+        .max(block.top)
+        .max(block.clip_top)
+        .max(canvas.y0 as isize)
+        .max(0);
+    let y1 = picture_top
+        .saturating_add(drawn_h as isize)
+        .min(block.top.saturating_add(block.height as isize))
+        .min(canvas.y1.min(canvas.h) as isize);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let scaled = r.pictures.get(picture, drawn_w, drawn_h);
+    let source = scaled.as_raw();
+    let stride = drawn_w as usize * 4;
+    for y in y0..y1 {
+        let source_row = (y - picture_top) as usize * stride;
+        let target_row = y as usize * canvas.w;
+        for x in x0..x1 {
+            let at = source_row + (x - picture_left) as usize * 4;
+            let alpha = source[at + 3] as u32;
+            if alpha == 0 {
+                continue;
+            }
+            let target = target_row + x as usize;
+            canvas.buf[target] = over(
+                canvas.buf[target],
+                [source[at], source[at + 1], source[at + 2]],
+                alpha,
+            );
+        }
+    }
 }
 
 /// `src` over `dst` (both 0x00RRGGBB) with straight alpha `a` (0..=255).

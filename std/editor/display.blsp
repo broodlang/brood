@@ -24,6 +24,10 @@
 ;;                                  background (ADR-515)
 ;;   [:rect row col w h face]       fill a w×h cell block with `face`'s :bg colour
 ;;   [:rect row col w h face r]     …with corners rounded by `r` cells (GUI only)
+;;   [:image row col w h src]       a raster picture (encoded bytes or an image-thumb map) in a
+;;                                  w×h cell block, at pixel resolution; half blocks in a terminal
+;;   [:image row col w h src opts]  …placed by {:fit :contain|:scale-down|:fill|:none
+;;                                  :align :center|:top-left} (ADR-686)
 ;;   [:frect x y w h face op r]     sub-cell rounded rect (cell-unit floats); GUI-only
 ;;   [:seam row]                    rows from `row` down anchored to the window's bottom, the
 ;;                                  leftover pixels at the seam (ADR-610); GUI-only
@@ -149,6 +153,30 @@ existing frames are byte-identical.
   (if (= radius 0.0)
     [:rect row col w h face]
     [:rect row col w h face radius]))
+
+(defn image (row col w h source &optional (opts nil))
+  "A render op painting a raster picture into the `w`×`h` block of cells whose top-left
+is (`row`, `col`) — at the window's FULL pixel resolution, clipped to the block (ADR-686).
+`source` is the picture's encoded bytes (PNG, and JPEG / GIF / WebP / BMP where the build
+reads them) or the `{:width :height :rgba}` map `gui/image-thumb` returns. The frontend
+decodes it once per content — a frame naming the same bytes again hashes them and decodes
+nothing — and resamples it once per size it is drawn at, so an app can emit the op in
+every frame. `opts` (a map, every key optional): `:fit` how the picture fills the block,
+CSS's `object-fit` — `:contain` (the default: as large as fits, aspect kept), `:scale-down`
+(as `:contain`, never larger than its own size), `:fill` (stretched to the block), `:none`
+(its own size, a picture pixel to a device pixel, clipped); `:align` where a picture that
+does not fill the block sits — `:center` (the default) or `:top-left`.
+
+Both window painters draw it (the offscreen one too, so `gui/render-frame` shows it); a
+TERMINAL draws the same op in half-block cells — `▀`, two pixels a cell — so one op serves
+both, and an app need not ask which it has. A source that does not decode paints nothing
+(check one with `gui/image-thumb`, which answers nil for it).
+
+    (editor/display/image 0 0 40 20 (file/slurp-bytes \"page.png\"))   ;~> [:image 0 0 40 20 #b\"\\x89PNG…\"]
+    (editor/display/image 1 2 3 4 nil {:fit :none})   ;=> [:image 1 2 3 4 nil {:fit :none}]"
+  (if (nil? opts)
+    [:image row col w h source]
+    [:image row col w h source opts]))
 
 (defn scroll-region (dy-frac ops)
   "A self-contained render block that draws `ops` with all `text`, `rect`, and `cursor`

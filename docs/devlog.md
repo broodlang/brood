@@ -1274,3 +1274,15 @@ hunks whose context would meet merged, an empty side counted `-0,0` from the lin
 end is a change, which `line-hunks` alone does not report). `diff/apply-unified` applies one
 file's diff to a text. Guard: `tests/diff_test.blsp`, with two properties over the `property`
 module (ADR-685): `apply-unified a (unified a b)` is `b`, and every hunk header counts its body.
+
+2026-11-10 (ADR-686). A picture is a display op. `(editor/display/image row col w h source
+opts)` → `[:image …]`: PNG / JPEG bytes (or an `image-thumb` map) in a cell block, painted at the
+window's full pixel resolution by the CPU, GPU and offscreen painters, and in half-block cells by
+the terminal, so an app emits one op for both. `:fit` takes CSS's `object-fit` words, `:align`
+`:center` or `:top-left`. The decode is cached by content (`host/picture.rs`, BLAKE3 of the bytes,
+256 MB), so a frame repainting the same page hashes and decodes nothing; each window keeps the
+picture resampled per drawn size, and the GPU target uploads it once per size and draws it texel
+for pixel. The bounded decoder moved from `builtins/image.rs` to `host/picture.rs`, which both
+share. Prompted by bedit's PDF doc-view, whose half-block pages were unreadable. Guards: the
+offscreen test that one-pixel stripes survive (red with the arm disabled), the terminal's
+half-block test, and `tests/gui_test.blsp` through `gui/render-frame`.

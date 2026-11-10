@@ -113,6 +113,9 @@ impl GpuWindow {
                         let bind_group = match key {
                             TexKey::Atlas(page) => self.atlas.get(*page).map(|p| &p.bind_group),
                             TexKey::User(tex) => self.textures.get(tex).map(|t| &t.bind_group),
+                            TexKey::Picture(id) => {
+                                self.pictures.textures.get(id).map(|t| &t.bind_group)
+                            }
                         };
                         let Some(bind_group) = bind_group else {
                             continue;

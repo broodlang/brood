@@ -693,6 +693,23 @@ pub enum Op {
         /// `Rect` for the terminal.
         radius: f32,
     },
+    /// A raster PICTURE in the `w`×`h` cell block from `(row, col)` (`[:image row col w h
+    /// source opts]`, ADR-686), painted at the window's full pixel resolution: placed in the
+    /// block by `fit` and `anchor` (`picture::place`), resampled once per size it is drawn at,
+    /// and clipped to the block. The rect is in cells — the grid every other cell op uses, so
+    /// it scrolls, sits in a cell region and is diffed by rows like a `Rect` — and only the
+    /// painting is in pixels. The picture was decoded when the op was parsed, cached by its
+    /// content (`picture::decoded`), so a frame naming the same bytes again decodes nothing.
+    /// Both window painters draw it; the terminal draws it in half-block cells.
+    Image {
+        row: u16,
+        col: u16,
+        w: u16,
+        h: u16,
+        picture: crate::host::picture::PictureRef,
+        fit: crate::host::picture::Fit,
+        anchor: crate::host::picture::Anchor,
+    },
     /// A **sub-cell** rounded rectangle: like `Rect`, but its position and size are in
     /// **cell units as floats** (`x`/`y` top-left, `w`/`h` size — `0.4` cells wide,
     /// `12.7` tall at `y = 3.25` are all legal), so it isn't snapped to the character

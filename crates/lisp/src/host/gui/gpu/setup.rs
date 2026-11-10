@@ -457,6 +457,7 @@ impl GpuWindow {
             atlas: Vec::new(),
             glyphs: HashMap::new(),
             textures: HashMap::new(),
+            pictures: PictureTextures::default(),
             viewport_layout,
             effects: None,
             particles: None,

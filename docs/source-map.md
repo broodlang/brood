@@ -114,6 +114,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `host/net_wasm.rs` — WASM stub for the TCP/TLS socket mechanism (`crate::host::net`).
   - `host/owned.rs` — A handle table whose entries belong to a green process, indexed by owner.
   - `host/owner_only.rs` — Windows's owner-only (KI-365): a protected DACL with one entry, full control for the user this process runs as.
+  - `host/picture.rs` — Pictures for the display's `[:image …]` op (ADR-686): encoded bytes decoded ONCE per content, and the geometry every painter shares — where a picture lands in its rect (`place`), the picture resampled to the pixels it is drawn at (`ScaledPictures`), and the half-block cells a terminal shows it in (`half_blocks`).
   - `host/subprocess.rs` — Persistent child processes (ADR-104), built on the blocking-IO → mailbox seam (ADR-059) — the same mechanism `crate::host::net` uses for sockets.
   - `host/tab.rs` — A browser tab as a display, for a program running IN the tab (the `brood-tab` wasm build): the page's script, not a socket, is the other end.
   - `host/text_width.rs` — Display-cell width of text — how many terminal/grid columns a string occupies.

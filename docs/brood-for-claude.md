@@ -962,6 +962,10 @@ code paints to a terminal or a GUI window unchanged.
   rot]`, physical pixels from the window's corner. Build them with `gui/line` and
   `gui/sprite` over a `gui/texture` handle; open the window with `{:input :pixels}` so
   mouse messages carry pixels. The engine above them is the `b2d` package (ADR-374).
+- **A picture** (a page, a photo) = `(editor/display/image row col w h source opts)`: PNG / JPEG
+  bytes in a cell block, painted at full pixel resolution by both window painters and in
+  half-block cells by a terminal — one op for both, decoded once per content (ADR-686). No
+  texture to manage; a sprite is for a game's many moving copies of one texture.
 
 ```lisp
 (defmodule main "a counter app" (:use editor/ui) (:use editor/frontend) (:use editor/display))

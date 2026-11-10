@@ -254,6 +254,76 @@ pub(in crate::builtins) fn cursor_style_from(v: Value) -> crate::host::gui::Curs
     }
 }
 
+/// What an `[:image row col w h source opts]` op says (ADR-686), read alike by the window and
+/// the terminal: the cell rect, the picture — `source` encoded bytes (PNG, JPEG, …) or the
+/// `{:width :height :rgba}` map `gui/image-thumb` returns, decoded through the content cache
+/// (`picture::decoded`) — and `opts`' `:fit` (`:contain` · `:scale-down` · `:fill` · `:none`)
+/// and `:align` (`:center` · `:top-left`). `None` for a malformed op or a source that is not
+/// a decodable picture: such an op paints nothing.
+pub(in crate::builtins) struct ImageOp {
+    pub(in crate::builtins) row: i64,
+    pub(in crate::builtins) col: i64,
+    pub(in crate::builtins) w: i64,
+    pub(in crate::builtins) h: i64,
+    pub(in crate::builtins) picture: std::sync::Arc<crate::host::picture::Picture>,
+    pub(in crate::builtins) fit: crate::host::picture::Fit,
+    pub(in crate::builtins) anchor: crate::host::picture::Anchor,
+}
+
+pub(in crate::builtins) fn read_image_op(heap: &Heap, parts: &[Value]) -> Option<ImageOp> {
+    use crate::host::picture::{self, Anchor, Fit};
+    let int = |index: usize| match parts.get(index) {
+        Some(Value::Int(n)) => Some(*n),
+        _ => None,
+    };
+    let (row, col, w, h) = (int(1)?, int(2)?, int(3)?, int(4)?);
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let picture = match parts.get(5).copied()? {
+        Value::Bytes(id) => picture::decoded(heap.bytes(id).as_bytes())?,
+        Value::Map(id) => {
+            let field = |name: &str| heap.map_get(id, value::kw(name));
+            let (Some(Value::Int(width)), Some(Value::Int(height)), Some(Value::Bytes(rgba))) =
+                (field("width"), field("height"), field("rgba"))
+            else {
+                return None;
+            };
+            let width = u32::try_from(width).ok()?;
+            let height = u32::try_from(height).ok()?;
+            picture::from_rgba(width, height, heap.bytes(rgba).as_bytes())?
+        }
+        _ => return None,
+    };
+    let option = |name: &str| match parts.get(6) {
+        Some(Value::Map(id)) => heap.map_get(*id, value::kw(name)),
+        _ => None,
+    };
+    let keyword = |value: Option<Value>| match value {
+        Some(Value::Keyword(symbol)) => Some(value::symbol_name(symbol)),
+        _ => None,
+    };
+    let fit = match keyword(option("fit")).as_deref() {
+        Some("scale-down") => Fit::ScaleDown,
+        Some("fill") => Fit::Fill,
+        Some("none") => Fit::None,
+        _ => Fit::Contain,
+    };
+    let anchor = match keyword(option("align")).as_deref() {
+        Some("top-left") => Anchor::TopLeft,
+        _ => Anchor::Center,
+    };
+    Some(ImageOp {
+        row,
+        col,
+        w,
+        h,
+        picture,
+        fit,
+        anchor,
+    })
+}
+
 #[cfg(test)]
 mod color_value_tests {
     use super::{face_rgb, parse_hex_color};

@@ -538,6 +538,56 @@ mod tests {
         assert_eq!(pixel(&image, 6 + cell_w, image.height - 1), BACKGROUND);
     }
 
+    /// An `[:image …]` op paints its picture at PIXEL resolution inside its cell block
+    /// (ADR-686): a picture of one-pixel stripes, drawn at its own size, keeps every stripe
+    /// — which two pixels a cell (the half-block cells a terminal shows) could not — and
+    /// nothing of it lands outside the block, which clips it.
+    #[test]
+    fn an_image_paints_at_pixel_resolution_inside_its_block() {
+        use crate::host::picture::{Anchor, Fit, PictureRef, from_rgba};
+        const RED: [u8; 3] = [250, 0, 0];
+        const BLUE: [u8; 3] = [0, 0, 250];
+        // 64×64: columns alternate red and blue, one pixel each
+        let rgba: Vec<u8> = (0..64 * 64)
+            .flat_map(|index| {
+                let colour = if index % 2 == 0 { RED } else { BLUE };
+                [colour[0], colour[1], colour[2], 255]
+            })
+            .collect();
+        let picture = from_rgba(64, 64, &rgba).expect("a picture");
+        let image_op = |fit| Op::Image {
+            row: 1,
+            col: 1,
+            w: 3,
+            h: 2,
+            picture: PictureRef(picture.clone()),
+            fit,
+            anchor: Anchor::TopLeft,
+        };
+        let image = render(vec![Op::Clear, image_op(Fit::None)], 6.0);
+        let cell_w = image.cell.0;
+        let (left, top) = (image.origin.0 + cell_w, image.row_tops[1]);
+        for x in 0..(3 * cell_w).min(64) {
+            let expected = if x % 2 == 0 { RED } else { BLUE };
+            assert_eq!(pixel(&image, left + x, top + 1), expected, "stripe {x}");
+        }
+        // clipped to the block: under it, and right of it, the background
+        let block_w = 3 * cell_w;
+        let block_bottom = image.row_tops[3];
+        assert_eq!(pixel(&image, left + 1, block_bottom), BACKGROUND);
+        if block_w < 64 {
+            assert_eq!(pixel(&image, left + block_w, top + 1), BACKGROUND);
+        }
+        assert_eq!(pixel(&image, left - 1, top + 1), BACKGROUND);
+        // fill: the block covered edge to edge
+        let filled = render(vec![Op::Clear, image_op(Fit::Fill)], 6.0);
+        assert_ne!(
+            pixel(&filled, left + block_w - 1, block_bottom - 1),
+            BACKGROUND
+        );
+        assert_eq!(pixel(&filled, left + block_w, block_bottom - 1), BACKGROUND);
+    }
+
     /// A band that reaches the grid's edges continues through the margin to the window's
     /// (edge bleed, ADR-508): the picture went through the window's bleed, not around it.
     #[test]
