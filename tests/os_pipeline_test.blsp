@@ -49,11 +49,16 @@ would run on."
   ["sh" "-c" (str "echo $$ > " (os/shell-quote path) "; exec sleep 30")])
 
 (defn- peak-kb ()
-  "This runtime's peak resident memory in kB (Linux's VmHWM)."
-  (let (line (seq/find (string/split (file/slurp "/proc/self/status") "\n")
-               (fn (line) (string/starts-with? line "VmHWM:"))))
-    (string/->number (first (seq/filter (string/split line " ")
-                              (fn (word) (not (failure? (string/->number word)))))))))
+  "This runtime's peak resident memory in kB (Linux's VmHWM); 0 when /proc does not say, so the
+memory test then proves nothing rather than something false."
+  (let (line (or (seq/find (string/split (file/slurp "/proc/self/status") "\n")
+                   (fn (line) (string/starts-with? line "VmHWM:")))
+               "")
+        word (or (seq/find (string/split line " ")
+                   (fn (word) (not (failure? (string/->number word)))))
+               "0")
+        kb (string/->number word))
+    (if (failure? kb) 0 kb)))
 
 (describe "os/pipeline"
   (test "three stages, each one's output the next one's input"
