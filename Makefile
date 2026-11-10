@@ -111,8 +111,9 @@ SYMBOLS_DIR := target/$(TARGET_SUBDIR)release-symbols
 # Every target is phony — none names a file it builds. A target missing here silently does
 # nothing once a file or directory of its name appears (`stress/`, `fuzz/`…); `tool_pins.rs`
 # fails on one.
-.PHONY: ab ab-clean ab-pin ab-vm asan benchmark breakagetests build check check-corpora \
-	check-cost check-examples check-imaged check-stress clean clippy configure doctor \
+.PHONY: ab ab-clean ab-pin ab-vm affected-tests asan benchmark breakagetests build check \
+	check-corpora check-cost check-desktop check-examples check-imaged check-stress clean clippy \
+	configure doctor \
 	ci-wait enable-perf-check ensure-nextest fmt fuzz gcstress gcstress-all green green-all help hooks install \
 	install-features \
 	latency-gate loom perf-brood perf-symbols prepush quickbench release release-brood repl \
