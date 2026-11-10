@@ -1,0 +1,187 @@
+;; tests/os_pipeline_test.blsp — `os/pipeline` and `os/spawn-pipeline` (ADR-696): children
+;; joined by OS pipes, each stage's stdout the next one's stdin.
+;;
+;; Coverage:
+;;   - three stages, an argument vector each, the last one's output answered
+;;   - `:stdin` feeds the first stage; a stage map's own `:env` / `:cwd` over the pipeline's
+;;   - a failing middle stage: `:exit` is pipefail, `:stages` has each stage's exit + stderr
+;;   - 256 MB through three stages with the runtime's peak memory flat (Linux)
+;;   - `:timeout-ms` kills EVERY stage; a killed caller kills every stage (ADR-514)
+;;   - a responsive process gets one `[:blocking-call …]` naming the stages (ADR-517)
+;;   - a stage that cannot start is the error, and the stages before it are killed
+;;   - `os/spawn-pipeline`: stdin to the first stage, the last stage's stdout and every
+;;     stage's stderr as messages, pipefail in `:proc-exit`, `os/close` ends every stage
+;; Unix-shaped commands (sh, cat, tr): the platform runs skip this file off Unix.
+(defmodule os-pipeline-test
+  (:use test))
+
+(defn- in-process (body)
+  "Run `body` in a fresh process and answer what it returned."
+  (let (me (self))
+    (spawn (fn () (send me [:done (body)])))
+    (receive ([:done value] value) (after 20000 :timed-out))))
+
+(defn- alive? (pid-text)
+  (= 0 (:exit (os/cmd "kill" ["-0" (string/trim pid-text)]))))
+
+(defn- await-file (path)
+  "Wait (bounded) until `path` exists and is not empty, then answer its text."
+  (letrec (wait (fn (tries)
+                  (cond
+                    (and (file/exists? path) (not (= "" (string/trim (file/slurp path)))))
+                      (file/slurp path)
+                    (= tries 0) (error "await-file: never written: " path)
+                    else (do (receive (after 10 nil)) (wait (dec tries))))))
+    (wait 500)))
+
+(defn- await-dead (pid-text)
+  "Whether the process `pid-text` is gone within a couple of seconds."
+  (letrec (wait (fn (tries)
+                  (cond
+                    (not (alive? pid-text)) true
+                    (= tries 0) false
+                    else (do (receive (after 10 nil)) (wait (dec tries))))))
+    (wait 200)))
+
+(defn- pid-recorder (path)
+  "A stage that writes its pid to `path` and then sleeps — standing in for a stage that
+would run on."
+  ["sh" "-c" (str "echo $$ > " (os/shell-quote path) "; exec sleep 30")])
+
+(defn- peak-kb ()
+  "This runtime's peak resident memory in kB (Linux's VmHWM)."
+  (let (line (seq/find (string/split (file/slurp "/proc/self/status") "\n")
+               (fn (line) (string/starts-with? line "VmHWM:"))))
+    (string/->number (first (seq/filter (string/split line " ")
+                              (fn (word) (not (failure? (string/->number word)))))))))
+
+(describe "os/pipeline"
+  (test "three stages, each one's output the next one's input"
+    (let (result (os/pipeline [["printf" "pear\\napple\\nfig\\n"] ["sort"] ["tr" "a-z" "A-Z"]]))
+      (assert= (:stdout result) "APPLE\nFIG\nPEAR\n")
+      (assert= (:exit result) 0)
+      (assert= (vec (map (:stages result) :exit)) [0 0 0])
+      (is (os/cmd-ok? result))))
+  (test ":stdin feeds the first stage"
+    (assert= (:stdout (os/pipeline [["cat"] ["tr" "a-z" "A-Z"]] {:stdin "piped"})) "PIPED"))
+  (test "a stage's own :env goes over the pipeline's, its :cwd replaces the pipeline's"
+    (let (dir (test/temp-dir "brood-pipeline-cwd-"))
+      (file/mkdir dir)
+      (try
+        (let (result (os/pipeline [["sh" "-c" "echo $A $B"]
+                                    {:argv ["sh" "-c" "cat; echo $A $B; pwd"]
+                                     :env {"B" "stage"}
+                                     :cwd dir}]
+                       {:env {"A" "all" "B" "pipeline"}}))
+          (assert= (vec (string/split (string/trim (:stdout result)) "\n"))
+            ["all pipeline" "all stage" (os/canonicalize dir)]))
+        (finally (file/rmdir dir)))))
+  (test "a failing middle stage fails the pipeline, and each stage says how it ended"
+    (let (result (os/pipeline [["echo" "data"]
+                                ["sh" "-c" "cat > /dev/null; echo middle broke >&2; exit 3"]
+                                ["sh" "-c" "cat; echo last spoke >&2"]]))
+      (assert= (:exit result) 3)
+      (assert= (vec (map (:stages result) :exit)) [0 3 0])
+      (assert= (vec (map (:stages result) :stderr)) ["" "middle broke\n" "last spoke\n"])
+      (assert= (:stderr result) "middle broke\nlast spoke\n")
+      (assert= (:stdout result) "")
+      (is (not (os/cmd-ok? result)))))
+  (test "the last failing stage decides the exit"
+    (assert= (:exit (os/pipeline [["sh" "-c" "exit 2"] ["sh" "-c" "cat >/dev/null; exit 5"]]))
+      5))
+  (test "256 MB pass through three stages without entering this process"
+    (when (= (os/type) :linux)
+      (let (before (peak-kb)
+            result (os/pipeline [["head" "-c" "268435456" "/dev/zero"] ["cat"] ["wc" "-c"]]))
+        (assert= (string/trim (:stdout result)) "268435456")
+        (assert= (:exit result) 0)
+        ;; through the heap it would be at least 256 MB more; a pipe holds 64 KB
+        (is (< (- (peak-kb) before) (* 64 1024))))))
+  (test ":timeout-ms kills every stage"
+    (let (dir (test/temp-dir "brood-pipeline-timeout-"))
+      (file/mkdir dir)
+      (try
+        (let (first-pid (str dir "/first")
+              last-pid (str dir "/last")
+              started (os/now)
+              result (os/pipeline [(pid-recorder first-pid) (pid-recorder last-pid)]
+                       {:timeout-ms 300}))
+          (is (:timed-out result))
+          ;; returned at the deadline, not when a stage left running chose to end
+          (is (< (- (os/now) started) 5000))
+          (is (await-dead (await-file first-pid)))
+          (is (await-dead (await-file last-pid))))
+        (finally (file/rmdir dir)))))
+  (test "a caller killed while it waits kills every stage"
+    (let (dir (test/temp-dir "brood-pipeline-cancel-"))
+      (file/mkdir dir)
+      (try
+        (let (first-pid (str dir "/first")
+              last-pid (str dir "/last")
+              caller (spawn (fn () (os/pipeline [(pid-recorder first-pid) (pid-recorder last-pid)]))))
+          (let (first-text (await-file first-pid)
+                last-text (await-file last-pid))
+            (exit caller :kill)
+            (is (await-dead first-text))
+            (is (await-dead last-text))))
+        (finally (file/rmdir dir)))))
+  (test "a responsive process is told once, the stages joined by |"
+    (let (facts (in-process (fn ()
+                              (proc/flag :responsive true)
+                              (os/pipeline [["echo" "a"] ["cat"]])
+                              (receive ([:blocking-call facts] facts) (after 0 nil)))))
+      (assert= (:native facts) "os/pipeline")
+      (assert= (:detail facts) "echo a | cat")))
+  (test "a stage that cannot start is the error, and the stages before it are killed"
+    (let (dir (test/temp-dir "brood-pipeline-nostart-"))
+      (file/mkdir dir)
+      (try
+        (let (first-pid (str dir "/first")
+              outcome (try
+                        (os/pipeline [(pid-recorder first-pid) ["surely-no-such-program-696"]])
+                        (catch e (error-message e))))
+          (is (includes? outcome "surely-no-such-program-696"))
+          ;; it may have been killed before it wrote its pid; if it did, it is gone
+          (when (file/exists? first-pid)
+            (is (await-dead (file/slurp first-pid)))))
+        (finally (file/rmdir dir)))))
+  (test "a stage naming no program is refused"
+    (is (includes? (try (os/pipeline [["echo" "a"] []]) (catch e (error-message e))) "stage 2"))))
+
+(defn- collect-proc (handle acc)
+  "Every message for `handle` until `:proc-closed`: `{:out :err :exit :closed}`."
+  (receive
+    ([:proc ^handle data] (collect-proc handle (assoc acc :out (str (:out acc) data))))
+    ([:proc-err ^handle data] (collect-proc handle (assoc acc :err (str (:err acc) data))))
+    ([:proc-exit ^handle code] (collect-proc handle (assoc acc :exit code)))
+    ([:proc-closed ^handle code] (assoc acc :closed code))
+    (after 10000 (assoc acc :timed-out true))))
+
+(describe "os/spawn-pipeline"
+  (test "stdin to the first stage, the last stage's stdout and every stderr as messages"
+    (let (handle (os/spawn-pipeline [["sh" "-c" "head -n 1; echo one >&2"]
+                                      ["sh" "-c" "tr a-z A-Z; echo two >&2"]]))
+      (os/write handle "streamed\n")
+      (let (got (collect-proc handle {:out "" :err ""}))
+        (assert= (:out got) "STREAMED\n")
+        (assert= (vec (sort (string/split (string/trim (:err got)) "\n"))) ["one" "two"])
+        (assert= (:exit got) 0)
+        (assert= (:closed got) 0))))
+  (test ":proc-exit carries pipefail over the stages"
+    (let (handle (os/spawn-pipeline [["sh" "-c" "exit 4"] ["cat"]]))
+      (assert= (:exit (collect-proc handle {:out "" :err ""})) 4)))
+  (test "os/close ends every stage"
+    (let (dir (test/temp-dir "brood-spawn-pipeline-close-"))
+      (file/mkdir dir)
+      (try
+        (let (first-pid (str dir "/first")
+              last-pid (str dir "/last")
+              handle (os/spawn-pipeline [(pid-recorder first-pid) (pid-recorder last-pid)])
+              first-text (await-file first-pid)
+              last-text (await-file last-pid))
+          (os/close handle)
+          (let (got (collect-proc handle {:out "" :err ""}))
+            (is (contains? got :closed))
+            (is (await-dead first-text))
+            (is (await-dead last-text))))
+        (finally (file/rmdir dir))))))

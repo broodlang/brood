@@ -2992,7 +2992,7 @@ Backpressure proper stays a library concern: `gen/call` with a timeout is
 already a bounded round-trip.
 
 **`:responsive`** marks a process whose job is to keep answering — an editor's loop, a
-REPL's reader (ADR-517). A native call that waits on the outside world (`os/cmd`,
+REPL's reader (ADR-517). A native call that waits on the outside world (`os/cmd`, `os/pipeline`,
 `os/run-process`, a clipboard read — ADR-536) is then reported to it or refused, instead of
 silently freezing it:
 
@@ -4206,7 +4206,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/diff.blsp` | `'diff` | LCS-based sequence diff and unified diffs: `seq`, `lines`, `line-hunks`, `summary`, `patch`; `unified` prints the unified diff of two texts (`@@` hunks with context, `\ No newline` markers), `parse-unified` reads one, `apply-unified` applies one |
 | `std/path.blsp` | `'path` | Path string manipulation: `string/join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `absolute`, `abbreviate` (`~` for `$HOME`, the inverse), `with-extension` |
 | `std/sudo.blsp` | `'sudo` | A file read or written as another user through `sudo` (ADR-588): `read`, `write`, `password-required?`; the password validated once (`sudo -S -v`) and kept nowhere, the text on a `sudo -n` command's stdin; `*program*` names the sudo run |
-| `std/system.blsp` | `'system` | The running program: `argv`, `script-args`, `halt`, `feature?`, `module-doc`. (OS interaction is `os/env`, `os/cmd`, `os/run-process`; `file/cwd` is in `file`.) |
+| `std/system.blsp` | `'system` | The running program: `argv`, `script-args`, `halt`, `feature?`, `module-doc`. (OS interaction is `os/env`, `os/cmd`, `os/pipeline`, `os/run-process`; `file/cwd` is in `file`.) |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-string`/`decrypt-string`), `password-hash`/`password-verify`, `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `constant-time-equal?`, signatures and key exchange (`rsa-*`, `ecdsa-*`, `sign`/`verify`, `x25519-*`) |
 | `std/proc/agent.blsp` | `'agent` | Process-backed state cell (an agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
 | `std/proc/names.blsp` | `'names` | A process registry (ADR-445): `start` (`:unique` or `:duplicate` keys), `register`, `unregister`, `lookup`, `whereis`, `count`; a `{:via registry :key key}` address works wherever `gen` takes a pid |

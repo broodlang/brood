@@ -5,6 +5,7 @@ use super::bytes::flatten_iolist;
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value, kw};
 use crate::error::{LispError, LispResult};
+use crate::host::subprocess::StageSpec;
 
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.
 pub(super) fn register(primitives: &mut super::Primitives) {
@@ -113,6 +114,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["prog", "&", "args", "opts"],
         "Run prog (with optional args list and an opts map {:cwd :env :stdin :timeout-ms :raw-args}) to completion; returns {:stdout s :stderr s :exit n}, plus :timed-out true when the timeout ended the call. The timeout bounds the WHOLE call — a grandchild still holding the output pipes is killed with the child's process group.",
         os_cmd);
+    primitives.def(
+        "%os-pipeline",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![seq], map_ty, map_ty),
+        &["stages", "opts"],
+        "Run stages (a list/vector; each an argument vector [\"prog\" \"arg\" …] or a map {:argv [...] :cwd :env :raw-args}) joined by OS pipes to completion — each stage's stdout the next one's stdin, the bytes never entering this process. opts as %os-cmd's: :cwd :env :raw-args every stage's defaults, :stdin the first stage's, :timeout-ms the whole pipeline's. Returns {:stdout s :stderr s :exit n :stages [{:exit n :stderr s} …]}, plus :timed-out true: :stdout the last stage's, :stderr every stage's in order, :exit bash's pipefail (the last stage that did not exit 0, -1 for a signal, else 0).",
+        os_pipeline);
     primitives.def(
         "%halt",
         Arity::exact(1),
@@ -337,7 +345,6 @@ pub(super) fn os_type_builtin(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispRe
 /// before reading any output deadlocks the moment the child emits more than one pipe
 /// buffer (~64 KiB) while still being fed.
 pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use std::process::Stdio;
     let prog = expect_string(heap, "%os-cmd", arg(args, 0))?;
     let mut argv = Vec::new();
     if args.len() > 1 && !matches!(arg(args, 1), Value::Nil) {
@@ -347,69 +354,152 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
     let super::subprocesses::ChildOptions { cwd, env, raw_args } =
         super::subprocesses::child_options(heap, "os/cmd", arg(args, 2))?;
-    let mut cmd =
-        crate::host::subprocess::program::command(&prog, cwd.as_deref(), &env).map_err(|e| {
-            LispError::runtime(format!("%os-cmd: {prog}: {e}"))
-                .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
-        })?;
-    crate::host::subprocess::add_args(&mut cmd, &argv, raw_args);
-    crate::host::subprocess::own_hidden_console(&mut cmd);
+    let stage = StageSpec {
+        prog,
+        args: argv,
+        cwd,
+        env,
+        raw_args,
+    };
+    let run = run_stages(heap, "os/cmd", "%os-cmd", vec![stage], arg(args, 2))?;
+    let mut pairs = run.common_pairs(heap);
+    if run.stop == Some(Stop::Deadline) {
+        pairs.push((kw("timed-out"), Value::Bool(true)));
+    }
+    Ok(heap.map_from_pairs(pairs))
+}
+
+/// `(%os-pipeline stages opts)` — run `stages` joined by OS pipes to completion (ADR-696):
+/// `os/cmd` for a pipeline. Each stage is an argument vector `["prog" "arg" …]` or a map
+/// `{:argv [...] :cwd :env :raw-args}`; `opts` takes `os/cmd`'s options, its `:cwd` /
+/// `:env` / `:raw-args` every stage's defaults, its `:stdin` the FIRST stage's, its
+/// `:timeout-ms` the whole pipeline's. Returns `{:stdout s :stderr s :exit n :stages
+/// [{:exit n :stderr s} …]}` (plus `:timed-out true`): `:stdout` the last stage's,
+/// `:stderr` every stage's in order, `:exit` bash's `pipefail` (the last stage that did
+/// not exit 0, else 0; `-1` for a signal), `:stages` each stage's own.
+///
+/// The bytes between stages pass from one child to the next through the pipe and never
+/// enter this process: a pipeline moving gigabytes holds only what its last stage prints.
+pub(super) fn os_pipeline(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let stages =
+        super::subprocesses::pipeline_stages(heap, "os/pipeline", arg(args, 0), arg(args, 1))?;
+    let run = run_stages(heap, "os/pipeline", "os/pipeline", stages, arg(args, 1))?;
+    let mut pairs = run.common_pairs(heap);
+    let stage_maps: Vec<Value> = run
+        .statuses
+        .iter()
+        .zip(&run.stderrs)
+        .map(|(status, stderr)| {
+            let stderr = heap.alloc_string(&String::from_utf8_lossy(stderr));
+            heap.map_from_pairs(vec![
+                (kw("exit"), Value::int(status_code(status))),
+                (kw("stderr"), stderr),
+            ])
+        })
+        .collect();
+    let stages_value = heap.alloc_vector(stage_maps);
+    pairs.push((kw("stages"), stages_value));
+    if run.stop == Some(Stop::Deadline) {
+        pairs.push((kw("timed-out"), Value::Bool(true)));
+    }
+    Ok(heap.map_from_pairs(pairs))
+}
+
+/// What a finished (or stopped) run of stages left: each stage's status, the last stage's
+/// stdout, each stage's stderr, and what stopped the call early, if anything did.
+struct StagesRun {
+    statuses: Vec<std::process::ExitStatus>,
+    stdout: Vec<u8>,
+    stderrs: Vec<Vec<u8>>,
+    stop: Option<Stop>,
+}
+
+/// A status as the result map gives it: its exit code, or `-1` when a signal ended it.
+fn status_code(status: &std::process::ExitStatus) -> i64 {
+    status.code().unwrap_or(-1) as i64
+}
+
+impl StagesRun {
+    /// `:stdout`, `:stderr` (every stage's, in order) and `:exit` (`pipefail` over the
+    /// stages — for one stage, simply its code).
+    fn common_pairs(&self, heap: &mut Heap) -> Vec<(Value, Value)> {
+        let stdout = heap.alloc_string(&String::from_utf8_lossy(&self.stdout));
+        let stderr = heap.alloc_string(&String::from_utf8_lossy(&self.stderrs.concat()));
+        let codes: Vec<Option<i32>> = self
+            .statuses
+            .iter()
+            .map(|status| Some(status_code(status) as i32))
+            .collect();
+        let exit = crate::host::subprocess::pipeline_code(&codes).unwrap_or(-1);
+        vec![
+            (kw("stdout"), stdout),
+            (kw("stderr"), stderr),
+            (kw("exit"), Value::int(exit as i64)),
+        ]
+    }
+}
+
+/// Run `stages` joined by pipes to completion under `opts`' `:stdin` and `:timeout-ms` —
+/// the one runner `os/cmd` (a pipeline of one) and `os/pipeline` share. `native` names the
+/// call in a responsive process's report (ADR-517), `who` prefixes its errors.
+///
+/// The children can run for as long as they like, and this worker runs nothing else until
+/// they finish: it is marked dirty-blocked (ADR-100 §7.4) for the wait, so its queue is
+/// moved to a live worker and a process woken meanwhile is not routed to it. Without this,
+/// two `os/cmd` calls — or one beside a tree-walked `receive` — on a two-worker pool left
+/// no worker to run anything else until a command returned (KI-280).
+///
+/// The children die with their caller: the wait checks the calling process's exit signal
+/// between polls, and a killed caller kills every stage's group and dies itself, as it
+/// would in a `receive` (ADR-514). Without it a cancelled task (`task/cancel`) left its
+/// command running to the end on a worker nothing would read from again.
+fn run_stages(
+    heap: &mut Heap,
+    native: &'static str,
+    who: &str,
+    stages: Vec<StageSpec>,
+    opts: Value,
+) -> Result<StagesRun, LispError> {
+    use std::process::Stdio;
     // a responsive process is told it waited, or refused the wait (ADR-517)
-    let blocking = crate::process::responsive::enter_blocking(heap, "os/cmd", || {
-        crate::process::responsive::command_detail(&prog, &argv)
+    let blocking = crate::process::responsive::enter_blocking(heap, native, || {
+        stages
+            .iter()
+            .map(|stage| crate::process::responsive::command_detail(&stage.prog, &stage.args))
+            .collect::<Vec<_>>()
+            .join(" | ")
     })?;
     let mut stdin_bytes: Option<Vec<u8>> = None;
     let mut timeout: Option<std::time::Duration> = None;
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    crate::host::subprocess::apply_env(&mut cmd, &env);
-    crate::host::subprocess::reset_inherited_signals(&mut cmd);
-    if let Value::Map(opts) = arg(args, 2) {
+    if let Value::Map(opts) = opts {
         if let Some(v) = heap.map_get(opts, kw("stdin"))
             && !matches!(v, Value::Nil)
         {
             let mut bytes = Vec::new();
-            flatten_iolist(heap, "os/cmd :stdin", v, &mut bytes)?;
+            flatten_iolist(heap, &format!("{native} :stdin"), v, &mut bytes)?;
             stdin_bytes = Some(bytes);
         }
         if let Some(v) = heap.map_get(opts, kw("timeout-ms"))
             && !matches!(v, Value::Nil)
         {
-            let ms = expect_int(heap, "os/cmd :timeout-ms", v)?;
+            let ms = expect_int(heap, &format!("{native} :timeout-ms"), v)?;
             timeout = Some(std::time::Duration::from_millis(ms.max(0) as u64));
         }
     }
-    cmd.stdin(if stdin_bytes.is_some() {
+    let fail = |e: std::io::Error| {
+        LispError::runtime(format!("{who}: {e}"))
+            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
+    };
+    let first_stdin = if stdin_bytes.is_some() {
         Stdio::piped()
     } else {
         Stdio::null()
-    });
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    // its own session: its own process group (killpg ends what it started) and no
-    // controlling terminal, so nothing it runs can prompt on, or stop reading, ours
-    #[cfg(unix)]
-    crate::host::subprocess::new_session(&mut cmd);
-    let fail = |e: std::io::Error| {
-        LispError::runtime(format!("%os-cmd: {prog}: {e}"))
-            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
     };
-    // The child can run for as long as it likes, and this worker runs nothing else until it
-    // finishes: mark it dirty-blocked (ADR-100 §7.4) for the wait, so its queue is moved to
-    // a live worker and a process woken meanwhile is not routed to it. Without this, two
-    // `os/cmd` calls — or one beside a tree-walked `receive` — on a two-worker pool left no
-    // worker to run anything else until a command returned (KI-280).
-    //
-    // The child dies with its caller: the wait checks the calling process's exit signal
-    // between polls, and a killed caller kills the child's group and dies itself, as it
-    // would in a `receive`. Without it a cancelled task (`task/cancel`) left its command
-    // running to the end on a worker nothing would read from again.
-    let (status, stdout_bytes, stderr_bytes, stop) = {
+    let run = {
         let _dirty = crate::process::dirty_block();
-        let child = cmd.spawn().map_err(fail)?;
-        os_cmd_collect(
-            child,
+        let children = crate::host::subprocess::spawn_chain(&stages, first_stdin).map_err(fail)?;
+        stages_collect(
+            children,
             stdin_bytes,
             timeout,
             crate::process::capture_kill_pending,
@@ -419,40 +509,25 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let Some(call) = blocking {
         call.report(heap);
     }
-    if stop == Some(Stop::Killed) {
+    if run.stop == Some(Stop::Killed) {
         return Err(LispError::kill_signal());
     }
-    let stdout = heap.alloc_string(&String::from_utf8_lossy(&stdout_bytes));
-    let stderr = heap.alloc_string(&String::from_utf8_lossy(&stderr_bytes));
-    let exit_code = status.code().unwrap_or(-1) as i64;
-    let mut pairs = vec![
-        (kw("stdout"), stdout),
-        (kw("stderr"), stderr),
-        (kw("exit"), Value::int(exit_code)),
-    ];
-    if stop == Some(Stop::Deadline) {
-        pairs.push((kw("timed-out"), Value::Bool(true)));
-    }
-    Ok(heap.map_from_pairs(pairs))
+    Ok(run)
 }
 
-/// Why `%os-cmd` stopped waiting before its child finished, and killed it.
+/// Why a run of stages stopped waiting before its children finished, and killed them.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stop {
     /// `:timeout-ms` ran out.
     Deadline,
-    /// The calling process was sent an exit signal: the child dies with it.
+    /// The calling process was sent an exit signal: the children die with it.
     Killed,
 }
 
-/// The longest one wait of `%os-cmd` runs before it looks for its caller's exit signal
-/// again — how long a killed caller's child can outlive it.
+/// The longest one wait of a run runs before it looks for its caller's exit signal
+/// again — how long a killed caller's children can outlive it.
 #[cfg(unix)]
 const KILL_CHECK: std::time::Duration = std::time::Duration::from_millis(20);
-
-/// What `%os-cmd` collects from a finished (or killed) child: its status, stdout,
-/// stderr, and what stopped the call early, if anything did.
-type OsCmdOutcome = (std::process::ExitStatus, Vec<u8>, Vec<u8>, Option<Stop>);
 
 /// What, if anything, stops the wait now: the deadline passed, or `killed` says the caller
 /// is dying.
@@ -466,21 +541,24 @@ fn os_cmd_stop(deadline: Option<std::time::Instant>, killed: fn() -> bool) -> Op
     }
 }
 
-/// Feed `%os-cmd`'s child its stdin and read both output pipes in ONE `poll` loop
-/// bounded by the deadline and by `killed` (asked at least every [`KILL_CHECK`]), so no
-/// helper thread exists to outlive the call: a grandchild that keeps a pipe open past
-/// either is killed with the group, and one that escaped the group (`setsid`) only finds
-/// our ends closed.
+/// Feed the first stage its stdin and read the last stage's stdout and every stage's
+/// stderr in ONE `poll` loop bounded by the deadline and by `killed` (asked at least every
+/// [`KILL_CHECK`]), so no helper thread exists to outlive the call: a grandchild that
+/// keeps a pipe open past either is killed with its stage's group, and one that escaped
+/// the group (`setsid`) only finds our ends closed. Every pipe is serviced together, so
+/// neither direction can fill and wedge the other: writing all of stdin before reading any
+/// output deadlocks the moment a child emits more than one pipe buffer (~64 KiB) while
+/// still being fed.
 ///
-/// The child is reaped LAST. Until then its pid — the process-group id — cannot be
-/// reused, so the `killpg` below can only ever reach the group we created.
+/// Each child is reaped LAST. Until then its pid — the process-group id — cannot be
+/// reused, so the `killpg` below can only ever reach a group we created.
 #[cfg(unix)]
-fn os_cmd_collect(
-    mut child: std::process::Child,
+fn stages_collect(
+    mut children: Vec<std::process::Child>,
     stdin_bytes: Option<Vec<u8>>,
     timeout: Option<std::time::Duration>,
     killed: fn() -> bool,
-) -> std::io::Result<OsCmdOutcome> {
+) -> std::io::Result<StagesRun> {
     use std::io::{ErrorKind, Read, Write};
     use std::os::fd::AsRawFd;
     use std::time::Instant;
@@ -493,24 +571,35 @@ fn os_cmd_collect(
             }
         }
     }
+    /// Kill the group an unreaped child leads.
+    fn kill_group(child: &std::process::Child) {
+        // SAFETY: the child leads its own group (`spawn_chain`) and every caller has not
+        // reaped it yet, so its pid, the group id, cannot have been reused.
+        unsafe {
+            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+        }
+    }
     let deadline = timeout.map(|limit| Instant::now() + limit);
     let stdin_bytes = stdin_bytes.unwrap_or_default();
     let mut stdin_written = 0usize;
     // An empty `:stdin` is EOF at once: dropping the pipe here closes it.
-    let mut stdin_pipe = child.stdin.take().filter(|_| !stdin_bytes.is_empty());
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
+    let mut stdin_pipe = children[0].stdin.take().filter(|_| !stdin_bytes.is_empty());
+    let mut stdout_pipe = children.last_mut().and_then(|child| child.stdout.take());
+    let mut stderr_pipes: Vec<Option<std::process::ChildStderr>> = children
+        .iter_mut()
+        .map(|child| child.stderr.take())
+        .collect();
     if let Some(pipe) = &stdin_pipe {
         set_nonblocking(pipe.as_raw_fd());
     }
     if let Some(pipe) = &stdout_pipe {
         set_nonblocking(pipe.as_raw_fd());
     }
-    if let Some(pipe) = &stderr_pipe {
+    for pipe in stderr_pipes.iter().flatten() {
         set_nonblocking(pipe.as_raw_fd());
     }
     let mut stdout_bytes = Vec::new();
-    let mut stderr_bytes = Vec::new();
+    let mut stderrs: Vec<Vec<u8>> = vec![Vec::new(); children.len()];
     let mut stop = None;
     let mut chunk = vec![0u8; 64 * 1024];
     // Read until the pipe would block; `None` it out at end-of-file or on an error.
@@ -525,7 +614,8 @@ fn os_cmd_collect(
             }
         }
     }
-    while stdin_pipe.is_some() || stdout_pipe.is_some() || stderr_pipe.is_some() {
+    while stdin_pipe.is_some() || stdout_pipe.is_some() || stderr_pipes.iter().any(Option::is_some)
+    {
         stop = os_cmd_stop(deadline, killed);
         if stop.is_some() {
             break;
@@ -535,7 +625,7 @@ fn os_cmd_collect(
             KILL_CHECK.min(deadline.saturating_duration_since(Instant::now()))
         });
         let wait_ms = (wait.as_millis() + 1) as libc::c_int;
-        let mut descriptors = Vec::with_capacity(3);
+        let mut descriptors = Vec::with_capacity(2 + stderr_pipes.len());
         if let Some(pipe) = &stdin_pipe {
             descriptors.push(libc::pollfd {
                 fd: pipe.as_raw_fd(),
@@ -543,12 +633,11 @@ fn os_cmd_collect(
                 revents: 0,
             });
         }
-        for fd in [
-            stdout_pipe.as_ref().map(|pipe| pipe.as_raw_fd()),
-            stderr_pipe.as_ref().map(|pipe| pipe.as_raw_fd()),
-        ]
-        .into_iter()
-        .flatten()
+        for fd in stdout_pipe
+            .as_ref()
+            .map(|pipe| pipe.as_raw_fd())
+            .into_iter()
+            .chain(stderr_pipes.iter().flatten().map(|pipe| pipe.as_raw_fd()))
         {
             descriptors.push(libc::pollfd {
                 fd,
@@ -569,11 +658,10 @@ fn os_cmd_collect(
             if error.kind() == ErrorKind::Interrupted {
                 continue;
             }
-            // SAFETY: as below — the group is ours until the child is reaped.
-            unsafe {
-                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+            for child in &mut children {
+                kill_group(child);
+                let _ = child.wait();
             }
-            let _ = child.wait();
             return Err(error);
         }
         if ready == 0 {
@@ -603,62 +691,85 @@ fn os_cmd_collect(
                 }
             } else if stdout_pipe.as_ref().map(|pipe| pipe.as_raw_fd()) == Some(fd) {
                 drain_ready(&mut stdout_pipe, &mut stdout_bytes, &mut chunk);
-            } else if stderr_pipe.as_ref().map(|pipe| pipe.as_raw_fd()) == Some(fd) {
-                drain_ready(&mut stderr_pipe, &mut stderr_bytes, &mut chunk);
+            } else if let Some(index) = stderr_pipes
+                .iter()
+                .position(|pipe| pipe.as_ref().map(|pipe| pipe.as_raw_fd()) == Some(fd))
+            {
+                drain_ready(&mut stderr_pipes[index], &mut stderrs[index], &mut chunk);
             }
         }
     }
     // Close our ends before waiting: a child blocked writing to us must see EPIPE.
     drop(stdin_pipe);
     drop(stdout_pipe);
-    drop(stderr_pipe);
-    // The pipes are closed but the child may still run (it closed its own output): it is
-    // waited for under the same two stops, polled, since a blocking `wait` would hear
-    // neither.
-    let status = loop {
+    drop(stderr_pipes);
+    // The pipes are closed but the children may still run (each closed its own output):
+    // they are waited for under the same two stops, polled, since a blocking `wait` would
+    // hear neither.
+    let mut statuses: Vec<Option<std::process::ExitStatus>> = vec![None; children.len()];
+    loop {
         if stop.is_some() {
-            // SAFETY: killpg on the group the child leads (`new_session` made it a session leader); the
-            // child is not reaped yet, so its pid (the group id) cannot have been reused.
-            unsafe {
-                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+            for (child, status) in children.iter_mut().zip(statuses.iter_mut()) {
+                if status.is_none() {
+                    kill_group(child);
+                    *status = Some(child.wait()?);
+                }
             }
-            break child.wait()?;
+            break;
         }
-        if let Some(status) = child.try_wait()? {
-            break status;
+        for (child, status) in children.iter_mut().zip(statuses.iter_mut()) {
+            if status.is_none() {
+                *status = child.try_wait()?;
+            }
+        }
+        if statuses.iter().all(Option::is_some) {
+            break;
         }
         stop = os_cmd_stop(deadline, killed);
         if stop.is_none() {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-    };
-    Ok((status, stdout_bytes, stderr_bytes, stop))
+    }
+    Ok(StagesRun {
+        statuses: statuses.into_iter().flatten().collect(),
+        stdout: stdout_bytes,
+        stderrs,
+        stop,
+    })
 }
 
-/// The portable fallback: a thread per pipe, the child killed at the deadline or when
-/// `killed` says the caller is dying. On Windows every process the child started goes
-/// with it (a `ProcessTree`); elsewhere off Unix a grandchild holding a pipe can still
+/// The portable fallback: a thread per pipe, the children killed at the deadline or when
+/// `killed` says the caller is dying. On Windows every process a stage started goes with
+/// it (a `ProcessTree` each); elsewhere off Unix a grandchild holding a pipe can still
 /// outlast either.
 #[cfg(not(unix))]
-fn os_cmd_collect(
-    mut child: std::process::Child,
+fn stages_collect(
+    mut children: Vec<std::process::Child>,
     stdin_bytes: Option<Vec<u8>>,
     timeout: Option<std::time::Duration>,
     killed: fn() -> bool,
-) -> std::io::Result<OsCmdOutcome> {
+) -> std::io::Result<StagesRun> {
     use std::io::{Read, Write};
-    let tree = crate::host::subprocess::ProcessTree::of(&child);
-    let stop_child = |child: &mut std::process::Child| {
-        if let Some(tree) = &tree {
+    let trees: Vec<Option<crate::host::subprocess::ProcessTree>> = children
+        .iter()
+        .map(crate::host::subprocess::ProcessTree::of)
+        .collect();
+    let stop_children = |children: &mut [std::process::Child]| {
+        for tree in trees.iter().flatten() {
             tree.terminate();
         }
-        let _ = child.kill();
+        for child in children.iter_mut() {
+            let _ = child.kill();
+        }
     };
     // `Builder::spawn`, not `thread::spawn`: the OS can refuse a thread (KI-241), and the
-    // child is already running, so a refusal kills and reaps it and is the call's error.
-    let stdin_pipe = child.stdin.take();
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
+    // children are already running, so a refusal kills and reaps them and is the error.
+    let stdin_pipe = children[0].stdin.take();
+    let stdout_pipe = children.last_mut().and_then(|child| child.stdout.take());
+    let stderr_pipes: Vec<Option<std::process::ChildStderr>> = children
+        .iter_mut()
+        .map(|child| child.stderr.take())
+        .collect();
     let started_threads = (|| {
         let writer = match (stdin_pipe, stdin_bytes) {
             (Some(mut pipe), Some(bytes)) => {
@@ -679,36 +790,60 @@ fn os_cmd_collect(
             })
         };
         let stdout_reader = drain(stdout_pipe.map(|pipe| Box::new(pipe) as Box<dyn Read + Send>))?;
-        let stderr_reader = drain(stderr_pipe.map(|pipe| Box::new(pipe) as Box<dyn Read + Send>))?;
-        Ok::<_, std::io::Error>((writer, stdout_reader, stderr_reader))
+        let stderr_readers = stderr_pipes
+            .into_iter()
+            .map(|pipe| drain(pipe.map(|pipe| Box::new(pipe) as Box<dyn Read + Send>)))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        Ok::<_, std::io::Error>((writer, stdout_reader, stderr_readers))
     })();
-    let (writer, stdout_reader, stderr_reader) = match started_threads {
+    let (writer, stdout_reader, stderr_readers) = match started_threads {
         Ok(threads) => threads,
         Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_children(&mut children);
+            for child in &mut children {
+                let _ = child.wait();
+            }
             return Err(error);
         }
     };
     let deadline = timeout.map(|limit| std::time::Instant::now() + limit);
     let mut stop = None;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+    let mut statuses: Vec<Option<std::process::ExitStatus>> = vec![None; children.len()];
+    loop {
+        for (child, status) in children.iter_mut().zip(statuses.iter_mut()) {
+            if status.is_none() {
+                *status = child.try_wait()?;
+            }
+        }
+        if statuses.iter().all(Option::is_some) {
+            break;
         }
         stop = os_cmd_stop(deadline, killed);
         if stop.is_some() {
-            stop_child(&mut child);
-            break child.wait()?;
+            stop_children(&mut children);
+            for (child, status) in children.iter_mut().zip(statuses.iter_mut()) {
+                if status.is_none() {
+                    *status = Some(child.wait()?);
+                }
+            }
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
-    };
+    }
     if let Some(writer) = writer {
         let _ = writer.join();
     }
     let stdout_bytes = stdout_reader.join().unwrap_or_default();
-    let stderr_bytes = stderr_reader.join().unwrap_or_default();
-    Ok((status, stdout_bytes, stderr_bytes, stop))
+    let stderrs = stderr_readers
+        .into_iter()
+        .map(|reader| reader.join().unwrap_or_default())
+        .collect();
+    Ok(StagesRun {
+        statuses: statuses.into_iter().flatten().collect(),
+        stdout: stdout_bytes,
+        stderrs,
+        stop,
+    })
 }
 
 /// `(%halt code)` — terminate the process immediately with `code`, which must be a

@@ -201,6 +201,42 @@ struct ChildSlot {
     /// The child's Job Object on Windows, so `close` ends what it started too; `None`
     /// elsewhere, where its process group does that.
     tree: Option<ProcessTree>,
+    /// For a PIPELINE handle ([`spawn_pipeline`], ADR-696), the stages before `child` —
+    /// which is the last, whose stdout the handle reads — in order. Each leads its own
+    /// session as `child` does, so `close` and `signal` reach every stage's group, and
+    /// each is reaped with `child`, under the same `reaped` flag. Empty for a plain child.
+    upstream: Vec<UpstreamStage>,
+}
+
+/// One earlier stage of a pipeline handle: its process and, on Windows, its Job Object.
+struct UpstreamStage {
+    child: ChildProcess,
+    tree: Option<ProcessTree>,
+}
+
+impl ChildSlot {
+    /// Every stage's process, the upstream ones first and `child` last.
+    #[cfg(unix)]
+    fn stage_ids(&self) -> Vec<u32> {
+        self.upstream
+            .iter()
+            .map(|stage| stage.child.id())
+            .chain(std::iter::once(self.child.id()))
+            .collect()
+    }
+}
+
+/// A pipeline's one exit code, bash's `pipefail`: the code of the LAST stage that did not
+/// exit 0 (nil when a signal ended it), else 0. A failing stage anywhere fails the whole,
+/// and the stage closest to the output says how — the answer a caller reading the output
+/// needs, since a stage that failed upstream left that output short.
+pub fn pipeline_code(codes: &[Option<i32>]) -> Option<i32> {
+    codes
+        .iter()
+        .rev()
+        .find(|code| **code != Some(0))
+        .copied()
+        .unwrap_or(Some(0))
 }
 
 /// Where a child is in its life: shared by its reader threads, its waiter thread and
@@ -722,7 +758,10 @@ fn start_waiter(
         release(removed);
         {
             let mut slot = crate::core::sync::lock(&child.slot);
-            // A zombie by now, so this returns at once.
+            // A zombie by now, so this returns at once — as is every upstream stage.
+            for stage in &mut slot.upstream {
+                stage.child.reap();
+            }
             slot.child.reap();
             slot.reaped = true;
         }
@@ -746,9 +785,19 @@ fn close_pseudoconsole(child: &ChildHandle) {
 /// Block until the child exits and return its exit code (`None` if a signal ended it),
 /// leaving it unreaped. `waitid` with `WNOWAIT` needs no lock on the `Child`, so `close`
 /// can kill it meanwhile, and the kill ends this wait at once.
+///
+/// A pipeline handle waits for EVERY stage, and answers [`pipeline_code`] of them.
 #[cfg(unix)]
 fn wait_for_exit(child: &ChildHandle) -> Option<i32> {
-    let pid = crate::core::sync::lock(&child.slot).child.id();
+    let pids = crate::core::sync::lock(&child.slot).stage_ids();
+    let codes: Vec<Option<i32>> = pids.into_iter().map(wait_for_pid).collect();
+    pipeline_code(&codes)
+}
+
+/// Block until the unreaped child `pid` exits, leaving it unreaped: its exit code, or
+/// `None` when a signal ended it.
+#[cfg(unix)]
+fn wait_for_pid(pid: u32) -> Option<i32> {
     loop {
         // SAFETY: zeroed is a valid siginfo_t; waitid fills it in.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -786,13 +835,25 @@ fn wait_for_exit(child: &ChildHandle) -> Option<i32> {
     loop {
         {
             let mut slot = crate::core::sync::lock(&child.slot);
-            match slot.child.try_wait() {
-                Ok(Some(code)) => {
-                    slot.reaped = true;
-                    return code;
+            // Every stage of a pipeline must have exited; `try_wait` keeps answering a
+            // reaped child's status, so asking again is harmless.
+            let mut codes = Vec::with_capacity(slot.upstream.len() + 1);
+            let mut running = false;
+            for stage in &mut slot.upstream {
+                match stage.child.try_wait() {
+                    Ok(Some(code)) => codes.push(code),
+                    Ok(None) => running = true,
+                    Err(_) => codes.push(None),
                 }
-                Ok(None) => {}
+            }
+            match slot.child.try_wait() {
+                Ok(Some(code)) => codes.push(code),
+                Ok(None) => running = true,
                 Err(_) => return None,
+            }
+            if !running {
+                slot.reaped = true;
+                return pipeline_code(&codes);
             }
         }
         std::thread::sleep(backoff);
@@ -1088,6 +1149,7 @@ pub fn spawn(
     let (id, child, binary) = register_child(
         ChildProcess::Standard(child),
         tree,
+        Vec::new(),
         start_stdin_writer(writer_thread, stdin),
         &lifecycle,
         subscriber,
@@ -1111,6 +1173,164 @@ pub fn spawn(
         subscriber,
         binary,
     );
+    start_waiter(waiter_thread, id, child, lifecycle, subscriber);
+    Ok(id)
+}
+
+// ---- pipelines (ADR-696) ----
+
+/// One stage of a pipeline: a program, its arguments and its own options, as `os/cmd`
+/// and `os/spawn` take them.
+pub struct StageSpec {
+    pub prog: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Vec<EnvEntry>,
+    pub raw_args: bool,
+}
+
+/// The `Command` for one pipeline stage, set up as every pipe child is: found by the one
+/// resolver, its own hidden console (Windows), its own session (Unix — so `killpg` on its
+/// pid ends it and what it started, and nothing it runs can reach our terminal), the
+/// inherited signal dispositions reset, its stderr piped. Its stdin and stdout are the
+/// chain's to set ([`spawn_chain`]).
+fn stage_command(stage: &StageSpec) -> std::io::Result<Command> {
+    let mut command = program::command(&stage.prog, stage.cwd.as_deref(), &stage.env)?;
+    add_args(&mut command, &stage.args, stage.raw_args);
+    own_hidden_console(&mut command);
+    #[cfg(unix)]
+    new_session(&mut command);
+    if let Some(dir) = &stage.cwd {
+        command.current_dir(dir);
+    }
+    apply_env(&mut command, &stage.env);
+    reset_inherited_signals(&mut command);
+    command.stderr(Stdio::piped());
+    Ok(command)
+}
+
+/// Kill and reap children already started, for a pipeline whose later stage failed to
+/// start: each one's group on Unix (the group is still ours, the child unreaped).
+fn kill_and_reap(children: Vec<Child>) {
+    for mut child in children {
+        // SAFETY: the child leads its own group (`stage_command`) and is not reaped yet,
+        // so its pid, the group id, cannot have been reused.
+        #[cfg(unix)]
+        unsafe {
+            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Start `stages` joined by OS pipes — each stage's stdout the next one's stdin, the
+/// bytes passing from one process to the next without ever entering this one — and
+/// answer the children in order. The first stage's stdin is `first_stdin`; the last
+/// stage's stdout and every stage's stderr are piped back to the caller. A stage that
+/// cannot be started kills and reaps the ones before it, and is the error.
+///
+/// Each stage's read end of the pipe is handed to it through `Stdio::from` and leaves this
+/// process when its `Command` drops, at the end of each turn: a copy kept here would hold
+/// the pipe open and the reading stage would never see end of file.
+pub fn spawn_chain(stages: &[StageSpec], first_stdin: Stdio) -> std::io::Result<Vec<Child>> {
+    let mut children: Vec<Child> = Vec::with_capacity(stages.len());
+    let mut next_stdin = Some(first_stdin);
+    for stage in stages {
+        let started = stage_command(stage).and_then(|mut command| {
+            let stdin = match next_stdin.take() {
+                Some(stdin) => stdin,
+                None => children
+                    .last_mut()
+                    .and_then(|previous| previous.stdout.take())
+                    .map_or_else(Stdio::null, Stdio::from),
+            };
+            command.stdin(stdin).stdout(Stdio::piped());
+            command.spawn()
+        });
+        match started {
+            Ok(child) => children.push(child),
+            Err(error) => {
+                kill_and_reap(children);
+                // the error names the stage's program, as `os/cmd`'s always did
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    format!("{}: {error}", stage.prog),
+                ));
+            }
+        }
+    }
+    Ok(children)
+}
+
+/// `(os/spawn-pipeline stages opts)` — [`spawn`] for a pipeline: ONE handle over every
+/// stage. [`send`] writes the first stage's stdin; the last stage's stdout arrives as
+/// `[:proc …]`, every stage's stderr as `[:proc-err …]`; `[:proc-exit …]` once every stage
+/// has exited, with their [`pipeline_code`]; `close` and `signal` reach every stage's
+/// group. The upstream stages ride the last one's registry entry ([`ChildSlot::upstream`]),
+/// so an owner's death closes them as it closes any child.
+pub fn spawn_pipeline(stages: &[StageSpec], subscriber: u64) -> std::io::Result<u64> {
+    if stages.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a pipeline needs at least one stage",
+        ));
+    }
+    // Before the spawn: once there are children, every failure would have to clean up.
+    let readers = stages.len() + 1;
+    let lifecycle = Arc::new(Lifecycle::new(readers)?);
+    let ChildThreads {
+        writer: writer_thread,
+        readers: mut reader_threads,
+        waiter: waiter_thread,
+    } = ChildThreads::reserve(readers)?;
+    let mut children = spawn_chain(stages, Stdio::piped())?;
+    // From here to the end nothing can fail: the children exist.
+    let stdin: ChildStdin = children[0].stdin.take().expect("piped stdin");
+    let mut last = children.pop().expect("at least one stage");
+    let stdout: ChildStdout = last.stdout.take().expect("piped stdout");
+    let mut stderrs: Vec<ChildStderr> = children
+        .iter_mut()
+        .map(|child| child.stderr.take().expect("piped stderr"))
+        .collect();
+    stderrs.push(last.stderr.take().expect("piped stderr"));
+    let upstream = children
+        .into_iter()
+        .map(|child| UpstreamStage {
+            tree: ProcessTree::of(&child),
+            child: ChildProcess::Standard(child),
+        })
+        .collect();
+    let tree = ProcessTree::of(&last);
+    let (id, child, binary) = register_child(
+        ChildProcess::Standard(last),
+        tree,
+        upstream,
+        start_stdin_writer(writer_thread, stdin),
+        &lifecycle,
+        subscriber,
+        None,
+    );
+    start_output_reader(
+        next_reader(&mut reader_threads),
+        id,
+        "proc",
+        stdout,
+        lifecycle.clone(),
+        subscriber,
+        binary.clone(),
+    );
+    for stderr in stderrs {
+        start_output_reader(
+            next_reader(&mut reader_threads),
+            id,
+            "proc-err",
+            stderr,
+            lifecycle.clone(),
+            subscriber,
+            binary.clone(),
+        );
+    }
     start_waiter(waiter_thread, id, child, lifecycle, subscriber);
     Ok(id)
 }
@@ -1149,6 +1369,7 @@ impl ChildThreads {
 fn register_child(
     child: ChildProcess,
     tree: Option<ProcessTree>,
+    upstream: Vec<UpstreamStage>,
     writer: mpsc::SyncSender<Vec<u8>>,
     lifecycle: &Arc<Lifecycle>,
     subscriber: u64,
@@ -1159,6 +1380,7 @@ fn register_child(
         slot: Mutex::new(ChildSlot {
             tree,
             child,
+            upstream,
             reaped: false,
         }),
     });
@@ -1283,10 +1505,20 @@ fn shut_down(entry: Proc) {
         if !slot.reaped {
             // The whole group — the child leads it (`spawn` / `spawn_pty`), and a
             // grandchild left behind keeps running and keeps the pipes open.
-            // SAFETY: an unreaped child's pid cannot have been reused.
+            // A pipeline's every stage the same way.
             #[cfg(unix)]
-            unsafe {
-                libc::killpg(slot.child.id() as libc::pid_t, libc::SIGKILL);
+            for pid in slot.stage_ids() {
+                // SAFETY: an unreaped child's pid cannot have been reused, and every
+                // stage of a pipeline is reaped together with it, under this same flag.
+                unsafe {
+                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            for stage in &mut slot.upstream {
+                if let Some(tree) = &stage.tree {
+                    tree.terminate();
+                }
+                let _ = stage.child.kill();
             }
             if let Some(tree) = &slot.tree {
                 tree.terminate();
@@ -1337,15 +1569,21 @@ pub fn signal(id: u64, sig: &str) -> std::io::Result<()> {
             std::io::Error::new(std::io::ErrorKind::NotFound, "unknown or closed subprocess")
         })?;
         let slot = crate::core::sync::lock(&p.child.slot);
-        // SAFETY: the entry is still registered (we hold the registry lock), so the waiter
-        // has not reaped the child — it removes the entry first — and the pid, the group id
-        // since `spawn`/`spawn_pty` make the child a group leader, cannot have been reused.
-        // That holds after the child has exited too: until the handle is finished it is a
-        // zombie, so a signal still reaches the descendants it left in its group.
-        if unsafe { libc::killpg(slot.child.id() as libc::pid_t, number) } < 0 {
-            return Err(std::io::Error::last_os_error());
+        // A pipeline's stages each lead a group: every one is signalled, and the first
+        // failure is the answer (after the rest were still tried).
+        let mut failure = None;
+        for pid in slot.stage_ids() {
+            // SAFETY: the entry is still registered (we hold the registry lock), so the
+            // waiter has not reaped the stage — it removes the entry first — and the pid,
+            // the group id since every spawn makes its child a group leader, cannot have
+            // been reused. That holds after the stage has exited too: until the handle is
+            // finished it is a zombie, so a signal still reaches the descendants it left
+            // in its group.
+            if unsafe { libc::killpg(pid as libc::pid_t, number) } < 0 && failure.is_none() {
+                failure = Some(std::io::Error::last_os_error());
+            }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
     #[cfg(not(unix))]
     {
@@ -1635,6 +1873,7 @@ pub fn spawn_pty(
     let (id, child, binary) = register_child(
         ChildProcess::Standard(child),
         None,
+        Vec::new(),
         start_stdin_writer(writer_thread, write_file),
         &lifecycle,
         subscriber,
@@ -1686,6 +1925,7 @@ pub fn spawn_pty(
     let (id, child, binary) = register_child(
         ChildProcess::Console(child),
         tree,
+        Vec::new(),
         start_stdin_writer(writer_thread, input),
         &lifecycle,
         subscriber,
