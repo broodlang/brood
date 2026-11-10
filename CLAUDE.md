@@ -18,10 +18,10 @@ Brood source files carry the **`.blsp`** extension (*Brood Lisp*; `.lisp` collid
 Emacs' `lisp-mode`). Any `.blsp` file, or a reference to "blsp", means **Brood-language
 source**, as distinct from the Rust kernel under `crates/`.
 
-**When writing Brood code, read `docs/brood-for-claude.md` first.** It's the
-pocket reference geared for AI assistants — syntax, idioms, and the patterns
-that aren't shared with other Lisps. `nest new` also drops a copy into every
-scaffolded project (it's baked into the binary via `%builtin-doc`).
+**When writing Brood code, load the `writing-brood` skill first**
+(`docs/writing-brood-skill.md`, ~160 lines): the traps and idioms that differ from other
+Lisps. `docs/brood-for-claude.md` is the full reference behind it. `nest new` drops both into
+every scaffolded project (they are baked into the binary via `%builtin-doc`).
 
 ## Greenfield: prefer the right structure over compatibility
 
@@ -112,57 +112,18 @@ in Brood and makes *every* multi-arity function faster.
 
 ## Layout
 
+**[`docs/source-map.md`](docs/source-map.md) lists every kernel and std module with its
+purpose.** It is generated from each module's own doc line and a test fails when it is stale,
+so it is current; read it to find where something lives. In brief:
+
 ```
-crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
-  core/        substrate: value.rs (Value, Tag, symbol interner, Closure/Arity); heap.rs
-               (per-process heap + shared regions, construction, alloc, region-dispatching
-               accessors) with children heap/{gc (the tracing collector + verifier, split
-               under gc/), gc_runtime, map_ops (CHAMP ops), equality, vm_cache (body cache,
-               inline caches, shared JIT code cache), facts, positions, env_globals (env
-               chain + global table), freeze (the once-per-runtime prelude freeze),
-               promote (LOCAL -> shared RUNTIME copying), local_string, slabs, runtime_code
-               (RuntimeCode: the shared `def`'d code + globals a runtime's processes hold
-               in common), roots_buf}; alloc.rs, blob.rs, map_champ.rs, table.rs (the
-               shared mutable table, ADR-107), sync.rs
-  syntax/      reader, scanner, printer, and the tooling CST (atom / cst / scope)
-  eval.rs + eval/   the tree-walking evaluator (machine.rs: a loop over a heap frame stack,
-               ADR-416) + compile.rs/compile/,
-               the closure-compiling VM (default engine, ADR-076): ir (IR types), lower
-               (front-end), walkers, closure (compile_arm, shared body cache), emit
-               (Node -> bytecode), prim_exec (the Prim2/Prim3 executors), dispatch (arm dispatcher, IC, JIT fast
-               path), exec_chunk (bytecode inner loop), vm_run_bc (outer trampoline),
-               inline (Node->Node passes), jit_plan (backend-independent lowering
-               decisions), jit_runtime/ (tiering glue: compiler thread, link, dispatch,
-               deopt), jit_lower (the Cranelift lowering); macros.rs (quasiquote,
-               macroexpand) + macros/ (hygiene, resolve: namespaces and `compile`,
-               pipeline and linmap: the loop rewrites, patterns: pattern lowering)
-  types.rs + types/   the set-theoretic lattice, sig, display, and check/ (the advisory
-               checker: walk/ dispatch, sigs, infer, and its tests)
-  builtins.rs + builtins/   the primitive kernel, one file per domain; EVERY domain file
-               owns both its implementations and its `register(&mut Primitives)`, so a
-               primitive is a one-file edit. signature_types.rs holds the `Ty` shorthands;
-               args.rs the argument readers (`arg`, `expect_int`, `expect_string`, …).
-  boot.rs + boot/   the shared prelude bundle, the two boot paths (prelude image ADR-314 /
-               source), boot/image.rs (the stdlib startup image, ADR-218)
-  introspect.rs, cli_support.rs, renames.rs (the rename ledger, ADR-304), stack.rs (native
-               stack growth over `stacker`), error.rs, lib.rs
-  process.rs + process/   green-process scheduler (mailbox, message, monitor, links, timer,
-               sysmon, io_source, pressure, cputime, receive_spec; scheduler/ split into
-               pool, lifecycle, guards)
-  dist.rs + dist/   distributed nodes (handshake, heartbeat, wire, session: the encrypted
-               session ADR-089, guest: guest links ADR-415) — ADR-033/034
-  host.rs + host/   feature-gated machine bindings, mechanism only: net (TCP/TLS, ADR-062),
-               subprocess (ADR-104), wasm (`wasmtime` host, ADR-071/145), treesit,
-               clipboard, gui + gui/ (ADR-046: winit backend, cosmic-text renderer, and
-               gpu.rs the wgpu render target behind `gui-gpu`), audio, text_width
-  diagnostics.rs + diagnostics/   coverage (ADR-148), perf/profile (VM counters, sampling
-               profiler), debug_flags.rs (the `BROOD_*` catalogue behind --debug-flags)
-  bundle.rs    single-binary app bundling (ADR-038) + the reserved `--brood-` argv prefix
-  jit.rs + jit/   the JIT ABI + backend registry (ADR-101/221): backend.rs (the
-               `JitBackend` contract), rt.rs (the `brood_rt_*` callbacks — the ONLY heap/GC
-               interface native code has), cranelift.rs
-  Module convention: a parent is `foo.rs` beside its `foo/` directory (never `foo/mod.rs`);
-  children reach the parent's private items via `use super::*`.
+crates/lisp/src/   the language and runtime; the directory tree mirrors the layers (lib.rs):
+                   core (values, heap, GC) · syntax · eval (tree-walker, VM, JIT lowering,
+                   macros) · types (the checker) · builtins (one file per domain, each owning
+                   its implementations AND its `register`) · boot · process · dist · host
+                   (feature-gated machine bindings) · diagnostics · jit (ABI; rt.rs is the
+                   ONLY heap/GC interface native code has)
+                   A parent is `foo.rs` beside its `foo/` (never `foo/mod.rs`).
 crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
 crates/nest/src/         the `nest` binary — a thin shell over std/tool/nest.blsp — ADR-028
 crates/lsp/src/main.rs   the `brood-lsp` language server (ADR-025, docs/lsp.md)
@@ -181,17 +142,9 @@ docs/                    architecture, language, roadmap, decisions, devlog, kno
 ```
 
 The CLI is split (ADR-028): **`brood` runs the language**, **`nest` runs the project**.
-Both embed the `brood` lib. `nest` subcommands: `new`, `test`, `check` (`--fix-renames`
-applies the unambiguous half of a rename wave from the ledger, ADR-304), `run` (refuses to
-launch over an unbound symbol in the entry point's require-closure; `--no-check` skips it;
-`--watch`; `--check-boot` loads every module and resolves `:main` but runs nothing, KI-66),
-`doc`, `docs`, `doctest`, `format`, `repl`, `mcp` (an MCP server over the project, ADR-036),
-`observe`, `attach` (thin frontend for a `ui-run` daemon, ADR-090), `completions`/`complete`,
-`grammar` (editor grammars from `(special-forms)`, ADR-092), `rename`, `ws`, `stdimage`, the
-package manager (`fetch`/`update`/`tree`/`add`/`remove`, ADR-037; `publish`/`search` against
-the hosted `hive` registry, ADR-147/211; `key`, ADR-212), `release` (bundling, ADR-038;
-boot-checks the binary it wrote and deletes it on failure; `--no-smoke` opts out), and
-`update-tooling`/`update-brood`.
+Every `nest` subcommand is described in
+[`docs/working-in-the-repo.md`](docs/working-in-the-repo.md), which also holds the command
+details, the debug tooling and the rename checklist this file points to.
 
 ## Commands
 
@@ -212,74 +165,17 @@ make ab BASE=<ref>                # A/B the working tree vs a git ref on the ben
 make help                         # every target
 ```
 
-- **After a push, `make ci-wait` — never a hand-written `gh run list -L 1` loop**: right after a
-  push that returns the PREVIOUS run, and every push cancels the run before it; `ci-wait`
-  follows the newest run whose commit contains yours and prints the failing tests.
-- **Waiting for a build: never `while pgrep -f "cargo build"`** — the pattern matches the waiting
-  shell's own command line, so the loop never ends. Wait on the build command itself.
-- **`make green` answers "is the tree green?" — never hand-read the run list.** A cancelled
-  CI run is not evidence (every run is cancelled by the next push), and `make check` is not
-  what CI runs: CI also runs `nest format --check`, the zero-warning checker gates, the
-  examples and stress gates, and a `downstream-bedit` job (bedit at `BEDIT_REF`;
-  `make smoke-bedit` is the same locally). `make green` prints **"no verdict"** rather than
-  "green" when CI has concluded nothing recent (KI-68/KI-69).
-- **Clippy: `--all-features` is load-bearing.** CI runs
-  `cargo clippy --all-targets --all-features -- -D warnings`; a plain
-  `cargo clippy --all-targets` passes code CI rejects. A failing clippy step skips every
-  CI step behind it.
-- **`make test` runs via `cargo-nextest`**: each test in its own process (a SIGSEGV is
-  contained to one case), hard-capped per case (`.config/nextest.toml`). `cargo test` has no
-  per-test timeout and can hang. `make ensure-nextest` installs it.
-- **Perf-benchmark builds: `--bin brood` (or `-p cli`), never `-p brood`.** `-p brood` builds
-  only the lib and does not relink the binary, so an A/B silently compares stale binaries.
-  The JIT is a default feature (ADR-101). The tier ceiling is **`BROOD_TIER=0|1|2`**
-  (tree-walker / bytecode VM / native, ADR-222) — the only engine knob.
-- **Measuring performance:** `docs/benchmarking.md` §6 has the rules and why: `make ab
-  ARGS=--floor`; `make ab-vm` for the VM call path; a base-vs-base control before believing a
-  few-percent delta; re-run a tiering-sensitive row unpinned; measure a short and a long run;
-  **count the calls** before optimising anything; attribute with `make perf-brood` +
-  `(perf/summary)` (its own profile, `target/release-perf/`, never the timing binary). Run
-  `make doctor` first — a stale binary fails by agreeing with the baseline. Never benchmark
-  on this machine; see `docs/benchmarking.md` §7 for what this machine can still answer.
-
-### Debug tooling
-
-**`brood --debug-flags` lists every `BROOD_*` flag the runtime reads**, grouped for triage,
-from `crates/lisp/src/diagnostics/debug_flags.rs`. Both directions are gated by tests: every
-catalogued name must exist in the source, and every `BROOD_*` read under `crates/*/src` or
-`std/` must be catalogued. That file is the reference — add a flag's description there, not
-here. The ones you reach for first: `BROOD_GC_STRESS` / `BROOD_GC_VERIFY` (GC races),
-`BROOD_TIER` (which engine), `BROOD_J=1` (one worker), `BROOD_JIT_DUMP_IR` /
-`BROOD_JIT_BAIL_TRACE` (did an arm lower, and why not), `BROOD_PERF_STATS` (counters; needs
-`make perf-brood`).
-
-**Build with `RUSTFLAGS="-C debug-assertions=on" cargo build --release`** to keep release
-speed while arming every debug check (plain `--release` strips them; plain debug is correct
-but too slow to expose contention races).
-
-**Two layers of use-after-GC detection** (a moving collector relocates LOCAL handles; a
-handle held across a collection without re-rooting goes stale):
-
-1. **Per-deref tripwire** (always on under debug-assertions). Every LOCAL handle accessor in
-   `core/heap.rs` checks a poison bit + a generation epoch (`check_epoch_aged`), panicking at the
-   *instant of the bad deref*. Catches a stale handle that's **dereferenced**.
-2. **Heap verifier** (`BROOD_GC_VERIFY=1`, `Heap::verify_local_graph`, works in plain
-   release). The tripwire misses a stale handle **stored** into a heap cell without being
-   deref'd (it surfaces far away — an OOB slab index, or `promote` recursing a corrupted
-   graph to a `SIGSEGV`). Before each collection the verifier walks the live LOCAL graph and
-   panics naming the stale handle and **the cell that holds it** (`0` = a root) — its
-   immediate parent, not a full root path — at the store site's next collection, so you find
-   the missed-rooting site, not the distant blow-up. Reach for it when GC_STRESS gives a
-   `SIGSEGV` or a raw index panic rather than a clean tripwire message.
-
-**Crash artifacts.** `brood`/`nest` install a panic hook (`cli_support::install_crash_dump`)
-that appends the panic + backtrace to **`.brood_crash_dump`** in the cwd — durable when a TUI
-scrolls the message away; at 16 MiB it rotates to `.brood_crash_dump.old`, replacing the last
-one. It catches Rust *panics*, **not** `SIGSEGV`: a fatal signal (SIGSEGV, SIGBUS, an abort)
-leaves a one-line record under `$XDG_STATE_HOME/brood/crashes/` instead (ADR-635,
-`crash-report/previous-crashes`), with no backtrace; for the stack use
-`gdb --batch -ex run -ex bt <test-binary>` (`rr` isn't installed, and `valgrind` won't see a
-*logical* use-after-GC over safe `Vec` slabs).
+- **After a push, `make ci-wait`**, never a hand-written `gh run list` loop; **`make green`**
+  answers "is the tree green?", never a hand-read run list.
+- **Clippy needs `--all-features`** (`cargo clippy --all-targets --all-features -- -D
+  warnings`); every `unsafe` block and impl needs a `// SAFETY:` comment.
+- **`make check-desktop`** runs CI's static gates on a machine that runs no suites;
+  **`make affected-tests`** prints the tests that name the current change.
+- **Never benchmark on this machine**; `docs/benchmarking.md` has the rules for where you can.
+- The reasons behind each, plus nextest, perf builds, the debug flags, the use-after-GC
+  tripwire and verifier and the crash artifacts, are in
+  [`docs/working-in-the-repo.md`](docs/working-in-the-repo.md). `brood --debug-flags` lists
+  every `BROOD_*` flag.
 
 ## Working in this repo (the tree changes under you)
 
@@ -313,7 +209,7 @@ attribute: run the failing file against a clean build of the previous commit.
 > chaining fix. On the development desktop that fix IS installed (`~/.config/git/hooks/pre-push`),
 > so the repo hook runs on every push — **including its `.blsp` test step, which the
 > no-tests-on-the-desktop rule forbids there.** On the desktop, run the hook's static gates
-> by hand (`cargo fmt --check`, `nest format --check`, `nest check` and `--strict` as CI
+> with `make check-desktop` (fmt, `nest format --check`, `nest check` and `--strict` as CI
 > spells them, clippy with `--all-features`) and push with `--no-verify`; CI runs the tests.
 > Wherever you run `make prepush`, **read its exit status, not its last line**
 > (`make prepush | tail` reports the pipe's status).
@@ -407,42 +303,11 @@ commits in this repo.**
 ## When you RENAME or REORDER a stdlib function
 
 A rename wave or argument reorder is not a find-and-replace (ADR-302/308 cost ten bugs, six
-silent). **Enumerate these before the first edit.**
-
-**A call has five spellings**, and a textual rewriter sees only the first: bare `(map xs f)`;
-qualified `(string/join xs sep)`; root-scoped `(/map xs f)`; macro-constructed
-`(list '/mapv …)` (ungreppable until expansion); and string-embedded — `%load-string`,
-`reflect/eval-string`, and `nest new`'s scaffold templates (a sweep finds ~118 strings with
-`(map …)`, ~15 executable — read them).
-
-**Code generators are outside every static gate** — the fuzz generators
-(`scripts/fuzz/generators/*.blsp`, `stress/fuzz_programs.blsp`) write Brood as strings, so
-grep them too; `crates/cli/tests/fuzz_generators_live.rs` runs each generator once and fails
-on an unbound symbol. The scaffold templates are covered by
-`crates/nest/tests/scaffold_quality.rs` (format, check, tests, `--check-boot`, and a full run
-for the templates whose `main` terminates).
-
-**The Rust checker encodes argument positions structurally**, and they degrade to `any`
-*silently* — `types/check/sigs.rs`, `infer.rs`, `walk.rs`. Two gates must stay green:
-`types::check::sigs::convention_tests::curated_combinators_put_the_callback_last`, and
-`tests/introspection_test.blsp` "combinator result inference survives the argument order"
-(pin a type the checker can actually prove; `any` is what a broken position yields too).
-
-**`map` is a function name AND a type name.** `(map K V)` in a `sig` is a type; `(map -> int)`
-parses as a two-argument call. Check `(sig …)` **and** `(sig! …)`.
-
-**Prefer the reorder that fails loudly.** Moving a collection into argument one fails at once;
-reordering a *callback's own* parameters fails silently (ADR-308 keeps `(fn (acc x))`).
-
-**`doctest` is the completeness gate.** `tests/doc_examples_test.blsp` and
-`tests/doctest_test.blsp` execute every `form → result` docstring example. Run them early.
-
-**A rename wave ends downstream.** Put every moved public name in the rename ledger
-(`crates/lisp/src/renames.rs`) so bedit's `nest check` says `renamed to …` and
-`--fix-renames` applies it; fix and push bedit; then `make smoke-bedit ARGS=--bump` (moves
-`BEDIT_REF` to bedit's pushed HEAD) and commit the pin with the change. Smoke with a
-grammar-enabled `nest` (`brood/treesit-grammars`), or bedit's mode tests fail on
-"no grammar for :elixir", which is not a regression.
+silent). **Read the checklist in
+[`docs/working-in-the-repo.md`](docs/working-in-the-repo.md#when-you-rename-or-reorder-a-stdlib-function)
+before the first edit**: a call has five spellings, code generators sit outside every static
+gate, the checker encodes argument positions structurally, `map` is also a type name, and a
+rename wave ends downstream in bedit with a rename-ledger entry.
 
 **Two measurement rules:**
 - **Assert the summary line is PRESENT**, never that failures are absent — `grep "test

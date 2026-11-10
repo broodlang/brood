@@ -689,6 +689,22 @@ path:
 both run `(work c)` in the child, and a bare function name is *called* —
 `(spawn worker)` runs `(worker)`. Prefer the plain expression.
 
+**When to reach for a process (vs staying pure).** Pure functions are the default; a
+process earns its place for:
+
+- **Long-lived evolving state** — a counter, cache, or session. A process holding
+  state in its `receive` loop is *the* way to express mutable state; the packaged
+  form is a `gen` server (`defserver` + `gen/start`/`gen/call`/`gen/cast`).
+- **CPU fan-out across cores** — `seq/pmap`, or `spawn` a worker per band and fan
+  back in with `receive`. Measure the sequential version first; small inputs won't
+  beat the spawn + copy-on-send overhead.
+- **I/O multiplexing** — several blocking sources at once: one process per source,
+  a coordinator `receive`s.
+
+Need the child's exit reason? `(spawn-monitor expr)` → `[pid ref]`, monitored before the
+child runs (a separate `spawn` then `monitor` can report `:noproc` instead). Test
+concurrency with spawn-N-then-collect.
+
 Each process has its own heap; messages are **deep-copied** on `send`. `(self)`
 is the current process's pid. A `send` target is a pid, a **registered name** —
 `(proc/register :editor (self))` then `(send :editor msg)` from anywhere; an
@@ -1068,6 +1084,31 @@ until 2026-08; that name is gone.)
 **Failures are values, bugs raise** — see *A `failure` is a returned value* below; the
 `try`/`catch` above is for the raising half. `(catch e …)` catches everything, a pattern
 such as `(catch {:kind :type} …)` one kind; `(error-message e)` reads whatever was caught.
+
+### When Brood itself crashes (a Rust panic)
+
+First tell your program's failure from the runtime's. A process that raises is
+reported by the default crash reporter (pid, reason, trace) under `brood file` /
+`nest run`, and deep recursion is a catchable `recursion too deep` error — both are
+*your* code. A Rust **panic** (a use-after-GC tripwire, a heap index, a runtime
+invariant) is the runtime's: it is appended to **`.brood_crash_dump`** in the working
+directory (read the **last** `=== brood crash dump ===` block; at 16 MiB it rotates to
+`.brood_crash_dump.old`). A `SIGSEGV` leaves no dump. (Inside the Brood repo, the
+`brood-debug` skill is the full playbook.)
+
+A runtime crash is a bug to report, not to work around:
+
+1. **Minimise** to the smallest deterministic `.blsp` that still reproduces.
+2. **Capture** the last dump block, plus `brood --version`.
+3. **Localise** with the knobs (`brood --debug-flags` lists them all); each one that
+   flips the verdict (crash ↔ clean) names a subsystem:
+   - `BROOD_GC_STRESS=1` — collect at every safepoint; makes a GC race deterministic.
+   - `BROOD_GC_VERIFY=1` — walk the live graph before each collection; names a stale
+     handle and the cell that holds it.
+   - `BROOD_TIER=1` (no JIT) / `BROOD_TIER=0` (tree-walker) — which execution tier.
+   - `BROOD_J=1` (one scheduler worker) or `nest test --jobs 1` (at most one spawned
+     process running at a time) — rules the scheduler in or out.
+4. **File it** with the repro, the dump block and which knobs change the verdict.
 
 ## Common builtins
 
