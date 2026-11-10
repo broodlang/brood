@@ -141,8 +141,17 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `syntax/typed.rs` — Typed parameters (ADR-420): how a parameter symbol carries a type, read the same way by every consumer of a parameter list — the expander that strips the types (`eval/macros/typed.rs`), the CST scope analysis, the std index's arity count, and the checker passes that read raw `defn` forms.
 - `types.rs` — The type lattice — step 1 of the set-theoretic type direction (ADR-023, semantic subtyping, set-theoretic + gradual; Castagna, Duboc, Valim).
   - `types/check.rs` — Step 4: a small **advisory** type checker — the consumer of the `Ty` lattice, so the type system actually *does* something.
+  - `types/construct.rs` — The named points, constructors and refinement accessors of [`Ty`]: the constants (`NEVER`, `ANY`, `NUMBER`, …), the builders for arrows, sequences, maps, records, tuples, literals and intervals, the readers a checker uses to see a refinement back, and the bridges from a runtime value or a type predicate to a type.
   - `types/display.rs` — Display rendering for [`Ty`] (extracted from mod.rs).
+  - `types/gradual.rs` — The gradual type [`GradualTy`] (ADR-024) — a static bound plus the `dynamic()` flag — with consistent subtyping derived from set inclusion, and the process-wide strict checking switch that reads it by inclusion instead of by overlap.
+  - `types/literal_set.rs` — The literal-set refinement [`LitSet`] — one tag's values stated positively (exactly these) or negatively (anything but these) — with its canonical form and the union, intersection, inclusion and disjointness of two sets over the same tag.
+  - `types/merge.rs` — The slot-merging rules behind a union or an intersection of terms: when two terms merge into one without loss, how each refinement slot (arrow, element, positional shape, literal set, interval, length) combines, the widening collapse a fixpoint uses, and the canonical forms an interval or literal slot is kept in.
+  - `types/range.rs` — The integer interval [`Range`] (ADR-350) — the refinement an `int` member and a countable member's length carry — and its interval arithmetic: hull, meet, inclusion, the four operations and the widening of an ascent.
+  - `types/recursive.rs` — Recursive types (ADR-349): the μ binder and its self-reference, unrolling and substitution, folding a fixpoint's ascent into a recursive type, and the coinductive assumptions and budgets that make every relation and meet over one terminate.
   - `types/sig.rs` — Function type signatures — [`Sig`] (extracted from mod.rs).
+  - `types/term_ops.rs` — The set operations on ONE term of a [`Ty`] — union, intersection and complement of a single term, slot by slot — and the size bound and depth widening that keep every type finite.
+  - `types/term_relations.rs` — The free helpers the term relations of [`Ty`] are built from: record-shape subtyping, disjointness and intersection, positional-shape intersection, the covering rules that decide whether one term sits inside a union of others (products, records, intersections of arrows), and the canonical form of an arrow intersection.
+  - `types/union_of_terms.rs` — The public set operations and relations of [`Ty`] over a union of terms (ADR-262): building a type from its terms, `union`, `intersect`, `negate`, `difference`, `is_subtype`, `is_consistent_subtype` and `is_disjoint`, with the per-term subtyping and disjointness they quantify over.
 
 ## Standard library — `std/`
 
