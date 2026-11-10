@@ -1,3 +1,4 @@
+//! Raising and catching: `throw`, `%raise`, `%try`, failure values, and `%make-macro`.
 use super::args::{arg, expect_string};
 use crate::core::heap::Heap;
 use crate::core::value::{EnvId, Value};

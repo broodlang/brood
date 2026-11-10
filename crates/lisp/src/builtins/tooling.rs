@@ -1,3 +1,5 @@
+//! Introspection for tooling: source positions, docs and arglists, declared signatures and
+//! type aliases, `bound?`, `reflect/gensym` and the rename ledger.
 use super::args::{arg, expect_string, expect_symbol};
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;

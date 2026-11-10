@@ -1,3 +1,5 @@
+//! The record value kind's primitives (ADR-542): build one, test for one, read its id and
+//! fields.
 use super::args::{arg, expect_keyword};
 use crate::core::heap::Heap;
 use crate::core::value::{EnvId, Value};
