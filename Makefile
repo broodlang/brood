@@ -448,11 +448,15 @@ miri: ## Miri (undefined-behaviour interpreter) over the kernel unit tests that 
 # a statement, returns a default) and reports every change no test noticed — CLAUDE.md's
 # "sabotage every guard" rule, run by a tool. Scope it: the whole crate is hours. TESTS is
 # the cargo-test filter to run per mutant (the module's own tests, by default all of `--lib`).
+# Its build copy goes under target/ (TMPDIR): /tmp is a RAM disk here, and a copied brood
+# build filled it until the linker died of SIGBUS. The report lands in target/mutants.out.
 F ?=
 TESTS ?=
 mutants: ## Mutation-test one Rust file: make mutants F=crates/lisp/src/core/heap/small_map.rs TESTS=core::heap::small_map (needs cargo-mutants)
 	@test -n "$(F)" || { echo "usage: make mutants F=path/to/file.rs [TESTS=test-filter]"; exit 2; }
-	cargo mutants --no-shuffle -p brood -f $(F) -- --lib $(TESTS)
+	@mkdir -p target/mutants-tmp
+	TMPDIR=$(CURDIR)/target/mutants-tmp cargo mutants --no-shuffle -p brood -f $(F) \
+		--cargo-arg=--lib -o target -- $(TESTS)
 
 # rr records a run so a one-in-N failure can be replayed exactly, and stepped backwards.
 # Chaos mode perturbs scheduling so a rare interleaving shows up sooner. Needs `rr` installed

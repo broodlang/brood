@@ -86,18 +86,46 @@
     ;; it opened the file for WRITING, which a read-only file refuses its owner too
     (let (file (path/join (fresh-dir) "read-only.txt"))
       (file/spit file "x")
-      (if (windows?)
-        (os/cmd "attrib" ["+r" (backslashed file)])
-        (os/cmd "chmod" ["444" file]))
+      (file/chmod file 0o444)
       (file/set-mtime file 1577836800000)
       (assert= (file/mtime file) 1577836800000)
-      (if (windows?)
-        (os/cmd "attrib" ["-r" (backslashed file)])
-        (os/cmd "chmod" ["644" file]))))
+      (file/chmod file 0o644)))
   (test "file/set-mtime dates a directory"
     (let (directory (fresh-dir))
       (file/set-mtime directory 1577836800000)
       (assert= (file/mtime directory) 1577836800000))))
+
+(describe "permission bits and symlinks (ADR-697)"
+  (test "file/chmod: the bits on Unix, the read-only attribute from the owner-write bit on Windows"
+    (let (file (path/join (fresh-dir) "tool"))
+      (file/spit file "x")
+      (assert= (file/chmod file 0o444) nil)
+      (if (windows?)
+        (let (listed (os/cmd-out (os/cmd "attrib" [(backslashed file)])))
+          (is (includes? (string/substring listed 0 (index-of listed ":")) "R")))
+        (assert= (:mode (file/stat file)) 0o444))
+      (assert= (file/chmod file 0o755) nil)
+      ;; writable again on every OS
+      (file/spit file "y")
+      (assert= (file/slurp file) "y")
+      (when (not (windows?)) (assert= (:mode (file/stat file)) 0o755))))
+  (test "file/symlink makes a link file/read-link reads back, or says why it may not"
+    ;; Windows makes one only with Developer Mode or the privilege; the failure names both
+    (let (directory (fresh-dir)
+          target (path/join directory "target.txt")
+          link (path/join directory "link"))
+      (file/spit target "x")
+      (let (made (file/symlink "target.txt" link))
+        (if (failure? made)
+          (do
+            (is (windows?))
+            (is (includes? (error-message made) "Developer Mode")))
+          (do
+            (assert= (file/read-link link) "target.txt")
+            (assert= (file/slurp link) "x")
+            (assert= (file/symlink "elsewhere" link {:replace true}) nil)
+            (assert= (file/read-link link) "elsewhere"))))
+      (assert= (file/read-link target) nil))))
 
 (describe "files: bytes go to disk as given"
   (test "CRLF is written and read back untranslated — no text mode on Windows"

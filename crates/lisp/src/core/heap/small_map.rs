@@ -203,6 +203,73 @@ mod tests {
         }
     }
 
+    // The three tests below close what `make mutants` found these tests never noticed: an
+    // inline lookup that matched the WRONG key, a spill that reserved less room, and a
+    // `shrink_to_fit` that did nothing.
+
+    #[test]
+    fn inline_lookups_find_each_key_and_only_that_key() {
+        let mut m = M::new();
+        for k in 1..=5u64 {
+            m.insert(k, k as u32 * 10);
+        }
+        assert!(matches!(m, SmallMap::Inline(_)));
+        for k in 1..=5u64 {
+            assert_eq!(m.get(&k), Some(&(k as u32 * 10)), "get({k})");
+        }
+        assert_eq!(
+            m.get(&6),
+            None,
+            "an absent key answers None, not some other entry"
+        );
+        *m.get_mut(&3).unwrap() = 33;
+        assert_eq!(m.get(&3), Some(&33));
+        assert_eq!(
+            m.get(&2),
+            Some(&20),
+            "get_mut wrote to its own key, not a neighbour"
+        );
+        assert!(m.get_mut(&6).is_none());
+    }
+
+    #[test]
+    fn a_spill_reserves_room_for_twice_the_inline_entries() {
+        // The ninth insert moves eight entries into a hash map sized for SPILL * 2, so the
+        // next several inserts do not rehash straight away.
+        let mut m = M::new();
+        for k in 0..=SPILL as u64 {
+            m.insert(k, 0);
+        }
+        assert!(matches!(m, SmallMap::Hashed(_)));
+        assert!(
+            m.capacity() >= SPILL * 2,
+            "the spilled map holds {} slots, fewer than SPILL * 2",
+            m.capacity()
+        );
+    }
+
+    #[test]
+    fn shrink_to_fit_gives_back_the_slack_in_both_shapes() {
+        let mut m = M::new();
+        for k in 0..3u64 {
+            m.insert(k, 0);
+        }
+        assert_eq!(m.capacity(), 4, "three entries sit in a four-slot vector");
+        m.shrink_to_fit();
+        assert_eq!(m.capacity(), 3, "inline: shrunk to the entries");
+        for k in 0..64u64 {
+            m.insert(k, 0);
+        }
+        m.retain(|k, _| *k < 2);
+        let before = m.capacity();
+        m.shrink_to_fit();
+        assert!(
+            m.capacity() < before,
+            "hashed: {before} slots for two entries were not given back"
+        );
+        assert_eq!(m.get(&1), Some(&0), "shrinking kept the entries");
+    }
+
     #[test]
     fn the_map_costs_a_vec_inline() {
         // Every process carries several of these on its `Heap`; the boxed spill keeps each

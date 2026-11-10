@@ -31,7 +31,7 @@ pub(super) use watched;
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.
 pub(super) fn register(primitives: &mut super::Primitives) {
     use super::signature_types::*;
-    use crate::core::value::Arity;
+    use crate::core::value::{Arity, Tag};
     use crate::types::{Sig, Ty};
     // filesystem — mechanism for the Brood module system + project test runner
     primitives.def(
@@ -186,6 +186,27 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["path"],
         "Metadata for path in ONE stat as a map {:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}, or nil if missing. :symlink? reads the link itself (lstat); the rest follow it. :mtime/:atime are epoch-ms last-modified/last-access (nil if unreadable; :atime may be coarse under relatime/noatime mounts); :exec? is the owner-execute bit; :mode is the unix permission bits (0 off-unix); :nlink the hard-link count; :uid/:gid the numeric ids; :owner/:group their resolved names (the numeric id as a string if unresolved). Everything an `ls -l` row + a recency sort needs in one syscall.\n\n    (file/stat \"notes.txt\")   ;~> {:dir? false, :size 5, :mtime 1761213600000, …}",
         watched!("file/stat", file_stat, 1));
+    primitives.def(
+        "file/read-link",
+        Arity::exact(1),
+        Sig::new(vec![string], string.union(nil_ty)),
+        &["path"],
+        "The target the symlink at path stores, as written when it was made — not resolved, so a relative target stays relative and a dangling link still answers. nil when path is not a symlink or is missing, as file/stat answers nil for a missing path. What `ls -l` prints after `->`.\n\n    (file/read-link \"/nonexistent-brood-xyz\")   ;=> nil",
+        watched!("file/read-link", read_link, 1));
+    primitives.def(
+        "file/symlink",
+        Arity::range(2, 3),
+        Sig::with_optional(vec![string, string], vec![map_ty.union(nil_ty)], nil_ty.union(Ty::of(Tag::Failure))),
+        &["target", "path", "opts"],
+        "Make path a symlink to target, stored as given (a relative target is read from the link's own directory, as `ln -s` makes it). Returns nil, or a failure saying why: path already exists (a dangling link too), the directory refuses it, or — on Windows — this account may not make symlinks. With {:replace true} an existing path is replaced ATOMICALLY: the link is made under a temp name beside it and renamed over, so a reader sees the old entry or the new link, never neither; a real directory at path is refused, not replaced. On Windows a target that is a directory makes a directory link (symlink_dir), anything else, a missing target included, a file link (symlink_file); making either needs Developer Mode or the SeCreateSymbolicLinkPrivilege, and the failure says so (ADR-697).\n\n    (failure? (file/symlink \"x\" \"/nonexistent-brood-xyz/link\"))   ;=> true",
+        watched!("file/symlink", make_symlink, 2));
+    primitives.def(
+        "file/chmod",
+        Arity::exact(2),
+        Sig::new(vec![string, int], nil_ty.union(Ty::of(Tag::Failure))),
+        &["path", "mode"],
+        "Set the permission bits of path to mode (an int, `0o755`; the low 12 bits, setuid/setgid/sticky included), following a symlink as chmod(1) does. Returns nil, or a failure saying why (missing, not this user's file). What file/stat's :mode and :exec? read back. On Windows a file has no permission bits, only a read-only attribute: it is set when mode lacks the owner-write bit (0o200) and cleared when mode has it; the rest of mode is ignored, and file/stat's :mode stays 0 there (ADR-697).\n\n    (failure? (file/chmod \"/nonexistent-brood-xyz\" 0o644))   ;=> true",
+        watched!("file/chmod", change_mode, 1));
     primitives.def(
         "file/rm",
         Arity::exact(1),
@@ -1291,6 +1312,168 @@ pub(super) fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(heap.map_from_pairs(pairs))
 }
 
+/// `(file/read-link path)` — the target the symlink at `path` stores, unresolved (`readlink`,
+/// not `realpath`), or nil when `path` is missing or not a symlink — the shape `file/stat`
+/// has for a missing path, since "is this a link?" is a question, not an error. A link that
+/// cannot be read (a permission refusal on its directory) raises.
+pub(super) fn read_link(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file/read-link", arg(args, 0))?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {}
+        _ => return Ok(Value::nil()),
+    }
+    let target = std::fs::read_link(&path).map_err(|e| {
+        LispError::runtime(format!("file/read-link: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    Ok(heap.alloc_string(&target.to_string_lossy()))
+}
+
+/// `(file/symlink target path opts?)` — make `path` a symlink to `target`, or answer a failure
+/// saying why not: an outcome a caller expects to meet (the name is taken, Windows refuses the
+/// privilege), so a value rather than a raise, as `file/trash` answers. `{:replace true}`
+/// replaces an existing entry atomically (a temp link beside it, renamed over).
+pub(super) fn make_symlink(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let target = expect_string(heap, "file/symlink", arg(args, 0))?;
+    let path = expect_string(heap, "file/symlink", arg(args, 1))?;
+    let replace = match arg(args, 2) {
+        Value::Map(opts) => heap
+            .map_get(opts, kw("replace"))
+            .is_some_and(crate::eval::truthy),
+        Value::Nil => false,
+        other => return Err(LispError::wrong_type(heap, "file/symlink", "map", other)),
+    };
+    let made = if replace {
+        symlink_replacing(&target, std::path::Path::new(&path))
+    } else {
+        symlink_at(&target, std::path::Path::new(&path))
+    };
+    Ok(match made {
+        Ok(()) => Value::nil(),
+        Err(error) => heap.alloc_failure(&format!(
+            "file/symlink: {} -> {}: {}",
+            path,
+            target,
+            symlink_refusal(&error)
+        )),
+    })
+}
+
+/// `link` made a symlink to `target`, as stored. Unix: `symlink(2)`.
+#[cfg(unix)]
+fn symlink_at(target: &str, link: &std::path::Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Windows tells a directory link from a file link when it is made, so the target is looked
+/// at — read from the link's own directory, as the link will read it. A missing target makes a
+/// file link: nothing says what it will be, and a file is the common case.
+#[cfg(windows)]
+fn symlink_at(target: &str, link: &std::path::Path) -> std::io::Result<()> {
+    let target_path = std::path::Path::new(target);
+    let seen_from_link = if target_path.is_absolute() {
+        target_path.to_path_buf()
+    } else {
+        link.parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(target_path)
+    };
+    if seen_from_link.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn symlink_at(_target: &str, _link: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "this system has no symlinks",
+    ))
+}
+
+/// `link` replaced by a symlink to `target` in one rename: the new link made under a free
+/// temp name beside it, then renamed over it, so the name never goes missing. A real
+/// directory at `link` is refused — a rename would not replace it on Unix, and replacing a
+/// tree with a link is not what "redirect this link" means.
+fn symlink_replacing(target: &str, link: &std::path::Path) -> std::io::Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(link)
+        && meta.is_dir()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::IsADirectory,
+            "a directory is there; it is not replaced by a link",
+        ));
+    }
+    let directory = link
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    let mut last_error: std::io::Error = std::io::ErrorKind::AlreadyExists.into();
+    for attempt in 0..64_u32 {
+        let temp = directory.join(format!(
+            ".brood-link-{}-{}",
+            std::process::id(),
+            stamp.wrapping_add(attempt)
+        ));
+        match symlink_at(target, &temp) {
+            Ok(()) => {
+                return std::fs::rename(&temp, link).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&temp);
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last_error = error,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error)
+}
+
+/// Why a symlink was refused, in words a person can act on: Windows' missing privilege is
+/// named for what grants it.
+fn symlink_refusal(error: &std::io::Error) -> String {
+    #[cfg(windows)]
+    if error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD as i32)
+    {
+        return "this account may not make symlinks: turn on Developer Mode, or grant SeCreateSymbolicLinkPrivilege".to_string();
+    }
+    error.to_string()
+}
+
+/// `(file/chmod path mode)` — set `path`'s permission bits, or a failure saying why not
+/// (missing, not the caller's file). Unix: `chmod(2)`, which follows a symlink. Windows: the
+/// read-only attribute from the owner-write bit, the one permission a Windows file carries.
+pub(super) fn change_mode(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file/chmod", arg(args, 0))?;
+    let mode = expect_int(heap, "file/chmod", arg(args, 1))?;
+    if !(0..=0o7777).contains(&mode) {
+        return Err(LispError::runtime(format!(
+            "file/chmod: mode {mode:#o} is not permission bits (0 to 0o7777)"
+        )));
+    }
+    Ok(match set_mode(std::path::Path::new(&path), mode as u32) {
+        Ok(()) => Value::nil(),
+        Err(error) => heap.alloc_failure(&format!("file/chmod: {}: {}", path, error)),
+    })
+}
+
+#[cfg(unix)]
+fn set_mode(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_mode(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_readonly(mode & 0o200 == 0);
+    std::fs::set_permissions(path, permissions)
+}
+
 /// The user name for `uid` via `getpwuid`, or `None` if it doesn't resolve. The libc
 /// call returns a pointer into a shared static buffer, so a process-wide lock serialises
 /// our calls (Brood schedules green processes across OS threads); the name is copied out
@@ -1869,5 +2052,70 @@ mod windows_replace_tests {
         std::fs::hard_link(&path, &other).unwrap();
         replace_file(&path, b"new", write_all).unwrap();
         assert_eq!(std::fs::read(&other).unwrap(), b"new");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod link_and_mode_tests {
+    use super::{set_mode, symlink_at, symlink_replacing};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("brood-link-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn a_link_keeps_its_target_as_written() {
+        let directory = scratch("as-written");
+        let link = directory.join("link");
+        symlink_at("../elsewhere/missing", &link).unwrap();
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            std::path::Path::new("../elsewhere/missing")
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_taken_name_is_refused_unless_replaced() {
+        let directory = scratch("taken");
+        let link = directory.join("link");
+        std::fs::write(&link, "plain").unwrap();
+        let refused = symlink_at("a", &link).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        symlink_replacing("b", &link).unwrap();
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            std::path::Path::new("b")
+        );
+        // no temp link left beside it
+        let names: Vec<_> = std::fs::read_dir(&directory).unwrap().collect();
+        assert_eq!(names.len(), 1);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_directory_is_not_replaced_by_a_link() {
+        let directory = scratch("directory");
+        let inner = directory.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        assert!(symlink_replacing("x", &inner).is_err());
+        assert!(inner.is_dir());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn mode_bits_round_trip() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = scratch("mode");
+        let file = directory.join("tool");
+        std::fs::write(&file, "#!/bin/sh\n").unwrap();
+        set_mode(&file, 0o751).unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o751);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
