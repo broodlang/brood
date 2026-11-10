@@ -21,6 +21,7 @@ pub(super) struct CallbackIds {
     rest: FuncId,
     is_empty: FuncId,
     pair_nursery_base: FuncId,
+    stack_recheck: FuncId,
     pair_old_base: FuncId,
     vector_nursery_base: FuncId,
     vector_old_base: FuncId,
@@ -74,6 +75,7 @@ pub(super) struct CallbackRefs {
     pub(super) rest: FuncRef,
     pub(super) is_empty: FuncRef,
     pub(super) pair_nursery_base: FuncRef,
+    pub(super) stack_recheck: FuncRef,
     pub(super) pair_old_base: FuncRef,
     pub(super) vector_nursery_base: FuncRef,
     pub(super) vector_old_base: FuncRef,
@@ -173,6 +175,12 @@ pub(super) fn declare_callbacks(module: &mut JITModule, pointer: Type) -> Option
     // so the inline `first`/`rest`/`nth` reads are plain loads.
     let base_signature = signature(module, &[pointer], &[pointer]);
     let pair_nursery_base = import(module, "brood_rt_pair_nursery_base", &base_signature)?;
+    // brood_rt_stack_recheck(heap) -> i8: the stack guard's slow path (1 = room, go on).
+    let stack_recheck = import(
+        module,
+        "brood_rt_stack_recheck",
+        &signature(module, &[pointer], &[i8]),
+    )?;
     let pair_old_base = import(module, "brood_rt_pair_old_base", &base_signature)?;
     let vector_nursery_base = import(module, "brood_rt_vec_nursery_base", &base_signature)?;
     let vector_old_base = import(module, "brood_rt_vec_old_base", &base_signature)?;
@@ -371,6 +379,7 @@ pub(super) fn declare_callbacks(module: &mut JITModule, pointer: Type) -> Option
         rest,
         is_empty,
         pair_nursery_base,
+        stack_recheck,
         pair_old_base,
         vector_nursery_base,
         vector_old_base,
@@ -427,6 +436,7 @@ pub(super) fn import_callbacks(
     let is_empty = declare(ids.is_empty, b.func);
     let cdr = declare(ids.cdr, b.func);
     let pair_nursery_base = declare(ids.pair_nursery_base, b.func);
+    let stack_recheck = declare(ids.stack_recheck, b.func);
     let pair_old_base = declare(ids.pair_old_base, b.func);
     let vector_nursery_base = declare(ids.vector_nursery_base, b.func);
     let vector_old_base = declare(ids.vector_old_base, b.func);
@@ -478,6 +488,7 @@ pub(super) fn import_callbacks(
         rest,
         is_empty,
         pair_nursery_base,
+        stack_recheck,
         pair_old_base,
         vector_nursery_base,
         vector_old_base,

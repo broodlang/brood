@@ -1300,3 +1300,30 @@ removed (`[2 28]`, inside the macro). It was red on the commit before ADR-674 as
 `memory_pressure`'s fast-allocating loop asserted the soft-limit message's exact prefix; at tier
 0 the error names the Brood function that was allocating first. The loop stopped at the soft
 limit in both; the assertion now reads the limit's error wherever it lands.
+
+2026-11-10. The weekly run's ASan reds. (1) Sixteen JIT cases bailed with
+`deopt-thrash-latched:native-depth-exceeded` on CI's runner only: the native prologue's stack
+guard compares this frame's address against `Heap::jit_stack_limit`, an absolute address stamped
+where the native nest began, so a frame on another stack (a `stacker` segment a walker grew into,
+which the ASan build's 1 MiB red zone makes common; a stamp a fast entry did not refresh) tripped
+it with megabytes to spare, deopted, and latched off native after sixteen. Not reproduced here;
+fixed by construction. A trip now calls `brood_rt_stack_recheck`, which re-stamps for the stack the
+frame is on and deopts only on a real shortage; the stamp reads the stack pointer (`psm`) instead
+of a local's address, which ASan may move off the stack. Guards: two unit tests in
+`jit_runtime::support` (a stale limit is re-stamped and runs on; a stack inside the margin still
+has no room), each red under its sabotage; `make tier-audit` clean. (2) `grammar_vet`'s crashing
+grammar exited 1 under ASan, whose own SIGSEGV handler caught the crash, so the vetting read a
+refusal: the vetting child runs with ASan's signal handlers off. (3) A real `reload` bug the ASan
+harness surfaced: `on-change` read the watched file's baseline mtime inside the spawned watcher,
+whenever it got a worker, so an edit saved in between became the baseline and was never reloaded.
+It is read before the spawn now; the test dates the file 2020 and edits at once (red 10 of 10 with
+the old spawn). The JIT failures did not reproduce under ASan here, through `nest test` or the
+harness, so CI's next weekly run is the confirmation.
+
+2026-11-10. Four more tools for the kernel (docs/testing.md has the table): `make shuttle` — a
+Shuttle model of the scheduler's park/spawn handshake and steal ownership, each property with a
+kept sabotage test that Shuttle must fail; `make miri` over the kernel modules whose `unsafe` Miri
+can run (value, alloc, map_champ, table, slabs, roots_buf, small_map: clean; `table` runs its
+portable page release under Miri, which does not model `MADV_DONTNEED`); `make mutants` for
+cargo-mutants on one file; `make rr-hunt` to record a test under rr chaos mode until it fails.
+`full.yml` runs shuttle beside loom and Miri as its own job. rr is not installed on the desktop.

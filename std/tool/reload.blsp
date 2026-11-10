@@ -186,7 +186,7 @@ behind a long-lived loop has changed since it started.
                 (on-reload p)
                 (catch e (io/puts "[reload] on-reload failed:" p "—" (error-message e))))))
           (catch e (io/puts "[reload] +load failed:" p "—" (error-message e))))
-        (spawn (reload-loop p (file/mtime p) on-reload))))
+        (let (seen (file/mtime p)) (spawn (reload-loop p seen on-reload)))))
     (proc/sleep *reload-scan-ms*)
     (reload-dir-loop dir current on-reload)))
 
@@ -223,7 +223,10 @@ use yet).
     ;;      `reflect/load` + per-file watcher for each.
       (let (initial (reload-collect-blsp path))
         (doseq (p initial)
-          (spawn (reload-loop p (file/mtime p) on-reload)))
+          (let (seen (file/mtime p)) (spawn (reload-loop p seen on-reload))))
         (spawn (reload-dir-loop path initial on-reload))
         nil)
-    else (do (spawn (reload-loop path (file/mtime path) on-reload)) nil)))
+    ;; The baseline mtime is read HERE, before the spawn: `spawn` runs its expression in the
+    ;; new process, whenever that process first gets a worker, so reading it there made an
+    ;; edit saved in between the watcher's baseline — never reloaded.
+    else (let (seen (file/mtime path)) (spawn (reload-loop path seen on-reload)) nil)))

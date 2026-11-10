@@ -54,11 +54,16 @@
         (let (f (path/join dir "w2.blsp"))
           (file/spit f "(def rwt-val2 1)\n")
           (reflect/load f)
+          ;; Dated 2020, so the edit below is newer than the baseline whatever the clock's
+          ;; resolution — and edited at once, with no pause: `on-change` reads the baseline
+          ;; before it returns. It used to read it in the watcher process, whenever that got a
+          ;; worker; under ASan that was after this edit, so the edit WAS the baseline and was
+          ;; never reloaded.
+          (file/set-mtime f 1577836800000)
           ;; A callback that always throws — the def must still take effect
           ;; (on-reload runs *after* system/reload-defs already succeeded) and the
           ;; watcher must survive to reload again on a later edit.
           (on-change f (fn (_p) (throw "boom")))
-          (proc/sleep 100)
           (file/spit f "(def rwt-val2 2)\n")
           (is (reload-watch-test-wait (fn () (= (reflect/eval 'rwt-val2) 2)) 3000))
           (assert= (reflect/eval 'rwt-val2) 2)

@@ -163,6 +163,7 @@ fn callback_table() -> Vec<(&'static str, *const u8)> {
         brood_rt_global_epoch_ptr,
         brood_rt_i64_throw,
         brood_rt_pair_nursery_base,
+        brood_rt_stack_recheck,
         brood_rt_pair_old_base,
         brood_rt_vec_nursery_base,
         brood_rt_vec_old_base,
