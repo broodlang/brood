@@ -83,7 +83,8 @@ docs/testing.md for the full guide."
   ;; `crates/cli/tests/test_framework_closure.rs` fails when the two drift apart.
   (:load bit
     bytes datetime dev encoding file humanize io json map math os path proc property rand reflect
-    regex seq set stdimage string system table tz url))
+    regex seq set stdimage string system table test-select tz url)
+  (:use-internals test-select))
 
 (defdyn test/*units* nil)
 ; all registered units, newest first
@@ -245,9 +246,6 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
    :line (if loc (second loc) nil)
    :skip (or skip false)})
 
-(defn- test-tags (t) (or (get (third t) :tags) []))
-(defn- test-file (t) (get (third t) :file))
-(defn- test-line (t) (get (third t) :line))
 (defn- test-skip? (t) (= (get (third t) :skip) true))
 
 ;; Merge a `describe`'s group-level tags into one collected test's own tags. A
@@ -262,7 +260,8 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
     t
     (list (first t)
       (second t)
-      (assoc (or (third t) {}) :tags (append (into [] group-tags) (into [] (test-tags t)))))))
+      (assoc (or (third t) {})
+        :tags (append (into [] group-tags) (into [] (test-select/test-tags t)))))))
 
 ;; A test registers itself: collected into the enclosing describe if there is
 ;; one, otherwise emitted as its own standalone unit (:isolated if flagged).
@@ -630,216 +629,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
     (test/r-where '(\"math\" \"adds\" () 3 false \"tests/m_test.blsp:4\"))   ;=> \"tests/m_test.blsp:4\"
     (test/r-where '(\"math\" \"adds\" () 3))   ;=> \"\""
   (if (> (count r) 5) (or (nth r 5) "") ""))
-(defn label (group name)
-  "Join a group and test name into one display label — `\"group › name\"`, or just `name` when `group` is \"\" (ungrouped).
-
-    (test/label \"math\" \"adds\")   ;=> \"math › adds\"
-    (test/label \"\" \"adds\")   ;=> \"adds\""
-  ; "group › name", or just name if ungrouped
-  (if (= group "") (str name) (str group " › " name)))
 (defn- full-name (r) (label (r-group r) (r-name r)))
-
-;; --- test selection (--only / --exclude / --include / FILE:LINE / shards) -----
-;; A *filter spec* is a map; nil means "run everything" (the default, and the only
-;; shape `run-tests` ever saw before selection existed):
-;;
-;;   {:only     (["db" ""] ["test" "adds"])   ; positive: run ONLY matches
-;;    :exclude  (["slow" ""])                 ; negative: drop matches
-;;    :include  (["slow" ""])                 ; re-admit something :exclude dropped
-;;    :lines    (["tests/a_test.blsp" 42])    ; FILE:LINE — the covering test
-;;    :names    ("math › adds")}              ; exact full labels (backs --failed)
-;;
-;; A *selector* is `[key value]`: `test`/`describe` match a substring of the test
-;; name / group label, anything else is a tag name: `--only tag`,
-;; `--only test:"name"`, `--only describe:"group"`.
-(defn- test-parse-selector (selector-string)
-  "Parse an `--only`/`--exclude`/`--include` selector into `[key value]` — `tag`, `tag:value`, `test:substring`, or `describe:substring`."
-  (let (i (index-of selector-string ":"))
-    (if (< i 0)
-      [selector-string ""]
-      [(string/substring selector-string 0 i)
-        (string/substring selector-string
-          (+ i 1)
-          (string/length selector-string))])))
-
-;; Build a filter spec from the raw strings a CLI hands over. Parsing lives here
-;; rather than in `nest`, so the selector grammar has one definition and the Rust
-;; side only forwards argv. `nil`/empty arguments mean "no constraint".
-(defn test-make-filter (only exclude include lines names seed shards shard)
-  "Assemble a `nest test` filter spec from raw CLI values: `only`/`exclude`/`include` are selector strings (`tag`, `test:substr`, `describe:substr`), `lines` a list of `[file line]`, `names` exact full labels, `seed` a shuffle seed, and `shards`/`shard` a CI split.
-
-    (test/test-make-filter [\"slow\"] nil nil nil nil 42 nil nil)   ;=> {:only ([\"slow\" \"\"]) :exclude nil :include nil :lines nil :names nil :seed 42 :shards nil :shard 0}"
-  {:only (map (or only (list)) test-parse-selector)
-   :exclude (map (or exclude (list)) test-parse-selector)
-   :include (map (or include (list)) test-parse-selector)
-   :lines (or lines (list))
-   :names names
-   :seed seed
-   :shards shards
-   :shard (or shard 0)})
-
-(defn- test-has-tag? (tags key-string)
-  (any? tags (fn (tag) (= (->string tag) key-string))))
-
-;; Is `needle` a trailing suffix of `path` on a PATH-COMPONENT boundary? The
-;; boundary check is what stops `a_test.blsp` from matching `extra_test.blsp` —
-;; a plain `ends-with?` says yes to that, so `nest test a_test.blsp:5` could
-;; select a test in a completely different file.
-(defn- test-path-suffix? (path needle)
-  (and (string/ends-with? path needle)
-    (let (cut (- (string/length path) (string/length needle)))
-      (or (= cut 0) (= (string/substring path (- cut 1) cut) "/")))))
-
-;; Two paths may name the same file (the CLI gets what the user typed; the meta
-;; carries what `current-file` recorded), so match on a path-suffix relationship
-;; rather than demanding string equality.
-(defn- test-same-file? (a b)
-  (and (not (nil? a))
-    (not (nil? b))
-    (or (= a b) (test-path-suffix? a b) (test-path-suffix? b a))))
-
-(defn- test-match-selector? (selector group-label test-name tags)
-  (let (key (first selector)
-        value (second selector))
-    (cond
-      (= key "test") (includes? test-name value)
-      (= key "describe") (includes? group-label value)
-      else (test-has-tag? tags key))))
-
-(defn- test-match-any? (selectors group-label test-name tags)
-  (fold (or selectors (list))
-    false
-    (fn (found selector) (or found (test-match-selector? selector group-label test-name tags)))))
-
-;; Every registered test tuple, across units — the flat view the line resolver
-;; and the shard assigner walk.
-(defn- test-all-tests (units)
-  (fold units nil (fn (acc unit) (append acc (map (third unit) (fn (t) (list (second unit) t)))))))
-
-;; Resolve one FILE:LINE selector to the exact declared line of the test it
-;; addresses: the LAST test in that file declared at or before LINE. So pointing
-;; anywhere inside a test's body (not just at its header) selects that test —
-;; what `nest test path:line` runs. nil when the file has no test at/before it.
-(defn- test-resolve-line (units file target)
-  (fold (test-all-tests units)
-    nil
-    (fn (best pair)
-      (let (t (second pair)
-            line (test-line t))
-        (if (and (not (nil? line))
-              (test-same-file? (test-file t) file)
-              (<= line target)
-              (or (nil? best) (> line best)))
-          line
-          best)))))
-
-;; Resolve every FILE:LINE selector, warning about any that addresses no test —
-;; a typo'd path or a line above the file's first test would otherwise just run
-;; zero tests and exit 0, which in CI reads as "all green".
-(defn- test-resolve-lines (units lines)
-  (fold (or lines (list))
-    nil
-    (fn (acc entry)
-      (let (resolved (test-resolve-line units (first entry) (second entry)))
-        (if (nil? resolved)
-          (do
-            (io/puts (str "warning: no test found at "
-                       (first entry)
-                       ":"
-                       (second entry)
-                       " — that file/line addresses nothing")
-              :to *err*)
-            acc)
-          (cons [(first entry) resolved] acc))))))
-
-(defn- test-match-line? (t resolved-lines)
-  (fold (or resolved-lines (list))
-    false
-    (fn (found entry)
-      (or found
-        (and (test-same-file? (test-file t) (first entry))
-          (= (test-line t) (second entry)))))))
-
-(defn- test-match-name? (t group-label names)
-  (fold (or names (list)) false (fn (found n) (or found (= n (label group-label (first t)))))))
-
-;; Does this test survive the spec? Positive constraints (`:only` / `:lines` /
-;; `:names`) are a whitelist — when none are given, everything is a candidate.
-;; `:exclude` then drops matches, and `:include` re-admits them (so `--include`
-;; overrides `--exclude`, as in ExUnit).
-;;
-;; NOTE the whitelist test uses the REQUESTED `:lines`, not the resolved ones. A
-;; selector that resolves to nothing (typo'd path, a line above the file's first
-;; test) still constrains the run to zero tests — deriving it from the resolved
-;; list instead made an unresolvable `FILE:LINE` fall through to "no constraints"
-;; and run the ENTIRE suite, which in CI is indistinguishable from success.
-(defn- test-select? (group-label t spec resolved-lines)
-  (let (test-name (first t)
-        tags (test-tags t)
-        only (get spec :only)
-        names (get spec :names)
-        positive? (or (not (empty? (or only (list))))
-                    (not (empty? (or (get spec :lines) (list))))
-                    (not (empty? (or names (list))))))
-    (and (or (not positive?)
-           (test-match-any? only group-label test-name tags)
-           (test-match-line? t resolved-lines)
-           (test-match-name? t group-label names))
-      (not (and (test-match-any? (get spec :exclude) group-label test-name tags)
-             (not (test-match-any? (get spec :include) group-label test-name tags)))))))
-
-;; Apply a filter spec to the unit list, dropping units left with no tests.
-(defn- test-filter-units (units spec)
-  (if (nil? spec)
-    units
-    (let (resolved (test-resolve-lines units (get spec :lines)))
-      (seq/filter (map units
-                    (fn (unit)
-                      (list (first unit)
-                        (second unit)
-                        (seq/filter (third unit)
-                          (fn (t) (test-select? (second unit) t spec resolved))))))
-        (fn (unit) (not (empty? (third unit))))))))
-
-;; A stable hash of a test's full label — FNV-1a over its codepoints, masked to
-;; 32 bits, then avalanched. Deterministic across machines and runs (no address
-;; or iteration-order input), which is what CI sharding needs: every shard must
-;; agree on the split, or a test gets run twice or dropped.
-;;
-;; The finalizer is load-bearing, not decoration. A plain polynomial hash
-;; (`h*31 + c`) leaves the LOW bits barely mixed — its parity is just the parity
-;; of the character sum — so `(math/rem h 2)` sent every test in a small suite to the
-;; same shard, leaving the other empty. Shifting the high bits down before the
-;; `rem` spreads that structure across the low bits, so small shard counts split
-;; evenly.
-(def- test-fnv-mask 0xFFFFFFFF)
-
-(defn- test-label-hash (s)
-  (let (h (fold (string/->codepoints s)
-            0x811C9DC5
-            (fn (acc c) (bit/and (* (bit/xor acc c) 0x01000193) test-fnv-mask))))
-    (bit/and (bit/xor h (bit/shift-right h 15)) test-fnv-mask)))
-
-;; Keep only the tests belonging to shard `index` of `count` (0-based) — the
-;; Partitions, for splitting a suite across CI machines.
-(defn- test-shard-units (units index total)
-  (if (or (nil? total) (< total 2))
-    units
-    (seq/filter (map units
-                  (fn (unit)
-                    (list (first unit)
-                      (second unit)
-                      (seq/filter (third unit)
-                        (fn (t)
-                          (= index
-                            (math/rem (test-label-hash (label (second unit) (first t))) total)))))))
-      (fn (unit) (not (empty? (third unit)))))))
-
-;; Randomise unit order for this run. `nil` seed keeps declaration order (the
-;; default — a suite that only passes in one order is a bug worth finding, but
-;; making it the default would churn every run's output).
-(defn- test-order-units (units seed)
-  (if (nil? seed) units (first (seq/shuffle seed units))))
 
 ;; The seed for this run, or nil. Read straight off the active filter so the
 ;; file-order shuffle below and the unit-order shuffle above can't disagree.
@@ -867,16 +657,6 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 (defn- test-order-files (loaders)
   (let (seed (test-filter-seed))
     (if (nil? seed) loaders (first (seq/shuffle seed loaders)))))
-
-;; The full selection pipeline: filter, shard, then order. One place, so
-;; `run-tests` and `run-tests-scoped` can't drift on selection semantics.
-(defn- test-select-units (units spec)
-  (if (nil? spec)
-    units
-    (test-order-units (test-shard-units (test-filter-units units spec)
-                        (or (get spec :shard) 0)
-                        (get spec :shards))
-      (get spec :seed))))
 
 ;; --- trace ---------------------------------------------------------------------
 ;; `--trace` reports each test as it FINISHES, coloured by outcome and carrying what
@@ -946,8 +726,8 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; `/home/…/project/tests/x_test.blsp` on every trace line buries the part that
 ;; matters. Falls back to the absolute path when it isn't under the cwd.
 (defn- test-where (t)
-  (let (f (test-file t)
-        l (test-line t))
+  (let (f (test-select/test-file t)
+        l (test-select/test-line t))
     (if (or (nil? f) (nil? l)) "" (str (test-relative-path f) ":" l))))
 
 (defn- test-relative-path (path)
@@ -1285,7 +1065,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
   (any? workers
     (fn (w)
       (any? (third (second w))
-        (fn (t) (any? (test-tags t) (fn (tag) (includes? *test-long-tags* tag))))))))
+        (fn (t) (any? (test-select/test-tags t) (fn (tag) (includes? *test-long-tags* tag))))))))
 
 (defn collect-units (workers acc)
   "Collect the results of one batch of spawned `workers` (a list of `(pid unit)`), accumulating onto `acc`. Waits for each worker's `:unit-result` AND its monitor `:down` (a batch is done when every worker has EXITED, not merely reported) under a fresh per-batch deadline, hard-killing and failing any straggler that overruns. A `:slow`/`:conformance`-tagged batch runs under the raised `test/*slow-timeout-ms*` budget.
@@ -1434,7 +1214,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; Split the currently-registered units into (iso par) and drain them — the shared
 ;; body of `run-tests` and `run-tests-scoped`.
 (defn- drain-current ()
-  (let (units (test-select-units (reverse test/*units*) test/*filter*)
+  (let (units (test-select/test-select-units (reverse test/*units*) test/*filter*)
         par (seq/filter units (fn (u) (not (= (first u) :isolated))))
         iso (seq/filter units (fn (u) (= (first u) :isolated))))
     (drain-runner iso par)))
@@ -1965,7 +1745,7 @@ read the un-imaged path as evidence about the imaged one."
 ;; One pass of the registered suite: select, drain, report, raise. Split out of
 ;; `run-tests` so `:repeat` can run it more than once.
 (defn- run-tests-pass (opts)
-  (let (units (test-select-units (reverse test/*units*) test/*filter*)
+  (let (units (test-select/test-select-units (reverse test/*units*) test/*filter*)
         par (seq/filter units (fn (u) (not (= (first u) :isolated))))
         ; parallel + serial
         iso (seq/filter units (fn (u) (= (first u) :isolated)))
@@ -1983,7 +1763,7 @@ read the un-imaged path as evidence about the imaged one."
 
     (test/run-tests-structured)   ;~> {:total 42 :passed 42 :failed 0 :failed-assertions 0 :ms 830 :results […]}"
   (test-apply-opts opts)
-  (let (units (test-select-units (reverse test/*units*) test/*filter*)
+  (let (units (test-select/test-select-units (reverse test/*units*) test/*filter*)
         parallel (seq/filter units (fn (unit) (not (= (first unit) :isolated))))
         isolated (seq/filter units (fn (unit) (= (first unit) :isolated)))
         start (os/now)

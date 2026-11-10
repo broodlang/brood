@@ -213,11 +213,12 @@ pub(crate) fn is_local(node: Symbol) -> bool {
 struct Conn {
     /// A generation id, unique per physical connection. Teardown removes a `NODES`
     /// entry only if the stored link still has *this* id, so an evicted/old link's
-    /// reader can't clobber a newer replacement (see `drop_link`).
+    /// reader can't clobber a newer replacement (see `drop_link`). Taken when this end
+    /// began the handshake, so it also orders this end's links by when they were opened.
     id: u64,
     /// Which node *initiated* this link. The tie-break for a duplicate keeps the
     /// link initiated by the lexicographically smaller node name, computed
-    /// identically on both ends (see `establish`).
+    /// identically on both ends (see `existing_link_wins`).
     connector: Symbol,
     /// The peer's incarnation, from its authenticated `Hello`: which life of the
     /// peer this link reaches. A new link under the same name with a different one
@@ -277,6 +278,13 @@ impl Conn {
 
 /// Source of per-connection generation ids.
 static NEXT_LINK: AtomicU64 = AtomicU64::new(0);
+
+/// A fresh generation id. The handshake takes it before it writes a byte, so the ids on
+/// this end order the links by when this end opened them — the order an equal-connector
+/// duplicate is decided by (see `register_link`).
+fn next_link_id() -> u64 {
+    NEXT_LINK.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Connected peer node-name → its connection.
 static NODES: LazyLock<RwLock<HashMap<Symbol, Conn>>> =
@@ -407,6 +415,7 @@ mod mesh;
 mod names;
 mod outbound;
 mod routing;
+mod shared_bytes;
 mod transport;
 
 use admission::*;

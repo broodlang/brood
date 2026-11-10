@@ -153,8 +153,27 @@ pub(crate) fn route_in_lane(
     if let Some(guest) = &guest {
         guest.translate_outbound(&mut frame);
     }
-    let bytes: Arc<Vec<u8>> = match encode_payload(&frame) {
-        Ok(b) => Arc::new(b),
+    // To a current peer a large bytes value is left out and spliced in by the writer, whole
+    // the first time and by digest after (ADR-695); a v10 peer gets every byte inline.
+    let encoded: io::Result<Payload> = if lanes {
+        shared_bytes::encode_sharing(|| encode_payload(&frame)).and_then(|payload| {
+            if payload.whole_len() > MAX_FRAME {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "frame of {} bytes exceeds the {MAX_FRAME}-byte limit",
+                        payload.whole_len()
+                    ),
+                ))
+            } else {
+                Ok(payload.into())
+            }
+        })
+    } else {
+        encode_payload(&frame).map(|bytes| Arc::new(bytes).into())
+    };
+    let bytes = match encoded {
+        Ok(payload) => payload,
         Err(e) => {
             eprintln!(
                 "dist: cannot encode message for {}: {}",

@@ -964,7 +964,8 @@ code paints to a terminal or a GUI window unchanged.
   mouse messages carry pixels. The engine above them is the `b2d` package (ADR-374).
 - **A picture** (a page, a photo) = `(editor/display/image row col w h source opts)`: PNG / JPEG
   bytes in a cell block, painted at full pixel resolution by both window painters and in
-  half-block cells by a terminal — one op for both, decoded once per content (ADR-686). No
+  half-block cells by a terminal (pixels through the kitty graphics protocol where the terminal
+  has it, ADR-695) — one op for both, decoded once per content (ADR-686). No
   texture to manage; a sprite is for a game's many moving copies of one texture.
 
 ```lisp

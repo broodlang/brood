@@ -11,6 +11,7 @@
 (defmodule buffer-test
   (:use test)
   (:use-internals editor/buffer)
+  (:use-internals editor/undo-region)
   (:use editor/buffer-server)
   (:use editor/buffer-file))
 
@@ -1267,13 +1268,13 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
 (describe "undo-region-restore (the pure core)"
   (test "chunk-wise over CHARACTERS: the changed span is what the region is tested against"
     ;; "old" -> "new" occupies chars 2..5; a region there undoes it, one elsewhere doesn't
-    (assert= (editor/buffer/undo-region-restore "a\nold\nz" "a\nnew\nz" 2 5)
+    (assert= (editor/undo-region/undo-region-restore "a\nold\nz" "a\nnew\nz" 2 5)
       ["a\nold\nz" (list [:new 0 2] [:old 2 3] [:new 5 2])])
-    (assert= (editor/buffer/undo-region-restore "a\nold\nz" "a\nnew\nz" 0 1)
+    (assert= (editor/undo-region/undo-region-restore "a\nold\nz" "a\nnew\nz" 0 1)
       ["a\nnew\nz" (list [:new 0 7])]))
 
   (test "identical texts are unchanged whatever the region"
-    (assert= (editor/buffer/undo-region-restore "a\nb" "a\nb" 0 9) ["a\nb" (list [:new 0 3])])))
+    (assert= (editor/undo-region/undo-region-restore "a\nb" "a\nb" 0 9) ["a\nb" (list [:new 0 3])])))
 
 ;; ---- undo-in-region is CHARACTER-precise, like Emacs ------------------------------
 ;; A line-granular version answered "undo that line's last change", which is a different

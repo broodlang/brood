@@ -49,6 +49,25 @@
               [low next-seed] (rand/int after-high two-to-32))
           [(math/mod (+ (* high two-to-32) low) span) next-seed])))))
 
+;; EDGE BIAS (ADR-685 addendum). A uniform draw finds 0, the ends of a range or an empty
+;; collection only by luck, so one random choice in `edge-odds` comes instead from the
+;; bound's edges: 0 and the bound three eighths each, 1 a quarter, bound - 1 an eighth,
+;; plus any `extra` edges a generator names (the codepoints beside the surrogates). It is a
+;; sampler, so it touches only the random half of `draw`: a replayed prefix and the shrinker
+;; never see it, choice 0 stays the simplest value, and a seed still fixes every draw.
+(def- edge-odds 8)
+
+(defn- edge-sampler (extra)
+  (fn (seed bound:int)
+    (let ([roll after-roll] (rand/int seed edge-odds))
+      (if (> roll 0)
+        (uniform after-roll bound)
+        (let (edges (into [0 0 0 bound bound 1 1 (- bound 1)] extra)
+              [pick next-seed] (rand/int after-roll (count edges)))
+          [(math/max 0 (math/min bound (nth edges pick))) next-seed])))))
+
+(def- biased (edge-sampler []))
+
 ;; One choice in [0, bound]. A recorded prefix answers first (clamped to the bound, so a
 ;; shrunk sequence replayed through a changed shape stays in range); past it the seed's
 ;; `sampler` does, or 0 when there is no seed — the simplest choice.
@@ -66,7 +85,9 @@
                                  else (sampler seed bound)))
         [choice (assoc source :choices (conj choices choice) :seed next-seed)]))))
 
-(defn- source (prefix seed limit) {:prefix prefix :choices [] :seed seed :limit limit})
+;; `:size` in (0, 1] scales how large a random draw tends to be: `check` grows it over the
+;; trials, so the early ones try small values first.
+(defn- source (prefix seed limit) {:prefix prefix :choices [] :seed seed :limit limit :size 1.0})
 
 ;; ---- primitive generators -------------------------------------------------
 
@@ -77,7 +98,7 @@
     (property/replay (property/choice 9) [12])   ;=> 9"
   (when (not (and (int? bound) (>= bound 0)))
     (error "property/choice: bound must be a non-negative integer: " bound))
-  (make (str "choice 0.." bound) (fn (source) (draw source bound uniform))))
+  (make (str "choice 0.." bound) (fn (source) (draw source bound biased))))
 
 (defn constant (value)
   "A generator that always produces `value` and draws nothing.
@@ -172,11 +193,14 @@
           (let ([value after] (run generator current))
             [(conj values value) after]))))))
 
-;; A random sampler for a "one more element?" flag: 1 with probability `more`.
+;; A random sampler for a "one more element?" flag: 1 with probability `more`, except that
+;; one flag in `edge-odds` stops the collection outright, so an empty or one-element
+;; collection turns up early whatever `:average` asks for (the edge bias).
 (defn- flag-sampler (more)
   (fn (seed _)
-    (let ([f next-seed] (rand/float seed))
-      [(if (< f more) 1 0) next-seed])))
+    (let ([roll after-roll] (rand/int seed edge-odds)
+          [f next-seed] (rand/float after-roll))
+      [(if (and (> roll 0) (< f more)) 1 0) next-seed])))
 
 (defn vector-of "A generator of vectors of values from `element`. `options`: `:min` (default 0) and `:max` (default 100) bound the length, `:average` (default `:min` + 5) is the length a random draw tends to. Each element past `:min` is preceded by a \"one more?\" choice, so shrinking deletes elements.
 
@@ -186,23 +210,26 @@
   ((element options) (let (minimum (get options :min 0)
                            maximum (get options :max (math/max 100 minimum))
                            extra (math/max 0 (- (get options :average (+ minimum 5)) minimum))
-                           sampler (flag-sampler (/ extra (+ extra 1.0))))
+                           sampler-for (fn (size)
+                                         (let (scaled (* extra size))
+                                           (flag-sampler (/ scaled (+ scaled 1.0))))))
                        (make (str "vector-of " (get element :label))
                          (fn (start)
-                           (letrec (go (fn (items current)
-                                         (let (n (count items))
-                                           (cond
-                                             (< n minimum)
-                                               (let ([value after] (run element current))
-                                                 (go (conj items value) after))
-                                             (>= n maximum) [items current]
-                                             else
-                                               (let ([more after] (draw current 1 sampler))
-                                                 (if (= more 0)
-                                                   [items after]
-                                                   (let ([value after-value] (run element after))
-                                                     (go (conj items value) after-value))))))))
-                             (go [] start)))))))
+                           (let (sampler (sampler-for (get start :size 1.0)))
+                             (letrec (go (fn (items current)
+                                           (let (n (count items))
+                                             (cond
+                                               (< n minimum)
+                                                 (let ([value after] (run element current))
+                                                   (go (conj items value) after))
+                                               (>= n maximum) [items current]
+                                               else
+                                                 (let ([more after] (draw current 1 sampler))
+                                                   (if (= more 0)
+                                                     [items after]
+                                                     (let ([value after-value] (run element after))
+                                                       (go (conj items value) after-value))))))))
+                               (go [] start))))))))
 
 (defn map-of "A generator of maps with keys from `key` and values from `value`; `options` are `vector-of`'s, bounding the number of pairs drawn (a repeated key keeps the last).
 
@@ -212,9 +239,13 @@
 
 ;; Codepoint classes for `character`, simplest first: printable ASCII (offset so choice 0
 ;; is `a`), the whitespace an editor cares about, Latin-1 and Latin Extended, the rest of
-;; the BMP (surrogates skipped), and the astral planes. A random draw picks them 60 : 10 :
+;; the BMP (surrogates skipped), and the astral planes. The whitespace class ends in NUL.
+;; A random draw picks them 60 : 10 :
 ;; 10 : 15 : 5.
-(def- whitespace-codepoints [10 9 32 13])
+(def- whitespace-codepoints [10 9 32 13 0])
+
+;; The BMP class's edges beside the surrogate gap: U+D7FF and U+E000.
+(def- bmp-sampler (edge-sampler [54703 54704]))
 
 (defn- class-sampler (seed _)
   (let ([k next-seed] (rand/int seed 100))
@@ -230,7 +261,7 @@
 (defn- class-bound (class)
   (case class
     0 94
-    1 3
+    1 4
     2 431
     3 62893
     1048575))
@@ -251,7 +282,7 @@
   (make "character"
     (fn (source)
       (let ([class after-class] (draw source 4 class-sampler)
-            [k after] (draw after-class (class-bound class) uniform))
+            [k after] (draw after-class (class-bound class) (if (= class 3) bmp-sampler biased)))
         [(string/codepoints-> [(class-codepoint class k)]) after]))))
 
 (defn string-of "A generator of strings whose characters come from `alphabet`: a string (each of its graphemes a choice, the first the simplest) or a generator of strings. `options` are `vector-of`'s, bounding the number of characters.
@@ -305,7 +336,7 @@
 (defn generate (generator seed)
   "One random value from `generator`, drawn from `seed`.
 
-    (property/generate (property/int 0 9) 42)   ;=> 2"
+    (property/generate (property/int 0 9) 42)   ;=> 9"
   (first (run generator (source [] seed default-limit))))
 
 (defn sample "`n` random values from `generator`, the first drawn from `seed` and each later one from a seed derived from the one before — the values `check` would test.
@@ -326,6 +357,11 @@
 ;; first draw steps from seed i to that state, so chaining through it would make each
 ;; trial's choices the previous trial's shifted by one.
 (defn- next-trial-seed (seed:int) (rand/seed (+ seed 2654435769)))
+
+;; How large trial `trial` (from 0) of `trials` draws: growing linearly to full size by the
+;; halfway trial, so the first trials try small collections and the rest range freely.
+(defn- trial-size (trial:int trials:int)
+  (math/min 1.0 (/ (+ trial 1.0) (math/max 1 (math/quot trials 2)))))
 
 ;; `[:ok value source]`, or `[:invalid reason]` when the draw overran or a `such-that` gave
 ;; up. Any other raise is a bug in a generator and propagates.
@@ -453,7 +489,9 @@
           (get context :limit)
           " choices")
       else
-        (let (outcome (generate-from (get context :generator) (source [] seed (get context :limit))))
+        (let (size (or (get context :size) (trial-size trial trials))
+              outcome (generate-from (get context :generator)
+                        (assoc (source [] seed (get context :limit)) :size size)))
           (if (= (first outcome) :invalid)
             (run-trials context (next-trial-seed seed) trial (inc invalids))
             (let ([_ value after] outcome
@@ -470,6 +508,8 @@
                    :trial (inc trial)
                    :trials trials
                    :seed seed
+                   :size size
+                   :start-seed (get context :seed)
                    :value (get shrunk :value)
                    :original value
                    :choices (get shrunk :choices)
@@ -477,9 +517,9 @@
                    :shrinks (get shrunk :shrinks)
                    :attempts (get shrunk :attempts)}))))))))
 
-(defn check "Check that `predicate` holds for values drawn from `generator`, returning a result map. `options`: `:trials` (default 100), `:seed` (default 1; the first trial draws from it, so a failing trial's seed replays it as trial 1), `:max-shrinks` (default 1000 predicate runs) and `:limit` (default 8192 choices a draw may make). A predicate that returns false or nil, or raises, fails.
+(defn check "Check that `predicate` holds for values drawn from `generator`, returning a result map. `options`: `:trials` (default 100), `:seed` (default 1; the first trial draws from it, so a failing trial's `:seed` and `:size` replay it as trial 1), `:size` (a fixed size in (0, 1] for every trial; by default the size grows from small to 1.0 by the halfway trial, so early trials draw small collections), `:max-shrinks` (default 1000 predicate runs) and `:limit` (default 8192 choices a draw may make). A predicate that returns false or nil, or raises, fails.
 
-A pass is `{:passed true :trials n :seed s}`. A failure is `{:passed false :value v :original o :seed s :trial i :trials n :choices c :error e :shrinks k :attempts a}`: `:value` is the SHRUNK counterexample, `:original` what the trial drew, `:seed` the failing trial's seed, `:error` what the predicate raised on `:value` (nil for a false answer).
+A pass is `{:passed true :trials n :seed s}`. A failure is `{:passed false :value v :original o :seed s :size z :start-seed r :trial i :trials n :choices c :error e :shrinks k :attempts a}`: `:value` is the SHRUNK counterexample, `:original` what the trial drew, `:seed` and `:size` the failing trial's seed and size (`:start-seed` the run's), `:error` what the predicate raised on `:value` (nil for a false answer).
 
     (get (property/check (property/vector-of (property/int 0 100)) (fn (xs) (not (includes? xs 42))) {:trials 500}) :value)   ;=> [42]
     (get (property/check (property/int 0 100) (fn (n) (< n 1000))) :passed)   ;=> true"
@@ -492,6 +532,7 @@ A pass is `{:passed true :trials n :seed s}`. A failure is `{:passed false :valu
                    :predicate predicate
                    :trials (get options :trials 100)
                    :seed seed
+                   :size (get options :size)
                    :budget (get options :max-shrinks 1000)
                    :limit (get options :limit default-limit)}
         seed 0 0))))
@@ -520,8 +561,13 @@ A pass is `{:passed true :trials n :seed s}`. A failure is `{:passed false :valu
           with-error (if (nil? (get result :error))
                        lines
                        (conj lines (str "raised: " (render-error (get result :error)))))
-          seed (get result :seed))
+          seed (get result :seed)
+          start-seed (get result :start-seed seed))
       (into with-error
         [(str "seed: " seed)
           (str "replay: pass {:seed "
-            seed "} in the property's options, or run nest test --seed " seed)]))))
+            seed
+            " :size "
+            (get result :size 1.0)
+            "} in the property's options, or run nest test --seed "
+            start-seed)]))))

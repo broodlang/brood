@@ -3,7 +3,7 @@
 //! Both ends of a fresh TCP connection drive the same four-step exchange
 //! before either accepts a steady-state frame:
 //!
-//! 1. **Magic + version** (4 bytes: `PROTOCOL_MAGIC`, `b"BRD\x0c"`, or `PROTOCOL_MAGIC_V10`).
+//! 1. **Magic + version** (4 bytes: `PROTOCOL_MAGIC`, `b"BRD\x0d"`, or `PROTOCOL_MAGIC_V10`).
 //!    A v11 responder reads the dialer's first and answers in its version, so a v10 node
 //!    still links; anything else aborts before any allocation — a stray HTTP request or
 //!    port-scanner can't push us past this point. See [`agree_version`] (ADR-492).
@@ -50,6 +50,9 @@ pub(super) enum Role {
 
 /// What a completed handshake proved about the peer, plus the session it agreed.
 pub(super) struct Authenticated {
+    /// The link's generation id, taken when this end began the handshake: ids on one end
+    /// order its links by when they were opened (see `register_link`).
+    pub(super) id: u64,
     /// The peer's authoritative node name — the `NODES` key.
     pub(super) peer: Symbol,
     /// How a third node should dial the peer (mesh gossip, ADR-088).
@@ -62,8 +65,9 @@ pub(super) struct Authenticated {
     /// The guest grant the initiator authenticated with (ADR-415), or `None` for a full
     /// peer — one that holds the node's own cookie. Only ever `Some` on the responder.
     pub(super) grant: Option<std::sync::Arc<super::guest::Grant>>,
-    /// Whether the peer speaks the current protocol (v12) and so takes a message's mailbox
-    /// lane in its `Send` frame (ADR-492) and a record (ADR-542). A v10 peer gets every send
+    /// Whether the peer speaks the current protocol (v13) and so takes a message's mailbox
+    /// lane in its `Send` frame (ADR-492), a record (ADR-542) and a large bytes value by
+    /// reference (ADR-695). A v10 peer gets every send
     /// as the plain frame it knows.
     pub(super) lanes: bool,
 }
@@ -78,6 +82,9 @@ pub(super) fn handshake<S: Read + Write>(
     role: Role,
     offer: Offer,
 ) -> io::Result<Authenticated> {
+    // Before anything goes out: a responder's id is then taken before its dialer can
+    // finish this handshake, so before that dialer can open its next link to us.
+    let id = super::next_link_id();
     // Step 1: magic + version. Reject before any allocation if we don't speak
     // the same dialect.
     let lanes = agree_version(stream, role, offer)?;
@@ -236,6 +243,7 @@ pub(super) fn handshake<S: Read + Write>(
         },
     };
     Ok(Authenticated {
+        id,
         peer: peer_name,
         addr: peer_addr,
         incarnation: peer_incarnation,

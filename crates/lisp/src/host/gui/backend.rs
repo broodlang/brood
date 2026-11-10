@@ -259,6 +259,9 @@ enum UserEvent {
     /// Release texture `tex` of window `id` (a later `:sprite` naming it draws nothing).
     /// Behind `gui-texture-free`.
     TextureFree { id: u64, tex: u32 },
+    /// A window's picture-resample worker finished one (ADR-695): every window takes what
+    /// landed for it and repaints. Sent from the worker thread.
+    PicturesLanded,
     /// Switch window `id`'s mouse input between cells and PIXELS at runtime (the
     /// `{:input :pixels}` open option, after the fact). The window republishes its size
     /// in the new unit so the app re-lays itself out. Behind `gui-input!` — how a window a

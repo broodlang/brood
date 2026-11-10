@@ -662,14 +662,19 @@ pub(super) fn run_vet(
     crate::host::subprocess::reset_inherited_signals(&mut cmd);
     #[cfg(unix)]
     crate::host::subprocess::new_session(&mut cmd);
-    // Under AddressSanitizer the child's crash must stay a crash: ASan's own handlers would
-    // catch the SIGSEGV or abort a grammar causes, print a report and exit 1, and the vetting
-    // reads a clean exit status as a refusal, not the signal that quarantines the library.
+    // Under the AddressSanitizer build, ASan's own handlers catch a grammar's fault in the
+    // child and exit 1 with a report, so the verdict would read "exited 1", not the signal
+    // it died of. Handing the fatal signals back lets the child die as a release child does.
     #[cfg(brood_asan)]
-    cmd.env(
-        "ASAN_OPTIONS",
-        "handle_segv=0:handle_sigbus=0:handle_abort=0:detect_leaks=0",
-    );
+    {
+        let inherited = std::env::var("ASAN_OPTIONS").unwrap_or_default();
+        cmd.env(
+            "ASAN_OPTIONS",
+            format!(
+                "{inherited}:handle_segv=0:handle_sigbus=0:handle_abort=0:handle_sigill=0:handle_sigfpe=0"
+            ),
+        );
+    }
     let _dirty = crate::process::dirty_block();
     let mut child = match cmd.spawn() {
         Ok(child) => child,

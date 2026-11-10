@@ -872,12 +872,13 @@ pub(super) struct PixelBlock {
 
 /// An `[:image …]` op's picture (ADR-686): placed in its block by `fit` and `anchor`,
 /// resampled to the size it is drawn at (cached on the renderer, so a repaint resamples
-/// nothing), and blended over the canvas with its straight alpha, clipped to the block and
+/// nothing; a live window resamples off this thread and stretches another size of the picture,
+/// nearest neighbour, until it lands — ADR-695), and blended over the canvas with its straight alpha, clipped to the block and
 /// the canvas band.
 fn paint_image(
     canvas: &mut Canvas,
     r: &mut Renderer,
-    picture: &crate::host::picture::Picture,
+    picture: &std::sync::Arc<crate::host::picture::Picture>,
     fit: crate::host::picture::Fit,
     anchor: crate::host::picture::Anchor,
     block: PixelBlock,
@@ -915,13 +916,20 @@ fn paint_image(
         return;
     }
     let scaled = r.pictures.get(picture, drawn_w, drawn_h);
-    let source = scaled.as_raw();
-    let stride = drawn_w as usize * 4;
+    let image = scaled.image();
+    let (source_w, source_h) = (image.width() as usize, image.height() as usize);
+    let source = image.as_raw();
+    let stride = source_w * 4;
+    // the source pixel each drawn column and row reads: itself at the drawn size, the nearest
+    // one of a stand-in of another size
+    let columns: Vec<usize> = (x0..x1)
+        .map(|x| (x - picture_left) as usize * source_w / drawn_w as usize * 4)
+        .collect();
     for y in y0..y1 {
-        let source_row = (y - picture_top) as usize * stride;
+        let source_row = (y - picture_top) as usize * source_h / drawn_h as usize * stride;
         let target_row = y as usize * canvas.w;
-        for x in x0..x1 {
-            let at = source_row + (x - picture_left) as usize * 4;
+        for (x, column) in (x0..x1).zip(&columns) {
+            let at = source_row + column;
             let alpha = source[at + 3] as u32;
             if alpha == 0 {
                 continue;

@@ -864,6 +864,49 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     // `with` both survive ADR-315; `with` changed shape, which is a semantic break the
     // ledger cannot express — see the ADR.)
     ("some->", "->", "ADR-315"),
+    // ADR-687 — the three largest std files split into a core module and the verbs over it;
+    // the moved names keep their spelling under the new module.
+    ("package/add", "package-manifest/add", "ADR-687"),
+    (
+        "package/remove-dep",
+        "package-manifest/remove-dep",
+        "ADR-687",
+    ),
+    ("package/search", "package-publish/search", "ADR-687"),
+    ("package/key-gen", "package-publish/key-gen", "ADR-687"),
+    (
+        "package/publish-brood-constraint",
+        "package-publish/publish-brood-constraint",
+        "ADR-687",
+    ),
+    ("package/publish", "package-publish/publish", "ADR-687"),
+    (
+        "package/bump-version",
+        "package-publish/bump-version",
+        "ADR-687",
+    ),
+    ("package/release", "package-publish/release", "ADR-687"),
+    (
+        "test/test-make-filter",
+        "test-select/test-make-filter",
+        "ADR-687",
+    ),
+    ("test/label", "test-select/label", "ADR-687"),
+    (
+        "editor/buffer/undo-in-region",
+        "editor/undo-region/undo-in-region",
+        "ADR-687",
+    ),
+    (
+        "editor/buffer/*undo-region-char-budget*",
+        "editor/undo-region/*undo-region-char-budget*",
+        "ADR-687",
+    ),
+    (
+        "editor/buffer/*undo-region-search-depth*",
+        "editor/undo-region/*undo-region-search-depth*",
+        "ADR-687",
+    ),
 ];
 
 /// Where `old` went, if it is a ledgered rename: `(new, adr)`.

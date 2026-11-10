@@ -1286,6 +1286,19 @@ for pixel. The bounded decoder moved from `builtins/image.rs` to `host/picture.r
 share. Prompted by bedit's PDF doc-view, whose half-block pages were unreadable. Guards: the
 offscreen test that one-pixel stripes survive (red with the arm disabled), the terminal's
 half-block test, and `tests/gui_test.blsp` through `gui/render-frame`.
+2026-11-10 (ADR-695). The picture op's follow-ups. A terminal that speaks the kitty graphics
+protocol (asked at `term-enter`: a graphics query then DA1; `BROOD_TERM_GRAPHICS=kitty|cells`
+decides without asking) shows an `[:image …]` at its pixels: resampled to the cells' pixels,
+cropped, sent once as PNG under an image id and placed per frame, deleted and re-placed as the
+frame changes, freed on leave; cells stay the fallback. A window resamples a new size on a worker
+thread and paints a nearest-neighbour stand-in until it lands (`PicturesLanded`), so a resize no
+longer resamples on the GUI thread; the offscreen painter stays synchronous. A bytes value of
+16 KiB or more crosses a node link whole once and by its digest after — mirrored LRU ledgers in
+the link's writer and reader, so a thin client's frames carry a page's bytes once (protocol v13; a
+v12 node no longer links). `SharedBlob` keeps its BLAKE3 digest, so a repainted picture value is
+not rehashed. Sixel left out (no ids: re-sent whenever a cell under it changes). Guards: the
+graphics, shared-bytes and picture unit tests, the decoder's APC case, and a two-node
+`distribution` test sending one large value four times.
 2026-11-10. The tree-walker differential (`BROOD_TIER=0`) had two reds on `main`; the weekly run's
 other reds from 2026-11-08 no longer reproduce (`make gcstress-all` clean, 352 files). (1) A
 macro's error fell inside the macro's own definition at tier 0. ADR-618 places an expander's
@@ -1301,6 +1314,39 @@ removed (`[2 28]`, inside the macro). It was red on the commit before ADR-674 as
 0 the error names the Brood function that was allocating first. The loop stopped at the soft
 limit in both; the assertion now reads the limit's error wherever it lands.
 
+2026-11-10 (ADR-685 addendum). Property generators lean on edges. One random choice in 8 is
+drawn from its bound's edges (0, 1, the bound, bound − 1, and `character`'s NUL, U+D7FF, U+E000,
+U+10FFFF), one collection flag in 8 stops the collection, and sizes grow from small to full by
+the halfway trial. Only the random half of a draw changes, so shrinking and replay are as they
+were; a failure now reports its `:size` with its seed. `x ≠ 0` over ±1,000,000 used to pass 100
+trials; it now fails within them on every seed tried. Guard: `tests/property_test.blsp`.
+
+2026-11-10 (ADR-687). The three largest std files split along layers the rest does not call back
+into. `package.blsp` 2 316 → 1 688 lines, with `package-manifest` (`nest add` / `remove`) and
+`package-publish` (`search`, `publish`, `release`, `key-gen`, `bump-version`) over it;
+`test.blsp` 1 991 → 1 770, with `test-select` (selector parsing, filtering, sharding, ordering,
+`label`); `buffer.blsp` 2 334 → 2 106, with `editor/undo-region` (`undo-in-region`). Every moved
+line was checked to land in exactly one file. Moved public names keep their spelling under the new
+module and are in the rename ledger; bedit's one caller of `undo-in-region` moved with it. Found on
+the way: a private referred bare through `(:use-internals m :only […])` is still unbound to the
+checker, so the new modules reach the old ones' privates qualified.
+Same day: KI-381 fixed (an equal-connector duplicate link keeps the one each end opened first, so
+both ends agree), and the Nightly's AddressSanitizer reds (a leaked box in a `fatal_signal` test;
+ASan turning a vetted grammar's SIGSEGV into "exited 1"). KI-382 filed: under ASan a dozen JIT tier
+assertions fail the suite's first try and pass its retry.
+2026-11-10 (ADR-696, ADR-588 addendum). **`os/pipeline` and `os/spawn-pipeline`**: children joined
+by OS pipes, each stage's stdout the next one's stdin, the bytes never entering the runtime. A stage
+is an argument vector or `{:argv :cwd :env :raw-args}`; the answer is `os/cmd`'s plus `:stages`, its
+`:exit` bash's `pipefail`. `os/cmd` is now a pipeline of one: one runner (`run_stages` over
+`host::subprocess::spawn_chain`) carries the timeout, the caller-killed kill (ADR-514), the
+dirty-blocked wait and the responsive report (ADR-517). The spawned form is one subprocess handle
+whose upstream stages ride the last stage's registry slot, so close / signal / owner death / reap
+reach them all. Prompted by bedit's `/ssh:` copy between machines, which had to run `sh -c "ssh A
+cat X | ssh B sh R"` and could not see a failing `cat`. **`sudo` drops `-p ""`**: sudo-rs before
+0.2.5 (Ubuntu 24.04's 0.2.2) refuses `-p`, so a local `/sudo::` needing a password failed there;
+the empty prompt now goes through `SUDO_PROMPT`, and the `[sudo: authenticate] Password:` an old
+sudo-rs prints regardless is stripped from what a failure reports. Guards:
+`tests/os_pipeline_test.blsp`, `tests/sudo_test.blsp`'s old-sudo-rs stand-in.
 2026-11-10. The weekly run's ASan reds. (1) Sixteen JIT cases bailed with
 `deopt-thrash-latched:native-depth-exceeded` on CI's runner only: the native prologue's stack
 guard compares this frame's address against `Heap::jit_stack_limit`, an absolute address stamped

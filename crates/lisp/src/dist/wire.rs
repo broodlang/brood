@@ -224,8 +224,11 @@ const MAX_GOSSIP_PEERS: usize = 4096;
 /// peer the new tag is a decode error, so the byte bumps and a v11 node does not link with a
 /// v12 one (greenfield, as every bump before lanes). A v12 node still speaks v10 to a v10
 /// peer, and a message carrying a record is refused for such a link rather than sent as
-/// bytes the peer cannot read ([`Message::holds_record`]); "current" below means v12.
-pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x0c";
+/// bytes the peer cannot read ([`Message::holds_record`]). **v13** adds `M_BYTES_NEW` and
+/// `M_BYTES_SEEN`: a large bytes value crosses a link once and then by its digest (ADR-695) — to
+/// a v12 peer the new tags are a decode error, so the byte bumps and a v12 node does not link
+/// with a v13 one (greenfield again); a v10 link never carries them. "current" below means v13.
+pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x0d";
 /// The version before lanes, which a v11 node still speaks to a v10 peer (ADR-492).
 pub(super) const PROTOCOL_MAGIC_V10: [u8; 4] = *b"BRD\x0a";
 pub(super) const NONCE_LEN: usize = 32;
@@ -600,6 +603,13 @@ const M_DOTTED: u8 = 21;
 /// A record (ADR-542, [`Message::Record`]): its id by name, then its fields encoded exactly
 /// like `M_MAP`'s entries. Only a v12 link carries one.
 const M_RECORD: u8 = 22;
+/// A large bytes value sent WHOLE on a current link (ADR-695): its BLAKE3 digest, then its bytes
+/// length-prefixed. The receiver keeps it in the link's ledger (`shared_bytes`) for the
+/// references that follow. Only the link writer's splice writes one.
+pub(super) const M_BYTES_NEW: u8 = 23;
+/// A large bytes value sent BY REFERENCE (ADR-695): its digest alone, naming one the link
+/// carried before and both ends' ledgers still hold.
+pub(super) const M_BYTES_SEEN: u8 = 24;
 
 pub(crate) fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
     // A container step grows the native stack when it is near its end (see
@@ -779,8 +789,12 @@ fn encode_msg_inner(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
             // it can't ride the `M_STR` path). The receiver allocates its own `SharedBlob`, so
             // there is no shared-Arc lifetime to worry about across the boundary. Carries the
             // startup image's `#b"…"` literals and a genuine cross-node byte send alike.
-            w.push(M_BYTES);
-            put_bytes(w, blob.as_bytes());
+            // On a current link a large one is left out here and spliced in by the link's writer,
+            // whole or by reference (`shared_bytes`, ADR-695).
+            if !super::shared_bytes::leave_out(w.len(), blob) {
+                w.push(M_BYTES);
+                put_bytes(w, blob.as_bytes());
+            }
         }
     }
     Ok(())
@@ -887,6 +901,11 @@ fn decode_msg_at_inner(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Messag
         M_KEYWORD => Message::Keyword(get_sym(r)?),
         M_NATIVE => Message::Native(get_sym(r)?),
         M_BYTES => Message::Bytes(SharedBlob::new(&get_bytes(r)?)),
+        M_BYTES_NEW => {
+            let digest = get_fixed::<32>(r)?;
+            Message::Bytes(super::shared_bytes::received_new(digest, &get_bytes(r)?)?)
+        }
+        M_BYTES_SEEN => Message::Bytes(super::shared_bytes::received_seen(get_fixed::<32>(r)?)?),
         M_LIST => {
             let n = get_u32(r)? as usize;
             let mut items = Vec::with_capacity(prealloc(r, n));

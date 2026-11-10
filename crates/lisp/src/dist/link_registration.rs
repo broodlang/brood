@@ -21,9 +21,10 @@ use super::*;
 ///   brand-new peer.
 /// - **A second link to the same live peer** (same incarnation: two dials crossing,
 ///   or two dials from one side racing). Both reach the live peer, so tearing either
-///   down must not reach a monitor: the connector tie-break picks one of two crossing
-///   dials, and an equal connector keeps the registered link, which is not symmetric, so
-///   this node makes one dial to a peer at a time ([`DialClaim`]).
+///   down must not reach a monitor: [`existing_link_wins`] picks the same one of the two on
+///   both ends — by connector for crossing dials, by opening order for one connector's
+///   two dials, which holds because this node makes one dial to a peer at a time
+///   ([`DialClaim`]).
 ///
 /// A GUEST link (ADR-415) stands outside both: its name is only its claim, so it is never
 /// registered under it. It gets a name this node mints in the guest namespace
@@ -32,6 +33,7 @@ use super::*;
 /// here or anywhere in the cluster (KI-287).
 pub(super) fn establish(authenticated: handshake::Authenticated, stream: Stream, role: Role) {
     let handshake::Authenticated {
+        id,
         peer,
         addr: peer_addr,
         incarnation,
@@ -48,7 +50,6 @@ pub(super) fn establish(authenticated: handshake::Authenticated, stream: Stream,
     let (tx, rx) = mpsc::sync_channel::<Outbound>(WRITER_QUEUE_CAP);
     let latest = LatestSlots::default();
     let last_seen = Arc::new(AtomicU64::new(now_millis()));
-    let id = NEXT_LINK.fetch_add(1, Ordering::Relaxed);
     // A guest link's every frame is filtered (ADR-415), through a standing that belongs
     // to THIS connection: the `Conn` and the reader share it, so it is in place before
     // the link is visible in `NODES`, it goes when the link goes, and no other link under
@@ -138,13 +139,7 @@ pub(super) fn register_link(peer: Symbol, link: Conn) -> Option<bool> {
                 }
                 continue;
             }
-            Some(existing)
-                if value::symbol_name(link.connector) >= value::symbol_name(existing.connector) =>
-            {
-                // The existing link to this same life of the peer wins (its connector
-                // sorts first, or it's the same initiator — a plain duplicate).
-                return None;
-            }
+            Some(existing) if existing_link_wins(existing, &link) => return None,
             other => {
                 // We win (or there was no existing link). Take over the slot; any
                 // evicted link is torn down below, outside the lock.
@@ -165,6 +160,26 @@ pub(super) fn register_link(peer: Symbol, link: Conn) -> Option<bool> {
         sever_couplings(peer);
     }
     Some(was_new)
+}
+
+/// Whether `existing`, a link to the same life of the peer, beats `link`. Both ends must
+/// pick the same one of the two, whichever they registered first:
+///
+/// - **Different connectors** (two dials crossing): the link whose connector's NAME sorts
+///   first. Interned ids differ per process, but both ends share the names.
+/// - **The same connector** (one node dialed twice — by two transports, or a program and
+///   gossip): the link this end OPENED first. Each end takes a link's id before its
+///   handshake writes a byte, and the connector opens its second link only after its first
+///   handshake has finished, which the other end cannot let happen before it has begun its
+///   side of that handshake. So both ends order the two links alike, and keep the older,
+///   which is the one already carrying traffic. Registration order is no substitute: an
+///   end registers after its handshake, so a delayed thread can register the newer link
+///   first there (KI-381).
+fn existing_link_wins(existing: &Conn, link: &Conn) -> bool {
+    match value::symbol_name(existing.connector).cmp(&value::symbol_name(link.connector)) {
+        std::cmp::Ordering::Equal => existing.id < link.id,
+        order => order == std::cmp::Ordering::Less,
+    }
 }
 
 /// Remove a link from `NODES` **iff** it's still this generation (so an evicted or

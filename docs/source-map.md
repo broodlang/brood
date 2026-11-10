@@ -97,6 +97,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `dist/outbound.rs` — A link's bounded writer queue: handing a frame to the writer thread (severing the link when the queue is full), and the `proc/send-latest` slots (ADR-492) that let a newer frame to one target and key replace an unwritten older one.
   - `dist/routing.rs` — Location-transparent message routing: the [`Target`] a `send` names within a node, and delivering a message to it — in-process for a local node, as a `Send` frame over the link for a remote one — with the once-per-name warning for a message to a registered name no process holds.
   - `dist/session.rs` — The encrypted steady-state session (ADR-089) — confidentiality + per-frame integrity for the node link, closing ADR-081's cleartext/injection gap.
+  - `dist/shared_bytes.rs` — Large bytes values cross a link ONCE (ADR-695): a bytes value of [`SHARED_BYTES_MIN`] or more that a link has already carried goes the next time as its digest alone.
   - `dist/transport.rs` — The link carrier: the [`Stream`] a node link runs over (TCP, or a Unix-domain socket on unix), and opening one — dialing an address, and binding and readying a Unix socket path.
   - `dist/wire.rs` — Wire codec for the distributed-node protocol.
 - `error.rs` — Error type used throughout the interpreter.
@@ -203,6 +204,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `editor/span-properties.blsp` (`editor/span-properties`) — Text-property spans as pure data: a property map is `{key [[start end value] …]}`, per key ascending, non-overlapping half-open spans.
 - `editor/treesit.blsp` (`editor/treesit`) — Generic tree-sitter language services over `tree-sitter-parse`'s positioned CST (`{:kind :start :end :named :kids/:text}`): `(fontify text lang face-of)` → `[start end face]` spans, and pure structural motions `(text lang point) -> point` — `point-forward` / `point-backward` (every named node), `point-list-forward` / `point-list-backward` (containers only), `point-up` / `point-up-forward` / `point-down`, and `point-defun-start` / `point-defun-end` — which find what each language declared a definition to be with `register-definitions`.
 - `editor/ui.blsp` (`editor/ui`) — A small terminal/GUI app framework over the M3 display/input seam (ADR-046): a `display` frontend (`editor/frontend`) plus a TEA-style `(ui-run model view update display)` loop.
+- `editor/undo-region.blsp` (`editor/undo-region`) — Undo restricted to the buffer's region: `undo-in-region` reverts the most recent change that touched the selected lines and leaves everything outside them as it is.
 - `editor/web.blsp` (`editor/web`) — A browser tab as a frontend.
 - `encoding.blsp` (`encoding`) — Hex and Base64 encoding/decoding.
 - `file.blsp` (`file`) — The file & filesystem library: whole-file and line read/write (`file/slurp`/`file/spit`/`read-lines`/`write-lines`/`spit-atomic`/`file/spit-append`), predicates (`regular?`/`file/dir?`/`file/exists?`), and directory listing (`list-files`/`list-dirs`/ `walk-files`), whole trees copied and moved (`copy-tree`, `move` across filesystems too) and the desktop trash (`trash`: freedesktop.org, macOS, the Windows recycle bin).
@@ -298,6 +300,8 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `tool/nest.blsp` (`nest`) — The `nest` command line: argv parsing and dispatch for the subcommands implemented in Brood (ADR-322).
 - `tool/observer.blsp` (`observer`) — An interactive process observer — showing this runtime's node stats and a navigable table of live processes (id, name, status, mailbox backlog, memory, monitors), built on the display seam (M3, ADR-046) over `proc/info`.
 - `tool/package.blsp` (`package`) — The package manager behind `nest fetch` and friends (ADR-037).
+- `tool/package-manifest.blsp` (`package-manifest`) — `nest add` and `nest remove`: add a dependency to the project manifest's :dependencies, or take one out, keeping the rest of the file and its comments, then re-resolve the lock file.
+- `tool/package-publish.blsp` (`package-publish`) — The registry verbs behind `nest search`, `nest publish`, `nest release` and `nest key-gen`: search the hive registry, build and post a release (signed when a key exists), bump the manifest's version and tag it.
 - `tool/perf.blsp` (`perf`) — One-call performance triage: `(perf/report)` answers *where the time goes*.
 - `tool/proctree.blsp` (`proctree`) — Order a flat `proc/info` list as a parent→child forest.
 - `tool/project.blsp` (`project`) — The project model behind `nest` (ADR-020), written in Brood: the manifest and its dependencies, finding the root, discovering sources and tests, `setup`, and the user-config loader.
@@ -313,6 +317,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `tool/sexp.blsp` (`sexp`) — Structural s-expression navigation over Brood's CST (`parse-source`).
 - `tool/stdimage.blsp` (`stdimage`) — A startup image for the standard library: std modules are pre-evaluated and promoted once at build time rather than re-read and re-evaluated on every run.
 - `tool/test.blsp` (`test`) — A tiny ExUnit-style test framework, written in Brood.
+- `tool/test-select.blsp` (`test-select`) — Test selection for the test runner: parse `nest test`'s selectors into a filter spec (`test-make-filter`), then filter, shard and order the registered units by it (`test-select-units`).
 - `tool/update-brood.blsp` (`update-brood`) — `nest update-brood` — update the installed `brood`, `nest` and `brood-lsp` to the latest GitHub release (or a named one), verified against the release's SHA-256, into the directory the running `nest` lives in.
 - `tool/workspace.blsp` (`workspace`) — Drive every Brood repo in the workspace with one command — what `nest ws` runs.
 - `tz.blsp` (`tz`) — Named time zones: the civil time in a place, and the instant a civil time there denotes.

@@ -542,6 +542,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "run the GUI/display layer with no real window, and no audio — for a headless CI box",
     ),
     f(
+        "BROOD_TERM_GRAPHICS",
+        HOST,
+        "how the terminal display draws an `[:image …]` op: `kitty` (the kitty graphics protocol, pixels) or `cells` (half blocks), without asking the terminal; unset or `auto` asks it at `term-enter` (ADR-695)",
+    ),
+    f(
         "BROOD_TEST_RUN",
         HOST,
         "`=1`: this process is part of a test run — set by `nest test` before the interpreter starts, inherited by what a test spawns; `test/running?` reads it (ADR-602)",

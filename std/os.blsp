@@ -234,6 +234,65 @@ once instead of hanging behind a full-screen program; `os/spawn-pty` gives it on
 (sig cmd
   (string &optional (or list vector) map -> (record &open :stdout string :stderr string :exit int)))
 
+;; ---- pipelines (ADR-696) -------------------------------------------------------
+;; Children joined by OS pipes, each stage's stdout the next one's stdin. Without these a
+;; program wanting `ssh a cat x | ssh b sh -c 'cat > x'` had to write a `sh -c` line —
+;; Unix only, and every argument quoted for the shell by hand.
+
+(defn pipeline (stages &optional (opts {}))
+  "Run `stages` joined by OS pipes to completion — [[cmd]] for a pipeline, `a | b | c`
+without a shell. Each stage is an argument vector `[\"prog\" \"arg\" …]`, or a map
+`{:argv [\"prog\" …] :cwd dir :env {…} :raw-args bool}` when one stage needs options of its
+own. Each stage's stdout is the next one's stdin through a pipe the OS holds, so the bytes
+between stages never enter this process: a pipeline moving gigabytes holds only what its
+last stage prints. Every argument goes to its program as it is, as [[cmd]]'s do, and each
+program is found as [[which]] finds it.
+
+`opts` takes [[cmd]]'s options: `:cwd`, `:env` and `:raw-args` are every stage's defaults
+(a stage's own `:cwd` replaces it, its `:env` entries go over it), `:stdin` is fed to the
+FIRST stage, and `:timeout-ms` bounds the whole pipeline. Returns
+
+- `:stdout` — the last stage's output;
+- `:stderr` — every stage's error output, in stage order;
+- `:exit` — bash's `pipefail`: the code of the last stage that did not exit 0 (`-1` when a
+  signal ended it), else 0 — so [[cmd-ok?]] means every stage succeeded. A stage killed
+  because the next one stopped reading (SIGPIPE: `yes | head -1`) counts as a failure;
+- `:stages` — each stage's own `{:exit n :stderr s}`, in order;
+- `:timed-out true` when `:timeout-ms` ended it.
+
+A timeout, or the caller being killed (`exit`, `task/cancel`), kills every stage and what it
+started; each stage runs in a session of its own, as an [[cmd]] child does. A
+[[proc/flag]] `:responsive` process gets one `[:blocking-call …]` report, its detail the
+stages joined by ` | `.
+
+    (os/cmd-out (os/pipeline [[\"echo\" \"b a\"] [\"tr\" \" \" \"\\n\"] [\"sort\"]]))   ;=> \"a\\nb\"
+    (:stdout (os/pipeline [[\"cat\"] [\"tr\" \"a-z\" \"A-Z\"]] {:stdin \"piped\"}))   ;=> \"PIPED\"
+    (:exit (os/pipeline [[\"true\"] [\"sh\" \"-c\" \"cat; exit 3\"] [\"cat\"]]))   ;=> 3
+    (map (:stages (os/pipeline [[\"false\"] [\"true\"]])) :exit)   ;=> (1 0)
+    (:timed-out (os/pipeline [[\"sleep\" \"5\"] [\"cat\"]] {:timeout-ms 50}))   ;=> true"
+  (%os-pipeline stages opts))
+(sig pipeline
+  ((or list vector) &optional
+    map
+    ->
+    (record &open :stdout string :stderr string :exit int :stages vector)))
+
+(defn spawn-pipeline (stages &optional opts)
+  "Start `stages` joined by OS pipes as ONE persistent child — [[spawn]] for a pipeline, as
+[[pipeline]] is [[cmd]]'s. Stages and options as [[pipeline]]'s (no `:stdin` or
+`:timeout-ms`: [[write]] and [[close]] are how a persistent child is fed and stopped).
+
+One subprocess handle stands for every stage: [[write]] feeds the FIRST stage's stdin; the
+last stage's stdout arrives as `[:proc handle data]` and every stage's stderr as
+`[:proc-err handle data]` (interleaved — a caller that must tell the stages apart gives each
+its own [[spawn]]); `[:proc-exit handle code]` once EVERY stage has exited, `code` bash's
+`pipefail` as in [[pipeline]] (nil when the deciding stage was signalled); `[:proc-closed
+handle code]` last. [[close]] kills every stage's group, [[signal]] signals each, and the
+owner dying closes them all, as for any child.
+
+    (let (p (os/spawn-pipeline [[\"sh\" \"-c\" \"exit 2\"] [\"cat\"]])) (receive ([:proc-exit ^p c] (receive ([:proc-closed ^p _] c)))))   ;=> 2"
+  (%proc-spawn-pipeline stages opts))
+
 ;; ---- the platform's shell (KI-364) --------------------------------------------
 ;; A command LINE — pipes, redirections, `&&` — needs the platform's command interpreter.
 ;; Naming `sh` works where there is one; Windows has `cmd.exe`, which reads its line raw:

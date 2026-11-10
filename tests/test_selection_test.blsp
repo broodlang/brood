@@ -9,7 +9,7 @@
 ;; same shape `register-test` builds — so exercising the selectors against
 ;; hand-built units tests exactly what the runner filters.
 
-(defmodule test-selection-test (:use-internals test) (:use test))
+(defmodule test-selection-test (:use-internals test) (:use-internals test-select) (:use test))
 
 ;; --- synthetic fixtures -------------------------------------------------------
 ;; A test tuple with explicit tags/file/line. The thunk is never called here (the
@@ -36,28 +36,29 @@
     nil
     (fn (acc unit) (append acc (map (third unit) (fn (t) (label (second unit) (first t))))))))
 
-(defn- selection-select (spec) (selection-labels (test/test-select-units selection-units spec)))
+(defn- selection-select (spec)
+  (selection-labels (test-select/test-select-units selection-units spec)))
 
 (describe "test selection: selector parsing"
   (test "a bare word is a tag selector with an empty value"
-    (assert= (test/test-parse-selector "db") ["db" ""]))
+    (assert= (test-select/test-parse-selector "db") ["db" ""]))
   (test "key:value splits on the FIRST colon"
-    (assert= (test/test-parse-selector "test:adds two") ["test" "adds two"]))
+    (assert= (test-select/test-parse-selector "test:adds two") ["test" "adds two"]))
   (test "a value may itself contain a colon"
-    (assert= (test/test-parse-selector "describe:a:b") ["describe" "a:b"]))
+    (assert= (test-select/test-parse-selector "describe:a:b") ["describe" "a:b"]))
   (test "an empty value is preserved"
-    (assert= (test/test-parse-selector "test:") ["test" ""])))
+    (assert= (test-select/test-parse-selector "test:") ["test" ""])))
 
 (describe "test selection: tag matching"
   (test "a tag present on the test matches"
-    (is (test/test-has-tag? [:fast :slow] "slow")))
+    (is (test-select/test-has-tag? [:fast :slow] "slow")))
   (test "an absent tag does not match"
-    (refute (test/test-has-tag? [:fast] "slow")))
+    (refute (test-select/test-has-tag? [:fast] "slow")))
   (test "no tags matches nothing"
-    (refute (test/test-has-tag? [] "fast")))
+    (refute (test-select/test-has-tag? [] "fast")))
   (test "group-level tags are merged into a test's own"
     (let (merged (test/test-add-tags (selection-test "t" [:own] "f.blsp" 1) [:group]))
-      (assert= (into [] (test/test-tags merged)) [:group :own])))
+      (assert= (into [] (test-select/test-tags merged)) [:group :own])))
   (test "merging with no group tags leaves the test untouched"
     (let (t (selection-test "t" [:own] "f.blsp" 1))
       (assert= (test/test-add-tags t []) t))))
@@ -86,7 +87,8 @@
   (test "an unmatched selector selects nothing"
     (assert= (selection-select {:only (list ["nope" ""])}) nil))
   (test "a unit left with no tests is dropped entirely"
-    (assert= (count (test/test-select-units selection-units {:only (list ["describe" "string"])}))
+    (assert= (count (test-select/test-select-units selection-units
+                      {:only (list ["describe" "string"])}))
       1)))
 
 (describe "test selection: FILE:LINE"
@@ -113,15 +115,15 @@
   ;; so a line selector could pick a test out of an unrelated file. The match must
   ;; land on a path-component boundary.
   (test "a suffix that isn't on a path boundary does NOT match"
-    (refute (test/test-same-file? "tests/extra_test.blsp" "a_test.blsp")))
+    (refute (test-select/test-same-file? "tests/extra_test.blsp" "a_test.blsp")))
   (test "a suffix on a path boundary does match"
-    (is (test/test-same-file? "tests/a_test.blsp" "a_test.blsp")))
+    (is (test-select/test-same-file? "tests/a_test.blsp" "a_test.blsp")))
   (test "a whole-path match still works"
-    (is (test/test-same-file? "tests/a_test.blsp" "tests/a_test.blsp")))
+    (is (test-select/test-same-file? "tests/a_test.blsp" "tests/a_test.blsp")))
   (test "a multi-component suffix matches on its boundary"
-    (is (test/test-same-file? "/abs/proj/tests/a_test.blsp" "tests/a_test.blsp")))
+    (is (test-select/test-same-file? "/abs/proj/tests/a_test.blsp" "tests/a_test.blsp")))
   (test "a near-miss directory does not match"
-    (refute (test/test-same-file? "/abs/proj/mytests/a_test.blsp" "tests/a_test.blsp")))
+    (refute (test-select/test-same-file? "/abs/proj/mytests/a_test.blsp" "tests/a_test.blsp")))
   (test "a line selector combines with --only as a union"
     (assert= (selection-select {:only (list ["describe" "string"])
                                 :lines (list ["tests/demo_test.blsp" 4])})
@@ -170,9 +172,11 @@
   (test "a shard count below 2 is a no-op"
     (assert= (selection-select {:shards 1 :shard 0}) (selection-select nil)))
   (test "the label hash is stable across calls"
-    (assert= (test/test-label-hash "math › adds") (test/test-label-hash "math › adds")))
+    (assert= (test-select/test-label-hash "math › adds")
+      (test-select/test-label-hash "math › adds")))
   (test "different labels hash differently"
-    (refute (= (test/test-label-hash "math › adds") (test/test-label-hash "math › multiplies"))))
+    (refute (= (test-select/test-label-hash "math › adds")
+              (test-select/test-label-hash "math › multiplies"))))
   ;; Regression: a plain polynomial hash left the LOW bits unmixed (its parity was
   ;; just the character-sum parity), so `(math/rem h 2)` sent a whole small suite to one
   ;; shard and left the other empty. The finalizer fixes that; assert the spread.
@@ -180,28 +184,30 @@
     (let (counts (fold (range 0 200)
                    {}
                    (fn (acc i)
-                     (let (k (math/rem (test/test-label-hash (str "group " i " › case " i)) 2))
+                     (let (k (math/rem (test-select/test-label-hash (str "group " i " › case " i))
+                               2))
                        (assoc acc k (+ 1 (or (get acc k) 0)))))))
       (and (is (> (or (get counts 0) 0) 50)) (is (> (or (get counts 1) 0) 50))))))
 
 (describe "test selection: the filter-spec constructor"
   (test "raw selector strings are parsed into key/value pairs"
-    (let (spec (test/test-make-filter (list "db" "test:adds") nil nil nil nil nil nil nil))
+    (let (spec (test-select/test-make-filter (list "db" "test:adds") nil nil nil nil nil nil nil))
       (assert= (get spec :only) (list ["db" ""] ["test" "adds"]))))
   (test "absent lists become empty, not nil-holes"
-    (let (spec (test/test-make-filter nil nil nil nil nil nil nil nil))
+    (let (spec (test-select/test-make-filter nil nil nil nil nil nil nil nil))
       (and (assert= (get spec :only) nil)
         (assert= (get spec :exclude) nil)
         (assert= (get spec :include) nil))))
   (test "shard defaults to 0 when unspecified"
-    (assert= (get (test/test-make-filter nil nil nil nil nil nil 4 nil) :shard) 0))
+    (assert= (get (test-select/test-make-filter nil nil nil nil nil nil 4 nil) :shard) 0))
   (test "seed and shard values pass through"
-    (let (spec (test/test-make-filter nil nil nil nil nil 42 8 3))
+    (let (spec (test-select/test-make-filter nil nil nil nil nil 42 8 3))
       (and (assert= (get spec :seed) 42)
         (assert= (get spec :shards) 8)
         (assert= (get spec :shard) 3))))
   (test "a constructed spec drives selection end-to-end"
-    (assert= (selection-select (test/test-make-filter (list "slow") nil nil nil nil nil nil nil))
+    (assert= (selection-select (test-select/test-make-filter (list "slow")
+                                 nil nil nil nil nil nil nil))
       (list "math › multiplies"))))
 
 ;; A narrowing selector that matches nothing must be reported, not pass silently:
@@ -290,7 +296,8 @@
   (if (= pending 0) acc (receive ([:echo spec] (selection-collect (- pending 1) (cons spec acc))))))
 
 ;; Each worker selects against the shared spec and reports the labels it got.
-(defn- selection-worker (from spec units) (send from [:echo (test/test-select-units units spec)]))
+(defn- selection-worker (from spec units)
+  (send from [:echo (test-select/test-select-units units spec)]))
 
 (describe "test selection: specs across processes"
   :isolated (test "a filter spec round-trips through a worker unchanged"

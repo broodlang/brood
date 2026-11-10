@@ -72,9 +72,10 @@ pub(super) static PROGRAM_DIALS: LazyLock<Mutex<ProgramDials>> = LazyLock::new(M
 
 /// One `node/connect` under way. While any is, gossip is held rather than considered: the
 /// dial's link is not registered until its handshake ends, so gossip naming that same peer
-/// would start a second dial from this node, and the two ends can register the two links in
-/// opposite orders. "The existing link wins" then has each end close the one the other kept,
-/// both die, and the mesh does not re-heal (KI-372). Dropping the last one considers what
+/// would start a second dial from this node at the same time. Two links one node opens at
+/// once can be opened in opposite orders on the two ends, so the opening order that decides
+/// between them (`existing_link_wins`) has each end close the one the other kept, both die,
+/// and the mesh does not re-heal (KI-372). Dropping the last one considers what
 /// was held, by when the peer is in `NODES`.
 pub(super) struct ProgramDial;
 

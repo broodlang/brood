@@ -4,7 +4,28 @@
 
 use super::*;
 
-/// Hand `bytes` to a link's writer thread, severing the link if its queue is full.
+/// A frame payload as a link's queue holds it: the bytes to seal, or — a `Send` to a current
+/// peer — the bytes with its large bytes values left out, which the writer splices back in,
+/// whole or by reference, when the frame's turn comes (ADR-695).
+#[derive(Clone)]
+pub(crate) enum Payload {
+    Plain(Arc<Vec<u8>>),
+    Sharing(Arc<shared_bytes::SharingPayload>),
+}
+
+impl From<Arc<Vec<u8>>> for Payload {
+    fn from(bytes: Arc<Vec<u8>>) -> Self {
+        Payload::Plain(bytes)
+    }
+}
+
+impl From<shared_bytes::SharingPayload> for Payload {
+    fn from(payload: shared_bytes::SharingPayload) -> Self {
+        Payload::Sharing(Arc::new(payload))
+    }
+}
+
+/// Hand `payload` to a link's writer thread, severing the link if its queue is full.
 ///
 /// Free-standing so a caller can run it **without holding `NODES`**: the `Err` arm
 /// issues a `shutdown` syscall, and that must not run under the `NODES` lock or it
@@ -14,9 +35,9 @@ use super::*;
 pub(super) fn enqueue_to(
     tx: &SyncSender<Outbound>,
     sock: &Arc<Stream>,
-    bytes: Arc<Vec<u8>>,
+    payload: impl Into<Payload>,
 ) -> bool {
-    match tx.try_send(bytes.into()) {
+    match tx.try_send(Outbound::Frame(payload.into())) {
         Ok(()) => true,
         Err(_) => {
             let _ = sock.shutdown(Shutdown::Both);
@@ -29,19 +50,19 @@ pub(super) fn enqueue_to(
 /// `proc/send-latest` frame to one target and key (ADR-492), whose payload waits in the
 /// link's [`LatestSlots`] so a newer one can replace it before it is written.
 pub(crate) enum Outbound {
-    Frame(Arc<Vec<u8>>),
+    Frame(Payload),
     Latest { slot: String, generation: u64 },
 }
 
 impl From<Arc<Vec<u8>>> for Outbound {
     fn from(payload: Arc<Vec<u8>>) -> Self {
-        Outbound::Frame(payload)
+        Outbound::Frame(Payload::Plain(payload))
     }
 }
 
 /// A link's queued `proc/send-latest` frames: slot (target and key) → the generation
 /// and payload of the newest one sent and not yet written.
-pub(super) type LatestSlots = Arc<Mutex<HashMap<String, (u64, Arc<Vec<u8>>)>>>;
+pub(super) type LatestSlots = Arc<Mutex<HashMap<String, (u64, Payload)>>>;
 
 /// Source of [`Outbound::Latest`] generations.
 pub(super) static NEXT_LATEST: AtomicU64 = AtomicU64::new(0);
@@ -65,10 +86,10 @@ pub(super) fn enqueue_latest(
     sock: &Arc<Stream>,
     latest: &LatestSlots,
     slot: String,
-    payload: Arc<Vec<u8>>,
+    payload: impl Into<Payload>,
 ) -> bool {
     let generation = NEXT_LATEST.fetch_add(1, Ordering::Relaxed);
-    crate::core::sync::lock(latest).insert(slot.clone(), (generation, payload));
+    crate::core::sync::lock(latest).insert(slot.clone(), (generation, payload.into()));
     match tx.try_send(Outbound::Latest { slot, generation }) {
         Ok(()) => true,
         Err(_) => {
@@ -81,7 +102,7 @@ pub(super) fn enqueue_latest(
 /// The payload the writer writes for `item`: a frame's own, or a ticket's when it is
 /// still the newest for its slot (which it then leaves). A ticket a later
 /// `send-latest` replaced writes nothing; the later one's ticket is behind it.
-pub(super) fn claim_outbound(latest: &LatestSlots, item: Outbound) -> Option<Arc<Vec<u8>>> {
+pub(super) fn claim_outbound(latest: &LatestSlots, item: Outbound) -> Option<Payload> {
     match item {
         Outbound::Frame(payload) => Some(payload),
         Outbound::Latest { slot, generation } => {

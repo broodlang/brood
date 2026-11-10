@@ -1,0 +1,418 @@
+;; std/tool/package-publish.blsp — the registry verbs a publisher runs: `nest search`,
+;; `nest publish`, `nest release`, `nest key-gen` (ADR-037, ADR-212, docs/packages.md). Split
+;; out of std/tool/package.blsp, which installs what these publish.
+
+(defmodule package-publish
+  "The registry verbs behind `nest search`, `nest publish`, `nest release` and `nest key-gen`:
+search the hive registry, build and post a release (signed when a key exists), bump the
+manifest's version and tag it."
+  (:use format)
+  (:use project)
+  (:use-internals project)
+  (:use package :exclude [update])
+  ;; `:only []`: the grant to reach `package`'s privates qualified, without referring its
+  ;; public names a second time — that refer would bring back the `update` excluded above.
+  (:use-internals package :only [])
+  (:use-internals package-manifest))
+
+;; --- `nest search` / `nest publish` (hive HTTP API) -------------------------
+
+(defn- registry-search-line (p)
+  "One search hit: `name  version  [app]  — description`. The `[app]` tag shows only for
+applications; libraries (the default kind) carry none, so the common case stays uncluttered."
+  (let (desc (get p :description))
+    (str (get p :name)
+      "  "
+      (let (v (get p :latest_version)) (if (or (nil? v) (= v "")) "?" v))
+      (if (= (get p :kind) "app") "  [app]" "")
+      (if (and desc (not (= desc ""))) (str "  — " desc) ""))))
+
+(defn search (term & opts)
+  "Search the package registry for `term` (matched against each package's name and
+latest description), printing name / latest version / description per hit. Options
+are a plist: `:index <base-url>` overrides the configured `:registry`, and
+`:enhances <app>` narrows the results to packages that declare they plug into that
+application (`nest search --enhances bedit zig`). Backs `nest search`.
+
+    (package-publish/search \"json\" :enhances \"bedit\")   ;~> nil — one name / version / description line printed per hit"
+  (let (term-string (or term "")
+        enhances (plist-get opts :enhances)
+        base (package/registry-base-for (plist-get opts :index))
+        url (package/registry-search-url base term-string enhances))
+    (let (data (package/registry-get-json url))
+      (if (failure? data)
+        (error "package: " (error-message data))
+        (do
+          (let (pkgs (get data :packages))
+            (if (empty? pkgs)
+              (io/puts (str "No packages matching \""
+                         term-string
+                         "\""
+                         (if (or (nil? enhances) (= enhances ""))
+                           ""
+                           (str " that enhance " enhances))
+                         "."))
+              (doseq (p pkgs) (io/puts (registry-search-line p)))))
+          nil)))))
+
+;; --- publish: build a source tarball, then POST it (Bearer-token authed) -----
+
+(defn- registry-excluded? (path)
+  "Whether the root-relative `path` stays out of a published source tarball: dependency and
+build caches, VCS data, tests, the lock file, and any stray tarball."
+  (or (any? ["_deps/" "_build/" ".git/" "tests/"] (fn (dir) (string/starts-with? path dir)))
+    (= path "project.lock.blsp")
+    (string/ends-with? path ".tar.gz")))
+
+(defn- registry-source-files (root)
+  "The root-relative paths a source tarball of `root` ships: the git-TRACKED files when
+`root` is a git work tree, else every file under it — minus [[registry-excluded?]]."
+  (let (prefix (str root "/")
+        files (or (registry-tracked-files root)
+                (map (or (file/walk-files root) (list))
+                  (fn (path) (string/substring path (string/length prefix))))))
+    (sort (seq/reject files registry-excluded?))))
+
+(defn- registry-tracked-files (root)
+  "The project's git-TRACKED paths relative to `root`, or nil when `root` is not a git
+work tree (or git is unavailable). Ignored and untracked files are absent by
+construction, which is the point — see `registry-build-tarball`."
+  (let (r (check-allow :discarded-catch
+            (try
+              (os/cmd "git" ["-C" root "ls-files" "--cached" "--exclude-standard"])
+              (catch _ nil))))
+    (if (or (nil? r) (not (= (get r :exit) 0)))
+      nil
+      (let (paths (seq/filter (string/split (get r :stdout) "\n")
+                    (fn (l) (not (= (string/trim l) "")))))
+        (if (empty? paths) nil paths)))))
+
+(defn- registry-build-tarball (root)
+  "Create a gzip'd source tarball of the project at `root` — its files at the archive
+  root — the files [[registry-source-files]] names, so `_deps/`, `_build/`, `.git/`,
+  `tests/`, the lock file and any stray tarball stay out. Returns the archive path (under
+  `_deps/`).
+
+  The list is git's tracked files where it can be: packing the working directory ships
+  whatever untracked build artifact happens to lie there, and a tarball whose contents
+  depend on what you last built is not reproducible. The excludes are applied to that list
+  here, in Brood: tar's `--exclude` patterns do not match explicitly named members."
+  (let (out (path/join (package/package-deps-dir root)
+              (str project/*name* "-" project/*version* ".tar.gz")))
+    (file/mkdir (package/package-deps-dir root))
+    (when (file/exists? out) (file/rm out))
+    (let (code (os/run-process "tar" (into ["-czf" out "-C" root] (registry-source-files root))))
+      (when (not (= code 0))
+        (error "package: building the source tarball failed (tar exit " code ")"))
+      out)))
+
+(defn- registry-publishable-deps ()
+  "The project's `:version` (registry) dependencies as a vector of `{:name :version}` —
+  the only deps a published package can carry on the registry. Path/git/tarball deps
+  are local, so they are omitted (with a warning)."
+  (let (registry-deps (seq/filter project/*dependencies* (fn (d) (= (dep-kind d) :registry)))
+        other (seq/filter project/*dependencies* (fn (d) (not (= (dep-kind d) :registry)))))
+    (doseq (d other)
+      (io/puts (str "package: warning — omitting non-registry dependency "
+                 (->string (get d :name))
+                 " ("
+                 (dep-kind d)
+                 ") from the published metadata")))
+    (apply vector
+      (map registry-deps (fn (d) {:name (->string (get d :name)) :version (get d :version)})))))
+
+(defn- registry-publishable-enhances ()
+  "The project's `:enhances` map with STRING keys — JSON has no symbols, and the
+registry indexes these names to answer \"which packages plug into X\". `{}` for an
+ordinary library, which the server stores as \"nothing\"."
+  (fold (%map-pairs project/*enhances*)
+    {}
+    (fn (acc [name constraint]) (assoc acc (->string name) constraint))))
+
+;; --- package signing (ADR-212): sign a release's checksum, TOFU-verify on install ------
+;; The publisher's ed25519 key lives at `<config>/brood/signing-key.blsp` (private stored 0600).
+;; Signing is OPTIONAL — a publisher without a key publishes unsigned. A signed release carries
+;; the signature + public key (hex) in its metadata; the client verifies the signature over the
+;; checksum and PINS the key in the lock (TOFU), warning on a key change. Advisory: never gates.
+
+(defn- package-config-dir ()
+  (let (xdg (os/env "XDG_CONFIG_HOME"))
+    (path/join (if (nil? xdg)
+                 (path/join (or (path/home)
+                              (error "package-config-dir: neither XDG_CONFIG_HOME nor HOME is set"))
+                   ".config")
+                 xdg)
+      "brood")))
+
+(defn- package-signing-key-path () (path/join (package-config-dir) "signing-key.blsp"))
+
+(defn- package-load-signing-key ()
+  "The publisher's stored keypair as `{:public <hex> :private <hex>}`, or nil if none exists."
+  (let (p (package-signing-key-path))
+    (if (file/exists? p)
+      (let (form (reflect/read-first (file/slurp p)))
+        (if (and (pair? form) (= (first form) 'signing-key))
+          {:public (plist-get (rest form) :public) :private (plist-get (rest form) :private)}
+          nil))
+      nil)))
+
+(defn key-gen (& opts)
+  "Generate an ed25519 signing keypair, store it at `<config>/brood/signing-key.blsp` (private
+written 0600), and print the public key to share so others can pin it (TOFU, ADR-212). Refuses
+to overwrite an existing key unless `:force true`. Backs `nest key gen`.
+
+    (package-publish/key-gen :force true)   ;~> \"3b6a27bc…\" — the public key, hex; the keypair written"
+  (let (p (package-signing-key-path))
+    (when (and (file/exists? p) (not (plist-get opts :force)))
+      (error "package: a signing key already exists at "
+        p " — `nest key gen --force` replaces it (invalidating signatures made with the old key)"))
+    (let (kp (crypto/keypair)
+          public-hex (encoding/hex-encode-bytes (get kp :public))
+          private-hex (encoding/hex-encode-bytes (get kp :private)))
+      (file/mkdir (package-config-dir))
+      (file/spit-private p
+        (str ";; Brood package signing key (ADR-212). KEEP :private SECRET — never commit or share it.\n"
+          (pr-str (list 'signing-key :public public-hex :private private-hex))
+          "\n"))
+      (io/puts "package: wrote signing key to " p)
+      (io/puts "package: public key (share this so others can pin it): " public-hex)
+      public-hex)))
+
+;; Sign the current release with the stored private key → `[signature-hex public-hex]`, or nil
+;; when there is no key (an unsigned publish).
+(defn- package-sign-checksum (checksum)
+  (let (key (package-load-signing-key))
+    (if (nil? key)
+      nil
+      [(encoding/hex-encode-bytes (crypto/sign (encoding/hex-decode-bytes (get key :private))
+                                    (package/package-signing-payload project/*name*
+                                      project/*version* checksum)))
+        (get key :public)])))
+
+(defn publish-brood-constraint (declared)
+  "The `:brood` runtime constraint to record for a release whose manifest declared
+`declared` (nil when it declared nothing).
+
+A manifest that declares one wins. When it declares nothing the constraint is DERIVED as
+`>= <the brood running this publish>`, rather than recorded as empty.
+
+Empty does not mean unknown, it means *no constraint* — a claim that the release runs on
+every brood ever published. For a pre-1.0 language that has renamed the standard library
+in four consecutive minors, that claim is never true, and it is not a harmless one: the
+resolver believes it, so a user on an old runtime installs the package and meets unbound
+symbols instead of a clear refusal.
+
+Deriving it also removes the only reason to hand-maintain a floor. Every package in this
+ecosystem sat at `>= 0.5.0` long after 0.10.0 broke it, and because a published release's
+metadata is immutable, correcting that meant re-publishing nine packages rather than
+editing nine lines. The derived value cannot go stale that way: it is whatever runtime
+just built and tested the thing being published.
+
+A declared constraint is returned untouched; nil derives `\">= \"` plus `(system/brood-version)`.
+
+    (package-publish/publish-brood-constraint \">= 0.9\") ;=> \">= 0.9\""
+  (or declared (str ">= " (system/brood-version))))
+
+(defn- report-brood-constraint (declared)
+  "Say which runtime constraint this release will carry, and where it came from. A derived
+floor is a decision made on the publisher's behalf, and one made silently is one nobody
+notices is wrong."
+  (if declared
+    (io/puts (str "package: requires brood " declared " (declared in project.blsp)"))
+    (io/puts (str "package: requires brood >= "
+               (system/brood-version)
+               " (derived — this is the brood that built and tested it; declare :brood in "
+               "project.blsp to widen it)"))))
+
+(defn- registry-publish-metadata (checksum source-url signature pubkey)
+  "The publish metadata envelope, base64-encoded for the `X-Brood-Publish` header. The
+tarball is NOT in here — for a hosted publish it rides as the raw request body, so neither
+client nor server builds a base64/JSON copy of the whole upload (streaming publish;
+docs/design.md in hive). For an EXTERNAL publish there is no body and `source-url` names where
+the bytes live (ADR-211); pass nil for a hosted publish. When the release is signed, `signature`
++ `pubkey` (hex) travel here too (ADR-212); pass nil for both when unsigned."
+  (let (meta {:name project/*name*
+              :version project/*version*
+              :description (or project/*description* "")
+              ;; the runtime-version constraint this release needs (ADR-209): the registry
+              ;; stores it per release so the RESOLVER can exclude a release the running
+              ;; brood can't satisfy, instead of it only being caught at setup on the root.
+              :brood (publish-brood-constraint project/*brood*)
+              :dependencies (registry-publishable-deps)
+              ;; what this package plugs into (Debian's `Enhances:`) — the registry stores it
+              ;; and can filter on its names, without knowing what any of them are
+              :enhances (registry-publishable-enhances)
+              ;; the package's kind — "app" or "library" (the default) — so the registry can
+              ;; list applications apart from the libraries everything depends on
+              :kind (->string project/*kind*)
+              :checksum checksum}
+        with-source (if (and source-url (not (= source-url "")))
+                      (assoc meta :source_url source-url)
+                      meta)
+        with-sig (if (and signature pubkey)
+                   (assoc with-source :signature signature :pubkey pubkey)
+                   with-source))
+    (encoding/base64-encode (json/encode with-sig))))
+
+(defn publish (& opts)
+  "Publish the current project's release to the registry. Two shapes, chosen by `opts` (a
+plist): with no `:source-url`, build a source tarball and POST it (with its sha256) — the
+registry hosts the bytes. With `:source-url URL`, publish an EXTERNAL release — fetch the URL
+once (to hash its bytes into the checksum and prove it is reachable), then POST metadata only;
+the registry records the URL and every downloader verifies the bytes it fetches from there
+(ADR-211). `:index` overrides the configured `:registry` base URL. Auth: a Bearer token
+($HIVE_TOKEN or the `:package/registry-token` config). Releases are immutable — a version already
+published is refused. Backs `nest publish`.
+
+    (package-publish/publish :index \"https://hive.example.org\")   ;~> the release posted; raises when the version is already published"
+  (let (index (plist-get opts :index)
+        source-url (plist-get opts :source-url))
+    (package/package-in-project (fn (root)
+                                  (let (base (package/registry-base-for index)
+                                        token (package/registry-token))
+                                    (when (nil? project/*name*)
+                                      (error "package: project has no :name"))
+                                    (when (reflect/reserved-package-name? project/*name*)
+                                      (error "package: cannot publish — the project name '"
+                                        project/*name*
+                                        "' is reserved by the standard library (it owns the '"
+                                        project/*name* "' module namespace); rename the project"))
+                                    (when (nil? project/*version*)
+                                      (error "package: nothing to publish — the project has no :version"))
+                                    (when (or (nil? token) (= token ""))
+                                      (error "package: publishing needs an auth token — set $HIVE_TOKEN (or :package/registry-token in your config)"))
+                                    (if (and source-url (not (= source-url "")))
+                                      (registry-publish-external base token source-url)
+                                      (registry-publish-hosted root base token)))))))
+
+(defn- registry-publish-hosted (root base token)
+  (let (archive (registry-build-tarball root)
+        bytes (file/slurp-bytes archive)
+        checksum (hash/sha256-bytes bytes)
+        sig (package-sign-checksum checksum))
+    (file/rm archive)
+    (report-brood-constraint project/*brood*)
+    (io/puts (str "package: publishing "
+               project/*name*
+               " "
+               project/*version*
+               " to "
+               base
+               (if sig " (signed)" "")
+               " …"))
+    (registry-post-publish base
+      token
+      bytes
+      (registry-publish-metadata checksum nil (and sig (first sig)) (and sig (second sig))))))
+
+(defn- registry-publish-external (base token source-url)
+  ;; Fetch the external tarball ONCE — to hash its bytes into the checksum and prove the URL
+  ;; is reachable now — then POST metadata only; no bytes cross to the registry.
+  (let (bytes (package/package-fetch-bytes source-url)
+        checksum (hash/sha256-bytes bytes)
+        sig (package-sign-checksum checksum))
+    (report-brood-constraint project/*brood*)
+    (io/puts (str "package: publishing "
+               project/*name*
+               " "
+               project/*version*
+               " to "
+               base
+               " (external source "
+               source-url
+               ")"
+               (if sig " (signed)" "")
+               " …"))
+    (registry-post-publish base
+      token
+      #b""
+      (registry-publish-metadata checksum source-url (and sig (first sig)) (and sig (second sig))))))
+
+(defn- registry-post-publish (base token body meta-header)
+  (let (resp (http/post (str base "/api/v1/publish")
+               body
+               {:headers {"Content-Type" "application/gzip"
+                          "X-Brood-Publish" meta-header
+                          "Authorization" (str "Bearer " token)}})
+        status (if (failure? resp) 0 (get resp :status)))
+    (cond
+      (failure? resp)
+        (error "package: cannot reach the registry at " base ": " (error-message resp))
+      (and (>= status 200) (< status 300))
+        (io/puts (str "package: published " project/*name* " " project/*version* "."))
+      else (error "package: publish failed (HTTP " status "): " (package/registry-error-text resp)))))
+
+(defn- semver-bump (current level)
+  (let (segments (map (string/split current ".") string/->number)
+        bad (fn ()
+              (error "semver-bump: malformed version " current " (expected MAJOR.MINOR.PATCH)"))
+        ;; `number?`, not `or`: a non-numeric segment parses to a FAILURE, which is
+        ;; truthy (ADR-310), so `or` would hand it on to `inc` instead of reaching
+        ;; `bad`. One test covers both a missing segment (nil) and an unparseable one.
+        segment (fn (index) (let (parsed (nth segments index)) (if (number? parsed) parsed (bad))))
+        major (segment 0)
+        minor (segment 1)
+        patch (segment 2))
+    (cond
+      (= level "major") (str (inc major) ".0.0")
+      (= level "minor") (str major "." (inc minor) ".0")
+      else (str major "." minor "." (inc patch)))))
+
+(defn- package-manifest-bump-version (src level)
+  "`[new-version new-src]`: manifest `src` with the `(project …)` form's OWN top-level
+`:version` bumped by `level` — located in the CST, so a dependency's `:version` is never
+the one touched, wherever it appears."
+  (let (new-src (package-manifest/package-manifest-transform src
+                  (fn (project-node)
+                    (let (children (vec->list (node-children project-node))
+                          index (package-manifest/package-keyword-value-index children ":version"))
+                      (when (nil? index) (error "package: no :version in project.blsp"))
+                      [:list
+                        (apply vector
+                          (package-manifest/package-list-update children
+                            index
+                            (fn (node)
+                              (let (version (semver-bump (reflect/read-first (node-text node))
+                                              level))
+                                [:str (package/package-str-lit version)]))))]))))
+    [(plist-get (rest (reflect/read-first new-src)) :version) new-src]))
+
+(defn bump-version (root level)
+  "Bump the project's OWN `:version` in `root`'s project.blsp — the `(project …)` form's
+top-level key, never a dependency's `:version`. `level` is \"patch\" (default), \"minor\", or
+\"major\". Returns the new version string.
+
+    (package-publish/bump-version \"/path/to/proj\" \"minor\")   ;~> \"0.2.0\" — from \"0.1.3\""
+  (let (manifest (path/join root "project.blsp")
+        [version new-src] (package-manifest-bump-version (file/slurp manifest) (or level "patch")))
+    (file/spit manifest new-src)
+    version))
+
+(defn- package-git-or-error (root step & git-args)
+  "Run `git -C root git-args…`, raising with git's own output when it fails."
+  (let (result (os/cmd "git" (append (list "-C" root) git-args)))
+    (when (not (= (get result :exit) 0))
+      (error "package: "
+        step
+        " failed (git exit "
+        (get result :exit)
+        "): "
+        (string/trim (str (get result :stderr) (get result :stdout)))))))
+
+(defn release (level & opts)
+  "`nest publish --bump LEVEL`: bump the project's own version, commit the bump, then publish.
+Stops with an error — publishing nothing — when the bump cannot be committed.
+
+    (package-publish/release \"patch\")   ;~> the bump committed, then the release published"
+  (package-release-in (project/require-root "package")
+    level
+    (fn () (apply publish opts))))
+
+(defn- package-release-in (root level publish-thunk)
+  (let (version (bump-version root level))
+    (package-git-or-error root "git add" "add" "project.blsp")
+    ;; A failed commit leaves the bumped project.blsp in the tree for the user to commit
+    ;; or revert; nothing is published.
+    (package-git-or-error root "git commit" "commit" "-q" "-m" (str "release: v" version))
+    (io/puts "package: bumped to v" version)
+    (publish-thunk)))

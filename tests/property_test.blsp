@@ -127,11 +127,13 @@
                   {:seed 7})))
       (assert= (run) (run))))
 
-  (test "the reported seed replays the failing trial as trial 1"
+  (test "the reported seed and size replay the failing trial as trial 1"
     (let (generator (property/vector-of (property/int 0 100))
           predicate (fn (xs) (not (includes? xs 42)))
           first-run (failing generator predicate {:trials 1000})
-          replayed (property/check generator predicate {:trials 1 :seed (get first-run :seed)}))
+          replayed (property/check generator
+                     predicate
+                     {:trials 1 :seed (get first-run :seed) :size (get first-run :size)}))
       (assert= 1 (get replayed :trial))
       (assert= (get first-run :original) (get replayed :original))
       (assert= (get first-run :value) (get replayed :value))))
@@ -162,3 +164,64 @@
           text (pr-str caught))
       (is (includes? text "raised: assert: (assert= (< n 30) true)"))
       (is (not (includes? text "raised: (:%test-fail"))))))
+
+(describe "edge bias finds edge values in a few trials"
+  ;; Each property fails on one edge value only; a uniform draw would find it by luck. The
+  ;; trial counts are small, and every seed of several finds it.
+  (test "zero in a wide range across it"
+    (map [1 2 3 4 5]
+      (fn (seed)
+        (let (result (failing (property/int -1000000 1000000)
+                       (fn (x) (not (= x 0)))
+                       {:trials 100 :seed seed}))
+          (assert= 0 (get result :value))))))
+
+  (test "the low and high ends of a range"
+    (map [1 2 3 4 5]
+      (fn (seed)
+        (assert= 1000000
+          (get (failing (property/int 0 1000000) (fn (x) (< x 1000000)) {:trials 200 :seed seed})
+            :value))
+        (assert= -1000000
+          (get (failing (property/int -1000000 1000000)
+                 (fn (x) (> x -1000000))
+                 {:trials 200 :seed seed})
+            :value)))))
+
+  (test "minus one, the empty vector and the one-element vector"
+    (map [1 2 3]
+      (fn (seed)
+        (assert= -1
+          (get (failing (property/int -1000000 1000000)
+                 (fn (x) (not (= x -1)))
+                 {:trials 600 :seed seed})
+            :value))
+        (assert= []
+          (get (failing (property/vector-of (property/int 0 9) {:average 50})
+                 (fn (xs) (not (empty? xs)))
+                 {:trials 30 :seed seed})
+            :value))
+        (assert= 1
+          (count (get (failing (property/vector-of (property/int 0 9) {:min 1 :average 50})
+                        (fn (xs) (> (count xs) 1))
+                        {:trials 30 :seed seed})
+                   :value))))))
+
+  (test "boundary characters: newline, NUL, either side of the surrogates, the last astral"
+    (map [["\n" 200] ["\u{0}" 3000] ["\u{d7ff}" 5000] ["\u{e000}" 5000] ["\u{10ffff}" 5000]]
+      (fn ([edge trials])
+        (let (result (failing (property/character) (fn (c) (not (= c edge))) {:trials trials}))
+          (assert= edge (get result :value))))))
+
+  (test "early trials draw small collections, later ones larger"
+    (let (lengths (fn (from-trial)
+                    (fold (range 0 40)
+                      0
+                      (fn (total seed)
+                        (+ total
+                          (count (get (property/check (property/vector-of (property/int 0 9)
+                                                        {:average 40})
+                                        (fn (_) false)
+                                        {:trials 1 :seed seed :size from-trial})
+                                   :original)))))))
+      (is (< (lengths 0.05) (lengths 1.0))))))
