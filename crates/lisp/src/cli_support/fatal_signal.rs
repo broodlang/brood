@@ -276,6 +276,8 @@ mod windows {
         }
         // SAFETY: `previous` is the filter `SetUnhandledExceptionFilter` returned, as an address.
         let previous: Filter = unsafe { std::mem::transmute::<usize, Filter>(previous) };
+        // SAFETY: the previous filter is a live function of the filter signature (filters
+        // are never unloaded), handed the same exception pointers the system gave us.
         unsafe { previous(info) }
     }
 
@@ -454,6 +456,7 @@ mod unix {
     // SAFETY: `libc::sigaction` is plain data (a handler address, a mask, flags); it is
     // written before the `Prepared` is published and only read after.
     unsafe impl Sync for Prepared {}
+    // SAFETY: as for `Sync` — every field is owned plain data with no thread affinity.
     unsafe impl Send for Prepared {}
 
     /// The prepared record, published once built. Replaced (the old one leaked, a few hundred
@@ -522,8 +525,11 @@ mod unix {
         let prior = match earlier {
             Some(earlier) => earlier.prior,
             None => {
+                // SAFETY: `sigaction` is plain data, so all-zero is a valid value.
                 let mut prior: [libc::sigaction; FATAL.len()] = unsafe { std::mem::zeroed() };
                 for (slot, signal) in prior.iter_mut().zip(FATAL) {
+                    // SAFETY: a null new action only reads the current one into `slot`, a
+                    // live, writable `sigaction`.
                     unsafe { libc::sigaction(signal, std::ptr::null(), slot) };
                 }
                 prior
@@ -602,7 +608,9 @@ mod unix {
         record.push(signal_name(signal));
         record.push(b"\" :signo ");
         record.push_int(signal as i128);
+        // SAFETY: `timespec` is plain data, so all-zero is a valid value.
         let mut now: libc::timespec = unsafe { std::mem::zeroed() };
+        // SAFETY: async-signal-safe; writes one `timespec` through a live pointer.
         unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
         record.push(b" :time ");
         record.push_int(now.tv_sec as i128 * 1000 + now.tv_nsec as i128 / 1_000_000);
@@ -610,6 +618,9 @@ mod unix {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             let mut name = [0u8; 16];
+            // SAFETY: PR_GET_NAME writes at most 16 bytes (NUL included) into `name`, which
+            // has 16. `prctl` is a plain syscall, not on the POSIX async-signal-safe list but
+            // takes no locks and allocates nothing.
             if unsafe { libc::prctl(libc::PR_GET_NAME, name.as_mut_ptr()) } == 0 {
                 record.push(b" :thread \"");
                 for &byte in name.iter().take_while(|&&byte| byte != 0) {
@@ -624,13 +635,19 @@ mod unix {
                 record.push(b"\"");
             }
             // the faulting address, which only a fault (si_code > 0) has
+            // SAFETY: non-null `info` is the `siginfo_t` the kernel handed an SA_SIGINFO
+            // handler, live for the handler's run.
             if !info.is_null() && unsafe { (*info).si_code } > 0 {
                 record.push(b" :address ");
+                // SAFETY: as above; a positive `si_code` is a fault, whose union holds the
+                // faulting address.
                 record.push_int(unsafe { (*info).si_addr() } as usize as i128);
             }
         }
         if !info.is_null() {
             record.push(b" :code ");
+            // SAFETY: non-null `info` is the kernel's `siginfo_t`, live for the handler's run;
+            // `si_code` is outside the union.
             record.push_int(unsafe { (*info).si_code } as i128);
         }
         let len = PANIC_NOTE_LEN.load(Ordering::SeqCst);
@@ -656,6 +673,7 @@ mod unix {
     /// Write `bytes` to `fd` whole, retrying a short write. Async-signal-safe.
     unsafe fn write_all(fd: libc::c_int, mut bytes: &[u8]) {
         while !bytes.is_empty() {
+            // SAFETY: async-signal-safe; the pointer and length are those of the live slice.
             let wrote = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
             if wrote <= 0 {
                 return;
@@ -670,11 +688,17 @@ mod unix {
     unsafe fn write_crash_file(crash_file: &super::CrashFile, signal: libc::c_int) {
         // written piece by piece, no second record buffer: the record's is still on this
         // stack, the alternate signal stack, which has only a few kilobytes
+        // SAFETY: `timespec` is plain data, so all-zero is a valid value.
         let mut now: libc::timespec = unsafe { std::mem::zeroed() };
+        // SAFETY: async-signal-safe; writes one `timespec` through a live pointer.
         unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
         let time = now.tv_sec as i128 * 1000 + now.tv_nsec as i128 / 1_000_000;
+        // SAFETY: `getpid` has no preconditions and is async-signal-safe.
         let pid = unsafe { libc::getpid() } as i128;
         let mut digits = [0u8; 40];
+        // SAFETY: only async-signal-safe calls (`mkdir`, `open`, `write`, `close`) over
+        // NUL-terminated paths built ahead of time by `with_crash_file`, and the descriptor
+        // `open` returned, checked before use and closed once.
         unsafe {
             for dir in &crash_file.mkdirs {
                 libc::mkdir(dir.as_ptr(), 0o700);

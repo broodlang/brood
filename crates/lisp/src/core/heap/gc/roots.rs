@@ -54,6 +54,9 @@ impl Heap {
     /// answer the tests catch — instead of as garbage with a valid-looking tag.
     #[cfg(feature = "jit")]
     pub(crate) unsafe fn push_roots_room(&mut self, n: usize) -> *mut Value {
+        // SAFETY: `reserve(n)` makes `old + n` slots in bounds for `add` and `set_len`. In
+        // release the new slots stay uninitialised; the caller's `# Safety` contract (store
+        // all `n` before anything allocates, collects or reads `roots`) makes that sound.
         unsafe {
             let old = self.roots.len();
             self.roots.reserve(n);

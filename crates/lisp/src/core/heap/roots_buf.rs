@@ -213,6 +213,8 @@ mod tests {
         assert!(matches!(b[9], Value::Int(9)));
         // reserve + set_len mirrors extend_roots_to_nil's raw pattern
         b.reserve(20);
+        // SAFETY: `reserve(20)` at length 10 makes capacity at least 30, so slots 10..30 are
+        // in bounds; all-zero bytes are a valid `Value` (`Nil`), so all 30 are initialised.
         unsafe {
             std::ptr::write_bytes(b.as_mut_ptr().add(10), 0, 20);
             b.set_len(30);

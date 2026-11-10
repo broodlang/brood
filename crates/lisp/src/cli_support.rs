@@ -494,7 +494,9 @@ pub fn arm_requested_test_run() -> bool {
 /// The run holds a lock in its scratch home for as long as it lives; earlier runs' homes
 /// whose lock is free — their run is gone — are purged first (ADR-608).
 pub fn arm_test_run(keep_home: bool) {
-    // SAFETY (all set_var below): called before any interpreter is created.
+    // SAFETY: called before any interpreter is created, so no runtime thread exists to read
+    // the environment concurrently. Unchecked: it relies on every caller (the binaries'
+    // `main`, the suite's test) calling it before starting threads of its own.
     unsafe { std::env::set_var("BROOD_TEST_RUN", "1") };
     let keep = keep_home || std::env::var_os("BROOD_TEST_HOME").is_some_and(|v| v == "keep");
     if keep {
@@ -539,6 +541,8 @@ pub fn arm_test_run(keep_home: bool) {
                 })
                 .map(|home| std::path::PathBuf::from(home).join(".config"))
         });
+    // SAFETY: as the `set_var` at the top: still before any interpreter or runtime thread
+    // exists.
     unsafe {
         if let Some(real) = real_config {
             std::env::set_var("BROOD_USER_CONFIG_HOME", real);

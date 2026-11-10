@@ -25,6 +25,26 @@
 //! scalars in registers with no stack map — the single hardest part of JIT-ing under a
 //! moving collector, sidestepped (ADR-101 §6.2). That is **obligation 5**, and it is the
 //! reason this table is the whole heap interface rather than a convenience.
+//!
+//! ## The safety contract every callback shares
+//!
+//! Every `brood_rt_*` function is called only by native code a backend emitted under the
+//! obligations in [`super::backend`], and the `// SAFETY:` comments below cite these facts
+//! by name rather than restating them:
+//!
+//! - **heap** — `heap` is the pinned context pointer of the activation: the running
+//!   process's own live `Heap`, used by this thread alone for the whole call, with no other
+//!   Rust reference to it live across the callback.
+//! - **out** — an `out` (or `out_len` / `out_flag`) pointer is a writable, aligned slot the
+//!   emitting arm owns (its stack slot or a `roots` slot), large enough for the type written.
+//! - **words** — every word triple is the three words of a real `Value`, read by native code
+//!   out of a frame slot, a constant or a previous callback's `out`, so
+//!   [`Value::from_raw_words`](crate::core::value::Value::from_raw_words) rebuilds a valid
+//!   enum.
+//! - **ctx** — `ctx` points at the `JitCallCtx` the running arm was entered with, which its
+//!   caller keeps alive across the call.
+//! - **no collection** — a callback that is not a safepoint allocates only by growing a slab
+//!   (`alloc_slot!`), never collects, so the handles it was handed stay valid for the call.
 
 use crate::core::heap::{FastLink, Heap};
 
@@ -54,6 +74,8 @@ pub unsafe extern "C" fn brood_rt_tick_n(
     n: i64,
     ctx: *const crate::jit::JitCallCtx,
 ) -> u8 {
+    // SAFETY: `heap` is the live process heap and is only read here (contract: heap); `ctx`
+    // is the running activation's context (contract: ctx).
     unsafe {
         match crate::core::alloc::soft_limit_state() {
             crate::core::alloc::SoftLimit::Clear => {}
@@ -111,6 +133,8 @@ fn sample_native_activation(ctx: &crate::jit::JitCallCtx) {
 /// live `Value`s outside `Heap::roots` (the no-stack-map invariant, ADR-101 §6.2).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_gc_safepoint(heap: *mut Heap) {
+    // SAFETY: `heap` is the live, exclusively used process heap (contract: heap), and the
+    // caller holds every live `Value` in `roots`, so collecting here leaves nothing stale.
     unsafe {
         #[cfg(debug_assertions)]
         if crate::diagnostics::debug_flags::jit_callback_trace() {
@@ -135,6 +159,8 @@ pub unsafe extern "C" fn brood_rt_gc_safepoint(heap: *mut Heap) {
 // can't go stale mid-`cons`; no `roots` is touched, so `roots_base` stays valid.
 #[inline]
 unsafe fn words_to_val(w0: i64, w1: i64, w2: i64) -> crate::core::value::Value {
+    // SAFETY: every caller passes the words of a real `Value` (contract: words), which is
+    // exactly what `from_raw_words` requires.
     unsafe { crate::core::value::Value::from_raw_words([w0, w1, w2]) }
 }
 
@@ -163,6 +189,8 @@ unsafe fn answer_or_park(
     out: *mut crate::core::value::Value,
     result: crate::error::LispResult,
 ) -> i64 {
+    // SAFETY: the caller passes a writable `Value` slot as `out` (this fn's `# Safety`);
+    // `Value` is `Copy`, so the store drops nothing that was there.
     unsafe {
         match result {
             Ok(value) => {
@@ -189,6 +217,8 @@ unsafe fn unary_fallback(
     words: [i64; 3],
     without_eval: fn(&mut Heap, crate::core::value::Value) -> Option<crate::error::LispResult>,
 ) -> i64 {
+    // SAFETY: the callers forward their own contract: `heap` live (contract: heap), `out`
+    // writable (contract: out), `words` from a real `Value` (contract: words).
     unsafe {
         let h = &mut *heap;
         match without_eval(h, words_to_val(words[0], words[1], words[2])) {
@@ -213,6 +243,8 @@ pub unsafe extern "C" fn brood_rt_cons(
     d1: i64,
     d2: i64,
 ) {
+    // SAFETY: contracts heap, out and words; `alloc_pair` never collects (contract: no
+    // collection), so the rebuilt operands cannot go stale before they are stored.
     unsafe {
         let h = &mut *heap;
         let car = words_to_val(c0, c1, c2);
@@ -237,6 +269,8 @@ pub unsafe extern "C" fn brood_rt_vec2_room(
     heap: *mut Heap,
     out: *mut crate::core::value::Value,
 ) -> *mut crate::core::value::Value {
+    // SAFETY: contracts heap and out. The returned element pointer is only sound if the
+    // emitting arm fills both elements before anything allocates (`alloc_vector2_room`'s doc).
     unsafe {
         let (handle, items) = (*heap).alloc_vector2_room();
         *out = handle;
@@ -264,6 +298,9 @@ pub unsafe extern "C" fn brood_rt_make_vector_n(
     elems: *const crate::core::value::Value,
     n: i64,
 ) {
+    // SAFETY: contracts heap and out; for `n > 0`, `elems` points at `n` initialised, aligned
+    // `Value`s in the arm's stack slot (this fn's `# Safety`), and `alloc_vector_from_slice`
+    // never collects, so those values stay valid while they are copied.
     unsafe {
         let h = &mut *heap;
         // Read in place: a one-element literal is stored inline with no `Vec`, a longer
@@ -294,6 +331,8 @@ pub unsafe extern "C" fn brood_rt_make_map_n(
     elems: *const crate::core::value::Value,
     npairs: i64,
 ) {
+    // SAFETY: contracts heap and out; for `npairs > 0`, `elems` points at `2 * npairs`
+    // initialised, aligned `Value`s (this fn's `# Safety`); the map build never collects.
     unsafe {
         let h = &mut *heap;
         // The pairs are read straight out of the staged buffer (the JIT's stack slot, not
@@ -327,6 +366,8 @@ pub unsafe extern "C" fn brood_rt_car(
     w1: i64,
     w2: i64,
 ) {
+    // SAFETY: contracts heap, out and words; a non-pair operand yields `nil`, so the handle
+    // passed to `pair` is always a real pair id.
     unsafe {
         let h = &mut *heap;
         *out = match words_to_val(w0, w1, w2) {
@@ -353,6 +394,8 @@ pub unsafe extern "C" fn brood_rt_first(
     w1: i64,
     w2: i64,
 ) -> i64 {
+    // SAFETY: `unary_fallback`'s requirements are this callback's own: contracts heap, out
+    // and words.
     unsafe { unary_fallback(heap, out, [w0, w1, w2], crate::builtins::first_without_eval) }
 }
 
@@ -368,6 +411,8 @@ pub unsafe extern "C" fn brood_rt_rest(
     w1: i64,
     w2: i64,
 ) -> i64 {
+    // SAFETY: `unary_fallback`'s requirements are this callback's own: contracts heap, out
+    // and words.
     unsafe { unary_fallback(heap, out, [w0, w1, w2], crate::builtins::rest_without_eval) }
 }
 
@@ -388,6 +433,8 @@ pub unsafe extern "C" fn brood_rt_is_empty(
     w1: i64,
     w2: i64,
 ) -> i64 {
+    // SAFETY: `unary_fallback`'s requirements are this callback's own: contracts heap, out
+    // and words.
     unsafe {
         unary_fallback(
             heap,
@@ -407,6 +454,7 @@ pub unsafe extern "C" fn brood_rt_is_empty(
 /// `heap` must be the live context pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_pair_nursery_base(heap: *mut Heap) -> *const u8 {
+    // SAFETY: `heap` is the live process heap (contract: heap); the read only takes an address.
     unsafe { (*heap).local_pair_nursery_base() }
 }
 
@@ -417,6 +465,7 @@ pub unsafe extern "C" fn brood_rt_pair_nursery_base(heap: *mut Heap) -> *const u
 /// `heap` must be the live context pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_pair_old_base(heap: *mut Heap) -> *const u8 {
+    // SAFETY: `heap` is the live process heap (contract: heap); the read only takes an address.
     unsafe { (*heap).local_pair_old_base() }
 }
 
@@ -428,6 +477,7 @@ pub unsafe extern "C" fn brood_rt_pair_old_base(heap: *mut Heap) -> *const u8 {
 /// `heap` must be the live context pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_vec_nursery_base(heap: *mut Heap) -> *const u8 {
+    // SAFETY: `heap` is the live process heap (contract: heap); the read only takes an address.
     unsafe { (*heap).local_vec_nursery_base() }
 }
 
@@ -438,6 +488,7 @@ pub unsafe extern "C" fn brood_rt_vec_nursery_base(heap: *mut Heap) -> *const u8
 /// `heap` must be the live context pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_vec_old_base(heap: *mut Heap) -> *const u8 {
+    // SAFETY: `heap` is the live process heap (contract: heap); the read only takes an address.
     unsafe { (*heap).local_vec_old_base() }
 }
 
@@ -453,6 +504,8 @@ pub unsafe extern "C" fn brood_rt_cdr(
     w1: i64,
     w2: i64,
 ) {
+    // SAFETY: contracts heap, out and words; a non-pair operand yields `nil`, so the handle
+    // passed to `pair` is always a real pair id.
     unsafe {
         let h = &mut *heap;
         *out = match words_to_val(w0, w1, w2) {
@@ -482,6 +535,8 @@ pub unsafe extern "C" fn brood_rt_vector_ref(
     i1: i64,
     i2: i64,
 ) -> i64 {
+    // SAFETY: contracts heap, out and words; the index is bounds-checked against the vector's
+    // length before the element is read.
     unsafe {
         use crate::core::value::Value;
         let h = &mut *heap;
@@ -509,6 +564,7 @@ pub unsafe extern "C" fn brood_rt_vector_ref(
 /// `heap` live; the word triple is a real `Value`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_vector_len(heap: *mut Heap, v0: i64, v1: i64, v2: i64) -> i64 {
+    // SAFETY: contracts heap and words; the heap is only read.
     unsafe {
         use crate::core::value::Value;
         match words_to_val(v0, v1, v2) {
@@ -527,6 +583,7 @@ pub unsafe extern "C" fn brood_rt_vector_len(heap: *mut Heap, v0: i64, v1: i64, 
 /// `heap` live; the word triple is a real `Value`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_count(heap: *mut Heap, v0: i64, v1: i64, v2: i64) -> i64 {
+    // SAFETY: contracts heap and words; the heap is only read.
     unsafe { (*heap).count_inline(words_to_val(v0, v1, v2)).unwrap_or(-1) }
 }
 
@@ -549,6 +606,7 @@ pub unsafe extern "C" fn brood_rt_table_has(
     k1: i64,
     k2: i64,
 ) -> i64 {
+    // SAFETY: contracts heap, out and words; the table lookup never collects.
     unsafe {
         use crate::core::value::Value;
         let h = &mut *heap;
@@ -582,6 +640,8 @@ pub unsafe extern "C" fn brood_rt_table_get2(
     k1: i64,
     k2: i64,
 ) -> i64 {
+    // SAFETY: contracts heap, out and words; rebuilding the stored value allocates but never
+    // collects (contract: no collection).
     unsafe {
         use crate::core::value::Value;
         let h = &mut *heap;
@@ -617,6 +677,8 @@ pub unsafe extern "C" fn brood_rt_table_put(
     v1: i64,
     v2: i64,
 ) -> i64 {
+    // SAFETY: contracts heap, out and words; storing deep-clones out of the heap and never
+    // collects (contract: no collection).
     unsafe {
         use crate::core::value::Value;
         let h = &mut *heap;
@@ -657,6 +719,9 @@ pub unsafe extern "C" fn brood_rt_vector_base(
     w2: i64,
     out_len: *mut i64,
 ) -> *const u8 {
+    // SAFETY: contracts heap, words and out (`out_len`). The returned pointer outlives this
+    // borrow of the heap; it stays valid only because the JIT hoists it solely in arms that
+    // neither allocate nor call (see the doc above), so nothing can move the storage.
     unsafe {
         use crate::core::value::Value;
         let h = &mut *heap;
@@ -692,6 +757,8 @@ pub unsafe extern "C" fn brood_rt_table_dense_base(
     w2: i64,
     out_flag: *mut i64,
 ) -> *const u8 {
+    // SAFETY: contracts words and out (`out_flag`); the heap is not touched. The returned
+    // region is process-lifetime and never moves (`table::jit_dense_base`).
     unsafe {
         use crate::core::value::Value;
         if let Value::Table(id) = words_to_val(w0, w1, w2)
@@ -726,6 +793,7 @@ pub unsafe extern "C" fn brood_rt_vector_ref3(
     d1: i64,
     d2: i64,
 ) -> i64 {
+    // SAFETY: contracts heap, out and words; the heap is only read.
     unsafe {
         let h = &*heap;
         match h.nth3_inline(
@@ -763,6 +831,7 @@ pub unsafe extern "C" fn brood_rt_map_get3(
     d1: i64,
     d2: i64,
 ) -> i64 {
+    // SAFETY: contracts heap, out and words; a CHAMP probe allocates nothing.
     unsafe {
         let h = &mut *heap;
         match h.map_get3_inline(
@@ -802,6 +871,8 @@ pub unsafe extern "C" fn brood_rt_map_assoc(
     v1: i64,
     v2: i64,
 ) -> i64 {
+    // SAFETY: contracts heap, out and words; the path copy allocates but never collects
+    // (contract: no collection), so the operands stay valid.
     unsafe {
         let h = &mut *heap;
         match h.map_assoc_inline(
@@ -841,6 +912,7 @@ pub unsafe extern "C" fn brood_rt_map_get(
     k1: i64,
     k2: i64,
 ) -> i64 {
+    // SAFETY: contracts heap, out and words; a CHAMP probe allocates nothing.
     unsafe {
         let h = &mut *heap;
         match h.map_get_inline(words_to_val(m0, m1, m2), words_to_val(k0, k1, k2)) {
@@ -875,6 +947,7 @@ pub unsafe extern "C" fn brood_rt_equal(
     b1: i64,
     b2: i64,
 ) -> i64 {
+    // SAFETY: contracts heap and words; the heap is only read.
     unsafe {
         use crate::core::value::Value;
         let h = &*heap;
@@ -897,6 +970,7 @@ pub unsafe extern "C" fn brood_rt_equal(
 /// `heap` must be live; the returned pointer is valid for the process lifetime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_global_epoch_ptr(heap: *mut Heap) -> *const u64 {
+    // SAFETY: `heap` is the live process heap (contract: heap); the read only takes an address.
     unsafe { (*heap).global_epoch_ptr() }
 }
 
@@ -911,6 +985,8 @@ pub unsafe extern "C" fn brood_rt_global_epoch_ptr(heap: *mut Heap) -> *const u6
 /// `heap` must be live; the returned pointer is valid for the arm's duration.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_i64_overflow_ptr(heap: *mut Heap) -> *mut u8 {
+    // SAFETY: `heap` is the live process heap (contract: heap); this only takes the field's
+    // address. Native code storing through it must write 0 or 1, the only valid `bool` bytes.
     unsafe { &mut (*heap).jit_i64_overflow as *mut bool as *mut u8 }
 }
 
@@ -927,6 +1003,8 @@ pub unsafe extern "C" fn brood_rt_push_room(
     heap: *mut Heap,
     n: i64,
 ) -> *mut crate::core::value::Value {
+    // SAFETY: contract heap. The returned slots hold no real `Value` until the emitting arm
+    // stores into them, which it does before anything allocates (`push_roots_room`'s doc).
     unsafe { (*heap).push_roots_room(n as usize) }
 }
 
@@ -943,6 +1021,8 @@ pub unsafe extern "C" fn brood_rt_in_call_journal(
     heap: *mut Heap,
     packed: i64,
 ) -> *mut crate::core::value::Value {
+    // SAFETY: contract heap; on a non-null return the caller fills the room before anything
+    // allocates, as for `brood_rt_push_room`.
     unsafe {
         crate::eval::compile::begin_in_call_journal(
             &mut *heap,
@@ -951,6 +1031,11 @@ pub unsafe extern "C" fn brood_rt_in_call_journal(
         )
     }
 }
+
+/// How many builtin arguments are copied inline before spilling to a `Vec`. Covers every
+/// arity the JIT's native flat-cell path sees in practice; the spill is correctness, not a
+/// path anything hot takes.
+const INLINE_ARGV: usize = 6;
 
 /// Direct builtin call from the IR fast-link path (the native flat cell): `func`
 /// is the `NativeFnPtr` bits published by `vm_fast_link_publish_native` (arity
@@ -964,12 +1049,8 @@ pub unsafe extern "C" fn brood_rt_in_call_journal(
 ///
 /// # Safety
 /// `heap` live; `out` writable; `func` a valid `NativeFnPtr`; `args` points to
-/// `argc` valid `Value`s.
-/// How many builtin arguments are copied inline before spilling to a `Vec`. Covers every
-/// arity the JIT's native flat-cell path sees in practice; the spill is correctness, not a
-/// path anything hot takes.
-const INLINE_ARGV: usize = 6;
-
+/// `argc` valid `Value`s, which are also the top `argc` entries of `roots`; `ctx` the
+/// running activation's context.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_call_native_fl(
     heap: *mut Heap,
@@ -979,6 +1060,10 @@ pub unsafe extern "C" fn brood_rt_call_native_fl(
     argc: u32,
     ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // SAFETY: contracts heap, out and ctx. `func` is the bits of a `NativeFnPtr` published
+    // for exactly this arity, so the transmute yields a valid fn pointer; `args` points at
+    // `argc` initialised `Value`s, copied out before the builtin runs. The `roots` truncation
+    // assumes the arm also staged those `argc` arguments on `roots` (it does, see below).
     unsafe {
         // Rung A1, the hottest callback (every builtin call from native code): the env the
         // builtin receives is READ from the activation context, not stored into the heap; only
@@ -1080,6 +1165,7 @@ fn soft_limit_check(heap: &Heap) -> Result<(), crate::error::LispError> {
 /// `heap` must be the live context pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_i64_throw(heap: *mut Heap, bits: i64, is_float: i64) -> i64 {
+    // SAFETY: contract heap; the parked payload is an immediate scalar, never a heap handle.
     unsafe {
         let h = &mut *heap;
         let sym = crate::core::value::intern("throw");
@@ -1141,6 +1227,9 @@ pub unsafe extern "C" fn brood_rt_dbg_check_slot(
     w2: i64,
     abs_idx: i64,
 ) {
+    // SAFETY: contract heap, read only. The words are meant to be a real `Value` (contract:
+    // words), but this check exists for when they are not: a garbage tag makes `words_to_val`
+    // build an invalid enum before `bad_tag` is consulted.
     unsafe {
         let h = &*heap;
         let tag = (w0 as u64 & 0xff) as u8;
@@ -1180,6 +1269,8 @@ pub unsafe extern "C" fn brood_rt_const_load(
     cv: *const crate::eval::compile::ConstVal,
     out: *mut crate::core::value::Value,
 ) {
+    // SAFETY: `cv` points into the arm's chunk, kept alive by its `Arc<CompiledArm>` for as
+    // long as the native code exists (the doc above); `out` per contract out.
     unsafe {
         let v = (*cv).load();
         // DEBUG (bug #2): a ConstVal must hold a RUNTIME/PRELUDE handle or an atom — NEVER a
@@ -1232,6 +1323,7 @@ pub unsafe extern "C" fn brood_rt_global_probe(
     sym: u32,
     ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // SAFETY: contracts heap, out and ctx; the two `&mut *heap` borrows are sequential.
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_global(ctx, &mut *heap);
@@ -1265,6 +1357,7 @@ pub unsafe extern "C" fn brood_rt_global(
     sym: u32,
     ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // SAFETY: contracts heap, out and ctx; the `&mut *heap` borrows are sequential.
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_global(ctx, &mut *heap);
@@ -1304,6 +1397,7 @@ pub unsafe extern "C" fn brood_rt_global_ic(
     site: u32,
     ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // SAFETY: contracts heap, out and ctx; the `&mut *heap` borrows are sequential.
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_global(ctx, &mut *heap);
@@ -1346,6 +1440,9 @@ pub unsafe extern "C" fn brood_rt_call_slow(
     head: u32,
     ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // SAFETY: contracts heap, out and ctx; the callee and `argc` arguments are staged on
+    // `roots` (this fn's `# Safety`), and every live `Value` of the arm is there too, so the
+    // collections the nested call may run leave nothing stale.
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
@@ -1386,6 +1483,9 @@ pub unsafe extern "C" fn brood_rt_trace_push(
     heap: *mut Heap,
     arm: *const crate::eval::compile::CompiledArm,
 ) {
+    // SAFETY: contract heap; `arm` is pinned for the process lifetime by `JIT_ARM_KEEPALIVE`
+    // (this fn's `# Safety`), and it is a separate object from the heap the error is borrowed
+    // out of.
     unsafe {
         let h = &mut *heap;
         // An unbound global read raised by this arm's callback: locate it from the arm's own
@@ -1433,6 +1533,7 @@ pub unsafe extern "C" fn brood_rt_trace_push(
 /// `heap` must be a live `*mut Heap` from the JIT calling convention.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brood_rt_note_deopt(heap: *mut Heap, reason: u32) {
+    // SAFETY: `heap` is the live, exclusively used process heap (contract: heap).
     unsafe {
         (*heap).note_jit_deopt_reason(reason);
     }
@@ -1452,6 +1553,8 @@ pub unsafe extern "C" fn brood_rt_fastlink_base(
     out_len: *mut u64,
     ctx: *const crate::jit::JitCallCtx,
 ) -> *const FastLink {
+    // SAFETY: contracts heap, ctx and out (`out_len`). The returned base is valid only until
+    // the table next grows; the emitting arm re-fetches it after every Brood-to-Brood call.
     unsafe {
         // Rung A1: per call site, so it writes nothing — the block cursor is read from the
         // activation context the arm was entered with.
@@ -1486,6 +1589,9 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
     slot: *const crate::core::heap::FastLink,
     ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // SAFETY: contracts heap, out and ctx; `slot` points at a live `FastLink` the IR's guard
+    // has just validated, and nothing between that guard and the copy below can move the
+    // table. `FastLink` is `Copy`, so the `ptr::read` duplicates nothing that owns memory.
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
@@ -1535,6 +1641,7 @@ pub unsafe extern "C" fn brood_rt_xcall_latch(
     epoch: i64,
     ctx: *const crate::jit::JitCallCtx,
 ) {
+    // SAFETY: contracts heap and ctx; the `&mut *heap` borrows are sequential.
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
@@ -1569,6 +1676,8 @@ pub unsafe extern "C" fn brood_rt_xcall_cold(
     stage_base: i64,
     ctx: *const crate::jit::JitCallCtx,
 ) -> i64 {
+    // SAFETY: contracts heap, out and ctx; every access to `*heap` is a fresh, sequential
+    // borrow, none held across `jit_xcall_cold_outcome`.
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);

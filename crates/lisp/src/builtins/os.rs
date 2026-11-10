@@ -1,4 +1,5 @@
-// OS / environment / subprocess builtins — extracted from io.rs (file-organization split).
+//! OS, environment and subprocess primitives: environment variables, argv, the clock,
+//! signal and interrupt traps, running a process and halting.
 use super::args::{arg, expect_int, expect_string};
 use super::bytes::flatten_iolist;
 use crate::core::heap::Heap;
@@ -167,10 +168,13 @@ fn lookup_user_home(name: &str) -> Option<String> {
     let c_name = std::ffi::CString::new(name).ok()?;
     let mut buffer: Vec<libc::c_char> = vec![0; 1024];
     loop {
-        // SAFETY: `getpwnam_r` fills `entry` with pointers into `buffer`, which outlives
-        // every read of them below; `found` is null or `&mut entry`.
+        // SAFETY: `passwd` is plain data (integers and raw pointers), so all-zero is a
+        // valid value for `getpwnam_r` to overwrite.
         let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
         let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: `c_name` is NUL-terminated; `buffer.len()` is the length of `buffer`;
+        // `getpwnam_r` fills `entry` with pointers into `buffer`, which outlives every read
+        // of them below; `found` is null or `&mut entry`.
         let status = unsafe {
             libc::getpwnam_r(
                 c_name.as_ptr(),
@@ -765,6 +769,8 @@ pub(super) fn install_interrupt_handler(_: &[Value], _: EnvId, _: &mut Heap) -> 
         // Via an explicit fn *pointer*: casting a fn *item* straight to an integer is
         // what `function_casts_as_integer` warns about.
         let handler: extern "C" fn(libc::c_int) = brood_handle_sigint;
+        // SAFETY: the handler is a `'static` function that only does a relaxed atomic store,
+        // which is async-signal-safe.
         unsafe {
             libc::signal(libc::SIGINT, handler as usize as libc::sighandler_t);
         }
@@ -785,6 +791,7 @@ pub(super) fn install_interrupt_handler(_: &[Value], _: EnvId, _: &mut Heap) -> 
 pub(super) fn restore_interrupt_handler(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     #[cfg(unix)]
     {
+        // SAFETY: setting the default disposition installs no code of ours.
         unsafe {
             libc::signal(libc::SIGINT, libc::SIG_DFL);
         }
@@ -855,6 +862,8 @@ impl Trap {
     fn lift(&mut self, signum: libc::c_int) {
         self.subscriber = 0;
         if let Some(action) = self.prior.take() {
+            // SAFETY: `action` is the `sigaction` the kernel returned when the trap was set,
+            // so it names a disposition that was valid then; the old-action pointer is null.
             unsafe {
                 libc::sigaction(signum, &action, std::ptr::null_mut());
             }
@@ -897,6 +906,8 @@ extern "C" fn brood_forward_signal(signum: libc::c_int) {
     let fd = SIGNAL_PIPE_WRITE.load(std::sync::atomic::Ordering::Relaxed);
     if fd >= 0 {
         let byte = signum as u8;
+        // SAFETY: `write` is async-signal-safe; one byte from a live stack local. The write
+        // end is never closed once published, so `fd` is still the pipe.
         unsafe {
             libc::write(fd, &byte as *const u8 as *const libc::c_void, 1);
         }
@@ -910,10 +921,12 @@ fn start_signal_pipe() -> Result<(), String> {
     let mut fds = [0 as libc::c_int; 2];
     // `pipe` then `FD_CLOEXEC`, not `pipe2`: macOS has no `pipe2`. The window between the
     // two only lets a child spawned at that instant inherit two idle descriptors.
+    // SAFETY: `pipe` writes two descriptors into `fds`, a live array of two.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         return Err(std::io::Error::last_os_error().to_string());
     }
     for fd in fds {
+        // SAFETY: `fd` is a descriptor `pipe` just returned, owned here.
         unsafe {
             libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         }
@@ -924,6 +937,8 @@ fn start_signal_pipe() -> Result<(), String> {
     reader.run(move || {
         loop {
             let mut byte = 0u8;
+            // SAFETY: reads at most one byte into a live stack local; `read_fd` is the pipe's
+            // read end, owned by this thread and never closed.
             let read = unsafe { libc::read(read_fd, &mut byte as *mut u8 as *mut libc::c_void, 1) };
             if read < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
             {
@@ -958,6 +973,8 @@ fn start_signal_pipe() -> Result<(), String> {
                 // trapped, so a dead subscriber cannot make the runtime unkillable.
                 traps[index].lift(signum);
                 drop(traps);
+                // SAFETY: `raise` has no memory preconditions; the disposition it triggers is
+                // the prior one `lift` just restored.
                 unsafe {
                     libc::raise(signum);
                 }
@@ -1023,6 +1040,9 @@ pub(super) fn trap_signal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             trap.delivered = false;
             // Installed on every trap (something may have replaced the handler since), but
             // the disposition to restore is the one from before the FIRST trap.
+            // SAFETY: `sigaction` is plain data, so zeroed structs are valid; the handler is
+            // a `'static` function that only calls the async-signal-safe `write`; both
+            // pointers are live locals for the call.
             unsafe {
                 let handler: extern "C" fn(libc::c_int) = brood_forward_signal;
                 let mut action: libc::sigaction = std::mem::zeroed();

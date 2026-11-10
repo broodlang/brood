@@ -90,6 +90,8 @@ fn wait_exit(child: &mut Child) -> std::process::ExitStatus {
 }
 
 fn sigterm(child: &Child) {
+    // SAFETY: `kill` has no memory preconditions. Every caller signals before `wait_exit`
+    // reaps the child, so the pid is still the child's and cannot have been reused.
     unsafe {
         libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
     }
@@ -160,6 +162,8 @@ fn lifting_a_trap_gives_back_an_ignored_sighup() {
 "#;
     let (mut child, lines, path) = start_with("ignored-hangup", source, |command| {
         use std::os::unix::process::CommandExt;
+        // SAFETY: the closure runs in the forked child before exec, and calls only
+        // `signal`, which is async-signal-safe; it allocates nothing.
         unsafe {
             command.pre_exec(|| {
                 libc::signal(libc::SIGHUP, libc::SIG_IGN);
@@ -168,6 +172,8 @@ fn lifting_a_trap_gives_back_an_ignored_sighup() {
         }
     });
     wait_for(&mut child, &lines, "ready");
+    // SAFETY: `kill` has no memory preconditions; the child is not reaped until `wait_exit`
+    // below, so its pid cannot have been reused.
     unsafe {
         libc::kill(child.id() as libc::pid_t, libc::SIGHUP);
     }

@@ -93,6 +93,7 @@ pub(crate) struct AppendBuf {
 // SAFETY: see the type's doc — one heap holds the buffer, and a heap runs on one thread at a
 // time; moving the heap to another worker moves the buffer with it, never shares it.
 unsafe impl Send for AppendBuf {}
+// SAFETY: as for `Send` — no two threads ever hold a reference to the same buffer.
 unsafe impl Sync for AppendBuf {}
 
 impl AppendBuf {
@@ -150,6 +151,7 @@ impl AppendBuf {
 // by the one constructor and re-derived on clone), so it is exactly as sendable/
 // sharable as the `Vec` it caches.
 unsafe impl Send for VecStore {}
+// SAFETY: as for `Send` — the cached pointer is no more shareable than the `Vec` it points into.
 unsafe impl Sync for VecStore {}
 
 impl Clone for VecStore {
@@ -897,6 +899,8 @@ mod vecstore_layout_tests {
         };
         let base = &v as *const VecStore as usize;
         // Discriminant byte at offset 0 (repr(u8), RFC 2195).
+        // SAFETY: `v` is a live local; under `repr(u8)` its first byte is the initialised
+        // discriminant, and only that byte is read.
         let tag = unsafe { *(base as *const u8) };
         assert_eq!(tag as i64, VecStore::JIT_INLINE_TAG, "Inline discriminant");
         if let VecStore::Inline { len, items } = &v {
@@ -923,6 +927,7 @@ mod vecstore_layout_tests {
         // JIT's pointer-read path loads exactly these.
         let sp = VecStore::spill(vec![Value::int(1), Value::int(2), Value::int(3)]);
         let sbase = &sp as *const VecStore as usize;
+        // SAFETY: as for `tag` — `sp` is a live local whose first byte is the discriminant.
         let stag = unsafe { *(sbase as *const u8) };
         assert_eq!(stag as i64, VecStore::JIT_SPILL_TAG, "Spill discriminant");
         if let VecStore::Spill { ptr, len, vec } = &sp {
@@ -944,6 +949,7 @@ mod vecstore_layout_tests {
         let buf = AppendBuf::new(vec![Value::int(1), Value::int(2), Value::int(3)]);
         let sh = VecStore::shared(buf, 3);
         let hbase = &sh as *const VecStore as usize;
+        // SAFETY: as for `tag` — `sh` is a live local whose first byte is the discriminant.
         let htag = unsafe { *(hbase as *const u8) };
         assert_eq!(htag as i64, VecStore::JIT_SHARED_TAG, "Shared discriminant");
         if let VecStore::Shared { ptr, len, buf } = &sh {

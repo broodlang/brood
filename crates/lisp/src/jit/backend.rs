@@ -30,7 +30,7 @@
 //! 4. **The callback table** — [`super::rt`]'s `brood_rt_*` functions are the *only* legal
 //!    way to touch the heap, the GC, the globals, or the scheduler. A backend that reaches
 //!    around them is unsound, not merely unidiomatic.
-//! 5. **Roots-only value discipline** — a `Value` is a 16-byte enum and never rides in a
+//! 5. **Roots-only value discipline** — a `Value` is a 24-byte enum and never rides in a
 //!    register (`docs/value-repr.md`). Live `Value`s stay in `Heap::roots`; only *unboxed*
 //!    `i64`/`f64` may sit in registers, and only within a safepoint-free segment. Since a
 //!    safepoint can occur only inside an obligation-4 callback, that segment needs no stack
@@ -190,6 +190,8 @@ impl JitCallCtx {
     /// entered with (its fourth argument), which its caller keeps alive across the call.
     #[inline]
     pub(crate) unsafe fn assert_into(ctx: *const JitCallCtx, heap: &mut crate::core::heap::Heap) {
+        // SAFETY: the caller passes the live context the running arm was entered with (this
+        // fn's `# Safety`); it is only read.
         unsafe {
             let c = &*ctx;
             heap.jit_call_env = c.env;
@@ -207,6 +209,7 @@ impl JitCallCtx {
     /// As [`JitCallCtx::assert_into`].
     #[inline]
     pub(crate) unsafe fn children_may_unwind(ctx: *const JitCallCtx) -> bool {
+        // SAFETY: `ctx` is the running arm's live context (this fn's `# Safety`); only read.
         unsafe {
             let c = &*ctx;
             c.unwind != 0 && c.no_child_unwind == 0
@@ -215,11 +218,15 @@ impl JitCallCtx {
 
     /// The two fields a builtin that re-enters the evaluator or parks would read from the
     /// heap; the env it is CALLED with comes straight from the ctx (`brood_rt_call_native_fl`).
+    ///
+    /// # Safety
+    /// As [`JitCallCtx::assert_into`].
     #[inline]
     pub(crate) unsafe fn assert_depth_gateway(
         ctx: *const JitCallCtx,
         heap: &mut crate::core::heap::Heap,
     ) {
+        // SAFETY: `ctx` is the running arm's live context (this fn's `# Safety`); only read.
         unsafe {
             let c = &*ctx;
             heap.jit_native_depth = c.depth as u32;
@@ -229,8 +236,12 @@ impl JitCallCtx {
 
     /// What a global read needs: the env to resolve in and the global-IC cursor. Resolution
     /// never re-enters the evaluator (a global is a binding lookup), so no depth/gateway.
+    ///
+    /// # Safety
+    /// As [`JitCallCtx::assert_into`].
     #[inline]
     pub(crate) unsafe fn assert_global(ctx: *const JitCallCtx, heap: &mut crate::core::heap::Heap) {
+        // SAFETY: `ctx` is the running arm's live context (this fn's `# Safety`); only read.
         unsafe {
             let c = &*ctx;
             heap.jit_call_env = c.env;

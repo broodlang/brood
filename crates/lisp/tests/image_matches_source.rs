@@ -99,7 +99,7 @@ fn own_the_cache() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("brood-image-differential-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create a private cache dir");
-    // Safe here: this binary holds one test (`env_isolation` enforces it), so nothing else
+    // SAFETY: this binary holds one test (`env_isolation` enforces it), so nothing else
     // is reading the environment concurrently.
     unsafe { std::env::set_var("XDG_CACHE_HOME", &dir) };
     dir
