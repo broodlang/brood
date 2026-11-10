@@ -5,6 +5,50 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-381 — `dual_listen_serves_tcp_and_unix_at_once`: `no pong over tcp`; two links to one peer can both die ✅ fixed 2026-11-10
+
+**Symptom.** CI run 42760010402 (`2418c1094`, test 1/2):
+`cli::distribution dual_listen_serves_tcp_and_unix_at_once` failed with the client's
+`error: no pong over tcp` after its 30 s `after`. The server's stderr held only
+`dist: incoming connection failed: failed to fill whole buffer`, which is the harness's own
+connect-and-drop probe from `wait_until_listening` (KI-99: it prints on every run). No
+ADR-232 drop warning, so the server had `:echo` registered (KI-154's window is closed).
+Passed on the run before, at `f22b260ff`.
+
+**Cause (diagnosed from the code; not reproduced end to end).** The client dials the same node
+twice, both times as the connector: `node/connect "ed@127.0.0.1:PORT"` over TCP, then
+`node/connect "ed"` over the Unix socket. Both links authenticate as the same life of the peer
+with the same connector, so `register_link` treated the second as a plain duplicate:
+**"the existing link wins"** — on each end, whichever link that end registered first. The
+client registers TCP first (its dials are sequential). The server registers a link in
+`establish`, after the handshake's last frame has gone out, so a server thread descheduled
+between the two can let the Unix link register first there. Then the server keeps Unix and
+closes TCP, the client keeps TCP and closes Unix, both links die, and the `[:hi]` the client
+sent over TCP is lost. That is the hazard `ProgramDial`'s comment records for KI-372 (two
+ends registering two links in opposite orders), reached here through two transports to one
+peer rather than through gossip.
+
+**Why it survived.** KI-154's recurrence of this same test was attributed to the
+register-before-listen window and fixed there; the test then passed, and the race needs a
+scheduling gap of a few microseconds on the server's accept thread.
+
+**Fix.** An equal-connector duplicate is decided by the order in which this end OPENED the two
+links, not the order it registered them (`existing_link_wins`). A link's generation id is now
+taken at the top of `handshake`, before a byte goes out. The dialer opens its second link only
+after its first handshake has finished, and that cannot happen before the server has begun its
+side of it, so the server's ids order the two links as the dialer's do and both ends keep the
+older link — the one already carrying traffic. No wire change: each end compares only its own
+ids. A considered alternative, comparing the two handshake nonces, is symmetric too, but would
+evict a live link carrying traffic half the time and fire `:noconnection` for a node that
+never went down. It still relies on one node dialing a peer once at a time (`DialClaim`,
+`ProgramDial`), as the old rule did.
+
+**Guard.** `dist::tests::one_connectors_two_links_keep_the_one_opened_first_whatever_registers_first`
+registers the second-opened link first and asserts the first-opened one wins; red with
+"existing wins" put back (27 of 28 dist unit tests passed, this one failed).
+`a_second_link_to_the_same_life_leaves_the_live_link_alone` still holds. The distribution
+suite was not looped on the desktop; CI ran it.
+
 ## KI-364 — Windows has no platform shell: a `sh -c` command needs an `sh` on PATH ✅ fixed 2026-11-04
 
 **Symptom.** On Windows every program that ran a command line as `(os/cmd "sh" ["-c" line])`

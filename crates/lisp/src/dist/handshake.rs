@@ -50,6 +50,9 @@ pub(super) enum Role {
 
 /// What a completed handshake proved about the peer, plus the session it agreed.
 pub(super) struct Authenticated {
+    /// The link's generation id, taken when this end began the handshake: ids on one end
+    /// order its links by when they were opened (see `register_link`).
+    pub(super) id: u64,
     /// The peer's authoritative node name — the `NODES` key.
     pub(super) peer: Symbol,
     /// How a third node should dial the peer (mesh gossip, ADR-088).
@@ -78,6 +81,9 @@ pub(super) fn handshake<S: Read + Write>(
     role: Role,
     offer: Offer,
 ) -> io::Result<Authenticated> {
+    // Before anything goes out: a responder's id is then taken before its dialer can
+    // finish this handshake, so before that dialer can open its next link to us.
+    let id = super::next_link_id();
     // Step 1: magic + version. Reject before any allocation if we don't speak
     // the same dialect.
     let lanes = agree_version(stream, role, offer)?;
@@ -236,6 +242,7 @@ pub(super) fn handshake<S: Read + Write>(
         },
     };
     Ok(Authenticated {
+        id,
         peer: peer_name,
         addr: peer_addr,
         incarnation: peer_incarnation,

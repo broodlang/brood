@@ -150,6 +150,7 @@ fn stream_pair() -> (Stream, TcpStream) {
 /// `establish`, with a throwaway session.
 fn authenticated_as(peer: Symbol, incarnation: u64) -> handshake::Authenticated {
     handshake::Authenticated {
+        id: next_link_id(),
         peer,
         addr: String::new(),
         incarnation,
@@ -708,6 +709,29 @@ fn a_second_link_to_the_same_life_leaves_the_live_link_alone() {
     );
     demonitor_node(peer, me);
     process::drop_pending_remote(peer, me, mref);
+}
+
+/// KI-381: one connector's two links to the same life, REGISTERED in the opposite order
+/// to the one they were opened in — a responder whose thread for the first link was
+/// descheduled between its handshake and its registration. The dialer keeps the link it
+/// opened first, so this end must too, or each end closes the link the other kept.
+#[test]
+fn one_connectors_two_links_keep_the_one_opened_first_whatever_registers_first() {
+    let peer = value::intern("opened-first-peer@test");
+    let opened_first = authenticated_as(peer, 9);
+    let opened_second = authenticated_as(peer, 9);
+    let first_id = opened_first.id;
+    assert!(first_id < opened_second.id);
+
+    let (second, _second_far_end) = stream_pair();
+    establish(opened_second, second, Role::Responder);
+    let (first, _first_far_end) = stream_pair();
+    establish(opened_first, first, Role::Responder);
+    assert_eq!(
+        registered_link(peer),
+        Some((first_id, 9)),
+        "the link opened first must win, though it registered second"
+    );
 }
 
 /// A connect that names a live peer by another spelling — `(node/connect "ed")`
