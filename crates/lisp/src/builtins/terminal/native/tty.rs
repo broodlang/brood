@@ -55,6 +55,19 @@ impl TtyInput {
         Ok(fd)
     }
 
+    /// Decode `bytes` someone else read from the tty (`keyboard::ask_terminal`) onto `out`,
+    /// as if read here.
+    pub(super) fn feed(&mut self, bytes: &[u8], out: &mut Vec<Event>) {
+        if bytes.is_empty() {
+            return;
+        }
+        let more = self
+            .fd
+            .is_some_and(|fd| readable(fd, Duration::ZERO).unwrap_or(false));
+        self.decoder.feed(bytes, more, out);
+        self.last_bytes = Some(Instant::now());
+    }
+
     /// Decode every byte the tty has waiting, without waiting, onto `out` — at most `room`
     /// events. True when the tty was drained (nothing more is waiting).
     pub(super) fn read_available(&mut self, out: &mut Vec<Event>, room: usize) -> io::Result<bool> {

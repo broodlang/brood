@@ -108,6 +108,12 @@ pub(super) fn base64_encode(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     Ok(heap.alloc_string(&encoded))
 }
 
+/// Padded standard-alphabet Base64 of `input`: what the terminal's kitty graphics protocol
+/// carries a picture in (ADR-695).
+pub(in crate::builtins) fn base64_standard(input: &[u8]) -> String {
+    base64_encode_with(input, BASE64_STANDARD)
+}
+
 fn base64_encode_with(input: &[u8], alphabet: &[u8; 64]) -> String {
     let mut out = Vec::with_capacity(input.len().div_ceil(3) * 4);
     for group in input.chunks(3) {
