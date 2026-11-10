@@ -97,6 +97,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `dist/outbound.rs` — A link's bounded writer queue: handing a frame to the writer thread (severing the link when the queue is full), and the `proc/send-latest` slots (ADR-492) that let a newer frame to one target and key replace an unwritten older one.
   - `dist/routing.rs` — Location-transparent message routing: the [`Target`] a `send` names within a node, and delivering a message to it — in-process for a local node, as a `Send` frame over the link for a remote one — with the once-per-name warning for a message to a registered name no process holds.
   - `dist/session.rs` — The encrypted steady-state session (ADR-089) — confidentiality + per-frame integrity for the node link, closing ADR-081's cleartext/injection gap.
+  - `dist/shared_bytes.rs` — Large bytes values cross a link ONCE (ADR-695): a bytes value of [`SHARED_BYTES_MIN`] or more that a link has already carried goes the next time as its digest alone.
   - `dist/transport.rs` — The link carrier: the [`Stream`] a node link runs over (TCP, or a Unix-domain socket on unix), and opening one — dialing an address, and binding and readying a Unix socket path.
   - `dist/wire.rs` — Wire codec for the distributed-node protocol.
 - `error.rs` — Error type used throughout the interpreter.

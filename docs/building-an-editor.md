@@ -121,7 +121,8 @@ pure data builders:
 - `(cursor row col)` → the cursor position
 - `(image row col w h source opts)` → a raster picture (PNG / JPEG bytes, or a
   `gui/image-thumb` map) in a `w`×`h` cell block — at full pixel resolution in a window,
-  in half-block cells in a terminal; `opts` `{:fit :contain|:scale-down|:fill|:none :align
+  in half-block cells in a terminal (at its pixels in one that speaks the kitty graphics
+  protocol, ADR-695); `opts` `{:fit :contain|:scale-down|:fill|:none :align
   :center|:top-left}` (ADR-686)
 - a **face** is a map: `{:fg :red :bg :blue :bold true :reverse true}` (colours
   are keywords: `:black :red :green :yellow :blue :magenta :cyan :white :grey
