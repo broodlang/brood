@@ -770,6 +770,15 @@ impl<'e> Machine<'e> {
                                 ))
                             }
                             kind => {
+                                // A macro's expander raised. Its body runs as frames here, so
+                                // the error has picked up a position inside the macro's
+                                // definition on the way out; the compiled tiers attach none.
+                                // ADR-618 places it at the call, unless the macro named the
+                                // sub-form with `reflect/error-at`.
+                                if matches!(kind, KontKind::Expand { .. }) && !e.pos_from_at {
+                                    e.pos = None;
+                                    e.file = None;
+                                }
                                 if let Some(form_r) = k.form {
                                     let form = heap.read_root(form_r);
                                     e = e.or_form_pos(heap, form);

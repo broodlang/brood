@@ -160,6 +160,7 @@ pub(super) fn raise(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let mut raised = LispError::thrown(error, heap).with_code(code);
             if let Some((pos, file)) = at {
                 raised = raised.with_pos(pos);
+                raised.pos_from_at = true;
                 // the form's own file: the position means nothing against another one
                 if let Some(file) = file {
                     raised.file = Some(file.to_string());

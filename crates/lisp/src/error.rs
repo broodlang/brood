@@ -259,6 +259,11 @@ pub struct LispErrorData {
     /// when the local shadows a root function, says so. `None` once named, and for every
     /// other error.
     pub uncalled: Option<String>,
+    /// The position came from a macro's own `reflect/error-at` (`%raise`'s `:at`): the
+    /// sub-form it is complaining about. Every other position an error picks up while a
+    /// macro's expander runs points into the macro's definition, so the tree-walker's
+    /// expander boundary replaces it with the call's; this one it keeps (ADR-618).
+    pub pos_from_at: bool,
 }
 
 /// `LispError` is a thin newtype over a **boxed** [`LispErrorData`]. It's returned
@@ -408,6 +413,7 @@ impl LispError {
             hint: None,
             rejected_tag: None,
             uncalled: None,
+            pos_from_at: false,
         }))
     }
 
@@ -426,6 +432,7 @@ impl LispError {
             hint: None,
             rejected_tag: None,
             uncalled: None,
+            pos_from_at: false,
         }))
     }
 
@@ -712,6 +719,7 @@ impl LispError {
             hint: None,
             rejected_tag: None,
             uncalled: None,
+            pos_from_at: false,
         }))
     }
 
@@ -815,6 +823,7 @@ impl LispError {
             hint: string_of(key("hint")),
             rejected_tag: None,
             uncalled: None,
+            pos_from_at: false,
         })))
     }
 

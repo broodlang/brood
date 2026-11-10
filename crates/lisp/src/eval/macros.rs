@@ -508,10 +508,18 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
         let env_now = heap.env_root_at(eb);
         let (next, expanded) = match macroexpand_1(heap, cur, env_now) {
             Ok(r) => r,
-            Err(e) => {
+            Err(mut e) => {
                 heap.truncate_env_roots(eb);
                 let original = heap.root_at(rb);
                 heap.truncate_roots(rb);
+                // A position from inside the expander points into the macro's definition —
+                // the tree-walker attaches one as the error leaves the body's frames; the
+                // compiled tiers attach none. Either way the error belongs at the call
+                // (ADR-618), unless the macro named a sub-form with `reflect/error-at`.
+                if !e.pos_from_at && !e.is_control() {
+                    e.pos = None;
+                    e.file = None;
+                }
                 return Err(e.or_form_pos(heap, original));
             }
         };

@@ -253,8 +253,14 @@ fn a_fast_allocating_loop_stops_at_the_soft_limit_not_the_hard_one() {
         !stderr.contains("hard memory limit reached"),
         "the loop reached the hard limit:\n{stderr}"
     );
+    // The soft limit's error, wherever it landed: the tree-walker raises it inside the
+    // Brood function that was allocating and names that function first
+    // (`string/%repeat-doubling: memory limit exceeded …`); the compiled tiers raise it
+    // unnamed.
     assert!(
-        stderr.contains("runtime error: memory limit exceeded"),
+        stderr.contains("runtime error: ")
+            && stderr.contains("memory limit exceeded")
+            && stderr.contains("soft limit"),
         "the loop was not stopped by the soft limit:\n{stderr}"
     );
 }

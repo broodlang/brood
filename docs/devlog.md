@@ -1251,3 +1251,18 @@ the first run of the migration also renamed the `match*` alias's own `defmacro` 
 in `try`. The migration now rewrites only a call. `match*` became `%match`, the engine's internal
 name; the compile pass emits `/%match`. Guard: `tests/reduce_forms_test.blsp`, whose warning test
 goes red with the new pass disabled.
+
+2026-11-10. The tree-walker differential (`BROOD_TIER=0`) had two reds on `main`; the weekly run's
+other reds from 2026-11-08 no longer reproduce (`make gcstress-all` clean, 352 files). (1) A
+macro's error fell inside the macro's own definition at tier 0. ADR-618 places an expander's
+error at the call unless `reflect/error-at` names a sub-form, but the tree-walker runs the
+expander as frames of its own, and the error picked up the position of the expander body's tail
+(`needs-pair`'s `if`, line 22 of the test file) on the way out; the compiled tiers attach none.
+`%raise` now marks a position that came from `:at` (`LispError::pos_from_at`), and both expander
+boundaries (the compile pass's `macroexpand` and the tree-walker's `Expand` frame, for a macro
+expanded when a function defined before it runs) replace any other position with the call's.
+Guard: `macro_error_position_test`'s run-time-expansion case, red at tier 0 with the frame's half
+removed (`[2 28]`, inside the macro). It was red on the commit before ADR-674 as well. (2)
+`memory_pressure`'s fast-allocating loop asserted the soft-limit message's exact prefix; at tier
+0 the error names the Brood function that was allocating first. The loop stopped at the soft
+limit in both; the assertion now reads the limit's error wherever it lands.

@@ -36,6 +36,13 @@
       (is (includes? msg "needs-pair: expected (a b)"))))
   (test "a sub-form with no position leaves the error at the call"
     (assert= (at (where "(do 1\n  (macro-error-position-test/needs-pair x))")) [2 3]))
+  (test "so does a macro expanded at run time, from a function defined before it"
+    ;; `late-user` names `late-pair` before it is a macro, so its call is expanded when the
+    ;; function runs, inside the tree-walker, whose frames attach the expander's own
+    ;; positions to an error on the way out (the tier-0 differential found it at line 22 of
+    ;; this file, inside `needs-pair`)
+    (assert= (at (where "(defn late-user () (late-pair x))\n(defmacro late-pair (form) (if (pair? form) 1 (reflect/error-at form \"late-pair: expected a list\")))\n(late-user)"))
+      [1 20]))
   (test "the place is not part of what the handler is handed"
     (let (e (try (reflect/error-at '(a) "boom") (catch e e)))
       (assert= :error (get e :kind))
