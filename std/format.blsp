@@ -1211,8 +1211,7 @@ Returns the number of files rewritten.
                         ;; second `nest format`, and an unformatted project keeps its layout
                         (let (migrated (migrate/text src))
                           (if (= src migrated)
-                            :unchanged
-                            (do
+                            :unchanged (do
                               (file/spit path (source migrated))
                               (io/puts (str "  migrated " path))
                               :rewrote)))))))
