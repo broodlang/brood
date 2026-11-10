@@ -1220,3 +1220,19 @@ is no longer read as one. CI's two checker gates stay at zero. Guard:
 `scope_and_guards::an_optional_default_sees_only_the_parameters_before_it` (red with the body's
 scope put back). KI-370 is still on watch: its warning is strict mode's own, so the sighting ran
 strict or read `(nth pids k)` as precise. The check cache does not carry it across modes.
+
+2026-11-09. Opened the road to 1.0. `docs/brood-among-lisps.md` places Brood among Common Lisp,
+Scheme/Racket, Clojure, Janet, Fennel, LFE and Emacs Lisp, and lists what a Lisper will look for
+and not find, with the ADR behind each absence. ADR-673 (proposed) drafts the compatibility
+promise: what it covers, the surfaces that are versioned, the deprecation rule and "a new lint is
+not a break", with four decisions left to the owner. `docs/road-to-1.0.md` is the checklist:
+the promise, the mechanism it needs (a lock-file version, structured warning severities, a
+versioned handshake, deprecating CLI flags), a docs truth pass, platforms, evidence, and spending
+the remaining breaks in 0.5x. One finding from applying the freeze test: open thread 6 ("reduce
+before adding") removes forms, so it must be decided before 1.0, not after.
+
+2026-11-10. ADR-673 is accepted. Distributed nodes link within one `major.minor`; this is the
+narrow promise, and widening it later is a relaxation. A project opts into new lints through a
+`project.blsp` key. Nothing is carved out as `:beta`: everything public is covered at 1.0, and
+the release candidates (`rc.0` onward) are where the surface settles. The minimum time for a
+deprecation is deferred until closer to 1.0.

@@ -54,6 +54,13 @@ Left from that session:
 - **pfib at tier 1 moving in `make ab-vm` is not a regression**: it is non-code content baked
   into the binary (the numbers are in the perf archive).
 
+## Toward 1.0 (2026-11-09)
+
+The owner opened the 1.0 work. The plan is [`road-to-1.0.md`](road-to-1.0.md); the promise is
+ADR-673 (accepted 2026-11-10; the deprecation window's minimum time is deferred); the positioning it starts from is
+[`brood-among-lisps.md`](brood-among-lisps.md). Under the freeze test, open thread 6 below has to
+be decided before 1.0, because it removes forms; the others are additive.
+
 ## Open threads: language features, in value order
 
 From the audit of ROADMAP's open items on 2026-11-06; nothing here is scheduled until the owner

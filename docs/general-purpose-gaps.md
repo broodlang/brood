@@ -57,6 +57,9 @@ Some of this is ahead of most of the reference languages. A gap list should not 
 
 ### 1. There is no stability promise
 
+**Update 2026-11-09:** ADR-673 (accepted 2026-11-10); the work to make it true is
+[`road-to-1.0.md`](road-to-1.0.md).
+
 **Missing.** README.md says the language, the standard library, the tooling and the
 on-disk formats "can change dramatically (and break) without notice or migration path …
 don't build anything you depend on against it yet." The 1.0 freeze gate is closed
