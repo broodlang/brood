@@ -25,7 +25,7 @@ and a three-tier engine (tree-walker, bytecode VM, Cranelift JIT) whose warm sta
 
 The shortest placement is this. It has **Emacs Lisp's purpose**: a program that edits itself
 while it runs. It has **LFE's runtime model**: processes, links and supervision, without
-needing a BEAM. It reads closest to **Clojure on the surface**: `[]`, `{}` and `#{}` literals,
+borrowing LFE's host VM. It reads closest to **Clojure on the surface**: `[]`, `{}` and `#{}` literals,
 keywords and persistent collections. Its macro system is its own middle path between Common
 Lisp and Scheme.
 
@@ -40,16 +40,16 @@ Lisp and Scheme.
 | Clojure | JVM (CLJS: JS; Babashka: GraalVM native) | STM refs, atoms, agents, core.async |
 | Janet | its own small C VM, embeddable | fibers, threads with message passing |
 | Fennel | Lua (compiles to Lua source, no runtime of its own) | Lua coroutines |
-| LFE | BEAM | Erlang processes and OTP |
+| LFE | its host actor VM | the host's processes and supervision library |
 | Emacs Lisp | Emacs | one thread, timers, cooperative threads |
 | **Brood** | **its own runtime in Rust; one static binary; wasm32 in a browser tab** | **preemptive M:N green processes, per-process heaps, share-nothing** |
 
-Brood is its own host. It has no JVM, BEAM or Lua underneath, which means no host library to
+Brood is its own host. It has no JVM, actor VM or Lua underneath, which means no host library to
 borrow and no host to wait on. Programs reach the outside world through subprocesses
 (ADR-104), TCP/TLS and HTTP (ADR-062), and sandboxed WASM components (ADR-145/453). It has no
 C FFI, and that is deliberate (`interop.md`): a native call cannot be preempted, and a crash in
 one would take every process with it. Among the Lisps above, only LFE gives the same failure
-isolation, and it gets it from the BEAM.
+isolation, and it gets it from its host VM.
 
 ### Data
 
@@ -105,12 +105,12 @@ dispatch space is reserved, which keeps every future literal additive (ADR-169).
 | Common Lisp | the condition system: `handler-bind`, restarts | `block`/`return-from`, `catch`/`throw`, `unwind-protect` |
 | Scheme / Racket | `raise`, `with-handlers`, exceptions as structs | first-class continuations (`call/cc`), `dynamic-wind`, prompts |
 | Clojure | JVM exceptions, `ex-info` | none |
-| LFE | Erlang exceptions, "let it crash" | none |
+| LFE | the host's exceptions, "let it crash" | none |
 | **Brood** | **two channels** (ADR-310): an expected failure is a returned `failure` value with fields (ADR-617), and a bug is raised as one error shape `{:kind :message …}` (ADR-501). `catch` takes a pattern; `finally` unwinds (ADR-306). | **none exposed**; recovery is supervision |
 
 Common Lisp users will miss **restarts**, and Scheme users **continuations**. Brood's answer to
 both is the process. A failure that should be retried is retried by a supervisor that restarts
-a clean process; that is LFE's and Erlang's answer, not Common Lisp's. Proper tail calls are
+a clean process; that is LFE's answer, and the actor model's, not Common Lisp's. Proper tail calls are
 guaranteed in every tier (the tree-walker is a loop over an explicit frame stack, ADR-416), so
 iteration is recursion: **no `loop`, `recur` or `while`** (ADR-154). Comprehensions are `for`,
 `for :into` and `fold-for` (ADR-377).
@@ -133,7 +133,7 @@ Every Lisp in the list has a REPL. They differ on what survives a redefinition:
 - **Common Lisp** redefines in place and saves the whole heap as an image
   (`save-lisp-and-die`).
 - **Emacs Lisp** redefines in place. The running editor is the program.
-- **LFE** gets the BEAM's two-version code loading with an upgrade callback.
+- **LFE** gets its host VM's two-version code loading with an upgrade callback.
 - **Clojure** redefines a var, but code that captured the old function keeps it.
 - **Brood**: a `def` reaches **every process** on its next lookup, because one runtime's
   processes share their code (`shared-code.md`). A long-lived process takes a `[:code-change]`
@@ -147,7 +147,7 @@ Every Lisp in the list has a REPL. They differ on what survives a redefinition:
 Typed Racket has gradual typing that is sound at its boundaries. Common Lisp has
 `declare`/`declaim`, which SBCL uses for checks and speed. Clojure has core.typed and spec as
 libraries. LFE has Dialyzer's success typing. **Brood ships a set-theoretic, gradual,
-advisory checker** in the line of Castagna and Elixir (ADR-023/024). It has occurrence typing,
+advisory checker** in the line of Castagna's semantic subtyping (ADR-023/024). It has occurrence typing,
 exhaustiveness over literal enums, and `sig`s that become runtime contracts with blame under
 `nest run` and `nest test` (ADR-381). It never refuses a redefinition in the live image; only a
 batch `nest check` gates.
@@ -182,7 +182,7 @@ Every row is a decision with an ADR, not a gap. ADR-170 is the ratified list.
 
 ## What Brood has that the others mostly don't
 
-- **Failure isolation and supervision without a BEAM**: one static binary that runs
+- **Failure isolation and supervision without a host VM**: one static binary that runs
   preemptive, share-nothing processes across all cores, and a crash in one takes down only
   what is linked to it.
 - **A `def` that reaches every running process.** Code is shared live across processes, while
