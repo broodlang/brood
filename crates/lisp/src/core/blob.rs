@@ -28,6 +28,10 @@ pub const SHARED_BLOB_THRESHOLD: usize = 256;
 /// text blob.
 pub struct SharedBlob {
     contents: Contents,
+    /// The BLAKE3 digest of the bytes, computed the first time it is asked for and kept: the
+    /// blob is immutable, so the digest of a value held across frames (a picture an app
+    /// repaints, ADR-686) or sent again on a link (ADR-695) is paid once, not per use.
+    digest: std::sync::OnceLock<[u8; 32]>,
 }
 
 enum Contents {
@@ -40,6 +44,7 @@ impl SharedBlob {
     pub fn new(bytes: &[u8]) -> Arc<Self> {
         Arc::new(SharedBlob {
             contents: Contents::Bytes(bytes.into()),
+            digest: std::sync::OnceLock::new(),
         })
     }
 
@@ -47,6 +52,7 @@ impl SharedBlob {
     pub fn from_text(text: &str) -> Arc<Self> {
         Arc::new(SharedBlob {
             contents: Contents::Text(text.into()),
+            digest: std::sync::OnceLock::new(),
         })
     }
 
@@ -56,6 +62,7 @@ impl SharedBlob {
     pub fn from_owned_text(text: String) -> Arc<Self> {
         Arc::new(SharedBlob {
             contents: Contents::Text(text.into_boxed_str()),
+            digest: std::sync::OnceLock::new(),
         })
     }
 
@@ -84,5 +91,32 @@ impl SharedBlob {
 
     pub fn is_empty(&self) -> bool {
         self.as_bytes().is_empty()
+    }
+
+    /// The BLAKE3 digest of the blob's bytes — hashed on the first call, the same 32 bytes
+    /// handed back on every later one (the blob never changes). What a content cache keys
+    /// a blob by without rehashing it each time the same value comes round.
+    pub fn digest(&self) -> [u8; 32] {
+        *self
+            .digest
+            .get_or_init(|| *blake3::hash(self.as_bytes()).as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedBlob;
+
+    #[test]
+    fn a_digest_is_the_bytes_blake3_and_is_kept() {
+        let blob = SharedBlob::new(b"a picture");
+        let expected = *blake3::hash(b"a picture").as_bytes();
+        assert_eq!(blob.digest(), expected);
+        assert_eq!(
+            blob.digest.get(),
+            Some(&expected),
+            "kept after the first call"
+        );
+        assert_eq!(SharedBlob::from_text("a picture").digest(), expected);
     }
 }

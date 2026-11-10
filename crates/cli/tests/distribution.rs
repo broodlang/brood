@@ -129,6 +129,64 @@ fn a_record_crosses_a_node_link_as_a_record() {
     );
 }
 
+/// A large bytes value sent again and again crosses a link whole once and by digest after
+/// (ADR-695) — what a thin client's frames holding a picture are. Three sends of one value
+/// and one of another, each echoed back (so both directions dedup), all arrive intact.
+#[test]
+fn a_large_bytes_value_sent_repeatedly_arrives_intact_every_time() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-bytes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+    let server = format!(
+        r#"
+(proc/register :mirror (self))
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(defn serve ()
+  (receive
+    ([:bytes from b] (do (send from [:back b]) (serve)))
+    (_ (serve))))
+(serve)
+"#
+    );
+    let client = format!(
+        r#"
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(node/connect "a@127.0.0.1:{port_a}")
+(def page (bytes/concat (string/repeat "picture!" 8000)))
+(def other (bytes/concat (string/repeat "another." 9000)))
+(defn round (b)
+  (send {{:name :mirror :node :a@127.0.0.1}} [:bytes (self) b])
+  (receive
+    ([:back got] (when (not (= got b)) (throw "bytes mangled in transit")))
+    (after 30000 (throw "no reply"))))
+(round page)
+(round page)
+(round other)
+(round page)
+(io/puts "SHARED-BYTES-OK")
+"#
+    );
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let mut a_err = String::new();
+    if let Some(mut e) = a.stderr.take() {
+        let _ = e.read_to_string(&mut a_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("SHARED-BYTES-OK"),
+        "client failed.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
+    );
+}
+
 /// A **clean** peer exit (process returns → OS closes the socket) fires
 /// `[:nodedown]` on the survivor **promptly** — via the reader's socket-EOF path,
 /// not the ~6s heartbeat timeout — and drops the peer from `(node/list)`.

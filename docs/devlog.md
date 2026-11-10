@@ -1286,6 +1286,19 @@ for pixel. The bounded decoder moved from `builtins/image.rs` to `host/picture.r
 share. Prompted by bedit's PDF doc-view, whose half-block pages were unreadable. Guards: the
 offscreen test that one-pixel stripes survive (red with the arm disabled), the terminal's
 half-block test, and `tests/gui_test.blsp` through `gui/render-frame`.
+2026-11-10 (ADR-695). The picture op's follow-ups. A terminal that speaks the kitty graphics
+protocol (asked at `term-enter`: a graphics query then DA1; `BROOD_TERM_GRAPHICS=kitty|cells`
+decides without asking) shows an `[:image …]` at its pixels: resampled to the cells' pixels,
+cropped, sent once as PNG under an image id and placed per frame, deleted and re-placed as the
+frame changes, freed on leave; cells stay the fallback. A window resamples a new size on a worker
+thread and paints a nearest-neighbour stand-in until it lands (`PicturesLanded`), so a resize no
+longer resamples on the GUI thread; the offscreen painter stays synchronous. A bytes value of
+16 KiB or more crosses a node link whole once and by its digest after — mirrored LRU ledgers in
+the link's writer and reader, so a thin client's frames carry a page's bytes once (protocol v13; a
+v12 node no longer links). `SharedBlob` keeps its BLAKE3 digest, so a repainted picture value is
+not rehashed. Sixel left out (no ids: re-sent whenever a cell under it changes). Guards: the
+graphics, shared-bytes and picture unit tests, the decoder's APC case, and a two-node
+`distribution` test sending one large value four times.
 2026-11-10. The tree-walker differential (`BROOD_TIER=0`) had two reds on `main`; the weekly run's
 other reds from 2026-11-08 no longer reproduce (`make gcstress-all` clean, 352 files). (1) A
 macro's error fell inside the macro's own definition at tier 0. ADR-618 places an expander's

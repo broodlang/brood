@@ -106,6 +106,20 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     }
                 }
             }
+            // A window's picture resampled off this thread (ADR-695): every window takes what
+            // its worker finished, and one that took something repaints whole.
+            UserEvent::PicturesLanded => {
+                for win in self.wins.values_mut() {
+                    if win.renderer.pictures.take_landed() {
+                        win.renderer.invalidate();
+                        #[cfg(feature = "gui-gpu")]
+                        if let Backend::Gpu(gpu) = &mut win.backend {
+                            gpu.pictures_landed();
+                        }
+                        win.window.request_redraw();
+                    }
+                }
+            }
             UserEvent::InputMode { id, pixels } => {
                 if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid))
                     && win.pixel_input != pixels

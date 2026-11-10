@@ -9,6 +9,7 @@ use crate::builtins::numeric::num_to_f64;
 
 #[cfg(unix)]
 mod decoder;
+mod graphics;
 mod keyboard;
 mod screen;
 #[cfg(unix)]
@@ -56,7 +57,27 @@ pub(in crate::builtins) fn term_enter(_: &[Value], _: EnvId, _: &mut Heap) -> Li
     // screen (each screen has its own flag stack), only here — the inline REPL seam keeps
     // the legacy keyboard.
     keyboard::enhance();
+    // Whether pictures can be drawn in pixels (ADR-695): asked once per process, after the
+    // keyboard query (whose reader crossterm owns), so the answer is read by Brood's.
+    if terminal_screen().graphics.is_none() {
+        let protocol = graphics::detect();
+        terminal_screen().graphics = Some(protocol);
+    }
     Ok(Value::nil())
+}
+
+/// The escapes that take every picture off the screen and out of the terminal's store
+/// (ADR-695), for the paths that leave the screen. `try_lock`, as [`invalidate_screen`]:
+/// the panic path may run on the thread whose draw holds the lock.
+fn pictures_farewell() -> Vec<u8> {
+    let mut state = match TERMINAL_SCREEN.try_lock() {
+        Ok(state) => state,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    state.pictures.farewell(&mut out);
+    out
 }
 
 /// `(term-leave)` — restore the terminal (show cursor, leave alternate screen,
@@ -65,6 +86,11 @@ pub(in crate::builtins) fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> Li
     use crossterm::cursor::Show;
     use crossterm::event::{DisableFocusChange, DisableMouseCapture};
     use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
+    // pictures first, while still on the screen that shows them (ADR-695)
+    let farewell = pictures_farewell();
+    if !farewell.is_empty() {
+        let _ = write_term_bytes(&farewell);
+    }
     keyboard::restore();
     invalidate_screen();
     // Best effort, never an error: leaving is what every exit path does, and after a hang-up
@@ -91,6 +117,11 @@ pub fn restore_terminal() {
     use crossterm::cursor::Show;
     use crossterm::event::{DisableFocusChange, DisableMouseCapture};
     use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
+    // the pictures off the screen and out of the terminal's store (ADR-695)
+    let farewell = pictures_farewell();
+    if !farewell.is_empty() {
+        let _ = write_term_bytes(&farewell);
+    }
     // before leaving the alternate screen, whose flag stack the push went on
     keyboard::restore();
     invalidate_screen();
@@ -442,6 +473,10 @@ struct TerminalScreen {
     /// The default face `term-bg` set: what `[:clear]` fills with, and the colours of a face
     /// that names none — a window's background (`gui/bg`) for the terminal.
     default_face: screen::Style,
+    /// How this terminal shows a picture, asked once by the first `term-enter` (ADR-695).
+    graphics: Option<graphics::Protocol>,
+    /// The pictures the terminal holds and shows through the kitty graphics protocol.
+    pictures: graphics::Kitty,
 }
 
 static TERMINAL_SCREEN: std::sync::Mutex<TerminalScreen> = std::sync::Mutex::new(TerminalScreen {
@@ -460,6 +495,8 @@ static TERMINAL_SCREEN: std::sync::Mutex<TerminalScreen> = std::sync::Mutex::new
         underline_colour: None,
         reverse: false,
     },
+    graphics: None,
+    pictures: graphics::Kitty::new(),
 });
 
 fn terminal_screen() -> std::sync::MutexGuard<'static, TerminalScreen> {
@@ -536,18 +573,32 @@ fn style_of(heap: &Heap, face: Value) -> screen::Style {
 pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let parsed = frame_ops(heap, arg(args, 0), "%term-draw", "vector (a frame)")?;
     let (cols, rows) = draw_size();
+    // pictures in pixels when the terminal speaks the kitty protocol and says its cell size
+    // (ADR-695), else in half-block cells
+    let cell = match terminal_screen().graphics {
+        Some(graphics::Protocol::Kitty) => graphics::cell_pixels(),
+        _ => None,
+    };
     let mut state = terminal_screen();
-    let mut next = match &state.shown {
-        Some(shown) if shown.cols == cols && shown.rows == rows => shown.clone(),
-        _ => screen::Screen::new(cols, rows),
+    let (mut next, whole) = match &state.shown {
+        Some(shown) if shown.cols == cols && shown.rows == rows => (shown.clone(), false),
+        _ => (screen::Screen::new(cols, rows), true),
     };
     next.cursor = None;
-    paint_ops(heap, parsed, &mut next, state.default_face)?;
+    let pictures = paint_ops(heap, parsed, &mut next, state.default_face, cell)?;
     let depth = color_depth(&state);
     let mut out: Vec<u8> = Vec::new();
-    let TerminalScreen { shown, cursor, .. } = &mut *state;
+    let TerminalScreen {
+        shown,
+        cursor,
+        pictures: stored,
+        ..
+    } = &mut *state;
     screen::render(shown.as_ref(), &next, depth, cursor, &mut out);
     *shown = Some(next);
+    if !(pictures.is_empty() && stored.is_empty()) {
+        stored.frame(&pictures, whole, graphics::encode_png, &mut out);
+    }
     drop(state);
     if !out.is_empty()
         && let Err(error) = write_term_bytes(&out)
@@ -585,13 +636,17 @@ fn draw_size() -> (u16, u16) {
 }
 
 /// Paint parsed frame ops onto `target` (see [`term_draw`]), a face's missing colours taken
-/// from `default_face` (`term-bg`).
+/// from `default_face` (`term-bg`). With `cell` (the kitty graphics protocol and the cell's
+/// pixel size, ADR-695) an `[:image …]` op's picture is not painted into the cells but
+/// returned, for [`graphics::Kitty::frame`] to place; without, it is drawn in half blocks.
 fn paint_ops(
     heap: &Heap,
     parsed: Vec<(value::Symbol, Vec<Value>)>,
     target: &mut screen::Screen,
     default_face: screen::Style,
-) -> Result<(), LispError> {
+    cell: Option<graphics::CellPixels>,
+) -> Result<Vec<graphics::Shown>, LispError> {
+    let mut pictures = Vec::new();
     use crate::host::gui::CursorStyle;
     let clear_t = value::intern("clear");
     let text_t = value::intern("text");
@@ -657,6 +712,18 @@ fn paint_ops(
             let Some(image) = read_image_op(heap, &parts) else {
                 continue;
             };
+            if let Some(cell) = cell {
+                // pixels through the protocol: placed after the cells are written
+                pictures.extend(graphics::plan(
+                    &image.picture,
+                    (image.row, image.col, image.w, image.h),
+                    image.fit,
+                    image.anchor,
+                    cell,
+                    (target.cols, target.rows),
+                ));
+                continue;
+            }
             let under = match default_face.bg {
                 Some(screen::Colour::Rgb(red, green, blue)) => [red, green, blue],
                 _ => [0, 0, 0],
@@ -704,7 +771,7 @@ fn paint_ops(
         }
     }
     target.cursor = solid.or(hollow);
-    Ok(())
+    Ok(pictures)
 }
 
 /// `(term-invalidate)` — forget what the terminal shows: the next `term-draw` clears it and
@@ -1461,6 +1528,7 @@ mod image_tests {
             vec![(value::intern("image"), parts)],
             &mut target,
             screen::Style::default(),
+            None,
         )
         .expect("paints");
         let red = Some(screen::Colour::Rgb(255, 0, 0));
@@ -1474,5 +1542,39 @@ mod image_tests {
         // outside the rect nothing was drawn
         assert_eq!(target.cell(0, 0).text, " ");
         assert_eq!(target.cell(1, 5).text, " ");
+    }
+
+    // With the kitty graphics protocol (ADR-695) the picture is not drawn into the cells:
+    // it comes back placed at the pixels its cells cover, for the protocol to show.
+    #[test]
+    fn an_image_op_through_the_kitty_protocol_leaves_the_cells_alone() {
+        let mut heap = Heap::new();
+        let source = bytes_to_value(two_band_png(4, 4), &mut heap);
+        let parts = vec![
+            value::kw("image"),
+            Value::int(1),
+            Value::int(1),
+            Value::int(4),
+            Value::int(2),
+            source,
+        ];
+        let mut target = screen::Screen::new(8, 4);
+        let pictures = paint_ops(
+            &heap,
+            vec![(value::intern("image"), parts)],
+            &mut target,
+            screen::Style::default(),
+            Some(super::graphics::CellPixels {
+                width: 8,
+                height: 16,
+            }),
+        )
+        .expect("paints");
+        assert_eq!(target.cell(1, 1).text, " ", "no half block");
+        assert_eq!(pictures.len(), 1);
+        // 4×2 cells of 8×16 are a 32×32 box: the 4×4 picture fills it
+        let shown = &pictures[0];
+        assert_eq!(shown.drawn, (32, 32));
+        assert_eq!((shown.row, shown.col, shown.offset), (1, 1, (0, 0)));
     }
 }

@@ -660,6 +660,45 @@ pub(super) fn enhance() {
     }
 }
 
+/// Ask the terminal something and collect what it answers: `request` written, then the
+/// tty's bytes read until `answered` says the answer is in or `patience` runs out. Every
+/// byte read also goes through the decoder, which swallows a terminal's answers, so a key
+/// typed meanwhile reaches the inbox as typed. What `graphics` detects the kitty graphics
+/// protocol with (ADR-695). Unix only: elsewhere crossterm reads the console.
+#[cfg(unix)]
+pub(super) fn ask_terminal(
+    request: &[u8],
+    answered: impl Fn(&[u8]) -> bool,
+    patience: Duration,
+) -> Vec<u8> {
+    let mut keyboard = keyboard();
+    let Ok(fd) = keyboard.tty.fd() else {
+        return Vec::new();
+    };
+    if super::write_term_bytes(request).is_err() {
+        return Vec::new();
+    }
+    let deadline = Instant::now() + patience;
+    let mut answer = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !answered(&answer) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || !matches!(super::tty::readable(fd, left), Ok(true)) {
+            break;
+        }
+        // SAFETY: the buffer is valid for its length, the descriptor open.
+        let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if read <= 0 {
+            break;
+        }
+        answer.extend_from_slice(&buffer[..read as usize]);
+    }
+    let mut events = Vec::new();
+    keyboard.tty.feed(&answer, &mut events);
+    keyboard.inbox.arrive(events, Instant::now(), true);
+    answer
+}
+
 fn write_to_terminal(sequence: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut out = std::io::stdout();

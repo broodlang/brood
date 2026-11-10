@@ -234,6 +234,9 @@ fn parse_escape(buffer: &[u8], input_available: bool) -> Step {
             }
         }
         b'[' => parse_csi(buffer),
+        // `ESC _ … ESC \`, an application program command: what a terminal answers a kitty
+        // graphics query with (`ESC _Gi=31;OK ESC \`, ADR-695) — swallowed, never typed
+        b'_' => parse_string_sequence(buffer),
         0x1B => key(KeyCode::Esc),
         // ESC before a key is Meta (Alt) on that key
         _ => parse(&buffer[1..], input_available).map(|step| {
@@ -245,6 +248,23 @@ fn parse_escape(buffer: &[u8], input_available: bool) -> Step {
                 other => other,
             })
         }),
+    }
+}
+
+/// The longest string sequence (`ESC _ …`) waited for before its bytes are dropped: a kitty
+/// graphics answer is a few dozen bytes, so only a lost terminator runs this long.
+const STRING_SEQUENCE_MAX: usize = 4096;
+
+/// A string sequence from its `ESC _` to its terminator (`ESC \`, or BEL as xterm also
+/// accepts): nothing, once complete — a terminal's answer, not a key.
+fn parse_string_sequence(buffer: &[u8]) -> Step {
+    let complete = buffer.ends_with(b"\x1b\\") && buffer.len() >= 4 || buffer.ends_with(b"\x07");
+    if complete {
+        Ok(Some(Decoded::Nothing))
+    } else if buffer.len() > STRING_SEQUENCE_MAX {
+        Err(())
+    } else {
+        Ok(None)
     }
 }
 
@@ -922,6 +942,11 @@ mod tests {
         assert_eq!(decode(b"\x1b[12;40R\x1b[?64;1;2c\x1b[?1u"), vec![]);
         // and an unknown sequence is dropped whole
         assert_eq!(decode(b"\x1b[99q"), vec![]);
+        // a kitty graphics answer (ADR-695), ended by ST or BEL, and a key after it still a key
+        assert_eq!(
+            decode(b"\x1b_Gi=31;OK\x1b\\\x1b_Gi=31;ENOENT:no such image\x07x"),
+            vec![pressed(KeyCode::Char('x'), NONE)]
+        );
     }
 
     #[test]
