@@ -128,7 +128,7 @@ already bound*; otherwise leave the existing binding untouched. This is Emacs's
 behaviour uses `defn`/`def`.
 
 It's a **pure prelude macro — no kernel change at all**, because the needed
-predicate `(bound? 'sym)` already exists (`crates/lisp/src/builtins/tooling.rs`) and `unless` is in
+predicate `(bound? 'sym)` already exists (`crates/lisp/src/builtins/tooling.rs`) and `when` is in
 the prelude:
 
 ```clojure fragment
@@ -136,7 +136,7 @@ the prelude:
   "Bind `name` to `val` only if it isn't already bound — so the value
 survives hot-reload (cf. Emacs `defvar`). Re-evaluating this form is a
 no-op once bound; restart or re-`def` to force re-init."
-  `(unless (bound? '~name) (def ~name ~val)))
+  `(when (not (bound? '~name)) (def ~name ~val)))
 ```
 
 **Why it composes with reload for free.** `system/reload-defs` re-evals forms whose

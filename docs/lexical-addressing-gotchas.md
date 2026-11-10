@@ -58,7 +58,7 @@ param-inference and unbound-checks misfire.
   separate `let*`): each binding sees the earlier ones. Assign slot indices
   **incrementally** as bindings are compiled, with the rhs compiled against the
   scope *so far*.
-- **`match*` opacity.** The branch found the pattern engine's output opaque to
+- **`%match` opacity.** The branch found the pattern engine's output opaque to
   addressing. In the VM a `match` expands to ordinary forms that compile, so this
   applies only to a shape the compiler declines, which defers.
 - **Don't address the call-head position.** Leaving a call head as a name keeps the

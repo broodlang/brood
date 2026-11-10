@@ -58,7 +58,7 @@
         (assert= (pt 7 8) got))))
   :isolated (test "many processes build records and fan them in"
     (let (me (self) n 32)
-      (dotimes (i n) (spawn (send me [:r (pt i (* 2 i))])))
+      (doseq (i (range n)) (spawn (send me [:r (pt i (* 2 i))])))
       (let (got (reduce (range n) [] (fn (acc _) (receive ([:r r] (conj acc r)) (after 5000 acc)))))
         (assert= n (count got))
         (is (every? got

@@ -35,7 +35,7 @@ use super::*;
 //   equality constraint, or each `or` alternative) keeps one replacement. `{:keys [a]}` is
 //   left literal: its names ARE the keys looked up, so a renamed `a` would read `:a__12`.
 // - the standard library's binding macros, by shape (`binding_shape`): binding pairs
-//   (`when-let`, `for`, `doseq`, `with`, …), pattern clauses (`match`, `match*`,
+//   (`when-let`, `for`, `doseq`, `with`, …), pattern clauses (`match`, `%match`,
 //   `receive`), `try`'s `catch`, `as->`, and the params of `defn`/`defmethod`/`impl` — a
 //   renamed param still reads as written wherever a parameter list is shown
 //   (`value::source_symbol`).
@@ -250,7 +250,7 @@ fn binding_shape(head: value::Symbol) -> Option<Shape> {
         }
         "if-let" | "if-some" => Some(Shape::PairsThenElse),
         "match" => Some(Shape::Clauses(2)),
-        "match*" => Some(Shape::Clauses(3)),
+        "%match" | "match*" => Some(Shape::Clauses(3)),
         "receive" => Some(Shape::Clauses(1)),
         "try" => Some(Shape::Try),
         "as->" => Some(Shape::AsArrow),

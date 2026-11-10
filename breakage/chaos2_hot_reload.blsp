@@ -22,7 +22,7 @@
 (defn p29-get-version () p29-version)
 
 ;; Warm the arm
-(dotimes (_ 10) (p29-get-version))
+(doseq (_ (range 10)) (p29-get-version))
 (io/puts "P29: before redef:" (p29-get-version))
 
 ;; Redefine p29-version
@@ -164,7 +164,7 @@
 
 (let (me (self)
       n 100)
-  (dotimes (i n)
+  (doseq (i (range n))
     (spawn
       (binding (*p35-worker-id* i)
         ;; Do some work to let other processes interleave

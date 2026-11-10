@@ -45,7 +45,7 @@
 > required closing a latent hole: `compile_node` must **defer a call whose head is an
 > unexpanded (forward-referenced) macro** (via `macros::macro_head_id`), or it
 > compiles the macro's argument syntax as calls (the `sleep`→`receive` bug). **Then
-> still worth doing (pure perf):** patterns / `match*`. See
+> still worth doing (pure perf):** patterns / `%match`. See
 > [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
 >
 > **ADR-096 perf round (2026-06-06, done):** call-site + global-read **inline

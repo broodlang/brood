@@ -38,7 +38,7 @@
         (send server [:incr 1 (self)])
         (receive ([:ok _] :ok) (after 5000 :timeout))
         (do-increments server me (- remaining 1) client))))
-  (dotimes (i n-clients)
+  (doseq (i (range n-clients))
     (spawn (do-increments server me 10 i)))
 
   ;; Wait for all clients to finish
@@ -179,7 +179,7 @@
     (receive (:ok :ok) (after 1000 :timeout)))
 
   ;; 50 concurrent readers
-  (dotimes (i 50)
+  (doseq (i (range 50))
     (spawn (let (key (math/rem (* i 197) 10000))
              (send server [:get key (self)])
              (let (r (receive ([:val v] v) (after 5000 :timeout)))
@@ -203,7 +203,7 @@
 
 (let (me (self))
   ;; Flood our mailbox so mailbox count is visible
-  (dotimes (_ 10) (send me :dummy))
+  (doseq (_ (range 10)) (send me :dummy))
   (let (info (proc/info me))
     (io/puts "P48: process-info keys:" (into [] (keys info)))
     (io/puts "P48: status:" (get info :status))
@@ -215,6 +215,6 @@
           (= :waiting (get info :status)))
         (>= (get info :mailbox) 10))))
   ;; Drain dummies
-  (dotimes (_ 10) (receive (:dummy :ok) (after 100 :ok))))
+  (doseq (_ (range 10)) (receive (:dummy :ok) (after 100 :ok))))
 
 (io/puts "=== chaos2_process_genserver DONE ===")

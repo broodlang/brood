@@ -297,9 +297,9 @@ before working in any Rust component:
 ### `std/prelude/*.blsp` — the core library · ~9,000 LOC across thirteen files
 - **Owns:** `defn`; logic; folding (`fold`/`reduce`/`map`); variadic
   arithmetic & comparison over the 2-arg primitives; control-flow macros
-  (`when`/`unless`/`and`/`or`/`cond`); sequence ops; the threading macro
+  (`when`/`and`/`or`/`cond`); sequence ops; the threading macro
   (`->`); error handling (`error`, `try`/`catch` over `%try`); the
-  **pattern-match compiler** (`match*`/`match`, reused by `let`/`fn`); string &
+  **pattern-match compiler** (`%match`/`match`, reused by `let`/`fn`); string &
   path helpers; and the **module system** (`provide`/`require`/`*load-path*`).
 - **Baked into the binary** via `include_str!` in `boot.rs`; frozen into PRELUDE.
 - **Work here independently:** this is where new language features should go by

@@ -158,7 +158,7 @@ fn run_fan(interp: &mut Interp, module: &str, call: &str, expected: &str) {
         ;; there first, with its own message.
         (defn fan (k)
           (do
-            (dotimes (_ k) (spawn-monitor (send root [:r {call}])))
+            (doseq (_ (range k)) (spawn-monitor (send root [:r {call}])))
             (reduce (range k) (list)
               (fn (acc _)
                 (receive

@@ -65,7 +65,7 @@ def  fn  quote  quasiquote  if  do  let  letrec
 
 Common macros (expanded once at the compile pass — runtime-free): `defmacro`
 (lowers to `(def name (%make-macro (fn …)))`), `defn`, `defn-` / `def-`, `defdyn`, `binding`,
-`cond`, `when`, `unless`, `and`, `or`, `match`, `try` / `catch`, `->` / `as->`,
+`cond`, `when`, `and`, `or`, `match`, `try` / `catch`, `->` / `as->`,
 `ok->` / `cond->` / `doto`, `if-let` / `when-let`,
 `string/interp` (string interpolation), `for` / `fold-for`, `condp`, `if-some` /
 `when-some`, `receive`, `spawn`.
@@ -219,8 +219,8 @@ and your packages stay fully redefinable, which is what hot reload is for. If a 
 you want is taken: pick another, shadow it locally (`(let (get …) …)` is fine), or
 define it in a `(defmodule your/mod …)` — that makes `your/mod/get`, which is yours.
 Inside that module your definition wins every bare call, even over a prelude **macro**
-(`(defn unless …)` → `(unless x)` calls yours; `/unless` reaches the macro). Defining a prelude
-macro's name warns at load unless the header says `(:shadow unless)` (ADR-423).
+(`(defn when …)` → `(when x)` calls yours; `/when` reaches the macro). Defining a prelude
+macro's name warns at load unless the header says `(:shadow when)` (ADR-423).
 The rule reserves shipped **functions**; a `defdyn` name is never reserved whatever it
 holds, and it is ambient (root) — so `(def *print-length* 3)` from any module rebinds the
 one root binding, and `(def *out* my-port)` still redirects output permanently. A plain
@@ -864,7 +864,7 @@ pattern most demos want):
 
 (defn run (n)
   (let (me (self))
-    (dotimes (i n) (spawn (worker me i)))   ; fan out n workers
+    (doseq (i (range n)) (spawn (worker me i)))   ; fan out n workers
     (collect 0 n {})))                       ; fan in n results into a map
 ```
 
@@ -1156,8 +1156,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **iteration** (macros — there is no `while` and no imperative `for` loop): `for`
   (list comprehension, with `:when`; add `:into []` / `:into {}` / `:into #{}` as the
   LAST pair to build that kind directly), `fold-for` (an accumulating comprehension:
-  `(fold-for (acc 0 x xs) (+ acc x))`), `doseq` (destructuring/`:when`),
-  `dotimes` `(i n)`, `dolist` `(x coll)`. `doseq`/`dotimes`/`dolist` return `nil`.
+  `(fold-for (acc 0 x xs) (+ acc x))`), and `doseq`, the one form for effects: `for`'s
+  bindings, collects nothing, returns `nil`; a counted loop is `(doseq (i (range n)) …)`.
+  `dotimes`, `dolist` and `unless` are deprecated (ADR-674): write `doseq` and
+  `(when (not t) …)`; `nest format --migrate` rewrites old code.
 - **string**: the string surface lives in the `string` module (ADR-230), so these are
   **`string/`-qualified** unless listed as bare below: `string/length`
   `string/substring` `string/char-at` (returns a 1-char *string* — Brood has no char

@@ -129,6 +129,7 @@
 pub mod annot;
 mod cross_module_def;
 mod ctx;
+mod deprecated_macros;
 pub(super) mod deps;
 mod discarded_catch;
 mod exhaustive;

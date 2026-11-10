@@ -16,7 +16,7 @@ use super::*;
 // Safety invariant: NEVER rewrite a binder/param/pattern position. Over-qualifying
 // a local (treating a bound name as free) is a *silent* miscompile; under-qualifying
 // a genuine reference is at worst a loud unbound error. So when the binder shape is
-// uncertain (e.g. `match*` patterns, `&optional` defaults) we over-approximate the
+// uncertain (e.g. `%match` patterns, `&optional` defaults) we over-approximate the
 // bound set and leave those positions verbatim — safe, occasionally incomplete.
 // Data is inviolate: `quote`/`quasiquote` are skipped wholesale (a quoted symbol is
 // a message tag / map key that travels by name across processes — ADR-034).
@@ -1333,8 +1333,13 @@ fn resolve_list(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Sy
         if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LETREC) {
             return resolve_let(heap, form, &items, ns_name, locals);
         }
-        // `/match*` is the form the pattern lowerings emit (ADR-638)
-        if value::symbol_is(h, kw::MATCH_STAR) || value::symbol_is(h, "/match*") {
+        // `/%match` is the form the pattern lowerings emit (ADR-638, ADR-674); `match*` is its
+        // deprecated spelling, accepted until it is removed
+        if value::symbol_is(h, kw::MATCH_ENGINE)
+            || value::symbol_is(h, "/%match")
+            || value::symbol_is(h, kw::MATCH_STAR)
+            || value::symbol_is(h, "/match*")
+        {
             return resolve_match(heap, form, &items, ns_name, locals);
         }
     }
@@ -1478,7 +1483,7 @@ fn resolve_arity_clause(
 }
 
 /// `(let/let*/letrec (s1 v1 …) body…)` — simple symbol binders post-expand
-/// (patterns lowered to `match*`). Binders left verbatim; RHSs and body resolved
+/// (patterns lowered to `%match`). Binders left verbatim; RHSs and body resolved
 /// with binders in scope (sequential — a safe over-approximation for plain `let`).
 fn resolve_let(
     heap: &mut Heap,
@@ -1524,7 +1529,7 @@ fn resolve_let(
     reuse_or_rebuild(heap, form, items, out)
 }
 
-/// `(match* :ctx valexpr (pattern body…) …)` — resolve `valexpr` and each clause
+/// `(%match :ctx valexpr (pattern body…) …)` — resolve `valexpr` and each clause
 /// body with the clause pattern's symbols treated as bound (over-approximation:
 /// all symbols anywhere in the pattern are collected, so a binder is never
 /// qualified; a pinned reference there is left bare — safe, occasionally lossy).
@@ -1539,7 +1544,7 @@ fn resolve_match(
         return generic_resolve(heap, form, items, ns_name, locals);
     }
     let mut out = Vec::with_capacity(items.len());
-    out.push(items[0]); // match*
+    out.push(items[0]); // %match
     out.push(items[1]); // :ctx keyword
     out.push(resolve_walk(heap, items[2], ns_name, locals)); // value expression
     for &clause in &items[3..] {

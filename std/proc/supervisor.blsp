@@ -224,7 +224,7 @@ its `:shutdown` policy, draining each one's `[:EXIT]`. **Reverse start order**
 `supervisor-ordered` — so we tear down last-started-first), so a child that depends on an earlier-started sibling is stopped first.
 Sequential: a child marked `:infinity` (a sub-supervisor) is fully torn down —
 recursively — before the next, so a whole tree shuts down depth-first."
-  (dolist (c (reverse children)) (supervisor-terminate-child c)))
+  (doseq (c (reverse children)) (supervisor-terminate-child c)))
 
 ;; ---- restart-intensity window -----------------------------------------------
 

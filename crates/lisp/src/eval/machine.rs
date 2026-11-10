@@ -1184,7 +1184,7 @@ impl<'e> Machine<'e> {
                 Some(SpecialForm::Def) => return self.def(heap, expr, rest),
                 Some(SpecialForm::Fn) => {
                     // Fallback: a multi-clause / pattern-parameter `fn` normally lowers to
-                    // `match*` in the compile pass, but can reach eval unlowered (built by a
+                    // `%match` in the compile pass, but can reach eval unlowered (built by a
                     // quasiquote, or a macro expanded lazily within its defining form).
                     // Lower it here and re-enter. The common case is detected away cheaply,
                     // so this never touches an ordinary `fn`.

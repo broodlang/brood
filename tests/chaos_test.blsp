@@ -241,7 +241,7 @@
 
   (test "spawning 50 processes that each crash does not affect parent"
     (let (_me (self))
-      (dotimes (_i 50)
+      (doseq (_i (range 50))
         (spawn (fn () (/ 1 0))))
       (assert= :alive (receive (after 200 :alive)))))
 
@@ -250,7 +250,7 @@
   ;; Capture the parent PID with `me=(self)` first.
   (test "20 spawned senders deliver :done to parent — all received without timeout"
     (let (me (self))
-      (dotimes (_i 20)
+      (doseq (_i (range 20))
         (spawn (send me :done))))
     (assert= :ok (await-done 20))))
 

@@ -30,7 +30,7 @@ mod path {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (path/join \"/usr\" \"local\" \"lib\" \"brood\"))"
+                 (doseq (i (range {n})) (path/join \"/usr\" \"local\" \"lib\" \"brood\"))"
             ),
         );
     }
@@ -42,7 +42,7 @@ mod path {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (path/normalize \"/usr/local/lib/../share/./brood\"))"
+                 (doseq (i (range {n})) (path/normalize \"/usr/local/lib/../share/./brood\"))"
             ),
         );
     }
@@ -54,7 +54,7 @@ mod path {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) \
+                 (doseq (i (range {n})) \
                    (do (path/basename  \"/usr/local/lib/brood.tar.gz\") \
                        (path/dirname   \"/usr/local/lib/brood.tar.gz\") \
                        (path/extension \"/usr/local/lib/brood.tar.gz\") \
@@ -70,7 +70,7 @@ mod path {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (path/relative-to \"/a/b/x/y/z\" \"/a/b/c/d\"))"
+                 (doseq (i (range {n})) (path/relative-to \"/a/b/x/y/z\" \"/a/b/c/d\"))"
             ),
         );
     }
@@ -93,7 +93,7 @@ mod encoding {
             format!(
                 "\
                  (def s {STR_64}) \
-                 (dotimes (i {n}) (encoding/hex-encode s))"
+                 (doseq (i (range {n})) (encoding/hex-encode s))"
             ),
         );
     }
@@ -106,7 +106,7 @@ mod encoding {
             format!(
                 "\
                  (def s {STR_64}) \
-                 (dotimes (i {n}) (encoding/hex-decode (encoding/hex-encode s)))"
+                 (doseq (i (range {n})) (encoding/hex-decode (encoding/hex-encode s)))"
             ),
         );
     }
@@ -119,7 +119,7 @@ mod encoding {
             format!(
                 "\
                  (def s {STR_64}) \
-                 (dotimes (i {n}) (encoding/base64-encode s))"
+                 (doseq (i (range {n})) (encoding/base64-encode s))"
             ),
         );
     }
@@ -132,7 +132,7 @@ mod encoding {
             format!(
                 "\
                  (def s {STR_64}) \
-                 (dotimes (i {n}) (encoding/base64-decode (encoding/base64-encode s)))"
+                 (doseq (i (range {n})) (encoding/base64-decode (encoding/base64-encode s)))"
             ),
         );
     }
@@ -151,7 +151,7 @@ mod hash {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (hash/sha256 \"hello, brood!\"))"
+                 (doseq (i (range {n})) (hash/sha256 \"hello, brood!\"))"
             ),
         );
     }
@@ -164,7 +164,7 @@ mod hash {
             format!(
                 "\
                  (def s (string/repeat \"a\" 1024)) \
-                 (dotimes (i {n}) (hash/sha256 s))"
+                 (doseq (i (range {n})) (hash/sha256 s))"
             ),
         );
     }
@@ -176,7 +176,7 @@ mod hash {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (hash/hmac-sha256 \"secret-key\" \"hello, brood!\"))"
+                 (doseq (i (range {n})) (hash/hmac-sha256 \"secret-key\" \"hello, brood!\"))"
             ),
         );
     }
@@ -195,7 +195,7 @@ mod uuid {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (uuid/v4))"
+                 (doseq (i (range {n})) (uuid/v4))"
             ),
         );
     }
@@ -207,7 +207,7 @@ mod uuid {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (uuid/v7))"
+                 (doseq (i (range {n})) (uuid/v7))"
             ),
         );
     }
@@ -219,7 +219,7 @@ mod uuid {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (uuid/v5 uuid/ns-dns \"example.com\"))"
+                 (doseq (i (range {n})) (uuid/v5 uuid/ns-dns \"example.com\"))"
             ),
         );
     }
@@ -241,7 +241,7 @@ mod crypto {
                  (def key   (crypto/random-key)) \
                  (def nonce (crypto/random-nonce)) \
                  (def plain (into [] (range 64))) \
-                 (dotimes (i {n}) \
+                 (doseq (i (range {n})) \
                    (crypto/decrypt key nonce (crypto/encrypt key nonce plain)))"
             ),
         );
@@ -254,7 +254,7 @@ mod crypto {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (crypto/pbkdf2 \"password\" \"salt\" 1000 32))"
+                 (doseq (i (range {n})) (crypto/pbkdf2 \"password\" \"salt\" 1000 32))"
             ),
         );
     }
@@ -273,7 +273,7 @@ mod datetime {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (datetime/parse-date \"2026-06-08\"))"
+                 (doseq (i (range {n})) (datetime/parse-date \"2026-06-08\"))"
             ),
         );
     }
@@ -286,7 +286,7 @@ mod datetime {
             format!(
                 "\
                  (def d (datetime/date 2026 1 1)) \
-                 (dotimes (i {n}) (datetime/add d (datetime/days 30)))"
+                 (doseq (i (range {n})) (datetime/add d (datetime/days 30)))"
             ),
         );
     }
@@ -299,7 +299,7 @@ mod datetime {
             format!(
                 "\
                  (def d (datetime/date 2026 6 8)) \
-                 (dotimes (i {n}) (datetime/format d \"%Y-%m-%d\"))"
+                 (doseq (i (range {n})) (datetime/format d \"%Y-%m-%d\"))"
             ),
         );
     }
@@ -312,7 +312,7 @@ mod datetime {
             format!(
                 "\
                  (def d (datetime/date 2026 6 8)) \
-                 (dotimes (i {n}) (datetime/epoch-ms-> (datetime/->epoch-ms d)))"
+                 (doseq (i (range {n})) (datetime/epoch-ms-> (datetime/->epoch-ms d)))"
             ),
         );
     }
@@ -361,7 +361,7 @@ mod url {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) \
+                 (doseq (i (range {n})) \
                    (url/parse-url \"https://example.com/path/to/page?foo=bar&baz=qux#section\"))"
             ),
         );
@@ -374,7 +374,7 @@ mod url {
             bencher,
             format!(
                 "\
-                 (dotimes (i {n}) (url/percent-encode \"hello world! foo=bar&baz=qux\"))"
+                 (doseq (i (range {n})) (url/percent-encode \"hello world! foo=bar&baz=qux\"))"
             ),
         );
     }
@@ -387,7 +387,7 @@ mod url {
             format!(
                 "\
                  (def q {{:name \"Alice Doe\" :age \"30\" :city \"New York\"}}) \
-                 (dotimes (i {n}) (url/query-decode (url/query-encode q)))"
+                 (doseq (i (range {n})) (url/query-decode (url/query-encode q)))"
             ),
         );
     }
@@ -456,7 +456,7 @@ mod template {
                 "\
                  (def tmpl \"Hello, {{{{name}}}}! You have {{{{count}}}} messages.\") \
                  (def ctx {{:name \"Alice\" :count \"5\"}}) \
-                 (dotimes (i {n}) (template/render tmpl ctx))"
+                 (doseq (i (range {n})) (template/render tmpl ctx))"
             ),
         );
     }
@@ -470,7 +470,7 @@ mod template {
                 "\
                  (def tmpl \"Hello, {{{{name}}}}!\") \
                  (def ctxs (map (fn (i) {{:name (str \"User\" i)}}) (range 10))) \
-                 (dotimes (i {n}) (template/render-all tmpl ctxs))"
+                 (doseq (i (range {n})) (template/render-all tmpl ctxs))"
             ),
         );
     }
@@ -633,7 +633,7 @@ mod agent {
             format!(
                 "\
                  (def a (agent/start (fn () 0))) \
-                 (dotimes (i {n}) (agent/update a inc)) \
+                 (doseq (i (range {n})) (agent/update a inc)) \
                  (agent/get a identity) \
                  (agent/stop a)"
             ),
@@ -648,7 +648,7 @@ mod agent {
             format!(
                 "\
                  (def a (agent/start (fn () 0))) \
-                 (dotimes (i {n}) (agent/get-and-update a (fn (s) [s (+ s 1)]))) \
+                 (doseq (i (range {n})) (agent/get-and-update a (fn (s) [s (+ s 1)]))) \
                  (agent/stop a)"
             ),
         );

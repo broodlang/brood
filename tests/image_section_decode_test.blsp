@@ -37,7 +37,7 @@
   :isolated (test "refuses every process that races its first require, and strands none"
     (ghost-image "ki127-ghost-fan")
     (let (me (self))
-      (dotimes (_ 8)
+      (doseq (_ (range 8))
         (spawn (send me [:r (try-require "ki127-ghost-fan")])))
       (assert= (seq/repeat 8 :refused)
         (map (range 8) (fn (_) (receive ([:r v] v) (after 20000 :timeout)))))

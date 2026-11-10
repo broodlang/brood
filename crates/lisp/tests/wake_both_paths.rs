@@ -32,7 +32,7 @@ fn racing_requirers_are_all_released_by_the_loader() {
     let v = interp
         .eval_str(
             "(def root (self))\
-             (dotimes (_ 32) (spawn (send root [:r (string/blank? \"\")])))\
+             (doseq (_ (range 32)) (spawn (send root [:r (string/blank? \"\")])))\
              (let (got (reduce (range 32) (list) (fn (a _) (receive ([:r v] (cons v a))))))\
                [(count got) (count (seq/filter got (fn (x) (= x true))))\
                 (%registry-member? '*features* \"string\")])",
@@ -141,7 +141,7 @@ fn a_failed_load_does_not_report_success_to_racing_requirers() {
     let v = interp
         .eval_str(
             "(def root (self))\
-             (dotimes (_ 8)\
+             (doseq (_ (range 8))\
                (spawn (send root [:r (try (do (require-one \"zzz-no-such-module\") :ok)\
                                        (catch _ :err))])))\
              (let (got (reduce (range 8) (list) (fn (a _) (receive ([:r v] (cons v a))))))\
@@ -166,7 +166,7 @@ fn a_receive_nested_in_a_native_hof_is_woken() {
     let v = interp
         .eval_str(
             "(def root (self))\
-             (dotimes (_ 24) (spawn (send root [:r 7])))\
+             (doseq (_ (range 24)) (spawn (send root [:r 7])))\
              (count (reduce (range 24) (list) (fn (acc _) (receive ([:r v] (cons v acc))))))",
         )
         .expect("racing 24 senders into a native-nested receive");
@@ -187,7 +187,7 @@ fn repeated_parks_in_a_native_hof_are_all_woken() {
     let v = interp
         .eval_str(
             "(def root (self))\
-             (dotimes (_ 40) (spawn (send root [:r 1])))\
+             (doseq (_ (range 40)) (spawn (send root [:r 1])))\
              (count (reduce (range 40) (list)\
                       (fn (acc _) (try (receive ([:r v] (cons v acc))) (catch _ acc)))))",
         )

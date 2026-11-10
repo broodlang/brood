@@ -111,7 +111,7 @@ with the name attached, which a raise here would not have."
   ;; `(not (nil? (index-of …)))` is true for every input and asserts nothing. The checker
   ;; says so out loud — "this can never be true" — and it was right.
   (test "neither shipped document teaches an absent spelling"
-    (dolist (doc (list 'writing-brood-skill 'brood-for-claude))
+    (doseq (doc (list 'writing-brood-skill 'brood-for-claude))
       (let (text (%builtin-doc doc))
         (assert= []
           (into []

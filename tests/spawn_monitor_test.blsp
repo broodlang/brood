@@ -84,7 +84,7 @@
                       (await-exit p)
                       (send me
                         [:saw (receive ([:down ^r _ reason] reason) (after test/*wait-ms* :lost))]))))
-      (dotimes (_ n) (spawn (watcher)))
+      (doseq (_ (range n)) (spawn (watcher)))
       (let (collect (fn (collect i bad)
                       (if (>= i n)
                         bad

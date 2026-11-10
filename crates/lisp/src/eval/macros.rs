@@ -485,7 +485,7 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     // The original call, rooted. An expander that raises is complaining about the call, so
     // an error with no position of its own is placed there — not at the enclosing top-level
     // form the compile pass would otherwise blame — and that includes an expansion a macro
-    // BUILT (`match` → `match*`), which has no reader position.
+    // BUILT (`match` → `%match`), which has no reader position.
     let rb = heap.roots_len();
     heap.push_root(form);
     let mut cur = form;
@@ -737,7 +737,7 @@ fn macroexpand_all_depth_step_inner(
                 {
                     return macroexpand_all_depth(heap, rewritten, env, depth + 1);
                 }
-                // Desugar pattern binders into the Brood `match*` engine so they
+                // Desugar pattern binders into the Brood `%match` engine so they
                 // expand once here (fast) rather than per call. eval's `let`/`fn`
                 // then only ever see plain symbol binds.
                 if value::symbol_is(s, kw::LET) || value::symbol_is(s, kw::LETREC) {
@@ -1106,7 +1106,7 @@ fn expand_tail(
 /// Does this (post-`lower_fn`) `fn`/`lambda` form's body consist entirely of
 /// `(param-list body…)` clauses — i.e. is it an arity-only multi-clause fn? (A
 /// leading docstring is allowed.) Pattern multi-clause fns were already lowered
-/// to `match*`, so by here "all clauses" implies arity-only.
+/// to `%match`, so by here "all clauses" implies arity-only.
 pub(crate) fn fn_is_arity_multi_clause(heap: &Heap, items: &[Value]) -> bool {
     let forms = &items[1..];
     let forms = match forms.first().map(|v| v.unpack()) {
@@ -1461,15 +1461,15 @@ mod resolve_tests {
 
     #[test]
     fn match_pattern_binders_are_not_qualified() {
-        // The `match*` clause pattern binds `n`; the body ref to `n` must stay local
+        // The `%match` clause pattern binds `n`; the body ref to `n` must stay local
         // even though `foo/n` exists, while a free `bar` qualifies.
         assert_eq!(
             resolved(
                 &["(def foo/n 1)", "(def foo/bar 2)"],
                 "foo",
-                "(match* :match v (n (bar n)))"
+                "(%match :match v (n (bar n)))"
             ),
-            "(match* :match v (n (foo/bar n)))"
+            "(%match :match v (n (foo/bar n)))"
         );
     }
 }

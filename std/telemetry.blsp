@@ -379,9 +379,9 @@ with the default crash reporter, an MCP snapshot, or a second `watch-runtime`.
     (:stop nil)
     (after interval
       (let (current (or (node/list) (list)))
-        (dolist (n (telemetry-absent current known))
+        (doseq (n (telemetry-absent current known))
           (emit [:runtime :nodeup] {} {:node n}))
-        (dolist (n (telemetry-absent known current))
+        (doseq (n (telemetry-absent known current))
           (emit [:runtime :nodedown] {} {:node n}))
         (telemetry-nodes-loop current interval)))))
 

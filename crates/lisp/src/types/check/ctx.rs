@@ -539,7 +539,7 @@ struct FileFacts {
     fn_forms: HashMap<Symbol, Value>,
     /// The un-expanded clauses of each same-file multi-clause `defn` (pattern or arity
     /// heads), keyed by the qualified name same-file inference records overloads under. The expanded
-    /// tree of such a definition is one variadic `fn` over `match*` (ADR-226) and says
+    /// tree of such a definition is one variadic `fn` over `%match` (ADR-226) and says
     /// nothing about what each clause takes; the clauses do, so specialization reads them.
     clause_arms: HashMap<Symbol, Vec<Value>>,
     /// The un-expanded clauses of each same-file **inline pattern-clause `fn` literal**

@@ -266,7 +266,7 @@ fn a_diverging_guard_narrows_the_rest_of_the_body() {
         format!("{base}(defn f (s) (let (r (p s)) (when (nil? r) (error \"no\")) (q r)))");
     assert!(file_warnings_mode(&guarded, true).is_empty(), "{guarded}");
     // `unless` — the diverging arm is the ELSE, so the sequel gets the then-scope
-    let unless = format!("{base}(defn f (s) (let (r (p s)) (unless r (error \"no\")) (q r)))");
+    let unless = format!("{base}(defn f (s) (let (r (p s)) (if r nil (do (error \"no\"))) (q r)))");
     assert!(file_warnings_mode(&unless, true).is_empty(), "{unless}");
     // …and it reaches the INFERRED RETURN, not just the walk: a function that guards and
     // then answers the value must advertise the narrowed type, or its callers are reported

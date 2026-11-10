@@ -59,7 +59,7 @@
       n-workers 1000
       config {:n 200 :seed 42 :label "stress"})
   ;; Fan out
-  (dotimes (i n-workers)
+  (doseq (i (range n-workers))
     (spawn (heavy-worker me i config)))
   ;; Fan in — collect all results into a map keyed by id
   (defn collect-workers (acc remaining)
@@ -107,7 +107,7 @@
 
 (let (me (self)
       n 50)
-  (dotimes (_ n)
+  (doseq (_ (range n))
     (spawn (let (pid (spawn :shared-counter (shared-counter-proc 0))) (send me pid))))
   ;; collect all returned pids
   (defn collect-pids (remaining acc)
@@ -126,7 +126,7 @@
       ; cube — a real closure
       f (fn (x) (* x x x))
       n 200)
-  (dotimes (i n)
+  (doseq (i (range n))
     (spawn (let (result (f (+ i 1))) (send me [:cube (+ i 1) result]))))
   (defn collect-cubes (remaining acc)
     (if (= remaining 0)

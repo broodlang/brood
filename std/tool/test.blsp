@@ -382,7 +382,7 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
          (check-allow :cross-module-def (def *collecting* false))
          (emit-describe ~mode ~group (reverse *collected*) ~tags ~skip)
          ;; Advisory: a describe with no tests is a heading over nothing (ADR-225).
-         ~(unless (describe-body-has-tests? body)
+         ~(when (not (describe-body-has-tests? body))
             (list 'io/puts
               (str "warning: describe " (pr-str group) " has no tests")
               :to '*err*))
@@ -431,7 +431,7 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
   "Assert that `expr` is truthy; on failure record the source expression and its actual value."
   (let (v (reflect/gensym "v") loc (fail-loc expr))
     `(let (~v ~expr)
-       (unless ~v
+       (when (not ~v)
          (test-fail (quote ~loc)
            (list (str "assert: " (pr-str (quote (is ~expr)))) (str "actual: " (pr-str ~v))))))))
 
@@ -448,7 +448,7 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
   "Assert that `actual` is structurally equal to `expected`; on failure record both values."
   (let (a (reflect/gensym "a") b (reflect/gensym "b") loc (fail-loc actual))
     `(let (~a ~actual ~b ~expected)
-       (unless (= ~a ~b)
+       (when (not (= ~a ~b))
          (test-fail (quote ~loc)
            (list (str "assert: " (pr-str (quote (assert= ~actual ~expected))))
              (str "actual: " (pr-str ~a))
@@ -505,7 +505,7 @@ the test rather than hanging the run.
   ;; Quote the body for the message: the lone form if there's one, else (do …).
   (let (form (if (= (count body) 1) (first body) (cons 'do body))
         loc (fail-loc (if (= (count body) 1) (first body) nil)))
-    `(unless (try (do ~@body false) (catch e true))
+    `(when (not (try (do ~@body false) (catch e true)))
        (test-fail (quote ~loc)
          (list (str "assert: " (pr-str (quote (assert-error ~form)))) "actual: no error was raised")))))
 
@@ -982,7 +982,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
     (test/progress-mark results)   ;~> one . F or ○ per result printed, flushed"
   ;; Suppressed under `:trace` (which prints a line per test) and under a machine
   ;; `--formatter` (whose output must stay parseable — no stray dots).
-  (unless (or test/*trace* *test-formatter*)
+  (when (not (or test/*trace* *test-formatter*))
     (fold results
       nil
       (fn (_ r)
@@ -1672,7 +1672,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
 (defn- report-failures (results)
   (let (failed (seq/filter results r-failed?))
-    (unless (empty? failed) (fold failed nil (fn (_ r) (print-failure "    " r))))))
+    (when (not (empty? failed)) (fold failed nil (fn (_ r) (print-failure "    " r))))))
 
 (defn- report-slow (results n)
   (io/puts "")
@@ -1698,7 +1698,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 (defn- report-slow-over (results over)
   (let (slow (seq/filter (map results (fn (r) [(full-name r) (r-ms r)]))
                (fn (p) (> (second p) over))))
-    (unless (empty? slow)
+    (when (not (empty? slow))
       (io/puts "")
       (io/puts (str "Slow tests (> " (secs-str over) "):"))
       (fold (sort-by-ms slow)

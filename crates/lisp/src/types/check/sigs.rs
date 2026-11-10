@@ -650,7 +650,7 @@ pub(super) fn infer_overload_from_form(heap: &Heap, fn_form: Value, ctx: &Ctx) -
 ///
 /// Taken as a *slice of clauses* rather than a form because the surface `defn` is
 /// where this fact is legible: a `:when`-guarded multi-clause definition **lowers**
-/// to a single variadic `fn` over `match*` (ADR-226), so by the time the expanded
+/// to a single variadic `fn` over `%match` (ADR-226), so by the time the expanded
 /// tree exists there are no clauses left to read — only a rest-list being
 /// destructured. The un-expanded form still says exactly what each clause takes.
 pub(super) fn infer_overload_from_clauses(
@@ -696,7 +696,7 @@ pub(super) fn infer_overload_from_clauses(
         // clause's domain, intersected with whatever its body demands. This is where a
         // guarded multi-clause `defn` gets its argument types from, with no annotation:
         // each clause contributes its guard, and a call no clause admits raises
-        // `match*`'s no-match at run time.
+        // `%match`'s no-match at run time.
         if let Some(g) = arm.guard {
             let scope = DomainScope {
                 shadowed: HashSet::new(),

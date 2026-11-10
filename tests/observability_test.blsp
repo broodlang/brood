@@ -23,8 +23,8 @@
 (describe "sched-stats"
   (test "counters exist, move with activity, and stay consistent"
     (let (me (self))
-      (dotimes (_ 8) (spawn (send me :done)))
-      (dotimes (_ 8) (receive (:done nil))))
+      (doseq (_ (range 8)) (spawn (send me :done)))
+      (doseq (_ (range 8)) (receive (:done nil))))
     (let (s (dev/sched-stats))
       (is (> (get s :spawned) 0))
       (is (> (get s :exited) 0))

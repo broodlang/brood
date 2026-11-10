@@ -38,6 +38,15 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   another collection. `()` stays `nil`.
 
 **Changed.**
+- **Deprecated: `dotimes`, `dolist`, `unless` and `match*`** (ADR-674), the first stage of
+  "reduce before adding": one form iterates for effect. They still work; `nest check` warns at
+  each use, and **`nest format --migrate`** rewrites them: `(dotimes (i n) …)` →
+  `(doseq (i (range n)) …)`, `(dolist (x xs) …)` → `(doseq (x xs) …)`, `(unless t …)` →
+  `(when (not t) …)`, and `match*` → `%match`, the engine's internal name (write `match`).
+  They are removed before 1.0.
+- **`doseq` collects nothing**: it walks `for`'s bindings as `fold-for` does instead of building
+  `for`'s list and discarding it, about 1.5× faster. A bare name as its body
+  (`(doseq (x xs) x)`) now draws `nest check`'s "evaluated and discarded" warning, which it is.
 - **A `defmemo` store is per process and keeps the caller's own values** (ADR-670): the same big
   argument passed again is a hit by identity, where the `def`'d store held a deep copy that every
   lookup walked and every miss copied (4.6 s a frame for a memo keyed on a large editor buffer).

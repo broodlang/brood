@@ -126,7 +126,7 @@ parse and nothing else."
                   (let (rel (include-str-arg node))
                     (when rel
                       (let (path (%include-str-path rel root))
-                        (unless (file/exists? path)
+                        (when (not (file/exists? path))
                           (error "release: include-str: no file at "
                             path " (named by " rel ")"))
                         [(get node :start)
@@ -268,10 +268,11 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 (defn- bundle-reject-missing-entry (names)
   (let (entry (or project/*main-override* project/*main*)
         modname (->string (first entry)))
-    (unless (or (includes? names modname)
+    (when (not
+            (or (includes? names modname)
               ;; A baked-in std module as the entry is odd but not this guard's business
               ;; to refuse — it is embedded in every runtime, so the bundle would boot.
-              (includes? (map (reflect/builtin-modules) ->string) modname))
+              (includes? (map (reflect/builtin-modules) ->string) modname)))
       (error "release: "
         (project-run/project-no-entry-advice (first entry))
         ". A release bundle boots by calling its entry fn, so one that names no"
@@ -505,7 +506,7 @@ which is what `nest release --smoke` does to the binary it just wrote. Loads the
 the way a launch does — from the bundle's startup image when it carries one — and says which.
 
     (project-release/check-bundle-boot)   ;~> 0 — every embedded module loaded and :main resolved; raises otherwise"
-  (unless (%bundled?)
+  (when (not (%bundled?))
     (error "check-bundle-boot: this executable is not a `nest release` bundle"))
   (let ([modname fname sections] (bundle-boot-load))
     (require-one modname)
@@ -532,7 +533,7 @@ release` gets an image the shipped runtime wrote itself (ADR-484); a load that c
 imaged (a `table` global) raises, and the release ships without one.
 
     (project-release/write-bundle-image \"/tmp/app.image\")   ;=> RAISED write-bundle-image: this executable is not a `nest release` bundle"
-  (unless (%bundled?)
+  (when (not (%bundled?))
     (error "write-bundle-image: this executable is not a `nest release` bundle"))
   ;; Both baselines before a single module loads, as a project image takes them (KI-106).
   (let (before (reflect/global-names)

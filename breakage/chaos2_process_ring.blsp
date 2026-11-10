@@ -77,7 +77,7 @@
 (let (me (self)
       n 100000)
   ;; Flood our own mailbox
-  (dotimes (i n) (send me i))
+  (doseq (i (range n)) (send me i))
   ;; Drain: sum all messages in order
   (defn drain-loop (remaining acc)
     (if (= remaining 0)
@@ -157,7 +157,7 @@
       victim (spawn (do (receive (:go :ok) (after 5000 :ok)) :done)))
   ;; Spawn 200 watchers, each monitors victim and reports :down to us
   (def watcher-count 200)
-  (dotimes (_ watcher-count)
+  (doseq (_ (range watcher-count))
     (spawn (let (ref (monitor victim))
              (let (r (receive ([:down ^ref _ reason] reason) (after 10000 :timeout)))
                (send me [:watcher-result r])))))

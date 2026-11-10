@@ -4,7 +4,7 @@
 > patterns)))` rather than a `(throw [:match-error …])` vector; the arguments sit in the same
 > positions, and `guards::match_failure_parts` is the one recogniser. `guards::match_coverage`
 > does what `match_exhaustiveness_gap` did below, reported from `check_into` at that `%raise`.
-> **`case` exists now** (a `match*` over literal tests, `std/prelude/match.blsp`), so it is
+> **`case` exists now** (a `%match` over literal tests, `std/prelude/match.blsp`), so it is
 > covered by the same shape. ADR-268 made an equality guard biconditional where the literal
 > is exact, and ADR-187 added record-pattern exhaustiveness (`check/exhaustive.rs`). The text
 > below predates all of that.
@@ -45,7 +45,7 @@ the note at the top.
 
 ## The insight that made this small
 
-`match` (`std/prelude/match.blsp`, `match*`/`match` macros, `%match-build-chain`/
+`match` (`std/prelude/match.blsp`, `%match`/`match` macros, `%match-build-chain`/
 `%match-no-match`) compiles
 
 ```lisp fragment

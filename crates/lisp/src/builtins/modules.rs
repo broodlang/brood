@@ -359,6 +359,8 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // The rename ledger as Brood data (ADR-304) — a thin wrapper over `%renames`, so
     // `nest check --fix-renames` reads the table the runtime error reads.
     embedded_module!("renames", "std/tool/renames.blsp"),
+    // The shape-changing rewrites behind `nest format --migrate` (ADR-674).
+    embedded_module!("migrate", "std/tool/migrate.blsp"),
     // The package manager (ADR-037): resolves the manifest's :dependencies into a
     // lock file + load-path entries. Required lazily by `project-setup` only when a
     // project actually declares deps. Opt-in, never in the prelude.

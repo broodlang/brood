@@ -44,7 +44,7 @@ fn defn_clauses(heap: &Heap, form: Value) -> Option<(Symbol, Vec<Value>)> {
 /// Walk `form` (un-expanded) for inline pattern-clause `fn` literals and record each
 /// one's `(heads, tail)` arms in `ctx` under its printed clause-head-list key — the side
 /// channel [`sigs::clause_lambda_ret`] reads back at call sites, where the expanded tree
-/// holds only the lowered variadic `match*` lambda (see `Ctx::fn_literal_clauses`).
+/// holds only the lowered variadic `%match` lambda (see `Ctx::fn_literal_clauses`).
 /// Quoted/quasiquoted subtrees are data/templates and `comment` never runs — skipped,
 /// like the other surface passes.
 fn record_fn_literal_clauses(heap: &Heap, form: Value, ctx: &mut Ctx) {
@@ -77,7 +77,7 @@ fn record_fn_literal_clauses(heap: &Heap, form: Value, ctx: &mut Ctx) {
 }
 
 /// Read `items` (a surface `(fn …)` form's items) as a literal the expander will lower
-/// to `match*` — clause style with at least one pattern head or guard, or the plain
+/// to `%match` — clause style with at least one pattern head or guard, or the plain
 /// single-clause style with a destructuring parameter. `None` for anything the expander
 /// keeps as a native `fn` (plain params, arity-only clauses), which the direct path in
 /// `clause_lambda_ret` / `lambda_ret` already types. Returns the head-list key (printed
@@ -251,7 +251,7 @@ pub(super) fn infer_same_file_functions(
         }
     }
     // Inline PATTERN-clause `fn` literals get the same surface record, keyed by their
-    // printed clause-head list: the expanded tree holds only the lowered `match*` lambda,
+    // printed clause-head list: the expanded tree holds only the lowered `%match` lambda,
     // whose embedded `(%match-error … (quote heads))` call is how
     // `sigs::clause_lambda_ret` finds its way back here from a combinator call site.
     for &form in forms {

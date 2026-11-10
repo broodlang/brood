@@ -158,6 +158,7 @@ pub(super) fn run_shape_lints(
     exhaustive::check_matches(heap, forms, ctx, out);
     guard_effects::check_guards(heap, forms, out);
     discarded_catch::check_discarded_catches(heap, forms, out);
+    deprecated_macros::check_deprecated_macros(heap, forms, out);
     let own: Vec<String> = crate::eval::macros::file_modules(heap, forms)
         .into_iter()
         .map(value::symbol_name)

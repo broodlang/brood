@@ -416,13 +416,13 @@
             n 4)
         ;; Fire N clients at once, each in its own process; the server must serve
         ;; them in N separate handler processes (the connections overlap in time).
-        (dotimes (i n)
+        (doseq (i (range n))
           (spawn (do
                    (let (path (str "/" i)
                          resp (answered (fetch (str "http://127.0.0.1:" port path))))
                      (send me [:done (get resp :status) (body-text resp)])))))
         ;; Fan-in: every client reports a 200 whose body is its own requested path.
-        (dotimes (_ n)
+        (doseq (_ (range n))
           (receive
             ([:done status body] (assert= status 200)
               (is (includes? body "/")))
@@ -672,7 +672,7 @@
                      [["GET /" (bytes 255) " HTTP/1.0\r\n\r\n"] "400"]])
       (doseq ([payload expected] requests)
         (spawn (send me [:answer expected (includes? (exchange port payload) expected)])))
-      (dotimes (_ (count requests))
+      (doseq (_ (range (count requests)))
         (receive
           ([:answer expected ok?] (assert= [expected true] [expected ok?]))
           (after 10000 (is false)))))))

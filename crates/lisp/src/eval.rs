@@ -1548,7 +1548,7 @@ fn build_closure(
 /// Parse a `(fn …)` form's cdr (`rest`) into a reusable [`ClosureTemplate`] — the arity
 /// arms (each with its `passthrough` analysed) and docstring. A pure function of the
 /// (immutable) AST, independent of the capturing environment, so it is memoised per site
-/// by [`make_closure_cached`]. Pattern clauses were lowered to `match*` by the compile
+/// by [`make_closure_cached`]. Pattern clauses were lowered to `%match` by the compile
 /// pass, so only plain *arity* clauses reach here.
 fn parse_closure_template(heap: &Heap, rest: Value) -> Result<ClosureTemplate, LispError> {
     let parts = heap.list_to_vec(rest)?;

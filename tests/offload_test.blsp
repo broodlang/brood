@@ -43,13 +43,13 @@
   (test "many processes offload at once; every result is correct"
     (let (parent (self)
           n 8)
-      (dotimes (i n)
+      (doseq (i (range n))
         (spawn (do
                  (let (data (string/->bytes (str "worker-" i))
                        direct (%digest :sha256 data)
                        pooled (proc/offload %digest :sha256 data))
                    (send parent [:done i (= pooled direct)])))))
-      (dotimes (_ n)
+      (doseq (_ (range n))
         (receive
           ([:done _i ok] (is ok))
           (after 10000 (is false)))))))

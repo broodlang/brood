@@ -57,7 +57,7 @@
 ;; Generate: (defn chaos-fn-N (x) (+ x N))  for N in [0, 1000)
 ;; Then sum all chaos-fn-N(N) = sum of N+N = 2 * sum(0..999) = 999000
 
-(dotimes (i 1000)
+(doseq (i (range 1000))
   (reflect/eval `(defn ~(symbol (str "chaos-fn-" i)) (x) (+ x ~i))))
 
 (def fn-sum

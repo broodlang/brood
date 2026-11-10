@@ -166,7 +166,7 @@
                        a22 a23 a24)))))
 
 ;; warm the arm
-(dotimes (_ 50) (p7-fn 1))
+(doseq (_ (range 50)) (p7-fn 1))
 
 (def p7-result (p7-fn 2))
 ;; 2*(1+2+...+25) = 2*325 = 650

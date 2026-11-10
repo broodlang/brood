@@ -144,7 +144,7 @@
     (assert= (/ 1.0 2.0) 0.5))
 
   (test "x - x is zero and x + 0 is x, for a spread of magnitudes"
-    (dolist (x [1.0 -1.0 0.5 3.14159 1.0e300 1.0e-300 (pa-epsilon)])
+    (doseq (x [1.0 -1.0 0.5 3.14159 1.0e300 1.0e-300 (pa-epsilon)])
       (assert= (- x x) 0.0)
       (assert= (+ x 0.0) x)
       (assert= (* x 1.0) x)
@@ -155,7 +155,7 @@
 
   ;; Every integer up to 2^53 is exactly representable; the boundary is where it stops.
   (test "integers below 2^53 are exact"
-    (dolist (n [1.0 2.0 1024.0 1048576.0 9007199254740991.0])
+    (doseq (n [1.0 2.0 1024.0 1048576.0 9007199254740991.0])
       (assert= (+ n 0.0) n)
       (assert= (- (+ n 1.0) 1.0) n)))
 
@@ -216,13 +216,13 @@
   :tags [:conformance]
 
   (test "sqrt is exact on perfect squares"
-    (dolist (n [0.0 1.0 4.0 9.0 16.0 100.0 1048576.0])
+    (doseq (n [0.0 1.0 4.0 9.0 16.0 100.0 1048576.0])
       (assert= (* (sqrt n) (sqrt n)) n)))
 
   (test "sqrt is correctly rounded on non-squares"
     ;; sqrt is required to be exactly rounded by IEEE 754; squaring back must land
     ;; within one eps.
-    (dolist (n [2.0 3.0 5.0 7.0 10.0])
+    (doseq (n [2.0 3.0 5.0 7.0 10.0])
       (is (< (abs (- (* (sqrt n) (sqrt n)) n)) (* n (pa-epsilon) 2.0)))))
 
   (test "sqrt respects monotonicity"
@@ -237,7 +237,7 @@
   :tags [:conformance]
 
   (test "the ordering is a total order"
-    (dolist (p [[1.0 2.0] [-2.0 -1.0] [-1.0 1.0] [0.0 1.0e-300] [1.0e300 (pa-inf)]])
+    (doseq (p [[1.0 2.0] [-2.0 -1.0] [-1.0 1.0] [0.0 1.0e-300] [1.0e300 (pa-inf)]])
       (let ([lo hi] p)
         (is (< lo hi))
         (is (> hi lo))
@@ -255,7 +255,7 @@
     (assert= (bit/float-> (* (* -1.0 0.0) -1.0)) 0))
 
   (test "negation and abs are exact, never rounding"
-    (dolist (x [1.0 -1.0 1.0e300 (pow 2.0 -1074) 3.14159])
+    (doseq (x [1.0 -1.0 1.0e300 (pow 2.0 -1074) 3.14159])
       (assert= (abs (- 0.0 x)) (abs x))
       (assert= (- 0.0 (- 0.0 x)) x)))
 

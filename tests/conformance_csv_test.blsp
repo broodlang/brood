@@ -105,9 +105,9 @@
     (assert= (csv/decode "a,b,c\n1,,\n") (list ["a" "b" "c"] ["1" "" ""])))
 
   (test "round-trip: emit then parse is identity on the rows"
-    (dolist (rows [(list ["a" "b"] ["1" "2"])
-                    (list ["a"] ["x,y"])
-                    (list ["a"] ["he said \"hi\""])
-                    (list ["a"] ["line1\nline2"])
-                    (list ["a" "b"] ["" ""])])
+    (doseq (rows [(list ["a" "b"] ["1" "2"])
+                   (list ["a"] ["x,y"])
+                   (list ["a"] ["he said \"hi\""])
+                   (list ["a"] ["line1\nline2"])
+                   (list ["a" "b"] ["" ""])])
       (assert= (csv/decode (csv/encode rows)) rows))))

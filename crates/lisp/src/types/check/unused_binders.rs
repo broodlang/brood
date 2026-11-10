@@ -12,7 +12,7 @@ use super::*;
 /// ignores the accumulator in both arms, so the `reduce` never folds and the result is
 /// whatever the last element produced. Nothing caught this. The unused-binding lint only
 /// ever looked at `let`, and by the time the checker's main walk runs, a pattern clause
-/// has been lowered to `match*` — where its binders become SYNTHETIC lets, which that lint
+/// has been lowered to `%match` — where its binders become SYNTHETIC lets, which that lint
 /// deliberately exempts (removing that exemption fires 69 times across std/ + tests/, so
 /// it is load-bearing). Hence a surface pass: here the clause is still as written.
 ///
@@ -161,11 +161,11 @@ fn lint_fn_pattern_clauses(heap: &Heap, items: &[Value], out: &mut Vec<(Option<P
         }
     }
     // A clause whose head holds a non-symbol is a PATTERN clause (the whole `fn` is then
-    // lowered to `match*`); one of only symbols is an arity clause (a native multi-arity
+    // lowered to `%match`); one of only symbols is an arity clause (a native multi-arity
     // arm). Both bind per-clause names, so both are linted — the wording differs so the
     // reader knows which construct is meant. It is decided once for the whole `fn`, NOT
     // per clause, because the LOWERING is per fn: one pattern head anywhere sends the
-    // entire dispatch through `match*`, so every clause's binders are then pattern
+    // entire dispatch through `%match`, so every clause's binders are then pattern
     // binders, including a head that happens to be all symbols. Naming that one a
     // "parameter" would describe a construct the program does not have.
     let any_pattern = heads.iter().any(|&h| {
@@ -388,7 +388,7 @@ fn occurrences_in(heap: &Heap, pattern: Value, sym: Symbol) -> usize {
 }
 
 /// **Unused binders at every other binding form**, on the un-expanded tree. Each of these
-/// lowers to `match*` or to synthetic `let`s, which the main walk's unused-`let` lint
+/// lowers to `%match` or to synthetic `let`s, which the main walk's unused-`let` lint
 /// exempts by design, so before this a binder nothing read was reported only when it was
 /// a plain symbol in a `let`/`letrec`. Two of the cases are bugs, not tidiness:
 /// `(fold-for (acc 0 x xs) x)` never folds, and a `match` arm that binds a field and then

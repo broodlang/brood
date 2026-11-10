@@ -34,7 +34,7 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
   (get opts k default))
 
 (defn- reconnect-notify (subs event)
-  (dolist (p subs) (send p event)))
+  (doseq (p subs) (send p event)))
 
 (defn- reconnect-up (spec peer opts subs)
   "Connected state: wait for the link to fall (or control messages)."

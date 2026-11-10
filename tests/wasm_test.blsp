@@ -248,9 +248,9 @@
     (let (inst (instantiate *scalars-wat*)
           me (self)
           n 8)
-      (dotimes (i n)
+      (doseq (i (range n))
         (spawn (do (send me [:r i (call inst "add" i i)]))))
-      (dotimes (_ n)
+      (doseq (_ (range n))
         (receive
           ([:r i r] (assert= r (* 2 i)))
           (after 10000 (is false))))

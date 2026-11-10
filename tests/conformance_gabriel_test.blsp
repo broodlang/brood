@@ -137,7 +137,7 @@
     ;; Upstream's own stanza is n=13 -> 73712, excluded at ~40 s here (see the README).
     ;; The published sequence prefix is a stronger oracle anyway: ten independent
     ;; answers, including the two n with no solutions at all.
-    (dolist (p (enumerate gb-nqueens-solutions))
+    (doseq (p (enumerate gb-nqueens-solutions))
       (let ([i want] p)
         (assert= (nqueens (+ i 1)) want)))))
 
@@ -176,7 +176,7 @@
     ;; sustained allocation — a GC or JIT-tiering bug rather than a logic one — shows up
     ;; at 1.8M rewrites and not at 95k.
     (let (db (setup-boyer))
-      (dolist (n (seq/filter [1 2] (fn (k) (<= k gb-nboyer-max-n))))
+      (doseq (n (seq/filter [1 2] (fn (k) (<= k gb-nboyer-max-n))))
         (assert= (test-boyer nboyer-alist nboyer-term n db)
           (get gb-nboyer-rewrites n)))))
 

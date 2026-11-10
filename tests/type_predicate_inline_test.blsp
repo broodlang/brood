@@ -85,7 +85,7 @@
 
 (describe "type predicates inline"
   (test "every predicate agrees with type-of on every sample"
-    (dolist (x samples)
+    (doseq (x samples)
       (assert= (kinds-by-type-of x) (kinds x))))
 
   (test "the collapsing rules hold: a bigint is an int, a range is a pair; a record is its own kind"
@@ -151,7 +151,7 @@
 (describe "element reads of a shared-region vector stay native"
   (test "a literal / def'd vector argument does not deopt the reading arm"
     (when (%native-tier?)
-      (dolist (f [lit-destructure lit-ref lit-ref-eq lit-nth lit-len])
+      (doseq (f [lit-destructure lit-ref lit-ref-eq lit-nth lit-len])
         (do
           (assert= :native (settle f 1 (fn () (drive f shared-vec 4000)) 40))
           (assert= 0 (get (%jit-arm-state f 1) :deopts)))))))

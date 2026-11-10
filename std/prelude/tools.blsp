@@ -132,8 +132,9 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 (def- %spy-special-forms
   #{'if
     'do 'def 'fn 'let 'letrec 'quote 'quasiquote 'defmacro 'defn 'defdyn 'defrecord 'defmodule 'when
-    'unless 'cond 'and 'or 'match 'match* 'case 'comment 'try 'catch 'throw 'receive 'binding
-    'dolist 'doseq 'dotimes 'for '-> 'spawn 'spawn-link 'error 'with-out-str 'with-err-str 'bench})
+    'unless 'cond 'and 'or 'match '%match 'match* 'case 'comment 'try 'catch 'throw 'receive
+    'binding 'dolist 'doseq 'dotimes 'for 'fold-for '-> 'spawn 'spawn-link 'error 'with-out-str
+    'with-err-str 'bench})
 
 (defn- %spy-walk-seq (forms depth) (map forms (fn (form) (%spy-walk form depth))))
 (defn- %spy-walk-binds (binds depth)

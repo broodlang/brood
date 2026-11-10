@@ -35,7 +35,7 @@
 ;; Run `acc-loop` hot in a process of its own, so its arm (shared by every process) is native.
 (defn warm-acc-loop ()
   (let (warm (spawn (acc-loop 0)))
-    (dotimes (_k 3000) (send warm [:add 1]))
+    (doseq (_k (range 3000)) (send warm [:add 1]))
     (ask-total warm)
     (send warm :stop)))
 
@@ -54,7 +54,7 @@
 (defn warm-fold-step ()
   (let (me (self)
         warm (spawn (send me [:warm (fold-step 0 0)])))
-    (dotimes (_k 3000) (send warm [:add 1]))
+    (doseq (_k (range 3000)) (send warm [:add 1]))
     (send warm :done)
     (receive ([:warm _] :ok) (after 20000 :timeout))))
 
@@ -120,11 +120,11 @@
 (describe "receive loops in native code"
   (test "a hot receive loop goes native and stays native across parks"
     (let (pid (spawn (acc-loop 0)))
-      (dotimes (_k 3000)
+      (doseq (_k (range 3000))
         (send pid [:add 1]))
       (assert= 3000 (ask-total pid))
       ;; Each round parks the loop between messages; it must come back native every time.
-      (dotimes (_round 50)
+      (doseq (_round (range 50))
         (send pid [:add 2])
         (proc/sleep 1))
       (assert= 3100 (ask-total pid))
@@ -146,7 +146,7 @@
     ;; however many rounds run — the defect this guards still fails it.
     (let (pid (spawn (lonely-loop 0))
           one-at-a-time (fn ()
-                          (dotimes (_k 100)
+                          (doseq (_k (range 100))
                             (send pid [:add 1])
                             (ask-total pid))))
       (if (%native-tier?)
@@ -182,7 +182,7 @@
       (assert= nil (proc/info loop))))
   (test "the state carried across parks is exact"
     (let (pid (spawn (acc-loop 0)))
-      (dotimes (k 500)
+      (doseq (k (range 500))
         (send pid [:add k])
         (when (= 0 (math/mod k 50)) (proc/sleep 1)))
       (assert= (/ (* 499 500) 2) (ask-total pid))
@@ -237,7 +237,7 @@
     (warm-acc-loop)
     (let (me (self)
           pid (spawn (send me [:sessions (sessions 40 0)])))
-      (dotimes (_k 40)
+      (doseq (_k (range 40))
         (proc/sleep 2)
         (send pid [:add 1])
         (proc/sleep 2)
@@ -251,7 +251,7 @@
     (let (me (self)
           pid (spawn (send me [:late (late-sessions 300010 0)])))
       (proc/sleep 300)
-      (dotimes (_k 10)
+      (doseq (_k (range 10))
         (proc/sleep 2)
         (send pid [:add 3])
         (send pid :stop))
@@ -277,7 +277,7 @@
     (warm-acc-loop)
     (let (me (self)
           pid (spawn (send me [:result (map (range 30) acc-loop)])))
-      (dotimes (_k 30)
+      (doseq (_k (range 30))
         (proc/sleep 2)
         (send pid [:add 9])
         (send pid :stop))
@@ -292,7 +292,7 @@
     (warm-fold-step)
     (let (me (self)
           pid (spawn (send me [:folded (fold (range 30) 0 fold-step)])))
-      (dotimes (_k 30)
+      (doseq (_k (range 30))
         (proc/sleep 2)
         (send pid [:add 1])
         (send pid :done))
@@ -306,7 +306,7 @@
 (describe "receive loops in native code, across processes"
   :isolated (test "many native loops, many messages, exact totals"
     (let (pids (map (range 8) (fn (_) (spawn (acc-loop 0)))))
-      (each pids (fn (p) (dotimes (_k 1000) (send p [:add 1]))))
+      (each pids (fn (p) (doseq (_k (range 1000)) (send p [:add 1]))))
       (assert= (map pids (fn (_) 1000)) (map pids ask-total))
       (each pids (fn (p) (send p :stop))))))
 
@@ -331,7 +331,7 @@
   (test "two receives in one arm, parking between them"
     (let (me (self)
           pid (spawn (send me [:pairs (pair-loop 0)])))
-      (dotimes (k 3000)
+      (doseq (k (range 3000))
         (send pid [:a k])
         (when (= 0 (math/mod k 100)) (proc/sleep 1))
         (send pid [:b 2]))

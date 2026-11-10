@@ -10,7 +10,7 @@
 //! tree-walker. A closure is VM-compiled when it's built from the core vocabulary
 //! ([`Node`] below): `if`/`do`/`let`/`letrec`/`fn`/`quote` plus calls and vector/map
 //! literals, with `&optional` (nil- *or* real-default) and any capture (global *or*
-//! local — Stage 2c). Because `match`/`match*`/`and`/`or` are macros that expand to
+//! local — Stage 2c). Because `match`/`%match`/`and`/`or` are macros that expand to
 //! exactly these forms, **pattern-matching `fn`s and `match` run on the VM too**. Anything
 //! still outside the set — `def`/`quasiquote`/`defmacro`/`binding`, or a body built
 //! from movable (conased) forms — **defers to the tree-walker** (`eval::eval`)

@@ -1193,6 +1193,32 @@ that does not parse is reported and skipped, never rewritten.
                  "."))
       rewrote)))
 
+(defn project-migrate ()
+  "Apply every migration in `migrate/*migrations*` to each .blsp under the current project,
+and format each file it changed: `nest format --migrate` (ADR-674). A deprecated form whose replacement has a
+different shape is rewritten in place; a file that does not parse is reported and skipped.
+Returns the number of files rewritten.
+
+    (format/project-migrate)   ;~> 3 — after printing each rewritten file and a summary line"
+  (let (root (format-require-root)
+        files (format-every-blsp root)
+        results (map files
+                  (fn (path)
+                    (let (src (file/slurp path))
+                      (if (not (format-parses? src))
+                        (do (io/puts (str "  skipped (does not parse): " path)) :unparseable)
+                        ;; only a file the migration changed is re-laid-out: --migrate is not a
+                        ;; second `nest format`, and an unformatted project keeps its layout
+                        (let (migrated (migrate/text src))
+                          (if (= src migrated)
+                            :unchanged (do
+                              (file/spit path (source migrated))
+                              (io/puts (str "  migrated " path))
+                              :rewrote)))))))
+        rewrote (count (seq/filter results (fn (r) (= r :rewrote)))))
+    (io/puts (str "format --migrate: " (count files) " considered, " rewrote " rewritten."))
+    rewrote))
+
 ;; Returns `[rewrote skipped]`. An unparseable file prints a `does not parse`
 ;; line so it is never silently passed over — the whole point is that the user
 ;; finds out their file was left alone, and why.

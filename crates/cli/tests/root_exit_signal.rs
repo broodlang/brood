@@ -157,7 +157,7 @@ fn a_linked_exit_kills_a_computing_root() {
         r#"(let (child (spawn-link (receive (:go (proc/sleep 200) (exit (self) :boom)))))
   (io/puts "before")
   (send child :go)
-  (dotimes (i 1000000000) i))
+  (doseq (i (range 1000000000)) i))
 (io/puts "after")"#,
     );
     assert_killed(&runs, ":boom");
@@ -241,7 +241,7 @@ fn an_exit_normal_ends_the_program_cleanly() {
 fn a_hard_kill_stops_a_computing_child() {
     let runs = run_on_every_tier(
         "kill-child",
-        r#"(let (child (spawn (do (dotimes (i 1000000000) i) (io/puts "child finished")))
+        r#"(let (child (spawn (do (doseq (i (range 1000000000)) i) (io/puts "child finished")))
       ref (monitor child))
   (proc/sleep 200)
   (exit child :kill)

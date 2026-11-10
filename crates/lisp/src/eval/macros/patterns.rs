@@ -1,8 +1,8 @@
-//! Pattern-binder lowering: the compile pass desugars destructuring `let`/`fn` to `match*`.
+//! Pattern-binder lowering: the compile pass desugars destructuring `let`/`fn` to `%match`.
 
 use super::*;
 
-// ---- pattern-binder lowering (the compile pass desugars these to `match*`) ----
+// ---- pattern-binder lowering (the compile pass desugars these to `%match`) ----
 
 fn is_sym(v: Value) -> bool {
     matches!(v.unpack(), ValueRef::Sym(_))
@@ -15,14 +15,14 @@ fn make_do(heap: &mut Heap, body: &[Value]) -> Value {
     heap.list(v)
 }
 
-/// The head every lowering here emits: the prelude's `match*`, as a root escape (ADR-638), so
-/// a module that defines a `match*` of its own does not capture the destructuring `let`s and
-/// pattern `fn`s written in it.
-fn match_star() -> Value {
-    value::sym("/match*")
+/// The head every lowering here emits: the prelude's `%match` engine (ADR-674), as a root
+/// escape (ADR-638), so a module that defines a `%match` of its own does not capture the
+/// destructuring `let`s and pattern `fn`s written in it.
+fn match_engine() -> Value {
+    value::sym("/%match")
 }
 
-/// `(match* :ctx valexpr (pattern inner))` — a single-clause refutable bind.
+/// `(%match :ctx valexpr (pattern inner))` — a single-clause refutable bind.
 fn refutable_bind(
     heap: &mut Heap,
     ctx: &str,
@@ -31,11 +31,11 @@ fn refutable_bind(
     inner: Value,
 ) -> Value {
     let clause = heap.list(vec![pattern, inner]);
-    heap.list(vec![match_star(), value::kw(ctx), valexpr, clause])
+    heap.list(vec![match_engine(), value::kw(ctx), valexpr, clause])
 }
 
 /// Lower a `let` whose bindings include a non-symbol (pattern) target into
-/// nested symbol-`let` / refutable `match*` binds (sequential, so each sees the
+/// nested symbol-`let` / refutable `%match` binds (sequential, so each sees the
 /// previous). Returns `None` for an all-symbol or malformed `let` (left as-is).
 pub(super) fn lower_let(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     let bindings = *items.get(1)?;
@@ -103,7 +103,7 @@ fn has_vector_clause_head(heap: &Heap, clauses: &[Value]) -> bool {
 /// the `&optional`/`&` markers, with no literal or destructuring *patterns*?
 /// Arity clauses dispatch by argument count via native multi-arity arms
 /// (`ClosureArm`, cheap — direct bind); a clause with any non-symbol parameter is
-/// a *pattern* clause and must go through the `match*` engine instead.
+/// a *pattern* clause and must go through the `%match` engine instead.
 pub(crate) fn is_arity_param_list(heap: &Heap, param_form: Value) -> bool {
     match heap.list_or_vector_items(param_form) {
         Some(items) => items.iter().all(|&p| is_sym(p)),
@@ -125,7 +125,7 @@ pub(crate) fn is_arity_clause(heap: &Heap, f: Value) -> bool {
 
 /// Does this clause carry a `:when` guard — is the form right after its
 /// parameter-list head the `:when` keyword (`(params :when guard body…)`)?
-/// A guarded clause must dispatch through `match*` (which evaluates the guard);
+/// A guarded clause must dispatch through `%match` (which evaluates the guard);
 /// the native arity path binds by argument count and cannot, so it would silently
 /// ignore the guard. See [`lower_fn`] (ADR-226).
 pub(crate) fn clause_has_when_guard(heap: &Heap, clause: Value) -> bool {
@@ -255,7 +255,7 @@ pub(crate) fn shadowed_clause_error(heap: &Heap, clauses: &[Value]) -> Option<Li
 
 /// `(%raise (%match-error :fn ARGS '(HEAD)))` for a single clause whose guard failed: ARGS
 /// the arguments as a list, rebuilt from the native parameters (`(append (list a b) rest)`
-/// with a rest), as the `match*` a clause `fn` lowers to would report them.
+/// with a rest), as the `%match` a clause `fn` lowers to would report them.
 fn guard_failure(heap: &mut Heap, params: &[Value], head: Value, context: Value) -> Value {
     let mut fixed = vec![value::sym("/list")];
     let mut rest = None;
@@ -300,7 +300,7 @@ fn single_clause_guard(body: &[Value]) -> Option<(Value, &[Value])> {
     }
 }
 
-/// Does a single-clause `fn` need the `match*` lowering rather than native parameters — a
+/// Does a single-clause `fn` need the `%match` lowering rather than native parameters — a
 /// pattern in an `&optional` slot (`([a b] [0 0])`, or a bare `[a b]`), or a pattern after
 /// `&`? (A guard does not: it wraps the native body, so the checker keeps the parameters.)
 fn single_clause_needs_match(heap: &Heap, params: &[Value]) -> bool {
@@ -354,7 +354,7 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
     }
     if forms.iter().all(|&f| is_clause(heap, f)) {
         // Multi-clause. Arity-only clauses dispatch natively (`make_closure`
-        // builds `ClosureArm`s), so they DON'T need `match*` lowering; only a
+        // builds `ClosureArm`s), so they DON'T need `%match` lowering; only a
         // clause carrying a literal/destructuring pattern — or a `:when` guard,
         // which the native path ignores (ADR-226) — does.
         return !forms.iter().all(|&f| is_arity_clause(heap, f))
@@ -398,7 +398,7 @@ pub(super) fn end_defining() {
     DEFINING.with(|cell| cell.set(None));
 }
 
-/// The `context` a lowered pattern `fn` gives `match*` — its name, when it is a definition's
+/// The `context` a lowered pattern `fn` gives `%match` — its name, when it is a definition's
 /// value, else `:fn`.
 fn fn_context(name: Option<value::Symbol>) -> Value {
     match name {
@@ -413,7 +413,7 @@ fn fn_context(name: Option<value::Symbol>) -> Value {
 }
 
 /// Lower a `fn` that is multi-clause, or single-clause with pattern(s) in its
-/// required parameters, into a plain `fn` plus the Brood `match*` engine.
+/// required parameters, into a plain `fn` plus the Brood `%match` engine.
 /// `Ok(None)` for an ordinary single-clause `fn` (left as-is); an error for a
 /// **vector** where a parameter list belongs (ADR-010, item 1 of the syntax
 /// finalisation) — rejected rather than misread.
@@ -456,19 +456,19 @@ fn lower_fn_named(
             {
                 // Arity-only AND guard-free: dispatches natively (the evaluator's
                 // `make_closure` builds one `ClosureArm` per clause, bound by argument
-                // count — no rest-list, no `match*`). Leave it un-lowered. A `:when`
-                // guard forces the `match*` path below, which evaluates it (ADR-226).
+                // count — no rest-list, no `%match`). Leave it un-lowered. A `:when`
+                // guard forces the `%match` path below, which evaluates it (ADR-226).
                 return Ok(None);
             }
             // At least one literal/destructuring *pattern* clause, or a `:when` *guard*
-            // clause (ADR-226) → lower the whole dispatch to the `match*` engine, where each
+            // clause (ADR-226) → lower the whole dispatch to the `%match` engine, where each
             // head is a list pattern over the argument list: `&` is that pattern's rest
             // (ADR-434) and `&optional` its optional elements (ADR-619), so a pattern clause
             // takes the same head grammar as an arity clause.
             let g = value::gensym("args");
             let params = heap.list(vec![value::sym(kw::AMP), g]);
-            let mut mexpr = vec![match_star(), context, g];
-            mexpr.extend_from_slice(clauses); // fn clauses are already match* clauses
+            let mut mexpr = vec![match_engine(), context, g];
+            mexpr.extend_from_slice(clauses); // fn clauses are already %match clauses
             let body = heap.list(mexpr);
             let mut lowered = vec![value::sym(kw::FN), params];
             if let Some(d) = doc {
@@ -514,7 +514,7 @@ fn lower_fn_named(
         let mut clause = vec![param_form];
         clause.extend_from_slice(body);
         let clause = heap.list(clause);
-        let dispatch = heap.list(vec![match_star(), context, g, clause]);
+        let dispatch = heap.list(vec![match_engine(), context, g, clause]);
         let mut lowered = vec![value::sym(kw::FN), rest_params];
         if let Some(doc) = doc {
             lowered.push(doc);

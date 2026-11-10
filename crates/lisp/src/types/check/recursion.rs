@@ -37,7 +37,7 @@ pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<(Option<Po
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         check_recursion_inner(heap, form, out)
     });
-    // One fault, one diagnostic. A pattern-clause `defn` is lowered to `match*`
+    // One fault, one diagnostic. A pattern-clause `defn` is lowered to `%match`
     // before we see it, and the lowering repeats the body across dispatch paths, so
     // a single non-tail self-call was walked — and reported — three times over. The
     // duplicates are indistinguishable by position and text, which is exactly what
@@ -137,7 +137,7 @@ fn analyze_fn(
     };
     // items = [fn, params-or-arm, ...]. Multi-arity iff the element after `fn`
     // is a clause `((params) body…)` — i.e. its own first element is a list.
-    // (Pattern clauses are already lowered to `match*`, so post-expansion arms
+    // (Pattern clauses are already lowered to `%match`, so post-expansion arms
     // are arity-only: their params are a plain symbol list.)
     let multi = matches!(items.get(1), Some(&arm) if first_is_list(heap, arm));
     if multi {
@@ -310,7 +310,7 @@ fn walk_inner(
         // flag it. Either way the arguments are evaluated in non-tail position.
         if head == name && !tail {
             out.push((
-                // The lowering that turns pattern clauses into `match*` builds fresh
+                // The lowering that turns pattern clauses into `%match` builds fresh
                 // forms, and a fresh form carries no source position — so this came
                 // out as `line: nil`, which no consumer can place. Fall back to the
                 // nearest ENCLOSING form that does have one: the reader is pointed at

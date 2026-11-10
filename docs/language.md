@@ -1062,7 +1062,7 @@ highlighter-facing list that also names the core macros.)
 
 `defmacro` is **not** among them: it is a prelude macro that lowers to
 `(def name (%make-macro (fn …)))` (ADR-098) — see [Macros](#macros).
-`when`, `unless`, `cond`, `and`, `or`, `case`, `match`, and `comment` read like
+`when`, `cond`, `and`, `or`, `case`, `match`, and `comment` read like
 special forms but are **prelude macros** over `if`/`do`/`let`
 (`std/prelude/`), expanded once by the compile pass (ADR-022) — so the
 evaluator's core stays minimal and they cost nothing extra at runtime.
@@ -1148,16 +1148,19 @@ iterate and will not overflow the stack:
     (count-down (- n 1))))
 ```
 
-For purely side-effecting iteration, two prelude macros wrap the common patterns:
+For purely side-effecting iteration there is one form, `doseq`. It takes `for`'s
+bindings (several pairs, `:when` guards, destructuring), collects nothing and returns
+`nil`. A counted loop iterates a `range` (ADR-674):
 
 ```clojure
-(dotimes (i 3) (io/write i " "))    ; prints "0 1 2 "
-(dolist (x (list :a :b))         ; runs the body for each element
-  (io/puts (->string x)))            ; prints "a" then "b"
+(doseq (i (range 3)) (io/write i " "))    ; prints "0 1 2 "
+(doseq (x (list :a :b))                   ; runs the body for each element
+  (io/puts (->string x)))                 ; prints "a" then "b"
 ```
 
-Both are tail-recursive and return `nil` (they're for effects). `doseq` (over
-`for`) is the alternative when destructuring or `:when` filters are wanted.
+`dotimes`, `dolist` and `unless` are deprecated (ADR-674) and go before 1.0:
+`nest check` warns at each use, and `nest format --migrate` rewrites them to `doseq`,
+`doseq` over a `range`, and `(when (not test) …)`.
 
 **Comprehensions** build a value from the same walk. `for` collects a list of its
 body's values over one or more bindings (the last varies fastest), with `:when`
@@ -1223,7 +1226,7 @@ capture nor be captured by caller code spliced in with `~`/`~@` — no `reflect/
 That holds at every binding site of the one pattern grammar: `let`/`letrec`/`fn` binders
 and their destructuring patterns, `match`/`receive` clauses (guards, `or` alternatives,
 pins), and the standard binding macros — `when-let`, `if-let`, `for`, `fold-for`, `doseq`,
-`dotimes`, `with`, `as->`, `try`'s `catch`, and the params of `defn`, `defmethod` and
+`with`, `as->`, `try`'s `catch`, and the params of `defn`, `defmethod` and
 `impl`. A typed binder keeps its annotation (`x:int` becomes `x__12:int`), and a renamed
 parameter still reads as written wherever a parameter list is shown — an arglist, a doc,
 an arity error say `(a)`, not `(a__12)`:
@@ -2344,7 +2347,7 @@ misuse — all advisory, zero false positives:
 visible scope. Every binding form is covered, with the same pattern grammar each uses:
 `let`/`letrec` (including destructuring), `with`, `if-let`/`when-let`/`if-some`/
 `when-some`, `as->`, `match` and `receive` clauses, `catch`, the loop forms
-(`dolist`, `doseq`, `dotimes`, `for`, `fold-for`) and anonymous `fn` parameters in
+(`doseq`, `for`, `fold-for`) and anonymous `fn` parameters in
 either spelling. A definition's own parameters (`defn`, `(def f (fn …))`) are its
 published arglist and are not reported. Exempt: names prefixed with `_` (intentional
 don't-care), a name that shadows a global, and a name the pattern itself reads (a

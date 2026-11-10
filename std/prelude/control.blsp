@@ -181,7 +181,7 @@ sorted."
 ;; The path an include reads, checked and recorded: a missing file is an error at expansion.
 (defn- %include-read-path (who rel)
   (let (path (%include-str-path rel))
-    (unless (file/exists? path)
+    (when (not (file/exists? path))
       (error who ": no file at " path))
     (%registry-update! '*included-files* :assoc [path] true)
     path))

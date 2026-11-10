@@ -20,10 +20,11 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
 - ⬜ **The last surface pass, using the freeze test** (`archive/roadmap-for-v1.md` § The
   test): *can this be added later without breaking anyone, and without leaving the whole corpus
   in a dated idiom?* Run every open thread in `handoff.md` through it:
-  - **Thread 6, "reduce before adding": must be decided before 1.0.** This thread removes
-    things: four iteration forms (`for`/`doseq`/`dolist`/`dotimes`), three match forms
-    (`match`/`match*`/`case`), `unless`, and `with-out-str`/`with-err-str`. After 1.0 a removal
-    waits for 2.0. Decide each form: keep it, or merge it and add a ledger entry.
+  - 🟡 **Thread 6, "reduce before adding": decided (ADR-674), stage 1 landed.** `doseq` is the
+    one form for effect and collects nothing. `dotimes`, `dolist`, `unless` and `match*` are
+    deprecated: they warn, and `nest format --migrate` rewrites them. `match*` became the internal
+    `%match`. `case`, `with-out-str` and `with-err-str` stay. **Stage 2, before `rc.0`:** remove
+    the four forms and their migrations, and put each in the rename ledger.
   - **Thread 5, a declared shadow for root functions.** Adding the warning later would be a new
     lint. Under ADR-673 §5 that is advisory and so additive, but only once structured
     severities exist (B3). Otherwise decide it now.
@@ -103,7 +104,7 @@ General-purpose gap 2, the release half.
 Everything ADR-673 would forbid after 1.0 is cheapest in 0.5x:
 
 - Clear CHANGELOG's Unreleased breaks in a 0.51 release.
-- Decide thread 6 (A) and land its merges, with ledger entries.
+- Land ADR-674's stage 2: remove `dotimes`, `dolist`, `unless` and `match*`, with ledger entries.
 - Rename anything the surface pass finds to be misnamed. A rename after 1.0 costs a full
   deprecation window.
 

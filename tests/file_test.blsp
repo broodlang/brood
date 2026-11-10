@@ -42,7 +42,7 @@
     (let (p (path/join (ftmp) "log.txt")
           me (self)
           n 40)
-      (dotimes (i n)
+      (doseq (i (range n))
         (spawn (fn () (file/spit-append p (str "worker-" i "\n")) (send me :done))))
       ; barrier: all workers finished
       (fa-await n)
@@ -92,7 +92,7 @@
           whole (into #{} texts))
       (file/spit-atomic p (first texts))
       (doseq (t texts)
-        (spawn (fn () (dotimes (_ 25) (file/spit-atomic p t)) (send me :done))))
+        (spawn (fn () (doseq (_ (range 25)) (file/spit-atomic p t)) (send me :done))))
       (let (torn (fa-read-whole p whole 200 0))
         (fa-await 4)
         (assert= torn 0)

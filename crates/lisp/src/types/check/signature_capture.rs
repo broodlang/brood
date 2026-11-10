@@ -148,7 +148,7 @@ fn reconcile_arity(heap: &Heap, value_form: Value, sig: Sig) -> Sig {
     };
     let required = arity.min;
     // **Fill in, never overrule.** A multi-clause `defn` lowers to a single variadic
-    // `fn` over `match*` (ADR-226), so the *form's* arity says "any number of arguments"
+    // `fn` over `%match` (ADR-226), so the *form's* arity says "any number of arguments"
     // while the clause inference knows the real one — reshaping to the form would throw
     // that away and offer `(...any) -> …`. So this only acts on the case it exists for:
     // an inference that produced no parameters at all for a definition that has some.
