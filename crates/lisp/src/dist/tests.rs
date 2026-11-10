@@ -632,7 +632,10 @@ fn a_send_latest_replaces_its_unwritten_frame_in_the_link_queue() {
         rx.try_iter()
             .take(count)
             .filter_map(|item| claim_outbound(&latest, item))
-            .map(|bytes| bytes[0])
+            .map(|payload| match payload {
+                Payload::Plain(bytes) => bytes[0],
+                Payload::Sharing(_) => unreachable!("only plain payloads were queued"),
+            })
             .collect()
     };
     assert_eq!(written(4), vec![2, 3, 4]);

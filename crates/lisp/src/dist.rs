@@ -415,6 +415,7 @@ mod mesh;
 mod names;
 mod outbound;
 mod routing;
+mod shared_bytes;
 mod transport;
 
 use admission::*;

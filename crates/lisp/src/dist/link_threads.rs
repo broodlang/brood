@@ -32,18 +32,21 @@ pub(super) fn spawn_link_writer(
             // next nonce — in fewer syscalls; nothing waits for a batch to fill, since
             // only what is already queued joins it.
             let mut batch: Vec<u8> = Vec::new();
+            // The large bytes values this link has carried, in the order written: what the
+            // peer's reader holds, so one it holds goes by digest (ADR-695).
+            let mut sent = shared_bytes::Ledger::default();
             // A replaced `send-latest` ticket claims nothing and is passed over (ADR-492).
             while let Ok(item) = queue.recv() {
                 let Some(payload) = claim_outbound(&latest, item) else {
                     continue;
                 };
                 batch.clear();
-                let mut sealed = seal.seal_into(&payload, &mut batch).is_ok();
+                let mut sealed = seal_payload(&mut seal, &payload, &mut sent, &mut batch);
                 while sealed && batch.len() < WRITE_BATCH_BYTES {
                     match queue.try_recv() {
                         Ok(next) => {
                             if let Some(next) = claim_outbound(&latest, next) {
-                                sealed = seal.seal_into(&next, &mut batch).is_ok();
+                                sealed = seal_payload(&mut seal, &next, &mut sent, &mut batch);
                             }
                         }
                         Err(_) => break,
@@ -63,6 +66,22 @@ pub(super) fn spawn_link_writer(
             }
         }));
     });
+}
+
+/// Seal one queued payload into `batch`: its bytes, or — a sharing payload — its bytes with the
+/// large values spliced in against the link's ledger `sent` (ADR-695). False when sealing failed.
+fn seal_payload(
+    seal: &mut session::SealKey,
+    payload: &Payload,
+    sent: &mut shared_bytes::Ledger,
+    batch: &mut Vec<u8>,
+) -> bool {
+    match payload {
+        Payload::Plain(bytes) => seal.seal_into(bytes, batch).is_ok(),
+        Payload::Sharing(sharing) => seal
+            .seal_into(&shared_bytes::splice(sharing, sent), batch)
+            .is_ok(),
+    }
 }
 
 /// The link's reader thread: every inbound frame refreshes liveness and is dispatched by
@@ -90,7 +109,11 @@ pub(super) fn spawn_link_reader(
         // Nothing else reads this socket after the handshake, so nothing is lost in it.
         let mut reader = std::io::BufReader::new(&*sock);
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            while let Ok(frame) = open.open(&mut reader) {
+            // The large bytes values the peer sent whole, which its references name (ADR-695).
+            let mut received = shared_bytes::ReceivedBytes::default();
+            while let Ok(frame) =
+                shared_bytes::with_received(&mut received, || open.open(&mut reader))
+            {
                 last_seen.store(now_millis(), Ordering::Release);
                 if let Frame::Ping = frame {
                     // Bounded queue: if we can't even enqueue a Pong, the writer is
