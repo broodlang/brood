@@ -624,6 +624,7 @@ struct GuiOpTags {
     scroll_region_t: value::Symbol,
     cell_region_t: value::Symbol,
     rect_t: value::Symbol,
+    image_t: value::Symbol,
     frect_t: value::Symbol,
     quad_t: value::Symbol,
     sprite_t: value::Symbol,
@@ -657,6 +658,7 @@ impl GuiOpTags {
             scroll_region_t: value::intern("scroll-region"),
             cell_region_t: value::intern("cell-region"),
             rect_t: value::intern("rect"),
+            image_t: value::intern("image"),
             frect_t: value::intern("frect"),
             quad_t: value::intern("quad"),
             sprite_t: value::intern("sprite"),
@@ -770,6 +772,20 @@ fn parse_gui_ops(
                 face,
                 radius,
             });
+        } else if tag == tags.image_t {
+            // `[:image row col w h source opts]` (ADR-686): decoded here, through the content
+            // cache, so the GUI thread only resamples and paints; one that does not read is skipped.
+            if let Some(image) = read_image_op(heap, &parts) {
+                ops.push(crate::host::gui::Op::Image {
+                    row: clamp_u16(image.row),
+                    col: clamp_u16(image.col),
+                    w: clamp_u16(image.w),
+                    h: clamp_u16(image.h),
+                    picture: crate::host::picture::PictureRef(image.picture),
+                    fit: image.fit,
+                    anchor: image.anchor,
+                });
+            }
         } else if tag == tags.frect_t {
             let x = num(arg(&parts, 1));
             let y = num(arg(&parts, 2));

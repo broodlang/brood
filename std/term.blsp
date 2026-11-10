@@ -84,7 +84,7 @@ nothing meanwhile. `editor/frontend/*term-display*` turns it on for its loop.
 str face], [:rect row col w h face], [:cursor row col] / [:cursor row col style]. A face is
 a map like {:fg :red :bold true}; a colour is a palette keyword (:red … :dark-grey) or an
 explicit [r g b] vector / \"#rrggbb\" hex string. [:rect …] fills a w×h cell block with the
-face's background. The optional cursor `style` is :block (default), :bar, or :underline. The
+face's background. [:image row col w h source opts] (editor/display/image, ADR-686) draws a picture in the cell block as half blocks — `▀`, two pixels a cell — where a window paints it at pixel resolution. The optional cursor `style` is :block (default), :bar, or :underline. The
 in-process frontend for the display protocol; returns nil.
 
 The frame is painted over what the terminal already shows, cell by cell, and only the cells

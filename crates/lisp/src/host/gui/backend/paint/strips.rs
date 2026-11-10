@@ -61,6 +61,7 @@ pub(super) fn op_band(op: &Op, dy: isize, rows: &RowMap) -> Option<(isize, isize
         Op::Text { row, face, .. } => band(cell_top(*row), px_h(face.scale.max(1) as usize)),
         Op::Cursor { row, .. } => band(cell_top(*row), ch_i),
         Op::Rect { row, h, .. } => band(cell_top(*row), span(*row, *h as usize)),
+        Op::Image { row, h, .. } => band(cell_top(*row), span(*row, *h as usize)),
         Op::FRect { y, h, .. } => {
             // shifted like a cell (`cell_top`): an frect inside a scroll region moves
             let top = rows.yf(*y) - dy as f32;
@@ -398,6 +399,7 @@ pub(super) fn leaf_columns(
             )
         }
         Op::Rect { col, w, .. } => cells(*col as usize, *col as usize + *w as usize),
+        Op::Image { col, w, .. } => cells(*col as usize, *col as usize + *w as usize),
         Op::VSpans { col0, cols, .. } => cells(*col0 as usize, *col0 as usize + cols.len()),
         Op::Cells {
             col0, w, aspect, ..

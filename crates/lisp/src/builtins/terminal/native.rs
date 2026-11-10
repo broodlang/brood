@@ -597,6 +597,7 @@ fn paint_ops(
     let text_t = value::intern("text");
     let cursor_t = value::intern("cursor");
     let rect_t = value::intern("rect");
+    let image_t = value::intern("image");
     let scroll_region_t = value::intern("scroll-region");
     let above_seam_t = value::intern("above-seam");
     // a scroll region's ops are drawn in place, in order: a deque they are prepended to
@@ -647,6 +648,41 @@ fn paint_ops(
             let text = expect_string(heap, "%term-draw", arg(&parts, 3))?;
             let face = parts.get(4).copied().unwrap_or(Value::nil());
             target.put_text(row, col, &text, style_of(heap, face).over(default_face));
+        } else if tag == image_t {
+            // `[:image …]` (ADR-686): no pixels here, so the picture in half-block cells —
+            // `▀` in its top pixel's colour over its bottom pixel's — and a cell the picture
+            // leaves transparent untouched. A half that is transparent is the terminal's own
+            // background (`▄` / `▀` with the other colour), a partly transparent one is
+            // blended over the default background (black when the terminal's is unknown).
+            let Some(image) = read_image_op(heap, &parts) else {
+                continue;
+            };
+            let under = match default_face.bg {
+                Some(screen::Colour::Rgb(red, green, blue)) => [red, green, blue],
+                _ => [0, 0, 0],
+            };
+            let cells = crate::host::picture::half_blocks(
+                &image.picture,
+                clamp_extent(image.w).min(target.cols),
+                clamp_extent(image.h).min(target.rows),
+                image.fit,
+                image.anchor,
+                under,
+            );
+            let colour = |rgb: [u8; 3]| Some(screen::Colour::Rgb(rgb[0], rgb[1], rgb[2]));
+            for (row, col, top, bottom) in cells {
+                let (glyph, fg, bg) = match (top, bottom) {
+                    (Some(top), bottom) => ("▀", colour(top), bottom.and_then(colour)),
+                    (None, Some(bottom)) => ("▄", colour(bottom), None),
+                    (None, None) => continue,
+                };
+                let style = screen::Style {
+                    fg,
+                    bg: bg.or(default_face.bg),
+                    ..screen::Style::default()
+                };
+                target.put_text(image.row + row as i64, image.col + col as i64, glyph, style);
+            }
         } else if tag == scroll_region_t {
             // a terminal can't do sub-cell offsets: the inner ops are drawn where they are
             let inner_val = arg(&parts, 2);
@@ -1379,5 +1415,64 @@ mod key_to_value_tests {
             super::key_up_value(&mut heap, KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)),
             Value::Nil
         ));
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::{paint_ops, screen};
+    use crate::builtins::bytes::bytes_to_value;
+    use crate::core::heap::Heap;
+    use crate::core::value::{self, Value};
+
+    /// A PNG of `width`×`height`, the top half red and the bottom half blue.
+    fn two_band_png(width: u32, height: u32) -> Vec<u8> {
+        let pixels = image::RgbaImage::from_fn(width, height, |_, y| {
+            if y < height / 2 {
+                image::Rgba([255, 0, 0, 255])
+            } else {
+                image::Rgba([0, 0, 255, 255])
+            }
+        });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(pixels)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode");
+        png
+    }
+
+    // The terminal has no pixels: an `[:image …]` op is drawn in half-block cells, two
+    // pixels a cell (ADR-686), so one op serves the window and the terminal.
+    #[test]
+    fn an_image_op_draws_half_block_cells() {
+        let mut heap = Heap::new();
+        let source = bytes_to_value(two_band_png(4, 4), &mut heap);
+        let parts = vec![
+            value::kw("image"),
+            Value::int(1),
+            Value::int(1),
+            Value::int(4),
+            Value::int(2),
+            source,
+        ];
+        let mut target = screen::Screen::new(8, 4);
+        paint_ops(
+            &heap,
+            vec![(value::intern("image"), parts)],
+            &mut target,
+            screen::Style::default(),
+        )
+        .expect("paints");
+        let red = Some(screen::Colour::Rgb(255, 0, 0));
+        let blue = Some(screen::Colour::Rgb(0, 0, 255));
+        // the 4×4 picture fills 4 cols × 2 rows: row 1 red over red, row 2 blue over blue
+        let top = target.cell(1, 1);
+        assert_eq!(top.text, "▀");
+        assert_eq!((top.style.fg, top.style.bg), (red, red));
+        let bottom = target.cell(2, 4);
+        assert_eq!((bottom.style.fg, bottom.style.bg), (blue, blue));
+        // outside the rect nothing was drawn
+        assert_eq!(target.cell(0, 0).text, " ");
+        assert_eq!(target.cell(1, 5).text, " ");
     }
 }

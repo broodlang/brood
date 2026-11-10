@@ -83,10 +83,21 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `diagnostics/perf.rs` — VM work-attribution counters — the `perf-stats` feature (see `docs/benchmarking.md`).
   - `diagnostics/profile.rs` — Sampling CPU profiler over the VM's reified frame stacks — the "no Brood-level CPU profile" half of the observability timing tier (ROADMAP survey gap #4; .NET has dotnet-trace).
 - `dist.rs` — Distributed nodes: connect two Brood runtimes and route messages between them.
+  - `dist/admission.rs` — Bounding unauthenticated peers before a handshake completes: the whole-handshake [`Deadline`] a trickling peer cannot restart, the [`HandshakeSlot`] permit that caps handshakes in flight, and the rate-limited warning when connections are shed at that cap.
+  - `dist/couplings.rs` — Monitors and links across nodes: the control frames that set up and tear down a process monitor or link whose other end lives on a peer (ADR-067), and node monitors (`monitor-node`) with their `[:nodedown name]` message.
+  - `dist/dialing.rs` — The dialing side of the connection lifecycle: `node/connect`, the client handshake, and the dial bookkeeping that keeps one node from making two dials to a peer — the address-to-node routes a pre-dial check answers from, the pending-dial claims, and the gossip held while a program's dial is under way (KI-372).
   - `dist/guest.rs` — Guest links (ADR-415): a node link authenticated by a GRANT rather than the node's own cookie, which can reach only what it was given and cannot carry code.
   - `dist/handshake.rs` — The v2 authenticated node handshake (ADR-034 v2).
   - `dist/heartbeat.rs` — Liveness detection: one shared OS thread probes every link on a fixed cadence, declaring a link **down** (and tearing it down via `Shutdown::Both`) when it's been silent past [`DOWN_AFTER`].
+  - `dist/link_registration.rs` — Registering an authenticated link as THE link to its peer and tearing it down again: `establish` with the duplicate resolution in `register_link` — the incarnation check for a restarted peer and the connector tie-break for a second link to the same life — and the node-down path that removes a link and severs the couplings made over it.
+  - `dist/link_threads.rs` — A steady-state link's two OS threads: the writer, which seals and writes what the link's queue holds, and the reader, which opens each inbound frame, answers pings, and dispatches the rest — deliveries, monitor and link signals, gossip — on the link's authenticated peer name.
+  - `dist/listener.rs` — The listening side of the connection lifecycle: `node-start` (publishing this runtime's identity and binding its first listener), `node-also-listen`, the shared accept loop, and the server side of the handshake for each accepted connection.
+  - `dist/mesh.rs` — Cluster-mesh gossip (ADR-088): whether to mesh at all, the address this node advertises for others to dial, broadcasting the peer table on a join, and dialing the peers an inbound gossip list names that this node is not yet linked to.
+  - `dist/names.rs` — The local registered-name table (`proc/register`, `proc/whereis`, `proc/unregister`), its death-path sweep, and named-spawn's atomic check-or-spawn — the names a peer can address a process by before it holds the pid.
+  - `dist/outbound.rs` — A link's bounded writer queue: handing a frame to the writer thread (severing the link when the queue is full), and the `proc/send-latest` slots (ADR-492) that let a newer frame to one target and key replace an unwritten older one.
+  - `dist/routing.rs` — Location-transparent message routing: the [`Target`] a `send` names within a node, and delivering a message to it — in-process for a local node, as a `Send` frame over the link for a remote one — with the once-per-name warning for a message to a registered name no process holds.
   - `dist/session.rs` — The encrypted steady-state session (ADR-089) — confidentiality + per-frame integrity for the node link, closing ADR-081's cleartext/injection gap.
+  - `dist/transport.rs` — The link carrier: the [`Stream`] a node link runs over (TCP, or a Unix-domain socket on unix), and opening one — dialing an address, and binding and readying a Unix socket path.
   - `dist/wire.rs` — Wire codec for the distributed-node protocol.
 - `error.rs` — Error type used throughout the interpreter.
 - `eval.rs` — The evaluator: a tree-walker with proper tail calls.
@@ -103,6 +114,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `host/net_wasm.rs` — WASM stub for the TCP/TLS socket mechanism (`crate::host::net`).
   - `host/owned.rs` — A handle table whose entries belong to a green process, indexed by owner.
   - `host/owner_only.rs` — Windows's owner-only (KI-365): a protected DACL with one entry, full control for the user this process runs as.
+  - `host/picture.rs` — Pictures for the display's `[:image …]` op (ADR-686): encoded bytes decoded ONCE per content, and the geometry every painter shares — where a picture lands in its rect (`place`), the picture resampled to the pixels it is drawn at (`ScaledPictures`), and the half-block cells a terminal shows it in (`half_blocks`).
   - `host/subprocess.rs` — Persistent child processes (ADR-104), built on the blocking-IO → mailbox seam (ADR-059) — the same mechanism `crate::host::net` uses for sockets.
   - `host/tab.rs` — A browser tab as a display, for a program running IN the tab (the `brood-tab` wasm build): the page's script, not a socket, is the other end.
   - `host/text_width.rs` — Display-cell width of text — how many terminal/grid columns a string occupies.
@@ -293,6 +305,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `tool/project-image.blsp` (`project-image`) — The project startup image (ADR-218 for a project): fingerprint the project's sources, write every module's bindings to one sectioned image, and materialise them on the next run instead of re-evaluating source.
 - `tool/project-release.blsp` (`project-release`) — Single-binary release (ADR-038): collect what a bundle ships, name the artifacts (`release-plan`), report what was written (`release-report`), and answer `--brood-build-info` from inside one.
 - `tool/project-run.blsp` (`project-run`) — Running a project: `run-tests` (with the `--failed` set, `--stale` skipping and the coverage wiring behind `nest test`), `run` (`nest run`, with the entry-point resolution and its advice) and `check-boot` (load everything, resolve `:main`, run nothing — KI-66).
+- `tool/property.blsp` (`property`) — Property-based testing with integrated shrinking: generators that draw from a recorded choice sequence, a runner that checks a predicate over many draws, and a shrinker that minimises a failure's choices.
 - `tool/reload.blsp` (`reload`) — Hot-reload helpers.
 - `tool/renames.blsp` (`renames`) — The rename ledger: where a deliberately renamed public name went (ADR-304).
 - `tool/repl.blsp` (`repl`) — The Brood read-eval-print loop.

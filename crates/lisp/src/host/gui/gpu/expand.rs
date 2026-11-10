@@ -472,6 +472,57 @@ impl GpuWindow {
                         }
                     }
                 }
+                // A picture in a cell block (ADR-686), the CPU `paint_image`: the block on the
+                // grid, the picture placed in it and drawn texel for pixel from a texture of
+                // exactly its drawn size, clipped to the block.
+                Op::Image {
+                    row,
+                    col,
+                    w,
+                    h,
+                    picture,
+                    fit,
+                    anchor,
+                } => {
+                    let left = g.ox + *col as f32 * g.cw;
+                    let top = g.top(*row as f32);
+                    let box_w = (*w as f32 * g.cw).max(0.0);
+                    let box_h = g.span(*row as f32, *h as f32).max(0.0);
+                    let Some((dx, dy, drawn_w, drawn_h)) = crate::host::picture::place(
+                        *fit,
+                        *anchor,
+                        picture.0.width(),
+                        picture.0.height(),
+                        box_w as u32,
+                        box_h as u32,
+                    ) else {
+                        continue;
+                    };
+                    let Some(id) = self.picture_texture(renderer, &picture.0, drawn_w, drawn_h)
+                    else {
+                        continue;
+                    };
+                    let saved_clip = fb.clip;
+                    fb.clip[0] = fb.clip[0].max(left);
+                    fb.clip[1] = fb.clip[1].max(top).max(g.rows.top as f32);
+                    fb.clip[2] = fb.clip[2].min(left + box_w);
+                    fb.clip[3] = fb.clip[3].min(top + box_h);
+                    if fb.clip[2] > fb.clip[0] && fb.clip[3] > fb.clip[1] {
+                        fb.textured(
+                            TexKey::Picture(id),
+                            left + dx as f32,
+                            top + dy as f32,
+                            drawn_w as f32,
+                            drawn_h as f32,
+                            [0.0, 0.0, 1.0, 1.0],
+                            [255, 255, 255, 255],
+                            0,
+                            0.0,
+                            0.0,
+                        );
+                    }
+                    fb.clip = saved_clip;
+                }
                 // Pixel space: window coordinates as given, untouched by grid or scroll.
                 Op::Sprite {
                     tex,

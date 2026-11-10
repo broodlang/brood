@@ -221,6 +221,14 @@ fn rule_heads_are_bound() {
         include_str!("../ctx.rs"),
         include_str!("../std_index.rs"),
         include_str!("../../check.rs"),
+        include_str!("../declarations.rs"),
+        include_str!("../file_lints.rs"),
+        include_str!("../imports.rs"),
+        include_str!("../module_loading.rs"),
+        include_str!("../same_file_inference.rs"),
+        include_str!("../signature_capture.rs"),
+        include_str!("../top_level.rs"),
+        include_str!("../unused_binders.rs"),
     ];
     // Keys that are not callees: defmodule clause words, check-allow categories, type
     // constructors, a special-form spelling the reader keeps, and the `contract` module's

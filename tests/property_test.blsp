@@ -1,0 +1,164 @@
+;; Property-based testing with integrated shrinking (std/tool/property.blsp, ADR-685): the
+;; generators, the choice sequence they draw from, and the shrinker that turns a large random
+;; counterexample into a small one.
+
+(defmodule property-test (:use test))
+
+(defn- failing (generator predicate options)
+  (let (result (property/check generator predicate options))
+    (is (not (get result :passed)))
+    result))
+
+(describe "generators draw from a choice sequence"
+  (test "choice 0 is each generator's simplest value"
+    (assert= 0 (property/replay (property/int -50 50) []))
+    (assert= 3 (property/replay (property/int 3 9) []))
+    (assert= -3 (property/replay (property/int -9 -3) []))
+    (assert= false (property/replay (property/bool) []))
+    (assert= [] (property/replay (property/vector-of (property/int 0 9)) []))
+    (assert= "" (property/replay (property/string) []))
+    (assert= "a" (property/replay (property/character) []))
+    (assert= :first
+      (property/replay (property/one-of [(property/constant :first) (property/constant :second)])
+        [])))
+
+  (test "every generator stays inside its bounds over random draws"
+    (check-property 200 (property/int -7 12) (fn (n) (and (>= n -7) (<= n 12))))
+    (check-property 100
+      (property/int 0 (* 1000 4294967296))
+      (fn (n) (and (>= n 0) (<= n (* 1000 4294967296)))))
+    (check-property 100
+      (property/vector-of (property/bool) {:min 2 :max 4})
+      (fn (bools) (and (>= (count bools) 2) (<= (count bools) 4))))
+    (check-property 100
+      (property/string-of "xyz")
+      (fn (text) (every? (string/->graphemes text) (fn (g) (includes? ["x" "y" "z"] g)))))
+    (check-property 100
+      (property/map-of (property/elements [:a :b :c]) (property/int 0 3))
+      (fn (m) (every? m (fn ([k v]) (and (includes? [:a :b :c] k) (<= 0 v 3)))))))
+
+  (test "a unicode string round-trips through its codepoints and never holds a surrogate"
+    (check-property 200
+      (property/string)
+      (fn (text)
+        (let (codepoints (string/->codepoints text))
+          (and (= text (string/codepoints-> codepoints))
+            (not (any? codepoints (fn (c) (and (>= c 55296) (<= c 57343))))))))))
+
+  (test "frequency honours its weights and skips a zero weight"
+    (let (values (property/sample (property/frequency [[0 (property/constant :never)]
+                                                        [1 (property/constant :rare)]
+                                                        [20 (property/constant :common)]])
+                   300))
+      (is (not (includes? values :never)))
+      (is (> (count (seq/filter values (fn (v) (= v :common)))) 200))))
+
+  (test "tuple, fmap and bind compose"
+    (check-property 100
+      (property/bind (property/int 0 5)
+        (fn (n)
+          (property/tuple (property/constant n)
+            (property/vector-of (property/bool) {:min n :max n}))))
+      (fn ([n bools]) (= n (count bools)))))
+
+  (test "such-that keeps only accepted values; one that accepts nothing is an error"
+    (check-property 100 (property/such-that (property/int 0 9) (fn (n) (> n 0))) (fn (n) (> n 0)))
+    (assert-error (property/check (property/such-that (property/int 0 9) (fn (_) false) 10)
+                    (fn (_) true)
+                    {:trials 5})))
+
+  (test "a non-generator is refused with a hint"
+    (is (includes? (error-of (property/check (fn (seed) (rand/int seed 10)) (fn (_) true)))
+          "from-rng"))))
+
+(describe "a failure shrinks to a small counterexample"
+  (test "a vector containing 42 shrinks to [42]"
+    (assert= [42]
+      (get (failing (property/vector-of (property/int 0 100))
+             (fn (xs) (not (includes? xs 42)))
+             {:trials 1000})
+        :value)))
+
+  (test "an integer bound shrinks to the boundary"
+    (assert= 1000 (get (failing (property/int 0 1000000) (fn (n) (< n 1000)) {}) :value))
+    (assert= -1000
+      (get (failing (property/int -1000000 1000000) (fn (n) (> n -1000)) {:trials 500}) :value)))
+
+  (test "a sum bound shrinks to a short vector at the bound"
+    (let (value (get (failing (property/vector-of (property/int 0 100))
+                       (fn (xs) (< (fold xs 0 +) 200))
+                       {})
+                  :value))
+      (assert= 200 (fold value 0 +))
+      (is (<= (count value) 3))))
+
+  (test "a string property shrinks to its smallest failing string"
+    (assert= "aa" (get (failing (property/string) (fn (s) (< (count s) 2)) {}) :value))
+    (assert= "b"
+      (get (failing (property/string-of "ab") (fn (s) (not (includes? s "b"))) {}) :value)))
+
+  (test "shrinking goes through fmap and bind"
+    (assert= [2 [false false]]
+      (get (failing (property/bind (property/int 0 9)
+                      (fn (n)
+                        (property/tuple (property/constant n)
+                          (property/vector-of (property/bool) {:min n :max n}))))
+             (fn ([n _]) (< n 2))
+             {})
+        :value)))
+
+  (test "a raise in the predicate fails and is kept for the shrunk value"
+    (let (result (failing (property/int 0 100) (fn (n) (if (> n 10) (error "too big: " n) true)) {}))
+      (assert= 11 (get result :value))
+      (is (includes? (pr-str (get result :error)) "too big: 11"))))
+
+  (test "the shrink budget bounds the work"
+    (is (<= (get (failing (property/vector-of (property/int 0 100))
+                   (fn (xs) (< (count xs) 3))
+                   {:max-shrinks 5})
+              :attempts)
+          5))))
+
+(describe "a failure replays"
+  (test "the run is deterministic: the same seed gives the same result"
+    (let (run (fn ()
+                (property/check (property/vector-of (property/int 0 1000))
+                  (fn (xs) (< (count xs) 4))
+                  {:seed 7})))
+      (assert= (run) (run))))
+
+  (test "the reported seed replays the failing trial as trial 1"
+    (let (generator (property/vector-of (property/int 0 100))
+          predicate (fn (xs) (not (includes? xs 42)))
+          first-run (failing generator predicate {:trials 1000})
+          replayed (property/check generator predicate {:trials 1 :seed (get first-run :seed)}))
+      (assert= 1 (get replayed :trial))
+      (assert= (get first-run :original) (get replayed :original))
+      (assert= (get first-run :value) (get replayed :value))))
+
+  (test "the shrunk choices rebuild the shrunk value"
+    (let (generator (property/vector-of (property/int 0 100))
+          result (failing generator (fn (xs) (not (includes? xs 42))) {:trials 1000}))
+      (assert= (get result :value) (property/replay generator (get result :choices)))))
+
+  (test "check-property fails with the report, naming the counterexample and the seed"
+    (let (caught (try
+                   (do (check-property 300 (property/int 0 100) (fn (n) (< n 50))) :no-failure)
+                   (catch e e))
+          text (pr-str caught))
+      (is (includes? text "counterexample: 50"))
+      (is (includes? text "seed: "))
+      (is (includes? text "replay: "))))
+
+  (test "check-property takes an options map"
+    (check-property 20 (property/int 0 9) (fn (n) (< n 10)) {:seed 99}))
+
+  (test "an assertion inside the predicate reports as its own lines"
+    (let (caught (try
+                   (do
+                     (check-property 50 (property/int 0 100) (fn (n) (assert= (< n 30) true) true))
+                     :no-failure)
+                   (catch e e))
+          text (pr-str caught))
+      (is (includes? text "raised: assert: (assert= (< n 30) true)"))
+      (is (not (includes? text "raised: (:%test-fail"))))))

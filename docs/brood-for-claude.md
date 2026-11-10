@@ -962,6 +962,10 @@ code paints to a terminal or a GUI window unchanged.
   rot]`, physical pixels from the window's corner. Build them with `gui/line` and
   `gui/sprite` over a `gui/texture` handle; open the window with `{:input :pixels}` so
   mouse messages carry pixels. The engine above them is the `b2d` package (ADR-374).
+- **A picture** (a page, a photo) = `(editor/display/image row col w h source opts)`: PNG / JPEG
+  bytes in a cell block, painted at full pixel resolution by both window painters and in
+  half-block cells by a terminal — one op for both, decoded once per content (ADR-686). No
+  texture to manage; a sprite is for a game's many moving copies of one texture.
 
 ```lisp
 (defmodule main "a counter app" (:use editor/ui) (:use editor/frontend) (:use editor/display))
@@ -1512,13 +1516,14 @@ What `nest new greeter` writes, with the module docstrings and comments abridged
 
 `describe` groups tests; `test` defines one. `(assert= actual expected)` checks
 structural equality with a diff on failure; `(is expr)` asserts truthy.
-`(assert-error body…)` asserts a raise. For stochastic code, **property testing**:
-`(check-property n gen pred)` draws `n` values from a `seed -> [value next-seed]`
-generator (over the PRNG) and asserts `pred` on each — deterministic, and on a
-counterexample it fails with the value + seed:
+`(assert-error body…)` asserts a raise. For many inputs, **property testing**:
+`(check-property n gen pred)` draws `n` values from a generator built with `property/…`
+(`property/int`, `property/vector-of`, `property/string`, `property/one-of`, `property/fmap`,
+`property/bind`, …) and asserts `pred` on each — deterministic, and on a failure it reports
+the SHRUNK counterexample (a vector holding 42 fails as `[42]`) and the seed that replays it:
 
 ```clojure fragment
-(check-property 100 (fn (s) (rand/int s 1000)) (fn (x) (and (>= x 0) (< x 1000))))
+(check-property 100 (property/vector-of (property/int 0 1000)) (fn (xs) (= (count (sort xs)) (count xs))))
 ```
 
 Testing processes: **never `proc/sleep` to wait for another process** — a loaded machine

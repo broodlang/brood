@@ -110,12 +110,32 @@ use crate::host::text_width::{TAB_WIDTH, cluster_cells, cluster_cells_at};
 enum TexKey {
     Atlas(usize),
     User(u32),
+    /// A picture an `[:image …]` op drew, at one size (`PictureTextures`, ADR-686).
+    Picture(u32),
 }
 
 /// A texture the app uploaded, bound for the textured pipeline.
 struct GpuTexture {
     bind_group: wgpu::BindGroup,
 }
+
+/// The textures `[:image …]` ops drew (ADR-686): each picture uploaded once per size it is
+/// drawn at — already resampled to exactly those pixels, so the nearest sampler maps texel
+/// to pixel — and the least recently used freed past a byte budget. A memoised fragment
+/// replaying a picture's quads does not touch its entry, so the budget, not a frame's use,
+/// decides what goes; a free bumps `texture_generation`, which makes every fragment expand
+/// (and touch its pictures) again.
+#[derive(Default)]
+struct PictureTextures {
+    textures: HashMap<u32, GpuTexture>,
+    by_size: HashMap<([u8; 16], u32, u32), (u32, u64)>,
+    bytes: usize,
+    clock: u64,
+    next_id: u32,
+}
+
+/// What one window keeps uploaded for its pictures, in bytes.
+const PICTURE_TEXTURE_BUDGET: usize = 128 * 1024 * 1024;
 
 /// How a device draws subpixel (LCD) text: in ONE pass with dual-source blending (each
 /// channel weighed by its own coverage, `LCD_BLEND`), or in three, one per colour channel
@@ -176,6 +196,8 @@ pub struct GpuWindow {
     /// nothing (or was too big for a page), remembered so it is not retried each frame.
     glyphs: HashMap<u64, Option<AtlasGlyph>>,
     textures: HashMap<u32, GpuTexture>,
+    /// The pictures `[:image …]` ops drew, each uploaded once per size it is drawn at.
+    pictures: PictureTextures,
     viewport_layout: wgpu::BindGroupLayout,
     /// Lighting and post-processing, made the first time a frame asks for either.
     effects: Option<EffectsGpu>,
@@ -380,6 +402,55 @@ impl GpuWindow {
         self.write_rgba(&texture, 0, 0, rgba, w, h);
         self.textures.insert(tex, GpuTexture { bind_group });
         self.texture_generation += 1;
+    }
+
+    /// The texture of `picture` at `width`×`height` for an `[:image …]` op (ADR-686): the
+    /// one uploaded before at that size, or the picture resampled (through the renderer's
+    /// `ScaledPictures`, which the CPU painter shares) and uploaded now. `None` past the
+    /// device's largest texture.
+    fn picture_texture(
+        &mut self,
+        renderer: &mut Renderer,
+        picture: &crate::host::picture::Picture,
+        width: u32,
+        height: u32,
+    ) -> Option<u32> {
+        let largest = self.device.limits().max_texture_dimension_2d;
+        if width == 0 || height == 0 || width > largest || height > largest {
+            return None;
+        }
+        let pictures = &mut self.pictures;
+        pictures.clock += 1;
+        let key = (picture.key, width, height);
+        if let Some((id, used)) = pictures.by_size.get_mut(&key) {
+            *used = pictures.clock;
+            return Some(*id);
+        }
+        let scaled = renderer.pictures.get(picture, width, height);
+        let (texture, bind_group) = self.create_texture(width, height);
+        self.write_rgba(&texture, 0, 0, scaled.as_raw(), width, height);
+        let pictures = &mut self.pictures;
+        let id = pictures.next_id;
+        pictures.next_id = pictures.next_id.wrapping_add(1);
+        pictures.textures.insert(id, GpuTexture { bind_group });
+        pictures.by_size.insert(key, (id, pictures.clock));
+        pictures.bytes += width as usize * height as usize * 4;
+        while pictures.bytes > PICTURE_TEXTURE_BUDGET && pictures.by_size.len() > 1 {
+            let Some((oldest, (gone, _))) = pictures
+                .by_size
+                .iter()
+                .filter(|(entry, _)| **entry != key)
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(entry, value)| (*entry, *value))
+            else {
+                break;
+            };
+            pictures.by_size.remove(&oldest);
+            pictures.textures.remove(&gone);
+            pictures.bytes -= oldest.1 as usize * oldest.2 as usize * 4;
+        }
+        self.texture_generation += 1;
+        Some(id)
     }
 
     /// `gui-texture-free`: drop texture `tex` (a later `:sprite` naming it draws nothing).

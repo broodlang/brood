@@ -16,6 +16,7 @@ pub mod net; // wasm has no sockets — stub with the same API (fails at runtime
 pub(crate) mod owned; // the owner-indexed handle table behind sockets, subprocesses, wasm instances and tree handles
 #[cfg(windows)]
 pub(crate) mod owner_only; // Windows's owner-only: a protected one-entry DACL (file/spit-private, file/mkdir-private)
+pub mod picture; // decoded pictures for the display's `[:image …]` op (ADR-686): the content cache, placement, resampling
 pub mod subprocess; // persistent child-process mechanism: spawn + stdio pipes over the mailbox seam (ADR-104)
 pub mod tab; // a browser tab as a display, for a program running in the tab (the brood-tab wasm build)
 pub mod text_width; // grapheme-cluster display-cell width (the `string/display-width` builtin + the GUI grid)

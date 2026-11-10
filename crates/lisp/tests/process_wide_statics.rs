@@ -72,6 +72,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // Compiled components keyed by the BLAKE3 of their source bytes: the bytes decide the code,
     // and each load still gets a store and instance of its own.
     ("host/wasm.rs", "COMPILED", PureCache),
+    // Decoded pictures for the display's `[:image …]` op, keyed by a BLAKE3 hash of the
+    // source bytes (ADR-686): the key determines the pixels.
+    ("host/picture.rs", "DECODED", PureCache),
     // The scheduler, timer and stdin are one per machine; sysmon observes them.
     ("process/timer.rs", "TIMERS", OneMachine),
     ("process/sysmon.rs", "MONITORS", OneMachine),
@@ -94,12 +97,12 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // The node: one per OS process (ADR-033).
     ("dist.rs", "NODE", OneMachine),
     ("dist.rs", "NODES", OneMachine),
-    ("dist.rs", "NAMES", OneMachine),
+    ("dist/names.rs", "NAMES", OneMachine),
     ("dist.rs", "NODE_MONITORS", OneMachine),
     ("dist.rs", "LISTEN_ADDRS", OneMachine),
-    ("dist.rs", "DIAL_ROUTES", OneMachine),
-    ("dist.rs", "PENDING_DIALS", OneMachine),
-    ("dist.rs", "PROGRAM_DIALS", OneMachine),
+    ("dist/dialing.rs", "DIAL_ROUTES", OneMachine),
+    ("dist/dialing.rs", "PENDING_DIALS", OneMachine),
+    ("dist/dialing.rs", "PROGRAM_DIALS", OneMachine),
     // Guest links (ADR-415): the grants the node accepts. A connected guest's standing is
     // its link's (`Conn::guest`), not a table (KI-286).
     ("dist/guest.rs", "GRANTS", OneMachine),
@@ -124,13 +127,13 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // Host services that exist once: the GUI event loop and its windows, the clipboard,
     // dynamically loaded grammars.
     ("host/gui/backend.rs", "G", OneMachine),
-    ("host/gui/backend.rs", "S", OneMachine),
+    ("host/gui/backend/main_thread.rs", "S", OneMachine),
     ("host/gui/backend.rs", "W", OneMachine),
     // what degraded before any window was open (ADR-636): the one GUI's, handed to the next
     // window opened
-    ("host/gui/backend.rs", "D", OneMachine),
+    ("host/gui/backend/degradation.rs", "D", OneMachine),
     // The GUI thread's exit gate: one GUI thread per OS process, shut once at its exit.
-    ("host/gui/backend.rs", "EXIT_GATE", OneMachine),
+    ("host/gui/backend/exit_gate.rs", "EXIT_GATE", OneMachine),
     // the offscreen painter's one thread (gui/render-frame, ADR-609): text shaping cannot
     // move between threads, so every runtime in the process sends its frames to this one
     ("host/gui/backend/offscreen.rs", "T", OneMachine),
@@ -180,7 +183,7 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("host/treesit/vet.rs", "VETTING", OneMachine),
     // Facts of the binary: the std sources baked into it, and the signatures derived from
     // them (the stdlib id is a build constant).
-    ("types/check.rs", "STD_REQUIRES", FactOfTheBinary),
+    ("types/check/imports.rs", "STD_REQUIRES", FactOfTheBinary),
     ("types/check/sigs.rs", "CACHE", FactOfTheBinary),
     ("eval/derive.rs", "SIGS", FactOfTheBinary),
     // Caches whose key determines the value.
@@ -209,7 +212,7 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("core/heap/vm_cache.rs", "PUBLISHED_FAST_LINKS", Diagnostic),
     ("process/scheduler/pool.rs", "QUANTUM_LEDGER", Diagnostic),
     ("eval/compile/closure.rs", "SEEN", Diagnostic),
-    ("dist.rs", "SEEN", Diagnostic),
+    ("dist/routing.rs", "SEEN", Diagnostic),
 ];
 
 fn source_root() -> PathBuf {

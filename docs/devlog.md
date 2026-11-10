@@ -1252,6 +1252,40 @@ in `try`. The migration now rewrites only a call. `match*` became `%match`, the 
 name; the compile pass emits `/%match`. Guard: `tests/reduce_forms_test.blsp`, whose warning test
 goes red with the new pass disabled.
 
+2026-11-10 (ADR-685). Property testing shrinks. `check-property` stopped at its first
+counterexample and printed it whole. The new DEV module `property` (`std/tool/property.blsp`)
+has generators (`int`, `bool`, `elements`, `one-of`, `frequency`, `tuple`, `vector-of`,
+`map-of`, `character`, `string`, `string-of`, `fmap`, `bind`, `such-that`, `from-rng`) that draw
+every random decision as one integer of a recorded choice sequence, and a shrinker that
+deletes, zeroes and lowers those integers and replays the generator, keeping a candidate that
+still fails and consumed a shortlex-smaller sequence (Hypothesis's design). `check-property`
+takes a generator now and fails with the shrunk value, the original draw and the failing
+trial's seed, which `{:seed S}` or `nest test --seed S` replays as trial 1; the start seed is
+`--seed`'s when given, else 1. `tests/prng_test.blsp` moved to `property/from-rng`. Guards:
+`tests/property_test.blsp`, 23 executed docstring examples. bedit's first users are its undo
+and save round-trip properties.
+
+2026-11-10. `diff/unified` prints a real unified diff. It took edit ops and a context count it
+ignored, and printed the ops with no headers, so bedit's package review hand-printed hunks from
+`line-hunks`. It now takes two texts and `{:context :from-label :to-label}` and returns what
+`diff -u` prints: `---`/`+++`, `@@ -a,b +c,d @@` hunks with `:context` lines (3 by default),
+hunks whose context would meet merged, an empty side counted `-0,0` from the line before it, and
+`\ No newline at end of file` after a last line without one (a newline added or removed at the
+end is a change, which `line-hunks` alone does not report). `diff/apply-unified` applies one
+file's diff to a text. Guard: `tests/diff_test.blsp`, with two properties over the `property`
+module (ADR-685): `apply-unified a (unified a b)` is `b`, and every hunk header counts its body.
+
+2026-11-10 (ADR-686). A picture is a display op. `(editor/display/image row col w h source
+opts)` → `[:image …]`: PNG / JPEG bytes (or an `image-thumb` map) in a cell block, painted at the
+window's full pixel resolution by the CPU, GPU and offscreen painters, and in half-block cells by
+the terminal, so an app emits one op for both. `:fit` takes CSS's `object-fit` words, `:align`
+`:center` or `:top-left`. The decode is cached by content (`host/picture.rs`, BLAKE3 of the bytes,
+256 MB), so a frame repainting the same page hashes and decodes nothing; each window keeps the
+picture resampled per drawn size, and the GPU target uploads it once per size and draws it texel
+for pixel. The bounded decoder moved from `builtins/image.rs` to `host/picture.rs`, which both
+share. Prompted by bedit's PDF doc-view, whose half-block pages were unreadable. Guards: the
+offscreen test that one-pixel stripes survive (red with the arm disabled), the terminal's
+half-block test, and `tests/gui_test.blsp` through `gui/render-frame`.
 2026-11-10. The tree-walker differential (`BROOD_TIER=0`) had two reds on `main`; the weekly run's
 other reds from 2026-11-08 no longer reproduce (`make gcstress-all` clean, 352 files). (1) A
 macro's error fell inside the macro's own definition at tier 0. ADR-618 places an expander's

@@ -216,21 +216,6 @@ order); the output is built from `:keep` and `:insert` ops.
     (diff/patch [1 2 3] (diff/seq [1 2 3] [1 3]))   ;=> (1 3)"
   (map (seq/filter ops (fn (op) (not (= (first op) :delete)))) second))
 
-(defn unified (ops context-lines)
-  "Format `ops` as a unified-diff-like list of strings, showing `context-lines`
-of context around each change. Returns a list of strings (one per line of output),
-each prefixed with ` ` (keep), `-` (delete), or `+` (insert).
-
-    (diff/unified (diff/seq [\"a\" \"b\"] [\"a\" \"c\"]) 3)   ;=> (\" a\" \"+c\" \"-b\")"
-  (map ops
-    (fn (op)
-      (let (tag (first op)
-            val (second op))
-        (cond
-          (= tag :keep) (str " " val)
-          (= tag :delete) (str "-" val)
-          else (str "+" val))))))
-
 ;; ---- reading a unified diff -------------------------------------------------
 ;; The other direction: git (or `diff -u`) PRODUCES the text, and a tool wants to act on
 ;; it — stage one hunk, stage three lines of a hunk, jump from a `+` line to the line of
@@ -510,3 +495,188 @@ written for `line-hunks`: a change gutter is `(hunks-status (mapcat hunks hunk-c
                       (let (flushed (flush state))
                         (assoc flushed :old (inc (:old flushed)) :new (inc (:new flushed))))))))
     (:out (flush final))))
+
+;; ---- printing a unified diff ------------------------------------------------
+;; Two texts as `diff -u` prints them: `---`/`+++` naming the sides, then each run of changes
+;; with `:context` unchanged lines around it as a hunk under its `@@ -a,b +c,d @@` header.
+;; Hunks whose context would touch or overlap are one hunk, as git prints them. The changes
+;; are `line-hunks`', with one adjustment: a last line that ends with no newline is a
+;; different line from the same text ending with one, so a newline added or removed at the
+;; end is a change, marked `\ No newline at end of file` — `line-hunks` alone calls it none.
+
+(def- no-newline-marker "\\ No newline at end of file")
+
+;; Appended to a last line that has no newline before the texts go to `line-hunks`, so that
+;; line compares unequal to the same text with a newline (and equal to itself).
+(def- no-newline-sentinel "\u{0}\u{fffe}no-newline")
+
+(defn- text-lines (text:string)
+  "`text`'s lines as a vector of `[line newline?]`: a final newline ends the last line rather
+than starting an empty one, and only a last line can lack one."
+  (if (= text "")
+    []
+    (let (pieces (into [] (string/split text "\n"))
+          ends-with-newline (string/ends-with? text "\n")
+          lines (if ends-with-newline (seq/subvec pieces 0 (dec (count pieces))) pieces)
+          last-index (dec (count lines)))
+      (into []
+        (map (range (count lines))
+          (fn (i) [(nth lines i) (or ends-with-newline (< i last-index))]))))))
+
+(defn- sentinel-text (text:string)
+  (if (or (= text "") (string/ends-with? text "\n")) text (str text no-newline-sentinel "\n")))
+
+;; Zero-context changes, `[old-start old-count new-start new-count]` 0-based, grouped into the
+;; hunks `context` lines of context make of them: two changes share a hunk when no more than
+;; 2·context unchanged lines lie between them.
+(defn- group-changes (changes context:int)
+  (reverse (fold changes
+             '()
+             (fn (groups change)
+               (let (previous (first (first groups)))
+                 (if (and previous
+                       (<= (- (first change) (+ (first previous) (second previous))) (* 2 context)))
+                   (cons (cons change (first groups)) (rest groups))
+                   (cons (list change) groups)))))))
+
+;; The body lines of one side's line `i` as printed with `prefix`, the no-newline marker
+;; after it when it has none.
+(defn- printed (prefix entry)
+  (let ([line newline?] entry)
+    (if newline? [(str prefix line)] [(str prefix line) no-newline-marker])))
+
+(defn- context-lines (old from:int to:int)
+  (mapcat (seq/subvec old from to) (fn (entry) (printed " " entry))))
+
+;; One change printed after the context lines from `at` up to it.
+(defn- change-lines (old new at:int old-at:int old-count:int new-at:int new-count:int)
+  (append (context-lines old at old-at)
+    (mapcat (seq/subvec old old-at (+ old-at old-count)) (fn (entry) (printed "-" entry)))
+    (mapcat (seq/subvec new new-at (+ new-at new-count)) (fn (entry) (printed "+" entry)))))
+
+(defn- hunk-body (old new changes previous-end:int previous-count:int end:int lines)
+  (if (empty? changes)
+    (into lines (context-lines old (+ previous-end previous-count) end))
+    (let ([old-at old-count new-at new-count] (first changes))
+      (hunk-body old
+        new
+        (rest changes)
+        old-at
+        old-count
+        end
+        (into lines
+          (change-lines old new (+ previous-end previous-count) old-at old-count new-at new-count))))))
+
+;; A hunk over `changes` (in order): `first-old`/`first-new` where the first starts,
+;; the last one's starts and counts, widened by `context` and clamped to the texts.
+(defn- hunk-of
+  (old new
+    changes context:int first-old:int first-new:int last-start:int last-old-count:int
+    last-new-start:int last-new-count:int)
+  (let (last-old (+ last-start last-old-count)
+        last-new (+ last-new-start last-new-count)
+        widened-start (- first-old context)
+        old-start (if (< widened-start 0) 0 widened-start)
+        widened-end (+ last-old context)
+        old-end (if (> widened-end (count old)) (count old) widened-end)
+        new-start (- first-new (- first-old old-start))
+        new-end (+ last-new (- old-end last-old))
+        old-count (- old-end old-start)
+        new-count (- new-end new-start))
+    (cons (header-line (if (= old-count 0) old-start (inc old-start))
+            old-count
+            (if (= new-count 0) new-start (inc new-start))
+            new-count
+            nil)
+      (hunk-body old new changes old-start 0 old-end []))))
+
+(defn- hunk-lines (old new group context:int)
+  (let (changes (reverse group)
+        [first-old _ first-new _] (first changes)
+        [last-old last-old-count last-new last-new-count] (last changes))
+    (hunk-of old
+      new changes context first-old first-new last-old last-old-count last-new last-new-count)))
+
+(defn unified "The unified diff that turns text `a` into text `b`, as `diff -u` prints it: `---` and
+`+++` lines naming the sides, then each change with `:context` unchanged lines around it
+(default 3) under its `@@ -start,count +start,count @@` header — a side with no lines counts
+0 from the line before it (`-0,0` for a file that was empty), changes whose context would
+meet share one hunk, and a last line with no newline is followed by `\\ No newline at end of
+file`. `options`: `:context`, `:from-label` (default `\"a\"`) and `:to-label` (default
+`\"b\"`). The empty string when the texts are equal. `parse-unified` reads it back and
+`apply-unified` applies it.
+
+    (diff/unified \"a\\nb\\nc\\n\" \"a\\nx\\nc\\n\")   ;=> \"--- a\\n+++ b\\n@@ -1,3 +1,3 @@\\n a\\n-b\\n+x\\n c\\n\"
+    (diff/unified \"a\\nb\\nc\\n\" \"a\\nx\\nc\\n\" {:context 0 :from-label \"old\" :to-label \"new\"})   ;=> \"--- old\\n+++ new\\n@@ -2 +2 @@\\n-b\\n+x\\n\"
+    (diff/unified \"\" \"a\\n\")   ;=> \"--- a\\n+++ b\\n@@ -0,0 +1 @@\\n+a\\n\"
+    (diff/unified \"a\" \"a\\n\")   ;=> \"--- a\\n+++ b\\n@@ -1 +1 @@\\n-a\\n\\\\ No newline at end of file\\n+a\\n\"
+    (diff/unified \"same\\n\" \"same\\n\")   ;=> \"\""
+  ((a b) (unified a b {}))
+  ((a b options) (let (context (get options :context 3)
+                       old (text-lines a)
+                       new (text-lines b)
+                       changes (line-hunks (sentinel-text a) (sentinel-text b)))
+                   (if (empty? changes)
+                     ""
+                     (str (string/join (append [(str "--- " (get options :from-label "a"))
+                                                 (str "+++ " (get options :to-label "b"))]
+                                         (mapcat (group-changes changes context)
+                                           (fn (group) (hunk-lines old new group context))))
+                            "\n")
+                       "\n")))))
+
+;; ---- applying one -----------------------------------------------------------
+
+;; A hunk's body applied at the old text's `index`: the lines it emits as `[line newline?]`, a
+;; no-newline marker taking the newline off the line emitted just before it (nothing, after a
+;; removed line), and the old index past the hunk. Raises on a line that does not match.
+(defn- apply-hunk (old index hunk)
+  (fold (:lines hunk)
+    {:out [] :at index :last nil}
+    (fn (state line)
+      (let (tag (if (= line "") " " (string/substring line 0 1))
+            body (string/substring line (math/min 1 (string/length line)) (string/length line))
+            expect (fn ()
+                     (let (entry (nth old (:at state)))
+                       (when (or (nil? entry) (not (= (first entry) body)))
+                         (error "diff/apply-unified: the text does not match the hunk at line "
+                           (inc (:at state))
+                           ": "
+                           line)))))
+        (cond
+          (= tag "\\")
+            (if (= (:last state) :emitted)
+              (assoc state
+                :out
+                  (assoc (:out state)
+                    (dec (count (:out state))) [(first (last (:out state))) false]))
+              state)
+          (= tag "+") (assoc state :out (conj (:out state) [body true]) :last :emitted)
+          (= tag "-") (do (expect) (assoc state :at (inc (:at state)) :last :removed))
+          else
+            (do
+              (expect)
+              (assoc state
+                :out (conj (:out state) [body true])
+                :at (inc (:at state))
+                :last :emitted)))))))
+
+(defn apply-unified (text:string patch-text:string -> string)
+  "`text` with the unified diff `patch-text` (one file's, as `unified` prints it or `diff -u`
+and git do) applied, its no-newline markers honoured. Raises when a context or removed line
+does not match `text`.
+
+    (diff/apply-unified \"a\\nb\\nc\\n\" (diff/unified \"a\\nb\\nc\\n\" \"a\\nx\\nc\"))   ;=> \"a\\nx\\nc\"
+    (diff/apply-unified \"same\" \"\")   ;=> \"same\""
+  (let (old (text-lines text)
+        hunks (mapcat (parse-unified patch-text) :hunks)
+        applied (fold hunks
+                  {:out [] :at 0}
+                  (fn (state hunk)
+                    (let (start (header-int (:old-start hunk) 0)
+                          index (if (= (header-int (:old-count hunk) 1) 0) start (dec start))
+                          copied (into (:out state) (seq/subvec old (:at state) index))
+                          result (apply-hunk old index hunk))
+                      {:out (into copied (:out result)) :at (:at result)})))
+        lines (into (:out applied) (seq/subvec old (:at applied) (count old))))
+    (string/join (map lines (fn ([line newline?]) (if newline? (str line "\n") line))) "")))
