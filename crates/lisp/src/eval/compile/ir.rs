@@ -1062,7 +1062,9 @@ impl CompiledArm {
 
     /// The global-read slot native code resolves call site `call_site`'s head through when
     /// it makes that call in tail position — past every slot the body's own global reads
-    /// use (see [`gsite_reservation`]).
+    /// use (see [`gsite_reservation`]). Only native code makes such a call, so only the
+    /// `jit` build has it — a build without warned it was never used.
+    #[cfg(feature = "jit")]
     pub(crate) fn tail_head_gsite(&self, call_site: u32) -> u32 {
         debug_assert!(
             call_site < self.nsites,

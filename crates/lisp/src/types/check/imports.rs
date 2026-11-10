@@ -352,10 +352,36 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                 let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
                     continue;
                 };
-                // A grant is also a use (publics refer bare), plus the ADR-146
-                // internals key the privacy walk consults.
-                clauses.push(Clause::Use(mod_sym, None, None));
+                // A grant is also a use, plus the ADR-146 internals key the privacy walk
+                // consults. `(:use-internals mod :only [a b])` refers just those names, which
+                // may be privates — so the grant goes FIRST, as the runtime emits it before
+                // the refer: the `:only` arm of `Clause::Use` skips a private it sees no grant
+                // for. Without `:only`, the module's publics refer bare, as `(:use mod)`.
+                let is_only = matches!(citems.get(2),
+                    Some(Value::Keyword(m)) if value::symbol_is(*m, "only"));
                 clauses.push(Clause::UseInternals(mod_sym));
+                if is_only {
+                    // Read-only, no alloc → no GC (as in the `:use` arm above).
+                    let names: Vec<Symbol> = citems
+                        .get(3)
+                        .and_then(|sub| heap.seq_items(*sub).ok())
+                        .map(|ns| {
+                            ns.iter()
+                                .filter_map(|n| match n {
+                                    Value::Sym(s) => Some(*s),
+                                    _ => None,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    clauses.push(Clause::Use(
+                        mod_sym,
+                        Some(names),
+                        heap.form_pos_only(*clause),
+                    ));
+                } else {
+                    clauses.push(Clause::Use(mod_sym, None, None));
+                }
             } else if value::symbol_is(*kw_sym, "shadow") {
                 for name in citems.iter().skip(1) {
                     if let Value::Sym(name) = *name {

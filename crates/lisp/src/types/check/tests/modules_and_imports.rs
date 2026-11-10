@@ -48,6 +48,33 @@ fn an_only_import_of_the_modules_ability_is_not_named() {
     );
 }
 
+/// `(:use-internals mod :only [a b])` refers just those names, privates included — the
+/// cycle-safe form the docs give for two mutually dependent modules, and what the runtime
+/// does. The checker read the clause as a refer-all of the publics, so a private named in
+/// `:only` was "unbound" though the file ran, and `:only []` referred everything it meant to
+/// keep out.
+#[test]
+fn use_internals_only_refers_exactly_the_names_privates_included() {
+    // `package-str-lit` is private to `package`; `fetch` is public.
+    let ws = file_warnings(
+        "(defmodule test/internals-only (:use-internals package :only [package-str-lit]))\n\
+         (defn f (s) (package-str-lit s))",
+    );
+    assert!(
+        ws.iter().all(|w| !w.contains("unbound symbol")),
+        "a private named in :only is referred: {ws:?}"
+    );
+    // A public the subset does not name is NOT referred.
+    let ws = file_warnings(
+        "(defmodule test/internals-only (:use-internals package :only [package-str-lit]))\n\
+         (defn f () (fetch))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("unbound symbol: fetch")),
+        "a public outside :only stays unreferred: {ws:?}"
+    );
+}
+
 // ---- unused :use import lint ----
 
 #[test]

@@ -1328,8 +1328,11 @@ into. `package.blsp` 2 316 → 1 688 lines, with `package-manifest` (`nest add` 
 `label`); `buffer.blsp` 2 334 → 2 106, with `editor/undo-region` (`undo-in-region`). Every moved
 line was checked to land in exactly one file. Moved public names keep their spelling under the new
 module and are in the rename ledger; bedit's one caller of `undo-in-region` moved with it. Found on
-the way: a private referred bare through `(:use-internals m :only […])` is still unbound to the
-checker, so the new modules reach the old ones' privates qualified.
+the way and fixed: the checker read `(:use-internals m :only […])` as a refer-all of `m`'s publics
+(the runtime refers just the names, privates included), so a private named there was "unbound"
+and `:only []` referred everything; the grant now goes ahead of an `:only` refer, as the runtime
+emits it. Guard: `use_internals_only_refers_exactly_the_names_privates_included`, red with the
+`:only` arm off.
 Same day: KI-381 fixed (an equal-connector duplicate link keeps the one each end opened first, so
 both ends agree), and the Nightly's AddressSanitizer reds (a leaked box in a `fatal_signal` test;
 ASan turning a vetted grammar's SIGSEGV into "exited 1"). KI-382 filed: under ASan a dozen JIT tier
