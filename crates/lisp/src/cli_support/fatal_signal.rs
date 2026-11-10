@@ -783,13 +783,16 @@ mod tests {
     #[test]
     fn foreign_code_is_marked_per_thread_and_a_long_fragment_is_dropped() {
         use super::{ForeignCode, current_foreign_code, enter_foreign_code};
-        let code: &'static ForeignCode = Box::leak(Box::new(
+        // A static, not a leaked box: LeakSanitizer reports a box nothing points at once
+        // the test returns, which fails the AddressSanitizer job.
+        static CODE: std::sync::OnceLock<ForeignCode> = std::sync::OnceLock::new();
+        let code: &'static ForeignCode = CODE.get_or_init(|| {
             ForeignCode::new(" :grammar {:lang :x}".to_string()).with_crash_file(
                 std::path::Path::new("/state/brood/grammar-verdicts/ab.blsp"),
                 "{:verdict :quarantined".to_string(),
                 "}\n".to_string(),
-            ),
-        ));
+            )
+        });
         assert_eq!(code.record_fragment(), b" :grammar {:lang :x}");
         let crash_file = code.crash_file.as_ref().expect("a crash file");
         assert_eq!(

@@ -12,6 +12,7 @@ use std::path::Path;
 
 mod fatal_signal;
 pub use fatal_signal::crash_record_dir;
+#[cfg(feature = "treesit")]
 pub(crate) use fatal_signal::literal_safe;
 pub use fatal_signal::{ForeignCode, ForeignGuard, current_foreign_code, enter_foreign_code};
 
