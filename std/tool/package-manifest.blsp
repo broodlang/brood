@@ -9,7 +9,9 @@ take one out, keeping the rest of the file and its comments, then re-resolve the
   (:use project)
   (:use-internals project)
   (:use package :exclude [update])
-  (:use-internals package))
+  ;; `:only []`: the grant to reach `package`'s privates qualified, without referring its
+  ;; public names a second time — that refer would bring back the `update` excluded above.
+  (:use-internals package :only []))
 
 ;; --- editing the manifest: `nest add` / `nest remove` -----------------------
 ;; These mutate project.blsp's :dependencies clause while preserving the rest of

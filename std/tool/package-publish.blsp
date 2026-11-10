@@ -10,7 +10,9 @@ manifest's version and tag it."
   (:use project)
   (:use-internals project)
   (:use package :exclude [update])
-  (:use-internals package)
+  ;; `:only []`: the grant to reach `package`'s privates qualified, without referring its
+  ;; public names a second time — that refer would bring back the `update` excluded above.
+  (:use-internals package :only [])
   (:use-internals package-manifest))
 
 ;; --- `nest search` / `nest publish` (hive HTTP API) -------------------------
