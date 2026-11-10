@@ -116,8 +116,8 @@ SYMBOLS_DIR := target/$(TARGET_SUBDIR)release-symbols
 	configure doctor \
 	ci-wait enable-perf-check ensure-nextest fmt fuzz gcstress gcstress-all green green-all help hooks install \
 	install-features \
-	latency-gate loom perf-brood perf-symbols prepush quickbench release release-brood repl \
-	runtime-soak smoke-bedit stress suite test test-both test-contracts test-light tier-audit tsan \
+	latency-gate loom miri mutants perf-brood perf-symbols prepush quickbench release release-brood repl \
+	rr-hunt runtime-soak shuttle smoke-bedit stress suite test test-both test-contracts test-light tier-audit tsan \
 	uninstall wasm-test
 
 help: ## Show this help
@@ -428,6 +428,39 @@ tsan: ## ThreadSanitizer over the concurrency-sensitive Rust tests (needs nightl
 
 loom: ## Loom model-check of the dense-table migration protocol (exhaustive interleavings of a faithful model)
 	cargo test -p brood --release --features brood/loom-model --test loom_table_protocol
+
+shuttle: ## Shuttle randomized (random + PCT) model-check of the scheduler's park/spawn handshake and steal ownership (a faithful miniature; each property's sabotage is a test too)
+	cargo test -p brood --release --features brood/shuttle-model --test shuttle_scheduler_model
+
+# The kernel modules whose `unsafe` Miri can interpret: no JIT, no mmap beyond what it models,
+# no foreign calls (hence the system allocator — mimalloc is C). `local_string` is left out:
+# its tests loop past what Miri, ~1000x slower than native, finishes in 15 minutes.
+MIRI_MODULES ?= core::value core::alloc core::map_champ core::table core::heap::slabs \
+	core::heap::roots_buf core::heap::small_map
+miri: ## Miri (undefined-behaviour interpreter) over the kernel unit tests that hold `unsafe` (needs nightly + the miri component; MIRI_MODULES narrows)
+	@for m in $(MIRI_MODULES); do \
+	  echo ">>> miri $$m"; \
+	  MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -q -p brood --lib \
+	    --no-default-features --features system-alloc $$m || exit 1; \
+	done
+
+# Mutation testing: cargo-mutants breaks one thing at a time in F (flips a comparison, deletes
+# a statement, returns a default) and reports every change no test noticed — CLAUDE.md's
+# "sabotage every guard" rule, run by a tool. Scope it: the whole crate is hours. TESTS is
+# the cargo-test filter to run per mutant (the module's own tests, by default all of `--lib`).
+F ?=
+TESTS ?=
+mutants: ## Mutation-test one Rust file: make mutants F=crates/lisp/src/core/heap/small_map.rs TESTS=core::heap::small_map (needs cargo-mutants)
+	@test -n "$(F)" || { echo "usage: make mutants F=path/to/file.rs [TESTS=test-filter]"; exit 2; }
+	cargo mutants --no-shuffle -p brood -f $(F) -- --lib $(TESTS)
+
+# rr records a run so a one-in-N failure can be replayed exactly, and stepped backwards.
+# Chaos mode perturbs scheduling so a rare interleaving shows up sooner. Needs `rr` installed
+# (apt install rr) and kernel.perf_event_paranoid <= 1.
+RR_TEST ?=
+RR_RUNS ?= 50
+rr-hunt: ## Record a test binary under `rr record --chaos` until it fails, keeping that recording: make rr-hunt RR_TEST="target/debug/deps/brood-HASH case_name" RR_RUNS=50
+	@scripts/rr-hunt.sh $(RR_RUNS) $(RR_TEST)
 
 asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly + rust-src + cargo-nextest; system-alloc so ASAN can intercept allocations instead of mimalloc's un-instrumented arena). Catches genuine OOB / use-after-free in the unsafe substrate (mmap table, JIT codegen buffers) that TSAN and the logical GC tripwires miss. Through nextest, which also skips doctests (they don't LINK under ASAN + build-std, a toolchain quirk).
 	# `--cfg brood_asan` sizes `WORKER_STACK_BYTES` to 64 MiB for this build, because ASAN's

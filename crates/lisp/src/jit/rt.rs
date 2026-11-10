@@ -445,6 +445,19 @@ pub unsafe extern "C" fn brood_rt_is_empty(
     }
 }
 
+/// The stack guard's slow path: the prologue's compare against `Heap::jit_stack_limit`
+/// tripped. Re-measure and re-stamp for the stack this frame is actually on; 1 = room,
+/// continue native, 0 = deopt (the VM drains deep recursion). See `recheck_stack_limit`.
+///
+/// # Safety
+/// `heap` must be the live context pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn brood_rt_stack_recheck(heap: *mut Heap) -> i8 {
+    // SAFETY: `heap` is the live process heap (contract: heap), borrowed for this call only.
+    let heap = unsafe { &mut *heap };
+    crate::eval::compile::recheck_stack_limit(heap) as i8
+}
+
 /// Byte pointer to the LOCAL nursery pair slab (`Vec<(Value, Value)>`). Called once at JIT
 /// function entry so inline `first`/`rest` can compute `base + idx * 48 + {0,24}` directly
 /// instead of calling `brood_rt_car`/`cdr` per element. Valid only while no `cons` can grow

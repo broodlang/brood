@@ -615,7 +615,7 @@ fn jit_lower_arm_inner(
         3,
     ));
 
-    entry::emit_stack_guard(&mut b, ptr_ty, heap, deopt);
+    entry::emit_stack_guard(&mut b, ptr_ty, heap, deopt, callbacks.stack_recheck);
 
     let epoch_ptr = entry::emit_epoch_pointer(&mut b, code, &hoist_plan, &callbacks, heap);
     let pair_bases = entry::emit_pair_bases(&mut b, code, &callbacks, heap, ptr_ty);

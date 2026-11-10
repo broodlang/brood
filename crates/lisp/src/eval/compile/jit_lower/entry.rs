@@ -155,14 +155,19 @@ pub(super) fn emit_nil_locals(
 /// guard page is an abort no `try` or supervisor can observe.
 ///
 /// Cost: a load of the limit the entry point stamped (`Heap::jit_stack_limit`), one compare
-/// of this frame's address against it, and a predicted branch. A trip deopts (the VM owns
-/// deep recursion: heap frames and the clean `MAX_BC_FRAMES` error). A `0` limit (the probe
-/// could not read the stack) never trips, because the compare is unsigned.
+/// of this frame's address against it, and a predicted branch. A trip first asks the runtime
+/// (`brood_rt_stack_recheck`): the stamp is an address on the stack the native nest began on,
+/// and a frame on another stack (a `stacker` segment, a stamp from another thread) trips it
+/// with room to spare — every arm under the ASan build deopted sixteen times and latched off
+/// native that way. The re-check re-stamps for this stack; only a real shortage deopts (the
+/// VM owns deep recursion: heap frames and the clean `MAX_BC_FRAMES` error). A `0` limit (the
+/// probe could not read the stack) never trips, because the compare is unsigned.
 pub(super) fn emit_stack_guard(
     b: &mut FunctionBuilder,
     pointer_type: Type,
     heap: SsaValue,
     deopt: cranelift_codegen::ir::Block,
+    stack_recheck: cranelift_codegen::ir::FuncRef,
 ) {
     let limit = b.ins().load(
         pointer_type,
@@ -176,8 +181,14 @@ pub(super) fn emit_stack_guard(
     let here = b.ins().stack_addr(pointer_type, probe, 0);
     let trip = b.ins().icmp(IntCC::UnsignedLessThan, here, limit);
     let cont = b.create_block();
+    let recheck = b.create_block();
     let bail = b.create_block();
-    b.ins().brif(trip, bail, &[], cont, &[]);
+    b.ins().brif(trip, recheck, &[], cont, &[]);
+    b.switch_to_block(recheck);
+    let call = b.ins().call(stack_recheck, &[heap]);
+    let room = b.inst_results(call)[0];
+    b.ins().brif(room, cont, &[], bail, &[]);
+    b.seal_block(recheck);
     // On a trip, set `Heap::jit_force_vm` before deopting. Deopt alone livelocks: the VM
     // re-runs the arm, the recursive callee tiers again, its prologue trips again. The flag
     // makes `jit_tier` decline native for the rest of this subtree (the native entry points

@@ -18,6 +18,9 @@ system-alloc = []
 # Loom model-check of the table migration protocol (tests/loom_table_protocol.rs);
 # a feature (not --cfg loom) so the global cfg doesn't break boxcar's own loom hooks.
 loom-model = []
+# Shuttle randomized model-check of the scheduler's park/steal protocol
+# (tests/shuttle_scheduler_model.rs); a feature for the same reason as `loom-model`.
+shuttle-model = []
 # `jit` is a default feature: the tier-1 JIT (ADR-101) is on for every ordinary
 # `cargo build`/`cargo test`/rust-analyzer and the shipped `brood`/`nest` binaries.
 # The lean `nest release` bundle and unsupported hosts strip it via
@@ -177,6 +180,10 @@ boxcar = "0.2"
 # fully iterative would mean rewriting four bottom-up builders as two-phase stack
 # machines — this removes that complexity instead (the CLAUDE.md crate bar).
 stacker = "0.1"
+# The real stack pointer for the JIT stack guard's limit (`stamp_stack_limit`): already in
+# the tree as `stacker`'s own dependency, named here because a local's address is not the
+# stack pointer under every build (ASan may move locals off the stack).
+psm = "0.1"
 # Atomic Arc swap for the two RUNTIME code generations (ADR-091 Stage 4). A dead
 # generation is freed by storing a fresh empty slab; readers hold a guard so the old
 # slab can't drop while in use — lock-free reads, safe whole-generation reclamation.
@@ -419,6 +426,9 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 loom = "0.7"
+# Randomized concurrency testing (PCT), for models with more threads than loom's exhaustive
+# search reaches. Dev-only; the model is gated behind the `shuttle-model` feature.
+shuttle = "0.9"
 # Lightweight microbenchmark harness for the interpreter core. Dev-only (the
 # released library pulls nothing extra). Run with `cargo bench`.
 divan = "0.1"

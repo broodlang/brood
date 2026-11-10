@@ -160,7 +160,10 @@ fn park_unbound(heap: &mut Heap, sym: Symbol, site: u32) {
 #[cfg(feature = "jit")]
 #[inline]
 pub(crate) fn stamp_stack_limit(heap: &mut Heap) {
-    let here = &heap as *const _ as usize;
+    // The stack pointer itself, not a local's address: `stacker::remaining_stack` measures
+    // from the stack pointer, and a local may not be on the stack at all (ASan can move one
+    // into a heap-allocated fake frame), which made the limit meaningless.
+    let here = psm::stack_pointer() as usize;
     heap.jit_stack_limit = match stacker::remaining_stack() {
         // Room left: the limit is the address `margin` bytes above the stack bottom.
         Some(left) if left > JIT_STACK_MARGIN_BYTES => here - (left - JIT_STACK_MARGIN_BYTES),
@@ -174,6 +177,20 @@ pub(crate) fn stamp_stack_limit(heap: &mut Heap) {
         // does with `None`.
         None => 0,
     };
+}
+
+/// The native prologue's slow path (`brood_rt_stack_recheck`): its one-compare guard tripped,
+/// so measure. The stamp is an absolute address for ONE stack — taken where the native nest
+/// began — and a frame running on another (a `stacker` segment a walker grew into, another
+/// thread's stack) compares against a limit that means nothing there. Re-stamp for the stack
+/// this frame is on, and answer whether it has room: true continues native, false deopts and
+/// drains the subtree on the VM. Costs nothing on the path that does not trip.
+#[cfg(feature = "jit")]
+pub(crate) fn recheck_stack_limit(heap: &mut Heap) -> bool {
+    stamp_stack_limit(heap);
+    // `0` (no probe) fails open, as the prologue does; `usize::MAX` (inside the margin) and
+    // any limit above this frame mean no room.
+    heap.jit_stack_limit == 0 || psm::stack_pointer() as usize >= heap.jit_stack_limit
 }
 
 /// Stamp the limit only at the **outermost** native entry — `native_depth` is the caller's
@@ -297,4 +314,49 @@ pub(super) fn jit_native_reenter<T>(
     let out = body(heap);
     heap.jit_native_depth = native_depth;
     out
+}
+
+#[cfg(all(test, feature = "jit"))]
+mod stack_recheck_tests {
+    use super::*;
+
+    /// A stamp from another stack — here, an address above this frame, which is what a frame
+    /// on a lower `stacker` segment sees — trips the prologue with room to spare. The re-check
+    /// must find the room and re-stamp for THIS stack, or the arm deopts on every call and
+    /// latches off native (every JIT case in the ASan job, `native-depth-exceeded` ×16).
+    #[test]
+    fn a_limit_from_another_stack_is_restamped_and_does_not_deopt() {
+        let mut interp = crate::Interp::new();
+        let sp = psm::stack_pointer() as usize;
+        interp.heap.jit_stack_limit = sp + 64 * 1024;
+        assert!(
+            recheck_stack_limit(&mut interp.heap),
+            "a thread with megabytes of stack left was told it had none"
+        );
+        let limit = interp.heap.jit_stack_limit;
+        assert!(
+            limit != 0 && limit < sp,
+            "the limit was not re-stamped below this frame: {limit:#x} vs sp {sp:#x}"
+        );
+    }
+
+    /// And a stack that really is inside the margin still deopts: the re-check must not turn
+    /// the guard off.
+    #[test]
+    fn a_stack_inside_the_margin_still_has_no_room() {
+        let mut interp = crate::Interp::new();
+        let left = stacker::remaining_stack().expect("this platform reports the stack");
+        // Recurse on a fresh segment small enough that the margin is all there is.
+        let room = stacker::grow(JIT_STACK_MARGIN_BYTES / 2, || {
+            recheck_stack_limit(&mut interp.heap)
+        });
+        assert!(
+            left > JIT_STACK_MARGIN_BYTES,
+            "the test thread itself is short of stack"
+        );
+        assert!(
+            !room,
+            "a frame with less than the margin left was told to go on"
+        );
+    }
 }
