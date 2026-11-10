@@ -180,7 +180,7 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("host/treesit/vet.rs", "VETTING", OneMachine),
     // Facts of the binary: the std sources baked into it, and the signatures derived from
     // them (the stdlib id is a build constant).
-    ("types/check.rs", "STD_REQUIRES", FactOfTheBinary),
+    ("types/check/imports.rs", "STD_REQUIRES", FactOfTheBinary),
     ("types/check/sigs.rs", "CACHE", FactOfTheBinary),
     ("eval/derive.rs", "SIGS", FactOfTheBinary),
     // Caches whose key determines the value.
