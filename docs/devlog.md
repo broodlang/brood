@@ -1388,3 +1388,14 @@ type, Developer Mode named in the failure; `chmod` sets or clears the read-only 
 owner-write bit. All three report under the responsive flag (ADR-517). Guards: `file_test`'s new
 block (sabotaged red: replace as plain create, chmod as a no-op), `platform_test`'s portable cases
 for CI's Windows job, `filesystem.rs` unit tests.
+
+2026-11-10. **ASan's suite-exit leak was the grammar marks a re-load orphaned.** With the JIT
+bails gone, the weekly ASan job's last red was `brood_suite_passes` exiting non-zero on
+LeakSanitizer (~1.1 KB in 11 allocations, the same in the run before it, hidden behind those 16
+failures). Symbolized locally: every allocation was a grammar's `ForeignCode` mark from
+`vet::build_mark`. A mark is leaked on purpose (a parse on another thread may still hold it), but
+one a re-load replaced in `GRAMMAR_MARKS`, or one built for a load that then failed, had nothing
+pointing at it, and LeakSanitizer reports exactly that. `GRAMMAR_MARKS` now also keeps every mark
+built, so each stays reachable for the process's life, as the libraries do. Reproduced in seconds
+on the ASan `brood`: `tests/tree_sitter_test.blsp` passed 8/8 and exited 1 with 1137 bytes
+leaked; with the fix it exits 0 with no report.

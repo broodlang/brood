@@ -477,8 +477,19 @@ pub(super) fn forget_verdict_in(dirs: &VerdictDirs, hash: &str) -> bool {
 
 /// The mark of each runtime-loaded grammar, by language: the library, its hash and the file a
 /// crash in it writes. Built when the library is loaded and leaked, as the library is.
-static GRAMMAR_MARKS: LazyLock<Mutex<HashMap<String, &'static crate::cli_support::ForeignCode>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static GRAMMAR_MARKS: LazyLock<Mutex<Marks>> = LazyLock::new(|| Mutex::new(Marks::default()));
+
+#[derive(Default)]
+struct Marks {
+    /// The mark of each language's grammar as loaded now.
+    current: HashMap<String, &'static crate::cli_support::ForeignCode>,
+    /// Every mark ever built, current or not. A mark is leaked because a parse on another
+    /// thread may still hold it, but one a re-load replaced, or one built for a load that
+    /// then failed, would have nothing pointing at it, and LeakSanitizer reports a box
+    /// nothing points at as leaked: it failed the ASan suite run at exit. Kept here, every
+    /// mark stays reachable for the process's life, as the libraries themselves do.
+    built: Vec<&'static crate::cli_support::ForeignCode>,
+}
 
 /// The mark for `lang`'s library at `path` with `hash`: its crash-record fragment, and its
 /// quarantine as the crash file. Leaked: the signal handler may read it at any time after.
@@ -501,17 +512,24 @@ pub(super) fn build_mark(
             "}\n".to_string(),
         );
     }
-    Box::leak(Box::new(mark))
+    let mark: &'static _ = Box::leak(Box::new(mark));
+    crate::core::sync::lock(&GRAMMAR_MARKS).built.push(mark);
+    mark
 }
 
 /// The mark of `lang`'s grammar as loaded now, if it was loaded from a library.
 pub(super) fn mark_of(lang: &str) -> Option<&'static crate::cli_support::ForeignCode> {
-    crate::core::sync::lock(&GRAMMAR_MARKS).get(lang).copied()
+    crate::core::sync::lock(&GRAMMAR_MARKS)
+        .current
+        .get(lang)
+        .copied()
 }
 
 /// `lang`'s grammar is now the one `mark` names.
 pub(super) fn set_mark(lang: &str, mark: &'static crate::cli_support::ForeignCode) {
-    crate::core::sync::lock(&GRAMMAR_MARKS).insert(lang.to_string(), mark);
+    crate::core::sync::lock(&GRAMMAR_MARKS)
+        .current
+        .insert(lang.to_string(), mark);
 }
 
 /// Mark this thread as running `lang`'s grammar code until the guard drops — around every parse
@@ -1578,7 +1596,9 @@ mod tests {
             assert!(crate::cli_support::current_foreign_code().is_some());
         }
         assert!(crate::cli_support::current_foreign_code().is_none());
-        crate::core::sync::lock(&GRAMMAR_MARKS).remove("vetmarktest");
+        crate::core::sync::lock(&GRAMMAR_MARKS)
+            .current
+            .remove("vetmarktest");
     }
 
     #[test]
