@@ -176,18 +176,21 @@ unsafe fn open_library(
             dir
         }
     });
-    // SAFETY: the caller's, for each attempt.
+    // The caller's safety contract covers each attempt.
     if let Some(dir) = beside
+        // SAFETY: the caller's: it accepts running this library's initialisers.
         && let Some(library) = unsafe { open_copy_at(&dir.join(&name), bytes) }
     {
         return (Ok(library), LoadedVia::Beside);
     }
     if let Some(dir) = grammar_cache_dir()
+        // SAFETY: the caller's, as above.
         && let Some(library) = unsafe { open_copy_at(&dir.join(&name), bytes) }
     {
         return (Ok(library), LoadedVia::Cache);
     }
     (
+        // SAFETY: the caller's, as above; this opens the original path in place.
         unsafe { libloading::Library::new(path) },
         LoadedVia::InPlace,
     )
@@ -244,6 +247,9 @@ fn load_admitted(
     // seen, so a grammar rebuilt in place and loaded again from the same path would go on
     // parsing with the old one (ADR-583). See `open_library`.
     let (opened, via) = unsafe { open_library(path, bytes, hash) };
+    // SAFETY: as above. Sound only if the library really is a tree-sitter grammar: the
+    // exported symbol's signature is taken on trust (nothing can check it), and the library
+    // is leaked so the tables `Language` points into stay mapped for the process's life.
     let language = unsafe {
         let lib = opened.map_err(|e| LispError::runtime(format!("{who}:{path}: {e}")))?;
         let entry: libloading::Symbol<unsafe extern "C" fn() -> *const ()> = lib

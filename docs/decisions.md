@@ -42,6 +42,9 @@ focused on current design — their full text (with retrospectives) lives in
 *(superseded by the tracing/copying GC)*, ADR-035 *(superseded/disabled)*,
 ADR-039 *(reverted → ADR-044)*, ADR-057 *(rejected as scoped)*. They're still
 listed (italicised) in the index below so the numbering stays complete.
+An ADR replaced by a later one, in whole or in part, but left in place says so in a
+`> **Superseded** …` or `> **Partly superseded** …` line directly under its heading, so a search hit
+on it shows that line first.
 ADR-071 *(WASM extensions)* is accepted and partly built (ADR-145). ADR-119
 *(incremental `nest check` cache)* has since shipped in full (Phase 1 + Phase
 2) — stale entry, corrected here rather than left to relitigate. ADR-123

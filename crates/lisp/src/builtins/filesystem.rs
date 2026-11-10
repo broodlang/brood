@@ -486,11 +486,15 @@ fn has_extended_attributes(path: &std::path::Path) -> bool {
     let Ok(name) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
         return true;
     };
+    // SAFETY: `name` is NUL-terminated and live; a null buffer of size 0 only asks for the
+    // size the list needs.
     let size = unsafe { libc::listxattr(name.as_ptr(), std::ptr::null_mut(), 0) };
     if size <= 0 {
         return false;
     }
     let mut names = vec![0_u8; size as usize];
+    // SAFETY: `name` is NUL-terminated; `names` is a live, writable buffer of exactly
+    // `names.len()` bytes (a list grown since the first call fails with ERANGE, not overflows).
     let read = unsafe { libc::listxattr(name.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
     if read <= 0 {
         return true;
@@ -726,7 +730,9 @@ fn replace_link_count(file: &std::fs::File) -> u32 {
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
+    // SAFETY: BY_HANDLE_FILE_INFORMATION is plain data, so all-zero is a valid value.
     let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle is `file`'s, open for the call; `information` is live and writable.
     let answered = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
     if answered == 0 {
         1
@@ -760,6 +766,7 @@ fn replace_by_move(temp: &std::path::Path, target: &std::path::Path) -> std::io:
     };
     let from = wide_path(temp);
     let to = wide_path(target);
+    // SAFETY: both paths are NUL-terminated wide strings (`wide_path`), live for the call.
     let moved = unsafe {
         MoveFileExW(
             from.as_ptr(),
@@ -784,6 +791,8 @@ fn replace_by_replace_file(
     use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW};
     let replaced = wide_path(target);
     let replacement = wide_path(temp);
+    // SAFETY: both paths are NUL-terminated wide strings (`wide_path`), live for the call;
+    // the backup name and the two reserved pointers are null, as allowed.
     let done = unsafe {
         ReplaceFileW(
             replaced.as_ptr(),
@@ -1709,14 +1718,17 @@ mod windows_replace_tests {
     }
 
     fn attributes(path: &std::path::Path) -> u32 {
+        // SAFETY: a NUL-terminated wide path; the temporary lives to the end of the statement.
         unsafe { GetFileAttributesW(super::wide_path(path).as_ptr()) }
     }
 
     /// The file's index on its volume: what a write in place keeps and a replace changes.
     fn file_index(path: &std::path::Path) -> u64 {
         let file = std::fs::File::open(path).unwrap();
+        // SAFETY: BY_HANDLE_FILE_INFORMATION is plain data, so all-zero is a valid value.
         let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         assert_ne!(
+            // SAFETY: the handle is `file`'s, open for the call; `information` is writable.
             unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) },
             0
         );
@@ -1739,6 +1751,7 @@ mod windows_replace_tests {
         std::fs::write(&path, "old").unwrap();
         let wide = super::wide_path(&path);
         assert_ne!(
+            // SAFETY: `wide` is a NUL-terminated wide path, live for the call.
             unsafe { SetFileAttributesW(wide.as_ptr(), attributes(&path) | FILE_ATTRIBUTE_HIDDEN) },
             0
         );

@@ -298,8 +298,14 @@ fn report_hard_limit(size: usize) {
     }
 }
 
+// SAFETY: every method forwards to `BACKEND` with the caller's layout and pointer unchanged,
+// so `BACKEND` upholds the `GlobalAlloc` contract. The bookkeeping around it never allocates
+// (atomics, and a stderr write from a stack buffer), and a refusal returns null, which the
+// contract allows.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: forwards the caller's `GlobalAlloc::alloc` contract (non-zero-size
+        // `layout`) unchanged to `BACKEND`; the bookkeeping around it does not allocate.
         unsafe {
             if would_exceed_hard(layout.size()) {
                 // Null tells Rust the allocation failed; the default handler then
@@ -319,6 +325,8 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: the caller guarantees `ptr` came from this allocator with `layout`, and
+        // every block this allocator hands out came from `BACKEND`, so it is `BACKEND`'s.
         unsafe {
             BACKEND.dealloc(ptr, layout);
             record_dealloc(layout.size());
@@ -326,6 +334,9 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: the caller's `GlobalAlloc::realloc` contract (`ptr` from this allocator
+        // with `layout`, valid non-zero `new_size`) is forwarded unchanged to `BACKEND`,
+        // which allocated `ptr`; refusing a growth returns null and leaves `ptr` intact.
         unsafe {
             // Only a *growth* can cross the limit; a shrink is always allowed.
             if new_size > layout.size() && would_exceed_hard(new_size - layout.size()) {

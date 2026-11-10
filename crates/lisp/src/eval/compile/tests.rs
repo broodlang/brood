@@ -517,6 +517,8 @@ fn jit_lowers_and_runs_a_straight_line_int_arm() {
 
     let mut jit = crate::jit::CraneliftBackend::new();
     let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("straight-line int arm should JIT");
+    // SAFETY: `jit_lower_arm` returns the entry of code emitted with the `JitArmFn`
+    // signature, and `jit`, whose module owns that code, outlives every call through `f`.
     let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(ptr) };
 
     // Frame: x = 41 at roots[base].
@@ -571,6 +573,8 @@ fn jit_lowers_and_runs_an_if_with_comparison() {
 
     let mut jit = crate::jit::CraneliftBackend::new();
     let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("if/cmp arm should JIT");
+    // SAFETY: `jit_lower_arm` returns the entry of code emitted with the `JitArmFn`
+    // signature, and `jit`, whose module owns that code, outlives every call through `f`.
     let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(ptr) };
 
     for (x, want) in [(-5i64, 5i64), (3, 3), (0, 0)] {
@@ -632,6 +636,8 @@ fn jit_lowers_and_runs_a_self_recursive_int_loop() {
 
     let mut jit = crate::jit::CraneliftBackend::new();
     let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("self-recursive int loop should JIT");
+    // SAFETY: `jit_lower_arm` returns the entry of code emitted with the `JitArmFn`
+    // signature, and `jit`, whose module owns that code, outlives every call through `f`.
     let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(ptr) };
 
     // Prime the reduction budget so these short loops run to completion (the
@@ -923,6 +929,8 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         2,
         2,
     );
+    // SAFETY: `jit_lower_arm` returns the entry of code emitted with the `JitArmFn`
+    // signature, and `jit`, whose module owns that code, outlives every call through `f`.
     let f: crate::jit::JitArmFn = unsafe {
         std::mem::transmute(jit_lower_arm(&mut jit, &sumto, &[]).expect("fused sumto JITs"))
     };
@@ -956,6 +964,7 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         1,
         1,
     );
+    // SAFETY: as for `f` — `JitArmFn`-signature code owned by `jit`, which outlives `g`.
     let g: crate::jit::JitArmFn =
         unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &gt, &[]).expect("(> x 5) JITs")) };
     for (x, want) in [(10i64, 100i64), (3, 200)] {
@@ -982,6 +991,7 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         1,
         1,
     );
+    // SAFETY: as for `f` — `JitArmFn`-signature code owned by `jit`, which outlives `s`.
     let s: crate::jit::JitArmFn =
         unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &sq, &[]).expect("(* x x) JITs")) };
     let mut heap = Heap::new();

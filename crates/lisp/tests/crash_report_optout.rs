@@ -19,6 +19,8 @@ const REPORTER_ONLY_NAME: &str = "crash-report/render";
 fn the_opt_out_arms_nothing_and_still_loads_nothing() {
     // `BROOD_NO_CRASH_REPORT` is read with `%getenv`, not `os/env`, precisely so that
     // deciding NOT to arm cannot load `os` + `string` + `reflect` + `math`.
+    // SAFETY: this binary holds this one test (see the module doc), and no interpreter
+    // exists yet, so no other thread reads the environment concurrently.
     unsafe { std::env::set_var("BROOD_NO_CRASH_REPORT", "1") };
     let mut interp = Interp::new();
     let armed = interp
@@ -33,5 +35,7 @@ fn the_opt_out_arms_nothing_and_still_loads_nothing() {
         !bound(&mut interp, "os/env"),
         "the opt-out path loaded `os` — read the env var with %getenv, not os/env"
     );
+    // SAFETY: the one test in this binary; but `interp` is still alive here, so this relies
+    // on none of its threads reading the environment through libc at this moment (unchecked).
     unsafe { std::env::remove_var("BROOD_NO_CRASH_REPORT") };
 }

@@ -1,3 +1,5 @@
+//! The sequence kernel: pairs, vectors, ranges and sequence views, sorting, `compare` and
+//! hashing — the primitives the prelude's collection functions are written over.
 use super::args::{
     arg, expect_fields, expect_int, expect_rope_ref, expect_set, expect_symbol, rewrap, two,
 };

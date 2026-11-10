@@ -1,3 +1,5 @@
+//! The checker's and the macro expander's primitives: `%check*`, the file and source
+//! signature readers, `reflect/macroexpand-1` and the form metadata table.
 use super::args::{arg, expect_string};
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};

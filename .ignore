@@ -1,0 +1,7 @@
+# Read by ripgrep, fd and the editor/agent search tools built on them (git ignores this file's
+# rules). These are history, not current design: a default search should land on the docs
+# that describe the tree as it is. Search them on purpose with `rg --no-ignore-dot` or by
+# naming the path (`rg PATTERN docs/devlog`).
+docs/archive/
+docs/devlog/
+docs/devlog.md

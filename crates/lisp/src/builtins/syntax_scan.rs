@@ -1,3 +1,5 @@
+//! Lexical scanning over strings and ropes for editors: token runs, highlight spans and
+//! form-boundary search, resumable from a safepoint.
 use super::args::{arg, expect_int, expect_string, expect_string_ref};
 use super::string::scan_bar;
 use crate::core::heap::Heap;

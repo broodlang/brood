@@ -1,3 +1,5 @@
+//! Numeric primitives: the binary arithmetic and comparison kernels behind `+ - * / <`,
+//! ratios, `math/floor`, `bit/*` and decimals.
 use super::args::{arg, expect_bigint, expect_int, expect_number, expect_string, two};
 use super::realize_seqview;
 use crate::core::heap::Heap;

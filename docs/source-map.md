@@ -1,0 +1,311 @@
+# Source map
+
+Every Rust module two levels deep under `crates/lisp/src`, and every std module, with the
+first sentence of its own documentation. **Generated** by `crates/lisp/tests/source_map.rs`
+from each file's `//!` paragraph or `defmodule` docstring, so do not edit it by hand:
+change the module's documentation and run `BLESS=1 cargo test -p brood --test source_map`.
+The test fails when a module is added, moved or re-documented without regenerating.
+
+A parent module is `foo.rs` beside its `foo/` directory (never `foo/mod.rs`). On disk std
+groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`gen/spawn-server`,
+`http/get`, `test/run`); `editor/*` is the one prefix that is part of the name.
+
+## Rust kernel — `crates/lisp/src`
+
+- `boot.rs` — **Boot**: how a runtime comes to hold the prelude — the shared code region every process reads and the global bindings that seed each one.
+  - `boot/image.rs` — The **startup image** mechanism (ADR-218): write a set of global bindings to a binary artifact, and restore them without re-reading or re-evaluating source.
+- `builtins.rs` — Primitive builtins: the irreducible kernel implemented in Rust.
+  - `builtins/args.rs` — Reading a primitive's arguments: the positional accessors and the `expect_*` family, each a self-identifying type error naming `who` (the primitive that needed the value) when the argument has the wrong shape.
+  - `builtins/build_info.rs` — What this binary **is**: its version, build id, stdlib id and build time, and the cargo features it was compiled with — the `(system/…)` identity surface.
+  - `builtins/bytes.rs` — The raw-bytes surface (`Value::Bytes`).
+  - `builtins/clipboard.rs` — The OS clipboard primitives: text (the editor's kill/yank ride on it) and images (ADR-392, a pasted screenshot).
+  - `builtins/compress.rs` — Compression primitives — the single place the kernel reaches for the `flate2` crate.
+  - `builtins/contracts.rs` — Runtime contracts — the binding-time mechanism (ADR-381).
+  - `builtins/crypto.rs` — Cryptographic primitives: digests, HMAC, authenticated encryption, key derivation, and a CSPRNG.
+  - `builtins/diagnostics.rs` — The observability primitives: the sampling profiler, line/branch coverage (ADR-148), and the debugger's per-process trace context.
+  - `builtins/display.rs` — What the terminal and the window read alike from the display protocol (ADR-046): a frame's ops, a face map, a colour, a coordinate, a key.
+  - `builtins/dynamic.rs` — Dynamic variables — the kernel for `defdyn`/`binding`; the surface macros are in the prelude.
+  - `builtins/editor_native.rs` — Natives added for the editor toolkit (`std/editor/*`), registered LAST: registration order feeds the intern table, and a primitive inserted mid-list reshuffles small-map key order image-wide (see `syntax_scan::register`).
+  - `builtins/errors.rs` — Raising and catching: `throw`, `%raise`, `%try`, failure values, and `%make-macro`.
+  - `builtins/evaluation.rs` — Evaluating and loading code at runtime: `eval`, `load`, the `%load-string` / `%eval-string` family the REPL and `nest` ride on, `%reload-defs` (hot reload), `%isolate` (the per-file globals scope `nest test` runs each file in), and the debugger's eval-in-paused-context primitives.
+  - `builtins/filesystem.rs` — The filesystem primitives: paths, directories, whole-file reads and writes (text and bytes), metadata, and the atomic `%file-swap`.
+  - `builtins/fuzzy.rs` — `%fuzzy-top` — the ranking pass under `std/fuzzy`'s `top` / `filter`, native.
+  - `builtins/gui.rs` — The windowed frontend's primitives (ADR-046): `%gui-*`, the same seam as `term-*`, painting the render-op protocol to a native window (`std/gui.blsp` is the policy).
+  - `builtins/gui_fonts.rs` — The GUI font natives added by ADR-442, registered last for the intern-order reason `editor_native` gives: `%gui-font-info` (where a family's faces came from — the file an installed name resolved to, or that it was not found — and the fallback fonts loaded so far) and `%gui-ligatures!` (shape punctuation runs together, so a programming font's ligatures form).
+  - `builtins/image.rs` — The image primitives: bytes nobody vouches for decoded into a bounded RGBA buffer, and such a buffer written back as a PNG.
+  - `builtins/io.rs` — Console I/O: print/render/write to stdout and stderr, TTY probes, the stdout capture `nest test` and the MCP server use, and the non-blocking stdin reader behind `read-line`.
+  - `builtins/json.rs` — `%json-encode-plain`: `json/encode` natively, for the values its built-in rules cover.
+  - `builtins/line_diff.rs` — `%diff-line-hunks` — the line diff under `std/diff`'s `line-hunks` / `line-status`, native (ADR-468).
+  - `builtins/modules.rs` — The module system's kernel: the catalogue of **baked-in** std modules ([`CORE_MODULES`] always, [`TOOLCHAIN_MODULES`] under `toolchain`, [`DEV_MODULES`] under `dev-tools`), the namespace and compile-context primitives (`%in-ns`, `%refer`, `%alias`, `%mark-private`, `%register-sig`), and the bundle manifest a released binary answers from.
+  - `builtins/nodes.rs` — Distributed nodes (ADR-033/034): listen, connect, name the local node, monitor and disconnect peers.
+  - `builtins/numeric.rs` — Numeric primitives: the binary arithmetic and comparison kernels behind `+ - * / <`, ratios, `math/floor`, `bit/*` and decimals.
+  - `builtins/offload.rs` — The dirty-native offload pool (ADR-144): run a blocking native call on a helper OS thread and deliver its result back as a message, so a slow `os/run-process` or a blocking read never stalls a scheduler worker.
+  - `builtins/os.rs` — OS, environment and subprocess primitives: environment variables, argv, the clock, signal and interrupt traps, running a process and halting.
+  - `builtins/pkg.rs` — Package-manager delivery *mechanism* (ADR-037): the `git` and `tar` shells the fetcher drives, plus the `_deps/`-bounded cache eviction.
+  - `builtins/processes.rs` — The process primitives: spawn/link/monitor/send, the named-process registry, process flags and introspection (`%processes`, scheduler statistics), and the system monitor.
+  - `builtins/pubkey.rs` — Public-key cryptography beyond ed25519 (ADR-448): ECDSA over P-256 / P-384 and RSA (PKCS#1 v1.5 and PSS) signing and verification, X25519 key agreement, and Argon2id password hashing.
+  - `builtins/records.rs` — The record value kind's primitives (ADR-542): build one, test for one, read its id and fields.
+  - `builtins/regex_native.rs` — Native regular-expression matching: the MECHANISM under `std/regex` (ADR-389).
+  - `builtins/rope.rs` — The rope primitives (ADR-045): the `ropey`-backed editor buffer text — O(log n) insert/delete/slice with line and char indexing.
+  - `builtins/rope_regex.rs` — Regular expressions over a ROPE, in place: the primitives under `regex/rope-find`, `regex/rope-find-backward`, `regex/rope-count` and `regex/rope-spans` (ADR-540).
+  - `builtins/selfhost_macros.rs` — The checker's and the macro expander's primitives: `%check*`, the file and source signature readers, `reflect/macroexpand-1` and the form metadata table.
+  - `builtins/sequences.rs` — The sequence kernel: pairs, vectors, ranges and sequence views, sorting, `compare` and hashing — the primitives the prelude's collection functions are written over.
+  - `builtins/signature_types.rs` — The lattice shorthands every domain's `register` spells its signatures in — see `types::Ty` for the algebra.
+  - `builtins/sockets.rs` — The TCP/TLS socket primitives (ADR-062): connect, listen, send, close, and the iolist flattener a send accepts.
+  - `builtins/source.rs` — Brood source as **data**: the reader primitives (`read-string`, `%read-all`), the positioned CST readers the LSP and formatter consume, and the definition scanner (`%scan-source-extract`) that lists what a file defines without evaluating it.
+  - `builtins/string.rs` — The string primitives: the pieces of the string library that genuinely need Rust — Unicode case folding, normalization, grapheme and codepoint access, UTF-8 encoding, substring/index scans at native speed, and `str`/`pr-str`.
+  - `builtins/subprocesses.rs` — Persistent child OS processes (ADR-104): spawn (plain or on a pty), write to stdin, resize, close.
+  - `builtins/syntax_scan.rs` — Lexical scanning over strings and ropes for editors: token runs, highlight spans and form-boundary search, resumable from a safepoint.
+  - `builtins/tab.rs` — The browser-tab display primitives: `%tab-post` queues a display event for the page a program runs in, `%tab-subscribe` makes the calling process the one its input goes to.
+  - `builtins/table.rs` — The shared mutable table (ADR-107), the ONE identity-mutable structure the language has.
+  - `builtins/terminal.rs` — The terminal primitives: raw-mode entry/exit, size, polling and drawing (`std/term.blsp` is the policy).
+  - `builtins/text_search.rs` — Case folding and searching, over ropes and strings, without materialising anything.
+  - `builtins/tooling.rs` — Introspection for tooling: source positions, docs and arglists, declared signatures and type aliases, `bound?`, `reflect/gensym` and the rename ledger.
+  - `builtins/treesit.rs` — The tree-sitter primitives: parse foreign-language text with a compiled grammar and walk the resulting tree (`std/editor/treesit.blsp` is the policy).
+  - `builtins/type_scope.rs` — Where a bare type name in a `sig` or a `deftype` body is resolved.
+  - `builtins/wasm.rs` — WASM component interop (ADR-071/145, feature `wasm`): load, call, list the exports of, and close a sandboxed guest.
+- `bundle.rs` — Single-binary app bundling — the "ship a Brood app as one executable" path (ADR-038).
+- `cli_support.rs` — Tiny CLI helpers shared between the `brood` (language) and `nest` (project) binaries.
+  - `cli_support/fatal_signal.rs` — The **fatal-signal record**: what a runtime that dies on SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT (a Rust panic that aborts, a failed allocation, a stack overflow) leaves for the next start to find.
+- `core.rs` — Substrate: the value model, the per-process heap, and the byte-counting allocator.
+  - `core/alloc.rs` — A process-wide allocator that counts bytes, so Brood can report how much memory a piece of work used — and *cap* it, so a runaway (or hostile) program can't exhaust host RAM and freeze the machine.
+  - `core/blob.rs` — Shared, refcounted storage for large immutable byte blobs.
+  - `core/heap.rs` — The per-process data heap, plus the two shared regions: the immutable **prelude** and a runtime's mutable, shared **code** region.
+  - `core/keywords.rs` — The canonical spellings of Brood's special forms and core macros — one `const` per keyword, so the spelling lives in exactly one place.
+  - `core/map_champ.rs` — CHAMP — *Compressed Hash-Array Mapped Prefix-tree* — backing for `Value::Map` (ADR-040): a 16-way branching, path-copying, structurally-immutable trie.
+  - `core/registries.rs` — The names of the Brood globals the kernel reads — one `const` per name, so the spelling lives in exactly one place on the Rust side.
+  - `core/sync.rs` — Lock helpers that recover from poisoning rather than propagating the panic.
+  - `core/table.rs` — In-memory shared mutable table (ADR-107).
+  - `core/value.rs` — The core value type, [`Value`], plus the handle types that address the per-process [`Heap`](crate::core::heap::Heap).
+- `diagnostics.rs` — **Diagnostics**: the observability instruments — counters, a sampling profiler, line coverage, and the catalogue of `BROOD_*` flags that arm them.
+  - `diagnostics/coverage.rs` — Line-coverage recording — the second tier of ADR-148.
+  - `diagnostics/debug_flags.rs` — The `BROOD_*` diagnostic-flag catalogue — what `brood --debug-flags` prints.
+  - `diagnostics/perf.rs` — VM work-attribution counters — the `perf-stats` feature (see `docs/benchmarking.md`).
+  - `diagnostics/profile.rs` — Sampling CPU profiler over the VM's reified frame stacks — the "no Brood-level CPU profile" half of the observability timing tier (ROADMAP survey gap #4; .NET has dotnet-trace).
+- `dist.rs` — Distributed nodes: connect two Brood runtimes and route messages between them.
+  - `dist/guest.rs` — Guest links (ADR-415): a node link authenticated by a GRANT rather than the node's own cookie, which can reach only what it was given and cannot carry code.
+  - `dist/handshake.rs` — The v2 authenticated node handshake (ADR-034 v2).
+  - `dist/heartbeat.rs` — Liveness detection: one shared OS thread probes every link on a fixed cadence, declaring a link **down** (and tearing it down via `Shutdown::Both`) when it's been silent past [`DOWN_AFTER`].
+  - `dist/session.rs` — The encrypted steady-state session (ADR-089) — confidentiality + per-frame integrity for the node link, closing ADR-081's cleartext/injection gap.
+  - `dist/wire.rs` — Wire codec for the distributed-node protocol.
+- `error.rs` — Error type used throughout the interpreter.
+- `eval.rs` — The evaluator: a tree-walker with proper tail calls.
+  - `eval/compile.rs` — The compiling execution engine — ADR-076, [`docs/bytecode-vm.md`].
+  - `eval/derive.rs` — Inferred module loading from qualified references (ADR-227 follow-up).
+  - `eval/machine.rs` — The tree-walker's frame stack (ADR-416).
+  - `eval/macros.rs` — Macro support: quasiquote expansion and `macroexpand`.
+- `host.rs` — The **host** layer: the optional, feature-gated mechanisms that bind the runtime to the machine it runs on — a window, a sound device, a socket, a child OS process, a WASM guest, a tree-sitter parser.
+  - `host/audio.rs` — Audio output backend — the `audio-beep` builtin's engine (feature `audio`, pulled in by `gui`).
+  - `host/clipboard.rs` — OS clipboard access (the `clipboard` feature, via `arboard`).
+  - `host/dial.rs` — Dialling a TCP peer by name with every wait bounded — the one policy both the node links (`dist`) and the socket primitives (`host::net`) dial through.
+  - `host/gui.rs` — The windowed (GUI) frontend for the M3 display/input seam — ADR-046's second frontend, alongside the terminal (crossterm) one in `builtins.rs`.
+  - `host/net.rs` — TCP sockets (ADR-062) — and UDP sockets (ADR-449) — on one **reactor thread** (ADR-143), delivering to process mailboxes (ADR-059).
+  - `host/net_wasm.rs` — WASM stub for the TCP/TLS socket mechanism (`crate::host::net`).
+  - `host/owned.rs` — A handle table whose entries belong to a green process, indexed by owner.
+  - `host/owner_only.rs` — Windows's owner-only (KI-365): a protected DACL with one entry, full control for the user this process runs as.
+  - `host/subprocess.rs` — Persistent child processes (ADR-104), built on the blocking-IO → mailbox seam (ADR-059) — the same mechanism `crate::host::net` uses for sockets.
+  - `host/tab.rs` — A browser tab as a display, for a program running IN the tab (the `brood-tab` wasm build): the page's script, not a socket, is the other end.
+  - `host/text_width.rs` — Display-cell width of text — how many terminal/grid columns a string occupies.
+  - `host/treesit.rs` — Tree-sitter parsing for *foreign* languages (feature `treesit`) — ROADMAP §C.
+  - `host/wasm.rs` — WASM component interop (ADR-071/145): the embedded `wasmtime` host.
+- `introspect.rs` — Introspection queries answered by a project `Interp`.
+- `jit.rs` — JIT (ADR-101) — the tier-1 template JIT, behind `--features jit` (a default feature).
+  - `jit/backend.rs` — The backend contract — what any JIT backend must satisfy.
+  - `jit/cranelift.rs` — The Cranelift backend — today's sole implementation of [`JitBackend`].
+  - `jit/rt.rs` — The `brood_rt_*` runtime-callback table — **obligation 4** of the backend contract ([`super::backend::JitBackend`]): the *only* legal way native code touches the heap, the GC, or the scheduler.
+- `lib.rs` — Brood — a small, dynamic Lisp built to (eventually) write a modern, self-editing text editor.
+- `process.rs` — Processes: share-nothing green processes communicating by message passing (`spawn`/`send`/`receive`/`self`).
+  - `process/cputime.rs` — Per-process CPU time: how long a process actually ran, as against how long it took.
+  - `process/interrupt.rs` — Interrupting a RUNNING process (ADR-491): Emacs's quit, as a kernel capability.
+  - `process/io_source.rs` — The core **blocking-work-delivers-to-a-mailbox** mechanism (ADR-059).
+  - `process/keywords.rs` — Canonical spellings of the keyword *tags* the runtime puts into process mailbox messages and exit/monitor reasons — the wire contract between the Rust scheduler / monitor / link / dist machinery and the Brood code that `receive`s these messages (`std/prelude.blsp`, `std/proc/supervisor.blsp`, `std/tool/observer.blsp`, …).
+  - `process/links.rs` — Process **links**: symmetric, bidirectional failure coupling — the complement of monitors ([`super::monitor`]).
+  - `process/mailbox.rs` — The mailbox: where messages queue between `send` and `receive`.
+  - `process/message.rs` — The `Send`, self-contained value form a [`Value`] takes to cross a heap.
+  - `process/monitor.rs` — Process monitors: a one-shot, unidirectional `[:down …]` to a **watcher** when the **watched** pid dies (or, for a remote target, when the link to its node drops).
+  - `process/pressure.rs` — **Memory pressure: which process the soft memory limit stops** (KI-229).
+  - `process/receive_spec.rs` — `receive`'s native matcher (ADR-409): a pattern SPEC the `receive` macro emits in place of a matcher closure when every clause is a simple shape, matched here against each scanned message without calling back into Brood.
+  - `process/responsive.rs` — A RESPONSIVE process (ADR-517): one whose job is to keep answering — an editor's loop, a REPL's reader, an observer's window — marks itself `(proc/flag :responsive mode)`, and a native call that waits on the outside world (a subprocess) is then reported or refused instead of silently freezing it.
+  - `process/scheduler.rs` — Green-process scheduler: the state-capture driver, the shared run queue, the worker pool, and the public `spawn` / `self` / `pid-value` / `spawn-count` / `peak-threads` / `set-max-parallel` surface.
+  - `process/sysmon.rs` — System monitor — kernel runtime events delivered as ordinary mailbox messages to subscriber processes (the observability event stream's kernel sources: the .NET EventPipe analogue at Brood's grain).
+  - `process/timer.rs` — Receive-timeout (`(after ms expr)`) machinery: a min-heap of pending deadlines + one OS thread that wakes parked green processes at their due times.
+- `renames.rs` — The rename ledger — where a deliberately renamed public name went (ADR-304).
+- `stack.rs` — Native-stack growth for the recursive walkers — the one door to `stacker`.
+- `syntax.rs` — Surface syntax: the reader (text → `Value`) and the printer (`Value` → text).
+  - `syntax/atom.rs` — Shared lexical rules for the two parsers in this layer: the evaluation [`reader`](super::reader) (text → `Value`) and the tooling [`cst`](super::cst) (text → lossless span tree).
+  - `syntax/cst.rs` — A lossless, span-carrying concrete syntax tree (CST) for **tooling** — the language server, and later a formatter.
+  - `syntax/printer.rs` — Renders a [`Value`] to text.
+  - `syntax/reader.rs` — The reader: turns source text into [`Value`]s.
+  - `syntax/scanner.rs` — Shared low-level scanner for the two structural parsers in this layer: the evaluation [`reader`](super::reader) (text → `Value`) and the tooling [`cst`](super::cst) (text → lossless span tree).
+  - `syntax/scope.rs` — A scope resolver over the tooling [`cst`](super::cst).
+  - `syntax/typed.rs` — Typed parameters (ADR-420): how a parameter symbol carries a type, read the same way by every consumer of a parameter list — the expander that strips the types (`eval/macros/typed.rs`), the CST scope analysis, the std index's arity count, and the checker passes that read raw `defn` forms.
+- `types.rs` — The type lattice — step 1 of the set-theoretic type direction (ADR-023, semantic subtyping, set-theoretic + gradual; Castagna, Duboc, Valim).
+  - `types/check.rs` — Step 4: a small **advisory** type checker — the consumer of the `Ty` lattice, so the type system actually *does* something.
+  - `types/construct.rs` — The named points, constructors and refinement accessors of [`Ty`]: the constants (`NEVER`, `ANY`, `NUMBER`, …), the builders for arrows, sequences, maps, records, tuples, literals and intervals, the readers a checker uses to see a refinement back, and the bridges from a runtime value or a type predicate to a type.
+  - `types/display.rs` — Display rendering for [`Ty`] (extracted from mod.rs).
+  - `types/gradual.rs` — The gradual type [`GradualTy`] (ADR-024) — a static bound plus the `dynamic()` flag — with consistent subtyping derived from set inclusion, and the process-wide strict checking switch that reads it by inclusion instead of by overlap.
+  - `types/literal_set.rs` — The literal-set refinement [`LitSet`] — one tag's values stated positively (exactly these) or negatively (anything but these) — with its canonical form and the union, intersection, inclusion and disjointness of two sets over the same tag.
+  - `types/merge.rs` — The slot-merging rules behind a union or an intersection of terms: when two terms merge into one without loss, how each refinement slot (arrow, element, positional shape, literal set, interval, length) combines, the widening collapse a fixpoint uses, and the canonical forms an interval or literal slot is kept in.
+  - `types/range.rs` — The integer interval [`Range`] (ADR-350) — the refinement an `int` member and a countable member's length carry — and its interval arithmetic: hull, meet, inclusion, the four operations and the widening of an ascent.
+  - `types/recursive.rs` — Recursive types (ADR-349): the μ binder and its self-reference, unrolling and substitution, folding a fixpoint's ascent into a recursive type, and the coinductive assumptions and budgets that make every relation and meet over one terminate.
+  - `types/sig.rs` — Function type signatures — [`Sig`] (extracted from mod.rs).
+  - `types/term_ops.rs` — The set operations on ONE term of a [`Ty`] — union, intersection and complement of a single term, slot by slot — and the size bound and depth widening that keep every type finite.
+  - `types/term_relations.rs` — The free helpers the term relations of [`Ty`] are built from: record-shape subtyping, disjointness and intersection, positional-shape intersection, the covering rules that decide whether one term sits inside a union of others (products, records, intersections of arrows), and the canonical form of an arrow intersection.
+  - `types/union_of_terms.rs` — The public set operations and relations of [`Ty`] over a union of terms (ADR-262): building a type from its terms, `union`, `intersect`, `negate`, `difference`, `is_subtype`, `is_consistent_subtype` and `is_disjoint`, with the per-term subtyping and disjointness they quantify over.
+
+## Standard library — `std/`
+
+- `ansi.blsp` (`ansi`) — ANSI / VT escape sequences in program output.
+- `audio.blsp` (`audio`) — Sound output.
+- `bit.blsp` (`bit`) — Bitwise operations on integers, plus the IEEE-754 float/bit reinterpretations.
+- `bytes.blsp` (`bytes`) — Immutable byte strings: construct, index, slice, concatenate, and read fixed-width big- or little-endian integers out of a buffer.
+- `combinator.blsp` (`combinator`) — Adapters that build a function from functions or values.
+- `contract.blsp` (`contract`) — Runtime contract machinery — the shims themselves (ADR-385)
+- `crypto.blsp` (`crypto`) — Authenticated encryption (ChaCha20-Poly1305), PBKDF2 key derivation, cryptographically secure random bytes, signatures (ed25519, ECDSA P-256/P-384, RSA PKCS#1 v1.5 and PSS), X25519 key agreement and Argon2id password hashing.
+- `csv.blsp` (`csv`) — CSV decoding and encoding, written entirely in Brood (pure; opt-in).
+- `datetime.blsp` (`datetime`) — Date and time utilities.
+- `decimal.blsp` (`decimal`) — Exact arbitrary-precision base-10 decimals — for money and anything else a float cannot hold exactly (`0.1 + 0.2` is `0.30000000000000004` in binary floating point).
+- `diff.blsp` (`diff`) — LCS-based diff: compute the shortest edit script between two sequences.
+- `editor/ansi.blsp` (`editor/ansi`) — ANSI escape *strings* for simple terminal output — the lightweight path for a script that just `print`s control codes each frame (animations, cellular automata, roguelikes, progress lines).
+- `editor/attach.blsp` (`editor/attach`) — A thin client for an app served by `editor/serve`: `attach` paints to the terminal, `attach-display` to any `ui-run` display map, and `attach-display-local` to a session in this same runtime.
+- `editor/buffer.blsp` (`editor/buffer`) — An immutable text buffer for building editors, written in Brood over the rope primitives (ADR-045).
+- `editor/buffer-client.blsp` (`editor/buffer-client`) — Track a buffer PROCESS (`editor/buffer` `spawn-buffer`) from the subscribing side: a *link* — `{:proc <pid> :me <own-id> :version <int> :pending (<[lo hi replen]>…)}` — plus the two operations the protocol needs.
+- `editor/buffer-file.blsp` (`editor/buffer-file`) — Files for `editor/buffer`: `buffer-from-file` / `find-file-buffer` read one, `save-buffer` writes it back the way it came (its line ending and byte-order mark), `revert-buffer` reads it again as one undoable edit, and `buffer-file-changed?` asks whether someone else wrote it.
+- `editor/buffer-registry.blsp` (`editor/buffer-registry`) — A directory of buffer processes keyed by document identity (`registry-key`: the file, else the name): `registry-share` answers the ONE process for a document (spawning it from text + meta on the first ask), `registry-entries` lists them, `registry-rekey` follows a buffer to a new file or name, `registry-remove` kills one everywhere, and a `registry-watch`er is told of every buffer created, renamed, killed or died.
+- `editor/buffer-server.blsp` (`editor/buffer-server`) — A process that owns an `editor/buffer`: `spawn-buffer` starts one, `buffer-edit` and `buffer-query` send it closures (a buffer never leaves it, only views do), `buffer-splice` sends a positional edit, `subscribe-buffer` asks for a push of every change, and `stop-buffer` ends it.
+- `editor/display.blsp` (`editor/display`) — The render-op protocol for the display seam (M3, ADR-046): pure constructors that build a **frame** — a vector of render ops — as plain data.
+- `editor/evalsession.blsp` (`editor/evalsession`) — A **supervised evaluation session in a child process** — the thing between `reflect/eval-string` (fast, but a stray definition rewrites the live image) and spawn-a-process-per-run (safe, but a whole runtime start per evaluation).
+- `editor/face.blsp` (`editor/face`) — Named text faces + a theme registry for UI apps on the display seam (the counterpart to `keymap`/`display`): style is named once and referenced everywhere, so restyling a section is a one-line redefinition rather than an edit at every call site.
+- `editor/frontend.blsp` (`editor/frontend`) — Display frontends for the render-op protocol (ADR-046): `*term-display*` (the terminal), `(gui-display)` (a native window) and `display-broadcast` (several at once), each a map of fns, with `display-poll-input` / `display-poll-tagged` asking one for input (ADR-490), `with-events` wrapping one so background events reach its poll, and the predicates that name a frontend's control inputs (`quit-request?`, `hangup-request?`, `focus-request?`).
+- `editor/grammar-install.blsp` (`editor/grammar-install`) — Getting a tree-sitter grammar: `grammar-fetch` a repository at a revision, `grammar-build` its parser into `grammar-library-name`, and `grammar-install` both, with a manifest beside the library saying what it was built from (`grammar-manifest`, ADR-583).
+- `editor/highlight.blsp` (`editor/highlight`) — Lexical syntax highlighting and bracket / call-site analysis for Brood source, as pure functions over a source string (ADR-052): - `(highlight-spans src)` — `[start end face]` colour spans for the tokens.
+- `editor/keymap.blsp` (`editor/keymap`) — A rebindable key→command dispatcher for interactive UIs.
+- `editor/layers.blsp` (`editor/layers`) — Composable, runtime-reconfigurable behaviour layers for interactive UIs.
+- `editor/lexer.blsp` (`editor/lexer`) — A line-oriented lexer from a table of rules: `lexer-grammar` compiles a map of `:structured` `[pattern role]` rules and an optional `:words` pattern with `:classes` (word → role) into one `regex/tokens` scan (earliest position, first rule, the word rule last), plus optional `:line` rules anchored at the line's start (`[prefix paint suffix role]` on `regex/paint`, or `[pattern role]` painting a capture group); `(lexer-spans grammar src)` returns `[start end face]` spans in the `highlight-spans` shape — what an editor's `:fontify` service is.
+- `editor/line-cache.blsp` (`editor/line-cache`) — A line-state cache for incremental highlighting (ADR-471, ADR-483): `line-lexer` or `stateless-lexer` wraps a function that colours one line, `line-cache-update` colours a window through a cache the caller keeps and threads back in, and `line-cache-state` answers what state a line starts in (Emacs's syntax-ppss question).
+- `editor/lineedit.blsp` (`editor/lineedit`) — A raw-mode, emacs/readline-style line editor for the REPL, written in Brood (ADR-052).
+- `editor/list-motion.blsp` (`editor/list-motion`) — Moving a selection through a list: `motion-of` names the motion an editor key means (`:next` `:previous` `:first` `:last`, from `motion-keys`), `motion-index` applies one to a row index — next and previous wrap, first and last are the ends.
+- `editor/pane.blsp` (`editor/pane`) — An immutable binary-tree pane layout (Emacs-style tiled splits) over the M3 display seam.
+- `editor/serve.blsp` (`editor/serve`) — Serve a `ui-run` app to remote frontends — the Emacs `--daemon`/`emacsclient` model (ADR-090).
+- `editor/serve-protocol.blsp` (`editor/serve-protocol`) — What `editor/serve` (the daemon) and `editor/attach` (the thin client) share: the registered name a session manager listens under, and the `:can` list in a client's attach identity (ADR-562).
+- `editor/span-properties.blsp` (`editor/span-properties`) — Text-property spans as pure data: a property map is `{key [[start end value] …]}`, per key ascending, non-overlapping half-open spans.
+- `editor/treesit.blsp` (`editor/treesit`) — Generic tree-sitter language services over `tree-sitter-parse`'s positioned CST (`{:kind :start :end :named :kids/:text}`): `(fontify text lang face-of)` → `[start end face]` spans, and pure structural motions `(text lang point) -> point` — `point-forward` / `point-backward` (every named node), `point-list-forward` / `point-list-backward` (containers only), `point-up` / `point-up-forward` / `point-down`, and `point-defun-start` / `point-defun-end` — which find what each language declared a definition to be with `register-definitions`.
+- `editor/ui.blsp` (`editor/ui`) — A small terminal/GUI app framework over the M3 display/input seam (ADR-046): a `display` frontend (`editor/frontend`) plus a TEA-style `(ui-run model view update display)` loop.
+- `editor/web.blsp` (`editor/web`) — A browser tab as a frontend.
+- `encoding.blsp` (`encoding`) — Hex and Base64 encoding/decoding.
+- `file.blsp` (`file`) — The file & filesystem library: whole-file and line read/write (`file/slurp`/`file/spit`/`read-lines`/`write-lines`/`spit-atomic`/`file/spit-append`), predicates (`regular?`/`file/dir?`/`file/exists?`), and directory listing (`list-files`/`list-dirs`/ `walk-files`), whole trees copied and moved (`copy-tree`, `move` across filesystems too) and the desktop trash (`trash`: freedesktop.org, macOS, the Windows recycle bin).
+- `format.blsp` (`format`) — The in-Brood code formatter behind `nest format` (ADR-020/028 extension).
+- `fuzzy.blsp` (`fuzzy`) — Fuzzy (subsequence) matching + ranking.
+- `gui.blsp` (`gui`) — Native windows: open a window, draw into it, and read input events.
+- `hash.blsp` (`hash`) — Hashing utilities: MD5, SHA-1, SHA-256, SHA-384, SHA-512, BLAKE3, and HMAC variants.
+- `humanize.blsp` (`humanize`) — Quantities the way a person reads them: a byte count at human scale, in full (`4.2 MB`) or in the terse `ls -h` spelling (`4.2m`).
+- `io.blsp` (`io`) — Output ports — the redirectable sink the prelude's `io/write`/`io/puts` write to.
+- `json.blsp` (`json`) — JSON ↔ Brood data, written entirely in Brood (pure; opt-in).
+- `jsonrpc.blsp` (`jsonrpc`) — JSON-RPC 2.0 messages over a `Content-Length`-framed stream — the wire of LSP, DAP and a stdio MCP server.
+- `list.blsp` (`list`) — The pair accessors `list/caar` … `list/cdddr`: each `a` takes a `first`, each `d` a `rest`, read right to left.
+- `log.blsp` (`log`) — An async, safe logger.
+- `map.blsp` (`map`) — Map transformations — the derived helpers over the bare map protocol.
+- `markdown.blsp` (`markdown`) — Markdown to HTML: `->html` renders a small subset (ATX headings, fenced code, `- ` and `1.
+- `math.blsp` (`math`) — The math library — roots, powers, rounding, aggregation, and constants.
+- `memo.blsp` (`memo`) — Bounded memoisation for hot paths: `defmemo` defines a function that remembers its last few calls, compared by `=` — for arguments like a buffer's rope, where hashing would read the whole text on every call.
+- `multimap.blsp` (`multimap`) — Multi-valued map: one key may have multiple associated values.
+- `net/dns.blsp` (`dns`) — Resolve a hostname to its A/AAAA records, over TCP.
+- `net/http.blsp` (`http`) — A minimal HTTP/1.0 server over the TCP + file libraries (ADR-062).
+- `net/reconnect.blsp` (`reconnect`) — Supervised node auto-reconnect (dist self-healing): `watch` keeps the link to a peer node alive with exponential-backoff `(node/connect …)` retries; `subscribe` delivers `[:nodeup name]` / `[:nodedown name]` to your mailbox; `unwatch` stops.
+- `net/sse.blsp` (`sse`) — Server-Sent Events (`text/event-stream`) in Brood: a client, and server-side framing for pushing events over `http`'s streaming seam.
+- `net/tcp.blsp` (`tcp`) — TCP sockets over the kernel's non-blocking primitives (ADR-059/060).
+- `net/tls.blsp` (`tls`) — TLS sockets over the kernel's `%tls-*` primitives.
+- `net/udp.blsp` (`udp`) — UDP sockets (ADR-449): `open` binds one, `send` sends a datagram, `recv` waits for the next, `close` closes it.
+- `node.blsp` (`node`) — Distributed nodes: start a node, connect to a peer, spawn a process on one, and monitor for `[:nodedown …]`.
+- `num.blsp` (`num`) — Arithmetic for record types — the `+`/`-`/`*`/`/` extension point (ADR-179).
+- `os.blsp` (`os`) — The OPERATING SYSTEM: environment, external commands, child processes, machine and terminal facts.
+- `path.blsp` (`path`) — Path string manipulation: join, split, basename, dirname, extension, stem, normalize.
+- `pq.blsp` (`pq`) — Purely functional min-priority queue (min priority pops first).
+- `prelude/abilities.blsp` — record identity and library-value predicates
+- `prelude/contracts.blsp` — Brood prelude / runtime contracts — the POLICY HOOK
+- `prelude/control.blsp` — I/O — Output is redirectable.
+- `prelude/core.blsp` — Brood prelude / core library
+- `prelude/image-install.blsp` — boot-time stdlib image install (opt-in)
+- `prelude/map.blsp` — map operations — Maps are immutable: `assoc`/`dissoc` return a fresh map, never mutate.
+- `prelude/match.blsp` — pattern matching — The matcher is written in Brood, not Rust: a pattern->code compiler (a macro plus expand-time helper `defn`s, exactly like the threading macros compute at expansion time) that emits nested `if`/`let` over existing primitives — `pair?`, `first`, `rest`, `nil?`, `vector?`, `vector-ref`, `vector-length`, and `%eq` (the kernel equality op, used by convention over `=` so a local binding named `=` can't hijack a generated match).
+- `prelude/modules.blsp` — modules: Emacs-flat provide / require (ADR-019) — A flat module system over the one shared global table: `provide` records a loaded feature, `require` loads one once.
+- `prelude/predicates.blsp` — type predicates — Each is a thin wrapper over `type-of`, the one reflective primitive (it returns the runtime tag as a keyword).
+- `prelude/process.blsp` — spawn: run an expression as a new green process — (spawn expr) runs `expr` in a fresh process and returns its pid.
+- `prelude/seq.blsp` — sequence library — All in Brood over the list primitives (`first`/`rest`/`cons`/`empty?`) and `take`/`drop`.
+- `prelude/string.blsp` — symbol / keyword conversions — `symbol` and `keyword` (Rust) are lenient — they take string/symbol/keyword.
+- `prelude/tools.blsp` — discovery / introspection — "What's in this image, and where?" — name- and doc-based search over the flat global table, on top of the `reflect/global-names`/`doc` primitives.
+- `proc.blsp` (`proc`) — The non-mainstream process surface: green-process introspection and control, plus OS subprocesses.
+- `proc/agent.blsp` (`agent`) — A process-backed state cell: read or transform a value via message-passing.
+- `proc/application.blsp` (`application`) — An application: a process tree with dependencies, started in order and stopped in reverse (ADR-436).
+- `proc/crash-report.blsp` (`crash-report`) — Crash reports for green processes nobody is watching (ADR-305).
+- `proc/gen.blsp` (`gen`) — The server framework: a server carries one immutable state value through a tail-recursive `receive` loop, and `defserver` declares how it handles each kind of message — CAST (async), CALL (sync), QUERY (sync, read-only), INFO (anything else), plus the `init` / `terminate` / `code-change` lifecycle clauses.
+- `proc/groups.blsp` (`groups`) — Process groups across a cluster: `join` a process to a named group, and `members` lists the group's processes on every connected node.
+- `proc/names.blsp` (`names`) — A process registry: a key that is any value, held by one process (`:unique`, the default) or by many (`:duplicate`), with a value stored beside each holder.
+- `proc/supervisor.blsp` (`supervisor`) — Process supervision written in Brood over the kernel's spawn / link / trap-exit / receive / exit (ADR-006, ADR-067).
+- `protocol.blsp` — Behaviour contracts — the module-satisfies-a-contract seam.
+- `queue.blsp` (`queue`) — Purely functional FIFO queue.
+- `rand.blsp` (`rand`) — A seeded PRNG (xorshift32).
+- `reflect.blsp` (`reflect`) — Reading Brood source as DATA: the advisory checker, the reader's lossless CST, the string- and comment-aware scanners, and where a definition lives.
+- `regex.blsp` (`regex`) — Regular expressions: Brood's pattern language, matched by a native engine.
+- `registry.blsp` (`registry`) — Named registries a program fills as its modules load — `put!` a row under a registry id and a key, read them back with `entries` / `lookup` / `ranked`.
+- `resolver.blsp` (`resolver`) — The dependency version resolver (ADR-209), a PubGrub solver.
+- `seq.blsp` (`seq`) — Sequence helpers — the derived enumeration API over the bare collection protocol.
+- `set.blsp` (`set`) — Sets — unordered collections of **unique** values with fast membership.
+- `settings.blsp` (`settings`) — Declared settings read from a data config file — `define` a setting once (default, type, doc) under a registry id, then `read-form` the user's `(config …)` form, `value-of` a setting with its fallback, `read-warnings` for a file that did not read as written, `warnings` for every typo, and `default-source` for the documented file to write the first time.
+- `sorted.blsp` (`sorted`) — Persistent sorted map and sorted set, ordered by `compare`.
+- `stats.blsp` (`stats`) — Descriptive statistics over numeric sequences.
+- `stream.blsp` (`stream`) — Process-based pull streams.
+- `string.blsp` (`string`) — The string-manipulation library — every operation whose subject is a string: trimming, padding, case folding, search, split/join, and char-content conversions.
+- `sudo.blsp` (`sudo`) — Reading and writing a file as another user — root by default — through `sudo`: what an editor needs to edit `/etc/hosts` (Emacs's TRAMP `/sudo::` method), and what an installer or a script fixing a system file needs too.
+- `system.blsp` (`system`) — The Brood RUNTIME itself: this process's arguments, how it exits, and which build it is.
+- `table.blsp` (`table`) — The shared, identity-mutable key-value store — Brood's one mutable value (ADR-107).
+- `task.blsp` (`task`) — Run a thunk off the current process, with an optional timeout and cancellation.
+- `telemetry.blsp` (`telemetry`) — An instrumentation seam, written in Brood.
+- `template.blsp` (`template`) — Simple `{{var}}` string templating.
+- `tempo.blsp` (`tempo`) — Time as an interval, not an instant.
+- `term.blsp` (`term`) — The terminal seam: raw mode, the alternate screen, cursor control and key decoding, over the `%term-*` primitives.
+- `text.blsp` (`text`) — The rope text engine: O(log n) insert, delete and slice with cheap line access, for editing large text.
+- `timer.blsp` (`timer`) — Scheduled sends: `send-after` fires once, `send-interval` repeats, `cancel` stops either.
+- `tool/audit.blsp` (`audit`) — Audit the public surface: docstrings, examples, and data-first argument order.
+- `tool/codemod.blsp` (`codemod`) — Identifier-aware whole-token rewrites over a project's Brood sources — what `nest rename` drives.
+- `tool/complete.blsp` (`complete`) — Project-aware candidate lists for `nest` shell completion — tags, dependency names, module names, test files.
+- `tool/coverage.blsp` (`coverage`) — Function-level test coverage for a Brood project.
+- `tool/dap.blsp` (`dap`) — A Debug Adapter Protocol server over Brood's process-native debugger (`debug`), so any editor that speaks DAP — VS Code, Emacs (`dape`, `dap-mode`), Neovim (`nvim-dap`), Zed — can debug a Brood program: function and line breakpoints, the paused processes as threads, their locals as variables, evaluate in a paused scope, continue (ADR-452).
+- `tool/debug.blsp` (`debug`) — A process-native tracing debugger — the actor-model answer to a breakpoint.
+- `tool/dev.blsp` (`dev`) — Runtime diagnostics: memory, GC, the scheduler, the sampling profiler and the VM's work-attribution counters.
+- `tool/doc-catalog.blsp` (`doc-catalog`) — The language reference's categories (math, strings, filesystem, processes, and so on), their order and display titles, and `category-of` — the category of any name, DERIVED from where the name is defined rather than listed per name.
+- `tool/docs.blsp` (`docs`) — Generate Markdown documentation for a module by loading it and introspecting the definitions it adds to the global table.
+- `tool/docsite.blsp` (`docsite`) — Render a documentation model to a browsable HTML site — the shared renderer behind `nest docs` and hive's per-package doc builds.
+- `tool/doctest.blsp` (`doctest`) — Run the examples in docstrings and report the ones that do not hold.
+- `tool/eval-server.blsp` (`eval-server`) — A line-protocol eval server for a dedicated runtime, plus the pure codec its client shares.
+- `tool/explain.blsp` (`explain`) — Teach-the-error and intent→idiom lookup for agents and the REPL: `(error "E0030")` explains an error code (or a caught error map); `(find-pattern "loop")` returns the idiomatic Brood pattern for a task.
+- `tool/grammar.blsp` (`grammar`) — Generate editor syntax grammars from `(reflect/special-forms)` — one source of truth, no drift across editors.
+- `tool/mcp.blsp` (`mcp`) — The `nest mcp` server: the Model Context Protocol over stdio (ADR-036, docs/mcp.md) — the JSON-RPC loop, its dispatch and error mapping, and the tool catalogue it serves.
+- `tool/module-index.blsp` (`module-index`) — The project's file → modules index (ADR-380): which `(defmodule NAME …)` forms each source file declares, cached on disk at `.brood/module-index` and keyed per file by size and mtime, so a warm start reads NO source file to learn the module graph.
+- `tool/nest.blsp` (`nest`) — The `nest` command line: argv parsing and dispatch for the subcommands implemented in Brood (ADR-322).
+- `tool/observer.blsp` (`observer`) — An interactive process observer — showing this runtime's node stats and a navigable table of live processes (id, name, status, mailbox backlog, memory, monitors), built on the display seam (M3, ADR-046) over `proc/info`.
+- `tool/package.blsp` (`package`) — The package manager behind `nest fetch` and friends (ADR-037).
+- `tool/perf.blsp` (`perf`) — One-call performance triage: `(perf/report)` answers *where the time goes*.
+- `tool/proctree.blsp` (`proctree`) — Order a flat `proc/info` list as a parent→child forest.
+- `tool/project.blsp` (`project`) — The project model behind `nest` (ADR-020), written in Brood: the manifest and its dependencies, finding the root, discovering sources and tests, `setup`, and the user-config loader.
+- `tool/project-check.blsp` (`project-check`) — The `nest check` driver: which files to check, the per-file result cache (ADR-129), the parallel fold over file chunks, the whole-project lints (duplicate globals, unused module-private defns) and the two migration aids, `--fix-renames` (ADR-304) and `--suggest-sigs`.
+- `tool/project-image.blsp` (`project-image`) — The project startup image (ADR-218 for a project): fingerprint the project's sources, write every module's bindings to one sectioned image, and materialise them on the next run instead of re-evaluating source.
+- `tool/project-release.blsp` (`project-release`) — Single-binary release (ADR-038): collect what a bundle ships, name the artifacts (`release-plan`), report what was written (`release-report`), and answer `--brood-build-info` from inside one.
+- `tool/project-run.blsp` (`project-run`) — Running a project: `run-tests` (with the `--failed` set, `--stale` skipping and the coverage wiring behind `nest test`), `run` (`nest run`, with the entry-point resolution and its advice) and `check-boot` (load everything, resolve `:main`, run nothing — KI-66).
+- `tool/reload.blsp` (`reload`) — Hot-reload helpers.
+- `tool/renames.blsp` (`renames`) — The rename ledger: where a deliberately renamed public name went (ADR-304).
+- `tool/repl.blsp` (`repl`) — The Brood read-eval-print loop.
+- `tool/scaffold.blsp` (`scaffold`) — `nest new` project scaffolding — templates and new-project creation, split out of the `project` module (which keeps project analysis: manifest parsing, test discovery, lints, release, config).
+- `tool/sexp.blsp` (`sexp`) — Structural s-expression navigation over Brood's CST (`parse-source`).
+- `tool/stdimage.blsp` (`stdimage`) — A startup image for the standard library: std modules are pre-evaluated and promoted once at build time rather than re-read and re-evaluated on every run.
+- `tool/test.blsp` (`test`) — A tiny ExUnit-style test framework, written in Brood.
+- `tool/update-brood.blsp` (`update-brood`) — `nest update-brood` — update the installed `brood`, `nest` and `brood-lsp` to the latest GitHub release (or a named one), verified against the release's SHA-256, into the directory the running `nest` lives in.
+- `tool/workspace.blsp` (`workspace`) — Drive every Brood repo in the workspace with one command — what `nest ws` runs.
+- `tz.blsp` (`tz`) — Named time zones: the civil time in a place, and the instant a civil time there denotes.
+- `url.blsp` (`url`) — URL encoding/decoding and parsing, written entirely in Brood (pure; opt-in).
+- `uuid.blsp` (`uuid`) — UUID generation: v3 (MD5), v4 (random), v5 (SHA-1), v7 (time-ordered).
+- `vcs.blsp` (`vcs`) — The version control a directory lives in — git, or another a package registers — and the questions every tool asks of it: where the checkout's top is ([[locate]]), which files are the project's ([[files]]), which this work changed ([[changed]]), what a file said before it was edited ([[base-text]]), and what the tree is at ([[id]]).
+- `version.blsp` (`version`) — Semantic-version helpers: `core` (→ `[major minor patch]`), `valid?`, `compare`, `newer?`, and `satisfies?` (a version against a `">= 1.2"`-, `"^1.2"`-, `"~> 1.3"`-, or `">= 1.2, < 2.0"`-style constraint).
+- `vt.blsp` (`vt`) — A virtual terminal as pure data: `(vt/feed vt chunk)` folds a program's output — cursor motion, erases, scroll regions, the alternate screen, SGR colour, the modes and queries an interactive program relies on — into a screen of cells, and `(vt/screen vt palette)` reads it back as `{:text :spans :cursor …}` for a buffer to show.
+- `wasm.blsp` (`wasm`) — WASM component interop (ADR-071/145/453): load sandboxed native components and call their exports as ordinary functions.
+- `zlib.blsp` (`zlib`) — gzip / zlib / raw-deflate compression.

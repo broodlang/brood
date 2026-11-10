@@ -1525,6 +1525,8 @@ mod pty {
         if dup < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        // SAFETY: `dup` is a fresh, open descriptor (checked above) that nothing else owns,
+        // so the `File` becomes its sole owner.
         Ok(std::process::Stdio::from(unsafe {
             std::fs::File::from_raw_fd(dup)
         }))

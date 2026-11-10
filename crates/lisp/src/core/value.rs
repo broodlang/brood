@@ -1661,6 +1661,9 @@ impl Value {
     /// for diagnostics (the debug dumps print these words). Never branch on the padding.
     #[cfg(feature = "jit")]
     pub(crate) unsafe fn raw_words(self) -> [i64; 3] {
+        // SAFETY: `Value` is 24 bytes (`repr(C, u8)`, pinned by the layout test), so the
+        // sizes match. The padding bytes may be uninitialised; the caller accepts that per
+        // this function's `# Safety` contract and never branches on them.
         unsafe { std::mem::transmute::<Value, [i64; 3]>(self) }
     }
 
@@ -1671,6 +1674,9 @@ impl Value {
     /// [`raw_words`](Self::raw_words)) — any other bit pattern is an invalid enum.
     #[cfg(feature = "jit")]
     pub(crate) unsafe fn from_raw_words(words: [i64; 3]) -> Value {
+        // SAFETY: the sizes match (24 bytes, pinned by the layout test), and the caller
+        // guarantees `words` are the bytes of a real `Value`, so the discriminant and payload
+        // form a valid variant.
         unsafe { std::mem::transmute::<[i64; 3], Value>(words) }
     }
 }
@@ -1734,6 +1740,8 @@ pub(crate) mod jit_layout {
         static T: LazyLock<[u32; 256]> = LazyLock::new(|| {
             let mut out = [0u32; 256];
             for v in exemplars() {
+                // SAFETY: `Value` is `repr(C, u8)`, so its first byte is the initialised
+                // discriminant; `v` is a live local and only that one byte is read.
                 let d = unsafe { *(&v as *const Value as *const u8) };
                 out[d as usize] = tag(v).keyword();
             }
@@ -1963,6 +1971,9 @@ mod jit_layout_tests {
         // `Value::Pair`'s discriminant byte must match `TAG_PAIR` (the JIT's car/cdr
         // tag-check); a variant reorder breaks it.
         let p = Value::Pair(PairId::local_gen(0, 0));
+        // SAFETY: `p` is a live local of exactly `size_of::<Value>()` bytes, borrowed shared
+        // for the slice's lifetime. The padding bytes in the view are not guaranteed
+        // initialised; soundness relies on reading only the discriminant `[0]`.
         let pbytes = unsafe {
             std::slice::from_raw_parts(
                 &p as *const Value as *const u8,
@@ -1977,6 +1988,8 @@ mod jit_layout_tests {
         // `Value::Vector`'s discriminant must match `TAG_VECTOR` (the JIT's inline
         // small-vector element read tag-check); a variant reorder breaks it.
         let vv = Value::Vector(VecId::local_gen(0, 0));
+        // SAFETY: as for `pbytes` — a live local of `size_of::<Value>()` bytes; only the
+        // discriminant `[0]` is read, never the possibly uninitialised padding.
         let vbytes = unsafe {
             std::slice::from_raw_parts(
                 &vv as *const Value as *const u8,
@@ -2002,6 +2015,8 @@ mod jit_layout_tests {
                 "Value::SeqView",
             ),
         ] {
+            // SAFETY: as for `pbytes` — `v` is a live local of `size_of::<Value>()` bytes;
+            // only the discriminant `[0]` is read, never the possibly uninitialised padding.
             let bytes = unsafe {
                 std::slice::from_raw_parts(
                     &v as *const Value as *const u8,
@@ -2013,6 +2028,8 @@ mod jit_layout_tests {
         // `Value::Sym` / `Value::Keyword` discriminants must match `TAG_SYM` /
         // `TAG_KEYWORD` (the JIT's inline interned-immediate `=`); a reorder breaks them.
         let sy = Value::Sym(0);
+        // SAFETY: as for `pbytes` — a live local of `size_of::<Value>()` bytes; only the
+        // discriminant `[0]` is read, never the possibly uninitialised padding.
         let sybytes = unsafe {
             std::slice::from_raw_parts(
                 &sy as *const Value as *const u8,
@@ -2025,6 +2042,8 @@ mod jit_layout_tests {
             "Value::Sym discriminant drifted"
         );
         let kw = Value::Keyword(0);
+        // SAFETY: as for `pbytes` — a live local of `size_of::<Value>()` bytes; only the
+        // discriminant `[0]` is read, never the possibly uninitialised padding.
         let kwbytes = unsafe {
             std::slice::from_raw_parts(
                 &kw as *const Value as *const u8,
@@ -2039,6 +2058,8 @@ mod jit_layout_tests {
         // `Value::Bool`'s discriminant must match `TAG_BOOL` (the JIT boxes a comparison
         // result as a Bool, not an Int); a variant reorder breaks it.
         let bt = Value::Bool(true);
+        // SAFETY: as for `pbytes` — a live local of `size_of::<Value>()` bytes; only the
+        // discriminant `[0]` is read, never the possibly uninitialised padding.
         let btbytes = unsafe {
             std::slice::from_raw_parts(
                 &bt as *const Value as *const u8,
@@ -2053,6 +2074,8 @@ mod jit_layout_tests {
         // `Value::Float`'s discriminant must match `TAG_FLOAT` (the float JIT's slot
         // tag-check); a variant reorder breaks it.
         let f = Value::Float(1.5);
+        // SAFETY: as for `pbytes` — a live local of `size_of::<Value>()` bytes; only the
+        // discriminant `[0]` is read, never the possibly uninitialised padding.
         let fbytes = unsafe {
             std::slice::from_raw_parts(
                 &f as *const Value as *const u8,
@@ -2066,6 +2089,9 @@ mod jit_layout_tests {
         );
         let v = Value::Int(0x0123_4567_89ab_cdef_u64 as i64);
         // Read the raw bytes (no transmute size constraint).
+        // SAFETY: as for `pbytes` — a live local of `size_of::<Value>()` bytes; only the
+        // discriminant `[0]` and the `i64` payload at `PAYLOAD_OFFSET` are read, both
+        // initialised, never the padding between them.
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 &v as *const Value as *const u8,

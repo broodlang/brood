@@ -111,8 +111,9 @@ SYMBOLS_DIR := target/$(TARGET_SUBDIR)release-symbols
 # Every target is phony — none names a file it builds. A target missing here silently does
 # nothing once a file or directory of its name appears (`stress/`, `fuzz/`…); `tool_pins.rs`
 # fails on one.
-.PHONY: ab ab-clean ab-pin ab-vm asan benchmark breakagetests build check check-corpora \
-	check-cost check-examples check-imaged check-stress clean clippy configure doctor \
+.PHONY: ab ab-clean ab-pin ab-vm affected-tests asan benchmark breakagetests build check \
+	check-corpora check-cost check-desktop check-examples check-imaged check-stress clean clippy \
+	configure doctor \
 	ci-wait enable-perf-check ensure-nextest fmt fuzz gcstress gcstress-all green green-all help hooks install \
 	install-features \
 	latency-gate loom perf-brood perf-symbols prepush quickbench release release-brood repl \
@@ -541,6 +542,19 @@ fmt: ## Format all Rust code
 
 prepush: ## Run the pre-push hook's gates by hand (rustfmt, the BROOD_* flag catalogue; with a .blsp involved: nest format --check + the tests naming what changed, the surface audit and the doc examples)
 	@sh scripts/git-hooks/pre-push && echo "prepush: clean"
+
+affected-tests: ## Print (don't run) the tests that name what this change touches: .blsp files for `nest test`, `cargo:` lines for nextest
+	@sh scripts/affected-tests.sh
+
+check-desktop: ## The static gates CI runs, safe on a workstation (fmt, nest format, nest check + --strict, clippy), plus TEST=tests/x_test.blsp if given; push after it with --no-verify
+	cargo fmt --all --check
+	cargo build -p nest
+	$(RUN_CAP) target/debug/nest format --check
+	$(RUN_CAP) target/debug/nest check $$(find std tests examples -name '*.blsp' | sort)
+	$(RUN_CAP) target/debug/nest check --strict $$(find std tests -name '*.blsp' | sort)
+	cargo clippy --all-targets --all-features -- -D warnings
+	$(if $(TEST),$(RUN_CAP) target/debug/nest test $(TEST))
+	@echo "check-desktop: clean"
 
 hooks: ## Install the local git pre-push hook (`make prepush` on every push, before CI sees it)
 	# Opt-in and local: the hook lives in scripts/git-hooks/ so it is version-controlled
