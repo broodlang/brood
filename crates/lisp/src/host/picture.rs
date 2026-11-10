@@ -38,7 +38,7 @@ pub fn decode_untrusted_image(bytes: &[u8]) -> Option<image::DynamicImage> {
 /// A decoded picture: straight-alpha RGBA8 rows, and the content key it was decoded under.
 pub struct Picture {
     pub key: [u8; 16],
-    pub pixels: image::RgbaImage,
+    pub pixels: Arc<image::RgbaImage>,
 }
 
 impl Picture {
@@ -226,7 +226,10 @@ fn decoded_by_digest(bytes: &[u8], digest: [u8; 32]) -> Option<Arc<Picture>> {
         return Some(picture);
     }
     let pixels = decode_untrusted_image(bytes)?.to_rgba8();
-    let picture = Arc::new(Picture { key, pixels });
+    let picture = Arc::new(Picture {
+        key,
+        pixels: Arc::new(pixels),
+    });
     with_decoded(|cache| cache.insert(picture.clone()));
     Some(picture)
 }
@@ -271,7 +274,10 @@ fn from_rgba_by_digest(
         return Some(picture);
     }
     let pixels = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
-    let picture = Arc::new(Picture { key, pixels });
+    let picture = Arc::new(Picture {
+        key,
+        pixels: Arc::new(pixels),
+    });
     with_decoded(|cache| cache.insert(picture.clone()));
     Some(picture)
 }
@@ -284,25 +290,72 @@ pub const MAX_DRAWN_PIXELS: u64 = 8192 * 8192;
 /// text distinct when a page is shrunk to a pane — or the picture itself at its own size.
 pub fn resampled(picture: &Picture, width: u32, height: u32) -> image::RgbaImage {
     if picture.width() == width && picture.height() == height {
-        return picture.pixels.clone();
+        return (*picture.pixels).clone();
     }
     image::imageops::resize(
-        &picture.pixels,
+        &*picture.pixels,
         width,
         height,
         image::imageops::FilterType::CatmullRom,
     )
 }
 
+/// A picture at the size a painter asked for, or — while that size is still being resampled
+/// off the painting thread — another size of it to stretch in the meantime.
+pub enum Scaled {
+    /// Exactly the asked size: drawn pixel for pixel.
+    Exact(Arc<image::RgbaImage>),
+    /// Another size of the same picture (the nearest one resampled before, else the decoded
+    /// picture itself): the painter stretches it to the asked size, nearest neighbour, until
+    /// the exact one lands and the window repaints.
+    StandIn(Arc<image::RgbaImage>),
+}
+
+impl Scaled {
+    pub fn image(&self) -> &Arc<image::RgbaImage> {
+        match self {
+            Scaled::Exact(image) | Scaled::StandIn(image) => image,
+        }
+    }
+}
+
 /// The resampled pictures one window paints with, by `(content key, width, height)`: a
 /// window repainting a picture at the size it painted it last resamples nothing. Least
 /// recently used dropped past a byte budget. Per window (the `Renderer` holds one), since
 /// the sizes are that window's.
+///
+/// A live window resamples OFF its painting thread ([`resample_in_background`]): a size not
+/// yet resampled is handed to a worker and painted from a stand-in until it lands (ADR-695),
+/// so the first paint at a new size — every step of a window resize — costs no resample on
+/// the GUI thread. The offscreen painter resamples in place, so what it paints is
+/// deterministic.
+///
+/// [`resample_in_background`]: ScaledPictures::resample_in_background
 pub struct ScaledPictures {
     entries: HashMap<([u8; 16], u32, u32), (Arc<image::RgbaImage>, u64)>,
     bytes: usize,
     clock: u64,
+    background: Option<Background>,
 }
+
+/// The worker a window's resamples run on, and what it has been asked for.
+struct Background {
+    jobs: std::sync::mpsc::Sender<Resample>,
+    landed: std::sync::mpsc::Receiver<Landed>,
+    /// The size each picture was last asked for: one outstanding resample a picture, so a
+    /// size asked for again while it is under way is not queued twice.
+    pending: HashMap<[u8; 16], (u32, u32)>,
+}
+
+/// A picture to resample to `width`×`height`.
+struct Resample {
+    picture: Arc<Picture>,
+    width: u32,
+    height: u32,
+}
+
+/// A resample done: the picture's key, the size, the pixels.
+type Landed = ([u8; 16], u32, u32, Arc<image::RgbaImage>);
 
 /// What one window keeps resampled, in bytes.
 const SCALED_BUDGET: usize = 128 * 1024 * 1024;
@@ -314,25 +367,120 @@ impl Default for ScaledPictures {
 }
 
 impl ScaledPictures {
+    /// Resampling in place, on the caller's thread: the offscreen painter's and every test's.
     pub fn new() -> Self {
         ScaledPictures {
             entries: HashMap::new(),
             bytes: 0,
             clock: 0,
+            background: None,
         }
     }
 
-    /// `picture` at `width`×`height`, resampled the first time it is asked for.
-    pub fn get(&mut self, picture: &Picture, width: u32, height: u32) -> Arc<image::RgbaImage> {
+    /// From now on resample on a worker thread of this window's, calling `wake` each time a
+    /// resample lands — the window then takes it ([`take_landed`](Self::take_landed)) and
+    /// repaints. Requests that pile up behind a slow resample are coalesced: only the newest
+    /// size of each picture is resampled (a resize drag asks for many). The worker ends
+    /// when the window's `ScaledPictures` is dropped.
+    pub fn resample_in_background(&mut self, wake: impl Fn() + Send + 'static) {
+        let (jobs, inbox) = std::sync::mpsc::channel::<Resample>();
+        let (done, landed) = std::sync::mpsc::channel::<Landed>();
+        let spawned = std::thread::Builder::new()
+            .name("picture-resample".into())
+            .spawn(move || {
+                while let Ok(first) = inbox.recv() {
+                    let mut newest = vec![first];
+                    while let Ok(next) = inbox.try_recv() {
+                        newest.retain(|job| job.picture.key != next.picture.key);
+                        newest.push(next);
+                    }
+                    for job in newest {
+                        let scaled = Arc::new(resampled(&job.picture, job.width, job.height));
+                        if done
+                            .send((job.picture.key, job.width, job.height, scaled))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        wake();
+                    }
+                }
+            });
+        // no thread to be had: resample in place, as before
+        if spawned.is_ok() {
+            self.background = Some(Background {
+                jobs,
+                landed,
+                pending: HashMap::new(),
+            });
+        }
+    }
+
+    /// `picture` at `width`×`height`: the one resampled before, the picture itself at its own
+    /// size, or a resample: done now in place, or handed to the worker with a
+    /// [`Scaled::StandIn`] to paint meanwhile.
+    pub fn get(&mut self, picture: &Arc<Picture>, width: u32, height: u32) -> Scaled {
         self.clock += 1;
         let key = (picture.key, width, height);
         if let Some((scaled, used)) = self.entries.get_mut(&key) {
             *used = self.clock;
-            return scaled.clone();
+            return Scaled::Exact(scaled.clone());
         }
-        let scaled = Arc::new(resampled(picture, width, height));
+        if picture.width() == width && picture.height() == height {
+            return Scaled::Exact(picture.pixels.clone());
+        }
+        let Some(background) = &mut self.background else {
+            let scaled = Arc::new(resampled(picture, width, height));
+            self.insert(key, scaled.clone());
+            return Scaled::Exact(scaled);
+        };
+        if background.pending.get(&picture.key) != Some(&(width, height)) {
+            background.pending.insert(picture.key, (width, height));
+            let _ = background.jobs.send(Resample {
+                picture: picture.clone(),
+                width,
+                height,
+            });
+        }
+        Scaled::StandIn(self.stand_in(picture, width))
+    }
+
+    /// What to paint `picture` from until its resample at `width` lands: the size of it
+    /// resampled before whose width is nearest, else the decoded picture.
+    fn stand_in(&self, picture: &Picture, width: u32) -> Arc<image::RgbaImage> {
+        self.entries
+            .iter()
+            .filter(|((key, _, _), _)| *key == picture.key)
+            .min_by_key(|((_, other, _), _)| other.abs_diff(width))
+            .map(|(_, (scaled, _))| scaled.clone())
+            .unwrap_or_else(|| picture.pixels.clone())
+    }
+
+    /// Keep the resamples the worker finished: true when one did, and the window should
+    /// repaint (a frame that drew a stand-in now has the exact size waiting).
+    pub fn take_landed(&mut self) -> bool {
+        let Some(background) = &mut self.background else {
+            return false;
+        };
+        let landed: Vec<Landed> = background.landed.try_iter().collect();
+        for (picture, width, height, _) in &landed {
+            if background.pending.get(picture) == Some(&(*width, *height)) {
+                background.pending.remove(picture);
+            }
+        }
+        let any = !landed.is_empty();
+        for (picture, width, height, scaled) in landed {
+            self.clock += 1;
+            self.insert((picture, width, height), scaled);
+        }
+        any
+    }
+
+    fn insert(&mut self, key: ([u8; 16], u32, u32), scaled: Arc<image::RgbaImage>) {
         self.bytes += scaled.as_raw().len();
-        self.entries.insert(key, (scaled.clone(), self.clock));
+        if let Some((replaced, _)) = self.entries.insert(key, (scaled, self.clock)) {
+            self.bytes -= replaced.as_raw().len();
+        }
         while self.bytes > SCALED_BUDGET && self.entries.len() > 1 {
             let Some(oldest) = self
                 .entries
@@ -347,7 +495,6 @@ impl ScaledPictures {
                 self.bytes -= gone.as_raw().len();
             }
         }
-        scaled
     }
 }
 
@@ -420,7 +567,11 @@ mod tests {
     fn solid(width: u32, height: u32, rgba: [u8; 4]) -> Picture {
         Picture {
             key: [0; 16],
-            pixels: image::RgbaImage::from_pixel(width, height, image::Rgba(rgba)),
+            pixels: Arc::new(image::RgbaImage::from_pixel(
+                width,
+                height,
+                image::Rgba(rgba),
+            )),
         }
     }
 
@@ -478,6 +629,45 @@ mod tests {
             "one key for bytes and blob"
         );
         assert_eq!(blob.digest(), *blake3::hash(&png).as_bytes());
+    }
+
+    // A live window's resample runs off its painting thread (ADR-695): the first ask for a
+    // size paints a stand-in, the worker's result lands with a wake, and the next ask is
+    // exact. The offscreen painter's (no worker) is exact at once.
+    #[test]
+    fn a_new_size_is_resampled_off_the_thread_and_a_stand_in_painted_meanwhile() {
+        let picture = Arc::new(solid(40, 20, [9, 8, 7, 255]));
+        let mut in_place = ScaledPictures::new();
+        assert!(
+            matches!(in_place.get(&picture, 20, 10), Scaled::Exact(image) if image.width() == 20)
+        );
+
+        let mut window = ScaledPictures::new();
+        let (woke, wakes) = std::sync::mpsc::channel();
+        window.resample_in_background(move || {
+            let _ = woke.send(());
+        });
+        // at its own size: the picture itself, nothing to resample
+        assert!(
+            matches!(window.get(&picture, 40, 20), Scaled::Exact(image) if Arc::ptr_eq(&image, &picture.pixels))
+        );
+        // a new size: the decoded picture stands in
+        match window.get(&picture, 20, 10) {
+            Scaled::StandIn(image) => assert_eq!(image.width(), 40),
+            Scaled::Exact(_) => panic!("resampled on the painting thread"),
+        }
+        wakes
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the worker woke the window");
+        assert!(window.take_landed(), "what landed is kept");
+        assert!(
+            matches!(window.get(&picture, 20, 10), Scaled::Exact(image) if image.width() == 20)
+        );
+        // another new size: the nearest size resampled before stands in
+        match window.get(&picture, 22, 11) {
+            Scaled::StandIn(image) => assert_eq!(image.width(), 20),
+            Scaled::Exact(_) => panic!("resampled on the painting thread"),
+        }
     }
 
     #[test]

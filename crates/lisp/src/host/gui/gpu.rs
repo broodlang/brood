@@ -411,7 +411,7 @@ impl GpuWindow {
     fn picture_texture(
         &mut self,
         renderer: &mut Renderer,
-        picture: &crate::host::picture::Picture,
+        picture: &std::sync::Arc<crate::host::picture::Picture>,
         width: u32,
         height: u32,
     ) -> Option<u32> {
@@ -421,12 +421,24 @@ impl GpuWindow {
         }
         let pictures = &mut self.pictures;
         pictures.clock += 1;
-        let key = (picture.key, width, height);
-        if let Some((id, used)) = pictures.by_size.get_mut(&key) {
+        if let Some((id, used)) = pictures.by_size.get_mut(&(picture.key, width, height)) {
             *used = pictures.clock;
             return Some(*id);
         }
+        // not resampled to this size yet (ADR-695): the stand-in's texture, at its own size —
+        // the quad is drawn at the asked size, so the sampler stretches it until the exact
+        // pixels land and `pictures_landed` makes every fragment expand again
         let scaled = renderer.pictures.get(picture, width, height);
+        let scaled = scaled.image();
+        let (width, height) = (scaled.width(), scaled.height());
+        if width > largest || height > largest {
+            return None;
+        }
+        let key = (picture.key, width, height);
+        if let Some((id, used)) = self.pictures.by_size.get_mut(&key) {
+            *used = self.pictures.clock;
+            return Some(*id);
+        }
         let (texture, bind_group) = self.create_texture(width, height);
         self.write_rgba(&texture, 0, 0, scaled.as_raw(), width, height);
         let pictures = &mut self.pictures;
@@ -456,6 +468,12 @@ impl GpuWindow {
     /// `gui-texture-free`: drop texture `tex` (a later `:sprite` naming it draws nothing).
     pub fn free_texture(&mut self, tex: u32) {
         self.textures.remove(&tex);
+        self.texture_generation += 1;
+    }
+
+    /// A picture resampled off the GUI thread landed (ADR-695): a memoised fragment that drew
+    /// its stand-in's texture expands again, and finds the exact size.
+    pub fn pictures_landed(&mut self) {
         self.texture_generation += 1;
     }
 

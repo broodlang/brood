@@ -132,6 +132,13 @@ pub(super) fn build_window(
     #[cfg(not(feature = "gui-gpu"))]
     let backend = cpu_backend(&window)?;
     let mut renderer = Renderer::new(window.scale_factor(), families, defaults.px);
+    // A real window resamples its pictures off this thread (ADR-695) and repaints when one
+    // lands; the offscreen painter's renderer keeps resampling in place, deterministically.
+    renderer.pictures.resample_in_background(|| {
+        if let Ok(gui) = gui() {
+            let _ = lock(gui).send_event(UserEvent::PicturesLanded);
+        }
+    });
     // honour the global defaults set before this window opened
     if let Some(f) = defaults.family {
         renderer.set_font(Some(f), None);
