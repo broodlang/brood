@@ -304,6 +304,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `tool/project-image.blsp` (`project-image`) — The project startup image (ADR-218 for a project): fingerprint the project's sources, write every module's bindings to one sectioned image, and materialise them on the next run instead of re-evaluating source.
 - `tool/project-release.blsp` (`project-release`) — Single-binary release (ADR-038): collect what a bundle ships, name the artifacts (`release-plan`), report what was written (`release-report`), and answer `--brood-build-info` from inside one.
 - `tool/project-run.blsp` (`project-run`) — Running a project: `run-tests` (with the `--failed` set, `--stale` skipping and the coverage wiring behind `nest test`), `run` (`nest run`, with the entry-point resolution and its advice) and `check-boot` (load everything, resolve `:main`, run nothing — KI-66).
+- `tool/property.blsp` (`property`) — Property-based testing with integrated shrinking: generators that draw from a recorded choice sequence, a runner that checks a predicate over many draws, and a shrinker that minimises a failure's choices.
 - `tool/reload.blsp` (`reload`) — Hot-reload helpers.
 - `tool/renames.blsp` (`renames`) — The rename ledger: where a deliberately renamed public name went (ADR-304).
 - `tool/repl.blsp` (`repl`) — The Brood read-eval-print loop.

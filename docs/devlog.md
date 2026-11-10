@@ -1251,3 +1251,16 @@ the first run of the migration also renamed the `match*` alias's own `defmacro` 
 in `try`. The migration now rewrites only a call. `match*` became `%match`, the engine's internal
 name; the compile pass emits `/%match`. Guard: `tests/reduce_forms_test.blsp`, whose warning test
 goes red with the new pass disabled.
+
+2026-11-10 (ADR-685). Property testing shrinks. `check-property` stopped at its first
+counterexample and printed it whole. The new DEV module `property` (`std/tool/property.blsp`)
+has generators (`int`, `bool`, `elements`, `one-of`, `frequency`, `tuple`, `vector-of`,
+`map-of`, `character`, `string`, `string-of`, `fmap`, `bind`, `such-that`, `from-rng`) that draw
+every random decision as one integer of a recorded choice sequence, and a shrinker that
+deletes, zeroes and lowers those integers and replays the generator, keeping a candidate that
+still fails and consumed a shortlex-smaller sequence (Hypothesis's design). `check-property`
+takes a generator now and fails with the shrunk value, the original draw and the failing
+trial's seed, which `{:seed S}` or `nest test --seed S` replays as trial 1; the start seed is
+`--seed`'s when given, else 1. `tests/prng_test.blsp` moved to `property/from-rng`. Guards:
+`tests/property_test.blsp`, 23 executed docstring examples. bedit's first users are its undo
+and save round-trip properties.

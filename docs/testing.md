@@ -67,7 +67,7 @@ and calls `(run-tests)` for you. The language binary `brood` only ever runs a
 | `(refute expr)` | `expr` is falsy | `<expr> is <v> — expected falsy` |
 | `(assert= actual expected)` | `(= actual expected)` | `<actual-expr> => <v>, expected <expected-v>` |
 | `(assert-error body…)` | evaluating `body` raises | `expected <body> to raise, but none did` |
-| `(check-property n gen pred)` | `pred` holds on all `n` generated values | `property failed on trial i/n` + counterexample + seed |
+| `(check-property n gen pred)` | `pred` holds on all `n` values the generator `gen` draws | `property failed on trial i/n` + the SHRUNK counterexample + the original draw + the seed that replays it |
 
 Every failure message **names the source expression that failed**, quoted at
 macro-expansion time — so a failing assertion identifies itself without your
@@ -167,20 +167,60 @@ the error it raised — a built-in error as its message string, a `(throw v)` as
 
 ### Property-based testing
 
-`(check-property n gen pred)` runs `n` trials. Each draws a value from `gen` — a
-`seed -> [value next-seed]` function over the seedable PRNG (`rand/int`,
-`rand/float`, `seq/shuffle`, `seq/sample`) — and asserts `(pred value)`. It's
-**deterministic** (a fixed start seed, threaded), so a failure reproduces; on the
-first counterexample it fails with the value, the trial number, and the seed that
-produced it. Sampling many inputs catches edge cases a single hand-written
-example misses.
+`(check-property n gen pred)` runs `n` trials. Each draws a value from the generator `gen`
+and asserts `(pred value)`; a predicate that returns false or nil, or raises (an assertion
+inside it included), fails. Generators come from `std/tool/property.blsp` (ADR-685):
+
+| generator | draws | shrinks toward |
+|---|---|---|
+| `(property/int low high)` | an integer in `[low, high]` | 0, else the end nearer 0 |
+| `(property/bool)` | `true` / `false` | `false` |
+| `(property/elements coll)` | a member of `coll` | the first |
+| `(property/one-of [g …])` | a value from one of the generators | the first |
+| `(property/frequency [[w g] …])` | from a generator chosen by weight | the first |
+| `(property/vector-of g {:min :max :average})` | a vector of `g`'s values | fewer, simpler elements |
+| `(property/map-of k v opts)` | a map | fewer pairs |
+| `(property/tuple g …)` | a vector, one value from each | each part |
+| `(property/character)` | a one-codepoint string across Unicode | `"a"` |
+| `(property/string opts)` / `(property/string-of alphabet opts)` | a Unicode string / one from an alphabet string or generator | `""` |
+| `(property/fmap g f)` · `(property/bind g f)` | `(f value)` · a draw from the generator `(f value)` returns | as `g` (and the inner one) |
+| `(property/such-that g pred)` | `g`'s values that pass `pred` | as `g` |
+| `(property/constant v)` · `(property/choice n)` | `v` · a raw choice in `[0, n]` | — · 0 |
+| `(property/from-rng f)` | `(first (f seed))` for a `seed -> [value next-seed]` function | smaller seeds only |
+
+A failure is **shrunk**: the runner reports the smallest counterexample it can find, not the
+random one the trial drew, so a property that fails for any vector holding 42 reports `[42]`.
+Every generator draws its random decisions as a recorded sequence of integers (choice 0
+being its simplest value); shrinking deletes, zeroes and lowers those integers and replays
+the generator, so `fmap`, `bind` and your own combinations shrink with no extra code.
 
 ```lisp fragment
-(test "rand/int stays in range"
-  (check-property 200 (fn (s) (rand/int s 1000)) (fn (x) (and (>= x 0) (< x 1000)))))
-(test "shuffle preserves length"
-  (check-property 50 (fn (s) (seq/shuffle s [1 2 3 4 5])) (fn (sh) (= (count sh) 5))))
+(test "reverse keeps the length"
+  (check-property 200 (property/vector-of (property/int -100 100))
+    (fn (xs) (= (count (reverse xs)) (count xs)))))
+(test "a pair of strings joins to their combined length"
+  (check-property 100 (property/tuple (property/string) (property/string-of "ab\n"))
+    (fn ([a b]) (= (string/length (str a b)) (+ (string/length a) (string/length b))))))
 ```
+
+A failing run reads:
+
+```text
+property failed on trial 37/200 (shrunk 9 times in 61 runs)
+counterexample: [42]
+original: [17 88 42 3 61]
+seed: 1786213
+replay: pass {:seed 1786213} in the property's options, or run nest test --seed 1786213
+```
+
+Runs are **deterministic**. The start seed is the options map's `:seed`, else the `--seed N`
+given to `nest test`, else 1; each trial draws from its own seed, and the reported seed is the
+failing trial's, so `{:seed S}` replays it as the first trial. An options map after `pred` also
+takes `:max-shrinks` (default 1000 predicate runs) and `:limit` (default 8192 choices per
+draw). Outside a test, `(property/check gen pred opts)` returns the result as a map
+(`:passed`, `:value`, `:original`, `:seed`, `:choices`, …), `(property/report result)` its
+lines, and `(property/replay gen choices)` / `(property/generate gen seed)` /
+`(property/sample gen n seed)` show what a generator makes.
 
 ### Testing what a window paints
 

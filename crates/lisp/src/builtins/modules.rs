@@ -831,6 +831,9 @@ const TOOLCHAIN_MODULES: &[EmbeddedModule] = &[];
 const DEV_MODULES: &[EmbeddedModule] = &[
     // The test framework — `deftest`/`describe`/`assert=`/`is`. Never shipped.
     embedded_module!("test", "std/tool/test.blsp"),
+    // Property-based testing with integrated shrinking (ADR-685): generators over a recorded
+    // choice sequence, the runner `check-property` calls, the shrinker. Never shipped.
+    embedded_module!("property", "std/tool/property.blsp"),
     // Doc generation (`nest doc`) — tooling, not runtime.
     embedded_module!("docs", "std/tool/docs.blsp"),
     // The surface audit — docstring / example / data-first argument order over every

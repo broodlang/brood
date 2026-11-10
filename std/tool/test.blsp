@@ -526,29 +526,22 @@ the test rather than hanging the run.
   "Evaluate `body` and return the error it raised — a built-in error as its `\"kind error: message\"` string, a `(throw v)` as the value `v` — or nil if `body` completes without raising."
   `(try (do ~@body nil) (catch e (error-of-render e))))
 
-;; --- property-based testing (over the seedable PRNG) -------------------------
-;; `(check-property n gen pred)` draws `n` values from `gen` (a `seed -> [value
-;; next-seed]` function, e.g. built on `rand/int`/`shuffle`/`sample`) and asserts
-;; `(pred value)` for each. Deterministic (fixed start seed) so a failure
-;; reproduces; on the first counterexample it fails the test with the value, the
-;; trial number, and the seed that produced it. A loop tested by random sampling
-;; catches edge cases a single hand-written example misses.
-(defn- check-property-loop (n gen pred loc seed i)
-  (if (>= i n)
-    ; all trials held
-    nil
-    (let ([val nxt] (gen seed))
-      (if (pred val)
-        (check-property-loop n gen pred loc nxt (inc i))
-        (test-fail loc
-          (list (str "property failed on trial " (inc i) "/" n)
-            (str "counterexample: " (pr-str val))
-            (str "reproduce with seed: " seed)))))))
+;; --- property-based testing (std/tool/property.blsp, ADR-685) -----------------
+;; `(check-property n gen pred)` checks `pred` over `n` values drawn from `gen`, a generator
+;; built with `property/…` (`property/int`, `property/vector-of`, `property/fmap`, …). On a
+;; failure it SHRINKS the counterexample to a small one and fails with it, the value the
+;; trial first drew, and the seed that replays it. The start seed is the options' `:seed`,
+;; else `nest test --seed N`, else 1 — so a run is deterministic and a seed reproduces it.
+(defn- check-property-run (n generator predicate loc options)
+  (let (seed (or (get options :seed) (test-filter-seed) 1)
+        result (property/check generator predicate (assoc options :trials n :seed seed)))
+    (when (not (get result :passed))
+      (test-fail loc (property/report result)))))
 
-(defmacro check-property (n gen pred)
-  "Property test: run `n` trials, each drawing a value with `gen` (a `seed -> [value next-seed]` function over the PRNG) and asserting `(pred value)`. Deterministic; on the first counterexample fails with the value, trial, and seed. e.g. `(check-property 100 (fn (s) (rand/int s 1000)) (fn (x) (>= x 0)))`."
+(defmacro check-property (n gen pred & options)
+  "Property test: check `(pred value)` for `n` values drawn from the generator `gen` (built with `property/…`), failing with the SHRUNK counterexample, the original draw and the seed that replays it. An optional options map takes `property/check`'s `:seed`, `:max-shrinks` and `:limit`; without `:seed` the start seed is `nest test --seed`'s, else 1. e.g. `(check-property 100 (property/vector-of (property/int 0 9)) (fn (xs) (= (count (reverse xs)) (count xs))))`."
   (let (loc (fail-loc pred))
-    `(check-property-loop ~n ~gen ~pred (quote ~loc) 1 0)))
+    `(check-property-run ~n ~gen ~pred (quote ~loc) ~(if (empty? options) {} (first options)))))
 
 ;; --- small text/list helpers for the trace and slow-test output --------------
 (defn opt? (flag opts)

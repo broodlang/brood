@@ -1,0 +1,527 @@
+;; std/tool/property.blsp — property-based testing with integrated shrinking (ADR-685).
+;;
+;; A generator does not draw from the PRNG directly. It draws from a CHOICE SEQUENCE: every
+;; random decision it makes is one non-negative integer, recorded as it is drawn. A random
+;; trial fills the sequence from a seed; a replay feeds a recorded sequence back. Shrinking
+;; works on that sequence alone — delete chunks, zero chunks, lower each choice — and replays
+;; the generator over each candidate, keeping one that still fails and is SMALLER (shorter,
+;; then lexicographically less). Because every value is rebuilt by its own generator, a
+;; shrunk value always satisfies the generator's invariants, and `fmap` / `bind` /
+;; `such-that` shrink with no per-combinator shrinking code. This is Hypothesis's design
+;; (minithesis is the small version of it); each generator is written so that choice 0 is
+;; its simplest value, which is what makes "smaller choices" mean "simpler value".
+;;
+;; A generator is a map `{:generator f :label s}`, `f` taking a SOURCE and returning
+;; `[value source]`. A source is `{:prefix choices :choices drawn :seed seed-or-nil :limit n}`:
+;; a draw past the prefix comes from the seed, or is 0 when there is no seed.
+(defmodule property
+  "Property-based testing with integrated shrinking: generators that draw from a recorded choice sequence, a runner that checks a predicate over many draws, and a shrinker that minimises a failure's choices.")
+
+(def- two-to-32 4294967296)
+
+;; The default number of choices one draw may make before it is abandoned as an overrun —
+;; what stops a recursive generator, or a replay of a corrupted sequence, from running away.
+(def- default-limit 8192)
+
+(defn- invalid (reason) (throw {:kind :property/invalid :reason reason}))
+
+(defn- invalid? (caught) (and (map? caught) (= (get caught :kind) :property/invalid)))
+
+(defn- make (label draw) {:generator draw :label label})
+
+(defn- run (generator source) ((get generator :generator) source))
+
+(defn generator? (value)
+  "Whether `value` is a generator built by this module.
+
+    (property/generator? (property/int 0 9))   ;=> true
+    (property/generator? (fn (seed) (rand/int seed 10)))   ;=> false"
+  (and (map? value) (fn? (get value :generator))))
+
+;; A uniform draw in [0, bound] from `seed`: `[k next-seed]`. A bound past 32 bits takes
+;; one draw per 32-bit limb (the modulo bias is immaterial to testing).
+(check-allow :non-tail-recursion
+  (defn- uniform (seed bound:int)
+    (let (span (+ bound 1))
+      (if (<= span two-to-32)
+        (rand/int seed span)
+        (let ([high after-high] (uniform seed (math/quot bound two-to-32))
+              [low next-seed] (rand/int after-high two-to-32))
+          [(math/mod (+ (* high two-to-32) low) span) next-seed])))))
+
+;; One choice in [0, bound]. A recorded prefix answers first (clamped to the bound, so a
+;; shrunk sequence replayed through a changed shape stays in range); past it the seed's
+;; `sampler` does, or 0 when there is no seed — the simplest choice.
+(defn- draw (source bound:int sampler)
+  (let (choices (get source :choices)
+        position (count choices)
+        prefix (get source :prefix)
+        seed (get source :seed))
+    (if (>= position (get source :limit))
+      (invalid "overrun")
+      (let ([choice next-seed] (cond
+                                 (< position (count prefix))
+                                   [(math/min (nth prefix position) bound) seed]
+                                 (nil? seed) [0 nil]
+                                 else (sampler seed bound)))
+        [choice (assoc source :choices (conj choices choice) :seed next-seed)]))))
+
+(defn- source (prefix seed limit) {:prefix prefix :choices [] :seed seed :limit limit})
+
+;; ---- primitive generators -------------------------------------------------
+
+(defn choice (bound)
+  "A generator of a raw choice: an integer in `[0, bound]`, shrinking toward 0. The primitive every other generator draws with.
+
+    (property/replay (property/choice 9) [7])   ;=> 7
+    (property/replay (property/choice 9) [12])   ;=> 9"
+  (when (not (and (int? bound) (>= bound 0)))
+    (error "property/choice: bound must be a non-negative integer: " bound))
+  (make (str "choice 0.." bound) (fn (source) (draw source bound uniform))))
+
+(defn constant (value)
+  "A generator that always produces `value` and draws nothing.
+
+    (property/replay (property/constant :x) [])   ;=> :x"
+  (make "constant" (fn (source) [value source])))
+
+(defn fmap (generator function)
+  "A generator of `(function value)` for each value `generator` draws; it shrinks as `generator` does.
+
+    (property/replay (property/fmap (property/int 0 9) (fn (n) (* n 10))) [3])   ;=> 30"
+  (make (str "fmap " (get generator :label))
+    (fn (source)
+      (let ([value after] (run generator source))
+        [(function value) after]))))
+
+(defn bind (generator function)
+  "A generator that draws a value from `generator`, then draws from the generator `(function value)` returns — a later draw that depends on an earlier one.
+
+    (property/replay (property/bind (property/int 1 3) (fn (n) (property/vector-of (property/constant n) {:min n :max n}))) [1])   ;=> [2 2]"
+  (make (str "bind " (get generator :label))
+    (fn (source)
+      (let ([value after] (run generator source))
+        (run (function value) after)))))
+
+(defn int (low:int high:int)
+  "A generator of integers in `[low, high]`, shrinking toward 0 when the range holds it, else toward the end nearer 0. A range across 0 draws a sign, then a magnitude.
+
+    (property/replay (property/int 5 10) [0])   ;=> 5
+    (property/replay (property/int -10 10) [1 4])   ;=> -4
+    (property/replay (property/int -10 -5) [0])   ;=> -5"
+  (cond
+    (> low high) (error "property/int: empty range: " [low high])
+    (>= low 0) (fmap (choice (- high low)) (fn (k) (+ low k)))
+    (<= high 0) (fmap (choice (- high low)) (fn (k) (- high k)))
+    else
+      (bind (choice 1)
+        (fn (negative)
+          (if (= negative 1)
+            (fmap (choice (- 0 low)) (fn (k) (- 0 k)))
+            (choice high))))))
+
+(defn bool ()
+  "A generator of `true` and `false`, shrinking toward `false`.
+
+    (property/replay (property/bool) [1])   ;=> true
+    (property/replay (property/bool) [])   ;=> false"
+  (fmap (choice 1) (fn (k) (= k 1))))
+
+(defn elements (coll)
+  "A generator of the members of `coll`, shrinking toward the first.
+
+    (property/replay (property/elements [:a :b :c]) [2])   ;=> :c"
+  (let (items (vec coll))
+    (when (empty? items) (error "property/elements: no elements to choose from"))
+    (fmap (choice (dec (count items))) (fn (i) (nth items i)))))
+
+(defn one-of (generators)
+  "A generator that draws from one of `generators` (a vector), shrinking toward the first.
+
+    (property/replay (property/one-of [(property/constant :x) (property/int 0 9)]) [1 4])   ;=> 4"
+  (let (choices (vec generators))
+    (when (empty? choices) (error "property/one-of: no generators to choose from"))
+    (bind (choice (dec (count choices))) (fn (i) (nth choices i)))))
+
+;; The generator a draw `k` in [0, total) lands on, walking the cumulative weights.
+(defn- frequency-pick (pairs k)
+  (let ([weight generator] (first pairs))
+    (if (or (< k weight) (empty? (rest pairs)))
+      generator
+      (frequency-pick (rest pairs) (- k weight)))))
+
+(defn frequency (pairs)
+  "A generator that draws from one of the generators in `pairs` — `[[weight generator] …]` — chosen in proportion to its weight, shrinking toward the first.
+
+    (property/replay (property/frequency [[1 (property/constant :rare)] [9 (property/constant :common)]]) [0])   ;=> :rare
+    (property/replay (property/frequency [[1 (property/constant :rare)] [9 (property/constant :common)]]) [5])   ;=> :common"
+  (let (weighted (seq/filter (vec pairs) (fn ([weight _]) (> weight 0)))
+        total (fold weighted 0 (fn (sum [weight _]) (+ sum weight))))
+    (when (<= total 0) (error "property/frequency: no positive weight: " pairs))
+    (bind (choice (dec total)) (fn (k) (frequency-pick weighted k)))))
+
+(defn tuple (& generators)
+  "A generator of vectors holding one value from each of `generators`, in order.
+
+    (property/replay (property/tuple (property/int 0 9) (property/bool)) [4 1])   ;=> [4 true]"
+  (make "tuple"
+    (fn (source)
+      (fold generators
+        [[] source]
+        (fn ([values current] generator)
+          (let ([value after] (run generator current))
+            [(conj values value) after]))))))
+
+;; A random sampler for a "one more element?" flag: 1 with probability `more`.
+(defn- flag-sampler (more)
+  (fn (seed _)
+    (let ([f next-seed] (rand/float seed))
+      [(if (< f more) 1 0) next-seed])))
+
+(defn vector-of "A generator of vectors of values from `element`. `options`: `:min` (default 0) and `:max` (default 100) bound the length, `:average` (default `:min` + 5) is the length a random draw tends to. Each element past `:min` is preceded by a \"one more?\" choice, so shrinking deletes elements.
+
+    (property/replay (property/vector-of (property/int 0 9)) [1 4 1 2 0])   ;=> [4 2]
+    (property/replay (property/vector-of (property/int 0 9) {:min 2}) [])   ;=> [0 0]"
+  ((element) (vector-of element {}))
+  ((element options) (let (minimum (get options :min 0)
+                           maximum (get options :max (math/max 100 minimum))
+                           extra (math/max 0 (- (get options :average (+ minimum 5)) minimum))
+                           sampler (flag-sampler (/ extra (+ extra 1.0))))
+                       (make (str "vector-of " (get element :label))
+                         (fn (start)
+                           (letrec (go (fn (items current)
+                                         (let (n (count items))
+                                           (cond
+                                             (< n minimum)
+                                               (let ([value after] (run element current))
+                                                 (go (conj items value) after))
+                                             (>= n maximum) [items current]
+                                             else
+                                               (let ([more after] (draw current 1 sampler))
+                                                 (if (= more 0)
+                                                   [items after]
+                                                   (let ([value after-value] (run element after))
+                                                     (go (conj items value) after-value))))))))
+                             (go [] start)))))))
+
+(defn map-of "A generator of maps with keys from `key` and values from `value`; `options` are `vector-of`'s, bounding the number of pairs drawn (a repeated key keeps the last).
+
+    (property/replay (property/map-of (property/elements [:a :b]) (property/int 0 9)) [1 1 3 0])   ;=> {:b 3}"
+  ((key value) (map-of key value {}))
+  ((key value options) (fmap (vector-of (tuple key value) options) (fn (pairs) (into {} pairs)))))
+
+;; Codepoint classes for `character`, simplest first: printable ASCII (offset so choice 0
+;; is `a`), the whitespace an editor cares about, Latin-1 and Latin Extended, the rest of
+;; the BMP (surrogates skipped), and the astral planes. A random draw picks them 60 : 10 :
+;; 10 : 15 : 5.
+(def- whitespace-codepoints [10 9 32 13])
+
+(defn- class-sampler (seed _)
+  (let ([k next-seed] (rand/int seed 100))
+    [(cond
+       (< k 60) 0
+       (< k 70) 1
+       (< k 80) 2
+       (< k 95) 3
+       else 4)
+      next-seed]))
+
+;; The largest offset within a class.
+(defn- class-bound (class)
+  (case class
+    0 94
+    1 3
+    2 431
+    3 62893
+    1048575))
+
+(defn- class-codepoint (class k:int)
+  (case class
+    0 (+ 32 (math/mod (+ k 65) 95))
+    1 (nth whitespace-codepoints k 32)
+    2 (+ 160 k)
+    3 (let (codepoint (+ 592 k)) (if (>= codepoint 55296) (+ codepoint 2048) codepoint))
+    (+ 65536 k)))
+
+(defn character ()
+  "A generator of one-codepoint strings across Unicode — mostly printable ASCII, with whitespace, Latin, the rest of the BMP and the astral planes — shrinking toward `\"a\"`. Surrogates are never drawn.
+
+    (property/replay (property/character) [])   ;=> \"a\"
+    (property/replay (property/character) [4 0])   ;=> \"𐀀\""
+  (make "character"
+    (fn (source)
+      (let ([class after-class] (draw source 4 class-sampler)
+            [k after] (draw after-class (class-bound class) uniform))
+        [(string/codepoints-> [(class-codepoint class k)]) after]))))
+
+(defn string-of "A generator of strings whose characters come from `alphabet`: a string (each of its graphemes a choice, the first the simplest) or a generator of strings. `options` are `vector-of`'s, bounding the number of characters.
+
+    (property/replay (property/string-of \"ab\") [1 1 1 0 0])   ;=> \"ba\"
+    (property/replay (property/string-of \"xyz\" {:min 3}) [])   ;=> \"xxx\""
+  ((alphabet) (string-of alphabet {}))
+  ((alphabet options) (let (element (if (generator? alphabet)
+                                      alphabet
+                                      (elements (string/->graphemes alphabet))))
+                        (fmap (vector-of element options) (fn (pieces) (string/join pieces ""))))))
+
+(defn string "A generator of Unicode strings (`character`s); `options` are `vector-of`'s.
+
+    (property/replay (property/string) [1 0 7 1 1 0 0])   ;=> \"h\\n\""
+  (() (string-of (character) {}))
+  ((options) (string-of (character) options)))
+
+(defn such-that "A generator of the values of `generator` that satisfy `predicate`, redrawing up to `tries` times (default 100) before abandoning the draw. Use it for a rare exclusion; a predicate most values fail wants a generator that builds the values directly.
+
+    (property/replay (property/such-that (property/int 0 9) (fn (n) (> n 2))) [1 5])   ;=> 5"
+  ((generator predicate) (such-that generator predicate 100))
+  ((generator predicate tries) (make (str "such-that " (get generator :label))
+                                 (fn (start)
+                                   (letrec (attempt (fn (remaining current)
+                                                      (if (<= remaining 0)
+                                                        (invalid "such-that")
+                                                        (let ([value after] (run generator current))
+                                                          (if (predicate value)
+                                                            [value after]
+                                                            (attempt (dec remaining) after))))))
+                                     (attempt tries start))))))
+
+(defn from-rng (function)
+  "A generator over a `seed -> [value next-seed]` function (`rand/int`, `seq/shuffle`, …): one 32-bit choice becomes the seed. It reproduces, but shrinks only by trying smaller seeds — build the value from this module's generators when a small counterexample matters.
+
+    (property/replay (property/from-rng (fn (seed) (rand/int seed 10))) [42])   ;=> 2"
+  (make "from-rng"
+    (fn (source)
+      (let ([seed after] (draw source (dec two-to-32) uniform))
+        [(first (function seed)) after]))))
+
+;; ---- drawing outside a property --------------------------------------------
+
+(defn replay (generator choices)
+  "The value `generator` builds from the choice sequence `choices` (a vector of non-negative integers); a choice past the end is 0, a choice past its bound is clamped. What the shrinker runs on every candidate, and the way to see what a sequence means.
+
+    (property/replay (property/vector-of (property/bool)) [1 1 1 0 0])   ;=> [true false]"
+  (first (run generator (source (vec choices) nil default-limit))))
+
+(defn generate (generator seed)
+  "One random value from `generator`, drawn from `seed`.
+
+    (property/generate (property/int 0 9) 42)   ;=> 2"
+  (first (run generator (source [] seed default-limit))))
+
+(defn sample "`n` random values from `generator`, the first drawn from `seed` and each later one from a seed derived from the one before — the values `check` would test.
+
+    (count (property/sample (property/int 0 9) 5 42))   ;=> 5"
+  ((generator n) (sample generator n 1))
+  ((generator n seed) (letrec (go (fn (values current remaining)
+                                    (if (<= remaining 0)
+                                      values
+                                      (go (conj values (generate generator current))
+                                        (next-trial-seed current)
+                                        (dec remaining)))))
+                        (go [] seed n))))
+
+;; ---- running a property -----------------------------------------------------
+
+;; The seed of the trial after one drawn from `seed`. Not the PRNG's next state: trial i's
+;; first draw steps from seed i to that state, so chaining through it would make each
+;; trial's choices the previous trial's shifted by one.
+(defn- next-trial-seed (seed:int) (rand/seed (+ seed 2654435769)))
+
+;; `[:ok value source]`, or `[:invalid reason]` when the draw overran or a `such-that` gave
+;; up. Any other raise is a bug in a generator and propagates.
+(defn- generate-from (generator from)
+  (try
+    (let ([value after] (run generator from))
+      [:ok value after])
+    (catch e (if (invalid? e) [:invalid (get e :reason)] (throw e)))))
+
+;; nil when `predicate` holds for `value`; else `{:error e}`, `e` nil for a false answer or
+;; the value it raised (an assertion inside the predicate included).
+(defn- violation (predicate value)
+  (try
+    (if (predicate value) nil {:error nil})
+    (catch e {:error e})))
+
+;; Shortlex order: a shorter choice sequence is simpler; equal lengths compare element by
+;; element. What "smaller" means to the shrinker.
+(defn- simpler? (candidate best)
+  (let (length (count candidate) best-length (count best))
+    (cond
+      (< length best-length) true
+      (> length best-length) false
+      else
+        (letrec (go (fn (i)
+                      (cond
+                        (>= i length) false
+                        (< (nth candidate i) (nth best i)) true
+                        (> (nth candidate i) (nth best i)) false
+                        else (go (inc i)))))
+          (go 0)))))
+
+(defn- exhausted? (context state) (>= (get state :attempts) (get context :budget)))
+
+;; Run the property on one candidate sequence; keep it when it still fails and what it
+;; actually consumed is simpler than the best so far.
+(defn- attempt (context state candidate)
+  (if (or (exhausted? context state) (not (simpler? candidate (get state :choices))))
+    state
+    (let (counted (assoc state :attempts (inc (get state :attempts)))
+          outcome (generate-from (get context :generator)
+                    (source candidate nil (get context :limit))))
+      (if (= (first outcome) :invalid)
+        counted
+        (let ([_ value after] outcome
+              consumed (get after :choices)
+              failure (violation (get context :predicate) value))
+          (if (and failure (simpler? consumed (get state :choices)))
+            (assoc counted
+              :choices consumed
+              :value value
+              :error (get failure :error)
+              :shrinks (inc (get state :shrinks)))
+            counted))))))
+
+(defn- improved? (before after) (> (get after :shrinks) (get before :shrinks)))
+
+(defn- cut (choices from to)
+  (into (seq/subvec choices 0 from) (seq/subvec choices (math/min to (count choices)))))
+
+;; Delete `size` choices at each position, from the end back to the front.
+(defn- delete-pass (context state size index)
+  (if (or (< index 0) (exhausted? context state))
+    state
+    (let (next (attempt context state (cut (get state :choices) index (+ index size))))
+      (delete-pass context next size (math/min (dec index) (- (count (get next :choices)) size))))))
+
+(defn- zeroed (choices from size)
+  (fold (range from (math/min (+ from size) (count choices))) choices (fn (acc i) (assoc acc i 0))))
+
+;; Set `size` choices to 0 at each position.
+(defn- zero-pass (context state size index)
+  (let (choices (get state :choices))
+    (if (or (> (+ index size) (count choices)) (exhausted? context state))
+      state
+      (zero-pass context (attempt context state (zeroed choices index size)) size (inc index)))))
+
+;; Lower the choice at `index` by binary search between a value known to pass (`low`) and
+;; one known to fail (`high`).
+(defn- lower-search (context state index low:int high:int)
+  (if (or (<= (- high low) 1) (exhausted? context state) (>= index (count (get state :choices))))
+    state
+    (let (middle (math/quot (+ low high) 2)
+          next (attempt context state (assoc (get state :choices) index middle)))
+      (if (improved? state next)
+        (lower-search context
+          next
+          index
+          low
+          (if (< index (count (get next :choices))) (nth (get next :choices) index) middle))
+        (lower-search context next index middle high)))))
+
+(defn- lower-pass (context state index)
+  (let (choices (get state :choices))
+    (if (or (>= index (count choices)) (exhausted? context state))
+      state
+      (let (current (nth choices index)
+            next (if (= current 0)
+                   state
+                   (let (zero (attempt context state (assoc choices index 0)))
+                     (if (improved? state zero) zero (lower-search context zero index 0 current)))))
+        (lower-pass context next (inc index))))))
+
+(defn- shrink-round (context state)
+  (let (deleted (fold [8 4 2 1]
+                  state
+                  (fn (acc size) (delete-pass context acc size (- (count (get acc :choices)) size))))
+        zeroed-state (fold [8 4 2 1] deleted (fn (acc size) (zero-pass context acc size 0))))
+    (lower-pass context zeroed-state 0)))
+
+(defn- shrink (context state)
+  (let (next (shrink-round context state))
+    (if (and (improved? state next) (not (exhausted? context next)))
+      (shrink context next)
+      next)))
+
+(defn- run-trials (context seed trial invalids)
+  (let (trials (get context :trials))
+    (cond
+      (>= trial trials) {:passed true :trials trials :seed (get context :seed)}
+      (> invalids (* 10 (math/max trials 10)))
+        (error "property/check: too many invalid draws ("
+          invalids
+          ") — a such-that rejects most values, or a draw overran its limit of "
+          (get context :limit)
+          " choices")
+      else
+        (let (outcome (generate-from (get context :generator) (source [] seed (get context :limit))))
+          (if (= (first outcome) :invalid)
+            (run-trials context (next-trial-seed seed) trial (inc invalids))
+            (let ([_ value after] outcome
+                  failure (violation (get context :predicate) value))
+              (if (nil? failure)
+                (run-trials context (next-trial-seed seed) (inc trial) invalids)
+                (let (shrunk (shrink context
+                               {:choices (get after :choices)
+                                :value value
+                                :error (get failure :error)
+                                :attempts 0
+                                :shrinks 0}))
+                  {:passed false
+                   :trial (inc trial)
+                   :trials trials
+                   :seed seed
+                   :value (get shrunk :value)
+                   :original value
+                   :choices (get shrunk :choices)
+                   :error (get shrunk :error)
+                   :shrinks (get shrunk :shrinks)
+                   :attempts (get shrunk :attempts)}))))))))
+
+(defn check "Check that `predicate` holds for values drawn from `generator`, returning a result map. `options`: `:trials` (default 100), `:seed` (default 1; the first trial draws from it, so a failing trial's seed replays it as trial 1), `:max-shrinks` (default 1000 predicate runs) and `:limit` (default 8192 choices a draw may make). A predicate that returns false or nil, or raises, fails.
+
+A pass is `{:passed true :trials n :seed s}`. A failure is `{:passed false :value v :original o :seed s :trial i :trials n :choices c :error e :shrinks k :attempts a}`: `:value` is the SHRUNK counterexample, `:original` what the trial drew, `:seed` the failing trial's seed, `:error` what the predicate raised on `:value` (nil for a false answer).
+
+    (get (property/check (property/vector-of (property/int 0 100)) (fn (xs) (not (includes? xs 42))) {:trials 500}) :value)   ;=> [42]
+    (get (property/check (property/int 0 100) (fn (n) (< n 1000))) :passed)   ;=> true"
+  ((generator predicate) (check generator predicate {}))
+  ((generator predicate options) (when (not (generator? generator))
+                                   (error "property/check: not a generator (build one with property/int, property/vector-of, …; a seed function wraps with property/from-rng): "
+                                     generator))
+    (let (seed (get options :seed 1))
+      (run-trials {:generator generator
+                   :predicate predicate
+                   :trials (get options :trials 100)
+                   :seed seed
+                   :budget (get options :max-shrinks 1000)
+                   :limit (get options :limit default-limit)}
+        seed 0 0))))
+
+(defn- render-error (e)
+  (if (and (map? e) (contains? e :message)) (get e :message) (pr-str e)))
+
+(defn report (result)
+  "The lines a failed `check` result is reported in: the trial, the shrunk counterexample, what the trial first drew, what the predicate raised, and how to replay it. A passing result has none.
+
+    (count (property/report (property/check (property/int 0 9) (fn (n) (< n 5)))))   ;=> 5
+    (property/report {:passed true :trials 100 :seed 1})   ;=> []"
+  (if (get result :passed)
+    []
+    (let (lines [(str "property failed on trial "
+                   (get result :trial)
+                   "/"
+                   (get result :trials)
+                   " (shrunk "
+                   (get result :shrinks)
+                   " times in "
+                   (get result :attempts)
+                   " runs)")
+                  (str "counterexample: " (pr-str (get result :value)))
+                  (str "original: " (pr-str (get result :original)))]
+          with-error (if (nil? (get result :error))
+                       lines
+                       (conj lines (str "raised: " (render-error (get result :error)))))
+          seed (get result :seed))
+      (into with-error
+        [(str "seed: " seed)
+          (str "replay: pass {:seed "
+            seed "} in the property's options, or run nest test --seed " seed)]))))
