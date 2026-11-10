@@ -648,7 +648,6 @@ mod tests {
             "\x1b_Ga=d,d=a,q=2\x1b\\\x1b_Ga=d,d=I,i=1,q=2\x1b\\"
         );
         assert!(kitty.is_empty());
-        drop(encode);
         assert_eq!(encodes, 1);
     }
 
