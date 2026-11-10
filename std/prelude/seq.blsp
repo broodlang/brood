@@ -890,47 +890,45 @@ A trailing `:into coll` collects with `conj` onto `coll` instead of building a l
           body (if (empty? (rest body)) (first body) (cons 'do body)))
       `(let (~acc ~init) ~(%for-fold acc (rest (rest binds)) body)))))
 
-;; (doseq (pat coll) body...) — run `body` for its side effects over each item,
-;; returning nil. Just `for` run for effect (the result list is discarded). The
-;; param is `bind`, not `binding` — the latter is the dynamic-variable form.
+;; (doseq (pat coll …) body...) — run `body` for its side effects over each item,
+;; returning nil: THE iteration-for-effect form (ADR-674 folded `dotimes` and `dolist`
+;; into it). It takes `for`'s bindings — several pairs, `:when` guards, destructuring —
+;; and walks them as `fold-for` does, with a nil accumulator, so nothing is collected.
+;; A counted loop is `(doseq (i (range n)) …)`. The param is `bind`, not `binding` — the
+;; latter is the dynamic-variable form.
 (defmacro doseq (bind & body)
-  "Run `body` for its side effects over each item of the binding (like `for`, but discards the result and returns `nil`).
+  "Run `body` for its side effects over each item of the binding, returning `nil`. The binding is [[for]]'s: one or more `pattern coll` pairs (the last varies fastest), with `:when` guards. Nothing is collected. A counted loop is `(doseq (i (range n)) …)`.
 
-    (with-out-str (doseq (x [1 2 3]) (io/write x)))   ;=> \"123\"
-    (doseq (x [1 2]) x)                               ;=> nil"
-  `(do (for ~bind (do ~@body)) nil))
+    (with-out-str (doseq (x [1 2 3]) (io/write x)))                 ;=> \"123\"
+    (with-out-str (doseq (i (range 3)) (io/write i)))               ;=> \"012\"
+    (with-out-str (doseq (x [1 2 3] :when (math/odd? x)) (io/write x)))  ;=> \"13\"
+    (doseq (x [1 2]) x)                                             ;=> nil"
+  `(do (/fold-for (acc# nil ~@bind) ~@body nil) nil))
 
-;; (dotimes (i n) body...) — run `body` for `i` = 0, 1, …, n-1; returns nil. The
-;; lean iteration primitive: a plain tail-recursive walker, no result list built
-;; (unlike `doseq`, which routes through `for`/`mapcat`). For effects only.
-(defn- %dotimes-loop (n f i) (when (< i n) (f i) (%dotimes-loop n f (+ i 1))))
-(defmacro dotimes "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`.
+;; `dotimes` and `dolist` are deprecated by ADR-674 and removed before 1.0: `doseq` takes
+;; both shapes — `(doseq (i (range n)) …)` and `(doseq (x xs) …)`. `nest format --migrate`
+;; rewrites them.
+(defmacro dotimes "Deprecated (ADR-674): write `(doseq (i (range n)) body…)`; `nest format --migrate` rewrites this. Runs `body` with the name bound to 0, 1, …, n-1; returns `nil`.
 
-    (with-out-str (dotimes (i 3) (io/write i)))   ;=> \"012\"
-    (dotimes (i 3) i)                             ;=> nil"
-  (((var n) & body) `(do (%dotimes-loop ~n (fn (~var) ~@body) 0) nil))
+    (with-out-str (dotimes (i 3) (io/write i)))   ;=> \"012\""
+  (((var n) & body) `(/doseq (~var (/range ~n)) ~@body))
   ((bind & _) (reflect/error-at bind
                 "dotimes: bind must be (var n), got "
                 (pr-str bind)
                 ". Syntax: (dotimes (i n) body...)"))
   (() (error "dotimes: expected a bind. Syntax: (dotimes (i n) body...)")))
+(meta dotimes :deprecated "0.51.0" :use 'doseq)
 
-;; (dolist (x xs) body...) — run `body` for each element of `xs`; returns nil.
-;; The list-only counterpart to `dotimes`: lean and tail-recursive, no discard
-;; list built. Use `doseq` when you need destructuring or `:when` filters; reach
-;; for `dolist` for the common "do this for each item" loop.
-(defn- %dolist-loop (xs f)
-  (if (nil? xs) nil (do (f (first xs)) (%dolist-loop (rest xs) f))))
-(defmacro dolist "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`.
+(defmacro dolist "Deprecated (ADR-674): write `(doseq (x xs) body…)`; `nest format --migrate` rewrites this. Runs `body` with the name bound to each element; returns `nil`.
 
-    (with-out-str (dolist (x '(1 2 3)) (io/write x)))   ;=> \"123\"
-    (dolist (x '(1 2)) x)                               ;=> nil   ; the value is discarded"
-  (((var coll) & body) `(do (%dolist-loop ~coll (fn (~var) ~@body)) nil))
+    (with-out-str (dolist (x '(1 2 3)) (io/write x)))   ;=> \"123\""
+  (((var coll) & body) `(/doseq (~var ~coll) ~@body))
   ((bind & _) (reflect/error-at bind
                 "dolist: bind must be (var coll), got "
                 (pr-str bind)
                 ". Syntax: (dolist (x xs) body...)"))
   (() (error "dolist: expected a bind. Syntax: (dolist (x xs) body...)")))
+(meta dolist :deprecated "0.51.0" :use 'doseq)
 
 ;; `bench` moved to the `dev` module (`dev/bench`) with the other diagnostics.
 

@@ -57,7 +57,7 @@
 (describe "(vector a …) across processes"
   :isolated (test "workers build vectors with `vector` and send them home intact"
     (let (me (self))
-      (dotimes (k 8)
+      (doseq (k (range 8))
         (spawn (vci-worker me k)))
       (let (got (into #{}
                   (map (range 8) (fn (_) (receive ([:built k p v] [k p v]) (after 20000 :timeout))))))

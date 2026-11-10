@@ -114,10 +114,10 @@
         (drain-60 (- expected 1) (+ acc (if (int? v) v 0))))))
   (let (receiver (spawn (drain-60 (* n-senders msgs-each) 0)))
     ;; Spawn senders
-    (dotimes (i n-senders)
+    (doseq (i (range n-senders))
       (spawn
         ;; Each sender sends msgs-each copies of the value (i+1)
-        (dotimes (_ msgs-each)
+        (doseq (_ (range msgs-each))
           (send receiver (+ i 1)))))
     (let (r (receive ([:p60 v] v) (after 30000 :timeout)))
       (io/puts "P60: total sum:" r)

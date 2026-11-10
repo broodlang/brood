@@ -119,7 +119,7 @@ fn file_signatures_covers_guarded_clauses_and_skips_non_functions() {
 
 #[test]
 fn file_signatures_reads_pattern_clauses() {
-    // A PATTERN-dispatched multi-clause `defn` lowers to one variadic `fn` over `match*`,
+    // A PATTERN-dispatched multi-clause `defn` lowers to one variadic `fn` over `%match`,
     // which alone reads as an arity-0 `(-> any)`; the un-expanded clauses say what each
     // position admits (a non-empty list pattern is `pair`, a literal its own type) and
     // the position-wise union over the arms is the signature a reader sees.
@@ -185,7 +185,7 @@ fn a_named_same_file_callback_flows_its_result_under_the_combinators_inputs() {
 #[test]
 fn an_inline_pattern_clause_callback_flows_its_result_too() {
     // The SAME clauses as the named `token` above, written INLINE in the reduce call.
-    // The expander lowers a pattern-clause literal to one variadic `match*` lambda
+    // The expander lowers a pattern-clause literal to one variadic `%match` lambda
     // before call sites are typed, so this read as `any` while the named spelling was
     // precise — two spellings of one program, two answers. The surface pre-pass records
     // the literal's clauses keyed by its printed head list; `clause_lambda_ret` recovers

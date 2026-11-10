@@ -111,7 +111,7 @@
     ;; demonitor is best-effort in this runtime: the child's :normal DOWN is
     ;; usually queued before we demonitor. Without the drain + down-flush each
     ;; request leaks one — 10 requests, then assert the mailbox is EMPTY.
-    (dotimes (i 10) (answer {:id i :src "(+ 1 1)"}))
+    (doseq (i (range 10)) (answer {:id i :src "(+ 1 1)"}))
     (eval-server/eval-server-flush-stale) ; belt: what a next request would do
     (assert= (get (proc/info (self)) :mailbox) 0)))
 
@@ -127,7 +127,7 @@
 
 (describe "output bounding"
   (test "a println flood is capped with a truncation marker"
-    (let (r (eval-capturing "(dotimes (i 5000) (io/puts i))"))
+    (let (r (eval-capturing "(doseq (i (range 5000)) (io/puts i))"))
       (is (<= (string/length (get r :output)) (+ eval-server/*output-cap-chars* 64)))
       (is (includes? (get r :output) "…[output truncated]"))))
   (test "evaluated code stealing the capture yields \"\" output, not nil"

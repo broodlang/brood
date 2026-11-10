@@ -4,7 +4,7 @@
 > there is no new special form, and one mechanism is reused at every binding site.
 > Subsumes two roadmap items — "Destructuring in `let`/`fn`" and "`case`" (see
 > [`../ROADMAP.md`](../ROADMAP.md) Tier 2). The `let`/`fn` pattern surfaces are
-> lowered to `match*` in the **compile pass** (ADR-022), which also makes a `match`
+> lowered to `%match` in the **compile pass** (ADR-022), which also makes a `match`
 > in a hot loop expand once rather than per call.
 >
 > One refinement landed differently from the original design: the failure **context**
@@ -366,15 +366,15 @@ The raised value is an error map (ADR-501): `{:kind :match :message … :context
   `continue 'tail`); the **implementation does the same rewrite one phase
   earlier**, in the `macroexpand_all` compile pass (ADR-022): a `let` with a
   non-symbol target, or a multi-clause / pattern-parameter `fn`, is desugared to
-  `match*` once at definition. So in the common case eval's `let`/`fn` see only
-  plain symbol binds, the matching *logic* stays in the Brood `match*` engine, and
+  `%match` once at definition. So in the common case eval's `let`/`fn` see only
+  plain symbol binds, the matching *logic* stays in the Brood `%match` engine, and
   a pattern binder in a hot loop expands once rather than per call. Tail position
-  is preserved (the body lands in `match*`'s tail), so `tail_calls_do_not_overflow`
+  is preserved (the body lands in `%match`'s tail), so `tail_calls_do_not_overflow`
   holds — including for multi-clause recursion like `fac`.
 
-  *Concretely:* `(let (pat v) body…)` → `(match* :let v (pat body…))`;
-  `(fn (clause…)…)` → `(fn (& g) (match* :fn g clause…))`;
-  `(fn (a [x y]) body)` → `(fn (a g) (match* :fn g ([x y] body)))`. `defn` is now
+  *Concretely:* `(let (pat v) body…)` → `(%match :let v (pat body…))`;
+  `(fn (clause…)…)` → `(fn (& g) (%match :fn g clause…))`;
+  `(fn (a [x y]) body)` → `(fn (a g) (%match :fn g ([x y] body)))`. `defn` is now
   a pure forwarder to `fn`, so it inherits both forms.
 
   **Eval keeps the Option-A fallback too.** A pattern binder can still reach the

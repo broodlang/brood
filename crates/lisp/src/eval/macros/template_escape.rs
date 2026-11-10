@@ -51,9 +51,9 @@ const PAIR_BINDERS: &[&str] = &[
 ];
 
 /// Forms whose clauses are `(pattern body…)` after one scrutinee.
-const PATTERN_CLAUSES: &[&str] = &["match", "match*", "receive"];
+const PATTERN_CLAUSES: &[&str] = &["match", "%match", "match*", "receive"];
 
-/// The head's name, a root escape read as the name it escapes (`/match*` is `match*`).
+/// The head's name, a root escape read as the name it escapes (`/%match` is `%match`).
 fn head_name(items: &[Value]) -> Option<String> {
     match items.first().map(|v| v.unpack()) {
         Some(ValueRef::Sym(s)) => {

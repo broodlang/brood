@@ -187,7 +187,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
                          file-total
                          ")")))))
         (let (missed (coverage-uncovered results))
-          (unless (empty? missed)
+          (when (not (empty? missed))
             (io/puts "")
             (io/puts (str "Never called (" (count missed) "):"))
             (fold
@@ -342,7 +342,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
         (fold results
           nil
           (fn (_ r)
-            (unless (empty? (get r :missing))
+            (when (not (empty? (get r :missing)))
               (io/puts "")
               (io/puts (str "Never ran in "
                          (coverage-relative (get r :file) root)
@@ -451,7 +451,7 @@ files under `source-dirs` are measured; files with no branches are omitted.
 
 (defn- coverage-branch-detail (root r)
   (let (partial (get r :partial))
-    (unless (empty? partial)
+    (when (not (empty? partial))
       (io/puts "")
       (io/puts (str "Half-covered branches in "
                  (coverage-relative (get r :file) root)

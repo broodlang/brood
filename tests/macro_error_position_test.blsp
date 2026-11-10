@@ -47,8 +47,8 @@
     (assert= (at (where "(do 1\n  (binding (*a*\n    1 *b*) 1))")) [2 12])
     (assert= (at (where "(match 1\n  (x 1)\n    (y 2))")) [3 5]))
   (test "dotimes and dolist still run on a well-formed bind"
-    (assert= "012" (with-out-str (dotimes (i 3) (io/write i))))
-    (assert= "ab" (with-out-str (dolist (s '("a" "b")) (io/write s))))))
+    (assert= "012" (with-out-str (doseq (i (range 3)) (io/write i))))
+    (assert= "ab" (with-out-str (doseq (s '("a" "b")) (io/write s))))))
 
 (describe "macro error positions across processes"
   :isolated (test "many processes locate the same macro error independently"

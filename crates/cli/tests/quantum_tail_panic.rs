@@ -74,19 +74,19 @@ const WORKLOAD: &str = r#"
 ;; the child, and every worker would message itself.
 (defn wave (n)
   (let (me (self))
-    (do (dotimes (i n) (spawn (worker me i)))
+    (do (doseq (i (range n)) (spawn (worker me i)))
         (collect n 0))))
 
 ;; 4M iterations is thousands of 2000-reduction quanta on every engine, while four of them
 ;; still fit inside one `after` on the tree-walker (~3.5 s each in a debug build).
-(dotimes (i 4) (monitor (spawn (spin 4000000))))
+(doseq (i (range 4)) (monitor (spawn (spin 4000000))))
 ;; Blocks until each spinner is retired. Pre-fix the struck one never is — it vanishes
 ;; mid-unwind with no deregister — so this times out and reports NO-DOWN.
 (defn await-down ()
   (receive
     ([:down mref _ reason] (io/puts (str "DOWN " reason)))
     (after 30000 (io/puts "NO-DOWN"))))
-(dotimes (i 4) (await-down))
+(doseq (i (range 4)) (await-down))
 (io/puts (str "WAVE " (wave 200)))
 (io/puts "ALIVE")
 "#;

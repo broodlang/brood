@@ -99,7 +99,7 @@ pub(super) struct FixedArm {
 /// memoized; a same-file body's answer depends on the same-file inference fixpoint and cannot be.
 fn fixed_arms_of(heap: &Heap, sym: Symbol, ctx: &Ctx) -> Option<(Vec<FixedArm>, bool)> {
     // A same-file multi-clause `defn`: its expanded form is one variadic `fn` over
-    // `match*` and has no fixed arms; the un-expanded clauses are the arms.
+    // `%match` and has no fixed arms; the un-expanded clauses are the arms.
     if let Some(clauses) = ctx.clause_arms(sym) {
         let mut out = Vec::with_capacity(clauses.len());
         for &clause in clauses {
@@ -296,7 +296,7 @@ pub(in crate::types::check) fn specialized_ret(
     let mut matched = false;
     for arm in arms.iter().filter(|a| a.heads.len() == inputs.len()) {
         // An arm whose head pattern cannot admit a known argument does not run for this
-        // call (`match*` tries the next clause), so it contributes nothing.
+        // call (`%match` tries the next clause), so it contributes nothing.
         let admits = arm.heads.iter().zip(inputs).all(|(&h, input)| match input {
             Some(t) => !t.clone().intersect(pattern_domain(heap, h)).is_never(),
             None => true,
@@ -620,7 +620,7 @@ pub(in crate::types::check) fn self_call_sites(
 ///  - **arity-only clause literals** survive expansion as clause syntax and are read
 ///    directly;
 ///  - **pattern/guard clauses** (and a destructuring single-clause param list) were
-///    already lowered to one variadic `match*` lambda by the time call sites are typed,
+///    already lowered to one variadic `%match` lambda by the time call sites are typed,
 ///    so the clauses are gone from the form itself. The lowering embeds the original
 ///    clause-head list in each `(%match-error (quote :fn) … (quote heads))` raise;
 ///    that datum's printed form is the key the surface pre-pass recorded the clauses

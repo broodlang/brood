@@ -52,7 +52,7 @@ fn fanout_with_concurrent_global_rebind_matches_serial() {
         (defn fan (k n)
           (do
             (spawn (churn 600))
-            (dotimes (b k) (spawn (send root [:r (count (tally n))])))
+            (doseq (b (range k)) (spawn (send root [:r (count (tally n))])))
             (reduce (range k) 0 (fn (acc _) (receive ([:r c] (+ acc c)))))))
 
         ;; Each trial's parallel total must equal the serial k*n. Tail-recursive

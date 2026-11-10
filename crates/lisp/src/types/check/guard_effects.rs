@@ -84,7 +84,7 @@ pub(super) fn check_guards(heap: &Heap, forms: &[Value], out: &mut Vec<(Option<P
 const LET_LIKE: &[&str] = &["let", "letrec", "let*", "if-let", "when-let", "for", "loop"];
 
 /// The heads whose clauses are `(pattern body…)`, the pattern binding for its clause.
-const CLAUSE_FORMS: &[&str] = &["match", "match*", "receive", "case"];
+const CLAUSE_FORMS: &[&str] = &["match", "%match", "match*", "receive", "case"];
 
 /// Recurse un-expanded code, skipping quoted data. At each list, apply the two guard shapes:
 /// a clause `(pattern :when GUARD body…)` (`:when` at index 1 — `match`/`receive`/`case`
@@ -116,7 +116,7 @@ fn walk(heap: &Heap, form: Value, scope: &HashSet<String>, out: &mut Vec<(Option
             Some(&Value::Sym(h)) => Some(value::symbol_name(h)),
             _ => None,
         };
-        // a root escape (`/match*`, ADR-638) is the form it escapes
+        // a root escape (`/%match`, ADR-638) is the form it escapes
         let head_name = head_name.as_deref().map(|name| {
             name.strip_prefix('/')
                 .filter(|n| !n.is_empty())

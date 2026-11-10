@@ -335,7 +335,7 @@
     (assert= (count (string/->graphemes "\r\n")) 1))
 
   (test "graphemes reassemble to the original string"
-    (dolist (s ["" "plain" "e\u{301}f" "\u{1F1FF}\u{1F1E6}x" "\r\n" "ne\u{301}e\u{301}"])
+    (doseq (s ["" "plain" "e\u{301}f" "\u{1F1FF}\u{1F1E6}x" "\r\n" "ne\u{301}e\u{301}"])
       (assert= (apply str (string/->graphemes s)) s)))
 
   (test "normalization makes text that reads the same compare the same"
@@ -354,8 +354,8 @@
     (assert= (string/normalize "\u{B2}" :nfd) "\u{B2}"))
 
   (test "every form is idempotent"
-    (dolist (form [:nfc :nfd :nfkc :nfkd])
-      (dolist (s ["e\u{301}" "\u{E9}" "\u{FB01}" "\u{1E0A}\u{323}"])
+    (doseq (form [:nfc :nfd :nfkc :nfkd])
+      (doseq (s ["e\u{301}" "\u{E9}" "\u{FB01}" "\u{1E0A}\u{323}"])
         (assert= (string/normalize (string/normalize s form) form)
           (string/normalize s form)))))
 

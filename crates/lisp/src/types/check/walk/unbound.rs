@@ -18,7 +18,7 @@ pub(in crate::types::check) const UNBOUND_PREFIX: &str = "unbound symbol: ";
 /// this reads the *loaded image* rather than the file — a deprecation is almost always
 /// cross-module, and the module that declares it has been loaded by the time its callers
 /// are checked.
-pub(super) fn stability_msg(heap: &Heap, sym: Symbol) -> Option<String> {
+pub(in crate::types::check) fn stability_msg(heap: &Heap, sym: Symbol) -> Option<String> {
     let meta = heap.name_meta(sym)?;
     let name = name_of(sym);
     if let Some(version) = &meta.deprecated {

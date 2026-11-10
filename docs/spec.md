@@ -167,7 +167,7 @@ Evaluation maps a (form, environment) pair to a value, or raises an error (§10)
 The implementation guarantees **proper tail calls**: a call in tail position
 uses O(1) interpreter stack. The tail positions are:
 
-- the last form of a `do`/`when`/`unless`/`let` body, and of a function body;
+- the last form of a `do`/`when`/`let` body, and of a function body;
 - both branches chosen by `if`; the chosen branch of `cond`;
 - the last operand of `and`/`or`;
 - the body that any of the above ultimately reduces to.
@@ -206,7 +206,7 @@ denotes zero or more forms evaluated as an implicit `do`.
 
 Only `quote`, `if`, `do`, `def`, `fn`, `let`, `letrec`, and `quasiquote` are
 **true core special forms** (the evaluator's own rules, in `eval.rs`) — eight
-in all. `defmacro`, `when`, `unless`, `cond`, `and`, and `or` are **prelude macros**
+in all. `defmacro`, `when`, `cond`, `and`, and `or` are **prelude macros**
 — they expand to the core forms and so can be shadowed or passed over like any
 binding; they are tabled here only so the whole surface reads in one place.
 `defmacro` lowers to `(def name (%make-macro (fn …)))`: a macro is just a closure
@@ -217,7 +217,6 @@ the expander calls, and `%make-macro` is the one primitive that tags it as such.
 | `(quote x)` | `x`, unevaluated. Reader shorthand: `'x`. |
 | `(if t a b?)` | Evaluate `t`; if truthy (§8) evaluate `a`, else `b` (or `nil`). `a`/`b` are in tail position. |
 | `(when t body...)` | If `t` is truthy, evaluate `body`; else `nil`. |
-| `(unless t body...)` | If `t` is falsy, evaluate `body`; else `nil`. |
 | `(cond t₁ e₁ t₂ e₂ …)` | Even number of forms. Evaluate tests left to right; the first truthy test's `eᵢ` is the result (tail position). `else`, which must be the last test, always matches; a constant test (`:else`, `true`, `nil`, a number) raises at expansion (ADR-518). No match ⇒ `nil`. |
 | `(do body...)` | Evaluate in order; result is the last (tail position), or `nil` if empty. |
 | `(def name v?)` | Evaluate `v` (or `nil`) and bind `name` globally (redefinable — the language's only mutation). Result: `name`. |
@@ -369,7 +368,7 @@ and the `receive`/`try`/`match` surfaces are **not** primitives — they are Bro
 written over the kernel above.
 
 **Derived (Brood, in the prelude):**
-the macros `defn`, `when`/`unless`/`cond`/`and`/`or`, `->`, `match`/`match*`,
+the macros `defn`, `when`/`cond`/`and`/`or`, `->`, `match`/`%match`,
 `receive`, and `try`/`catch`; `error`; the full arithmetic/comparison family
 (`+ - * / < <= > >= = inc dec` — plus ~~`not=`~~, deprecated since 0.19.1 in favour of
 `(not (= a b))` — and, in the `math` module, `math/mod`, `math/abs`, `math/max`,

@@ -123,7 +123,7 @@
     (assert= '() (scan-source "(describe \"g\" :isolated (test \"n\" (is 1)))"))
     (assert= '() (scan-source "(describe \"g\" :tags [:slow] (test \"n\" (is 1)))"))
     ;; a trailing keyword VALUE is legal — macro_harden_test relies on it
-    (assert= '() (scan-source "(test \"n\" (dolist (x '(1 2)) x) :ok)")))
+    (assert= '() (scan-source "(test \"n\" (doseq (x '(1 2)) x) :ok)")))
 
   (test "every test file in the tree places its modifiers legally"
     (let (files (seq/filter (file/walk-files "tests") blsp?)

@@ -106,7 +106,7 @@
   (test "correct dotimes works"
     (let (_acc (ref))
       ; side-effect-only, just check no error
-      (dotimes (i 3) i)
+      (doseq (i (range 3)) (+ i 1))
       :ok))
 
   (test "bare symbol bind raises a clear error"
@@ -125,7 +125,7 @@
 
   (test "correct (i n) bind does NOT raise"
     (let (_result (ref))
-      (dotimes (i 3) i)
+      (doseq (i (range 3)) (+ i 1))
       :ok)))
 
 ;; ── 4. dolist — malformed bind ────────────────────────────────────────────────
@@ -133,7 +133,7 @@
 (describe "dolist — wrong syntax"
   (test "correct dolist works"
     ; side-effect-only
-    (dolist (x '(1 2 3)) x)
+    (doseq (x '(1 2 3)) (list x))
     :ok)
 
   (test "bare symbol bind raises a clear error"
@@ -151,7 +151,7 @@
       (is (includes? msg "dolist"))))
 
   (test "correct (x xs) bind does NOT raise"
-    (dolist (x '(a b c)) x)
+    (doseq (x '(a b c)) (list x))
     :ok))
 
 ;; ── 5. for — unpaired binding or lone :when ───────────────────────────────────

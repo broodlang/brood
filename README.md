@@ -225,7 +225,7 @@ a `.mcp.json` wired to it — see [`docs/mcp.md`](docs/mcp.md).
 ## What works today
 
 Lexically-scoped closures, proper tail calls, `def`/`defn`/`let`/`fn`,
-`if`/`when`/`unless`/`cond`, `and`/`or`, **macros** (`defmacro` +
+`if`/`when`/`cond`, `and`/`or`, **macros** (`defmacro` +
 Clojure-style `` ` ``/`~`/`~@` quasiquote, `reflect/macroexpand`, `reflect/gensym`), integers that
 promote to bignums, floats, exact ratios, strings, symbols, keywords, cons-cell
 lists, `[ ]` vectors, immutable `{ }` maps (`get`/`assoc`/`dissoc`/`keys`/`vals`/

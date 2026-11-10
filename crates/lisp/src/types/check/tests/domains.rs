@@ -403,7 +403,7 @@ fn a_call_no_clause_of_a_multi_arity_function_accepts_is_flagged() {
 
 #[test]
 fn guarded_clauses_give_a_function_its_domain() {
-    // `:when` guards (ADR-226) lower to a single variadic `fn` over `match*`, so the
+    // `:when` guards (ADR-226) lower to a single variadic `fn` over `%match`, so the
     // clauses only exist in the un-expanded form — which is where this reads them.
     let ws = file_warnings(
         "(defn g ((x) :when (string? x) (string/length x)) ((x) :when (int? x) (+ x 1)))\n\

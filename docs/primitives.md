@@ -842,7 +842,7 @@ control how their arguments are evaluated and cannot be passed as values:
 quote  if  do  def  fn  let  letrec  quasiquote
 ```
 
-`defmacro`, `when`, `unless`, `cond`, `and`, and `or` are **prelude macros**, not
+`defmacro`, `when`, `cond`, `and`, and `or` are **prelude macros**, not
 special forms (ADR-022). `defmacro` lowers to `(def name (%make-macro (fn …)))` —
 a macro is just a closure the expander calls, and `%make-macro` is the lone
 primitive that tags one. There is no `set!` and no `while`: data is immutable and there is

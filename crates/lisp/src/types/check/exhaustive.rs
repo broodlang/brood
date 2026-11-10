@@ -94,7 +94,7 @@ fn walk(
         };
         if let Value::Sym(h) = head {
             let name = value::symbol_name(h);
-            // `/match*` (a root escape, ADR-638) is the same form as `match*`
+            // `/%match` (a root escape, ADR-638) is the same form as `%match`
             match name
                 .strip_prefix('/')
                 .filter(|n| !n.is_empty())
@@ -117,7 +117,7 @@ fn walk(
                     walk_let(heap, &items, ctx, namespace, out);
                     return;
                 }
-                "match" | "match*" => {
+                "match" | "%match" | "match*" => {
                     analyze_match(heap, form, &items, ctx, namespace, out);
                     return;
                 }

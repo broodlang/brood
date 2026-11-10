@@ -115,7 +115,7 @@
                        (:stop :stopped))))
       (let (me (self)
             server (spawn (serve)))
-        (dotimes (k 50)
+        (doseq (k (range 50))
           (spawn (send server [:add me k 1])))
         (let (sums (map (range 50) (fn (_) (receive ([:sum s] s) (after 20000 :timeout)))))
           (send server :stop)

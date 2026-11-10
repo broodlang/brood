@@ -388,7 +388,7 @@
 (describe "concurrent impl registration (KI-22)"
   :isolated (test "no impl is lost when many processes register at once"
     (let (n 120)
-      (dotimes (i n) (abt-conc-declare i))
+      (doseq (i (range n)) (abt-conc-declare i))
       (concurrently n
         (fn (i) (%register-impl (abt-conc-name i) (abt-conc-op i) :int (fn (_x) i) nil)))
       ;; before the fix this lost roughly 40% of them

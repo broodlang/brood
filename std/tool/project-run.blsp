@@ -333,7 +333,7 @@ into the callable a boot runs.
     (when (nil? target)
       (error who ": entry fn '" fname "' is not defined (module '" modname "')"))
     (let (entry (reflect/eval target))
-      (unless (or (fn? entry) (application/app? entry))
+      (when (not (or (fn? entry) (application/app? entry)))
         (error who ": entry '" fname "' is not callable (" (type-of entry) ")"))
       entry)))
 

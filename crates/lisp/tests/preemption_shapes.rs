@@ -249,7 +249,7 @@ fn native_shape_is_preemptible(name: &str, hog: &str) {
     interp.eval_str(NATIVE_CHAIN).expect("prelude errored");
     settle_native(
         &mut interp,
-        "(dotimes (i 200) (n-outer 40 2 0))",
+        "(doseq (i (range 200)) (n-outer 40 2 0))",
         &[("n-spin", 3), ("n-caller", 3), ("n-outer", 3)],
     );
     let first = first_message(&mut interp, hog);
@@ -294,7 +294,7 @@ fn an_unwound_native_chain_returns_the_same_value() {
     interp.eval_str(NATIVE_CHAIN).expect("prelude errored");
     settle_native(
         &mut interp,
-        "(dotimes (i 200) (n-outer 40 2 0))",
+        "(doseq (i (range 200)) (n-outer 40 2 0))",
         &[("n-spin", 3), ("n-caller", 3), ("n-outer", 3)],
     );
     // A companion hog keeps a process waiting for the worker throughout: with none, a spent
@@ -338,7 +338,11 @@ fn a_native_recursion_is_preemptible() {
     interp
         .eval_str("(defn n-make (d) (if (= d 0) [nil nil] [(n-make (- d 1)) (n-make (- d 1))]))")
         .expect("prelude errored");
-    settle_native(&mut interp, "(dotimes (i 50) (n-make 6))", &[("n-make", 1)]);
+    settle_native(
+        &mut interp,
+        "(doseq (i (range 50)) (n-make 6))",
+        &[("n-make", 1)],
+    );
     let first = first_message(&mut interp, "(n-make 17)");
     process::set_test_no_workers(false);
     assert_eq!(
@@ -369,7 +373,7 @@ fn an_unwound_native_recursion_returns_the_same_value() {
         .expect("prelude errored");
     settle_native(
         &mut interp,
-        "(dotimes (i 50) (n-count (n-make 6)))",
+        "(doseq (i (range 50)) (n-count (n-make 6)))",
         &[("n-count", 1)],
     );
     // The companion keeps a process waiting, so spent budgets unwind (see above).

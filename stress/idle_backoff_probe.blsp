@@ -25,7 +25,7 @@
                    (if (nil? last-at) t (math/max last-at t)))))))
 
 (let (me (self) t0 (os/now))
-  (dotimes (_ k) (spawn (sleeper me)))
+  (doseq (_ (range k)) (spawn (sleeper me)))
   (let ([first-at last-at] (collect k nil nil))
     (io/puts (str "first-finish "
                (- first-at t0)

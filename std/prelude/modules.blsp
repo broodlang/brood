@@ -1106,11 +1106,11 @@ not a header, or does not read: the load itself reports a malformed one."
           ;; providing then published a module with names missing, and its callers died of
           ;; `unbound symbol` — the silent half of KI-127. It raises instead, as a broken
           ;; source module does, and `require-one` releases the claim and its waiters.
-          (unless (%image-load-section img-path
-                    (first sec)
-                    (second sec)
-                    (not (nil? embedded))
-                    (->string key))
+          (when (not (%image-load-section img-path
+                       (first sec)
+                       (second sec)
+                       (not (nil? embedded))
+                       (->string key)))
             (error "require: module '"
               (->string key)
               "' did not decode from the image "
@@ -1617,7 +1617,7 @@ it waits for that load to finish (a half-evaluated module is never observable).
           ;; guard read was stale reloads an already-loaded module — the co-located-secondary
           ;; double-load (ADR-225). The marker is released either way.
           (if (= :%cycle-broken
-                (unless (%registry-member? '*features* key)
+                (when (not (%registry-member? '*features* key))
                   ;; `%with-load-journal` (KI-134, ADR-339): this load's defines and registrations
                   ;; are journalled, so an `%isolate` restore — this process's window or a
                   ;; concurrent one's — replays them instead of rolling back a module every other
@@ -1674,8 +1674,8 @@ it waits for that load to finish (a half-evaluated module is never observable).
       (catch e
         (let (message (error-message e)
               name (->string module))
-          (unless (or (= message (str "require: cannot find module '" name "'"))
-                    (includes? message (str "circular `(:use " name ")`")))
+          (when (not (or (= message (str "require: cannot find module '" name "'"))
+                       (includes? message (str "circular `(:use " name ")`"))))
             (throw e)))))))
 
 (defn %lazy-global (module sym)

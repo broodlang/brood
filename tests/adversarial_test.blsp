@@ -341,7 +341,7 @@
     (let (ws (seq/filter (reflect/check-string-structured NON-TAIL)
                (fn (w) (includes? (:message w) "non-tail"))))
       (is (not (empty? ws)))
-      (dolist (w ws)
+      (doseq (w ws)
         (is (not (nil? (:line w)))))
       ;; and it points at the non-tail call itself — `(* n (fac (- n 1)))` on line 7.
       ;; (It pointed at the `defn` on line 5 until the match lowering stopped rebuilding

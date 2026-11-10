@@ -637,12 +637,14 @@ inlines, while this wrapper stays a call — and it does not mislead past two ar
     (when false :yes)   ;=> nil"
   `(if ~test (do ~@body) nil))
 
+;; `unless` is deprecated by ADR-674 and removed before 1.0: write `(when (not test) …)`.
+;; `nest format --migrate` rewrites it.
 (defmacro unless (test & body)
-  "Evaluate `body` (returning the last) when `test` is falsy, else `nil`.
+  "Deprecated (ADR-674): write `(when (not test) body…)`; `nest format --migrate` rewrites this. Evaluates `body` (returning the last) when `test` is falsy, else `nil`.
 
-    (unless false :yes)   ;=> :yes
-    (unless true :yes)    ;=> nil"
+    (unless false :yes)   ;=> :yes"
   `(if ~test nil (do ~@body)))
+(%register-meta 'unless [:deprecated "0.51.0" :use 'when])
 
 ;; `defonce` — define only if the name is not already bound. The point is
 ;; hot-reload: re-evaluating a file (via `system/reload-defs` or `reflect/load`) re-runs every
@@ -673,7 +675,7 @@ hot-reload (cf. Emacs `defvar`). Once bound, re-evaluating is a no-op; restart
 or re-`def` to force re-init. Works for a module-level name: the bound? check is
 resolved against the LOADING module's namespace (`%defonce-qualified-name`), the same
 binding `def` writes — a bare `(bound? '~name)` would read at root and miss it."
-  `(unless (/bound? (%defonce-qualified-name '~name)) (def ~name ~val)))
+  `(when (/not (/bound? (%defonce-qualified-name '~name))) (def ~name ~val)))
 
 ;; `(comment …)` — the dev-scratch block every Lisp has. Its body is read (so it
 ;; must still be balanced sexps) but never evaluated, which is the point: a

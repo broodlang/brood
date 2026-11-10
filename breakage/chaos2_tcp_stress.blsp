@@ -47,7 +47,7 @@
   (def p36-port (receive ([:p36-port p] p) (after 5000 :timeout)))
 
   ;; Spawn n-clients clients, each sends a unique message and waits for echo
-  (dotimes (i n-clients)
+  (doseq (i (range n-clients))
     (spawn (let (msg (str "client-" i "-hello")
                  c (tcp/connect "127.0.0.1" p36-port))
              (tcp/send c msg)
@@ -88,7 +88,7 @@
   (def p37-port (receive ([:p37-port p] p) (after 5000 :timeout)))
 
   ;; Clients: connect and immediately close
-  (dotimes (_ n)
+  (doseq (_ (range n))
     (let (c (tcp/connect "127.0.0.1" p37-port))
       ;; Connection may be closed by server before we even close our side
       (tcp/close c)))

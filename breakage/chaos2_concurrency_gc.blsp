@@ -17,7 +17,7 @@
 (io/puts "=== P68: 200 concurrent heavy-allocating processes ===")
 (let (me (self)
       n 200)
-  (dotimes (_ n)
+  (doseq (_ (range n))
     (spawn
       (do
         ;; Each process: build and discard 10k-element lists repeatedly
@@ -68,7 +68,7 @@
 
 (let (me (self)
       n 100)
-  (dotimes (i n)
+  (doseq (i (range n))
     (spawn (let (r (p70-compute i 10000)) (send me [:p70 i r]))))
   (defn collect-p70 (remaining wrong)
     (if (= remaining 0)
@@ -97,7 +97,7 @@
 (let (me (self)
       n-readers 100)
   ;; Spawn readers: each does 10k reads of the global
-  (dotimes (_ n-readers)
+  (doseq (_ (range n-readers))
     (spawn (let (result (p71-reader 10000 0)) (send me [:p71 result]))))
   ;; Concurrently rebind the global several times
   (spawn

@@ -78,7 +78,7 @@
 
 (defn flood (pid n)
   "Send `n` messages to `pid`."
-  (dotimes (_ n) (send pid :flood)))
+  (doseq (_ (range n)) (send pid :flood)))
 
 (describe "proc/flag :max-mailbox"
   (test "read/set/clear returns the previous value"

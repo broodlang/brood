@@ -60,7 +60,7 @@
     (let (p (os/spawn "sleep" ["30"])
           chunk (string/repeat "x" 8192))
       ;; ~1.6 MB, far beyond any pipe buffer. Pre-fix this never returned.
-      (dotimes (_i 200) (os/write p chunk))
+      (doseq (_i (range 200)) (os/write p chunk))
       ;; Still alive and still scheduling — the point of the whole exercise.
       (assert= (type-of p) :subprocess)
       (assert= (+ 1 1) 2)

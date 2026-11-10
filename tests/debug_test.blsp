@@ -53,7 +53,7 @@
 (describe "debugger — trace fan-in across processes"
   :isolated (test "spy events from many workers fan into one debugger's ordered log"
     (let (dbg (start-debugger) me (self))
-      (dotimes (i 4)
+      (doseq (i (range 4))
         (let (n i)
           (spawn (with-debugger dbg (fn () (debug/spy (* (inc n) n)) (send me [:done]))))))
       (letrec (drain (fn (k)
@@ -79,7 +79,7 @@
       (dbg-stop dbg)))
   (test "many processes park simultaneously and all resume (no single-session limit)"
     (let (dbg (start-debugger) me (self))
-      (dotimes (i 5)
+      (doseq (i (range 5))
         (let (n i)
           (spawn (with-debugger dbg (fn () (break (str "bp-" n)) (send me [:done]))))))
       (assert= true (wait-until dbg (fn (s) (= 5 (count (get s :paused))))))
@@ -100,7 +100,7 @@
         (fn ()
           (span "root"
             (fn ()
-              (dotimes (i 3) (let (n i) (span-spawn (str "w" n) (fn () (debug/spy (* n 2))))))
+              (doseq (i (range 3)) (let (n i) (span-spawn (str "w" n) (fn () (debug/spy (* n 2))))))
               nil))))
       ;; wait until root + 3 worker spans have all closed
       (assert= true (wait-until dbg (fn (s) (>= (exit-count s) 4))))
@@ -128,7 +128,8 @@
         (fn ()
           (span "root"
             (fn ()
-              (dotimes (i 3) (let (n i) (spawn (span (str "c" n) (fn () (debug/spy (* n 2)))))))
+              (doseq (i (range 3))
+                (let (n i) (spawn (span (str "c" n) (fn () (debug/spy (* n 2)))))))
               nil))))
       (assert= true (wait-until dbg (fn (s) (>= (exit-count s) 4))))
       (let (tree (causal-tree dbg))
@@ -211,7 +212,7 @@
 (describe "debugger — aggregate / population queries"
   :isolated (test "value-distribution, modal-value and outliers summarise many workers"
     (let (dbg (start-debugger) me (self))
-      (dotimes (i 10)
+      (doseq (i (range 10))
         (let (n i)
           (spawn (with-debugger dbg (fn () (debug/spy (classify n)) (send me [:done]))))))
       (letrec (drain (fn (k)

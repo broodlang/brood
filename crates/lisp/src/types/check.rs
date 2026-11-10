@@ -121,6 +121,7 @@
 pub mod annot;
 mod cross_module_def;
 mod ctx;
+mod deprecated_macros;
 pub(super) mod deps;
 mod discarded_catch;
 mod exhaustive;
@@ -536,7 +537,7 @@ fn defn_clauses(heap: &Heap, form: Value) -> Option<(Symbol, Vec<Value>)> {
 /// ignores the accumulator in both arms, so the `reduce` never folds and the result is
 /// whatever the last element produced. Nothing caught this. The unused-binding lint only
 /// ever looked at `let`, and by the time the checker's main walk runs, a pattern clause
-/// has been lowered to `match*` — where its binders become SYNTHETIC lets, which that lint
+/// has been lowered to `%match` — where its binders become SYNTHETIC lets, which that lint
 /// deliberately exempts (removing that exemption fires 69 times across std/ + tests/, so
 /// it is load-bearing). Hence a surface pass: here the clause is still as written.
 ///
@@ -681,11 +682,11 @@ fn lint_fn_pattern_clauses(heap: &Heap, items: &[Value], out: &mut Vec<(Option<P
         }
     }
     // A clause whose head holds a non-symbol is a PATTERN clause (the whole `fn` is then
-    // lowered to `match*`); one of only symbols is an arity clause (a native multi-arity
+    // lowered to `%match`); one of only symbols is an arity clause (a native multi-arity
     // arm). Both bind per-clause names, so both are linted — the wording differs so the
     // reader knows which construct is meant. It is decided once for the whole `fn`, NOT
     // per clause, because the LOWERING is per fn: one pattern head anywhere sends the
-    // entire dispatch through `match*`, so every clause's binders are then pattern
+    // entire dispatch through `%match`, so every clause's binders are then pattern
     // binders, including a head that happens to be all symbols. Naming that one a
     // "parameter" would describe a construct the program does not have.
     let any_pattern = heads.iter().any(|&h| {
@@ -908,7 +909,7 @@ fn occurrences_in(heap: &Heap, pattern: Value, sym: Symbol) -> usize {
 }
 
 /// **Unused binders at every other binding form**, on the un-expanded tree. Each of these
-/// lowers to `match*` or to synthetic `let`s, which the main walk's unused-`let` lint
+/// lowers to `%match` or to synthetic `let`s, which the main walk's unused-`let` lint
 /// exempts by design, so before this a binder nothing read was reported only when it was
 /// a plain symbol in a `let`/`letrec`. Two of the cases are bugs, not tidiness:
 /// `(fold-for (acc 0 x xs) x)` never folds, and a `match` arm that binds a field and then
@@ -1051,7 +1052,7 @@ fn report_unused_binders(
 /// Walk `form` (un-expanded) for inline pattern-clause `fn` literals and record each
 /// one's `(heads, tail)` arms in `ctx` under its printed clause-head-list key — the side
 /// channel [`sigs::clause_lambda_ret`] reads back at call sites, where the expanded tree
-/// holds only the lowered variadic `match*` lambda (see `Ctx::fn_literal_clauses`).
+/// holds only the lowered variadic `%match` lambda (see `Ctx::fn_literal_clauses`).
 /// Quoted/quasiquoted subtrees are data/templates and `comment` never runs — skipped,
 /// like the other surface passes.
 fn record_fn_literal_clauses(heap: &Heap, form: Value, ctx: &mut Ctx) {
@@ -1084,7 +1085,7 @@ fn record_fn_literal_clauses(heap: &Heap, form: Value, ctx: &mut Ctx) {
 }
 
 /// Read `items` (a surface `(fn …)` form's items) as a literal the expander will lower
-/// to `match*` — clause style with at least one pattern head or guard, or the plain
+/// to `%match` — clause style with at least one pattern head or guard, or the plain
 /// single-clause style with a destructuring parameter. `None` for anything the expander
 /// keeps as a native `fn` (plain params, arity-only clauses), which the direct path in
 /// `clause_lambda_ret` / `lambda_ret` already types. Returns the head-list key (printed
@@ -2981,7 +2982,7 @@ fn infer_same_file_functions(
         }
     }
     // Inline PATTERN-clause `fn` literals get the same surface record, keyed by their
-    // printed clause-head list: the expanded tree holds only the lowered `match*` lambda,
+    // printed clause-head list: the expanded tree holds only the lowered `%match` lambda,
     // whose embedded `(%match-error … (quote heads))` call is how
     // `sigs::clause_lambda_ret` finds its way back here from a combinator call site.
     for &form in forms {
@@ -3356,6 +3357,7 @@ fn run_shape_lints(
     exhaustive::check_matches(heap, forms, ctx, out);
     guard_effects::check_guards(heap, forms, out);
     discarded_catch::check_discarded_catches(heap, forms, out);
+    deprecated_macros::check_deprecated_macros(heap, forms, out);
     let own: Vec<String> = crate::eval::macros::file_modules(heap, forms)
         .into_iter()
         .map(value::symbol_name)
@@ -3468,7 +3470,7 @@ fn reconcile_arity(heap: &Heap, value_form: Value, sig: Sig) -> Sig {
     };
     let required = arity.min;
     // **Fill in, never overrule.** A multi-clause `defn` lowers to a single variadic
-    // `fn` over `match*` (ADR-226), so the *form's* arity says "any number of arguments"
+    // `fn` over `%match` (ADR-226), so the *form's* arity says "any number of arguments"
     // while the clause inference knows the real one — reshaping to the form would throw
     // that away and offer `(...any) -> …`. So this only acts on the case it exists for:
     // an inference that produced no parameters at all for a definition that has some.

@@ -129,7 +129,7 @@
         (tcp/controlling-process s (self))
         (tcp/set-idle-timeout c 2000)
         ;; Each send resets the idle stamp; the last one leaves ~500 ms on the clock.
-        (dotimes (_ 5)
+        (doseq (_ (range 5))
           (tcp/send c "a")
           (proc/sleep 500))
         (let (still (receive ([:tcp-closed ^c] :reaped-BUG) (after 100 :alive)))
@@ -199,7 +199,7 @@
         (tcp/set-binary s true)
         ;; drive the mailbox directly: the kernel is free to coalesce real socket
         ;; reads, and this case is precisely about NOT being coalesced.
-        (dolist (b (list "a" "b" "\r" "\n" "\r" "\n" "z"))
+        (doseq (b (list "a" "b" "\r" "\n" "\r" "\n" "z"))
           (send (self) [:tcp s (bytes/concat b)]))
         (let (r (read-until s "\r\n\r\n"))
           (assert= (string/bytes-> (nth r 0)) "ab\r\n\r\n")
@@ -224,7 +224,7 @@
         ;; the last chunk both completes the delimiter and carries surplus, so this
         ;; also pins the cut offset (computed from the running total + an index into
         ;; the straddle probe, never from a scan of the whole buffer).
-        (dolist (b (list "h" "\r\n\r" "x" "\r\n" "\r\ntail"))
+        (doseq (b (list "h" "\r\n\r" "x" "\r\n" "\r\ntail"))
           (send (self) [:tcp s (bytes/concat b)]))
         (let (r (read-until s "\r\n\r\n"))
           (tcp/close c)
@@ -242,7 +242,7 @@
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
         (tcp/set-binary s true)
-        (dotimes (_i 200) (send (self) [:tcp s (bytes/concat "0123456789")]))
+        (doseq (_i (range 200)) (send (self) [:tcp s (bytes/concat "0123456789")]))
         (send (self) [:tcp s (bytes/concat "END\r\n\r\nrest")])
         (let (r (read-until s "\r\n\r\n"))
           (tcp/close c)

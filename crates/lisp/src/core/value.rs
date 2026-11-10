@@ -1251,7 +1251,7 @@ pub fn tag(v: Value) -> Tag {
 /// rest-list, so the common small-arity call is cheap). Only *arity* clauses —
 /// plain symbol params plus optional `&optional`/`&` rest — become arms; clauses
 /// with literal/destructuring *patterns* (e.g. `((3 _) …)`) are lowered to the
-/// `match*` engine instead (see `eval::macros::lower_fn`).
+/// `%match` engine instead (see `eval::macros::lower_fn`).
 #[derive(Clone, Default)]
 pub struct ClosureArm {
     pub params: Vec<Symbol>,

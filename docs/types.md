@@ -641,7 +641,7 @@ item's landing; later ADRs refined several (see
   catch-all clause is present). No new parser or pass — recognizes the exact
   compiled shape `match`'s no-catch-all failure takes
   (`(%raise (%match-error …))`, ADR-501) in the existing macroexpanded walk. `case`
-  lowers to the same `match*`, so it is covered too. See
+  lowers to the same `%match`, so it is covered too. See
   [`docs/type-match-exhaustiveness.md`](type-match-exhaustiveness.md).
 - ✅ **Match redundancy / unreachable-clause detection** (ADR-122) — a clause
   whose literal test duplicates one already tried earlier in the same

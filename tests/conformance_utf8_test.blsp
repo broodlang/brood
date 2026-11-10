@@ -170,8 +170,7 @@
 
   ;; Beyond Kuhn: every sequence that decodes must re-encode to the same bytes.
   (test "round-trip: decode then encode is identity on the bytes"
-    (dolist (hex (list "00"
-                   "7F" "C280" "DFBF" "E0A080" "EFBFBF" "F0908080" "F48FBFBF" "EFBFBE"))
+    (doseq (hex (list "00" "7F" "C280" "DFBF" "E0A080" "EFBFBF" "F0908080" "F48FBFBF" "EFBFBE"))
       ;; check-allow :type-mismatch — `u8-bytes` decodes hex, so it is `bytes | failure`;
       ;; every literal in the list above is valid hex and nothing here guards it.
       (assert= (check-allow :type-mismatch (string/->bytes (string/bytes-> (u8-bytes hex))))

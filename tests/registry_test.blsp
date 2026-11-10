@@ -30,8 +30,8 @@
 ;; Fan `n` processes out over `f` (called with its index) and wait for all of them.
 (defn- reg-fan (n f)
   (let (me (self))
-    (dotimes (i n) (spawn (do (f i) (send me [:reg-done]))))
-    (dotimes (_ n) (receive ([:reg-done] :ok) (after 30000 :timeout)))))
+    (doseq (i (range n)) (spawn (do (f i) (send me [:reg-done]))))
+    (doseq (_ (range n)) (receive ([:reg-done] :ok) (after 30000 :timeout)))))
 
 (def *reg-plain* {})
 (def *reg-swapped* {})

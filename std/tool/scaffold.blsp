@@ -612,7 +612,7 @@ only one, else the one called \"default\"."
 ;; degrades to "written as-is" rather than mangled; failures are swallowed because a
 ;; cosmetic pass must never break scaffolding.
 (defn- scaffold-format-generated (paths)
-  (dolist (p paths)
+  (doseq (p paths)
     ;; check-allow :discarded-catch — a cosmetic formatting pass must never break scaffolding
     (when (string/ends-with? p ".blsp")
       (check-allow :discarded-catch (try (format/file p) (catch _ nil))))))
@@ -631,13 +631,13 @@ only one, else the one called \"default\"."
         actual-name (if in-place (path/basename (file/cwd)) nm)
         reusing-dir (file/exists? nm)
         tmpl (or template "default"))
-    (unless (or from (includes? scaffold/*templates* tmpl))
+    (when (not (or from (includes? scaffold/*templates* tmpl)))
       (error "new: unknown template '"
         tmpl
         "' (use one of: "
         (string/join scaffold/*templates* ", ")
         "; a package's own templates come with --from <package>)"))
-    (unless (or in-place (project-valid-name? nm))
+    (when (not (or in-place (project-valid-name? nm)))
       (error "new: invalid project name '" nm "' (no '/' or spaces, and not empty)"))
     (when (and in-place (= actual-name ""))
       (error "new: cwd has no basename — cannot derive a project name"))
@@ -686,7 +686,7 @@ only one, else the one called \"default\"."
         (io/puts (str "  " nm "/.mcp.json"))
         (io/puts (str "  " nm "/docs/brood-for-claude.md"))
         (io/puts (str "  " nm "/.claude/skills/writing-brood/SKILL.md"))
-        (dolist (f code-files) (io/puts (str "  " f))))
+        (doseq (f code-files) (io/puts (str "  " f))))
       (when project/*config-git-init*
         (if (= 0 (os/run-process "git" (list "init" "-q" nm)))
           (io/puts "  initialized a git repository")

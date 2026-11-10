@@ -331,7 +331,7 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(let (s \"12\") (if (failure? (string/->number s)) (string/->number s) 0))",
         // a guard that DIVERGES narrowing the rest of the body (v0.25.2)
         "(let (r \"x\") (when (nil? r) (error \"no\")) r)",
-        "(let (r \"x\") (unless r (error \"no\")) r)",
+        "(let (r \"x\") (if r nil (do (error \"no\"))) r)",
         // higher-order results (parametric — ADR-078)
         "(map [1 2 3] inc)",
         "(seq/filter [1 2 3 4] math/even?)",
@@ -709,7 +709,7 @@ fn an_inferred_parameter_domain_over_approximates_the_real_one() {
         "(defn f (x) (if (nil? x) 0 (+ x 1)))",
         "(defn f (x) (if (string? x) 1 2))",
         "(defn f (x) (when (string? x) (string/length x)))",
-        "(defn f (x) (unless (string? x) 0))",
+        "(defn f (x) (if (string? x) nil (do 0)))",
         "(defn f (x) (cond (nil? x) 0 (string? x) (string/length x) else 1))",
         "(defn f (x) (and (string? x) (string/length x)))",
         "(defn f (x) (or (nil? x) (+ x 1)))",
@@ -728,7 +728,7 @@ fn an_inferred_parameter_domain_over_approximates_the_real_one() {
         "(defn f (x) (if x 1 (string/length x)))",
         "(defn f (x) (let (v x) (if v (inc v) 0)))",
         "(defn f (x) (when x (inc x)))",
-        "(defn f (x) (unless x (string/length x)))",
+        "(defn f (x) (if x nil (do (string/length x))))",
         "(defn f (x) (if-let (v (get x :k)) (inc v) 0))",
         "(defn f (x) (when-let (v (get x :k)) (str v)))",
         "(defn f (x) (if (not x) 0 (inc x)))",

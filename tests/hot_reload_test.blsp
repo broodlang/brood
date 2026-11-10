@@ -101,7 +101,7 @@
     (:stop total)))
 
 (defn hrn-total (pid) (send pid [:get (self)]) (receive ([:total t] t) (after 20000 :timeout)))
-(defn hrn-warm (pid) (dotimes (_k 3000) (send pid [:add 1])) (hrn-total pid))
+(defn hrn-warm (pid) (doseq (_k (range 3000)) (send pid [:add 1])) (hrn-total pid))
 ;; An arm's tier once a queued background compile has finished.
 (defn hrn-tier (f tries)
   (let (state (get (%jit-arm-state f 1) :state))
@@ -140,7 +140,7 @@
       (send pid [:hold 300])
       (proc/sleep 50)
       (hrn-times-ten "hrn-b")
-      (dotimes (_k 200000) (send pid [:add 1]))
+      (doseq (_k (range 200000)) (send pid [:add 1]))
       (let (total (hrn-total pid))
         (is (<= (- (+ 3000 (* 10 200000)) total) (* 9 128))))
       (send pid :stop)))
@@ -151,7 +151,7 @@
       (proc/sleep 20)
       (let (before (proc/info pid))
         (assert= :waiting (get before :status))
-        (dotimes (_k 2000) (send pid [:add 1]))
+        (doseq (_k (range 2000)) (send pid [:add 1]))
         (hrn-total pid)
         (proc/sleep 20)
         (let (after (proc/info pid))

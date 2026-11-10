@@ -251,7 +251,7 @@ transitively-closed lock file and puts each dep's source on *load-path*."
 ;; gather; the first failure raises with the package named. Returns `[[name releases]...]`.
 (defn- package-fetch-frontier (base frontier)
   (let (me (self))
-    (dolist (name frontier)
+    (doseq (name frontier)
       (spawn (send me
                [:fetched
                  name
@@ -294,7 +294,7 @@ transitively-closed lock file and puts each dep's source on *load-path*."
 ;; release is left to the solver, which (via the provider below) only ever sees the compatible
 ;; ones. This makes the resolver care about the brood version, not just the root-project setup gate.
 (defn- package-check-brood-compat (fetched)
-  (dolist (entry (%map-pairs fetched))
+  (doseq (entry (%map-pairs fetched))
     (let ([name releases] entry)
       (when (and (not (empty? releases)) (empty? (seq/filter releases package-release-brood-ok?)))
         (let (needed (seq/distinct (seq/filter (map releases (fn (r) (get r :brood)))
@@ -1639,7 +1639,7 @@ temp, and the second rename would find it gone.
 ;; dep's resolved direct deps via `index`. `seen` breaks cycles / shared deps:
 ;; a name already printed is shown once more, marked, without re-descending.
 (defn- package-print-tree (deps index prefix seen)
-  (dolist (d deps)
+  (doseq (d deps)
     (let (name (get d :name)
           dup (includes? seen name)
           entry (get index name))
@@ -1943,7 +1943,7 @@ application (`nest search --enhances bedit zig`). Backs `nest search`.
                            ""
                            (str " that enhance " enhances))
                          "."))
-              (dolist (p pkgs) (io/puts (registry-search-line p)))))
+              (doseq (p pkgs) (io/puts (registry-search-line p)))))
           nil)))))
 
 ;; --- publish: build a source tarball, then POST it (Bearer-token authed) -----
@@ -2003,7 +2003,7 @@ construction, which is the point — see `registry-build-tarball`."
   are local, so they are omitted (with a warning)."
   (let (registry-deps (seq/filter project/*dependencies* (fn (d) (= (dep-kind d) :registry)))
         other (seq/filter project/*dependencies* (fn (d) (not (= (dep-kind d) :registry)))))
-    (dolist (d other)
+    (doseq (d other)
       (io/puts (str "package: warning — omitting non-registry dependency "
                  (->string (get d :name))
                  " ("

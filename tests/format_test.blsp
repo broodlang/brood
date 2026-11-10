@@ -38,7 +38,7 @@
   ;; The contract that actually protects the tree: formatting must not GROW a file that
   ;; is already canonical. A forced break is visible as extra lines.
   (test "a canonical one-line form is unchanged, so re-formatting cannot grow it"
-    (dolist (src (list "(sqrt 9/4)" "(math/floor 1.5M)" "(list 1/2)" "(f 22/7 1.5M)"))
+    (doseq (src (list "(sqrt 9/4)" "(math/floor 1.5M)" "(list 1/2)" "(f 22/7 1.5M)"))
       (let (out (source src))
         (assert= out (str src "\n"))
         (assert= (count-newlines out) 1)
@@ -117,10 +117,10 @@
             "(if (and (some-long-predicate-name alpha beta gamma)\n      (another-long-predicate-name"))
       (is (includes? out "(third-one eta theta))\n  (then-branch)\n  (else-branch))"))))
   (test "the defn shapes are idempotent"
-    (dolist (in ["(defn- long-function-name (x y z) (some-long-body-form x y z w v u u1 u2) (another-long-body x y z w v))"
-                  "(defn arity ((x) (* x x)) ((x y) (* x y)) ((x y z) (* x y z) (+ x y z) (- x y z) (+ x y z) (- x y z) (+ x y z)))"
-                  "(defn long-params (alpha-parameter beta-parameter gamma-parameter delta-parameter epsilon-parameter zeta-parameter) (+ alpha-parameter beta-parameter))"
-                  "(defn also-long (alpha-parameter beta-parameter gamma-parameter delta-parameter epsilon-parameter zeta-parameter eta-parameter theta-parameter iota-parameter) (+ alpha-parameter beta-parameter))"])
+    (doseq (in ["(defn- long-function-name (x y z) (some-long-body-form x y z w v u u1 u2) (another-long-body x y z w v))"
+                 "(defn arity ((x) (* x x)) ((x y) (* x y)) ((x y z) (* x y z) (+ x y z) (- x y z) (+ x y z) (- x y z) (+ x y z)))"
+                 "(defn long-params (alpha-parameter beta-parameter gamma-parameter delta-parameter epsilon-parameter zeta-parameter) (+ alpha-parameter beta-parameter))"
+                 "(defn also-long (alpha-parameter beta-parameter gamma-parameter delta-parameter epsilon-parameter zeta-parameter eta-parameter theta-parameter iota-parameter) (+ alpha-parameter beta-parameter))"])
       (let (once (source in))
         (assert= (source once) once))))
   (test "let bindings break as pairs aligned under the first element"

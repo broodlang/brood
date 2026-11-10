@@ -183,7 +183,7 @@ const CORPUS: &[&str] = &[
     "(defn ma ((x) :one) ((x y) :two) ((x y & r) [:many (count r)])) [(ma 1) (ma 1 2) (ma 1 2 3 4)]",
     // a variadic helper driven in a tail loop (rest list rebuilt each call)
     "(defn vmax (& xs) (reduce (rest xs) (first xs) (fn (a b) (if (< a b) b a)))) (vmax 3 9 2 7 1)",
-    // pattern-dispatch fns (string/lower to match* whose no-match arm is `(%raise (%match-error
+    // pattern-dispatch fns (string/lower to %match whose no-match arm is `(%raise (%match-error
     // (quote ctx) m (quote pats)))`): the VM now compiles `quote` + vector/map literals,
     // so these run on the VM instead of deferring. Recursive + non-total + the throw path.
     "(defn pfib ((0) 0) ((1) 1) ((n) (+ (pfib (- n 1)) (pfib (- n 2))))) (pfib 12)",
@@ -266,7 +266,7 @@ const CORPUS: &[&str] = &[
 #[test]
 fn engines_agree_on_corpus() {
     // Run on a large, explicitly-sized stack (like tests/suite.rs and the `brood`
-    // binaries): some corpus entries are pattern-dispatch fns whose `match*`
+    // binaries): some corpus entries are pattern-dispatch fns whose `%match`
     // expansion is a large nested-`if` tree, and macroexpand/compile recurse over it
     // deeper than libtest's small default thread stack would allow.
     std::thread::Builder::new()

@@ -3437,6 +3437,11 @@ Design notes for whoever picks it up:
 
 ### Reduce before adding
 
+🟡 **Decided by ADR-674 (2026-11-10).** `doseq` is the one form for effect; `dotimes`, `dolist`,
+`unless` and `match*` (now the internal `%match`) are deprecated with `nest format --migrate`, and
+are removed before 1.0. `case` and `with-out-str`/`with-err-str` stay (the ADR says why). The
+original note:
+
 The more valuable direction, and it needs no evaluator change — both families are
 prelude macros:
 

@@ -389,7 +389,7 @@ NON-LINEAR patterns (the same name twice) work.
           [(cons (%match-optional-slot (first pats)) (nth sub 0)) (nth sub 1) (nth sub 2)]))))
 
 (defn- %match-compile-list (pat target bound success fail)
-  ;; plain `nth`, not a destructuring `let`: that lowers to the `match*` this file defines
+  ;; plain `nth`, not a destructuring `let`: that lowers to the `%match` this file defines
   (let (parts (%match-split pat))
     (%match-compile-seq pat
       (nth parts 0)
@@ -893,15 +893,23 @@ and carries the name as `:name`."
     (%match-no-match context target (%match-clause-patterns clauses))
     false))
 
-;; match* — the shared engine. `context` (a keyword like :match/:let, or a fn
-;; name) is embedded in the failure. `match` is the value-dispatch surface; the
-;; `let` and `fn` special forms target match* directly with their own context.
-(defmacro match* (context expr & clauses)
+;; %match — the shared engine (ADR-674; it was the public `match*`). `context` (a keyword
+;; like :match/:let, or a fn name) is embedded in the failure. `match` is the
+;; value-dispatch surface; the destructuring `let` and pattern `fn` lower to %match
+;; directly with their own context.
+(defmacro %match (context expr & clauses)
   "The shared pattern-matching ENGINE behind `match`, `case`, and the destructuring `let`
 and `fn` forms. `context` (a keyword like `:match`/`:let`, or a function name) is embedded
 in the no-match failure so the error names the form that failed. Prefer `match` — this is
 the surface the special forms target directly when they need their own context."
   (let (v (reflect/gensym "m")) `(let (~v ~expr) ~(%match-build clauses v context))))
+
+;; `match*` is the engine's old public name, deprecated by ADR-674 and removed before 1.0.
+;; `nest format --migrate` rewrites it.
+(defmacro match* (context expr & clauses)
+  "Deprecated (ADR-674): the pattern-matching engine's old name. Write `match`; `nest format --migrate` rewrites this."
+  `(/%match ~context ~expr ~@clauses))
+(meta match* :deprecated "0.51.0" :use 'match)
 
 ;; (match expr (pattern [:when guard] body...) ...) — match `expr` against each
 ;; clause in order; the first whose pattern (and guard) matches runs its body.
@@ -911,10 +919,10 @@ the surface the special forms target directly when they need their own context."
 
     (match [1 2] ([a b] (+ a b)))                  ;=> 3
     (match 5 (n :when (> n 3) :big) (_ :small))    ;=> :big"
-  `(match* :match ~expr ~@clauses))
+  `(%match :match ~expr ~@clauses))
 
 ;; ---- case: literal dispatch, flat pairs -------------------------------------
-;; Sugar over `match*`, but NOT a synonym for it (which is why it earns a name
+;; Sugar over `%match`, but NOT a synonym for it (which is why it earns a name
 ;; under "one spelling each"): `case` accepts only *literal* tests, so it cannot
 ;; silently bind where you meant to compare — the one trap `match` has. A bare
 ;; symbol test is therefore rejected rather than read as a binder.
@@ -954,4 +962,4 @@ match raises a `:match` error with `:context :case`, exactly as `match` does.
 
     (case :b :a 1 :b 2 :other)   ;=> 2
     (case :z :a 1 :other)        ;=> :other"
-  `(match* :case ~expr ~@(%case-clauses clauses nil)))
+  `(%match :case ~expr ~@(%case-clauses clauses nil)))

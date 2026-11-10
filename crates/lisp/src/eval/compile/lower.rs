@@ -604,7 +604,7 @@ pub(crate) fn is_fn_form(heap: &Heap, form: Value) -> bool {
 /// when the closure is first called, keyed by its RUNTIME body handle.
 pub(crate) fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node> {
     // Post-macroexpand a pattern-param / multi-clause `fn` is already lowered to
-    // `match*`; a `fn` reaching here should be plain. Defer defensively otherwise.
+    // `%match`; a `fn` reaching here should be plain. Defer defensively otherwise.
     if crate::eval::macros::fn_needs_lowering(heap, form) {
         return None;
     }
@@ -1091,7 +1091,7 @@ fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -
                 if value::symbol_is(h, kw::QUOTE) {
                     // Quoted data → one immovable `Const` (`const_node` promotes the
                     // datum into the shared RUNTIME region). Unblocks any body that
-                    // quotes data — notably match*'s no-match arm,
+                    // quotes data — notably %match's no-match arm,
                     // `(%raise (%match-error (quote :ctx) m (quote pats)))`, which had
                     // been forcing every non-total `match` / pattern-dispatch `fn`
                     // onto the tree-walker.
@@ -1147,7 +1147,7 @@ fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -
                 // Any *other* special form (`def`/`quasiquote`/`binding`) is outside
                 // the VM's vocabulary — defer the whole closure to the tree-walker.
                 // (`if`/`do`/`let`/`letrec`/`fn`/`quote` are handled above;
-                // `defmacro`/`and`/`or`/`match`/`match*` aren't special forms — they're
+                // `defmacro`/`and`/`or`/`match`/`%match` aren't special forms — they're
                 // macros, already expanded to these core forms by the compile pass.)
                 if crate::eval::is_special_form(h) {
                     return None;

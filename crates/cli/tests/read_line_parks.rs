@@ -36,7 +36,7 @@ use support::script;
 /// inside the spawned form would evaluate in the child.
 const WAVE: &str = r#"
 (defn reader () (io/read-line))
-(dotimes (i 256) (spawn (reader)))
+(doseq (i (range 256)) (spawn (reader)))
 
 (defn worker (parent i) (send parent [:done i]))
 (defn collect (n got)
@@ -47,7 +47,7 @@ const WAVE: &str = r#"
       (after 20000 got))))
 (defn wave (n)
   (let (me (self))
-    (do (dotimes (i n) (spawn (worker me i)))
+    (do (doseq (i (range n)) (spawn (worker me i)))
         (collect n 0))))
 
 ;; Let the readers get scheduled (and, pre-fix, pin the pool) before the wave is queued.

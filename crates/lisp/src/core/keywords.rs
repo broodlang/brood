@@ -46,6 +46,9 @@ pub const COND: &str = "cond";
 pub const AND: &str = "and";
 pub const OR: &str = "or";
 pub const MATCH: &str = "match";
+/// The pattern-matching engine `match`, `case` and the destructuring `let`/`fn` lower to
+/// (ADR-674; `match*` before it, still accepted while deprecated).
+pub const MATCH_ENGINE: &str = "%match";
 pub const MATCH_STAR: &str = "match*";
 pub const TRY: &str = "try";
 pub const CATCH: &str = "catch";

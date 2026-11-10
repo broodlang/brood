@@ -58,8 +58,10 @@ Left from that session:
 
 The owner opened the 1.0 work. The plan is [`road-to-1.0.md`](road-to-1.0.md); the promise is
 ADR-673 (accepted 2026-11-10; the deprecation window's minimum time is deferred); the positioning it starts from is
-[`brood-among-lisps.md`](brood-among-lisps.md). Under the freeze test, open thread 6 below has to
-be decided before 1.0, because it removes forms; the others are additive.
+[`brood-among-lisps.md`](brood-among-lisps.md). Thread 6 below was the one that had to be settled
+before 1.0, because it removes forms: ADR-674 deprecated `dotimes`, `dolist`, `unless` and `match*`
+(stage 1, 2026-11-10; `nest format --migrate` rewrites them), and stage 2 removes them before
+`rc.0`. The other threads are additive.
 
 ## Open threads: language features, in value order
 
@@ -73,7 +75,7 @@ ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character ty
 3. **Regex named groups.** Lookaround and backreferences are missing too (`std/regex.blsp`).
 4. **`std/url`: resolving against a base URL.** Still RFC 3986, not WHATWG.
 5. **A declared shadow for root functions.** Only a shadowing macro warns (ADR-423).
-6. **"Reduce before adding":** four iteration forms and three match forms.
+6. ~~**"Reduce before adding"**~~ — decided by ADR-674; stage 2 (removal) is open in `road-to-1.0.md`.
 7. **The non-tail lint:** mutual `letrec` recursion, `try` bodies, conditional-position demands.
 8. **View patterns** (low to medium value).
 9. **Parametric abilities** (low).

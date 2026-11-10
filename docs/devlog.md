@@ -1236,3 +1236,18 @@ narrow promise, and widening it later is a relaxation. A project opts into new l
 `project.blsp` key. Nothing is carved out as `:beta`: everything public is covered at 1.0, and
 the release candidates (`rc.0` onward) are where the surface settles. The minimum time for a
 deprecation is deferred until closer to 1.0.
+
+2026-11-10 (ADR-674). Reduce before adding, stage 1. `doseq` now walks `for`'s bindings as
+`fold-for` does, with a nil accumulator, instead of building `for`'s list and discarding it:
+368 ms against 560 at tier 2 (3M iterations over a table put), 951 against 1333 at tier 1;
+`dotimes` is 328 and 716, a gap left to the range fold. `dotimes`, `dolist`, `unless` and
+`match*` are deprecated: each still works, and `nest check` warns at each use. A macro's
+deprecation had warned nowhere, because the checker reads expanded code, so
+`types/check/deprecated_macros.rs` walks the unexpanded forms for it. `nest format --migrate`
+(`std/tool/migrate.blsp`, over the lossless CST) rewrites the four forms. It migrated 69 files
+in std and the tests; the Rust tests' embedded Brood was rewritten by hand. One trap on the way:
+the first run of the migration also renamed the `match*` alias's own `defmacro` head, so
+`%match` was defined as a macro expanding to itself, and the source boot hit the expansion cap
+in `try`. The migration now rewrites only a call. `match*` became `%match`, the engine's internal
+name; the compile pass emits `/%match`. Guard: `tests/reduce_forms_test.blsp`, whose warning test
+goes red with the new pass disabled.

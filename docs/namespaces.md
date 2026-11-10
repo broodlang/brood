@@ -177,7 +177,7 @@ one thing it deliberately can't do is *hard* sealing — which §2 says we don't
   re-prefixed (so `(def observer/observe …)` from outside works; matches Clojure).
 - A bare symbol resolves in order: **(1)** local lexical binding (unchanged —
   resolution only touches *free* references; the resolver tracks `let`/
-  `letrec`/`fn` binders and over-approximates `match*` pattern binders), **(2)** an
+  `letrec`/`fn` binders and over-approximates `%match` pattern binders), **(2)** an
   **ambient** name (declared with `defdyn`, ADR-151), **(3) own-namespace** —
   ns-qualified (`observe` → `observer/observe`) if such a global **already exists**
   *or* the name was **pre-scanned** as a def head this file will create (the

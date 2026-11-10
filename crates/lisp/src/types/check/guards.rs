@@ -978,7 +978,7 @@ pub(super) fn match_coverage(heap: &Heap, raised: Value, ctx: &Ctx) -> Option<Ma
         return Some(MatchCoverage::Unknown);
     };
     // Name the *surface* form in the diagnostic. `match`/`case`/refutable `let`
-    // all lower to the same `match*` failure, so the embedded context keyword is
+    // all lower to the same `%match` failure, so the embedded context keyword is
     // the only thing that distinguishes them — without it a `case` was reported
     // as "match: not exhaustive", naming a form the author never wrote.
     // (The context arrives as the *unevaluated* `(quote :match)` / `(quote :case)`

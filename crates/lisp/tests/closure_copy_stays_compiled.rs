@@ -120,7 +120,7 @@ fn a_closure_inside_a_spawned_capture_stays_compiled() {
     }
     let (ok, peak, workers) = run(
         "(let (repo {:adaptor (make-adaptor) :pool (start-pool)} parent (self))
-           (dolist (c (range 200))
+           (doseq (c (range 200))
              (spawn (send parent [:done ((get (get repo :adaptor) :exec) (get repo :pool) c) c])))
            (collect 200))",
     );
@@ -135,7 +135,7 @@ fn a_closure_received_in_a_message_stays_compiled() {
     }
     let (ok, peak, workers) = run(
         "(let (adaptor (make-adaptor) pool (start-pool) parent (self))
-           (dolist (c (range 200))
+           (doseq (c (range 200))
              (let (client (spawn (receive ([:work f] (f)))))
                (send client [:work (fn () (send parent [:done ((get adaptor :exec) pool c) c]))])))
            (collect 200))",

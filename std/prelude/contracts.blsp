@@ -58,7 +58,7 @@ or `orig` itself when nothing is to be enforced — contracts unarmed and the na
 ;; with no stdlib image to vouch for the name — the cold prelude build — that head would
 ;; resolve while the prelude is being built.
 (defn- %contract-machinery (name orig type)
-  (unless (bound? 'contract/shim) (require-one 'contract))
+  (when (not (bound? 'contract/shim)) (require-one 'contract))
   ((reflect/eval 'contract/shim) name orig type))
 
 (defmacro sig! (name type)
