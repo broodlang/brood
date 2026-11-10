@@ -4,8 +4,9 @@
 //! half-block cells a terminal shows it in (`half_blocks`).
 //!
 //! A frame repaints often and a memoised fragment is not guaranteed, so the decode is cached
-//! by CONTENT: the op is parsed every frame, the bytes are hashed (BLAKE3, no copy out of the
-//! heap), and the decoded picture of bytes seen before comes back from [`DECODED`] as the same
+//! by CONTENT: the op is parsed every frame, the bytes are keyed by their BLAKE3 digest — which
+//! the heap blob keeps once hashed (`SharedBlob::digest`), so the same bytes value repainted
+//! is not hashed again — and the decoded picture of bytes seen before comes back from [`DECODED`] as the same
 //! `Arc`. Decoding stays bounded as `image-thumb`'s is: bytes nobody vouches for decode
 //! within `IMAGE_MAX_SIDE` / `IMAGE_MAX_ALLOC` or not at all.
 
@@ -209,7 +210,18 @@ fn content_key(parts: &[&[u8]]) -> [u8; 16] {
 /// naming the same bytes decodes nothing — or `None` when they are not a decodable image
 /// within the limits.
 pub fn decoded(bytes: &[u8]) -> Option<Arc<Picture>> {
-    let key = content_key(&[b"encoded", bytes]);
+    decoded_by_digest(bytes, *blake3::hash(bytes).as_bytes())
+}
+
+/// [`decoded`] for a heap blob (a `Value::Bytes`): keyed by the digest the blob keeps
+/// (`SharedBlob::digest`), so a frame naming the same bytes VALUE again — an app holding
+/// its picture in its model — costs neither a hash nor a decode.
+pub fn decoded_blob(blob: &crate::core::blob::SharedBlob) -> Option<Arc<Picture>> {
+    decoded_by_digest(blob.as_bytes(), blob.digest())
+}
+
+fn decoded_by_digest(bytes: &[u8], digest: [u8; 32]) -> Option<Arc<Picture>> {
+    let key = content_key(&[b"encoded", &digest]);
     if let Some(picture) = with_decoded(|cache| cache.get(&key)) {
         return Some(picture);
     }
@@ -223,6 +235,24 @@ pub fn decoded(bytes: &[u8]) -> Option<Arc<Picture>> {
 /// `gui/image-thumb` returns) — cached by content like [`decoded`]; `None` when the byte
 /// count is not `width*height*4` or a side is out of range.
 pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Arc<Picture>> {
+    from_rgba_by_digest(width, height, rgba, *blake3::hash(rgba).as_bytes())
+}
+
+/// [`from_rgba`] for a heap blob, keyed by the digest it keeps (see [`decoded_blob`]).
+pub fn from_rgba_blob(
+    width: u32,
+    height: u32,
+    rgba: &crate::core::blob::SharedBlob,
+) -> Option<Arc<Picture>> {
+    from_rgba_by_digest(width, height, rgba.as_bytes(), rgba.digest())
+}
+
+fn from_rgba_by_digest(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    digest: [u8; 32],
+) -> Option<Arc<Picture>> {
     if width == 0
         || height == 0
         || width > IMAGE_MAX_SIDE
@@ -231,7 +261,12 @@ pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Arc<Picture>> {
     {
         return None;
     }
-    let key = content_key(&[b"rgba", &width.to_le_bytes(), &height.to_le_bytes(), rgba]);
+    let key = content_key(&[
+        b"rgba",
+        &width.to_le_bytes(),
+        &height.to_le_bytes(),
+        &digest,
+    ]);
     if let Some(picture) = with_decoded(|cache| cache.get(&key)) {
         return Some(picture);
     }
@@ -435,6 +470,14 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second), "the second is the cached one");
         assert_eq!((first.width(), first.height()), (3, 2));
         assert!(decoded(b"not an image").is_none());
+        // a heap blob of the same bytes finds the same picture, keyed by the digest it keeps
+        let blob = crate::core::blob::SharedBlob::new(&png);
+        let from_blob = decoded_blob(&blob).expect("decodes");
+        assert!(
+            Arc::ptr_eq(&first, &from_blob),
+            "one key for bytes and blob"
+        );
+        assert_eq!(blob.digest(), *blake3::hash(&png).as_bytes());
     }
 
     #[test]

@@ -281,7 +281,7 @@ pub(in crate::builtins) fn read_image_op(heap: &Heap, parts: &[Value]) -> Option
         return None;
     }
     let picture = match parts.get(5).copied()? {
-        Value::Bytes(id) => picture::decoded(heap.bytes(id).as_bytes())?,
+        Value::Bytes(id) => picture::decoded_blob(heap.bytes(id))?,
         Value::Map(id) => {
             let field = |name: &str| heap.map_get(id, value::kw(name));
             let (Some(Value::Int(width)), Some(Value::Int(height)), Some(Value::Bytes(rgba))) =
@@ -291,7 +291,7 @@ pub(in crate::builtins) fn read_image_op(heap: &Heap, parts: &[Value]) -> Option
             };
             let width = u32::try_from(width).ok()?;
             let height = u32::try_from(height).ok()?;
-            picture::from_rgba(width, height, heap.bytes(rgba).as_bytes())?
+            picture::from_rgba_blob(width, height, heap.bytes(rgba))?
         }
         _ => return None,
     };
