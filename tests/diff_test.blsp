@@ -72,11 +72,56 @@
           out (diff/patch a ops))
       (assert= [10 20 30] (into [] out)))))
 
+(defn- parse-unified-hunks (text) (mapcat (diff/parse-unified text) :hunks))
+
 (describe "unified"
-  (test "formats ops with prefixes"
-    (let (ops '([:keep "a"] [:delete "b"] [:insert "c"])
-          lines (diff/unified ops 0))
-      (assert= [" a" "-b" "+c"] (into [] lines)))))
+  (test "headers name the sides and each hunk gives its ranges"
+    (assert= "--- old.txt\n+++ new.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+      (diff/unified "a\nb\nc\n" "a\nB\nc\n" {:from-label "old.txt" :to-label "new.txt"})))
+  (test "context is cut to :context lines, and changes far apart are separate hunks"
+    (let (old "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n"
+          new "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\nELEVEN\n12\n")
+      (assert= "--- a\n+++ b\n@@ -1,3 +1,3 @@\n 1\n-2\n+TWO\n 3\n@@ -10,3 +10,3 @@\n 10\n-11\n+ELEVEN\n 12\n"
+        (diff/unified old new {:context 1}))))
+  (test "changes whose context would meet share one hunk"
+    (assert= "--- a\n+++ b\n@@ -1,5 +1,5 @@\n-1\n+one\n 2\n 3\n-4\n+four\n 5\n"
+      (diff/unified "1\n2\n3\n4\n5\n" "one\n2\n3\nfour\n5\n" {:context 1})))
+  (test "an empty side counts 0 from the line before it"
+    (assert= "--- a\n+++ b\n@@ -0,0 +1,2 @@\n+x\n+y\n" (diff/unified "" "x\ny\n"))
+    (assert= "--- a\n+++ b\n@@ -1,2 +0,0 @@\n-x\n-y\n" (diff/unified "x\ny\n" ""))
+    (assert= "--- a\n+++ b\n@@ -1,0 +2 @@\n+b\n" (diff/unified "a\nc\n" "a\nb\nc\n" {:context 0})))
+  (test "a last line with no newline is marked, on either side"
+    (assert= "--- a\n+++ b\n@@ -1 +1 @@\n-a\n+a\n\\ No newline at end of file\n"
+      (diff/unified "a\n" "a"))
+    (assert= "--- a\n+++ b\n@@ -1,2 +1,2 @@\n x\n-y\n\\ No newline at end of file\n+z\n\\ No newline at end of file\n"
+      (diff/unified "x\ny" "x\nz")))
+  (test "equal texts have no diff"
+    (assert= "" (diff/unified "a\nb" "a\nb")))
+  (test "apply-unified refuses a hunk whose lines are not there"
+    (assert-error (diff/apply-unified "q\n" (diff/unified "a\n" "b\n"))))
+  (test "what unified prints, parse-unified reads and apply-unified applies back to the new text"
+    ;; texts over a small alphabet, so lines repeat and diffs are dense; any line may be the
+    ;; last one and lack its newline
+    (check-property 300
+      (property/tuple (property/string-of "ab\n" {:max 30})
+        (property/string-of "ab\n" {:max 30})
+        (property/int 0 4))
+      (fn ([a b context])
+        (let (patch (diff/unified a b {:context context}))
+          (= b (diff/apply-unified a patch))))))
+  (test "every hunk's header counts the lines its body holds"
+    (check-property 200
+      (property/tuple (property/string-of "abc\n" {:max 40})
+        (property/string-of "abc\n" {:max 40})
+        (property/int 0 3))
+      (fn ([a b context])
+        (every? (parse-unified-hunks (diff/unified a b {:context context}))
+          (fn (hunk)
+            (let (lines (seq/filter (:lines hunk) (fn (line) (not (string/starts-with? line "\\")))))
+              (and (= (:old-count hunk)
+                     (count (seq/filter lines (fn (line) (not (string/starts-with? line "+"))))))
+                (= (:new-count hunk)
+                  (count (seq/filter lines (fn (line) (not (string/starts-with? line "-"))))))))))))))
 
 ;; ---- reading a unified diff -------------------------------------------------------
 

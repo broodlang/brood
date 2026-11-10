@@ -1264,3 +1264,13 @@ trial's seed, which `{:seed S}` or `nest test --seed S` replays as trial 1; the 
 `--seed`'s when given, else 1. `tests/prng_test.blsp` moved to `property/from-rng`. Guards:
 `tests/property_test.blsp`, 23 executed docstring examples. bedit's first users are its undo
 and save round-trip properties.
+
+2026-11-10. `diff/unified` prints a real unified diff. It took edit ops and a context count it
+ignored, and printed the ops with no headers, so bedit's package review hand-printed hunks from
+`line-hunks`. It now takes two texts and `{:context :from-label :to-label}` and returns what
+`diff -u` prints: `---`/`+++`, `@@ -a,b +c,d @@` hunks with `:context` lines (3 by default),
+hunks whose context would meet merged, an empty side counted `-0,0` from the line before it, and
+`\ No newline at end of file` after a last line without one (a newline added or removed at the
+end is a change, which `line-hunks` alone does not report). `diff/apply-unified` applies one
+file's diff to a text. Guard: `tests/diff_test.blsp`, with two properties over the `property`
+module (ADR-685): `apply-unified a (unified a b)` is `b`, and every hunk header counts its body.
