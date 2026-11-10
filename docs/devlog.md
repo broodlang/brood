@@ -1328,8 +1328,11 @@ into. `package.blsp` 2 316 → 1 688 lines, with `package-manifest` (`nest add` 
 `label`); `buffer.blsp` 2 334 → 2 106, with `editor/undo-region` (`undo-in-region`). Every moved
 line was checked to land in exactly one file. Moved public names keep their spelling under the new
 module and are in the rename ledger; bedit's one caller of `undo-in-region` moved with it. Found on
-the way: a private referred bare through `(:use-internals m :only […])` is still unbound to the
-checker, so the new modules reach the old ones' privates qualified.
+the way and fixed: the checker read `(:use-internals m :only […])` as a refer-all of `m`'s publics
+(the runtime refers just the names, privates included), so a private named there was "unbound"
+and `:only []` referred everything; the grant now goes ahead of an `:only` refer, as the runtime
+emits it. Guard: `use_internals_only_refers_exactly_the_names_privates_included`, red with the
+`:only` arm off.
 Same day: KI-381 fixed (an equal-connector duplicate link keeps the one each end opened first, so
 both ends agree), and the Nightly's AddressSanitizer reds (a leaked box in a `fatal_signal` test;
 ASan turning a vetted grammar's SIGSEGV into "exited 1"). KI-382 filed: under ASan a dozen JIT tier
@@ -1373,3 +1376,15 @@ can run (value, alloc, map_champ, table, slabs, roots_buf, small_map: clean; `ta
 portable page release under Miri, which does not model `MADV_DONTNEED`); `make mutants` for
 cargo-mutants on one file; `make rr-hunt` to record a test under rr chaos mode until it fails.
 `full.yml` runs shuttle beside loom and Miri as its own job. rr is not installed on the desktop.
+
+2026-11-10 (ADR-697). **`file/read-link`, `file/symlink`, `file/chmod`.** `file/stat` reported
+`:symlink?` and `:mode` and nothing could change them or read a link's target, so bedit's dired
+could not show `-> target` and its writable dired could not redirect a link or edit permissions;
+an installer could not set `:exec?`. `read-link` answers the stored target or nil (missing, not a
+link); `symlink` and `chmod` answer nil or a failure saying why (a taken name, a missing file,
+Windows' missing symlink privilege), and `{:replace true}` replaces atomically through a temp link
+renamed over (a real directory refused). Windows: `symlink_dir` / `symlink_file` by the target's
+type, Developer Mode named in the failure; `chmod` sets or clears the read-only attribute from the
+owner-write bit. All three report under the responsive flag (ADR-517). Guards: `file_test`'s new
+block (sabotaged red: replace as plain create, chmod as a no-op), `platform_test`'s portable cases
+for CI's Windows job, `filesystem.rs` unit tests.

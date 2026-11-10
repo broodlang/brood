@@ -9,13 +9,15 @@
 ;; `:use-internals project` as well as `package`: the `:enhances` tests reach
 ;; `project-parse-enhances`, the manifest-validation helper, the same way the rest of
 ;; this suite tests `package`'s cwd-free helpers directly rather than through a verb.
+;; `package`'s publics are referred once, without `update` (it would shadow the root `update`
+;; and warn at every load); the grant is `:only []`, so it refers nothing a second time.
 (defmodule package-test
-  (:use-internals package)
+  (:use-internals package :only [])
   (:use-internals package-manifest)
   (:use-internals package-publish)
   (:use-internals project)
   (:use test)
-  (:use package)
+  (:use package :exclude [update])
   (:use project))
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
