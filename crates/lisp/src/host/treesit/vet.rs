@@ -665,13 +665,16 @@ pub(super) fn run_vet(
     // Under the AddressSanitizer build, ASan's own handlers catch a grammar's fault in the
     // child and exit 1 with a report, so the verdict would read "exited 1", not the signal
     // it died of. Handing the fatal signals back lets the child die as a release child does.
+    // And no leak check: LeakSanitizer turns a clean child's exit into a non-zero one when the
+    // grammar library leaked, which the vetting would read as a failed run.
     #[cfg(brood_asan)]
     {
         let inherited = std::env::var("ASAN_OPTIONS").unwrap_or_default();
         cmd.env(
             "ASAN_OPTIONS",
             format!(
-                "{inherited}:handle_segv=0:handle_sigbus=0:handle_abort=0:handle_sigill=0:handle_sigfpe=0"
+                "{inherited}:handle_segv=0:handle_sigbus=0:handle_abort=0:handle_sigill=0:\
+                 handle_sigfpe=0:detect_leaks=0"
             ),
         );
     }

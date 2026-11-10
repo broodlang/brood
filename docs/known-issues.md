@@ -68,27 +68,6 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
-## KI-382 — under AddressSanitizer, JIT tier assertions fail on the suite's first try and pass on its retry ⚠️ open 2026-11-10
-
-**Symptom.** The Nightly's AddressSanitizer job, `brood::suite brood_suite_passes`, TRY 1:
-`vector_call_inline_test`, `type_predicate_inline_test`, `sysmon_test`,
-`optional_defaults_test`, `jit_eq_join_test` (six cases), `jit_computed_call_test` (three),
-`hof_loop_native_test` and `count_nth_inline_test` failed. Each pins a tier through `settle` or
-`%jit-arm-state`: the arm read `:bailed` (or `:untried`) where `:native` was expected, or its
-deopt count ran past the bound. TRY 2, the same binary on a warm cache, passed every one of
-them. Seen on runs 42468592893 (`a06981b33`, 2026-11-08) and 42771193866 (`4282ec6a1`,
-2026-11-10), the same set both times; run 42348304044 (`1783ad469`, 2026-11-07) passed TRY 1.
-Those two runs were red for other reasons (the `grammar_vet_test` crash verdict and a leaked
-box in a `fatal_signal` test, both fixed 2026-11-10), so the retry has hidden this one.
-
-**Cause.** Unknown. Only the first try fails, so suspect state the first run builds: the
-stdlib image cache (KI-313 split the same way on a primed cache), and the ASan build's slower
-background compiles racing the `settle` budget. Something landed between `1783ad469` and
-`a06981b33` made it start.
-
-**Next.** On the test machine: the ASan build, one of these files run alone on a cold cache and
-then a warm one, with `BROOD_JIT_BAIL_TRACE` naming the bail reason; then bisect the range above.
-
 ## KI-370 — `nest check` reported a warning on `examples/life_bands.blsp` once, then never again
 
 **Seen** 2026-11-05, once: a full `nest check std/ tests/ examples/` printed
@@ -127,7 +106,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
-| KI-382 | **Under AddressSanitizer, a dozen JIT tier assertions fail on the suite's first try and pass on its retry** — `settle` reads `:bailed` or `:untried` where `:native` is pinned, and deopt counts run high | ⚠️ **open 2026-11-10** — seen on the Nightlies of `a06981b33` and `4282ec6a1`, not on `1783ad469`; not reproduced, cause unknown |
+| KI-382 | **Under AddressSanitizer, a dozen JIT tier assertions fail on the suite's first try and pass on its retry** — `settle` reads `:bailed` or `:untried` where `:native` is pinned, and deopt counts run high | ✅ **FIXED 2026-11-10** — every bail read `native-depth-exceeded`: the native stack guard tripped on a frame on another stack (a `stacker` segment, common on a cold-cache first try under ASan); `c5177a2b4` re-stamps the limit for the frame's stack before deopting. Guards: `jit_runtime::support::stack_recheck_tests`. Was: open, cause unknown |
 | KI-381 | **`dual_listen_serves_tcp_and_unix_at_once` failed: `no pong over tcp`** — a client dialing one node over TCP and then the Unix socket; each end keeps the link it registered first, so the two ends can keep different links and both die | ✅ **FIXED 2026-11-10** — an equal-connector duplicate keeps the link this end opened first (its id is taken before the handshake writes), which both ends agree on. Guard: `dist::tests::one_connectors_two_links_keep_the_one_opened_first_whatever_registers_first` (red with "existing wins" back). Was: open — mechanism diagnosed from the code |
 | KI-370 | **`nest check` reported `send: … got nil \| pid` on `examples/life_bands.blsp` once** — a non-strict warning on an overlapping type, in a file that changed nothing, right after a rebuild | ⚠️ **watching 2026-11-05** — the warning is strict mode's own (2026-11-09); 0 of 24 non-strict re-runs; diagnostic named in the section |
 | KI-380 | **`nest check` passed an `&optional` default that names a later parameter** — walked in the whole parameter scope | ✅ **FIXED 2026-11-09** — each default is walked in the enclosing scope plus the parameters before it (`check_param_defaults`). Guard: `scope_and_guards::an_optional_default_sees_only_the_parameters_before_it` (red with the body's scope put back) |

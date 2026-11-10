@@ -5,6 +5,37 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-382 — under AddressSanitizer, JIT tier assertions fail on the suite's first try and pass on its retry ✅ fixed 2026-11-10
+
+**Symptom.** The Nightly's AddressSanitizer job, `brood::suite brood_suite_passes`, TRY 1:
+`vector_call_inline_test`, `type_predicate_inline_test`, `sysmon_test`,
+`optional_defaults_test`, `jit_eq_join_test` (six cases), `jit_computed_call_test` (three),
+`hof_loop_native_test` and `count_nth_inline_test` failed. Each pins a tier through `settle` or
+`%jit-arm-state`: the arm read `:bailed` (or `:untried`) where `:native` was expected, or its
+deopt count ran past the bound. TRY 2, the same binary on a warm cache, passed every one of
+them. Seen on runs 42468592893 (`a06981b33`, 2026-11-08) and 42771193866 (`4282ec6a1`,
+2026-11-10), the same set both times; run 42348304044 (`1783ad469`, 2026-11-07) passed TRY 1.
+Those two runs were red for other reasons (the `grammar_vet_test` crash verdict and a leaked
+box in a `fatal_signal` test), so the retry hid this one.
+
+**Cause.** `settle` writes the arm's state to stderr when it is not native, and every one in
+both logs reads `deopt-thrash-latched:native-depth-exceeded` with 16 deopts: the native
+prologue's stack guard tripped. It compared the frame's address with `Heap::jit_stack_limit`,
+an absolute address stamped where the native nest began, so a frame running on another stack —
+a `stacker` segment a walker grew into, which the ASan build's 1 MiB red zone makes common —
+tripped it with megabytes to spare, deopted, and latched off native after sixteen. The `:untried`
+arms are the thin wrappers whose native callers had latched off, so nothing ever tiered them up.
+Only the first try: it runs on a cold cache, so std loads from source through the deep walkers
+that grow segments; the retry boots from the image the first try wrote. (The
+`why-not-native-test/polls` lines, `hosts-receive`, are that test's expected answer.)
+
+**Fix.** `c5177a2b4` (the same day, from the same weekly run): a trip calls
+`brood_rt_stack_recheck`, which re-stamps for the stack the frame is on and deopts only on a real
+shortage, and the stamp reads the stack pointer (`psm`) rather than a local's address, which ASan
+may move off the stack. Guards: `jit_runtime::support::stack_recheck_tests` — a stale limit is
+re-stamped and runs on; a stack inside the margin still has no room. Not reproduced on a desktop
+ASan run; the next weekly ASan job is the confirmation.
+
 ## KI-381 — `dual_listen_serves_tcp_and_unix_at_once`: `no pong over tcp`; two links to one peer can both die ✅ fixed 2026-11-10
 
 **Symptom.** CI run 42760010402 (`2418c1094`, test 1/2):
