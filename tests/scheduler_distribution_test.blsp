@@ -35,6 +35,26 @@
 (defn drain (got)
   (if (>= got fan-size) got (drain (receive ([:done _] (+ got 1))))))
 
+;; The steal case's fan: a child's cost runs from nothing to a full `burn` with its index, so the queues the
+;; round-robin spill fills drain at different rates and a worker that empties its own can
+;; find a peer's backlog. Tagged apart from `fan`, so its replies are never confused.
+(defn uneven-fan (me i)
+  (if (>= i fan-size)
+    nil
+    (do
+      (spawn (send me [:uneven (burn (* 1000 (math/rem (* i 7919) 31)) i)]))
+      (uneven-fan me (+ i 1)))))
+
+(defn uneven-drain (got)
+  (if (>= got fan-size) got (uneven-drain (receive ([:uneven _] (+ got 1))))))
+
+(defn steal-within (me before tries)
+  "Run uneven fans until the steal counter moves past `before`; false after `tries`."
+  (cond
+    (> (get (dev/sched-stats) :steals) before) true
+    (= tries 0) false
+    else (do (uneven-fan me 0) (uneven-drain 0) (steal-within me before (- tries 1)))))
+
 (describe "scheduler distribution"
   (test "every spawned process runs exactly once under fan-out"
     ;; The unconditional guard: correctness cannot depend on how many workers the
@@ -56,16 +76,24 @@
         (assert= (>= (get (dev/sched-stats) :peak-threads) 1) true))))
 
   (test "the steal path fires when there is a pool to steal across"
+    :isolated
     ;; Complements `work_stealing.rs` (which pins a 2-worker pool in its own test
     ;; binary): here we assert it on the *default* pool the suite actually runs with,
     ;; so a regression that only shows at nproc workers is still caught.
+    ;; A steal needs a worker that is IDLE while a peer has a backlog, and nothing makes
+    ;; one fan produce that: spawn already spills round-robin (docs/scheduler.md), so a
+    ;; fan of equal children ends balanced, and with two workers it finished with no
+    ;; steal in 6 of 12 runs (tier 2, `BROOD_J=2`). So the children here cost unequally,
+    ;; the test runs alone (`:isolated`, no neighbour keeping the workers busy), and up to
+    ;; ten fans are tried: a working steal path fires in one of them, a broken one never.
     (let (me (self) w (workers) before (get (dev/sched-stats) :steals))
-      (fan me 0)
-      (drain 0)
       (if (> w 1)
-        (assert= (> (get (dev/sched-stats) :steals) before) true)
-        ;; a one-worker pool has no peer to steal from — the counter must not move
-        (assert= (get (dev/sched-stats) :steals) before))))
+        (assert= (steal-within me before 10) true)
+        (do
+          (uneven-fan me 0)
+          (uneven-drain 0)
+          ;; a one-worker pool has no peer to steal from — the counter must not move
+          (assert= (get (dev/sched-stats) :steals) before)))))
 
   (test "spawn/exit accounting balances over a fan-out"
     ;; Every spawned process must also be accounted as exited once the fan drains —

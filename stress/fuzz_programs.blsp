@@ -221,7 +221,7 @@
       (str "(defn "
         name " (x)\n" "  (try\n" "    (let (d (math/rem x 3))\n"
         "      (if (= d 0) (throw [:zero x]) (math/quot 100 d)))\n"
-        "    (catch e (bit/and (+ 7 (math/rem x 5)) 255))))")]))
+        "    (catch _e (bit/and (+ 7 (math/rem x 5)) 255))))")]))
 
 (defn- slot-torture-helper ()
   ;; sibling lets in operand positions, shadowing, let-in-if, a bool-slot let as a condition
