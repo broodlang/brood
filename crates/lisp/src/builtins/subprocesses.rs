@@ -5,7 +5,7 @@
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
-use crate::host::subprocess::EnvEntry;
+use crate::host::subprocess::{EnvEntry, StageSpec};
 
 use super::args::{arg, expect_int, expect_string};
 use super::bytes::send_payload;
@@ -54,6 +54,15 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["p"],
         "How pty child p's terminal is reading input right now: {:echo bool :canonical bool} — its termios ECHO flag (the line discipline echoes what is typed) and ICANON flag (input is read a line at a time). A program reading a password (sudo, ssh, getpass) turns echo off and keeps canonical mode for that read; a program with its own line editor (readline, a REPL in raw mode) turns both off. Returns nil when p is unknown or already closed, or off Unix, where nothing is known. Throws if p was spawned with pipes rather than a pty.",
         pty_mode);
+    // A pipeline under one handle (ADR-696): the stages joined by OS pipes, so the bytes
+    // between them never enter this process.
+    primitives.def(
+        "%proc-spawn-pipeline",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![list_ty.union(vec_ty)], map_ty, subprocess_ty),
+        &["stages", "opts"],
+        "Start stages (a list/vector; each an argument vector [\"prog\" \"arg\" …] or a map {:argv [...] :cwd :env :raw-args}) as ONE persistent pipeline, each stage's stdout joined to the next one's stdin by an OS pipe. opts (:cwd :env :raw-args) are every stage's defaults. One subprocess handle: os/write feeds the first stage's stdin; the last stage's stdout arrives as [:proc handle data], every stage's stderr as [:proc-err handle data]; [:proc-exit handle code] once every stage has exited, code bash's pipefail (the last stage that did not exit 0, nil for a signal, else 0); [:proc-closed handle code] last. os/close and os/signal reach every stage's process group. Throws if a stage can't be started (the stages before it are killed).",
+        proc_spawn_pipeline);
     primitives.def(
         "%program-path",
         Arity::range(1, 2),
@@ -163,6 +172,79 @@ pub(super) struct ChildOptions {
     pub(super) cwd: Option<String>,
     pub(super) env: Vec<EnvEntry>,
     pub(super) raw_args: bool,
+}
+
+/// A pipeline's stages (ADR-696), read from `stages` — a list or vector, each stage an
+/// argument vector `["prog" "arg" …]` or a map `{:argv [...] :cwd :env :raw-args}` — with
+/// the pipeline's options `opts` as every stage's defaults: a stage's `:cwd` replaces the
+/// pipeline's, its `:env` entries go over the pipeline's, its `:raw-args` over the
+/// pipeline's.
+pub(super) fn pipeline_stages(
+    heap: &Heap,
+    who: &str,
+    stages: Value,
+    opts: Value,
+) -> Result<Vec<StageSpec>, LispError> {
+    let defaults = child_options(heap, who, opts)?;
+    let mut specs = Vec::new();
+    for stage in heap.seq_items(stages)? {
+        let (argv_value, own) = match stage {
+            Value::Map(map) => (
+                heap.map_get(map, value::kw("argv")).unwrap_or(Value::Nil),
+                child_options(heap, who, stage)?,
+            ),
+            other => (other, ChildOptions::default()),
+        };
+        let mut argv = Vec::new();
+        if !matches!(argv_value, Value::Nil) {
+            for item in heap.seq_items(argv_value)? {
+                argv.push(expect_string(heap, &format!("{who} stage"), item)?);
+            }
+        }
+        if argv.is_empty() {
+            return Err(LispError::runtime(format!(
+                "{who}: stage {} names no program — each stage is [\"prog\" \"arg\" …] or {{:argv [...]}}",
+                specs.len() + 1
+            )));
+        }
+        let mut env: Vec<EnvEntry> = defaults
+            .env
+            .iter()
+            .filter(|(name, _)| !own.env.iter().any(|(own_name, _)| own_name == name))
+            .cloned()
+            .collect();
+        env.extend(own.env);
+        let prog = argv.remove(0);
+        let raw_args = match stage {
+            Value::Map(map) if heap.map_get(map, value::kw("raw-args")).is_some() => own.raw_args,
+            _ => defaults.raw_args,
+        };
+        specs.push(StageSpec {
+            prog,
+            args: argv,
+            cwd: own.cwd.or_else(|| defaults.cwd.clone()),
+            env,
+            raw_args,
+        });
+    }
+    if specs.is_empty() {
+        return Err(LispError::runtime(format!(
+            "{who}: a pipeline needs at least one stage"
+        )));
+    }
+    Ok(specs)
+}
+
+/// `(%proc-spawn-pipeline stages opts)` — a persistent pipeline under ONE subprocess
+/// handle (see [`crate::host::subprocess::spawn_pipeline`]).
+pub(super) fn proc_spawn_pipeline(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let stages = pipeline_stages(heap, "os/spawn-pipeline", arg(args, 0), arg(args, 1))?;
+    let owner = crate::process::self_pid();
+    match crate::host::subprocess::spawn_pipeline(&stages, owner) {
+        Ok(id) => Ok(Value::subprocess(id)),
+        Err(e) => Err(LispError::runtime(format!("os/spawn-pipeline: {e}"))
+            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)),
+    }
 }
 
 fn spawn_spec(heap: &Heap, who: &str, args: &[Value]) -> Result<SpawnSpec, LispError> {

@@ -11,10 +11,15 @@
     (os/shell-quote state)
     "\n"
     "noninteractive=0; from_stdin=0; ignore_cache=0; validate=0\n"
+    ;; classic sudo's prompt: -p, else SUDO_PROMPT (set but empty: none), else its default
+    "prompt=\"${SUDO_PROMPT-[sudo] password for $USER: }\"\n"
     "while [ $# -gt 0 ]; do\n"
     "  case \"$1\" in\n"
     "    -n) noninteractive=1 ;; -S) from_stdin=1 ;; -k) ignore_cache=1 ;; -v) validate=1 ;;\n"
-    "    -p|-u) shift ;;\n"
+    ;; sudo-rs before 0.2.5 has no -p at all
+    "    -p) if [ -f \"$state/old-sudo-rs\" ]; then echo 'sudo-rs: invalid option provided' >&2; exit 1; fi\n"
+    "        prompt=\"$2\"; shift ;;\n"
+    "    -u) shift ;;\n"
     "    --) shift; break ;;\n"
     "    *) break ;;\n"
     "  esac\n"
@@ -26,6 +31,9 @@
     "[ -f \"$state/cached\" ] && [ $ignore_cache = 0 ] && needs_password=0\n"
     "if [ $needs_password = 1 ]; then\n"
     "  if [ $from_stdin = 1 ] && [ $noninteractive = 0 ]; then\n"
+    ;; old sudo-rs prompts whatever it is told; classic sudo as -p / SUDO_PROMPT say
+    "    if [ -f \"$state/old-sudo-rs\" ]; then printf '[sudo: authenticate] Password: ' >&2\n"
+    "    else printf '%s' \"$prompt\" >&2; fi\n"
     "    IFS= read -r typed\n"
     "    if [ \"$typed\" != secret ]; then echo 'Sorry, try again.' >&2; exit 1; fi\n"
     "    [ -f \"$state/nocache\" ] || touch \"$state/cached\"\n"
@@ -145,6 +153,37 @@
             (assert= (file/slurp path) "rs\n")
             ;; and with no password, the refusal is said as one
             (is (includes? (error-message (sudo/read path opts)) "a password is required")))))))
+  (test "an old sudo-rs, which refuses -p, takes the password — validated and in one call"
+    (with-stub (fn (dir opts)
+                 (let (path (str dir "/conf")
+                       typed (assoc opts :password "secret"))
+                   (do
+                     (file/spit (str dir "/old-sudo-rs") "")
+                     (file/spit path "old\n")
+                     (assert= (sudo/read path typed) "old\n")
+                     (file/spit (str dir "/nocache") "")
+                     (os/cmd "rm" ["-f" (str dir "/cached")])
+                     (assert= (sudo/write path "new\n" typed) true)
+                     (assert= (file/slurp path) "new\n"))))))
+  (test "the password prompt never reaches a failure's message, whichever sudo"
+    (with-stub
+      (fn (dir opts)
+        (let (path (str dir "/conf")
+              wrong (assoc opts :password "wrong"))
+          (do
+            (file/spit path "text\n")
+            ;; classic sudo, asked for no prompt through SUDO_PROMPT
+            (let (said (error-message (sudo/read path wrong)))
+              (do
+                (is (includes? said "Sorry, try again."))
+                (is (not (includes? said "password for")))))
+            ;; old sudo-rs, which prompts whatever it is told
+            (file/spit (str dir "/old-sudo-rs") "")
+            (let (said (error-message (sudo/read path wrong)))
+              (do
+                (is (includes? said "Sorry, try again."))
+                (is (not (includes? said "authenticate")))
+                (is (not (includes? said "invalid option"))))))))))
   (test "file/mkdir-private makes an owner-only directory, and makes an existing one so"
     (let (dir (test/temp-dir "brood-private-dir-")
           inner (str dir "/a/b"))

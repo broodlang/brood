@@ -44,6 +44,23 @@ one; `opts`' `:program` does the same for one call.
   ;; sudo's messages in English where it can be asked — read only to say why a call failed
   {"LC_ALL" "C" "LANG" "C"})
 
+(def- prompting-env
+  ;; a call that hands sudo the password on its stdin (`-S`): no prompt, asked for through
+  ;; `SUDO_PROMPT` rather than `-p ""` — sudo-rs before 0.2.5 (Ubuntu 24.04's) refuses `-p`
+  ;; outright, and classic sudo and later sudo-rs read the variable as they read the flag
+  (assoc sudo-env "SUDO_PROMPT" ""))
+
+(def- old-sudo-rs-prompt
+  ;; what a sudo-rs that ignores SUDO_PROMPT writes on stderr before reading the password:
+  ;; `[sudo: authenticate] Password: `, or `[sudo: authenticate as alice] …`
+  "\\[sudo: [^\\]\\n]*\\] [Pp]assword: ?")
+
+(defn- without-prompt (said)
+  "`said`, a sudo call's stderr, without the password prompt an old sudo-rs writes there
+whatever `SUDO_PROMPT` says — so a failure reads as sudo's message, and a command's own
+stderr as the command's."
+  (regex/replace old-sudo-rs-prompt (or said "") ""))
+
 (defn- program-of (opts)
   (or (:program opts) sudo/*program*))
 
@@ -72,7 +89,7 @@ user, never by its message (classic sudo and sudo-rs word it differently)."
   (failure (str "sudo/"
              who
              ": "
-             (let (said (string/trim (or (:stderr result) "")))
+             (let (said (string/trim (without-prompt (:stderr result))))
                (if (= said "") (str "exit " (:exit result)) said)))))
 
 (defn- run-as (opts who command input own-exits)
@@ -82,7 +99,7 @@ password, none given when one is required). See the module doc for how a passwor
   (let (program (program-of opts)
         password (:password opts)
         validated (when password
-                    (os/cmd program ["-S" "-p" "" "-v"] {:stdin (str password "\n") :env sudo-env})))
+                    (os/cmd program ["-S" "-v"] {:stdin (str password "\n") :env prompting-env})))
     (if (and validated (not (= 0 (:exit validated))))
       (failure-of who validated)
       (let (result (os/cmd program
@@ -96,11 +113,11 @@ password, none given when one is required). See the module doc for how a passwor
           ;; `-k` so the password is the line sudo reads before the command sees any
           password
             (let (once (os/cmd program
-                         (append ["-S" "-k" "-p" ""] (user-args opts) ["--"] command)
-                         {:stdin [(str password "\n") (or input "")] :env sudo-env}))
+                         (append ["-S" "-k"] (user-args opts) ["--"] command)
+                         {:stdin [(str password "\n") (or input "")] :env prompting-env}))
               (if (and (not (contains? own-exits (:exit once))) (sudo-refused? opts once))
                 (failure-of who once)
-                once))
+                (assoc once :stderr (without-prompt (:stderr once)))))
           else (failure (str "sudo/" who ": a password is required")))))))
 
 ;; the file's bytes as Base64 (no text decode can lose one), a missing file told by exit 3

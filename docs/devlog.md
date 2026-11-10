@@ -1334,3 +1334,16 @@ Same day: KI-381 fixed (an equal-connector duplicate link keeps the one each end
 both ends agree), and the Nightly's AddressSanitizer reds (a leaked box in a `fatal_signal` test;
 ASan turning a vetted grammar's SIGSEGV into "exited 1"). KI-382 filed: under ASan a dozen JIT tier
 assertions fail the suite's first try and pass its retry.
+2026-11-10 (ADR-696, ADR-588 addendum). **`os/pipeline` and `os/spawn-pipeline`**: children joined
+by OS pipes, each stage's stdout the next one's stdin, the bytes never entering the runtime. A stage
+is an argument vector or `{:argv :cwd :env :raw-args}`; the answer is `os/cmd`'s plus `:stages`, its
+`:exit` bash's `pipefail`. `os/cmd` is now a pipeline of one: one runner (`run_stages` over
+`host::subprocess::spawn_chain`) carries the timeout, the caller-killed kill (ADR-514), the
+dirty-blocked wait and the responsive report (ADR-517). The spawned form is one subprocess handle
+whose upstream stages ride the last stage's registry slot, so close / signal / owner death / reap
+reach them all. Prompted by bedit's `/ssh:` copy between machines, which had to run `sh -c "ssh A
+cat X | ssh B sh R"` and could not see a failing `cat`. **`sudo` drops `-p ""`**: sudo-rs before
+0.2.5 (Ubuntu 24.04's 0.2.2) refuses `-p`, so a local `/sudo::` needing a password failed there;
+the empty prompt now goes through `SUDO_PROMPT`, and the `[sudo: authenticate] Password:` an old
+sudo-rs prints regardless is stripped from what a failure reports. Guards:
+`tests/os_pipeline_test.blsp`, `tests/sudo_test.blsp`'s old-sudo-rs stand-in.
