@@ -534,9 +534,14 @@ the test rather than hanging the run.
 ;; else `nest test --seed N`, else 1 — so a run is deterministic and a seed reproduces it.
 (defn- check-property-run (n generator predicate loc options)
   (let (seed (or (get options :seed) (test-filter-seed) 1)
-        result (property/check generator predicate (assoc options :trials n :seed seed)))
+        result (property/check generator predicate (assoc options :trials n :seed seed))
+        raised (get result :error))
     (when (not (get result :passed))
-      (test-fail loc (property/report result)))))
+      ;; an assertion inside the predicate reports as its own lines, not as the raw failure
+      (test-fail loc
+        (property/report (if (test-failure? raised)
+                           (assoc result :error {:message (string/join (nth raised 2) " · ")})
+                           result))))))
 
 (defmacro check-property (n gen pred & options)
   "Property test: check `(pred value)` for `n` values drawn from the generator `gen` (built with `property/…`), failing with the SHRUNK counterexample, the original draw and the seed that replays it. An optional options map takes `property/check`'s `:seed`, `:max-shrinks` and `:limit`; without `:seed` the start seed is `nest test --seed`'s, else 1. e.g. `(check-property 100 (property/vector-of (property/int 0 9)) (fn (xs) (= (count (reverse xs)) (count xs))))`."

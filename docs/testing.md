@@ -169,7 +169,8 @@ the error it raised — a built-in error as its message string, a `(throw v)` as
 
 `(check-property n gen pred)` runs `n` trials. Each draws a value from the generator `gen`
 and asserts `(pred value)`; a predicate that returns false or nil, or raises (an assertion
-inside it included), fails. Generators come from `std/tool/property.blsp` (ADR-685):
+inside it included), fails — so a predicate made of assertions ends in `true`, since an
+assertion answers nil. Generators come from `std/tool/property.blsp` (ADR-685):
 
 | generator | draws | shrinks toward |
 |---|---|---|

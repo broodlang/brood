@@ -151,4 +151,14 @@
       (is (includes? text "replay: "))))
 
   (test "check-property takes an options map"
-    (check-property 20 (property/int 0 9) (fn (n) (< n 10)) {:seed 99})))
+    (check-property 20 (property/int 0 9) (fn (n) (< n 10)) {:seed 99}))
+
+  (test "an assertion inside the predicate reports as its own lines"
+    (let (caught (try
+                   (do
+                     (check-property 50 (property/int 0 100) (fn (n) (assert= (< n 30) true) true))
+                     :no-failure)
+                   (catch e e))
+          text (pr-str caught))
+      (is (includes? text "raised: assert: (assert= (< n 30) true)"))
+      (is (not (includes? text "raised: (:%test-fail"))))))
