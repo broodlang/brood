@@ -1376,3 +1376,15 @@ can run (value, alloc, map_champ, table, slabs, roots_buf, small_map: clean; `ta
 portable page release under Miri, which does not model `MADV_DONTNEED`); `make mutants` for
 cargo-mutants on one file; `make rr-hunt` to record a test under rr chaos mode until it fails.
 `full.yml` runs shuttle beside loom and Miri as its own job. rr is not installed on the desktop.
+
+2026-11-10 (ADR-697). **`file/read-link`, `file/symlink`, `file/chmod`.** `file/stat` reported
+`:symlink?` and `:mode` and nothing could change them or read a link's target, so bedit's dired
+could not show `-> target` and its writable dired could not redirect a link or edit permissions;
+an installer could not set `:exec?`. `read-link` answers the stored target or nil (missing, not a
+link); `symlink` and `chmod` answer nil or a failure saying why (a taken name, a missing file,
+Windows' missing symlink privilege), and `{:replace true}` replaces atomically through a temp link
+renamed over (a real directory refused). Windows: `symlink_dir` / `symlink_file` by the target's
+type, Developer Mode named in the failure; `chmod` sets or clears the read-only attribute from the
+owner-write bit. All three report under the responsive flag (ADR-517). Guards: `file_test`'s new
+block (sabotaged red: replace as plain create, chmod as a no-op), `platform_test`'s portable cases
+for CI's Windows job, `filesystem.rs` unit tests.
