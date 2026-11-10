@@ -681,7 +681,7 @@ narrows or reorders the run — the plain case passes none, so the runner keeps 
                  (nil? (flag "--partitions")))
         filter (if plain?
                  nil
-                 (test/test-make-filter (flag "--only")
+                 (test-select/test-make-filter (flag "--only")
                    (flag "--exclude")
                    (flag "--include")
                    lines
@@ -935,57 +935,66 @@ parsed command line."
 
 ;; The package manager (ADR-037) ------------------------------------------------------
 
-(defn- with-package (cmd body)
-  "The bootstrap every package command shares, then `body`. `load-config` is load-bearing:
-the user config supplies `:registry`, which a `:version` dependency resolves against."
+(defn- with-package (cmd module body)
+  "The bootstrap every package command shares — the project, its config, `module` (`package`
+or a verb module over it) — then `body`. `load-config` is load-bearing: the user config
+supplies `:registry`, which a `:version` dependency resolves against."
   (if (require-project cmd nil)
-    (do (project/load-config) (require-one 'package) (body) 0)
+    (do (project/load-config) (require-one module) (body) 0)
     2))
 
 (defn- run-fetch (options)
-  (with-package "fetch" (fn () (package/fetch))))
+  (with-package "fetch" 'package (fn () (package/fetch))))
 
 (defn- run-update (options)
-  (with-package "update" (fn () (apply package/update (get options :positionals)))))
+  (with-package "update" 'package (fn () (apply package/update (get options :positionals)))))
 
 (defn- run-tree (options)
-  (with-package "tree" (fn () (package/tree))))
+  (with-package "tree" 'package (fn () (package/tree))))
 
 (defn- run-add (options)
   ;; `(add NAME & SPEC)` — the positionals are already in that shape.
-  (with-package "add" (fn () (apply package/add (get options :positionals)))))
+  (with-package "add"
+    'package-manifest
+    (fn () (apply package-manifest/add (get options :positionals)))))
 
 (defn- run-remove (options)
-  (with-package "remove" (fn () (package/remove-dep (first (get options :positionals))))))
+  (with-package "remove"
+    'package-manifest
+    (fn () (package-manifest/remove-dep (first (get options :positionals))))))
 
 (defn- plist-when (key value)
   (if value (list key value) (list)))
 
 (defn- run-publish (options)
   (with-package "publish"
+    'package-publish
     (fn ()
       (let (flags (get options :flags)
             opts (append (plist-when :index (first (get options :positionals)))
                    (plist-when :source-url (get flags "--source-url"))))
         (if (get flags "--bump")
-          (apply package/release (get flags "--bump") opts)
-          (apply package/publish opts))))))
+          (apply package-publish/release (get flags "--bump") opts)
+          (apply package-publish/publish opts))))))
 
 (defn- run-search (options)
-  ;; `package/search` resolves the registry through the project's config, so it needs a
-  ;; project today — guard it for a clean message rather than an internal trace.
+  ;; `package-publish/search` resolves the registry through the project's config, so it needs
+  ;; a project today — guard it for a clean message rather than an internal trace.
   (with-package "search"
+    'package-publish
     (fn ()
       (let (query (first (get options :positionals))
             opts (append (plist-when :index (second (get options :positionals)))
                    (plist-when :enhances (get (get options :flags) "--enhances"))))
-        (apply package/search query opts)))))
+        (apply package-publish/search query opts)))))
 
 (defn- run-key (options)
   ;; A user-level operation (a signing key in the config dir), not a project one.
   (project/load-config)
-  (require-one 'package)
-  (if (get (get options :flags) "--force") (package/key-gen :force true) (package/key-gen))
+  (require-one 'package-publish)
+  (if (get (get options :flags) "--force")
+    (package-publish/key-gen :force true)
+    (package-publish/key-gen))
   0)
 
 (defn- run-ws (options)

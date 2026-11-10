@@ -1,0 +1,239 @@
+;; std/tool/package-manifest.blsp — `nest add` / `nest remove`: editing a project's
+;; :dependencies in place (ADR-037, docs/packages.md). Split out of std/tool/package.blsp,
+;; which resolves and fetches what this writes.
+
+(defmodule package-manifest
+  "`nest add` and `nest remove`: add a dependency to the project manifest's :dependencies, or
+take one out, keeping the rest of the file and its comments, then re-resolve the lock file."
+  (:use format)
+  (:use project)
+  (:use-internals project)
+  (:use package :exclude [update])
+  (:use-internals package))
+
+;; --- editing the manifest: `nest add` / `nest remove` -----------------------
+;; These mutate project.blsp's :dependencies clause while preserving the rest of
+;; the file — crucially its comments. We do it over the lossless CST (parse-source
+;; + std/format.blsp): parse → splice an entry node in/out of the :dependencies
+;; vector → re-render with `format/cst-root` (which keeps comments). The
+;; manifest is reformatted in the process, which is fine for a tool-managed file.
+;; The pure text transforms (`package-manifest-add`/`-remove`) take a manifest
+;; string and return a new one, so they unit-test without touching the filesystem.
+
+;; Is `n` the manifest's top-level (project …) list node?
+(defn- package-project-list? (n)
+  (and (= (node-kind n) :list)
+    (let (forms (seq/filter (node-children n) (fn (c) (not (trivia? c)))))
+      (and (not (empty? forms))
+        (= (node-kind (first forms)) :symbol)
+        (= (node-text (first forms)) "project")))))
+
+;; The list index of the node *following* the top-level `keyword` (e.g. ":dependencies")
+;; among `children` — its value — or nil if the form has no such key.
+(defn- package-keyword-value-index (children keyword)
+  (package-keyword-value-index-scan children keyword 0 false))
+(defn- package-keyword-value-index-scan (children keyword index after-keyword)
+  (cond
+    (empty? children) nil
+    after-keyword
+      (if (trivia? (first children))
+        (package-keyword-value-index-scan (rest children) keyword (inc index) true)
+        index)
+    (and (= (node-kind (first children)) :keyword) (= (node-text (first children)) keyword))
+      (package-keyword-value-index-scan (rest children) keyword (inc index) true)
+    else (package-keyword-value-index-scan (rest children) keyword (inc index) false)))
+
+;; Functional list update: `lst` with element `i` replaced by `(f element)`.
+(defn- package-list-update (lst i f) (package-list-update-acc lst i f 0 nil))
+(defn- package-list-update-acc (lst i f j acc)
+  (if (empty? lst)
+    (reverse acc)
+    (package-list-update-acc (rest lst)
+      i
+      f
+      (inc j)
+      (cons (if (= j i) (f (first lst)) (first lst)) acc))))
+
+;; The dep name (symbol) of an entry node `[:vector [[:symbol "name"] …]]`, or nil.
+(defn- package-entry-name (entry-node)
+  (let (forms (seq/filter (node-children entry-node) (fn (c) (not (trivia? c)))))
+    (if (and (not (empty? forms)) (= (node-kind (first forms)) :symbol))
+      (symbol (node-text (first forms)))
+      nil)))
+
+;; Append `entry-node` to the project node's :dependencies vector, creating the
+;; clause if absent. `children` is the project list's child-node list.
+(defn- package-children-add-dep (children entry-node)
+  (let (deps-index (package-keyword-value-index children ":dependencies"))
+    (if (nil? deps-index)
+      (append children
+        (list [:whitespace " "]
+          [:keyword ":dependencies"]
+          [:whitespace " "]
+          [:vector (vector entry-node)]))
+      (package-list-update children
+        deps-index
+        (fn (vector-node)
+          [:vector
+            (apply vector (append (node-children vector-node) (list entry-node)))])))))
+
+;; Drop the entry named `name` from the project node's :dependencies vector.
+(defn- package-children-remove-dep (children name)
+  (let (deps-index (package-keyword-value-index children ":dependencies"))
+    (if (nil? deps-index)
+      children
+      (package-list-update children
+        deps-index
+        (fn (vector-node)
+          [:vector
+            (apply vector
+              (seq/filter (node-children vector-node)
+                (fn (child)
+                  (not (and (= (node-kind child) :vector) (= (package-entry-name child) name))))))])))))
+
+;; Re-render `src` after applying `f` to its (project …) node. Comments survive.
+(defn- package-manifest-transform (src f)
+  (format/cst-root (apply vector
+                     (map (node-children (reflect/parse-source src))
+                       (fn (n) (if (package-project-list? n) (f n) n))))))
+
+(defn- package-manifest-add (src entry-node)
+  "Return manifest `src` with `entry-node` added to its :dependencies (pure)."
+  (package-manifest-transform src
+    (fn (proj)
+      [:list (apply vector (package-children-add-dep (vec->list (node-children proj)) entry-node))])))
+
+(defn- package-manifest-remove (src name)
+  "Return manifest `src` with the dep named `name` removed from :dependencies (pure)."
+  (package-manifest-transform src
+    (fn (proj)
+      [:list (apply vector (package-children-remove-dep (vec->list (node-children proj)) name))])))
+
+;; A CLI spec token: ":path"/":git"/":ref" → keyword; anything else → the string.
+(defn- package-spec-token (tok)
+  (if (string/starts-with? tok ":") (keyword (string/substring tok 1 (string/length tok))) tok))
+
+(defn- package-has-dep? (deps name) (any? deps (fn (d) (= (get d :name) name))))
+
+;; A dependency name is written VERBATIM into project.blsp (unquoted, as a symbol) and
+;; names the `_deps/<name>/` directory, so `add` refuses one `project/valid-dep-name?`
+;; rejects. Without it `nest add "" :path ../x` would write a manifest that does not parse,
+;; and `nest add .. …` would aim the re-fetch's delete at the project itself.
+
+;; --- editing project.blsp safely --------------------------------------------
+;; The manifest edit is a read-modify-write: read the source, splice an entry in or
+;; out (Brood code), write it back. A plain `file/slurp`/`file/spit` LOSES an update
+;; under concurrency — two `nest add`s both read the original, both append, the second
+;; write erases the first, and both report success.
+;;
+;; `%file-swap` closes it: the write only lands if the file still holds exactly what
+;; we read, serialised across processes by an exclusive lock, and crash-atomic. When
+;; the compare fails, someone edited in between — so re-read and recompute the edit
+;; against the new content rather than clobbering it. That retry is the whole reason
+;; a CAS is the right shape here: the "modify" step is Brood, so it cannot run inside
+;; the locked primitive.
+
+;; The lock lives beside the project's other derived state (the check caches), NOT in
+;; the project directory — no stray file appears next to the user's source, and the
+;; inode is stable across manifest rewrites. The temp root is the fallback when there is no
+;; cache dir (no HOME), so an edit is always serialised.
+(defn- package-manifest-lock (root)
+  (let (dir (or (project-check/project-cache-dir root) (path/temp-root)))
+    (path/join dir (str "manifest-" (hash/sha256 root) ".lock"))))
+
+;; Attempts are bounded so a pathological writer can't spin here forever; each retry
+;; re-reads, so progress is real and 8 is far beyond any plausible contention.
+(def- *package-manifest-edit-attempts* 8)
+
+(defn- package-edit-manifest (root transform)
+  "Apply `transform` (old manifest source -> new source) to project.blsp atomically, retrying if a concurrent edit lands in between. Returns `[old new]` so the caller can roll its own edit back. Raises if it cannot win within `*package-manifest-edit-attempts*` tries."
+  (package-edit-manifest-try (path/join root "project.blsp")
+    (package-manifest-lock root)
+    transform
+    *package-manifest-edit-attempts*))
+
+(defn- package-edit-manifest-try (manifest lock transform attempts)
+  (if (<= attempts 0)
+    (error "package: project.blsp kept changing while this command tried to edit it — "
+      "is another `nest add`/`nest remove` running? Nothing was written; re-run it.")
+    (let (old (file/slurp manifest)
+          new (transform old))
+      (if (%file-swap lock manifest old new)
+        [old new]
+        (package-edit-manifest-try manifest lock transform (- attempts 1))))))
+
+;; Undo an edit this command made, without stomping a concurrent one: the swap only
+;; lands if the manifest still holds exactly what we wrote. If it doesn't, someone
+;; else has edited since and their content wins — say so rather than overwrite it.
+(defn- package-revert-manifest (root written original)
+  (let (manifest (path/join root "project.blsp"))
+    (if (%file-swap (package-manifest-lock root) manifest written original)
+      true
+      (do
+        (io/puts "warning: could not undo the project.blsp edit — it changed again in the meantime; check :dependencies by hand"
+          :to *err*)
+        false))))
+
+(defn add (name & spec)
+  "Add a dependency to project.blsp and re-lock. `name` is the require-name; `spec` is `:path PATH`, `:git URL :ref REF`, `:git URL :version RANGE` (newest matching tag, ADR-209), or `:tarball URL :sha256 HEX` (strings). A :git/:tarball dep is fetched into _deps/ as part of the re-lock. Backs `nest add`.
+
+    (package-manifest/add \"json\" :git \"https://github.com/me/json\" :version \"^1.2.0\")   ;~> prints \"package: added json\" — project.blsp edited, lock rewritten"
+  ;; Checked BEFORE anything is written, so a bad name can't leave a half-edited
+  ;; manifest behind.
+  (when (not (project/valid-dep-name? name))
+    (error "package: "
+      (pr-str name)
+      " is not a usable dependency name — it must be a plain symbol written verbatim into project.blsp (no spaces, quotes, brackets, parens, and not a number) and a single directory name under _deps/ (no `/` or `\\`, not starting with `.`, `-` or `~`)"))
+  (package/package-in-project
+    (fn (root)
+      (let (dep (project/parse-dep (apply vector (cons (symbol name) (map spec package-spec-token)))))
+        (when (package-has-dep? project/*dependencies* (get dep :name))
+          (error "package: " name " is already a dependency"))
+        ;; ATOMIC: the manifest edit has to happen before
+        ;; resolution (resolution reads the loaded manifest), so a
+        ;; failure afterwards is rolled back. Without this, `nest
+        ;; add foo :path ../nonexistent` would leave an unresolvable
+        ;; dep in project.blsp that fails every later command.
+        ;; The edit is a locked compare-and-swap (see package-edit-manifest), so a
+        ;; concurrent `nest add` cannot erase this one.
+        (let (manifest (path/join root "project.blsp")
+              edit (package-edit-manifest root
+                     (fn (src) (package-manifest-add src (dep-entry-node dep))))
+              original (nth edit 0)
+              written (nth edit 1))
+          (let (outcome (try
+                          (do
+                            (package/package-load-manifest manifest)
+                            (let (entries (resolve-deps root
+                                            project/*dependencies*
+                                            (read-lockfile root)))
+                              (package/package-guard-collisions root entries)
+                              (write-lockfile root entries))
+                            :%added)
+                          (catch e (list :%add-failed e))))
+            (if (and (pair? outcome) (= (first outcome) :%add-failed))
+              (do
+                (package-revert-manifest root written original)
+                (package/package-load-manifest manifest)
+                (throw (second outcome)))
+              (io/puts (str "package: added " name)))))))))
+
+(defn remove-dep (name)
+  "Remove dependency `name` from project.blsp and re-lock (an empty lock if no deps remain). Backs `nest remove`.
+
+    (package-manifest/remove-dep \"json\")   ;~> prints \"package: removed json\" — project.blsp edited, lock rewritten"
+  (package/package-in-project
+    (fn (root)
+      (let (name-sym (symbol name))
+        (when (not (package-has-dep? project/*dependencies* name-sym))
+          (error "package: " name " is not a dependency"))
+        (let (manifest (path/join root "project.blsp")
+              target (package/package-git-target root name-sym))
+          ;; Same locked compare-and-swap as `add`: a concurrent edit must not be
+          ;; erased by this removal (or vice versa).
+          (package-edit-manifest root (fn (src) (package-manifest-remove src name-sym)))
+          (package/package-load-manifest manifest)
+          ; drop its _deps/ cache, if any
+          (when (file/dir? target) (%rm-rf target))
+          (write-lockfile root (resolve-deps root project/*dependencies* (read-lockfile root)))
+          (io/puts (str "package: removed " name)))))))

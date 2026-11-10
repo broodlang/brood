@@ -11,6 +11,8 @@
 ;; this suite tests `package`'s cwd-free helpers directly rather than through a verb.
 (defmodule package-test
   (:use-internals package)
+  (:use-internals package-manifest)
+  (:use-internals package-publish)
   (:use-internals project)
   (:use test)
   (:use package)
@@ -148,7 +150,7 @@
       (file/spit (path/join app-dir "app-binary") "ELF-ish bytes")
       (pkg-git-init app-dir)
       (file/spit (path/join app-dir "scratch.txt") "not committed")
-      (let (tracked (package/registry-tracked-files app-dir))
+      (let (tracked (package-publish/registry-tracked-files app-dir))
         (is (not (nil? tracked)))
         ;; The manifest and the source module are there …
         (is (includes? tracked "project.blsp"))
@@ -162,7 +164,7 @@
     (let (parent (pkg-fixture-root)
           app-dir (path/join parent "app"))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
-      (assert= nil (package/registry-tracked-files app-dir))))
+      (assert= nil (package-publish/registry-tracked-files app-dir))))
 
   ;; The excludes once rode to tar as `--exclude=./tests` beside the tracked paths named
   ;; explicitly — and tar does not apply those patterns to `tests/a_test.blsp`, so tests and
@@ -176,7 +178,7 @@
       (file/spit (path/join app-dir "project.lock.blsp") "(lock)\n")
       (pkg-git-init app-dir)
       (let (archive (binding (project/*name* "app" project/*version* "0.1.0")
-                      (package/registry-build-tarball app-dir))
+                      (package-publish/registry-build-tarball app-dir))
             members (string/split (get (os/cmd "tar" ["-tzf" archive]) :stdout) "\n"))
         (is (includes? members "project.blsp"))
         (is (includes? members "src/main.blsp"))
@@ -190,19 +192,20 @@
       (file/mkdir (path/join app-dir "tests"))
       (file/spit (path/join app-dir "tests" "a_test.blsp") "(defmodule a-test)\n")
       (file/spit (path/join app-dir "project.lock.blsp") "(lock)\n")
-      (assert= (package/registry-source-files app-dir) (list "project.blsp" "src/main.blsp")))))
+      (assert= (package-publish/registry-source-files app-dir)
+        (list "project.blsp" "src/main.blsp")))))
 
 (describe "package: bump-version and release"
   (test "bumps the project's own :version, not a dependency's that comes first"
     (let (src "(project :dependencies [[dep :version \"1.0.0\"]]\n  :name \"app\"\n  :version \"0.4.2\")\n"
-          [version new-src] (package/package-manifest-bump-version src "minor"))
+          [version new-src] (package-publish/package-manifest-bump-version src "minor"))
       (assert= version "0.5.0")
       (let (form (reflect/read-first new-src))
         (assert= (plist-get (rest form) :version) "0.5.0")
         (assert= (plist-get (rest form) :dependencies) [['dep :version "1.0.0"]]))))
 
   (test "a manifest with no :version of its own is an error"
-    (assert-error (package/package-manifest-bump-version "(project :name \"app\" :dependencies [[dep :version \"1.0.0\"]])\n"
+    (assert-error (package-publish/package-manifest-bump-version "(project :name \"app\" :dependencies [[dep :version \"1.0.0\"]])\n"
                     "patch")))
 
   (test "release stops before publishing when the bump cannot be committed"
@@ -211,7 +214,9 @@
     (let (app-dir (path/join (pkg-fixture-root) "app"))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (let (message (error-message (try
-                                     (package/package-release-in app-dir "patch" (fn () :published))
+                                     (package-publish/package-release-in app-dir
+                                       "patch"
+                                       (fn () :published))
                                      (catch e (error-message e)))))
         (is (string/starts-with? message "package: git add failed"))
         (assert= (plist-get (rest (reflect/read-first (file/slurp (path/join app-dir "project.blsp"))))
@@ -778,14 +783,15 @@
         (is (failure? missing))
         (assert= (get (fields missing) :status) 404))))
   (test "registry-search-line formats a hit"
-    (assert= (package/registry-search-line {:name "greeter"
-                                            :latest_version "1.0.0"
-                                            :description "greetings"})
+    (assert= (package-publish/registry-search-line {:name "greeter"
+                                                    :latest_version "1.0.0"
+                                                    :description "greetings"})
       "greeter  1.0.0  — greetings")
-    (assert= (package/registry-search-line {:name "x" :latest_version "" :description ""}) "x  ?"))
+    (assert= (package-publish/registry-search-line {:name "x" :latest_version "" :description ""})
+      "x  ?"))
   (test "publishable-deps keeps registry deps and omits local ones"
     (binding (project/*dependencies* (list (dep-registry 'foo "1.2.0") (dep-path 'bar "../bar")))
-      (let (out (package/registry-publishable-deps))
+      (let (out (package-publish/registry-publishable-deps))
         (assert= (count out) 1)
         (assert= (get (first out) :name) "foo")
         (assert= (get (first out) :version) "1.2.0"))))
@@ -798,18 +804,20 @@
               project/*description* ""
               project/*dependencies* nil
               project/*enhances* {})
-      (let (ext (encoding/base64-decode (package/registry-publish-metadata "abc"
+      (let (ext (encoding/base64-decode (package-publish/registry-publish-metadata "abc"
                                           "https://ex/f.tgz" nil nil)))
         (is (includes? ext "\"source_url\":\"https://ex/f.tgz\""))
         (is (includes? ext "\"checksum\":\"abc\"")))
-      (let (hosted (encoding/base64-decode (package/registry-publish-metadata "abc" nil nil nil)))
+      (let (hosted (encoding/base64-decode (package-publish/registry-publish-metadata "abc"
+                                             nil nil nil)))
         (is (not (includes? hosted "source_url"))))
       ;; a signed publish carries :signature + :pubkey; an unsigned one omits both
-      (let (signed (encoding/base64-decode (package/registry-publish-metadata "abc"
+      (let (signed (encoding/base64-decode (package-publish/registry-publish-metadata "abc"
                                              nil "sighex" "pubhex")))
         (is (includes? signed "\"signature\":\"sighex\""))
         (is (includes? signed "\"pubkey\":\"pubhex\"")))
-      (let (unsigned (encoding/base64-decode (package/registry-publish-metadata "abc" nil nil nil)))
+      (let (unsigned (encoding/base64-decode (package-publish/registry-publish-metadata "abc"
+                                               nil nil nil)))
         (is (not (includes? unsigned "signature")))
         (is (not (includes? unsigned "pubkey")))))))
 
@@ -1059,9 +1067,9 @@
       (def project/*enhances* saved)))
   (test "the publish envelope carries it with STRING keys (JSON has no symbols)"
     (binding (project/*enhances* {'bedit ">= 0.1"})
-      (assert= {"bedit" ">= 0.1"} (package/registry-publishable-enhances)))
+      (assert= {"bedit" ">= 0.1"} (package-publish/registry-publishable-enhances)))
     (binding (project/*enhances* {})
-      (assert= {} (package/registry-publishable-enhances))))
+      (assert= {} (package-publish/registry-publishable-enhances))))
   (test "search narrows by it through a query parameter, url-encoded"
     (assert= "http://h/api/v1/packages?q=zig"
       (package/registry-search-url "http://h" "zig" nil))
@@ -1299,7 +1307,7 @@
 (describe "package: editing the manifest"
   (test "add creates a :dependencies clause and preserves comments"
     (let (src "(project :name \"app\" :version \"0.1.0\")\n\n;; a keeper comment\n"
-          out (package/package-manifest-add src
+          out (package-manifest/package-manifest-add src
                 (dep-entry-node (dep-path 'greeter "../greeter"))))
       (is (includes? out "a keeper comment"))
       (let (form (reflect/read-string out))
@@ -1307,7 +1315,7 @@
           (list (assoc (dep-path 'greeter "../greeter") :optional false))))))
   (test "add appends to an existing :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
-          out (package/package-manifest-add src
+          out (package-manifest/package-manifest-add src
                 (dep-entry-node (dep-path 'b "../b"))))
       (let (form (reflect/read-string out))
         (assert= (map (project/parse-deps (plist-get (rest form) :dependencies))
@@ -1315,7 +1323,7 @@
           (list 'a 'b)))))
   (test "remove drops the named dep, keeps the rest and comments"
     (let (src "(project :name \"app\"\n  :dependencies [[a :path \"../a\"] [b :path \"../b\"]])\n;; keep me\n"
-          out (package/package-manifest-remove src 'a))
+          out (package-manifest/package-manifest-remove src 'a))
       (is (includes? out "keep me"))
       (let (form (reflect/read-string out))
         (assert= (map (project/parse-deps (plist-get (rest form) :dependencies))
@@ -1323,7 +1331,7 @@
           (list 'b)))))
   (test "remove of the only dep leaves an empty :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
-          out (package/package-manifest-remove src 'a))
+          out (package-manifest/package-manifest-remove src 'a))
       (assert= (project/parse-deps (plist-get (rest (reflect/read-string out)) :dependencies)) nil))))
 
 ;; ---- the Dependency ability -------------------------------------------------
@@ -1536,7 +1544,7 @@
   (test "a trailing-newline name is rejected"
     (refute (project/valid-dep-name? "a\n")))
   (test "add refuses a corrupting name before touching the manifest"
-    (is (includes? (try (package/add "" ":path" "../x") (catch e (error-message e)))
+    (is (includes? (try (package-manifest/add "" ":path" "../x") (catch e (error-message e)))
           "not a usable dependency name")))
   ;; A dep name is also the directory `_deps/<name>/`, which a re-fetch deletes.
   (test "a name that is not one path component is rejected"
@@ -1549,7 +1557,7 @@
     (refute (project/valid-dep-name? "-flag"))
     (refute (project/valid-dep-name? "~home")))
   (test "add refuses a name that escapes _deps/"
-    (is (includes? (try (package/add ".." ":path" "../x") (catch e (error-message e)))
+    (is (includes? (try (package-manifest/add ".." ":path" "../x") (catch e (error-message e)))
           "not a usable dependency name")))
   (test "the manifest parser refuses a name that escapes _deps/"
     (is (includes? (try
@@ -1700,16 +1708,16 @@
 ;; run on every brood ever released, which the resolver believes.
 (describe "package: the :brood constraint a publish records"
   (test "a declared constraint is recorded untouched"
-    (assert= (package/publish-brood-constraint ">= 0.9") ">= 0.9"))
+    (assert= (package-publish/publish-brood-constraint ">= 0.9") ">= 0.9"))
   (test "a declared constraint may be narrower or wider than the running brood"
-    (assert= (package/publish-brood-constraint "~> 0.13") "~> 0.13"))
+    (assert= (package-publish/publish-brood-constraint "~> 0.13") "~> 0.13"))
   (test "declaring nothing derives the running brood rather than recording no constraint"
-    (assert= (package/publish-brood-constraint nil) (str ">= " (system/brood-version))))
+    (assert= (package-publish/publish-brood-constraint nil) (str ">= " (system/brood-version))))
   (test "the derived constraint is satisfied by the brood that derived it"
-    (is (version/satisfies? (system/brood-version) (package/publish-brood-constraint nil))))
+    (is (version/satisfies? (system/brood-version) (package-publish/publish-brood-constraint nil))))
   ;; The bug this replaces: "" is not "unknown", it is "runs anywhere".
   (test "the derived constraint is never empty"
-    (refute (= (package/publish-brood-constraint nil) ""))))
+    (refute (= (package-publish/publish-brood-constraint nil) ""))))
 
 ;; ADR-310 made a failure TRUTHY, which quietly disarmed this function's validation:
 ;; `(or (nth p 0) (bad))` was written when an unparseable segment came back falsy, so
@@ -1718,13 +1726,13 @@
 ;; ("inc: argument 1 expects number, got number | failure"); nothing else did.
 (describe "package: semver-bump rejects a version it cannot parse"
   (test "a well-formed version bumps on each level"
-    (assert= (package/semver-bump "1.2.3" "patch") "1.2.4")
-    (assert= (package/semver-bump "1.2.3" "minor") "1.3.0")
-    (assert= (package/semver-bump "1.2.3" "major") "2.0.0"))
+    (assert= (package-publish/semver-bump "1.2.3" "patch") "1.2.4")
+    (assert= (package-publish/semver-bump "1.2.3" "minor") "1.3.0")
+    (assert= (package-publish/semver-bump "1.2.3" "major") "2.0.0"))
   (test "a non-numeric segment raises rather than bumping a failure"
-    (assert-error (package/semver-bump "1.x.3" "patch")))
+    (assert-error (package-publish/semver-bump "1.x.3" "patch")))
   (test "a missing segment raises too"
-    (assert-error (package/semver-bump "1.2" "patch"))))
+    (assert-error (package-publish/semver-bump "1.2" "patch"))))
 
 ;; ADR-212's TOFU on the RUNTIME install path (an editor's plugins): `registry-install` used to
 ;; skip the signature as "a lock-file concern", so a plugin was checked only against a checksum

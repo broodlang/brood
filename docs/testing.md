@@ -473,14 +473,14 @@ and usable directly if you call it yourself:
 (run-tests :slow-over 200)  ; list any test over this many ms (informational; default 1000)
 (run-tests :max-failures 1) ; abandon the run once this many tests have failed
 (run-tests :repeat 50)      ; run the suite up to 50 times, stop at the first failure
-(run-tests :filter SPEC)    ; a selection spec — see `test/test-make-filter`
+(run-tests :filter SPEC)    ; a selection spec — see `test-select/test-make-filter`
 (run-tests :trace :slow)
 ```
 
 The `nest test` flags map onto these one-for-one: `--max-failures` → `:max-failures`,
 `--repeat-until-failure` → `:repeat`, `--slowest` → `:slowest`, `--timeout` →
 `:timeout`, `--trace` sets `:trace` (opt-in — see above), and the selection flags are lowered
-into one `:filter` spec built by `test/test-make-filter` (selector *parsing* lives in
+into one `:filter` spec built by `test-select/test-make-filter` (selector *parsing* lives in
 Brood, so the grammar has a single definition).
 
 **`--max-failures` granularity.** The budget is checked between scheduling steps

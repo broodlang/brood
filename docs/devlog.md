@@ -1307,3 +1307,17 @@ U+10FFFF), one collection flag in 8 stops the collection, and sizes grow from sm
 the halfway trial. Only the random half of a draw changes, so shrinking and replay are as they
 were; a failure now reports its `:size` with its seed. `x ≠ 0` over ±1,000,000 used to pass 100
 trials; it now fails within them on every seed tried. Guard: `tests/property_test.blsp`.
+
+2026-11-10 (ADR-687). The three largest std files split along layers the rest does not call back
+into. `package.blsp` 2 316 → 1 688 lines, with `package-manifest` (`nest add` / `remove`) and
+`package-publish` (`search`, `publish`, `release`, `key-gen`, `bump-version`) over it;
+`test.blsp` 1 991 → 1 770, with `test-select` (selector parsing, filtering, sharding, ordering,
+`label`); `buffer.blsp` 2 334 → 2 106, with `editor/undo-region` (`undo-in-region`). Every moved
+line was checked to land in exactly one file. Moved public names keep their spelling under the new
+module and are in the rename ledger; bedit's one caller of `undo-in-region` moved with it. Found on
+the way: a private referred bare through `(:use-internals m :only […])` is still unbound to the
+checker, so the new modules reach the old ones' privates qualified.
+Same day: KI-381 fixed (an equal-connector duplicate link keeps the one each end opened first, so
+both ends agree), and the Nightly's AddressSanitizer reds (a leaked box in a `fatal_signal` test;
+ASan turning a vetted grammar's SIGSEGV into "exited 1"). KI-382 filed: under ASan a dozen JIT tier
+assertions fail the suite's first try and pass its retry.

@@ -600,6 +600,8 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     embedded_module!("editor/buffer", "std/editor/buffer.blsp"),
+    // Undo restricted to the region (`undo-in-region`), over the buffer's snapshot history.
+    embedded_module!("editor/undo-region", "std/editor/undo-region.blsp"),
     // A buffer and the file behind it: the toolkit's edge with the disk.
     embedded_module!("editor/buffer-file", "std/editor/buffer-file.blsp"),
     // The buffer as a process: the server half of the protocol (ADR-134, ADR-630).
@@ -807,6 +809,11 @@ const TOOLCHAIN_MODULES: &[EmbeddedModule] = &[
     // intent → the idiomatic Brood pattern). Curated Brood data; backs the
     // `nest mcp` tools of the same names. Opt-in.
     embedded_module!("explain", "std/tool/explain.blsp"),
+    // `nest add` / `nest remove`: edit the manifest's :dependencies in place, over
+    // `package` (which stays in the core list: a bundle with dependencies sets up through it).
+    embedded_module!("package-manifest", "std/tool/package-manifest.blsp"),
+    // `nest search` / `publish` / `release` / `key-gen`: the registry verbs a publisher runs.
+    embedded_module!("package-publish", "std/tool/package-publish.blsp"),
 ];
 
 /// Empty without the `toolchain` feature — the modules above are not compiled in.
@@ -831,6 +838,8 @@ const TOOLCHAIN_MODULES: &[EmbeddedModule] = &[];
 const DEV_MODULES: &[EmbeddedModule] = &[
     // The test framework — `deftest`/`describe`/`assert=`/`is`. Never shipped.
     embedded_module!("test", "std/tool/test.blsp"),
+    // Which registered tests a run runs, and in what order — the runner's selection.
+    embedded_module!("test-select", "std/tool/test-select.blsp"),
     // Property-based testing with integrated shrinking (ADR-685): generators over a recorded
     // choice sequence, the runner `check-property` calls, the shrinker. Never shipped.
     embedded_module!("property", "std/tool/property.blsp"),
