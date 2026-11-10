@@ -195,6 +195,14 @@ Every generator draws its random decisions as a recorded sequence of integers (c
 being its simplest value); shrinking deletes, zeroes and lowers those integers and replays
 the generator, so `fmap`, `bind` and your own combinations shrink with no extra code.
 
+Random draws lean on **edges**: one choice in 8 is drawn from its range's edges (0, 1, the
+bound, bound − 1) rather than uniformly, one collection in 8 stops early, and `character`
+favours `"\n"`, NUL, U+D7FF, U+E000 and U+10FFFF — so `(fn (x) (not (= x 0)))` over
+`(property/int -1000000 1000000)` fails within a few dozen trials instead of never. Sizes
+**grow**: the first trials draw small collections, reaching full size by the halfway trial.
+A failure therefore names its `:size` beside its seed, and replaying one trial takes both
+(`{:seed S :size Z}`); the `--seed` in the report is the run's start seed.
+
 ```lisp fragment
 (test "reverse keeps the length"
   (check-property 200 (property/vector-of (property/int -100 100))
@@ -211,7 +219,7 @@ property failed on trial 37/200 (shrunk 9 times in 61 runs)
 counterexample: [42]
 original: [17 88 42 3 61]
 seed: 1786213
-replay: pass {:seed 1786213} in the property's options, or run nest test --seed 1786213
+replay: pass {:seed 1786213 :size 0.74} in the property's options, or run nest test --seed 1786213
 ```
 
 Runs are **deterministic**. The start seed is the options map's `:seed`, else the `--seed N`

@@ -1300,3 +1300,10 @@ removed (`[2 28]`, inside the macro). It was red on the commit before ADR-674 as
 `memory_pressure`'s fast-allocating loop asserted the soft-limit message's exact prefix; at tier
 0 the error names the Brood function that was allocating first. The loop stopped at the soft
 limit in both; the assertion now reads the limit's error wherever it lands.
+
+2026-11-10 (ADR-685 addendum). Property generators lean on edges. One random choice in 8 is
+drawn from its bound's edges (0, 1, the bound, bound − 1, and `character`'s NUL, U+D7FF, U+E000,
+U+10FFFF), one collection flag in 8 stops the collection, and sizes grow from small to full by
+the halfway trial. Only the random half of a draw changes, so shrinking and replay are as they
+were; a failure now reports its `:size` with its seed. `x ≠ 0` over ±1,000,000 used to pass 100
+trials; it now fails within them on every seed tried. Guard: `tests/property_test.blsp`.
