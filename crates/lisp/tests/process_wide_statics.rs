@@ -94,12 +94,12 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // The node: one per OS process (ADR-033).
     ("dist.rs", "NODE", OneMachine),
     ("dist.rs", "NODES", OneMachine),
-    ("dist.rs", "NAMES", OneMachine),
+    ("dist/names.rs", "NAMES", OneMachine),
     ("dist.rs", "NODE_MONITORS", OneMachine),
     ("dist.rs", "LISTEN_ADDRS", OneMachine),
-    ("dist.rs", "DIAL_ROUTES", OneMachine),
-    ("dist.rs", "PENDING_DIALS", OneMachine),
-    ("dist.rs", "PROGRAM_DIALS", OneMachine),
+    ("dist/dialing.rs", "DIAL_ROUTES", OneMachine),
+    ("dist/dialing.rs", "PENDING_DIALS", OneMachine),
+    ("dist/dialing.rs", "PROGRAM_DIALS", OneMachine),
     // Guest links (ADR-415): the grants the node accepts. A connected guest's standing is
     // its link's (`Conn::guest`), not a table (KI-286).
     ("dist/guest.rs", "GRANTS", OneMachine),
@@ -209,7 +209,7 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("core/heap/vm_cache.rs", "PUBLISHED_FAST_LINKS", Diagnostic),
     ("process/scheduler/pool.rs", "QUANTUM_LEDGER", Diagnostic),
     ("eval/compile/closure.rs", "SEEN", Diagnostic),
-    ("dist.rs", "SEEN", Diagnostic),
+    ("dist/routing.rs", "SEEN", Diagnostic),
 ];
 
 fn source_root() -> PathBuf {
