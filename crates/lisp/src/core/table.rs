@@ -353,7 +353,9 @@ fn unmap_chunk_region(ptr: *mut AtomicU64) {
 }
 
 /// Discard a chunk's pages: the next touch reads zero (= `EMPTY`) and commits afresh.
-#[cfg(unix)]
+/// Miri does not model `MADV_DONTNEED`, so under it the portable version below runs: it
+/// writes the same zeroes the kernel would fill in.
+#[cfg(all(unix, not(miri)))]
 fn release_chunk_pages(ptr: *mut AtomicU64) {
     let bytes = CHUNK_SLOTS * std::mem::size_of::<AtomicU64>();
     // SAFETY: `ptr` is an installed chunk — a live private anonymous mapping of `bytes`.
@@ -363,7 +365,7 @@ fn release_chunk_pages(ptr: *mut AtomicU64) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), miri))]
 fn release_chunk_pages(ptr: *mut AtomicU64) {
     // SAFETY: an installed chunk is a live `CHUNK_SLOTS`-word allocation.
     let words = unsafe { std::slice::from_raw_parts(ptr as *const AtomicU64, CHUNK_SLOTS) };

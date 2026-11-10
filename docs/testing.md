@@ -609,3 +609,23 @@ The full inventory — which suites are wired and which are still ahead — is t
 When you add a language feature, add an in-language case to the relevant
 `tests/*_test.blsp` file (or a new one) and/or a Rust case in `basic.rs` (see the
 checklist in `CLAUDE.md`).
+
+## The kernel's sanitizers and model checkers
+
+The Rust kernel has its own tools beside the suite. Each is a `make` target; the slow ones
+run in the weekly `full.yml`, and none runs per push.
+
+| Target | What it finds | Where it runs |
+|---|---|---|
+| `make asan` | AddressSanitizer: out-of-bounds, use-after-free and double free in the unsafe substrate (the mmap table, JIT code buffers) | weekly |
+| `make tsan` | ThreadSanitizer: data races in the concurrency-sensitive Rust tests | weekly |
+| `make loom` | loom: every interleaving of a faithful model of the dense-table migration (`tests/loom_table_protocol.rs`) | weekly |
+| `make shuttle` | Shuttle: random and PCT schedules of a faithful model of the scheduler's park/spawn handshake and steal ownership (`tests/shuttle_scheduler_model.rs`). Scales to more threads than loom; a pass is evidence, not proof. Each property's sabotage is a test of its own, so the check is known to fail | weekly |
+| `make miri` | Miri: undefined behaviour in `unsafe` that ASan cannot see (aliasing violations, invalid values, misaligned reads) — what every `// SAFETY:` comment claims cannot happen — over the kernel modules Miri can interpret (`MIRI_MODULES`: no JIT, no foreign calls, the system allocator) | weekly |
+| `make mutants F=… TESTS=…` | cargo-mutants: breaks one thing at a time in a Rust file and lists every change no test noticed — "sabotage every guard" (CLAUDE.md), run by a tool. Scope it to a file and its tests; the whole crate is hours | by hand |
+| `make rr-hunt RR_TEST="BIN CASE" RR_RUNS=50` | rr: records a test under chaos scheduling until it fails, and keeps that one recording for `rr replay` — reverse execution through a one-in-N race. Needs `rr` (`apt install rr`) and `kernel.perf_event_paranoid <= 1` | by hand |
+| `make fuzz T=… SECS=…` | libFuzzer over the reader, eval, JSON, the wire format and bundles | by hand |
+
+Installing them: `rustup +nightly component add miri rust-src`; `cargo install --locked
+cargo-mutants`; `apt install rr`. Shuttle and loom are dev-dependencies behind the
+`shuttle-model` and `loom-model` features.

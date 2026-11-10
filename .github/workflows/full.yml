@@ -297,10 +297,10 @@ jobs:
       - name: make asan
         run: make asan
 
-  # ThreadSanitizer and the loom model check. Both are fast; they are here rather than in
-  # CI only because they need a nightly toolchain.
+  # ThreadSanitizer, the loom model check and the Shuttle model check. All three are fast; they
+  # are here rather than in CI only because TSan needs a nightly toolchain.
   tsan-loom:
-    name: ThreadSanitizer + loom
+    name: ThreadSanitizer + loom + shuttle
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -316,6 +316,29 @@ jobs:
 
       - name: make loom
         run: make loom
+
+      - name: make shuttle
+        run: make shuttle
+
+  # Miri interprets the kernel's unit tests and stops at undefined behaviour in `unsafe` code
+  # that ASan cannot see — an aliasing violation, an invalid value, a misaligned read — which
+  # is what every `// SAFETY:` comment claims cannot happen. Only the modules Miri can run
+  # (`make miri`'s MIRI_MODULES): no JIT, no foreign calls.
+  miri:
+    name: Miri (kernel unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: make miri
+        run: make miri
 
   # The ADR-076 differential gate — the whole suite through the tree-walker
   # (`BROOD_TIER=0`), the second half of `make test-both`. The VM is
