@@ -1,0 +1,63 @@
+(defmodule mcp-server-test
+  (:use test)
+  (:load mcp-server))
+
+(def mst-catalogue
+  [{:name "add"
+    :description "Add two numbers."
+    :schema {:type "object"}
+    :handler (fn (args) (+ (get args :x) (get args :y)))}
+    {:name "spin" :schema {:type "object"} :handler (fn (_args) (receive (after 5000 :late)))}])
+
+(def mst-server
+  {:catalogue (fn () mst-catalogue)
+   :info {:name "demo" :version "1.2.3"}
+   :methods {"demo/echo" (fn (params _server) [:ok params])}
+   :deadline-tools #{"spin"}
+   :deadline-ms 100})
+
+(defn mst-request (method params)
+  (let (reply (mcp-server/handle {:jsonrpc "2.0" :id 1 :method method :params params} mst-server))
+    (if (map? reply) reply (error "mcp-server-test: expected a reply, got " (pr-str reply)))))
+(sig mst-request (string map -> map))
+
+(describe "mcp-server dispatch"
+  (test "initialize names the server and its capabilities"
+    (let (result (get (mst-request "initialize" {}) :result))
+      (assert= (get result :serverInfo) {:name "demo" :version "1.2.3"})
+      (assert= (get result :capabilities) {:tools {}})))
+  (test "a server's own method answers"
+    (assert= (get (mst-request "demo/echo" {:a 1}) :result) {:a 1}))
+  (test "tools/call runs the handler"
+    (assert= (get (mst-request "tools/call" {:name "add" :arguments {:x 2 :y 3}}) :result)
+      {:content [{:type "text" :text "5"}]}))
+  (test "a deadline tool past its deadline is a soft failure"
+    (is (map/get-in (mst-request "tools/call" {:name "spin" :arguments {}}) [:result :isError])))
+  (test "an unknown method is -32601"
+    (assert= (map/get-in (mst-request "no/such" {}) [:error :code]) -32601)))
+
+(defn mst-answered (response)
+  (if (failure? response) (error "mcp-server-test: " (error-message response)) response))
+
+(defn mst-post (url body headers)
+  (mst-answered (http/post url body {:headers headers})))
+
+(describe "mcp-server over HTTP"
+  (test "a POST with the token gets the reply; without it 403; GET 405; a notification 202"
+    (let (started (mcp-server/start-http mst-server "sekrit")
+          url (get started :url)
+          token {"X-Token" "sekrit" "Content-Type" "application/json"})
+      (try
+        (let (ok (mst-post url
+                   "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"add\",\"arguments\":{\"x\":1,\"y\":1}}}"
+                   token))
+          (assert= (get ok :status) 200)
+          (assert= (map/get-in (json/decode (http/body-text ok)) [:result :content])
+            [{:type "text" :text "2"}])
+          (assert= (get (mst-post url "{}" {}) :status) 403)
+          (assert= (get (mst-post url
+                          "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}" token)
+                     :status)
+            202)
+          (assert= (get (mst-answered (http/fetch url {:headers token})) :status) 405))
+        (finally (exit (get started :pid) :kill))))))

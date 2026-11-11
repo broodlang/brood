@@ -14,12 +14,16 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - **`assert=` says when a list met a vector**: a failure whose two sides hold the same elements,
   one a list and the other a vector (at any depth), adds `note: same elements, but actual is a list
   and expected is a vector` — or the path to the inner one. What passes is unchanged.
+- **`editor/buffer/insert-program-output`**: text a program writes into a buffer you also type in (a shell's
+  output, an agent's reply), inserted into the text and every undo snapshot at once, recording
+  nothing, so undo and redo of your typing step over it (ADR-712).
 - **A `nest` flag can be deprecated**: it keeps working, warns naming its replacement, and
   leaves completion (road-to-1.0 §B5). **An error code keeps its `:kind`**, now enforced by a
   frozen ledger test (§B7).
 - **`string/scripts` and `string/mixed-script?`** (ADR-710): the Unicode Script of a string's letters, and
   UTS #39's single-script test over it — `p\u{430}ypal` (a Cyrillic `а`) mixes scripts, `日本語のテキスト`
   and `Unicode漢字` do not. What a homoglyph warning, a registry's name check or a mail reader reads.
+- **`mcp-server`**: the MCP protocol behind `nest mcp`, as a runtime module any program can serve tools with — a server spec as data (its catalogue, extra methods, deadlines), handlers isolated in their own processes, a stdio transport and a loopback HTTP one with a token (`start-http`). `nest mcp` is one spec over it (ADR-711).
 - **`gui/color-scheme`**: the desktop's light or dark preference (`:dark`, `:light`, nil) — GNOME,
   KDE, macOS, Windows — beside `gui/reduce-motion?`, so an app can follow the system theme.
 - **`nest check` flags a qualified name into a module that does not exist**: `net/http/post`

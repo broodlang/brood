@@ -216,6 +216,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `io.blsp` (`io`) — Output ports — the redirectable sink the prelude's `io/write`/`io/puts` write to.
 - `json.blsp` (`json`) — JSON ↔ Brood data, written entirely in Brood (pure; opt-in).
 - `jsonrpc.blsp` (`jsonrpc`) — JSON-RPC 2.0 messages over a `Content-Length`-framed stream — the wire of LSP, DAP and a stdio MCP server.
+- `mcp-server.blsp` (`mcp-server`) — A Model Context Protocol server for any program that serves tools to an agent: a server spec as data, handlers in monitored processes, stdio and loopback-HTTP transports (ADR-711); `nest mcp` is one spec over it.
 - `list.blsp` (`list`) — The pair accessors `list/caar` … `list/cdddr`: each `a` takes a `first`, each `d` a `rest`, read right to left.
 - `log.blsp` (`log`) — An async, safe logger.
 - `map.blsp` (`map`) — Map transformations — the derived helpers over the bare map protocol.
