@@ -696,3 +696,43 @@ wrong), the way `%d` passes a float through."
                (string/char-at template i)
                "' at column "
                i))))
+
+;; ---- mixed scripts (homoglyphs, ADR-710) --------------------------------------------------
+;; A Cyrillic `а` looks like a Latin `a`, so `pаypal` reads as `paypal` and is not. Unicode's
+;; TR39 names the check: a word (an identifier, a domain name, a sender) should be written in
+;; one script — with the combinations real text uses: Han with kana (Japanese), with Hangul
+;; (Korean), with Bopomofo, and any of those with Latin. That is TR39's "highly restrictive"
+;; level; what it refuses is the mixing an attacker relies on.
+
+(def- *script-companions*
+  ;; TR39's augmented script sets: the scripts a script may share a word with, each as the
+  ;; writing systems it can belong to
+  {:han #{:han :japanese :korean :bopomofo}
+   :hiragana #{:japanese}
+   :katakana #{:japanese}
+   :hangul #{:korean}
+   :bopomofo #{:bopomofo}})
+
+(defn- single-script? (scripts)
+  ;; whether every script in `scripts` can belong to one writing system
+  (or (<= (count scripts) 1)
+    (not (empty? (reduce (map scripts (fn (script) (get *script-companions* script #{script})))
+                   set/intersection)))))
+
+(defn mixed-script? (s:string -> bool)
+  "Whether `s` mixes writing systems the way a homoglyph does: letters from scripts no word of
+real text combines — Latin with Cyrillic or Greek, Cyrillic with Armenian — by Unicode TR39's
+\"highly restrictive\" level. One script is fine, and so is Han with kana or Hangul, and any of
+those with Latin; digits and punctuation belong to every script. Ask it of a WORD (an
+identifier, a host name, a display name), not of prose, where a quoted Greek word is no attack.
+
+    (string/mixed-script? \"paypal\")         ;=> false
+    (string/mixed-script? \"p\\u{430}ypal\")   ;=> true
+    (string/mixed-script? \"Unicode漢字\")    ;=> false
+    (string/mixed-script? \"日本語のテキスト\")  ;=> false"
+  (let (scripts (string/scripts s))
+    (not (or (single-script? scripts)
+           (and (includes? scripts :latin)
+             (let (others (seq/reject scripts (fn (script) (= script :latin))))
+               (and (single-script? others)
+                 (any? others (fn (script) (contains? *script-companions* script))))))))))
