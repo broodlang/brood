@@ -16,6 +16,7 @@ use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
 use crate::error::Pos;
+use crate::types::check::{Finding, Lint};
 
 use super::deps::obs_registry;
 use super::walk::{head_name, is_fn_head, list_items, unquote};
@@ -90,7 +91,7 @@ pub(super) fn check_impls(
     heap: &Heap,
     forms: &[Value],
     protos: &HashMap<String, Protocol>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     for &form in forms {
         let Some(items) = list_items(heap, form) else {
@@ -123,7 +124,8 @@ pub(super) fn check_impls(
         for op in &proto.ops {
             match provided.get(&op.name) {
                 None if op.provided => {}
-                None => out.push((
+                None => out.push(Finding::new(
+                    Lint::Conformance,
                     pos,
                     format!("{} {}: impl is missing op `{}`", noun, pname, op.name),
                 )),
@@ -138,7 +140,8 @@ pub(super) fn check_impls(
                             arity == op.arity
                         };
                     if !compatible {
-                        out.push((
+                        out.push(Finding::new(
+                            Lint::Conformance,
                             pos,
                             format!(
                                 "{} {}: op `{}` takes {} arg(s), this impl has {}",
@@ -155,7 +158,11 @@ pub(super) fn check_impls(
         provided_names.sort();
         for name in provided_names {
             if !proto.ops.iter().any(|o| &o.name == name) {
-                out.push((pos, format!("{} {}: has no op `{}`", noun, pname, name)));
+                out.push(Finding::new(
+                    Lint::Conformance,
+                    pos,
+                    format!("{} {}: has no op `{}`", noun, pname, name),
+                ));
             }
         }
     }
@@ -253,7 +260,7 @@ pub(super) fn check_behaviours(
     forms: &[Value],
     expanded: &[Value],
     ifaces: &HashMap<String, Protocol>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let claims = implements_claims(heap, forms);
     if claims.is_empty() {
@@ -268,7 +275,8 @@ pub(super) fn check_behaviours(
         };
         for op in &iface.ops {
             match provided.get(&op.name) {
-                None => out.push((
+                None => out.push(Finding::new(
+                    Lint::Conformance,
                     pos,
                     format!(
                         "behaviour {}: this module is missing `{}` ({} arg(s))",
@@ -277,7 +285,8 @@ pub(super) fn check_behaviours(
                 )),
                 // A variadic op (`(render (self & more))`) declares no single arity to pin
                 // — accept any provider, as `check_impls` does.
-                Some(&Some(arity)) if !op.variadic && arity != op.arity => out.push((
+                Some(&Some(arity)) if !op.variadic && arity != op.arity => out.push(Finding::new(
+                    Lint::Conformance,
                     pos,
                     format!(
                         "behaviour {}: `{}` takes {} arg(s), the behaviour needs {}",
@@ -736,7 +745,7 @@ pub(super) struct AbilityInfo {
     provided: HashSet<(String, String)>,
     /// Same-module op-name collisions: two abilities in this file declaring the same op
     /// name (the second clobbers the first's generic fn). Emitted by `check_op_collisions`.
-    collisions: Vec<(Option<Pos>, String)>,
+    collisions: Vec<Finding>,
 }
 
 impl AbilityInfo {
@@ -921,7 +930,7 @@ fn spec_param_types(heap: &Heap, spec: Value) -> Option<Vec<Option<crate::types:
 /// Same-module op-name collisions (two abilities in this file declaring the same op name).
 /// One diagnostic per collision — advisory in the live image, ship-blocking under
 /// `nest check` (which exits nonzero on any warning), so op names stay unique per module.
-pub(super) fn check_op_collisions(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, String)>) {
+pub(super) fn check_op_collisions(info: &AbilityInfo, out: &mut Vec<Finding>) {
     out.extend(info.collisions.iter().cloned());
 }
 
@@ -1274,7 +1283,7 @@ fn read_sealed_registry(
 /// `:default`/provided op). Advisory, like `check_sealed` — a declared conformance contract,
 /// not a gate. An unknown required ability (not in the registry) is skipped (no false
 /// positive). The implementor set is `A`'s sealed members plus any id with a direct `A` impl.
-pub(super) fn check_requires(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, String)>) {
+pub(super) fn check_requires(info: &AbilityInfo, out: &mut Vec<Finding>) {
     // Ability order is the report order, so it is sorted, not hash order (B8).
     let mut requires: Vec<(&String, &Vec<String>)> = info.requires.iter().collect();
     requires.sort();
@@ -1306,7 +1315,8 @@ pub(super) fn check_requires(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, Str
                     {
                         continue;
                     }
-                    out.push((
+                    out.push(Finding::new(
+                        Lint::Conformance,
                         None,
                         format!(
                             "ability {} requires {}: :{} implements {} but has no impl of `{}` for {}",
@@ -1319,7 +1329,7 @@ pub(super) fn check_requires(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, Str
     }
 }
 
-pub(super) fn check_sealed(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, String)>) {
+pub(super) fn check_sealed(info: &AbilityInfo, out: &mut Vec<Finding>) {
     let mut sealed: Vec<(&String, &Vec<String>)> = info.sealed.iter().collect();
     sealed.sort(); // report order, not hash order (B8)
     for (ability, members) in sealed {
@@ -1335,7 +1345,8 @@ pub(super) fn check_sealed(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, Strin
                     .impls
                     .contains(&(ability.clone(), op.clone(), member.clone()))
                 {
-                    out.push((
+                    out.push(Finding::new(
+                        Lint::Conformance,
                         None,
                         format!(
                             "sealed ability {}: no impl of `{}` for :{}",
@@ -1378,7 +1389,7 @@ pub(super) fn check_dispatch_calls(
     expanded: &[Value],
     abilities: &AbilityInfo,
     multis: &MultiInfo,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     if abilities.is_empty() && multis.is_empty() {
         return;
@@ -1400,7 +1411,7 @@ impl DispatchFacts<'_> {
         heap: &Heap,
         form: Value,
         locals: &HashSet<value::Symbol>,
-        out: &mut Vec<(Option<Pos>, String)>,
+        out: &mut Vec<Finding>,
     ) {
         crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
             if let Value::Vector(id) = form {
@@ -1452,7 +1463,7 @@ impl DispatchFacts<'_> {
         items: &[Value],
         recursive: bool,
         locals: &HashSet<value::Symbol>,
-        out: &mut Vec<(Option<Pos>, String)>,
+        out: &mut Vec<Finding>,
     ) {
         let bindings = items
             .get(1)
@@ -1481,14 +1492,15 @@ impl DispatchFacts<'_> {
         form: Value,
         head: value::Symbol,
         items: &[Value],
-        out: &mut Vec<(Option<Pos>, String)>,
+        out: &mut Vec<Finding>,
     ) {
         if let Some((ability, op)) = self.abilities.op_of(head)
             && let Some(&arg) = items.get(1)
             && let Some(id) = arg_identity(heap, arg, &self.abilities.ctors)
             && self.abilities.missing(ability, op, &id)
         {
-            out.push((
+            out.push(Finding::new(
+                Lint::TypeMismatch,
                 heap.form_pos_only(form),
                 format!("ability {ability}: no impl of `{op}` for :{id}"),
             ));
@@ -1507,7 +1519,8 @@ impl DispatchFacts<'_> {
             if let Some(tuple) = tuple
                 && self.multis.missing(name, &tuple)
             {
-                out.push((
+                out.push(Finding::new(
+                    Lint::TypeMismatch,
                     heap.form_pos_only(form),
                     multi_missing_warning(name, &tuple),
                 ));
@@ -1543,7 +1556,7 @@ fn fn_binders(heap: &Heap, items: &[Value]) -> HashSet<value::Symbol> {
 struct DispatchDefs {
     op_fns: HashMap<value::Symbol, (String, String)>,
     ambiguous: HashSet<value::Symbol>,
-    collisions: Vec<(Option<Pos>, String)>,
+    collisions: Vec<Finding>,
     generics: HashMap<value::Symbol, String>,
     ctors: HashMap<value::Symbol, String>,
 }
@@ -1589,7 +1602,8 @@ impl DispatchDefs {
                 // binds a distinct `<module>/op` global and is fine).
                 Some(previous) if *previous != key => {
                     self.ambiguous.insert(name);
-                    self.collisions.push((
+                    self.collisions.push(Finding::new(
+                        Lint::Conformance,
                         heap.form_pos_only(form),
                         format!(
                             "ability {}: op `{}` is already declared by ability {} in this \
@@ -1620,7 +1634,7 @@ pub(super) fn check_ability_call_inferred(
     head: value::Symbol,
     arg_ty: &crate::types::Ty,
     pos: Option<Pos>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let Some((a, op)) = info.op_of(head) else {
         return;
@@ -1628,7 +1642,8 @@ pub(super) fn check_ability_call_inferred(
     if let Some(id) = ty_record_id(arg_ty)
         && info.missing(a, op, &id)
     {
-        out.push((
+        out.push(Finding::new(
+            Lint::TypeMismatch,
             pos,
             format!("ability {}: no impl of `{}` for :{}", a, op, id),
         ));
@@ -1745,19 +1760,14 @@ pub(super) fn lint_single_dispatch_multis(
     heap: &Heap,
     expanded: &[Value],
     info: &MultiInfo,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     for &form in expanded {
         scan_single_dispatch(heap, form, info, out);
     }
 }
 
-fn scan_single_dispatch(
-    heap: &Heap,
-    form: Value,
-    info: &MultiInfo,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn scan_single_dispatch(heap: &Heap, form: Value, info: &MultiInfo, out: &mut Vec<Finding>) {
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
@@ -1784,7 +1794,8 @@ fn scan_single_dispatch(
                     .iter()
                     .all(|t| t.len() == first.len() && t[1..] == first[1..])
             {
-                out.push((
+                out.push(Finding::new(
+                    Lint::SingleDispatch,
                     heap.form_pos_only(form),
                     format!(
                         "multimethod {mname}: every method dispatches on the first argument \
@@ -2146,7 +2157,7 @@ pub(super) fn check_operator_sugar(
     info: &MultiInfo,
     ctx: &super::ctx::Ctx,
     pos: Option<Pos>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     if info.record_ids.is_empty() {
         return;
@@ -2176,7 +2187,8 @@ pub(super) fn check_operator_sugar(
             .map(|s| format!(":{}", s))
             .collect::<Vec<_>>()
             .join(" ");
-        out.push((
+        out.push(Finding::new(
+            Lint::TypeMismatch,
             pos,
             format!(
                 "{}: no `{}` method for [{}]",
@@ -2217,7 +2229,7 @@ pub(super) fn check_multi_call_inferred(
     info: &MultiInfo,
     ctx: &super::ctx::Ctx,
     pos: Option<Pos>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let Some(mname) = info.generics.get(&head) else {
         return;
@@ -2233,7 +2245,11 @@ pub(super) fn check_multi_call_inferred(
     if let Some(tuple) = tuple
         && info.missing(mname, &tuple)
     {
-        out.push((pos, multi_missing_warning(mname, &tuple)));
+        out.push(Finding::new(
+            Lint::TypeMismatch,
+            pos,
+            multi_missing_warning(mname, &tuple),
+        ));
     }
 }
 

@@ -38,6 +38,14 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   another collection. `()` stays `nil`.
 
 **Changed.**
+- **Warnings have categories, and the project decides which gate** (ADR-698): each `nest check`
+  line ends with its category (`[type-mismatch]`), `project.blsp`'s `:check {:advisory […]
+  :gating […] :allow […]}` moves them, and `(defmodule m "…" (:check-allow :category))` silences
+  one for a file. Breaking for tools: the structured check maps gain `:category` and `:text`, and
+  `reflect/check-file-deps` returns those maps instead of strings.
+- **Nodes link only within one `major.minor`** (ADR-699): the handshake says the Brood version
+  and refuses another minor at both ends, naming both. Breaking: wire v14 does not link with
+  v13, and the v10 fallback for runtimes from before mailbox lanes is gone.
 - **Deprecated: `dotimes`, `dolist`, `unless` and `match*`** (ADR-674), the first stage of
   "reduce before adding": one form iterates for effect. They still work; `nest check` warns at
   each use, and **`nest format --migrate`** rewrites them: `(dotimes (i n) …)` →

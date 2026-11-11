@@ -267,7 +267,7 @@ pub(crate) struct ImportScope {
     /// `(:use mod :only [name])` naming something `mod` does not define — the check the
     /// runtime `%refer` cannot make (KI-211: at refer time a module may be mid-load or
     /// image-backed), reported at the `(:use …)` clause.
-    pub(crate) unknown_only: Vec<(Option<Pos>, String)>,
+    pub(crate) unknown_only: Vec<Finding>,
 }
 
 impl ImportScope {
@@ -469,7 +469,8 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                                 || crate::eval::derive::image_sig_arity(heap, qual).is_some()
                                 || protocol::ability_declared_by(heap, bare, &mod_name);
                             if !defined && !exports.is_empty() {
-                                scope.unknown_only.push((
+                                scope.unknown_only.push(Finding::new(
+                                    Lint::UnknownImport,
                                     pos,
                                     format!(
                                         "(:use {mod_name} :only [... {bare_name} ...]): \

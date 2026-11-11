@@ -18,16 +18,12 @@ use std::collections::HashSet;
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
-use crate::error::Pos;
+use crate::types::check::Finding;
 
 use super::walk::{list_items, stability_msg};
 
 /// Entry: walk every top-level (un-expanded) form for a call of a deprecated macro.
-pub(super) fn check_deprecated_macros(
-    heap: &Heap,
-    forms: &[Value],
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn check_deprecated_macros(heap: &Heap, forms: &[Value], out: &mut Vec<Finding>) {
     let mut defined = HashSet::new();
     for &form in forms {
         collect_defined(heap, form, &mut defined);
@@ -37,7 +33,7 @@ pub(super) fn check_deprecated_macros(
     }
 }
 
-fn walk(heap: &Heap, form: Value, defined: &HashSet<String>, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk(heap: &Heap, form: Value, defined: &HashSet<String>, out: &mut Vec<Finding>) {
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             if let Value::Vector(id) = form {
@@ -67,10 +63,11 @@ fn walk(heap: &Heap, form: Value, defined: &HashSet<String>, out: &mut Vec<(Opti
                 if matches!(
                     crate::types::check::deps::obs_global(heap, sym),
                     Some(Value::Macro(_))
-                ) && let Some(msg) = stability_msg(heap, sym)
+                ) && let Some((lint, msg)) = stability_msg(heap, sym)
                 {
                     // A form with a shape change has a migration; say where it is.
-                    out.push((
+                    out.push(Finding::new(
+                        lint,
                         heap.form_pos_only(form),
                         format!("{msg} (`nest format --migrate` rewrites it)"),
                     ));

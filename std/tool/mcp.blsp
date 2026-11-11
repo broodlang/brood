@@ -96,8 +96,8 @@ cross-file flat-namespace collisions."
 (defn load-tool (args)
   "`load` — load a `.blsp` file into the session and check it. Side-effects
 (`def`, `defn`, `defmacro`) persist. Returns `{:ok true :diagnostics [...]
-:shadows [...]}` — `diagnostics` are advisory `{:file :line :col :message}`
-type/arity/unbound/non-tail-recursion warnings from `check-file-structured`;
+:shadows [...]}` — `diagnostics` are advisory `{:file :line :col :message :category :text}`
+warnings from `check-file-structured`;
 `shadows` flags names this file defines that another project source file also
 defines (the silent flat-namespace collision). On a load error:
 `{:ok false :error msg}`.
@@ -305,7 +305,7 @@ check after the first invocation.
 
 (defn check-tool (args)
   "`check` — advisory type-check the project. Returns
-`{:diagnostics [{:file :line :col :message} ...]}` (one entry per warning,
+`{:diagnostics [{:file :line :col :message :category :severity :text} ...]}` (one entry per warning,
 position omitted when the checker can't supply one — ADR-024). Backed by
 `(project-check/check-structured project/*root*)` in `std/tool/project-check.blsp` (step 1c-a). `(or … [])`
 so a clean project renders as `{:diagnostics []}` rather than `{:diagnostics

@@ -2200,10 +2200,26 @@ special forms.
 
 **Advisory in the image, a gate where you want one.** The checker never stops code from
 loading into a live image — hot reload depends on that — but its verdict is an exit status.
-`nest check` exits non-zero on any finding, and `--strict` adds the findings for a value
-merely wider than a parameter accepts. A project that wants a type gate
+`nest check` exits non-zero on any gating finding, and `--strict` adds the findings for a
+value merely wider than a parameter accepts. A project that wants a type gate
 runs `nest check --strict` in CI, as Brood does for `std/` and `tests/` and bedit does for
 itself; `(check-allow :category form…)` records a deliberate exception where it is made.
+
+Every finding has a **category**, printed after it (`… [type-mismatch]`) and listed by
+`(reflect/check-categories)`. Four are advisory by default — printed, never failing the
+check: `:non-tail-recursion`, `:gave-up` (a checker budget ran out), `:deprecated` and
+`:beta`; the rest gate (ADR-698). A project moves categories in `project.blsp`, and a module
+silences one for its whole file in its header:
+
+```clojure fragment
+(project :name "app" :version "0.1.0"
+  :check {:advisory [:unused-binding]        ; printed, never gating
+          :gating [:non-tail-recursion]      ; fails the check
+          :allow [:list-truthiness]})        ; not reported at all
+
+(defmodule app/render "Drawing."
+  (:check-allow :non-tail-recursion))        ; this file only
+```
 
 `(sig name (params… -> ret))` declares a function's signature. It is a pure
 declaration — a runtime no-op — read by the advisory checker, which then flags a

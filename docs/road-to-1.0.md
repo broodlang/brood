@@ -44,12 +44,16 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
    newer one with a message, and read every older one.
 2. ⬜ **Manifest keys.** An unknown `project.blsp` key should warn, never fail, so that a later
    minor can add keys. Check what happens today and pin it with a test.
-3. ⬜ **Structured warning severities in `nest check`.** Replace the matching on message text
+3. ✅ **Structured warning severities in `nest check`** (ADR-698, 2026-11-11). Every warning
+   carries a category; `nest check` decides gating from it and the project's `:check` key, and a
+   `(:check-allow …)` header clause silences a category for a file. Open: the "new lint is
+   advisory until the next major" rule needs a lint's `:since`, which only a lint added after
+   1.0 will have. Was: Replace the matching on message text
    (`project-check.blsp`'s "for now, pending structured warning severities") with a severity on
    each warning. Then add project- and file-level controls (open thread 1), the "new lint is
    advisory" rule, and the `project.blsp` key that opts a project into new lints.
    ADR-673 §5 depends on this.
-4. ⬜ **Wire protocol versioning (ADR-673 §3: same `major.minor`).** Put the Brood
+4. ✅ **Wire protocol versioning (ADR-673 §3: same `major.minor`)** (ADR-699, 2026-11-11). Was: Put the Brood
    `major.minor` in the handshake beside the protocol magic. Refuse a mismatch with a message
    that names both versions. Keep the refusal before any session key is derived, so a
    mismatched node learns why and nothing else.

@@ -92,7 +92,7 @@ pub(super) fn check_sig_declarations(
     forms: &[Value],
     file_ns: Option<&str>,
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     for &form in forms {
         // Typed parameters (ADR-420) are a declaration too: each type they write must read,
@@ -107,7 +107,11 @@ pub(super) fn check_sig_declarations(
                     } else {
                         format!("parameter `{label}`")
                     };
-                    out.push((pos, format!("defn {spelling}: {what}: {problem}")));
+                    out.push(Finding::new(
+                        Lint::Declaration,
+                        pos,
+                        format!("defn {spelling}: {what}: {problem}"),
+                    ));
                 }
             }
             continue;
@@ -119,7 +123,11 @@ pub(super) fn check_sig_declarations(
         let pos = heap.form_pos_only(form);
         // 1. Is the type-expression readable at all?
         if let Some(problem) = annot::type_expr_problem(heap, ty_form) {
-            out.push((pos, format!("sig {spelling}: {problem}")));
+            out.push(Finding::new(
+                Lint::Declaration,
+                pos,
+                format!("sig {spelling}: {problem}"),
+            ));
             continue; // the rest reads the parsed sig, which doesn't exist
         }
         let qualified = qualify_decl_name(heap, ctx, file_ns, name);
@@ -127,7 +135,8 @@ pub(super) fn check_sig_declarations(
         //    that isn't bound anywhere in the image) annotates nothing — usually a
         //    rename that moved the `defn` and left the declaration behind.
         if walk::is_unbound(heap, ctx, name) && walk::is_unbound(heap, ctx, qualified) {
-            out.push((
+            out.push(Finding::new(
+                Lint::Declaration,
                 pos,
                 format!("sig {spelling}: nothing named `{spelling}` is defined here"),
             ));
@@ -141,7 +150,8 @@ pub(super) fn check_sig_declarations(
         ) {
             let declared = walk::arity_of_sig(&sig);
             if !arities_overlap(declared, def_arity) {
-                out.push((
+                out.push(Finding::new(
+                    Lint::Declaration,
                     pos,
                     format!(
                         "sig {spelling}: declares {} argument(s) but the definition takes {}",
@@ -211,7 +221,7 @@ pub(super) fn install_type_vocabulary(
     file_ns_name: Option<&str>,
     mut import_scope: ImportScope,
     multi_info: &protocol::MultiInfo,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     annot::set_ability_types(protocol::ability_type_table(heap, expanded));
     annot::set_record_ids(protocol::record_id_names(heap, expanded));
@@ -238,7 +248,8 @@ pub(super) fn install_type_vocabulary(
                     .and_then(|items| items.first().copied())
                     .is_some_and(|h| matches!(h, Value::Sym(s) if value::symbol_is(s, "record") || value::symbol_is(s, "tuple")));
             if declares_shape && ty.record_fields().is_none() && ty.positional_elems().is_none() {
-                out.push((
+                out.push(Finding::new(
+                        Lint::Declaration,
                         heap.form_pos_only(form),
                         format!(
                             "deftype {name}: the shape exceeds the checker's budget of {} nodes and is read as a bare `{}` — every field is unrefined; split it into named parts",

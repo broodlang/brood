@@ -13,7 +13,7 @@ pub(in crate::types::check) fn check_impl_returns(
     heap: &Heap,
     expanded: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     // Runs for abilities OR multimethods — either kind can declare a return.
     if ctx.ability().is_none_or(|i| i.is_empty()) && ctx.multi().is_none() {
@@ -24,12 +24,7 @@ pub(in crate::types::check) fn check_impl_returns(
     }
 }
 
-pub(super) fn walk_impl_returns(
-    heap: &Heap,
-    form: Value,
-    ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn walk_impl_returns(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<Finding>) {
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
@@ -66,7 +61,7 @@ pub(super) fn check_one_method_return(
     heap: &Heap,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let Some(info) = ctx.multi() else {
         return;
@@ -167,7 +162,8 @@ pub(super) fn check_one_method_return(
         && !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_TYPE_MISMATCH)
     {
         let key_str = key.map(|k| format!(" for {k}")).unwrap_or_default();
-        out.push((
+        out.push(Finding::new(
+            Lint::TypeMismatch,
             heap.form_pos_only(ret_form),
             format!(
                 "multimethod {mname}{key_str}: declared return type {} but the method yields {}",
@@ -184,7 +180,7 @@ pub(super) fn check_one_impl_return(
     heap: &Heap,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let info = match ctx.ability() {
         Some(i) => i,
@@ -270,7 +266,8 @@ pub(super) fn check_one_impl_return(
         && !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_TYPE_MISMATCH)
     {
         let id_str = id.map(|i| format!(" for :{i}")).unwrap_or_default();
-        out.push((
+        out.push(Finding::new(
+            Lint::TypeMismatch,
             heap.form_pos_only(ret_form),
             format!(
                 "ability {ability}/{op}{id_str}: declared return type {} but the impl yields {}",

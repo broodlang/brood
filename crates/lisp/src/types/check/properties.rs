@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Value};
-use crate::error::Pos;
+use crate::types::check::{Finding, Lint};
 
 use super::ctx::Ctx;
 use super::sigs::{declared_heap_sig, self_call_sites};
@@ -84,12 +84,7 @@ pub(crate) fn effect_of(heap: &Heap, name: Symbol) -> Option<String> {
 
 /// Entry: the declared properties of every `(def name (fn …))` in the expanded forms, and
 /// every `ui-memo` thunk.
-pub(super) fn check_properties(
-    heap: &Heap,
-    expanded: &[Value],
-    ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn check_properties(heap: &Heap, expanded: &[Value], ctx: &Ctx, out: &mut Vec<Finding>) {
     let mut defs: HashMap<Symbol, Value> = HashMap::new();
     let mut allowed: HashMap<Symbol, Vec<String>> = HashMap::new();
     for &form in expanded {
@@ -117,7 +112,8 @@ pub(super) fn check_properties(
             // and this is where that declaration is earned.
             let bodies = fn_bodies(heap, fn_form);
             if let Some(effect) = purity.effect_in_forms(&bodies) {
-                out.push((
+                out.push(Finding::new(
+                    Lint::Pure,
                     pos,
                     format!(
                         "{} is declared :pure but performs an effect: {effect}",
@@ -130,7 +126,7 @@ pub(super) fn check_properties(
             && !allows("total")
             && let Some(msg) = non_decreasing_self_call(heap, ctx, name, fn_form)
         {
-            out.push((pos, msg));
+            out.push(Finding::new(Lint::Total, pos, msg));
         }
     }
     for &form in expanded {
@@ -490,12 +486,7 @@ pub(super) fn collect_pattern_names(heap: &Heap, pat: Value, out: &mut HashSet<S
 /// A `(ui-memo key deps thunk)` call whose thunk performs an effect is reported: the memo
 /// reuses the fragment while `deps` are equal, so the effect runs on some turns and not
 /// others — the one thing a cached view must not do.
-fn check_memo_thunks(
-    heap: &Heap,
-    form: Value,
-    purity: &mut Purity<'_>,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn check_memo_thunks(heap: &Heap, form: Value, purity: &mut Purity<'_>, out: &mut Vec<Finding>) {
     let mut work = vec![form];
     while let Some(v) = work.pop() {
         let Some(items) = list_items(heap, v) else {
@@ -527,7 +518,8 @@ fn check_memo_thunks(
                     },
                 };
                 if let Some(effect) = effect {
-                    out.push((
+                    out.push(Finding::new(
+                        Lint::Pure,
                         heap.form_pos_only(v),
                         format!(
                             "ui-memo caches a fragment whose thunk performs an effect: {effect} \

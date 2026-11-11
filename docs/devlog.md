@@ -1399,3 +1399,17 @@ pointing at it, and LeakSanitizer reports exactly that. `GRAMMAR_MARKS` now also
 built, so each stays reachable for the process's life, as the libraries do. Reproduced in seconds
 on the ASan `brood`: `tests/tree_sitter_test.blsp` passed 8/8 and exited 1 with 1137 bytes
 leaked; with the fix it exits 0 with no report.
+
+2026-11-11 (ADR-698, road-to-1.0 §B3). Every checker warning carries a category (30, the names
+`check-allow` takes where it had one), and `nest check` decides what gates from the category,
+not from the message text. Advisory by default: `:non-tail-recursion`, `:gave-up`,
+`:deprecated`, `:beta`. A project moves categories with `:check {:advisory […] :gating […]
+:allow […]}` in `project.blsp`, and a module silences one for its file with a `(:check-allow …)`
+header clause. Each printed warning ends with its category. Breaking: the structured check maps
+gain `:category` and `:text`, `check-file-deps` returns maps, and the check cache is v5.
+
+2026-11-11 (ADR-699, road-to-1.0 §B4). The dist handshake opens with the Brood `major.minor`
+after the magic (wire v14), and a node of another minor is refused at both ends naming both
+versions, before any key. The v10 fallback (ADR-492) went with it: v10 runtimes are older
+minors, which ADR-673 §3 refuses. Breaking: a v13 node does not link with a v14 one, and
+`BROOD_DIST_V10` is now `BROOD_DIST_VERSION`.

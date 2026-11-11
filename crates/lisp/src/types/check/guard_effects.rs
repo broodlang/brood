@@ -16,7 +16,7 @@
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
-use crate::error::Pos;
+use crate::types::check::{Finding, Lint};
 use std::collections::HashSet;
 
 use super::walk::list_items;
@@ -68,7 +68,7 @@ pub(super) const EFFECTFUL_IN_GUARD: &[&str] = &[
 ];
 
 /// Entry: walk every top-level form for effectful `:when` guards.
-pub(super) fn check_guards(heap: &Heap, forms: &[Value], out: &mut Vec<(Option<Pos>, String)>) {
+pub(super) fn check_guards(heap: &Heap, forms: &[Value], out: &mut Vec<Finding>) {
     // A name the file defines itself shadows the global of that spelling: a module's own
     // `(defn exit (s) …)` is what a bare `exit` in its guards calls.
     let mut defined = HashSet::new();
@@ -96,7 +96,7 @@ const CLAUSE_FORMS: &[&str] = &["match", "%match", "match*", "receive", "case"];
 /// a parameter, a module function of that name) is not read as the primitive. Binders are
 /// read generously (every symbol in a pattern counts); a name wrongly counted as bound only
 /// costs a missed warning, never a false one.
-fn walk(heap: &Heap, form: Value, scope: &HashSet<String>, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk(heap: &Heap, form: Value, scope: &HashSet<String>, out: &mut Vec<Finding>) {
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             if let Value::Vector(id) = form {
@@ -248,14 +248,10 @@ fn is_when_kw(v: Option<&Value>) -> bool {
 }
 
 /// Warn if `guard` contains an effectful primitive.
-fn lint_guard(
-    heap: &Heap,
-    guard: Value,
-    scope: &HashSet<String>,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn lint_guard(heap: &Heap, guard: Value, scope: &HashSet<String>, out: &mut Vec<Finding>) {
     if let Some(name) = effectful_head(heap, guard, scope) {
-        out.push((
+        out.push(Finding::new(
+            Lint::EffectfulGuard,
             heap.form_pos_only(guard),
             format!(
                 "effectful call `{name}` in a `:when` guard — a guard is a decision, not an \

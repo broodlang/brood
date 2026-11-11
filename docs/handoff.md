@@ -69,8 +69,8 @@ From the audit of ROADMAP's open items on 2026-11-06; nothing here is scheduled 
 picks it. ROADMAP's "Language features — candidates" section is the bar each has to clear, and
 ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character type) stay refused.
 
-1. **Warning suppression at project and file level.** Only `check-allow` around a form exists,
-   and any warning fails a batch `nest check`.
+1. ~~**Warning suppression at project and file level.**~~ — done by ADR-698 (2026-11-11):
+   `project.blsp`'s `:check` key and a `(:check-allow …)` header clause.
 2. **A stability policy and the road to 1.0** (`general-purpose-gaps.md`, gap 1).
 3. **Regex named groups.** Lookaround and backreferences are missing too (`std/regex.blsp`).
 4. **`std/url`: resolving against a base URL.** Still RFC 3986, not WHATWG.
