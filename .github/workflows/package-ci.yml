@@ -18,7 +18,7 @@ on:
   workflow_call:
     inputs:
       brood-ref:
-        description: "Which brood to build against. Defaults to main — the early-warning behaviour."
+        description: "Which brood to build against. Defaults to main — the early-warning behaviour; `last-green` is the newest main commit whose own CI passed every job (ci.yml advances it), so a main that does not build reddens no package."
         type: string
         required: false
         default: main
