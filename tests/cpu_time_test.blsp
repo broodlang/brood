@@ -7,6 +7,17 @@
 (defn- spin (n acc) (if (= n 0) acc (spin (dec n) (+ acc 1))))
 (defn- cpu-us (pid) (:cpu-us (proc/info pid)))
 
+;; `pid`'s `:cpu-us` once it passes `floor`, or its last reading at the deadline. Another
+;; process's figure counts BOOKED quanta, and a quantum is booked when it ends: a worker
+;; that sends `:done` is still inside the quantum that did the work until it parks, so a
+;; reader woken on another thread can read before that quantum is booked — which a loaded
+;; CI box did (2026-11-11). Polled, not slept: a figure that never arrives still fails.
+(defn- cpu-us-past (pid floor deadline-ms)
+  (let (now (cpu-us pid))
+    (if (or (> now floor) (<= deadline-ms 0))
+      now
+      (do (receive ([:never] nil) (after 10 nil)) (cpu-us-past pid floor (- deadline-ms 10))))))
+
 (describe "process-info :cpu-us"
   (test "a process that works accrues CPU time, read from another process"
     ;; quantum accounting is armed by the first read, so read once before the work starts
@@ -14,7 +25,7 @@
           me (self)
           worker (spawn (fn () (spin 3000000 0) (send me :done) (receive ([:never] nil))))
           _ (receive (:done nil) (after 30000 nil)))
-      (is (> (cpu-us worker) 1000)) ; at least a millisecond of real work
+      (is (> (cpu-us-past worker 1000 30000) 1000)) ; at least a millisecond of real work
       (exit worker :kill)))
 
   (test "a process that waits accrues next to none"
