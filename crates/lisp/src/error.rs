@@ -397,6 +397,37 @@ pub mod error_codes {
         .into_iter()
         .find(|known| *known == code)
     }
+
+    /// The `:kind` an error with each code is caught with — one row per code, and the
+    /// promise that it does not change (road-to-1.0 §B7): a program that branches on
+    /// `{:code "E0042"}` and `{:kind :runtime}` must see both keep their meaning. A new code
+    /// gets a row here; `crates/lisp/tests/error_code_kinds.rs` freezes the shipped rows and
+    /// checks this table against `docs/error-codes.md` and against what the codes raise.
+    pub const KINDS: &[(&str, &str)] = &[
+        (PARSE_GENERIC, "parse"),
+        (INCOMPLETE_INPUT, "parse"),
+        (UNBOUND_SYMBOL, "unbound"),
+        (ARITY_MISMATCH, "arity"),
+        (TYPE_MISMATCH, "type"),
+        (DIV_BY_ZERO, "runtime"),
+        (INT_OVERFLOW, "runtime"),
+        (INDEX_OUT_OF_RANGE, "runtime"),
+        (MEMORY_LIMIT, "runtime"),
+        (STACK_DEPTH_EXCEEDED, "runtime"),
+        (PROC_MEMORY_LIMIT, "runtime"),
+        (PROC_MAILBOX_LIMIT, "runtime"),
+        (INTERRUPTED, "interrupted"),
+        (BLOCKED_RESPONSIVE, "runtime"),
+        (FILE_IO, "runtime"),
+        (SUBPROCESS_FAILED, "runtime"),
+        (DISTRIBUTION, "runtime"),
+        (MESSAGE_TOO_DEEP, "runtime"),
+        (CONTRACT_VIOLATION, "contract"),
+        (RAISED_ERROR, "error"),
+        (ASSERTION_FAILED, "assert"),
+        (MATCH_FAILED, "match"),
+        (RUNTIME_GENERIC, "runtime"),
+    ];
 }
 
 impl LispError {
