@@ -6,6 +6,8 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.51.0 — warnings with categories, nodes within one minor, Windows and static Linux builds
+
 **Added.**
 - **Windows and static Linux builds, and `nest release --target` with no other machine**
   (ADR-714): every release publishes the toolchain and the lean runtime for Linux x86_64 and
