@@ -9,6 +9,9 @@
 #   always (under a second)
 #     - `cargo fmt --check` — unformatted Rust reached main three times on 2026-07-26.
 #     - `scripts/banned-names.sh` — Brood described in its own terms; a whole-tree git grep.
+#     - `scripts/embedded-paths.sh HEAD` — every file an `include_str!` / `embedded_module!`
+#       names is in the pushed tree; a swept-up deletion of an embedded std module reached
+#       `main` on 2026-11-11 and nothing built.
 #     - the BROOD_* flag catalogue — every `"BROOD_X"` literal in a changed .rs/.blsp must
 #       have an entry in diagnostics/debug_flags.rs (the same rule the 0.03 s Rust unit test
 #       `every_runtime_flag_is_catalogued` enforces, as a grep, so it costs nothing to ask
@@ -68,6 +71,12 @@ fi
 
 # ---- 1b. no other runtime named in a forward-facing file ----------------------------
 scripts/banned-names.sh >/dev/null || fail "banned-names would fail CI (listed above)"
+
+# ---- 1c. every file a crate compiles in is in the commit -----------------------------
+# A commit that drops a file `include_str!` / `embedded_module!` still names builds here (the
+# file is on disk) and nowhere else: 2b21345d1 swept up a staged deletion of
+# std/tool/migrate.blsp and main stopped building (2026-11-11). HEAD's tree is what is pushed.
+scripts/embedded-paths.sh HEAD || fail "a crate embeds a file the pushed commit does not have (listed above)"
 
 # ---- 2. the change set: the commits being pushed AND the working tree -------------
 # Both, because the Brood gates read the TREE: gating only on the pushed commits left a
