@@ -234,7 +234,7 @@
 
 (describe "for takes multiple body forms"
   ;; It took exactly one until 2026-07-26 — the only iteration form that did
-  ;; (`doseq`/`dotimes`/`let`/`when` all take `body…`).
+  ;; (`doseq`/`let`/`when` all take `body…`).
   (test "earlier forms run for effect, the last is collected"
     (let (t (table/new))
       (assert= (list 1 2) (for (x [1 2]) (table/put t x true) x))

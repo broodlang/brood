@@ -158,24 +158,24 @@
 ;; :serial — the side-effecting loop macros write into a global accumulator;
 ;; isolating the writes keeps them out of the cross-test race window.
 (describe "loop macros"
-  :serial (test "dotimes runs body 0..n-1"
+  :serial (test "doseq over a range runs body 0..n-1"
     (def- loop-acc nil)
     (doseq (i (range 5)) (def- loop-acc (cons i loop-acc)))
     (assert= (reverse loop-acc) (list 0 1 2 3 4)))
-  (test "dotimes with n=0 is a no-op"
+  (test "doseq over an empty range is a no-op"
     (def- loop-acc :untouched)
     (doseq (_i (range 0)) (def- loop-acc :touched))
     (assert= loop-acc :untouched))
-  (test "dotimes returns nil" (assert= (doseq (i (range 3)) (+ i 1)) nil))
-  (test "dolist walks each item"
+  (test "doseq over a range returns nil" (assert= (doseq (i (range 3)) (+ i 1)) nil))
+  (test "doseq walks each item"
     (def- loop-acc nil)
     (doseq (x (list :a :b :c)) (def- loop-acc (cons x loop-acc)))
     (assert= (reverse loop-acc) (list :a :b :c)))
-  (test "dolist on empty is a no-op"
+  (test "doseq over an empty list is a no-op"
     (def- loop-acc :untouched)
     (doseq (_x nil) (def- loop-acc :touched))
     (assert= loop-acc :untouched))
-  (test "dolist returns nil" (assert= (doseq (x (list 1 2)) (list x)) nil)))
+  (test "doseq over a list returns nil" (assert= (doseq (x (list 1 2)) (list x)) nil)))
 
 (describe "threading macros"
   (test "->" (assert= (-> 5 (- 1) (* 2)) 8))

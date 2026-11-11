@@ -20,11 +20,11 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
 - ⬜ **The last surface pass, using the freeze test** (`archive/roadmap-for-v1.md` § The
   test): *can this be added later without breaking anyone, and without leaving the whole corpus
   in a dated idiom?* Run every open thread in `handoff.md` through it:
-  - 🟡 **Thread 6, "reduce before adding": decided (ADR-674), stage 1 landed.** `doseq` is the
-    one form for effect and collects nothing. `dotimes`, `dolist`, `unless` and `match*` are
-    deprecated: they warn, and `nest format --migrate` rewrites them. `match*` became the internal
-    `%match`. `case`, `with-out-str` and `with-err-str` stay. **Stage 2, before `rc.0`:** remove
-    the four forms and their migrations, and put each in the rename ledger.
+  - ✅ **Thread 6, "reduce before adding": decided (ADR-674), both stages landed.** `doseq` is
+    the one form for effect and collects nothing. `dotimes`, `dolist`, `unless` and `match*` were
+    deprecated in stage 1 (2026-11-10) and removed in stage 2 (2026-11-11), with the migration
+    that rewrote them; each is in the rename ledger, so its unbound error names the replacement.
+    `match*` became the internal `%match`. `case`, `with-out-str` and `with-err-str` stay.
   - **Thread 5, a declared shadow for root functions.** Adding the warning later would be a new
     lint. Under ADR-673 §5 that is advisory and so additive, but only once structured
     severities exist (B3). Otherwise decide it now.
@@ -67,7 +67,9 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
    `std/` uses them about 22 times. Nothing is `:beta` at 1.0, so clear the three existing
    `:beta` marks before the release candidates: settle each name or remove it. `:since` stays
    implicit for names that exist at 1.0. Make `nest doc` show "beta" for names added later.
-7. ⬜ **"An error keeps its code."** `error-codes.md` promises only that a code is never reused.
+7. ✅ **"An error keeps its code."** (2026-11-11) `error_codes::KINDS` declares each code's
+   kind; `crates/lisp/tests/error_code_kinds.rs` freezes the shipped rows, checks
+   `error-codes.md` against them and checks real raises. Was: `error-codes.md` promises only that a code is never reused.
    Add a gate that fails if an existing code's `:kind` changes.
 
 ## C. The docs tell the truth
@@ -112,7 +114,8 @@ General-purpose gap 2, the release half.
 Everything ADR-673 would forbid after 1.0 is cheapest in 0.5x:
 
 - Clear CHANGELOG's Unreleased breaks in a 0.51 release.
-- Land ADR-674's stage 2: remove `dotimes`, `dolist`, `unless` and `match*`, with ledger entries.
+- ✅ Land ADR-674's stage 2: remove `dotimes`, `dolist`, `unless` and `match*`, with ledger
+  entries (2026-11-11).
 - Rename anything the surface pass finds to be misnamed. A rename after 1.0 costs a full
   deprecation window.
 

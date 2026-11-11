@@ -141,7 +141,7 @@ passes. A report that does not match belongs to another test — drop it and kee
       (start {:sink (crash-report-collect me)})
       ;; one raise site (a loop re-running the same spawn), a different message each
       ;; time: one report. (`crash-report-boom` tail-calls `error`, so the recorded
-      ;; site is the call that entered it — this `dotimes` body.)
+      ;; site is the call that entered it — this `map` body.)
       ;; Which iteration's crash is reported first is scheduling order; the site is not.
       (let (boomers (map (range 0 3) (fn (i) (spawn (+ 1 (crash-report-boom i))))))
         (is (includes? (crash-report-next-of boomers) "exited: boom: "))

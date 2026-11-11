@@ -47,9 +47,8 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
               :flags {}
               :positional ["target" ["tmlanguage" "emacs" "tree-sitter"]]
               :run (fn (options) (run-grammar options))}
-   "format" {:about "Format every `.blsp` in the project (`--check`: CI mode, `--changed`: git-narrowed, `--migrate`: rewrite deprecated forms first, ADR-674)."
-             :flags {"--check" :bool "-c" :bool "--changed" :bool "--migrate" :bool}
-             :conflicts [["--migrate" "--check"] ["--migrate" "-c"] ["--migrate" "--changed"]]
+   "format" {:about "Format every `.blsp` in the project (`--check`: CI mode, `--changed`: git-narrowed)."
+             :flags {"--check" :bool "-c" :bool "--changed" :bool}
              :run (fn (options) (run-format options))}
    "check" {:about "Advisory type-check the project (every `.blsp` under `src/` + `tests/`), or specific files; exit non-zero on any warning."
             :flags {"--fix-renames" :bool
@@ -581,7 +580,6 @@ so at the CLI boundary and returns false (exit 2), rather than a trace from deep
           ;; --check is CI's clean-tree gate: it must see the whole project, so --changed
           ;; does not narrow it (a stale committed file would slip by).
           (get flags "--check") (format/project-check)
-          (get flags "--migrate") (format/project-migrate)
           (get flags "--changed") (format/project-changed)
           else (format/project)))
       0)

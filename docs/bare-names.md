@@ -34,7 +34,7 @@ The groups below are coarse on purpose: they carry the *kind* of justification, 
 per name. `*earmuffed*` dynamics and operators are bare by convention and need no argument;
 the `core` list is the one worth pushing back on, and the one to read before adding to it.
 
-Since ADR-506 kept the bare namespace to the language, the count is **192** bare public
+Since ADR-506 kept the bare namespace to the language, the count is **188** bare public
 names: the headers below are checked against their bullets.
 
 ## operator (13)
@@ -112,7 +112,7 @@ Predicates — `x?` type and shape tests. Bare because they read as English at a
 - `table?`
 - `vector?`
 
-## core (129)
+## core (125)
 
 Core vocabulary — the language's own words: special-form companions, sequence and map operations, the process primitives, and the test/dev macros. **This is the group with a real budget.** Before adding here, ask whether the name belongs to a module instead: `string/`, `seq/`, `proc/`, `test/` all exist precisely so a name does not have to be bare.
 - `record-id`
@@ -158,9 +158,7 @@ Core vocabulary — the language's own words: special-form companions, sequence 
 - `deftype`
 - `demonitor`
 - `dissoc`
-- `dolist`
 - `doseq`
-- `dotimes`
 - `doto`
 - `drop`
 - `each`
@@ -195,7 +193,6 @@ Core vocabulary — the language's own words: special-form companions, sequence 
 - `map`
 - `mapcat`
 - `match`
-- `match*`
 - `merge`
 - `meta`
 - `monitor`
@@ -232,7 +229,6 @@ Core vocabulary — the language's own words: special-form companions, sequence 
 - `throw`
 - `try`
 - `type-of`
-- `unless`
 - `unlink`
 - `update`
 - `vals`

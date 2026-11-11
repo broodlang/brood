@@ -247,7 +247,7 @@ fn domain_of_inner(
             join(meet(then_slice, d_then), meet(else_slice, d_else)),
         );
     }
-    // `cond` / `when` / `unless` — `if`s in disguise, and *not* always expanded away
+    // `cond` / `when` — `if`s in disguise, and *not* always expanded away
     // before this runs: a prelude closure keeps its body as written, so the checker
     // reads `(cond …)` verbatim there. (Reading it as an ordinary call is what made
     // `type-matches?` demand a `seqable` first argument: every clause body, including
@@ -255,7 +255,7 @@ fn domain_of_inner(
     if value::symbol_is(h, kw::COND) {
         return cond_domain(heap, &items[1..], params, scope, ctx);
     }
-    if value::symbol_is(h, kw::WHEN) || value::symbol_is(h, kw::UNLESS) {
+    if value::symbol_is(h, kw::WHEN) {
         let Some(&test) = items.get(1) else {
             return any_domain(n);
         };
@@ -264,14 +264,8 @@ fn domain_of_inner(
         let d_body = items[2..].iter().fold(any_domain(n), |acc, &f| {
             meet(acc, domain_of(heap, f, params, scope, ctx))
         });
-        // `unless` runs its body on the *false* side; either way the other outcome
-        // runs nothing and demands nothing.
-        let (taken, skipped) = if value::symbol_is(h, kw::WHEN) {
-            (then_slice, else_slice)
-        } else {
-            (else_slice, then_slice)
-        };
-        return meet(d_test, join(meet(taken, d_body), skipped));
+        // The false outcome runs nothing and demands nothing.
+        return meet(d_test, join(meet(then_slice, d_body), else_slice));
     }
     // `case` / `match`: only the scrutinee is guaranteed to run. Their clause bodies
     // are guarded by patterns this walk doesn't read (the *expanded* form is where a

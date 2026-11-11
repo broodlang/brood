@@ -92,7 +92,7 @@ What the walk flags, beyond types/arity/unbound: **non-tail self-recursion**.
 Brood loops must be tail-recursive — deep *non*-tail recursion overflows the
 green-process stack (a silent footgun that only bites at depth). The checker
 walks each function's body mirroring the evaluator's tail-position rules
-(`if`/`when`/`unless`/`cond`/`do`/`let`/`letrec`/`and`/`or`) and warns
+(`if`/`when`/`cond`/`do`/`let`/`letrec`/`and`/`or`) and warns
 when a function calls *itself* outside tail position (e.g. `(* n (fact (- n 1)))`
 — `fact` is an argument, so non-tail). Conservative: it stops at nested closures
 (a different frame) and only warns when certain, preferring a miss to a false
@@ -237,7 +237,7 @@ within the width budget (`format/*width*`, 100 cols by default); otherwise it
 breaks across lines with each body argument on its own line at +2 indent. A small
 table of *header counts* (`*format-headers*`) keeps a fixed prefix of args on the
 first line of certain forms — `defn` keeps `name params`, `let` keeps the bindings
-list, `if`/`when`/`unless` keep the predicate, etc. — so the body indents under
+list, `if`/`when` keep the predicate, etc. — so the body indents under
 a recognisable header. Comments inside a list force the multi-line shape; they
 re-emit on their own line at the surrounding indent, with their original text
 preserved verbatim. Blank lines between top-level forms (or top-level comments)

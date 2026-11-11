@@ -4,8 +4,7 @@
 ;; Coverage:
 ;;   cond    — odd clause count → named error
 ;;   %defseq  — non-string docstring → named error
-;;   dotimes — malformed bind → named error
-;;   dolist  — malformed bind → named error
+;;   doseq   — malformed bind → named error
 ;;   for     — unpaired binding / bare :when → named error
 ;;   receive — (after …) in non-last position → named error
 ;;   describe — keyword group name → named error
@@ -100,61 +99,32 @@
     (let (msg (expand-error '(%defseq bad-seq () some-sym (cons item acc))))
       (is (includes? msg "%defseq")))))
 
-;; ── 3. dotimes — malformed bind ───────────────────────────────────────────────
+;; ── 3. doseq — malformed bind ─────────────────────────────────────────────────
 
-(describe "dotimes — wrong syntax"
-  (test "correct dotimes works"
-    (let (_acc (ref))
-      ; side-effect-only, just check no error
-      (doseq (i (range 3)) (+ i 1))
-      :ok))
+(describe "doseq — wrong syntax"
+  (test "a well-formed bind runs"
+    (is (expand-ok? '(doseq (i (range 3)) (+ i 1))))
+    (is (expand-ok? '(doseq (x '(1 2 3)) (list x)))))
 
-  (test "bare symbol bind raises a clear error"
-    (let (msg (expand-error '(dotimes n (+ n 1))))
+  (test "a bare symbol bind raises a clear error"
+    (let (msg (expand-error '(doseq xs (io/puts xs))))
       (is (string? msg))
-      (is (includes? msg "dotimes"))
-      (is (includes? msg "(i n)"))))
-
-  (test "single-element list bind raises"
-    (let (msg (expand-error '(dotimes (i) (+ i 1))))
-      (is (includes? msg "dotimes"))))
-
-  (test "empty list bind raises"
-    (let (msg (expand-error '(dotimes () nil)))
-      (is (includes? msg "dotimes"))))
-
-  (test "correct (i n) bind does NOT raise"
-    (let (_result (ref))
-      (doseq (i (range 3)) (+ i 1))
-      :ok)))
-
-;; ── 4. dolist — malformed bind ────────────────────────────────────────────────
-
-(describe "dolist — wrong syntax"
-  (test "correct dolist works"
-    ; side-effect-only
-    (doseq (x '(1 2 3)) (list x))
-    :ok)
-
-  (test "bare symbol bind raises a clear error"
-    (let (msg (expand-error '(dolist xs (io/puts xs))))
-      (is (string? msg))
-      (is (includes? msg "dolist"))
+      (is (includes? msg "doseq"))
       (is (includes? msg "(x xs)"))))
 
-  (test "single-element list bind raises"
-    (let (msg (expand-error '(dolist (x) (io/puts x))))
-      (is (includes? msg "dolist"))))
+  (test "an empty bind raises, rather than running the body once"
+    (let (msg (expand-error '(doseq () (io/puts 1))))
+      (is (includes? msg "doseq"))))
 
-  (test "empty list bind raises"
-    (let (msg (expand-error '(dolist () nil)))
-      (is (includes? msg "dolist"))))
+  (test "a vector bind raises: bindings are lists"
+    (let (msg (expand-error '(doseq [x [1 2]] (io/puts x))))
+      (is (includes? msg "doseq"))))
 
-  (test "correct (x xs) bind does NOT raise"
-    (doseq (x '(a b c)) (list x))
-    :ok))
+  (test "a pattern with no collection raises"
+    (let (msg (expand-error '(doseq (x) (io/puts x))))
+      (is (includes? msg "has no collection")))))
 
-;; ── 5. for — unpaired binding or lone :when ───────────────────────────────────
+;; ── 4. for — unpaired binding or lone :when ───────────────────────────────────
 
 (describe "for — wrong syntax"
   (test "correct (for (x xs) expr) works"
@@ -190,7 +160,7 @@
   (test ":when with guard does NOT raise"
     (assert= (for (x '(1 2 3 4 5) :when (> x 3)) x) '(4 5))))
 
-;; ── 6. receive — (after …) in non-last position ───────────────────────────────
+;; ── 5. receive — (after …) in non-last position ───────────────────────────────
 
 (describe "receive — wrong syntax"
   :serial (test "correct receive with after works"
@@ -221,7 +191,7 @@
       ;; Just check expansion — after in last position is valid syntax.
       (assert= (receive (:x :ok) (after test/*wait-ms* :timed-out)) :ok))))
 
-;; ── 7. describe — keyword group name ─────────────────────────────────────────
+;; ── 6. describe — keyword group name ─────────────────────────────────────────
 ;; `describe` is defined in the `test` module. When testing via `reflect/eval`, we must
 ;; use the qualified name `test/describe` because `reflect/eval` resolves bare symbols
 ;; from the global (root) namespace, not from the current module's imports.

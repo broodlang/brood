@@ -891,8 +891,8 @@ A trailing `:into coll` collects with `conj` onto `coll` instead of building a l
       `(let (~acc ~init) ~(%for-fold acc (rest (rest binds)) body)))))
 
 ;; (doseq (pat coll …) body...) — run `body` for its side effects over each item,
-;; returning nil: THE iteration-for-effect form (ADR-674 folded `dotimes` and `dolist`
-;; into it). It takes `for`'s bindings — several pairs, `:when` guards, destructuring —
+;; returning nil: THE iteration-for-effect form (ADR-674 folded and removed `dotimes`
+;; and `dolist`). It takes `for`'s bindings — several pairs, `:when` guards, destructuring —
 ;; and walks them as `fold-for` does, with a nil accumulator, so nothing is collected.
 ;; A counted loop is `(doseq (i (range n)) …)`. The param is `bind`, not `binding` — the
 ;; latter is the dynamic-variable form.
@@ -903,32 +903,16 @@ A trailing `:into coll` collects with `conj` onto `coll` instead of building a l
     (with-out-str (doseq (i (range 3)) (io/write i)))               ;=> \"012\"
     (with-out-str (doseq (x [1 2 3] :when (math/odd? x)) (io/write x)))  ;=> \"13\"
     (doseq (x [1 2]) x)                                             ;=> nil"
-  `(do (/fold-for (acc# nil ~@bind) ~@body nil) nil))
-
-;; `dotimes` and `dolist` are deprecated by ADR-674 and removed before 1.0: `doseq` takes
-;; both shapes — `(doseq (i (range n)) …)` and `(doseq (x xs) …)`. `nest format --migrate`
-;; rewrites them.
-(defmacro dotimes "Deprecated (ADR-674): write `(doseq (i (range n)) body…)`; `nest format --migrate` rewrites this. Runs `body` with the name bound to 0, 1, …, n-1; returns `nil`.
-
-    (with-out-str (dotimes (i 3) (io/write i)))   ;=> \"012\""
-  (((var n) & body) `(/doseq (~var (/range ~n)) ~@body))
-  ((bind & _) (reflect/error-at bind
-                "dotimes: bind must be (var n), got "
-                (pr-str bind)
-                ". Syntax: (dotimes (i n) body...)"))
-  (() (error "dotimes: expected a bind. Syntax: (dotimes (i n) body...)")))
-(meta dotimes :deprecated "0.51.0" :use 'doseq)
-
-(defmacro dolist "Deprecated (ADR-674): write `(doseq (x xs) body…)`; `nest format --migrate` rewrites this. Runs `body` with the name bound to each element; returns `nil`.
-
-    (with-out-str (dolist (x '(1 2 3)) (io/write x)))   ;=> \"123\""
-  (((var coll) & body) `(/doseq (~var ~coll) ~@body))
-  ((bind & _) (reflect/error-at bind
-                "dolist: bind must be (var coll), got "
-                (pr-str bind)
-                ". Syntax: (dolist (x xs) body...)"))
-  (() (error "dolist: expected a bind. Syntax: (dolist (x xs) body...)")))
-(meta dolist :deprecated "0.51.0" :use 'doseq)
+  (do
+    ;; Checked here, against the list the reader positioned, so the error names `doseq` and
+    ;; points at the binding (the `fold-for` this expands to sees a list it built itself).
+    (when (not (pair? bind))
+      (reflect/error-at bind
+        "doseq: bindings must be a non-empty list of pattern-collection pairs, got "
+        (pr-str bind)
+        ". Syntax: (doseq (x xs) body...)"))
+    (%for-check-binds bind)
+    `(do (/fold-for (acc# nil ~@bind) ~@body nil) nil)))
 
 ;; `bench` moved to the `dev` module (`dev/bench`) with the other diagnostics.
 

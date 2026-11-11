@@ -964,8 +964,9 @@ pub(crate) fn unbound_error(heap: &Heap, sym: Symbol) -> LispError {
 /// *warning* (write-time), so the Brood way is right there, not a doc lookup.
 /// Only consulted once a name is known-unbound, so a user who defines one of
 /// these sees no hint. Names Brood *does* provide are intentionally absent:
-/// it aliases `car`/`cdr`, and has `lambda`/`let*`/`dotimes`/`doseq`/`dolist`/
-/// `unless`/`when`/`ref` — those Just Work, so hinting them would be wrong.
+/// it aliases `car`/`cdr`, and has `lambda`/`let*`/`doseq`/`when`/`ref` — those Just
+/// Work, so hinting them would be wrong. (`dotimes`, `dolist` and `unless` were removed
+/// by ADR-674; the rename ledger points them at their replacements.)
 pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
     Some(match name {
         "set!" | "setq" | "setf" | "set-car!" | "set-cdr!" | "vector-set!" | "string-set!" => {

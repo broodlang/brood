@@ -28,9 +28,9 @@ pub(in crate::types::check) fn diverging_guard_scope(
     let &Value::Sym(head) = items.first()? else {
         return None;
     };
-    // Post-expansion. `(when t b)` is `(if t (do b) nil)` and `(unless t b)` is
-    // `(if t nil (do b))`, so BOTH arms have to be considered — and a hand-written
-    // branchless `(if t b)` is the same shape and the same argument.
+    // Post-expansion. `(when t b)` is `(if t (do b) nil)`, and `(if t nil (do b))` is the
+    // same guard written on the else side, so BOTH arms have to be considered — and a
+    // hand-written branchless `(if t b)` is the same shape and the same argument.
     if !value::symbol_is(head, kw::IF) || !(items.len() == 3 || items.len() == 4) {
         return None;
     }
@@ -43,7 +43,7 @@ pub(in crate::types::check) fn diverging_guard_scope(
     if diverges(then) {
         return Some(else_ctx);
     }
-    // …and symmetrically for `unless`, where the diverging arm is the else.
+    // …and symmetrically when the diverging arm is the else.
     if items.len() == 4 && diverges(items[3]) {
         return Some(then_ctx);
     }

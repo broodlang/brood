@@ -849,7 +849,7 @@ Fixing the signatures without fixing that would have pushed sixteen false positi
 
 `walk::diverging_guard_scope` — a body form `(if COND THEN [ELSE])` with one arm typed
 `never` narrows every following form to that arm's complement. Both directions, since
-`(when t b)` lowers to `(if t (do b) nil)` and `(unless t b)` to `(if t nil (do b))`. Sound
+`(when t b)` lowers to `(if t (do b) nil)` and a guard on the else side reads `(if t nil (do b))`. Sound
 because it is the ordinary else-scope of the condition, applied on the path where the other
 arm provably did not run.
 

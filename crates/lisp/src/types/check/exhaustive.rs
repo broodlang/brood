@@ -107,7 +107,7 @@ fn walk(heap: &Heap, form: Value, ctx: &Ctx, namespace: Option<&str>, out: &mut 
                     walk_let(heap, &items, ctx, namespace, out);
                     return;
                 }
-                "match" | "%match" | "match*" => {
+                "match" | "%match" => {
                     analyze_match(heap, form, &items, ctx, namespace, out);
                     return;
                 }
@@ -382,7 +382,7 @@ fn record_pattern_id(heap: &Heap, pat: Value) -> Option<String> {
 /// The special forms and macros whose operands are evaluated in the enclosing scope — they
 /// bind no name, so a scrutinee's type passes through them unchanged.
 const NON_BINDING_HEADS: &[&str] = &[
-    "if", "do", "when", "unless", "cond", "and", "or", "not", "->", "->>", "throw",
+    "if", "do", "when", "cond", "and", "or", "not", "->", "->>", "throw",
 ];
 
 /// Does a form with this head bind nothing? A non-macro function (a global or a local) is

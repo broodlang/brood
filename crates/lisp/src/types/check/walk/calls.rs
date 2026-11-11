@@ -606,9 +606,6 @@ pub(super) const ELEMENT_CALLBACK_COMBINATORS: &[&str] = &[
     "keep",
     "seq/keep",
     "each",
-    // `dolist`'s expansion: `(%dolist-loop coll (fn (x) body…))` — the loop variable is an
-    // element, exactly as `each`'s is.
-    "%dolist-loop",
     "seq/take-while",
     "seq/drop-while",
     "seq/sort-by",
@@ -870,8 +867,8 @@ pub(super) fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option
             _ => Some(GradualTy::stat(NIL_TY)),
         };
     }
-    // `(when t body…)` / `(unless t body…)` → gradual(last) | nil.
-    if value::symbol_is(head, kw::WHEN) || value::symbol_is(head, kw::UNLESS) {
+    // `(when t body…)` → gradual(last) | nil.
+    if value::symbol_is(head, kw::WHEN) {
         let &last = items.last()?;
         if items.len() < 3 {
             return Some(GradualTy::stat(NIL_TY));

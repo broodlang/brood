@@ -1679,7 +1679,7 @@ fn from_message_inner(heap: &mut Heap, m: &Message, depth: u32) -> Value {
 ///
 /// The emitted guard is built from **primitives and core special forms only** (`if`, `do`,
 /// `quote`, `fn`, `%try`) — a rebuilt body is never macroexpanded on the receiver, so
-/// `unless`/`try` would survive to the compiler as unexpanded calls:
+/// `when`/`try` would survive to the compiler as unexpanded calls:
 ///
 /// ```text
 /// (do (if (bound? 'math/sqrt)

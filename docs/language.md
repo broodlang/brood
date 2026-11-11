@@ -1158,9 +1158,9 @@ bindings (several pairs, `:when` guards, destructuring), collects nothing and re
   (io/puts (->string x)))                 ; prints "a" then "b"
 ```
 
-`dotimes`, `dolist` and `unless` are deprecated (ADR-674) and go before 1.0:
-`nest check` warns at each use, and `nest format --migrate` rewrites them to `doseq`,
-`doseq` over a `range`, and `(when (not test) …)`.
+There is no `dotimes`, `dolist` or `unless`: ADR-674 removed them. A call of one is
+unbound, and the error names its replacement: `doseq`, `doseq` over a `range`, and
+`(when (not test) …)`.
 
 **Comprehensions** build a value from the same walk. `for` collects a list of its
 body's values over one or more bindings (the last varies fastest), with `:when`
@@ -2370,7 +2370,7 @@ don't-care), a name that shadows a global, and a name the pattern itself reads (
 repeat `[x x]`, or a `bytes` size naming an earlier segment). A pin `^x` and a
 quoted `'sym` bind nothing.
 
-```clojure
+```clojure fragment
 (let (x 1 y 2) x)                  ; warning: unused let binding: y
 (let ([c r] (term/size)) c)        ; warning: unused let binding: r
 (match msg ([:attach c rows] c))   ; warning: unused pattern binding: rows

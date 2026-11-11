@@ -97,7 +97,7 @@ fn conditionals() {
     assert_eq!(run("(cond (= 1 2) :a (= 1 1) :b else :c)"), ":b");
     assert_eq!(run("(cond (= 1 2) :a else :fallback)"), ":fallback");
     assert_eq!(run("(when true 1 2 3)"), "3");
-    assert_eq!(run("(unless false :ok)"), ":ok");
+    assert_eq!(run("(when (not false) :ok)"), ":ok");
 }
 
 #[test]

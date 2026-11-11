@@ -9,7 +9,7 @@
 //! the LSP).
 //!
 //! Runs over the **macroexpanded** forms (like the rest of the checker), so
-//! `match`/`case`/threading macros — and `when`/`unless`/`cond`/`and`/`or`,
+//! `match`/`case`/threading macros — and `when`/`cond`/`and`/`or`,
 //! which are all prelude macros lowering to `if`/`do`/`let` — are already gone,
 //! and a `defn` is `(def name (fn …))`. That leaves a small, fixed set of
 //! tail-propagating *special forms* to model — `if` / `do` / `let` /

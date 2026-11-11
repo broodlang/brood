@@ -1,7 +1,7 @@
 ;; ADR-618: a macro's error is placed where the problem is. An expander that raises points at
 ;; the macro call — never at the enclosing top-level form, where the compile pass used to put
 ;; it — and `reflect/error-at` lets the macro point at the sub-form it is complaining about.
-;; An expansion the macro BUILT (`match` → `match*`) has no reader position, so its error falls
+;; An expansion the macro BUILT (`match` → `%match`) has no reader position, so its error falls
 ;; back to the call the user wrote.
 
 (defmodule macro-error-position-test (:use test))
@@ -25,7 +25,7 @@
 
 (describe "a macro's error is located at the call"
   (test "a prelude macro's check points at the call, not the top-level form"
-    (assert= (at (where "(do 1\n  (dotimes))")) [2 3]))
+    (assert= (at (where "(do 1\n  (doseq x))")) [2 3]))
   (test "an expansion the macro built falls back to the call"
     (assert= (at (where "(do 1\n  (match 1\n    x 1))")) [2 3])))
 
@@ -49,11 +49,11 @@
       (assert= "boom" (get e :message))
       (refute (contains? e :at))))
   (test "the prelude's binding checks point at the binding list"
-    (assert= (at (where "(do 1\n  (dotimes (i) i))")) [2 12])
+    (assert= (at (where "(do 1\n  (doseq (i) i))")) [2 10])
     (assert= (at (where "(do 1\n  (for (x [1]\n         y) x))")) [2 8])
     (assert= (at (where "(do 1\n  (binding (*a*\n    1 *b*) 1))")) [2 12])
     (assert= (at (where "(match 1\n  (x 1)\n    (y 2))")) [3 5]))
-  (test "dotimes and dolist still run on a well-formed bind"
+  (test "doseq still runs on a well-formed bind"
     (assert= "012" (with-out-str (doseq (i (range 3)) (io/write i))))
     (assert= "ab" (with-out-str (doseq (s '("a" "b")) (io/write s))))))
 

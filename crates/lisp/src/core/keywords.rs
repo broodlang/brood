@@ -41,15 +41,13 @@ pub const FN: &str = "fn";
 pub const LET: &str = "let";
 pub const LETREC: &str = "letrec";
 pub const WHEN: &str = "when";
-pub const UNLESS: &str = "unless";
 pub const COND: &str = "cond";
 pub const AND: &str = "and";
 pub const OR: &str = "or";
 pub const MATCH: &str = "match";
 /// The pattern-matching engine `match`, `case` and the destructuring `let`/`fn` lower to
-/// (ADR-674; `match*` before it, still accepted while deprecated).
+/// (ADR-674; it was the public `match*` until 0.5x).
 pub const MATCH_ENGINE: &str = "%match";
-pub const MATCH_STAR: &str = "match*";
 pub const TRY: &str = "try";
 pub const CATCH: &str = "catch";
 pub const THROW: &str = "throw";
@@ -105,9 +103,7 @@ pub const ERROR_OF: &str = "error-of";
 pub const ASSERT_ERROR: &str = "assert-error";
 pub const RECEIVE: &str = "receive";
 pub const BINDING: &str = "binding";
-pub const DOLIST: &str = "dolist";
 pub const DOSEQ: &str = "doseq";
-pub const DOTIMES: &str = "dotimes";
 pub const FOR: &str = "for";
 pub const THREAD_FIRST: &str = "->";
 

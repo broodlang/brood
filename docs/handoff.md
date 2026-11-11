@@ -60,8 +60,8 @@ The owner opened the 1.0 work. The plan is [`road-to-1.0.md`](road-to-1.0.md); t
 ADR-673 (accepted 2026-11-10; the deprecation window's minimum time is deferred); the positioning it starts from is
 [`brood-among-lisps.md`](brood-among-lisps.md). Thread 6 below was the one that had to be settled
 before 1.0, because it removes forms: ADR-674 deprecated `dotimes`, `dolist`, `unless` and `match*`
-(stage 1, 2026-11-10; `nest format --migrate` rewrites them), and stage 2 removes them before
-`rc.0`. The other threads are additive.
+(stage 1, 2026-11-10) and removed them (stage 2, 2026-11-11; the rename ledger names each
+replacement). The other threads are additive.
 
 ## Open threads: language features, in value order
 

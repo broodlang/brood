@@ -49,12 +49,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - **Nodes link only within one `major.minor`** (ADR-699): the handshake says the Brood version
   and refuses another minor at both ends, naming both. Breaking: wire v14 does not link with
   v13, and the v10 fallback for runtimes from before mailbox lanes is gone.
-- **Deprecated: `dotimes`, `dolist`, `unless` and `match*`** (ADR-674), the first stage of
-  "reduce before adding": one form iterates for effect. They still work; `nest check` warns at
-  each use, and **`nest format --migrate`** rewrites them: `(dotimes (i n) …)` →
-  `(doseq (i (range n)) …)`, `(dolist (x xs) …)` → `(doseq (x xs) …)`, `(unless t …)` →
-  `(when (not t) …)`, and `match*` → `%match`, the engine's internal name (write `match`).
-  They are removed before 1.0.
+- **Removed: `dotimes`, `dolist`, `unless` and `match*`** (ADR-674, "reduce before adding": one
+  form iterates for effect). Breaking: a call of one is unbound, and the error (and `nest
+  check`'s warning) names the replacement: `(dotimes (i n) …)` → `(doseq (i (range n)) …)`,
+  `(dolist (x xs) …)` → `(doseq (x xs) …)`, `(unless t …)` → `(when (not t) …)`, and
+  `match*` → `match` (the engine is the internal `%match`). `nest check --fix-renames` rewrites
+  `dolist`; the other three change shape and are left to you. They were deprecated earlier in
+  this cycle with a `nest format --migrate` rewrite, which went with them.
 - **`doseq` collects nothing**: it walks `for`'s bindings as `fold-for` does instead of building
   `for`'s list and discarding it, about 1.5× faster. A bare name as its body
   (`(doseq (x xs) x)`) now draws `nest check`'s "evaluated and discarded" warning, which it is.

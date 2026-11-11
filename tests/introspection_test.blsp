@@ -451,7 +451,7 @@
 
   ;; An INLINE pattern-clause literal is two spellings of the named `token` reducer the
   ;; Rust tests pin — and it read `(string -> any)` while the named spelling was precise,
-  ;; because the literal is lowered to a variadic `match*` lambda before call sites are
+  ;; because the literal is lowered to a variadic `%match` lambda before call sites are
   ;; typed. The surface pre-pass now records the literal's clauses by printed head list
   ;; and `clause_lambda_ret` recovers them (found on an RPN reduce, 2026-08-31). No `nil`
   ;; in the answer: `string/split` never yields an empty list, so the fold stepped at

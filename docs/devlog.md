@@ -1421,3 +1421,19 @@ unversioned lock reads as format 1, and a file that is not a `(lock …)` form i
 unknown `project.blsp` key was silently ignored; it now warns once per command (one command
 sets the project up twice) and the project still loads. `docs/packages.md`'s lock example
 showed a `:brood-version` the writer never wrote; removed.
+
+2026-11-11 (ADR-674 stage 2, road-to-1.0 §F). `dotimes`, `dolist`, `unless` and `match*` are
+removed, with every special case of their names in the kernel (the keyword table and so the
+editor grammars and LSP, the hygiene and template-escape binder shapes, the checker's
+exhaustiveness, guard-effect, unused-binder and syntactic-keyword lists, the param-domain and
+`when`-typing branches) and in std (the formatter's header table, the spy walker's form set).
+Each is in the rename ledger, so the runtime's and the checker's unbound message name the
+replacement. `dolist` → `doseq` is a true rename, so `nest check --fix-renames` applies it; the
+other three change shape and are ledgered as call shapes (a target with a space), which
+`--fix-renames` already names and leaves to a human (ADR-433), so it cannot turn `(unless t x)`
+into `(when t x)`. A Rust test pins that the three stay call shapes. The migration went with
+the forms: `std/tool/migrate.blsp`, `format/project-migrate` and `nest format --migrate` are
+deleted, and the deprecated-macro pass no longer appends a pointer to it; the pass itself stays
+(it is generic), and `tests/reduce_forms_test.blsp` now drives it with a deprecated macro the
+test defines. Brood itself needed no migration beyond that test file (stage 1 had done it).
+`docs/bare-names.md` drops to 188.

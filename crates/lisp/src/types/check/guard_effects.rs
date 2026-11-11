@@ -84,7 +84,7 @@ pub(super) fn check_guards(heap: &Heap, forms: &[Value], out: &mut Vec<Finding>)
 const LET_LIKE: &[&str] = &["let", "letrec", "let*", "if-let", "when-let", "for", "loop"];
 
 /// The heads whose clauses are `(pattern body…)`, the pattern binding for its clause.
-const CLAUSE_FORMS: &[&str] = &["match", "%match", "match*", "receive", "case"];
+const CLAUSE_FORMS: &[&str] = &["match", "%match", "receive", "case"];
 
 /// Recurse un-expanded code, skipping quoted data. At each list, apply the two guard shapes:
 /// a clause `(pattern :when GUARD body…)` (`:when` at index 1 — `match`/`receive`/`case`

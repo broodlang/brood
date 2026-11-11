@@ -140,7 +140,7 @@ from `what`. Pure — reads the curated `explain/*error-explanations*` table.
 (def *idiom-cookbook*
   (list {:intent "loop / iterate / repeat"
          :keywords ["loop" "for" "while" "iterate" "repeat" "recur"]
-         :idiom "There is no `while`/`for`/`loop`. Iterate with tail recursion (O(1) stack) or a higher-order fn (`map`/`filter`/`reduce`/`dotimes`/`dolist`)."
+         :idiom "There is no `while`/`loop`, and `for` is a comprehension. Iterate with tail recursion (O(1) stack) or a higher-order fn (`map`/`seq/filter`/`reduce`), or `doseq` for an effect per item."
          :example "(defn count-up (i n acc) (if (= i n) acc (count-up (+ i 1) n (+ acc i))))"
          :see "docs/language.md §Recursion is the loop"}
     {:intent "mutable state / a variable I can change"

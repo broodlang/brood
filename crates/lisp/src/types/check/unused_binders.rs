@@ -408,7 +408,7 @@ fn lint_binding_form(
             let noun = "unused let binding";
             lint_sequential_binders(heap, form, items, name == "letrec", name, noun, out);
         }
-        "dolist" | "dotimes" | "doseq" | "for" | "fold-for" => {
+        "doseq" | "for" | "fold-for" => {
             lint_sequential_binders(heap, form, items, false, name, "unused loop binding", out);
         }
         "match" | "receive" => {

@@ -518,7 +518,7 @@
   (test "defn forwards single-clause unchanged" (defn pm-sq (x) (* x x)) (assert= (pm-sq 9) 81)))
 
 ;; ── Regression: pattern binders reaching eval *unlowered* (ADR-022 fallback) ──
-;; A pattern `let`/`fn` normally lowers to `match*` in the compile pass, but can
+;; A pattern `let`/`fn` normally lowers to `%match` in the compile pass, but can
 ;; reach the evaluator unlowered — built inside a quasiquote unquote (which the
 ;; compile pass leaves opaque), or produced by a macro expanded lazily within its
 ;; own defining form. eval's let/fn lower it on the fly, so these still work
