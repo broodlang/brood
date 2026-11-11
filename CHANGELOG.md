@@ -101,6 +101,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   failure, not a `{:status 0 :error …}` map (ADR-617).
 
 **Fixed.**
+- **`contains?` on a vector and `map` over a string name themselves**: they reported
+  `%map-get: …` and `first: …`, and now say `contains?: expected a map or set` and
+  `expected a sequence, got string`, each with a hint. **Hover shows a deprecation and a beta
+  mark**, which only completion and `nest doc` showed. The freeze list is restated as ADR-713.
 - **A bare type name in a `sig` means its own module's type** (ADR-633). Under contracts, a
   `(sig parse-body (conn -> conn))` over a module's own record `conn` was checked against another
   module's `(deftype conn …)` and rejected the record. A bare name now resolves in the module that

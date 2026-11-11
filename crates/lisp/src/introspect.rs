@@ -142,6 +142,16 @@ pub fn deprecation(interp: &Interp, name: &str) -> Option<String> {
     })
 }
 
+/// `name`'s beta note (ADR-283), rendered for a human: `"beta — the options map may still
+/// change"`, or `None` if the name carries no `:beta` meta. Read the way [`deprecation`]
+/// reads; the editor shows it beside the signature so a beta surface is visible before
+/// the checker's advisory warning is.
+pub fn beta(interp: &Interp, name: &str) -> Option<String> {
+    let sym = value::intern_existing(name)?;
+    let reason = interp.heap.name_meta(sym)?.beta?;
+    Some(format!("beta — {reason}"))
+}
+
 /// The `(signature, docstring)` of a global `name`, via `(list (arglist NAME)
 /// (doc NAME))`. `name` is a CST symbol token, so it can't contain a delimiter,
 /// comment, or quote char (see [`is_delimiter`]) — interpolating it can't escape

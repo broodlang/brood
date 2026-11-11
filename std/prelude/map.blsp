@@ -201,10 +201,17 @@ can.)
     (contains? {:a 1} :zz)     ;=> false"
   (if (set? m)
     (%set-has? m k)
-    (let (a (%map-get m k :%contains-miss-a))
-      (if (= a :%contains-miss-a)
-        (if (= (%map-get m k :%contains-miss-b) :%contains-miss-b) false true)
-        true))))
+    ;; A vector is refused by name (ADR-156, Clojure's index trap): without this the
+    ;; error came from `%map-get`, an internal the caller never called.
+    (if (vector? m)
+      (%raise {:kind :type
+               :code "E0030"
+               :message (str "contains?: expected a map or set, got vector (" (pr-str m) ")")
+               :hint "`contains?` asks about keys, never indexes: for an element use `(includes? v x)`, for an index `(< -1 i (count v))`."})
+      (let (a (%map-get m k :%contains-miss-a))
+        (if (= a :%contains-miss-a)
+          (if (= (%map-get m k :%contains-miss-b) :%contains-miss-b) false true)
+          true)))))
 
 ;; ---- map: merge / update / nested access -----------------------------------
 ;; All Brood over the kernel ops (`%map-assoc`/`%map-pairs`) and the surface above

@@ -33,9 +33,10 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
   - **Threads 1, 3, 4, 7, 8, 9 and 11** are additive (warning controls, regex groups, URL
     resolution, the non-tail lint, view patterns, parametric abilities, function modifiers).
     They can come after 1.0, except that thread 1 is needed by B3.
-- ⬜ **Re-ratify ADR-170.** Two rows are stale. The "nominal types" row says `type-of` is
-  `:map`, which ADR-542 superseded. Continuations are refused in practice, but the table does
-  not list them. Restate the table as it stands at 1.0.
+- ✅ **Re-ratify ADR-170** (2026-11-11): ADR-713 restates the table, every row checked against
+  the running language. Ratios and multiple dispatch dropped (shipped), "nominal types" restated
+  after ADR-542, continuations added. Two refusals that raised from an internal now name the
+  function called (`contains?` on a vector, `map` over a string).
 
 ## B. Mechanism the promise needs (kernel and std)
 
@@ -66,10 +67,12 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
    in `--help` and drops out of completion. Guard: `tests/nest_test.blsp` "a deprecated flag".
    Was: `nest`'s flags are data in `std/tool/nest.blsp`, so they can
    carry `:deprecated` the way names do. Today nothing can retire a flag gently.
-6. 🟡 **Stability metadata in use.** `:since`, `:deprecated` and `:beta` exist (ADR-283), and
-   `std/` uses them about 22 times. Nothing is `:beta` at 1.0, so clear the three existing
-   `:beta` marks before the release candidates: settle each name or remove it. `:since` stays
-   implicit for names that exist at 1.0. Make `nest doc` show "beta" for names added later.
+6. ✅ **Stability metadata in use** (2026-11-11). No name in `std/` carries `:beta` (the marks
+   this item counted were gone; the only `:beta` left is a docstring example and a test).
+   `:since` stays implicit for names that exist at 1.0. A beta name added later shows as beta
+   everywhere it surfaces: `nest doc` printed it already, and the editor now does too, in hover
+   and in completion's detail line (hover shows a deprecation as well, which it did not).
+   Guards: `crates/lsp/src/hover.rs` and `completion.rs` tests.
 7. ✅ **"An error keeps its code."** (2026-11-11) `error_codes::KINDS` declares each code's
    kind; `crates/lisp/tests/error_code_kinds.rs` freezes the shipped rows, checks
    `error-codes.md` against them and checks real raises. Was: `error-codes.md` promises only that a code is never reused.

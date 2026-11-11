@@ -267,7 +267,10 @@ current element and `acc` is the current accumulator."
                           acc
                           (let (~'item (/first coll))
                             (-loop (/rest coll) ~step)))))
-         (/reverse (-loop (/seq coll) nil))))))
+         ;; `%fold-source`, not `seq`: `seq` passes a string through (for `count` and
+         ;; `empty?`), and walking it would then fail inside `first`, naming a function
+         ;; the caller never called. `%fold-source` refuses a string with the hint.
+         (/reverse (-loop (/%fold-source coll) nil))))))
 
 (%defseq map
   (f)

@@ -34,7 +34,17 @@
 
     (test "a string where a sequence belongs says a string is not one"
       (is (includes? (try (reduce "abc" +) (catch e (:hint e))) "string/->list"))
-      (is (includes? (try (fold "abc" 0 +) (catch e (:hint e))) "string/->list")))
+      (is (includes? (try (fold "abc" 0 +) (catch e (:hint e))) "string/->list"))
+      ;; `map` walked a string with `first` and reported `first: …`
+      (is (includes? (try (map "abc" identity) (catch e (:hint e))) "string/->list")))
+
+    (test "contains? on a vector names contains?, not the map primitive under it"
+      (let (e (try (contains? [1 2] 1) (catch e e)))
+        (is (string/starts-with? (:message e) "contains?: expected a map or set"))
+        (assert= (:kind e) :type)
+        (is (includes? (:hint e) "never indexes")))
+      (is (contains? #{1} 1))
+      (is (contains? {:a nil} :a)))
 
     (test "a non-function passed where library code calls one gets the argument-order hint"
       (let (e (try (fold [1 2] + 0) (catch e e)))

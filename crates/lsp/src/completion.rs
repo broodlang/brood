@@ -180,6 +180,14 @@ pub fn resolve(interp: &mut Interp, mut item: CompletionItem) -> CompletionItem 
             None => note,
         });
     }
+    // A beta name is offered normally — nothing about it is wrong to use — but its detail
+    // line says so, because the surface may still change under the caller.
+    if let Some(note) = introspect::beta(interp, &lookup) {
+        item.detail = Some(match item.detail.take() {
+            Some(d) => format!("{d}  — {note}"),
+            None => note,
+        });
+    }
     item
 }
 
@@ -520,6 +528,24 @@ mod tests {
         assert!(
             detail.contains("`not`"),
             "`:use` names the replacement, which is what makes it actionable: {detail}"
+        );
+    }
+
+    #[test]
+    fn resolve_names_a_beta_mark_without_tagging_it_deprecated() {
+        let mut interp = Interp::new();
+        interp
+            .eval_str("(defn wobbly (x) x) (meta wobbly :beta \"still settling\")")
+            .expect("define the beta name");
+        let r = resolve(
+            &mut interp,
+            item("wobbly".into(), CompletionItemKind::FUNCTION),
+        );
+        assert_eq!(r.tags, None, "a beta name is not deprecated: {r:?}");
+        let detail = r.detail.unwrap_or_default();
+        assert!(
+            detail.contains("beta — still settling"),
+            "the beta reason belongs in `detail`: {detail}"
         );
     }
 
