@@ -482,7 +482,11 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     ("*observe-timeout*", "observer/*timeout*", "ADR-506"),
     ("*observe-keymap*", "observer/*keymap*", "ADR-506"),
     ("*ns-package*", "project/*ns-package*", "ADR-506"),
-    ("*mcp-progress-sink*", "mcp-server/*progress-sink*", "ADR-506"),
+    (
+        "*mcp-progress-sink*",
+        "mcp-server/*progress-sink*",
+        "ADR-506",
+    ),
     ("*mcp-documents*", "mcp/*documents*", "ADR-506"),
     ("*loaded-mtimes*", "project/*loaded-mtimes*", "ADR-506"),
     ("*lineedit-keymap*", "editor/lineedit/*keymap*", "ADR-506"),
