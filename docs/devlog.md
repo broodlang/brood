@@ -1413,3 +1413,11 @@ after the magic (wire v14), and a node of another minor is refused at both ends 
 versions, before any key. The v10 fallback (ADR-492) went with it: v10 runtimes are older
 minors, which ADR-673 §3 refuses. Breaking: a v13 node does not link with a v14 one, and
 `BROOD_DIST_V10` is now `BROOD_DIST_VERSION`.
+
+2026-11-11 (road-to-1.0 §B1, §B2). The lock writer already stamped `:version 1`, but the reader
+ignored it, and a lock it could not make sense of read as absent, so `nest fetch` would
+re-resolve and overwrite a newer Brood's lock. Now a newer format is refused naming both, an
+unversioned lock reads as format 1, and a file that is not a `(lock …)` form is refused. An
+unknown `project.blsp` key was silently ignored; it now warns once per command (one command
+sets the project up twice) and the project still loads. `docs/packages.md`'s lock example
+showed a `:brood-version` the writer never wrote; removed.

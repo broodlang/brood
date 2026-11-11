@@ -43,6 +43,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   :gating […] :allow […]}` moves them, and `(defmodule m "…" (:check-allow :category))` silences
   one for a file. Breaking for tools: the structured check maps gain `:category` and `:text`, and
   `reflect/check-file-deps` returns those maps instead of strings.
+- **A lock file of a newer format is refused, naming both formats**, instead of being treated
+  as absent and overwritten; a file that is not a `(lock …)` form is refused too. An unknown
+  `project.blsp` key now warns (it was silently ignored), and the project still loads.
 - **Nodes link only within one `major.minor`** (ADR-699): the handshake says the Brood version
   and refuses another minor at both ends, naming both. Breaking: wire v14 does not link with
   v13, and the v10 fallback for runtimes from before mailbox lanes is gone.

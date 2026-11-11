@@ -39,10 +39,14 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
 
 ## B. Mechanism the promise needs (kernel and std)
 
-1. ⬜ **A format version on the lock file.** Today `(lock :dependencies …)` has none, and a lock
+1. ✅ **A format version on the lock file** (2026-11-11). The writer already stamped
+   `:version 1`; the reader now honours it — a newer format is refused naming both, an
+   unversioned lock reads as 1, a non-lock file is refused. Guard:
+   `crates/nest/tests/manifest_and_lock_versions.rs`. Was: Today `(lock :dependencies …)` has none, and a lock
    it cannot read is treated as absent (`std/tool/package.blsp`). Add the version, refuse a
    newer one with a message, and read every older one.
-2. ⬜ **Manifest keys.** An unknown `project.blsp` key should warn, never fail, so that a later
+2. ✅ **Manifest keys** (2026-11-11). Today an unknown key was silently ignored; it now warns
+   once per command and the project loads. Same guard. Was: An unknown `project.blsp` key should warn, never fail, so that a later
    minor can add keys. Check what happens today and pin it with a test.
 3. ✅ **Structured warning severities in `nest check`** (ADR-698, 2026-11-11). Every warning
    carries a category; `nest check` decides gating from it and the project's `:check` key, and a

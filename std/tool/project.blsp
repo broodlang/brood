@@ -508,10 +508,38 @@ manifest is read, naming the key, not later inside whoever consumes the map."
                 " \">= 0.3\"}"))
             (assoc acc (if (symbol? nm) nm (symbol (str nm))) constraint))))))
 
+;; Every key a `(project …)` form may hold: the manifest's own, `:templates` (read by `nest
+;; new --from`, ADR-424), and the build stamps a release bundle adds (`project-release`).
+(def- *project-manifest-keys*
+  #{:name
+    :version :description :repository :brood :kind :enhances :check :main :source-paths :test-paths
+    :format-paths :doc-paths :dependencies :dev-dependencies :format-headers :format-plugins
+    :width :templates :bundled-packages :project-modules :built-at :built-with})
+
+;; Warn — never fail — on a key this build does not know (road-to-1.0 §B2): a later minor
+;; may add keys, and a manifest written for it must still load here. A typo
+;; (`:dependecies`) is the other way to get one, which is why it is said at all.
+;; Said once per manifest: one command sets the project up more than once, and the same
+;; warning twice reads as two problems.
+(def- *project-warned-manifest* nil)
+
+(defn- project-warn-unknown-keys (opts)
+  (when (not (= opts *project-warned-manifest*))
+    (def- *project-warned-manifest* opts)
+    (let ([keys _] (fold opts
+                     [[] true]
+                     (fn ([found at-key] item) [(if at-key (conj found item) found) (not at-key)])))
+      (doseq (key (seq/filter keys (fn (key) (not (contains? *project-manifest-keys* key)))))
+        (io/puts (str "project: warning: unknown key "
+                   (pr-str key)
+                   " in project.blsp is ignored — a typo, or a key from a newer Brood")
+          :to *err*)))))
+
 (defn apply-config (opts)
   "Apply a parsed manifest `opts` (a plist) by `def`ing the `*project-*` globals — name, version, description, paths, `:main` entry, dependencies and formatter settings; returns the project name.
 
     (project/apply-config '(:name \"myapp\" :version \"0.1.0\"))   ;~> \"myapp\" — the *project-* globals now set"
+  (project-warn-unknown-keys opts)
   (def project/*name* (plist-get opts :name))
   (def project/*version* (plist-get opts :version))
   ;; Package-registry metadata (ADR-147): human summary + the git URL this package
