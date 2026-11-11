@@ -81,9 +81,11 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
   promises from 1.0.0, and links `brood-among-lisps.md`. At 1.0.0 the "until 1.0" half goes.
   Was: Replace the "experimental, pre-1.0" warning with the ADR-673 promise. Link
   `brood-among-lisps.md`.
-- 🟡 **`language.md`.** The "most-specific arity wins" paragraph now says clauses run in order
-  (2026-11-11). Open: sweep the page against the implementation once, since it is the
-  document a newcomer trusts.
+- ✅ **`language.md`** (2026-11-11). The "most-specific arity wins" paragraph now says clauses
+  run in order, and a sweep against the implementation corrected 28 more statements (error
+  kinds, removed and renamed names, bitwise width, failure returns, lint severities). It
+  found three code bugs, fixed: two `proc/offload` allowlist names left behind by renames,
+  a stale `defprotocol` hint, a stale crash-report sample.
 - ✅ **`lsp.md`** (2026-11-11): every `require`-form passage (goto, links, completion, the
   add/remove-require code actions, the tier table) now describes what the server does since
   ADR-229. Was: still talks about a `require` target; there is no `require` form.
