@@ -105,15 +105,17 @@ General-purpose gap 2, the release half.
 - 🟡 **Platforms.** macOS and Windows smoke sets run in CI, and Windows has been a gate since
   2026-11-04. Remaining: the full suite on macOS, and a decision on whether Windows runs the
   full suite or the smoke set at 1.0. Write that decision down as the supported-platform list.
-- 🟡 **Release runtimes** (ADR-714, 2026-11-11). `release.yml` builds toolchains and lean
+- ✅ **Release runtimes** (ADR-714, 2026-11-11). `release.yml` builds toolchains and lean
   runtimes for six targets, Windows x86_64 and static musl x86_64 among them, each with a
   `.sha256`; `nest release --target` downloads the runtime it lacks and refuses one whose
-  digest differs. Remaining: the first release that runs it (v0.51.0); a dry run
-  (`gh workflow run release.yml -f tag=… -f dry_run=true`) proves the build first.
+  digest differs. v0.51.0 published all 24 files; a released `nest` on Linux built a Windows
+  and a static musl app from them, and the musl one ran. A dry run (`gh workflow run
+  release.yml -f tag=… -f dry_run=true`) tries a change to the release before a tag.
 - 🟡 **Install** (2026-11-11). `install.sh` picks the static build where there is no glibc
   and refuses an unchecked download; `install.ps1` is Windows' one line; `nest
-  update-brood` fetches the build it is (`system/target`). Remaining: hive serves
-  `/install.ps1` once deployed, and the first release with Windows archives.
+  update-brood` fetches the build it is (`system/target`). `install.sh` installed v0.51.0's
+  glibc and musl builds. Remaining: deploy hive, so brood.fly.dev serves `/install.ps1`;
+  `install.ps1` has not yet run on a Windows machine.
 
 ## E. Evidence, not features
 
