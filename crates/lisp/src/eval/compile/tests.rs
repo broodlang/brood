@@ -2548,7 +2548,23 @@ fn an_unrelated_def_does_not_cost_a_leaf_derivation_its_inlined_body() {
         || {
             interp.eval_str("(warm 200)").expect("warm");
         },
-        || "`sum-sq`'s inlined body never installed after an unrelated def".to_string(),
+        || {
+            format!(
+                "`sum-sq`'s inlined body never installed after an unrelated def \
+                 (jit_code {:?}, inline_code {:?}, inline_queued {}, jit_calls {}, \
+                 native_resets {}, compile_epoch {}, leaf epoch {})",
+                arm.jit_code.load(Acquire),
+                arm.inline_code.load(Acquire),
+                arm.inline_queued.load(Acquire),
+                arm.jit_calls.load(Acquire),
+                arm.native_resets.load(Acquire),
+                arm.compile_epoch.load(Acquire),
+                arm.leaf
+                    .as_ref()
+                    .map(|l| l.epoch.load(Acquire))
+                    .unwrap_or(0),
+            )
+        },
     );
     assert_eq!(
         interp

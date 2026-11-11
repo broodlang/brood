@@ -463,8 +463,9 @@ mutants: ## Mutation-test one Rust file: make mutants F=crates/lisp/src/core/hea
 # (apt install rr) and kernel.perf_event_paranoid <= 1.
 RR_TEST ?=
 RR_RUNS ?= 50
-rr-hunt: ## Record a test binary under `rr record --chaos` until it fails, keeping that recording: make rr-hunt RR_TEST="target/debug/deps/brood-HASH case_name" RR_RUNS=50
-	@scripts/rr-hunt.sh $(RR_RUNS) $(RR_TEST)
+RR ?= rr
+rr-hunt: ## Record a test binary under `rr record --chaos` until it fails, keeping that recording: make rr-hunt RR_TEST="target/debug/deps/brood-HASH case_name" RR_RUNS=50 [RR=/path/to/rr, 5.10+ on glibc 2.42+]
+	@RR="$(RR)" scripts/rr-hunt.sh $(RR_RUNS) $(RR_TEST)
 
 asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly + rust-src + cargo-nextest; system-alloc so ASAN can intercept allocations instead of mimalloc's un-instrumented arena). Catches genuine OOB / use-after-free in the unsafe substrate (mmap table, JIT codegen buffers) that TSAN and the logical GC tripwires miss. Through nextest, which also skips doctests (they don't LINK under ASAN + build-std, a toolchain quirk).
 	# `--cfg brood_asan` sizes `WORKER_STACK_BYTES` to 64 MiB for this build, because ASAN's
