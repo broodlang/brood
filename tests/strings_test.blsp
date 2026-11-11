@@ -945,3 +945,24 @@
     (assert= (string/break-opportunities "a\nb") [2])
     ;; é as one code point, then e + U+0301: the indices count code points
     (assert= (string/break-opportunities "é éx y") [2 6])))
+
+;; ADR-710: the Script property, and TR39's mixed-script test over it (homoglyphs)
+(describe "string/scripts and string/mixed-script?"
+  (test "each letter's script, first appearance first, shared characters left out"
+    (assert= (string/scripts "paypal") [:latin])
+    (assert= (string/scripts "p\u{430}ypal") [:latin :cyrillic])
+    (assert= (string/scripts "42 + 1.5") [])
+    (assert= (string/scripts "e\u{301}") [:latin])
+    (assert= (string/scripts "日本語のテキスト") [:han :hiragana :katakana]))
+  (test "a homoglyph mixes scripts"
+    (is (string/mixed-script? "p\u{430}ypal"))
+    (is (string/mixed-script? "abc\u{3b1}"))
+    (is (string/mixed-script? "ひらがな한글")))
+  (test "one script, and the combinations real text uses, do not"
+    (refute (string/mixed-script? "paypal"))
+    (refute (string/mixed-script? "Ελληνικά"))
+    (refute (string/mixed-script? "日本語のテキスト"))
+    (refute (string/mixed-script? "한국어漢字"))
+    (refute (string/mixed-script? "Unicode漢字"))
+    (refute (string/mixed-script? "v2_final"))
+    (refute (string/mixed-script? ""))))

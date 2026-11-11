@@ -84,6 +84,7 @@ const ADR_FILES: &[&str] = &[
     "docs/decisions/adr-400-499.md",
     "docs/decisions/adr-500-599.md",
     "docs/decisions/adr-600-699.md",
+    "docs/decisions/adr-700-799.md",
     "docs/archive/decisions-superseded.md",
 ];
 

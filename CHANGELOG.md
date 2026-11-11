@@ -7,6 +7,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## Unreleased
 
 **Added.**
+- **`string/scripts` and `string/mixed-script?`** (ADR-710): the Unicode Script of a string's letters, and
+  UTS #39's single-script test over it — `p\u{430}ypal` (a Cyrillic `а`) mixes scripts, `日本語のテキスト`
+  and `Unicode漢字` do not. What a homoglyph warning, a registry's name check or a mail reader reads.
 - **`gui/color-scheme`**: the desktop's light or dark preference (`:dark`, `:light`, nil) — GNOME,
   KDE, macOS, Windows — beside `gui/reduce-motion?`, so an app can follow the system theme.
 - **`nest check` flags a qualified name into a module that does not exist**: `net/http/post`
