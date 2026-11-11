@@ -46,7 +46,8 @@ calls `take-over` on the first crash (ADR-313). `BROOD_NO_CRASH_REPORT=1` opts o
 A report looks like:
 
     [crash] #<pid a/9> exited: division by zero
-            kind :arith-error  code E0031  at src/worker.blsp:14:9
+            kind :runtime  code E0040  at src/worker.blsp:14:9
+            hint: guard the denominator: (when (not (= y 0)) (/ x y))
             at worker/step (src/worker.blsp:14:9)
             at worker/loop (src/worker.blsp:9:5)
             (further crashes at this site are not reported)
@@ -330,7 +331,7 @@ innermost `:frames` with project-relative paths, the `:brood` version, the `:os`
 `:signature` ([[signature]]), and the caller's `context` map under `:context`, redacted
 (the program's name and version, what it was doing). Pure but for reading the version.
 
-    (crash-report/describe-error (try (/ 1 0) (catch e e)) {:program \"bedit\"})   ;~> {:kind :arith-error :site {…} :signature \"…\" …}"
+    (crash-report/describe-error (try (/ 1 0) (catch e e)) {:program \"bedit\"})   ;~> {:kind :runtime :site {…} :signature \"…\" …}"
   (let (m (crash-report-error-map error)
         trace (or (get m :trace) [])
         at (if (get m :file) m (or (seq/find trace (fn (frame) (get frame :file))) {}))

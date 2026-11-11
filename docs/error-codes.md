@@ -1,8 +1,11 @@
 # Error codes
 
 Stable identifiers attached to built-in Brood errors at construction time.
-Once shipped, **codes never get repurposed** — new errors get the next free
-slot in their range. Agents and Brood code branch on `:code` (or `:kind`) for
+Once shipped, **codes never get repurposed, and a code keeps its `:kind`** — new
+errors get the next free slot in their range. `error_codes::KINDS` declares each
+code's kind, and `crates/lisp/tests/error_code_kinds.rs` holds the shipped rows
+frozen (append only), checks the table below against `KINDS`, and checks that the
+codes a program can raise on demand raise with their declared kind. Agents and Brood code branch on `:code` (or `:kind`) for
 programmatic handling; humans read `:message` and `:hint`.
 
 The contract is described in [`archive/llm-native.md`](archive/llm-native.md) §4; the
@@ -91,9 +94,12 @@ diagnostic value of a code without one is small.
 
 1. Pick the next free slot in the right range.
 2. Add a `pub const` to [`error_codes`](../crates/lisp/src/error.rs)
-   alongside the existing ones — the name uppercases the kind.
+   alongside the existing ones — the name uppercases the kind — and its row to
+   `error_codes::KINDS`, the `:kind` it is caught with, for good.
 3. Tag the raise site with `.with_code(error_codes::YOUR_NEW)`.
-4. Add a row to the table above. Don't reuse a retired code.
+4. Add a row to the table above, and append one to `SHIPPED` in
+   `crates/lisp/tests/error_code_kinds.rs`. Don't reuse a retired code, and
+   never edit a `SHIPPED` row.
 5. If the error has a common fix, attach a `:hint` at construction via
    `.with_hint("…")`.
 

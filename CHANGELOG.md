@@ -7,6 +7,23 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## Unreleased
 
 **Added.**
+- **`nest test --doc FILE…`** (and `nest doctest FILE.blsp…`) checks the docstring examples of
+  the named source files only, each failure as `FILE:LINE:` at the example's own line, private
+  helpers included; inside a project its image is loaded first, so it works downstream
+  (`nest test --doc src/pool.blsp`). The engine is `doctest/failures-in-file`.
+- **`assert=` says when a list met a vector**: a failure whose two sides hold the same elements,
+  one a list and the other a vector (at any depth), adds `note: same elements, but actual is a list
+  and expected is a vector` — or the path to the inner one. What passes is unchanged.
+- **`editor/buffer/insert-program-output`**: text a program writes into a buffer you also type in (a shell's
+  output, an agent's reply), inserted into the text and every undo snapshot at once, recording
+  nothing, so undo and redo of your typing step over it (ADR-712).
+- **A `nest` flag can be deprecated**: it keeps working, warns naming its replacement, and
+  leaves completion (road-to-1.0 §B5). **An error code keeps its `:kind`**, now enforced by a
+  frozen ledger test (§B7).
+- **`string/scripts` and `string/mixed-script?`** (ADR-710): the Unicode Script of a string's letters, and
+  UTS #39's single-script test over it — `p\u{430}ypal` (a Cyrillic `а`) mixes scripts, `日本語のテキスト`
+  and `Unicode漢字` do not. What a homoglyph warning, a registry's name check or a mail reader reads.
+- **`mcp-server`**: the MCP protocol behind `nest mcp`, as a runtime module any program can serve tools with — a server spec as data (its catalogue, extra methods, deadlines), handlers isolated in their own processes, a stdio transport and a loopback HTTP one with a token (`start-http`). `nest mcp` is one spec over it (ADR-711).
 - **`gui/color-scheme`**: the desktop's light or dark preference (`:dark`, `:light`, nil) — GNOME,
   KDE, macOS, Windows — beside `gui/reduce-motion?`, so an app can follow the system theme.
 - **`nest check` flags a qualified name into a module that does not exist**: `net/http/post`
@@ -38,12 +55,24 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   another collection. `()` stays `nil`.
 
 **Changed.**
-- **Deprecated: `dotimes`, `dolist`, `unless` and `match*`** (ADR-674), the first stage of
-  "reduce before adding": one form iterates for effect. They still work; `nest check` warns at
-  each use, and **`nest format --migrate`** rewrites them: `(dotimes (i n) …)` →
-  `(doseq (i (range n)) …)`, `(dolist (x xs) …)` → `(doseq (x xs) …)`, `(unless t …)` →
-  `(when (not t) …)`, and `match*` → `%match`, the engine's internal name (write `match`).
-  They are removed before 1.0.
+- **Warnings have categories, and the project decides which gate** (ADR-698): each `nest check`
+  line ends with its category (`[type-mismatch]`), `project.blsp`'s `:check {:advisory […]
+  :gating […] :allow […]}` moves them, and `(defmodule m "…" (:check-allow :category))` silences
+  one for a file. Breaking for tools: the structured check maps gain `:category` and `:text`, and
+  `reflect/check-file-deps` returns those maps instead of strings.
+- **A lock file of a newer format is refused, naming both formats**, instead of being treated
+  as absent and overwritten; a file that is not a `(lock …)` form is refused too. An unknown
+  `project.blsp` key now warns (it was silently ignored), and the project still loads.
+- **Nodes link only within one `major.minor`** (ADR-699): the handshake says the Brood version
+  and refuses another minor at both ends, naming both. Breaking: wire v14 does not link with
+  v13, and the v10 fallback for runtimes from before mailbox lanes is gone.
+- **Removed: `dotimes`, `dolist`, `unless` and `match*`** (ADR-674, "reduce before adding": one
+  form iterates for effect). Breaking: a call of one is unbound, and the error (and `nest
+  check`'s warning) names the replacement: `(dotimes (i n) …)` → `(doseq (i (range n)) …)`,
+  `(dolist (x xs) …)` → `(doseq (x xs) …)`, `(unless t …)` → `(when (not t) …)`, and
+  `match*` → `match` (the engine is the internal `%match`). `nest check --fix-renames` rewrites
+  `dolist`; the other three change shape and are left to you. They were deprecated earlier in
+  this cycle with a `nest format --migrate` rewrite, which went with them.
 - **`doseq` collects nothing**: it walks `for`'s bindings as `fold-for` does instead of building
   `for`'s list and discarding it, about 1.5× faster. A bare name as its body
   (`(doseq (x xs) x)`) now draws `nest check`'s "evaluated and discarded" warning, which it is.

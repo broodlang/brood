@@ -6,7 +6,7 @@
 ;; plus the docstring rules, which are driven by the kernel's `(reflect/doc-forms)` so a `def…`
 ;; form's documentation colours apart from a string value in every editor (ADR-265).
 
-(defmodule grammar-test (:use test) (:use grammar) (:use json))
+(defmodule grammar-test (:use test) (:use-internals grammar) (:use json))
 
 (describe "grammar — editor grammars generated from (reflect/special-forms)"
   (test "special-keywords is exactly (reflect/special-forms) minus the def… heads"
@@ -17,7 +17,9 @@
       (is (not (includes? kw "defmodule")))
       ;; everything else from the canonical list is present
       (is (includes? kw "when"))
-      (is (includes? kw "match*"))
+      (is (includes? kw "doseq"))
+      ;; ADR-674 removed `match*`, `unless`, `dotimes` and `dolist`: none is coloured
+      (is (not (any? ["match*" "unless" "dotimes" "dolist"] (fn (k) (includes? kw k)))))
       (is (includes? kw "->"))
       ;; `->>` was here until ADR-308 deleted it — the grammar went on colouring a macro
       ;; the language does not have. There is no thread-last form to assert now.
@@ -42,8 +44,9 @@
           repo (let (r (get g :repository)) (if (map? r) r {}))
           sf (let (x (get repo :special-form)) (if (map? x) x {}))
           m (get sf :match))
-      ;; regex metacharacters in keywords are escaped (`match*` → `match\*`)
-      (is (includes? m "match\\*"))
+      ;; regex metacharacters in a keyword are escaped (`a*` → `a\*`); no current keyword
+      ;; holds one, so the escape is asserted directly
+      (assert= (grammar/grammar-escape "match*?") "match\\*\\?")
       ;; the word forms and the operator forms both made it in
       (is (includes? m "when"))
       (is (includes? m "->"))
@@ -106,8 +109,7 @@
       ;; escaping needed — #any-of? compares node text)
       (is (includes? q "#any-of? @keyword.control"))
       (is (includes? q "\"when\""))
-      ; the `*` is a plain literal here
-      (is (includes? q "\"match*\""))
+      (is (includes? q "\"doseq\""))
       (is (includes? q "\"->\""))
       (is (not (includes? q "\"->>\"")))
       ;; static node→capture rules + the separate def-head rule

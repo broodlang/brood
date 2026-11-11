@@ -8,11 +8,11 @@ one server that owns the language knowledge.
 
 > Status: **Tiers 0–2 live, plus a "developer ergonomics" pass** —
 > diagnostics (syntactic + semantic), completion, hover, signature help, document
-> symbols, goto-definition (in-file, cross-module, stdlib, `require`-target, and
+> symbols, goto-definition (in-file, cross-module, stdlib, and
 > `defmodule` `:use`/`:alias`/`:implements` clauses),
 > references, document-highlight, rename, semantic tokens, **document formatting,
 > workspace symbol search, code actions, folding ranges, inlay hints,
-> document links** (clickable module names in `require`/`:use`/`:alias`)**, and
+> document links** (clickable module names in `:use`/`:alias`)**, and
 > selection range** (expand/shrink to s-expression).
 > Recorded as
 > [ADR-025](decisions/adr-001-099.md#adr-025--a-lossless-span-carrying-cst-for-tooling-separate-from-the-eval-value);
@@ -99,15 +99,12 @@ one server that owns the language knowledge.
 > choice, not a silent pick. This is the *modern, statically-analyzable* answer to
 > "referenced-but-not-imported" — the editor writes the explicit import for you (like
 > Rust-analyzer / TS auto-import), **not** a runtime autoload that would hide the
-> dependency from the very tooling that reads it (ADR-206). **"Add `(require 'mod)`"**
-> for a *qualified* `mod/x` whose module is on the load-path but unloaded; and
-> **"Create function `foo`"** — an unbound call head gets a stub `(defn foo (a …) nil)`
-> at arity, the TDD case. Plus **"remove seemingly-unused `(require 'mod)`"** — a
-> structural fix (not tied to a diagnostic): a lone top-level require whose module is
-> never referenced by a qualified `mod/…` name anywhere in the file. Conservative —
-> any textual `mod/` keeps it (false negatives only), `(require 'a 'b)` and
-> `(:use mod)` clauses are left alone, and a side-effect-only require can't be
-> detected statically, so it's a **non-preferred** suggestion, not an auto-fix.
+> dependency from the very tooling that reads it (ADR-206). A *qualified* `mod/x` needs no
+> action: its module loads on first use (ADR-229 removed the user-facing `require`, and with
+> it the "add/remove `(require 'mod)`" actions). And **"Create function `foo`"** — an
+> unbound call head gets a stub `(defn foo (a …) nil)` at arity, the TDD case. Plus
+> **"Declare signature"** — the checker's inferred `(sig …)` for the `defn` under the
+> cursor, ready to keep (ADR-259).
 > • **`textDocument/foldingRange`** (`folding.rs`) — collapsible regions off the
 > CST: every multi-line container (`()`/`[]`/`{}`) and every run of consecutive
 > comment lines. Pure structural walk, no eval.
@@ -152,7 +149,7 @@ one server that owns the language knowledge.
 > selection along the CST: symbol → enclosing form → outer form → … → file, read
 > off the node chain at each cursor (trivia and same-extent wrappers skipped so
 > each step is a visible jump). Pure tree geometry, no eval.
-> • **Context-aware completion** — inside `(require '…)` or a `(:use …)`/`(:alias
+> • **Context-aware completion** — inside a `(:use …)`/`(:alias
 > …)` clause, `completion.rs` offers requireable **module names** alone (loaded
 > features + top-level `<name>.blsp` on the load-path, via
 > `introspect::loadable_modules`), instead of the generic globals that would be
@@ -176,9 +173,7 @@ one server that owns the language knowledge.
 > the typed map argument's own fields are offered.
 > • **More code actions** (shipped) — off an `unbound symbol: foo` finding, beyond
 > did-you-mean: **auto-import** ("Import `foo` from `(:use mod)`" + "Qualify as
-> `mod/foo`") for a bare name a module exports (ADR-206, above); **"Add
-> `(require 'mod)`"** when `foo` is a qualified `mod/x` whose module resolves on the
-> load-path (inserted under any `defmodule` header); and **"Create function `foo`"**
+> `mod/foo`") for a bare name a module exports (ADR-206, above); and **"Create function `foo`"**
 > when `foo` is a call head — a stub `(defn foo (a b …) nil)` at EOF, arity matched
 > to the call site.
 > **Incremental document sync shipped** (2026-07-24): the server advertises
@@ -372,22 +367,22 @@ symbol binds to**. Two layers:
 ## Cross-file resolution: an image query, not a static index (ADR-031)
 
 The Tier-1 server's knowledge of names had exactly two sources, and neither crossed
-a `require`:
+into another module:
 
 - the **open buffer's** CST + scope tree (locals and this file's `def`s), and
 - the **interpreter's globals** — the *prelude + Rust builtins* only. The server
   deliberately never evaluates the buffer (no side effects, no loops), so it also
-  never ran a `(require 'foo)`; a symbol another module provided was invisible
-  to it and resolved as `Free`.
+  never loaded the modules the buffer names; a symbol another module provided was
+  invisible to it and resolved as `Free`.
 
 The tempting fix is a **static workspace-indexer** (rust-analyzer's model: walk
-the `require` graph off `*load-path*`, parse every file's CST, never run
+the module graph off `*load-path*`, parse every file's CST, never run
 anything). We **reject that as the primary path** (ADR-031). Brood is an
 image-based, hot-reloadable Lisp (ADR-013), and the endgame is an editor that
 *is* a running Brood image editing Brood — so the running runtime already holds
 every loaded module's globals (it's what `reflect/global-names` enumerates). A static
 index just re-derives, approximately, what the image already knows for certain —
-and can't follow computed/conditional `require`s or see through macros.
+and can't follow computed or conditional loads or see through macros.
 
 So cross-file is the **SLIME/CIDER/Emacs-xref model**: the image recorded *where
 each thing was defined as it loaded*, and `M-.` is a lookup against it. The plan
@@ -419,21 +414,12 @@ each thing was defined as it loaded*, and `M-.` is a lookup against it. The plan
    CST-level source occurrences aggregated across files; "go to definition"
    becomes the name→site lookup.
 
-**Navigating to a `require`'d module.** Goto-definition on the module name in
-`(require 'foo)` doesn't go through the def-site table (the feature name binds
-nothing); instead `definition.rs` detects the `require` call context (an
-enclosing `List` whose head is `require`) and resolves the name with
-`introspect::module_file` — `%require-find "foo.blsp" *load-path*`, the same
-lookup `require` itself uses, against the bootstrapped project's load-path. It
-lands at the top of the module's file. (A baked-in std module — `%builtin-module`
-source, no file — has no target.)
-
 **Navigating from a `defmodule` clause.** The same idea extends to the module
 header itself (`module_ref::clause_ref_at`, shared by goto and hover). The
 module/behaviour names there also bind nothing, so they're recognized
 *structurally* — the cursor on the form right after a clause keyword:
 - `(:use foo)` / `(:alias foo)` → the module name resolves via
-  `introspect::module_file` (as `require` does) and jumps to `foo.blsp`; hover
+  `introspect::module_file` (as loading does) and jumps to `foo.blsp`; hover
   shows `(module foo)` plus the docstring its `defmodule` header declared
   (`introspect::module_doc`, read off `*module-docs*`).
 - `(:implements Bar)` → the behaviour name. The interface registry (`*protocols*`)
@@ -453,10 +439,9 @@ module/behaviour names there also bind nothing, so they're recognized
 
 **Document links** (`document_link.rs`) are the *passive* counterpart to goto:
 rather than waiting for the cursor, the server underlines **every** module name in
-a load position at once — a `(require 'foo)` argument and a `(:use foo)` /
-`(:alias foo)` clause — each carrying the resolved `foo.blsp` URI so the editor
-Ctrl-click opens it. Same `introspect::module_file` resolution as the
-require-target goto; a name with no file gets no underline. (`:implements` isn't
+a `(:use foo)` / `(:alias foo)` clause at once, each carrying the resolved `foo.blsp`
+URI so the editor Ctrl-click opens it. Same `introspect::module_file` resolution as the
+clause goto; a name with no file gets no underline. (`:implements` isn't
 linked — its target is found by a project scan, not a single file URI; goto still
 covers it.)
 
@@ -509,10 +494,10 @@ additive change behind the same feature handlers.
 |---|---|---|---|
 | **0** | `publishDiagnostics` (syntactic), document sync, lifecycle | `cst::parse` + `LineIndex` | **done** |
 | **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition**, **signature help** | `reflect/arglist` / `reflect/global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** |
-| **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto**, `require`-target goto | located `check_file`; project bootstrap; `reflect/source-location` + prelude-cache; `%require-find` | **done** |
+| **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto** | located `check_file`; project bootstrap; `reflect/source-location` + prelude-cache | **done** |
 | **2** | **cross-file** references & rename (+prepareRename), document-highlight, semantic tokens, completion resolve | `scope::references` / `references_to_global`; `project_files`; CST token classification | **done** |
-| **2+** | formatting, workspace symbol, code actions (did-you-mean, remove-unused-require), folding ranges, inlay hints | `introspect::format_source`; `defs::top_level` + `workspace::all_sources`; `global_names`/`names_in_scope` + Levenshtein; CST container/comment walk; `arglist_tokens` | **done** |
-| **2++** | document links + `defmodule`-clause goto/hover, selection range, context-aware module completion, code actions (add-require, create-defn) | `module_ref` clause classifier; `introspect::module_file`/`module_doc`/`loadable_modules`; CST node-chain | **done** |
+| **2+** | formatting, workspace symbol, code actions (did-you-mean, declare signature), folding ranges, inlay hints | `introspect::format_source`; `defs::top_level` + `workspace::all_sources`; `global_names`/`names_in_scope` + Levenshtein; CST container/comment walk; `arglist_tokens` | **done** |
+| **2++** | document links + `defmodule`-clause goto/hover, selection range, context-aware module completion, code actions (import via `:use`, create-defn) | `module_ref` clause classifier; `introspect::module_file`/`module_doc`/`loadable_modules`; CST node-chain | **done** |
 | **2+++** | type-directed record-field completion (`:keyword` candidates from the map argument's inferred record shape) | `check::arg_ty_at` (position-keyed checker type query); `record_key_context` CST classifier; mid-edit buffer repair (blank the key, close delimiters) | **done** |
 
 Tier 0 was reachable immediately because syntactic diagnostics need only the
@@ -543,7 +528,7 @@ model ADR-031 keeps — *definitions* are image-based, *references* stay static
 because macro-generated references have no faithful spans; so references are
 source occurrences, and a name another module synthesises via a macro won't
 appear. **Quoted symbols are excluded** (`collect_symbols` doesn't descend into a
-`'…` quote): the module name in `(require 'foo)` and quoted data `'(a b)` are
+`'…` quote): a quoted `'foo` and quoted data `'(a b)` are
 *data*, not references, so rename never rewrites them. (Quasiquote is left as-is
 — its unquoted `~x` parts are live; untangling those is deferred.)
 

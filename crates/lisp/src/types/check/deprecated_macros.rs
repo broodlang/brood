@@ -2,32 +2,28 @@
 //!
 //! A `(meta name :deprecated …)` mark on a FUNCTION warns at every call the body walk sees
 //! (`walk::stability_msg`). A MACRO's calls never reach that walk: the checker reads
-//! macroexpanded code, and by then `(unless t …)` is an `if`. So a deprecated macro — the
-//! forms ADR-674 retires — would warn nowhere, and the deprecation would end in a removal
-//! nobody was told about. This pass walks the **un-expanded** forms, like the guard-purity
-//! and discarded-catch passes, and gives a call of a deprecated macro the same diagnostic a
-//! call of a deprecated function gets.
+//! macroexpanded code, and by then a call of a `when`-shaped macro is an `if`. So a
+//! deprecated macro — the forms ADR-674 retired went through this — would warn nowhere, and
+//! the deprecation would end in a removal nobody was told about. This pass walks the
+//! **un-expanded** forms, like the guard-purity and discarded-catch passes, and gives a call
+//! of a deprecated macro the same diagnostic a call of a deprecated function gets.
 //!
 //! Quoted data is skipped. A `quasiquote` template is walked: what it builds is code a macro
-//! emits, and `nest format --migrate` rewrites it there too. A name the file defines itself
-//! is its own, not the deprecated global. `(check-allow :deprecated …)` silences a deliberate
-//! use (a shim that calls the name it replaces).
+//! emits. A name the file defines itself is its own, not the deprecated global.
+//! `(check-allow :deprecated …)` silences a deliberate use (a shim that calls the name it
+//! replaces).
 
 use std::collections::HashSet;
 
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
-use crate::error::Pos;
+use crate::types::check::Finding;
 
 use super::walk::{list_items, stability_msg};
 
 /// Entry: walk every top-level (un-expanded) form for a call of a deprecated macro.
-pub(super) fn check_deprecated_macros(
-    heap: &Heap,
-    forms: &[Value],
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn check_deprecated_macros(heap: &Heap, forms: &[Value], out: &mut Vec<Finding>) {
     let mut defined = HashSet::new();
     for &form in forms {
         collect_defined(heap, form, &mut defined);
@@ -37,7 +33,7 @@ pub(super) fn check_deprecated_macros(
     }
 }
 
-fn walk(heap: &Heap, form: Value, defined: &HashSet<String>, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk(heap: &Heap, form: Value, defined: &HashSet<String>, out: &mut Vec<Finding>) {
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             if let Value::Vector(id) = form {
@@ -67,13 +63,9 @@ fn walk(heap: &Heap, form: Value, defined: &HashSet<String>, out: &mut Vec<(Opti
                 if matches!(
                     crate::types::check::deps::obs_global(heap, sym),
                     Some(Value::Macro(_))
-                ) && let Some(msg) = stability_msg(heap, sym)
+                ) && let Some((lint, msg)) = stability_msg(heap, sym)
                 {
-                    // A form with a shape change has a migration; say where it is.
-                    out.push((
-                        heap.form_pos_only(form),
-                        format!("{msg} (`nest format --migrate` rewrites it)"),
-                    ));
+                    out.push(Finding::new(lint, heap.form_pos_only(form), msg));
                 }
             }
         }
@@ -83,8 +75,8 @@ fn walk(heap: &Heap, form: Value, defined: &HashSet<String>, out: &mut Vec<(Opti
     })
 }
 
-/// The names the file defines itself, at any depth: a module's own `unless` is not the
-/// deprecated global.
+/// The names the file defines itself, at any depth: a module's own definition of a
+/// deprecated name is not the deprecated global.
 fn collect_defined(heap: &Heap, form: Value, out: &mut HashSet<String>) {
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {

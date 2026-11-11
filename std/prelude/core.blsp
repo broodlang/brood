@@ -637,15 +637,6 @@ inlines, while this wrapper stays a call — and it does not mislead past two ar
     (when false :yes)   ;=> nil"
   `(if ~test (do ~@body) nil))
 
-;; `unless` is deprecated by ADR-674 and removed before 1.0: write `(when (not test) …)`.
-;; `nest format --migrate` rewrites it.
-(defmacro unless (test & body)
-  "Deprecated (ADR-674): write `(when (not test) body…)`; `nest format --migrate` rewrites this. Evaluates `body` (returning the last) when `test` is falsy, else `nil`.
-
-    (unless false :yes)   ;=> :yes"
-  `(if ~test nil (do ~@body)))
-(%register-meta 'unless [:deprecated "0.51.0" :use 'when])
-
 ;; `defonce` — define only if the name is not already bound. The point is
 ;; hot-reload: re-evaluating a file (via `system/reload-defs` or `reflect/load`) re-runs every
 ;; `def…` form, which would reset top-level state and re-create singletons (a

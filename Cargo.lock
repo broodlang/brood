@@ -562,6 +562,7 @@ dependencies = [
  "tree-sitter-ruby",
  "unicode-linebreak",
  "unicode-normalization",
+ "unicode-script",
  "unicode-segmentation",
  "unicode-width",
  "wasmtime",

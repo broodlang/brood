@@ -225,7 +225,7 @@ pub(super) fn infer_same_file_functions(
     expanded: &[Value],
     ctx: &mut Ctx,
     file_ns_name: Option<&str>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) -> Vec<(Symbol, Value)> {
     let derive_dbg = derive_debug();
     let candidates = inference_candidates(heap, expanded, ctx);
@@ -306,7 +306,8 @@ pub(super) fn infer_same_file_functions(
             .map(|demands| demands.into_sig(Ty::ANY))
             .unwrap_or_else(|| crate::types::Sig::new(Vec::new(), Ty::ANY));
         ctx.add_inferred_fn_sig(name, sig);
-        out.push((
+        out.push(Finding::new(
+            Lint::GaveUp,
             rhs.and_then(|rhs| heap.form_pos_only(rhs)),
             format!(
                 "checker gave up: the return of {} was still moving after {MAX_RETURN_ROUNDS} inference rounds — read as unknown here and by every caller",
@@ -384,7 +385,7 @@ pub(super) fn derive_caller_params(
     expanded: &[Value],
     all_candidates: &[(Symbol, Value)],
     ctx: &mut Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
     timing: &mut DeriveTiming,
 ) {
     let candidates: HashMap<Symbol, Value> = all_candidates.iter().copied().collect();
@@ -460,7 +461,8 @@ pub(super) fn derive_caller_params(
             && !derivation_declined
         {
             derivation_declined = true;
-            out.push((
+            out.push(Finding::new(
+                    Lint::GaveUp,
                     None,
                     match why {
                         sigs::DeriveDecline::Opaque => "checker gave up: an unexpanded macro call keeps every caller-derived parameter unknown in this file".to_string(),
@@ -558,7 +560,8 @@ pub(super) fn derive_caller_params(
         ctx.set_derived_params(HashMap::new());
         // Sound — every return is back at its demand-based one and no parameter is derived
         // — and reported: otherwise a file whose derivation gave up reads as clean.
-        out.push((
+        out.push(Finding::new(
+            Lint::GaveUp,
             None,
             format!("checker gave up: the caller-derived parameters and returns did not settle in {MAX_JOINT_ROUNDS} joint rounds — every parameter is read as unknown in this file"),
         ));

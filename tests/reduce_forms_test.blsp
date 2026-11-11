@@ -1,14 +1,14 @@
-;; ADR-674 — "reduce before adding": one iteration form for effects (`doseq`), and the
-;; forms it replaces deprecated in stage 1 (`dotimes`, `dolist`, `unless`, and the public
-;; `match*`, now the `%match` engine). Stage 2, before 1.0, removes them; until then each
-;; still works, `nest check` warns at every use, and `nest format --migrate` rewrites it.
+;; ADR-674 — "reduce before adding": one iteration form for effects (`doseq`). Stage 1
+;; deprecated the forms it replaces (`dotimes`, `dolist`, `unless`, and the public
+;; `match*`, now the `%match` engine); stage 2 removed them, each with a rename-ledger
+;; entry so the unbound error names its replacement.
 ;;
 ;; Three properties matter and each is asserted at the entry point a user reaches:
-;;   1. `doseq` takes every shape the retired forms took, and `for`'s whole binding grammar;
-;;   2. a deprecated form warns where it is called, though the checker reads expanded code
-;;      (a macro's call is gone by then — the reason `deprecated_macros.rs` exists);
-;;   3. `migrate/text` turns each old form into the new one, and leaves strings, comments
-;;      and quoted data alone.
+;;   1. `doseq` takes every shape the removed forms took, and `for`'s whole binding grammar;
+;;   2. a call of a removed form is unbound, and both the runtime error and the checker's
+;;      diagnostic name the replacement (from `crates/lisp/src/renames.rs`);
+;;   3. a deprecated MACRO warns where it is called, though the checker reads expanded code
+;;      (a macro's call is gone by then — the reason `deprecated_macros.rs` exists).
 
 (defmodule reduce-forms-test (:use test))
 
@@ -17,6 +17,12 @@
 (defn- stability-messages (src)
   (seq/filter (map (reflect/check-string-structured src) (fn (d) (get d :message)))
     (fn (m) (includes? m "is deprecated"))))
+
+;; A deprecated macro of this file's own, so the warning pass is tested on a form that
+;; exists: the forms ADR-674 deprecated are gone, and the pass is generic.
+(defmacro old-twice (x) `(* 2 ~x))
+(meta old-twice :deprecated "0.1.0" :use 'new-twice)
+(defmacro new-twice (x) `(* 2 ~x))
 
 (describe "doseq is the one form for effects"
   (test "a counted loop is doseq over a range"
@@ -59,65 +65,43 @@
       (assert= (into [] (map (range 6) (fn (_) (receive ([:s s] s)))))
         ["012" "012" "012" "012" "012" "012"]))))
 
-(describe "the deprecated forms still work"
-  ;; `check-allow`: this file is checked at zero warnings, and these are the calls we are
-  ;; telling everyone not to make.
-  (test "dotimes, dolist, unless and match* behave as they did"
-    (check-allow :deprecated
-      (do
-        (assert= (printed (fn () (dotimes (i 3) (io/write i)))) "012")
-        (assert= (printed (fn () (dolist (x '("a" "b")) (io/write x)))) "ab")
-        (assert= (dotimes (i 2) (str i)) nil)
-        (assert= (unless false :yes) :yes)
-        (assert= (unless true :yes) nil)
-        (assert= (match* :m 3 (n (* n 2))) 6)))))
+;; Each call's arguments evaluate to themselves, so the only unbound name is the head.
+;; `reflect/eval-string`, so this file's own check never sees the removed names.
+(def- *removed*
+  [["(dotimes 3)" "dotimes" "renamed to doseq (i (range n)) body… (ADR-674)"]
+    ["(dolist [1] 1)" "dolist" "renamed to doseq (ADR-674)"]
+    ["(unless false 1)" "unless" "renamed to when (not test) body… (ADR-674)"]
+    ["(match* :m 3 1)" "match*" "renamed to match expr (pattern body…)… (ADR-674)"]])
 
-(describe "a deprecated form warns where it is called"
-  (test "each of the four names its replacement and the migration"
-    (doseq ([src name use] [["(defn f (n) (dotimes (i n) (io/write i)))" "dotimes" "doseq"]
-                             ["(defn f (xs) (dolist (x xs) (io/write x)))" "dolist" "doseq"]
-                             ["(defn f (ok) (unless ok :no))" "unless" "when"]
-                             ["(defn f (v) (match* :m v (n n)))" "match*" "match"]])
-      (let (msgs (stability-messages src))
-        (assert= (count msgs) 1)
-        (is (includes? (first msgs) (str "`" name "` is deprecated since 0.51.0")))
-        (is (includes? (first msgs) (str "use `" use "` instead")))
-        (is (includes? (first msgs) "nest format --migrate")))))
+(describe "the removed forms are unbound, and the error names the replacement"
+  (test "evaluating a call raises unbound with the ledger's pointer"
+    (doseq ([src name pointer] *removed*)
+      (let (msg (try (reflect/eval-string src) (catch e (error-message e))))
+        (is (includes? msg (str "unbound symbol: " name)))
+        (is (includes? msg pointer)))))
+  (test "the checker reports the same call unbound, with the same pointer"
+    (doseq ([src name pointer] *removed*)
+      (let (unbound (seq/filter (map (reflect/check-string-structured (str "(defn f () " src ")"))
+                                  (fn (d) (get d :message)))
+                      (fn (m) (includes? m (str "unbound symbol: " name)))))
+        (assert= (count unbound) 1)
+        (is (includes? (first unbound) pointer)))))
+  (test "none of the four is bound any more"
+    (assert= (seq/filter ['dotimes 'dolist 'unless 'match*] bound?) nil)))
+
+(describe "a deprecated macro warns where it is called"
+  (test "the call names the replacement"
+    (let (msgs (stability-messages "(defn f (n) (reduce-forms-test/old-twice n))"))
+      (assert= (count msgs) 1)
+      (is (includes? (first msgs) "is deprecated since 0.1.0"))
+      (is (includes? (first msgs) "use `new-twice` instead"))))
   (test "check-allow :deprecated silences it, and quoted data never warns"
-    (assert= (stability-messages "(defn f (ok) (check-allow :deprecated (unless ok :no)))") nil)
-    (assert= (stability-messages "(def q '(unless a b))") nil))
-  (test "a module's own definition of the name is its own, not the deprecated macro"
-    (assert= (stability-messages "(defmodule own-unless (:shadow unless)) (defn unless (x) x) (defn g () (unless 1))")
+    (assert= (stability-messages "(defn f (n) (check-allow :deprecated (reduce-forms-test/old-twice n)))")
+      nil)
+    (assert= (stability-messages "(def q '(reduce-forms-test/old-twice 1))") nil))
+  (test "a file's own definition of the name is its own, not the deprecated macro"
+    (assert= (stability-messages "(defn reduce-forms-test/old-twice (x) x) (defn g () (reduce-forms-test/old-twice 1))")
       nil))
   (test "the replacements do not warn"
     (assert= (stability-messages "(defn f (ok xs) (when (not ok) (doseq (i (range 3)) (io/write i))) (doseq (x xs) (match x (n n))))")
       nil)))
-
-(describe "nest format --migrate rewrites each form"
-  (test "dotimes becomes doseq over a range"
-    (assert= (migrate/text "(dotimes (i n) (f i))") "(doseq (i (range n)) (f i))")
-    (assert= (migrate/text "(dotimes (i (count v)) (f i))") "(doseq (i (range (count v))) (f i))"))
-  (test "dolist becomes doseq"
-    (assert= (migrate/text "(dolist (x xs)\n  (f x))") "(doseq (x xs)\n  (f x))"))
-  (test "unless becomes when over a not, and a negated test loses its not"
-    (assert= (migrate/text "(unless ok (a) (b))") "(when (not ok) (a) (b))")
-    (assert= (migrate/text "(unless (not ok) (go))") "(when ok (go))"))
-  (test "match* becomes %match, root-scoped too"
-    (assert= (migrate/text "(match* :m v (n n))") "(%match :m v (n n))")
-    (assert= (migrate/text "(/match* :m v (n n))") "(/%match :m v (n n))"))
-  (test "a root-escaped unless keeps its not root-escaped, as a prelude template needs"
-    (assert= (migrate/text "`(/unless ~t ~@body)") "`(/when (/not ~t) ~@body)"))
-  (test "a template is code it emits, so it is rewritten; quoted data is not"
-    (assert= (migrate/text "`(unless ~t ~@body)") "`(when (not ~t) ~@body)")
-    (assert= (migrate/text "'(unless a b)") "'(unless a b)")
-    (assert= (migrate/text "(quote (dotimes (i 2) x))") "(quote (dotimes (i 2) x))"))
-  (test "strings and comments come back byte for byte"
-    (let (src "(def s \"(unless x y)\") ; (dolist (x xs))\n")
-      (assert= src (migrate/text src))))
-  (test "the rewrites nest"
-    (assert= (migrate/text "(dotimes (i 3) (unless (done? i) (dolist (x (xs i)) (f x))))")
-      "(doseq (i (range 3)) (when (not (done? i)) (doseq (x (xs i)) (f x))))"))
-  (test "a migrated program runs as the original did"
-    (let (src "(with-out-str (dotimes (i 3) (unless (= i 1) (dolist (x '(:a)) (io/write i x)))))")
-      (assert= (reflect/eval-string src)
-        (reflect/eval-string (migrate/text src))))))

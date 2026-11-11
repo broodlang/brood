@@ -38,9 +38,7 @@ const PAIR_BINDERS: &[&str] = &[
     "let",
     "letrec",
     "binding",
-    "dolist",
     "doseq",
-    "dotimes",
     "fold-for",
     "for",
     "if-let",
@@ -51,7 +49,7 @@ const PAIR_BINDERS: &[&str] = &[
 ];
 
 /// Forms whose clauses are `(pattern body…)` after one scrutinee.
-const PATTERN_CLAUSES: &[&str] = &["match", "%match", "match*", "receive"];
+const PATTERN_CLAUSES: &[&str] = &["match", "%match", "receive"];
 
 /// The head's name, a root escape read as the name it escapes (`/%match` is `%match`).
 fn head_name(items: &[Value]) -> Option<String> {

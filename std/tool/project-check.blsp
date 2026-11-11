@@ -356,31 +356,53 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 ;; by filename, which is fine for advisory GNU `FILE:LINE:COL` diagnostics. Honors
 ;; the `BROOD_NO_CHECK=1` opt-out — the same flag the `brood` CLI respects, so
 ;; callers' "exit non-zero on warning" gating gets 0 (no print) under it.
-;; A warning the checker reports but that does NOT gate the build (`nest check`'s
-;; exit code). Currently only the non-tail-recursion lint: since deep recursion
-;; became a catchable `MAX_BC_FRAMES` error rather than a silent stack overflow,
-;; that lint is an advisory perf/robustness hint — and it fires on correct code
-;; (inherently-tree recursion like %merge-sort or a window tree, and bounded
-;; compile-time macro helpers, none of which can overflow). So it stays visible
-;; but must never fail CI. Classified by message text for now, pending structured
-;; warning severities (a fuller fix — see the roadmap).
-(defn- project-advisory-warning? (w)
-  (or (includes? w "recursive call in non-tail position")
-    ;; A budget the checker ran out of: the file WAS checked, with the
-    ;; part past the cap read as unknown — sound, and worth seeing, since "zero warnings"
-    ;; would otherwise read as "checked". A file defining and using its own macro hits
-    ;; the commonest one (the derivation declines) by construction, so it cannot gate.
-    (includes? w "checker gave up:")
-    ;; Stability diagnostics (ADR-283). A deprecation that FAILS the build is a removal
-    ;; with extra steps — the point is to say "this is going away" while the code still
-    ;; works, so it prints and does not gate. Same for a beta notice.
-    (includes? w "is deprecated since")
-    (includes? w "is beta —")))
+;; ── which warnings gate (ADR-698) ────────────────────────────────────────────
+;; Every warning carries a CATEGORY (`reflect/check-categories`; the same names
+;; `check-allow` takes). Whether it fails `nest check` is decided here, from the category
+;; and the project's `:check` key — never from the message text, which ADR-673 leaves free
+;; to change. A warning is `{:category :text …}`: the checker's own structured warnings,
+;; and the whole-project lints below, which build the same shape.
+;;
+;; Advisory by default — printed, never a CI failure:
+;; - `:non-tail-recursion`: deep recursion is a catchable `recursion too deep`, not a
+;;   silent overflow, and the lint fires on correct code (tree recursion like
+;;   %merge-sort, bounded macro helpers), so it is a perf/robustness hint.
+;; - `:gave-up`: a budget the checker ran out of. The file WAS checked, the part past the
+;;   cap read as unknown — sound, and worth seeing, since "zero warnings" would otherwise
+;;   read as "checked". A file defining and using its own macro hits the commonest one by
+;;   construction, so it cannot gate.
+;; - `:deprecated`, `:beta` (ADR-283): a deprecation that FAILS the build is a removal with
+;;   extra steps — the point is to say "this is going away" while the code still works.
+(def- *project-advisory-categories* #{:non-tail-recursion :gave-up :deprecated :beta})
 
-;; Print warning `w` and return the running gate count `n`, incremented only when
-;; `w` gates the build. An advisory warning prints with an `(advisory)` marker and
-;; leaves the count untouched — visible in the output, never a CI failure. Both
-;; the fresh and the cached check paths tally through this.
+;; `:off`, `:advisory` or `:gating` for a warning of `category` under this project's
+;; `:check` key. `:allow` wins over the rest, then the project's own lists, then the
+;; defaults above; anything else gates.
+(defn- project-warning-severity (category)
+  (let (policy project/*check*)
+    (cond
+      (contains? (%map-get policy :allow #{}) category) :off
+      (contains? (%map-get policy :gating #{}) category) :gating
+      (contains? (%map-get policy :advisory #{}) category) :advisory
+      (contains? *project-advisory-categories* category) :advisory
+      else :gating)))
+
+;; `w` as `nest check` prints it, or nil when the project silences its category: the
+;; checker's GNU line, then the category — the name a `check-allow` or the project's
+;; `:check` takes — and, for an advisory warning, that it does not gate.
+(defn- project-printed-warning (w)
+  (let (category (%map-get w :category nil)
+        severity (project-warning-severity category))
+    (cond
+      (= severity :off) nil
+      (= severity :advisory)
+        (str (%map-get w :text "") "  [" (->string category) ", advisory — not gating]")
+      else (str (%map-get w :text "") "  [" (->string category) "]"))))
+
+;; Print warning `w` and return the running tally, incremented only when `w` gates the
+;; build. An advisory warning prints with its marker and leaves the tally untouched; a
+;; silenced one prints nothing. Both the fresh and the cached check paths tally through
+;; this.
 ;;
 ;; The tally is a pair `[gating unbound]`, not one count: `nest run`'s launch gate
 ;; (ADR-304) refuses to start over an UNBOUND symbol only — the one category that is a
@@ -392,18 +414,13 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 (defn- project-tally-add (a b)
   [(+ (first a) (first b)) (+ (second a) (second b))])
 
-(defn- project-unbound-warning? (w)
-  (includes? w "unbound symbol: "))
-
-;; `w` as `nest check` prints it: an advisory warning carries its marker.
-(defn- project-printed-warning (w)
-  (if (project-advisory-warning? w) (str w "  (advisory — not gating)") w))
-
 (defn- project-tally-warning (tally w)
-  (io/puts (project-printed-warning w) :to *err*)
-  (if (project-advisory-warning? w)
-    tally
-    (project-tally-add tally [1 (if (project-unbound-warning? w) 1 0)])))
+  (let (category (%map-get w :category nil)
+        printed (project-printed-warning w))
+    (when printed (io/puts printed :to *err*))
+    (if (= (project-warning-severity category) :gating)
+      (project-tally-add tally [1 (if (= category :unbound) 1 0)])
+      tally)))
 
 ;; The `:check` op (runs in a worker): check every file in `chunk`, PRINT each
 ;; file's warnings, return the GATING count. A global (not a shipped closure) so
@@ -413,7 +430,8 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 (defn- project-check-chunk (chunk)
   (fold chunk
     *project-tally-zero*
-    (fn (k pair) (let ([f cl] pair) (fold (reflect/check-file f cl) k project-tally-warning)))))
+    (fn (k pair)
+      (let ([f cl] pair) (fold (reflect/check-file-structured f cl) k project-tally-warning)))))
 
 ;; The same pass for the case where every file shares ONE reachability set, which is what
 ;; `check-run-closure` has: the loaded features are the closure, identically for all
@@ -427,7 +445,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
   (let (cl (first chunk))
     (fold (rest chunk)
       *project-tally-zero*
-      (fn (k f) (fold (reflect/check-file f cl) k project-tally-warning)))))
+      (fn (k f) (fold (reflect/check-file-structured f cl) k project-tally-warning)))))
 
 ;; The from-scratch parallel path: fan `check-file` (print-in-worker) across the
 ;; pool. Used when the cache is off, absent, or the project is over the file cap.
@@ -570,7 +588,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
                 (map files
                   (fn (path)
                     (let (entry (%map-get entries path nil))
-                      (and entry (map (nth entry 1) project-printed-warning)))))))
+                      (and entry (seq/keep (nth entry 1) project-printed-warning)))))))
     (when (not (empty? recheck))
       (let (t4 (os/now-ns))
         (project-write-cache root
@@ -662,12 +680,12 @@ against the fully-loaded state is also what a live image would see. Returns nil.
   (project-image/load-sources-cached root :skip-loaded))
 
 ;; Structured analogue of `check` — returns a flat list of
-;; `{:file :line :col :message}` maps instead of printing GNU lines + a
+;; `{:file :line :col :message :category :severity :text}` maps instead of printing GNU lines + a
 ;; count. Backs the `nest mcp` `check` tool (`std/tool/mcp.blsp`, step 1c-a).
 ;; Honors `BROOD_NO_CHECK=1` the same way `check` does: returns
 ;; an empty list under the flag.
 (defn check-structured (&optional from)
-  "Advisory type-check a project, returning a list of `{:file :line :col :message}` diagnostic maps (one per warning) instead of printing. Returns nil under `BROOD_NO_CHECK=1`. `from` is the directory to find the project from — it defaults to `(file/cwd)`, and naming one lets a caller check a project other than the ambient one. Errors if there is no project there. Backs the `nest mcp` `check` tool.
+  "Advisory type-check a project, returning a list of `{:file :line :col :message :category :severity :text}` diagnostic maps (one per warning) instead of printing. `:severity` is `:gating` or `:advisory`, as `nest check` would judge it under the project's `:check` key; a warning the project silences is left out. Returns nil under `BROOD_NO_CHECK=1`. `from` is the directory to find the project from — it defaults to `(file/cwd)`, and naming one lets a caller check a project other than the ambient one. Errors if there is no project there. Backs the `nest mcp` `check` tool.
 
     (project-check/check-structured \"/path/to/proj\")   ;~> ({:file \"/path/to/proj/src/app.blsp\" :line 12 :col 5 :message \"…\"} …)"
   ;; `from` exists because cwd was the ONLY way in, which made this function
@@ -695,7 +713,12 @@ against the fully-loaded state is also what a live image would see. Returns nil.
   (if (nil? files)
     (apply append chunks)
     (let (file (first files)
-          diagnostics (reflect/check-file-structured file (%map-get closures file nil))
+          ;; each with the severity `nest check` would give it, and none it would silence
+          diagnostics (seq/keep (reflect/check-file-structured file (%map-get closures file nil))
+                        (fn (diagnostic)
+                          (let (severity (project-warning-severity (%map-get diagnostic
+                                                                     :category nil)))
+                            (when (not (= severity :off)) (assoc diagnostic :severity severity)))))
           checked (inc done))
       ;; Only when `nest mcp` has loaded its module: a plain `nest check` must not load
       ;; it, and `mcp/progress` is itself a no-op outside a progress-token call.
@@ -841,7 +864,9 @@ Returns nil when there is nothing to report.
     0
     (fold (project-duplicate-def-warnings extracts source-set)
       0
-      (fn (n w) (io/puts w :to *err*) (+ n 1)))))
+      (fn (n w)
+        (let (printed (project-printed-warning {:category :duplicate-def :text w}))
+          (if printed (do (io/puts printed :to *err*) (+ n 1)) n))))))
 
 ;; SEQUENTIAL duplicate-defs over `files` (over-cap / cache-off path): parse each
 ;; source file's def-names directly (no extract map, no cache). The original path;
@@ -958,7 +983,8 @@ Returns nil when there is nothing to report.
 ;; extract depends on the Rust `parse-source`, so it isn't portable across binaries).
 ;; Opt out with `BROOD_NO_CHECK_CACHE=1`.
 ; v2: check-result entries gained a 5th field, the KI-17 require-closure (ADR-189).
-(def *check-cache-version* "v4")
+; v5: an entry's warnings are `{:category :text …}` maps, no longer GNU strings (ADR-698).
+(def *check-cache-version* "v5")
 ;; The stamp every manifest carries: the binary, the manifest format, and the values of
 ;; the flags that change what a walk does (`%check-walk-flags`, the list `brood file`'s
 ;; pre-flight cache keys on too, ADR-371) — a verdict taken under `BROOD_NO_IMAGE_SIGS=1`
@@ -1180,11 +1206,34 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
           t2 (os/now-ns)
           unused (project-unused-private-warnings extracts)
           _ (project-check-trace "lints-unused" t2))
-      (fold (seq/filter (append dups unused) keep?)
+      (fold (append (project-unknown-check-categories root)
+              (map (seq/filter dups keep?) (fn (w) {:category :duplicate-def :text w}))
+              (map (seq/filter unused keep?) (fn (w) {:category :unused-private :text w})))
         [0 nil]
         (fn (acc w)
-          (io/puts w :to *err*)
-          [(+ (first acc) 1) (cons w (second acc))])))))
+          (let (printed (project-printed-warning w))
+            (cond
+              (nil? printed) acc
+              (= (project-warning-severity (%map-get w :category nil)) :gating)
+                (do (io/puts printed :to *err*) [(+ (first acc) 1) (cons printed (second acc))])
+              else (do (io/puts printed :to *err*) [(first acc) (cons printed (second acc))]))))))))
+
+;; A `:check` entry in project.blsp naming no category this checker has — a typo, which
+;; would otherwise silence or demote nothing without a word. A warning rather than a
+;; manifest error, because a newer checker may know the name (ADR-698).
+(defn- project-unknown-check-categories (root)
+  (let (known (into #{} (reflect/check-categories))
+        manifest (path/join root "project.blsp"))
+    (apply append
+      (map (sort (%map-pairs project/*check*))
+        (fn ([key categories])
+          (seq/keep (sort categories)
+            (fn (category)
+              (when (not (contains? known category))
+                {:category :check-allow
+                 :text (str manifest
+                         ": warning: :check " key " names " category
+                         ", which is not a warning category — `reflect/check-categories` lists them")}))))))))
 
 (defn check ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`.
@@ -1213,6 +1262,11 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
     (str (project-cache-stamp)
       "\n"
       (project-check-manifest "checks")
+      "\n"
+      ;; the warning policy decides what printed and what gated, and lives in project.blsp,
+      ;; which no file below fingerprints
+      (pr-str (sort (map (%map-pairs project/*check*)
+                      (fn ([key categories]) [key (sort categories)]))))
       "\n"
       (string/join listed "\n")
       "\n"

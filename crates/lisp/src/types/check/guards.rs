@@ -43,7 +43,6 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
             | kw::DEFMODULE
             | kw::MODULE_DOC
             | kw::WHEN
-            | kw::UNLESS
             | kw::COND
             | kw::AND
             | kw::OR

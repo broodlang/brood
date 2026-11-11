@@ -7,9 +7,9 @@
 ;; `sig!` after the function's definition (it rebinds the name, preserving arity).
 (defmodule contract-test
   (:use test)
-  ;; `project-advisory-warning?` is module-private: the stability tests below assert that a
-  ;; deprecation PRINTS but does not gate the build, and that classifier is the thing that
-  ;; decides it (ADR-283).
+  ;; `project-warning-severity` is module-private: the stability tests below assert that a
+  ;; deprecation PRINTS but does not gate the build, and that function is the thing that
+  ;; decides it (ADR-283, ADR-698).
   (:use-internals project-check))
 
 (defn c-add (a b) (+ a b))
@@ -516,10 +516,14 @@
   (test "a deprecation is ADVISORY — it prints, it does not gate the build"
     ;; The point of a deprecation is to say "this is going away" while the code still
     ;; works. One that fails CI is a removal with extra steps.
-    (assert= true
-      (project-check/project-advisory-warning? "f.blsp:1:1: warning: `x` is deprecated since 0.14.0 — use `y` instead"))
-    (assert= false
-      (project-check/project-advisory-warning? "f.blsp:1:1: warning: unbound symbol: zz")))
+    ;; From the checker's own finding, through its category, to the severity `nest check`
+    ;; gives it (ADR-698).
+    (let (severities (map (reflect/check-string-structured "(defn u (s) (contract-test/m-old s) (zz))")
+                       (fn (d)
+                         [(get d :category)
+                           (project-check/project-warning-severity (get d :category))])))
+      (assert= true (any? severities (fn (s) (= s [:deprecated :advisory]))))
+      (assert= true (any? severities (fn (s) (= s [:unbound :gating]))))))
 
   (test "a cap the checker hit is reported but never gates (B6)"
     ;; The checker's four budgets (fixpoint rounds, specialization fuel, expression
@@ -528,8 +532,7 @@
     ;; largely gave up on must not read as checked) and it must not fail the build,
     ;; because the commonest cause is inherent: a file that defines and uses its own
     ;; macro.
-    (assert= true
-      (project-check/project-advisory-warning? "f.blsp: note: checker gave up: an unexpanded macro call keeps every caller-derived parameter unknown in this file")))
+    (assert= :advisory (project-check/project-warning-severity :gave-up)))
 
   (test "`:beta` warns with its reason"
     (let (msgs (stability-messages "(defn u (s) (contract-test/m-wobbly s))"))

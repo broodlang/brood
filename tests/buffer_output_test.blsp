@@ -1,0 +1,49 @@
+;; `insert-program-output`: text a program writes, which undo and redo of what you typed step over.
+
+(defmodule buffer-output-test
+  (:use test)
+  (:use editor/buffer))
+
+(defn bot-prompt ()
+  "A program buffer: its output so far, a prompt, and you typing after it."
+  (let (shown (end-of-buffer (insert (make-buffer "") "$ ")))
+    (insert (amalgamate-undo shown) "ls")))
+
+(describe "output a program writes"
+  (test "undoing your typing leaves the output where it is"
+    (let (typed (insert (end-of-buffer (insert-program-output (make-buffer "") 0 "> ")) "hello")
+          output (insert-program-output typed 0 "earlier output\n"))
+      (assert= (buffer-text output) "earlier output\n> hello")
+      (assert= (buffer-text (undo output)) "earlier output\n> ")))
+  (test "every step of the history keeps it, and redo too"
+    (let (first-word (insert (insert-program-output (make-buffer "") 0 "> ") "one")
+          second-word (insert first-word " two")
+          output (insert-program-output second-word 0 "log line\n")
+          once (undo output)
+          twice (undo-next once)
+          redone (undo (undo-start twice)))
+      (assert= (buffer-text once) "log line\n> one")
+      (assert= (buffer-text twice) "log line\n> ")
+      ;; an undo after the run takes the last undo back: the output stays through that too
+      (assert= (buffer-text redone) "log line\n> one")))
+  (test "point, past it, moves along; a marker before it stays"
+    (let (typed (buffer-marker-set (insert (insert-program-output (make-buffer "") 0 "> ") "x")
+                  :before 0)
+          output (insert-program-output typed 0 "out\n"))
+      (assert= (buffer-point output) 7)
+      (assert= (buffer-marker output :before) 0)))
+  (test "a narrowed buffer takes it, and its input region slides with the text"
+    (let (base (insert-program-output (make-buffer "") 0 "> ")
+          narrowed (narrow-to (end-of-buffer base) [[2 2]])
+          typed (insert narrowed "hi")
+          output (insert-program-output typed 0 "out\n"))
+      (assert= (editable-regions output) [[6 8]])
+      (assert= (buffer-text (undo output)) "out\n> ")
+      (assert= (editable-regions (undo output)) [[6 6]])))
+  (test "its text properties come with it, and survive an undo"
+    (let (typed (insert (insert-program-output (make-buffer "") 0 "> ") "x")
+          output (insert-program-output typed 0 "red\n" {:face [[0 3 :red]]}))
+      (assert= (buffer-properties (undo output) :face) [[0 3 :red]])))
+  (test "nothing is recorded: the output alone is not a step"
+    (let (output (insert-program-output (make-buffer "") 0 "out"))
+      (assert= (buffer-text (undo output)) "out"))))

@@ -329,6 +329,22 @@ which writes the notification while it waits for the handler's answer.
 `project-check` calls it only when the `mcp` module is already loaded, so a plain
 `nest check` never loads it.
 
+## Serving tools from another program: `mcp-server`
+
+The protocol lives in `std/mcp-server.blsp` (ADR-711), a runtime module; `nest mcp` is one
+server SPEC over it. A program serves its own tools by handing `mcp-server` a map:
+
+```clojure
+(mcp-server/start-http
+  {:catalogue (fn () [{:name "buffers" :description "The open buffers."
+                       :schema {:type "object"} :handler (fn (_args) (open-buffers))}])
+   :info {:name "my-editor" :version "1.0"}})
+;; => {:pid … :port 41733 :token "…" :url "http://127.0.0.1:41733/mcp"}
+```
+
+and pointing the agent at `:url` with an `X-Token` header. `serve-stdio` is the other
+transport; `:methods` adds JSON-RPC methods (resources, prompts) beside the tools.
+
 ## The self-hosting boundary
 
 Per ADR-006 the server is Brood end to end (`std/tool/mcp.blsp`); the only Rust left

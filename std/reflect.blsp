@@ -83,16 +83,22 @@ answers `((render [x]))`."
   (if (empty? more) (%check-file path) (%check-file path (first more))))
 
 (defn check-file-deps (path & more)
-  "Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; reuse warnings on a later run iff (check-deps-fp dep-keys) still matches and the file's mtime is unchanged. `required-mods`: see check-file.
+  "Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the warnings as `check-file-structured` maps, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; reuse warnings on a later run iff (check-deps-fp dep-keys) still matches and the file's mtime is unchanged. `required-mods`: see check-file.
 
     (reflect/check-file-deps \"src/app.blsp\")   ;~> [warnings dep-keys fingerprint]"
   (if (empty? more) (%check-file-deps path) (%check-file-deps path (first more))))
 
 (defn check-file-structured (path & more)
-  "Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics). `required-mods`: see check-file.
+  "Like check-file but returns a list of `{:file :line :col :message :category :text}` maps instead of GNU-format strings — for tools (`nest check`, the `nest mcp` `check` tool, editor diagnostics). `:category` is the warning's kind as a keyword, the name `check-allow` and a project's `:check` key take (`reflect/check-categories` lists them); `:text` is the line `check-file` gives. `required-mods`: see check-file.
 
-    (reflect/check-file-structured \"src/app.blsp\")   ;~> ({:file \"src/app.blsp\" :line 3 :col 5 :message \"…\"})"
+    (reflect/check-file-structured \"src/app.blsp\")   ;~> ({:file \"src/app.blsp\" :line 3 :col 5 :message \"…\" :category :type-mismatch :text \"src/app.blsp:3:5: warning: …\"})"
   (if (empty? more) (%check-file-structured path) (%check-file-structured path (first more))))
+
+(defn check-categories ()
+  "Every warning category the checker reports, as keywords: the names `check-allow`, a `(defmodule … (:check-allow …))` header and a project's `:check` key take (ADR-698).
+
+    (contains? (into #{} (reflect/check-categories)) :non-tail-recursion)   ;=> true"
+  (%check-categories))
 
 (defn file-signatures (path)
   "The signature the checker holds for every function the file at path defines: a list of `{:name :sig :declared? :informative?}` maps, `:sig` written in source syntax (`\"(int int -> int)\"`) and ready to paste into a `(sig …)`, or nil where the type names a runtime kind the grammar cannot write. `:declared?` marks the ones a `(sig …)` already states; `:informative?` marks the ones saying something an all-`any` arrow does not. Does not evaluate the file. The bulk counterpart of the editor's declare-sig action.

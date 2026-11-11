@@ -103,25 +103,8 @@ impl Drop for ProgramDial {
     }
 }
 
-/// The protocol version this node offers in a handshake (ADR-492): v11, or exactly v10
-/// under `BROOD_DIST_V10` — a runtime from before lanes, which a mixed-cluster test
-/// needs and cannot otherwise build.
-pub(super) fn local_offer() -> Offer {
-    static OFFER: LazyLock<Offer> = LazyLock::new(|| {
-        if std::env::var_os("BROOD_DIST_V10").is_some() {
-            Offer::V10
-        } else {
-            Offer::Current
-        }
-    });
-    *OFFER
-}
-
-/// Dial `addr` and drive the client handshake, offering `offer`.
-pub(super) fn dial_and_greet(
-    addr: &str,
-    offer: Offer,
-) -> io::Result<(Stream, handshake::Authenticated)> {
+/// Dial `addr` and drive the client handshake.
+pub(super) fn dial_and_greet(addr: &str) -> io::Result<(Stream, handshake::Authenticated)> {
     let mut stream = dial(addr)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     // Deadlined like the accept side: a malicious or wedged *listener* can
@@ -129,7 +112,7 @@ pub(super) fn dial_and_greet(
     // worker, so an unbounded hold here wedges a worker rather than a slot.
     let authenticated = {
         let mut guarded = Deadline::new(&mut stream, HANDSHAKE_DEADLINE);
-        handshake(&mut guarded, Role::Initiator, offer)?
+        handshake(&mut guarded, Role::Initiator)?
     };
     Ok((stream, authenticated))
 }
@@ -165,12 +148,7 @@ pub(super) fn connect_to(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     if let Some(linked) = linked_peer_for(peer, addr) {
         return Ok(linked);
     }
-    // A v10 node answers a v11 offer with its own magic and closes: dial it again in v10,
-    // so a node from before lanes still links (ADR-492).
-    let (stream, authenticated) = match dial_and_greet(addr, local_offer()) {
-        Err(error) if handshake::is_v10_peer(&error) => dial_and_greet(addr, Offer::V10)?,
-        greeted => greeted?,
-    };
+    let (stream, authenticated) = dial_and_greet(addr)?;
     let peer = authenticated.peer;
     // The claim can name another node while the address reaches us (a second
     // spelling of our own name, a relay looping back): the accept side refuses a

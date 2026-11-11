@@ -1728,6 +1728,55 @@ it too. What a revert needs, so a file read back costs none of the history befor
         restored
         (assoc restored :undo (cons (buffer-snapshot buf) (rest (get restored :undo))))))))
 
+;; ---- output: text a program writes, which undo steps over --------------------------------
+;; Undo restores whole snapshots, so text a PROGRAM wrote into a buffer you also type in — a
+;; shell's output, an agent's reply above its prompt — would be taken back by undoing your own
+;; typing, and come back on redo. `insert-program-output` writes such text as though it had always been
+;; there: into the buffer and into every snapshot of its history, at the same position, with
+;; nothing recorded. Exact when the text before that position is the same in every snapshot —
+;; the shape every program buffer has, its output above the input you edit; elsewhere a
+;; snapshot gets it at the same offset, clamped.
+
+(defn- output-into (state:buffer at:int text:string properties -> buffer)
+  "`state` with `text` inserted at `at` (clamped), recording nothing and refusing nothing:
+point and mark past it move along, its markers and text properties move as any insertion
+moves them, its narrowing moves with the text (the regions after `at` slide)."
+  (let (regions (get state :editable)
+        point (buffer-point state)
+        mark (get state :mark)
+        open (dissoc (assoc state :undo-disabled true :read-only false) :editable)
+        place (buffer-clamp 0 (buffer-length open) at)
+        width (string/length text)
+        shift (fn (position)
+                (if (and (int? position) (>= position place)) (+ position width) position))
+        inserted (insert (goto-char open place) text properties)
+        placed (assoc (goto-char inserted (if (>= point place) (+ point width) point))
+                 :mark (shift mark)
+                 :read-only (get state :read-only))
+        narrowed (if regions
+                   (buffer-adjust-editable (assoc placed :editable regions) :insert place width)
+                   placed))
+    (if (get state :undo-disabled) narrowed (dissoc narrowed :undo-disabled))))
+
+(defn insert-program-output (buf:buffer at:int text:string &optional (properties nil) -> buffer)
+  "`buf` with `text` — what a program wrote — inserted at `at` as though it had always been
+there: into the text and into every snapshot of its undo history, recording nothing, so undo
+and redo of what YOU typed step over it and leave it where it is. Point, mark, markers,
+narrowing and text properties move as any insertion moves them; `properties` (`{key spans}`
+relative to `text`) come with it. Exact when the text before `at` is the same in every
+snapshot — a program's output above the input you edit, as a shell or an agent's chat has
+it. A read-only or narrowed buffer takes it too: it is the program's, not an edit.
+
+    (editor/buffer/buffer-text (editor/buffer/undo (editor/buffer/insert-program-output (editor/buffer/insert (editor/buffer/make-buffer \"\") \"typed\") 0 \"out \")))   ;=> \"out \""
+  (let (through (fn (snapshots)
+                  (map (or snapshots '())
+                    (fn (snapshot)
+                      (buffer-snapshot (output-into (buffer-restore buf snapshot)
+                                         at text properties))))))
+    (assoc (output-into buf at text properties)
+      :undo (through (get buf :undo))
+      :pending-undo (through (get buf :pending-undo)))))
+
 (defn- property-change-range (buf:buffer lo:int width:int -> (tuple int int))
   "`[from to]`: the range `[lo, lo + width)` a property change names, clamped into `buf`."
   (let (length (buffer-length buf)

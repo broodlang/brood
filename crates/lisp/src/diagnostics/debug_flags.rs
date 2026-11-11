@@ -527,9 +527,9 @@ pub const FLAGS: &[DebugFlag] = &[
     ),
     // ---- host environment ----
     f(
-        "BROOD_DIST_V10",
+        "BROOD_DIST_VERSION",
         HOST,
-        "speak distribution protocol v10 exactly, as a runtime from before mailbox lanes crossed a link (ADR-492) — the old peer a mixed-cluster test links with",
+        "the `major.minor` this node says in the distribution handshake instead of its own (ADR-699) — the node of another minor a test of the refusal needs",
     ),
     f(
         "BROOD_GUI_MAIN_THREAD",

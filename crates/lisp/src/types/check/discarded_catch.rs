@@ -27,7 +27,7 @@
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
-use crate::error::Pos;
+use crate::types::check::{Finding, Lint};
 
 use super::walk::list_items;
 
@@ -35,22 +35,18 @@ use super::walk::list_items;
 pub(super) const DISCARDED_CATCH_PREFIX: &str = "catch discards the error unread";
 
 /// Entry: walk every top-level (un-expanded) form for a `try` whose `catch` discards.
-pub(super) fn check_discarded_catches(
-    heap: &Heap,
-    forms: &[Value],
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn check_discarded_catches(heap: &Heap, forms: &[Value], out: &mut Vec<Finding>) {
     for &form in forms {
         walk(heap, form, out);
     }
 }
 
-fn walk(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk(heap: &Heap, form: Value, out: &mut Vec<Finding>) {
     // Deep-form stack safety — the same stacker remedy as the other raw-form passes.
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || walk_inner(heap, form, out))
 }
 
-fn walk_inner(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk_inner(heap: &Heap, form: Value, out: &mut Vec<Finding>) {
     let Some(items) = list_items(heap, form) else {
         return;
     };
@@ -84,7 +80,7 @@ fn walk_inner(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
 /// `(try body… (catch BINDING handler…))` — warn when the handler is empty or one
 /// constant. A `try` with no `catch` clause, or a malformed one, is not this lint's
 /// business (the macro reports the malformed shapes itself).
-fn lint_try(heap: &Heap, form: Value, items: &[Value], out: &mut Vec<(Option<Pos>, String)>) {
+fn lint_try(heap: &Heap, form: Value, items: &[Value], out: &mut Vec<Finding>) {
     let Some(&clause) = items.last() else { return };
     let Some(clause_items) = list_items(heap, clause) else {
         return;
@@ -104,7 +100,8 @@ fn lint_try(heap: &Heap, form: Value, items: &[Value], out: &mut Vec<(Option<Pos
         return;
     }
     let binding_name = value::symbol_name(*binding);
-    out.push((
+    out.push(Finding::new(
+        Lint::DiscardedCatch,
         heap.form_pos_only(clause)
             .or_else(|| heap.form_pos_only(form)),
         format!(

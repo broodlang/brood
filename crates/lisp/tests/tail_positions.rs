@@ -34,12 +34,10 @@ const TAIL_SHAPES: &[(&str, &str)] = &[
         "(if (= n 0) :done (letrec (k (fn () 1)) (spin (dec n))))",
     ),
     ("when", "(if (= n 0) :done (when true (spin (dec n))))"),
-    ("unless", "(if (= n 0) :done (unless false (spin (dec n))))"),
     ("cond", "(cond (= n 0) :done else (spin (dec n)))"),
     ("and", "(if (= n 0) :done (and true (spin (dec n))))"),
     ("or", "(if (= n 0) :done (or false (spin (dec n))))"),
     ("match", "(match n (0 :done) (m (spin (dec m))))"),
-    ("match*", "(match n (0 :done) (m (spin (dec m))))"),
     ("case", "(case n 0 :done (spin (dec n)))"),
     ("->", "(if (= n 0) :done (-> n dec spin))"),
 ];
@@ -81,9 +79,7 @@ const NO_TAIL_POSITION: &[(&str, &str)] = &[
         "binding",
         "restores the dynamic binding after the body, so the body is not in tail position",
     ),
-    ("dolist", "a loop that returns nil"),
     ("doseq", "a loop that returns nil"),
-    ("dotimes", "a loop that returns nil"),
     ("for", "a comprehension that builds a collection"),
     ("error", "raises"),
     (

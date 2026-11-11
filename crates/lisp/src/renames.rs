@@ -907,6 +907,17 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "editor/undo-region/*undo-region-search-depth*",
         "ADR-687",
     ),
+    // ADR-674 stage 2 — the forms "reduce before adding" deprecated are removed. `dolist`
+    // took exactly `doseq`'s `(x xs) body…`, so the bare name is a true rename and
+    // `--fix-renames` applies it. The other three change shape: `dotimes` gains a `range`,
+    // `unless` a `not`, and `match*` took a context before the scrutinee that `match`
+    // does not. Their targets are CALL SHAPES (a space in the target, as ADR-433's are),
+    // which `--fix-renames` names and leaves to a human rather than rewriting into a
+    // program that means something else.
+    ("dolist", "doseq", "ADR-674"),
+    ("dotimes", "doseq (i (range n)) body…", "ADR-674"),
+    ("unless", "when (not test) body…", "ADR-674"),
+    ("match*", "match expr (pattern body…)…", "ADR-674"),
 ];
 
 /// Where `old` went, if it is a ledgered rename: `(new, adr)`.
@@ -942,5 +953,17 @@ mod tests {
             Some(" — renamed to gui/font (ADR-302)")
         );
         assert_eq!(rename_hint("gui/font"), None);
+    }
+
+    /// A removed form whose replacement has another shape must stay a call shape (a target
+    /// with a space): `--fix-renames` rewrites a bare-name target in place, and
+    /// `(unless t x)` → `(when t x)` would invert the program without a word.
+    #[test]
+    fn shape_changing_removals_are_never_bare_names() {
+        for old in ["dotimes", "unless", "match*"] {
+            let (to, _) = renamed_to(old).expect("ledgered");
+            assert!(to.contains(' '), "{old} → {to} would be auto-rewritten");
+        }
+        assert_eq!(renamed_to("dolist"), Some(("doseq", "ADR-674")));
     }
 }

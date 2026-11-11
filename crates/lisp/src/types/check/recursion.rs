@@ -9,7 +9,7 @@
 //! the LSP).
 //!
 //! Runs over the **macroexpanded** forms (like the rest of the checker), so
-//! `match`/`case`/threading macros — and `when`/`unless`/`cond`/`and`/`or`,
+//! `match`/`case`/threading macros — and `when`/`cond`/`and`/`or`,
 //! which are all prelude macros lowering to `if`/`do`/`let` — are already gone,
 //! and a `defn` is `(def name (fn …))`. That leaves a small, fixed set of
 //! tail-propagating *special forms* to model — `if` / `do` / `let` /
@@ -25,12 +25,13 @@ use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Value};
 use crate::error::Pos;
+use crate::types::check::{Finding, Lint};
 
 use super::walk::list_items;
 
 /// Entry: find every `(def NAME (fn …))` anywhere in `form` and check each for
 /// self-calls to `NAME` in non-tail position.
-pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
+pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<Finding>) {
     // Deep-form stack safety — the same stacker remedy as walk.rs's
     // check_into/collect_def_names.
     let before = out.len();
@@ -42,16 +43,16 @@ pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<(Option<Po
     // a single non-tail self-call was walked — and reported — three times over. The
     // duplicates are indistinguishable by position and text, which is exactly what
     // makes them safe to collapse here rather than in every consumer.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let deduped: Vec<(Option<Pos>, String)> = out
+    let mut seen: std::collections::HashSet<Finding> = std::collections::HashSet::new();
+    let deduped: Vec<Finding> = out
         .split_off(before)
         .into_iter()
-        .filter(|d| seen.insert(format!("{:?}|{}", d.0, d.1)))
+        .filter(|finding| seen.insert(finding.clone()))
         .collect();
     out.extend(deduped);
 }
 
-fn check_recursion_inner(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
+fn check_recursion_inner(heap: &Heap, form: Value, out: &mut Vec<Finding>) {
     let Some(items) = list_items(heap, form) else {
         return;
     };
@@ -118,7 +119,7 @@ fn analyze_fn(
     name: Symbol,
     fnval: Value,
     enclosing: Option<Pos>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let Some(items) = list_items(heap, fnval) else {
         return;
@@ -198,7 +199,7 @@ fn analyze_body(
     name: Symbol,
     body: &[Value],
     enclosing: Option<Pos>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let here = enclosing;
     if body.is_empty() {
@@ -222,7 +223,7 @@ fn walk(
     tail: bool,
     name: Symbol,
     enclosing: Option<Pos>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         walk_inner(heap, form, tail, name, enclosing, out)
@@ -235,7 +236,7 @@ fn walk_inner(
     tail: bool,
     name: Symbol,
     enclosing: Option<Pos>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     // the nearest known source position: this form's own, else the one handed down
     let here = heap.form_pos_only(form).or(enclosing);
@@ -309,7 +310,8 @@ fn walk_inner(
         // A regular call. If it's a self-call and we're NOT in tail position,
         // flag it. Either way the arguments are evaluated in non-tail position.
         if head == name && !tail {
-            out.push((
+            out.push(Finding::new(
+                Lint::NonTailRecursion,
                 // The lowering that turns pattern clauses into `%match` builds fresh
                 // forms, and a fresh form carries no source position — so this came
                 // out as `line: nil`, which no consumer can place. Fall back to the

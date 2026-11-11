@@ -238,10 +238,6 @@ struct Conn {
     /// `Arc<[u8]>`, so wrapping a freshly encoded frame takes its buffer as it is
     /// instead of copying it into a new allocation.
     tx: SyncSender<Outbound>,
-    /// Whether the peer speaks the current protocol (v12), so a send in a lane goes as
-    /// `FRAME_SEND_LANE` (ADR-492) and a record crosses (ADR-542). A v10 peer is sent every
-    /// message as the plain `Send` it knows, and no record.
-    lanes: bool,
     /// The `proc/send-latest` frames queued on this link and not yet written, one per
     /// target and key (ADR-492) — shared with the writer, which writes a ticket's frame
     /// only if no newer one has replaced it. Whatever the peer speaks: replacing a frame
@@ -397,7 +393,7 @@ where
 // `Role` + the four-step `handshake` live in `dist::handshake`; only the link
 // lifecycle uses them, and they keep the cookie/nonce/MAC plumbing self-
 // contained.
-use handshake::{Offer, Role, handshake};
+use handshake::{Role, handshake};
 
 pub(crate) mod guest;
 mod handshake;

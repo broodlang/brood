@@ -787,10 +787,10 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
             _ => Some(Ty::of(Tag::Nil)),
         };
     }
-    // `(when test body…)` / `(unless test body…)` → ty(last body form) | nil
+    // `(when test body…)` → ty(last body form) | nil
     // (the test failing yields `nil`). Surface form; usually already lowered to
     // `(if test (do …) nil)` by macroexpansion, but handled here for fragments.
-    if value::symbol_is(head, kw::WHEN) || value::symbol_is(head, kw::UNLESS) {
+    if value::symbol_is(head, kw::WHEN) {
         let last = *items.last()?;
         if items.len() < 3 {
             return Some(Ty::of(Tag::Nil));

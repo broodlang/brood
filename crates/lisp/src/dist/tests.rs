@@ -155,7 +155,6 @@ fn authenticated_as(peer: Symbol, incarnation: u64) -> handshake::Authenticated 
         addr: String::new(),
         incarnation,
         grant: None,
-        lanes: true,
         session: Session {
             send: session::SealKey::new([1; session::KEY_LEN]),
             recv: session::OpenKey::new([2; session::KEY_LEN]),
@@ -553,22 +552,13 @@ fn a_guest_receives_its_own_pids_in_its_own_spelling() {
     assert!(disconnect(guest_name));
 }
 
-/// A lane reaches the wire only on a link to a v11 peer (ADR-492): to a v10 peer, a
-/// priority and a latest send each go as the plain `Send` it knows, and to a v11 peer
-/// both keep their lane.
+/// A priority and a latest send each keep their lane on the wire (ADR-492).
 #[test]
-fn a_lane_goes_on_the_wire_only_to_a_v11_peer() {
-    let lanes_seen = |peer: &str, lanes: bool| {
+fn a_lane_goes_on_the_wire() {
+    let lanes_seen = |peer: &str| {
         let peer = value::intern(peer);
         let (stream, far_end) = stream_pair();
-        establish(
-            handshake::Authenticated {
-                lanes,
-                ..authenticated_as(peer, 1)
-            },
-            stream,
-            Role::Responder,
-        );
+        establish(authenticated_as(peer, 1), stream, Role::Responder);
         let latest = process::Lane::Latest(Box::new(":frame".to_string()));
         for lane in [process::Lane::Priority, latest] {
             assert!(route_in_lane(peer, Target::Pid(3), Message::Int(1), lane));
@@ -588,11 +578,7 @@ fn a_lane_goes_on_the_wire_only_to_a_v11_peer() {
         seen
     };
     assert_eq!(
-        lanes_seen("v10-lane-peer@test", false),
-        vec![process::Lane::Normal, process::Lane::Normal]
-    );
-    assert_eq!(
-        lanes_seen("v11-lane-peer@test", true),
+        lanes_seen("lane-peer@test"),
         vec![
             process::Lane::Priority,
             process::Lane::Latest(Box::new(":frame".to_string()))

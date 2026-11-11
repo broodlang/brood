@@ -346,29 +346,29 @@
 
 (describe "mcp JSON projection"
   (test "data kinds project onto JSON"
-    (assert= (mcp/json-data {:n 42
-                             :f 1.5
-                             :s "hello"
-                             :items (list 1 2 3)
-                             :nested {:k "v"}
-                             :flag true
-                             :absent nil})
+    (assert= (mcp-server/json-data {:n 42
+                                    :f 1.5
+                                    :s "hello"
+                                    :items (list 1 2 3)
+                                    :nested {:k "v"}
+                                    :flag true
+                                    :absent nil})
       {"n" 42 "f" 1.5 "s" "hello" "items" [1 2 3] "nested" {"k" "v"} "flag" true "absent" nil})
-    (assert= (mcp/json-data [:kw 'sym #{1}]) ["kw" "sym" [1]])
-    (assert= (mcp/json-data 12345678901234567890123) "12345678901234567890123")
-    (assert= (mcp/json-data 1/3) "1/3"))
+    (assert= (mcp-server/json-data [:kw 'sym #{1}]) ["kw" "sym" [1]])
+    (assert= (mcp-server/json-data 12345678901234567890123) "12345678901234567890123")
+    (assert= (mcp-server/json-data 1/3) "1/3"))
   (test "a pid is a $type-tagged object"
-    (let (pid (mcpt-object (mcp/json-data (self))))
+    (let (pid (mcpt-object (mcp-server/json-data (self))))
       (assert= (get pid "$type") "pid")
       (is (int? (get pid "id")))
       (is (string? (get pid "node")))))
   (test "colliding keys, functions and non-finite floats are errors, not dropped data"
-    (is (includes? (error-of (mcp/json-data {:foo 1 "foo" 2})) "colliding"))
-    (assert-error (mcp/json-data (fn (x) x)))
-    (assert-error (mcp/json-data (/ 1.0 0.0)))
-    (assert= (mcp/json-data {:foo 1 :bar 2}) {"foo" 1 "bar" 2}))
+    (is (includes? (error-of (mcp-server/json-data {:foo 1 "foo" 2})) "colliding"))
+    (assert-error (mcp-server/json-data (fn (x) x)))
+    (assert-error (mcp-server/json-data (/ 1.0 0.0)))
+    (assert= (mcp-server/json-data {:foo 1 :bar 2}) {"foo" 1 "bar" 2}))
   (test "indented JSON sorts keys and indents two spaces a level"
-    (assert= (mcp/pretty-json {"b" [1 2] "a" {} "c" []} "")
+    (assert= (mcp-server/pretty-json {"b" [1 2] "a" {} "c" []} "")
       "{\n  \"a\": {},\n  \"b\": [\n    1,\n    2\n  ],\n  \"c\": []\n}")))
 
 (describe "mcp staleness warning"

@@ -451,8 +451,10 @@ one call site is inside `defmodule`'s template — see the note there."
 ;; `:implements` is a CHECKER annotation, not a loader one: a module claiming a protocol
 ;; is verified by `crates/lisp/src/types/check/protocol.rs`, which reads the clause
 ;; straight out of the header source. The loader's job is only to tolerate it — drop it
-;; from this list and every protocol-implementing module fails to load.
-(def- %defmodule-clause-heads [:use :use-internals :alias :load :implements :shadow])
+;; from this list and every protocol-implementing module fails to load. `:check-allow` is
+;; the same kind: `(:check-allow :category …)` silences those checker categories for the
+;; module (ADR-673), read by the checker from the header source; the loader ignores it.
+(def- %defmodule-clause-heads [:use :use-internals :alias :load :implements :shadow :check-allow])
 
 ;; `(:shadow name …)` declares that this module defines a root MACRO's name on purpose
 ;; (ADR-423): inside the module its own definition wins, and the declaration silences the
@@ -487,7 +489,8 @@ one call site is inside `defmodule`'s template — see the note there."
       ": unrecognised header form "
       (pr-str clause)
       " — a `defmodule` header takes only (:use mod [:only [names]]), (:load mod …),"
-      " (:use-internals mod), (:alias mod [:as short]), (:shadow name …) and (:implements Protocol)."
+      " (:use-internals mod), (:alias mod [:as short]), (:shadow name …), (:implements Protocol)"
+      " and (:check-allow :category …)."
       " Check the spelling;"
       " Clojure's `(:require …)` is not a Brood clause (`:use` both loads and refers)."
       (%defmodule-clause-hint clause))))

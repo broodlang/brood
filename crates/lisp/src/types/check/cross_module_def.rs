@@ -30,7 +30,7 @@
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
-use crate::error::Pos;
+use crate::types::check::{Finding, Lint};
 
 use super::deps;
 use super::walk::list_items;
@@ -44,7 +44,7 @@ pub(super) fn check_cross_module_defs(
     heap: &Heap,
     expanded: &[Value],
     own: &[String],
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     if own.is_empty() {
         return;
@@ -54,26 +54,14 @@ pub(super) fn check_cross_module_defs(
     }
 }
 
-fn walk(
-    heap: &Heap,
-    form: Value,
-    top: Value,
-    own: &[String],
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn walk(heap: &Heap, form: Value, top: Value, own: &[String], out: &mut Vec<Finding>) {
     // Deep-form stack safety — the same stacker remedy as the other raw-form passes.
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         walk_inner(heap, form, top, own, out)
     })
 }
 
-fn walk_inner(
-    heap: &Heap,
-    form: Value,
-    top: Value,
-    own: &[String],
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn walk_inner(heap: &Heap, form: Value, top: Value, own: &[String], out: &mut Vec<Finding>) {
     let Some(items) = list_items(heap, form) else {
         return;
     };
@@ -98,7 +86,8 @@ fn walk_inner(
             && let Some(owner) = foreign_owner(&name, own)
             && already_bound(heap, target)
         {
-            out.push((
+            out.push(Finding::new(
+                Lint::CrossModuleDef,
                 heap.form_pos_only(form).or_else(|| heap.form_pos_only(top)),
                 format!(
                     "{CROSS_MODULE_DEF_PREFIX}: `{name}` belongs to `{owner}`, and this \

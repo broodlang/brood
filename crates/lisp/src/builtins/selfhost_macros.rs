@@ -5,6 +5,8 @@ use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 use crate::syntax::reader;
+#[cfg(feature = "checker")]
+use crate::types::check::{Finding, Lint};
 
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.
 pub(super) fn register(primitives: &mut super::Primitives) {
@@ -70,15 +72,23 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 2),
         Sig::with_rest(vec![string], any, list_ty),
         &["path", "&optional required-mods"],
-        "Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics). `required-mods`: see check-file.",
+        "Like check-file but returns a list of `{:file :line :col :category :message :text}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics). `:category` is the finding's keyword (one of `%check-categories`), `:text` the GNU line check-file prints; `:line`/`:col` are absent for a finding with no position. `required-mods`: see check-file.",
         check_file_structured);
+    #[cfg(feature = "checker")]
+    primitives.def(
+        "%check-categories",
+        Arity::exact(0),
+        Sig::new(vec![], list_ty),
+        &[],
+        "Every category a checker finding can carry, as a list of keywords in a stable order — the names `(check-allow :category …)` and a `(defmodule … (:check-allow :category …))` header clause accept, and the `:category` of a structured finding.",
+        check_categories);
     #[cfg(feature = "checker")]
     primitives.def(
         "%check-file-deps",
         Arity::range(1, 2),
         Sig::with_rest(vec![string], any, any),
         &["path", "&optional required-mods"],
-        "Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; reuse warnings on a later run iff (check-deps-fp dep-keys) still matches and the file's mtime is unchanged. `required-mods`: see check-file.",
+        "Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the findings as `{:file :line :col :category :message :text}` maps (as check-file-structured), the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; reuse warnings on a later run iff (check-deps-fp dep-keys) still matches and the file's mtime is unchanged. `required-mods`: see check-file.",
         check_file_deps);
     primitives.def(
         "%module-direct-requires",
@@ -134,7 +144,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], list_ty),
         &["src"],
-        "Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics.",
+        "Advisory type-check the source string `src`, returning a list of `{:line :col :category :message :text}` maps (1-based positions; `:text` names the source `<string>`), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics.",
         check_string_structured);
     #[cfg(feature = "checker")]
     primitives.def(
@@ -197,11 +207,11 @@ fn check_file_at(
     path: &str,
     forms: &[Value],
     required: &[String],
-) -> Vec<(Option<crate::error::Pos>, String)> {
+) -> Vec<Finding> {
     let previous = heap.set_current_file(Some(path.to_string()));
-    let warnings = crate::types::check::check_file_ext(heap, forms, required);
+    let findings = crate::types::check::check_file_ext_findings(heap, forms, required);
     heap.set_current_file(previous);
-    warnings
+    findings
 }
 
 /// `(check-file path)` — run the advisory type checker over every top-level
@@ -224,10 +234,10 @@ pub(super) fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
     let required = required_mods_arg(heap, arg(args, 1));
-    let warnings = check_file_at(heap, &path, &just_forms, &required);
-    let mut out = Vec::with_capacity(warnings.len());
-    for (pos, msg) in &warnings {
-        let s = diagnostic_line(&path, *pos, msg);
+    let findings = check_file_at(heap, &path, &just_forms, &required);
+    let mut out = Vec::with_capacity(findings.len());
+    for finding in &findings {
+        let s = diagnostic_line(&path, finding);
         out.push(heap.alloc_string(&s));
     }
     Ok(heap.list(out))
@@ -390,18 +400,56 @@ pub(super) fn meta_of(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResul
 /// A list-or-vector argument flattened to a `Vec<Value>`; empty for anything else.
 /// One GNU-style diagnostic line. A budget the checker ran out of (B6, `checker gave
 /// up: …`) is a NOTE about the check, not a finding about the code; the project checker
-/// prints it as advisory and never gates on it (`project-advisory-warning?`).
+/// prints it as advisory and never gates on it (category `:gave-up`, ADR-698).
 #[cfg(feature = "checker")]
-fn diagnostic_line(path: &str, pos: Option<crate::error::Pos>, msg: &str) -> String {
-    let kind = if msg.starts_with("checker gave up:") {
+fn diagnostic_line(path: &str, finding: &Finding) -> String {
+    let kind = if finding.lint == Lint::GaveUp {
         "note"
     } else {
         "warning"
     };
-    match pos {
-        Some(p) => format!("{}:{}:{}: {kind}: {}", path, p.line, p.col, msg),
-        None => format!("{}: {kind}: {}", path, msg),
+    let message = &finding.message;
+    match finding.pos {
+        Some(p) => format!("{}:{}:{}: {kind}: {}", path, p.line, p.col, message),
+        None => format!("{}: {kind}: {}", path, message),
     }
+}
+
+/// One finding as the structured builtins return it: `{:file :line :col :category
+/// :message :text}` — `:file` only when `file` is given, `:line`/`:col` only when the
+/// finding has a position, `:category` the [`Lint`]'s keyword, and `:text` the GNU line
+/// [`diagnostic_line`] renders for `path`.
+#[cfg(feature = "checker")]
+fn finding_map(heap: &mut Heap, finding: &Finding, path: &str, file: Option<Value>) -> Value {
+    let key = |name: &str| Value::keyword(value::intern(name));
+    let mut entries: Vec<(Value, Value)> = Vec::with_capacity(6);
+    if let Some(file) = file {
+        entries.push((key("file"), file));
+    }
+    if let Some(p) = finding.pos {
+        entries.push((key("line"), Value::int(p.line as i64)));
+        entries.push((key("col"), Value::int(p.col as i64)));
+    }
+    entries.push((
+        key("category"),
+        Value::keyword(value::intern(finding.lint.name())),
+    ));
+    let message = heap.alloc_string(&finding.message);
+    entries.push((key("message"), message));
+    let text = heap.alloc_string(&diagnostic_line(path, finding));
+    entries.push((key("text"), text));
+    heap.map_from_pairs(entries)
+}
+
+/// `(%check-categories)` — every checker finding category (`Lint::ALL`), as keywords in
+/// a stable order.
+#[cfg(feature = "checker")]
+pub(super) fn check_categories(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let categories = Lint::ALL
+        .iter()
+        .map(|lint| Value::keyword(value::intern(lint.name())))
+        .collect();
+    Ok(heap.list(categories))
 }
 
 fn list_or_vec_items(heap: &Heap, v: Value) -> Vec<Value> {
@@ -525,7 +573,8 @@ fn qualified_mentions(src: &str) -> std::collections::BTreeSet<String> {
 
 /// `(check-file-deps path)` — the incremental-cache counterpart of `check-file`
 /// (ADR-119 Phase 2). Returns a 3-vector `[warnings dep-keys fingerprint]`:
-///   - `warnings`: the same GNU `path:line:col: warning: …` string list as `check-file`,
+///   - `warnings`: the findings as `{:file :line :col :category :message :text}` maps, the
+///     shape `check-file-structured` returns (`:text` is the GNU line `check-file` prints),
 ///   - `dep-keys`: the serializable set of global observations the check made
 ///     (`{:syms :kns :exp :proto}`) — store it, then re-fingerprint on a later run,
 ///   - `fingerprint`: a stamp of those observations against the CURRENT image; a
@@ -550,15 +599,15 @@ pub(super) fn check_file_deps(args: &[Value], _env: EnvId, heap: &mut Heap) -> L
     let required = required_mods_arg(heap, arg(args, 1));
     // `path` is the current file for the walk, as in `check_file_at`.
     let previous = heap.set_current_file(Some(path.clone()));
-    let (warnings, dep_keys) =
-        crate::types::check::check_file_with_deps_ext(heap, &just_forms, &required);
+    let (findings, dep_keys) =
+        crate::types::check::check_file_with_deps_ext_findings(heap, &just_forms, &required);
     heap.set_current_file(previous);
     let fp = crate::types::check::deps_fingerprint(heap, dep_keys);
     let fp_val = heap.alloc_string(&fp);
-    let mut warn_vals = Vec::with_capacity(warnings.len());
-    for (pos, msg) in &warnings {
-        let s = diagnostic_line(&path, *pos, msg);
-        warn_vals.push(heap.alloc_string(&s));
+    let file_val = heap.alloc_string(&path);
+    let mut warn_vals = Vec::with_capacity(findings.len());
+    for finding in &findings {
+        warn_vals.push(finding_map(heap, finding, &path, Some(file_val)));
     }
     let warns_list = heap.list(warn_vals);
     Ok(heap.alloc_vector(vec![warns_list, dep_keys, fp_val]))
@@ -613,8 +662,8 @@ pub(super) fn check_strict_set(args: &[Value], _env: EnvId, _heap: &mut Heap) ->
 }
 
 /// `(check-file-structured path)` — the data-shaped counterpart of
-/// `check-file`. Returns a list of `{:file :line :col :message}` maps (or
-/// `{:file :message}` for warnings without a position — the advisory
+/// `check-file`. Returns a list of `{:file :line :col :category :message :text}` maps
+/// (without `:line`/`:col` for warnings without a position — the advisory
 /// checker doesn't carry spans through macroexpansion yet, ADR-024). Used
 /// by the `nest mcp` `check` tool (step 1c-a) and any other consumer that
 /// wants structured diagnostics rather than a GNU-line string to re-parse.
@@ -631,23 +680,11 @@ pub(super) fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
     let required = required_mods_arg(heap, arg(args, 1));
-    let warnings = check_file_at(heap, &path, &just_forms, &required);
-    let file_kw = Value::keyword(value::intern("file"));
-    let line_kw = Value::keyword(value::intern("line"));
-    let col_kw = Value::keyword(value::intern("col"));
-    let msg_kw = Value::keyword(value::intern("message"));
+    let findings = check_file_at(heap, &path, &just_forms, &required);
     let file_val = heap.alloc_string(&path);
-    let mut out = Vec::with_capacity(warnings.len());
-    for (pos_opt, msg) in &warnings {
-        let msg_val = heap.alloc_string(msg);
-        let mut entries: Vec<(Value, Value)> = Vec::with_capacity(4);
-        entries.push((file_kw, file_val));
-        if let Some(p) = pos_opt {
-            entries.push((line_kw, Value::int(p.line as i64)));
-            entries.push((col_kw, Value::int(p.col as i64)));
-        }
-        entries.push((msg_kw, msg_val));
-        out.push(heap.map_from_pairs(entries));
+    let mut out = Vec::with_capacity(findings.len());
+    for finding in &findings {
+        out.push(finding_map(heap, finding, &path, Some(file_val)));
     }
     Ok(heap.list(out))
 }
@@ -684,7 +721,8 @@ pub(super) fn expr_type(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispRes
 
 /// `(check-string-structured src)` — the source-string counterpart of
 /// `check-file-structured`: advisory type-check the Brood source string `src` and
-/// return a list of `{:line :col :message}` maps (1-based positions; no `:file`).
+/// return a list of `{:line :col :category :message :text}` maps (1-based positions; no
+/// `:file`).
 /// Returns `()` when `src` doesn't parse — e.g. incomplete input while an editor
 /// buffer is mid-edit — so a live diagnostics loop never errors on an unbalanced
 /// buffer; warnings reappear once it parses. Reuses the same checker as the file
@@ -712,24 +750,15 @@ fn check_string_as(heap: &mut Heap, src: &str, here: bool) -> LispResult {
         Err(_) => return Ok(heap.list(Vec::new())),
     };
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
-    let warnings = if here {
-        crate::types::check::check_forms_here(heap, &just_forms)
+    let findings = if here {
+        crate::types::check::check_forms_here_findings(heap, &just_forms)
     } else {
-        crate::types::check::check_file(heap, &just_forms)
+        crate::types::check::check_file_findings(heap, &just_forms)
     };
-    let line_kw = Value::keyword(value::intern("line"));
-    let col_kw = Value::keyword(value::intern("col"));
-    let msg_kw = Value::keyword(value::intern("message"));
-    let mut out = Vec::with_capacity(warnings.len());
-    for (pos_opt, msg) in &warnings {
-        let msg_val = heap.alloc_string(msg);
-        let mut entries: Vec<(Value, Value)> = Vec::with_capacity(3);
-        if let Some(p) = pos_opt {
-            entries.push((line_kw, Value::int(p.line as i64)));
-            entries.push((col_kw, Value::int(p.col as i64)));
-        }
-        entries.push((msg_kw, msg_val));
-        out.push(heap.map_from_pairs(entries));
+    // Source text has no path; its `:text` lines name it `<string>`.
+    let mut out = Vec::with_capacity(findings.len());
+    for finding in &findings {
+        out.push(finding_map(heap, finding, "<string>", None));
     }
     Ok(heap.list(out))
 }

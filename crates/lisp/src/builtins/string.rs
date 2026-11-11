@@ -124,6 +124,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["s"],
         "The character indices at which a line of s may break, ascending, by Unicode's line-breaking algorithm (UAX #14): a line may end just before each index. After a space or a hyphen; between two CJK ideographs or kana; never before closing punctuation (`)` `」` `。` `,`) or after opening punctuation (`(` `「`); after a `/` but not before one. A line terminator's break is mandatory and is in the list too: index i is one when s[i-1] is a newline. The end of the text is not listed. A wrapper fits as much of a line as the width allows and ends it at the last index that fits.\n\n    (string/break-opportunities \"ab cd\")   ;=> [3]\n    (string/break-opportunities \"日本語\")   ;=> [1 2]\n    (string/break-opportunities \"a (b)\")   ;=> [2]",
         string_break_opportunities);
+    primitives.def(
+        "string/scripts",
+        Arity::exact(1),
+        Sig::new(vec![string], Ty::vector_of(kw)),
+        &["s"],
+        "The writing systems the characters of s are in, by the Unicode Script property — each a keyword (`:latin`, `:cyrillic`, `:greek`, `:han`, `:hiragana`, `:old-italic`), in the order each first appears, none twice. Characters every script shares (digits, punctuation, spaces: Common) and combining marks that take their base's script (Inherited) are left out, so a plain ASCII word is `[:latin]` and `\"42\"` is `[]`. What a mixed-script check (a Cyrillic `а` inside a Latin word, a homoglyph) reads: see string/mixed-script?. (ADR-710)\n\n    (string/scripts \"paypal\")   ;=> [:latin]\n    (string/scripts \"p\\u{430}ypal\")   ;=> [:latin :cyrillic]\n    (string/scripts \"v1.2\")   ;=> [:latin]",
+        string_scripts);
     // The indexed grapheme accessors (ADR-159). `string->graphemes` alone made the
     // *documented-correct* cursor step — read the cluster at an index — cost a vector
     // of every cluster in the string, per keystroke. These walk to the index instead.
@@ -1268,5 +1275,35 @@ pub(super) fn string_break_opportunities(args: &[Value], _: EnvId, heap: &mut He
         indices.push(chars);
     }
     let values: Vec<Value> = indices.into_iter().map(Value::int).collect();
+    Ok(heap.alloc_vector(values))
+}
+
+/// `(string/scripts s)` — the Unicode scripts of `s`'s characters as keywords, in order of
+/// first appearance, Common / Inherited / Unknown left out (ADR-710). The property needs
+/// Unicode's tables, which is why this is a primitive; the mixed-script RULE over it
+/// (`string/mixed-script?`, TR39's single-script test with Han's allowed companions) is
+/// Brood in std.
+pub(super) fn string_scripts(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use unicode_script::{Script, UnicodeScript};
+    let s = expect_string_ref(heap, "string/scripts", arg(args, 0))?;
+    let mut poll = InterruptPoll::new();
+    let mut seen: Vec<Script> = Vec::new();
+    for character in s.chars() {
+        poll.tick()?;
+        let script = character.script();
+        if matches!(script, Script::Common | Script::Inherited | Script::Unknown) {
+            continue;
+        }
+        if !seen.contains(&script) {
+            seen.push(script);
+        }
+    }
+    let values: Vec<Value> = seen
+        .into_iter()
+        .map(|script| {
+            let name = script.full_name().to_lowercase().replace('_', "-");
+            Value::keyword(value::intern(&name))
+        })
+        .collect();
     Ok(heap.alloc_vector(values))
 }

@@ -373,6 +373,10 @@ unicode-normalization = "0.1"
 # table and pair rules a word wrap needs for CJK and punctuation. Already in the tree
 # (cosmic-text breaks lines with it); tiny, no dependencies, so always linked.
 unicode-linebreak = "0.1"
+# The Unicode Script property (`string/scripts`, ADR-710): which writing system each letter
+# belongs to, what a mixed-script (homoglyph) check reads. Already in the tree (cosmic-text
+# itemizes runs with it); tables only, no dependencies, so always linked.
+unicode-script = "0.5"
 cranelift-jit = { version = "0.137", optional = true }
 cranelift-module = { version = "0.137", optional = true }
 cranelift-codegen = { version = "0.137", optional = true }

@@ -24,6 +24,7 @@ use crate::core::heap::Heap;
 use crate::core::value::{self, Value};
 use crate::error::Pos;
 use crate::types::Ty;
+use crate::types::check::{Finding, Lint};
 
 use super::ctx::Ctx;
 use super::infer::expr_ty;
@@ -34,12 +35,7 @@ use super::walk::{fn_form_items, fn_params, list_items, resolves_to_macro};
 /// accumulated `ctx` (globals + sigs + abilities). `(defmodule M …)` is a directive that sets
 /// the namespace for the *following* top-level forms, so a defn's sig is stored qualified as
 /// `M/name`; we track the current namespace here to qualify the lookup.
-pub(super) fn check_matches(
-    heap: &Heap,
-    forms: &[Value],
-    ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn check_matches(heap: &Heap, forms: &[Value], ctx: &Ctx, out: &mut Vec<Finding>) {
     let mut namespace: Option<String> = None;
     for &form in forms {
         if let Some(items) = list_items(heap, form)
@@ -78,13 +74,7 @@ fn sig_of(
 
 /// Recurse, threading `ctx` and the current namespace. Binding forms extend the scope; a
 /// `match` is analysed; a `quote`/`quasiquote` subtree is skipped (data / patterns, not code).
-fn walk(
-    heap: &Heap,
-    form: Value,
-    ctx: &Ctx,
-    namespace: Option<&str>,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn walk(heap: &Heap, form: Value, ctx: &Ctx, namespace: Option<&str>, out: &mut Vec<Finding>) {
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
@@ -117,7 +107,7 @@ fn walk(
                     walk_let(heap, &items, ctx, namespace, out);
                     return;
                 }
-                "match" | "%match" | "match*" => {
+                "match" | "%match" => {
                     analyze_match(heap, form, &items, ctx, namespace, out);
                     return;
                 }
@@ -147,7 +137,7 @@ fn walk_defn(
     items: &[Value],
     ctx: &Ctx,
     namespace: Option<&str>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let (Some(&Value::Sym(name)), Some(&params_form)) = (items.get(1), items.get(2)) else {
         recurse_rest(heap, items, ctx, namespace, out);
@@ -177,7 +167,7 @@ fn walk_def(
     items: &[Value],
     ctx: &Ctx,
     namespace: Option<&str>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     if let (Some(&Value::Sym(name)), Some(&val)) = (items.get(1), items.get(2))
         && let Some(value_items) = fn_form_items(heap, val)
@@ -195,7 +185,7 @@ fn walk_fn(
     items: &[Value],
     ctx: &Ctx,
     namespace: Option<&str>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     walk_fn_seeded(heap, items, ctx, namespace, out, None);
 }
@@ -205,7 +195,7 @@ fn walk_fn_seeded(
     items: &[Value],
     ctx: &Ctx,
     namespace: Option<&str>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
     sig: Option<&crate::types::Sig>,
 ) {
     let Some(&params_form) = items.get(1) else {
@@ -235,7 +225,7 @@ fn walk_let(
     items: &[Value],
     ctx: &Ctx,
     namespace: Option<&str>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let mut scope = ctx.clone();
     if let Some(&binds_form) = items.get(1)
@@ -267,7 +257,7 @@ fn recurse_rest(
     items: &[Value],
     ctx: &Ctx,
     namespace: Option<&str>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     for &it in items.iter().skip(1) {
         walk(heap, it, ctx, namespace, out);
@@ -282,7 +272,7 @@ fn analyze_match(
     items: &[Value],
     ctx: &Ctx,
     namespace: Option<&str>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     if let Some(&scrutinee) = items.get(1) {
         if let Some(ty) = expr_ty(heap, scrutinee, ctx)
@@ -332,7 +322,7 @@ fn check_coverage(
     clauses: &[Value],
     ids: &BTreeSet<String>,
     pos: Option<Pos>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let mut covered: BTreeSet<String> = BTreeSet::new();
     for &clause in clauses {
@@ -358,7 +348,8 @@ fn check_coverage(
     }
     for id in ids {
         if !covered.contains(last_seg(id)) {
-            out.push((
+            out.push(Finding::new(
+                Lint::NonExhaustive,
                 pos,
                 format!(
                     "sealed match: no clause handles :{} (add a clause or a `_` catch-all)",
@@ -391,7 +382,7 @@ fn record_pattern_id(heap: &Heap, pat: Value) -> Option<String> {
 /// The special forms and macros whose operands are evaluated in the enclosing scope — they
 /// bind no name, so a scrutinee's type passes through them unchanged.
 const NON_BINDING_HEADS: &[&str] = &[
-    "if", "do", "when", "unless", "cond", "and", "or", "not", "->", "->>", "throw",
+    "if", "do", "when", "cond", "and", "or", "not", "->", "->>", "throw",
 ];
 
 /// Does a form with this head bind nothing? A non-macro function (a global or a local) is

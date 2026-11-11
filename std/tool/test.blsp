@@ -449,9 +449,60 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
     `(let (~a ~actual ~b ~expected)
        (when (not (= ~a ~b))
          (test-fail (quote ~loc)
-           (list (str "assert: " (pr-str (quote (assert= ~actual ~expected))))
-             (str "actual: " (pr-str ~a))
-             (str "expect: " (pr-str ~b))))))))
+           (append (list (str "assert: " (pr-str (quote (assert= ~actual ~expected))))
+                     (str "actual: " (pr-str ~a))
+                     (str "expect: " (pr-str ~b)))
+             (sequence-kind-notes ~a ~b)))))))
+
+;; A list and a vector of the same elements are not `=` (a list is code, a vector data), and
+;; the two print so alike that a failing `assert=` over them reads as "these are equal". When
+;; that is the whole difference the failure says so, naming where it is. Nothing here changes
+;; what passes: it runs only once `=` has already said no.
+(defn- sequence-kind (value)
+  (cond
+    (nil? value) "an empty list"
+    (list? value) "a list"
+    (vector? value) "a vector"
+    else nil))
+
+;; Equal element for element, a list and a vector counting as the same sequence at any depth.
+(defn- same-elements? (actual expected)
+  (if (and (sequence-kind actual) (sequence-kind expected))
+    (and (= (count actual) (count expected))
+      (every? (seq/zip actual expected) (fn ([left right]) (same-elements? left right))))
+    (= actual expected)))
+
+;; The first place a list stands against a vector, as [path actual-kind expected-kind], `path`
+;; the indices down to it; nil when there is none.
+(defn- kind-mismatch (actual expected path)
+  (let (actual-kind (sequence-kind actual)
+        expected-kind (sequence-kind expected))
+    (cond
+      (or (nil? actual-kind) (nil? expected-kind)) nil
+      (not (= (list? actual) (list? expected))) [path actual-kind expected-kind]
+      else (first-kind-mismatch (seq/zip actual expected) 0 path))))
+
+(defn- first-kind-mismatch (pairs index path)
+  (if (empty? pairs)
+    nil
+    (let ([left right] (first pairs))
+      (or (kind-mismatch left right (conj path index))
+        (first-kind-mismatch (rest pairs) (+ index 1) path)))))
+
+(defn- sequence-kind-notes (actual expected)
+  (let (found (and (same-elements? actual expected) (kind-mismatch actual expected [])))
+    (if found
+      (let ([path actual-kind expected-kind] found)
+        (list (if (empty? path)
+                (str "note: same elements, but actual is "
+                  actual-kind " and expected is " expected-kind)
+                (str "note: same elements, but at "
+                  (pr-str path)
+                  " actual has "
+                  actual-kind
+                  " where expected has "
+                  expected-kind))))
+      nil)))
 
 (defn concurrently (n f)
   "Run `(f i)` for `i` in 0..n-1, each in its OWN process, and block until all `n` have

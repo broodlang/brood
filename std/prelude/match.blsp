@@ -904,13 +904,6 @@ in the no-match failure so the error names the form that failed. Prefer `match` 
 the surface the special forms target directly when they need their own context."
   (let (v (reflect/gensym "m")) `(let (~v ~expr) ~(%match-build clauses v context))))
 
-;; `match*` is the engine's old public name, deprecated by ADR-674 and removed before 1.0.
-;; `nest format --migrate` rewrites it.
-(defmacro match* (context expr & clauses)
-  "Deprecated (ADR-674): the pattern-matching engine's old name. Write `match`; `nest format --migrate` rewrites this."
-  `(/%match ~context ~expr ~@clauses))
-(meta match* :deprecated "0.51.0" :use 'match)
-
 ;; (match expr (pattern [:when guard] body...) ...) — match `expr` against each
 ;; clause in order; the first whose pattern (and guard) matches runs its body.
 ;; No clause matching crashes with a structured value; add a `_` clause to total it.

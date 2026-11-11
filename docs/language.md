@@ -60,6 +60,31 @@ the param lists are **lists** `(x y)`, not vectors `[x y]`, and clauses are trie
 (see [`fn`/`defn` clauses](#fn--defn-clauses)). The list-not-vector spelling
 is the one piece that can't be guessed from Clojure; it has to be read.
 
+## Coming from Common Lisp or Scheme
+
+Brood is a Lisp-1 with immutable data, so the habits that differ most are the ones about
+names and change. [`brood-among-lisps.md`](brood-among-lisps.md) places it among the other
+Lisps and lists, with the decision behind each, what a Lisper will look for and not find.
+
+| Common Lisp / Scheme habit | Brood |
+|---|---|
+| `(defun f (x) …)`, `(define (f x) …)`, `(lambda (x) …)` | `(defn f (x) …)` and `(fn (x) …)`. |
+| `(let ((a 1) (b 2)) …)` | Bindings are **flat**: `(let (a 1 b 2) …)`, each seeing the ones before it. |
+| `(funcall f x)`, `#'f`, `(apply #'f args)` | One namespace (a Lisp-1): `(f x)`, `f`, `(apply f args)`. |
+| `car`, `cdr`, `mapcar`, `(reduce f xs)` | `first`, `rest`, and **the collection first**: `(map xs f)`, `(fold xs init f)`. |
+| `setf`, `setq`, `set!`, `incf`, a mutable vector or hash table | Nothing changes once made. Return a new value; `def` rebinds a global; a `Table` or a process holds state that must change ([Immutability](#immutability)). |
+| `loop`, `do`, `dolist`, `dotimes`, named `let` | `doseq` for effect (`(doseq (i (range n)) …)`), `for` to collect, `fold`, or tail recursion, which never grows the stack. |
+| `progn`, `begin` | `do`. |
+| `unless` | `(when (not test) …)`. |
+| `eq`, `eql`, `equal`, `eqv?`, `equal?` | One `=`, structural and type-sensitive: `(= [1 2] [1 2])` is true, `(= 1 1.0)` is false. |
+| `t`, `#t`, `#f` | `true` and `false`. Only `nil` and `false` are falsy; `()` is `nil`, so the empty list is falsy as in Common Lisp. |
+| `` `(a ,b ,@c) `` | `` `(a ~b ~@c) ``. |
+| `&rest`, `&key` | `&` for the rest; a trailing options map instead of keywords (ADR-163). `&optional` is spelled the same. |
+| `handler-case`, `with-handlers`, `guard`, restarts | `(try … (catch pattern …))`, and a function that cannot do its job usually returns a **failure value** rather than raising ([Errors](#errors)). |
+| `call/cc`, `dynamic-wind` | Processes and supervision. |
+| `#\a` | No character type: `"a"`. |
+| Symbols read upcased (`'Foo` is `FOO`) | Case-sensitive: `'Foo` and `'foo` are different symbols. |
+
 ## Data types
 
 | Type | Examples | Notes |
@@ -567,8 +592,8 @@ ability-specific rule.)
 
 A missing implementation is a **loud, named error** — `ability Shape/area: no impl
 for :geometry/circle — have (…)`, listing the ids that *are* implemented — never a
-silent `nil`. The thrown value is a **structured map**, `{:kind :no-impl :message …
-:ability :op :id :have}`, so a handler can branch on the parts —
+silent `nil`. The thrown value is a **structured map**, `{:kind :%no-impl :code "E0090"
+:message … :ability :op :id :have}`, so a handler can branch on the parts —
 `(catch e (get e :id))` — rather than parse the string; `error-message` still
 returns that same human text.
 
@@ -883,7 +908,7 @@ loaded in the prelude), so `defbehaviour` is available bare — no `require`, no
 `defbehaviour` declares the ops and defines **no functions of its own** — a module
 satisfies the contract by defining them itself and calling them directly. A module
 claims it with `(:implements Name)` in its header, and `nest check` verifies the
-module defines each declared op at the right arity. `(protocol-ops 'Name)` exposes
+module defines each declared op at the right arity. `(reflect/behaviour-ops 'Name)` exposes
 the specs as data.
 
 > **`defprotocol` / `defimpl` were retired** (ADR-168) in favour of `ability`, which
@@ -894,7 +919,9 @@ the specs as data.
 
 #### The abilities the standard library ships
 
-Beyond the core `Display`/`Inspect`, `std/` declares these (ADR-177). Each is the
+Beyond the core `Display`/`Inspect`, `std/` declares these (ADR-177), and a few that serve
+one module's own types (`math`'s `Numeric` and `Zero`, `tempo`'s `Spanning`, `editor/ui`'s
+`Overlay`). Each is the
 extension point for its module: `impl` it for your own type and that module accepts the
 type with no change to it.
 
@@ -942,7 +969,7 @@ method for an exact tuple of ids (a built-in id keyword `:int`, or a record name
 
 **Resolution is total and unambiguous by construction.** A call resolves by (1) an **exact**
 tuple match, else (2) a single declared **`:default`** method, else (3) a loud, structured
-`no-method` error (`{:kind :no-method :multi :key :have}`). There are **no partial wildcards**
+`no-method` error (`{:kind :%no-method :code "E0090" :message … :multi :key :have}`). There are **no partial wildcards**
 and therefore **no ambiguity** — a key hits exactly one method or the default, never a
 "nearest" guess. (Partial patterns + a specificity order are deliberately deferred; they are
 where ambiguity lives, and Brood's flat record ids give no basis to break a tie — ADR-179.)
@@ -1158,9 +1185,9 @@ bindings (several pairs, `:when` guards, destructuring), collects nothing and re
   (io/puts (->string x)))                 ; prints "a" then "b"
 ```
 
-`dotimes`, `dolist` and `unless` are deprecated (ADR-674) and go before 1.0:
-`nest check` warns at each use, and `nest format --migrate` rewrites them to `doseq`,
-`doseq` over a `range`, and `(when (not test) …)`.
+There is no `dotimes`, `dolist` or `unless`: ADR-674 removed them. A call of one is
+unbound, and the error names its replacement: `doseq`, `doseq` over a `range`, and
+`(when (not test) …)`.
 
 **Comprehensions** build a value from the same walk. `for` collects a list of its
 body's values over one or more bindings (the last varies fastest), with `:when`
@@ -1690,17 +1717,15 @@ raises on mismatch. Bindings stay sequential, freely mixed with plain symbols:
 
 ### `fn` / `defn` clauses
 
-`fn` is **multi-clause** when every form after it is a clause `(param-list body…)`.
-Multi-clause dispatch has **two axes** (ADR-047):
+`fn` is **multi-clause** when every form after it is a clause `(param-list body…)`. The
+clauses are tried **in order** and the first that matches runs (ADR-619, below), whether a
+clause is told apart by its argument count or by the shape of its arguments:
 
 - **By argument count** (Clojure-style multi-arity) when the heads are *arity
-  clauses* — plain-symbol params, optionally with `&optional` / `&` rest. The
-  call's arg count picks the clause; an exact fixed arity beats a variadic one,
-  and among matches the most-specific (most required params) wins. Each arm binds
-  its params *directly* (no rest-list), so it's as cheap as a single-clause fn —
-  this is how the prelude's variadic `+`/`-`/`<`/`=` stay fast and stay Brood.
-- **By pattern** (same-arity dispatch) when a head contains
-  literals or destructuring — the clauses share an arity and the first matching
+  clauses* — plain-symbol params, optionally with `&optional` / `&` rest. Each arm
+  binds its params *directly* (no rest-list), so it's as cheap as a single-clause fn —
+  this is how the prelude's variadic `+`/`-`/`<`/`=` stay fast and stay Brood (ADR-047).
+- **By pattern** when a head contains literals or destructuring — the first matching
   shape (and `:when` guard) wins.
 
 Otherwise `fn` is single-clause, and each **required** parameter may itself be a
@@ -2158,10 +2183,10 @@ takes down only that line, not the caller.
 (defmodule my-app (:use log))
 
 (start-logger)                          ; default: stdout, :info and up
-(log-info "server up" {:port 8080})     ; structured fields are optional
+(info "server up" {:port 8080})         ; structured fields are optional
 (log :warn "disk low")
-;; => [INFO  1736…] server up
-;;    [WARN  1736…] disk low
+;; => [INFO 1736…] server up
+;;    [WARN 1736…] disk low
 ```
 
 Levels are `:debug` < `:info` < `:warn` < `:error`. A **backend** is any value
@@ -2200,10 +2225,26 @@ special forms.
 
 **Advisory in the image, a gate where you want one.** The checker never stops code from
 loading into a live image — hot reload depends on that — but its verdict is an exit status.
-`nest check` exits non-zero on any finding, and `--strict` adds the findings for a value
-merely wider than a parameter accepts. A project that wants a type gate
+`nest check` exits non-zero on any gating finding, and `--strict` adds the findings for a
+value merely wider than a parameter accepts. A project that wants a type gate
 runs `nest check --strict` in CI, as Brood does for `std/` and `tests/` and bedit does for
 itself; `(check-allow :category form…)` records a deliberate exception where it is made.
+
+Every finding has a **category**, printed after it (`… [type-mismatch]`) and listed by
+`(reflect/check-categories)`. Four are advisory by default — printed, never failing the
+check: `:non-tail-recursion`, `:gave-up` (a checker budget ran out), `:deprecated` and
+`:beta`; the rest gate (ADR-698). A project moves categories in `project.blsp`, and a module
+silences one for its whole file in its header:
+
+```clojure fragment
+(project :name "app" :version "0.1.0"
+  :check {:advisory [:unused-binding]        ; printed, never gating
+          :gating [:non-tail-recursion]      ; fails the check
+          :allow [:list-truthiness]})        ; not reported at all
+
+(defmodule app/render "Drawing."
+  (:check-allow :non-tail-recursion))        ; this file only
+```
 
 `(sig name (params… -> ret))` declares a function's signature. It is a pure
 declaration — a runtime no-op — read by the advisory checker, which then flags a
@@ -2245,10 +2286,12 @@ work on `defn`, `defn-`, `fn` and `defmacro`; a multi-clause `fn`, a destructuri
 a `let` binding refuse a type with an error — declare those with `(sig f (and …))` or on the
 enclosing function.
 
-The type grammar: base names — `int float number decimal string symbol keyword
-bool nil pair vector list map set bytes fn rope pid ref table socket subprocess`,
-plus `any` (everything) and `never` (nothing); the spellings match what `type-of`
-returns, with `number` = int∪float, `list` = nil∪pair, and `fn` = closure∪native.
+The type grammar: base names — `int float number decimal ratio string symbol keyword
+bool nil pair vector list map set bytes failure record fn rope pid ref table socket
+subprocess`, plus `any` (everything) and `never` (nothing); the spellings match what
+`type-of` returns, with `number` = int∪float, `list` = nil∪pair, and `fn` = closure∪native.
+Four more name unions: `seqable` (what the sequence functions walk: a list, vector, set, map
+or `bytes`, never a string), `countable`, `numeric` and `ordered`.
 Then function arrows `(p… -> r)`, element-typed
 sequences `(list E)` / `(vector E)`, unions `(or A B …)`, intersections
 `(and A B …)` and the complement `(not T)` — so "anything but nil" is `(and any
@@ -2331,7 +2374,8 @@ runtime cost) in a release; `sig!` adds the runtime guarantee everywhere.
 **The prelude carries signatures too**, ~16 of them, enforced per runtime at boot under
 `all` (the shared prelude is frozen; a shim is an ordinary runtime rebinding).
 
-Adoption is broad — **613 declarations across 79 std modules** (ADR-153 started it in
+Adoption is broad — **over 800 declarations, `sig`s and typed parameters, across more than
+90 std modules** (ADR-153 started it in
 `std/path`, `std/json` and `std/set`). The checker enforces them at every call site, in
 any module, and result types flow (a `bool` result handed to `string/length` is caught).
 The checker treats `sig` and `sig!` identically. Writing a *type* never changes
@@ -2341,7 +2385,9 @@ behaviour; opting into *enforcement* does. Full design:
 ### Advisory lints (non-type warnings)
 
 `nest check` / `brood --check` emit several additional warnings beyond type
-misuse — all advisory, zero false positives:
+misuse, with zero false positives. Like a type warning they never stop code loading, and
+their categories (`:unused-binding`, `:unused-import`, `:unused-private`) gate `nest check`
+unless the project's `:check` key moves them:
 
 **Unused bindings** — a name a binding form introduces that never appears in its
 visible scope. Every binding form is covered, with the same pattern grammar each uses:
@@ -2354,12 +2400,12 @@ don't-care), a name that shadows a global, and a name the pattern itself reads (
 repeat `[x x]`, or a `bytes` size naming an earlier segment). A pin `^x` and a
 quoted `'sym` bind nothing.
 
-```clojure
+```clojure fragment
 (let (x 1 y 2) x)                  ; warning: unused let binding: y
 (let ([c r] (term/size)) c)        ; warning: unused let binding: r
 (match msg ([:attach c rows] c))   ; warning: unused pattern binding: rows
 (try (f) (catch e nil))            ; warning: unused catch binding: e
-(fold-for (acc 0 x xs) x)          ; warning: unused loop binding: acc — it never folds
+(fold-for (acc 0 x xs) x)          ; warning: unused loop binding: acc (it never folds)
 (map xs (fn (acc x) acc))          ; warning: unused parameter: x
 (let (_y 1) 2)                     ; silent — _-prefix means intentional
 ```
@@ -2371,7 +2417,7 @@ one name (so a failed load or an empty module is silent).
 ```clojure
 (defmodule my/app (:use io) (:use json))
 (defn handler (x) (encode x))
-; warning: unused :use import: io — emit, stdout-port, etc. never used
+; warning: unused :use import: io  [unused-import]
 ```
 
 **Unused module-private defns** — a `defn-`/`def-` private that is never referenced
@@ -2437,9 +2483,9 @@ child's own pid** — to hand the parent's pid in, bind it in an enclosing `let`
 | `(monitor pid)` | Watch `pid`; returns a monitor `ref`. See *Monitors* below. |
 | `(demonitor mref)` | Drop the monitor created by `(monitor …)`. |
 | `(exit pid reason)` | Send an exit signal to a local process. `reason` `:kill` is the **untrappable** hard kill — the target dies at its next reduction tick, or immediately if parked, even in a tight loop. Any other `reason` is the **soft** signal — the target dies at its next `receive` (a tight non-`receive` loop won't honour it). Monitors fire `[:down ref pid reason]`. No-op for a dead/unknown pid. |
-| `(spawn-count)` | How many green processes have been spawned since the program started. |
-| `(peak-threads)` | High-water mark of processes running *simultaneously* (bounded by the worker pool). |
-| `(worker-threads)` | Size of the worker-thread pool (≈ `nproc`, or `-j N`). |
+| `(dev/spawn-count)` | How many green processes have been spawned since the program started. |
+| `(dev/peak-threads)` | High-water mark of processes running *simultaneously* (bounded by the worker pool). |
+| `(dev/worker-threads)` | Size of the worker-thread pool (≈ `nproc`, or `-j N`). |
 
 ### Selective receive
 
@@ -2553,7 +2599,7 @@ right tool for request/reply to a long-lived process.
 ### The `gen` server framework
 
 `std/proc/gen.blsp` packages the request/reply idiom above into a
-server framework — ~180 lines of Brood over `spawn`/`send`/`receive`/
+server framework — ~500 lines of Brood (`defstatem` and `{:via …}` addresses included) over `spawn`/`send`/`receive`/
 `ref`/`monitor`, no kernel surface (ADR-099). A server carries one immutable
 state value through a tail-recursive `receive` loop; `defserver` declares how it
 handles each kind of message.
@@ -2813,7 +2859,7 @@ unchanged. The prelude macro expands to the `%spawn-monitor` primitive (ADR-309)
 ### Crash reports
 
 A process nobody links to or monitors still crashes somewhere: the kernel prints
-one line to stderr — `process 7 died: worker.blsp:14:9: division by zero` — and
+one line to stderr — `process 7 died: worker.blsp:14:9: runtime error: division by zero` — and
 appends it to `.brood_crash_dump`, but that line has no trace, no hint, and prints
 again for every iteration of a crash loop. **The default crash reporter**
 (`std/proc/crash-report.blsp`, ADR-305) is a `proc/system-monitor` subscriber
@@ -2823,7 +2869,8 @@ runner reports its own failures), and it prints one report per **crash site**:
 
 ```
 [crash] #<pid a/7> exited: division by zero
-        kind :arith-error  code E0031  at src/worker.blsp:14:9
+        kind :runtime  code E0040  at src/worker.blsp:14:9
+        hint: guard the denominator: (when (not (= y 0)) (/ x y))
         at worker/step (src/worker.blsp:14:9)
         at worker/loop (src/worker.blsp:9:5)
         (further crashes at this site are not reported)
@@ -2844,8 +2891,9 @@ reading.
   stderr — the seam for a host that captures reports (an editor's message
   area) and for tests. `(crash-report/stop)` disarms and returns once the
   subscription is gone; `(crash-report/running?)`; `(crash-report/render pid
-  reason)` is the pure formatter. `(crash-report/arm-default)` is what the
-  entry points call — a no-op under **`BROOD_NO_CRASH_REPORT=1`**.
+  reason)` is the pure formatter. The entry points call the prelude's
+  `(%crash-report-arm-default)`, which subscribes without loading the module and hands
+  over to it on the first crash (ADR-313) — a no-op under **`BROOD_NO_CRASH_REPORT=1`**.
 - The kernel's one-liner yields while any abnormal-exit subscriber is armed
   (see `proc/system-monitor` above), so opting out restores it: nothing is ever
   reported twice, and nothing goes unreported.
@@ -2903,7 +2951,7 @@ machine, where a start would bind the application's ports.
 `(timer/send-interval ms pid msg)`
 delivers it every `ms` until cancelled. Both return a **timer handle** (the
 timer's pid — a tiny green process parked on the scheduler's timer wheel, so a
-pending timer costs no worker thread); `(cancel-timer h)` stops it, idempotently
+pending timer costs no worker thread); `(timer/cancel h)` stops it, idempotently
 (cancellation races an in-flight fire — a message already sent
 stays sent). An interval timer monitors its target and exits when the target
 dies, so a forgotten interval can't tick forever.
@@ -2911,7 +2959,7 @@ dies, so a forgotten interval can't tick forever.
 ```clojure fragment
 (def t (timer/send-interval 1000 (self) :heartbeat))
 (receive (:heartbeat (redraw)))
-(cancel-timer t)
+(timer/cancel t)
 ```
 
 ### Blocking natives (`proc/offload`)
@@ -2928,9 +2976,10 @@ site, catchable as usual.
 ```
 
 Only long/blocking **data-in/data-out** natives are allowed (`%git-clone`,
-`%git-resolve-ref`, `%pbkdf2-sha256-bytes`, `%digest`, `%hmac`, `file/slurp`,
-`file/slurp-bytes`, `file/spit`, `file/replace`, `file/spit-bytes`, `file/spit-append`, `file/spit-bytes-append`,
-`%tls-self-signed`); anything heap-sharing or env-reading is refused with a
+`%git-resolve-ref`, `%git-list-tags`, `%untar-gz`, `%pbkdf2-sha256-bytes`, `%digest`, `%hmac`,
+the compressors `%gzip`/`%gunzip`/`%zlib-compress`/`%zlib-uncompress`/`%deflate`/`%inflate`,
+`file/slurp`, `file/slurp-bytes`, `file/spit`, `file/replace`, `file/spit-bytes`,
+`file/spit-append`, `file/spit-bytes-append`, `%tls-self-signed`, and `%wasm-call`); anything heap-sharing or env-reading is refused with a
 clear error. Args and the result are deep-copied across (like `send`), so
 they must be sendable values. The package manager's clones already ride it.
 
@@ -3111,7 +3160,7 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   of the two scales for `+`/`-`, the sum of them for `*`. So `1.50M * 2.25M` is
   `3.3750M`, not `3.375M`, and `(- 1M 0.0M)` is `1.0M`, not `1M` — significance
   survives the operation, which is the point of using a decimal for money. Only a
-  zero *result* prints scale-less (`(- 1.50M 1.50M)` renders `0`). A float operand
+  zero *result* prints scale-less (`(- 1.50M 1.50M)` renders `0M`). A float operand
   anywhere makes the result an inexact float (contagion), and `/` is inexact by
   nature, so neither carries an ideal exponent. Pinned by the dectest conformance
   corpus (`tests/conformance_dectest_test.blsp`).
@@ -3159,14 +3208,18 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   (`std/prelude/core.blsp`) — including `+`, `<`, and `=` themselves.
 
 ### Bitwise
-`bit/and`  `bit/or`  `bit/xor`  `bit/not`  `bit/shift-left`  `bit/shift-right`
+`bit/and`  `bit/or`  `bit/xor`  `bit/not`  `bit/shift-left`  `bit/shift-right`  `bit/count`  `bit/positions`
 
-- Integer bit operations over the 64-bit two's-complement representation.
-  `bit/and`/`bit/or`/`bit/xor` are binary; `bit/not` is the unary complement
-  (`(bit/not n)` = `(- (- n) 1)`).
-- `bit/shift-left` discards bits shifted past bit 63; `bit/shift-right` is an
-  **arithmetic** (sign-preserving) shift. The shift amount must be in `[0, 64)`
-  — outside that range is a clean error, not a crash.
+- Integer bit operations over an unbounded two's-complement representation, so a bignum
+  works like an int. `bit/and`/`bit/or`/`bit/xor` are binary; `bit/not` is the unary
+  complement (`(bit/not n)` = `(- (- n) 1)`).
+- `bit/shift-left` never loses bits: a result past `i64` promotes to a bignum
+  (`(bit/shift-left 1 64)` is `18446744073709551616`). `bit/shift-right` is an
+  **arithmetic** (sign-preserving) shift, so `(bit/shift-right -1 200)` is `-1`. A
+  negative shift amount, or one past 2^27, is a clean error, not a crash.
+- `(bit/count n)` is the number of 1 bits (`(bit/count -1)` is `64`); `(bit/positions n)`
+  is a vector of the set bit indices of a non-negative `n`, ascending (`(bit/positions 5)`
+  is `[0 2]`).
 - These are Rust primitives (they can't be bootstrapped from the numeric ops).
 
 ### Float bit patterns
@@ -3230,8 +3283,8 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   is why `(sort maps)` sorts — until 2026-08-28 every map compared *equal* to every other,
   so the sort silently returned its input (ADR-285).
 - A **record** is the exception, and deliberately so: it orders through its `compare-to`
-  method or not at all — never by its underlying map layout. See "Records and multimethods"
-  below.
+  method or not at all — never by its underlying map layout. See
+  [Multiple dispatch](#polymorphism-multiple-dispatch-defmulti) above.
 
 ### Lists & sequences
 `cons`  `first`  `rest`  `second`  `third`  `last`  `seq/but-last`
@@ -3590,7 +3643,7 @@ Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
   corpora (`tests/conformance_ucd_test.blsp`).
 - `string/upper` / `string/lower` case-fold (Unicode-aware: `(string/upper "ß")` → `"SS"`).
 - `string/->number` is a **strict** parse — int if it is one, else float, else
-  `nil`; it rejects partial input (`(string/->number "3abc")` → `nil`) and
+  a **failure**; it rejects partial input (`(string/->number "3abc")` is a failure) and
   surrounding whitespace (`string/trim` first if needed). `str` is its inverse
   (the textual form of a number). An optional **radix** reads hex/octal/binary:
   `(string/->number "1F" 16)` → `31`. See [Text → number](#text--number) for the
@@ -3619,8 +3672,8 @@ Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
   braces; braces nest inside a hole (`(string/interp "m={ {:a 1} }")`). Prefer it over
   quote-chopped `str` wherever text interleaves values, including `error` messages:
   `(error (string/interp "index out of range: {i}"))`.
-  An unknown specifier or a truncated one errors; a missing arg renders as
-  `nil`, extra args are ignored.
+  An unknown specifier or a truncated one errors; a missing arg is `nil` (so `%s`
+  renders `nil` and `%d` raises), extra args are ignored.
 
 ```clojure
 (string/split "a,b,c" ",")      ;=> ("a" "b" "c")
@@ -3632,7 +3685,7 @@ Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
 
 Only `string/upper`/`string/lower` (Unicode tables), `string/->number` (strict parse-or-failure),
 `->fixed` (float formatting), and the O(n) char-access mechanisms
-(`string/split`, `string/->codepoints`, `string-span`/`string-span-until`,
+(`string/split`, `string/->codepoints`, `string/span`/`string/span-until`,
 `%str-index-of` — one native pass each, where the pure-Brood equivalent is a
 per-character loop) are Rust primitives; the rest of the library is Brood over
 `string/substring`/`str` (`std/prelude/string.blsp`) — the "write the language in the
@@ -3794,10 +3847,12 @@ iolist in memory.
   time.
 - `(dev/gc-stats)` returns a snapshot map of this process's garbage collection —
   `{:collections :copied :reclaimed :live :live-bytes :threshold
-  :pause-total-us :pause-max-us :pause-last-us :debug-build}` —
+  :pause-total-us :pause-max-us :pause-last-us :debug-build :runtime-threshold
+  :runtime-closures}` —
   for observing reclamation *and* pause behaviour: the `:pause-*` trio is
   cumulative wall time spent in this process's collections, the worst single
-  pause, and the most recent one (µs). `:debug-build` is `true` when the binary
+  pause, and the most recent one (µs). `:runtime-closures`/`:runtime-threshold` describe
+  the shared code region instead, the same in every process. `:debug-build` is `true` when the binary
   carries debug assertions (i.e. *not* a performance build); `proc/info`
   carries the per-process `:collections` count too.
 - `(dev/vm-stats)` returns the VM **work-attribution** counters — `:vm-apply`,
@@ -3866,9 +3921,9 @@ iolist in memory.
   nursery's survivors and drops the rest, an occasional
   major compacts the old generation (ADR-072). So a long-running tail loop or
   `receive` server runs in bounded memory with nothing from the author — no
-  manual GC call, no `while`, just recursion. (You never collect by hand; the old
-  `(proc/hibernate)` primitive that did so was removed once automatic collection
-  landed.) The three thresholds are tunable for a given workload via
+  manual GC call, no `while`, just recursion. (You never need to collect by hand;
+  `(proc/hibernate)`, under [Going idle](#going-idle-prochibernate), is for a process
+  about to sit idle, not for keeping memory bounded.) The three thresholds are tunable for a given workload via
   `BROOD_GC_FLOOR` / `BROOD_GC_TENURE` / `BROOD_GC_MAJOR` (object counts, `K`/`M`
   suffixes accepted).
 
@@ -3963,11 +4018,11 @@ unchanged.
 ```
 
 **A module's own definition wins over a root name — function or macro — inside that
-module** (ADR-423). `(defn spy (x) …)` in a module makes every bare `(debug/spy …)` there call
-it, not expand the prelude's `debug/spy` macro; `/spy` still reaches the root one. Because a
-root *macro* changing meaning is easy to miss, defining one's name prints a warning at
-load — `warning: \`m/spy\` shadows the prelude macro \`debug/spy\` …` — unless the header
-declares the shadow: `(defmodule m (:shadow spy))`. Shadowing a root *function* is silent:
+module** (ADR-423). `(defn when-let (x) …)` in a module makes every bare `(when-let …)` there
+call it, not expand the prelude's `when-let` macro; `/when-let` still reaches the root one.
+Because a root *macro* changing meaning is easy to miss, defining one's name prints a warning
+at load — `warning: \`m/when-let\` shadows the prelude macro \`when-let\` …` — unless the header
+declares the shadow: `(defmodule m (:shadow when-let))`. Shadowing a root *function* is silent:
 modules owning `get`, `map` or `count` is the designed style (ADR-236).
 
 The same rule cannot let a module capture a *macro's* expansion. When a macro is defined,
@@ -4010,8 +4065,9 @@ first use; a broken or absent module errors at first use (the checker still repo
 statically). A file that needs a module loaded *before* its first call says so with
 `(:use mod)` or `(:alias mod)`, which load at the referencing file's load as they always have.
 There is **no bare-name magic**: a bare
-`sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly six clauses — `(:use …)`,
-`(:use-internals …)`, `(:alias …)`, `(:shadow …)`, `(:implements …)` and `(:load a b …)`, which loads modules at this file's load
+`sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly seven clauses — `(:use …)`,
+`(:use-internals …)`, `(:alias …)`, `(:shadow …)`, `(:implements …)`, `(:check-allow …)` (see
+[Type annotations](#type-annotations)) and `(:load a b …)`, which loads modules at this file's load
 and refers nothing: the explicit eager request for code that must have a module BEFORE its first
 call reaches it (ADR-335 — the test runner declares its whole dependency closure this way, since
 a module first used inside an `:isolated` unit is rolled back with it); **anything else is a
@@ -4049,7 +4105,7 @@ Two consequences worth knowing:
   A knob only its own module touches needs nothing.
 - A **root** registry can only be rebound by root code, so the prelude exposes
   setters for the ones tooling extends — `(reflect/set-load-path dirs)` /
-  `(reflect/add-load-path dir…)` for `*load-path*`, `(record-module-doc! key doc)` for
+  `(reflect/add-load-path dir…)` for `*load-path*`, `(%record-module-doc! mod doc)` for
   `*module-docs*`. Writing `(def *load-path* …)` inside a module would define
   `mod/*load-path*` and the loader would never see it.
 
@@ -4204,7 +4260,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/sorted.blsp` | `'sorted` | Sorted map and sorted set, ordered by `compare` (ADR-430): `empty-map`, `empty-set`, `assoc`, `dissoc`, `get`, `contains?`, `min`, `max`, `floor`, `ceiling`, `range`. Collections (`seq`/`fold`/`into`/`conj`/`count`/bare `get` in key order), and two with the same contents are `=` |
 | `std/hash.blsp` | `'hash` | `sha256`/`sha1`/`sha384`/`sha512`/`blake3`/`md5` (hex over strings or byte vectors), raw-byte digests (`sha256-raw` … → byte vectors, for chaining over bytes), `bytes->hex` (byte seq → lowercase hex), `hmac-sha256` (RFC 2104) and raw-byte `hmac-sha256-raw`/`hmac-sha1-raw`/`hmac-sha512-raw` (byte-vector key+msg → byte vector, for binary-protocol auth), `string` (djb2). All Brood over two Rust prims (`%digest`/`%hmac`). |
 | `std/diff.blsp` | `'diff` | LCS-based sequence diff and unified diffs: `seq`, `lines`, `line-hunks`, `summary`, `patch`; `unified` prints the unified diff of two texts (`@@` hunks with context, `\ No newline` markers), `parse-unified` reads one, `apply-unified` applies one |
-| `std/path.blsp` | `'path` | Path string manipulation: `string/join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `absolute`, `abbreviate` (`~` for `$HOME`, the inverse), `with-extension` |
+| `std/path.blsp` | `'path` | Path string manipulation: `join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `absolute`, `abbreviate` (`~` for `$HOME`, the inverse), `with-extension` |
 | `std/sudo.blsp` | `'sudo` | A file read or written as another user through `sudo` (ADR-588): `read`, `write`, `password-required?`; the password validated once (`sudo -S -v`) and kept nowhere, the text on a `sudo -n` command's stdin; `*program*` names the sudo run |
 | `std/system.blsp` | `'system` | The running program: `argv`, `script-args`, `halt`, `feature?`, `module-doc`. (OS interaction is `os/env`, `os/cmd`, `os/pipeline`, `os/run-process`; `file/cwd` is in `file`.) |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-string`/`decrypt-string`), `password-hash`/`password-verify`, `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `constant-time-equal?`, signatures and key exchange (`rsa-*`, `ecdsa-*`, `sign`/`verify`, `x25519-*`) |

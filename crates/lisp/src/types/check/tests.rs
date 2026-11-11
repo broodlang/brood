@@ -12,6 +12,7 @@ use crate::types::Ty;
 mod abilities;
 mod callback_shapes;
 mod caps;
+mod categories;
 mod closure_inference;
 mod cross_module_def_lint;
 mod declarations;
@@ -154,7 +155,7 @@ fn recursion_warnings(src: &str) -> Vec<String> {
     let form = expanded_for_check(&mut interp.heap, form, interp.root);
     let mut out = Vec::new();
     recursion::check_recursion(&interp.heap, form, &mut out);
-    out.into_iter().map(|(_, m)| m).collect()
+    out.into_iter().map(|finding| finding.message).collect()
 }
 
 // ------------- Step 3: sigs sourced from NativeFn, closure inference --------------

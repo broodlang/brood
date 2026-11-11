@@ -19,11 +19,7 @@ use super::*;
 /// Per CLAUSE, because each clause has its own binder list, so `_`-prefixing one that is
 /// deliberately ignored costs nothing — the same escape the `let` lint uses. A whole-fn
 /// rule would be unsound: one arm may legitimately ignore what another arm reads.
-pub(super) fn lint_unused_pattern_binders(
-    heap: &Heap,
-    form: Value,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn lint_unused_pattern_binders(heap: &Heap, form: Value, out: &mut Vec<Finding>) {
     lint_binders_walk(heap, form, true, out);
 }
 
@@ -36,12 +32,7 @@ pub(super) fn lint_unused_pattern_binders(
 /// runs it over expanded ones (where `defn` has already become `(def name (fn …))`). The
 /// first version relied on that accident and so warned in the editor but not on the
 /// command line for the same source, which is worse than either answer alone.
-fn lint_binders_walk(
-    heap: &Heap,
-    root: Value,
-    root_lint: bool,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn lint_binders_walk(heap: &Heap, root: Value, root_lint: bool, out: &mut Vec<Finding>) {
     // An explicit work stack, not recursion: this walks arbitrary user source, and the
     // checker is expected to survive deeply nested forms (`checker_survives_a_deep_let_body`
     // overflows a debug-build stack on the recursive version).
@@ -100,7 +91,7 @@ fn lint_binders_walk(
 /// The per-clause half of [`lint_unused_pattern_binders`], for an anonymous `fn` in either
 /// spelling. `(fn (acc x) acc)` and `(fn ((acc x) acc))` are the same function, so they get
 /// the same answer: the single-arm form is one clause whose head is the parameter list.
-fn lint_fn_pattern_clauses(heap: &Heap, items: &[Value], out: &mut Vec<(Option<Pos>, String)>) {
+fn lint_fn_pattern_clauses(heap: &Heap, items: &[Value], out: &mut Vec<Finding>) {
     let forms = match items.get(1..) {
         Some([Value::Str(_), rest @ ..]) if !rest.is_empty() => rest,
         Some(rest) => rest,
@@ -148,7 +139,8 @@ fn lint_fn_pattern_clauses(heap: &Heap, items: &[Value], out: &mut Vec<(Option<P
             .any(|p| matches!(p, Value::Keyword(k) if value::symbol_is(*k, "when")))
             && let Some(pos) = heap.form_pos_only(clause)
         {
-            out.push((
+            out.push(Finding::new(
+                Lint::Suspicious,
                 Some(pos),
                 concat!(
                     "`:when` belongs after the head list, not inside it — ",
@@ -195,7 +187,7 @@ fn lint_clause_binders(
     plist: Value,
     body: &[Value],
     noun: &str,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     if body.is_empty() || heap.is_synthetic(located) {
         return;
@@ -228,7 +220,11 @@ fn lint_clause_binders(
             .chain(&defaults)
             .any(|&f| walk::sym_appears_in(heap, f, b))
         {
-            out.push((Some(pos), format!("{noun}: {name}")));
+            out.push(Finding::new(
+                Lint::UnusedBinding,
+                Some(pos),
+                format!("{noun}: {name}"),
+            ));
         }
     }
 }
@@ -401,7 +397,7 @@ fn lint_binding_form(
     head: Symbol,
     form: Value,
     items: &[Value],
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     if heap.is_synthetic(form) {
         return;
@@ -412,7 +408,7 @@ fn lint_binding_form(
             let noun = "unused let binding";
             lint_sequential_binders(heap, form, items, name == "letrec", name, noun, out);
         }
-        "dolist" | "dotimes" | "doseq" | "for" | "fold-for" => {
+        "doseq" | "for" | "fold-for" => {
             lint_sequential_binders(heap, form, items, false, name, "unused loop binding", out);
         }
         "match" | "receive" => {
@@ -462,7 +458,7 @@ fn lint_sequential_binders(
     letrec: bool,
     name: &str,
     noun: &str,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let (Some(&binds), Some(body)) = (items.get(1), items.get(2..)) else {
         return;
@@ -502,7 +498,7 @@ fn report_unused_binders(
     pattern: Value,
     scope: &[Value],
     noun: &str,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let Some(pos) = heap
         .form_pos_only(pattern)
@@ -523,7 +519,11 @@ fn report_unused_binders(
             continue;
         }
         if !scope.iter().any(|&f| walk::sym_appears_in(heap, f, binder)) {
-            out.push((Some(pos), format!("{noun}: {spelling}")));
+            out.push(Finding::new(
+                Lint::UnusedBinding,
+                Some(pos),
+                format!("{noun}: {spelling}"),
+            ));
         }
     }
 }

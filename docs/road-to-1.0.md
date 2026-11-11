@@ -20,11 +20,11 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
 - ⬜ **The last surface pass, using the freeze test** (`archive/roadmap-for-v1.md` § The
   test): *can this be added later without breaking anyone, and without leaving the whole corpus
   in a dated idiom?* Run every open thread in `handoff.md` through it:
-  - 🟡 **Thread 6, "reduce before adding": decided (ADR-674), stage 1 landed.** `doseq` is the
-    one form for effect and collects nothing. `dotimes`, `dolist`, `unless` and `match*` are
-    deprecated: they warn, and `nest format --migrate` rewrites them. `match*` became the internal
-    `%match`. `case`, `with-out-str` and `with-err-str` stay. **Stage 2, before `rc.0`:** remove
-    the four forms and their migrations, and put each in the rename ledger.
+  - ✅ **Thread 6, "reduce before adding": decided (ADR-674), both stages landed.** `doseq` is
+    the one form for effect and collects nothing. `dotimes`, `dolist`, `unless` and `match*` were
+    deprecated in stage 1 (2026-11-10) and removed in stage 2 (2026-11-11), with the migration
+    that rewrote them; each is in the rename ledger, so its unbound error names the replacement.
+    `match*` became the internal `%match`. `case`, `with-out-str` and `with-err-str` stay.
   - **Thread 5, a declared shadow for root functions.** Adding the warning later would be a new
     lint. Under ADR-673 §5 that is advisory and so additive, but only once structured
     severities exist (B3). Otherwise decide it now.
@@ -39,40 +39,60 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
 
 ## B. Mechanism the promise needs (kernel and std)
 
-1. ⬜ **A format version on the lock file.** Today `(lock :dependencies …)` has none, and a lock
+1. ✅ **A format version on the lock file** (2026-11-11). The writer already stamped
+   `:version 1`; the reader now honours it — a newer format is refused naming both, an
+   unversioned lock reads as 1, a non-lock file is refused. Guard:
+   `crates/nest/tests/manifest_and_lock_versions.rs`. Was: Today `(lock :dependencies …)` has none, and a lock
    it cannot read is treated as absent (`std/tool/package.blsp`). Add the version, refuse a
    newer one with a message, and read every older one.
-2. ⬜ **Manifest keys.** An unknown `project.blsp` key should warn, never fail, so that a later
+2. ✅ **Manifest keys** (2026-11-11). Today an unknown key was silently ignored; it now warns
+   once per command and the project loads. Same guard. Was: An unknown `project.blsp` key should warn, never fail, so that a later
    minor can add keys. Check what happens today and pin it with a test.
-3. ⬜ **Structured warning severities in `nest check`.** Replace the matching on message text
+3. ✅ **Structured warning severities in `nest check`** (ADR-698, 2026-11-11). Every warning
+   carries a category; `nest check` decides gating from it and the project's `:check` key, and a
+   `(:check-allow …)` header clause silences a category for a file. Open: the "new lint is
+   advisory until the next major" rule needs a lint's `:since`, which only a lint added after
+   1.0 will have. Was: Replace the matching on message text
    (`project-check.blsp`'s "for now, pending structured warning severities") with a severity on
    each warning. Then add project- and file-level controls (open thread 1), the "new lint is
    advisory" rule, and the `project.blsp` key that opts a project into new lints.
    ADR-673 §5 depends on this.
-4. ⬜ **Wire protocol versioning (ADR-673 §3: same `major.minor`).** Put the Brood
+4. ✅ **Wire protocol versioning (ADR-673 §3: same `major.minor`)** (ADR-699, 2026-11-11). Was: Put the Brood
    `major.minor` in the handshake beside the protocol magic. Refuse a mismatch with a message
    that names both versions. Keep the refusal before any session key is derived, so a
    mismatched node learns why and nothing else.
-5. ⬜ **Deprecating CLI flags.** `nest`'s flags are data in `std/tool/nest.blsp`, so they can
+5. ✅ **Deprecating CLI flags** (2026-11-11). A flag spec `{:deprecated "VERSION" :use
+   "--new"}` keeps working, warns on stderr, stores its value under the replacement, is marked
+   in `--help` and drops out of completion. Guard: `tests/nest_test.blsp` "a deprecated flag".
+   Was: `nest`'s flags are data in `std/tool/nest.blsp`, so they can
    carry `:deprecated` the way names do. Today nothing can retire a flag gently.
 6. 🟡 **Stability metadata in use.** `:since`, `:deprecated` and `:beta` exist (ADR-283), and
    `std/` uses them about 22 times. Nothing is `:beta` at 1.0, so clear the three existing
    `:beta` marks before the release candidates: settle each name or remove it. `:since` stays
    implicit for names that exist at 1.0. Make `nest doc` show "beta" for names added later.
-7. ⬜ **"An error keeps its code."** `error-codes.md` promises only that a code is never reused.
+7. ✅ **"An error keeps its code."** (2026-11-11) `error_codes::KINDS` declares each code's
+   kind; `crates/lisp/tests/error_code_kinds.rs` freezes the shipped rows, checks
+   `error-codes.md` against them and checks real raises. Was: `error-codes.md` promises only that a code is never reused.
    Add a gate that fails if an existing code's `:kind` changes.
 
 ## C. The docs tell the truth
 
-- ⬜ **README.** Replace the "experimental, pre-1.0" warning with the ADR-673 promise. Link
+- ✅ **README** (2026-11-11): the warning now says what holds before 1.0 and what ADR-673
+  promises from 1.0.0, and links `brood-among-lisps.md`. At 1.0.0 the "until 1.0" half goes.
+  Was: Replace the "experimental, pre-1.0" warning with the ADR-673 promise. Link
   `brood-among-lisps.md`.
-- ⬜ **`language.md`.** Its paragraph on "most-specific arity wins" (ADR-047) contradicts
-  ADR-619's in-order clauses further down the same page. Sweep the page against the
-  implementation once, since it is the document a newcomer trusts.
-- ⬜ **`lsp.md`** still talks about a `require` target; there is no `require` form.
+- ✅ **`language.md`** (2026-11-11). The "most-specific arity wins" paragraph now says clauses
+  run in order, and a sweep against the implementation corrected 28 more statements (error
+  kinds, removed and renamed names, bitwise width, failure returns, lint severities). It
+  found three code bugs, fixed: two `proc/offload` allowlist names left behind by renames,
+  a stale `defprotocol` hint, a stale crash-report sample.
+- ✅ **`lsp.md`** (2026-11-11): every `require`-form passage (goto, links, completion, the
+  add/remove-require code actions, the tier table) now describes what the server does since
+  ADR-229. Was: still talks about a `require` target; there is no `require` form.
 - ⬜ **CLAUDE.md** loses the greenfield section at 1.0.0 (ADR-673 §7). The rename-wave section
   becomes the procedure for a major release.
-- ⬜ **A "Coming from …" note for Common Lisp and Scheme**, beside the Clojure table. The
+- ✅ **A "Coming from …" note for Common Lisp and Scheme** (2026-11-11), `language.md`
+  beside the Clojure table, each row checked against the running language. Was: The
   "reaches for and not find" table in `brood-among-lisps.md` is the seed.
 
 ## D. It runs where people are
@@ -104,7 +124,8 @@ General-purpose gap 2, the release half.
 Everything ADR-673 would forbid after 1.0 is cheapest in 0.5x:
 
 - Clear CHANGELOG's Unreleased breaks in a 0.51 release.
-- Land ADR-674's stage 2: remove `dotimes`, `dolist`, `unless` and `match*`, with ledger entries.
+- ✅ Land ADR-674's stage 2: remove `dotimes`, `dolist`, `unless` and `match*`, with ledger
+  entries (2026-11-11).
 - Rename anything the surface pass finds to be misnamed. A rename after 1.0 costs a full
   deprecation window.
 

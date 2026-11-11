@@ -223,14 +223,17 @@ const MAX_GOSSIP_PEERS: usize = 4096;
 /// on a v10 link are exactly v10's. **v12** adds `M_RECORD`, a record (ADR-542) — to a v11
 /// peer the new tag is a decode error, so the byte bumps and a v11 node does not link with a
 /// v12 one (greenfield, as every bump before lanes). A v12 node still speaks v10 to a v10
-/// peer, and a message carrying a record is refused for such a link rather than sent as
-/// bytes the peer cannot read ([`Message::holds_record`]). **v13** adds `M_BYTES_NEW` and
+/// peer, and a message carrying a record was refused for such a link rather than sent as
+/// bytes the peer cannot read. **v13** adds `M_BYTES_NEW` and
 /// `M_BYTES_SEEN`: a large bytes value crosses a link once and then by its digest (ADR-695) — to
 /// a v12 peer the new tags are a decode error, so the byte bumps and a v12 node does not link
-/// with a v13 one (greenfield again); a v10 link never carries them. "current" below means v13.
-pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x0d";
-/// The version before lanes, which a v11 node still speaks to a v10 peer (ADR-492).
-pub(super) const PROTOCOL_MAGIC_V10: [u8; 4] = *b"BRD\x0a";
+/// with a v13 one (greenfield again). **v14** follows the magic with the Brood `major.minor`
+/// (ADR-673 §3, ADR-699): nodes link only within one minor, so the v10 fallback above is
+/// gone — a v10 runtime is from an older minor by construction — and a later protocol
+/// change needs no byte of its own, since a peer of another minor is refused by version.
+/// The byte bumps once more so a v13 node, which would read the version as the start of
+/// its `Hello`, is refused as a magic mismatch instead.
+pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x0e";
 pub(super) const NONCE_LEN: usize = 32;
 pub(super) const MAC_LEN: usize = 32;
 /// Length of an X25519 public key (the ephemeral DH key in `Hello`, ADR-089).

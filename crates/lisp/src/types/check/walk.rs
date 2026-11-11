@@ -20,7 +20,7 @@ use super::sigs::{
 use crate::core::heap::{Heap, SymbolMap};
 use crate::core::keywords as kw;
 use crate::core::value::{self, Arity, Symbol, Value};
-use crate::error::Pos;
+use crate::types::check::{Finding, Lint};
 use crate::types::{GradualTy, Sig, Ty};
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -43,13 +43,7 @@ pub(in crate::types::check) use unbound::*;
 /// `Pos` of its own). A no-op for any non-symbol form, which `check_into` walks
 /// instead. Shared by the call-operand loop and the `def`/`let`/`if` value
 /// slots so every evaluated-leaf site applies the one [`is_unbound`] rule.
-fn check_value_leaf(
-    heap: &Heap,
-    form: Value,
-    parent: Value,
-    ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn check_value_leaf(heap: &Heap, form: Value, parent: Value, ctx: &Ctx, out: &mut Vec<Finding>) {
     // Operand / value-slot checking is whole-file-only — a bare fragment's free
     // variables are legitimately ambiguous (see `Ctx::check_operands`).
     if !ctx.checks_operands() {
@@ -57,12 +51,16 @@ fn check_value_leaf(
     }
     if let Value::Sym(s) = form {
         if is_unbound(heap, ctx, s) && !ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
-            out.push((heap.form_pos_only(parent), unbound_msg_in(ctx, &name_of(s))));
+            out.push(Finding::new(
+                Lint::Unbound,
+                heap.form_pos_only(parent),
+                unbound_msg_in(ctx, &name_of(s)),
+            ));
         }
         if !ctx.is_suppressed(super::ctx::SUPPRESS_DEPRECATED)
-            && let Some(msg) = stability_msg(heap, s)
+            && let Some((lint, msg)) = stability_msg(heap, s)
         {
-            out.push((heap.form_pos_only(parent), msg));
+            out.push(Finding::new(lint, heap.form_pos_only(parent), msg));
         }
     }
 }
@@ -76,13 +74,7 @@ fn check_value_leaf(
 /// only an escape that brings the depth back to 0 is code *here* (an inner template's
 /// `~` belongs to that template). Containers are walked too — `` `[~a {:k ~b}] `` — for
 /// the same reason KI-70 gave.
-fn check_unquoted(
-    heap: &Heap,
-    form: Value,
-    level: u32,
-    ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn check_unquoted(heap: &Heap, form: Value, level: u32, ctx: &Ctx, out: &mut Vec<Finding>) {
     crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
         match form {
             Value::Vector(id) => {
@@ -128,12 +120,7 @@ fn check_unquoted(
     })
 }
 
-pub(super) fn check_into(
-    heap: &Heap,
-    form: Value,
-    ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn check_into(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<Finding>) {
     // The walk recurses per nesting level of the checked form, and a
     // deeply-nested-but-legal form (the kernel's deep-value tests build
     // 60k-deep lists) would blow the native stack. Grow it in heap-backed
@@ -179,7 +166,7 @@ fn check_arg_against_param(
     param: &Ty,
     form: Value,
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) -> bool {
     let fn_literal = matches!(arg, Value::Pair(_))
         && list_items(heap, arg)
@@ -192,7 +179,8 @@ fn check_arg_against_param(
         )
         && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
     {
-        out.push((
+        out.push(Finding::new(
+            Lint::TypeMismatch,
             arg_pos(heap, arg, form),
             format!(
                 "{}: argument {} expects {}, got a function ({})",
@@ -232,7 +220,11 @@ fn check_arg_against_param(
         );
         // Anchor at the offending ARGUMENT when it's a positioned sub-form (a nested
         // call), else the call form.
-        out.push((arg_pos(heap, arg, form), msg));
+        out.push(Finding::new(
+            Lint::TypeMismatch,
+            arg_pos(heap, arg, form),
+            msg,
+        ));
     }
     true
 }
@@ -249,7 +241,7 @@ fn check_computed_call(
     form: Value,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let Some(&head @ Value::Pair(_)) = items.first() else {
         return;
@@ -268,7 +260,8 @@ fn check_computed_call(
     let arity = arity_of_sig(&sig);
     if !arity.accepts(argc) {
         if !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) {
-            out.push((
+            out.push(Finding::new(
+                Lint::TypeMismatch,
                 heap.form_pos_only(form),
                 crate::eval::arity_message(&callee, arity.min, arity.max, argc, ""),
             ));
@@ -306,7 +299,7 @@ fn indexed_collection(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Symbol>
     }
 }
 
-fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<Finding>) {
     // A vector or map **literal in value position is evaluated code**: `[:tag (f x)]`
     // calls `f`, and so does `{:k (f x)}`, so the walk descends into both.
     //
@@ -418,7 +411,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                     out.extend(
                         inner_out
                             .into_iter()
-                            .filter(|(_, m)| m.starts_with(UNBOUND_PREFIX)),
+                            .filter(|finding| finding.message.starts_with(UNBOUND_PREFIX)),
                     );
                     return;
                 }
@@ -482,7 +475,7 @@ fn check_dispatch_hooks(
     head: Symbol,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let shadowed = ctx.is_lexical_local(head);
     if let (Some(info), false) = (ctx.ability(), shadowed)
@@ -510,7 +503,8 @@ fn check_dispatch_hooks(
                     .consistent_with_mode(relax_param_for_arg(param_ty), ctx.strict())
                 && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
             {
-                out.push((
+                out.push(Finding::new(
+                    Lint::TypeMismatch,
                     arg_pos(heap, arg, form),
                     format!(
                         "ability {}/{}: argument {} expects {}, got {} ({})",
@@ -574,12 +568,13 @@ fn check_keyword_accessor(
     key: Symbol,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let shown = format!(":{}", value::symbol_name_ref(key));
     let argc = items.len() - 1;
     if argc == 0 || argc > 2 {
-        out.push((
+        out.push(Finding::new(
+            Lint::TypeMismatch,
             heap.form_pos_only(form),
             format!("{shown}: a keyword accessor takes 1 or 2 arguments, got {argc}"),
         ));
@@ -589,7 +584,8 @@ fn check_keyword_accessor(
             && gradual.bound.is_disjoint(&keyed_receiver())
             && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
         {
-            out.push((
+            out.push(Finding::new(
+                Lint::TypeMismatch,
                 arg_pos(heap, items[1], form),
                 format!(
                     "{shown}: expected a map, record, set or nil to look up in, got {} ({})",
@@ -609,13 +605,7 @@ fn check_keyword_accessor(
 /// per-argument signature cannot say this: `countable` includes both keyed and indexed
 /// kinds, and the conflict is in the relationship between the two arguments. Literal
 /// keyword keys only, so a computed key is never guessed at.
-fn check_keyword_get(
-    heap: &Heap,
-    form: Value,
-    items: &[Value],
-    ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn check_keyword_get(heap: &Heap, form: Value, items: &[Value], ctx: &Ctx, out: &mut Vec<Finding>) {
     if items.len() < 3 || !matches!(items[2], Value::Keyword(_)) {
         return;
     }
@@ -624,7 +614,8 @@ fn check_keyword_get(
         && gradual.bound.is_disjoint(&keyed_receiver())
         && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
     {
-        out.push((
+        out.push(Finding::new(
+            Lint::TypeMismatch,
             arg_pos(heap, items[1], form),
             format!(
                 "get: a keyword key needs a map, record, set or nil, got {} ({}) — an \
@@ -647,7 +638,7 @@ fn check_named_call(
     s: Symbol,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let declared = if ctx.is_lexical_local(s) {
         None // a fn/let local shadows the name → not the declared global
@@ -743,12 +734,16 @@ fn check_named_call(
     // A CALLED name gets the same stability diagnostic a referenced one does — the
     // call is the commoner shape by far, and the value-slot check above never sees it.
     if !ctx.is_suppressed(super::ctx::SUPPRESS_DEPRECATED)
-        && let Some(msg) = stability_msg(heap, s)
+        && let Some((lint, msg)) = stability_msg(heap, s)
     {
-        out.push((heap.form_pos_only(form), msg));
+        out.push(Finding::new(lint, heap.form_pos_only(form), msg));
     }
     if is_unbound(heap, ctx, s) && !ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
-        out.push((heap.form_pos_only(form), unbound_msg_in(ctx, &name_of(s))));
+        out.push(Finding::new(
+            Lint::Unbound,
+            heap.form_pos_only(form),
+            unbound_msg_in(ctx, &name_of(s)),
+        ));
         // Still recurse into args below — they may carry their own issues.
     }
 
@@ -774,7 +769,8 @@ fn check_named_call(
             // The SAME function the runtime's arity error raises with
             // (`eval::arity_message`), same parameter names, so one defect never reads
             // as two unrelated messages.
-            out.push((
+            out.push(Finding::new(
+                Lint::TypeMismatch,
                 heap.form_pos_only(form),
                 crate::eval::arity_message(
                     &name_of(s),
@@ -804,7 +800,11 @@ fn check_named_call(
         && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
     {
         for msg in comp_stage_mismatch(heap, form, ctx) {
-            out.push((heap.form_pos_only(form), msg));
+            out.push(Finding::new(
+                Lint::TypeMismatch,
+                heap.form_pos_only(form),
+                msg,
+            ));
         }
     }
     // …and `(apply f … xs)` handing `f` what it cannot take (`apply_spread_mismatch`).
@@ -813,7 +813,11 @@ fn check_named_call(
         && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
     {
         for msg in apply_spread_mismatch(heap, form, ctx) {
-            out.push((heap.form_pos_only(form), msg));
+            out.push(Finding::new(
+                Lint::TypeMismatch,
+                heap.form_pos_only(form),
+                msg,
+            ));
         }
     }
     if is_output_sink(s) {
@@ -824,7 +828,8 @@ fn check_named_call(
                         && matches!(arity_of(heap, a), Some(ar) if ar.min == 0 && ar.max == Some(0))
             {
                 let n = name_of(a);
-                out.push((
+                out.push(Finding::new(
+                            Lint::Suspicious,
                             heap.form_pos_only(form),
                             format!(
                                 "{n}: function used as a value — did you mean ({n})? \
@@ -860,7 +865,8 @@ fn check_named_call(
             if let Value::Sym(a) = arg {
                 let nm = name_of(a);
                 if !ctx.is_local(a) && super::guards::is_syntactic_keyword(&nm) {
-                    out.push((
+                    out.push(Finding::new(
+                        Lint::Unbound,
                         arg_pos(heap, arg, form),
                         format!(
                             "{nm} is a special form, not a value — it has to be called, \
@@ -882,7 +888,11 @@ fn check_named_call(
             Some(super::guards::MatchCoverage::Missing(msg))
                 if !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) =>
             {
-                out.push((heap.form_pos_only(form), msg));
+                out.push(Finding::new(
+                    Lint::TypeMismatch,
+                    heap.form_pos_only(form),
+                    msg,
+                ));
             }
             Some(super::guards::MatchCoverage::Missing(_)) => {}
             // A `:total` function (ADR-351) may not reach a `match` failure the
@@ -894,7 +904,8 @@ fn check_named_call(
                     .total_fn()
                     .filter(|_| !ctx.is_suppressed(super::ctx::SUPPRESS_TOTAL))
                 {
-                    out.push((
+                    out.push(Finding::new(
+                        Lint::Total,
                         heap.form_pos_only(form),
                         format!(
                             "{} is declared :total but a match in its body has no \
@@ -944,7 +955,11 @@ fn check_named_call(
     if !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
         && let Some(message) = never_true_predicate(heap, items, ctx)
     {
-        out.push((arg_pos(heap, items[1], form), message));
+        out.push(Finding::new(
+            Lint::TypeMismatch,
+            arg_pos(heap, items[1], form),
+            message,
+        ));
     }
 
     if let Some(sig) = sig {
@@ -963,7 +978,7 @@ fn check_args_against_sig(
     sig: &Sig,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     // A self-call's arguments are typed under the caller's own demands (the induction
     // step — `Ctx::under_self_demands`); every other call, and the callback checks
@@ -1001,7 +1016,11 @@ fn check_args_against_sig(
                     callback_desc(arg),
                     arity_str(cb),
                 );
-                out.push((arg_pos(heap, arg, form), msg));
+                out.push(Finding::new(
+                    Lint::TypeMismatch,
+                    arg_pos(heap, arg, form),
+                    msg,
+                ));
             }
             // Callback **parameter-type** check. The arity check above asks
             // whether the callback can be called at all; this asks whether it
@@ -1038,7 +1057,11 @@ fn check_args_against_sig(
                         callback_desc(arg),
                         accepts,
                     );
-                    out.push((arg_pos(heap, arg, form), msg));
+                    out.push(Finding::new(
+                        Lint::TypeMismatch,
+                        arg_pos(heap, arg, form),
+                        msg,
+                    ));
                 }
                 // …and the **result**. This was left out on the grounds that
                 // an inferred return over-approximates, so comparing it by
@@ -1066,7 +1089,11 @@ fn check_args_against_sig(
                         callback_desc(arg),
                         gives,
                     );
-                    out.push((arg_pos(heap, arg, form), msg));
+                    out.push(Finding::new(
+                        Lint::TypeMismatch,
+                        arg_pos(heap, arg, form),
+                        msg,
+                    ));
                 }
             }
         }
@@ -1084,7 +1111,7 @@ fn check_overload_call(
     s: Symbol,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     if !ctx.is_lexical_local(s)
         && let Some(arms) = ctx
@@ -1105,7 +1132,8 @@ fn check_overload_call(
         if overload_arg_mismatch(&arms, &arg_tys)
             && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
         {
-            out.push((
+            out.push(Finding::new(
+                Lint::TypeMismatch,
                 heap.form_pos_only(form),
                 format!(
                     "{}: no clause accepts these arguments — the clauses take {}",
@@ -1122,13 +1150,7 @@ fn check_overload_call(
 /// `resolves_to_macro`): walking them as code would false-flag a template's spliced
 /// binders (`(wp v (+ a b))` where `wp` binds `a`/`b`). A `fold`/`map` callback is held
 /// to, or walked under, the types its combinator hands it.
-fn walk_operands(
-    heap: &Heap,
-    form: Value,
-    items: &[Value],
-    ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+fn walk_operands(heap: &Heap, form: Value, items: &[Value], ctx: &Ctx, out: &mut Vec<Finding>) {
     let head_is_macro =
         matches!(items.first(), Some(&Value::Sym(s)) if resolves_to_macro(heap, ctx, s));
     // A `do`'s non-final forms are a body sequence, so a bare symbol among them is
@@ -1179,7 +1201,8 @@ fn walk_operands(
                         {
                             continue;
                         }
-                        out.push((
+                        out.push(Finding::new(
+                            Lint::TypeMismatch,
                             arg_pos(heap, arg, form),
                             format!(
                                 "{}: argument {} is a callback handed {} at position {}, \
@@ -1277,7 +1300,7 @@ fn drop_unwanted_dead_clause(
     form: Value,
     items: &[Value],
     ctx: &Ctx,
-    if_out: &mut Vec<(Option<Pos>, String)>,
+    if_out: &mut Vec<Finding>,
 ) {
     let test = items.get(1).copied().unwrap_or(Value::nil());
     let Some(guard) = guard_assertion(heap, test, ctx) else {
@@ -1294,8 +1317,13 @@ fn drop_unwanted_dead_clause(
     // The never-true predicate's own warning for this test, computed whatever suppression
     // is in force, and the symbol it tested.
     let test_items = list_items(heap, test).unwrap_or_default();
-    let predicate_warning = never_true_predicate(heap, &test_items, ctx)
-        .map(|message| (arg_pos(heap, test_items[1], test), message));
+    let predicate_warning = never_true_predicate(heap, &test_items, ctx).map(|message| {
+        Finding::new(
+            Lint::TypeMismatch,
+            arg_pos(heap, test_items[1], test),
+            message,
+        )
+    });
     if !suppressed && predicate_warning.is_none() {
         return;
     }
@@ -1311,7 +1339,7 @@ fn drop_unwanted_dead_clause(
     let message = dead_clause(binding);
     let Some(index) = if_out
         .iter()
-        .position(|(pos, text)| *pos == position && *text == message)
+        .position(|finding| finding.pos == position && finding.message == message)
     else {
         return;
     };
@@ -1333,7 +1361,10 @@ fn drop_unwanted_dead_clause(
         Some(&Value::Sym(tested)) => tested,
         _ => binding,
     };
-    if_out.insert(index.min(if_out.len()), (position, dead_clause(named)));
+    if_out.insert(
+        index.min(if_out.len()),
+        Finding::new(Lint::UnreachableClause, position, dead_clause(named)),
+    );
 }
 
 /// Is this `(%try thunk handler)` the expansion of `assert-error` or `error-of` — a form

@@ -14,11 +14,11 @@ pub(in crate::types::check) const UNBOUND_PREFIX: &str = "unbound symbol: ";
 ///
 /// **Advisory, not gating.** A deprecation that fails the build is a removal with extra
 /// steps: the whole point is to say "this is going away" while the code still works, so
-/// `project-advisory-warning?` classifies it as printed-but-not-counted. That is also why
+/// its category, `:deprecated`, is advisory: printed but not counted (ADR-698). That is also why
 /// this reads the *loaded image* rather than the file — a deprecation is almost always
 /// cross-module, and the module that declares it has been loaded by the time its callers
 /// are checked.
-pub(in crate::types::check) fn stability_msg(heap: &Heap, sym: Symbol) -> Option<String> {
+pub(in crate::types::check) fn stability_msg(heap: &Heap, sym: Symbol) -> Option<(Lint, String)> {
     let meta = heap.name_meta(sym)?;
     let name = name_of(sym);
     if let Some(version) = &meta.deprecated {
@@ -26,13 +26,14 @@ pub(in crate::types::check) fn stability_msg(heap: &Heap, sym: Symbol) -> Option
             Some(u) => format!(" — use `{}` instead", name_of(u)),
             None => String::new(),
         };
-        return Some(format!(
-            "`{name}` is deprecated since {version}{replacement}"
+        return Some((
+            Lint::Deprecated,
+            format!("`{name}` is deprecated since {version}{replacement}"),
         ));
     }
     meta.beta
         .as_ref()
-        .map(|why| format!("`{name}` is beta — {why}"))
+        .map(|why| (Lint::Beta, format!("`{name}` is beta — {why}")))
 }
 
 /// Clip `s` to `max` characters with a trailing ellipsis. A diagnostic names the *reason*;
@@ -290,7 +291,7 @@ pub(super) fn lint_discarded_symbols(
     body: &[Value],
     parent: Value,
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     if body.len() < 2 || ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_UNBOUND) {
         return;
@@ -330,6 +331,10 @@ pub(super) fn lint_discarded_symbols(
         } else {
             format!("{name} is evaluated here and discarded — reading a name has no effect")
         };
-        out.push((arg_pos(heap, form, parent), msg));
+        out.push(Finding::new(
+            Lint::Suspicious,
+            arg_pos(heap, form, parent),
+            msg,
+        ));
     }
 }

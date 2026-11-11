@@ -90,6 +90,10 @@ identity and may override those paths. The rest of the tool is its siblings:
 ;; hive lists them differently. Optional; absent = `:library`. Orthogonal to `:enhances`,
 ;; which marks a plugin (a library that plugs into an app) regardless of kind.
 (defdyn project/*kind* :library)
+;; `:check` — which warning categories this project's `nest check` treats as advisory,
+;; gating, or silent (ADR-698): `{:advisory #{…} :gating #{…} :allow #{…}}`. Absent = `{}`,
+;; the checker's defaults.
+(defdyn project/*check* {})
 ;; `:bundled-packages` — the FULL rooted-package set `bundle-collect` baked into a release
 ;; (`project-release` reads it at bundle boot); nil outside a bundle.
 (defdyn project/*bundled-packages* nil)
@@ -386,7 +390,7 @@ spells, and it is a single path component — no `/`, `\\` or NUL, and not start
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
-  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:doc-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. `:doc-paths` names the markdown `nest doctest` runs the fenced examples of — files, directories (every `.md` under them) and `!`-prefixed paths to leave out; default `README.md` when there is one. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(system/brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. `:kind` is the package's kind — `:app` (an application you run) or `:library` (the default, an ordinary reusable package); optional, and the registry lists the two differently. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:doc-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. `:doc-paths` names the markdown `nest doctest` runs the fenced examples of — files, directories (every `.md` under them) and `!`-prefixed paths to leave out; default `README.md` when there is one. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(system/brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. `:kind` is the package's kind — `:app` (an application you run) or `:library` (the default, an ordinary reusable package); optional, and the registry lists the two differently. `:check` sets which warning categories `nest check` treats as advisory, gating or silent (`:check {:advisory [:non-tail-recursion] :allow [:list-truthiness]}`, ADR-698). Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
   ;; quasiquote (not `(list 'apply …)`) so α qualifies `apply`
   ;; to `project/apply-config` at this macro's definition (ADR-065 §7).
   `(apply-config (quote ~opts)))
@@ -441,6 +445,37 @@ to `:enhances`: a plugin is an ordinary `:library` that also declares what it en
         (pr-str value)
         " — write :kind :app for an application, or omit it (the default is :library)")))
 
+(defn- project-parse-check (value)
+  "`:check` as a map of `:advisory`, `:gating` and `:allow` to SETS of warning categories
+(ADR-698): which of `nest check`'s categories this project demotes to advisory, promotes to
+gating, or silences. Absent is `{}`. The shape is validated here, at load, naming the key;
+whether each name is a category the checker has is `nest check`'s to report, as a warning,
+since a newer checker may know names this one does not."
+  (cond
+    (nil? value) {}
+    (not (map? value))
+      (error "project: "
+        ":check must be a MAP, got "
+        (pr-str value)
+        " — write it as :check {:advisory [:non-tail-recursion] :allow [:list-truthiness]}")
+    else
+      (fold (%map-pairs value)
+        {}
+        (fn (acc [key categories])
+          (when (not (contains? #{:advisory :gating :allow} key))
+            (error "project: " ":check takes :advisory, :gating and :allow, got " (pr-str key)))
+          (when (not (and (or (vector? categories) (pair? categories) (nil? categories))
+                       (every? categories keyword?)))
+            (error "project: "
+              ":check "
+              key
+              " must be a vector of category keywords, got "
+              (pr-str categories)
+              " — write it as :check {"
+              key
+              " [:non-tail-recursion]}"))
+          (assoc acc key (into #{} categories))))))
+
 (defn- project-parse-enhances (value)
   "`:enhances` as a `{name-symbol -> constraint-string}` map. Absent is `{}` (an
 ordinary library). Names may be written as symbols (`{bedit \">= 0.3\"}`, matching
@@ -473,10 +508,38 @@ manifest is read, naming the key, not later inside whoever consumes the map."
                 " \">= 0.3\"}"))
             (assoc acc (if (symbol? nm) nm (symbol (str nm))) constraint))))))
 
+;; Every key a `(project …)` form may hold: the manifest's own, `:templates` (read by `nest
+;; new --from`, ADR-424), and the build stamps a release bundle adds (`project-release`).
+(def- *project-manifest-keys*
+  #{:name
+    :version :description :repository :brood :kind :enhances :check :main :source-paths :test-paths
+    :format-paths :doc-paths :dependencies :dev-dependencies :format-headers :format-plugins
+    :width :templates :bundled-packages :project-modules :built-at :built-with})
+
+;; Warn — never fail — on a key this build does not know (road-to-1.0 §B2): a later minor
+;; may add keys, and a manifest written for it must still load here. A typo
+;; (`:dependecies`) is the other way to get one, which is why it is said at all.
+;; Said once per manifest: one command sets the project up more than once, and the same
+;; warning twice reads as two problems.
+(def- *project-warned-manifest* nil)
+
+(defn- project-warn-unknown-keys (opts)
+  (when (not (= opts *project-warned-manifest*))
+    (def- *project-warned-manifest* opts)
+    (let ([keys _] (fold opts
+                     [[] true]
+                     (fn ([found at-key] item) [(if at-key (conj found item) found) (not at-key)])))
+      (doseq (key (seq/filter keys (fn (key) (not (contains? *project-manifest-keys* key)))))
+        (io/puts (str "project: warning: unknown key "
+                   (pr-str key)
+                   " in project.blsp is ignored — a typo, or a key from a newer Brood")
+          :to *err*)))))
+
 (defn apply-config (opts)
   "Apply a parsed manifest `opts` (a plist) by `def`ing the `*project-*` globals — name, version, description, paths, `:main` entry, dependencies and formatter settings; returns the project name.
 
     (project/apply-config '(:name \"myapp\" :version \"0.1.0\"))   ;~> \"myapp\" — the *project-* globals now set"
+  (project-warn-unknown-keys opts)
   (def project/*name* (plist-get opts :name))
   (def project/*version* (plist-get opts :version))
   ;; Package-registry metadata (ADR-147): human summary + the git URL this package
@@ -490,6 +553,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (def project/*bundled-packages* (plist-get opts :bundled-packages))
   (def project/*enhances* (project-parse-enhances (plist-get opts :enhances)))
   (def project/*kind* (project-parse-kind (plist-get opts :kind)))
+  (def project/*check* (project-parse-check (plist-get opts :check)))
   (let (src (plist-get opts :source-paths)
         tst (plist-get opts :test-paths)
         fmt (plist-get opts :format-paths)
@@ -1058,6 +1122,9 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   ;; prior setup's constraint in a long-lived tooling image (`apply` re-sets it,
   ;; but only when a manifest is applied — a bare/manifest-less setup skips that).
   (def project/*brood* nil)
+  ;; and the warning policy, for the same reason: one project's `:check` must not decide
+  ;; the next one's gate
+  (def project/*check* {})
   ;; Read the manifest as *data* and apply it — rather than `reflect/load`ing it, which
   ;; would need the `(project …)` macro bound bare in the (root) manifest file
   ;; (it now lives in this namespace). Manifests stay written `(project …)`.

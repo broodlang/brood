@@ -1333,13 +1333,8 @@ fn resolve_list(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Sy
         if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LETREC) {
             return resolve_let(heap, form, &items, ns_name, locals);
         }
-        // `/%match` is the form the pattern lowerings emit (ADR-638, ADR-674); `match*` is its
-        // deprecated spelling, accepted until it is removed
-        if value::symbol_is(h, kw::MATCH_ENGINE)
-            || value::symbol_is(h, "/%match")
-            || value::symbol_is(h, kw::MATCH_STAR)
-            || value::symbol_is(h, "/match*")
-        {
+        // `/%match` is the form the pattern lowerings emit (ADR-638, ADR-674)
+        if value::symbol_is(h, kw::MATCH_ENGINE) || value::symbol_is(h, "/%match") {
             return resolve_match(heap, form, &items, ns_name, locals);
         }
     }

@@ -96,8 +96,8 @@ cross-file flat-namespace collisions."
 (defn load-tool (args)
   "`load` — load a `.blsp` file into the session and check it. Side-effects
 (`def`, `defn`, `defmacro`) persist. Returns `{:ok true :diagnostics [...]
-:shadows [...]}` — `diagnostics` are advisory `{:file :line :col :message}`
-type/arity/unbound/non-tail-recursion warnings from `check-file-structured`;
+:shadows [...]}` — `diagnostics` are advisory `{:file :line :col :message :category :text}`
+warnings from `check-file-structured`;
 `shadows` flags names this file defines that another project source file also
 defines (the silent flat-namespace collision). On a load error:
 `{:ok false :error msg}`.
@@ -305,7 +305,7 @@ check after the first invocation.
 
 (defn check-tool (args)
   "`check` — advisory type-check the project. Returns
-`{:diagnostics [{:file :line :col :message} ...]}` (one entry per warning,
+`{:diagnostics [{:file :line :col :message :category :severity :text} ...]}` (one entry per warning,
 position omitted when the checker can't supply one — ADR-024). Backed by
 `(project-check/check-structured project/*root*)` in `std/tool/project-check.blsp` (step 1c-a). `(or … [])`
 so a clean project renders as `{:diagnostics []}` rather than `{:diagnostics
@@ -780,37 +780,23 @@ Brood pattern, `std/tool/explain.blsp`)."
               :required ["query"]}
      :handler find-pattern-tool}))
 
-;; ---- the server: JSON-RPC 2.0 over stdio ------------------------------------
+;; ---- the server: `nest mcp` over `mcp-server` -----------------------------------
 ;;
-;; The MCP stdio transport is newline-delimited JSON — one message per line, NOT LSP's
-;; `Content-Length` framing (a real client never completes `initialize` against that).
-;; One reply per request, none for a notification; a line that does not parse is
-;; answered `-32700` and the session keeps serving.
-;;
-;; A `tools/call` handler runs in a process of its own, monitored by the dispatcher: its
-;; stdout is captured there (the channel stays pure JSON; the text rides back as a second
-;; content block), `eval`/`load` are killed past a deadline, and a handler process that
-;; dies — a Rust panic in a primitive included — becomes an error reply while the session
-;; keeps serving.
-
-(def- protocol-version "2024-11-05")
+;; The protocol — dispatch, handler isolation, the JSON projection, the stdio framing — is
+;; `mcp-server`'s, shared with any program that serves tools to an agent. What is `nest
+;; mcp`'s own is the server SPEC below: the catalogue (this project's tools), the reference
+;; documents as resources, the `brood-task` prompt, the deadline on `eval`/`load`, and the
+;; staleness warning a rebuilt binary earns.
 
 ;; The tools whose handler runs arbitrary, possibly-runaway code, so runs under the
 ;; deadline. The rest are fast, or legitimately long (`run-tests`), and run unbounded.
 (def- deadline-tools #{"eval" "load"})
 (def- tool-deadline-ms 30000)
 
-;; How long an unbounded handler is waited on before the dispatcher re-arms its wait.
-(def- unbounded-wait-ms 60000)
-
 ;; The reference texts `resources/read` and `prompts/get` serve, keyed by name. `nest`
 ;; binds it around the server with the documents its binary embeds (the docs and the
 ;; prelude source), so an agent reads them without filesystem access.
 (defdyn mcp/*documents* {})
-
-;; Inside a handler whose `tools/call` carried `_meta.progressToken`: `{:to dispatcher
-;; :call handler-pid}`, where [[progress]] sends its reports. Nil otherwise.
-(defdyn mcp/*progress-sink* nil)
 
 (def- resources
   [{:uri "brood://docs/brood-for-claude"
@@ -829,339 +815,68 @@ Brood pattern, `std/tool/explain.blsp`)."
 optional `total` (the denominator) and `message` (a label). Streams a
 `notifications/progress` to the client when the current `tools/call` carried a
 `_meta.progressToken`; a no-op otherwise, so it is safe to call from any handler.
-Returns true if a report was sent.
+Returns true if a report was sent. The same as `mcp-server/progress`.
 
     (mcp/progress 1 3 \"step one\")   ;=> false"
-  (let (sink mcp/*progress-sink*)
-    (if (nil? sink)
-      false
-      (do
-        (send (get sink :to)
-          [:mcp-progress (get sink :call) {:progress progress :total total :message message}])
-        true))))
+  (mcp-server/progress progress total message))
 ;; Declared so `nest check` types the call in `project-check` from the image, without
 ;; loading this module.
 (sig progress (int &optional (or int nil) (or string nil) -> bool))
 
-;; ---- Brood data -> JSON data ------------------------------------------------
+(defn- list-resources (_params _server)
+  [:ok
+    {:resources (into []
+                  (map resources
+                    (fn (r) {:uri (get r :uri) :name (get r :name) :mimeType "text/markdown"})))}])
 
-(defn- json-key (k)
-  "The JSON object key for map key `k`: a string as-is, a keyword or symbol by name."
-  (cond
-    (string? k) k
-    (or (keyword? k) (symbol? k)) (->string k)
-    else (error "mcp: a JSON object key must be a string, keyword or symbol, got a " (type-of k))))
-
-(defn- handle-spelling (v kind)
-  "The inside of a handle's printed form `#<kind …>`."
-  (let (printed (str v))
-    (string/substring printed (+ 3 (string/length kind)) (- (string/length printed) 1))))
-
-(defn- pid-data (pid)
-  "A pid as the tagged object `{\"$type\" \"pid\" \"node\" … \"id\" …}`: recognisable to an
-agent, never something it could turn back into a live mailbox."
-  (let (spelling (handle-spelling pid "pid")
-        slash (string/last-index-of spelling "/"))
-    {"$type" "pid"
-     "node" (string/substring spelling 0 slash)
-     "id" (string/->number (string/substring spelling (+ slash 1)))}))
-
-(defn- json-object (m)
-  "Map `m` as a JSON object. String, keyword and symbol keys share one JSON key, so a
-collision is an error rather than a silently dropped entry."
-  (fold m
-    {}
-    (fn (acc [k v])
-      (let (key (json-key k))
-        (if (contains? acc key)
-          (error "mcp: map has colliding JSON key "
-            (pr-str key)
-            " (string/keyword/symbol keys share one JSON key — one would silently win)")
-          (assoc acc key (json-data v)))))))
-
-(defn- json-data (v)
-  "`v` projected onto what JSON carries, ready for `json/encode`: keywords and symbols by
-name, an exact number JSON cannot hold (bignum, ratio, decimal) and a failure's message as
-strings, any sequence or set as an array, a pid or ref as a `$type`-tagged object. Errors on
-a value with no JSON shape — a function, a table, a non-finite float — so a tool returning
-one fails loudly instead of dropping data."
-  (cond
-    ;; First: a range reads as a pair to the checker, and `range?` does not narrow.
-    (range? v) (into [] (map v json-data))
-    (or (nil? v) (bool? v) (string? v)) v
-    (failure? v) (error-message v)
-    (float? v)
-      (if (or (math/nan? v) (math/infinite? v))
-        (error "mcp: non-finite float " v " can't be represented in JSON")
-        v)
-    (and (int? v) (>= v -9223372036854775808) (<= v 9223372036854775807)) v
-    (number? v) (str v)
-    (or (keyword? v) (symbol? v)) (->string v)
-    (pid? v) (pid-data v)
-    (ref? v) {"$type" "ref" "id" (string/->number (handle-spelling v "ref"))}
-    (map? v) (json-object v)
-    (or (list? v) (vector? v) (set? v)) (into [] (map v json-data))
-    else (error "mcp: a " (type-of v) " has no JSON representation")))
-
-(defn- pretty-json (v indent)
-  "JSON data `v` as indented text — two spaces a level, object keys sorted — the form a
-tool result takes in its content block."
-  (let (inner (str indent "  "))
-    (cond
-      (and (map? v) (not (empty? v)))
-        (str "{\n"
-          (string/join (map (sort (keys v))
-                         (fn (k) (str inner (json/encode k) ": " (pretty-json (get v k) inner))))
-            ",\n")
-          "\n"
-          indent
-          "}")
-      (and (vector? v) (not (empty? v)))
-        (str "[\n"
-          (string/join (map v (fn (x) (str inner (pretty-json x inner)))) ",\n")
-          "\n"
-          indent
-          "]")
-      else (json/encode v))))
-
-(defn- brood-arguments (v)
-  "Decoded JSON `arguments` as a handler receives them: arrays as lists, so a handler can
-walk them with `first`/`rest`."
-  (cond
-    (map? v) (into {} (map v (fn ([k x]) [k (brood-arguments x)])))
-    (vector? v) (apply list (map v brood-arguments))
-    else v))
-
-;; ---- replies ----------------------------------------------------------------
-
-(defn- rpc-error (code message) {:code code :message message})
-
-(def- error-labels
-  {:user "error:"
-   :parse "parse error:"
-   :unbound "unbound error:"
-   :arity "arity error:"
-   :type "type error:"
-   :runtime "runtime error:"})
-
-(defn- raised-error (e error)
-  "The JSON-RPC error for value `e` a handler raised and did not catch, `error` the raise's
-description from `%try-described`. A kernel error is a map (`{:kind :message :code …}`, the
-shape `catch` binds) and travels whole in `data`, so an agent branches on
-`error.data.kind`; anything else a handler threw is `:user`, with the raise's
-`file`/`line`/`col`/`trace` beside its message."
-  (if (and (map? e) (contains? e :kind) (contains? e :message))
-    {:code -32603
-     :message (str (or (get error-labels (get e :kind)) "error:") " " (get e :message))
-     :data (try
-             (json-data e)
-             (catch _ {"kind" (str (get e :kind)) "message" (str (get e :message))}))}
-    (let (message (if (string? e) e (pr-str e)))
-      {:code -32603
-       :message (str "error: " message)
-       :data (json-data (assoc (dissoc error :code :hint) :kind "user" :message message))})))
-
-(defn- died-error (reason)
-  "The JSON-RPC error for a handler process that died rather than answering — a Rust panic
-inside a primitive kills only that process (exit reason `:killed`)."
-  (let (detail (str "the handler's process died ("
-                 (pr-str reason)
-                 ") — the panic message is on the server's stderr and in .brood_crash_dump"))
-    {:code -32603
-     :message (str "panic in tool handler: " detail)
-     :data {"kind" "panic"
-            "message" detail
-            "hint" "interpreter bug — the tool handler triggered a Rust panic. Subsequent calls on this session continue to work."}}))
-
-(defn- tool-content (data output)
-  "MCP's `tools/call` result for handler result `data`: one text block (a string as-is,
-anything else as indented JSON), plus a labelled block of whatever the handler printed.
-A map with a non-null `error` is a soft failure, so the result says `isError`."
-  (let (text (if (string? data) data (pretty-json data ""))
-        blocks (if (empty? output)
-                 [{:type "text" :text text}]
-                 [{:type "text" :text text} {:type "text" :text (str "[captured stdout]\n" output)}]))
-    (if (and (map? data) (not (nil? (get data "error"))))
-      {:content blocks :isError true}
-      {:content blocks})))
-
-(defn- progress-notification (token report)
-  "The `notifications/progress` message for `report` under the request's progress `token`."
-  (let (base {:progressToken token :progress (get report :progress)}
-        with-total (if (nil? (get report :total)) base (assoc base :total (get report :total)))
-        params (if (nil? (get report :message))
-                 with-total
-                 (assoc with-total :message (get report :message))))
-    {:jsonrpc "2.0" :method "notifications/progress" :params params}))
-
-;; ---- tools/call ----------------------------------------------------------------
-
-(defn- run-handler (handler arguments dispatcher reports-progress)
-  "The body of a handler's own process: run `handler` on `arguments` with stdout captured
-and send the outcome to `dispatcher`, already projected to JSON data."
-  (%capture-begin)
-  (let (sink (if reports-progress {:to dispatcher :call (self)} nil)
-        outcome (%try-described (fn ()
-                                  (let (value (binding (mcp/*progress-sink* sink)
-                                                (handler arguments)))
-                                    (try
-                                      [:ok (json-data value)]
-                                      (catch e [:unencodable (error-message e)]))))
-                  (fn (caught error) [:raised caught error]))
-        output (or (%capture-take) ""))
-    (send dispatcher [:mcp-outcome (self) outcome output])))
-
-(defn- await-outcome (call)
-  "Wait for the handler process in `call`, forwarding its progress reports, until it
-answers, dies, or overruns `:deadline` (epoch ms, nil for none) and is killed."
-  (let (pid (get call :pid)
-        ref (get call :ref)
-        deadline (get call :deadline))
-    (receive
-      ([:mcp-progress ^pid report] ((get call :emit) (progress-notification (get call :token)
-                                                       report))
-        (await-outcome call))
-      ([:mcp-outcome ^pid outcome output] (receive ([:down ^ref _ _] nil))
-        (if (= (first outcome) :ok) [:ok (second outcome) output] outcome))
-      ([:down ^ref _ reason] [:died reason])
-      (after (if (int? deadline) (math/max 0 (- deadline (os/now))) unbounded-wait-ms)
-        (if deadline
-          (do
-            (exit pid :kill)
-            (receive ([:down ^ref _ _] nil))
-            [:timed-out])
-          (await-outcome call))))))
-
-(defn- call-reply (outcome)
-  "The `[status payload]` reply for a handler's outcome."
-  (case (first outcome)
-    :ok [:ok (tool-content (nth outcome 1) (nth outcome 2))]
-    :raised [:error (raised-error (nth outcome 1) (nth outcome 2))]
-    :unencodable [:error (rpc-error -32603 (nth outcome 1))]
-    :died [:error (died-error (nth outcome 1))]
-    [:ok
-      (tool-content {"error" {"kind" "runtime"
-                              "message" "evaluation exceeded its time limit (MCP tool watchdog)"}}
-        "")]))
-
-(defn- catalogue (session)
-  "The session's current tool catalogue, re-read on every request so a hot-reloaded
-`tools` takes effect at once; empty if building it fails."
-  ;; check-allow :discarded-catch — a broken catalogue serves no tools rather than no server
-  (check-allow :discarded-catch
-    (try (into [] ((get session :catalogue))) (catch _ []))))
-
-(defn- listed-tool (entry)
-  "Catalogue `entry` in the `tools/list` shape, or nil when it is malformed — one bad entry
-does not hide the rest."
-  (when (and (map? entry) (string? (get entry :name)) (contains? entry :schema))
-    ;; check-allow :discarded-catch — an entry whose schema has no JSON shape is skipped
-    (check-allow :discarded-catch
-      (try
-        (let (listed {:name (get entry :name) :inputSchema (json-data (get entry :schema))}
-              description (get entry :description))
-          (if (string? description) (assoc listed :description description) listed))
-        (catch _ nil)))))
-
-(defn- call-tool (params session)
-  "`tools/call`: run the named tool's handler on the request's `arguments`."
-  (let (name (get params :name)
-        entry (and (string? name)
-                (seq/find (catalogue session) (fn (e) (and (map? e) (= (get e :name) name))))))
-    (cond
-      (not (string? name)) [:error (rpc-error -32602 "missing 'name'")]
-      (not entry) [:error (rpc-error -32602 (str "no such tool: " name))]
-      else
-        (let (meta (get params :_meta)
-              token (if (map? meta) (get meta :progressToken) nil)
-              arguments (brood-arguments (if (contains? params :arguments)
-                                           (get params :arguments)
-                                           {}))
-              handler (get entry :handler)
-              dispatcher (self)
-              [pid ref] (spawn-monitor (run-handler handler arguments dispatcher (not (nil? token)))))
-          (call-reply (await-outcome {:pid pid
-                                      :ref ref
-                                      :token token
-                                      :emit (get session :emit)
-                                      :deadline (if (contains? deadline-tools name)
-                                                  (+ (os/now) (get session :deadline-ms))
-                                                  nil)}))))))
-
-;; ---- the other methods ------------------------------------------------------
-
-(defn- initialize-result ()
-  {:protocolVersion protocol-version
-   :capabilities {:tools {} :resources {} :prompts {}}
-   :serverInfo {:name "nest-mcp" :version (system/brood-version)}})
-
-(defn- read-resource (params)
+(defn- read-resource (params _server)
   (let (uri (get params :uri)
         resource (seq/find resources (fn (r) (= (get r :uri) uri)))
         text (if resource (get mcp/*documents* (get resource :document)) nil))
     (cond
-      (not (string? uri)) [:error (rpc-error -32602 "missing 'uri'")]
-      (not (string? text)) [:error (rpc-error -32602 (str "no such resource: " uri))]
+      (not (string? uri)) [:error (mcp-server/rpc-error -32602 "missing 'uri'")]
+      (not (string? text)) [:error (mcp-server/rpc-error -32602 (str "no such resource: " uri))]
       else [:ok {:contents [{:uri uri :mimeType "text/markdown" :text text}]}])))
+
+(defn- list-prompts (_params _server)
+  [:ok
+    {:prompts [{:name "brood-task"
+                :description "Orient an agent for editing this Brood project: language quirks, MCP tool list, and project conventions pointer."}]}])
 
 ;; The orientation prompt an agent fetches first (ADR-036): `docs/prompts/brood-task.md`,
 ;; a file other agent harnesses can drop into their own system prompts too.
-(defn- get-prompt (params)
+(defn- get-prompt (params _server)
   (let (name (get params :name))
     (cond
-      (not (string? name)) [:error (rpc-error -32602 "missing 'name'")]
-      (not (= name "brood-task")) [:error (rpc-error -32602 (str "no such prompt: " name))]
+      (not (string? name)) [:error (mcp-server/rpc-error -32602 "missing 'name'")]
+      (not (= name "brood-task"))
+        [:error (mcp-server/rpc-error -32602 (str "no such prompt: " name))]
       else
         [:ok
           {:description "Orient an agent for editing this Brood project"
            :messages [{:role "user"
                        :content {:type "text" :text (get mcp/*documents* "brood-task")}}]}])))
 
+(defn- nest-server (session)
+  "`session` (its `:catalogue`, `:emit`, `:deadline-ms`) as the `mcp-server` spec `nest
+mcp` serves: its resources and prompt methods, its name, the deadline on `eval`/`load`."
+  (merge {:info {:name "nest-mcp" :version (system/brood-version)}
+          :capabilities {:tools {} :resources {} :prompts {}}
+          :methods {"resources/list" list-resources
+                    "resources/read" read-resource
+                    "prompts/list" list-prompts
+                    "prompts/get" get-prompt}
+          :deadline-tools deadline-tools
+          :deadline-ms tool-deadline-ms}
+    session))
+
 (defn- handle (message session)
-  "The reply to one decoded JSON-RPC `message`: a response map, nil for a notification
-(never answered), or `:exit`. A request for a method this server lacks is answered
-`-32601`; an unknown notification is dropped, as JSON-RPC says."
-  (cond
-    (not (map? message)) nil
-    (not (contains? message :id)) (if (= (get message :method) "exit") :exit nil)
-    else
-      (let (method (get message :method)
-            raw-params (get message :params)
-            params (if (map? raw-params) raw-params {})
-            [status payload] (case method
-                               "initialize" [:ok (initialize-result)]
-                               "tools/list"
-                                 [:ok
-                                   {:tools (into []
-                                             (seq/reject (map (catalogue session) listed-tool) nil?))}]
-                               "tools/call" (call-tool params session)
-                               "resources/list"
-                                 [:ok
-                                   {:resources (into []
-                                                 (map resources
-                                                   (fn (r)
-                                                     {:uri (get r :uri)
-                                                      :name (get r :name)
-                                                      :mimeType "text/markdown"})))}]
-                               "resources/read" (read-resource params)
-                               "prompts/list"
-                                 [:ok
-                                   {:prompts [{:name "brood-task"
-                                               :description "Orient an agent for editing this Brood project: language quirks, MCP tool list, and project conventions pointer."}]}]
-                               "prompts/get" (get-prompt params)
-                               "ping" [:ok {}]
-                               "shutdown" [:ok nil]
-                               [:error (rpc-error -32601 (str "method not found: " method))]))
-        (if (= status :ok)
-          {:jsonrpc "2.0" :id (get message :id) :result payload}
-          {:jsonrpc "2.0" :id (get message :id) :error payload}))))
+  "The reply to one decoded JSON-RPC `message` from `nest mcp` (see `mcp-server/handle`)."
+  (mcp-server/handle message (nest-server session)))
 
 (defn- respond (line session)
   "The reply to one transport line — a line that is not JSON is answered `-32700`."
-  (let (decoded (try [:ok (json/decode line)] (catch e [:unparsed (error-message e)])))
-    (if (= (first decoded) :ok)
-      (handle (second decoded) session)
-      {:jsonrpc "2.0" :id nil :error {:code -32700 :message "Parse error" :data (second decoded)}})))
+  (mcp-server/respond line (nest-server session)))
 
 ;; ---- staleness: a server whose binary was rebuilt under it ---------------------
 
@@ -1199,25 +914,15 @@ binary is seen rebuilt."
 
 ;; ---- the loop -------------------------------------------------------------------
 
-(defn- write-message (message)
-  (io/write (str (json/encode message) "\n")))
-
-(defn- serve-loop (session)
-  (let (line (io/read-line))
-    (cond
-      (nil? line) 0
-      (string/blank? line) (serve-loop session)
-      else
-        (let (noticed (notice-rebuild session)
-              reply (respond line noticed))
-          (cond
-            (= reply :exit) 0
-            (nil? reply) (serve-loop noticed)
-            else
-              (let (warning (get noticed :pending-warning)
-                    carried (if warning (with-warning reply warning) nil))
-                (write-message (or carried reply))
-                (serve-loop (if carried (assoc noticed :pending-warning nil) noticed))))))))
+(defn- carry-warning (reply session)
+  ;; `mcp-server/serve-stdio`'s per-reply step: notice a rebuild, and carry a pending
+  ;; warning on the first reply that can take it
+  (let (noticed (notice-rebuild session)
+        warning (get noticed :pending-warning)
+        carried (if warning (with-warning reply warning) nil))
+    (if carried
+      [carried (assoc noticed :pending-warning nil)]
+      [reply noticed])))
 
 (defn- project-catalogue ()
   "The served catalogue: the project's own `mcp-tools` when its `mcp.blsp` defines one —
@@ -1238,10 +943,10 @@ the catalogue; anything that prints is discarded, since stdout is the JSON-RPC c
     (let (extensions (path/join root "mcp.blsp"))
       (when (file/exists? extensions)
         (with-out-str (reflect/load extensions))))
-    (serve-loop {:catalogue project-catalogue
-                 :emit write-message
-                 :deadline-ms tool-deadline-ms
-                 :exe (os/exe-path)
-                 :started (os/now)
-                 :warned false
-                 :pending-warning nil})))
+    (mcp-server/serve-stdio (nest-server {:catalogue project-catalogue
+                                          :emit mcp-server/write-message
+                                          :exe (os/exe-path)
+                                          :started (os/now)
+                                          :warned false
+                                          :pending-warning nil})
+      carry-warning)))

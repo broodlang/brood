@@ -60,8 +60,8 @@ The owner opened the 1.0 work. The plan is [`road-to-1.0.md`](road-to-1.0.md); t
 ADR-673 (accepted 2026-11-10; the deprecation window's minimum time is deferred); the positioning it starts from is
 [`brood-among-lisps.md`](brood-among-lisps.md). Thread 6 below was the one that had to be settled
 before 1.0, because it removes forms: ADR-674 deprecated `dotimes`, `dolist`, `unless` and `match*`
-(stage 1, 2026-11-10; `nest format --migrate` rewrites them), and stage 2 removes them before
-`rc.0`. The other threads are additive.
+(stage 1, 2026-11-10) and removed them (stage 2, 2026-11-11; the rename ledger names each
+replacement). The other threads are additive.
 
 ## Open threads: language features, in value order
 
@@ -69,8 +69,8 @@ From the audit of ROADMAP's open items on 2026-11-06; nothing here is scheduled 
 picks it. ROADMAP's "Language features — candidates" section is the bar each has to clear, and
 ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character type) stay refused.
 
-1. **Warning suppression at project and file level.** Only `check-allow` around a form exists,
-   and any warning fails a batch `nest check`.
+1. ~~**Warning suppression at project and file level.**~~ — done by ADR-698 (2026-11-11):
+   `project.blsp`'s `:check` key and a `(:check-allow …)` header clause.
 2. **A stability policy and the road to 1.0** (`general-purpose-gaps.md`, gap 1).
 3. **Regex named groups.** Lookaround and backreferences are missing too (`std/regex.blsp`).
 4. **`std/url`: resolving against a base URL.** Still RFC 3986, not WHATWG.

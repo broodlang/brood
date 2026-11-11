@@ -82,7 +82,7 @@ grammar target.
 
 (defn- grammar-alternation (keywords)
   "An escaped, longest-first `a|b|c` regex alternation. Longest-first so a prefix
-can't shadow a longer form (`spawn-link` before `spawn`, `dolist` before `do`)."
+can't shadow a longer form (`spawn-link` before `spawn`, `doseq` before `do`)."
   (string/join (map (seq/sort-by keywords (fn (k) (- (count k)))) grammar-escape) "|"))
 
 ;; ---- TextMate grammar (VS Code) ----------------------------------------------

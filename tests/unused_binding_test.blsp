@@ -1,6 +1,6 @@
 ;; The unused-binder lints for anonymous `fn` clauses (a checker SURFACE pass, so it
 ;; sees clauses as written — by the time the main walk runs, a pattern clause has been
-;; lowered to `match*` and its binders are synthetic `let`s the unused-`let` lint
+;; lowered to `%match` and its binders are synthetic `let`s the unused-`let` lint
 ;; deliberately exempts; removing that exemption fires 69 times across std/ + tests/).
 ;;
 ;; The bug that motivated it: `(reduce toks '() (fn ((acc "+") "+") ((acc n) n)))`
@@ -50,7 +50,7 @@
     (assert= (unused-count "(map xs (fn ((list) :a) ((list y) y)))") 0))
 
   (test "the wording follows the LOWERING, which is per fn and not per clause"
-    ;; one pattern head anywhere sends the whole dispatch through `match*`, so every
+    ;; one pattern head anywhere sends the whole dispatch through `%match`, so every
     ;; clause's binders are pattern binders — including the all-symbol head. Deciding
     ;; per clause called that one a "parameter", describing a construct the program
     ;; does not have.
@@ -66,7 +66,7 @@
     (assert= (count-of "(match v ([p q] p) (_ 0))" "unused pattern binding: q") 1)
     (assert= (count-of "(receive ([:x p q] p) (after 10 :t))" "unused pattern binding: q") 1)
     (assert= (count-of "(try (v) (catch e 1))" "unused catch binding: e") 1)
-    (assert= (count-of "(dotimes (i 3) (f))" "unused loop binding: i") 1)
+    (assert= (count-of "(doseq (i (range 3)) (f))" "unused loop binding: i") 1)
     (assert= (count-of "(for (x xs) 1)" "unused loop binding: x") 1)
     (assert= (count-of "(fold-for (acc 0 x xs) x)" "unused loop binding: acc") 1)
     (assert= (count-of "(when-let (x v) 1)" "unused let binding: x") 1)

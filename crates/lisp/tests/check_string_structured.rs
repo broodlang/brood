@@ -24,6 +24,21 @@ fn warns_with_position_and_message_on_a_bad_form() {
         out(&format!("(string? (get (first {bad}) :message))")),
         "true"
     );
+    // …and its category, as a keyword: a call-shape finding is a type mismatch.
+    assert_eq!(
+        out(&format!("(keyword? (get (first {bad}) :category))")),
+        "true"
+    );
+    assert_eq!(
+        out(&format!("(get (first {bad}) :category)")),
+        ":type-mismatch"
+    );
+    assert_eq!(
+        out(&format!(
+            "(includes? (%check-categories) (get (first {bad}) :category))"
+        )),
+        "true"
+    );
 }
 
 #[test]

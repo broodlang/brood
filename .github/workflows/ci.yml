@@ -36,7 +36,7 @@ env:
   # `gh api repos/broodlang/bedit/commits/main -q .sha`), paste it here, and run
   # `make smoke-bedit` against that checkout first — bump it whenever bedit adopts a
   # brood change (a rename wave, a new std name) that its previous commit predates.
-  BEDIT_REF: ff6df90d4b82f9ae9261e0a4c4de39357c6a589d
+  BEDIT_REF: adafe6833dc668947f374a2e4e2ef9f92e20ba98
 
 jobs:
   # Is the version in Cargo.toml actually released? Not a gate — a NOTICE, because the
@@ -727,3 +727,28 @@ jobs:
           name: breakage-log
           path: breakage.log
           retention-days: 14
+
+  # `last-green`: a branch at the newest main commit whose run passed every job — what a
+  # package's CI builds against (bedit: `brood-ref: last-green` and its BROOD_REF), so a main
+  # that does not build reddens brood and no package, while a package still tracks main within
+  # one green run. It only moves forward: a slower run of an older commit leaves it alone.
+  last-green:
+    name: advance last-green
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [fmt, msrv, deny, wasm, lint, macos-check, windows-check, windows-smoke, build-test, typecheck, examples, contracts-armed, downstream-bedit, breakage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Move last-green to this commit
+        shell: bash
+        run: |
+          if git fetch -q origin last-green 2>/dev/null \
+              && ! git merge-base --is-ancestor FETCH_HEAD "$GITHUB_SHA"; then
+            echo "last-green is already past this commit; left where it is"
+            exit 0
+          fi
+          git push --force origin "$GITHUB_SHA:refs/heads/last-green"

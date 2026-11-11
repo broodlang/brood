@@ -1,0 +1,451 @@
+;; std/mcp-server.blsp — a Model Context Protocol server, whatever it serves and over
+;; whichever transport.
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - `nest mcp` had the whole protocol inside it, bound to stdio and to its own catalogue.
+;;    An application that wants to hand an agent ITS tools — an editor offering its buffers
+;;    and diagnostics to a coding agent, an agent harness exposing its file tools — needs the
+;;    same dispatcher, the same JSON projection of Brood data and the same handler
+;;    isolation, served from inside its own event loop. So the protocol lives here and
+;;    `nest mcp` is one SERVER SPEC over it: its catalogue, its resources and prompts, a
+;;    stdio loop.
+;;  - A server is a plain map (see `handle`), not a process: the transport owns the
+;;    process shape. Over stdio one loop reads lines; over HTTP each connection is its own
+;;    process (`std/http`), so tool calls arriving together run side by side.
+;;  - A handler runs in a process of its own, monitored: its stdout is captured (a
+;;    transport channel stays pure JSON), a deadline can kill it, and a handler that dies —
+;;    a Rust panic in a primitive included — is an error reply while the server keeps
+;;    serving.
+;;  - The HTTP transport is the "streamable HTTP" one with JSON responses only: a POST
+;;    carries one message and is answered with one JSON reply (202 for a notification). It
+;;    listens on loopback only and wants a secret token, because a tool server is a remote
+;;    control for whoever can reach it.
+
+(defmodule mcp-server
+  "A Model Context Protocol server: the JSON-RPC dispatcher behind `nest mcp`, for any
+program that serves tools to an agent. A SERVER is a map — `:catalogue` (a fn answering
+the tool entries, `{:name :description :schema :handler}`, re-read on every request so a
+redefinition takes effect at once), `:info` (`{:name :version}`), optional `:methods`
+(more JSON-RPC methods, `name -> (fn (params server) [status payload])`), `:capabilities`,
+`:emit` (where a progress notification goes), `:deadline-ms` and `:deadline-tools` (the
+tool names a deadline kills).
+
+    (mcp-server/handle {:jsonrpc \"2.0\" :id 1 :method \"ping\"}
+      {:catalogue (fn () []) :info {:name \"demo\" :version \"0.1.0\"}})
+    ;=> {:jsonrpc \"2.0\" :id 1 :result {}}
+
+Transports: `serve-stdio` (newline-delimited JSON on stdin / stdout) and `http-handler` /
+`start-http` (POST, loopback, a token)."
+  (:use json)
+  (:use http :only [loopback-only require-token response random-token listen serve-loop body-text]))
+
+;; The protocol revision this server speaks.
+(def protocol-version "2024-11-05")
+
+;; How long an unbounded handler is waited on before the dispatcher re-arms its wait.
+(def- unbounded-wait-ms 60000)
+
+;; Inside a handler whose `tools/call` carried `_meta.progressToken`: `{:to dispatcher
+;; :call handler-pid}`, where [[progress]] sends its reports. Nil otherwise.
+(defdyn mcp-server/*progress-sink* nil)
+
+(defn progress (progress &optional (total nil) (message nil))
+  "Report incremental progress from a tool handler: `progress` units done, optional
+`total` (the denominator) and `message` (a label). Streams a `notifications/progress` to
+the client when the current `tools/call` carried a `_meta.progressToken`; a no-op
+otherwise, so any handler may call it. Returns true if a report was sent.
+
+    (mcp-server/progress 1 3 \"step one\")   ;=> false"
+  (let (sink mcp-server/*progress-sink*)
+    (if (nil? sink)
+      false
+      (do
+        (send (get sink :to)
+          [:mcp-progress (get sink :call) {:progress progress :total total :message message}])
+        true))))
+(sig progress (int &optional (or int nil) (or string nil) -> bool))
+
+;; ---- Brood data -> JSON data ------------------------------------------------
+
+(defn- json-key (k)
+  "The JSON object key for map key `k`: a string as-is, a keyword or symbol by name."
+  (cond
+    (string? k) k
+    (or (keyword? k) (symbol? k)) (->string k)
+    else
+      (error "mcp-server: a JSON object key must be a string, keyword or symbol, got a "
+        (type-of k))))
+
+(defn- handle-spelling (v kind)
+  "The inside of a handle's printed form `#<kind …>`."
+  (let (printed (str v))
+    (string/substring printed (+ 3 (string/length kind)) (- (string/length printed) 1))))
+
+(defn- pid-data (pid)
+  "A pid as the tagged object `{\"$type\" \"pid\" \"node\" … \"id\" …}`: recognisable to an
+agent, never something it could turn back into a live mailbox."
+  (let (spelling (handle-spelling pid "pid")
+        slash (string/last-index-of spelling "/"))
+    {"$type" "pid"
+     "node" (string/substring spelling 0 slash)
+     "id" (string/->number (string/substring spelling (+ slash 1)))}))
+
+(defn- json-object (m)
+  "Map `m` as a JSON object. String, keyword and symbol keys share one JSON key, so a
+collision is an error rather than a silently dropped entry."
+  (fold m
+    {}
+    (fn (acc [k v])
+      (let (key (json-key k))
+        (if (contains? acc key)
+          (error "mcp-server: map has colliding JSON key "
+            (pr-str key)
+            " (string/keyword/symbol keys share one JSON key — one would silently win)")
+          (assoc acc key (json-data v)))))))
+
+(defn json-data (v)
+  "`v` projected onto what JSON carries, ready for `json/encode`: keywords and symbols by
+name, an exact number JSON cannot hold (bignum, ratio, decimal) and a failure's message as
+strings, any sequence or set as an array, a pid or ref as a `$type`-tagged object. Raises on
+a value with no JSON shape — a function, a table, a non-finite float — so a tool returning
+one fails loudly instead of dropping data.
+
+    (mcp-server/json-data {:a [1 :b]})   ;=> {\"a\" [1 \"b\"]}"
+  (cond
+    ;; First: a range reads as a pair to the checker, and `range?` does not narrow.
+    (range? v) (into [] (map v json-data))
+    (or (nil? v) (bool? v) (string? v)) v
+    (failure? v) (error-message v)
+    (float? v)
+      (if (or (math/nan? v) (math/infinite? v))
+        (error "mcp-server: non-finite float " v " can't be represented in JSON")
+        v)
+    (and (int? v) (>= v -9223372036854775808) (<= v 9223372036854775807)) v
+    (number? v) (str v)
+    (or (keyword? v) (symbol? v)) (->string v)
+    (pid? v) (pid-data v)
+    (ref? v) {"$type" "ref" "id" (string/->number (handle-spelling v "ref"))}
+    (map? v) (json-object v)
+    (or (list? v) (vector? v) (set? v)) (into [] (map v json-data))
+    else (error "mcp-server: a " (type-of v) " has no JSON representation")))
+
+(defn pretty-json (v &optional (indent ""))
+  "JSON data `v` as indented text — two spaces a level, object keys sorted — the form a
+tool result takes in its content block.
+
+    (mcp-server/pretty-json {\"a\" 1})   ;=> \"{\\n  \\\"a\\\": 1\\n}\""
+  (let (inner (str indent "  "))
+    (cond
+      (and (map? v) (not (empty? v)))
+        (str "{\n"
+          (string/join (map (sort (keys v))
+                         (fn (k) (str inner (json/encode k) ": " (pretty-json (get v k) inner))))
+            ",\n")
+          "\n"
+          indent
+          "}")
+      (and (vector? v) (not (empty? v)))
+        (str "[\n"
+          (string/join (map v (fn (x) (str inner (pretty-json x inner)))) ",\n")
+          "\n"
+          indent
+          "]")
+      else (json/encode v))))
+
+(defn- brood-arguments (v)
+  "Decoded JSON `arguments` as a handler receives them: arrays as lists, so a handler can
+walk them with `first`/`rest`."
+  (cond
+    (map? v) (into {} (map v (fn ([k x]) [k (brood-arguments x)])))
+    (vector? v) (apply list (map v brood-arguments))
+    else v))
+
+;; ---- replies ----------------------------------------------------------------
+
+(defn rpc-error (code message)
+  "A JSON-RPC error object: `code` and `message`.
+
+    (mcp-server/rpc-error -32602 \"missing 'name'\")   ;=> {:code -32602 :message \"missing 'name'\"}"
+  {:code code :message message})
+
+(def- error-labels
+  {:user "error:"
+   :parse "parse error:"
+   :unbound "unbound error:"
+   :arity "arity error:"
+   :type "type error:"
+   :runtime "runtime error:"})
+
+(defn- raised-error (e error)
+  "The JSON-RPC error for value `e` a handler raised and did not catch, `error` the raise's
+description from `%try-described`. A kernel error is a map (`{:kind :message :code …}`, the
+shape `catch` binds) and travels whole in `data`, so an agent branches on
+`error.data.kind`; anything else a handler threw is `:user`, with the raise's
+`file`/`line`/`col`/`trace` beside its message."
+  (if (and (map? e) (contains? e :kind) (contains? e :message))
+    {:code -32603
+     :message (str (or (get error-labels (get e :kind)) "error:") " " (get e :message))
+     :data (try
+             (json-data e)
+             (catch _ {"kind" (str (get e :kind)) "message" (str (get e :message))}))}
+    (let (message (if (string? e) e (pr-str e)))
+      {:code -32603
+       :message (str "error: " message)
+       :data (json-data (assoc (dissoc error :code :hint) :kind "user" :message message))})))
+
+(defn- died-error (reason)
+  "The JSON-RPC error for a handler process that died rather than answering — a Rust panic
+inside a primitive kills only that process (exit reason `:killed`)."
+  (let (detail (str "the handler's process died ("
+                 (pr-str reason)
+                 ") — the panic message is on the server's stderr and in .brood_crash_dump"))
+    {:code -32603
+     :message (str "panic in tool handler: " detail)
+     :data {"kind" "panic"
+            "message" detail
+            "hint" "interpreter bug — the tool handler triggered a Rust panic. Subsequent calls on this session continue to work."}}))
+
+(defn- tool-content (data output)
+  "MCP's `tools/call` result for handler result `data`: one text block (a string as-is,
+anything else as indented JSON), plus a labelled block of whatever the handler printed.
+A map with a non-null `error` is a soft failure, so the result says `isError`."
+  (let (text (if (string? data) data (pretty-json data ""))
+        blocks (if (empty? output)
+                 [{:type "text" :text text}]
+                 [{:type "text" :text text} {:type "text" :text (str "[captured stdout]\n" output)}]))
+    (if (and (map? data) (not (nil? (get data "error"))))
+      {:content blocks :isError true}
+      {:content blocks})))
+
+(defn- progress-notification (token report)
+  "The `notifications/progress` message for `report` under the request's progress `token`."
+  (let (base {:progressToken token :progress (get report :progress)}
+        with-total (if (nil? (get report :total)) base (assoc base :total (get report :total)))
+        params (if (nil? (get report :message))
+                 with-total
+                 (assoc with-total :message (get report :message))))
+    {:jsonrpc "2.0" :method "notifications/progress" :params params}))
+
+;; ---- tools/call ----------------------------------------------------------------
+
+(defn- run-handler (handler arguments dispatcher reports-progress)
+  "The body of a handler's own process: run `handler` on `arguments` with stdout captured
+and send the outcome to `dispatcher`, already projected to JSON data."
+  (%capture-begin)
+  (let (sink (if reports-progress {:to dispatcher :call (self)} nil)
+        outcome (%try-described (fn ()
+                                  (let (value (binding (mcp-server/*progress-sink* sink)
+                                                (handler arguments)))
+                                    (try
+                                      [:ok (json-data value)]
+                                      (catch e [:unencodable (error-message e)]))))
+                  (fn (caught error) [:raised caught error]))
+        output (or (%capture-take) ""))
+    (send dispatcher [:mcp-outcome (self) outcome output])))
+
+(defn- await-outcome (call)
+  "Wait for the handler process in `call`, forwarding its progress reports, until it
+answers, dies, or overruns `:deadline` (epoch ms, nil for none) and is killed."
+  (let (pid (get call :pid)
+        ref (get call :ref)
+        deadline (get call :deadline))
+    (receive
+      ([:mcp-progress ^pid report] ((get call :emit) (progress-notification (get call :token)
+                                                       report))
+        (await-outcome call))
+      ([:mcp-outcome ^pid outcome output] (receive ([:down ^ref _ _] nil))
+        (if (= (first outcome) :ok) [:ok (second outcome) output] outcome))
+      ([:down ^ref _ reason] [:died reason])
+      (after (if (int? deadline) (math/max 0 (- deadline (os/now))) unbounded-wait-ms)
+        (if deadline
+          (do
+            (exit pid :kill)
+            (receive ([:down ^ref _ _] nil))
+            [:timed-out])
+          (await-outcome call))))))
+
+(defn- call-reply (outcome)
+  "The `[status payload]` reply for a handler's outcome."
+  (case (first outcome)
+    :ok [:ok (tool-content (nth outcome 1) (nth outcome 2))]
+    :raised [:error (raised-error (nth outcome 1) (nth outcome 2))]
+    :unencodable [:error (rpc-error -32603 (nth outcome 1))]
+    :died [:error (died-error (nth outcome 1))]
+    [:ok
+      (tool-content {"error" {"kind" "runtime"
+                              "message" "evaluation exceeded its time limit (MCP tool watchdog)"}}
+        "")]))
+
+(defn catalogue (server)
+  "The server's current tool entries, read afresh from its `:catalogue` fn so a
+redefinition takes effect at once; empty if building it fails.
+
+    (mcp-server/catalogue {:catalogue (fn () [{:name \"t\"}])})   ;=> [{:name \"t\"}]"
+  ;; check-allow :discarded-catch — a broken catalogue serves no tools rather than no server
+  (check-allow :discarded-catch
+    (try (into [] ((get server :catalogue))) (catch _ []))))
+
+(defn listed-tool (entry)
+  "Catalogue `entry` in the `tools/list` shape (`{:name :inputSchema :description}`, the
+schema as JSON data), or nil when it is malformed — one bad entry does not hide the rest.
+
+    (mcp-server/listed-tool {:name \"t\" :schema {:type \"object\"}})   ;=> {:name \"t\" :inputSchema {\"type\" \"object\"}}"
+  (when (and (map? entry) (string? (get entry :name)) (contains? entry :schema))
+    ;; check-allow :discarded-catch — an entry whose schema has no JSON shape is skipped
+    (check-allow :discarded-catch
+      (try
+        (let (listed {:name (get entry :name) :inputSchema (json-data (get entry :schema))}
+              description (get entry :description))
+          (if (string? description) (assoc listed :description description) listed))
+        (catch _ nil)))))
+
+(defn- call-tool (params server)
+  "`tools/call`: run the named tool's handler on the request's `arguments`."
+  (let (name (get params :name)
+        entry (and (string? name)
+                (seq/find (catalogue server) (fn (e) (and (map? e) (= (get e :name) name))))))
+    (cond
+      (not (string? name)) [:error (rpc-error -32602 "missing 'name'")]
+      (not entry) [:error (rpc-error -32602 (str "no such tool: " name))]
+      else
+        (let (meta (get params :_meta)
+              token (if (map? meta) (get meta :progressToken) nil)
+              arguments (brood-arguments (if (contains? params :arguments)
+                                           (get params :arguments)
+                                           {}))
+              handler (get entry :handler)
+              dispatcher (self)
+              [pid ref] (spawn-monitor (run-handler handler arguments dispatcher (not (nil? token))))
+              deadline-tools (or (get server :deadline-tools) #{}))
+          (call-reply (await-outcome {:pid pid
+                                      :ref ref
+                                      :token token
+                                      :emit (or (get server :emit) (fn (_message) nil))
+                                      :deadline (if (contains? deadline-tools name)
+                                                  (+ (os/now) (or (get server :deadline-ms) 30000))
+                                                  nil)}))))))
+
+;; ---- dispatch -------------------------------------------------------------------
+
+(defn- initialize-result (server)
+  (let (info (or (get server :info) {}))
+    {:protocolVersion protocol-version
+     :capabilities (or (get server :capabilities) {:tools {}})
+     :serverInfo {:name (or (get info :name) "brood-mcp")
+                  :version (or (get info :version) (system/brood-version))}}))
+
+(defn- builtin-method (method params server)
+  ;; the methods every server answers; nil for one it does not know
+  (case method
+    "initialize" [:ok (initialize-result server)]
+    "tools/list" [:ok {:tools (into [] (seq/reject (map (catalogue server) listed-tool) nil?))}]
+    "tools/call" (call-tool params server)
+    "ping" [:ok {}]
+    "shutdown" [:ok nil]
+    nil))
+
+(defn handle (message server)
+  "The reply to one decoded JSON-RPC `message` under `server` (see the module doc): a
+response map, nil for a notification (never answered), or `:exit`. The server's own
+`:methods` answer first, then the built-in ones (`initialize`, `tools/list`, `tools/call`,
+`ping`, `shutdown`); any other request is `-32601`, any other notification dropped.
+
+    (mcp-server/handle {:jsonrpc \"2.0\" :method \"exit\"} {:catalogue (fn () [])})   ;=> :exit"
+  (cond
+    (not (map? message)) nil
+    (not (contains? message :id)) (if (= (get message :method) "exit") :exit nil)
+    else
+      (let (method (get message :method)
+            raw-params (get message :params)
+            params (if (map? raw-params) raw-params {})
+            own (get (or (get server :methods) {}) method)
+            [status payload] (or (if own (own params server) nil)
+                               (builtin-method method params server)
+                               [:error (rpc-error -32601 (str "method not found: " method))]))
+        (if (= status :ok)
+          {:jsonrpc "2.0" :id (get message :id) :result payload}
+          {:jsonrpc "2.0" :id (get message :id) :error payload}))))
+
+(defn respond (text server)
+  "The reply to one message's JSON `text` (see [[handle]]) — text that is not JSON is
+answered `-32700` with a null id.
+
+    (map/get-in (mcp-server/respond \"{{\" {:catalogue (fn () [])}) [:error :code])   ;=> -32700"
+  (let (decoded (try [:ok (json/decode text)] (catch e [:unparsed (error-message e)])))
+    (if (= (first decoded) :ok)
+      (handle (second decoded) server)
+      {:jsonrpc "2.0" :id nil :error {:code -32700 :message "Parse error" :data (second decoded)}})))
+
+;; ---- transport: stdio -----------------------------------------------------------
+;;
+;; The MCP stdio transport is newline-delimited JSON — one message per line, NOT LSP's
+;; `Content-Length` framing (a real client never completes `initialize` against that).
+
+(defn write-message (message)
+  "Write one JSON-RPC `message` to stdout as a line — the stdio transport's framing, and a
+stdio server's `:emit`.
+
+    (mcp-server/write-message {:jsonrpc \"2.0\" :id 1 :result {}})   ;~> prints {\"jsonrpc\":\"2.0\",…}"
+  (io/write (str (json/encode message) "\n")))
+
+(defn serve-stdio (server &optional (each-reply nil))
+  "Serve `server` on stdin / stdout until the client hangs up or sends `exit`; answers
+0. `each-reply`, when given, is `(fn (reply server) -> [reply server])`, run on every reply
+before it is written: a server may carry a notice on it (`nest mcp`'s staleness warning).
+
+    (mcp-server/serve-stdio {:catalogue (fn () []) :emit mcp-server/write-message})   ;~> 0 once stdin closes"
+  (let (line (io/read-line))
+    (cond
+      (nil? line) 0
+      (string/blank? line) (serve-stdio server each-reply)
+      else
+        (let (reply (respond line server))
+          (cond
+            (= reply :exit) 0
+            (nil? reply) (serve-stdio server each-reply)
+            else
+              (let ([written next] (if each-reply (each-reply reply server) [reply server]))
+                (write-message written)
+                (serve-stdio next each-reply)))))))
+
+;; ---- transport: HTTP ------------------------------------------------------------
+
+(defn- json-response (status body)
+  (response status {"Content-Type" "application/json"} (json/encode body)))
+
+(defn http-handler (server token)
+  "An `http` handler serving `server` as MCP's streamable-HTTP transport with JSON
+responses: a POST carries one JSON-RPC message and is answered with its reply as JSON, or
+202 for a notification; anything else is 405. Only a loopback request carrying `token`
+(an `X-Token` header or a `token` query parameter) is served; the rest are 403. Progress
+notifications go to the server's `:emit`, if any — a JSON response cannot carry them.
+
+    (:status ((mcp-server/http-handler {:catalogue (fn () [])} \"t\") {:method \"GET\" :headers {\"host\" \"127.0.0.1\" \"x-token\" \"t\"}}))   ;=> 405"
+  (loopback-only (require-token token
+                   (fn (request)
+                     (if (= (get request :method) "POST")
+                       (let (reply (respond (body-text request) server))
+                         (if (or (nil? reply) (= reply :exit))
+                           (response 202 {} "")
+                           (json-response 200 reply)))
+                       (response 405 {"Allow" "POST"} ""))))))
+
+(defn start-http (server &optional (token nil))
+  "Serve `server` over HTTP on an OS-assigned loopback port, in a process of its own, and
+answer `{:pid :port :token :url}` once it listens — `token` a fresh secret unless given.
+A client sends the token as an `X-Token` header (see [[http-handler]]); stop the server by
+killing `:pid`.
+
+    (get (mcp-server/start-http {:catalogue (fn () [])}) :url)   ;~> \"http://127.0.0.1:41733/mcp\""
+  (let (secret (or token (random-token))
+        parent (self)
+        handler (http-handler server secret)
+        pid (spawn (let (socket (listen 0))
+                     (send parent [:mcp-http-port (self) (tcp/local-port socket)])
+                     (serve-loop socket handler))))
+    (receive
+      ([:mcp-http-port ^pid port] {:pid pid
+                                   :port port
+                                   :token secret
+                                   :url (str "http://127.0.0.1:" port "/mcp")})
+      (after 5000 (error "mcp-server/start-http: the listener did not start")))))

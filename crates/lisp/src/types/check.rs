@@ -137,7 +137,9 @@ mod guard_effects;
 mod guards;
 mod infer;
 mod known_ops;
+mod lint;
 mod properties;
+pub use lint::{Finding, Lint};
 mod protocol;
 mod recursion;
 mod sigs;
@@ -243,7 +245,12 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
     sigs::clear_sig_memo();
     let mut out = Vec::new();
     check_into(heap, form, &Ctx::default(), &mut out);
-    out
+    out.into_iter().map(Finding::into_pair).collect()
+}
+
+/// The findings as `(pos, message)` pairs — the shape of the tuple entry points.
+fn pairs(findings: Vec<Finding>) -> Vec<(Option<Pos>, String)> {
+    findings.into_iter().map(Finding::into_pair).collect()
 }
 
 /// Check a sequence of top-level forms together, threading file-local
@@ -285,6 +292,11 @@ pub fn expr_ty_visits_spent() -> u64 {
 
 pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
     check_file_ext(heap, forms, &[])
+}
+
+/// [`check_file`] with each finding's [`Lint`] category.
+pub fn check_file_findings(heap: &mut Heap, forms: &[Value]) -> Vec<Finding> {
+    check_file_ext_findings(heap, forms, &[])
 }
 
 /// The checker-inferred [`Ty`] of item `arg_index` (0 = the head) of the **call form
@@ -331,7 +343,16 @@ pub fn check_file_ext(
     forms: &[Value],
     extra_required: &[String],
 ) -> Vec<(Option<Pos>, String)> {
-    check_file_mode(heap, forms, extra_required, super::strict_checking())
+    pairs(check_file_ext_findings(heap, forms, extra_required))
+}
+
+/// [`check_file_ext`] with each finding's [`Lint`] category.
+pub fn check_file_ext_findings(
+    heap: &mut Heap,
+    forms: &[Value],
+    extra_required: &[String],
+) -> Vec<Finding> {
+    check_forms(heap, forms, extra_required, super::strict_checking(), false)
 }
 
 /// [`check_file_ext`] with the strict switch passed explicitly rather than read from the
@@ -343,7 +364,7 @@ pub fn check_file_mode(
     extra_required: &[String],
     strict: bool,
 ) -> Vec<(Option<Pos>, String)> {
-    check_forms(heap, forms, extra_required, strict, false)
+    pairs(check_forms(heap, forms, extra_required, strict, false))
 }
 
 /// [`check_file`] for forms that are about to be EVALUATED HERE — a REPL line, an
@@ -355,6 +376,11 @@ pub fn check_file_mode(
 /// unknown, so the checker's verdict on it describes a different program than the one
 /// that runs.
 pub fn check_forms_here(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
+    pairs(check_forms_here_findings(heap, forms))
+}
+
+/// [`check_forms_here`] with each finding's [`Lint`] category.
+pub fn check_forms_here_findings(heap: &mut Heap, forms: &[Value]) -> Vec<Finding> {
     check_forms(heap, forms, &[], super::strict_checking(), true)
 }
 
@@ -405,8 +431,11 @@ fn check_forms(
     extra_required: &[String],
     strict: bool,
     inherit_context: bool,
-) -> Vec<(Option<Pos>, String)> {
+) -> Vec<Finding> {
     let mut out = Vec::new();
+    // The header's `(:check-allow …)` clauses, read while `forms` is fresh: a module load
+    // during the passes may collect and move them.
+    let file_allows = lint::FileAllows::read(heap, forms);
     // Block the copying GC for the whole check: LOCAL handles are held in Rust `Vec`s
     // across the `eval` of `(require …)` forms, and a collection would relocate them.
     // Inner evals then run at depth ≥ 2, so the outermost-eval safepoint never fires
@@ -502,7 +531,8 @@ fn check_forms(
         } else {
             "non-string panic payload".to_string()
         };
-        out.push((
+        out.push(Finding::new(
+            Lint::Internal,
             None,
             format!("checker internal error (advisory pass aborted; please report): {message}"),
         ));
@@ -511,7 +541,15 @@ fn check_forms(
     // falls through to a clause from both its tag test and its shape test — walks the same
     // positioned source twice. First occurrence wins, so the order is unchanged.
     let mut seen = HashSet::new();
-    out.retain(|(pos, message)| seen.insert((pos.map(|p| (p.line, p.col)), message.clone())));
+    out.retain(|finding| {
+        seen.insert((
+            finding.pos.map(|p| (p.line, p.col)),
+            finding.message.clone(),
+        ))
+    });
+    // The file-level control: a category the module's header allows is dropped.
+    out.extend(file_allows.unknown.iter().cloned());
+    out.retain(|finding| !file_allows.allows(finding));
     out
 }
 
@@ -540,7 +578,7 @@ fn check_file_passes(
     extra_required: &[String],
     strict: bool,
     file_ns: Option<Symbol>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let file_started = std::time::Instant::now();
     let (forms, expanded, import_scope, absent_ns) = expand_and_load(heap, forms, roots_base, out);
@@ -640,7 +678,7 @@ fn expand_and_load(
     heap: &mut Heap,
     forms: &[Value],
     roots_base: usize,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) -> (Vec<Value>, Vec<Value>, ImportScope, HashSet<String>) {
     let root = heap.global();
     for &f in forms {
@@ -659,7 +697,8 @@ fn expand_and_load(
             Err(err) => {
                 // A macro's own `(error …)` during expansion carries no position; the
                 // form it was expanding does. Report there rather than nowhere.
-                out.push((
+                out.push(Finding::new(
+                    Lint::CompileError,
                     err.pos.or_else(|| heap.form_pos_only(forms[j])),
                     format!("does not compile: {}", err.message),
                 ));
@@ -672,7 +711,11 @@ fn expand_and_load(
         heap.push_root(expansion);
         let form = heap.root_at(roots_base + j);
         if let Some(message) = reserved_def_warning(heap, expansion) {
-            out.push((heap.form_pos_only(form), message));
+            out.push(Finding::new(
+                Lint::ReservedName,
+                heap.form_pos_only(form),
+                message,
+            ));
         }
         if is_ns_header(heap, form) {
             // A later `(defmodule …)` opens a new region (ADR-223): switch the compile-ns
@@ -782,10 +825,20 @@ pub fn check_file_with_deps_ext(
     forms: &[Value],
     extra_required: &[String],
 ) -> (Vec<(Option<Pos>, String)>, Value) {
+    let (findings, dep_keys) = check_file_with_deps_ext_findings(heap, forms, extra_required);
+    (pairs(findings), dep_keys)
+}
+
+/// [`check_file_with_deps_ext`] with each finding's [`Lint`] category.
+pub fn check_file_with_deps_ext_findings(
+    heap: &mut Heap,
+    forms: &[Value],
+    extra_required: &[String],
+) -> (Vec<Finding>, Value) {
     deps::begin_record(heap);
-    let warnings = check_file_ext(heap, forms, extra_required);
+    let findings = check_file_ext_findings(heap, forms, extra_required);
     let dep_keys = deps::take_dep_keys(heap);
-    (warnings, dep_keys)
+    (findings, dep_keys)
 }
 
 /// The current-image fingerprint for a file's `dep_keys` (from

@@ -1399,3 +1399,50 @@ pointing at it, and LeakSanitizer reports exactly that. `GRAMMAR_MARKS` now also
 built, so each stays reachable for the process's life, as the libraries do. Reproduced in seconds
 on the ASan `brood`: `tests/tree_sitter_test.blsp` passed 8/8 and exited 1 with 1137 bytes
 leaked; with the fix it exits 0 with no report.
+
+2026-11-11 (ADR-698, road-to-1.0 §B3). Every checker warning carries a category (30, the names
+`check-allow` takes where it had one), and `nest check` decides what gates from the category,
+not from the message text. Advisory by default: `:non-tail-recursion`, `:gave-up`,
+`:deprecated`, `:beta`. A project moves categories with `:check {:advisory […] :gating […]
+:allow […]}` in `project.blsp`, and a module silences one for its file with a `(:check-allow …)`
+header clause. Each printed warning ends with its category. Breaking: the structured check maps
+gain `:category` and `:text`, `check-file-deps` returns maps, and the check cache is v5.
+
+2026-11-11 (ADR-699, road-to-1.0 §B4). The dist handshake opens with the Brood `major.minor`
+after the magic (wire v14), and a node of another minor is refused at both ends naming both
+versions, before any key. The v10 fallback (ADR-492) went with it: v10 runtimes are older
+minors, which ADR-673 §3 refuses. Breaking: a v13 node does not link with a v14 one, and
+`BROOD_DIST_V10` is now `BROOD_DIST_VERSION`.
+
+2026-11-11 (road-to-1.0 §B1, §B2). The lock writer already stamped `:version 1`, but the reader
+ignored it, and a lock it could not make sense of read as absent, so `nest fetch` would
+re-resolve and overwrite a newer Brood's lock. Now a newer format is refused naming both, an
+unversioned lock reads as format 1, and a file that is not a `(lock …)` form is refused. An
+unknown `project.blsp` key was silently ignored; it now warns once per command (one command
+sets the project up twice) and the project still loads. `docs/packages.md`'s lock example
+showed a `:brood-version` the writer never wrote; removed.
+
+2026-11-11 (ADR-674 stage 2, road-to-1.0 §F). `dotimes`, `dolist`, `unless` and `match*` are
+removed, with every special case of their names in the kernel (the keyword table and so the
+editor grammars and LSP, the hygiene and template-escape binder shapes, the checker's
+exhaustiveness, guard-effect, unused-binder and syntactic-keyword lists, the param-domain and
+`when`-typing branches) and in std (the formatter's header table, the spy walker's form set).
+Each is in the rename ledger, so the runtime's and the checker's unbound message name the
+replacement. `dolist` → `doseq` is a true rename, so `nest check --fix-renames` applies it; the
+other three change shape and are ledgered as call shapes (a target with a space), which
+`--fix-renames` already names and leaves to a human (ADR-433), so it cannot turn `(unless t x)`
+into `(when t x)`. A Rust test pins that the three stay call shapes. The migration went with
+the forms: `std/tool/migrate.blsp`, `format/project-migrate` and `nest format --migrate` are
+deleted, and the deprecated-macro pass no longer appends a pointer to it; the pass itself stays
+(it is generic), and `tests/reduce_forms_test.blsp` now drives it with a deprecated macro the
+test defines. Brood itself needed no migration beyond that test file (stage 1 had done it).
+`docs/bare-names.md` drops to 188.
+
+2026-11-11 (road-to-1.0 §B5, §B7). A `nest` flag can be retired gently: `{:deprecated
+"0.52.0" :use "--new"}` in the command table keeps the old spelling working, prints
+"'--old' is deprecated since 0.52.0 — use '--new'" on stderr, hands the command its value under
+the new name, marks it in `--help` and leaves it out of completion. And a code keeps its
+`:kind`: `error_codes::KINDS` declares each code's, and `crates/lisp/tests/error_code_kinds.rs`
+freezes the shipped rows, checks `docs/error-codes.md` against them and checks real raises.
+Also: `cpu_time_test` read a worker's CPU time before the quantum that did the work was booked
+(CI, run 42981945904); it now waits for the figure under a deadline.

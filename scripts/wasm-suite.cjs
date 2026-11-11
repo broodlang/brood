@@ -25,7 +25,7 @@ const cases = [
   // The pump must sweep EVERY worker queue, not just its own: spawns spill across
   // queues (BROOD_SPAWN_SPILL), so a single-queue pump would hang here.
   { name: "pump sweeps every queue: 3 spawned processes all fan in",
-    src: '(defn- w (me i) (send me i))\n(let (me (self)) (do (dotimes (i 3) (spawn (w me i))) (+ (receive (n n)) (receive (n n)) (receive (n n)))))',
+    src: '(defn- w (me i) (send me i))\n(let (me (self)) (do (doseq (i (range 3)) (spawn (w me i))) (+ (receive (n n)) (receive (n n)) (receive (n n)))))',
     want: "3" },
 
   // A ping-pong parks and wakes repeatedly — the park path under repetition.

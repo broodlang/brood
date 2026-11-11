@@ -37,7 +37,7 @@
   ;; Asserted on the warnings themselves, so a failure names the line and lint too.
   ;; A `checker gave up:` note (B6) is not a finding: it says a cap declined soundly — a
   ;; std file that defines and uses its own macro reports one every run — and it never
-  ;; gates `nest check` either (`project-check/project-advisory-warning?`).
+  ;; gates `nest check` either (category `:gave-up`, ADR-698).
   (doseq (path (sort (std-check-files "std")))
     (test (str "check-file reports nothing for " path)
       (assert= (or (seq/filter (reflect/check-file path)

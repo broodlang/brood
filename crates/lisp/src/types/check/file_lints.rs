@@ -17,11 +17,7 @@ use super::*;
 /// way the sig collector does. Region-aware (ADR-223): a `(defmodule …)` starts a fresh
 /// name set, so two modules in one file may each bind `helper`. Suppress a deliberate
 /// override with `(check-allow :duplicate-def …)` around the second definition.
-pub(super) fn lint_duplicate_defs(
-    heap: &mut Heap,
-    forms: &[Value],
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn lint_duplicate_defs(heap: &mut Heap, forms: &[Value], out: &mut Vec<Finding>) {
     let mut seen: HashMap<Symbol, Option<Pos>> = HashMap::new();
     for &form in forms {
         lint_duplicate_defs_in(heap, form, false, &mut seen, out);
@@ -33,7 +29,7 @@ fn lint_duplicate_defs_in(
     form: Value,
     allowed: bool,
     seen: &mut HashMap<Symbol, Option<Pos>>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     // Recurses through nested `(do (do …))`, like `collect_register_sig_forms` beside it,
     // and for the same reason grows the stack in heap-backed segments: a 30 000-deep
@@ -50,7 +46,7 @@ fn lint_duplicate_defs_in_inner(
     form: Value,
     allowed: bool,
     seen: &mut HashMap<Symbol, Option<Pos>>,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let Some(items) = heap.list_items(form) else {
         return;
@@ -99,7 +95,8 @@ fn lint_duplicate_defs_in_inner(
             let where_first = first
                 .map(|p| format!(" at line {}", p.line))
                 .unwrap_or_default();
-            out.push((
+            out.push(Finding::new(
+                Lint::DuplicateDef,
                 pos,
                 format!(
                     "`{}` is defined twice in this file: this definition replaces the one{where_first}, \
@@ -125,7 +122,7 @@ pub(super) fn check_conformance(
     ability_info: &protocol::AbilityInfo,
     multi_info: &protocol::MultiInfo,
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let protocols = protocol::collect(heap, forms);
     protocol::check_impls(heap, forms, &protocols, out);
@@ -150,7 +147,7 @@ pub(super) fn run_shape_lints(
     forms: &[Value],
     expanded: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     for &form in expanded {
         recursion::check_recursion(heap, form, out);
@@ -174,14 +171,15 @@ pub(super) fn lint_unused_imports(
     heap: &Heap,
     forms: &[Value],
     expanded: &[Value],
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     // A file with an unresolved BARE reference has an import table that doesn't cover
     // everything it names, so "module M contributed nothing you reference" is not
     // provable — the unresolved name may be M's — and the advice would be to delete an
     // import the code needs. The lint stands down whenever a bare name was unbound.
-    let unresolved_bare = out.iter().any(|(_, message)| {
-        message
+    let unresolved_bare = out.iter().any(|finding| {
+        finding
+            .message
             .strip_prefix("unbound symbol: ")
             .is_some_and(|rest| !rest.split(' ').next().unwrap_or("").contains('/'))
     });
@@ -223,7 +221,11 @@ pub(super) fn lint_unused_imports(
             let used = names.iter().any(|symbol| all_refs.contains(symbol))
                 || qualified_modules.contains(module_name);
             if !used {
-                out.push((None, format!("unused :use import: {module_name}")));
+                out.push(Finding::new(
+                    Lint::UnusedImport,
+                    None,
+                    format!("unused :use import: {module_name}"),
+                ));
             }
         }
     }
@@ -233,9 +235,10 @@ pub(super) fn lint_unused_imports(
 /// every re-typing question answers "unknown", and past the expression depth cap a nest
 /// types as unknown. Both are sound, and both are reported, so a file the checker largely
 /// gave up on does not read as checked.
-pub(super) fn report_exhausted_budgets(out: &mut Vec<(Option<Pos>, String)>) {
+pub(super) fn report_exhausted_budgets(out: &mut Vec<Finding>) {
     if sigs::fuel_exhausted() {
-        out.push((
+        out.push(Finding::new(
+            Lint::GaveUp,
             None,
             format!(
                 "checker gave up: the specialization budget ({} re-typings) ran out — every later call-site specialization in this file read as unknown",
@@ -245,7 +248,8 @@ pub(super) fn report_exhausted_budgets(out: &mut Vec<(Option<Pos>, String)>) {
     }
     let depth_hits = infer::expr_ty_depth_hits();
     if depth_hits > 0 {
-        out.push((
+        out.push(Finding::new(
+            Lint::GaveUp,
             None,
             format!(
                 "checker gave up: {depth_hits} expression{} nested past the depth cap ({}) read as unknown",

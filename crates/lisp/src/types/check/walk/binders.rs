@@ -28,9 +28,9 @@ pub(in crate::types::check) fn diverging_guard_scope(
     let &Value::Sym(head) = items.first()? else {
         return None;
     };
-    // Post-expansion. `(when t b)` is `(if t (do b) nil)` and `(unless t b)` is
-    // `(if t nil (do b))`, so BOTH arms have to be considered — and a hand-written
-    // branchless `(if t b)` is the same shape and the same argument.
+    // Post-expansion. `(when t b)` is `(if t (do b) nil)`, and `(if t nil (do b))` is the
+    // same guard written on the else side, so BOTH arms have to be considered — and a
+    // hand-written branchless `(if t b)` is the same shape and the same argument.
     if !value::symbol_is(head, kw::IF) || !(items.len() == 3 || items.len() == 4) {
         return None;
     }
@@ -43,7 +43,7 @@ pub(in crate::types::check) fn diverging_guard_scope(
     if diverges(then) {
         return Some(else_ctx);
     }
-    // …and symmetrically for `unless`, where the diverging arm is the else.
+    // …and symmetrically when the diverging arm is the else.
     if items.len() == 4 && diverges(items[3]) {
         return Some(then_ctx);
     }
@@ -62,7 +62,7 @@ fn check_fn_forms(
     body: &[Value],
     outer: &Ctx,
     scope: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     // A bare symbol carries no position, so the warning is put on the parameter list, or
     // the first body form that has one
@@ -93,7 +93,7 @@ fn check_param_defaults(
     anchor: Value,
     outer: &Ctx,
     scope: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     use crate::syntax::typed::{self as typed, TypedName};
     let items = heap.list_or_vector_items(params_form).unwrap_or_default();
@@ -181,7 +181,7 @@ pub(super) fn check_fn_bound_with(
     heap: &Heap,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
     tys: &[Option<Ty>],
     derived: bool,
 ) {
@@ -197,7 +197,7 @@ pub(super) fn check_fn_bound_indexed(
     heap: &Heap,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
     tys: &[Option<Ty>],
     derived: bool,
     indexes: Option<Symbol>,
@@ -285,12 +285,7 @@ pub(super) fn check_fn_bound_indexed(
 /// shape) — parse the parameter list, bind each into `ctx`, then walk the body
 /// in the extended scope. Parameter positions (`& rest`, `&optional`) are
 /// binders, not references, so they're not flagged as unbound.
-pub(super) fn check_fn(
-    heap: &Heap,
-    items: &[Value],
-    ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn check_fn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<Finding>) {
     check_fn_seeded(heap, items, ctx, out, None, None, true);
 }
 
@@ -381,7 +376,7 @@ pub(super) fn check_fn_seeded(
     heap: &Heap,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
     sig: Option<&crate::types::Sig>,
     name: Option<Symbol>,
     // Whether a seeded parameter is the function's whole contract (`bind_sig_param`: a
@@ -479,7 +474,8 @@ pub(super) fn check_fn_seeded(
             && !g.consistent_with_mode(s.ret.clone(), ctx.strict())
             && !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_TYPE_MISMATCH)
         {
-            out.push((
+            out.push(Finding::new(
+                Lint::TypeMismatch,
                 heap.form_pos_only(ret_form),
                 format!(
                     "{}declared return type {} but the body yields {}",
@@ -505,7 +501,8 @@ pub(super) fn check_fn_seeded(
             // unknown, so nothing was checked against the declared return, and every
             // caller reads it as fact (ADR-259). Outside contracts mode that is the one
             // way a wrong declaration goes unreported; strict says so.
-            out.push((
+            out.push(Finding::new(
+                    Lint::Trusted,
                     heap.form_pos_only(ret_form),
                     format!(
                         "{}declared return type {} is trusted, not verified — the body's result is unknown to the checker",
@@ -526,7 +523,7 @@ pub(super) fn check_def(
     form: Value,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let Some(&value_form) = items.get(2) else {
         // `(def name)` — degenerate; skip.
@@ -591,8 +588,7 @@ pub(super) fn check_def(
         if let Some(arms) = overload
             && let Some(fn_items) = fn_form_items(heap, value_form)
         {
-            let mut seen: std::collections::HashSet<(Option<Pos>, String)> =
-                std::collections::HashSet::new();
+            let mut seen: std::collections::HashSet<Finding> = std::collections::HashSet::new();
             for arm in &arms {
                 let mut findings = Vec::new();
                 check_fn_seeded(
@@ -687,7 +683,8 @@ pub(super) fn check_def(
         if let Some(t) = declared_value_ty {
             let g = gradual_of(heap, value_form, ctx);
             if !g.consistent_with_mode(t.clone(), ctx.strict()) {
-                out.push((
+                out.push(Finding::new(
+                    Lint::TypeMismatch,
                     heap.form_pos_only(form),
                     format!(
                         "{}: value of type {} is not assignable to declared type {}",
@@ -728,12 +725,7 @@ fn demand_domains(heap: &Heap, name: Symbol, value_form: Value, ctx: &Ctx) -> Op
 /// `defmacro` — the body lives in a fresh scope with `params` bound. Like
 /// `def`, the `name` is a binder, not a reference; file-global accumulation
 /// happens in [`check_file`].
-pub(super) fn check_defn(
-    heap: &Heap,
-    items: &[Value],
-    ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
-) {
+pub(super) fn check_defn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<Finding>) {
     let Some(&params_form) = items.get(2) else {
         return;
     };
@@ -780,7 +772,7 @@ pub(super) fn check_if(
     form: Value,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
 ) {
     let test = items.get(1).copied().unwrap_or(Value::nil());
     let then_form = items.get(2).copied().unwrap_or(Value::nil());
@@ -811,7 +803,8 @@ pub(super) fn check_if(
         && let Some(dup) = find_redundant_clause(heap, else_form, sym, lit)
     {
         let label = render_literal_pattern(heap, lit).unwrap_or_else(|| "this value".to_string());
-        out.push((
+        out.push(Finding::new(
+            Lint::UnreachableClause,
             heap.form_pos_only(dup),
             format!("match: unreachable clause — {label} is already handled above"),
         ));
@@ -839,7 +832,8 @@ pub(super) fn check_if(
         let pos = heap
             .form_pos_only(test)
             .or_else(|| heap.form_pos_only(form));
-        out.push((
+        out.push(Finding::new(
+            Lint::TypeMismatch,
             pos,
             "a failure value is TRUTHY, so this tests as true when the operation \
                      FAILED — narrow with the type you want (`int?`, `bytes?`, `string?`) \
@@ -875,7 +869,8 @@ pub(super) fn check_if(
         let pos = heap
             .form_pos_only(test)
             .or_else(|| heap.form_pos_only(form));
-        out.push((
+        out.push(Finding::new(
+            Lint::ListTruthiness,
             pos,
             format!(
                 "this tests a value that may be a list or a {} ({ty}) for truthiness — an empty \
@@ -925,7 +920,8 @@ pub(super) fn check_if(
             let pos = heap
                 .form_pos_only(test)
                 .or_else(|| heap.form_pos_only(form));
-            out.push((
+            out.push(Finding::new(
+                Lint::ConstantCondition,
                 pos,
                 format!(
                     "this test is always true — only nil and false are falsy, and \
@@ -957,7 +953,8 @@ pub(super) fn check_if(
             // ruled out at the *binding*, never at the guard site — exactly how the
             // sig-param lint stays false-positive-free without inspecting positions.
             if let Some((p, known)) = then_ctx.newly_dead_binding(ctx, g.sym) {
-                out.push((
+                out.push(Finding::new(
+                    Lint::UnreachableClause,
                     heap.form_pos_only(form),
                     format!(
                         "unreachable clause: {} is {}, which can never be {} \
@@ -1161,7 +1158,7 @@ pub(super) fn check_let(
     form: Value,
     items: &[Value],
     ctx: &Ctx,
-    out: &mut Vec<(Option<Pos>, String)>,
+    out: &mut Vec<Finding>,
     letrec: bool,
 ) {
     let Some(&binds_form) = items.get(1) else {
@@ -1329,7 +1326,11 @@ pub(super) fn check_let(
                         if !heap.is_synthetic(form)
                             && let Some(pos) = heap.form_pos_only(form)
                         {
-                            out.push((Some(pos), format!("unused let binding: {}", nm)));
+                            out.push(Finding::new(
+                                Lint::UnusedBinding,
+                                Some(pos),
+                                format!("unused let binding: {}", nm),
+                            ));
                         }
                     }
                 }

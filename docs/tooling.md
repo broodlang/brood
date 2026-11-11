@@ -92,7 +92,7 @@ What the walk flags, beyond types/arity/unbound: **non-tail self-recursion**.
 Brood loops must be tail-recursive — deep *non*-tail recursion overflows the
 green-process stack (a silent footgun that only bites at depth). The checker
 walks each function's body mirroring the evaluator's tail-position rules
-(`if`/`when`/`unless`/`cond`/`do`/`let`/`letrec`/`and`/`or`) and warns
+(`if`/`when`/`cond`/`do`/`let`/`letrec`/`and`/`or`) and warns
 when a function calls *itself* outside tail position (e.g. `(* n (fact (- n 1)))`
 — `fact` is an argument, so non-tail). Conservative: it stops at nested closures
 (a different frame) and only warns when certain, preferring a miss to a false
@@ -237,7 +237,7 @@ within the width budget (`format/*width*`, 100 cols by default); otherwise it
 breaks across lines with each body argument on its own line at +2 indent. A small
 table of *header counts* (`*format-headers*`) keeps a fixed prefix of args on the
 first line of certain forms — `defn` keeps `name params`, `let` keeps the bindings
-list, `if`/`when`/`unless` keep the predicate, etc. — so the body indents under
+list, `if`/`when` keep the predicate, etc. — so the body indents under
 a recognisable header. Comments inside a list force the multi-line shape; they
 re-emit on their own line at the surrounding indent, with their original text
 preserved verbatim. Blank lines between top-level forms (or top-level comments)
@@ -403,6 +403,18 @@ It exits 1 on any failure and prints one `FAIL` line per failure, naming `file:l
   FAIL docs/guide.md:31: setup raised: unbound symbol: conn — in (send conn :ping)
   FAIL docs/guide.md:58: block did not finish — timed out after 10000 ms
 1 markdown file(s), 12 block(s) checked, 3 failing example(s)
+```
+
+**One source file's examples:** `nest test --doc src/x.blsp std/y.blsp` (or `nest doctest
+src/x.blsp`) checks only the docstring examples of the names those files define, private
+helpers included, each failure at the example's own line — what to run while editing a
+file, instead of the whole-image gate. Inside a project its image is loaded first, so the
+examples see every module the file uses; a standard-library module is the binary's own copy
+(rebuild after editing `std/`), any other file is loaded from disk.
+
+```text
+  FAIL src/demo.blsp:7: demo/double: (demo/double 3)  ;=> got 6, documented 7
+1 source file(s) checked, 1 failing example(s)
 ```
 
 The markers are the same everywhere: `form ;=> result` is evaluated and compared as a value;

@@ -136,11 +136,11 @@
           (fold [:a :b :a] {} (fn (m x) (assoc m x (inc (get m x 0)))))]")
       [10 {:a 2 :b 1}]))
 
-  (test "a module defining its own `match*` keeps its pattern fns and destructuring lets"
+  (test "a module defining its own `match` keeps its pattern fns and destructuring lets"
     (assert=
       (%load-string
-        "(defmodule capture-match-star (:shadow match*))
-         (defmacro match* (& xs) :CAPTURED)
+        "(defmodule capture-match (:shadow match))
+         (defmacro match (& xs) :CAPTURED)
          [((fn ([a b]) (+ a b)) [1 2]) (let ((c d) (list 3 4)) (+ c d))]")
       [3 7]))
 
