@@ -584,8 +584,9 @@ prepush: ## Run the pre-push hook's gates by hand (rustfmt, the BROOD_* flag cat
 affected-tests: ## Print (don't run) the tests that name what this change touches: .blsp files for `nest test`, `cargo:` lines for nextest
 	@sh scripts/affected-tests.sh
 
-check-desktop: ## The static gates CI runs, safe on a workstation (fmt, nest format, nest check + --strict, clippy), plus TEST=tests/x_test.blsp if given; push after it with --no-verify
+check-desktop: ## The static gates CI runs, safe on a workstation (fmt, the BROOD_* flag catalogue, nest format, nest check + --strict, clippy), plus TEST=tests/x_test.blsp if given; push after it with --no-verify
 	cargo fmt --all --check
+	scripts/check-flag-catalogue.sh
 	cargo build -p nest
 	$(RUN_CAP) target/debug/nest format --check
 	$(RUN_CAP) target/debug/nest check $$(find std tests examples -name '*.blsp' | sort)
