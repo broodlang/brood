@@ -324,7 +324,7 @@ streamed on the stdout channel during the (synchronous) call: a Brood handler
 calls `(mcp/progress progress total message)` — a no-op without a token, so
 any handler can use it. The `check` tool reports per file
 (`checked foo.blsp`, 3/12). Mechanism: the handler runs in its own process with
-`mcp/*progress-sink*` bound; `mcp/progress` sends each report to the dispatcher,
+`mcp-server/*progress-sink*` bound; `mcp/progress` sends each report to the dispatcher,
 which writes the notification while it waits for the handler's answer.
 `project-check` calls it only when the `mcp` module is already loaded, so a plain
 `nest check` never loads it.
