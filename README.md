@@ -1,9 +1,17 @@
 # Brood
 
-> ⚠️ **Experimental — pre-1.0.** Brood is under active development and nothing is
-> stable yet. The language, standard library, tooling, and on-disk formats can
-> change dramatically (and break) without notice or migration path. Explore and
-> experiment freely, but don't build anything you depend on against it yet.
+> **Pre-1.0 — on the road to a compatibility promise.** Until 1.0, a 0.x minor release may
+> still break things; every break is listed in [`CHANGELOG.md`](CHANGELOG.md), and a renamed
+> name's unbound error says where it went. From **1.0.0** the promise in
+> [ADR-673](docs/decisions/adr-600-699.md#adr-673--the-10-compatibility-promise-what-is-covered-for-how-long-and-what-is-not)
+> holds: semantic versioning, and the language, every public std name, the `project.blsp`
+> and lock formats, the `nest`/`brood` command lines and the error codes change only at a
+> major release. A deprecated name keeps working, with a warning, until then; nodes of one
+> `major.minor` always link. [`docs/road-to-1.0.md`](docs/road-to-1.0.md) is what is left.
+>
+> Coming from another Lisp? [`docs/brood-among-lisps.md`](docs/brood-among-lisps.md) places
+> Brood among Common Lisp, Scheme, Clojure and the rest, and lists what you will look for and
+> not find.
 
 **Brood** is a dynamic **Lisp implemented in Rust** with a deliberately small core:
 a handful of special forms, with the standard library, REPL and toolchain written in

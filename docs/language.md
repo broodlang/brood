@@ -60,6 +60,31 @@ the param lists are **lists** `(x y)`, not vectors `[x y]`, and clauses are trie
 (see [`fn`/`defn` clauses](#fn--defn-clauses)). The list-not-vector spelling
 is the one piece that can't be guessed from Clojure; it has to be read.
 
+## Coming from Common Lisp or Scheme
+
+Brood is a Lisp-1 with immutable data, so the habits that differ most are the ones about
+names and change. [`brood-among-lisps.md`](brood-among-lisps.md) places it among the other
+Lisps and lists, with the decision behind each, what a Lisper will look for and not find.
+
+| Common Lisp / Scheme habit | Brood |
+|---|---|
+| `(defun f (x) …)`, `(define (f x) …)`, `(lambda (x) …)` | `(defn f (x) …)` and `(fn (x) …)`. |
+| `(let ((a 1) (b 2)) …)` | Bindings are **flat**: `(let (a 1 b 2) …)`, each seeing the ones before it. |
+| `(funcall f x)`, `#'f`, `(apply #'f args)` | One namespace (a Lisp-1): `(f x)`, `f`, `(apply f args)`. |
+| `car`, `cdr`, `mapcar`, `(reduce f xs)` | `first`, `rest`, and **the collection first**: `(map xs f)`, `(fold xs init f)`. |
+| `setf`, `setq`, `set!`, `incf`, a mutable vector or hash table | Nothing changes once made. Return a new value; `def` rebinds a global; a `Table` or a process holds state that must change ([Immutability](#immutability)). |
+| `loop`, `do`, `dolist`, `dotimes`, named `let` | `doseq` for effect (`(doseq (i (range n)) …)`), `for` to collect, `fold`, or tail recursion, which never grows the stack. |
+| `progn`, `begin` | `do`. |
+| `unless` | `(when (not test) …)`. |
+| `eq`, `eql`, `equal`, `eqv?`, `equal?` | One `=`, structural and type-sensitive: `(= [1 2] [1 2])` is true, `(= 1 1.0)` is false. |
+| `t`, `#t`, `#f` | `true` and `false`. Only `nil` and `false` are falsy; `()` is `nil`, so the empty list is falsy as in Common Lisp. |
+| `` `(a ,b ,@c) `` | `` `(a ~b ~@c) ``. |
+| `&rest`, `&key` | `&` for the rest; a trailing options map instead of keywords (ADR-163). `&optional` is spelled the same. |
+| `handler-case`, `with-handlers`, `guard`, restarts | `(try … (catch pattern …))`, and a function that cannot do its job usually returns a **failure value** rather than raising ([Errors](#errors)). |
+| `call/cc`, `dynamic-wind` | Processes and supervision. |
+| `#\a` | No character type: `"a"`. |
+| Symbols read upcased (`'Foo` is `FOO`) | Case-sensitive: `'Foo` and `'foo` are different symbols. |
+
 ## Data types
 
 | Type | Examples | Notes |
@@ -1690,17 +1715,15 @@ raises on mismatch. Bindings stay sequential, freely mixed with plain symbols:
 
 ### `fn` / `defn` clauses
 
-`fn` is **multi-clause** when every form after it is a clause `(param-list body…)`.
-Multi-clause dispatch has **two axes** (ADR-047):
+`fn` is **multi-clause** when every form after it is a clause `(param-list body…)`. The
+clauses are tried **in order** and the first that matches runs (ADR-619, below), whether a
+clause is told apart by its argument count or by the shape of its arguments:
 
 - **By argument count** (Clojure-style multi-arity) when the heads are *arity
-  clauses* — plain-symbol params, optionally with `&optional` / `&` rest. The
-  call's arg count picks the clause; an exact fixed arity beats a variadic one,
-  and among matches the most-specific (most required params) wins. Each arm binds
-  its params *directly* (no rest-list), so it's as cheap as a single-clause fn —
-  this is how the prelude's variadic `+`/`-`/`<`/`=` stay fast and stay Brood.
-- **By pattern** (same-arity dispatch) when a head contains
-  literals or destructuring — the clauses share an arity and the first matching
+  clauses* — plain-symbol params, optionally with `&optional` / `&` rest. Each arm
+  binds its params *directly* (no rest-list), so it's as cheap as a single-clause fn —
+  this is how the prelude's variadic `+`/`-`/`<`/`=` stay fast and stay Brood (ADR-047).
+- **By pattern** when a head contains literals or destructuring — the first matching
   shape (and `:when` guard) wins.
 
 Otherwise `fn` is single-clause, and each **required** parameter may itself be a

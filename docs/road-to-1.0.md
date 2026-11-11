@@ -77,15 +77,20 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
 
 ## C. The docs tell the truth
 
-- ⬜ **README.** Replace the "experimental, pre-1.0" warning with the ADR-673 promise. Link
+- ✅ **README** (2026-11-11): the warning now says what holds before 1.0 and what ADR-673
+  promises from 1.0.0, and links `brood-among-lisps.md`. At 1.0.0 the "until 1.0" half goes.
+  Was: Replace the "experimental, pre-1.0" warning with the ADR-673 promise. Link
   `brood-among-lisps.md`.
-- ⬜ **`language.md`.** Its paragraph on "most-specific arity wins" (ADR-047) contradicts
-  ADR-619's in-order clauses further down the same page. Sweep the page against the
-  implementation once, since it is the document a newcomer trusts.
-- ⬜ **`lsp.md`** still talks about a `require` target; there is no `require` form.
+- 🟡 **`language.md`.** The "most-specific arity wins" paragraph now says clauses run in order
+  (2026-11-11). Open: sweep the page against the implementation once, since it is the
+  document a newcomer trusts.
+- ✅ **`lsp.md`** (2026-11-11): every `require`-form passage (goto, links, completion, the
+  add/remove-require code actions, the tier table) now describes what the server does since
+  ADR-229. Was: still talks about a `require` target; there is no `require` form.
 - ⬜ **CLAUDE.md** loses the greenfield section at 1.0.0 (ADR-673 §7). The rename-wave section
   becomes the procedure for a major release.
-- ⬜ **A "Coming from …" note for Common Lisp and Scheme**, beside the Clojure table. The
+- ✅ **A "Coming from …" note for Common Lisp and Scheme** (2026-11-11), `language.md`
+  beside the Clojure table, each row checked against the running language. Was: The
   "reaches for and not find" table in `brood-among-lisps.md` is the seed.
 
 ## D. It runs where people are
