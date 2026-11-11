@@ -1437,3 +1437,12 @@ deleted, and the deprecated-macro pass no longer appends a pointer to it; the pa
 (it is generic), and `tests/reduce_forms_test.blsp` now drives it with a deprecated macro the
 test defines. Brood itself needed no migration beyond that test file (stage 1 had done it).
 `docs/bare-names.md` drops to 188.
+
+2026-11-11 (road-to-1.0 §B5, §B7). A `nest` flag can be retired gently: `{:deprecated
+"0.52.0" :use "--new"}` in the command table keeps the old spelling working, prints
+"'--old' is deprecated since 0.52.0 — use '--new'" on stderr, hands the command its value under
+the new name, marks it in `--help` and leaves it out of completion. And a code keeps its
+`:kind`: `error_codes::KINDS` declares each code's, and `crates/lisp/tests/error_code_kinds.rs`
+freezes the shipped rows, checks `docs/error-codes.md` against them and checks real raises.
+Also: `cpu_time_test` read a worker's CPU time before the quantum that did the work was booked
+(CI, run 42981945904); it now waits for the figure under a deadline.

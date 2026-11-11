@@ -21,7 +21,9 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
 ;; `run` function. A flag's spec is `:bool`, the NAME of the value it takes (`"DIR"`), or a
 ;; map `{:value "N" :int [lo hi] :repeat true :complete "kind"}` — an integer in range
 ;; (either bound nil for open), repeatable (collected into a list), completed by a
-;; `complete/print-candidates` kind. A positional is `[name values]`: its allowed values as a
+;; `complete/print-candidates` kind. A flag on its way out is `{:deprecated "VERSION" :use
+;; "--new"}` (or, with no replacement, `{:deprecated "VERSION" :bool true}` / `:value
+;; "NAME"`): it keeps working, warns, and drops out of completion (`resolve-flag`). A positional is `[name values]`: its allowed values as a
 ;; list, the name of a completion kind for free text, or nil. `:many true` admits any number
 ;; of positionals; `:trailing true` hands every word after the first positional through
 ;; unparsed, hyphens included; `:arity n` demands exactly n and `:arity [lo hi]` between lo
@@ -251,8 +253,12 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
 
     (includes? (nest/flags-of \"format\") \"--check\")  ;=> true
     (nest/flags-of \"no-such-command\")              ;=> nil"
+  ;; a deprecated flag still parses, but is not offered: no one should learn it new
   (let (spec (command-spec cmd))
-    (if spec (sort (keys (get spec :flags))) (list))))
+    (if spec
+      (sort (seq/filter (keys (get spec :flags))
+              (fn (flag) (not (flag-deprecated (get (get spec :flags) flag))))))
+      (list))))
 
 (defn- positional-values-of (spec)
   "The allowed values of `spec`'s positional — `()` when it is free text or absent."
@@ -290,6 +296,35 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
 (defn- flag-complete-kind (kind)
   (and (map? kind) (get kind :complete)))
 
+(defn- flag-deprecated (kind)
+  (and (map? kind) (get kind :deprecated)))
+
+;; A flag on its way out (road-to-1.0 §B5): `{:deprecated "0.52.0" :use "--new"}` keeps
+;; working with a warning on stderr, its value stored under `--new` so the command reads one
+;; name; without `:use`, the map says its own shape (`:bool true`, or `:value "NAME"`). Help
+;; marks it and completion stops offering it, so no one learns it new.
+(defn- resolve-flag (spec word)
+  "`[canon kind warning]` for `word` under `spec`, or nil for a flag `spec` does not have.
+`kind` is `:bool` or a valued spec; `warning` is nil unless the flag is deprecated."
+  (let (kind (flag-kind spec word)
+        canon (or (get *short-aliases* word) word))
+    (cond
+      (nil? kind) nil
+      (flag-deprecated kind)
+        (let (replacement (get kind :use)
+              target-kind (if replacement (flag-kind spec replacement) nil))
+          [(or replacement canon)
+            (cond
+              target-kind target-kind
+              (get kind :bool) :bool
+              else kind)
+            (str "'"
+              word
+              "' is deprecated since "
+              (flag-deprecated kind)
+              (if replacement (str " — use '" replacement "'") ""))])
+      else [canon kind nil])))
+
 (defn- store-flag (acc canon kind value)
   "Record `value` for `canon`: a repeatable flag collects a list, any other keeps the last."
   (let (flags (get acc :flags))
@@ -317,10 +352,11 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
         (= word "--") (assoc acc :positionals (append (get acc :positionals) rest-words))
         (or (= word "--help") (= word "-h")) (parse-words spec rest-words (assoc acc :help true))
         (string/starts-with? word "-")
-          (let (kind (flag-kind spec word)
-                canon (or (get *short-aliases* word) word))
+          (let (resolved (resolve-flag spec word)
+                [canon kind warning] (or resolved [nil nil nil])
+                acc (if warning (assoc acc :warnings (conj (get acc :warnings []) warning)) acc))
             (cond
-              (nil? kind) (assoc acc :error (str "unexpected argument '" word "'"))
+              (nil? resolved) (assoc acc :error (str "unexpected argument '" word "'"))
               (and (= kind :bool) inline)
                 (assoc acc
                   :error
@@ -458,14 +494,18 @@ clap's words."
 (defn parse (cmd words)
   "Parse `words` (argv after the subcommand) against `cmd`'s table entry:
 `{:flags {\"--all\" true …} :positionals (…) :error nil-or-message}`. An `:int` flag's value
-arrives as an int; a `:repeat` flag's as a list.
+arrives as an int; a `:repeat` flag's as a list. A deprecated flag adds its notice to
+`:warnings`, which `main` prints before running the command.
 
     (nest/parse \"format\" [\"--check\"])  ;=> {:positionals nil, :flags {\"--check\" true}, :error nil}
     (get (nest/parse \"format\" [\"--bogus\"]) :error)  ;=> \"unexpected argument '--bogus'\""
-  (let (spec (get *commands* cmd))
-    (check-int-flags spec
-      (check-constraints spec
-        (check-positional spec (parse-words spec words {:flags {} :positionals (list) :error nil}))))))
+  (parse-against (get *commands* cmd) words))
+
+(defn- parse-against (spec words)
+  "`parse` over a command table entry `spec` itself."
+  (check-int-flags spec
+    (check-constraints spec
+      (check-positional spec (parse-words spec words {:flags {} :positionals (list) :error nil})))))
 
 ;; ── the plumbing the Rust arms had ───────────────────────────────────────────────────
 
@@ -506,8 +546,11 @@ arrives as an int; a `:repeat` flag's as a list.
     (when (not (empty? (get spec :flags)))
       (io/puts "Options:")
       (doseq (flag (sort (keys (get spec :flags))))
-        (let (kind (get (get spec :flags) flag))
-          (io/puts (str "  " flag (if (= kind :bool) "" (str " <" (flag-value-name kind) ">")))))))
+        (let ([_ kind warning] (resolve-flag spec flag))
+          (io/puts (str "  "
+                     flag
+                     (if (= kind :bool) "" (str " <" (flag-value-name kind) ">"))
+                     (if warning (str "  (" warning ")") ""))))))
     0))
 
 (defn- require-project (cmd hint)
@@ -1150,7 +1193,11 @@ words, it is the program's.
                 (eputs "")
                 (eputs "For more information, try '--help'.")
                 2)
-            else ((get spec :run) options)))))))
+            else
+              (do
+                (doseq (warning (seq/distinct (get options :warnings [])))
+                  (eputs "nest " cmd ": warning: " warning))
+                ((get spec :run) options))))))))
 ;; `list`, not `vector`: the router passes `(list "check" …)`, so a `vector` contract would
 ;; refuse every Brood-routed subcommand when contracts are armed (KI-113).
 (sig main ((list string) -> int))

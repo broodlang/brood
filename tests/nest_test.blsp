@@ -5,7 +5,11 @@
 ;; → options parse, its clap-shaped errors, and the constraint rules — in-image, where a
 ;; case costs microseconds rather than a process.
 
-(defmodule nest-test (:use test))
+(defmodule nest-test
+  (:use test)
+  ;; `parse-against` is private: the deprecated-flag tests parse against a table entry of
+  ;; their own, since no shipped flag is deprecated yet
+  (:use-internals nest :only []))
 
 (describe "nest/parse — flags and positionals"
   (test "a variadic FILE list and a bool flag"
@@ -168,3 +172,30 @@
     (assert= (list "commit" "msg") (get (nest/parse "ws" ["commit" "msg"]) :positionals))
     (is (includes? (get (nest/parse "ws" ["bogus"]) :error) "invalid value 'bogus'"))
     (assert= true (get (get (nest/parse "key" ["gen" "--force"]) :flags) "--force"))))
+
+(describe "a deprecated flag (road-to-1.0 §B5)"
+  ;; A table entry of the test's own: `--fast` renamed to `--quick`, `--old-out` renamed to
+  ;; `--out` (valued), and `--legacy` retired with no replacement.
+  (def- spec
+    {:flags {"--quick" :bool
+             "--fast" {:deprecated "0.52.0" :use "--quick"}
+             "--out" "DIR"
+             "--old-out" {:deprecated "0.52.0" :use "--out"}
+             "--legacy" {:deprecated "0.52.0" :bool true}}})
+
+  (test "it still works, stored under its replacement, with a notice naming both"
+    (let (o (nest/parse-against spec ["--fast" "--old-out" "d"]))
+      (assert= nil (get o :error))
+      (assert= true (get (get o :flags) "--quick"))
+      (assert= "d" (get (get o :flags) "--out"))
+      (assert= ["'--fast' is deprecated since 0.52.0 — use '--quick'"
+                 "'--old-out' is deprecated since 0.52.0 — use '--out'"]
+        (get o :warnings))))
+
+  (test "one with no replacement keeps its own shape and says only that it is going"
+    (let (o (nest/parse-against spec ["--legacy"]))
+      (assert= true (get (get o :flags) "--legacy"))
+      (assert= ["'--legacy' is deprecated since 0.52.0"] (get o :warnings))))
+
+  (test "a flag in good standing warns about nothing"
+    (assert= nil (get (nest/parse-against spec ["--quick" "--out" "d"]) :warnings))))

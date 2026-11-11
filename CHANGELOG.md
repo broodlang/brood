@@ -7,6 +7,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## Unreleased
 
 **Added.**
+- **A `nest` flag can be deprecated**: it keeps working, warns naming its replacement, and
+  leaves completion (road-to-1.0 §B5). **An error code keeps its `:kind`**, now enforced by a
+  frozen ledger test (§B7).
 - **`string/scripts` and `string/mixed-script?`** (ADR-710): the Unicode Script of a string's letters, and
   UTS #39's single-script test over it — `p\u{430}ypal` (a Cyrillic `а`) mixes scripts, `日本語のテキスト`
   and `Unicode漢字` do not. What a homoglyph warning, a registry's name check or a mail reader reads.

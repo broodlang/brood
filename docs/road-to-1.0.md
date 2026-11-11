@@ -61,7 +61,10 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
    `major.minor` in the handshake beside the protocol magic. Refuse a mismatch with a message
    that names both versions. Keep the refusal before any session key is derived, so a
    mismatched node learns why and nothing else.
-5. ⬜ **Deprecating CLI flags.** `nest`'s flags are data in `std/tool/nest.blsp`, so they can
+5. ✅ **Deprecating CLI flags** (2026-11-11). A flag spec `{:deprecated "VERSION" :use
+   "--new"}` keeps working, warns on stderr, stores its value under the replacement, is marked
+   in `--help` and drops out of completion. Guard: `tests/nest_test.blsp` "a deprecated flag".
+   Was: `nest`'s flags are data in `std/tool/nest.blsp`, so they can
    carry `:deprecated` the way names do. Today nothing can retire a flag gently.
 6. 🟡 **Stability metadata in use.** `:since`, `:deprecated` and `:beta` exist (ADR-283), and
    `std/` uses them about 22 times. Nothing is `:beta` at 1.0, so clear the three existing
