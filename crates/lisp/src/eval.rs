@@ -995,14 +995,15 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
         // Polymorphism/type constructs from other languages → point at `ability`
         // (`defprotocol`/`defimpl` were retired in its favour). `deftype` is NOT here: it
         // is Brood's own form since ADR-327 — a structural type alias for the checker,
-        // not Clojure's nominal class — so a bare `(deftype …)` is a real call.
-        "definterface" | "reify" | "defprotocol" | "defimpl" | "defmulti" | "defmethod" => {
-            "Brood has no nominal types — for a named, optionally-typed record use \
-             `defrecord` (sugar over a plain map, so records stay structural). For \
-             polymorphism, `defability`/`impl`/`defrecord` are built in (core, no \
-             import) — open generic functions dispatching on the first argument's \
-             identity (its `type-of` kind, or a `defrecord` record's nominal id), \
-             extensible from any module; a driver is just a value you dispatch on. Or \
+        // not Clojure's nominal class — so a bare `(deftype …)` is a real call. Nor are
+        // `defmulti`/`defmethod`, which are Brood's own (ADR-179), so never unbound.
+        "definterface" | "reify" | "defprotocol" | "defimpl" => {
+            "For a named data type use `defrecord`: a record is its own kind of value \
+             with a nominal id (ADR-542), read with keyword accessors like a map. For \
+             polymorphism, `defability`/`impl` are built in (core, no import) — open \
+             generic functions dispatching on the first argument's identity (its \
+             `type-of` kind, or a record's id), extensible from any module; \
+             `defmulti`/`defmethod` dispatch on any function of the arguments. Or \
              dispatch with `match`/`cond`; multi-clause `defn` dispatches on arity or \
              pattern. (`defprotocol`/`defimpl` were retired in favour of `ability`.)"
         }

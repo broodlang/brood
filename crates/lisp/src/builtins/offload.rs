@@ -20,7 +20,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![any, any], int),
         &["f", "args"],
-        "Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. Only long/blocking data-in/data-out natives are allowed (%git-clone, %git-resolve-ref, %git-list-tags, %pbkdf2-sha256-bytes, %digest, %hmac, file/slurp, file/slurp-bytes, file/spit, file/spit-bytes, file/spit-append, append-bytes, tls-self-signed) — anything heap-sharing or env-reading is refused. Prefer the `proc/offload` wrapper, which parks in a selective receive and rethrows errors.",
+        "Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. Only long/blocking data-in/data-out natives are allowed (%git-clone, %git-resolve-ref, %git-list-tags, %pbkdf2-sha256-bytes, %digest, %hmac, file/slurp, file/slurp-bytes, file/spit, file/spit-bytes, file/spit-append, file/spit-bytes-append, %tls-self-signed) — anything heap-sharing or env-reading is refused. Prefer the `proc/offload` wrapper, which parks in a selective receive and rethrows errors.",
         offload_start);
 }
 
@@ -49,8 +49,8 @@ const OFFLOAD_ALLOWED: &[&str] = &[
     "file/replace",
     "file/spit-bytes",
     "file/spit-append",
-    "append-bytes",
-    "tls-self-signed",
+    "file/spit-bytes-append",
+    "%tls-self-signed",
     // A long guest call is exactly what the pool is for (docs/interop.md):
     // the handle is an int token, args/results are data, and the instance
     // registry is global with a per-instance mutex — off-worker is sound.
@@ -223,4 +223,29 @@ pub(super) fn offload_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     };
     let _ = crate::core::sync::lock(&pool.jobs).send(job);
     Ok(Value::Int(token))
+}
+
+#[cfg(all(test, feature = "wasm", feature = "toolchain"))]
+mod tests {
+    /// The allowlist is matched against a native's REGISTERED name, so a name that is not
+    /// one — left behind by a rename — refuses the very native it was meant to admit, with
+    /// nothing to say so: `append-bytes` and `tls-self-signed` sat here for months after
+    /// their natives became `file/spit-bytes-append` and `%tls-self-signed` (2026-11-11).
+    #[test]
+    fn every_allowed_name_is_a_registered_native() {
+        let mut interp = crate::Interp::new();
+        for name in super::OFFLOAD_ALLOWED {
+            let value = interp
+                .eval_str(name)
+                .unwrap_or_else(|error| panic!("`{name}` is not bound: {error:?}"));
+            match value {
+                super::Value::Native(id) => assert_eq!(
+                    interp.heap.native(id).name,
+                    *name,
+                    "`{name}` is bound to a native registered under another name"
+                ),
+                _ => panic!("`{name}` is bound, but not to a native"),
+            }
+        }
+    }
 }
