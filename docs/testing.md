@@ -77,6 +77,11 @@ and `(number? "nope") is false` — not three identical lines. Use `assert=` for
 equality (it shows both the actual expression's value and the expected value) and
 `is` / `refute` for boolean predicates.
 
+A list and a vector of the same elements are not `=`, and they print alike. When that
+is the whole difference, `assert=` says so on a `note:` line — `same elements, but
+actual is a list and expected is a vector`, or the index path to the inner one that
+differs (`at [1 0] actual has a list where expected has a vector`).
+
 A test can report **several failures** — one per top-level body form. Each operand
 is evaluated once. With no mutable accumulator (data is immutable, ADR-026), an
 assertion signals failure by **throwing** a tagged record; the `test` macro runs
@@ -458,6 +463,11 @@ its interpreter exists, and drops the request from its environment so what it st
 run. A run holds a lock in its scratch home while it lives; the next run purges only the homes
 of runs that are gone. A `nest test` started inside a run keeps the user's config base for
 `nest`'s preferences.
+
+**`nest test --doc FILE…` checks a source file's docstring examples** instead of running
+tests: every `form ;=> result` in the docstrings of the names `src/x.blsp` defines, each
+failure as `src/x.blsp:LINE:` at the example's own line, exit 1 when one does not hold. See
+[tooling.md](tooling.md#checking-examples-nest-doctest).
 
 In a project, run the whole suite with **`nest test`** (or `make suite`, or
 `cargo test`): the runner discovers `tests/**/*_test.blsp`, loads them, and calls

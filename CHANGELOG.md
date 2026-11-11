@@ -7,6 +7,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 ## Unreleased
 
 **Added.**
+- **`nest test --doc FILE…`** (and `nest doctest FILE.blsp…`) checks the docstring examples of
+  the named source files only, each failure as `FILE:LINE:` at the example's own line, private
+  helpers included; inside a project its image is loaded first, so it works downstream
+  (`nest test --doc src/pool.blsp`). The engine is `doctest/failures-in-file`.
+- **`assert=` says when a list met a vector**: a failure whose two sides hold the same elements,
+  one a list and the other a vector (at any depth), adds `note: same elements, but actual is a list
+  and expected is a vector` — or the path to the inner one. What passes is unchanged.
 - **A `nest` flag can be deprecated**: it keeps working, warns naming its replacement, and
   leaves completion (road-to-1.0 §B5). **An error code keeps its `:kind`**, now enforced by a
   frozen ledger test (§B7).

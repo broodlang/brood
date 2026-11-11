@@ -537,6 +537,46 @@ and a summary, and returns the failure count (0 = all hold). The policy behind
 each block in a process of its own. Prints each failure and a summary, and returns the
 failure count (0 = all hold). The policy behind `nest doctest FILE.md…`."
   (markdown-doctests (map paths (fn (p) [p p]))))
+
+(defn- doctest-load (path)
+  ;; Bring the definitions of source file `path` into the image: a standard-library module
+  ;; by name (the binary's own copy — rebuild after editing std/), nothing when the project
+  ;; image already holds every name the file defines, else the file itself from disk.
+  (let (modules (map (or (module-index/modules-of nil path) nil) ->string)
+        builtin (reflect/builtin-modules)
+        names (nth (reflect/scan-source-extract (file/slurp path)) 2))
+    (cond
+      (and (not (empty? modules)) (every? modules (fn (m) (includes? builtin m))))
+        (each modules require-one)
+      (every? names (fn (n) (bound? (reflect/read-string n)))) nil
+      else (reflect/load path))))
+
+(defn run-file-doctests (paths)
+  "Check the documented examples of the Brood source files `paths` with
+`doctest/failures-in-file`: each file's module is loaded (a std module by name, a file the
+project image already holds as it is, any other from disk), then every `form ;=> result`
+case and `form ;~> result` illustration in the docstrings of every name it defines (private ones too) is
+checked. Prints each failure as `FILE:LINE: …` (the example's own line) and a summary, and
+returns the failure count (0 = all hold). The policy behind `nest test --doc FILE…` and
+`nest doctest FILE.blsp…`.
+
+    (docs/run-file-doctests [\"src/app.blsp\"])   ;~> 0 — after printing `1 source file(s) checked, 0 failing example(s)`"
+  (let (problems (fold paths
+                   []
+                   (fn (acc path)
+                     (cond
+                       (not (file/exists? path)) (append acc [(str path ": no such file")])
+                       else
+                         (let (outcome (try
+                                         (do (doctest-load path) nil)
+                                         (catch e
+                                           (str path ": could not be loaded: " (error-message e)))))
+                           (if outcome
+                             (append acc [outcome])
+                             (append acc (doctest/failures-in-file path))))))))
+    (each problems (fn (f) (io/puts (str "  FAIL " f))))
+    (io/puts (str (count paths) " source file(s) checked, " (count problems) " failing example(s)"))
+    (count problems)))
 (defn generate (& args)
   "Print Markdown documentation to stdout: the whole project with no args, or a single module given its name. The policy behind `nest doc`.
 

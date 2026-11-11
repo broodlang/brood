@@ -40,7 +40,7 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
    "docs" {:about "Generate a browsable HTML documentation site from docstrings (default `doc/`)."
            :flags {"--all" :bool "--out" "DIR" "-o" "DIR"}
            :run (fn (options) (run-docs options))}
-   "doctest" {:about "Check every `expr ;=> result` docstring example still holds, or, given markdown FILEs, run their ```clojure, ```lisp and ```brood blocks (each in a process of its own; ```clojure fragment opts one out); exit non-zero on a mismatch."
+   "doctest" {:about "Check every `expr ;=> result` docstring example still holds, or, given markdown FILEs, run their ```clojure, ```lisp and ```brood blocks (each in a process of its own; ```clojure fragment opts one out), or, given .blsp FILEs, the docstring examples of the names those files define (FILE:LINE per failure); exit non-zero on a mismatch."
               :flags {}
               :positional ["file" nil]
               :many true
@@ -68,7 +68,7 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
             ;; caller and leave the rest.
             :no-positional-with ["--fix-renames"]
             :run (fn (options) (run-check options))}
-   "test" {:about "Run the project's tests (every `tests/**/*_test.blsp`), or specific test files — `FILE`, or `FILE:LINE` for the one test at that line."
+   "test" {:about "Run the project's tests (every `tests/**/*_test.blsp`), or specific test files — `FILE`, or `FILE:LINE` for the one test at that line. `--doc FILE…` checks the `form ;=> result` docstring examples of those SOURCE files instead, each failure as FILE:LINE."
            :flags {"--only" {:value "SELECTOR" :repeat true :complete "selector"}
                    "--exclude" {:value "SELECTOR" :repeat true :complete "selector"}
                    "--include" {:value "SELECTOR" :repeat true :complete "selector"}
@@ -88,7 +88,9 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
                    "--cover-branches" :bool
                    "--cover-min" {:value "PCT" :int [0 100]}
                    ;; keep the real XDG config / state / data homes, not a scratch one (ADR-602)
-                   "--real-home" :bool}
+                   "--real-home" :bool
+                   ;; FILEs are source files: check their docstring examples, not tests
+                   "--doc" :bool}
            :positional ["file" "test-file"]
            :many true
            :run (fn (options) (run-test options))}
@@ -602,9 +604,22 @@ so at the CLI boundary and returns false (exit 2), rather than a trace from deep
 (defn- run-doctest (options)
   (if (require-project "doctest" nil)
     (let (files (get options :positionals)
-          failures (if (empty? files) (docs/run-doctests) (docs/run-markdown-doctests files)))
+          sources (seq/filter files (fn (f) (string/ends-with? f ".blsp")))
+          markdown (seq/filter files (fn (f) (not (string/ends-with? f ".blsp"))))
+          failures (if (empty? files)
+                     (docs/run-doctests)
+                     (+ (if (empty? sources) 0 (run-source-doctests sources))
+                       (if (empty? markdown) 0 (docs/run-markdown-doctests markdown)))))
       (if (and (int? failures) (> failures 0)) 1 0))
     2))
+
+(defn- run-source-doctests (files)
+  "The docstring examples of the source `files` (`nest test --doc`, `nest doctest FILE.blsp`):
+inside a project its image is loaded first, so a file's examples see the modules it uses.
+Returns the failure count."
+  (load-project-image)
+  (require-one 'doctest)
+  (docs/run-file-doctests files))
 
 (defn- run-grammar (options)
   (let (target (or (first (get options :positionals)) "tmlanguage"))
@@ -764,6 +779,15 @@ file) propagates for the normal error report."
         problem (shard-error flags))
     (cond
       problem (do (eputs "nest test: " problem) 2)
+      (get flags "--doc")
+        (cond
+          (empty? paths)
+            (do
+              (eputs "nest test: --doc checks the examples of named source files: nest test --doc FILE.blsp…")
+              (eputs "  For every documented example in the project: nest doctest")
+              2)
+          (not (readable-files? "test" paths)) 2
+          else (if (> (run-source-doctests paths) 0) 1 0))
       (and (empty? paths)
         (not (require-project "test"
                "To run one file outside a project: nest test <file>_test.blsp")))

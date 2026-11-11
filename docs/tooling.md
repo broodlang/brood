@@ -405,6 +405,18 @@ It exits 1 on any failure and prints one `FAIL` line per failure, naming `file:l
 1 markdown file(s), 12 block(s) checked, 3 failing example(s)
 ```
 
+**One source file's examples:** `nest test --doc src/x.blsp std/y.blsp` (or `nest doctest
+src/x.blsp`) checks only the docstring examples of the names those files define, private
+helpers included, each failure at the example's own line — what to run while editing a
+file, instead of the whole-image gate. Inside a project its image is loaded first, so the
+examples see every module the file uses; a standard-library module is the binary's own copy
+(rebuild after editing `std/`), any other file is loaded from disk.
+
+```text
+  FAIL src/demo.blsp:7: demo/double: (demo/double 3)  ;=> got 6, documented 7
+1 source file(s) checked, 1 failing example(s)
+```
+
 The markers are the same everywhere: `form ;=> result` is evaluated and compared as a value;
 `form ;~> result` is read, and its head must exist with an arity that takes the arguments,
 but it is not run. Examples run at the top level, so they are written with the full
