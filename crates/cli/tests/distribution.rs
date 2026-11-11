@@ -3245,16 +3245,14 @@ fn mailbox_lanes_cross_a_node_link() {
     );
 }
 
-/// A v10 node and a v11 node link, whichever dials, and exchange messages both ways
-/// (ADR-492). The old side runs under `BROOD_DIST_V10`, which speaks exactly the
-/// protocol from before lanes crossed a link: its magic written before it reads the
-/// peer's, nothing but v10 accepted, and plain `Send` frames only. Every message arrives,
-/// the plain, priority and latest sends alike, as the plain sends a v10 link carries.
-fn mixed_versions_exchange_messages(old_server: bool) {
+/// Nodes of different minors do not link, whichever dials, and the dialer's `node/connect`
+/// raises naming both versions (ADR-673 §3, ADR-699). The other minor is said with
+/// `BROOD_DIST_VERSION`; the claim `0.0` is one no real build has.
+fn another_minor_is_refused(other_dials: bool) {
     let _g = port_lock();
     let dir = std::env::temp_dir().join(format!(
-        "brood-dist-mixed-{}-{}",
-        old_server,
+        "brood-dist-minor-{}-{}",
+        other_dials,
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
@@ -3263,38 +3261,21 @@ fn mixed_versions_exchange_messages(old_server: bool) {
     let server = format!(
         r#"
 (node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
-(defn serve ()
-  (receive
-    ([:hi from n] (do (send from [:pong n])
-                      (proc/send-priority from [:urgent n])
-                      (proc/send-latest from n [:latest n])
-                      (serve)))
-    (_ (serve))))
-(proc/register :echo (spawn (serve)))
 (receive (:never :x))
 "#
     );
     let client = format!(
         r#"
 (node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(node/connect "a@127.0.0.1:{port_a}")
-(def echo {{:name :echo :node :a@127.0.0.1}})
-(send echo [:hi (self) 1])
-(proc/send-priority echo [:hi (self) 2])
-(proc/send-latest echo :hi [:hi (self) 3])
-(defn collect (acc) (if (= (count acc) 9) acc (receive (m (collect (conj acc m))) (after 30000 acc))))
-(def got (into #{{}} (collect [])))
-(def want (into #{{}} (mapcat [1 2 3] (fn (n) [[:pong n] [:urgent n] [:latest n]]))))
-(when (not (= got want))
-  (throw (str "mixed versions lost messages: got " (pr-str got) ", want " (pr-str want))))
-(io/puts "MIXED-VERSIONS-OK")
+(io/puts (try (do (node/connect "a@127.0.0.1:{port_a}") "UNEXPECTED-CONNECT")
+              (catch e (str "REFUSED: " (error-message e)))))
 "#
     );
-    let old: &[(&str, &str)] = &[("BROOD_DIST_V10", "1")];
-    let (server_env, client_env) = if old_server {
-        (old, &[][..])
+    let other: &[(&str, &str)] = &[("BROOD_DIST_VERSION", "0.0")];
+    let (server_env, client_env) = if other_dials {
+        (&[][..], other)
     } else {
-        (&[][..], old)
+        (other, &[][..])
     };
     let mut a = spawn_brood_env(&dir, "server.blsp", &server, server_env);
     wait_until_listening(port_a);
@@ -3304,19 +3285,27 @@ fn mixed_versions_exchange_messages(old_server: bool) {
     let _ = a.wait();
     let _ = std::fs::remove_dir_all(&dir);
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let ours = brood::VERSION
+        .split('.')
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(".");
     assert!(
-        out.status.success() && stdout.contains("MIXED-VERSIONS-OK"),
-        "a v10 and a v11 node did not link (old server: {old_server}).\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        stdout.contains("REFUSED: ")
+            && stdout.contains("Brood 0.0")
+            && stdout.contains(&format!("Brood {ours}"))
+            && stdout.contains("one major.minor"),
+        "another minor must be refused, naming both versions (other dials: {other_dials}).\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
 
 #[test]
-fn a_v11_node_dials_a_v10_node_and_they_exchange_messages() {
-    mixed_versions_exchange_messages(true);
+fn a_node_of_another_minor_dialing_is_refused_naming_both_versions() {
+    another_minor_is_refused(true);
 }
 
 #[test]
-fn a_v10_node_dials_a_v11_node_and_they_exchange_messages() {
-    mixed_versions_exchange_messages(false);
+fn dialing_a_node_of_another_minor_is_refused_naming_both_versions() {
+    another_minor_is_refused(false);
 }

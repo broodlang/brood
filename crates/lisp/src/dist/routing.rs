@@ -117,31 +117,17 @@ pub(crate) fn route_in_lane(
         (
             conn.writer_handles(),
             conn.guest.clone(),
-            conn.lanes,
             Arc::clone(&conn.latest),
         )
     });
-    let Some(((tx, sock), guest, lanes, latest)) = link else {
+    let Some(((tx, sock), guest, latest)) = link else {
         return false;
     };
-    // A `send-latest` replaces its slot's unwritten frame on the link whatever the peer
-    // speaks; the lane itself goes on the wire only to a v11 peer, and to a v10 one the
-    // message is the plain `Send` it knows (ADR-492).
+    // A `send-latest` replaces its slot's unwritten frame on the link (ADR-492).
     let slot = match &lane {
         process::Lane::Latest(key) => Some(latest_slot(&target, key)),
         _ => None,
     };
-    let lane = if lanes { lane } else { process::Lane::Normal };
-    // A v10 peer (one not speaking the current protocol) cannot decode a record (ADR-542):
-    // refused here, the way an unencodable message is below, rather than sent as bytes that
-    // would tear the link down at the other end.
-    if !lanes && msg.holds_record() {
-        eprintln!(
-            "dist: cannot send a record to {}: the peer speaks protocol v10, which has no records",
-            value::symbol_name(node)
-        );
-        return true;
-    }
     // A guest link is told about every local pid in the message, which is what lets it
     // reply to one (ADR-415) — noted on the link the message goes out on, before it is
     // queued there.
@@ -153,10 +139,10 @@ pub(crate) fn route_in_lane(
     if let Some(guest) = &guest {
         guest.translate_outbound(&mut frame);
     }
-    // To a current peer a large bytes value is left out and spliced in by the writer, whole
-    // the first time and by digest after (ADR-695); a v10 peer gets every byte inline.
-    let encoded: io::Result<Payload> = if lanes {
-        shared_bytes::encode_sharing(|| encode_payload(&frame)).and_then(|payload| {
+    // A large bytes value is left out and spliced in by the writer, whole the first time
+    // and by digest after (ADR-695).
+    let encoded: io::Result<Payload> = shared_bytes::encode_sharing(|| encode_payload(&frame))
+        .and_then(|payload| {
             if payload.whole_len() > MAX_FRAME {
                 Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -168,10 +154,7 @@ pub(crate) fn route_in_lane(
             } else {
                 Ok(payload.into())
             }
-        })
-    } else {
-        encode_payload(&frame).map(|bytes| Arc::new(bytes).into())
-    };
+        });
     let bytes = match encoded {
         Ok(payload) => payload,
         Err(e) => {

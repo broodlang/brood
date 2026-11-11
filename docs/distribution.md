@@ -160,8 +160,10 @@ Silence it with `BROOD_NO_DROP_WARN=1`.
 `TcpListener` for `host:port` — and runs an acceptor thread; `connect` dials the
 matching carrier. A single `Stream { Tcp | Unix }` enum (ADR-068) carries the
 link, so everything below is transport-agnostic. Both ends perform the
-authenticated handshake (ADR-034 v2; wire **v11**, ADR-089): a 4-byte
-magic+version prefix (`b"BRD\x0d"`, v13, or v10's `b"BRD\x0a"` with a v10 peer, ADR-492), then a `Hello { node, nonce, eph_pub, addr,
+authenticated handshake (ADR-034 v2; wire **v14**, ADR-089): an 8-byte greeting, the
+magic (`b"BRD\x0e"`) and the Brood `major.minor` (ADR-699) — nodes link only within one
+minor (ADR-673 §3), and a node of another minor is refused at both ends with a message
+naming both versions, before any key exists — then a `Hello { node, nonce, eph_pub, addr,
 incarnation }` exchange (each side a fresh 32-byte nonce, a fresh **ephemeral X25519
 pubkey**, the address peers should dial it at, and its **incarnation** — a random id the
 runtime process mints once, so a peer can tell a restart from a duplicate link; it is
@@ -209,13 +211,11 @@ independent symbol interners. (In-process messages keep the interned id.)
 A send in a lane other than the normal one is a `FRAME_SEND_LANE`, which carries the
 **mailbox lane** (ADR-492): priority (`proc/send-priority`) or latest with its key's
 printed form (`proc/send-latest`), and the receiving node queues the message in it, so a
-lane means the same thing to a remote pid as to a local one. Only a v11 link carries it.
-A v11 node still links with a v10 one: its responder reads the dialer's magic first and
-answers in that version, and its dialer, answered in v10, redials offering v10. On a v10
-link every send is the plain `Send` v10 knows. A `send-latest` frame not yet written to
-the socket is also replaced in the link's writer queue by the next one to the same target
-and key, whatever the peer speaks. `BROOD_DIST_V10=1` makes a runtime speak exactly v10,
-for testing a mixed cluster.
+lane means the same thing to a remote pid as to a local one. A `send-latest` frame not
+yet written to the socket is also replaced in the link's writer queue by the next one to
+the same target and key. (Until ADR-699 a node still linked with a v10 one, which knew no
+lanes; a v10 runtime is from an older minor, so it is refused now.)
+`BROOD_DIST_VERSION=0.0` makes a runtime say another `major.minor`, for testing the refusal.
 
 ## Scope & limitations (slice 1)
 
@@ -384,8 +384,8 @@ non-constant-time, with no protocol-version field, so a wire change couldn't
 be negotiated and a wrong-version peer failed opaquely.
 
 **As built** (*Transport* above; ADR-034 v2, ADR-089).
-- A 4-byte magic+version prefix, so the codec can evolve compatibly; a mismatch aborts
-  with a clear error, and a v11 node down-negotiates to v10 (ADR-492).
+- A magic and the Brood `major.minor` ahead of everything else; a mismatch of either
+  aborts with a clear error naming both sides (ADR-699).
 - A **challenge–response** in place of the plaintext cookie: each side sends a nonce and
   the other returns a MAC of it keyed by the shared cookie, so the secret never crosses
   the wire and a constant-time compare removes the timing channel.

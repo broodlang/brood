@@ -708,19 +708,19 @@ fn a_send_carries_its_lane_across_the_wire() {
     }
 }
 
-/// A normal send is the `FRAME_SEND` a v10 peer reads — no lane byte — so what a v11
-/// node writes on a v10 link is exactly what a v10 node writes (ADR-492).
+/// A normal send is the plain `FRAME_SEND`, with no lane byte: a lane costs a byte only on
+/// the sends that have one (ADR-492).
 #[test]
-fn a_normal_send_is_the_frame_a_v10_peer_reads() {
+fn a_normal_send_carries_no_lane_byte() {
     let f = Frame::Send {
         target: Target::Pid(7),
         msg: Message::Int(1),
         lane: crate::process::Lane::Normal,
     };
-    let mut v10 = vec![FRAME_SEND];
-    encode_target(&mut v10, &Target::Pid(7));
-    encode_msg(&mut v10, &Message::Int(1)).unwrap();
-    assert_eq!(encode_payload(&f).unwrap(), v10);
+    let mut plain = vec![FRAME_SEND];
+    encode_target(&mut plain, &Target::Pid(7));
+    encode_msg(&mut plain, &Message::Int(1)).unwrap();
+    assert_eq!(encode_payload(&f).unwrap(), plain);
 }
 
 /// A record crosses a v12 link as itself (ADR-542): its id by name and its fields. Before
@@ -741,15 +741,4 @@ fn a_record_round_trips_with_its_id_and_fields() {
         }
         _ => panic!("a record came back as another kind"),
     }
-}
-
-/// A v10 peer has no `M_RECORD`, so a message carrying a record — however deep — is one a
-/// send to such a link refuses (ADR-542); one with none is not.
-#[test]
-fn a_message_says_whether_it_holds_a_record() {
-    let id = crate::core::value::intern("point");
-    let record = Message::Record(id, vec![]);
-    let nested = Message::Vector(vec![Message::Int(1), Message::List(vec![record], None)]);
-    assert!(nested.holds_record());
-    assert!(!Message::Vector(vec![Message::Int(1)]).holds_record());
 }

@@ -39,7 +39,6 @@ pub(super) fn establish(authenticated: handshake::Authenticated, stream: Stream,
         incarnation,
         session,
         grant,
-        lanes,
     } = authenticated;
     // Who initiated *this* connection (the tie-break key).
     let connector = match role {
@@ -69,7 +68,6 @@ pub(super) fn establish(authenticated: handshake::Authenticated, stream: Stream,
         incarnation,
         addr: peer_addr,
         tx: tx.clone(),
-        lanes,
         latest: Arc::clone(&latest),
         sock: Arc::clone(&sock),
         last_seen: Arc::clone(&last_seen),

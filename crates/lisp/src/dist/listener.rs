@@ -207,7 +207,7 @@ pub(super) fn accept_link(mut stream: Stream) -> io::Result<()> {
     // unauthenticated peer can hold its `HandshakeSlot` (KI-97 item 1).
     let authenticated = {
         let mut guarded = Deadline::new(&mut stream, HANDSHAKE_DEADLINE);
-        handshake(&mut guarded, Role::Responder, local_offer())?
+        handshake(&mut guarded, Role::Responder)?
     };
     let peer = authenticated.peer;
     // Refuse a peer claiming to BE us — the accept-side counterpart of the check

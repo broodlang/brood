@@ -282,19 +282,6 @@ impl Message {
         }
     }
 
-    /// Does this message carry a record anywhere (ADR-542)? A v10 node link cannot decode one,
-    /// so a send to such a peer checks before it encodes. Iterative, as `Drop` is.
-    pub(crate) fn holds_record(&self) -> bool {
-        let mut work = vec![self];
-        while let Some(m) = work.pop() {
-            if matches!(m, Message::Record(..)) {
-                return true;
-            }
-            m.for_each_child(|child| work.push(child));
-        }
-        false
-    }
-
     pub(crate) fn nests(&self) -> bool {
         matches!(
             self,
