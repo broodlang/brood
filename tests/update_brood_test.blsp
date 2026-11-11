@@ -2,20 +2,20 @@
 
 (defmodule update-brood-test (:use test))
 
-(describe "update-brood/target-triple"
-  (test "names the four release targets the way install.sh does"
-    (is (= (update-brood/target-triple "Linux" "x86_64") "x86_64-unknown-linux-gnu"))
-    (is (= (update-brood/target-triple "Linux" "aarch64") "aarch64-unknown-linux-gnu"))
-    (is (= (update-brood/target-triple "Darwin" "arm64") "aarch64-apple-darwin"))
-    (is (= (update-brood/target-triple "Darwin" "x86_64") "x86_64-apple-darwin"))
-    (is (= (update-brood/target-triple "Linux" "amd64") "x86_64-unknown-linux-gnu")))
-  (test "a platform with no release is a failure that says which"
-    (let (windows (update-brood/target-triple "MINGW64_NT" "x86_64")
-          riscv (update-brood/target-triple "Linux" "riscv64"))
-      (is (failure? windows))
-      (is (includes? (error-message windows) "MINGW64_NT"))
+(describe "update-brood/release-target"
+  (test "every target a release publishes is its own release target"
+    (doseq (target ["x86_64-unknown-linux-gnu"
+                     "aarch64-unknown-linux-gnu" "x86_64-unknown-linux-musl" "aarch64-apple-darwin"
+                     "x86_64-apple-darwin" "x86_64-pc-windows-msvc"])
+      (assert= (update-brood/release-target target) target)))
+  (test "this runtime's own target names its build: a musl install stays musl"
+    (let (own (system/target))
+      (is (string? own))
+      (is (includes? own "-"))))
+  (test "a build no release publishes is a failure that says which"
+    (let (riscv (update-brood/release-target "riscv64gc-unknown-linux-gnu"))
       (is (failure? riscv))
-      (is (includes? (error-message riscv) "riscv64")))))
+      (is (includes? (error-message riscv) "riscv64gc-unknown-linux-gnu")))))
 
 (describe "update-brood/version-newer?"
   (test "compares numerically, part by part, ignoring a leading v"
@@ -35,4 +35,7 @@
 (describe "update-brood/asset-url"
   (test "points at the release tarball install.sh downloads"
     (is (= (update-brood/asset-url "v0.34.0" "aarch64-apple-darwin")
-          "https://github.com/broodlang/brood/releases/download/v0.34.0/brood-v0.34.0-aarch64-apple-darwin.tar.gz"))))
+          "https://github.com/broodlang/brood/releases/download/v0.34.0/brood-v0.34.0-aarch64-apple-darwin.tar.gz")))
+  (test "Windows's archive is a zip"
+    (is (string/ends-with? (update-brood/asset-url "v0.52.0" "x86_64-pc-windows-msvc")
+          "brood-v0.52.0-x86_64-pc-windows-msvc.zip"))))

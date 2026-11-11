@@ -6,7 +6,7 @@
 (defmodule update-brood
   "`nest update-brood` — update the installed `brood`, `nest` and `brood-lsp` to the latest
 GitHub release (or a named one), verified against the release's SHA-256, into the directory
-the running `nest` lives in. The pure parts (`target-triple`, `version-newer?`,
+the running `nest` lives in. The pure parts (`release-target`, `version-newer?`,
 `asset-url`) decide; `update` does the fetching and the file work.")
 
 (def- *repository* "broodlang/brood")
@@ -14,27 +14,26 @@ the running `nest` lives in. The pure parts (`target-triple`, `version-newer?`,
 ;; A release tarball is ~45 MB; room to grow without letting a runaway body fill memory.
 (def- *max-download-bytes* (* 256 1024 1024))
 (def- *max-redirects* 5)
+;; The targets a release publishes (ADR-714; `release.yml`'s matrix).
+(def- *published-targets*
+  #{"x86_64-unknown-linux-gnu"
+    "aarch64-unknown-linux-gnu" "x86_64-unknown-linux-musl" "aarch64-apple-darwin"
+    "x86_64-apple-darwin" "x86_64-pc-windows-msvc"})
 
 ;; ---- pure ------------------------------------------------------------------------
 
-(defn target-triple (os-name machine)
-  "The release target for `uname -s` and `uname -m` output, as the release assets name it,
-or a failure for a platform no release is built for.
+(defn release-target (target)
+  "`target` (what `system/target` says this runtime was built for) when a release publishes
+that build, else a failure naming it. Asking the binary rather than `uname` keeps a musl
+install on musl and works where there is no `uname`.
 
-    (update-brood/target-triple \"Linux\" \"x86_64\")   ;=> \"x86_64-unknown-linux-gnu\"
-    (update-brood/target-triple \"Darwin\" \"arm64\")   ;=> \"aarch64-apple-darwin\""
-  (let (os-part (case os-name "Linux" "unknown-linux-gnu" "Darwin" "apple-darwin" nil)
-        arch-part (case machine
-                    "x86_64" "x86_64"
-                    "amd64" "x86_64"
-                    "aarch64" "aarch64"
-                    "arm64" "aarch64"
-                    nil))
-    (cond
-      (nil? os-part)
-        (failure (str "update-brood: no release is built for " os-name " (Linux and macOS only)"))
-      (nil? arch-part) (failure (str "update-brood: no release is built for " machine))
-      else (str arch-part "-" os-part))))
+    (update-brood/release-target \"x86_64-unknown-linux-musl\")   ;=> \"x86_64-unknown-linux-musl\"
+    (failure? (update-brood/release-target \"riscv64gc-unknown-linux-gnu\"))   ;=> true"
+  (if (contains? *published-targets* target)
+    target
+    (failure (str "update-brood: no release is built for " target))))
+
+(defn- windows? (target) (includes? target "windows"))
 
 (defn- version-parts (version)
   ;; "v0.34.0" / "0.34.0" / "0.34.0-rc1" → [0 34 0]; a part that is not a number counts 0.
@@ -60,11 +59,20 @@ or a failure for a platform no release is built for.
     (compare (seq (version-parts candidate)) (seq (version-parts current)))))
 
 (defn asset-url (tag target)
-  "The download URL of release `tag`'s tarball for `target` (add `.sha256` for its checksum).
+  "The download URL of release `tag`'s archive for `target`, a `.zip` for Windows and a
+`.tar.gz` for the rest (add `.sha256` for its checksum).
 
-    (update-brood/asset-url \"v0.34.0\" \"x86_64-unknown-linux-gnu\")   ;=> \"https://github.com/broodlang/brood/releases/download/v0.34.0/brood-v0.34.0-x86_64-unknown-linux-gnu.tar.gz\""
+    (update-brood/asset-url \"v0.34.0\" \"x86_64-unknown-linux-gnu\")   ;=> \"https://github.com/broodlang/brood/releases/download/v0.34.0/brood-v0.34.0-x86_64-unknown-linux-gnu.tar.gz\"
+    (update-brood/asset-url \"v0.52.0\" \"x86_64-pc-windows-msvc\")   ;=> \"https://github.com/broodlang/brood/releases/download/v0.52.0/brood-v0.52.0-x86_64-pc-windows-msvc.zip\""
   (str "https://github.com/"
-    *repository* "/releases/download/" tag "/brood-" tag "-" target ".tar.gz"))
+    *repository*
+    "/releases/download/"
+    tag
+    "/brood-"
+    tag
+    "-"
+    target
+    (if (windows? target) ".zip" ".tar.gz")))
 
 ;; ---- effects ---------------------------------------------------------------------
 
@@ -95,16 +103,6 @@ or a failure for a platform no release is built for.
           tag (if (map? release) (get release :tag_name) nil))
       (if (string? tag) tag (failure "update-brood: the latest release has no tag")))))
 
-(defn- uname (flag)
-  (let (result (os/cmd "uname" [flag]))
-    (if (os/cmd-ok? result)
-      (string/trim (os/cmd-out result))
-      (failure (str "update-brood: uname " flag " failed")))))
-
-(defn- this-target ()
-  (with (os-name (uname "-s") machine (uname "-m"))
-    (target-triple os-name machine)))
-
 (defn- install-directory (explicit)
   ;; The directory the running `nest` is in: `install.sh` put all three binaries there.
   ;; A build tree's binary is not an install, and overwriting it would be a surprise.
@@ -112,7 +110,7 @@ or a failure for a platform no release is built for.
     (cond
       (string? explicit) explicit
       (nil? exe) (failure "update-brood: cannot tell where this nest is installed; pass --dir")
-      (includes? exe "/target/")
+      (or (includes? exe "/target/") (includes? exe "\\target\\"))
         (failure (str "update-brood: "
                    exe " is a build tree, not an install; pass --dir to install elsewhere"))
       else (path/dirname exe))))
@@ -124,26 +122,36 @@ or a failure for a platform no release is built for.
       tarball
       (failure (str "update-brood: checksum mismatch (expected " expected ", got " actual ")")))))
 
-(defn- unpack (tarball tag target scratch)
-  ;; → the directory in `scratch` holding the three binaries.
-  (let (archive (path/join scratch "brood.tar.gz"))
-    (file/spit-bytes archive tarball)
-    (let (result (os/cmd "tar" ["-xzf" archive "-C" scratch]))
+(defn- unpack (archive-bytes tag target scratch)
+  ;; → the directory in `scratch` holding the three binaries. `tar -xf` reads the format
+  ;; itself, so it unpacks the `.tar.gz` and, on Windows (whose `tar` is bsdtar), the `.zip`.
+  (let (archive (path/join scratch (if (windows? target) "brood.zip" "brood.tar.gz")))
+    (file/spit-bytes archive archive-bytes)
+    (let (result (os/cmd "tar" ["-xf" archive "-C" scratch]))
       (if (os/cmd-ok? result)
         (path/join scratch (str "brood-" tag "-" target))
         (failure (str "update-brood: tar failed: " (get result :stderr)))))))
 
-(defn- replace-binaries (from directory)
+(defn- replace-binaries (from directory target)
   ;; Each binary is copied next to its target and renamed over it, so a running `nest`
-  ;; (this one) keeps its old inode and nothing sees a half-written file.
-  (fold *binaries*
-    []
-    (fn (installed binary)
-      (let (staged (path/join directory (str "." binary ".new"))
-            target (path/join directory binary))
-        (file/cp (path/join from binary) staged)
-        (file/rename staged target)
-        (conj installed target)))))
+  ;; (this one) keeps its old inode and nothing sees a half-written file. Windows will not
+  ;; replace a running executable, but it will rename one: the old file steps aside to
+  ;; `.old` first (the one a previous update left is removed when nothing runs it).
+  (let (suffix (if (windows? target) ".exe" ""))
+    (fold *binaries*
+      []
+      (fn (installed binary)
+        (let (staged (path/join directory (str "." binary ".new" suffix))
+              destination (path/join directory (str binary suffix))
+              aside (str destination ".old"))
+          (file/cp (path/join from (str binary suffix)) staged)
+          (when (and (windows? target) (file/exists? destination))
+            (check-allow :discarded-catch
+              ;; still running from the last update: it stays until the next one
+              (try (file/rm aside) (catch _ nil)))
+            (file/rename destination aside))
+          (file/rename staged destination)
+          (conj installed destination))))))
 
 (defn- install-release (tag target directory)
   (let (url (asset-url tag target)
@@ -158,7 +166,7 @@ or a failure for a platform no release is built for.
                             (verify tarball (string/bytes-> checksum))
                             unpacked
                             (unpack verified tag target scratch))
-                      (replace-binaries unpacked directory)
+                      (replace-binaries unpacked directory target)
                       (say "installed brood " tag " to " directory)
                       :installed)
                     (catch problem (file/rmdir scratch) (throw problem))))
@@ -174,7 +182,9 @@ true, only says whether a newer release exists. Returns 0 when done or already c
     (update-brood/update {:check true})   ;~> 0 — says whether a newer release exists, installs nothing"
   (let ({:keys [version dir check]} options
         current (system/brood-version)
-        outcome (with (tag (if (string? version) version (latest-tag)) target (this-target))
+        outcome (with (tag (if (string? version) version (latest-tag))
+                        target
+                        (release-target (system/target)))
                   (cond
                     (and (nil? version) (not (version-newer? tag current)))
                       (do (say "brood " current " is the latest release") :current)

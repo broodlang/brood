@@ -1454,3 +1454,15 @@ internal and now name the function called: `(contains? [1 2] 1)` said `%map-get:
 `(map "ab" f)` said `first: …` (`%defseq` now walks `%fold-source`, as `fold` does). No name in
 `std/` is `:beta` any more; the editor now shows a beta mark in hover and completion, and hover
 shows a deprecation, which only completion and `nest doc` did.
+
+2026-11-11 (ADR-714, road-to-1.0 §D). A release builds six targets through one script
+(`scripts/ci/release-build.sh`, since the Windows runner has no `make`), adding Windows x86_64
+and static musl x86_64, and publishes beside each toolchain the lean runtime its `nest` embeds,
+every file with a `.sha256`. `nest release --target T` downloads the runtime it lacks from the
+release matching its version (`project-release/fetch-runtime`, over the package manager's
+`fetch-bytes`, now public), refuses one whose digest differs, and keeps it under
+`runtimes/v<version>/T/`. `install.sh` now refuses an unchecked download (a missing sidecar
+used to install anyway) and picks the musl build where there is no glibc; `install.ps1` is the
+Windows one-liner; `nest update-brood` asks the binary what it is (`system/target`, new)
+rather than `uname`. `release.yml` gained a dry run, and a manual run for a tag builds the tag
+(it built main's head). hive serves `/install.ps1` once deployed.

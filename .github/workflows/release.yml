@@ -1,11 +1,15 @@
 name: Release
 
-# Build the Brood toolchain (brood + nest + brood-lsp) for each supported platform
-# and attach the tarballs to a GitHub Release. Triggered by pushing a version tag
-# (`v1.2.3`), or manually via workflow_dispatch with a tag name.
+# Build the Brood toolchain (brood + nest + brood-lsp) for each supported platform and
+# attach it to a GitHub Release, with the lean runtime `nest release --target` downloads
+# (ADR-714). Each file has a `.sha256` beside it. Triggered by pushing a version tag
+# (`v1.2.3`), or manually via workflow_dispatch with a tag name, which builds that tag.
 #
-# The `install.sh` script (scripts/install.sh, also served at brood.fly.dev/install.sh)
-# downloads the tarball matching the user's OS/arch from the release these jobs create.
+# `dry_run` builds every target from the dispatched branch and keeps the files as workflow
+# artifacts instead of publishing them: how a change to this file is tested before a tag.
+#
+# `scripts/install.sh` (Linux, macOS) and `scripts/install.ps1` (Windows), also served at
+# brood.fly.dev, download the archive matching the machine from the release these jobs create.
 
 on:
   push:
@@ -15,6 +19,10 @@ on:
       tag:
         description: "Tag to build and release (e.g. v0.1.0)"
         required: true
+      dry_run:
+        description: "Build from this branch and keep the files as artifacts; publish nothing"
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.ref }}
@@ -33,7 +41,11 @@ jobs:
     name: tag matches the tree
     runs-on: ubuntu-latest
     steps:
+      # A manual run for a tag builds the TAG: checking out the dispatched branch would
+      # publish main's head under the tag's name. A dry run builds the branch.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.tag || '' }}
       - name: The tag, Cargo.toml and CHANGELOG must agree
         run: |
           tag="${{ github.event.inputs.tag || github.ref_name }}"
@@ -85,23 +97,46 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            window: gui
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            window: gui
+          # A static binary for any Linux, Alpine included. Headless: a static musl binary
+          # cannot load the display libraries a window opens at run time.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            window: headless
           - os: macos-15
             target: aarch64-apple-darwin
+            window: gui
           # Intel mac: cross-compiled on the Apple-Silicon runner (macos-15). GitHub's
           # Intel macos-13 runners are scarce/deprecated; arm64 macs build x86_64-apple-
           # darwin natively (same OS SDK, `-C` via the added rustup target).
           - os: macos-15
             target: x86_64-apple-darwin
+            window: gui
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            window: gui
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.tag || '' }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config git
+
+      # The window's build-time headers (it loads the libraries themselves at run time).
+      - name: Install the window's build dependencies (Linux)
+        if: runner.os == 'Linux' && matrix.window == 'gui'
+        run: scripts/ci/install-gui-deps.sh
+
+      - name: Install the musl C toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get install -y --no-install-recommends musl-tools
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -118,30 +153,30 @@ jobs:
           key: release-${{ matrix.target }}
           save-if: false
 
-      # Lean default build (no gui/audio; jit + treesit + dev-tools) — the same set
-      # `make install` ships. TARGET builds for the triple (native or cross), into
-      # target/${{ matrix.target }}/release-fast/{brood,nest,brood-lsp}.
-      - name: Build
-        run: make release TARGET=${{ matrix.target }}
-
-      - name: Package
+      # The toolchain archive and the lean runtime, each with its .sha256, into dist/
+      # (scripts/ci/release-build.sh says what each holds).
+      - name: Build and package
         id: package
         shell: bash
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
         run: |
           tag="${{ github.event.inputs.tag || github.ref_name }}"
-          name="brood-${tag}-${{ matrix.target }}"
-          mkdir -p "dist/${name}"
-          bindir="target/${{ matrix.target }}/release-fast"
-          cp "$bindir/brood" "$bindir/nest" "$bindir/brood-lsp" "dist/${name}/"
-          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
-          ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          scripts/ci/release-build.sh "${{ matrix.target }}" "$tag" "${{ matrix.window }}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
+      - name: Keep the files (dry run)
+        if: inputs.dry_run
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
       - name: Upload to release
+        if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.package.outputs.tag }}
-          files: |
-            dist/*.tar.gz
-            dist/*.sha256
+          files: dist/*
           fail_on_unmatched_files: true

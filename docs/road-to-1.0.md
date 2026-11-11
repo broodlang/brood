@@ -25,9 +25,9 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
     deprecated in stage 1 (2026-11-10) and removed in stage 2 (2026-11-11), with the migration
     that rewrote them; each is in the rename ledger, so its unbound error names the replacement.
     `match*` became the internal `%match`. `case`, `with-out-str` and `with-err-str` stay.
-  - **Thread 5, a declared shadow for root functions.** Adding the warning later would be a new
-    lint. Under ADR-673 §5 that is advisory and so additive, but only once structured
-    severities exist (B3). Otherwise decide it now.
+  - ✅ **Thread 5, a declared shadow for root functions: after 1.0** (2026-11-11). The warning
+    would be a new lint, and since structured severities exist (B3, ADR-698) a new lint
+    starts advisory, so it is additive and nothing needs deciding before 1.0.
   - **Thread 10, operators that can be shadowed locally.** This is a relaxation, so it is
     additive and can wait.
   - **Threads 1, 3, 4, 7, 8, 9 and 11** are additive (warning controls, regex groups, URL
@@ -105,10 +105,15 @@ General-purpose gap 2, the release half.
 - 🟡 **Platforms.** macOS and Windows smoke sets run in CI, and Windows has been a gate since
   2026-11-04. Remaining: the full suite on macOS, and a decision on whether Windows runs the
   full suite or the smoke set at 1.0. Write that decision down as the supported-platform list.
-- ⬜ **Release runtimes.** `release.yml` should publish Windows and musl runtimes, and
-  `nest release --target` should download the matching runtime with a hash check instead of
-  reading a hand-copied one. This changes ADR-038, so it needs an ADR.
-- ⬜ **Install.** A one-line install per platform that needs no Rust toolchain.
+- 🟡 **Release runtimes** (ADR-714, 2026-11-11). `release.yml` builds toolchains and lean
+  runtimes for six targets, Windows x86_64 and static musl x86_64 among them, each with a
+  `.sha256`; `nest release --target` downloads the runtime it lacks and refuses one whose
+  digest differs. Remaining: the first release that runs it (v0.51.0); a dry run
+  (`gh workflow run release.yml -f tag=… -f dry_run=true`) proves the build first.
+- 🟡 **Install** (2026-11-11). `install.sh` picks the static build where there is no glibc
+  and refuses an unchecked download; `install.ps1` is Windows' one line; `nest
+  update-brood` fetches the build it is (`system/target`). Remaining: hive serves
+  `/install.ps1` once deployed, and the first release with Windows archives.
 
 ## E. Evidence, not features
 

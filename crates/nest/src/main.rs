@@ -628,6 +628,24 @@ fn cmd_release(
     };
     for (triple, out) in plans {
         let triple = triple.as_deref();
+        // A foreign target with no runtime on this machine: download the one the release
+        // matching this `nest` publishes, checked against its .sha256 (ADR-714). Policy,
+        // so Brood does it; a failure is reported naming the URL and ends the release.
+        if let Some((target, keep_at)) = release::runtime_to_fetch(runtime, triple) {
+            eprintln!(
+                "nest release: downloading the {} runtime for {target}…",
+                env!("CARGO_PKG_VERSION")
+            );
+            run_for_value(
+                interp,
+                &format!(
+                    "(project-release/fetch-runtime {} {} {})",
+                    string_literal(env!("CARGO_PKG_VERSION")),
+                    string_literal(target),
+                    string_literal(&keep_at.display().to_string()),
+                ),
+            );
+        }
         let base = release::resolve_runtime(runtime, triple);
         if let Err(e) = brood::bundle::write_release(&base, &archive, &out) {
             eprintln!("nest release: cannot write {}: {e}", out.display());

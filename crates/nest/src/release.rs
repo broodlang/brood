@@ -24,13 +24,15 @@ pub(crate) const HOST_TRIPLE: &str = env!("NEST_HOST_TRIPLE");
 /// runtime (no test/observer/MCP/doc/hot-reload/REPL/GC-debug surface, but the
 /// windowed backend kept so any app runs). Priority:
 ///   1. `--runtime PATH` — read it (a prebuilt/cross runtime you supply).
-///   2. with `--target`, the local runtime cache
-///      (`~/.cache/brood/runtimes/<triple>/brood`) — you populate it with lean
-///      runtimes built on/for each target (cross-compiling is out of scope,
-///      ADR-038); a `--target` equal to the host's own triple falls through to:
-///   3. the runtime embedded in *this* `nest` at install time — the **no-Rust**
+///   2. with `--target`, a runtime you placed in the local cache
+///      (`~/.cache/brood/runtimes/<triple>/brood`), built on/for that target;
+///   3. with a `--target` other than the host's, the runtime downloaded from the
+///      release matching this `nest` (`runtimes/v<version>/<triple>/brood`, ADR-714) —
+///      `cmd_release` fetches it first ([`runtime_to_fetch`]); the host's own
+///      triple falls through to:
+///   4. the runtime embedded in *this* `nest` at install time — the **no-Rust**
 ///      path (`make install` bakes it in; see `build.rs`).
-///   4. built on demand from the workspace source (cargo fallback — needs Rust),
+///   5. built on demand from the workspace source (cargo fallback — needs Rust),
 ///      for a plain `cargo build` of `nest` that embedded nothing.
 pub(crate) fn resolve_runtime(runtime: Option<&str>, target: Option<&str>) -> Vec<u8> {
     if let Some(r) = runtime {
@@ -40,9 +42,17 @@ pub(crate) fn resolve_runtime(runtime: Option<&str>, target: Option<&str>) -> Ve
         });
     }
     if let Some(t) = target {
-        if let Some(path) = runtime_cache_path(t) {
+        let placed = runtime_cache_path(t);
+        // The host's own triple needs no download: the embedded/built runtime below
+        // *is* a runtime for it.
+        let fetched = if t == HOST_TRIPLE {
+            None
+        } else {
+            fetched_runtime_path(t)
+        };
+        for path in [&placed, &fetched].into_iter().flatten() {
             if path.is_file() {
-                return std::fs::read(&path).unwrap_or_else(|e| {
+                return std::fs::read(path).unwrap_or_else(|e| {
                     eprintln!(
                         "nest release: cannot read cached runtime {}: {e}",
                         path.display()
@@ -50,23 +60,14 @@ pub(crate) fn resolve_runtime(runtime: Option<&str>, target: Option<&str>) -> Ve
                     std::process::exit(1);
                 });
             }
-            // The host's own triple needs no prebuilt — the embedded/built
-            // runtime below *is* a runtime for it.
-            if t != HOST_TRIPLE {
-                eprintln!(
-                    "nest release: no cached runtime for {t}.\nBuild the lean runtime on/for \
-                     that target:\n  cargo build --profile release-lean -p cli \
-                     --no-default-features --features brood/gui --target {t}\nthen place the \
-                     `brood` binary at {} (or pass --runtime PATH). Cross-compiling is out of \
-                     scope for `nest release` itself (ADR-038).",
-                    path.display()
-                );
-                std::process::exit(2);
-            }
-        } else if t != HOST_TRIPLE {
+        }
+        if t != HOST_TRIPLE {
+            let place = placed
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "the runtime cache".to_string());
             eprintln!(
-                "nest release: cannot locate the runtime cache (no $XDG_CACHE_HOME or $HOME) — \
-                 pass --runtime PATH for {t}"
+                "nest release: no runtime for {t} on this machine, and none was downloaded.\n\
+                 Place a lean runtime built for it at {place}, or pass --runtime PATH."
             );
             std::process::exit(2);
         }
@@ -84,6 +85,41 @@ pub(crate) fn resolve_runtime(runtime: Option<&str>, target: Option<&str>) -> Ve
         );
         std::process::exit(1);
     })
+}
+
+/// Where a runtime downloaded for `triple` is kept (ADR-714):
+/// `$XDG_CACHE_HOME/brood/runtimes/v<version>/<triple>/brood`, under THIS `nest`'s
+/// version, because a runtime is right only for the release that built it — a cached
+/// runtime from an older release must not be appended to by a newer `nest`.
+pub(crate) fn fetched_runtime_path(triple: &str) -> Option<std::path::PathBuf> {
+    let placed = runtime_cache_path(triple)?;
+    let bin = placed.file_name()?.to_owned();
+    let runtimes = placed.parent()?.parent()?;
+    Some(
+        runtimes
+            .join(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .join(triple)
+            .join(bin),
+    )
+}
+
+/// The runtime `nest release` must download before it can append for `target`, as
+/// `(triple, where to keep it)`: only when nothing nearer serves it — no `--runtime`,
+/// not the host's own triple, nothing placed in the cache by hand, nothing downloaded
+/// before.
+pub(crate) fn runtime_to_fetch<'a>(
+    runtime: Option<&str>,
+    target: Option<&'a str>,
+) -> Option<(&'a str, std::path::PathBuf)> {
+    let triple = target?;
+    if runtime.is_some() || triple == HOST_TRIPLE {
+        return None;
+    }
+    if runtime_cache_path(triple).is_some_and(|p| p.is_file()) {
+        return None;
+    }
+    let fetched = fetched_runtime_path(triple)?;
+    (!fetched.is_file()).then_some((triple, fetched))
 }
 
 /// Where a prebuilt lean runtime for `triple` lives in the local cache:
@@ -190,7 +226,36 @@ fn workspace_dir() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::runtime_cache_path;
+    use super::{HOST_TRIPLE, fetched_runtime_path, runtime_cache_path, runtime_to_fetch};
+
+    #[test]
+    fn a_downloaded_runtime_is_kept_under_this_nests_version() {
+        if let Some(p) = fetched_runtime_path("x86_64-pc-windows-msvc") {
+            let s = p.to_string_lossy().into_owned();
+            let want = format!(
+                "brood/runtimes/v{}/x86_64-pc-windows-msvc/brood.exe",
+                env!("CARGO_PKG_VERSION")
+            );
+            assert!(s.ends_with(&want), "{s} should end with {want}");
+        }
+    }
+
+    #[test]
+    fn only_a_foreign_target_with_nothing_nearer_is_downloaded() {
+        // No target, an explicit --runtime, or the host's own triple: never a download.
+        assert!(runtime_to_fetch(None, None).is_none());
+        assert!(runtime_to_fetch(Some("/some/brood"), Some("x86_64-pc-windows-msvc")).is_none());
+        assert!(runtime_to_fetch(None, Some(HOST_TRIPLE)).is_none());
+        // A triple no machine has a runtime for (so nothing is placed or cached) is, when
+        // there is a cache to keep it in.
+        let unknown = "riscv64gc-unknown-none-elf";
+        if fetched_runtime_path(unknown).is_some() {
+            let (triple, path) = runtime_to_fetch(None, Some(unknown))
+                .expect("a foreign target with nothing cached is downloaded");
+            assert_eq!(triple, unknown);
+            assert_eq!(Some(path), fetched_runtime_path(unknown));
+        }
+    }
 
     #[test]
     fn runtime_cache_path_is_per_triple() {

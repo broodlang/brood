@@ -60,6 +60,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "This runtime's semantic version as a string (e.g. \"0.1.0\") — just the semver, without the git-sha/binary-stamp that `system/build-id` carries. What a project's `:brood` manifest constraint is checked against (a project can require `:brood \">= 0.2\"` and `nest` refuses an older runtime with a clear message).\n\n    (system/brood-version)   ;~> \"0.1.0\"",
         brood_version);
     primitives.def(
+        "system/target",
+        Arity::exact(0),
+        Sig::nullary(string),
+        &[],
+        "The target triple this runtime was built for (e.g. \"x86_64-unknown-linux-musl\") — the name a Brood release gives each build's assets, so a program that fetches a release for the machine it runs on asks for exactly the build it is: musl rather than glibc, Windows rather than whatever `uname` would say.\n\n    (system/target)   ;~> \"x86_64-unknown-linux-gnu\"",
+        target);
+    primitives.def(
         "system/build-time",
         Arity::exact(0),
         Sig::nullary(int.union(nil_ty)),
@@ -187,6 +194,12 @@ pub(super) fn stdlib_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// incompatible runtime is Brood (`std/tool/project.blsp`).
 pub(super) fn brood_version(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(env!("CARGO_PKG_VERSION")))
+}
+
+/// `(system/target)` — the target triple this runtime was built for, baked in by
+/// `build.rs` from cargo's `TARGET`.
+pub(super) fn target(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(heap.alloc_string(env!("BROOD_TARGET")))
 }
 
 /// The `(system/build-id)` string as plain Rust — shared with the boot cache

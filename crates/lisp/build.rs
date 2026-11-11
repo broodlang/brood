@@ -38,6 +38,13 @@ fn main() {
     let sha = if dirty { format!("{sha}-dirty") } else { sha };
     println!("cargo:rustc-env=BROOD_GIT_SHA={sha}");
 
+    // The triple this runtime is built FOR, which names its release assets (ADR-714):
+    // `system/target`, read by `nest update-brood` to fetch the same build it runs.
+    println!(
+        "cargo:rustc-env=BROOD_TARGET={}",
+        std::env::var("TARGET").expect("cargo sets TARGET for build scripts")
+    );
+
     // A CONTENT hash of the embedded standard library — every `std/**/*.blsp` plus the
     // prelude. `system/build-id` cannot serve here: it embeds the executable's own mtime, so
     // `brood`, `nest` and `brood-lsp` from one tree get three different ids and each would

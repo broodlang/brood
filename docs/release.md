@@ -4,8 +4,8 @@
 > one self-contained executable — no interpreter install, no project dir, no
 > `.blsp` files on the target. After `make install`, **`nest release` needs no
 > Rust toolchain**. Code-only (no runtime asset filesystem yet). Cross-targets
-> (mac M-series, Intel mac, Windows, ARM) release from a local runtime cache —
-> see "Targets and portability".
+> (macOS, Windows, ARM and static Linux) download the runtime the matching Brood
+> release publishes (ADR-714) — see "Targets and portability".
 
 ## TL;DR
 
@@ -192,16 +192,35 @@ Rust supplies only mechanism (append/extract the archive, the three
 The base `brood` is an ordinary dynamically-linked ELF — it runs on any Linux
 with a compatible-or-newer glibc.
 
-For other OS/arch combinations (mac M-series, Intel mac, Windows, ARM Linux),
-`--target <triple>` resolves a prebuilt lean runtime from the **local runtime
-cache**:
+For other OS/arch combinations, `--target <triple>` **downloads the lean runtime the
+matching Brood release publishes** (ADR-714) and appends to it — no other machine and no
+Rust toolchain:
+
+```bash
+nest release --target x86_64-pc-windows-msvc \
+             --target aarch64-apple-darwin \
+             --target x86_64-unknown-linux-musl
+```
+
+Every release publishes runtimes for Linux x86_64 and aarch64 (glibc), Linux x86_64 musl
+(static, headless), macOS arm64 and x86_64, and Windows x86_64. Each download is checked
+against the release's `.sha256` for it (a mismatch writes nothing) and kept under this
+`nest`'s version, so it happens once per target per release:
+
+```
+$XDG_CACHE_HOME/brood/runtimes/v<version>/<triple>/brood      (~/.cache fallback;
+                                                              brood.exe on Windows)
+```
+
+A runtime you place by hand wins over the download — for a target no release publishes,
+or a runtime built with other features:
 
 ```
 $XDG_CACHE_HOME/brood/runtimes/<triple>/brood        (~/.cache fallback;
 $XDG_CACHE_HOME/brood/runtimes/<triple>/brood.exe     Windows triples)
 ```
 
-You populate the cache once per target — build the lean runtime **on (or for)
+To place one, build the lean runtime **on (or for)
 that machine** and copy the binary over:
 
 ```bash
@@ -212,24 +231,15 @@ mkdir -p ~/.cache/brood/runtimes/aarch64-apple-darwin
 scp mac:brood/target/release-lean/brood ~/.cache/brood/runtimes/aarch64-apple-darwin/brood
 ```
 
-From then on `nest release --target aarch64-apple-darwin` appends to it with no
-toolchain at all; the runtime only needs refreshing when `brood` itself changes
-(the app archive is re-appended each release). A `--target` equal to the host's
-own triple needs no cache entry — the runtime embedded in `nest` serves it.
-Cross-*compiling* the runtime stays out of scope for `nest release` itself
-(ADR-038); `--runtime PATH` remains the explicit one-off escape hatch.
+A placed runtime only needs refreshing when `brood` itself changes (the app archive is
+re-appended each release). A `--target` equal to the host's own triple needs no cache
+entry — the runtime embedded in `nest` serves it. Cross-*compiling* the runtime stays out
+of scope for `nest release` itself (ADR-038); `--runtime PATH` remains the explicit
+one-off escape hatch.
 
-For a drop-anywhere Linux binary, cache a musl runtime the same way (buildable
-on the host — `rustup target add x86_64-unknown-linux-musl` first):
-
-```bash
-cargo build --profile release-lean -p cli --no-default-features \
-  --features brood/gui --target x86_64-unknown-linux-musl
-mkdir -p ~/.cache/brood/runtimes/x86_64-unknown-linux-musl
-cp target/x86_64-unknown-linux-musl/release-lean/brood \
-   ~/.cache/brood/runtimes/x86_64-unknown-linux-musl/
-nest release --target x86_64-unknown-linux-musl   # → app-linux-musl-x86_64
-```
+For a drop-anywhere Linux binary, `--target x86_64-unknown-linux-musl` gives a static one
+(`app-linux-musl-x86_64`). It has no window: a static musl binary cannot load the display
+libraries a window opens at run time.
 
 **macOS note:** appending bytes invalidates an existing code signature; re-sign
 the produced binary (`codesign`) before distributing.
