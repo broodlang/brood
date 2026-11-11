@@ -77,6 +77,11 @@ and `(number? "nope") is false` — not three identical lines. Use `assert=` for
 equality (it shows both the actual expression's value and the expected value) and
 `is` / `refute` for boolean predicates.
 
+A list and a vector of the same elements are not `=`, and they print alike. When that
+is the whole difference, `assert=` says so on a `note:` line — `same elements, but
+actual is a list and expected is a vector`, or the index path to the inner one that
+differs (`at [1 0] actual has a list where expected has a vector`).
+
 A test can report **several failures** — one per top-level body form. Each operand
 is evaluated once. With no mutable accumulator (data is immutable, ADR-026), an
 assertion signals failure by **throwing** a tagged record; the `test` macro runs

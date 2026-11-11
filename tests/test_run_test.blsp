@@ -39,3 +39,33 @@
       (when scratch
         (assert= (os/env "BROOD_HISTORY") (path/join scratch "state" "brood_history"))
         (is (string/starts-with? (repl/repl-history-path) scratch))))))
+
+;; The detail lines a failing assertion would report — its thrown record's third element.
+(defn- failure-lines (thunk)
+  (let (thrown (try (do (thunk) nil) (catch e e)))
+    (if (and (pair? thrown) (= (first thrown) :%test-fail)) (nth thrown 2) nil)))
+
+(describe "assert= on a list against a vector"
+  (test "says the elements are the same and names the two kinds"
+    (let (lines (failure-lines (fn () (assert= (list 1 2) [1 2]))))
+      (is (includes? lines "note: same elements, but actual is a list and expected is a vector"))))
+  (test "the other way round"
+    (let (lines (failure-lines (fn () (assert= [1 2] (list 1 2)))))
+      (is (includes? lines "note: same elements, but actual is a vector and expected is a list"))))
+  (test "a nested one is found by its path"
+    (let (lines (failure-lines (fn () (assert= [1 [2 (list 3 4)]] [1 [2 [3 4]]]))))
+      (is (includes? lines
+            "note: same elements, but at [1 1] actual has a list where expected has a vector"))))
+  (test "an empty list against an empty vector"
+    (let (lines (failure-lines (fn () (assert= (list) []))))
+      (is (includes? lines
+            "note: same elements, but actual is an empty list and expected is a vector"))))
+  (test "different elements get no note"
+    (let (lines (failure-lines (fn () (assert= (list 1 2) [1 3]))))
+      (assert= (count lines) 3)
+      (refute (seq/find lines (fn (line) (string/starts-with? line "note:"))))))
+  (test "a plain mismatch gets no note"
+    (assert= (count (failure-lines (fn () (assert= 1 2)))) 3))
+  (test "what passes is unchanged"
+    (is (nil? (failure-lines (fn () (assert= [1 2] [1 2])))))
+    (is (nil? (failure-lines (fn () (assert= (list 1 2) (list 1 2))))))))
