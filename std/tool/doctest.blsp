@@ -323,6 +323,76 @@ whether that is a failure, so this is usable as a report as well as a gate.
     (doctest/failures)   ;~> [] — or one description per example that does not hold"
   (failures-under nil))
 
+;; ── One source file's examples ───────────────────────────────────────────────────────────
+;;
+;; The whole-image gate above answers "does every example hold", minutes into a suite. While
+;; a file is being edited the question is narrower: do THIS file's examples hold, and where is
+;; the one that does not. The names come from the file itself (its top-level defs, read
+;; natively), the values from the image the caller loaded, and each failure is placed at the
+;; source line of its example, so an editor can jump there.
+
+(defn- source-escaped (text)
+  ;; A docstring line as it is written inside the string literal in the source.
+  (string/replace (string/replace text "\\" "\\\\") "\"" "\\\""))
+
+(defn- bare-name (qualified)
+  (let (slash (string/last-index-of qualified "/"))
+    (if (> slash 0) (string/substring qualified (+ slash 1) (string/length qualified)) qualified)))
+
+(defn- defines? (line bare)
+  ;; Does the source line open a top-level def form for `bare`?
+  (let (text (string/trim line)
+        words (seq/filter (string/split text " ") (fn (w) (not (= w "")))))
+    (and (string/starts-with? text "(def") (= (second words) bare))))
+
+(defn- index-where (lines from pred)
+  ;; The first index at or after `from` whose line satisfies `pred`, or nil.
+  (cond
+    (empty? lines) nil
+    (pred (first lines)) from
+    else (index-where (rest lines) (+ from 1) pred)))
+
+(defn- example-line-number (source-lines qualified example)
+  ;; The 1-based line `example` (a docstring line of `qualified`) sits on, searched from the
+  ;; definition down; the definition's own line when the text cannot be found, 1 when neither.
+  (let (definition (or (index-where source-lines 0 (fn (l) (defines? l (bare-name qualified)))) 0)
+        wanted (source-escaped (string/trim example))
+        found (index-where (drop source-lines definition)
+                definition
+                (fn (l) (string/starts-with? (string/trim l) wanted))))
+    (+ 1 (or found definition))))
+
+(defn failures-in-file (path &optional label)
+  "Every documented example that does not hold among the names (private ones too) the source file
+`path` defines at top level, each as `LABEL:LINE: description` — `LINE` the example's own
+line in the file, `label` defaulting to `path`. Reads the file for its names and their
+lines; the values are the image's, so load the file's module first. A vector, empty when
+every example holds (or the file defines nothing documented).
+
+    (doctest/failures-in-file \"/no/such/file.blsp\")   ;=> []"
+  (let (text (if (file/exists? path) (file/slurp path) nil))
+    (if (not (string? text))
+      []
+      (let (source-lines (string/split text "\n")
+            names (seq/filter (map (nth (reflect/scan-source-extract text) 2) reflect/read-string)
+                    (fn (s) (and (bound? s) (documented? s)))))
+        (apply vector
+          (fold names
+            []
+            (fn (acc s)
+              (fold (string/split (str (reflect/doc (reflect/eval s))) "\n")
+                acc
+                (fn (inner line)
+                  (let (fault (check (->string s) line))
+                    (if fault
+                      (append inner
+                        [(str (or label path)
+                           ":"
+                           (example-line-number source-lines (->string s) line)
+                           ": "
+                           fault)])
+                      inner)))))))))))
+
 ;; ── Markdown: fenced blocks ──────────────────────────────────────────────────────────────
 ;;
 ;; A fenced block in a document is an example the same way a docstring line is, and it drifts

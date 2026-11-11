@@ -206,3 +206,25 @@
       (doctest/block-faults "a.md"
         1
         "(defn arrow-doc ()\n  \"Doc.\n\n    (arrow-doc)   ;=> 99\n    a → b\"\n  1)\n(arrow-doc)   ;=> 1"))))
+
+;; `nest test --doc FILE` / `nest doctest FILE.blsp`: one source file's examples, each failure
+;; placed at the example's own line.
+(describe "failures-in-file"
+  (test "a wrong example is reported at its line, a holding one is not"
+    (let (path (str (path/temp "doctest-file-") ".blsp"))
+      (file/spit path
+        (str "(defmodule doctest-file-probe)\n"
+          "\n" "(defn two ()\n" "  \"Two.\n" "\n" "    (doctest-file-probe/two)   ;=> 2\n"
+          "    (doctest-file-probe/two)   ;=> 3\"\n" "  2)\n" "\n" "(defn- quoted ()\n"
+          "  \"A quote, escaped in the source.\n" "\n"
+          "    (doctest-file-probe/quoted)   ;=> \\\"[q]\\\"\"\n" "  \"q\")\n"))
+      (reflect/load path)
+      (let (fails (doctest/failures-in-file path "probe.blsp"))
+        (file/rm path)
+        (assert= 2 (count fails))
+        (is (string/starts-with? (first fails) "probe.blsp:7: doctest-file-probe/two:"))
+        (is (includes? (first fails) "got 2, documented 3"))
+        ;; a private helper's example counts too, found through its escaped source text
+        (is (string/starts-with? (second fails) "probe.blsp:13: doctest-file-probe/quoted:")))))
+  (test "a file that does not exist has nothing to report"
+    (assert= [] (doctest/failures-in-file "/no/such/file.blsp"))))

@@ -464,6 +464,11 @@ run. A run holds a lock in its scratch home while it lives; the next run purges 
 of runs that are gone. A `nest test` started inside a run keeps the user's config base for
 `nest`'s preferences.
 
+**`nest test --doc FILE…` checks a source file's docstring examples** instead of running
+tests: every `form ;=> result` in the docstrings of the names `src/x.blsp` defines, each
+failure as `src/x.blsp:LINE:` at the example's own line, exit 1 when one does not hold. See
+[tooling.md](tooling.md#checking-examples-nest-doctest).
+
 In a project, run the whole suite with **`nest test`** (or `make suite`, or
 `cargo test`): the runner discovers `tests/**/*_test.blsp`, loads them, and calls
 `run-tests` once. `run-tests` itself takes the flags below — forwarded by the runner,
