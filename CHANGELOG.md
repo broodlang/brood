@@ -6,6 +6,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Added.**
+- **`editor/pane/pane-layout` takes `{:row-seam 0}`**: panes stacked by a `:row` split share the height with
+  no row between them, as a terminal editor lays them out — the upper pane's last row (its mode line)
+  is the separator and the divider's `:rect`, so a drag there resizes. Dividers carry `:seam`.
+
 **Fixed.**
 - **The terminal display draws text over what is painted**, as a window does: a `[:text …]` op whose
   face names no background keeps the cell's, so text over a `[:rect …]` (a current-line band, a
