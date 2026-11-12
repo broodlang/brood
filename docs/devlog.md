@@ -1508,3 +1508,17 @@ The audit now counts `pattern`/`query`/`rules` as subjects, and `audit_test` nam
 `bytes` and `stream`; and 47 settings drop their doubled prefix, 31 of them going private.
 That rename found `eval-server` binding its own `*test-formatter*`, which the test runner
 never read.
+
+2026-11-12 (ADR-718, KI-383, KI-384). The rest of the surface pass. `string/length` goes for
+`count`: about 1,100 sites in brood and 700 in bedit, and the primitive is `%string-length`
+internally. 19 private settings lose their doubled prefix. `(seq/drop-last xs 1)` gets
+`seq/but-last`'s checker precision back. `refer_excluded_all` again excludes every `fuzzy`
+public. CI's bedit smoke found the cost of shortening: bedit's unqualified
+`(defdyn *indent-width* nil)` declares a root name, which then took over lineedit's private
+`*indent-width*` whenever std loaded from source (in the checker: `nil` not assignable to
+`int`). That collision and coverage's `*targets*` are renamed out of reach. The general hazard
+is KI-383, whose fix (an unqualified `defdyn` in a module is module-scoped) waits on a
+decision. Moving to `count` widened what the checker infers for parameters that only
+`string/length` had pinned to string, in `package-git-tag-version` and the dectest
+helpers; those leaves now declare `string`. KI-384 records a contracts-only checker
+difference in bedit's terminal.blsp.

@@ -966,7 +966,7 @@
     (= input "crash") (do (exit (self) :boom) (receive (after 0 nil)) m)
     (and (vector? input) (= (first input) :session-restarted))
       (assoc m :who (str "restarted " (:restarts (second input))))
-    (and (string? input) (= (string/length input) 1))
+    (and (string? input) (= (count input) 1))
       (let (typed (str (or (:typed m) "") input)) (do (serve-retain typed) (assoc m :typed typed)))
     else m))
 

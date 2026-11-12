@@ -41,7 +41,7 @@
 ignored so `(basename \"/usr/bin/\")` returns `\"bin\"`. `(basename \"/\")` returns `\"/\"`.
 
     (path/basename \"/a/b/c.txt\")   ;=> \"c.txt\""
-  (let (n (string/length p)
+  (let (n (count p)
         e (if (and (> n 1) (= (string/char-at p (- n 1)) "/")) (- n 1) n)
         i (string/last-index-of p "/" e))
     (cond
@@ -59,12 +59,12 @@ Windows that includes a drive's `C:/` (and a bare `C:`) and a UNC share's
     (path/dirname \"/a/b/c.txt\")    ;=> \"/a/b\"
     (path/dirname \"/\")             ;=> \"/\""
   (let (root (root-of p)
-        n (string/length p)
+        n (count p)
         e (if (and (> n 1) (= (string/char-at p (- n 1)) "/")) (- n 1) n)
         i (string/last-index-of p "/" e))
     (cond
       (bare-drive? p) p
-      (and root (<= i (dec (string/length root)))) root
+      (and root (<= i (dec (count root)))) root
       (< i 0) "."
       (= i 0) "/"
       else (string/substring p 0 i))))
@@ -74,7 +74,7 @@ Windows that includes a drive's `C:/` (and a bare `C:`) and a UNC share's
 
     (path/extension \"/a/b/c.txt\")  ;=> \".txt\""
   (let (b (basename p)
-        n (string/length b)
+        n (count b)
         i (string/last-index-of b "."))
     (if (<= i 0) "" (string/substring b i n))))
 
@@ -145,8 +145,8 @@ UNC share's `//server/share/` (kept with its two slashes)."
         absolute (not (nil? root))
         tail (cond
                (not absolute) p
-               (>= (string/length root) (string/length p)) ""
-               else (string/substring p (string/length root) (string/length p)))
+               (>= (count root) (count p)) ""
+               else (string/substring p (count root) (count p)))
         parts (seq/filter (string/split tail "/") (fn (s) (not (or (= s "") (= s ".")))))
         resolved (collapse-dots parts nil absolute))
     (cond
@@ -220,7 +220,7 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
   ;; A share with no name yet (`//server`) roots at `//server/`.
   (when (and (windows?) (or (string/starts-with? p "//") (string/starts-with? p "\\\\")))
     (let (text (string/replace p "\\" "/")
-          n (string/length text)
+          n (count text)
           server-end (index-of text "/" 2)
           share-end (if (< server-end 0) -1 (index-of text "/" (inc server-end))))
       (cond
@@ -242,13 +242,13 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
 
 (defn- bare-drive? (p)
   ;; Windows: `C:` alone — the drive's current directory; its own parent here
-  (and (= (string/length p) 2)
+  (and (= (count p) 2)
     (= (string/char-at p 1) ":")
     (letter? (string/char-at p 0))
     (windows?)))
 
 (defn- drive-rooted? (p)
-  (and (>= (string/length p) 3)
+  (and (>= (count p) 3)
     (= (string/char-at p 1) ":")
     (or (= (string/char-at p 2) "/") (= (string/char-at p 2) "\\"))
     (windows?)))
@@ -307,9 +307,9 @@ the current drive is usually not there.
   "`path`, which starts `~name`, with that prefix replaced by the home of the user `name`
 (`%user-home`) — or nil when `name` is no user."
   (let (slash (index-of path "/")
-        end (if (< slash 0) (string/length path) slash)
+        end (if (< slash 0) (count path) slash)
         home (%user-home (string/substring path 1 end)))
-    (when home (str home (string/substring path end (string/length path))))))
+    (when home (str home (string/substring path end (count path))))))
 
 (defn absolute (path:string &optional base:string -> string)
   "Resolve `path` to an absolute path: a `/`-rooted path is returned unchanged, a
@@ -324,8 +324,7 @@ string is returned as is. Makes a path absolute, not canonical — it does not c
   (cond
     (or (= path "") (rooted? path)) path
     (= path "~") (or (home) path)
-    (string/starts-with? path "~/")
-      (str (or (home) "~") (string/substring path 1 (string/length path)))
+    (string/starts-with? path "~/") (str (or (home) "~") (string/substring path 1 (count path)))
     (string/starts-with? path "~") (or (expand-user path) (path/join (or base (file/cwd)) path))
     else (path/join (or base (file/cwd)) path)))
 
@@ -340,7 +339,7 @@ that merely starts with the home's text (`/home/me2` under `/home/me`), is uncha
       (nil? home-directory) path
       (= path home-directory) "~"
       (string/starts-with? path (str home-directory "/"))
-        (str "~" (string/substring path (string/length home-directory) (string/length path)))
+        (str "~" (string/substring path (count home-directory) (count path)))
       else path)))
 
 ;; ---- a path as a person types it -------------------------------------------
@@ -382,7 +381,7 @@ exactly that name — how a file name from the disk goes into text that will be 
 (defn- names-a-home? (component)
   "Is `component` (`~` or `~name`) a home: `~` always, `~name` when `name` is a user."
   (or (= component "~")
-    (not (nil? (%user-home (string/substring component 1 (string/length component)))))))
+    (not (nil? (%user-home (string/substring component 1 (count component)))))))
 
 (defn- drive-start? (text i n)
   ;; Windows: a drive root (`C:/`, `C:\`, or a bare `C:` at the end) starts a path over, as
@@ -432,7 +431,7 @@ expanded) and so is a file there, not a home.
     (path/substitute-start \"~/src//etc/\")   ;=> 6
     (path/substitute-start \"/usr/lib/~/x\")  ;=> 9
     (path/substitute-start \"~/src/\")        ;=> 0"
-  (restart-scan text 0 (string/length text) 0 (or keep? never-kept) expand-env))
+  (restart-scan text 0 (count text) 0 (or keep? never-kept) expand-env))
 
 (defn substitute (text:string &optional keep? -> string)
   "The path `text` means, the way Emacs reads a typed file name (`substitute-in-file-name`):
@@ -445,10 +444,10 @@ what follows the last `//` or `/~/` ([[substitute-start]]), with its variables e
     (path/substitute \"/tmp/$$x\")           ;=> \"/tmp/$x\"
     (path/substitute \"/srv/~/x\" (fn (directory component) true))   ;=> \"/srv/~/x\""
   (let (keep? (or keep? never-kept)
-        typed (string/substring text (substitute-start text keep?) (string/length text))
+        typed (string/substring text (substitute-start text keep?) (count text))
         expanded (expand-env typed)
-        start (restart-scan expanded 0 (string/length expanded) 0 keep? identity))
-    (string/substring expanded start (string/length expanded))))
+        start (restart-scan expanded 0 (count expanded) 0 keep? identity))
+    (string/substring expanded start (count expanded))))
 
 (defn temp (prefix:string -> string)
   "A fresh, unpredictable path under `/tmp` ([[temp-root]]: the user's temp directory on
@@ -481,20 +480,19 @@ space is `%20`): `file:///a/b`. On Windows a drive path `C:/x` (or `C:\\x`) is
     (path/->file-uri \"/my project/a.rs\")   ;=> \"file:///my%20project/a.rs\""
   (let (text (forward-slashes p))
     (cond
-      (unc-root text)
-        (str "file://" (encode-segments (string/substring text 2 (string/length text))))
+      (unc-root text) (str "file://" (encode-segments (string/substring text 2 (count text))))
       (drive-rooted? text)
         (str "file:///"
           (string/substring text 0 2)
-          (encode-segments (string/substring text 2 (string/length text))))
+          (encode-segments (string/substring text 2 (count text))))
       else (str "file://" (encode-segments text)))))
 
 (defn- uri-authority (text)
   ;; `//host/x` → [host "/x"]; `//host` → [host "/"]
   (let (slash (index-of text "/" 2))
     (if (< slash 0)
-      [(string/substring text 2 (string/length text)) "/"]
-      [(string/substring text 2 slash) (string/substring text slash (string/length text))])))
+      [(string/substring text 2 (count text)) "/"]
+      [(string/substring text 2 slash) (string/substring text slash (count text))])))
 
 (defn file-uri-> (uri:string -> (or string nil))
   "The path a `file:` `uri` names, percent-decoded — the inverse of [[->file-uri]] — or
@@ -505,20 +503,20 @@ not decode is left as it is.
 
     (path/file-uri-> \"file:///my%20project/a.rs\")   ;=> \"/my project/a.rs\""
   (when (string/starts-with? uri "file:")
-    (let (after-scheme (string/substring uri 5 (string/length uri))
+    (let (after-scheme (string/substring uri 5 (count uri))
           [host raw] (if (string/starts-with? after-scheme "//")
                        (uri-authority after-scheme)
                        ["" after-scheme])
           decoded (url/percent-decode raw)
           local (if (string? decoded) decoded raw)
           drive? (and (windows?)
-                   (>= (string/length local) 3)
+                   (>= (count local) 3)
                    (= (string/char-at local 0) "/")
                    (letter? (string/char-at local 1))
                    (= (string/char-at local 2) ":")))
       (cond
         drive?
           (str (string/upper (string/char-at local 1))
-            (string/substring local 2 (string/length local)))
+            (string/substring local 2 (count local)))
         (or (= host "") (= host "localhost")) local
         else (str "//" host local)))))

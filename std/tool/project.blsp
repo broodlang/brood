@@ -204,7 +204,7 @@ identity and may override those paths. The rest of the tool is its siblings:
 ;; the resolution fields (`:resolved-path`/`:sha256`/`:commit`/`:deps`) assoc'd on, so it
 ;; dispatches identically to the dep it came from.
 
-(def- *project-reserved-dep-opts* (list :branch :dir :features))
+(def- *reserved-dep-opts* (list :branch :dir :features))
 
 (defrecord dep-path (name path))
 ;; A git dep pins EITHER an exact `:ref` (tag/branch/commit) OR a `:version` range
@@ -230,7 +230,7 @@ identity and may override those paths. The rest of the tool is its siblings:
   project/dep-registry
   (->string (d) (str (get d :name) "  (registry v" (get d :version) ")")))
 
-(def- *project-dep-ids*
+(def- *dep-ids*
   (list :project/dep-path :project/dep-git :project/dep-tarball :project/dep-registry))
 
 (defn dep? (x)
@@ -238,7 +238,7 @@ identity and may override those paths. The rest of the tool is its siblings:
 
     (project/dep? (project/parse-dep '[foo :path \"../foo\"]))  ;=> true
     (project/dep? {:name 'foo})                                 ;=> false"
-  (and (record? x) (includes? *project-dep-ids* (record-id x))))
+  (and (record? x) (includes? *dep-ids* (record-id x))))
 
 (defn dep-path? (x)
   "True if `x` is a `:path` dependency — the one kind that loads **in place** rather
@@ -259,7 +259,7 @@ than being fetched into `_deps/<name>/`.
   (fold (project-plist-keys opts)
     nil
     (fn (_ k)
-      (when (includes? *project-reserved-dep-opts* k)
+      (when (includes? *reserved-dep-opts* k)
         (error "project: dependency "
           name " uses " k ", which is reserved for a future version")))))
 
@@ -510,7 +510,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 
 ;; Every key a `(project …)` form may hold: the manifest's own, `:templates` (read by `nest
 ;; new --from`, ADR-424), and the build stamps a release bundle adds (`project-release`).
-(def- *project-manifest-keys*
+(def- *manifest-keys*
   #{:name
     :version :description :repository :brood :kind :enhances :check :main :source-paths :test-paths
     :format-paths :doc-paths :dependencies :dev-dependencies :format-headers :format-plugins
@@ -521,15 +521,15 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; (`:dependecies`) is the other way to get one, which is why it is said at all.
 ;; Said once per manifest: one command sets the project up more than once, and the same
 ;; warning twice reads as two problems.
-(def- *project-warned-manifest* nil)
+(def- *warned-manifest* nil)
 
 (defn- project-warn-unknown-keys (opts)
-  (when (not (= opts *project-warned-manifest*))
-    (def- *project-warned-manifest* opts)
+  (when (not (= opts *warned-manifest*))
+    (def- *warned-manifest* opts)
     (let ([keys _] (fold opts
                      [[] true]
                      (fn ([found at-key] item) [(if at-key (conj found item) found) (not at-key)])))
-      (doseq (key (seq/filter keys (fn (key) (not (contains? *project-manifest-keys* key)))))
+      (doseq (key (seq/filter keys (fn (key) (not (contains? *manifest-keys* key)))))
         (io/puts (str "project: warning: unknown key "
                    (pr-str key)
                    " in project.blsp is ignored — a typo, or a key from a newer Brood")

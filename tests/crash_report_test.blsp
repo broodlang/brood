@@ -251,7 +251,7 @@ passes. A report that does not match belongs to another test — drop it and kee
       (is (keyword? (:kind report)))
       (assert= (map/get-in report [:context :program]) "probe")
       (assert= (:brood report) (system/brood-version))
-      (is (= 16 (string/length (:signature report))))))
+      (is (= 16 (count (:signature report))))))
 
   (test "the same bug has one signature whatever its message"
     (let (raise (fn (n) (crash-report-caught (fn () (error (str "boom: " n))))))

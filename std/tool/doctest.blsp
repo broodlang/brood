@@ -75,14 +75,13 @@ An indented line still carrying the old ` → ` marker is reported, never skippe
     (let (i (comment-index line))
       (when i
         (let (form (string/trim (string/substring line 0 i))
-              tail (string/substring line i (string/length line)))
+              tail (string/substring line i (count line)))
           (when (and (not (= form "")) (string/starts-with? tail marker))
             (let (after (string/drop-prefix tail marker)
                   j (comment-index after)
                   result (string/trim (strip-comment after)))
               (cond
-                (and j (opens-with-marker? (string/substring after j (string/length after))))
-                  [:malformed]
+                (and j (opens-with-marker? (string/substring after j (count after)))) [:malformed]
                 (and (= result "") (= marker ";=>")) [:malformed]
                 else [:example form result]))))))))
 
@@ -236,8 +235,8 @@ whose callee must exist, but that are not evaluated.
               (string/starts-with? (second outcome) "RAISED unbound symbol: "))
           (qualify-hint owner
             (string/substring (second outcome)
-              (string/length "RAISED unbound symbol: ")
-              (string/length (second outcome))))
+              (count "RAISED unbound symbol: ")
+              (count (second outcome))))
           "")))))
 
 (defn- check-case (name-str src expected)
@@ -337,7 +336,7 @@ whether that is a failure, so this is usable as a report as well as a gate.
 
 (defn- bare-name (qualified)
   (let (slash (string/last-index-of qualified "/"))
-    (if (> slash 0) (string/substring qualified (+ slash 1) (string/length qualified)) qualified)))
+    (if (> slash 0) (string/substring qualified (+ slash 1) (count qualified)) qualified)))
 
 (defn- defines? (line bare)
   ;; Does the source line open a top-level def form for `bare`?
@@ -412,13 +411,13 @@ every example holds (or the file defines nothing documented).
 (def- *faults-prefix* "doctest-faults: ")
 
 (defn- indent-of (line)
-  (- (string/length line) (string/length (string/trim-left line))))
+  (- (count line) (count (string/trim-left line))))
 
 (defn- dedent (line indent)
   ;; `line` without the fence's own indent, or without whatever indent it has when that is
   ;; less — a block inside a list item is indented with the item.
   (if (string/starts-with? line (string/repeat " " indent))
-    (string/substring line indent (string/length line))
+    (string/substring line indent (count line))
     (string/trim-left line)))
 
 (defn- runnable-fence? (info)

@@ -355,8 +355,8 @@ keyword** — including an integer-indexed collection, because `(:name deps)` wh
 
 The advisory checker knows the form (ADR-167): it flags a receiver that provably
 can't be keyed, a wrong arity, and flows a **typed record field** through the result —
-so `(string/length (:x p))` is caught for a `(defrecord pt ((x int) …))` exactly as
-`(string/length (get p :x))` is.
+so `(string/upper (:x p))` is caught for a `(defrecord pt ((x int) …))` exactly as
+`(string/upper (get p :x))` is.
 
 **Only keywords.** A map, vector or set in head position is still an error with a
 hint — `({:a 1} :a)` would be a second spelling of `get`, and a callable vector or set
@@ -692,7 +692,7 @@ tail is a real type the checker consumes, not a comment. Two things follow from 
 - **The return flows into inference at every call site.** An op is a generic `defn`
   whose body *is* the dispatch machinery, so its own type is opaque — the declared
   return is the only static handle on what the call yields. `(area shape)` for `(area
-  (self) :-> float)` types as `float`, so `(+ (area s) 1.0)` checks and `(string/length
+  (self) :-> float)` types as `float`, so `(+ (area s) 1.0)` checks and `(string/upper
   (area s))` is flagged. This is the single most useful place to recover type
   information, because it's the polymorphic boundary where it would otherwise be lost.
 - **Each `impl` body is checked against it.** An impl of `(size (self) :-> int)` whose
@@ -2255,7 +2255,7 @@ provably wrong call against it (both the argument and the result type flow):
 (sig area (number -> number))
 
 (area "circle")           ; warning: area: argument 1 expects number, got string
-(string/length (area 2))  ; warning: string/length: argument 1 expects string, got number
+(string/upper (area 2))   ; warning: string/upper: argument 1 expects string, got number
 ```
 
 **Either side of the definition** — see "Placement" below. A `sig` is a declaration
@@ -2377,7 +2377,7 @@ runtime cost) in a release; `sig!` adds the runtime guarantee everywhere.
 Adoption is broad — **over 800 declarations, `sig`s and typed parameters, across more than
 90 std modules** (ADR-153 started it in
 `std/path`, `std/json` and `std/set`). The checker enforces them at every call site, in
-any module, and result types flow (a `bool` result handed to `string/length` is caught).
+any module, and result types flow (a `bool` result handed to `string/upper` is caught).
 The checker treats `sig` and `sig!` identically. Writing a *type* never changes
 behaviour; opting into *enforcement* does. Full design:
 [type-annotations.md](type-annotations.md) (ADR-082).
@@ -3558,7 +3558,7 @@ The function combinators build the callbacks those ops take:
 Every operation whose **subject is a string** lives in the `string` module
 (ADR-230): call it qualified, or `(:use string)` to refer them bare.
 
-`string/length`  `string/substring`  `string/char-at`  `string/->list`
+`string/substring`  `string/char-at`  `string/->list`
 `string/list->`  `string/->codepoints`  `string/codepoints->`
 `string/upper`  `string/lower`  `string/capitalize`  `string/join`
 `string/split`  `string/replace`  `string/trim`  `string/trim-left`  `string/trim-right`
@@ -3569,7 +3569,8 @@ Every operation whose **subject is a string** lives in the `string` module
 `string/break-opportunities`
 
 Bare in the prelude — these operate on *any* collection, so they are **not**
-string-library ops: `str`  `pr-str`  `index-of`  `includes?`
+string-library ops: `str`  `pr-str`  `count`  `index-of`  `includes?`. A string's
+length in chars is `(count s)`; there is no `string/length`.
 
 Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
 `string/format`  `string/interp`  `string/display-width`. Number-to-text is `math/->fixed`.
@@ -3578,9 +3579,10 @@ Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
   *readable* form of one value.
 - There is **no distinct character type** (deferred): a "character" is just a
   1-char string, so `(string/char-at s i)` and the elements of `(string/->list s)` are
-  strings. All indices are **char-based**, matching `string/length` (so they are
+  strings. All indices are **char-based**, matching `count` (so they are
   correct for multi-byte UTF-8, not byte offsets).
-- `string/substring`, `string/char-at`, `string/length` are the char-indexed accessors;
+- `string/substring` and `string/char-at` are the char-indexed accessors, and `count` is
+  the length they index against;
   `string/->list` / `string/list->` bridge to and from a list of chars.
 - `string/->codepoints` gives the chars as a **vector of integer codepoints** in
   one O(n) native pass — the random-access form text parsers index with `nth`
@@ -3597,7 +3599,7 @@ Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
   code point splits a cluster and corrupts the text. `(apply str (string/->graphemes
   s))` is `s`. `string/display-width` counts terminal cells over the same clusters (a CJK
   char or emoji is 2, a combining mark 0), and `(string/width->index s cell)` maps a cell
-  back to the character index of the cluster on it (`(string/length s)` past the end; a cell
+  back to the character index of the cluster on it (`(count s)` past the end; a cell
   inside a wide glyph gives the glyph's start) — the pair an editor needs to place a caret
   and to map a click back to a character by the same measure. A **tab** is the one
   cluster whose width depends on where it is: it advances to the next tab stop (a
@@ -3617,7 +3619,7 @@ Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
   found over the rope's own chunks, with no segmentation built or cached.
 - **The cluster-indexed accessors** are `string/grapheme-count`, `(string/grapheme-at s i
   [default])`, and `(string/substring-graphemes s start [end])` — the grapheme-indexed
-  counterparts of `string/length`, `string/char-at`, and `string/substring`, which are all
+  counterparts of `count`, `string/char-at`, and `string/substring`, which are all
   *code-point*-indexed. Reach for these whenever an index is a cursor position:
   `(string/substring s 1 2)` can slice a cluster in half (leaving a bare `e` and an orphan
   combining mark) where `(string/substring-graphemes s 1 2)` keeps it whole. Out-of-range

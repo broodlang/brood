@@ -111,7 +111,7 @@ pub(super) fn check_one_method_return(
     // Seed each param from the DISPATCH KEY. A `defmulti` declares only its return, but a
     // method is registered for one concrete key — `[:int :string]` says, positionally, what
     // this method's arguments are, and the runtime will not call it with anything else.
-    // Without this every param bound unknown, so `(+ n (string/length s))` widened to
+    // Without this every param bound unknown, so `(+ n (%string-length s))` widened to
     // `number` and a `:-> int` multimethod could not be satisfied by arithmetic — the same
     // gap an ability impl's `self` had, one level up from rules that were already right.
     //

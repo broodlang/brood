@@ -77,7 +77,7 @@
     ")"))
 
 (def big-do-src (make-def-src 500))
-(io/puts "big-do-src length:" (string/length big-do-src))
+(io/puts "big-do-src length:" (count big-do-src))
 
 ;; Read it back as a value (s-expression)
 (def big-do-form (reflect/read-string big-do-src))

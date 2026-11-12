@@ -184,7 +184,7 @@ three real defects, since fixed with regression tests:
    for its siblings is the mistake worth naming here; it took two further passes to finish.
 
    Everything else validates acceptably by house convention: a wrong type reaches a primitive
-   and throws (`(parse 42)` → `string/length: expected string`), and a non-`Spanning` value
+   and throws (`(parse 42)` throws from the first string primitive it reaches), and a non-`Spanning` value
    gets the ability's own error, which names the impls it does have. `unit` was the only
    entry point that answered wrongly instead of raising.
 

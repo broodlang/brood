@@ -103,7 +103,7 @@ fn a_depth_capped_body_walk_is_not_memoized_as_the_callees_signature() {
     // parameter so call-site specialization — which skips such arms — cannot re-derive
     // the return at the misuse and paper over a poisoned signature.
     interp
-        .eval_str("(defn g (s & more) (if s (string/length s) 0))")
+        .eval_str("(defn g (s & more) (if s (%string-length s) 0))")
         .expect("def g");
     let if_sym = Value::Sym(crate::core::value::intern("if"));
     let call = reader::read_one(&mut interp.heap, "(g \"a\")").unwrap();
@@ -133,7 +133,7 @@ fn a_depth_capped_body_walk_is_not_memoized_as_the_callees_signature() {
         );
     }
     let misuse =
-        reader::read_one(&mut interp.heap, "(defn h () (string/length (g \"a\")))").unwrap();
+        reader::read_one(&mut interp.heap, "(defn h () (%string-length (g \"a\")))").unwrap();
     forms.push(misuse);
     let ws: Vec<String> = check_file(&mut interp.heap, &forms)
         .into_iter()
@@ -141,7 +141,7 @@ fn a_depth_capped_body_walk_is_not_memoized_as_the_callees_signature() {
         .collect();
     assert!(
         ws.iter()
-            .any(|w| w.contains("string/length") && w.contains("int")),
+            .any(|w| w.contains("%string-length") && w.contains("int")),
         "g's int return must survive a depth-capped first ask: {ws:?}"
     );
 }

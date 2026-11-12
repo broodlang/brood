@@ -293,7 +293,7 @@ through: a caller holding one should not put it in an error.
     (crash-report/redact \"{\\\"password\\\":\\\"hunter2\\\"}\")   ;=> \"{\\\"password\\\":[redacted]}\""
   (let (text (if (string? text) text (pr-str text))
         home (path/home)
-        homed (if (and (string? home) (> (string/length home) 1))
+        homed (if (and (string? home) (> (count home) 1))
                 (string/replace text (str home "/") "~/")
                 text))
     (fold crash-report-redactions
@@ -338,7 +338,7 @@ innermost `:frames` with project-relative paths, the `:brood` version, the `:os`
         message (redact (or (get m :message) ""))
         report {:kind (get m :kind)
                 :code (get m :code)
-                :message (if (> (string/length message) crash-report-max-message)
+                :message (if (> (count message) crash-report-max-message)
                            (str (string/substring message 0 crash-report-max-message) "…")
                            message)
                 :hint (when (get m :hint) (redact (get m :hint)))

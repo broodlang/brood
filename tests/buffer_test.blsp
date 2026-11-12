@@ -1529,7 +1529,7 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
     text
     (fn (acc splice)
       (let ([lo hi repl] splice)
-        (str (string/substring acc 0 lo) repl (string/substring acc hi (string/length acc)))))))
+        (str (string/substring acc 0 lo) repl (string/substring acc hi (count acc)))))))
 
 (defn- type-chars (buf n)
   ;; `n` single-character inserts, as a typing burst makes them
@@ -1636,14 +1636,14 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
                         (let ([lo hi repl] splice)
                           (str (string/substring text 0 lo)
                             repl
-                            (string/substring text hi (string/length text)))))
+                            (string/substring text hi (count text)))))
           wrong (seq/filter cases
                   (fn (splices)
                     (let (after (fold splices base splice-into)
                           [lo old-hi new-hi] (buffer-splices-cover splices))
                       (not (and (= (string/substring base 0 lo) (string/substring after 0 lo))
-                             (= (string/substring base old-hi (string/length base))
-                               (string/substring after new-hi (string/length after)))))))))
+                             (= (string/substring base old-hi (count base))
+                               (string/substring after new-hi (count after)))))))))
       (assert= [] (vec wrong))))
   (test "the cover of a buffer's edits is what the compare of its texts finds, or wider"
     (let (before (make-buffer "(a)\n(b)\n(c)\n")
@@ -1968,7 +1968,7 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
       (assert= (count (get after :splices)) 1)
       (let (edit (first (buffer-edits-since b after))
             [lo hi replacement properties] edit)
-        (assert= [lo hi (string/length replacement)] [7 7 80])
+        (assert= [lo hi (count replacement)] [7 7 80])
         (assert= (count (get properties :face)) 40)
         (assert= (first (get properties :face)) [0 1 :red])
         (assert= (last (get properties :face)) [78 79 :blue]))))

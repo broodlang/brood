@@ -101,7 +101,7 @@
 (describe "strings: char-indexed, unicode-aware"
   (test "length and indexing count CHARS, not bytes"
     (do
-      (assert= (string/length "hé€") 3)
+      (assert= (count "hé€") 3)
       (assert= (string/char-at "hé€" 1) "é")
       (assert= (string/char-at "hé€" 2) "€")
       (assert= (string/substring "hé€xyz" 1 4) "é€x")

@@ -103,7 +103,7 @@
     (let (dir (git-repository "brood-vcs-git-id-"))
       (when dir
         (let (clean (id dir))
-          (assert= (string/length (:id clean)) 12)
+          (assert= (count (:id clean)) 12)
           (refute (:dirty? clean))
           (file/spit (path/join dir "a.txt") "edited\n")
           (is (:dirty? (id dir)))))))

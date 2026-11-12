@@ -11,11 +11,11 @@ fn map_kv_refinement_flows_through_checker() {
     let src = "
 (defn f (m) (get m :k))
 (sig f ((map keyword int) -> int))
-(string/length (f {:a 1}))
+(%string-length (f {:a 1}))
 ";
     let w = file_warnings(src);
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "expected string-length warning for int|nil arg, got {w:?}"
     );
 
@@ -24,11 +24,11 @@ fn map_kv_refinement_flows_through_checker() {
     let src2 = "
 (defn g (m) (keys m))
 (sig g ((map keyword int) -> (list keyword)))
-(string/length (g {:a 1}))
+(%string-length (g {:a 1}))
 ";
     let w2 = file_warnings(src2);
     assert!(
-        w2.iter().any(|s| s.contains("string/length")),
+        w2.iter().any(|s| s.contains("%string-length")),
         "expected string-length warning for list<keyword> arg, got {w2:?}"
     );
 
@@ -79,18 +79,18 @@ fn record_field_refinement_flows_through_checker() {
     let src = "
 (defn f (m) (get m :a))
 (sig f ((record :a int) -> int))
-(string/length (f {:a 1}))
+(%string-length (f {:a 1}))
 ";
     let w = file_warnings(src);
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "expected string-length warning for int|nil arg, got {w:?}"
     );
 
     // A key a *fully-read literal* doesn't carry is provably absent (ADR-264), so it
-    // reads as `nil` — and `(string/length nil)` is a real error, not a false positive.
+    // reads as `nil` — and `(%string-length nil)` is a real error, not a false positive.
     assert!(
-        warnings("(let (m {:a 1}) (string/length (get m :other)))")
+        warnings("(let (m {:a 1}) (%string-length (get m :other)))")
             .iter()
             .any(|w| w.contains("expects string")),
         "an absent key on a closed literal is nil, and must be caught"
@@ -98,7 +98,7 @@ fn record_field_refinement_flows_through_checker() {
     // But a literal the checker could not read completely stays OPEN — the dropped
     // entry might be the key being asked for, so nothing may be concluded about it.
     assert!(
-        warnings("(let (m {:a 1 :b (unknown-thing)}) (string/length (get m :other)))")
+        warnings("(let (m {:a 1 :b (unknown-thing)}) (%string-length (get m :other)))")
             .iter()
             .all(|w| !w.contains("expects string")),
         "an incompletely-read literal must not claim a key is absent"
@@ -108,16 +108,16 @@ fn record_field_refinement_flows_through_checker() {
     // (`:a` required, type int) directly from the literal, no `sig`
     // needed — feeding the field straight to a sink warns.
     assert!(
-        warnings("(string/length (get {:a 1} :a))")
+        warnings("(%string-length (get {:a 1} :a))")
             .iter()
-            .any(|w| w.contains("string/length")),
+            .any(|w| w.contains("%string-length")),
         "expected a warning from the inferred record-literal shape"
     );
 
     // Correct uses stay silent.
     for ok in [
         "(get {:a 1} :a)",
-        "(string/length (get {:a \"x\"} :a))",
+        "(%string-length (get {:a \"x\"} :a))",
         "(get {:a 1} :b)", // undeclared key — unresolved, not a warning
     ] {
         assert!(
@@ -135,11 +135,11 @@ fn overload_refinement_flows_through_checker() {
     let src = "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
-(string/length (f 1))
+(%string-length (f 1))
 ";
     let w = file_warnings(src);
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "an int arg should resolve to the int arm's return type, got {w:?}"
     );
 
@@ -147,7 +147,7 @@ fn overload_refinement_flows_through_checker() {
     let src2 = "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
-(string/length (f \"hi\"))
+(%string-length (f \"hi\"))
 ";
     assert!(
         file_warnings(src2).is_empty(),
@@ -173,7 +173,7 @@ fn overload_refinement_flows_through_checker() {
     let src4 = "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
-(defn g (y) (string/length (f y)))
+(defn g (y) (%string-length (f y)))
 ";
     assert!(
         file_warnings(src4).is_empty(),
@@ -269,7 +269,7 @@ fn a_declared_overload_is_checked_against_its_body_per_arm() {
     // unchecked wrong arm would be trusted at every call site.
     let ok = "
 (defmodule t)
-(defn ok (x) (if (int? x) (inc x) (string/length x)))
+(defn ok (x) (if (int? x) (inc x) (%string-length x)))
 (sig ok (and (int -> int) (string -> int)))
 ";
     let w = file_warnings_mode(ok, true);
@@ -332,11 +332,11 @@ fn int_literal_return_type_flows_through_checker() {
     let src = "
 (defn f (x) x)
 (sig f ((or 200 404 500) -> (or 200 404 500)))
-(string/length (f 200))
+(%string-length (f 200))
 ";
     let w = file_warnings(src);
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "expected string-length warning for an int-literal return, got {w:?}"
     );
 
@@ -411,7 +411,7 @@ fn a_match_clause_on_a_tagged_tuple_binds_the_positions_of_its_own_arm() {
     let ws = file_warnings_mode(&program("(get got :email)", "(str code msg)"), true);
     assert!(ws.is_empty(), "{ws:?}");
     let ws = file_warnings_mode(
-        &program("(string/length got)", "(string/length code)"),
+        &program("(%string-length got)", "(%string-length code)"),
         true,
     );
     assert!(

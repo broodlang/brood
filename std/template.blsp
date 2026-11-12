@@ -45,7 +45,7 @@ tried. Unknown keys render as empty string. Nested `{{` are not supported.
     (if (< close 0)
       (str "{{" p)
       (str (template-lookup data (string/trim (string/substring p 0 close)))
-        (string/substring p (+ close 2) (string/length p))))))
+        (string/substring p (+ close 2) (count p))))))
 
 (defn- template-lookup (data key)
   "Look up `key` in `data`, trying string key then keyword key. Returns \"\" if absent.

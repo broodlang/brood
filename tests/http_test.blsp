@@ -209,7 +209,7 @@
   (test "random-token is 32 hex chars and fresh each call"
     (let (a (random-token)
           b (random-token))
-      (assert= (string/length a) 32)
+      (assert= (count a) 32)
       (is (not (= a b))))))
 
 (describe "http: streaming responses (the connection-handoff seam)"

@@ -78,7 +78,7 @@ when the runtime crashes); `std/prelude/*.blsp` is the canonical idiomatic code.
    `:when` guard and `and`.
 
 13. **Retired names.** `fn`, not `lambda`; `first`/`rest`, not `car`/`cdr`; `append`, not
-   `concat`; `count`, not `length`; `any?` (a pred over a coll), not `some?` — for non-nil
+   `concat`; `count`, not `length` (a string's too: there is no `string/length`); `any?` (a pred over a coll), not `some?` — for non-nil
    write `(not (nil? x))`; `mapcat`, not `flat-map`; `(not (= a b))`, not `not=`
    (deprecated). Unsure? `(bound? 'name)`.
 

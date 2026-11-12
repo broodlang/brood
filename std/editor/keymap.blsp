@@ -335,9 +335,9 @@ whole key, prefix and all; a prefix in `high` over a command in `low` is the pre
 
 (defn- key-function-name? (name)
   "Whether `name` is a function key's, `f1` … `f24`."
-  (and (> (string/length name) 1)
+  (and (> (count name) 1)
     (string/starts-with? name "f")
-    (let (number (string/->number (string/substring name 1 (string/length name))))
+    (let (number (string/->number (string/substring name 1 (count name))))
       (and (int? number) (>= number 1) (<= number 24)))))
 
 (defn- key-angle-name? (name)
@@ -360,9 +360,7 @@ inverting a keymap labels a few hundred keys, and seven scans each was ~40 µs a
         else
           (let ([prefix spelling] hit)
             (str spelling
-              (key-name-description (string/substring name
-                                      (string/length prefix)
-                                      (string/length name)))))))))
+              (key-name-description (string/substring name (count prefix) (count name)))))))))
 
 (defn single-key-description (key)
   "The Emacs spelling of one key: `:ctrl-e` → `C-e`, `:alt-g` → `M-g`, `:ctrl-meta-i` →
@@ -389,11 +387,11 @@ The inverse of [[key-parse]].
   "`[modifiers rest]`: the `C-` / `M-` / `S-` / `s-` prefixes peeled off the front of
 `token` into the set `modifiers`, for as long as a key is left after the dash — so `C--` is
 Ctrl and `-`, and a lone `C` is the letter."
-  (let (modifier (and (> (string/length token) 2)
+  (let (modifier (and (> (count token) 2)
                    (= (string/substring token 1 2) "-")
                    (get key-modifier-letters (string/substring token 0 1))))
     (if modifier
-      (key-peel-modifiers (string/substring token 2 (string/length token))
+      (key-peel-modifiers (string/substring token 2 (count token))
         (conj modifiers modifier))
       [modifiers token])))
 
@@ -405,7 +403,7 @@ nil when it names none."
 
 (defn- key-angle? (token)
   "Whether `token` is written in angle brackets, `<name>`."
-  (and (> (string/length token) 2) (string/starts-with? token "<") (string/ends-with? token ">")))
+  (and (> (count token) 2) (string/starts-with? token "<") (string/ends-with? token ">")))
 
 (defn- key-base (token modifiers)
   "`[modifiers base]` for a written key after its outer modifiers: `base` is `[:char c]` or
@@ -418,7 +416,7 @@ their own (`<C-return>`, the older Emacs spelling)."
       (key-angle? token)
         (let ([inner-modifiers inner] (key-peel-modifiers (string/substring token
                                                             1
-                                                            (dec (string/length token)))
+                                                            (dec (count token)))
                                         modifiers)
               name (key-named-base inner))
           (if (nil? name)

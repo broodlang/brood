@@ -178,7 +178,7 @@ A name with no recognisable pair is vacuously true.
 (defn- %audit-match-paren (text i depth)
   ;; Index of the `)` that closes the `(` at index 0, scanning from `i` at `depth`.
   (cond
-    (>= i (string/length text)) -1
+    (>= i (count text)) -1
     else
       (let (ch (string/char-at text i))
         (cond
@@ -195,7 +195,7 @@ A name with no recognisable pair is vacuously true.
   ;; parametric type RENDERS as `map<any, nil | list<any>>`, one parameter with a comma
   ;; inside. The `>` of an arrow `->` is not a close; only a `>` not preceded by `-`
   ;; nests out.
-  (if (>= acc (string/length text))
+  (if (>= acc (count text))
     (reverse (cons (string/trim current) out))
     (let (ch (string/char-at text acc)
           prev (if (> acc 0) (string/char-at text (- acc 1)) ""))
@@ -233,8 +233,8 @@ no signature. Split at top level, so a callback's own `(any, any) -> any` stays 
 (defn- bare-type (t)
   (let (t (string/trim t))
     (cond
-      (string/starts-with? t "&optional ") (string/trim (string/substring t 10 (string/length t)))
-      (string/starts-with? t "&rest ") (string/trim (string/substring t 6 (string/length t)))
+      (string/starts-with? t "&optional ") (string/trim (string/substring t 10 (count t)))
+      (string/starts-with? t "&rest ") (string/trim (string/substring t 6 (count t)))
       else t)))
 
 (defn- arrow-type? (t) (includes? (bare-type t) "->"))

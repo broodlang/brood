@@ -64,7 +64,7 @@ fn nullary_fn_body(heap: &Heap, form: Value) -> Option<Vec<Value>> {
 /// invisible:
 ///
 /// ```lisp
-/// (defn f (x) (if (string? x) (string/length x) (+ x 1)))
+/// (defn f (x) (if (string? x) (%string-length x) (+ x 1)))
 /// (f :kw)   ; neither branch admits a keyword — and nothing said so
 /// ```
 ///

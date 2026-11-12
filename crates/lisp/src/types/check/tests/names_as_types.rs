@@ -279,7 +279,7 @@ fn deftype_names_a_structural_type_for_sigs() {
          (sig rows (pane -> int))\n\
          (defn rows (p) (let ([_x _y _w h] (:rect p)) (math/quot (dec h) 2)))\n\
          (sig bad-field (pane -> int))\n\
-         (defn bad-field (p) (string/length (:rect p)))\n\
+         (defn bad-field (p) (%string-length (:rect p)))\n\
          (sig first-of (maybe-cell -> int))\n\
          (defn first-of (c) (if (nil? c) 0 (first c)))\n\
          (sig f-loop (loopy -> int))\n\
@@ -292,7 +292,7 @@ fn deftype_names_a_structural_type_for_sigs() {
     // the alias resolves: a field read through it is typed, and a wrong argument is named
     assert!(
         strict.iter().any(|w| w
-            .contains("string/length: argument 1 expects string, got (tuple int, int, int, int)")),
+            .contains("%string-length: argument 1 expects string, got (tuple int, int, int, int)")),
         "{strict:?}"
     );
     // …and named as the alias the sig spelled, not as the shape it expands to
@@ -340,13 +340,13 @@ fn a_self_referential_alias_is_typed_at_every_depth() {
          (defmodule t)\n\
          (deftype tree (or nil (record :v int :l tree :r tree)))\n\
          (sig root (tree -> int))\n\
-         (defn root (t) (string/length (:v t)))\n\
+         (defn root (t) (%string-length (:v t)))\n\
          (sig one-deep (tree -> int))\n\
-         (defn one-deep (t) (string/length (:v (:l t))))\n\
+         (defn one-deep (t) (%string-length (:v (:l t))))\n\
          (sig two-deep (tree -> int))\n\
-         (defn two-deep (t) (string/length (:v (:l (:l t)))))\n\
+         (defn two-deep (t) (%string-length (:v (:l (:l t)))))\n\
          (sig four-deep (tree -> int))\n\
-         (defn four-deep (t) (string/length (:v (:l (:l (:l (:l t)))))))";
+         (defn four-deep (t) (%string-length (:v (:l (:l (:l (:l t)))))))";
     let ws = file_warnings_mode(src, false);
     // Every level sees `:v` as `nil | int`, disjoint from string — including the ones past
     // the old unrolling bound, which is the whole point.

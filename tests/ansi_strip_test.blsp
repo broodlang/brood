@@ -64,7 +64,7 @@
     (let (line (str "\e" "[32mok" "\e" "[0m  a test name\r\n")
           want (apply str (seq/repeat 2000 "ok  a test name\n"))
           got (strip (apply str (seq/repeat 2000 line))))
-      (assert= (string/length want) (string/length got))
+      (assert= (count want) (count got))
       (assert= want got))))
 
 ;; ---- ansi/render: the escapes as LAYOUT, not as noise ------------------------

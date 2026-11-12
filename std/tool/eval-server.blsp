@@ -196,7 +196,7 @@ silencing them fixes the runner rather than the case: a test is still free to pr
     (:ready (eval-server/evsrv-decode-reply \"progress{:ready true}\"))   ;=> true"
   (or (evsrv-read-map line)
     (let (i (index-of line "{"))
-      (when (> i 0) (evsrv-read-map (string/substring line i (string/length line)))))))
+      (when (> i 0) (evsrv-read-map (string/substring line i (count line)))))))
 
 ;; ---- the evaluation core ------------------------------------------------------
 
@@ -213,7 +213,7 @@ silencing them fixes the runner rather than the case: a test is still free to pr
 (def *spy-entry-cap* 200)
 
 (defn- eval-server-bound-output (s)
-  (if (<= (string/length s) *output-cap-chars*)
+  (if (<= (count s) *output-cap-chars*)
     s
     (str (string/substring s 0 *output-cap-chars*) "\n…[output truncated]")))
 

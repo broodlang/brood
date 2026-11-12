@@ -433,7 +433,7 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
             // matters: `of_value` has no heap to read the bytes, so `(= m "x")` yields
             // the bare `string` tag. Negating *that* claims `m` is not a string at all
             // — which is how this guard came to be one-sided in the first place (it
-            // flagged a valid `(string/length m)` in the else branch).
+            // flagged a valid `(%string-length m)` in the else branch).
             let exact = ty.as_lit().is_some()
                 || ty.as_lit_int().is_some()
                 || ty.as_lit_bool().is_some()
@@ -1186,7 +1186,7 @@ pub(super) fn find_redundant_clause(
 // ---- comparison facts: intervals, lengths and index bounds (ADR-350) ------------------
 
 /// One side of a comparison the interval rules can read: a local (narrowed by its int
-/// interval), the count of a local (`(count xs)` / `(string/length xs)` — narrowed by its
+/// interval), the count of a local (`(count xs)` / `(%string-length xs)` — narrowed by its
 /// length), or a literal int.
 enum CmpSide {
     Local(Symbol),
@@ -1297,7 +1297,8 @@ fn cmp_side(heap: &Heap, form: Value, ctx: &Ctx) -> Option<CmpSide> {
                 // narrowed nothing and bounded nothing.
                 return local_plus_offset(heap, form, ctx).map(|(i, k)| CmpSide::Offset(i, k));
             };
-            let counts = value::symbol_is(head, "count") || value::symbol_is(head, "string/length");
+            let counts =
+                value::symbol_is(head, "count") || value::symbol_is(head, "%string-length");
             if counts && !ctx.is_lexical_local(head) && ctx.is_lexical_local(target) {
                 return Some(CmpSide::Count(target));
             }
@@ -1356,7 +1357,7 @@ pub(super) fn count_alias_target(heap: &Heap, rhs: Value, ctx: &Ctx) -> Option<S
     let [Value::Sym(head), Value::Sym(target)] = items[..] else {
         return None;
     };
-    let counts = value::symbol_is(head, "count") || value::symbol_is(head, "string/length");
+    let counts = value::symbol_is(head, "count") || value::symbol_is(head, "%string-length");
     (counts && !ctx.is_lexical_local(head) && ctx.is_lexical_local(target)).then_some(target)
 }
 

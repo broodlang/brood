@@ -78,9 +78,9 @@ which is not the file this work touches now, so it is skipped."
               (fn (state entry)
                 (cond
                   (:skip? state) (assoc state :skip? false)
-                  (< (string/length entry) 4) state
+                  (< (count entry) 4) state
                   else
-                    {:paths (conj (:paths state) (string/substring entry 3 (string/length entry)))
+                    {:paths (conj (:paths state) (string/substring entry 3 (count entry)))
                      :skip? (contains? #{"R" "C"} (string/substring entry 0 1))}))))))
 
 (defn git-changed (root:string -> (or (list string) nil))

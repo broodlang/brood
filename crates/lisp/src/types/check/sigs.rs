@@ -544,7 +544,7 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
 /// arm of the matching arity accepts errors as surely as a single-arm mismatch:
 ///
 /// ```lisp
-/// (defn g ((x) :when (string? x) (string/length x))
+/// (defn g ((x) :when (string? x) (%string-length x))
 ///         ((x) :when (int? x)    (+ x 1)))
 /// (g :kw)   ; no clause takes a keyword
 /// ```

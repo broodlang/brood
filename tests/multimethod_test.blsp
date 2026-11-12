@@ -77,11 +77,11 @@
 
 (check-allow :single-dispatch
   (defmulti mm-typed :-> int)
-  (defmethod mm-typed [:string] (s) (string/length s))
+  (defmethod mm-typed [:string] (s) (count s))
   (defmethod mm-typed [:int] (n) n))
 
 (defmulti mm-typed-alg :commutative :-> int)
-(defmethod mm-typed-alg [:int :string] (n s) (+ n (string/length s)))
+(defmethod mm-typed-alg [:int :string] (n s) (+ n (count s)))
 
 ;; These snippets are one-argument multimethods — single dispatch, which the checker reports
 ;; as an ability written the long way (ADR-523). They are here for their return types, so

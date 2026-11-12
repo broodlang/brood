@@ -42,7 +42,7 @@
       [(string/substring selector-string 0 i)
         (string/substring selector-string
           (+ i 1)
-          (string/length selector-string))])))
+          (count selector-string))])))
 
 ;; Build a filter spec from the raw strings a CLI hands over. Parsing lives here
 ;; rather than in `nest`, so the selector grammar has one definition and the Rust
@@ -69,7 +69,7 @@
 ;; select a test in a completely different file.
 (defn- test-path-suffix? (path needle)
   (and (string/ends-with? path needle)
-    (let (cut (- (string/length path) (string/length needle)))
+    (let (cut (- (count path) (count needle)))
       (or (= cut 0) (= (string/substring path (- cut 1) cut) "/")))))
 
 ;; Two paths may name the same file (the CLI gets what the user typed; the meta

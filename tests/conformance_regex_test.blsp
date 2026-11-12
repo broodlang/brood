@@ -43,7 +43,7 @@
                    else
                      (cons (assoc (first cases)
                              (string/substring line 0 i)
-                               (rx-value (string/substring line (+ i 3) (string/length line))))
+                               (rx-value (string/substring line (+ i 3) (count line))))
                        (rest cases))))))))
 
 (defn- rx-all-cases () (mapcat (corpus-files "regex") rx-cases))

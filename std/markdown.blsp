@@ -89,7 +89,7 @@ both as element text and inside a double-quoted attribute.
 ;; unmatched `[`, a lone `*`, a `<b>` that is a tag rather than a URL: all text, never a crash.
 (defn- md-run-acc (text chunks)
   (let (at (string/span-until text 0 *md-inline-openers*)
-        end (string/length text))
+        end (count text))
     (if (>= at end)
       (cons (escape text) chunks)
       (let (before (escape (string/substring text 0 at))
@@ -97,7 +97,7 @@ both as element text and inside a double-quoted attribute.
             parsed (md-construct rest))
         (if parsed
           (md-run-acc (second parsed) (cons (first parsed) (cons before chunks)))
-          (md-run-acc (string/substring rest 1 (string/length rest))
+          (md-run-acc (string/substring rest 1 (count rest))
             (cons (escape (string/substring rest 0 1)) (cons before chunks))))))))
 
 ;; One inline construct at the head of `text` (which starts with an opener), as
@@ -118,13 +118,13 @@ both as element text and inside a double-quoted attribute.
   (let (close (index-of text "`" 1))
     (when (> close 0)
       [(str "<code>" (escape (string/substring text 1 close)) "</code>")
-        (string/substring text (+ close 1) (string/length text))])))
+        (string/substring text (+ close 1) (count text))])))
 
 ;; `[text](url)`: the link text is escaped, not re-scanned — `[**x**](u)` is rare enough that
 ;; a literal is the safer reading, and it keeps a `]` inside the text from ending it early.
 (defn- md-link (text)
   (let (close-bracket (index-of text "]")
-        end (string/length text))
+        end (count text))
     (when (and (> close-bracket 0)
             (= (string/substring text (+ close-bracket 1) (math/min (+ close-bracket 2) end)) "("))
       (let (rest (string/substring text (+ close-bracket 2) end)
@@ -135,7 +135,7 @@ both as element text and inside a double-quoted attribute.
              "\">"
              (escape (string/substring text 1 close-bracket))
              "</a>")
-            (string/substring rest (+ close-paren 1) (string/length rest))])))))
+            (string/substring rest (+ close-paren 1) (count rest))])))))
 
 ;; The schemes an `<…>` autolink may carry. Anything else between angle brackets — an HTML
 ;; tag, a placeholder like `<your token>` — is text, and is escaped like the rest.
@@ -143,11 +143,11 @@ both as element text and inside a double-quoted attribute.
 
 (defn- md-autolink (text)
   (let (close (index-of text ">")
-        end (string/length text))
+        end (count text))
     (when (> close 1)
       (let (url (string/substring text 1 close))
         (when (and (any? *md-autolink-schemes* (fn (scheme) (string/starts-with? url scheme)))
-                (= (string/span-until url 0 " \t") (string/length url)))
+                (= (string/span-until url 0 " \t") (count url)))
           [(str "<a href=\"" (md-attr url) "\">" (escape url) "</a>")
             (string/substring text (+ close 1) end)])))))
 
@@ -155,8 +155,8 @@ both as element text and inside a double-quoted attribute.
 ;; strong text. The closing marker must exist, the content must be non-empty and must not
 ;; begin with a space — `2 * 3 * 4` is arithmetic, not emphasis.
 (defn- md-span (text marker tag)
-  (let (width (string/length marker)
-        end (string/length text)
+  (let (width (count marker)
+        end (count text)
         close (index-of text marker width))
     (when (and (> close width) (not (string/starts-with? (string/substring text width end) " ")))
       (let (content (string/substring text width close))
@@ -179,7 +179,7 @@ both as element text and inside a double-quoted attribute.
 ;; than that, so a further-indented line inside the block keeps its shape.
 (defn- md-close-code (state)
   (let (indent (or (get state :indent) 0)
-        shed (fn (l) (string/substring l (math/min indent (string/span l 0 " ")) (string/length l))))
+        shed (fn (l) (string/substring l (math/min indent (string/span l 0 " ")) (count l))))
     (md-emit state (md-pre (map (reverse (get state :buf)) shed)))))
 
 ;; An indented code block, closed: trailing blank lines dropped, every line shed of the
@@ -188,10 +188,10 @@ both as element text and inside a double-quoted attribute.
 (defn- md-close-indented (state)
   (let (lines (reverse (seq/drop-while (get state :buf) (fn (l) (= (string/trim l) ""))))
         indent (fold lines
-                 (string/length (or (first lines) ""))
+                 (count (or (first lines) ""))
                  (fn (least l)
                    (if (= (string/trim l) "") least (math/min least (string/span l 0 " \t")))))
-        shed (fn (l) (string/substring l (math/min indent (string/length l)) (string/length l))))
+        shed (fn (l) (string/substring l (math/min indent (count l)) (count l))))
     (md-emit state (md-pre (map lines shed)))))
 
 ;; Does `line` open (or continue) an indented code block? A tab, or at least the
@@ -222,7 +222,7 @@ both as element text and inside a double-quoted attribute.
 ;; The width of an ordered-list marker (`12. `) at the head of `t`, or 0 when there is none.
 (defn- md-ordered-marker (t)
   (let (digits (string/span t 0 "0123456789")
-        end (string/length t))
+        end (count t))
     (if (and (> digits 0) (= (string/substring t digits (math/min (+ digits 2) end)) ". "))
       (+ digits 2)
       0)))
@@ -245,7 +245,7 @@ both as element text and inside a double-quoted attribute.
 (defn- md-line (state:map line:string -> map)
   (let (mode (get state :mode)
         t (string/trim line)
-        end (string/length (string/trim line))
+        end (count (string/trim line))
         ordered (md-ordered-marker t))
     (cond
       (string/starts-with? t "```")
@@ -254,7 +254,7 @@ both as element text and inside a double-quoted attribute.
           (assoc (md-flush state)
             :mode :code
             :buf nil
-            :indent (- (string/length line) (string/length (string/trim-left line)))))
+            :indent (- (count line) (count (string/trim-left line)))))
       (= mode :code) (assoc state :buf (cons line (get state :buf)))
       ;; an indented block continues through blank lines and ends at the first unindented
       ;; text, which is then read as the line it is

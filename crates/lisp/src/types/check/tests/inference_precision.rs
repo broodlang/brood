@@ -692,6 +692,10 @@ fn a_list_call_and_a_quoted_list_are_positional_shapes() {
     assert_eq!(ty_str("(rest (list 1))"), "nil");
     assert_eq!(ty_str("(rest [])"), "nil");
     assert_eq!(ty_str("(%but-last [1])"), "nil");
+    // `(seq/drop-last xs 1)` replaced the public `seq/but-last` (ADR-716) and keeps its
+    // precision: the shape less its last, `nil` from one element.
+    assert_eq!(ty_str("(seq/drop-last (list 1 \"s\") 1)"), "(list 1)");
+    assert_eq!(ty_str("(seq/drop-last [1] 1)"), "nil");
     assert_eq!(ty_str("(count (list 1 \"s\"))"), "2");
     assert_eq!(ty_str("(cons :k (list 1 \"s\"))"), "(list :k, 1, \"s\")");
     assert_eq!(ty_str("(cons :k nil)"), "(list :k)");
@@ -1072,7 +1076,7 @@ fn a_moving_interval_beside_a_stable_tuple_of_the_same_tags_still_widens() {
 
 // KI-140: `apply` binds the callee's type variable from the spread operands and the
 // collection's element type, the way the written-out call does. `math/max` declares
-// `(& ?A -> ?A)`, so `(apply math/max 1 (map xs string/length))` is an `int` — it used to
+// `(& ?A -> ?A)`, so `(apply math/max 1 (map xs %string-length))` is an `int` — it used to
 // type by `apply`'s own curated signature, which knows nothing of the callee's variable, and
 // fell to the callee's flat return (`ordered`), failing a `-> int` declaration under `--strict`
 // (bedit's ratchet, four findings of this shape).
@@ -1082,9 +1086,9 @@ fn apply_binds_the_callee_type_variable_from_its_operands() {
         "\
          (defmodule t)\n\
          (sig widest (list -> int))\n\
-         (defn widest (xs) (apply math/max 1 (map xs string/length)))\n\
+         (defn widest (xs) (apply math/max 1 (map xs %string-length)))\n\
          (sig widest2 (list -> int))\n\
-         (defn widest2 (xs) (math/max 1 (string/length (first xs))))",
+         (defn widest2 (xs) (math/max 1 (%string-length (first xs))))",
         true,
     );
     assert!(ws.is_empty(), "both bodies are ints — {ws:?}");
@@ -1096,7 +1100,7 @@ fn apply_binds_the_callee_type_variable_from_its_operands() {
          (sig pick (& ?A -> ?A))\n\
          (defn pick (& xs) (first xs))\n\
          (sig use-pick (list -> int))\n\
-         (defn use-pick (xs) (apply pick 1 (map xs string/length)))",
+         (defn use-pick (xs) (apply pick 1 (map xs %string-length)))",
         true,
     );
     assert!(

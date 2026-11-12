@@ -141,7 +141,7 @@ generated: that needs the tree-sitter CLI. Returns `{:ok path}` or `{:error text
 
     (editor/grammar-install/grammar-manifest-path \"/g/libtree-sitter-go.so\")   ;=> \"/g/libtree-sitter-go.manifest\""
   (str (if (string/ends-with? library ".so")
-         (string/substring library 0 (- (string/length library) 3))
+         (string/substring library 0 (- (count library) 3))
          library)
     ".manifest"))
 
@@ -158,7 +158,7 @@ generated: that needs the tree-sitter CLI. Returns `{:ok path}` or `{:error text
   (let (result (os/cmd "grep" ["-m1" "-E" "^#define LANGUAGE_VERSION " parser]))
     (when (os/cmd-ok? result)
       (let (number (string/->number (string/trim (string/substring (string/trim (get result :stdout))
-                                                   (string/length "#define LANGUAGE_VERSION")))))
+                                                   (count "#define LANGUAGE_VERSION")))))
         (when (int? number) number)))))
 
 (defn grammar-manifest (library:string)
@@ -274,7 +274,7 @@ takes. [] when the grammar has none.
                         (try (file/slurp (path/join dir name)) (catch _ nil)))))
             inputs (mapcat texts corpus-inputs))
         (into []
-          (take (seq/filter inputs (fn (input) (<= (string/length input) corpus-max-input-length)))
+          (take (seq/filter inputs (fn (input) (<= (count input) corpus-max-input-length)))
             corpus-max-inputs))))))
 
 (defn grammar-vet (library:string lang:keyword &optional (root nil) (options nil) -> map)

@@ -114,14 +114,14 @@ stands for itself, as any other unknown escape does."
       (not (or (= c "x") (= c "u"))) 0
       (= (regex-peek pcs (inc i)) "{")
         (let (digits (regex-hex-run pcs (+ i 2) 8 "")
-              close (+ i 2 (string/length digits)))
+              close (+ i 2 (count digits)))
           (if (and (regex-code-point digits) (= (regex-peek pcs close) "}"))
-            (+ 3 (string/length digits))
+            (+ 3 (count digits))
             0))
       else
         (let (width (if (= c "x") 2 4)
               digits (regex-hex-run pcs (inc i) width ""))
-          (if (and (regex-code-point digits) (= (string/length digits) width)) (inc width) 0)))))
+          (if (and (regex-code-point digits) (= (count digits) width)) (inc width) 0)))))
 
 (defn- regex-coded-char (pcs: (vector string) i:int -> (or nil string))
   "The character the escape at `i` (just past a backslash) names by its code
@@ -216,7 +216,7 @@ and not be `]`; one before a class (`[a-\\d]`) is a literal member too."
                           (when (contains? regex-posix-classes name) (+ k 2))
                         (and (string? c)
                           (includes? "abcdefghijklmnopqrstuvwxyz" c)
-                          (< (string/length name) 8))
+                          (< (count name) 8))
                           (scan (inc k) (str name c))
                         else nil))))
       (scan (+ i 2) ""))))
@@ -822,10 +822,10 @@ empty pattern `\"\"` is an absent prefix or suffix.
 
 (defn- regex-expand-loop (template:string m:any i:int acc:string -> string)
   "Expand `$0`..`$9` (and `$$` for a literal dollar) in a replacement template."
-  (if (>= i (string/length template))
+  (if (>= i (count template))
     acc
     (let (c (string/substring template i (inc i))
-          d (when (< (inc i) (string/length template)) (string/substring template (inc i) (+ i 2))))
+          d (when (< (inc i) (count template)) (string/substring template (inc i) (+ i 2))))
       (cond
         (and (= c "$") (= d "$")) (regex-expand-loop template m (+ i 2) (str acc "$"))
         (and (= c "$") d (includes? "0123456789" d))
@@ -836,7 +836,7 @@ empty pattern `\"\"` is an absent prefix or suffix.
 
 (defn- regex-replace-loop (s matches j at acc replacement)
   (if (>= j (count matches))
-    (str acc (string/substring s at (string/length s)))
+    (str acc (string/substring s at (count s)))
     (let (m (nth matches j)
           piece (if (fn? replacement)
                   (replacement m)
@@ -862,7 +862,7 @@ A group that did not participate expands to the empty string."
 
 (defn- regex-split-loop (s matches j at acc)
   (if (>= j (count matches))
-    (into acc [(string/substring s at (string/length s))])
+    (into acc [(string/substring s at (count s))])
     (let (m (nth matches j))
       (regex-split-loop s
         matches

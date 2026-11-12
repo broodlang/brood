@@ -121,4 +121,4 @@ reader, exactly as the Scheme harness's repeated `(read)` drops them."
 (defn hex->int (s)
   "The non-negative integer with hexadecimal spelling `s` (either case), promoting
 past i64 as needed. Throws on a non-hex character."
-  (corpus-hex-at s 0 (string/length s) 0))
+  (corpus-hex-at s 0 (count s) 0))

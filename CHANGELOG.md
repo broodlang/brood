@@ -18,7 +18,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   completion read dark on dark and the bar showed only around it.
 
 **Breaking: duplicates and doubled prefixes (ADR-718).**
-- `bytes/length`, `text/length` and `table/count` are removed: use `count`.
+- `string/length`, `bytes/length`, `text/length` and `table/count` are removed: use
+  `count`, which gives the same answer and, on the compiled tiers, inlines to the same
+  cached length.
 - `decimal/number->` is removed: use `decimal/of`, which now takes a ratio too. On a float,
   the two gave different answers; `decimal/of`'s shortest round-trip form (`0.1` → `0.1M`)
   is the one kept.

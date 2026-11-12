@@ -139,7 +139,7 @@ string, not absolute (`/…`) or home-anchored (`~…`), with no `..` segment. T
 first (cheap) of two gates; the second is the symlink-resolving check in
 `project-path`."
   (and (string? rel)
-    (> (string/length rel) 0)
+    (> (count rel) 0)
     (not (string/starts-with? rel "/"))
     (not (string/starts-with? rel "~"))
     (not (includes? (string/split rel "/") ".."))))

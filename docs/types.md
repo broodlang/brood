@@ -193,7 +193,7 @@ one-step-deep inferencer** that now covers control-flow, recursion, and complex 
   `Sig::any()` lane (`(...any) -> any`) — overlaps every input, so the
   disjointness checker never warns against it.
   Example sigs: `%add: (number,number)→number`, `first: (list|vector)→any`,
-  `string/length: (string)→int`, `string/->number: (string &optional int)→number|failure`.
+  `string/upper: (string)→string`, `string/->number: (string &optional int)→number|failure`.
 - ✅ **Curated stdlib** — a small hand-written table (`CURATED_SIGS` in
   `check/sigs.rs`) for the variadic / `reduce`-based / branchy / higher-order Brood
   closures the checker can't infer but that matter: the arithmetic and comparison
@@ -289,8 +289,8 @@ never a false positive.
   intersecting (otherwise the outer leaks through the shadow).
 - ✅ **Path narrowing (occurrence typing through a `(get base :key)` access).**
   A type-predicate guard over a record-field path narrows the *path*, not just a
-  bare variable: `(if (int? (get r :age)) (string/length (get r :age)) …)` types
-  `(get r :age)` as `int` in the then-branch, catching the `string/length`
+  bare variable: `(if (int? (get r :age)) (string/upper (get r :age)) …)` types
+  `(get r :age)` as `int` in the then-branch, catching the `string/upper`
   misuse (`¬int` in the else-branch, for a biconditional predicate). Sound under
   immutability — `r` and the pure `get` can't change between the guard and the
   use. `Ctx` carries `path_types: (base, [keys…]) → Ty` (`narrow_path`/`path_ty`),
@@ -568,7 +568,7 @@ the rest of the element-preserving / element-extracting sequence library:
 `nil | list<B>`, like `map`); `seq/interpose` (`nil | list<A | type(sep)>`, weaving the
 separator in); and `range`
 (`nil | list<number>` — always numeric, a sound superset over int/float bounds).
-So `(+ 1 (first (rest ["a" "b"])))` and `(string/length (first (range 5)))` are now
+So `(+ 1 (first (rest ["a" "b"])))` and `(string/upper (first (range 5)))` are now
 flagged. Each rule yields the *exact* element type or a sound superset, and
 `is_disjoint` ignored element refinements at this slice, so the additions could only sharpen
 a result — never raise a false positive. Zero new across `std/` + `tests/`.

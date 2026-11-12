@@ -41,12 +41,12 @@
                            [late remaining] (jsonrpc/decode (str rest
                                                               (string/substring whole
                                                                 n
-                                                                (string/length whole)))))
+                                                                (count whole)))))
                        (and (empty? early) (= (count late) 1) (= remaining "")))))
       ;; inside the header, just past the blank line, and one byte short of the end
       (is (split-at 5))
       (is (split-at (+ 4 (index-of whole "\r\n\r\n"))))
-      (is (split-at (dec (string/length whole))))))
+      (is (split-at (dec (count whole))))))
   (test "a multi-byte body is not waited on forever"
     ;; measured in characters it is short of its byte length, and would never complete
     (let ([messages rest] (jsonrpc/decode (jsonrpc/response 1 "ünïcödé")))
@@ -71,7 +71,7 @@
     (let (items (string/join (map (range 4000) (fn (i) (str "{\"label\":\"item" i "\"}"))) ",")
           body (str "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" items "]}")
           [messages leftover] (jsonrpc/decode (jsonrpc/frame body)))
-      (is (> (string/length body) 80000))
+      (is (> (count body) 80000))
       (assert= (count messages) 1)
       (assert= leftover "")
       (assert= (count (get (first messages) :result)) 4000))))

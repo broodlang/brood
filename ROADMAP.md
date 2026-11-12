@@ -842,7 +842,7 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
       written is a test gained. A campaign, not a pass
 - [x] **Ability seams: the seqable half is CLOSED (2026-08-29, ADR-295).** `count` and
       `empty?` now accept a rope and a table — a rope in CHARACTERS, so it agrees with
-      `string/length` for the text it stands for (pinned by a test, multi-byte included); a
+      `count` of the string it stands for (pinned by a test, multi-byte included); a
       table by entries. Sized directly rather than through `Seqable`, whose `->seq` is a list
       view a rope would have to materialise. **`(seq r)` was left alone deliberately: it was
       never the bug** — a string returns itself from `seq` and raises on `first` too, so a
@@ -1064,7 +1064,7 @@ Shipped as ADRs:
     the sealed-op-derived case, cross-file. Sound (under-constrained → under-warn). **[checker]**
     *Cross-file was weaker than this line said until 2026-09-13:* the loaded-closure
     inferencer had a "Tier 1" that read only DIRECT parameter arguments of a one-call body
-    and returned before the domain walk, so `(defn v (s) (+ 1 (string/length s)))` checked
+    and returned before the domain walk, so `(defn v (s) (+ 1 (count s)))` checked
     its callers in its own file and from no other module. Deleted; the domain walk is the
     one inferencer now (`docs/type-system-status.md`, 2026-09-13).
   - ✅ **Ability bounds** ([ADR-192](docs/decisions.md)) — a sealed ability name in a `sig` is

@@ -113,7 +113,7 @@ take one out, keeping the rest of the file and its comments, then re-resolve the
 
 ;; A CLI spec token: ":path"/":git"/":ref" → keyword; anything else → the string.
 (defn- package-spec-token (tok)
-  (if (string/starts-with? tok ":") (keyword (string/substring tok 1 (string/length tok))) tok))
+  (if (string/starts-with? tok ":") (keyword (string/substring tok 1 (count tok))) tok))
 
 (defn- package-has-dep? (deps name) (any? deps (fn (d) (= (get d :name) name))))
 
@@ -145,14 +145,14 @@ take one out, keeping the rest of the file and its comments, then re-resolve the
 
 ;; Attempts are bounded so a pathological writer can't spin here forever; each retry
 ;; re-reads, so progress is real and 8 is far beyond any plausible contention.
-(def- *package-manifest-edit-attempts* 8)
+(def- *edit-attempts* 8)
 
 (defn- package-edit-manifest (root transform)
-  "Apply `transform` (old manifest source -> new source) to project.blsp atomically, retrying if a concurrent edit lands in between. Returns `[old new]` so the caller can roll its own edit back. Raises if it cannot win within `*package-manifest-edit-attempts*` tries."
+  "Apply `transform` (old manifest source -> new source) to project.blsp atomically, retrying if a concurrent edit lands in between. Returns `[old new]` so the caller can roll its own edit back. Raises if it cannot win within `*edit-attempts*` tries."
   (package-edit-manifest-try (path/join root "project.blsp")
     (package-manifest-lock root)
     transform
-    *package-manifest-edit-attempts*))
+    *edit-attempts*))
 
 (defn- package-edit-manifest-try (manifest lock transform attempts)
   (if (<= attempts 0)

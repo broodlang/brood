@@ -147,7 +147,7 @@
       (assert= (sort pairs (fn (x y) (< (first x) (first y))))
         (list [0 :b] [0 :d] [1 :a] [1 :c]))))
   (test "sort-by orders by a key function"
-    (assert= (seq/sort-by (list "ccc" "a" "bb") (fn (s) (string/length s))) (list "a" "bb" "ccc"))
+    (assert= (seq/sort-by (list "ccc" "a" "bb") (fn (s) (count s))) (list "a" "bb" "ccc"))
     (assert= (seq/sort-by (list -3 1 -2 4) abs) (list 1 -2 -3 4)))
   (test "sort handles a larger, reversed input correctly"
     (assert= (sort (range 50 0 -1)) (range 1 51)))

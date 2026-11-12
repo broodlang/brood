@@ -1499,7 +1499,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
     (if (< i 0)
       line
       (str (test-dim (string/substring line 0 (+ i 1)))
-        (string/substring line (+ i 1) (string/length line))))))
+        (string/substring line (+ i 1) (count line))))))
 
 ;; Emit one editor-parseable block per failed assertion. There is a single
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).

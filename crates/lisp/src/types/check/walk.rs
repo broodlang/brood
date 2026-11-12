@@ -249,7 +249,7 @@ fn check_computed_call(
     let head_ty = expr_ty(heap, head, ctx);
     // An immediately-applied `fn` literal gets what a `let`-bound one gets at its call
     // sites: each parameter's domain over the body, and the literal's arity — its own
-    // arrow carries neither, so `((fn (y) (string/length y)) 5)` would pass unread.
+    // arrow carries neither, so `((fn (y) (%string-length y)) 5)` would pass unread.
     let Some(sig) = super::sigs::let_bound_lambda_sig(heap, head, head_ty.as_ref(), ctx)
         .or_else(|| head_ty.as_ref().and_then(Ty::as_arrow).cloned())
     else {
@@ -389,7 +389,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<Finding>)
                 }
                 // A `%try` an author's `try` expanded to is ordinary code: it is where a
                 // program handles its errors, and a type misuse in its body is as wrong
-                // there as anywhere (`(try (string/length 6) (catch e e))`). Only the
+                // there as anywhere (`(try (%string-length 6) (catch e e))`). Only the
                 // expansions of `error-of` / `assert-error` — whose whole purpose is to
                 // provoke the failure — keep the suppression below. Falls through to the
                 // generic call path, which walks the thunk and the handler as `fn`s.
@@ -1026,7 +1026,7 @@ fn check_args_against_sig(
             // whether the callback can be called at all; this asks whether it
             // can accept what it will be handed. A `sig`-declared higher-order
             // parameter (`(sig g (((int -> int)) -> int))`) was annotated and
-            // then not enforced — passing `string/length` to it was silent.
+            // then not enforced — passing `%string-length` to it was silent.
             //
             // Disjointness only, per position, and never on the *result*: an
             // inferred return over-approximates, so comparing results would

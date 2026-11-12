@@ -380,12 +380,12 @@ which is meaningless for a rope, so falling through unconditionally would swap a
     ;; `prelude_hygiene` states: prelude code reaches for the `%`-primitive, never the module
     ;; wrapper.
     (let (nm (->string m)
-          cut (%str-last-index-of nm "/" (string/length nm)))
+          cut (%str-last-index-of nm "/" (%string-length nm)))
       (if (< cut 0)
         (%defrecord-qualify nm)
         (keyword (str (->string (%root-module-name (symbol (string/substring nm 0 cut))))
                    "/"
-                   (string/substring nm (inc cut) (string/length nm))))))
+                   (string/substring nm (inc cut) (%string-length nm))))))
     m))
 
 (defn- %defability-op-call (impl-sym arg-syms)

@@ -282,7 +282,7 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(quote sym)",
         "(quote (1 2 3))",
         // primitive results
-        "(string/length \"hi\")",
+        "(%string-length \"hi\")",
         "(+ 1 2)",
         "(- 10 3 2)",
         "(* 2 3)",
@@ -616,7 +616,7 @@ fn correct_programs_draw_no_type_disjointness_warning() {
     // — the path B1's `negate` over-approximation protects.
     let cases = [
         "(+ 1 (first [1 2 3]))",
-        "(string/length (str 1 2 3))",
+        "(%string-length (str 1 2 3))",
         "(if (int? 5) (+ 5 1) :no)",
         "(if (number? 5) (* 5 5) :no)",
         "(let (x [1 2 3]) (if (vector? x) (first x) :no))",
@@ -632,25 +632,25 @@ fn correct_programs_draw_no_type_disjointness_warning() {
         // value outside the map's value type is the one that WAS a false positive.
         "(get {:a 1} :a)",
         "(+ 1 (get {:a 1} :a))",
-        "(string/length (get (assoc {:a 1} :b \"text\") :b))",
-        "(string/length (get (assoc {:a 1} :a \"replaced\") :a))",
+        "(%string-length (get (assoc {:a 1} :b \"text\") :b))",
+        "(%string-length (get (assoc {:a 1} :a \"replaced\") :a))",
         "(+ 1 (get (dissoc {:a 1 :b 2} :b) :a))",
         "(map (keys {:a 1 :b 2}) (fn (k) k))",
         "(map (vals {:a 1 :b 2}) (fn (v) v))",
-        "(let (r {:name \"x\"}) (string/length (get r :name)))",
-        "(let (r (assoc {} :name \"x\")) (string/length (get r :name)))",
+        "(let (r {:name \"x\"}) (%string-length (get r :name)))",
+        "(let (r (assoc {} :name \"x\")) (%string-length (get r :name)))",
         // Literal narrowing on BOTH branches (ADR-268) — the else branch now knows what
         // the equality test ruled out, and must not over-claim on the way.
-        "(let (tag :ok) (if (%eq tag :ok) 1 (string/length tag)))",
+        "(let (tag :ok) (if (%eq tag :ok) 1 (%string-length tag)))",
         "(let (tag :err) (if (%eq tag :ok) 1 :other))",
         "(let (n 5) (if (%eq n 5) (+ n 1) (+ n 2)))",
-        "(let (s \"x\") (if (%eq s \"x\") 1 (string/length s)))",
+        "(let (s \"x\") (if (%eq s \"x\") 1 (%string-length s)))",
         "(let (b true) (if b 1 2))",
         "(let (x nil) (if (%eq x nil) 0 (+ x 1)))",
         // An arrow parameter now describes the call it heads (ADR-273) — in both
         // directions, so a CORRECT use of one must stay silent.
         "(let (f inc) (+ 1 (f 1)))",
-        "(let (f str) (string/length (f 1)))",
+        "(let (f str) (%string-length (f 1)))",
         "(map (list inc) (fn (g) (g 1)))",
         // Multi-alternative unions reaching a call (ADR-267's per-tag decomposition).
         "(let (v (if true 1 [2])) (if (vector? v) (first v) v))",
@@ -705,13 +705,13 @@ fn an_inferred_parameter_domain_over_approximates_the_real_one() {
     // `match` patterns, destructuring, `cond`, short-circuits, `let` aliases), where
     // an *under*-approximation would hide.
     let cases = [
-        "(defn f (x) (if (string? x) (string/length x) (+ x 1)))",
+        "(defn f (x) (if (string? x) (%string-length x) (+ x 1)))",
         "(defn f (x) (if (nil? x) 0 (+ x 1)))",
         "(defn f (x) (if (string? x) 1 2))",
-        "(defn f (x) (when (string? x) (string/length x)))",
+        "(defn f (x) (when (string? x) (%string-length x)))",
         "(defn f (x) (if (string? x) nil (do 0)))",
-        "(defn f (x) (cond (nil? x) 0 (string? x) (string/length x) else 1))",
-        "(defn f (x) (and (string? x) (string/length x)))",
+        "(defn f (x) (cond (nil? x) 0 (string? x) (%string-length x) else 1))",
+        "(defn f (x) (and (string? x) (%string-length x)))",
         "(defn f (x) (or (nil? x) (+ x 1)))",
         "(defn f (x) (match x ((:ok v) v) (_ 0)))",
         "(defn f (x) (let (y x) (if (int? y) (+ y 1) 0)))",
@@ -725,10 +725,10 @@ fn an_inferred_parameter_domain_over_approximates_the_real_one() {
         // shapes that guard fires on — including the `if-let` expansion that motivated
         // it, where a closed literal's `nil` had read as a false positive.
         "(defn f (x) (if x (inc x) 0))",
-        "(defn f (x) (if x 1 (string/length x)))",
+        "(defn f (x) (if x 1 (%string-length x)))",
         "(defn f (x) (let (v x) (if v (inc v) 0)))",
         "(defn f (x) (when x (inc x)))",
-        "(defn f (x) (if x nil (do (string/length x))))",
+        "(defn f (x) (if x nil (do (%string-length x))))",
         "(defn f (x) (if-let (v (get x :k)) (inc v) 0))",
         "(defn f (x) (when-let (v (get x :k)) (str v)))",
         "(defn f (x) (if (not x) 0 (inc x)))",
@@ -791,7 +791,7 @@ fn an_inferred_clause_domain_over_approximates_the_real_one() {
     // call is ruled out only if EVERY arity-relevant arm rejects it (ADR-261). A value
     // the runtime accepts must be admitted by at least one arm of that arity.
     let cases = [
-        "(defn f ((x) :when (string? x) (string/length x)) ((x) :when (int? x) (+ x 1)))",
+        "(defn f ((x) :when (string? x) (%string-length x)) ((x) :when (int? x) (+ x 1)))",
         "(defn f ((x) :when (string? x) 1) ((x) 2))",
         "(defn f ((x) (str x)) ((x y) (str x y)))",
         "(defn f ((x) :when (nil? x) 0) ((x) :when (vector? x) (count x)) ((x) 9))",

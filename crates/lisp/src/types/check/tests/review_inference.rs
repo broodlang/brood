@@ -21,7 +21,7 @@ fn loaded_self_call_in_a_when_is_not_a_diverging_guard() {
     // `(when (nil? x) (dv 0))` falls through when `dv` returns — which it does.
     let w = check_with_defs(
         &["(defn rv-dv (x) (do (when (nil? x) (rv-dv 0)) (if (nil? x) \"none\" (+ x 1))))"],
-        "(string/length (rv-dv nil))",
+        "(%string-length (rv-dv nil))",
     );
     assert!(w.is_empty(), "{w:?}");
 }
@@ -41,7 +41,7 @@ fn loaded_multi_arity_self_call_reaches_the_ascent() {
 fn merge_with_an_open_later_argument_forgets_the_earlier_field_type() {
     let w = file_warnings(
         "(sig cfg ((record &open :host string) -> int))\n\
-         (defn cfg (opts) (string/length (:port (merge {:port 80} opts))))",
+         (defn cfg (opts) (%string-length (:port (merge {:port 80} opts))))",
     );
     assert!(w.is_empty(), "{w:?}");
 }
@@ -60,7 +60,7 @@ fn cons_onto_a_vector_is_not_a_list() {
 fn seq_of_a_vector_or_string_is_the_input() {
     let w = file_warnings(
         "(defn f () (%vector-length (seq [1 2 3])))\n\
-         (defn g () (string/length (seq \"abc\")))",
+         (defn g () (%string-length (seq \"abc\")))",
     );
     assert!(w.is_empty(), "{w:?}");
 }
@@ -94,7 +94,7 @@ fn guard_alias_dies_with_its_target_binding() {
         "(defn f (x)\n\
            (let (ok (int? x))\n\
              (let (x \"s\")\n\
-               (if ok (string/length x) (string/length x)))))",
+               (if ok (%string-length x) (%string-length x)))))",
     );
     assert!(w.is_empty(), "{w:?}");
 }
@@ -116,9 +116,9 @@ fn arithmetic_over_a_call_result_is_checked_by_overlap() {
 #[test]
 fn nth_default_past_a_known_end_is_the_default() {
     let w = file_warnings(
-        "(defn a () (string/length (nth [\"a\"] 1 \"\")))\n\
+        "(defn a () (%string-length (nth [\"a\"] 1 \"\")))\n\
          (defn b () (+ (nth [1] 1 0) 1))\n\
-         (defn c () (string/length (get [\"a\"] 1 \"\")))",
+         (defn c () (%string-length (get [\"a\"] 1 \"\")))",
     );
     assert!(w.is_empty(), "{w:?}");
 }
@@ -128,11 +128,11 @@ fn nth_default_past_a_known_end_is_the_default() {
 #[test]
 fn field_truthiness_narrows_a_closed_record_union() {
     let src = "(sig e ((or (record :ok int) (record :error string)) -> int))\n\
-               (defn e (r) (if (:ok r) (+ (:ok r) 1) (string/length (:error r))))\n\
+               (defn e (r) (if (:ok r) (+ (:ok r) 1) (%string-length (:error r))))\n\
                (sig e2 ((or (record :ok int) (record :error string)) -> int))\n\
-               (defn e2 (r) (let (v (:ok r)) (if v (+ v 1) (string/length (:error r)))))\n\
+               (defn e2 (r) (let (v (:ok r)) (if v (+ v 1) (%string-length (:error r)))))\n\
                (sig e3 ((or (record :ok int) (record :error string)) -> int))\n\
-               (defn e3 (r) (if (contains? r :ok) (+ (:ok r) 1) (string/length (:error r))))";
+               (defn e3 (r) (if (contains? r :ok) (+ (:ok r) 1) (%string-length (:error r))))";
     let w = file_warnings_mode(src, true);
     assert!(w.is_empty(), "{w:?}");
 }
@@ -141,9 +141,9 @@ fn field_truthiness_narrows_a_closed_record_union() {
 fn field_truthiness_keeps_an_alternative_whose_field_may_be_falsy() {
     // `:ok` admits `nil`, so a falsy `(:ok r)` does not rule the `:ok` record out.
     let src = "(sig e ((or (record :ok (or nil int)) (record :error string)) -> int))\n\
-               (defn e (r) (if (:ok r) 1 (string/length (:error r))))";
+               (defn e (r) (if (:ok r) 1 (%string-length (:error r))))";
     let w = file_warnings_mode(src, true);
-    assert!(w.iter().any(|m| m.contains("string/length")), "{w:?}");
+    assert!(w.iter().any(|m| m.contains("%string-length")), "{w:?}");
 }
 
 // ---- 14: an `&optional` parameter's domain constrains a passed argument --------------
@@ -151,12 +151,12 @@ fn field_truthiness_keeps_an_alternative_whose_field_may_be_falsy() {
 #[test]
 fn optional_parameter_domain_is_checked_at_a_call() {
     let w = file_warnings(
-        "(defn h (a &optional (b \"x\")) (if (string? b) (string/length b) (+ a b)))\n\
+        "(defn h (a &optional (b \"x\")) (if (string? b) (%string-length b) (+ a b)))\n\
          (defn g () (h 1 :kw))",
     );
     assert!(w.iter().any(|m| m.contains("h: argument 2")), "{w:?}");
     let ok = file_warnings(
-        "(defn h (a &optional (b \"x\")) (if (string? b) (string/length b) (+ a b)))\n\
+        "(defn h (a &optional (b \"x\")) (if (string? b) (%string-length b) (+ a b)))\n\
          (defn g () (list (h 1) (h 1 2) (h 1 \"s\")))",
     );
     assert!(ok.is_empty(), "{ok:?}");
@@ -352,7 +352,7 @@ fn a_lambda_is_typed_under_the_arrow_it_is_passed_as() {
 
 #[test]
 fn an_immediately_applied_lambda_checks_its_arguments_and_arity() {
-    let w = file_warnings("(defn f () ((fn (y) (string/length y)) 5))");
+    let w = file_warnings("(defn f () ((fn (y) (%string-length y)) 5))");
     assert!(
         w.iter().any(|m| m.contains("argument 1 expects string")),
         "{w:?}"
@@ -362,7 +362,7 @@ fn an_immediately_applied_lambda_checks_its_arguments_and_arity() {
         w.iter().any(|m| m.contains("expected 1 argument, got 2")),
         "{w:?}"
     );
-    let w = file_warnings("(defn f () ((fn (y) (string/length y)) \"ok\"))");
+    let w = file_warnings("(defn f () ((fn (y) (%string-length y)) \"ok\"))");
     assert!(w.is_empty(), "{w:?}");
 }
 

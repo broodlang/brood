@@ -770,7 +770,7 @@
   (if (= remaining 0)
     nil
     (let ([late received] (close-under-chatter payload window-ms))
-      (if (and (= late 0) (or (nil? payload) (= received (string/length payload))))
+      (if (and (= late 0) (or (nil? payload) (= received (count payload))))
         (first-noisy-close payload window-ms (dec remaining))
         [remaining [late received]]))))
 

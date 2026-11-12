@@ -157,7 +157,7 @@ read (`nest profile` writes it to a file).
     (nil? reason) "no reason was recorded"
     (string/starts-with? reason "deopt-thrash-latched")
       (str "it went native and fell back to the interpreter 16 times in a row ("
-        (string/substring reason (inc (string/length "deopt-thrash-latched")))
+        (string/substring reason (inc (count "deopt-thrash-latched")))
         ")")
     else (or (get *bail-explanations* reason) reason)))
 

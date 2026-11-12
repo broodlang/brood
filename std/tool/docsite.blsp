@@ -108,7 +108,7 @@ result and the cited name stays escaped."
                 (str "<code>" piece)
                 (str "<code>"
                   (string/substring piece 0 (+ close 7))
-                  (doclinks (string/substring piece (+ close 7) (string/length piece)) module-name))))))))))
+                  (doclinks (string/substring piece (+ close 7) (count piece)) module-name))))))))))
 
 (defn prose (text &optional module-name)
   "Render a docstring as safe HTML: `markdown/->html` — paragraphs, `- ` lists, `**bold**`

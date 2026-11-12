@@ -62,7 +62,7 @@
   (let (s (pressure 150 "")
         v (into [] (range 12))
         d (vdiff v v 0 1200 {}))
-    (send parent [:done (+ (string/length s) (count d))])))
+    (send parent [:done (+ (count s) (count d))])))
 
 (defn c3-spawn (parent n)
   (when (> n 0) (spawn (c3-worker parent n)) (c3-spawn parent (- n 1))))

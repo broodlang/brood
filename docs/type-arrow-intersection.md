@@ -21,7 +21,7 @@ matched its argument — the classic overloaded-function shape:
 (sig f (and (int -> int) (bool -> bool)))
 (defn f (x) (if (int? x) (inc x) (not x)))
 
-(string/length (f 1))   ; f's result on an int arg is int — should warn
+(string/upper (f 1))    ; f's result on an int arg is int — should warn
 (f true)                 ; f's result on a bool arg is bool — fine
 ```
 
@@ -222,7 +222,7 @@ Verified with a Rust test that actually *evaluates* a declaration (so
 and, end-to-end, with a real two-file `nest new` project (`hello.blsp`
 declaring an overloaded `clamp`, `main.blsp` calling `hello/clamp` via
 `(:use hello)`): `nest check` correctly flagged a genuine mismatch
-(`(string/length (clamp 0 10 5))`) and stayed silent on the correct call
+(`(string/upper (clamp 0 10 5))`) and stayed silent on the correct call
 (`(+ 1 (clamp 0 10 5))`).
 
 ## Argument check (shipped — the second hook)

@@ -40,7 +40,7 @@
           built (str-build 3000)
           after (collections))
       (do
-        (assert= (string/length built) 30000)
+        (assert= (count built) 30000)
         (assert (>= (- after before) 2))))))
 
 (describe "the byte trigger across processes"

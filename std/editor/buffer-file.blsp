@@ -37,7 +37,7 @@ agreed. `buffer-from-file` and `save-buffer` stamp it; `buffer-file-changed?` re
     (:eol (editor/buffer-file/eol-decode \"a\\r\\nb\\n\"))   ;=> :lf
     (:eol (editor/buffer-file/eol-decode \"no newline\"))   ;=> :lf"
   (let (decoded (string/replace text "\r\n" "\n")
-        removed (- (string/length text) (string/length decoded)))
+        removed (- (count text) (count decoded)))
     (if (= removed 0)
       {:text text :eol :lf}
       (let (rope (text/string-> decoded)

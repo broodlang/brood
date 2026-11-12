@@ -373,7 +373,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 ;;   construction, so it cannot gate.
 ;; - `:deprecated`, `:beta` (ADR-283): a deprecation that FAILS the build is a removal with
 ;;   extra steps — the point is to say "this is going away" while the code still works.
-(def- *project-advisory-categories* #{:non-tail-recursion :gave-up :deprecated :beta})
+(def- *advisory-categories* #{:non-tail-recursion :gave-up :deprecated :beta})
 
 ;; `:off`, `:advisory` or `:gating` for a warning of `category` under this project's
 ;; `:check` key. `:allow` wins over the rest, then the project's own lists, then the
@@ -384,7 +384,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
       (contains? (%map-get policy :allow #{}) category) :off
       (contains? (%map-get policy :gating #{}) category) :gating
       (contains? (%map-get policy :advisory #{}) category) :advisory
-      (contains? *project-advisory-categories* category) :advisory
+      (contains? *advisory-categories* category) :advisory
       else :gating)))
 
 ;; `w` as `nest check` prints it, or nil when the project silences its category: the
@@ -409,7 +409,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 ;; dead call, not advice — while every other gating warning still prints and, under
 ;; `nest check`, still fails CI. `project-tally-add` merges two tallies (a worker's chunk
 ;; result into the running total, or a dead worker as one gating warning).
-(def- *project-tally-zero* [0 0])
+(def- *tally-zero* [0 0])
 
 (defn- project-tally-add (a b)
   [(+ (first a) (first b)) (+ (second a) (second b))])
@@ -429,7 +429,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 ;; reachability set, carried as data so it reaches the worker).
 (defn- project-check-chunk (chunk)
   (fold chunk
-    *project-tally-zero*
+    *tally-zero*
     (fn (k pair)
       (let ([f cl] pair) (fold (reflect/check-file-structured f cl) k project-tally-warning)))))
 
@@ -444,7 +444,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
 (defn- project-check-chunk-shared (chunk)
   (let (cl (first chunk))
     (fold (rest chunk)
-      *project-tally-zero*
+      *tally-zero*
       (fn (k f) (fold (reflect/check-file-structured f cl) k project-tally-warning)))))
 
 ;; The from-scratch parallel path: fan `check-file` (print-in-worker) across the
@@ -456,7 +456,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
       (io/puts (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason))
         :to *err*)
       (project-tally-add n [1 0]))
-    *project-tally-zero*))
+    *tally-zero*))
 
 ;; `project-check-files-fresh` for one shared reachability set (see
 ;; `project-check-chunk-shared`). Same files, same warnings — only the amount copied to each
@@ -469,7 +469,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
       (io/puts (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason))
         :to *err*)
       (project-tally-add n [1 0]))
-    *project-tally-zero*))
+    *tally-zero*))
 
 ;; ── incremental check-result cache (Phase 2, ADR-119) ────────────────────────
 ;; Cache each file's `check-file` warnings on disk, keyed by (file mtime + a
@@ -577,7 +577,7 @@ module included), built from the whole `files` universe — the KI-17 reachabili
         ;; print every file's warnings (reused + fresh) and tally them — in FILE order, so
         ;; a replayed run (ADR-382) prints what this one printed
         n (fold files
-            *project-tally-zero*
+            *tally-zero*
             (fn (n p)
               (let (e (%map-get entries p nil))
                 (if e (fold (nth e 1) n project-tally-warning) n))))
@@ -648,7 +648,7 @@ against the fully-loaded state is also what a live image would see. Returns nil.
 ;; cached path produced them (nil from the fresh path, whose workers print for themselves).
 (defn- project-check-files (files root)
   (if (= (os/env "BROOD_NO_CHECK") "1")
-    [*project-tally-zero* nil]
+    [*tally-zero* nil]
     ;; Build the KI-17 reachability closures from the WHOLE project (every file's
     ;; header), not just `files` — a `nest check FILE` still needs the full graph to
     ;; resolve `FILE`'s transitive requires, else a transitively-reached module would
@@ -742,7 +742,7 @@ against the fully-loaded state is also what a live image would see. Returns nil.
 
 ;; Top-level heads that bind a global (each expands to `def`). `defmodule` is
 ;; excluded — it registers a module feature, not a clashing value binding.
-(def- *project-def-heads* ["def" "def-" "defn" "defn-" "defmacro" "defdyn" "defonce"])
+(def- *def-heads* ["def" "def-" "defn" "defn-" "defmacro" "defdyn" "defonce"])
 
 ;; `[head name]` for a recognised def-style form (both strings), else nil. The head
 ;; is what says whether the name is ambient, so the two travel together.
@@ -752,7 +752,7 @@ against the fully-loaded state is also what a live image would see. Returns nil.
     (when (>= (count kids) 2)
       (let (head (first kids) nm (second kids))
         (when (and (= (project-node-kind head) :symbol)
-                (includes? *project-def-heads* (project-node-val head))
+                (includes? *def-heads* (project-node-val head))
                 (= (project-node-kind nm) :symbol))
           [(project-node-val head) (project-node-val nm)])))))
 
@@ -1007,20 +1007,20 @@ Returns nil when there is nothing to report.
 ;; moved — thousands of unreachable directories within days. The boot cache prunes by age
 ;; (`prelude_image_prune` in boot.rs); this is the same policy for its sibling.
 ;;
-;; Once per run, not per file: `*project-cache-pruned*` latches. Never prunes the directory
+;; Once per run, not per file: `*cache-pruned*` latches. Never prunes the directory
 ;; in use. Best-effort throughout — a cache is an optimisation, so a prune that cannot read
 ;; the directory or delete an entry simply leaves it (and a concurrent `nest` deleting the
 ;; same entry is a no-op, since `file/rmdir` treats NotFound as success).
 ;; Milliseconds: both `now` and `file/mtime` report ms since the epoch.
-(def *project-cache-max-age-ms* (* 7 24 3600 1000))
-(def *project-cache-pruned* false)
+(def- *cache-max-age-ms* (* 7 24 3600 1000))
+(def- *cache-pruned* false)
 
 (defn- project-cache-prune (base in-use)
-  (when (not *project-cache-pruned*)
-    (def *project-cache-pruned* true)
+  (when (not *cache-pruned*)
+    (def- *cache-pruned* true)
     (check-allow :discarded-catch
       (try
-        (let (cutoff (- (os/now) *project-cache-max-age-ms*))
+        (let (cutoff (- (os/now) *cache-max-age-ms*))
           (fold (file/ls base)
             nil
             (fn (_ entry)
@@ -1388,8 +1388,7 @@ and the pre-flight would 'check' the manifest and warn on it."
   (let (n (->string feat)
         prefix (cond (nil? project/*name*) nil else (str project/*name* "/"))
         rel (cond
-              (and prefix (string/starts-with? n prefix))
-                (string/substring n (string/length prefix))
+              (and prefix (string/starts-with? n prefix)) (string/substring n (count prefix))
               else n)
         p (%require-find (str rel ".blsp") *load-path*))
     (when (and p (any? srcdirs (fn (d) (string/starts-with? p d)))) p)))
@@ -1440,7 +1439,7 @@ reaches is `nest check`/`nest test`'s business.
     (project-check/check-run-closure 'myapp)   ;~> [3 1] — 3 gating warnings, 1 of them an unbound symbol"
   (let (root (project/require-root "check-run-closure"))
     (if (= (os/env "BROOD_NO_CHECK") "1")
-      *project-tally-zero*
+      *tally-zero*
       (let ([want reach] (project-entry-closure entry
                            (project/abs-paths root project/*source-paths*))
             extracts (project-gather-extracts want)
@@ -1494,7 +1493,7 @@ diagnostic may carry a trailing ` — hint`, so the name is the first word after
           (if (not (string/starts-with? msg prefix))
             acc
             ;; `index-of` answers -1, not nil, when the needle is absent.
-            (let (tail (string/substring msg (string/length prefix))
+            (let (tail (string/substring msg (count prefix))
                   space (index-of tail " ")
                   nm (if (< space 0) tail (string/substring tail 0 space)))
               (if (string/blank? nm) acc (conj acc nm)))))))))
@@ -1698,7 +1697,7 @@ wrapper — `(check-allow :kw (defn f …) (sig f …))` — and mean something 
   "The site whose definition declares `name`, trying the reported spelling and its bare
 tail (see `sig-defn-spelling`), or nil."
   (let (bare (let (i (index-of name "/"))
-               (if (and i (>= i 0)) (string/substring name (inc i) (string/length name)) name)))
+               (if (and i (>= i 0)) (string/substring name (inc i) (count name)) name)))
     (seq/find sites (fn (s) (or (= (first s) name) (= (first s) bare))))))
 
 (defn- sig-insertions (path text)

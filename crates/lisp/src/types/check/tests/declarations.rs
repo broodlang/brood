@@ -365,7 +365,7 @@ fn a_provable_return_is_silent_in_both_modes() {
         "(sig f (int -> (int 0 255)))\n(defn f (x) (bit/and x 255))",
         "(sig f ((int 0 10) -> (int 0 20)))\n(defn f (x) (* x 2))",
         "(sig f ((int 0 _) -> (int 0 _)))\n(defn f (x) (math/quot x 2))",
-        "(sig f (string -> int))\n(defn f (s) (string/length s))",
+        "(sig f (string -> int))\n(defn f (s) (%string-length s))",
     ] {
         for strict in [false, true] {
             let ws = file_warnings_mode(&format!("(defmodule t)\n{src}"), strict);

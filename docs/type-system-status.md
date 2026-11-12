@@ -74,11 +74,11 @@ Everything the audit listed, plus:
 
 ```lisp fragment
 ;; the domain rule (ADR-261) — no annotation anywhere
-(defn f (x) (if (string? x) (string/length x) (+ x 1)))   (f :kw)   ; neither branch admits it
+(defn f (x) (if (string? x) (string/upper x) (+ x 1)))    (f :kw)   ; neither branch admits it
 (defn d ([a b]) (+ a b))                                  (d 5)     ; head destructuring
 (defn m (x) (match x ((:ok v) v) ((:error e) e)))         (m 5)     ; no clause matches
 (defn g ((x) :when (string? x) …) ((x) :when (int? x) …)) (g :kw)   ; no clause accepts
-(defn h ((x) (string/length x)) ((x y) (+ x y)))          (h 5)     ; arm 1 wants a string
+(defn h ((x) (string/upper x)) ((x y) (+ x y)))           (h 5)     ; arm 1 wants a string
 
 ;; unions of structured types (ADR-262)
 (sig t ((or (tuple int) (tuple string)) -> any))       (t [true])
@@ -110,7 +110,7 @@ Everything the audit listed, plus:
 (sig q3 (int -> int)) (defn q3 (a b) …)          ; sig contradicts the definition
 (sig q4 (int -> int))                            ; annotates nothing
 (defn n1 (x y) x) (defn n2 () (n1 1))            ; same-file arity
-(sig g ((int -> int) -> int)) (g string/length)  ; arrow-typed parameter
+(sig g ((int -> int) -> int)) (g string/upper)   ; arrow-typed parameter
 (defmacro m (x) `(a ~(zzz x)))                   ; a quasiquote escape is code
 ```
 

@@ -93,9 +93,9 @@ fn and_guard_does_not_narrow_the_else_branch() {
         "the else-branch of an `and` guard must not be narrowed: {w:?}"
     );
     // The then-branch still narrows (sanity: the guard didn't go silent).
-    let w = warnings_expanded(r#"(fn (m) (if (and (int? m) true) (string/length m) 0))"#);
+    let w = warnings_expanded(r#"(fn (m) (if (and (int? m) true) (%string-length m) 0))"#);
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "the then-branch should still narrow m to int: {w:?}"
     );
 }
@@ -106,7 +106,7 @@ fn or_guard_does_not_falsely_narrow() {
     // nothing about it). `(or (int? x) true)` is always true, so the then
     // branch keeps `x`'s full (string) type — and a genuine misuse there is
     // still seen. (Guards against the `and`-fix over-reaching into `or`.)
-    let w = warnings_expanded(r#"(let (x "s") (if (or (int? x) true) (string/length x) 0))"#);
+    let w = warnings_expanded(r#"(let (x "s") (if (or (int? x) true) (%string-length x) 0))"#);
     assert!(
         w.iter().all(|s| !s.contains("expects")),
         "a correct use under an `or` guard must not warn: {w:?}"
@@ -119,9 +119,9 @@ fn or_guard_does_not_falsely_narrow() {
 fn map_result_flows_the_callback_return() {
     // `(map (list 1 2 3) inc)` : list<number>, so `(first …)` is number|nil —
     // disjoint from string → string-length flags it.
-    let w = warnings("(string/length (first (map (list 1 2 3) inc)))");
+    let w = warnings("(%string-length (first (map (list 1 2 3) inc)))");
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "map's element type (number) should flow to first: {w:?}"
     );
     // ...and a numeric sink is fine (number overlaps).
@@ -135,9 +135,9 @@ fn map_result_flows_the_callback_return() {
 #[test]
 fn filter_preserves_the_element_type() {
     // `(seq/filter (list 1 2 3) even?)` : list<int> — element type unchanged.
-    let w = warnings("(string/length (first (seq/filter (list 1 2 3) even?)))");
+    let w = warnings("(%string-length (first (seq/filter (list 1 2 3) even?)))");
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "filter should preserve the int element type: {w:?}"
     );
 }
@@ -156,7 +156,7 @@ fn element_type_flows_through_more_combinators() {
         r#"(+ 1 (first (seq/reject ["a" "b"] (fn (x) false))))"#,
         r#"(+ 1 (first (seq/take-last ["a" "b"] 1)))"#,
         r#"(+ 1 (first (seq/keep ["a" "b"] (fn (x) x))))"#,
-        "(string/length (first (range 5)))",
+        "(%string-length (first (range 5)))",
     ] {
         let w = warnings(src);
         assert!(
@@ -184,9 +184,9 @@ fn element_type_flows_through_more_combinators() {
 fn identity_lambda_preserves_element_type() {
     // `(map (list 1 2 3) (fn (x) x))` : list<int> — the lambda returns its
     // argument, so B = the element type A.
-    let w = warnings("(string/length (first (map (list 1 2 3) (fn (x) x))))");
+    let w = warnings("(%string-length (first (map (list 1 2 3) (fn (x) x))))");
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "an identity callback should preserve the element type: {w:?}"
     );
 }
@@ -194,26 +194,26 @@ fn identity_lambda_preserves_element_type() {
 #[test]
 fn map_filter_do_not_refine_when_uncertain() {
     // Unknown callback (a local) → no refinement → no warning.
-    let w = warnings("(fn (g) (string/length (first (map (list 1 2 3) g))))");
+    let w = warnings("(fn (g) (%string-length (first (map (list 1 2 3) g))))");
     assert!(
-        w.iter().all(|s| !s.contains("string/length")),
+        w.iter().all(|s| !s.contains("%string-length")),
         "an unknown callback must not refine the result: {w:?}"
     );
     // Identity callback + unknown collection → B depends on the (unknown)
     // element type → no refinement.
-    let w = warnings("(fn (xs) (string/length (first (map xs (fn (x) x)))))");
+    let w = warnings("(fn (xs) (%string-length (first (map xs (fn (x) x)))))");
     assert!(
-        w.iter().all(|s| !s.contains("string/length")),
+        w.iter().all(|s| !s.contains("%string-length")),
         "an identity callback over an unknown collection must not refine: {w:?}"
     );
     // A branchy lambda body over elements whose truthiness is unknown → the union of
     // both branches, `1 | "a"`, which is not provably a string → reported by `⊆` (precise).
     // Over `(list 1 2 3)` the else-branch is DEAD (an int is never falsy — `Ctx::is_dead`),
-    // so the result is exactly `1`, and `string/length` of it is a genuine misuse.
-    let w = warnings(r#"(string/length (first (map (list 1 2 3) (fn (x) (if x 1 "a")))))"#);
+    // so the result is exactly `1`, and `%string-length` of it is a genuine misuse.
+    let w = warnings(r#"(%string-length (first (map (list 1 2 3) (fn (x) (if x 1 "a")))))"#);
     assert!(
         w.iter()
-            .any(|s| s.contains("string/length") && s.contains("got 1")),
+            .any(|s| s.contains("%string-length") && s.contains("got 1")),
         "a dead else-branch must not widen the result: {w:?}"
     );
 }
@@ -224,9 +224,9 @@ fn map_filter_do_not_refine_when_uncertain() {
 fn reduce_result_is_the_accumulator_type() {
     // `(reduce (list 1 2 3) 0 +)` : number (init int ∪ +'s number return) —
     // disjoint from string → flagged.
-    let w = warnings("(string/length (reduce (list 1 2 3) 0 +))");
+    let w = warnings("(%string-length (reduce (list 1 2 3) 0 +))");
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "reduce's accumulator type should flow out: {w:?}"
     );
     // ...and a numeric sink is fine.
@@ -241,9 +241,9 @@ fn reduce_result_is_the_accumulator_type() {
 fn fold_with_a_lambda_callback_types_the_result() {
     // `(fold … 0 (fn (acc x) (+ acc x)))` : number — the 2-arg callback's
     // return (number) joined with the init (int).
-    let w = warnings("(string/length (fold (list 1 2 3) 0 (fn (acc x) (+ acc x))))");
+    let w = warnings("(%string-length (fold (list 1 2 3) 0 (fn (acc x) (+ acc x))))");
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "fold should type the accumulator from a lambda callback: {w:?}"
     );
 }
@@ -251,15 +251,15 @@ fn fold_with_a_lambda_callback_types_the_result() {
 #[test]
 fn reduce_fold_bail_when_init_or_callback_unknown() {
     // Unknown callback (local) → flat, no warning.
-    let w = warnings("(fn (g) (string/length (reduce (list 1 2 3) 0 g)))");
+    let w = warnings("(fn (g) (%string-length (reduce (list 1 2 3) 0 g)))");
     assert!(
-        w.iter().all(|s| !s.contains("string/length")),
+        w.iter().all(|s| !s.contains("%string-length")),
         "an unknown reduce callback must not refine: {w:?}"
     );
     // Unknown init type (a fn param) → flat, no warning.
-    let w = warnings("(fn (init) (string/length (reduce (list 1 2 3) init +)))");
+    let w = warnings("(fn (init) (%string-length (reduce (list 1 2 3) init +)))");
     assert!(
-        w.iter().all(|s| !s.contains("string/length")),
+        w.iter().all(|s| !s.contains("%string-length")),
         "an unknown init must not refine the reduce result: {w:?}"
     );
 }
@@ -396,10 +396,10 @@ fn an_extremum_is_typed_as_the_union_of_its_operands() {
 fn mutually_recursive_loaded_functions_infer_in_bounded_time() {
     let mut interp = crate::Interp::new();
     interp
-        .eval_str("(defn mutual-a (x) (list (mutual-b x) (mutual-b (string/length x))))")
+        .eval_str("(defn mutual-a (x) (list (mutual-b x) (mutual-b (%string-length x))))")
         .unwrap();
     interp
-        .eval_str("(defn mutual-b (x) (list (mutual-a x) (mutual-a (string/length x))))")
+        .eval_str("(defn mutual-b (x) (list (mutual-a x) (mutual-a (%string-length x))))")
         .unwrap();
     let started = std::time::Instant::now();
     let a = super::sigs::sig_of(&interp.heap, value::intern("mutual-a"));
@@ -408,7 +408,7 @@ fn mutually_recursive_loaded_functions_infer_in_bounded_time() {
         started.elapsed() < std::time::Duration::from_secs(5),
         "inference diverged"
     );
-    // The cycle refusal leaves the partner's return unknown, but `string/length`'s own
+    // The cycle refusal leaves the partner's return unknown, but `%string-length`'s own
     // demand (a primitive: its domain needs no inference) still pins the parameter.
     for (name, sig) in [("mutual-a", a), ("mutual-b", b)] {
         let sig = sig.unwrap_or_else(|| panic!("{name}: no sig"));
@@ -602,12 +602,12 @@ fn a_seqable_of_flows_its_element_type_into_the_body() {
     let ws = file_warnings_mode(
         "(defmodule t)\n\
          (sig f ((seqable number) -> int))\n\
-         (defn f (xs) (string/length (first xs)))",
+         (defn f (xs) (%string-length (first xs)))",
         true,
     );
     assert!(
         ws.iter()
-            .any(|w| w.contains("string/length") && w.contains("nil | number")),
+            .any(|w| w.contains("%string-length") && w.contains("nil | number")),
         "{ws:?}"
     );
 }

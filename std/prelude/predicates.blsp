@@ -374,7 +374,7 @@ front of an accumulated remainder wants; a vector last is converted."
     ;; A lazy seq-view counts by fusing a counting reducer through `fold` — walks
     ;; the source once, no list materialised.
     (seqview? coll) (fold coll 0 (fn (n _) (%add n 1)))
-    (string? coll) (string/length coll)
+    (string? coll) (%string-length coll)
     (vector? coll) (%vector-length coll)
     (bytes? coll) (%byte-length coll)
     (map? coll) (%map-count coll)
@@ -385,8 +385,7 @@ front of an accumulated remainder wants; a vector last is converted."
     ;; directly rather than through `Seqable`, whose `->seq` is a LIST view: a rope
     ;; would have to materialise every character to answer what its length already
     ;; knows, and a rope is on the editor's hot path. A rope counts in CHARACTERS,
-    ;; matching `string/length` for the string it stands for — so `(count r)` and
-    ;; `(count (rope->string r))` agree.
+    ;; as a string does — so `(count r)` and `(count (rope->string r))` agree.
     (rope? coll) (%rope-length coll)
     (table? coll) (%table-count coll)
     ;; Lists and nil are what `%count-acc` is for. Anything else reaching here has no

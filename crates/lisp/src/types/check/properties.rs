@@ -655,6 +655,7 @@ fn decreases(heap: &Heap, arg: Value, param: Symbol, scope: &Ctx) -> bool {
     let negative_literal = |v: &Value| matches!(v, Value::Int(n) if *n < 0);
     match (value::symbol_name(head).as_str(), &items[1..]) {
         ("rest" | "%but-last", [x]) if is_param(x) => non_empty(),
+        ("seq/drop-last", [x, Value::Int(1)]) if is_param(x) => non_empty(),
         ("dec", [x]) if is_param(x) => bounded_below(),
         ("inc", [x]) if is_param(x) => bounded_above(),
         ("-", [x, k]) if is_param(x) && positive_literal(k) => bounded_below(),

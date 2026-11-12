@@ -121,7 +121,7 @@ release run from a subdirectory resolved every embedded file against the wrong p
 ;; a UNC `\\server`. `path/absolute?` is the public rule; this is its bootstrap copy.
 (defn- %include-drive-rooted? (path)
   (and (= (%os-type) :windows)
-    (>= (string/length path) 3)
+    (>= (%string-length path) 3)
     (= (string/substring path 1 2) ":")
     (or (= (string/substring path 2 3) "/") (= (string/substring path 2 3) "\\"))))
 
@@ -158,7 +158,7 @@ REPL form, an `eval`) or the file is in no project.
       else "/")))
 
 (defn- %include-root? (dir)
-  (or (= dir "/") (and (%include-drive-rooted? dir) (= (string/length dir) 3))))
+  (or (= dir "/") (and (%include-drive-rooted? dir) (= (%string-length dir) 3))))
 
 (defn- %include-root-above (dir)
   (cond

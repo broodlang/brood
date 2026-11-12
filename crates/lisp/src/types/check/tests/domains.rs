@@ -55,7 +55,7 @@ fn a_small_complement_renders_as_not_rather_than_a_tag_dump() {
 
 // ---- arrow-typed parameters are enforced at the call site ----
 // A `sig`-declared higher-order parameter was annotated and then not checked:
-// `(sig g ((int -> int) -> int))` accepted `string/length` in silence.
+// `(sig g ((int -> int) -> int))` accepted `%string-length` in silence.
 
 // A lambda LITERAL was never checked as a callback: `callback_sig` answered `None` for
 // one, so the parameter and result rules both skipped it and `(g (fn (x) (str x)))`
@@ -107,11 +107,11 @@ fn a_tuple_shape_does_not_leak_onto_a_pair_member_through_first() {
 #[test]
 fn a_callback_that_cannot_accept_what_it_is_handed_is_flagged() {
     let ws = file_warnings(
-        "(sig g ((int -> int) -> int))\n(defn g (f) (f 1))\n(defn c () (g string/length))",
+        "(sig g ((int -> int) -> int))\n(defn g (f) (f 1))\n(defn c () (g %string-length))",
     );
     assert!(
         ws.iter().any(|w| w.contains(
-            "g: argument 1 is a callback handed int at position 1, but string/length takes string there"
+            "g: argument 1 is a callback handed int at position 1, but %string-length takes string there"
         )),
         "{ws:?}"
     );
@@ -184,7 +184,7 @@ fn a_same_file_callback_is_checked_from_its_inferred_signature() {
     // accepts, so disjoint-from-the-superset is disjoint from the truth.
     let ws = file_warnings(
         "(sig g ((int -> int) -> int))\n(defn g (f) (f 1))\n\
-         (defn cb (s) (string/length s))\n(defn c () (g cb))",
+         (defn cb (s) (%string-length s))\n(defn c () (g cb))",
     );
     assert!(
         ws.iter().any(|w| w.contains("but cb takes string there")),
@@ -195,13 +195,13 @@ fn a_same_file_callback_is_checked_from_its_inferred_signature() {
 #[test]
 fn a_stdlib_callback_is_held_to_the_elements_it_is_handed() {
     // `map`'s curated arrow is `(any) -> any`, disjoint from nothing — so a named callback
-    // is held to the ELEMENT seed instead (`callback_shapes`): `string/length` over ints
+    // is held to the ELEMENT seed instead (`callback_shapes`): `%string-length` over ints
     // raises, and says so. A callback
     // that takes what it is handed stays silent.
-    let ws = file_warnings("(defn c () (map [1 2 3] string/length))");
+    let ws = file_warnings("(defn c () (map [1 2 3] %string-length))");
     assert!(
         ws.iter().any(|w| w
-            .contains("callback handed 1 | 2 | 3 at position 1, but string/length takes string")),
+            .contains("callback handed 1 | 2 | 3 at position 1, but %string-length takes string")),
         "{ws:?}"
     );
     let ws = file_warnings("(defn c () (map [1 2 3] inc))");
@@ -246,7 +246,7 @@ fn the_domain_walk_survives_a_pathologically_deep_body() {
 #[test]
 fn a_branch_union_domain_rejects_what_no_branch_admits() {
     let ws = file_warnings(
-        "(defn f (x) (if (string? x) (string/length x) (+ x 1)))\n(defn c () (f :kw))",
+        "(defn f (x) (if (string? x) (%string-length x) (+ x 1)))\n(defn c () (f :kw))",
     );
     assert!(
         ws.iter().any(|w| w.contains("f: argument 1 expects")),
@@ -260,7 +260,7 @@ fn a_branch_union_domain_admits_what_either_branch_admits() {
     // the unconditional-demand rule was protecting against.
     for arg in ["\"s\"", "5"] {
         let ws = file_warnings(&format!(
-            "(defn f (x) (if (string? x) (string/length x) (+ x 1)))\n(defn c () (f {arg}))"
+            "(defn f (x) (if (string? x) (%string-length x) (+ x 1)))\n(defn c () (f {arg}))"
         ));
         assert!(
             !ws.iter().any(|w| w.contains("f: argument 1")),
@@ -274,12 +274,12 @@ fn a_guard_that_proves_nothing_leaves_the_branch_unconstrained() {
     // `(if b …)` on an unrelated variable: whichever branch runs, one of the two
     // demands must hold — but neither alone may constrain.
     let ws = file_warnings(
-        "(defn f (b x) (if b (string/length x) (+ x 1)))\n(defn c () (f true \"s\"))",
+        "(defn f (b x) (if b (%string-length x) (+ x 1)))\n(defn c () (f true \"s\"))",
     );
     assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
     // …and a value no branch admits is still caught.
     let ws =
-        file_warnings("(defn f (b x) (if b (string/length x) (+ x 1)))\n(defn c () (f true :kw))");
+        file_warnings("(defn f (b x) (if b (%string-length x) (+ x 1)))\n(defn c () (f true :kw))");
     assert!(
         ws.iter().any(|w| w.contains("f: argument 2 expects")),
         "{ws:?}"
@@ -290,7 +290,7 @@ fn a_guard_that_proves_nothing_leaves_the_branch_unconstrained() {
 fn a_when_body_does_not_constrain_what_the_test_does_not_reach() {
     // `(when test body)` runs `body` only sometimes, so an argument the body would
     // reject is not provably wrong — unless the test itself pins the argument.
-    let ws = file_warnings("(defn f (b x) (when b (string/length x)))\n(defn c () (f true 5))");
+    let ws = file_warnings("(defn f (b x) (when b (%string-length x)))\n(defn c () (f true 5))");
     assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
 }
 
@@ -352,7 +352,7 @@ fn a_destructuring_head_constrains_the_argument() {
 
 #[test]
 fn a_clause_guard_constrains_the_argument() {
-    let ws = file_warnings("(defn f (x) :when (string? x) (string/length x))\n(defn c () (f 5))");
+    let ws = file_warnings("(defn f (x) :when (string? x) (%string-length x))\n(defn c () (f 5))");
     assert!(
         ws.iter()
             .any(|w| w.contains("f: argument 1 expects string")),
@@ -387,14 +387,15 @@ fn an_unexpanded_macro_body_does_not_leak_a_demand() {
 
 #[test]
 fn a_call_no_clause_of_a_multi_arity_function_accepts_is_flagged() {
-    let ws = file_warnings("(defn f ((x) (string/length x)) ((x y) (+ x y)))\n(defn c () (f 5))");
+    let ws = file_warnings("(defn f ((x) (%string-length x)) ((x y) (+ x y)))\n(defn c () (f 5))");
     assert!(
         ws.iter()
             .any(|w| w.contains("f: no clause accepts these arguments")),
         "{ws:?}"
     );
     // The arity that fits a different clause stays silent.
-    let ws = file_warnings("(defn f ((x) (string/length x)) ((x y) (+ x y)))\n(defn c () (f 1 2))");
+    let ws =
+        file_warnings("(defn f ((x) (%string-length x)) ((x y) (+ x y)))\n(defn c () (f 1 2))");
     assert!(
         !ws.iter().any(|w| w.contains("no clause accepts")),
         "{ws:?}"
@@ -406,7 +407,7 @@ fn guarded_clauses_give_a_function_its_domain() {
     // `:when` guards (ADR-226) lower to a single variadic `fn` over `%match`, so the
     // clauses only exist in the un-expanded form — which is where this reads them.
     let ws = file_warnings(
-        "(defn g ((x) :when (string? x) (string/length x)) ((x) :when (int? x) (+ x 1)))\n\
+        "(defn g ((x) :when (string? x) (%string-length x)) ((x) :when (int? x) (+ x 1)))\n\
          (defn c () (g :kw))",
     );
     assert!(
@@ -418,7 +419,7 @@ fn guarded_clauses_give_a_function_its_domain() {
     // Both admitted types stay silent.
     for arg in ["\"s\"", "5"] {
         let ws = file_warnings(&format!(
-            "(defn g ((x) :when (string? x) (string/length x)) ((x) :when (int? x) (+ x 1)))\n\
+            "(defn g ((x) :when (string? x) (%string-length x)) ((x) :when (int? x) (+ x 1)))\n\
              (defn c () (g {arg}))"
         ));
         assert!(
@@ -433,7 +434,7 @@ fn an_unguarded_final_clause_keeps_a_multi_clause_call_silent() {
     // A clause that admits anything is the catch-all every dispatch-style function
     // ends with; its domain is `any`, so no call can be ruled out.
     let ws = file_warnings(
-        "(defn g ((x) :when (string? x) (string/length x)) ((x) x))\n(defn c () (g :kw))",
+        "(defn g ((x) :when (string? x) (%string-length x)) ((x) x))\n(defn c () (g :kw))",
     );
     assert!(
         !ws.iter().any(|w| w.contains("no clause accepts")),
@@ -530,19 +531,19 @@ fn a_field_read_through_a_tagged_union_resolves() {
     // second (closed: the key is absent) — so the union answers `int | nil`.
     let ws = file_warnings(
         "(sig f ((or (record :ok int) (record :error string)) -> any))\n\
-         (defn f (r) (string/length (get r :ok)))",
+         (defn f (r) (%string-length (get r :ok)))",
     );
     assert!(
         ws.iter()
-            .any(|w| w.contains("string/length") && w.contains("int")),
+            .any(|w| w.contains("%string-length") && w.contains("int")),
         "{ws:?}"
     );
     // An open alternative says nothing about the key, so the union says nothing.
     let ws = file_warnings(
         "(sig f ((or (record :ok int) (record &open :error string)) -> any))\n\
-         (defn f (r) (string/length (get r :ok)))",
+         (defn f (r) (%string-length (get r :ok)))",
     );
-    assert!(!ws.iter().any(|w| w.contains("string/length")), "{ws:?}");
+    assert!(!ws.iter().any(|w| w.contains("%string-length")), "{ws:?}");
 }
 
 #[test]
@@ -585,7 +586,7 @@ fn a_bare_local_test_narrows_by_truthiness() {
 // The inferencer a cross-module caller consults (`sig_of` over the loaded closure) had a
 // "Tier 1" ahead of the domain walk: a body that was one call to a primitive/curated callee
 // read its parameters off that call — direct parameter arguments only — and returned. So
-// `(defn v (s) (+ 1 (string/length s)))` inferred `(string)` in its own file (same-file inference
+// `(defn v (s) (+ 1 (%string-length s)))` inferred `(string)` in its own file (same-file inference
 // never had the tier) and `(any)` from every other module, and the reversed call the
 // signature exists to catch was accepted in silence everywhere but at home. Verified by
 // sabotage: restoring the tier fails every case below.
@@ -594,11 +595,11 @@ fn a_bare_local_test_narrows_by_truthiness() {
 fn a_loaded_closure_walks_the_nested_arguments_of_a_primitive_callee() {
     let mut interp = crate::Interp::new();
     for def in [
-        "(defn under-str (s n) (str (string/length s) (+ n 1)))",
-        "(defn under-plus (s) (+ 1 (string/length s)))",
-        "(defn under-puts (s) (io/puts (string/length s)))",
-        "(defn under-vector (s) (vector 1 (string/length s)))",
-        "(defn under-lt (s) (< 1 (string/length s)))",
+        "(defn under-str (s n) (str (%string-length s) (+ n 1)))",
+        "(defn under-plus (s) (+ 1 (%string-length s)))",
+        "(defn under-puts (s) (io/puts (%string-length s)))",
+        "(defn under-vector (s) (vector 1 (%string-length s)))",
+        "(defn under-lt (s) (< 1 (%string-length s)))",
     ] {
         interp.eval_str(def).expect("def");
     }
@@ -637,7 +638,7 @@ fn a_cross_module_caller_is_checked_against_the_loaded_domain() {
     // …and the direct-parameter case the tier DID handle still infers, with its return.
     let ws = check_with_defs(
         &["(defn shout (s) (string/upper s))"],
-        "(string/length (shout 5))",
+        "(%string-length (shout 5))",
     );
     assert!(
         ws.iter()

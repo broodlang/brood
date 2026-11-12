@@ -300,7 +300,7 @@ pub(super) fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Valu
 /// additionally `:kids` (a vector of child node maps) for containers
 /// (`:root`/`:list`/`:vector`/`:map`) and reader-macro wrappers
 /// (`:quote`/`:quasi`/`:unquote`/`:splice`). `:start`/`:end` are half-open
-/// CHARACTER offsets (not bytes) — matching `string-length` and editor buffer
+/// CHARACTER offsets (not bytes) — matching `count` of a string and editor buffer
 /// point — so structural tooling (`std/sexp`) navigates the tree directly.
 ///
 /// The kernel already tracks every node's span; this projects it in one pass. It

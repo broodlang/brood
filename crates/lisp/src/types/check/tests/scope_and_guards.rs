@@ -20,7 +20,7 @@ fn let_binding_propagates_its_rhs_type() {
 fn let_binding_from_nested_call_propagates() {
     // RHS is a known primitive whose return type is int — exactly `2`, since a literal
     // knows its length. So `x : 2`, and `(first x)` flags.
-    let w = warnings("(let (x (string/length \"hi\")) (first x))");
+    let w = warnings("(let (x (%string-length \"hi\")) (first x))");
     assert!(
         w.iter().any(|s| s.contains("first") && s.contains("got 2")),
         "expected a `first x` warning where x : int, got {:?}",
@@ -187,10 +187,10 @@ fn and_falsy_does_not_narrow_the_else_branch() {
 fn or_same_var_narrows_both_branches() {
     // Every disjunct a biconditional guard over the same var: the then-branch is the
     // union (a truthy `or` ⇒ some disjunct holds), the else-branch its complement (a
-    // falsy `or` ⇒ none hold). So `(string/length c)` in the else flags — c is not string.
-    let w = warnings_expanded("(if (or (nil? c) (string? c)) 0 (string/length c))");
+    // falsy `or` ⇒ none hold). So `(%string-length c)` in the else flags — c is not string.
+    let w = warnings_expanded("(if (or (nil? c) (string? c)) 0 (%string-length c))");
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "the else of an all-same-var `or` should narrow c to ¬(nil|string): {w:?}"
     );
     // But a valid use in either branch stays silent — `str` accepts anything, and the
@@ -206,9 +206,9 @@ fn or_same_var_narrows_both_branches() {
 fn or_over_different_vars_does_not_narrow() {
     // Disjuncts over *different* variables give no single-variable narrowing — the
     // else-branch must not flag a use of either (would be a false positive).
-    let w = warnings_expanded("(if (or (nil? a) (string? b)) 0 (string/length a))");
+    let w = warnings_expanded("(if (or (nil? a) (string? b)) 0 (%string-length a))");
     assert!(
-        !w.iter().any(|s| s.contains("string/length")),
+        !w.iter().any(|s| s.contains("%string-length")),
         "an `or` over different vars must not narrow: {w:?}"
     );
 }
@@ -335,9 +335,9 @@ fn flags_too_few_arguments() {
     );
     // `string-length` expects exactly 1.
     assert!(
-        warnings("(string/length)")
+        warnings("(%string-length)")
             .iter()
-            .any(|w| w.contains("string/length") && w.contains("expected 1"))
+            .any(|w| w.contains("%string-length") && w.contains("expected 1"))
     );
 }
 
@@ -821,11 +821,11 @@ fn eq_between_two_variables_is_not_a_guard() {
 fn eq_guard_does_not_narrow_the_else_branch() {
     // `(= m "x")` being *false* does NOT prove `m` isn't a string — it could
     // be another string. So the else-branch must not narrow `m` to `¬string`
-    // and flag a valid `(string/length m)`. (Same then-only soundness as the
+    // and flag a valid `(%string-length m)`. (Same then-only soundness as the
     // `and` guard.)
-    let w = warnings(r#"(if (%eq m "x") :yes (string/length m))"#);
+    let w = warnings(r#"(if (%eq m "x") :yes (%string-length m))"#);
     assert!(
-        w.iter().all(|s| !s.contains("string/length")),
+        w.iter().all(|s| !s.contains("%string-length")),
         "the else-branch of an `=`/`%eq` guard must not be narrowed: {w:?}"
     );
     // The then-branch must still narrow (sanity): `(= m 5)` true ⇒ m : int.

@@ -244,7 +244,7 @@ impl Site {
                     *arg == b
                         && !scope.is_lexical_local(*head)
                         && (value::symbol_is(*head, "count")
-                            || value::symbol_is(*head, "string/length"))
+                            || value::symbol_is(*head, "%string-length"))
                 }
                 _ => false,
             },
@@ -889,7 +889,7 @@ fn collect_form_sites(
 
 /// The **count relations** between a live private function's parameters that its call
 /// sites establish (ADR-350): `(n, xs)` when every EXTERNAL site hands `n` the count of what
-/// it hands `xs` — `(count b)` (or `string/length`/`vector-length`) beside `b`, or a count
+/// it hands `xs` — `(count b)` (or `%string-length`/`vector-length`) beside `b`, or a count
 /// alias of `b` beside `b`: one a `let` bound, or one the CALLER's own parameters carry —
 /// and every self-call hands the pair on under its own assumption (`n` and `xs`
 /// themselves, typically).
@@ -1019,7 +1019,7 @@ pub(in crate::types::check) fn live_private_functions(
     // A self-call is not a site that seeds anything: the least fixpoint starts every
     // parameter at ⊥ and a self-call's arguments are typed under those very parameters,
     // so a function whose ONLY sites are its own recursion derives ⊥ for every parameter,
-    // its body reads as dead code, and nothing in it — not even `(string/length 5)` —
+    // its body reads as dead code, and nothing in it — not even `(%string-length 5)` —
     // is ever reported. Its callers are not all here (a public function's
     // never are; a private one's would be a bug of another kind), so it is site-less.
     Some(

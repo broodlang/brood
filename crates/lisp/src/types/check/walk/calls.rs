@@ -68,7 +68,7 @@ pub(super) fn capture_arg_ty(heap: &Heap, form: Value, items: &[Value], ctx: &Ct
 
 /// The finding position for a call **argument**: the argument's own source
 /// position when it has one (a nested call / vector — the reader positions
-/// pairs, so `(string/length (+ 1 2))` anchors the type finding at `(+ 1 2)`,
+/// pairs, so `(%string-length (+ 1 2))` anchors the type finding at `(+ 1 2)`,
 /// not the call head), falling back to the whole call form for a bare literal
 /// or symbol (which the pair-keyed position table doesn't record). Finer LSP /
 /// `nest check` spans without threading `Pos` through the whole walk.
@@ -128,7 +128,7 @@ pub(super) fn callback_sig(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Sig> {
 }
 
 /// The signature of a `(comp f … g)` form: what `g`, the first function applied, takes,
-/// and what `f`, the last, returns — so `(map xs (comp string/length inc))` over strings
+/// and what `f`, the last, returns — so `(map xs (comp %string-length inc))` over strings
 /// is checked against `inc`'s `number` like a named callback is. `None` unless `comp` is the prelude's and EVERY
 /// stage has a knowable signature — one unknown stage and the composition says nothing,
 /// which is the false-positive-free answer. A stage handed a value it cannot take is

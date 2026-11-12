@@ -70,7 +70,7 @@ build caches, VCS data, tests, the lock file, and any stray tarball."
   (let (prefix (str root "/")
         files (or (registry-tracked-files root)
                 (map (or (file/walk-files root) (list))
-                  (fn (path) (string/substring path (string/length prefix))))))
+                  (fn (path) (string/substring path (count prefix))))))
     (sort (seq/reject files registry-excluded?))))
 
 (defn- registry-tracked-files (root)

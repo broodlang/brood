@@ -34,8 +34,7 @@ primitives. The kernel also provides the always-available file primitives
   (let (text (file/slurp path))
     (cond
       (= text "") nil
-      (string/ends-with? text "\n")
-        (string/split (string/substring text 0 (dec (string/length text))) "\n")
+      (string/ends-with? text "\n") (string/split (string/substring text 0 (dec (count text))) "\n")
       else (string/split text "\n"))))
 
 (defn write-lines (path:string lines:seqable -> nil)

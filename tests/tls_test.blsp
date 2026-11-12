@@ -124,7 +124,7 @@
   (if (= remaining 0)
     nil
     (let (result (tls-close-mid-request ls cert request reply))
-      (if (= result [0 (string/length reply)])
+      (if (= result [0 (count reply)])
         (first-noisy-tls-close ls cert request reply (dec remaining))
         [remaining result]))))
 

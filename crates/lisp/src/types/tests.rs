@@ -2674,7 +2674,7 @@ fn a_record_is_not_absorbed_by_a_shape_whose_map_values_exclude_it() {
     assert_eq!(union, candidate.union(record));
     let warnings = checker_warnings(
         "(sig f ((and (record &open :a int) (map keyword int)) bool -> int))\n\
-         (defn f (m c) (let (x (if c {:a 1 :b \"s\"} m)) (string/length (get x :b))))",
+         (defn f (m c) (let (x (if c {:a 1 :b \"s\"} m)) (%string-length (get x :b))))",
         false,
     );
     assert!(warnings.is_empty(), "{warnings:?}");
@@ -2742,7 +2742,7 @@ fn a_bare_pair_parameter_is_not_a_subtype_of_everything() {
     assert!(!Ty::of(Tag::Pair).is_consistent_subtype(&Ty::of(Tag::Str)));
     for strict in [false, true] {
         let warnings = checker_warnings(
-            "(sig f (pair -> int))\n(defn f (xs) (string/length xs))",
+            "(sig f (pair -> int))\n(defn f (xs) (%string-length xs))",
             strict,
         );
         assert_eq!(warnings.len(), 1, "strict={strict}: {warnings:?}");

@@ -153,8 +153,7 @@ received, the echo its sender counts on."
         next-version
         (if property-change
           recent
-          (take (cons [next-version applied-lo applied-hi (string/length applied-repl) origin]
-                  recent)
+          (take (cons [next-version applied-lo applied-hi (count applied-repl) origin] recent)
             64))))))
 
 (defn- buffer-serve (buf subs version &optional recent)
@@ -245,7 +244,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                       (buffer-serve nb
                         subs
                         v
-                        (take (cons [v n n (string/length s) nil] rec) 64)))))
+                        (take (cons [v n n (count s) nil] rec) 64)))))
       ([:get f from r] (do (send from [:reply r (f buf)]) (buffer-serve buf subs version rec)))
       ;; An atomic [version view] snapshot — the RESYNC primitive: a client rebuilding
       ;; its copy after an ambiguous collision needs the text AND the version it

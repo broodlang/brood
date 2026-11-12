@@ -209,7 +209,7 @@ registration order, the new one last). The extension seam tools use to add comma
 
 (defn- repl-meta? (line)
   "True when `line` is a recognised `,cmd` meta-command (a leading `,` + a registered name)."
-  (and (> (string/length line) 0)
+  (and (> (count line) 0)
     (= (string/char-at line 0) ",")
     (let ([cmd _] (repl-meta-parts (string/substring line 1)))
       (not (nil? (repl-command-for cmd))))))
@@ -315,7 +315,7 @@ forms into the eval rather than fail cleanly."
 line, so a multi-paragraph doc doesn't turn one search hit into a screenful."
   (let (line (first (string/split (or s "") "\n"))
         max 96)
-    (if (> (string/length line) max) (str (string/substring line 0 max) "…") line)))
+    (if (> (count line) max) (str (string/substring line 0 max) "…") line)))
 
 (defn- repl-meta-expand (expr all)
   "Print `expr` macroexpanded — fully when `all`, one step otherwise — syntax-coloured
@@ -559,30 +559,30 @@ reporting a real error. Never lets an error escape the loop."
 ;; as its child runs — so push/pop never race. If the head pid has *died* without
 ;; popping (its runner was killed rather than returning), the next poller repairs the
 ;; stack instead of leaving the flag permanently unowned.
-(def- *repl-interrupt-owners* (table/new))
+(def- *interrupt-owners* (table/new))
 
 (defn- repl-interrupt-push ()
   "Register the calling process as the innermost interrupt owner."
-  (table/put *repl-interrupt-owners*
-    :stack (cons (self) (or (table/get *repl-interrupt-owners* :stack) '()))))
+  (table/put *interrupt-owners*
+    :stack (cons (self) (or (table/get *interrupt-owners* :stack) '()))))
 
 (defn- repl-interrupt-pop ()
   "Deregister the calling process (must be the current head — strict nesting)."
-  (table/put *repl-interrupt-owners*
-    :stack (rest (or (table/get *repl-interrupt-owners* :stack) '()))))
+  (table/put *interrupt-owners*
+    :stack (rest (or (table/get *interrupt-owners* :stack) '()))))
 
 (defn- repl-interrupt-owner? ()
   "Is the calling process the innermost live interrupt owner? Repairs the stack past
 dead heads (a runner that was killed instead of returning), so ownership can never be
 wedged on a corpse."
-  (let (stack (or (table/get *repl-interrupt-owners* :stack) '()))
+  (let (stack (or (table/get *interrupt-owners* :stack) '()))
     (cond
       (empty? stack) true
       (= (first stack) (self)) true
       ;; a dead head can't poll — drop it and re-ask
       (nil? (proc/info (first stack)))
         (do
-          (table/put *repl-interrupt-owners*
+          (table/put *interrupt-owners*
             :stack (rest stack))
           (repl-interrupt-owner?))
       else false)))
@@ -696,7 +696,7 @@ Returns `{:eof false :history h}`."
                      {:eof false :history h2})))
     (cond
       (repl-meta? form) (do (repl-run-meta form) (remember))
-      (not (repl-content? form 0 (string/length form) false)) {:eof false :history history}
+      (not (repl-content? form 0 (count form) false)) {:eof false :history history}
       else (do (repl-eval form) (remember)))))
 
 (defn- repl-read-eval-interactive (history)
@@ -725,7 +725,7 @@ complete, echoing the prompt only when stdout is a TTY. Recurses on an incomplet
               (io/write "error: incomplete input at end of input\n" :to *err*))
             {:eof true :history history})
         (and (= acc "") (repl-meta? line)) (do (repl-run-meta line) {:eof false :history history})
-        (and (= acc "") (not (repl-content? line 0 (string/length line) false)))
+        (and (= acc "") (not (repl-content? line 0 (count line) false)))
           {:eof false
            :history history}
         else
@@ -787,15 +787,15 @@ from your home directory doesn't load the same file twice."
 ;; Loaded ONCE per runtime, not once per `run`: `pry` launches a nested `run`
 ;; mid-session, and re-running the user's rc there would re-execute its side effects
 ;; and silently re-apply defs over the live session's state.
-(def- *repl-rc-loaded* false)
+(def- *rc-loaded* false)
 
 (defn- repl-load-rc ()
   "Load each existing startup file, reporting (but surviving) a failure in one — once
 per runtime (a nested `run`, e.g. `pry`, must not re-run the rc mid-session).
 Runs before the banner so anything an rc prints reads as part of startup, and before
 the loop spawns so its `def`s are in place for the first prompt."
-  (when (not *repl-rc-loaded*)
-    (def- *repl-rc-loaded* true)
+  (when (not *rc-loaded*)
+    (def- *rc-loaded* true)
     (fold (repl-rc-paths)
       nil
       (fn (_ path)
@@ -813,7 +813,7 @@ the loop spawns so its `def`s are in place for the first prompt."
 ;; handler alone, while a transient session (pry under a *script*) must restore the
 ;; script's normal fatal Ctrl-C — otherwise every later Ctrl-C sets a flag nobody
 ;; polls and the script becomes uninterruptible.
-(def- *repl-sigint-owner* nil)
+(def- *sigint-owner* nil)
 
 ;; If non-nil (a bare module symbol), the loop enters this namespace at startup, so a
 ;; bare name defined there resolves at the prompt without qualification. `nest repl`
@@ -863,8 +863,8 @@ by the outermost invocation only.
         ;; The first armed invocation owns the handler (a unique token compared at
         ;; exit); a nested run sees a non-nil owner and leaves restoration to it.
         token (ref)
-        owner (and armed (nil? *repl-sigint-owner*))
-        _own (when owner (def- *repl-sigint-owner* token))
+        owner (and armed (nil? *sigint-owner*))
+        _own (when owner (def- *sigint-owner* token))
         ;; Capture the prompts HERE, where a caller's `binding` (pry's `debug> `) is
         ;; still in scope — dynamics do not cross `spawn`, so the loop process would
         ;; otherwise fall back to the defaults — and re-establish them in the loop.
@@ -891,9 +891,9 @@ by the outermost invocation only.
           (let (start-ns *start-ns*)
             (when (symbol? start-ns) (%in-ns start-ns)))
           (repl-loop interactive history))))
-    (when (and owner (= *repl-sigint-owner* token))
+    (when (and owner (= *sigint-owner* token))
       (%restore-interrupt-handler)
-      (def- *repl-sigint-owner* nil)
+      (def- *sigint-owner* nil)
       ;; back to the "arm if you can" intent, so a later run re-resolves afresh
       (def repl/*interruptible* true))
     nil))

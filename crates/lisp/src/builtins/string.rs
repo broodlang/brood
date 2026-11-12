@@ -26,7 +26,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(2, 3),
         Sig::with_rest(vec![string, int], int, string),
         &["s", "start", "end"],
-        "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string/length s), so (string/substring s start) is \"from start to the end\".\n\n    (string/substring \"Hi there\" 0 2)   ;=> \"Hi\"",
+        "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (count s), so (string/substring s start) is \"from start to the end\".\n\n    (string/substring \"Hi there\" 0 2)   ;=> \"Hi\"",
         substring);
     primitives.def(
         "string/span",
@@ -40,7 +40,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(3),
         Sig::new(vec![string, int, string], int),
         &["s", "start", "chars"],
-        "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string/length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string/span.\n\n    (string/span-until \"abc def\" 0 \" \")   ;=> 3\n    (string/span-until \"abc\" 0 \" \")   ;=> 3",
+        "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (count s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string/span.\n\n    (string/span-until \"abc def\" 0 \" \")   ;=> 3\n    (string/span-until \"abc\" 0 \" \")   ;=> 3",
         string_span_until);
     // Linear substring search — like `substring`/`lower`, it genuinely needs Rust:
     // Brood has no O(1) char access (char indexing into UTF-8 is O(index)), so a
@@ -177,7 +177,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![string, kw], string),
         &["s", "form"],
-        "s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; compatibility (:nfkc/:nfkd) also folds presentation ('ﬁ' -> 'fi', '²' -> '2') — right for search and identifier matching, wrong for round-tripping text.\n\n    (string/length (string/normalize \"é\" :nfd))   ;=> 2\n    (string/normalize \"ﬁ\" :nfkc)   ;=> \"fi\"",
+        "s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; compatibility (:nfkc/:nfkd) also folds presentation ('ﬁ' -> 'fi', '²' -> '2') — right for search and identifier matching, wrong for round-tripping text.\n\n    (count (string/normalize \"é\" :nfd))   ;=> 2\n    (string/normalize \"ﬁ\" :nfkc)   ;=> \"fi\"",
         string_normalize);
     // The minimal-splice diff of two strings — one O(n) byte pass, char-indexed
     // result. Needs Rust like the search/split above (no O(1) char access), and it
@@ -279,7 +279,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![any], string),
         &["x"],
-        "The readable (re-readable) text form of x — quoted and escaped, so it reads back. Unlike str, which renders for display: (str \"hi\") is 2 chars, (pr-str \"hi\") is 4.\n\n    (string/length (pr-str \"hi\"))   ;=> 4",
+        "The readable (re-readable) text form of x — quoted and escaped, so it reads back. Unlike str, which renders for display: (str \"hi\") is 2 chars, (pr-str \"hi\") is 4.\n\n    (count (pr-str \"hi\"))   ;=> 4",
         pr_str,
     );
     // symbols
@@ -484,7 +484,7 @@ pub(super) fn to_keyword(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 }
 
 /// `(string/substring s start [end])` — the characters of `s` in `[start, end)`,
-/// char-indexed (consistent with `string-length`). `end` defaults to the
+/// char-indexed (consistent with `count`). `end` defaults to the
 /// string's length, so `(string/substring s start)` is "from `start` to the end".
 /// Errors if out of range.
 

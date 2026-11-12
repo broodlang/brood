@@ -106,7 +106,7 @@ embedded copy, a bundle).
     (let (close (index-of s ">" i))
       [(string/substring s (inc i) close) (inc close)])
     (let (end (letrec (go (fn (j)
-                            (if (and (< j (string/length s)) (letter? (string/char-at s j)))
+                            (if (and (< j (count s)) (letter? (string/char-at s j)))
                               (go (inc j))
                               j)))
                 (go i)))
@@ -121,12 +121,12 @@ embedded copy, a bundle).
 
 (defn- scan-clock (s i)
   ;; [seconds next-index] for [+-]hh[:mm[:ss]]
-  (let (sign (case (string/substring s i (math/min (string/length s) (inc i))) "-" -1 1)
-        i (if (includes? ["-" "+"] (string/substring s i (math/min (string/length s) (inc i))))
+  (let (sign (case (string/substring s i (math/min (count s) (inc i))) "-" -1 1)
+        i (if (includes? ["-" "+"] (string/substring s i (math/min (count s) (inc i))))
             (inc i)
             i)
         end (letrec (go (fn (j)
-                          (if (and (< j (string/length s))
+                          (if (and (< j (count s))
                                 (or (digit? (string/char-at s j))
                                   (= (string/substring s j (inc j)) ":")))
                             (go (inc j))
@@ -140,7 +140,7 @@ embedded copy, a bundle).
   ;; [date next-index]: {:kind :m :month :week :day}, {:kind :julian :day} or {:kind :zero :day}
   (let (head (string/substring s i (inc i))
         end (letrec (go (fn (j)
-                          (if (and (< j (string/length s))
+                          (if (and (< j (count s))
                                 (not (includes? ["," "/"] (string/substring s j (inc j)))))
                             (go (inc j))
                             j)))
@@ -149,17 +149,16 @@ embedded copy, a bundle).
     (cond
       (= head "M")
         (let ([m w d] (into []
-                        (map (string/split (string/substring body 1 (string/length body)) ".")
+                        (map (string/split (string/substring body 1 (count body)) ".")
                           rule-int)))
           [{:kind :m :month m :week w :day d} end])
-      (= head "J")
-        [{:kind :julian :day (rule-int (string/substring body 1 (string/length body)))} end]
+      (= head "J") [{:kind :julian :day (rule-int (string/substring body 1 (count body)))} end]
       else [{:kind :zero :day (rule-int body)} end])))
 
 (defn- scan-change (s i)
   ;; [{:date :time} next-index] for `date[/time]`
   (let ([date j] (scan-date s i))
-    (if (and (< j (string/length s)) (= (string/substring s j (inc j)) "/"))
+    (if (and (< j (count s)) (= (string/substring s j (inc j)) "/"))
       (let ([time k] (scan-clock s (inc j))) [{:date date :time time} k])
       [{:date date :time 7200} j])))
 
@@ -169,12 +168,12 @@ their offsets in seconds EAST of UTC (`:std-offset`, `:dst-offset`), and the `:s
 `:end` of daylight time — nil fields for a zone without it. A failure when `s` is not one.
 
     (:std-offset (tz/posix-rule \"EST5EDT,M3.2.0,M11.1.0\"))   ;=> -18000"
-  (let (at (fn (i) (if (< i (string/length s)) (string/substring s i (inc i)) "")))
+  (let (at (fn (i) (if (< i (count s)) (string/substring s i (inc i)) "")))
     (try
       (let ([std i] (scan-name s 0)
             [west j] (scan-clock s i)
             std-offset (- west))
-        (if (or (= std "") (>= j (string/length s)))
+        (if (or (= std "") (>= j (count s)))
           {:std std :std-offset std-offset :dst nil :dst-offset nil :start nil :end nil}
           (let ([dst k] (scan-name s j)
                 [dst-offset l] (if (includes? ["," ""] (at k))
@@ -269,7 +268,7 @@ the rule applied to every year. A failure when the rule does not parse.
     (string? (:name (tz/local-zone)))   ;=> true"
   (let (env (os/env "TZ")
         name (when env
-               (if (string/starts-with? env ":") (string/substring env 1 (string/length env)) env)))
+               (if (string/starts-with? env ":") (string/substring env 1 (count env)) env)))
     (cond
       (and name (not (failure? (zone name)))) (zone name)
       (and name (not (failure? (rule-zone name)))) (rule-zone name)
@@ -278,7 +277,7 @@ the rule applied to every year. A failure when the rule does not parse.
         (let (real (or (os/canonicalize "/etc/localtime") "")
               at (index-of real "/zoneinfo/"))
           (parse-tzif (file/slurp-bytes "/etc/localtime")
-            (if (>= at 0) (string/substring real (+ at 10) (string/length real)) "localtime")))
+            (if (>= at 0) (string/substring real (+ at 10) (count real)) "localtime")))
       else (rule-zone "UTC0"))))
 
 (defn- last-at-or-before (times seconds)

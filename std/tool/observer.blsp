@@ -100,7 +100,7 @@ attach). Drive the standalone app from the shell with `nest observe`."
 
 (defn- observe-fit (s:string w:int -> string)
   "Truncate `s` to at most `w` characters so a rendered row never wraps."
-  (if (> (string/length s) w) (string/substring s 0 (math/max 0 w)) s))
+  (if (> (count s) w) (string/substring s 0 (math/max 0 w)) s))
 
 (defn- observe-opt (v f)
   "Render optional field `v` with `f`, or `\"-\"` when it's absent (nil)."
@@ -229,7 +229,7 @@ on screen (roughly centred), clamped so the window never runs past the end."
     (let ([s f] (first chunks))
       (observe-chunk-ops-acc (rest chunks)
         row
-        (+ col (string/length s))
+        (+ col (count s))
         (cons (text row col s f) acc)))))
 
 (defn- observe-chunk-ops (chunks row col)
@@ -247,11 +247,11 @@ line editor uses (`highlight-chunks` / `lineedit/lineedit-overrides` over
 pure, so it shares the REPL's colouring rather than re-implementing it. (Tab
 completion already works via `lineedit/lineedit-handle`'s keymap in `observe-command-key`.)"
   (let (prompt (observe-fit (get edit :prompt) cols)
-        promptw (string/length prompt)
+        promptw (count prompt)
         input (get edit :text)
         hs (or (get edit :hscroll) 0)
         avail (math/max 0 (- cols promptw))
-        len (string/length input)
+        len (count input)
         vis (string/substring input hs (math/min len (+ hs avail)))
         point (get edit :point)
         overrides (editor/lineedit/lineedit-overrides input point)

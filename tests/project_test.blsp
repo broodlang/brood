@@ -821,7 +821,7 @@
     (assert= (scaffold/project-module-name "main") "main-lib"))
   (test "a non-ASCII name is not silently mangled into nothing"
     ;; Every character is replaced, but the result is still a usable symbol.
-    (is (> (string/length (scaffold/project-module-name "日本")) 0)))
+    (is (> (count (scaffold/project-module-name "日本")) 0)))
   (test "the derived name is stable"
     (assert= (scaffold/project-module-name "x") (scaffold/project-module-name "x"))))
 
@@ -1213,8 +1213,8 @@
   ;; Two definitions, so the second's insertion point is one the first would move.
   (def pt-two-defns
     (string/join ["(defmodule pt-two)"
-                   "" "(defn- alpha (a b)" "  (+ (string/length a) b))" "" "(defn- beta (s)"
-                   "  (string/length s))"]
+                   "" "(defn- alpha (a b)" "  (+ (%string-length a) b))" "" "(defn- beta (s)"
+                   "  (%string-length s))"]
       "\n"))
 
   :isolated (test "every signature lands directly below its own definition"
@@ -1275,7 +1275,7 @@
     (let (dir (pt-sig-dir)
           src (string/join ["(defmodule pt-wrap)"
                              "(check-allow :discarded-catch" "  (defn- risky (s)"
-                             "    (try (string/length s) (catch e 0))))"]
+                             "    (try (%string-length s) (catch e 0))))"]
                 "\n")
           path (pt-sig-file dir "wrap.blsp" src))
       (project-check/fix-sigs (list path) true)
@@ -1289,12 +1289,12 @@
           ;; no single line opens `(defn- odd `, and the form spans three lines
           path (pt-sig-file dir
                  "odd.blsp"
-                 (string/join ["(defmodule pt-odd)" "(defn-" "  odd (s)" "  (string/length s))"]
+                 (string/join ["(defmodule pt-odd)" "(defn-" "  odd (s)" "  (%string-length s))"]
                    "\n")))
       (project-check/fix-sigs (list path) true)
       (let (lines (into [] (string/split (file/slurp path) "\n")))
         (is (string/starts-with? (nth lines 4 "") "(sig odd "))
-        (assert= (nth lines 3 "") "  (string/length s))"))
+        (assert= (nth lines 3 "") "  (%string-length s))"))
       (is (> (count (reflect/read-all (file/slurp path))) 0)))))
 
 ;; ---- keeping a loaded image current ---------------------------------------------

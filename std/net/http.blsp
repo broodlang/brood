@@ -178,7 +178,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
     (if (< i 0)
       (list s "")
       (list (string/substring s 0 i)
-        (string/substring s (+ i (string/length sep)) (string/length s))))))
+        (string/substring s (+ i (count sep)) (count s))))))
 
 (defn- http-parse-headers (lines)
   (fold lines
@@ -189,7 +189,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
           m
           (assoc m
             (string/lower (string/trim (string/substring line 0 i)))
-              (string/trim (string/substring line (+ i 1) (string/length line)))))))))
+              (string/trim (string/substring line (+ i 1) (count line)))))))))
 
 ;; Every value of header `name` (lower-case) across the head's header lines, trimmed —
 ;; a repeated header is several lines, which `http-parse-headers`' map collapses.
@@ -199,7 +199,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
     (fn (values line)
       (let (i (index-of line ":"))
         (if (and (>= i 0) (= (string/lower (string/trim (string/substring line 0 i))) name))
-          (cons (string/trim (string/substring line (+ i 1) (string/length line))) values)
+          (cons (string/trim (string/substring line (+ i 1) (count line))) values)
           values)))))
 
 (defn- http-digits? (s)
@@ -572,7 +572,7 @@ section comment for the attacks each check stops.
   "A fresh secret for `require-token`: 128 bits from the OS CSPRNG, as 32 hex chars —
 safe to put in a URL.
 
-    (string/length (http/random-token))   ;=> 32"
+    (count (http/random-token))   ;=> 32"
   (encoding/hex-encode-bytes (crypto/random-bytes 16)))
 
 (defn- http-request-token (req)
@@ -737,7 +737,7 @@ knows the body is text — the map itself always carries byte-faithful `bytes`.
 ;; a multibyte string, which only loosens the cap — fine for a DoS bound.
 
 (defn- http-chunk-size (d)
-  (if (string? d) (string/length d) (count d)))
+  (if (string? d) (count d) (count d)))
 
 ;; Collect the response delivered as messages until close; [:ok bytes] or
 ;; [:error msg]. `acc` is the chunks in reverse, `have` their running byte total;

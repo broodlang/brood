@@ -234,7 +234,7 @@ order); the output is built from `:keep` and `:insert` ops.
 
 (defn- header-range (s)
   "`[start count]` from a hunk header range like `-12,5` or `+3` (count 1 when absent)."
-  (let (body (string/substring s 1 (string/length s))
+  (let (body (string/substring s 1 (count s))
         parts (string/split body ","))
     [(header-int (first parts) 0)
       (if (> (count parts) 1) (header-int (second parts) 0) 1)]))
@@ -252,33 +252,33 @@ order); the output is built from `:keep` and `:insert` ops.
         nil
         (let ([os oc] (header-range (nth parts 1))
               [ns nc] (header-range (nth parts 2))
-              close (index-of (string/substring line 2 (string/length line)) "@@"))
+              close (index-of (string/substring line 2 (count line)) "@@"))
           {:old-start os
            :old-count oc
            :new-start ns
            :new-count nc
-           :context (string/trim (string/substring line (+ close 4) (string/length line)))})))))
+           :context (string/trim (string/substring line (+ close 4) (count line)))})))))
 
 (defn- strip-prefix-path (s)
   "A path from a `--- a/x` / `+++ b/x` line: the `a/` or `b/` dropped, nil for /dev/null."
-  (let (p (string/trim-right (string/substring s 4 (string/length s)))
+  (let (p (string/trim-right (string/substring s 4 (count s)))
         ;; `diff -u` appends a tab and a timestamp to the path
         tab (index-of p "\t")
         p (if (< tab 0) p (string/substring p 0 tab)))
     (cond
       (= p "/dev/null") nil
       (or (string/starts-with? p "a/") (string/starts-with? p "b/"))
-        (string/substring p 2 (string/length p))
+        (string/substring p 2 (count p))
       else p)))
 
 (defn- git-header-paths (line)
   "`[old new]` from a `diff --git a/x b/y` line (the split is at ` b/`, so a path with a
 space survives when the two sides are equal, which is every case but a rename)."
-  (let (body (string/substring line 11 (string/length line))
+  (let (body (string/substring line 11 (count line))
         i (index-of body " b/"))
     (if (< i 0)
       [nil nil]
-      [(string/substring body 0 i) (string/substring body (+ i 3) (string/length body))])))
+      [(string/substring body 0 i) (string/substring body (+ i 3) (count body))])))
 
 (defn- close-file (st)
   "The parse state with the file in progress (if any) finished onto `:files`."
@@ -407,8 +407,8 @@ counts are recomputed; nil when the range holds no change at all.
                        tag (if (= line "") " " (string/substring line 0 1))
                        inside? (and (>= i from) (< i to))
                        body (string/substring line
-                              (math/min 1 (string/length line))
-                              (string/length line)))
+                              (math/min 1 (count line))
+                              (count line)))
                    (cond
                      ;; the no-newline marker follows its line in or out
                      (= tag "\\") (if (:dropped? acc) acc (assoc acc :out (cons line (:out acc))))
@@ -635,7 +635,7 @@ file`. `options`: `:context`, `:from-label` (default `\"a\"`) and `:to-label` (d
     {:out [] :at index :last nil}
     (fn (state line)
       (let (tag (if (= line "") " " (string/substring line 0 1))
-            body (string/substring line (math/min 1 (string/length line)) (string/length line))
+            body (string/substring line (math/min 1 (count line)) (count line))
             expect (fn ()
                      (let (entry (nth old (:at state)))
                        (when (or (nil? entry) (not (= (first entry) body)))

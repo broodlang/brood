@@ -120,8 +120,10 @@ General-purpose gap 2, the release half.
 
 ## E. Evidence, not features
 
-- ✅ **`known-issues.md` with no open bug** (2026-11-12). KI-370 closed: its one warning was
-  strict mode's and true, and the example no longer has the `nil | pid` it reported.
+- 🟡 **`known-issues.md` with no open bug.** KI-370 closed (2026-11-12): its one warning was
+  strict mode's and true, and the example no longer has the `nil | pid` it reported. KI-383
+  opened the same day: a downstream root `defdyn` takes over a std setting of the same name;
+  the live collisions are fixed, and the module-scoped `defdyn` fix waits on a decision.
 - ⬜ **`full.yml` green on the release candidate's commit**, together with the weekly soak
   (`soak.yml`) and the two-hour node soak.
 - ⬜ **A release-candidate period.** Tag `1.0.0-rc.0`, then `rc.1` and onward. Everything
@@ -137,11 +139,11 @@ Everything ADR-673 would forbid after 1.0 is cheapest in 0.5x:
 - Clear CHANGELOG's Unreleased breaks in a 0.51 release.
 - ✅ Land ADR-674's stage 2: remove `dotimes`, `dolist`, `unless` and `match*`, with ledger
   entries (2026-11-11).
-- 🟡 Rename anything the surface pass finds to be misnamed. A rename after 1.0 costs a full
+- ✅ Rename anything the surface pass finds to be misnamed. A rename after 1.0 costs a full
   deprecation window. First batch done (ADR-716, 2026-11-12): about 40 names that broke a rule
   already set, all ledgered. Then regex and fuzzy data-first (ADR-717), and duplicates and
   doubled-prefix settings (ADR-718); an `editor/*` accessor keeps its module's noun, because
-  apps `:use` those modules bare (ADR-719). Still open: whether `string/length` stays beside
+  apps `:use` those modules bare (ADR-719). `string/length` is gone: a string's length is
   `count`.
 
 ## Out of scope for 1.0 (additive, ADR-011)

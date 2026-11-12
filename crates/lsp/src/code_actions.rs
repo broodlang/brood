@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn declares_the_inferred_signature_under_the_cursor() {
-        let src = "(defn f (s) (string/length s))";
+        let src = "(defn f (s) (%string-length s))";
         let titles = actions_at(src, 8);
         assert!(
             titles
@@ -700,10 +700,10 @@ mod tests {
     fn several_edits_from_one_snapshot_drift_when_applied_top_down() {
         let src = "\
 (defn- alpha (a b)
-  (+ (string/length a) b))
+  (+ (%string-length a) b))
 
 (defn- beta (s)
-  (string/length s))
+  (%string-length s))
 ";
         let mut interp = Interp::new();
         let root = brood::syntax::cst::parse(src);
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn the_declared_edit_is_a_parseable_sig_line_above_the_defn() {
-        let src = "(defn f (s) (string/length s))";
+        let src = "(defn f (s) (%string-length s))";
         let mut interp = Interp::new();
         let root = brood::syntax::cst::parse(src);
         let scope = brood::syntax::scope::analyze(&root, src);

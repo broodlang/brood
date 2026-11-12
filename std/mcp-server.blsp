@@ -79,7 +79,7 @@ otherwise, so any handler may call it. Returns true if a report was sent.
 (defn- handle-spelling (v kind)
   "The inside of a handle's printed form `#<kind …>`."
   (let (printed (str v))
-    (string/substring printed (+ 3 (string/length kind)) (- (string/length printed) 1))))
+    (string/substring printed (+ 3 (count kind)) (- (count printed) 1))))
 
 (defn- pid-data (pid)
   "A pid as the tagged object `{\"$type\" \"pid\" \"node\" … \"id\" …}`: recognisable to an

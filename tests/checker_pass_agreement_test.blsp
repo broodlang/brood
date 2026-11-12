@@ -26,7 +26,7 @@
   (if (map? d)
     (get d :message)
     (let (i (index-of d ": warning: "))
-      (if (< i 0) d (string/substring d (+ i 11) (string/length d))))))
+      (if (< i 0) d (string/substring d (+ i 11) (count d))))))
 
 (defn- messages (diags)
   (sort (seq/mapv (or diags []) message-of)))
@@ -60,7 +60,7 @@
       (is (agree? src))))
 
   (test "an impossible type predicate on a NAME (ADR-315)"
-    (let (src "(defmodule t)\n(defn a (s) (if (failure? (string/length s)) 0 1))\n")
+    (let (src "(defmodule t)\n(defn a (s) (if (failure? (%string-length s)) 0 1))\n")
       (is (both-report src "failure?: this can never be true"))
       (is (agree? src))))
 

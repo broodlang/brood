@@ -14,9 +14,9 @@ fn flags_literal_misuse_of_primitives() {
     // A keyword literal now infers as its singleton type, so the diagnostic
     // names the exact value (`:k`) rather than the coarse `keyword` tag.
     assert!(
-        warnings("(string/length :k)")
+        warnings("(%string-length :k)")
             .iter()
-            .any(|w| w.contains("string/length") && w.contains(":k"))
+            .any(|w| w.contains("%string-length") && w.contains(":k"))
     );
     assert!(
         warnings("(%add 1 \"x\")")
@@ -36,7 +36,7 @@ fn no_false_positives_when_type_is_unknown_or_right() {
     assert!(warnings("(first xs)").is_empty()); // variable → dynamic
     assert!(warnings("(first [1 2 3])").is_empty()); // vector is allowed
     assert!(warnings("(%add 1 2)").is_empty());
-    assert!(warnings("(string/length \"hi\")").is_empty());
+    assert!(warnings("(%string-length \"hi\")").is_empty());
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn propagates_primitive_result_types() {
     // string-length returns int — the literal `1` here, a literal's length being known;
     // first wants a list/vector → flag it.
     assert!(
-        warnings("(first (string/length \"a\"))")
+        warnings("(first (%string-length \"a\"))")
             .iter()
             .any(|w| w.contains("first") && w.contains("got 1"))
     );
@@ -54,13 +54,13 @@ fn propagates_primitive_result_types() {
 fn an_any_result_is_not_a_false_positive() {
     // `%vector-ref` on a vector whose elements are unknown is unknown, so feeding it to
     // string-length (wants string) must NOT warn — `any` overlaps `string`.
-    assert!(warnings("(string/length (%vector-ref xs 0))").is_empty());
+    assert!(warnings("(%string-length (%vector-ref xs 0))").is_empty());
     // …but on a literal it is exactly that position (a destructuring `let` lowers to
     // `%vector-ref` behind a length check, so this is what types `[x y] rect` binders).
     assert!(
-        warnings("(string/length (%vector-ref [1] 0))")
+        warnings("(%string-length (%vector-ref [1] 0))")
             .iter()
-            .any(|w| w.contains("string/length"))
+            .any(|w| w.contains("%string-length"))
     );
 }
 
@@ -101,10 +101,10 @@ fn sig_declaration_is_read_by_the_checker() {
         "declared param type should flag (f \"s\"): {w:?}"
     );
     // The declared *result* flows out: f : int, string-length wants string.
-    let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(string/length (f 3))");
+    let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(%string-length (f 3))");
     assert!(
-        w.iter().any(|m| m.contains("string/length")),
-        "declared result type should flag string/length: {w:?}"
+        w.iter().any(|m| m.contains("%string-length")),
+        "declared result type should flag %string-length: {w:?}"
     );
     // Correct uses stay silent.
     let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(f 3)\n(+ 1 (f 4))");
@@ -131,10 +131,10 @@ fn keyword_literal_types_in_a_sig_are_enforced() {
     );
     // The declared literal *result* flows out and is checked too.
     let w = file_warnings(
-        "(sig mode (-> (or :maximized :fullscreen)))\n(defn mode () :maximized)\n(string/length (mode))",
+        "(sig mode (-> (or :maximized :fullscreen)))\n(defn mode () :maximized)\n(%string-length (mode))",
     );
     assert!(
-        w.iter().any(|m| m.contains("string/length")),
+        w.iter().any(|m| m.contains("%string-length")),
         "a keyword-literal result feeding string-length should flag: {w:?}"
     );
 }
@@ -150,9 +150,9 @@ fn sig_declaration_handles_arity_unions_and_bad_exprs() {
     );
     // Union result type: (or int nil) — feeding it to a sink that wants a
     // string is still a provable mismatch.
-    let w = file_warnings("(sig h (int -> (or int nil)))\n(defn h (x) x)\n(string/length (h 1))");
+    let w = file_warnings("(sig h (int -> (or int nil)))\n(defn h (x) x)\n(%string-length (h 1))");
     assert!(
-        w.iter().any(|m| m.contains("string/length")),
+        w.iter().any(|m| m.contains("%string-length")),
         "union result (int|nil) is disjoint from string: {w:?}"
     );
     // An unparseable type-expr is dropped — never a false signal.
@@ -253,7 +253,7 @@ fn optional_sig_params_parse_and_check() {
     // can't be nil) is still caught.
     let w = file_warnings(
         "(sig g (int &optional string -> int))\n\
-             (defn g (a &optional b) (if (nil? b) a (+ a (string/length b))))",
+             (defn g (a &optional b) (if (nil? b) a (+ a (%string-length b))))",
     );
     assert!(
         w.is_empty(),
@@ -327,30 +327,30 @@ fn tuple_sig_params_parse_and_check() {
     // (not the coarse union every other element access falls back to),
     // so a mismatch on the specific position used is caught.
     let w = file_warnings(
-        "(sig f ((tuple int string) -> any))\n(defn f (t) (string/length (first t)))",
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (%string-length (first t)))",
     );
     assert!(
         w.iter()
-            .any(|m| m.contains("string/length: argument 1 expects string") && m.contains("int")),
+            .any(|m| m.contains("%string-length: argument 1 expects string") && m.contains("int")),
         "first on a tuple must resolve to position 0's exact type: {w:?}"
     );
     let w = file_warnings(
-        "(sig f ((tuple int string) -> any))\n(defn f (t) (string/length (second t)))",
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (%string-length (second t)))",
     );
     assert!(
         w.is_empty(),
         "second on this tuple is already a string — no warning: {w:?}"
     );
     let w = file_warnings(
-        "(sig f ((tuple int string) -> any))\n(defn f (t) (string/length (nth t 0)))",
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (%string-length (nth t 0)))",
     );
     assert!(
         w.iter()
-            .any(|m| m.contains("string/length: argument 1 expects string") && m.contains("int")),
+            .any(|m| m.contains("%string-length: argument 1 expects string") && m.contains("int")),
         "a literal-index nth on a tuple must resolve position-exactly: {w:?}"
     );
     let w = file_warnings(
-        "(sig f ((tuple int string) -> any))\n(defn f (t) (string/length (nth t 1)))",
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (%string-length (nth t 1)))",
     );
     assert!(
         w.is_empty(),
@@ -626,9 +626,9 @@ fn curated_output_and_numeric_sigs() {
     );
     // min/max return a number — feeding to a string sink is caught.
     assert!(
-        warnings("(string/length (math/min 1 2))")
+        warnings("(%string-length (math/min 1 2))")
             .iter()
-            .any(|w| w.contains("string/length"))
+            .any(|w| w.contains("%string-length"))
     );
     // Correct uses stay silent.
     for ok in [

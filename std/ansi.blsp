@@ -145,7 +145,7 @@ group this model does not know — or one whose sub-parameters it cannot read �
   "A parameter's digits as a number, nil for an empty slot — and for anything but digits
 (`-5`, `+5`, `1e3`): ECMA-48 parameters are decimal digits, so a sign or an exponent is
 malformed and reads as an empty slot, never as a negative count."
-  (if (or (= p "") (< (string/span p 0 "0123456789") (string/length p)))
+  (if (or (= p "") (< (string/span p 0 "0123456789") (count p)))
     nil
     (let (n (string/->number p)) (if (int? n) n nil))))
 
@@ -316,7 +316,7 @@ each says what an abort means to it. Over a string the body bytes are one native
   "Whether a CSI body ending in `m` is SGR: parameters only — digits, `;` and `:`. A
 private marker (`ESC[>4;2m` is xterm's modifyOtherKeys, not a colour) or an
 intermediate byte makes it some other sequence."
-  (= (string/span body 0 "0123456789;:") (string/length body)))
+  (= (string/span body 0 "0123456789;:") (count body)))
 
 (defn- intermediate-scan (piece:string j:int n:int -> vector)
   "From index `j`, past an escape's intermediate bytes (0x20–0x2F) and its final byte."
@@ -339,7 +339,7 @@ when `sgr?` — else an SGR is `[:skip end]` like any CSI), `[:skip end]` (consu
 resumes at `end`), `[:string]` (an OSC-like string still open at the piece's end),
 `[:csi]` (a CSI past `csi-pending-max` still open at the piece's end) or `[:incomplete]`
 (the piece ends inside the escape)."
-  (let (n (string/length piece))
+  (let (n (count piece))
     (if (= n 0)
       [:incomplete]
       ;; `char->int` reads the first character natively — no one-character substring
@@ -363,7 +363,7 @@ resumes at `end`), `[:string]` (an OSC-like string still open at the piece's end
           else [:skip 0])))))
 
 (defn- tail-from (piece:string at:int -> string)
-  (if (= at 0) piece (string/substring piece at (string/length piece))))
+  (if (= at 0) piece (string/substring piece at (count piece))))
 
 (defn- swallow-head (piece:string inside -> (tuple any (or nil string)))
   "The text before a chunk's first ESC when the last chunk ended `inside` a swallowed
@@ -373,7 +373,7 @@ piece's); a CSI at its final byte, or at a control character, which is text agai
   (if (= inside :string)
     (let (bel (index-of piece "\x07"))
       (if (>= bel 0) [nil (tail-from piece (inc bel))] [:string nil]))
-    (let (scan (csi-scan piece 0 (string/length piece)))
+    (let (scan (csi-scan piece 0 (count piece)))
       (if (= (first scan) :incomplete) [:csi nil] [nil (tail-from piece (second scan))]))))
 
 (defn- emit (acc text:string attr -> any)
@@ -488,7 +488,7 @@ its faces.
            (fn (state segment)
              (let ([spans at] state
                    [text attr] segment
-                   end (+ at (string/length text)))
+                   end (+ at (count text)))
                [(if (nil? attr) spans (conj spans [at end attr])) end])))))
 
 ;; ---- strip: the escapes removed --------------------------------------------------------------
@@ -564,15 +564,15 @@ starts at `i` in `v`, or `n` when it is unterminated."
   "`s` cut at `col`. Deliberately NOT padded out to `col` first: a cursor may sit past the end
 of a short line, and erasing from there erases nothing — padding it out to the cursor
 would write spaces where the program asked for deletion."
-  (string/substring s 0 (math/min col (string/length s))))
+  (string/substring s 0 (math/min col (count s))))
 
 (defn- ansi-write (lines:vector row:int col:int text:string -> vector)
   "Overwrite `text` at (row, col), extending the line if it ends short."
   ;; padded out to `col`: a cursor may sit past the end of its line
   (let (l (string/pad-right (ansi-line lines row) col)
         before (string/substring l 0 col)
-        after-start (math/min (string/length l) (+ col (string/length text)))
-        after (string/substring l after-start (string/length l)))
+        after-start (math/min (count l) (+ col (count text)))
+        after (string/substring l after-start (count l)))
     (ansi-set-line lines row (str before text after))))
 
 (defn- ansi-param (params default)
@@ -689,4 +689,4 @@ positioning, no wrapping, no alternate screen."
         (count v)
         lines
         (math/max 0 (dec (count lines)))
-        (string/length (or (last lines) ""))))))
+        (count (or (last lines) ""))))))

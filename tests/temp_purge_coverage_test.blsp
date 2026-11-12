@@ -26,7 +26,7 @@
 ;; (`nest test`, `cargo test` via suite.rs, and a bare `--test` all differ).
 (def tests-dir
   (let (f (or (reflect/current-file) "") b (path/basename f))
-    (string/substring f 0 (- (string/length f) (string/length b)))))
+    (string/substring f 0 (- (count f) (count b)))))
 
 ;; This file quotes the two markers below as string literals, so scanning it would find
 ;; them in its own source and report a phantom prefix. Skip it by name.

@@ -48,7 +48,7 @@
     (assert= (humanize/byte-size 512) "512 B")
     (assert= (humanize/byte-size 2048) "2.0 KB")
     (assert= (humanize/byte-size 3145728) "3.0 MB")
-    (assert= (string/length (humanize/byte-size 248704614)) 8))
+    (assert= (count (humanize/byte-size 248704614)) 8))
   (test "observer/observe-opt renders a value or a dash when absent"
     (assert= (observer/observe-opt nil ->string) "-")
     (assert= (observer/observe-opt :foo ->string) "foo"))
@@ -63,7 +63,7 @@
       ; the reductions/second rate column
       (is (includes? r "1200"))
       ;; 5 + 12 + 8 + 6 + 8 + 9 + 8 + 4 columns + 7 single-space gaps
-      (assert= (string/length r) 67)))
+      (assert= (count r) 67)))
   ; nil name / absent memory
   (test "observer/observe-proc-cells renders a proc/info map (absent fields → dash)"
     (let (r (observer/observe-proc-cells {:id 2
@@ -317,7 +317,7 @@
 
   (test "every text op is clipped to the terminal width"
     (let (f (observe-frame sample-node [(pinfo 1 :longname :running 0 0)] 0 20 10 false :id :ok nil))
-      (is (every? f (fn (op) (or (not (= (first op) :text)) (<= (string/length (nth op 3)) 20)))))))
+      (is (every? f (fn (op) (or (not (= (first op) :text)) (<= (count (nth op 3)) 20)))))))
 
   (test "command-mode frame renders the minibuffer + cursor"
     (let (ui {:mode :command :edit (editor/lineedit/lineedit-init "λ " []) :msg nil}

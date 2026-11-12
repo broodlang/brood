@@ -688,7 +688,7 @@ Returns the failure count."
 selector; a name that merely contains a colon still loads."
   (let (i (string/last-index-of arg ":"))
     (if (and (int? i) (> i 0))
-      (let (n (string/->number (string/substring arg (+ i 1) (string/length arg))))
+      (let (n (string/->number (string/substring arg (+ i 1) (count arg))))
         (if (int? n) [(string/substring arg 0 i) n] [arg nil]))
       [arg nil])))
 
@@ -815,9 +815,9 @@ milliseconds; nil for anything else (garbage, a negative).
   (let (text (string/trim s)
         [digits scale] (cond
                          (string/ends-with? text "ms")
-                           [(string/substring text 0 (- (string/length text) 2)) 1]
+                           [(string/substring text 0 (- (count text) 2)) 1]
                          (string/ends-with? text "s")
-                           [(string/substring text 0 (- (string/length text) 1)) 1000]
+                           [(string/substring text 0 (- (count text) 1)) 1000]
                          else [text 1])
         amount (string/->number (string/trim digits)))
     ;; `failure?` first and alone: the checker narrows `amount` on that test, not through an `or`.
@@ -1158,9 +1158,7 @@ so a matching local setup needs no flag."
   (let (line (seq/find (string/split (file/slurp file) "\n")
                (fn (l) (string/starts-with? l "(defmodule "))))
     (when line
-      (first (string/split (first (string/split (string/trim (string/substring line
-                                                               11
-                                                               (string/length line)))
+      (first (string/split (first (string/split (string/trim (string/substring line 11 (count line)))
                                     ")"))
                " ")))))
 

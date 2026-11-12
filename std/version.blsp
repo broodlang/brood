@@ -88,7 +88,7 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
         dash (index-of-str no-build "-"))
     (if (nil? dash)
       nil
-      (string/split (string/substring no-build (+ dash 1) (string/length no-build)) "."))))
+      (string/split (string/substring no-build (+ dash 1) (count no-build)) "."))))
 
 (defn- index-of-str (s sub)
   (let (i (index-of s sub)) (if (< i 0) nil i)))
@@ -184,7 +184,7 @@ everything (the \"no release yet\" placeholder a registry starts from).
   (let (c (string/trim constraint)
         op (seq/find *operators* (fn (o) (string/starts-with? c o))))
     (cond
-      (not (nil? op)) [op (string/trim (string/substring c (string/length op) (string/length c)))]
+      (not (nil? op)) [op (string/trim (string/substring c (count op) (count c)))]
       (digit-start? c) ["=" c]
       else
         (error "satisfies?: unknown operator in "

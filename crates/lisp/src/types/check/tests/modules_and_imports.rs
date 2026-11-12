@@ -169,16 +169,16 @@ fn keyword_accessor_arity_is_checked() {
 fn keyword_accessor_result_type_matches_get() {
     // A record field's declared type flows through the keyword spelling exactly as
     // it does through `get`, so a misuse of the RESULT is caught either way.
-    let src = "(defrecord pt ((x int) (y int)))\n(defn a () (string/length (:x (pt 1 2))))";
+    let src = "(defrecord pt ((x int) (y int)))\n(defn a () (%string-length (:x (pt 1 2))))";
     let w = file_warnings(src);
     assert!(
         w.iter()
-            .any(|m| m.contains("string/length") && m.contains("int")),
+            .any(|m| m.contains("%string-length") && m.contains("int")),
         "the keyword spelling must flow the field type: {w:?}"
     );
     // and the two spellings agree
     let via_get = file_warnings(
-        "(defrecord pt ((x int) (y int)))\n(defn a () (string/length (get (pt 1 2) :x)))",
+        "(defrecord pt ((x int) (y int)))\n(defn a () (%string-length (get (pt 1 2) :x)))",
     );
     assert_eq!(w.len(), via_get.len(), "get: {via_get:?} vs kw: {w:?}");
 }
@@ -282,7 +282,7 @@ fn feature_loaded_reads_the_feature_registry_not_the_namespace() {
     // `file` has 18 `file/…` kernel primitives but its .blsp is not loaded yet — the
     // exact shape that fooled the old namespace-presence test. `string` is the same
     // shape twice over since ADR-246: its `.blsp` no longer loads at boot, while
-    // `string/split`, `string/length`, … are kernel primitives AND the prelude binds
+    // `string/split`, `string/upper`, … are kernel primitives AND the prelude binds
     // `string/join` and friends to autoload stubs. Neither may read as the module.
     for module in ["file", "string"] {
         assert!(

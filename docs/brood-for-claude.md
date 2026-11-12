@@ -1166,13 +1166,14 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   There is no `dotimes`, `dolist` or `unless` (removed by ADR-674): write `doseq` and
   `(when (not t) …)`.
 - **string**: the string surface lives in the `string` module (ADR-230), so these are
-  **`string/`-qualified** unless listed as bare below: `string/length`
+  **`string/`-qualified** unless listed as bare below:
   `string/substring` `string/char-at` (returns a 1-char *string* — Brood has no char
   type) `string/split` `string/join` `string/replace` `string/trim` `string/trim-left`
   `string/trim-right` `string/blank?` `string/upper` `string/lower`
   `string/starts-with?` `string/ends-with?` `string/->list` `string/list->`
   `string/->bytes` `string/bytes->`.
-  **Bare (core, not in the module):** `str` `pr-str` `index-of` `includes?`
+  **Bare (core, not in the module):** `str` `pr-str` `count` (a string's length in
+  chars; there is no `string/length`) `index-of` `includes?`
   `->string` (the polymorphic Display op — on a symbol or keyword it
   yields the bare spelling, so `(->string :foo)` is `"foo"` while `(str :foo)` is `":foo"`).
   There is no `symbol->string`/`number->string`/`name` — use `str` or `->string`

@@ -647,18 +647,9 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "project-check/*check-oversample*",
         "ADR-325",
     ),
-    (
-        "project/*project-cache-max-age-ms*",
-        "project-check/*project-cache-max-age-ms*",
-        "ADR-325",
-    ),
-    (
-        "project/*project-cache-pruned*",
-        "project-check/*project-cache-pruned*",
-        "ADR-325",
-    ),
-    // `project/*project-image-file*` and `*project-image-registry-exclusions*` moved to
-    // project-image here, then went private (ADR-718): no public home left to point at.
+    // `project/*project-image-file*`, `*project-image-registry-exclusions*`,
+    // `*project-cache-max-age-ms*` and `*project-cache-pruned*` moved out of `project` here,
+    // then went private (ADR-718): no public home left to point at.
     ("project/all-files", "project-check/all-files", "ADR-325"),
     (
         "project/build-info",
@@ -966,6 +957,7 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     ("bytes/concat", "bytes/append", "ADR-718"),
     ("stream/concat", "stream/append", "ADR-718"),
     ("decimal/number->", "decimal/of", "ADR-718"),
+    ("string/length", "count", "ADR-718"),
     (
         "telemetry/*telemetry-handlers*",
         "telemetry/*handlers*",

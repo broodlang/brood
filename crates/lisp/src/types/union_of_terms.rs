@@ -297,7 +297,7 @@ impl Ty {
         // so `pair<never>` is EMPTY, and filling a bare `pair`'s unknown elements with
         // `never` turned a value positively known to be a list into the empty type — a
         // consistent subtype of everything. `(sig f (pair -> int))` then passed its
-        // parameter to `string/length` silently, in both modes, where `(list any)` warned.
+        // parameter to `%string-length` silently, in both modes, where `(list any)` warned.
         // A pair's materialisation must keep a pair, with SOME element: that fits exactly
         // when `other` admits such a pair at all, which is the overlap reading.
         self.terms_vec().into_iter().all(|term| {

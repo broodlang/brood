@@ -198,7 +198,7 @@
     ;; registers the docstring we then introspect
     (is (fn? encoding/base64-encode))
     (is (string? (system/module-doc 'encoding)))
-    (is (> (string/length (system/module-doc 'encoding)) 100))))
+    (is (> (count (system/module-doc 'encoding)) 100))))
 
 (describe "ADR-503: a nested quasiquote keeps its levels"
   (test "a ` inside a ` template leaves the inner hole for the inner level"

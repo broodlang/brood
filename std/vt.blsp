@@ -465,15 +465,15 @@ first, which is all a non-SGR sequence means by one."
   "`[prefix digits intermediate]` of a CSI body: a leading private marker (`?` `>` `=`
 `<`), the parameter bytes, a trailing intermediate (a space before `q`). Only the first
 and last byte are inspected — an SGR, most of what a program emits, is digits and `;`."
-  (let (len (string/length body)
+  (let (len (count body)
         first-code (if (= len 0) 0 (string/char->int body))
         last-code (if (= len 0) 0 (string/char->int (string/char-at body (dec len))))
         prefix (if (<= 0x3c first-code 0x3f) (string/char-at body 0) "")
         intermediate (if (and (> len 0) (<= 0x20 last-code 0x2f))
                        (string/char-at body (dec len))
                        "")
-        from (string/length prefix)
-        to (- len (string/length intermediate))
+        from (count prefix)
+        to (- len (count intermediate))
         digits (if (and (= from 0) (= to len)) body (string/substring body from (max from to))))
     [prefix digits intermediate]))
 
@@ -534,7 +534,7 @@ their own sequences rather than flags on `h`, `c` and `q`."
     (if (< sep 0)
       vt
       (let (code (string/substring body 0 sep)
-            arg (string/substring body (inc sep) (string/length body)))
+            arg (string/substring body (inc sep) (count body)))
         (if (includes? ["0" "2"] code) (assoc vt :title arg) vt)))))
 
 ;; ---- the parser ------------------------------------------------------------------------------------
@@ -715,7 +715,7 @@ fewer than `keep` (the cursor's column, so its position exists in the text)."
 
 (defn- text-length (cells:seqable -> int)
   "The chars the graphemes of `cells` take in a string (a continuation cell takes none)."
-  (fold cells 0 (fn (n cell) (+ n (string/length (first cell))))))
+  (fold cells 0 (fn (n cell) (+ n (count (first cell))))))
 
 (defn- cells-line (cells:row base:int palette:any -> (tuple string list int))
   "`[text spans end]` for `cells` whose text starts at buffer offset `base`: the graphemes
@@ -727,7 +727,7 @@ concatenated, `spans` the `[start end face]` runs of one attribute (reversed, co
                     (if (nil? cur) spans (cons [start pos (ansi/face cur palette)] spans))
                     pos]
                   (let ([g attr] (nth cells i)
-                        next (+ pos (string/length g))
+                        next (+ pos (count g))
                         texts2 (cons g texts))
                     (cond
                       (= attr cur) (go (inc i) next cur start texts2 spans)
@@ -828,21 +828,21 @@ cursor in it (its row is padded out to the cursor, so the offset always exists).
 (defn- modified (sequence:string modifier:int -> string)
   "xterm's modified form of a named key's `sequence`: `ESC [ 3 ~` → `ESC [ 3 ; m ~`,
 `ESC [ A` / `ESC O A` → `ESC [ 1 ; m A`."
-  (let (len (string/length sequence)
+  (let (len (count sequence)
         params (string/substring sequence 2 (dec len))
         final (string/substring sequence (dec len) len))
     (str "\e[" (if (= params "") "1" params) ";" modifier final)))
 
 (defn- split-modifiers (name:string -> (tuple bool bool bool string))
   "`[ctrl alt shift base]` from a key name spelled `[ctrl-meta-|ctrl-|alt-][shift-]<base>`."
-  (let (after (fn (prefix) (string/substring name (string/length prefix) (string/length name)))
+  (let (after (fn (prefix) (string/substring name (count prefix) (count name)))
         [ctrl alt rest] (cond
                           (string/starts-with? name "ctrl-meta-") [true true (after "ctrl-meta-")]
                           (string/starts-with? name "ctrl-") [true false (after "ctrl-")]
                           (string/starts-with? name "alt-") [false true (after "alt-")]
                           else [false false name])
-        shifted? (and (string/starts-with? rest "shift-") (> (string/length rest) 6)))
-    [ctrl alt shifted? (if shifted? (string/substring rest 6 (string/length rest)) rest)]))
+        shifted? (and (string/starts-with? rest "shift-") (> (count rest) 6)))
+    [ctrl alt shifted? (if shifted? (string/substring rest 6 (count rest)) rest)]))
 
 (defn- control-byte (ch:string -> (or nil string))
   "The C0 byte ctrl+`ch` produces, or nil for a character that has none."
@@ -869,19 +869,19 @@ shift-enter from enter. Nil for a key with no terminal spelling.
     (string? key) key
     (not (keyword? key)) nil
     else
-      (let (name (let (s (str key)) (string/substring s 1 (string/length s)))
+      (let (name (let (s (str key)) (string/substring s 1 (count s)))
             [ctrl alt shift base] (split-modifiers name)
             k (keyword base)
             modifier (+ 1 (if shift 1 0) (if alt 2 0) (if ctrl 4 0))
             plain (or (and (mode vt :app-cursor) (get application-keys k)) (get named-keys k)))
         (cond
           (= modifier 1) plain
-          (and plain (> (string/length plain) 1)) (modified plain modifier)
+          (and plain (> (count plain) 1)) (modified plain modifier)
           (= k :enter) (if alt "\e\r" (str "\e[13;" modifier "u"))
           (= k :tab) (if shift "\e[Z" (str "\e[9;" modifier "u"))
           (= k :backspace) (if alt "\e\x7f" (str "\e[127;" modifier "u"))
           (= k :escape) "\e"
-          (not (= (string/length base) 1)) nil
+          (not (= (count base) 1)) nil
           else
             (let (ch (if shift (string/upper base) base)
                   byte (if ctrl (control-byte ch) ch))

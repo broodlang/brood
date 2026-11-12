@@ -405,7 +405,7 @@
     ;; so cost is O(enclosing form), not O(pos) — but the answer must still be exact.
     (let (lead (string/join (map (range 500) (fn (_i) "(defn f ())\n")) "")
           src (str lead "(map g "))
-      (assert= (enclosing-call src (+ (string/length lead) 7)) ["map" 1]))))
+      (assert= (enclosing-call src (+ (count lead) 7)) ["map" 1]))))
 
 (describe "completion helpers"
   (test "symbol-prefix-at returns the token start and text"
@@ -474,8 +474,8 @@ reader sees, which a multi-line string's one span and its per-line spans agree o
         (fn (lo)
           (let (spans (second (line-cache-update (line-cache) lexer rope lo lines))
                 from (text/line->char rope lo))
-            (assert= (ll-faces ll-source spans from (string/length ll-source))
-              (ll-faces ll-source whole from (string/length ll-source))))))))
+            (assert= (ll-faces ll-source spans from (count ll-source))
+              (ll-faces ll-source whole from (count ll-source))))))))
 
   (test "a line inside a docstring carries the doc face, a value string's the string face"
     (let (lex (:lex (lisp-line-lexer))

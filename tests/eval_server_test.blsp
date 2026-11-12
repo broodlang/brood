@@ -128,7 +128,7 @@
 (describe "output bounding"
   (test "a println flood is capped with a truncation marker"
     (let (r (eval-capturing "(doseq (i (range 5000)) (io/puts i))"))
-      (is (<= (string/length (get r :output)) (+ eval-server/*output-cap-chars* 64)))
+      (is (<= (count (get r :output)) (+ eval-server/*output-cap-chars* 64)))
       (is (includes? (get r :output) "…[output truncated]"))))
   (test "evaluated code stealing the capture yields \"\" output, not nil"
     (let (r (eval-capturing "(do (%capture-take) :done)"))

@@ -76,7 +76,7 @@ would be unsound — this exclusion also closed a latent hole in the same-file p
 It shares `infer_sig`'s one narrow, *pre-existing* false-positive class (a
 top-level use that ran at load before a same-name redefinition), which the project
 already accepts for functions; it introduces nothing new. Verified: a `(def g 5)`
-in the image with `(string/length g)` elsewhere warns; a dynvar used
+in the image with `(string/upper g)` elsewhere warns; a dynvar used
 polymorphically via `binding` does not; the whole corpus (every cross-module
 reference) stays at zero warnings.
 
@@ -97,7 +97,7 @@ precise `stat`** — an undeclared global has no author-asserted contract and *i
 redefinable, so its inferred type is a current-state observation, not a promise.
 The `dynamic` flag means every decision uses `∩` (defer unless provably disjoint),
 so:
-- `(def g 5)` then `(string/length g)` → `int ∩ string = ⊥` → **warns** (a real
+- `(def g 5)` then `(string/upper g)` → `int ∩ string = ⊥` → **warns** (a real
   misuse of the current image);
 - if `g` is later redefined to a string, the reload re-check (ADR-125) re-derives
   and the warning clears — no stale hard proof.

@@ -83,7 +83,7 @@ fn zz_probe_failure() {
     let cases = [
         (
             "arg into a native",
-            "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n(defn q (s) (string/length (p s)))",
+            "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n(defn q (s) (%string-length (p s)))",
         ),
         (
             "arg into a local defn",
@@ -99,7 +99,7 @@ fn zz_probe_failure() {
         ),
         (
             "guarded — must stay silent",
-            "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n(defn q (s) (let (v (p s)) (if (failure? v) 0 (string/length v))))",
+            "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n(defn q (s) (let (v (p s)) (if (failure? v) 0 (%string-length v))))",
         ),
     ];
     for (name, src) in cases {
@@ -166,7 +166,7 @@ fn a_guard_narrows_across_every_shape_and_value_form() {
     for (vname, v, open, expect) in &values {
         for (gname, tmpl) in guards {
             let use_site = if *vname == "user-fn-path" || v.contains("mine") {
-                format!("(string/length {v})")
+                format!("(%string-length {v})")
             } else {
                 format!("(+ 1 {v})")
             };

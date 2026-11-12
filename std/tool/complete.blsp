@@ -109,11 +109,8 @@ suggestions\", never to an error on the user's command line."
 ;; Strip `root/` from an absolute path so completions read as the relative paths a
 ;; user actually types.
 (defn- complete-relative (path root)
-  (if (and (not (nil? root))
-        (string/starts-with? path root)
-        (> (string/length path)
-          (+ (string/length root) 1)))
-    (string/substring path (+ (string/length root) 1) (string/length path))
+  (if (and (not (nil? root)) (string/starts-with? path root) (> (count path) (+ (count root) 1)))
+    (string/substring path (+ (count root) 1) (count path))
     path))
 
 ;; --- files --------------------------------------------------------------------
@@ -182,9 +179,9 @@ suggestions\", never to an error on the user's command line."
 
 ;; `index-of` has no start offset, so scan a suffix and re-base the result.
 (defn- index-of-from (text:string needle:string from:int -> int)
-  (if (>= from (string/length text))
+  (if (>= from (count text))
     -1
-    (let (i (index-of (string/substring text from (string/length text)) needle))
+    (let (i (index-of (string/substring text from (count text)) needle))
       (if (< i 0) -1 (+ from i)))))
 
 ;; Is index `i` inside a string literal? Checked within `i`'s own LINE, using native
@@ -208,8 +205,8 @@ suggestions\", never to an error on the user's command line."
   (fold (seq/filter (string/split (string/trim fragment) " ") (fn (s) (not (= s ""))))
     nil
     (fn (acc token)
-      (if (and (string/starts-with? token ":") (> (string/length token) 1))
-        (let (name (string/substring token 1 (string/length token)))
+      (if (and (string/starts-with? token ":") (> (count token) 1))
+        (let (name (string/substring token 1 (count token)))
           (if (complete-tag-name? name) (append acc (list name)) acc))
         acc))))
 
@@ -217,13 +214,13 @@ suggestions\", never to an error on the user's command line."
 ;; quote, bracket, paren or backslash came from surrounding syntax rather than from a
 ;; tag — the scan is textual, so it can pick up a `:tags` inside a string literal and
 ;; produce a candidate like `fast"`. Offering that is worse than offering nothing.
-(def- *complete-tag-reject* "\"'()[]{}\\;`,")
+(def- *tag-reject* "\"'()[]{}\\;`,")
 
 (defn- complete-tag-name? (name)
   (and (not (= name ""))
     (fold (string/split name "")
       true
-      (fn (ok ch) (and ok (not (includes? *complete-tag-reject* ch)))))))
+      (fn (ok ch) (and ok (not (includes? *tag-reject* ch)))))))
 
 (defn tags ()
   "Every tag name declared with `:tags [...]` anywhere in the project's test files, de-duplicated and sorted. Textual scan — see the file header on why.

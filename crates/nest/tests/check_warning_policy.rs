@@ -13,7 +13,7 @@ use std::process::Command;
 use support::{TempDir, temp_dir};
 
 const PROBE: &str = "(defn count-down (n) (if (= n 0) 0 (+ 1 (count-down (- n 1)))))\n\
-                     (defn bad () (string/length 3))\n";
+                     (defn bad () (%string-length 3))\n";
 
 fn project(tag: &str) -> TempDir {
     let temp = temp_dir(tag);
@@ -80,7 +80,7 @@ fn scenarios(cached: bool) {
     let (output, passed) = check(root, cached);
     assert!(!passed, "a type mismatch gates by default:\n{output}");
     assert!(
-        line_with(&output, "string/length").ends_with("[type-mismatch]"),
+        line_with(&output, "%string-length").ends_with("[type-mismatch]"),
         "{output}"
     );
     assert!(
@@ -94,7 +94,7 @@ fn scenarios(cached: bool) {
     let (output, passed) = check(root, cached);
     assert!(passed, ":advisory must stop a category gating:\n{output}");
     assert!(
-        line_with(&output, "string/length").ends_with("[type-mismatch, advisory — not gating]"),
+        line_with(&output, "%string-length").ends_with("[type-mismatch, advisory — not gating]"),
         "{output}"
     );
 
@@ -105,7 +105,7 @@ fn scenarios(cached: bool) {
     );
     let (output, passed) = check(root, cached);
     assert!(
-        !output.contains("string/length"),
+        !output.contains("%string-length"),
         ":allow must silence:\n{output}"
     );
     assert!(
@@ -130,7 +130,7 @@ fn scenarios(cached: bool) {
     write_main(root, "(:check-allow :type-mismatch)");
     let (output, passed) = check(root, cached);
     assert!(
-        passed && !output.contains("string/length"),
+        passed && !output.contains("%string-length"),
         "(:check-allow :type-mismatch) in the header must silence the mismatch:\n{output}"
     );
 }
