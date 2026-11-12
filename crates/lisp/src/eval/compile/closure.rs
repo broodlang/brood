@@ -1025,6 +1025,11 @@ pub(crate) fn hof_apply_native(
         crate::perf_bump!(hof_decline_epoch);
         return None;
     }
+    // Tier work only an entry does (an upgrade to queue or swap in): run this call through
+    // the driver, which does it and settles the arm.
+    if crate::eval::compile::needs_tier_entry(arm, code) {
+        return None;
+    }
     // Size the fast frame to the version we are about to CALL — keyed on the `code` pointer
     // loaded above, not on a second (independently-racing) read of `inline_installed`. A peer
     // process sharing this `CompiledArm` (ADR-215) can swap the inlined upgrade in between the

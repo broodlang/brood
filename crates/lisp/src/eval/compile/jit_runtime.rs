@@ -327,6 +327,8 @@ pub(crate) fn jit_tier_in_frame(
     let code = arm.jit_code.load(Acquire);
     if !code.is_null()
         && code == arm.settled_code.load(Relaxed)
+        // No upgrade landed since this process last cleared its links (see `INLINE_LANDED`).
+        && INLINE_LANDED.load(Relaxed) == heap.inline_landed_seen
         && !heap.jit_force_vm
         && arm.compile_epoch.load(Acquire) == heap.global_epoch()
         // The slow path's re-load (a peer's reset + re-election between the two reads).
@@ -352,6 +354,13 @@ fn jit_tier_in_frame_slow(
     unwind: bool,
 ) -> Option<i64> {
     use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+    // An upgrade landed somewhere since this process last looked: links its callers made
+    // while it compiled bypass the entry that swaps it in, so clear them (`needs_tier_entry`).
+    let landed = INLINE_LANDED.load(Acquire);
+    if landed != heap.inline_landed_seen {
+        heap.inline_landed_seen = landed;
+        heap.unlink_arms_needing_tier_entry();
+    }
     // Draining an over-deep native-recursion subtree on the VM (see [`JIT_FORCE_VM`]):
     // interpret this arm so its recursion stays in the bounded heap-frame loop.
     if heap.jit_force_vm {
@@ -709,6 +718,8 @@ fn jit_tier_in_frame_slow(
                     }
                 }
                 arm.inline_code.store(ptr, Release);
+                // A landing like the compiler's: links to this arm skip the entry that swaps.
+                INLINE_LANDED.fetch_add(1, AcqRel);
                 return None; // next entry swaps it in
             }
             // Not shared yet. Elect a single enqueuer via the queued flag — loaded first, so
