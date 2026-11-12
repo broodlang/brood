@@ -120,8 +120,8 @@ General-purpose gap 2, the release half.
 
 ## E. Evidence, not features
 
-- ⬜ **`known-issues.md` with no open bug, and the watch item KI-370 resolved or reasoned
-  away.**
+- ✅ **`known-issues.md` with no open bug** (2026-11-12). KI-370 closed: its one warning was
+  strict mode's and true, and the example no longer has the `nil | pid` it reported.
 - ⬜ **`full.yml` green on the release candidate's commit**, together with the weekly soak
   (`soak.yml`) and the two-hour node soak.
 - ⬜ **A release-candidate period.** Tag `1.0.0-rc.0`, then `rc.1` and onward. Everything

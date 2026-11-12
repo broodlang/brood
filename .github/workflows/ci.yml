@@ -465,13 +465,14 @@ jobs:
       # `int` is declared, or `nil | string` handed to a string function, is a warning.
       # Keep it at zero — a new strict warning is an undeclared function or a real
       # maybe-nil. A test that passes what a sig would not admit ON PURPOSE says so with
-      # `(check-allow :type-mismatch …)`.
-      - name: Type-checker STRICT gate over std + tests (nest check --strict — zero warnings)
+      # `(check-allow :type-mismatch …)`. Examples are in it since KI-370 (2026-11-12): its
+      # one sighting was a true strict warning in an example no strict gate read.
+      - name: Type-checker STRICT gate over std + tests + examples (nest check --strict — zero warnings)
         shell: bash
         run: |
           shopt -s globstar nullglob
           cargo run -q -p nest --features brood/treesit-grammars -- \
-            check --strict std/**/*.blsp tests/**/*.blsp
+            check --strict std/**/*.blsp tests/**/*.blsp examples/**/*.blsp
 
   # `examples/`: the user-facing programs, which no gate ran until 2026-08-17 — and they had
   # rotted three separate ways by then. `examples/editor` had called a module that moved to a

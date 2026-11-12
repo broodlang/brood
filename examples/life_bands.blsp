@@ -65,9 +65,9 @@ Run:  brood examples/life_bands.blsp")
         indices (range (count slices))
         pids (vec (map indices (fn (k) (spawn (band-worker me k (nth slices k) generations))))))
     ;; neighbours go out once the pids exist; a band at the world's edge has nil there
-    (each indices
-      (fn (k)
-        (send (nth pids k)
+    (each (seq/zip indices pids)
+      (fn ([k pid])
+        (send pid
           [:neighbours
             (when (> k 0) (nth pids (- k 1)))
             (when (< (+ k 1) (count pids)) (nth pids (+ k 1)))])))

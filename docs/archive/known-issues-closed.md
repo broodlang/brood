@@ -5,6 +5,34 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-370 — `nest check` reported a warning on `examples/life_bands.blsp` once, then never again ✅ closed 2026-11-12
+
+**Seen** 2026-11-05, once: a full `nest check std/ tests/ examples/` printed
+`examples/life_bands.blsp:70:15: warning: send: argument 1 expects keyword | map | pid, got
+nil | pid ((nth pids k))` — four warnings where the run before it printed none. It ran right
+after a `make release` over a working tree that was giving `std/gui.blsp` signatures for its
+images (an attempt since dropped). Nothing in the file or its requires had changed.
+
+**Not reproduced** in 45 later runs (2026-11-06 to 11-09): full-tree and single-file, cached
+and `BROOD_NO_CHECK_CACHE=1`, imaged and `BROOD_NO_STDIMAGE=1`, and with the dropped
+`image-thumb` sig put back. The check cache's stamp carries the binary's mtime, so a rebuild
+drops it.
+
+**The warning is strict mode's** (2026-11-09): `nest check --strict` printed exactly it,
+every time. Outside strict mode an overlapping `nil | pid` is reported only when the argument
+reads precise rather than dynamic (`check_arg_against_param`: `consistent_with_mode`), so the
+sighting either ran strict or read `(nth pids k)` as precise, most plausibly through a sig the
+tree carried that day and has since dropped. A strict run followed by a plain one leaves the
+plain run quiet, so it is not a cache leak.
+
+**Closed by removing the source** (2026-11-12, road-to-1.0 §E). The warning was true:
+`(nth pids k)` can be `nil`. The neighbour loop now walks `(seq/zip indices pids)` and sends
+to each `pid` itself, so there is no `nil | pid` to report in either mode. `nest check
+--strict examples/*.blsp` gives no warnings, the old file still gives this one, and the
+example still agrees with the serial step. If the non-strict sighting came from the checker
+reading a type as precise, that is the checker's ordinary mode rule, which a now-dropped
+sig fed, not a defect in the checker.
+
 ## KI-382 — under AddressSanitizer, JIT tier assertions fail on the suite's first try and pass on its retry ✅ fixed 2026-11-10
 
 **Symptom.** The Nightly's AddressSanitizer job, `brood::suite brood_suite_passes`, TRY 1:
