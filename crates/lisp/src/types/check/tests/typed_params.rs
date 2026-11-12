@@ -110,3 +110,23 @@ fn a_typed_parameter_bounds_the_return_of_a_private_helper_used_as_a_value() {
         "`unq` is declared over strings, so its result is a string: {ws:?}"
     );
 }
+
+/// The cross-module half of the case above: a LOADED typed function's open result is read by
+/// `sig_of` through `infer_sig`, which bound each parameter to its body's demand alone. hatch's
+/// `(defn trim-if-needed (s:string) … (count s) …)` read as returning any countable, so a
+/// caller in another module passing its result to `string/lower` was flagged under `--strict`.
+#[test]
+fn a_loaded_typed_function_returns_within_its_declared_parameter() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(defn trim1 (s:string) (if (> (count s) 3) (string/trim s) s))")
+        .expect("def");
+    let sig = crate::types::check::sigs::sig_of(&interp.heap, crate::core::value::intern("trim1"))
+        .expect("trim1 has a signature");
+    assert!(
+        sig.ret
+            .is_subtype(&crate::types::Ty::of(crate::core::value::Tag::Str)),
+        "`trim1` returns `s` or `(string/trim s)`, both strings, so its result is a string; got {}",
+        sig.ret
+    );
+}

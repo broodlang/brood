@@ -16,9 +16,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   face names no background keeps the cell's, so text over a `[:rect …]` (a current-line band, a
   selection bar) no longer punches the default background through it. In bedit -nw the selected
   completion read dark on dark and the bar showed only around it.
-- **`nest check` honours a private helper's typed parameter when the helper is passed as a value.**
-  Its return was read under what the body demanded alone, so `(defn- f (w:string) …(count w)…)`
-  typed `w` as any countable and widened `f`'s result.
+- **`nest check` honours a typed parameter when it infers a function's result**, for a private
+  helper passed as a value and for a function another module calls. The result was read under
+  what the body demanded alone, so `(defn f (w:string) …(count w)…)` typed `w` as any countable
+  and widened `f`'s result; hatch's `--strict` check flagged a caller for it.
 
 **Breaking: duplicates and doubled prefixes (ADR-718).**
 - `string/length`, `bytes/length`, `text/length` and `table/count` are removed: use

@@ -1529,6 +1529,10 @@ upstream one whole. What it left: the parameters that only `string/length` had p
 widened because the return inference for a private helper with no caller-derived types
 (one passed as a value: `(map xs helper)`) bound each parameter to its body's demand alone and
 ignored a declared type, so declaring `w:string` did not help. It now meets each parameter with
-its declaration as well as with the caller-derived type. Guard:
-`a_typed_parameter_bounds_the_return_of_a_private_helper_used_as_a_value`, red with the meet
-removed.
+its declaration as well as with the caller-derived type. The loaded-function path a
+cross-module caller reads (`infer_sig`) had the same gap and gets the same meet; hatch's
+`trim-if-needed` was the live case. Guards:
+`a_typed_parameter_bounds_the_return_of_a_private_helper_used_as_a_value` and
+`a_loaded_typed_function_returns_within_its_declared_parameter`, each red with its meet
+removed. Also filed KI-385: `nest check --fix-renames` is not scope-aware and rewrote hatch's
+local `name` bindings to `node/name`.

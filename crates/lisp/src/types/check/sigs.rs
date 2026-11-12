@@ -897,6 +897,14 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let mut names = params.clone();
     names.extend(rest_binder);
     let mut param_tys = param_domains(heap, &arm.body, &names, &Ctx::default());
+    // A typed parameter (ADR-420) bounds the demand too, as in `infer_return_from_form`:
+    // `(defn f (s:string) … (count s) …)` demands only a countable, and without the meet a
+    // cross-module caller read `f`'s open result as widened past the `string` it returns.
+    if let Some(declared) = declared_heap_sig(heap, sym) {
+        for (ty, decl) in param_tys.iter_mut().zip(&declared.params) {
+            *ty = ty.clone().intersect(decl.clone());
+        }
+    }
     let rest = match rest_binder {
         Some(_) => rest_element_demand(&param_tys.pop()?),
         None => None,
