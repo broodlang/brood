@@ -114,8 +114,8 @@ General-purpose gap 2, the release half.
 - 🟡 **Install** (2026-11-11). `install.sh` picks the static build where there is no glibc
   and refuses an unchecked download; `install.ps1` is Windows' one line; `nest
   update-brood` fetches the build it is (`system/target`). `install.sh` installed v0.51.0's
-  glibc and musl builds. Remaining: deploy hive, so brood.fly.dev serves `/install.ps1`;
-  `install.ps1` has not yet run on a Windows machine.
+  glibc and musl builds; brood.fly.dev serves both installers (hive deployed 2026-11-12).
+  Remaining: `install.ps1` has not yet run on a Windows machine.
 
 ## E. Evidence, not features
 
