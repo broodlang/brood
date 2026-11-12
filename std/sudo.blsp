@@ -59,7 +59,7 @@ one; `opts`' `:program` does the same for one call.
   "`said`, a sudo call's stderr, without the password prompt an old sudo-rs writes there
 whatever `SUDO_PROMPT` says — so a failure reads as sudo's message, and a command's own
 stderr as the command's."
-  (regex/replace old-sudo-rs-prompt (or said "") ""))
+  (regex/replace (or said "") old-sudo-rs-prompt ""))
 
 (defn- program-of (opts)
   (or (:program opts) sudo/*program*))

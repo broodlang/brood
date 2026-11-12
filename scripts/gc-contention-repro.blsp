@@ -92,7 +92,7 @@
       (fn () (fold (range 60000) 0 (fn (acc i) (+ acc (count {:start i :end (inc i)}))))))
     (beside "beside a big live vector of maps" keep-maps)
     (beside "beside a big live vector of strings" keep-strings)
-    (beside "beside a regex split of a big text" (fn () (count (regex/split "\\s+" text))))))
+    (beside "beside a regex split of a big text" (fn () (count (regex/split text "\\s+"))))))
 
 ;; `KI307_MODE` splits the experiment across two OS processes, which share the machine but
 ;; not an address space, an allocator or a scheduler: `background` runs the live-maps loop
@@ -106,14 +106,14 @@
       (do (memory-report "at the start") (beside "beside a big live vector of maps" keep-maps))
     (= mode "regex-preloaded")
       (do
-        (regex/split "\\s+" "loads std/regex in this runtime before the background starts")
+        (regex/split "loads std/regex in this runtime before the background starts" "\\s+")
         (memory-report "at the start")
         (beside "beside a regex split, regex loaded first"
-          (fn () (count (regex/split "\\s+" text)))))
+          (fn () (count (regex/split text "\\s+")))))
     (= mode "regex")
       (do
         (memory-report "at the start")
-        (beside "beside a regex split of a big text" (fn () (count (regex/split "\\s+" text)))))
+        (beside "beside a regex split of a big text" (fn () (count (regex/split text "\\s+")))))
     (= mode "strings")
       (do
         (memory-report "at the start")

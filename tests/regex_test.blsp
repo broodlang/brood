@@ -6,88 +6,88 @@
 ; case-sensitive
 (describe "regex match? (search)"
   (test "literals search anywhere in the string"
-    (is (match? "lo" "hello"))
-    (is (not (match? "xy" "hello"))))
+    (is (match? "hello" "lo"))
+    (is (not (match? "hello" "xy"))))
   (test ". matches any one character"
-    (is (match? "h.llo" "hello"))
-    (is (not (match? "h.llo" "hllo"))))
+    (is (match? "hello" "h.llo"))
+    (is (not (match? "hllo" "h.llo"))))
   (test "anchors ^ and $"
-    (is (match? "^he" "hello"))
-    (is (not (match? "^el" "hello")))
-    (is (match? "lo$" "hello"))
-    (is (not (match? "el$" "hello"))))
+    (is (match? "hello" "^he"))
+    (is (not (match? "hello" "^el")))
+    (is (match? "hello" "lo$"))
+    (is (not (match? "hello" "el$"))))
   (test "suffix match — the .blsp file-type case"
-    (is (match? "\\.blsp$" "foo.blsp"))
-    (is (not (match? "\\.blsp$" "foo.blsp.txt")))
+    (is (match? "foo.blsp" "\\.blsp$"))
+    (is (not (match? "foo.blsp.txt" "\\.blsp$")))
     ; \\. is a literal dot, not any-char
-    (is (not (match? "\\.blsp$" "fooXblsp")))
-    (is (not (match? "\\.blsp$" "foo.BLSP")))))
+    (is (not (match? "fooXblsp" "\\.blsp$")))
+    (is (not (match? "foo.BLSP" "\\.blsp$")))))
 (describe "regex quantifiers"
   (test "* matches zero or more (greedy)"
-    (is (matches? "ab*c" "ac"))
-    (is (matches? "ab*c" "abbbc")))
+    (is (matches? "ac" "ab*c"))
+    (is (matches? "abbbc" "ab*c")))
   (test "+ matches one or more"
-    (is (matches? "ab+c" "abc"))
-    (is (not (matches? "ab+c" "ac"))))
+    (is (matches? "abc" "ab+c"))
+    (is (not (matches? "ac" "ab+c"))))
   (test "? matches zero or one"
-    (is (matches? "ab?c" "ac"))
-    (is (matches? "ab?c" "abc"))
-    (is (not (matches? "ab?c" "abbc"))))
+    (is (matches? "ac" "ab?c"))
+    (is (matches? "abc" "ab?c"))
+    (is (not (matches? "abbc" "ab?c"))))
   (test "greedy * still lets the rest match (backtracks)"
-    (is (matches? "a.*z" "abcz"))
-    (is (matches? "a.*z" "az"))))
+    (is (matches? "abcz" "a.*z"))
+    (is (matches? "az" "a.*z"))))
 
 (describe "regex classes & sets"
   (test "\\d \\w \\s"
-    (is (matches? "\\d+" "2026"))
-    (is (not (matches? "\\d+" "20x6")))
-    (is (matches? "\\w+" "foo_bar9"))
+    (is (matches? "2026" "\\d+"))
+    (is (not (matches? "20x6" "\\d+")))
+    (is (matches? "foo_bar9" "\\w+"))
     ; '-' isn't a word char
-    (is (not (matches? "\\w+" "foo-bar")))
-    (is (match? "\\s" "a b")))
+    (is (not (matches? "foo-bar" "\\w+")))
+    (is (match? "a b" "\\s")))
   ;; Before these were parsed, `\S` was the letter S, so `brood\s+(\S+)` matched nothing in
   ;; `brood 0.42.0 (b3deae5a)` and said nothing (found porting the benchmark harness).
   (test "\\D \\W \\S are the negations, standing alone and inside a set"
-    (is (matches? "\\S+" "0.42.0"))
-    (is (not (match? "\\S" " \t ")))
-    (is (matches? "\\D+" "abc-"))
-    (is (not (match? "\\D" "123")))
-    (is (matches? "\\W+" " .-"))
-    (is (not (match? "\\W" "foo_9")))
-    (is (= (map/get-in (find "brood\\s+(\\S+)\\s+\\(([0-9a-f]+)\\)" "brood 0.42.0 (b3deae5a)")
+    (is (matches? "0.42.0" "\\S+"))
+    (is (not (match? " \t " "\\S")))
+    (is (matches? "abc-" "\\D+"))
+    (is (not (match? "123" "\\D")))
+    (is (matches? " .-" "\\W+"))
+    (is (not (match? "foo_9" "\\W")))
+    (is (= (map/get-in (find "brood 0.42.0 (b3deae5a)" "brood\\s+(\\S+)\\s+\\(([0-9a-f]+)\\)")
              [:groups 0 :text])
           "0.42.0"))
-    (is (matches? "[\\S]+" "ab"))
-    (is (matches? "[\\D.]+" "a.b"))
-    (is (not (match? "[\\D]" "7")))
-    (is (matches? "[^\\S]+" " \t"))
+    (is (matches? "ab" "[\\S]+"))
+    (is (matches? "a.b" "[\\D.]+"))
+    (is (not (match? "7" "[\\D]")))
+    (is (matches? " \t" "[^\\S]+"))
     ;; `\d` is ASCII, so `\D` is its ASCII complement: a non-ASCII digit is not a `\d`
-    (is (matches? "\\D" "٣")))
+    (is (matches? "٣" "\\D")))
   (test "[...] set and [^...] negated set (explicit chars, no ranges yet)"
-    (is (matches? "[abc]+" "cabba"))
-    (is (not (matches? "[abc]+" "cabx")))
-    (is (matches? "[^abc]+" "xyz"))
-    (is (not (matches? "[^abc]+" "xya")))))
+    (is (matches? "cabba" "[abc]+"))
+    (is (not (matches? "cabx" "[abc]+")))
+    (is (matches? "xyz" "[^abc]+"))
+    (is (not (matches? "xya" "[^abc]+")))))
 
 (describe "regex alternation & groups"
   (test "| alternation"
-    (is (matches? "cat|dog" "cat"))
-    (is (matches? "cat|dog" "dog"))
-    (is (not (matches? "cat|dog" "cow"))))
+    (is (matches? "cat" "cat|dog"))
+    (is (matches? "dog" "cat|dog"))
+    (is (not (matches? "cow" "cat|dog"))))
   (test "(...) grouping, quantified"
-    (is (matches? "(ab)+" "ababab"))
-    (is (not (matches? "(ab)+" "aba")))
-    (is (matches? "(foo|bar)+baz" "foobarbaz")))
+    (is (matches? "ababab" "(ab)+"))
+    (is (not (matches? "aba" "(ab)+")))
+    (is (matches? "foobarbaz" "(foo|bar)+baz")))
   (test "escaped metacharacters are literal"
-    (is (matches? "a\\+b" "a+b"))
-    (is (not (matches? "a\\+b" "aab")))
-    (is (matches? "\\(x\\)" "(x)"))))
+    (is (matches? "a+b" "a\\+b"))
+    (is (not (matches? "aab" "a\\+b")))
+    (is (matches? "(x)" "\\(x\\)"))))
 
 (describe "regex matches? anchors the whole string"
   (test "must cover the entire string"
     (is (matches? "abc" "abc"))
-    (is (not (matches? "abc" "abcd")))
-    (is (not (matches? "abc" "xabc")))))
+    (is (not (matches? "abcd" "abc")))
+    (is (not (matches? "xabc" "abc")))))
 
 ;; ---- character-set ranges and classes ---------------------------------------
 ;; `[0-9]` used to be a set of the three characters `0`, `-` and `9`: the dash was a
@@ -96,50 +96,50 @@
 ;; "abc123" as an example of a call returning true, which it did not.
 (describe "regex character sets: ranges"
   (test "a-z spans the range, and is not three literal characters"
-    (is (match? "[0-9]" "5"))
-    (is (match? "[0-9]+" "abc123"))
-    (is (not (match? "[0-9]" "-")))
-    (is (match? "[a-z]" "m"))
-    (is (not (match? "[a-z]" "M")))
-    (is (match? "[A-Za-z]" "M")))
+    (is (match? "5" "[0-9]"))
+    (is (match? "abc123" "[0-9]+"))
+    (is (not (match? "-" "[0-9]")))
+    (is (match? "m" "[a-z]"))
+    (is (not (match? "M" "[a-z]")))
+    (is (match? "M" "[A-Za-z]")))
   (test "a dash that cannot open a range is a literal member"
-    (is (match? "[a-]" "-")) ; last in the set
-    (is (match? "[a\\-z]" "-")) ; escaped
-    (is (not (match? "[a\\-z]" "m")))) ; …so it is NOT a range
+    (is (match? "-" "[a-]")) ; last in the set
+    (is (match? "-" "[a\\-z]")) ; escaped
+    (is (not (match? "m" "[a\\-z]")))) ; …so it is NOT a range
   (test "negation applies to the whole set, ranges included"
-    (is (match? "[^a-z]" "M"))
-    (is (not (match? "[^a-z]" "m"))))
+    (is (match? "M" "[^a-z]"))
+    (is (not (match? "m" "[^a-z]"))))
   (test "classes may be written inside a set, beside chars and ranges"
-    (is (matches? "[\\d]+" "42"))
-    (is (matches? "[\\w.-]+" "foo-bar.ex"))
-    (is (not (matches? "[\\w.-]+" "foo/bar")))
-    (is (matches? "[\\s,]+" " , ")))
+    (is (matches? "42" "[\\d]+"))
+    (is (matches? "foo-bar.ex" "[\\w.-]+"))
+    (is (not (matches? "foo/bar" "[\\w.-]+")))
+    (is (matches? " , " "[\\s,]+")))
   (test "an unterminated set still takes what it has, as before"
-    (is (match? "[abc" "b"))))
+    (is (match? "b" "[abc"))))
 
 ;; ---- counted repetition ------------------------------------------------------
 (describe "regex {m,n} repetition"
   (test "{m} is exactly m"
-    (is (matches? "a{3}" "aaa"))
-    (is (not (matches? "a{3}" "aa")))
-    (is (not (matches? "a{3}" "aaaa"))))
+    (is (matches? "aaa" "a{3}"))
+    (is (not (matches? "aa" "a{3}")))
+    (is (not (matches? "aaaa" "a{3}"))))
   (test "{m,} is m or more"
-    (is (matches? "a{2,}" "aa"))
-    (is (matches? "a{2,}" "aaaaa"))
-    (is (not (matches? "a{2,}" "a"))))
+    (is (matches? "aa" "a{2,}"))
+    (is (matches? "aaaaa" "a{2,}"))
+    (is (not (matches? "a" "a{2,}"))))
   (test "{m,n} is a bounded range"
-    (is (matches? "a{2,3}" "aa"))
-    (is (matches? "a{2,3}" "aaa"))
-    (is (not (matches? "a{2,3}" "a")))
-    (is (not (matches? "a{2,3}" "aaaa"))))
+    (is (matches? "aa" "a{2,3}"))
+    (is (matches? "aaa" "a{2,3}"))
+    (is (not (matches? "a" "a{2,3}")))
+    (is (not (matches? "aaaa" "a{2,3}"))))
   (test "it repeats the preceding atom, group or class"
-    (is (matches? "(ab){2}" "abab"))
-    (is (matches? "\\d{3}" "123"))
-    (is (matches? "[a-c]{2}" "ca")))
+    (is (matches? "abab" "(ab){2}"))
+    (is (matches? "123" "\\d{3}"))
+    (is (matches? "ca" "[a-c]{2}")))
   ;; It was once expanded into copies, which copied the group: three groups, and the
   ;; one after the repetition answered at the wrong number.
   (test "a repeated group is still one group, holding the last iteration"
-    (let (m (find "(a|b){2}(x)" "abx"))
+    (let (m (find "abx" "(a|b){2}(x)"))
       (assert= 2 (count (get m :groups)))
       (assert= "b" (get (nth (get m :groups) 0) :text))
       (assert= "x" (get (nth (get m :groups) 1) :text))))
@@ -151,21 +151,21 @@
     (is (matches? "a{2" "a{2"))
     (is (matches? "a{3,1}" "a{3,1}")))
   (test "a repetition too large to expand is refused out loud, not hung on"
-    (assert= (get (try (match? "a{1,100000}" "aaa") (catch e e)) :kind) :parse)))
+    (assert= (get (try (match? "aaa" "a{1,100000}") (catch e e)) :kind) :parse)))
 
 ;; ---- lazy quantifiers --------------------------------------------------------
 ;; `a*?` used to parse as `a*` followed by a LITERAL `?`, which is what a parser does
 ;; when it has no notion of laziness and `?` is just another character.
 (describe "regex lazy quantifiers"
   (test "*? +? ?? take the shortest match, not the longest"
-    (assert= (get (find "a+" "caaab") :text) "aaa")
-    (assert= (get (find "a+?" "caaab") :text) "a")
-    (assert= (get (find "<.*>" "<a><b>") :text) "<a><b>")
-    (assert= (get (find "<.*?>" "<a><b>") :text) "<a>"))
+    (assert= (get (find "caaab" "a+") :text) "aaa")
+    (assert= (get (find "caaab" "a+?") :text) "a")
+    (assert= (get (find "<a><b>" "<.*>") :text) "<a><b>")
+    (assert= (get (find "<a><b>" "<.*?>") :text) "<a>"))
   (test "they still match the same LANGUAGE — only the choice differs"
-    (is (matches? "a*?" ""))
-    (is (matches? "a+?" "aaa"))
-    (is (matches? "a??" "a"))))
+    (is (matches? "" "a*?"))
+    (is (matches? "aaa" "a+?"))
+    (is (matches? "a" "a??"))))
 
 ;; ---- captures ----------------------------------------------------------------
 (describe "regex find: where, and which groups"
@@ -173,78 +173,78 @@
   (defn- gtxt (m k) (let (g (nth (get m :groups) k nil)) (when g (get g :text))))
 
   (test "a match carries its own half-open span"
-    (let (m (find "\\d+" "a1b22c333"))
+    (let (m (find "a1b22c333" "\\d+"))
       (assert= (get m :text) "1")
       (assert= (get m :start) 1)
       (assert= (get m :end) 2)))
   (test "no match is nil, not an empty match"
-    (is (nil? (find "zzz" "abc"))))
+    (is (nil? (find "abc" "zzz"))))
   (test "groups are numbered by their opening paren, left to right"
-    (let (m (find "([\\w.]+):(\\d+)" "at worker.ex:42 today"))
+    (let (m (find "at worker.ex:42 today" "([\\w.]+):(\\d+)"))
       (assert= (get m :text) "worker.ex:42")
       (assert= (get m :start) 3)
       (assert= (gtxt m 0) "worker.ex")
       (assert= (gtxt m 1) "42")
       (assert= (get (nth (get m :groups) 1) :start) 13)))
   (test "a nested group is numbered after the one enclosing it"
-    (let (m (find "((a)(b))c" "abc"))
+    (let (m (find "abc" "((a)(b))c"))
       (assert= (gtxt m 0) "ab")
       (assert= (gtxt m 1) "a")
       (assert= (gtxt m 2) "b")))
   (test "a group that did not participate is nil, not \"\""
-    (let (m (find "(a)|(b)" "zzb"))
+    (let (m (find "zzb" "(a)|(b)"))
       (assert= (get m :text) "b")
       (is (nil? (gtxt m 0)))
       (assert= (gtxt m 1) "b")))
   (test "(?:...) groups, and are not numbered"
-    (let (m (find "(?:ab)+(c)" "ababc"))
+    (let (m (find "ababc" "(?:ab)+(c)"))
       (assert= (get m :text) "ababc")
       (assert= (count (get m :groups)) 1)
       (assert= (gtxt m 0) "c")))
   (test "a repeated group keeps its LAST iteration, as everywhere else"
-    (assert= (gtxt (find "(?:(\\w)-)+" "a-b-c-") 0) "c"))
+    (assert= (gtxt (find "a-b-c-" "(?:(\\w)-)+") 0) "c"))
   (test "leftmost wins, and anchors still mean the whole string"
-    (assert= (txt (find "a|ab" "xxab")) "a")
-    (is (nil? (find "^a" "ba")))
-    (assert= (txt (find "b$" "ab")) "b"))
+    (assert= (txt (find "xxab" "a|ab")) "a")
+    (is (nil? (find "ba" "^a")))
+    (assert= (txt (find "ab" "b$")) "b"))
   (test "the match is greedy or lazy as the pattern asked"
-    (assert= (txt (find "\\w+" "hello world")) "hello")))
+    (assert= (txt (find "hello world" "\\w+")) "hello")))
 
 (describe "regex find-all"
   (test "every non-overlapping match, left to right"
-    (assert= (into [] (map (find-all "\\d+" "a1b22c333") (fn (m) (get m :text)))) ["1" "22" "333"]))
+    (assert= (into [] (map (find-all "a1b22c333" "\\d+") (fn (m) (get m :text)))) ["1" "22" "333"]))
   (test "no matches is an empty vector"
-    (assert= (find-all "z" "abc") []))
+    (assert= (find-all "abc" "z") []))
   (test "an empty match advances rather than repeating forever"
     ;; `a*` matches "" at every position it cannot match an `a`; the guard is what
     ;; makes this terminate at all, so the assertion is really that it returns.
-    (assert= (count (find-all "a*" "bb")) 3))
+    (assert= (count (find-all "bb" "a*")) 3))
   (test "matches do not overlap"
-    (assert= (into [] (map (find-all "aa" "aaaa") (fn (m) (get m :start)))) [0 2])))
+    (assert= (into [] (map (find-all "aaaa" "aa") (fn (m) (get m :start)))) [0 2])))
 
 (describe "regex replace"
   (test "a template splices $0, the groups, and $$"
-    (assert= (replace "(\\w+)@(\\w+)" "a@b" "$2@$1") "b@a")
-    (assert= (replace "\\d+" "a1b22" "[$0]") "a[1]b[22]")
+    (assert= (replace "a@b" "(\\w+)@(\\w+)" "$2@$1") "b@a")
+    (assert= (replace "a1b22" "\\d+" "[$0]") "a[1]b[22]")
     (assert= (replace "a" "a" "$$") "$"))
   (test "a function computes the replacement from the match"
-    (assert= (replace "\\d+" "a1b22" (fn (m) (str "<" (get m :text) ">"))) "a<1>b<22>"))
+    (assert= (replace "a1b22" "\\d+" (fn (m) (str "<" (get m :text) ">"))) "a<1>b<22>"))
   (test "a group that did not participate expands to nothing"
-    (assert= (replace "(a)|(b)" "b" "[$1]") "[]"))
+    (assert= (replace "b" "(a)|(b)" "[$1]") "[]"))
   (test "no match leaves the string alone"
-    (assert= (replace "z" "abc" "!") "abc")))
+    (assert= (replace "abc" "z" "!") "abc")))
 
 (describe "regex split"
   (test "splits on the pattern, dropping the separators"
-    (assert= (split "\\s*,\\s*" "a , b,c") ["a" "b" "c"]))
+    (assert= (split "a , b,c" "\\s*,\\s*") ["a" "b" "c"]))
   (test "adjacent separators leave an empty piece"
-    (assert= (split "," "a,,b") ["a" "" "b"]))
+    (assert= (split "a,,b" ",") ["a" "" "b"]))
   (test "no match is the whole string, one piece"
-    (assert= (split "z" "abc") ["abc"])))
+    (assert= (split "abc" "z") ["abc"])))
 
 ;; The two engines share a parser and an NFA construction, so the property worth
 ;; asserting is that they never disagree about whether there is a match at all.
-(defn- agree? (pattern s) (= (match? pattern s) (not (nil? (find pattern s)))))
+(defn- agree? (pattern s) (= (match? s pattern) (not (nil? (find s pattern)))))
 
 (describe "match?, matches?, find and find-all agree on the same patterns"
   (test "across sets, quantifiers, alternation and anchors"
@@ -263,30 +263,30 @@
 
 (describe "\\b and \\B — word boundaries (zero-width)"
   (test "find sees a whole word and not the same letters inside one"
-    (assert= (map (regex/find-all "\\bfi\\b" "file fi fi_ x fi") (fn (m) (get m :start)))
+    (assert= (map (regex/find-all "file fi fi_ x fi" "\\bfi\\b") (fn (m) (get m :start)))
       (list 5 14))
-    (is (nil? (regex/find "\\bfi\\b" "file")))
-    (assert= (get (regex/find "\\bfi\\b" "fi") :text) "fi"))
+    (is (nil? (regex/find "file" "\\bfi\\b")))
+    (assert= (get (regex/find "fi" "\\bfi\\b") :text) "fi"))
   (test "the string's edges are boundaries; \\B is the complement"
-    (assert= (get (regex/find "\\b\\w+\\b" "  hello  ") :text) "hello")
-    (assert= (map (regex/find-all "\\Bi\\B" "fix i fi") (fn (m) (get m :start))) (list 1))
-    (assert= (get (regex/find "\\B" "ab") :start) 1))
+    (assert= (get (regex/find "  hello  " "\\b\\w+\\b") :text) "hello")
+    (assert= (map (regex/find-all "fix i fi" "\\Bi\\B") (fn (m) (get m :start))) (list 1))
+    (assert= (get (regex/find "ab" "\\B") :start) 1))
   (test "match? and matches? answer a boundary pattern too"
-    (is (regex/match? "\\bthen\\b" "if x; then"))
-    (is (not (regex/match? "\\bfi\\b" "file")))
-    (is (regex/matches? "\\bfi\\b|\\bdone\\b" "done"))
-    (is (not (regex/matches? "\\bfi\\b" "fix")))
-    (is (not (regex/match? "\\b" "")))
-    (is (regex/match? "\\B" "")))
+    (is (regex/match? "if x; then" "\\bthen\\b"))
+    (is (not (regex/match? "file" "\\bfi\\b")))
+    (is (regex/matches? "done" "\\bfi\\b|\\bdone\\b"))
+    (is (not (regex/matches? "fix" "\\bfi\\b")))
+    (is (not (regex/match? "" "\\b")))
+    (is (regex/match? "" "\\B")))
   (test "a boundary inside a group and under a quantifier"
-    (assert= (map (regex/find-all "(\\bin\\b)" "in inside in") (fn (m) (get m :start))) (list 0 10))
-    (assert= (get (regex/find "\\b\\w+\\b(?:\\s+\\b\\w+\\b)*" "a bb ccc") :text) "a bb ccc")))
+    (assert= (map (regex/find-all "in inside in" "(\\bin\\b)") (fn (m) (get m :start))) (list 0 10))
+    (assert= (get (regex/find "a bb ccc" "\\b\\w+\\b(?:\\s+\\b\\w+\\b)*") :text) "a bb ccc")))
 
 ;; `tokens` — the lexer's scan (ADR-352, native since ADR-389): where a match begins and
 ;; how far it reaches, with the RULE as the token's identity instead of a capture group.
 (defn- toks (rules s)
   "`[tag text]` per token — the shape the assertions read."
-  (map (regex/tokens rules s) (fn (t) [(get t :tag) (get t :text)])))
+  (map (regex/tokens s rules) (fn (t) [(get t :tag) (get t :text)])))
 
 (describe "regex tokens — a rule table scanned as one"
   (test "the earliest position wins, and at it the first rule in table order"
@@ -295,14 +295,14 @@
     ;; two rules match at 0: the first listed takes it, even though the second is longer
     (assert= (toks [["ab" :short] ["abc" :long]] "abc") (list [:short "ab"])))
   (test "a rule takes its longest match; tokens are ascending, non-overlapping offsets"
-    (assert= (map (regex/tokens [["\\d+" :n]] "a12b345")
+    (assert= (map (regex/tokens "a12b345" [["\\d+" :n]])
                (fn (t) [(get t :start) (get t :end) (get t :text)]))
       (list [1 3 "12"] [4 7 "345"]))
     (assert= (toks [["a|ab|abc" :x]] "abcd") (list [:x "abc"])))
   (test "^ and $ anchor to the string's ends, never to a token's"
     (assert= (toks [["^#.*" :c]] "x #a") '())
     (assert= (toks [["^#.*" :c]] "#a b") (list [:c "#a b"]))
-    (assert= (map (regex/tokens [["b$" :e]] "bab") (fn (t) (get t :start))) (list 2))
+    (assert= (map (regex/tokens "bab" [["b$" :e]]) (fn (t) (get t :start))) (list 2))
     (assert= (toks [["a+$" :e]] "aa aa") (list [:e "aa"])))
   (test "a \\b at a rule's edge is a word boundary"
     (assert= (toks [["\\b\\d+\\b" :n]] "a1 22 3b 44") (list [:n "22"] [:n "44"]))
@@ -313,11 +313,11 @@
   (test "a \\b inside a rule is a boundary too — the old engine could only guard the edges"
     (assert= (toks [["a\\b" :x]] "a ab") (list [:x "a"]))
     (assert= (toks [["\\w+\\b-" :x]] "ab- a-b") (list [:x "ab-"] [:x "a-"]))
-    (assert= (regex/tokens [["a\\bb" :x]] "ab") []))
+    (assert= (regex/tokens "ab" [["a\\bb" :x]]) []))
   (test "an empty match never makes a token; the empty string has none"
-    (assert= (regex/tokens [["a*" :a]] "bbb") [])
+    (assert= (regex/tokens "bbb" [["a*" :a]]) [])
     (assert= (toks [["a*" :a] ["b" :b]] "bab") (list [:b "b"] [:a "a"] [:b "b"]))
-    (assert= (regex/tokens [["x" :x]] "") []))
+    (assert= (regex/tokens "" [["x" :x]]) []))
   (test "agrees with find-all over the same rules joined as an alternation"
     (let (rules [["(?:^|\\s)#.*" :comment]
                   ["\"(?:[^\"\\\\]|\\\\.)*\"" :string]
@@ -326,7 +326,7 @@
           joined (string/join (map rules (fn ([p _]) (str "(" p ")"))) "|")
           lines (list "echo \"$HOME # x\" $USER # done" "# only" "no tokens here?" "a\"b\"c")
           via-find (fn (s)
-                     (map (regex/find-all joined s)
+                     (map (regex/find-all s joined)
                        (fn (m)
                          (let (groups (get m :groups)
                                which (or (seq/find (range (count groups))
@@ -338,123 +338,123 @@
 
 (describe "regex find — a start found far along a line"
   (test "results are unchanged where a match exists, including empty and end matches"
-    (assert= (get (regex/find "a*" "bbb") :end) 0)
-    (assert= (map (regex/find-all "\\d*" "a1") (fn (m) [(get m :start) (get m :end)]))
+    (assert= (get (regex/find "bbb" "a*") :end) 0)
+    (assert= (map (regex/find-all "a1" "\\d*") (fn (m) [(get m :start) (get m :end)]))
       (list [0 0] [1 2] [2 2]))
-    (assert= (get (regex/find "x*$" "ab") :start) 2)
-    (assert= (map (regex/find-all "(?:^|\\s)#.*" "a #b #c") (fn (m) [(get m :start) (get m :end)]))
+    (assert= (get (regex/find "ab" "x*$") :start) 2)
+    (assert= (map (regex/find-all "a #b #c" "(?:^|\\s)#.*") (fn (m) [(get m :start) (get m :end)]))
       (list [1 7]))
-    (assert= (get (regex/find "(a)|(b)" "xxb") :start) 2)
-    (assert= (map (regex/find-all "a|" "ba") (fn (m) (get m :start))) (list 0 1 2)))
+    (assert= (get (regex/find "xxb" "(a)|(b)") :start) 2)
+    (assert= (map (regex/find-all "ba" "a|") (fn (m) (get m :start))) (list 0 1 2)))
   (test "an anchor-only pattern matches where the anchor is"
-    (assert= (get (regex/find "^" "abc") :start) 0)
-    (assert= (get (regex/find "$" "abc") :start) 3)
-    (assert= (get (regex/find "^$" "") :start) 0))
+    (assert= (get (regex/find "abc" "^") :start) 0)
+    (assert= (get (regex/find "abc" "$") :start) 3)
+    (assert= (get (regex/find "" "^$") :start) 0))
   (test "a long line with no match is answered without a match"
-    (is (nil? (regex/find "#.*" (string/repeat "abcdefgh" 200))))
-    (assert= (regex/find-all "\"[^\"]*\"" (string/repeat "no quotes " 100)) [])))
+    (is (nil? (regex/find (string/repeat "abcdefgh" 200) "#.*")))
+    (assert= (regex/find-all (string/repeat "no quotes " 100) "\"[^\"]*\"") [])))
 
 (describe "regex paint — a line rule: prefix, the painted text, suffix"
   (test "paints the text between a prefix at the line's start and a suffix after it"
-    (assert= (regex/paint "^\\s*" "\\[[^\\]]*\\]" "" "  [core] x") [2 8])
-    (assert= (regex/paint "^" "[^\\s:#=][^:#=]*" ":(?:[^=]|$)" "build: x") [0 5])
+    (assert= (regex/paint "  [core] x" "^\\s*" "\\[[^\\]]*\\]" "") [2 8])
+    (assert= (regex/paint "build: x" "^" "[^\\s:#=][^:#=]*" ":(?:[^=]|$)") [0 5])
     ;; `:=` is an assignment, not a target: no `:` end lets the suffix follow
-    (is (nil? (regex/paint "^" "[^\\s:#=][^:#=]*" ":(?:[^=]|$)" "CC := gcc"))))
+    (is (nil? (regex/paint "CC := gcc" "^" "[^\\s:#=][^:#=]*" ":(?:[^=]|$)"))))
   (test "a greedy paint backtracks to the longest end the suffix follows; a lazy one takes the shortest"
-    (assert= (regex/paint "^" "[a-z :]+" ":" "a b: c: d") [0 6])
-    (assert= (regex/paint "^" "[a-z :]+?" ":" "a b: c: d") [0 3]))
+    (assert= (regex/paint "a b: c: d" "^" "[a-z :]+" ":") [0 6])
+    (assert= (regex/paint "a b: c: d" "^" "[a-z :]+?" ":") [0 3]))
   (test "the prefix takes its longest match first, and a line that does not match answers nil"
-    (assert= (regex/paint "^\\s*(?:-\\s+)*"
-               "[A-Za-z0-9_.\\-\"' ]+?" "\\s*:(?:\\s|$)" "  - brood: \"0.27\"")
+    (assert= (regex/paint "  - brood: \"0.27\""
+               "^\\s*(?:-\\s+)*" "[A-Za-z0-9_.\\-\"' ]+?" "\\s*:(?:\\s|$)")
       [4 9])
-    (is (nil? (regex/paint "^" "[a-z]+" ":" "abc")))
-    (is (nil? (regex/paint "^" "x" "" "")))
+    (is (nil? (regex/paint "abc" "^" "[a-z]+" ":")))
+    (is (nil? (regex/paint "" "^" "x" "")))
     ;; a boundary is allowed in a line rule now, as anywhere
-    (assert= (regex/paint "^" "\\bx\\b" "" "x y") [0 1]))
+    (assert= (regex/paint "x y" "^" "\\bx\\b" "") [0 1]))
   (test "a tokenizer held in a def scans like its table"
     (let (tz (regex/tokenizer [["\\d+" :n] ["[a-z]+" :w]]))
-      (assert= (map (regex/tokens tz "ab12") (fn (t) (get t :tag))) (list :w :n))
-      (assert= (regex/tokens tz "ab12") (regex/tokens [["\\d+" :n] ["[a-z]+" :w]] "ab12")))))
+      (assert= (map (regex/tokens "ab12" tz) (fn (t) (get t :tag))) (list :w :n))
+      (assert= (regex/tokens "ab12" tz) (regex/tokens "ab12" [["\\d+" :n] ["[a-z]+" :w]])))))
 
 ;; ---- the dialect is Brood's, the engine native (ADR-389) ------------------------------
 ;; The parser translates every construct explicitly, so the engine's own readings of the
 ;; same characters never leak through. Each of these is a place the two syntaxes differ.
 (describe "regex dialect — what the translation keeps from the engine's syntax"
   (test ". crosses a newline; ^ and $ are the whole string, not a line"
-    (is (matches? "a.b" "a\nb"))
-    (is (not (match? "^b" "a\nb")))
-    (is (not (match? "a$" "a\nb"))))
+    (is (matches? "a\nb" "a.b"))
+    (is (not (match? "a\nb" "^b")))
+    (is (not (match? "a\nb" "a$"))))
   (test "\\n \\t \\r \\f \\v are the control characters, as every other engine reads them"
-    (is (matches? "a\\nb" "a\nb"))
-    (is (not (match? "\\n" "n")))
-    (is (matches? "\\t\\r\\f\\v" "\t\r\u{c}\u{b}"))
+    (is (matches? "a\nb" "a\\nb"))
+    (is (not (match? "n" "\\n")))
+    (is (matches? "\t\r\u{c}\u{b}" "\\t\\r\\f\\v"))
     (is (matches? "a\nb" "a\nb"))
     ;; the pattern a carried-over `[ \t]*` was written to be: it matched the letter t
-    (assert= (regex/replace "^[ \\t]*" "\t  x" "") "x")
-    (is (not (match? "^[ \\t]+$" "t")))
-    (is (matches? "[^\\n]+" "abc"))
-    (is (not (match? "[^\\n]" "\n"))))
+    (assert= (regex/replace "\t  x" "^[ \\t]*" "") "x")
+    (is (not (match? "t" "^[ \\t]+$")))
+    (is (matches? "abc" "[^\\n]+"))
+    (is (not (match? "\n" "[^\\n]"))))
   (test "a hex escape is the character with that code point; a malformed one is the letter"
-    (is (matches? "\\x41\\x{42}\\u0043\\u{1F600}" "ABC😀"))
-    (is (matches? "[\\x00-\\x7F]+" "plain ASCII ~"))
-    (is (not (match? "[\\x00-\\x7F]" "é")))
-    (is (matches? "[a-\\x{7A}]+" "az"))
-    (is (matches? "\\xg" "xg"))
-    (is (matches? "\\x4" "x4"))
+    (is (matches? "ABC😀" "\\x41\\x{42}\\u0043\\u{1F600}"))
+    (is (matches? "plain ASCII ~" "[\\x00-\\x7F]+"))
+    (is (not (match? "é" "[\\x00-\\x7F]")))
+    (is (matches? "az" "[a-\\x{7A}]+"))
+    (is (matches? "xg" "\\xg"))
+    (is (matches? "x4" "\\x4"))
     ;; past Unicode, or a surrogate: the letter, and the braces after it are themselves
-    (is (matches? "[\\u{110000}]+" "u{10}"))
-    (is (matches? "\\u{D800}" "u{D800}")))
+    (is (matches? "u{10}" "[\\u{110000}]+"))
+    (is (matches? "u{D800}" "\\u{D800}")))
   (test "any other escaped letter is that letter"
-    (is (matches? "\\q\\y" "qy"))
-    (is (matches? "[\\q]" "q")))
+    (is (matches? "qy" "\\q\\y"))
+    (is (matches? "q" "[\\q]")))
   (test "an escaped character is the low or high end of a range like a plain one"
-    (is (matches? "[\\--/]+" "-./"))
-    (is (matches? "[\\]-a]+" "]^_`a"))
+    (is (matches? "-./" "[\\--/]+"))
+    (is (matches? "]^_`a" "[\\]-a]+"))
     ;; a `-` before a class is a member, as it is last in the set
-    (is (matches? "[a-\\d]+" "a-1")))
+    (is (matches? "a-1" "[a-\\d]+")))
   (test "a character the engine reads as syntax is a literal where the dialect says so"
     (is (matches? "a&&b" "a&&b"))
-    (is (matches? "[a&&b]+" "a&b"))
-    (is (matches? "[~-]+" "~-~"))
+    (is (matches? "a&b" "[a&&b]+"))
+    (is (matches? "~-~" "[~-]+"))
     (is (matches? "x#y" "x#y"))
-    (is (matches? "\\<a\\>" "<a>")))
+    (is (matches? "<a>" "\\<a\\>")))
   (test "a stray metacharacter is the character it looks like"
     (is (matches? "a)" "a)"))
     ;; a stray ) used to END the pattern: `a)x` was `a`, and matched "ay"
-    (is (not (match? "a)x" "ay")))
-    (is (matches? "(a))" "a)"))
-    (is (matches? "[)]" ")"))
+    (is (not (match? "ay" "a)x")))
+    (is (matches? "a)" "(a))"))
+    (is (matches? ")" "[)]"))
     (is (matches? "*a" "*a"))
-    (is (matches? "a**" "a*"))
-    (is (matches? "(a" "a")))
+    (is (matches? "a*" "a**"))
+    (is (matches? "a" "(a")))
   (test "an empty set matches nothing, a negated empty one anything, a backwards range nothing"
-    (is (not (match? "[]" "abc")))
-    (is (matches? "[^]" "\n"))
-    (is (not (match? "[z-a]" "m"))))
+    (is (not (match? "abc" "[]")))
+    (is (matches? "\n" "[^]"))
+    (is (not (match? "m" "[z-a]"))))
   (test "\\d is ASCII — what string/->number reads — while \\w and \\s are Unicode"
-    (is (not (matches? "\\d" "٣")))
-    (is (matches? "\\w+" "日本語"))
-    (is (matches? "\\w+" "café"))
-    (is (matches? "\\s" "\u{a0}"))
-    (assert= (map (find-all "\\b\\w+\\b" "naïve café") (fn (m) (get m :text)))
+    (is (not (matches? "٣" "\\d")))
+    (is (matches? "日本語" "\\w+"))
+    (is (matches? "café" "\\w+"))
+    (is (matches? "\u{a0}" "\\s"))
+    (assert= (map (find-all "naïve café" "\\b\\w+\\b") (fn (m) (get m :text)))
       (list "naïve" "café"))))
 
 (describe "regex offsets are characters, not bytes"
   (test "find and its groups past multi-byte characters"
-    (let (m (find "(\\d+):(\\d+)" "héllo wörld 12:34"))
+    (let (m (find "héllo wörld 12:34" "(\\d+):(\\d+)"))
       (assert= (get m :start) 12)
       (assert= (get m :text) "12:34")
       (assert= (get (second (get m :groups)) :start) 15)))
   (test "find-all, including an empty match stepping over a multi-byte character"
-    (assert= (map (find-all "x*" "éxé") (fn (m) [(get m :start) (get m :end)]))
+    (assert= (map (find-all "éxé" "x*") (fn (m) [(get m :start) (get m :end)]))
       (list [0 0] [1 2] [2 2] [3 3])))
   (test "tokens and paint"
-    (assert= (map (tokens [["[a-zé]+" :w]] "→ été ok") (fn (t) [(get t :start) (get t :end)]))
+    (assert= (map (tokens "→ été ok" [["[a-zé]+" :w]]) (fn (t) [(get t :start) (get t :end)]))
       (list [2 5] [6 8]))
-    (assert= (paint "^·\\s*" "[a-z]+" ":" "· key: v") [2 5]))
+    (assert= (paint "· key: v" "^·\\s*" "[a-z]+" ":") [2 5]))
   (test "replace and split splice at the right characters"
-    (assert= (replace "ö" "föö" "o") "foo")
-    (assert= (split "→" "a→b→c") ["a" "b" "c"])))
+    (assert= (replace "föö" "ö" "o") "foo")
+    (assert= (split "a→b→c" "→") ["a" "b" "c"])))
 
 ;; Every language feature runs across cores (CLAUDE.md): the compiled patterns are one
 ;; process-wide cache the worker threads share, so many processes matching at once — the
@@ -466,8 +466,8 @@
           _ (doseq (i (range n))
               (spawn (fn ()
                        (let (line (str "file" i ".ex:" (* i 7) ": boom")
-                             m (find "([\\w.]+):(\\d+)" line)
-                             toks (tokens [["\\d+" :n] ["[a-z]+" :w]] line))
+                             m (find line "([\\w.]+):(\\d+)")
+                             toks (tokens line [["\\d+" :n] ["[a-z]+" :w]]))
                          (send me [i (get (second (get m :groups)) :text) (count toks)])))))
           got (fold (range n) {} (fn (acc _) (receive ([i text k] (assoc acc i [text k]))))))
       (doseq (i (range n))
@@ -482,83 +482,83 @@
   (test "rope-find is find over the flattened text, from an offset"
     (let (text "alpha beta\ngamma beta delta"
           r (text/string-> text))
-      (assert= (get (rope-find "beta" r 0) :start) 6)
-      (assert= (get (rope-find "beta" r 7) :start) 17)
-      (assert= (rope-find "beta" r 18) nil)
-      (assert= (get (rope-find "(\\w+) (\\w+)" r 11) :text) "gamma beta")
-      (assert= (get (second (get (rope-find "(\\w+) (\\w+)" r 11) :groups)) :text) "beta")))
+      (assert= (get (rope-find r "beta" 0) :start) 6)
+      (assert= (get (rope-find r "beta" 7) :start) 17)
+      (assert= (rope-find r "beta" 18) nil)
+      (assert= (get (rope-find r "(\\w+) (\\w+)" 11) :text) "gamma beta")
+      (assert= (get (second (get (rope-find r "(\\w+) (\\w+)" 11) :groups)) :text) "beta")))
   (test "a match straddling the rope's leaves is found whole"
     (let (text (string/join (map (range 3000) (fn (i) (str "w" i))) " ")
           r (text/string-> text)
           at (index-of text "w2999"))
-      (assert= (get (rope-find "w2999\\b" r 0) :start) at)
-      (assert= (first (rope-count "w\\d+" r 0 (string/length text))) 3000)))
+      (assert= (get (rope-find r "w2999\\b" 0) :start) at)
+      (assert= (first (rope-count r "w\\d+" 0 (string/length text))) 3000)))
   (test "line mode: ^ $ and . stay on a line unless :lines? is false"
     (let (r (text/string-> "ab\ncd\nab"))
-      (assert= (get (rope-find "^ab" r 1) :start) 6)
-      (assert= (get (rope-find "b$" r 0) :start) 1)
-      (assert= (get (rope-find "b.c" r 0) :start) nil)
-      (assert= (get (rope-find "b.c" r 0 {:lines? false}) :start) 1)
-      (assert= (rope-find "^ab" r 1 {:lines? false}) nil)))
+      (assert= (get (rope-find r "^ab" 1) :start) 6)
+      (assert= (get (rope-find r "b$" 0) :start) 1)
+      (assert= (get (rope-find r "b.c" 0) :start) nil)
+      (assert= (get (rope-find r "b.c" 0 {:lines? false}) :start) 1)
+      (assert= (rope-find r "^ab" 1 {:lines? false}) nil)))
   (test ":fold? ignores case"
     (let (r (text/string-> "Foo FOO foo"))
-      (assert= (map (rope-spans "foo" r 0 100) first) '(8))
-      (assert= (map (rope-spans "foo" r 0 100 {:fold? true}) first) '(0 4 8))))
+      (assert= (map (rope-spans r "foo" 0 100) first) '(8))
+      (assert= (map (rope-spans r "foo" 0 100 {:fold? true}) first) '(0 4 8))))
   (test "a match is never empty"
     (let (r (text/string-> "aa x b xx"))
-      (assert= (rope-spans "x*" r 0 100) [[3 4] [7 9]])
-      (assert= (get (rope-find "x*" r 0) :start) 3)
-      (assert= (get (rope-find "x*" r 0 {:empty? true}) :end) 0)
-      (assert= (get (rope-find-backward "x*" r 5 {:empty? true}) :start) 5)
-      (assert= (get (rope-find-backward "x*" r 5) :start) 3)))
+      (assert= (rope-spans r "x*" 0 100) [[3 4] [7 9]])
+      (assert= (get (rope-find r "x*" 0) :start) 3)
+      (assert= (get (rope-find r "x*" 0 {:empty? true}) :end) 0)
+      (assert= (get (rope-find-backward r "x*" 5 {:empty? true}) :start) 5)
+      (assert= (get (rope-find-backward r "x*" 5) :start) 3)))
   (test ":bound — a match ends by it, look-around reads past it (ADR-554)"
     (let (r (text/string-> "aaaa foo\nbar foobar üüü"))
-      (assert= (get (rope-find "a+" r 0 {:bound 2}) :text) "aa")
-      (assert= (get (rope-find "a+" r 0) :text) "aaaa")
-      (assert= (rope-find "foo" r 0 {:bound 7}) nil)
-      (assert= (get (rope-find "foo" r 0 {:bound 8}) :start) 5)
+      (assert= (get (rope-find r "a+" 0 {:bound 2}) :text) "aa")
+      (assert= (get (rope-find r "a+" 0) :text) "aaaa")
+      (assert= (rope-find r "foo" 0 {:bound 7}) nil)
+      (assert= (get (rope-find r "foo" 0 {:bound 8}) :start) 5)
       ;; `$` at the bound is a line's end only where the text has one
-      (assert= (get (rope-find "o$" r 0 {:bound 8}) :start) 7)
-      (assert= (rope-find "foo$" r 9 {:bound 16}) nil)
+      (assert= (get (rope-find r "o$" 0 {:bound 8}) :start) 7)
+      (assert= (rope-find r "foo$" 9 {:bound 16}) nil)
       ;; `\b` at the bound sees `bar` go on
-      (assert= (rope-find "foo\\b" r 9 {:bound 16}) nil)
+      (assert= (rope-find r "foo\\b" 9 {:bound 16}) nil)
       ;; groups come from the bounded match
-      (assert= (get (first (get (rope-find "(a+)" r 0 {:bound 3}) :groups)) :text) "aaa")
+      (assert= (get (first (get (rope-find r "(a+)" 0 {:bound 3}) :groups)) :text) "aaa")
       ;; a Unicode word boundary quits the lazy DFA: the fallback is bounded too
-      (assert= (get (rope-find "\\bü+" r 20 {:bound 22}) :text) "üü")
-      (assert= (rope-find "ü\\b" r 20 {:bound 22}) nil)
+      (assert= (get (rope-find r "\\bü+" 20 {:bound 22}) :text) "üü")
+      (assert= (rope-find r "ü\\b" 20 {:bound 22}) nil)
       ;; an empty match at the bound is an answer when one is asked for
-      (assert= (get (rope-find "x*" r 2 {:bound 2 :empty? true}) :start) 2)
+      (assert= (get (rope-find r "x*" 2 {:bound 2 :empty? true}) :start) 2)
       ;; a greedy match through the fallback reaches the rope's end whole
-      (assert= (get (rope-find "\\bü+" r 20) :text) "üüü")))
+      (assert= (get (rope-find r "\\bü+" 20) :text) "üüü")))
   (test "rope-find-backward: the last start, ending by `before`"
     (let (r (text/string-> "foo foo xfoo"))
-      (assert= (get (rope-find-backward "fo+" r 12) :start) 9)
-      (assert= (get (rope-find-backward "fo+" r 11) :text) "fo")
-      (assert= (get (rope-find-backward "fo+" r 9) :start) 4)
-      (assert= (rope-find-backward "fo+" r 1) nil)))
+      (assert= (get (rope-find-backward r "fo+" 12) :start) 9)
+      (assert= (get (rope-find-backward r "fo+" 11) :text) "fo")
+      (assert= (get (rope-find-backward r "fo+" 9) :start) 4)
+      (assert= (rope-find-backward r "fo+" 1) nil)))
   (test "rope-count counts the matches that START before its limit"
     (let (r (text/string-> "ab ab ab ab"))
-      (assert= (rope-count "ab" r 0 6) [2 6])
-      (assert= (rope-count "ab" r 0 7) [3 8])
-      (assert= (rope-count "ab" r 6 100) [2 nil])))
+      (assert= (rope-count r "ab" 0 6) [2 6])
+      (assert= (rope-count r "ab" 0 7) [3 8])
+      (assert= (rope-count r "ab" 6 100) [2 nil])))
   (test "a count taken in slices adds up to the whole"
     (let (text (string/join (map (range 500) (fn (i) (if (= 0 (math/mod i 3)) "hit" "miss"))) " ")
           r (text/string-> text)
-          whole (count (find-all "hit" text)))
+          whole (count (find-all text "hit")))
       (letrec (slices (fn (from total)
-                        (let ([n resume] (rope-count "hit" r from (+ from 50)))
+                        (let ([n resume] (rope-count r "hit" from (+ from 50)))
                           (if (nil? resume) (+ total n) (slices resume (+ total n))))))
         (assert= (slices 0 0) whole))))
   (test "a Unicode word boundary before non-ASCII text still answers"
     (let (r (text/string-> "über foo über foo"))
-      (assert= (map (rope-spans "\\bfoo\\b" r 0 100) first) '(5 14))
-      (assert= (get (rope-find-backward "\\bfoo\\b" r 17) :start) 14))))
+      (assert= (map (rope-spans r "\\bfoo\\b" 0 100) first) '(5 14))
+      (assert= (get (rope-find-backward r "\\bfoo\\b" 17) :start) 14))))
 
 (describe "regex escape and incomplete?"
   (test "escape matches its text literally"
     (doseq (s ["a.b" "(x)" "[y]" "1+1=2?" "^$|\\" "{3}"])
-      (is (matches? (escape s) s))))
+      (is (matches? s (escape s)))))
   (test "incomplete? — an unclosed group or set, or a trailing backslash"
     (is (incomplete? "foo\\"))
     (is (incomplete? "(a|b"))
@@ -573,64 +573,64 @@
 ;; the POSIX bracket classes — read the same by the string searches and the rope searches.
 (describe "regex case folding"
   (test "(?i) folds the rest of the pattern, every alternative included"
-    (is (match? "(?i)password:" "[sudo] Password: "))
-    (is (match? "(?i)abc|xyz" "XYZ"))
-    (is (not (match? "password:" "Password:"))))
+    (is (match? "[sudo] Password: " "(?i)password:"))
+    (is (match? "XYZ" "(?i)abc|xyz"))
+    (is (not (match? "Password:" "password:"))))
   (test "(?-i) turns it back off, and (?i:…) folds one group"
-    (is (match? "(?i)a(?-i)b" "Ab"))
-    (is (not (match? "(?i)a(?-i)b" "AB")))
-    (is (match? "x(?i:abc)y" "xABCy"))
-    (is (not (match? "x(?i:abc)y" "XABCY"))))
+    (is (match? "Ab" "(?i)a(?-i)b"))
+    (is (not (match? "AB" "(?i)a(?-i)b")))
+    (is (match? "xABCy" "x(?i:abc)y"))
+    (is (not (match? "XABCY" "x(?i:abc)y"))))
   (test "a folding group does not capture; the groups after it keep their numbers"
-    (let (m (find "(?i:id)=(\\d+)" "ID=42"))
+    (let (m (find "ID=42" "(?i:id)=(\\d+)"))
       (assert= (get m :text) "ID=42")
       (assert= (count (get m :groups)) 1)
       (assert= (get (first (get m :groups)) :text) "42")))
   (test ":fold? on every string search is (?i) in front"
-    (is (match? "^abc$" "ABC" {:fold? true}))
-    (is (matches? "[a-c]+" "AbC" {:fold? true}))
-    (assert= (get (find "beta" "ALPHA BETA" {:fold? true}) :start) 6)
-    (assert= (count (find-all "o" "fOo" {:fold? true})) 2)
-    (assert= (replace "x" "aXbx" "-" {:fold? true}) "a-b-")
-    (assert= (split "and" "aANDb" {:fold? true}) ["a" "b"]))
+    (is (match? "ABC" "^abc$" {:fold? true}))
+    (is (matches? "AbC" "[a-c]+" {:fold? true}))
+    (assert= (get (find "ALPHA BETA" "beta" {:fold? true}) :start) 6)
+    (assert= (count (find-all "fOo" "o" {:fold? true})) 2)
+    (assert= (replace "aXbx" "x" "-" {:fold? true}) "a-b-")
+    (assert= (split "aANDb" "and" {:fold? true}) ["a" "b"]))
   (test "a pattern that is not a flag still means what it did"
-    (is (match? "(?:i)" "i"))
+    (is (match? "i" "(?:i)"))
 
     (is (not (incomplete? "(?i)abc")))
     (is (incomplete? "(?i:abc"))))
 
 (describe "regex POSIX classes"
   (test "each class inside a set"
-    (is (matches? "[[:alpha:]]+" "abcÄß"))
-    (is (matches? "[[:digit:]]+" "0123"))
-    (is (not (match? "[[:digit:]]" "٣")))
-    (is (matches? "[[:alnum:]]+" "a1Ä٣"))
-    (is (matches? "[[:upper:]]+" "ABÄ"))
-    (is (not (match? "[[:upper:]]" "abä")))
-    (is (matches? "[[:lower:]]+" "abä"))
-    (is (matches? "[[:space:]]+" " \t\n"))
-    (is (matches? "[[:blank:]]+" " \t"))
-    (is (not (match? "[[:blank:]]" "\n")))
-    (is (matches? "[[:punct:]]+" "!?.,;:$+<=>^`|~"))
-    (is (matches? "[[:xdigit:]]+" "09afAF"))
-    (is (not (match? "[[:xdigit:]]" "g")))
-    (is (matches? "[[:cntrl:]]" "\u{7}"))
-    (is (matches? "[[:graph:]]+" "a!é"))
-    (is (not (match? "[[:graph:]]" " ")))
-    (is (matches? "[[:print:]]+" "a b"))
-    (is (matches? "[[:word:]]+" "a_1"))
-    (is (matches? "[[:ascii:]]+" "az~"))
-    (is (matches? "[[:nonascii:]]+" "éß")))
+    (is (matches? "abcÄß" "[[:alpha:]]+"))
+    (is (matches? "0123" "[[:digit:]]+"))
+    (is (not (match? "٣" "[[:digit:]]")))
+    (is (matches? "a1Ä٣" "[[:alnum:]]+"))
+    (is (matches? "ABÄ" "[[:upper:]]+"))
+    (is (not (match? "abä" "[[:upper:]]")))
+    (is (matches? "abä" "[[:lower:]]+"))
+    (is (matches? " \t\n" "[[:space:]]+"))
+    (is (matches? " \t" "[[:blank:]]+"))
+    (is (not (match? "\n" "[[:blank:]]")))
+    (is (matches? "!?.,;:$+<=>^`|~" "[[:punct:]]+"))
+    (is (matches? "09afAF" "[[:xdigit:]]+"))
+    (is (not (match? "g" "[[:xdigit:]]")))
+    (is (matches? "\u{7}" "[[:cntrl:]]"))
+    (is (matches? "a!é" "[[:graph:]]+"))
+    (is (not (match? " " "[[:graph:]]")))
+    (is (matches? "a b" "[[:print:]]+"))
+    (is (matches? "a_1" "[[:word:]]+"))
+    (is (matches? "az~" "[[:ascii:]]+"))
+    (is (matches? "éß" "[[:nonascii:]]+")))
   (test "classes mix with chars and ranges, and negate with the set"
-    (is (matches? "[[:alpha:]_-]+" "a_b-c"))
-    (is (matches? "[^[:space:]]+" "abc"))
-    (is (not (match? "[^[:space:]]" " \t")))
-    (is (matches? "[[:digit:][:upper:]]+" "A1B2")))
+    (is (matches? "a_b-c" "[[:alpha:]_-]+"))
+    (is (matches? "abc" "[^[:space:]]+"))
+    (is (not (match? " \t" "[^[:space:]]")))
+    (is (matches? "A1B2" "[[:digit:][:upper:]]+")))
   (test "under (?i) upper and lower are any cased letter, as Emacs folds them"
-    (is (matches? "(?i)[[:upper:]]+" "aB")))
+    (is (matches? "aB" "(?i)[[:upper:]]+")))
   (test "an unknown name keeps the old reading, and a paren after a class is literal"
-    (is (match? "[[:foo:]]" ":]"))
-    (is (matches? "[[:alpha:])]+" "a)b"))
+    (is (match? ":]" "[[:foo:]]"))
+    (is (matches? "a)b" "[[:alpha:])]+"))
     (is (not (incomplete? "[[:alpha:](]")))))
 
 (describe "regex case folding and POSIX classes over a rope"
@@ -640,10 +640,10 @@
       (doseq (pattern ["(?i)beta"
                         "x(?i:bc)" "[[:upper:]]+" "[[:alpha:]]+:" "(?i)password:" "[^[:space:]]+"
                         "[[:punct:]]"])
-        (assert= (map (rope-spans pattern r 0 (string/length text) {:lines? false})
+        (assert= (map (rope-spans r pattern 0 (string/length text) {:lines? false})
                    (fn (span) (string/substring text (first span) (second span))))
-          (map (find-all pattern text) :text)))))
+          (map (find-all text pattern) :text)))))
   (test ":fold? and (?i) agree on a rope"
     (let (r (text/string-> "a Foo foo FOO"))
-      (assert= (rope-spans "foo" r 0 13 {:fold? true}) (rope-spans "(?i)foo" r 0 13))
-      (assert= (count (rope-spans "(?i)foo" r 0 13)) 3))))
+      (assert= (rope-spans r "foo" 0 13 {:fold? true}) (rope-spans r "(?i)foo" 0 13))
+      (assert= (count (rope-spans r "(?i)foo" 0 13)) 3))))

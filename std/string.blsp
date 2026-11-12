@@ -433,7 +433,7 @@ reaches its tab stop at `*tab-width*` (`string/display-width`).
 
 (defn- fill-match (pattern line)
   ;; the text `pattern` matches at the start of `line`, or ""
-  (let (m (regex/find pattern line)
+  (let (m (regex/find line pattern)
         text (if m (get m :text) nil))
     (if (string? text) text "")))
 
@@ -471,7 +471,7 @@ the item.
       (> (count lines) 1) [first-prefix (fill-match pattern (second lines))]
       (= bullet "") [first-prefix first-prefix]
       ;; the bullet's characters become spaces; a tab after it stays a tab
-      else [first-prefix (str marker (regex/replace "[^ \t]" bullet " "))])))
+      else [first-prefix (str marker (regex/replace bullet "[^ \t]" " "))])))
 
 (defn fill-prefix (s:string &optional (markers:any nil) -> string)
   "The fill prefix of paragraph `s`'s first line: its indentation, a comment or quote marker

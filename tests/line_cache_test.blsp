@@ -305,7 +305,7 @@ cached: a line inserted at line 10, then the window (moved down one) shown again
 ;; between are never lexed for their state, and every answer stays the one without it.
 (defn lc-fence-skip (rope line state)
   ;; the toy lexer's state changes only on a "```" line
-  (let (hit (regex/rope-find "^```$" rope (text/line->char rope line)))
+  (let (hit (regex/rope-find rope "^```$" (text/line->char rope line)))
     (if hit (text/char->line rope (:start hit)) (text/line-count rope))))
 
 (defn lc-skipping-lexer (me)

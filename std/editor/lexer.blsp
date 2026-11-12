@@ -82,7 +82,7 @@ here, not once per line."
 paints the role `:classes` gives its text, or nothing."
   (if (nil? (:scanner grammar))
     '()
-    (seq/keep (regex/tokens (:scanner grammar) line)
+    (seq/keep (regex/tokens line (:scanner grammar))
       (fn (t)
         (let (s (get t :start)
               e (get t :end)
@@ -106,10 +106,10 @@ group (the whole match when it has none)."
     (fn (rule)
       (if (= (count rule) 4)
         (let ([prefix pattern suffix role] rule
-              hit (regex/paint prefix pattern suffix line))
+              hit (regex/paint line prefix pattern suffix))
           (when hit (let ([s e] hit) [s e (get faces role)])))
         (let ([pattern role] rule
-              m (regex/find pattern line))
+              m (regex/find line pattern))
           (if (or (nil? m) (not (= (get m :start) 0)))
             nil
             (let (g (first (or (get m :groups) [])))

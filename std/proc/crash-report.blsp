@@ -253,7 +253,7 @@ anything else as a message."
 the directories above that are the checkout's, else its name alone."
   (if (not (string? file))
     nil
-    (let (found (regex/find "^(?:.*/)?((?:src|std|tests|tools)/.*)$" file))
+    (let (found (regex/find file "^(?:.*/)?((?:src|std|tests|tools)/.*)$"))
       (if found (:text (first (:groups found))) (path/basename file)))))
 
 (defn- crash-report-frame (frame)
@@ -298,7 +298,7 @@ through: a caller holding one should not put it in an error.
                 text))
     (fold crash-report-redactions
       homed
-      (fn (redacted rule) (regex/replace (first rule) redacted (second rule))))))
+      (fn (redacted rule) (regex/replace redacted (first rule) (second rule))))))
 
 (defn- crash-report-redact-value (value)
   "`value` with every string in it, however deep, through [[redact]]."

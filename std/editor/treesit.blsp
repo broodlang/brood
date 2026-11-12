@@ -366,7 +366,7 @@ needs from that is the one token that opened, and that token is at the front."
   (let (t (string/trim-left text))
     (if (= t "")
       ""
-      (let (word (regex/find "^[A-Za-z_][A-Za-z_0-9]*" t))
+      (let (word (regex/find t "^[A-Za-z_][A-Za-z_0-9]*"))
         (if word (get word :text) (string/substring t 0 1))))))
 
 (defn parse-state (text:string lang:keyword -> parse-state)
@@ -913,7 +913,7 @@ The boundary is asked of a token that ENDS in a word character only. A punctuati
 has no word to run on into — JSX's `</` closes an element whatever tag name follows it."
   (let (t (string/trim-left line)
         n (string/length token)
-        word-char? (fn (c) (regex/matches? "[A-Za-z0-9_]" c)))
+        word-char? (fn (c) (regex/matches? c "[A-Za-z0-9_]")))
     (and (string/starts-with? t token)
       (or (= (string/length t) n)
         (not (word-char? (string/substring token (dec n) n)))
@@ -1336,7 +1336,7 @@ a first child — which is the same token either way, and does not require the t
         limit (string/length head))
     (letrec (scan (fn (i)
                     (if (or (>= i limit)
-                          (not (regex/matches? "[A-Za-z0-9_?!]" (string/char-at head i))))
+                          (not (regex/matches? (string/char-at head i) "[A-Za-z0-9_?!]")))
                       (string/substring head 0 i)
                       (scan (inc i)))))
       (scan 0))))

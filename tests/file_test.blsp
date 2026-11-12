@@ -411,8 +411,8 @@
         (assert= (file/slurp went) "keep me")
         (is (string/starts-with? info "[Trash Info]\nPath="))
         (is (includes? info "old%20notes.txt\n"))
-        (is (regex/match? "DeletionDate=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\n"
-              info)))))
+        (is (regex/match? info
+              "DeletionDate=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\n")))))
   (test "a clash takes a numbered name"
     (let (dir (ftmp) trash (path/join dir "Trash") victim (path/join dir "a"))
       (file/spit victim "1")

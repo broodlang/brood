@@ -41,7 +41,7 @@ fn excluding_every_public_name_of_a_std_module_is_not_reported_as_missing_global
         &dir.path,
         "exclude_all.blsp",
         "(defmodule exclude-all-probe (:use fuzzy :exclude [filter match]))\n\
-         (io/puts (fuzzy/match \"ab\" \"a-b\"))\n",
+         (io/puts (fuzzy/match \"a-b\" \"ab\"))\n",
     );
     assert!(
         !err.contains("[refer]"),
@@ -58,7 +58,7 @@ fn an_ordinary_refer_all_of_the_same_module_is_also_silent() {
     let err = stderr_of(
         &dir.path,
         "refer_all.blsp",
-        "(defmodule refer-all-probe (:use fuzzy))\n(io/puts (match \"ab\" \"a-b\"))\n",
+        "(defmodule refer-all-probe (:use fuzzy))\n(io/puts (match \"a-b\" \"ab\"))\n",
     );
     assert!(
         !err.contains("[refer]"),

@@ -48,9 +48,9 @@
 (defmodule regex
   "Regular expressions: Brood's pattern language, matched by a native engine.
 
-`(regex/match? pattern s)` searches `s` for `pattern` (anchors `^`/`$` tie to the
-string's start/end); `(regex/matches? pattern s)` requires the whole string to
-match. `(regex/find pattern s)` returns WHERE it matched and what each `(...)`
+`(regex/match? s pattern)` searches `s` for `pattern` (anchors `^`/`$` tie to the
+string's start/end); `(regex/matches? s pattern)` requires the whole string to
+match. `(regex/find s pattern)` returns WHERE it matched and what each `(...)`
 group captured, `find-all` every non-overlapping match, and `replace`/`split`
 build on those. `tokens` lexes a line with a rule table, `paint` finds the text a
 line rule colours.
@@ -591,47 +591,47 @@ a literal, and the engine caches its compiled form under exactly this text."
   "`pattern` with what `opts` asks for written into it: `(?i)` in front under `:fold?`."
   (if (= true (:fold? opts)) (str "(?i)" pattern) pattern))
 
-(defn match? (pattern:any s:string &optional (opts:map {}) -> bool)
+(defn match? (s:string pattern:any &optional (opts:map {}) -> bool)
   "True if `pattern` matches anywhere in `s` (a search). `^`/`$` anchor to the
-start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a suffix.
+start/end of the whole string, so e.g. `(match? name \"\\\\.blsp$\")` tests a suffix.
 `opts`: `{:fold? true}` ignores case (as `(?i)` does), here and in every string search.
 
-    (regex/match? \"^a\" \"abc\")                     ;=> true
-    (regex/match? \"^a\" \"ABC\" {:fold? true})       ;=> true
-    (regex/match? \"(?i)password:\" \"Password:\")    ;=> true"
+    (regex/match? \"abc\" \"^a\")                     ;=> true
+    (regex/match? \"ABC\" \"^a\" {:fold? true})       ;=> true
+    (regex/match? \"Password:\" \"(?i)password:\")    ;=> true"
   (%regex-match? (regex-search-src (regex-opts-pattern pattern opts)) s))
 
-(defn matches? (pattern:any s:string &optional (opts:map {}) -> bool)
+(defn matches? (s:string pattern:any &optional (opts:map {}) -> bool)
   "True if `pattern` matches the **entire** string `s` (anchored both ends).
 
-    (regex/matches? \"[0-9]+\" \"a1b22\")   ;=> false   ; the WHOLE string must match"
+    (regex/matches? \"a1b22\" \"[0-9]+\")   ;=> false   ; the WHOLE string must match"
   (%regex-match? (regex-whole-src (regex-opts-pattern pattern opts)) s))
 
 ;; ---- where, and with which groups -----------------------------------------------
 
-(defn find (pattern:any s:string &optional (opts:map {}) -> (or nil (map keyword any)))
+(defn find (s:string pattern:any &optional (opts:map {}) -> (or nil (map keyword any)))
   "The leftmost match of `pattern` in `s`, or nil. The match is
 `{:start :end :text :groups [...]}` — half-open char offsets, the matched text, and
 one entry per `(...)` group in the pattern (each itself `{:start :end :text}`, or
 nil for a group that did not participate). Group numbering is the order of the
 opening parens; `(?:...)` groups are not numbered.
 
-    (get (regex/find \"([\\\\w.]+):(\\\\d+)\" \"at worker.ex:42\") :text)     ;=> \"worker.ex:42\"
-    (get (regex/find \"([\\\\w.]+):(\\\\d+)\" \"at worker.ex:42\") :start)    ;=> 3
-    (get (second (get (regex/find \"(a)-(b)\" \"a-b\") :groups)) :text)   ;=> \"b\"
-    (regex/find \"zzz\" \"abc\")                                          ;=> nil
+    (get (regex/find \"at worker.ex:42\" \"([\\\\w.]+):(\\\\d+)\") :text)     ;=> \"worker.ex:42\"
+    (get (regex/find \"at worker.ex:42\" \"([\\\\w.]+):(\\\\d+)\") :start)    ;=> 3
+    (get (second (get (regex/find \"a-b\" \"(a)-(b)\") :groups)) :text)   ;=> \"b\"
+    (regex/find \"abc\" \"zzz\")                                          ;=> nil
 
 Leftmost-first, like Perl and unlike POSIX: of two matches starting at the same
 place, the one the pattern's own alternation and greediness prefer wins."
   (%regex-find (regex-search-src (regex-opts-pattern pattern opts)) s 0))
 
-(defn find-all (pattern:any s:string &optional (opts:map {}) -> (vector (map keyword any)))
+(defn find-all (s:string pattern:any &optional (opts:map {}) -> (vector (map keyword any)))
   "Every non-overlapping match of `pattern` in `s`, left to right, as a vector of the
 maps `find` returns (empty when there are none). Scanning resumes at each match's
 end, and steps one character past an EMPTY match so a pattern that can match nothing
 (`a*`) terminates instead of finding the same empty match forever.
 
-    (map (regex/find-all \"\\\\d+\" \"a1b22c333\") (fn (m) (get m :text)))   ;=> (\"1\" \"22\" \"333\")"
+    (map (regex/find-all \"a1b22c333\" \"\\\\d+\") (fn (m) (get m :text)))   ;=> (\"1\" \"22\" \"333\")"
   (%regex-find-all (regex-search-src (regex-opts-pattern pattern opts)) s))
 
 ;; ---- searching a rope, and a search box's pattern (ADR-540) ------------------------
@@ -687,7 +687,7 @@ false). Memoised by the pattern and its flags."
         (table/put regex-rope-cache key src)
         src))))
 
-(defn rope-find (pattern r from &optional (opts {}))
+(defn rope-find (r pattern from &optional (opts {}))
   "The first non-empty match of `pattern` in rope `r` starting at or after char index
 `from`, as the map [[find]] answers (`{:start :end :text :groups}`, char offsets into the
 rope), or nil. Searches the rope in place: the cost is the distance to the match, not the
@@ -698,47 +698,47 @@ does) where by default one is stepped over; `:bound` (a char index) is where a m
 by — a greedy pattern stops there rather than being refused, while `^`, `$` and `\\b` still read
 the text past it (Emacs's BOUND, what a search confined to a region wants; ADR-554).
 
-    (get (regex/rope-find \"o+\" (text/string-> \"foo boo\") 3) :start)                ;=> 5
-    (get (regex/rope-find \"^b\" (text/string-> \"ab\\nbc\") 0) :start)                ;=> 3
-    (get (regex/rope-find \"FOO\" (text/string-> \"a foo\") 0 {:fold? true}) :text)   ;=> \"foo\"
-    (get (regex/rope-find \"x*\" (text/string-> \"ab x\") 0 {:empty? true}) :end)   ;=> 0
-    (get (regex/rope-find \"a+\" (text/string-> \"aaaa\") 0 {:bound 2}) :end)       ;=> 2
-    (regex/rope-find \"o$\" (text/string-> \"foo bar\") 0 {:bound 3})               ;=> nil"
+    (get (regex/rope-find (text/string-> \"foo boo\") \"o+\" 3) :start)                ;=> 5
+    (get (regex/rope-find (text/string-> \"ab\\nbc\") \"^b\" 0) :start)                ;=> 3
+    (get (regex/rope-find (text/string-> \"a foo\") \"FOO\" 0 {:fold? true}) :text)   ;=> \"foo\"
+    (get (regex/rope-find (text/string-> \"ab x\") \"x*\" 0 {:empty? true}) :end)   ;=> 0
+    (get (regex/rope-find (text/string-> \"aaaa\") \"a+\" 0 {:bound 2}) :end)       ;=> 2
+    (regex/rope-find (text/string-> \"foo bar\") \"o$\" 0 {:bound 3})               ;=> nil"
   (%rope-regex-find r (regex-rope-src pattern opts) from (= true (:empty? opts)) (:bound opts)))
 
-(defn rope-find-backward (pattern r before &optional (opts {}))
+(defn rope-find-backward (r pattern before &optional (opts {}))
   "The non-empty match of `pattern` in rope `r` that starts LAST while ending at or before
 char index `before` — Emacs's `re-search-backward` — as the map [[find]] answers, or nil.
 Reads backward from `before`, so the cost is the distance to the match. `opts` as
 [[rope-find]].
 
-    (get (regex/rope-find-backward \"[fb]o+\" (text/string-> \"foo boo\") 7) :start)   ;=> 4
-    (get (regex/rope-find-backward \"[fb]o+\" (text/string-> \"foo boo\") 4) :start)   ;=> 0
-    (get (regex/rope-find-backward \"o+\" (text/string-> \"foo boo\") 7) :start)      ;=> 6"
+    (get (regex/rope-find-backward (text/string-> \"foo boo\") \"[fb]o+\" 7) :start)   ;=> 4
+    (get (regex/rope-find-backward (text/string-> \"foo boo\") \"[fb]o+\" 4) :start)   ;=> 0
+    (get (regex/rope-find-backward (text/string-> \"foo boo\") \"o+\" 7) :start)      ;=> 6"
   (%rope-regex-rfind r (regex-rope-src pattern opts) before (= true (:empty? opts))))
 
-(defn rope-count (pattern r from limit &optional (opts {}))
+(defn rope-count (r pattern from limit &optional (opts {}))
   "`[n resume]`: how many non-overlapping, non-empty matches of `pattern` in rope `r`, scanned
 from char index `from`, START before `limit`. `resume` is where the next slice begins — the
 first match starting at or past `limit`, or the first point past it where no match is in
 progress — or nil once the scan reached the end. Counting a large text in slices (`limit` a
 little past `from` each time) adds up to exactly the whole count, and no slice costs much
 more than its length: what a search's match count runs on while the editor stays
-responsive. `(rope-count p r 0 at)` is how many matches start before `at`. `opts` as
+responsive. `(rope-count r p 0 at)` is how many matches start before `at`. `opts` as
 [[rope-find]].
 
-    (regex/rope-count \"ab\" (text/string-> \"ab ab ab\") 0 100)   ;=> [3 nil]
-    (regex/rope-count \"ab\" (text/string-> \"ab ab ab\") 0 4)     ;=> [2 5]
-    (regex/rope-count \"ab\" (text/string-> \"ab ab ab\") 0 6)     ;=> [2 6]"
+    (regex/rope-count (text/string-> \"ab ab ab\") \"ab\" 0 100)   ;=> [3 nil]
+    (regex/rope-count (text/string-> \"ab ab ab\") \"ab\" 0 4)     ;=> [2 5]
+    (regex/rope-count (text/string-> \"ab ab ab\") \"ab\" 0 6)     ;=> [2 6]"
   (%rope-regex-count r (regex-rope-src pattern opts) from limit))
 
-(defn rope-spans (pattern r from to &optional (opts {}))
+(defn rope-spans (r pattern from to &optional (opts {}))
   "Every non-overlapping, non-empty match of `pattern` in rope `r` that starts in char range
 `[from, to)`, as a vector of `[start end]` (an end may lie past `to`) — at most 4096. What
 highlighting the matches in a window wants: the cost is the window, not the rope. `opts` as
 [[rope-find]].
 
-    (regex/rope-spans \"o+\" (text/string-> \"foo boo zoo\") 0 6)   ;=> [[1 3] [5 7]]"
+    (regex/rope-spans (text/string-> \"foo boo zoo\") \"o+\" 0 6)   ;=> [[1 3] [5 7]]"
   (%rope-regex-spans r (regex-rope-src pattern opts) from to))
 
 (def- regex-escaped-chars "\\.*+?{}()[]^$|")
@@ -748,7 +748,7 @@ highlighting the matches in a window wants: the cost is the window, not the rope
 meaning to escaped.
 
     (regex/escape \"a.b*\")                      ;=> \"a\\\\.b\\\\*\"
-    (regex/match? (regex/escape \"(x)\") \"f(x)\")  ;=> true"
+    (regex/match? \"f(x)\" (regex/escape \"(x)\"))  ;=> true"
   (string/join (map (string/->list s)
                  (fn (c) (if (includes? regex-escaped-chars c) (str "\\" c) c)))
     ""))
@@ -787,11 +787,11 @@ this is the only way to tell that the text is unfinished rather than meant.
 place of the table itself: `{:patterns :tags}`, each pattern already translated, so a
 lexer that holds one in a `def` translates its table once rather than per line.
 
-    (regex/tokens (regex/tokenizer [[\"\\\\d+\" :n]]) \"a1\")   ;=> [{:start 1 :end 2 :text \"1\" :tag :n}]"
+    (regex/tokens \"a1\" (regex/tokenizer [[\"\\\\d+\" :n]]))   ;=> [{:start 1 :end 2 :text \"1\" :tag :n}]"
   {:patterns (into [] (map rules (fn (rule) (regex-search-src (first rule)))))
    :tags (into [] (map rules second))})
 
-(defn tokens (rules:any s:string -> vector)
+(defn tokens (s:string rules:any -> vector)
   "Scan `s` with `rules` — a vector of `[pattern tag]`, or a `tokenizer` of one — into a
 vector of the tokens `{:start :end :text :tag}` (half-open char offsets, ascending,
 non-overlapping). At the earliest position any rule matches, the FIRST rule in table order
@@ -799,11 +799,11 @@ that matches there wins, and it takes its LONGEST match; the scan resumes at the
 end. A position no rule matches is skipped, and a rule's empty match never makes a token.
 `^`/`$` anchor to the string's ends, and `\\b` is a word boundary anywhere in a rule.
 
-    (map (regex/tokens [[\"#.*\" :comment] [\"[a-z]+\" :word]] \"ab # c\") (fn (t) [(get t :tag) (get t :text)]))   ;=> ([:word \"ab\"] [:comment \"# c\"])"
+    (map (regex/tokens \"ab # c\" [[\"#.*\" :comment] [\"[a-z]+\" :word]]) (fn (t) [(get t :tag) (get t :text)]))   ;=> ([:word \"ab\"] [:comment \"# c\"])"
   (let (tz (if (map? rules) rules (tokenizer rules)))
     (%regex-tokens (:patterns tz) (:tags tz) s)))
 
-(defn paint (prefix:string pattern:string suffix:string s:string -> any)
+(defn paint (s:string prefix:string pattern:string suffix:string -> any)
   "At the start of `s`: the `[start end]` of the text `pattern` matches between a `prefix`
 matched at position 0 and a `suffix` matched after it — the group a `^prefix(pattern)suffix`
 regex would paint — or nil when the line does not match. The prefix's longest match first,
@@ -811,7 +811,7 @@ then `pattern`'s longest end after which `suffix` matches (its shortest, when `p
 lazy: it contains `*?`, `+?` or `??`), each backtracked when the rest cannot follow. The
 empty pattern `\"\"` is an absent prefix or suffix.
 
-    (regex/paint \"^\\\\s*\" \"\\\\[[^\\\\]]*\\\\]\" \"\" \"  [core] x\")   ;=> [2 8]"
+    (regex/paint \"  [core] x\" \"^\\\\s*\" \"\\\\[[^\\\\]]*\\\\]\" \"\")   ;=> [2 8]"
   (%regex-paint (regex-search-src prefix)
     (regex-search-src pattern)
     (regex-search-src suffix)
@@ -848,17 +848,17 @@ empty pattern `\"\"` is an absent prefix or suffix.
         (str acc (string/substring s at (get m :start)) piece)
         replacement))))
 
-(defn replace (pattern s replacement &optional (opts {}))
+(defn replace (s pattern replacement &optional (opts {}))
   "Replace every non-overlapping match of `pattern` in `s`. `replacement` is either a
 template string, where `$0` is the whole match, `$1`..`$9` are the groups and `$$` is
 a literal dollar, or a FUNCTION of the match map — which is the one to reach for when
 the new text has to be computed rather than spliced.
 
-    (regex/replace \"(\\\\w+)@(\\\\w+)\" \"a@b\" \"$2@$1\")                     ;=> \"b@a\"
-    (regex/replace \"\\\\d+\" \"a1b22\" (fn (m) (str \"<\" (get m :text) \">\")))   ;=> \"a<1>b<22>\"
+    (regex/replace \"a@b\" \"(\\\\w+)@(\\\\w+)\" \"$2@$1\")                     ;=> \"b@a\"
+    (regex/replace \"a1b22\" \"\\\\d+\" (fn (m) (str \"<\" (get m :text) \">\")))   ;=> \"a<1>b<22>\"
 
 A group that did not participate expands to the empty string."
-  (regex-replace-loop s (find-all pattern s opts) 0 0 "" replacement))
+  (regex-replace-loop s (find-all s pattern opts) 0 0 "" replacement))
 
 (defn- regex-split-loop (s matches j at acc)
   (if (>= j (count matches))
@@ -870,12 +870,12 @@ A group that did not participate expands to the empty string."
         (get m :end)
         (into acc [(string/substring s at (get m :start))])))))
 
-(defn split (pattern:any s:string &optional (opts:map {}) -> any)
+(defn split (s:string pattern:any &optional (opts:map {}) -> any)
   "Split `s` on every non-overlapping match of `pattern`, returning the pieces between
 them — the regex counterpart of `string/split`, which separates on a literal.
 
-    (regex/split \"\\\\s*,\\\\s*\" \"a , b,c\")   ;=> [\"a\" \"b\" \"c\"]
+    (regex/split \"a , b,c\" \"\\\\s*,\\\\s*\")   ;=> [\"a\" \"b\" \"c\"]
 
 Separators are dropped, and an empty piece between two adjacent separators is kept, so
 the result always has one more element than there were matches."
-  (regex-split-loop s (find-all pattern s opts) 0 0 []))
+  (regex-split-loop s (find-all s pattern opts) 0 0 []))

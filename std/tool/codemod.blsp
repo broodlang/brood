@@ -476,7 +476,7 @@ everything else byte for byte."
   "The module a source text declares (`(defmodule NAME …)`), or nil.
 
     (codemod/module-name \"(defmodule shop/cart (:use x))\")   ;=> \"shop/cart\""
-  (let (found (regex/find "\\(defmodule\\s+([^\\s()]+)" text))
+  (let (found (regex/find text "\\(defmodule\\s+([^\\s()]+)"))
     (when found (:text (first (:groups found))))))
 
 (defn- attached-comments (kids index)
@@ -522,7 +522,7 @@ spaces before it, which go wherever the form goes."
 (defn- squeeze-blank-lines (nodes)
   "The text of `nodes`, at most one blank line between forms now some have been taken out. Only
 the whitespace between them is touched: a string keeps its blank lines."
-  (let (squeezed (fn (space) (regex/replace "\n[ \t]*\n(?:[ \t]*\n)+" space "\n\n"))
+  (let (squeezed (fn (space) (regex/replace space "\n[ \t]*\n(?:[ \t]*\n)+" "\n\n"))
         joined (fold nodes
                  ["" ""]
                  (fn (acc node)
@@ -556,8 +556,8 @@ private — `defn-`, `def-` — made public: another module reaches it now."
     (fn (acc name)
       (let (head (get heads name))
         (if (and head (private-head? head))
-          (regex/replace (str "\\(" (regex/escape head) "(\\s+)" (regex/escape name) "([\\s)])")
-            acc
+          (regex/replace acc
+            (str "\\(" (regex/escape head) "(\\s+)" (regex/escape name) "([\\s)])")
             (str "(" (string/substring head 0 (dec (string/length head))) "$1" name "$2"))
           acc)))))
 
@@ -568,8 +568,8 @@ other things, and a string or a keyword in the code is data."
   (let (moved (fold names {} (fn (acc name) (assoc acc (str from "/" name) (str to "/" name)))))
     (map-prose (reflect/parse-source text)
       (fn (prose)
-        (regex/replace "[A-Za-z0-9_*+!?<>=%/:-]+"
-          prose
+        (regex/replace prose
+          "[A-Za-z0-9_*+!?<>=%/:-]+"
           (fn (found) (or (get moved (:text found)) (:text found))))))))
 
 (defn move-text (source destination names)
@@ -692,11 +692,11 @@ left out of `:only`, every bare NAME no local shadows; a moved name leaves a `(:
     (codemod/move-references-text \"(:use a :only [f g]) (f 1)\" \"a\" \"b\" [\"f\"])   ;=> \"(:use a :only [g]) (b/f 1)\""
   (let (moved (into #{} names)
         module (regex/escape from)
-        internals? (regex/find (str "\\(:use-internals\\s+" module "[\\s)]") text)
-        uses-from? (regex/find (str "\\(:use\\s+" module "[\\s)]") text)
-        only (regex/find (str "\\(:use\\s+" module "\\s+:only\\s+\\[([^\\]]*)\\]") text)
-        listed (when only (regex/split "\\s+" (string/trim (:text (first (:groups only))))))
-        short (regex/find (str "\\(:alias\\s+" module "\\s+:as\\s+([^\\s)]+)") text)
+        internals? (regex/find text (str "\\(:use-internals\\s+" module "[\\s)]"))
+        uses-from? (regex/find text (str "\\(:use\\s+" module "[\\s)]"))
+        only (regex/find text (str "\\(:use\\s+" module "\\s+:only\\s+\\[([^\\]]*)\\]"))
+        listed (when only (regex/split (string/trim (:text (first (:groups only)))) "\\s+"))
+        short (regex/find text (str "\\(:alias\\s+" module "\\s+:as\\s+([^\\s)]+)"))
         own (top-level-names text)
         referred (if (and uses-from? (not internals?))
                    (seq/filter names
@@ -718,11 +718,11 @@ left out of `:only`, every bare NAME no local shadows; a moved name leaves a `(:
         ;; prose follows a qualified name too
         rewritten (prose-follows rewritten from to names)
         ;; a moved name leaves the `:only` list that named it
-        trimmed (regex/replace (str "(\\(:use\\s+" module "\\s+:only\\s+\\[)([^\\]]*)(\\])")
-                  rewritten
+        trimmed (regex/replace rewritten
+                  (str "(\\(:use\\s+" module "\\s+:only\\s+\\[)([^\\]]*)(\\])")
                   (fn (found)
                     (let ([open listed close] (vec (map (:groups found) (fn (group) (:text group))))
-                          listed-names (regex/split "\\s+" (string/trim listed)))
+                          listed-names (regex/split (string/trim listed) "\\s+"))
                       ;; a list naming nothing moved stays as it was written
                       (if (any? listed-names (fn (name) (contains? moved name)))
                         (str open
@@ -735,9 +735,9 @@ left out of `:only`, every bare NAME no local shadows; a moved name leaves a `(:
                            (or (contains? moved name) (contains? moved (unqualified-in name to))))))
     (if (and internals?
           reaches-moved?
-          (nil? (regex/find (str "\\(:use-internals\\s+" (regex/escape to) "[\\s)]") trimmed)))
-      (regex/replace (str "(\\(:use-internals\\s+" module "\\))")
-        trimmed
+          (nil? (regex/find trimmed (str "\\(:use-internals\\s+" (regex/escape to) "[\\s)]"))))
+      (regex/replace trimmed
+        (str "(\\(:use-internals\\s+" module "\\))")
         (str "$1\n  (:use-internals " to ")"))
       trimmed)))
 
@@ -746,10 +746,10 @@ left out of `:only`, every bare NAME no local shadows; a moved name leaves a `(:
 :use — what code moved from one to the other may need there.
 
     (codemod/missing-uses \"(defmodule a (:use x) (:use y :only [f]))\" \"(defmodule b (:use x))\")   ;=> (\"(:use y :only [f])\")"
-  (seq/reject (map (regex/find-all "\\(:use [^()]*\\)" source) (fn (found) (:text found)))
+  (seq/reject (map (regex/find-all source "\\(:use [^()]*\\)") (fn (found) (:text found)))
     (fn (clause)
-      (let (module (:text (first (:groups (regex/find "^\\(:use\\s+([^\\s()]+)" clause)))))
-        (regex/find (str "\\(:use\\s+" (regex/escape module) "[\\s)]") destination)))))
+      (let (module (:text (first (:groups (regex/find clause "^\\(:use\\s+([^\\s()]+)")))))
+        (regex/find destination (str "\\(:use\\s+" (regex/escape module) "[\\s)]"))))))
 
 (defn move (source-file destination-file names)
   "Move the definitions `names` from the module in `source-file` to the one in
@@ -766,7 +766,7 @@ be made (nothing is written then).
         new? (not (file/exists? destination-file))
         destination (if new?
                       (let (stem (path/stem destination-file)
-                            uses (map (regex/find-all "\\(:use [^()]*\\)" source)
+                            uses (map (regex/find-all source "\\(:use [^()]*\\)")
                                    (fn (found) (:text found))))
                         (str "(defmodule "
                           stem

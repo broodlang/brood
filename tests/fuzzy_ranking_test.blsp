@@ -16,80 +16,80 @@
 
 (describe "a term per word the reader remembers"
   (test "`foo somet` finds foo-bar-something.txt first among decoys"
-    (assert= "foo-bar-something.txt" (first (fuzzy/top "foo somet" decoys 10)))
-    (assert= "foo-bar-something.txt" (first (fuzzy/top "foo somet" decoys 10 file)))))
+    (assert= "foo-bar-something.txt" (first (fuzzy/top decoys "foo somet" 10)))
+    (assert= "foo-bar-something.txt" (first (fuzzy/top decoys "foo somet" 10 file)))))
 
 (describe "the optimal alignment"
   (test "takes the word-start run over the first letters it meets"
     ;; greedy spends s-o-m on the scattered letters before the slash and never reaches the
     ;; run; there is no contiguous `somet` to fall back on either — only the table finds
     ;; `some` + the `t` that starts `thing`
-    (assert= (list 8 9 10 11 13) (:positions (fuzzy/match "somet" "asoxmet/some-thing"))))
+    (assert= (list 8 9 10 11 13) (:positions (fuzzy/match "asoxmet/some-thing" "somet"))))
   (test "and ranks by it: the candidate whose words the query names comes first"
     (assert= (list "lib/some-thing.ex" "lib/asoxmet.ex")
-      (fuzzy/top "somet" ["lib/asoxmet.ex" "lib/some-thing.ex"] 2)))
+      (fuzzy/top ["lib/asoxmet.ex" "lib/some-thing.ex"] "somet" 2)))
   (test "a candidate past the table's size still matches, by the greedy walk"
     (let (long (str (string/repeat "x" 20000) "some-thing"))
-      (is (map? (fuzzy/match "somet" long)))
-      (assert= (list long) (fuzzy/top "somet" [long "zzz"] 5)))))
+      (is (map? (fuzzy/match long "somet")))
+      (assert= (list long) (fuzzy/top [long "zzz"] "somet" 5)))))
 
 (describe "paths: :category :file"
   (test "a match in the file name outranks the same match in a directory"
     (assert= (list "view/model.blsp" "src/view.blsp")
-      (fuzzy/top "view" ["view/model.blsp" "src/view.blsp"] 2))
+      (fuzzy/top ["view/model.blsp" "src/view.blsp"] "view" 2))
     (assert= (list "src/view.blsp" "view/model.blsp")
-      (fuzzy/top "view" ["view/model.blsp" "src/view.blsp"] 2 file)))
+      (fuzzy/top ["view/model.blsp" "src/view.blsp"] "view" 2 file)))
   (test "the highlight moves onto the file name too"
-    (assert= (list 0 1 2 3) (:positions (fuzzy/match "view" "view/view.blsp")))
-    (assert= (list 5 6 7 8) (:positions (fuzzy/match "view" "view/view.blsp" file))))
+    (assert= (list 0 1 2 3) (:positions (fuzzy/match "view/view.blsp" "view")))
+    (assert= (list 5 6 7 8) (:positions (fuzzy/match "view/view.blsp" "view" file))))
   (test "on a tie, fewer path segments win before the shorter candidate"
-    (assert= (list "a/b/c" "abcd/c") (fuzzy/top "c" ["abcd/c" "a/b/c"] 2))
-    (assert= (list "abcd/c" "a/b/c") (fuzzy/top "c" ["abcd/c" "a/b/c"] 2 file))))
+    (assert= (list "a/b/c" "abcd/c") (fuzzy/top ["abcd/c" "a/b/c"] "c" 2))
+    (assert= (list "abcd/c" "a/b/c") (fuzzy/top ["abcd/c" "a/b/c"] "c" 2 file))))
 
 (describe "term operators"
   (test "!x excludes candidates containing x, and highlights nothing"
-    (assert= (list "foo.ex") (fuzzy/top "foo !test" ["foo.ex" "foo_test.ex"] 5))
-    (assert= [(list 0 1 2) ()] (:terms (fuzzy/match "foo !test" "foo.ex")))
-    (is (nil? (fuzzy/match "!test" "foo_test.ex"))))
+    (assert= (list "foo.ex") (fuzzy/top ["foo.ex" "foo_test.ex"] "foo !test" 5))
+    (assert= [(list 0 1 2) ()] (:terms (fuzzy/match "foo.ex" "foo !test")))
+    (is (nil? (fuzzy/match "foo_test.ex" "!test"))))
   (test "a query of exclusions alone keeps everything else"
-    (assert= (list "a.ex" "b.ex") (fuzzy/top "!test" ["a.ex" "a_test.ex" "b.ex"] 5)))
+    (assert= (list "a.ex" "b.ex") (fuzzy/top ["a.ex" "a_test.ex" "b.ex"] "!test" 5)))
   (test "=x wants x as one run, and highlights that run"
-    (assert= (list "foobar") (fuzzy/top "=oba" ["foo-bar" "foobar" "o-b-a"] 5))
-    (assert= [(list 2 3 4)] (:terms (fuzzy/match "=oba" "foobar"))))
+    (assert= (list "foobar") (fuzzy/top ["foo-bar" "foobar" "o-b-a"] "=oba" 5))
+    (assert= [(list 2 3 4)] (:terms (fuzzy/match "foobar" "=oba"))))
   (test "^x anchors at the start — of the file name, for a path"
-    (assert= (list "foo.ex") (fuzzy/top "^foo" ["foo.ex" "lib/foo.ex" "bar_foo.ex"] 5))
+    (assert= (list "foo.ex") (fuzzy/top ["foo.ex" "lib/foo.ex" "bar_foo.ex"] "^foo" 5))
     (assert= (list "foo.ex" "lib/foo.ex")
-      (fuzzy/top "^foo" ["foo.ex" "lib/foo.ex" "bar_foo.ex"] 5 file))
-    (assert= [(list 4 5 6)] (:terms (fuzzy/match "^foo" "lib/foo.ex" file))))
+      (fuzzy/top ["foo.ex" "lib/foo.ex" "bar_foo.ex"] "^foo" 5 file))
+    (assert= [(list 4 5 6)] (:terms (fuzzy/match "lib/foo.ex" "^foo" file))))
   (test "x$ anchors at the end; ^x$ is the whole name"
-    (assert= (list "a.ex") (fuzzy/top "ex$" ["a.ex" "a.exs" "ex.md"] 5))
-    (assert= (list "lib/a.ex") (fuzzy/top "^a.ex$" ["lib/a.ex" "lib/a.exs" "lib/ba.ex"] 5 file)))
+    (assert= (list "a.ex") (fuzzy/top ["a.ex" "a.exs" "ex.md"] "ex$" 5))
+    (assert= (list "lib/a.ex") (fuzzy/top ["lib/a.ex" "lib/a.exs" "lib/ba.ex"] "^a.ex$" 5 file)))
   (test "a lone operator asks nothing"
-    (assert= ["b" "a"] (fuzzy/top "! = ^ $" ["b" "a"] nil))
-    (assert= {:score 0 :positions () :terms []} (fuzzy/match "!" "abc"))))
+    (assert= ["b" "a"] (fuzzy/top ["b" "a"] "! = ^ $" nil))
+    (assert= {:score 0 :positions () :terms []} (fuzzy/match "abc" "!"))))
 
 (describe "smart case"
   (test "a term with an upper-case letter matches case-sensitively"
-    (assert= (list "Foo" "xFoo") (fuzzy/top "Foo" ["foo" "Foo" "xFoo"] 5)))
+    (assert= (list "Foo" "xFoo") (fuzzy/top ["foo" "Foo" "xFoo"] "Foo" 5)))
   (test "a lower-case term ignores case"
-    (assert= 3 (count (fuzzy/top "foo" ["foo" "Foo" "xFoo"] 5))))
+    (assert= 3 (count (fuzzy/top ["foo" "Foo" "xFoo"] "foo" 5))))
   (test "per term: one term can care while the other does not"
-    (assert= (list "README.md") (fuzzy/top "READ md" ["README.md" "readme.MD" "README.txt"] 5))))
+    (assert= (list "README.md") (fuzzy/top ["README.md" "readme.MD" "README.txt"] "READ md" 5))))
 
 (describe "history: :boost and the exact match"
   (test "a boost reorders matches"
     (assert= (list "config.blsp" "cmd-other.blsp")
-      (fuzzy/top "co" ["cmd-other.blsp" "config.blsp"] 2))
+      (fuzzy/top ["cmd-other.blsp" "config.blsp"] "co" 2))
     (assert= (list "cmd-other.blsp" "config.blsp")
-      (fuzzy/top "co" ["cmd-other.blsp" "config.blsp"] 2 {:boost {"cmd-other.blsp" 100}})))
+      (fuzzy/top ["cmd-other.blsp" "config.blsp"] "co" 2 {:boost {"cmd-other.blsp" 100}})))
   (test "a boost never makes a non-match match"
-    (assert= (list "abc") (fuzzy/top "ab" ["abc" "zzz"] 5 {:boost {"zzz" 1000}})))
+    (assert= (list "abc") (fuzzy/top ["abc" "zzz"] "ab" 5 {:boost {"zzz" 1000}})))
   (test "a candidate that IS the query ranks first, boost or not"
-    (assert= (list "ab" "abc") (fuzzy/top "ab" ["abc" "ab"] 2 {:boost {"abc" 100}})))
+    (assert= (list "ab" "abc") (fuzzy/top ["abc" "ab"] "ab" 2 {:boost {"abc" 100}})))
   (test "for a path, its file name being the query is enough"
     (assert= (list "src/view.blsp" "view.blsp.orig")
-      (fuzzy/top "view.blsp"
-        ["view.blsp.orig" "src/view.blsp"]
+      (fuzzy/top ["view.blsp.orig" "src/view.blsp"]
+        "view.blsp"
         2
         {:category :file :boost {"view.blsp.orig" 100}}))))
 
@@ -138,7 +138,7 @@
                         "vi" "vie" "view" "view t" "view te" "view te !s" "view te !sc" "view" "vie"
                         "VIEW" "view" "=view" "^view" "view$" "" "v"])
           (fuzzy/rank-async session query 3)
-          (assert= [query (fuzzy/top query narrowing-corpus 3 options)] (await-ranked session)))
+          (assert= [query (fuzzy/top narrowing-corpus query 3 options)] (await-ranked session)))
         (fuzzy/ranker-stop session))))
   (test "replacing the candidates forgets the narrowing"
     (let (session (fuzzy/ranker narrowing-corpus))

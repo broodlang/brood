@@ -363,8 +363,8 @@ typed. Nothing else is read: no `~`, no glob, no command.
     (path/expand-env \"/tmp/$$x\")                                   ;=> \"/tmp/$x\"
     (path/expand-env \"$BROOD_SURELY_UNSET/a\")                      ;=> \"$BROOD_SURELY_UNSET/a\"
     (= (path/expand-env \"${HOME}/a\") (str (%getenv \"HOME\") \"/a\"))   ;=> true"
-  (regex/replace *env-reference*
-    text
+  (regex/replace text
+    *env-reference*
     (fn (found)
       (if (= (:text found) "$$")
         "$"

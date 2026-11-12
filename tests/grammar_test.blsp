@@ -65,11 +65,11 @@
              "1.50M" "0M"]
         (fn (t)
           (is (reads-as-number? t))
-          (is (regex/match? whole t))))
+          (is (regex/match? t whole))))
       ;; names the reader keeps as names must not colour as numbers
       (map ["x0b1" "a0xFF" "foo" "+" "-" "..." "x-5"]
         (fn (t)
-          (is (not (regex/match? whole t)))))
+          (is (not (regex/match? t whole)))))
       ;; and the emitted grammar carries it
       (let (decoded (decode (tmlanguage))
             repo (get (if (map? decoded) decoded {}) :repository))

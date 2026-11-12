@@ -17,7 +17,7 @@
 
 (defn fnt-brood-top (query cands limit &optional (options nil))
   "`top` forced down the Brood paths — the same rules behind a custom scorer."
-  (binding (fuzzy/*scorer* (fn (q options) (scorer q options))) (top query cands limit options)))
+  (binding (fuzzy/*scorer* (fn (q options) (scorer q options))) (top cands query limit options)))
 
 (def fnt-corpus
   ;; paths, module names and symbols — the shapes a completion UI actually ranks, plus the
@@ -55,45 +55,45 @@
 (describe "%fuzzy-top agrees with the Brood ranking"
   (test "bounded: the best 5 are the same list for every query over the corpus"
     (doseq (q fnt-queries)
-      (assert= (fnt-brood-top q fnt-corpus 5) (top q fnt-corpus 5))))
+      (assert= (fnt-brood-top q fnt-corpus 5) (top fnt-corpus q 5))))
   (test "bounded past the match count, and bounded to one"
     (doseq (q fnt-queries)
-      (assert= (fnt-brood-top q fnt-corpus 1) (top q fnt-corpus 1))
-      (assert= (fnt-brood-top q fnt-corpus 500) (top q fnt-corpus 500))))
+      (assert= (fnt-brood-top q fnt-corpus 1) (top fnt-corpus q 1))
+      (assert= (fnt-brood-top q fnt-corpus 500) (top fnt-corpus q 500))))
   (test "unbounded: `filter` ranks every match identically"
     (doseq (q fnt-queries)
-      (assert= (fnt-brood-top q fnt-corpus nil) (fuzzy/filter q fnt-corpus))))
+      (assert= (fnt-brood-top q fnt-corpus nil) (fuzzy/filter fnt-corpus q))))
   (test "with options: :category :file, a :boost, and both"
     (doseq (options fnt-options)
       (doseq (q fnt-queries)
-        (assert= (fnt-brood-top q fnt-corpus 5 options) (top q fnt-corpus 5 options))
-        (assert= (fnt-brood-top q fnt-corpus nil options) (top q fnt-corpus nil options)))))
+        (assert= (fnt-brood-top q fnt-corpus 5 options) (top fnt-corpus q 5 options))
+        (assert= (fnt-brood-top q fnt-corpus nil options) (top fnt-corpus q nil options)))))
   (test "past the optimal alignment's size: the greedy fallback agrees"
     (doseq (q ["limits" "lim its" "=its" "its$" "li ex"])
-      (assert= (fnt-brood-top q fnt-long 3) (top q fnt-long 3))
-      (assert= (fnt-brood-top q fnt-long 3 {:category :file}) (top q fnt-long 3 {:category :file}))))
+      (assert= (fnt-brood-top q fnt-long 3) (top fnt-long q 3))
+      (assert= (fnt-brood-top q fnt-long 3 {:category :file}) (top fnt-long q 3 {:category :file}))))
   (test "the sharded path answers the same too — the corpus forced past the shard floor"
     ;; `fuzzy/*parallel-min*` 0 makes every ranking shard, so the merge is compared against
     ;; the native pass rather than only against the serial Brood fold
     (doseq (q (take fnt-queries 8))
       (assert= (binding (fuzzy/*parallel-min* 0) (fnt-brood-top q fnt-corpus 5))
-        (top q fnt-corpus 5)))))
+        (top fnt-corpus q 5)))))
 
 (describe "%fuzzy-top edge cases"
   (test "an empty query keeps the candidates in their given order, capped"
-    (assert= (list "a" "b") (top "" ["a" "b" "c"] 2))
-    (assert= ["a" "b" "c"] (top "" ["a" "b" "c"] nil)))
+    (assert= (list "a" "b") (top ["a" "b" "c"] "" 2))
+    (assert= ["a" "b" "c"] (top ["a" "b" "c"] "" nil)))
   (test "an empty candidate set ranks to nothing"
-    (assert= '() (top "a" [] 5))
-    (assert= '() (top "a" '() 5)))
+    (assert= '() (top [] "a" 5))
+    (assert= '() (top '() "a" 5)))
   (test "a list of candidates ranks like a vector of them"
-    (assert= (top "ab" ["axb" "ab" "zz"] 5) (top "ab" (list "axb" "ab" "zz") 5)))
+    (assert= (top ["axb" "ab" "zz"] "ab" 5) (top (list "axb" "ab" "zz") "ab" 5)))
   (test "a non-string candidate is a type error, not a silent skip"
-    (is (not (nil? (try (do (top "a" ["ok" 42] 5) nil) (catch e e))))))
+    (is (not (nil? (try (do (top ["ok" 42] "a" 5) nil) (catch e e))))))
   (test "ties break on length, then lexicographically"
     ;; "ab" matches both at the same score; the shorter wins, and equal lengths sort by name
-    (assert= (list "ab" "abb") (top "ab" ["abb" "ab"] 5))
-    (assert= (list "aba" "abb") (top "ab" ["abb" "aba"] 5))))
+    (assert= (list "ab" "abb") (top ["abb" "ab"] "ab" 5))
+    (assert= (list "aba" "abb") (top ["abb" "aba"] "ab" 5))))
 
 (describe "the native gate"
   ;; Tested by what it DOES, not by reading the private predicate: the gate exists so that
@@ -104,7 +104,7 @@
     ;; which no candidate here even matches under them (`q` is in none of them)
     (let (by-length (fn (_q _options) (fn (cand) (- 0 (string/length cand)))))
       (assert= (list "z" "yy" "xxx")
-        (binding (fuzzy/*scorer* by-length) (top "q" ["xxx" "z" "yy"] 3)))
-      (assert= '() (top "q" ["xxx" "z" "yy"] 3))))
+        (binding (fuzzy/*scorer* by-length) (top ["xxx" "z" "yy"] "q" 3)))
+      (assert= '() (top ["xxx" "z" "yy"] "q" 3))))
   (test "the custom scorer is put back: the default rules rank the same as before"
-    (assert= (fnt-brood-top "ab" fnt-corpus 5) (top "ab" fnt-corpus 5))))
+    (assert= (fnt-brood-top "ab" fnt-corpus 5) (top fnt-corpus "ab" 5))))

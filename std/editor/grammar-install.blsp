@@ -42,11 +42,11 @@ which grammar the runtime parses a language with, as far as that can be told."
 (defn- sha-like? (revision)
   ;; a revision spelled as a full commit hash, which the fetched commit must then be — a tag
   ;; or branch name is whatever the remote says it is
-  (regex/matches? "[0-9a-f]{40}" revision))
+  (regex/matches? revision "[0-9a-f]{40}"))
 
 (defn- abbreviated-hash? (revision)
   ;; a commit hash cut short: git's protocol fetches a full one only, so it cannot be a pin
-  (and (string? revision) (regex/matches? "[0-9a-f]{7,39}" revision)))
+  (and (string? revision) (regex/matches? revision "[0-9a-f]{7,39}")))
 
 (defn- ensure-repository (source dest)
   ;; `dest` a git repository whose `origin` is `source`: made, or re-pointed

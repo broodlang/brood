@@ -26,12 +26,12 @@ the strict checker flagged on `main` (2026-09-20), and rightly."
   (test "answers a query with the same ranking `top` would give, tagged with the query"
     (let (session (ranker frt-cands))
       (rank-async session "view" 3)
-      (assert= ["view" (top "view" frt-cands 3)] (frt-await session))
+      (assert= ["view" (top frt-cands "view" 3)] (frt-await session))
       (ranker-stop session)))
   (test "an unbounded query ranks every match"
     (let (session (ranker frt-cands))
       (rank-async session "blsp")
-      (assert= ["blsp" (fuzzy/filter "blsp" frt-cands)] (frt-await session))
+      (assert= ["blsp" (fuzzy/filter frt-cands "blsp")] (frt-await session))
       (ranker-stop session)))
   (test "a burst of queries is answered ONCE, at the newest — the point of the session"
     ;; five keystrokes' worth, queued while the session is busy. A session that queued them
@@ -59,7 +59,7 @@ the strict checker flagged on `main` (2026-09-20), and rightly."
         (let (answer (frt-await session))
           (do
             (assert= "comma" (first answer))
-            (assert= (top "comma" frt-cands 3) (second answer))
+            (assert= (top frt-cands "comma" 3) (second answer))
             (assert= :timeout (receive ([:fuzzy-ranked ^session q h] [q h]) (after 200 :timeout)))))
         (ranker-stop session))))
   (test "the candidate set can be replaced without a new session"

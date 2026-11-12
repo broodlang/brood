@@ -466,9 +466,9 @@ fn suggestions(interp: &mut Interp, scope: &ScopeTree, offset: u32, name: &str) 
         )
         .collect();
     let form = format!(
-        "(fuzzy/nearest {} (append (list {}) (map (reflect/global-names) str)))",
-        introspect::string_literal(name),
-        literal_candidates.join(" ")
+        "(fuzzy/nearest (append (list {}) (map (reflect/global-names) str)) {})",
+        literal_candidates.join(" "),
+        introspect::string_literal(name)
     );
     let checkpoint = interp.heap.checkpoint();
     let names = match interp.eval_str(&form) {

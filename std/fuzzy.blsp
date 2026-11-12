@@ -29,11 +29,11 @@
 (defmodule fuzzy
   "Fuzzy (subsequence) matching + ranking.
 
-    (match \"fb\" \"foo-bar\")   ; => {:score N :positions [0 4] :terms [[0 4]]}
-    (match \"xz\" \"foo-bar\")   ; => nil
-    (filter \"fb\" cands)        ; => the matching cands, best score first
-    (top \"fb\" cands 20)        ; => just the best 20 of them
-    (top \"view\" paths 20 {:category :file :boost {\"src/view.blsp\" 40}})
+    (match \"foo-bar\" \"fb\")   ; => {:score N :positions [0 4] :terms [[0 4]]}
+    (match \"foo-bar\" \"xz\")   ; => nil
+    (filter cands \"fb\")        ; => the matching cands, best score first
+    (top cands \"fb\" 20)        ; => just the best 20 of them
+    (top paths \"view\" 20 {:category :file :boost {\"src/view.blsp\" 40}})
 
 `match` returns nil unless each space-separated term of `query` matches the candidate (in
 any order), else `{:score :positions :terms}` (`positions` are the matched char indices, for
@@ -419,7 +419,7 @@ once), and each term's own positions in query order."
 
 ;; ---- matching one candidate -------------------------------------------------
 
-(defn match (query:string cand:string &optional (options nil) -> (or nil map))
+(defn match (cand:string query:string &optional (options nil) -> (or nil map))
   "`nil` unless every term of `query` matches `cand`, else `{:score <int> :positions (i …)
 :terms [(i …) …]}` — the terms' scores added, all their matched indices in order (each
 once), and each term's own indices in query order, so a UI can colour every term apart (an
@@ -430,11 +430,11 @@ matches anything (score 0, no terms).
 For ONE candidate — the rows a UI actually draws, which need `:positions` to highlight the
 matched chars. To rank a whole set use `top`.
 
-    (fuzzy/match \"abc\" \"xAxbxC\")   ;=> {:score 12 :positions (1 3 5) :terms [(1 3 5)]}
-    (fuzzy/match \"zz\" \"abc\")   ;=> nil
-    (:terms (fuzzy/match \"ex lim\" \"lib/limits.ex\"))   ;=> [(11 12) (4 5 6)]
-    (:positions (fuzzy/match \"somet\" \"s-o-m/something\"))   ;=> (6 7 8 9 10)
-    (:terms (fuzzy/match \"=it !zz lim$\" \"lib/limits.ex/lim\"))   ;=> [(7 8) () (14 15 16)]"
+    (fuzzy/match \"xAxbxC\" \"abc\")   ;=> {:score 12 :positions (1 3 5) :terms [(1 3 5)]}
+    (fuzzy/match \"abc\" \"zz\")   ;=> nil
+    (:terms (fuzzy/match \"lib/limits.ex\" \"ex lim\"))   ;=> [(11 12) (4 5 6)]
+    (:positions (fuzzy/match \"s-o-m/something\" \"somet\"))   ;=> (6 7 8 9 10)
+    (:terms (fuzzy/match \"lib/limits.ex/lim\" \"=it !zz lim$\"))   ;=> [(7 8) () (14 15 16)]"
   (let (terms (fuzzy-terms query))
     (if (empty? terms)
       {:score 0 :positions () :terms []}
@@ -459,7 +459,7 @@ keystroke, so everything that depends only on the query happens out here, once.
     (binding (fuzzy/*scorer*
                (fn (q options) (let (base (fuzzy/scorer q options))
                                  (fn (c) (let (s (base c)) (if (nil? s) nil (+ s (recency c))))))))
-      (fuzzy/top query files 20))"
+      (fuzzy/top files query 20))"
   (let (terms (fuzzy-terms query)
         file? (fuzzy-file? options))
     (if (empty? terms)
@@ -714,7 +714,7 @@ means. A custom scorer takes the Brood paths, unchanged."
         partial (fuzzy-gather tag pending '() score-of k file?))
     (fuzzy-fold score-of partial k file?)))
 
-(defn top (query cands &optional (limit nil) (options nil))
+(defn top (cands query &optional (limit nil) (options nil))
   "The best `limit` candidates in `cands` for `query`, best score first — the ranking
 `filter` does, stopping at the `limit` a completion UI can actually show. `nil` or a limit
 ≤ 0 means all of them. Ties: fewer path segments (for `:category :file`), shorter candidate,
@@ -728,9 +728,9 @@ then lexicographic. A query with no terms keeps `cands` in their given order. Sc
 - `:boost {cand n}` — added to a candidate's score when it matches: history, frecency.
 - a candidate equal to the whole query (for a path, or its file name) ranks first.
 
-    (fuzzy/top \"ab\" [\"axb\" \"ab\" \"zz\"] 1)   ;=> (\"ab\")
-    (fuzzy/top \"view\" [\"view/model.blsp\" \"src/view.blsp\"] 2 {:category :file})   ;=> (\"src/view.blsp\" \"view/model.blsp\")
-    (fuzzy/top \"ab\" [\"abc\" \"axb\"] 2 {:boost {\"axb\" 50}})   ;=> (\"axb\" \"abc\")"
+    (fuzzy/top [\"axb\" \"ab\" \"zz\"] \"ab\" 1)   ;=> (\"ab\")
+    (fuzzy/top [\"view/model.blsp\" \"src/view.blsp\"] \"view\" 2 {:category :file})   ;=> (\"src/view.blsp\" \"view/model.blsp\")
+    (fuzzy/top [\"abc\" \"axb\"] \"ab\" 2 {:boost {\"axb\" 50}})   ;=> (\"axb\" \"abc\")"
   (let (k (or limit 0)
         bounded (> k 0)
         n (if bounded (count cands) 0)
@@ -751,15 +751,15 @@ then lexicographic. A query with no terms keeps `cands` in their given order. Sc
       ;; what matters is how many candidates get sorted per row actually displayed.
       (> n (* 100 k)) (fuzzy-fold (fuzzy-score-of query options) cands k file?)
       else (take (fuzzy-all (fuzzy-score-of query options) cands file?) k))))
-(sig top (string seqable &optional (or nil int) (or nil map) -> seqable))
+(sig top (seqable string &optional (or nil int) (or nil map) -> seqable))
 
-(defn filter (query:string cands:seqable &optional (options nil) -> seqable)
+(defn filter (cands:seqable query:string &optional (options nil) -> seqable)
   "The candidates in `cands` that fuzzily match `query`, best score first (ties: fewer path
 segments for `:category :file`, shorter candidate, then lexicographic). An empty `query`
 returns `cands` unchanged. `options` as `top`.
 
-    (fuzzy/filter \"ab\" [\"axb\" \"zz\"])   ;=> (\"axb\")"
-  (top query cands nil options))
+    (fuzzy/filter [\"axb\" \"zz\"] \"ab\")   ;=> (\"axb\")"
+  (top cands query nil options))
 ;; `cands` and the result are `seqable` (empty query returns `cands` as-is, else a ranked
 ;; list) — the domain checks the argument without false-flagging a vector caller.
 
@@ -831,7 +831,7 @@ there is none — a non-blocking selective receive, so a burst of keystrokes ran
 when there is nothing to narrow from (a custom scorer, a query with no terms)."
   (let (terms (fuzzy-terms query))
     (if (or (not (= score-of :default)) (empty? terms))
-      [(binding (fuzzy/*scorer* score-of) (top query cands limit options)) nil]
+      [(binding (fuzzy/*scorer* score-of) (top cands query limit options)) nil]
       (let (subset (if (and previous (fuzzy-refines? (first previous) terms)) (second previous) nil)
             [hits indices] (%fuzzy-top query
                              cands
@@ -938,15 +938,15 @@ deletions and substitutions turning one into the other, counted in codepoints.
     (fuzzy/edit-distance \"\" \"abc\")   ;=> 3"
   (characters-distance (string/->list a) (string/->list b)))
 
-(defn nearest (name:string candidates:seqable -> list)
+(defn nearest (candidates:seqable name:string -> list)
   "The \"did you mean\" for `name`: at most three of `candidates` within edit distance
 `max(1, length/3)` of it, nearest first, ties alphabetical. `name` itself and duplicates
 are never offered, and the threshold grows with the name, so a short unrelated candidate
 (`x` for `frobnicate`) is not.
 
-    (fuzzy/nearest \"reduc\" [\"reduce\" \"reduced\" \"map\"])   ;=> (\"reduce\")
-    (fuzzy/nearest \"cat\" [\"cot\" \"bat\" \"cat\" \"cab\" \"bat\"])   ;=> (\"bat\" \"cab\" \"cot\")
-    (fuzzy/nearest \"zzqqxx\" [\"reduce\" \"map\"])   ;=> ()"
+    (fuzzy/nearest [\"reduce\" \"reduced\" \"map\"] \"reduc\")   ;=> (\"reduce\")
+    (fuzzy/nearest [\"cot\" \"bat\" \"cat\" \"cab\" \"bat\"] \"cat\")   ;=> (\"bat\" \"cab\" \"cot\")
+    (fuzzy/nearest [\"reduce\" \"map\"] \"zzqqxx\")   ;=> ()"
   (let (characters (string/->list name)
         length (count characters)
         limit (math/max 1 (math/quot length 3))

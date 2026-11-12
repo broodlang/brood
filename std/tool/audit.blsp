@@ -128,12 +128,15 @@ result depends on the world, which `doctest` reads and checks the callee of.
 ;; Judged by parameter SPELLING. A name in `collection-params` ought to precede
 ;; every name in `subject-params` — `(map coll f)`, not `(map f coll)`.
 
-(def- collection-params #{'coll 'xs 'ys 'seq 'items 'col 'colls 'm 'mm 's})
+(def- collection-params
+  #{'coll 'xs 'ys 'seq 'items 'col 'colls 'm 'mm 's 'cand 'cands 'candidates 'r})
 (def- subject-params
   ;; NOT `k`: a key is not a callback or an index. `(multimap/assoc-all mm k vs)` puts
   ;; its collection first and correctly so, but reading `k` as a subject made the
   ;; payload `vs` look like the collection and reported a reversal that was not one.
-  #{'f 'pred 'g 'fun 'keyfn 'key-fn 'kf 'n 'i 'sep 'init 'xform 'rf})
+  ;; `pattern`, `query` and `rules` are what a string or a candidate set is searched WITH, and
+  ;; both are strings: a pattern-first call reads fine and silently matches the wrong thing.
+  #{'f 'pred 'g 'fun 'keyfn 'key-fn 'kf 'n 'i 'sep 'init 'xform 'rf 'pattern 'query 'rules})
 
 (defn- position-of (needle params index)
   (cond

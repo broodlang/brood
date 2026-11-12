@@ -209,10 +209,10 @@
   (let (said (fn (k) (string/trim (or (get answers k) ""))))
     (case os
       :macos (= (said :macos) "1")
-      :windows (regex/match? "MinAnimate\\s+REG_SZ\\s+0(\\s|$)" (said :windows))
+      :windows (regex/match? (said :windows) "MinAnimate\\s+REG_SZ\\s+0(\\s|$)")
       (or (= (said :gnome) "false")
         (any? (string/split (said :kde) "\n")
-          (fn (line) (regex/matches? "\\s*AnimationDurationFactor\\s*=\\s*0+(\\.0*)?\\s*" line)))))))
+          (fn (line) (regex/matches? line "\\s*AnimationDurationFactor\\s*=\\s*0+(\\.0*)?\\s*")))))))
 
 (defn- desktop-answer (prog args)
   ;; what `prog args` printed when it ran and succeeded, else nil — a source that is not
@@ -268,17 +268,17 @@ AppleInterfaceStyle` (`Dark`; the key is absent in light mode), `:windows` `reg 
       :macos (if (= (said :macos) "Dark") :dark :light)
       :windows
         (cond
-          (regex/find "AppsUseLightTheme\\s+REG_DWORD\\s+0x0+(\\s|$)" (said :windows)) :dark
-          (regex/find "AppsUseLightTheme\\s+REG_DWORD\\s+0x0*1(\\s|$)" (said :windows)) :light
+          (regex/find (said :windows) "AppsUseLightTheme\\s+REG_DWORD\\s+0x0+(\\s|$)") :dark
+          (regex/find (said :windows) "AppsUseLightTheme\\s+REG_DWORD\\s+0x0*1(\\s|$)") :light
           else nil)
       (let (gnome (said :gnome)
             kde (seq/find (string/split (said :kde) "\n")
-                  (fn (line) (regex/matches? "\\s*ColorScheme\\s*=.*" line))))
+                  (fn (line) (regex/matches? line "\\s*ColorScheme\\s*=.*"))))
         (cond
           (includes? gnome "prefer-dark") :dark
           (includes? gnome "prefer-light") :light
-          kde (if (regex/find "(?i)dark" kde) :dark :light)
-          (regex/find "(?i)-dark'?\\s*$" (said :gtk-theme)) :dark
+          kde (if (regex/find kde "(?i)dark") :dark :light)
+          (regex/find (said :gtk-theme) "(?i)-dark'?\\s*$") :dark
           else nil)))))
 
 (defn color-scheme ()

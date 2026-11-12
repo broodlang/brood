@@ -72,8 +72,8 @@
                    (rx-unescape (get case "haystack"))
                    (get case "haystack"))
         found (try
-                (regex/find (get case "regex")
-                  haystack
+                (regex/find haystack
+                  (get case "regex")
                   {:fold? (= true (get case "case-insensitive"))})
                 (catch e [:raised (error-message e)])))
     (cond

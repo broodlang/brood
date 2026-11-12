@@ -6,82 +6,81 @@
 (describe "fuzzy/match"
   ; smart case: a lower-case query ignores case, one with an upper-case letter does not
   (test "matches a subsequence, reporting positions — smart case"
-    (assert= (get (fuzzy/match "fb" "foo-bar") :positions) (list 0 4))
-    (assert= (get (fuzzy/match "fb" "Foo-Bar") :positions) (list 0 4))
-    (assert= (get (fuzzy/match "FB" "Foo-Bar") :positions) (list 0 4))
-    (is (nil? (fuzzy/match "FB" "foo-bar"))))
+    (assert= (get (fuzzy/match "foo-bar" "fb") :positions) (list 0 4))
+    (assert= (get (fuzzy/match "Foo-Bar" "fb") :positions) (list 0 4))
+    (assert= (get (fuzzy/match "Foo-Bar" "FB") :positions) (list 0 4))
+    (is (nil? (fuzzy/match "foo-bar" "FB"))))
   ; order matters
   (test "is nil when the query is not a subsequence"
-    (is (nil? (fuzzy/match "xz" "foo-bar")))
-    (is (nil? (fuzzy/match "rab" "foo-bar"))))
+    (is (nil? (fuzzy/match "foo-bar" "xz")))
+    (is (nil? (fuzzy/match "foo-bar" "rab"))))
   (test "the empty query matches anything, score 0"
-    (assert= (fuzzy/match "" "abc") {:score 0 :positions () :terms []}))
+    (assert= (fuzzy/match "abc" "") {:score 0 :positions () :terms []}))
   ; f@0, b@? scattered, no boundary on b
   (test "a boundary/contiguous match outscores a scattered one"
     (is
-      (> (get (fuzzy/match "fb" "foo-bar") :score)
+      (> (get (fuzzy/match "foo-bar" "fb") :score)
         ; f@0, b@4 — both word starts
-        (get (fuzzy/match "fb" "fluffball") :score))))
+        (get (fuzzy/match "fluffball" "fb") :score))))
   (test "an exact prefix scores well (contiguous + boundary + early)"
-    (is (> (get (fuzzy/match "foo" "foobar") :score) (get (fuzzy/match "foo" "barfoo") :score)))))
+    (is (> (get (fuzzy/match "foobar" "foo") :score) (get (fuzzy/match "barfoo" "foo") :score)))))
 
 (describe "terms — a space separates what must match, in any order (ADR-429)"
   (test "every term must match; either order finds the same candidate"
-    (is (map? (fuzzy/match "lim ex" "lib/limits.ex")))
-    (is (map? (fuzzy/match "ex lim" "lib/limits.ex")))
-    (is (nil? (fuzzy/match "lim rb" "lib/limits.ex"))))
+    (is (map? (fuzzy/match "lib/limits.ex" "lim ex")))
+    (is (map? (fuzzy/match "lib/limits.ex" "ex lim")))
+    (is (nil? (fuzzy/match "lib/limits.ex" "lim rb"))))
   (test "the score is the terms' scores added, and positions are all of theirs, in order"
-    (let (lim (fuzzy/match "lim" "lib/limits.ex")
-          ex (fuzzy/match "ex" "lib/limits.ex")
-          both (fuzzy/match "ex lim" "lib/limits.ex"))
+    (let (lim (fuzzy/match "lib/limits.ex" "lim")
+          ex (fuzzy/match "lib/limits.ex" "ex")
+          both (fuzzy/match "lib/limits.ex" "ex lim"))
       (assert= (+ (:score lim) (:score ex)) (:score both))
       (assert= (list 4 5 6 11 12) (:positions both))
       ;; and each term's own, in the order the query names them — what colours them apart
       (assert= [(list 11 12) (list 4 5 6)] (:terms both))))
   (test "a term overlapping another's positions lists each position once"
-    (assert= (list 0 1) (:positions (fuzzy/match "ab a" "ab"))))
+    (assert= (list 0 1) (:positions (fuzzy/match "ab" "ab a"))))
   (test "extra spaces are not terms; only spaces is the empty query"
-    (assert= (:score (fuzzy/match "lim  ex " "lib/limits.ex"))
-      (:score (fuzzy/match "lim ex" "lib/limits.ex")))
-    (assert= {:score 0 :positions () :terms []} (fuzzy/match "   " "abc"))
-    (assert= (list "b" "a") (fuzzy/filter "  " (list "b" "a"))))
+    (assert= (:score (fuzzy/match "lib/limits.ex" "lim  ex "))
+      (:score (fuzzy/match "lib/limits.ex" "lim ex")))
+    (assert= {:score 0 :positions () :terms []} (fuzzy/match "abc" "   "))
+    (assert= (list "b" "a") (fuzzy/filter (list "b" "a") "  ")))
   (test "a space no longer matches a space: it separates"
-    (is (map? (fuzzy/match "my file" "my-file.txt"))))
+    (is (map? (fuzzy/match "my-file.txt" "my file"))))
   (test "ranking with terms: only candidates matching every term, best first"
     (assert= (list "lib/limits.ex" "test/limits_test.exs")
-      (fuzzy/top "lim ex"
-        (list "lib/limits.ex" "lib/other.ex" "test/limits_test.exs" "README.md")
-        5))))
+      (fuzzy/top (list "lib/limits.ex" "lib/other.ex" "test/limits_test.exs" "README.md")
+        "lim ex" 5))))
 
 (describe "fuzzy/filter"
   (test "keeps matches, best score first"
     ;; "fb": foo-bar starts a word with each of them; afb holds the query as one unbroken
     ;; run; foobar spreads it (f, then b three chars later, mid-word) and pays for the gap.
-    (assert= (fuzzy/filter "fb" (list "afb" "foobar" "foo-bar"))
+    (assert= (fuzzy/filter (list "afb" "foobar" "foo-bar") "fb")
       (list "foo-bar" "afb" "foobar")))
   (test "a prefix match ranks above a tail match"
-    (assert= (fuzzy/filter "foo" (list "barfoo" "foobar")) (list "foobar" "barfoo")))
+    (assert= (fuzzy/filter (list "barfoo" "foobar") "foo") (list "foobar" "barfoo")))
   (test "drops non-matches"
-    (assert= (fuzzy/filter "zzz" (list "abc" "def")) ()))
+    (assert= (fuzzy/filter (list "abc" "def") "zzz") ()))
   (test "an empty query returns the candidates unchanged"
-    (assert= (fuzzy/filter "" (list "a" "b" "c")) (list "a" "b" "c"))))
+    (assert= (fuzzy/filter (list "a" "b" "c") "") (list "a" "b" "c"))))
 
 (describe "fuzzy/top"
   (test "keeps only the best `limit` of the matches"
-    (assert= (fuzzy/top "fb" (list "afb" "foobar" "foo-bar") 2) (list "foo-bar" "afb"))
-    (assert= (fuzzy/top "fb" (list "afb" "foobar" "foo-bar") 1) (list "foo-bar")))
+    (assert= (fuzzy/top (list "afb" "foobar" "foo-bar") "fb" 2) (list "foo-bar" "afb"))
+    (assert= (fuzzy/top (list "afb" "foobar" "foo-bar") "fb" 1) (list "foo-bar")))
   (test "a nil / zero / negative limit means all of them — filter"
     (let (cands (list "afb" "foobar" "foo-bar"))
-      (assert= (fuzzy/top "fb" cands) (fuzzy/filter "fb" cands))
-      (assert= (fuzzy/top "fb" cands 0) (list "foo-bar" "afb" "foobar"))
-      (assert= (fuzzy/top "fb" cands -1) (list "foo-bar" "afb" "foobar"))))
+      (assert= (fuzzy/top cands "fb") (fuzzy/filter cands "fb"))
+      (assert= (fuzzy/top cands "fb" 0) (list "foo-bar" "afb" "foobar"))
+      (assert= (fuzzy/top cands "fb" -1) (list "foo-bar" "afb" "foobar"))))
   (test "a limit past the match count is not padded"
-    (assert= (fuzzy/top "fb" (list "afb" "zzz") 5) (list "afb")))
+    (assert= (fuzzy/top (list "afb" "zzz") "fb" 5) (list "afb")))
   (test "an empty query keeps the candidates in their given order, capped"
-    (assert= (fuzzy/top "" (list "c" "a" "b") 2) (list "c" "a"))
-    (assert= (fuzzy/top "" (list "c" "a" "b")) (list "c" "a" "b")))
+    (assert= (fuzzy/top (list "c" "a" "b") "" 2) (list "c" "a"))
+    (assert= (fuzzy/top (list "c" "a" "b") "") (list "c" "a" "b")))
   (test "drops non-matches"
-    (assert= (fuzzy/top "zzz" (list "abc" "def") 10) ())))
+    (assert= (fuzzy/top (list "abc" "def") "zzz" 10) ())))
 
 ;; ---- a path is not a bag of word starts -------------------------------------
 ;; The failure this pins was live in a real editor: typing a file's name into a project
@@ -100,17 +99,17 @@
 
 (describe "ranking a project's paths"
   (test "the file NAMED by the query outranks files that merely scatter its letters"
-    (assert= (take (fuzzy/top "limits.ex" project-paths 4) 2)
+    (assert= (take (fuzzy/top project-paths "limits.ex" 4) 2)
       (list "lib/moneyclub/limits.ex" "lib/moneyclub/accounts/limits.ex")))
   (test "a run buried past an earlier false start is still found (the walk cannot backtrack)"
     ;; greedy alone spends l-i-m on `lib/moneyclub` and scores this below the scattered ones
-    (is (> (get (fuzzy/match "limits.ex" "lib/moneyclub/accounts/limits.ex") :score)
-          (get (fuzzy/match "limits.ex" "lib/moneyclub/reports/it3b/submission.ex") :score))))
+    (is (> (get (fuzzy/match "lib/moneyclub/accounts/limits.ex" "limits.ex") :score)
+          (get (fuzzy/match "lib/moneyclub/reports/it3b/submission.ex" "limits.ex") :score))))
   (test "and the run is what gets highlighted, not the false start"
-    (assert= (get (fuzzy/match "limits" "lib/moneyclub/accounts/limits.ex") :positions)
+    (assert= (get (fuzzy/match "lib/moneyclub/accounts/limits.ex" "limits") :positions)
       (list 23 24 25 26 27 28)))
   (test "a scattered match still matches — it just ranks last"
-    (is (not (nil? (fuzzy/match "limits.ex" "lib/moneyclub/reports/it3b/submission.ex"))))))
+    (is (not (nil? (fuzzy/match "lib/moneyclub/reports/it3b/submission.ex" "limits.ex"))))))
 
 ;; ---- the bounded fold and the sort must agree -------------------------------
 ;; `top` keeps the best k in a fold and `filter` sorts everything; they are two ways to
@@ -131,7 +130,7 @@
   (test "top k is the first k of filter, for every query shape"
     (doseq (q (list "f" "fb" "FB" "bar" "foo" "b/f" "src" "buf" "é" "a" "zq"))
       (doseq (k (list 1 3 20))
-        (assert= (fuzzy/top q rank-corpus k) (take (fuzzy/filter q rank-corpus) k))))))
+        (assert= (fuzzy/top rank-corpus q k) (take (fuzzy/filter rank-corpus q) k))))))
 
 ;; ---- sharding across processes ----------------------------------------------
 ;; Past fuzzy/*parallel-min* candidates a ranking is split across fuzzy/*workers*
@@ -143,13 +142,13 @@
 (describe "fuzzy/top across processes"
   (test "a sharded ranking is identical to the single-process one"
     (doseq (q (list "view" "v9" "mod_42" "srcview" "zzq"))
-      (assert= (fuzzy/top q big-corpus 20)
-        (binding (fuzzy/*parallel-min* 1000000) (fuzzy/top q big-corpus 20)))))
+      (assert= (fuzzy/top big-corpus q 20)
+        (binding (fuzzy/*parallel-min* 1000000) (fuzzy/top big-corpus q 20)))))
   (test "and identical to sorting the whole set"
-    (assert= (fuzzy/top "v9" big-corpus 20) (take (fuzzy/filter "v9" big-corpus) 20)))
+    (assert= (fuzzy/top big-corpus "v9" 20) (take (fuzzy/filter big-corpus "v9") 20)))
   (test "one worker is the same answer as eight"
-    (assert= (binding (fuzzy/*workers* 1) (fuzzy/top "view_9" big-corpus 10))
-      (binding (fuzzy/*workers* 8) (fuzzy/top "view_9" big-corpus 10))))
+    (assert= (binding (fuzzy/*workers* 1) (fuzzy/top big-corpus "view_9" 10))
+      (binding (fuzzy/*workers* 8) (fuzzy/top big-corpus "view_9" 10))))
   ;; A worker runs a pure fold, so it only dies through a scorer that throws — and then the
   ;; caller must still answer. The straggler is killed and its slice ranked in the caller,
   ;; where the same scorer raises: an error you can see, not a loop that hangs.
@@ -160,12 +159,12 @@
   ;; whatever still landed later. Before the sweep, a 1 ms budget over this corpus stranded
   ;; seven replies per ranking, forever.
   (test "a ranking that times out leaves nothing in the caller's mailbox"
-    (let (answer (binding (fuzzy/*parallel-min* 1000000) (fuzzy/top "view_9" big-corpus 5))
-          timed-out (binding (fuzzy/*worker-timeout-ms* 1) (fuzzy/top "view_9" big-corpus 5))
+    (let (answer (binding (fuzzy/*parallel-min* 1000000) (fuzzy/top big-corpus "view_9" 5))
+          timed-out (binding (fuzzy/*worker-timeout-ms* 1) (fuzzy/top big-corpus "view_9" 5))
           ;; give every killed worker time to finish and send, then let one ordinary
           ;; ranking run — its first act is to discard what the timed-out one stranded
           _ (receive (:never nil) (after 600 nil))
-          _ (fuzzy/top "view_9" big-corpus 5)
+          _ (fuzzy/top big-corpus "view_9" 5)
           strays (fold (range 40)
                    0
                    (fn (n _) (receive ([:fuzzy-ranked _t _i _r] (inc n)) (after 50 n)))))
@@ -174,7 +173,7 @@
   (test "a scorer that throws does not hang the ranking"
     (assert-error (binding (fuzzy/*scorer* (fn (_q _options) (fn (_c) (throw :boom)))
                             fuzzy/*worker-timeout-ms* 200)
-                    (fuzzy/top "view" big-corpus 5)))))
+                    (fuzzy/top big-corpus "view" 5)))))
 
 ;; ---- the rules are still replaceable ----------------------------------------
 ;; The reason the hot path stayed Brood: bind fuzzy/*scorer* and every ranking follows —
@@ -186,18 +185,18 @@
 (describe "fuzzy/*scorer*"
   (test "a custom scorer replaces the rules"
     (assert= (binding (fuzzy/*scorer* shortest-first)
-               (fuzzy/top "o" (list "foo-bar" "fo" "foobar" "zz") 3))
+               (fuzzy/top (list "foo-bar" "fo" "foobar" "zz") "o" 3))
       (list "fo" "foobar" "foo-bar")))
   (test "a custom scorer reaches the sharded path too"
-    (assert= (binding (fuzzy/*scorer* shortest-first) (fuzzy/top "view_9" big-corpus 2))
+    (assert= (binding (fuzzy/*scorer* shortest-first) (fuzzy/top big-corpus "view_9" 2))
       (binding (fuzzy/*scorer* shortest-first fuzzy/*parallel-min* 1000000)
-        (fuzzy/top "view_9" big-corpus 2))))
+        (fuzzy/top big-corpus "view_9" 2))))
   (test "scorer composes — it is a value, not a rule buried in the walk"
     (let (boosted (fn (q options)
                     (let (base (fuzzy/scorer q options))
                       (fn (c) (let (s (base c)) (if (nil? s) nil (+ s 100)))))))
-      (assert= (binding (fuzzy/*scorer* boosted) (fuzzy/top "fb" rank-corpus 5))
-        (fuzzy/top "fb" rank-corpus 5)))))
+      (assert= (binding (fuzzy/*scorer* boosted) (fuzzy/top rank-corpus "fb" 5))
+        (fuzzy/top rank-corpus "fb" 5)))))
 
 (describe "fuzzy/edit-distance"
   (test "counts insertions, deletions and substitutions"
@@ -216,20 +215,20 @@
 (describe "fuzzy/nearest"
   (test "the threshold is a third of the name's length"
     ;; six characters allow two edits, not three
-    (assert= (fuzzy/nearest "abcdef" ["abcdxy" "abcxyz"]) (list "abcdxy"))
+    (assert= (fuzzy/nearest ["abcdxy" "abcxyz"] "abcdef") (list "abcdxy"))
     ;; five characters allow one: `reduced` is two away
-    (assert= (fuzzy/nearest "reduc" ["reduce" "reduced"]) (list "reduce")))
+    (assert= (fuzzy/nearest ["reduce" "reduced"] "reduc") (list "reduce")))
   (test "a short name still allows one edit"
-    (assert= (fuzzy/nearest "ab" ["xb" "xy"]) (list "xb")))
+    (assert= (fuzzy/nearest ["xb" "xy"] "ab") (list "xb")))
   (test "nearer first, then alphabetical, at most three"
-    (assert= (fuzzy/nearest "cat" ["cot" "bat" "cut" "cab" "cart"]) (list "bat" "cab" "cart"))
-    (assert= (fuzzy/nearest "abcdef" ["abcdxy" "zbcdef"]) (list "zbcdef" "abcdxy")))
+    (assert= (fuzzy/nearest ["cot" "bat" "cut" "cab" "cart"] "cat") (list "bat" "cab" "cart"))
+    (assert= (fuzzy/nearest ["abcdxy" "zbcdef"] "abcdef") (list "zbcdef" "abcdxy")))
   (test "never offers the name itself, and offers a duplicate once"
-    (assert= (fuzzy/nearest "cat" ["cat" "bat" "bat"]) (list "bat")))
+    (assert= (fuzzy/nearest ["cat" "bat" "bat"] "cat") (list "bat")))
   (test "a candidate of a different length within the threshold qualifies"
-    (assert= (fuzzy/nearest "abc" ["abcd" "ab" "abcde"]) (list "ab" "abcd")))
+    (assert= (fuzzy/nearest ["abcd" "ab" "abcde"] "abc") (list "ab" "abcd")))
   (test "nothing close is an empty answer"
-    (assert= (fuzzy/nearest "zzqqxx" ["reduce" "map"]) ()))
+    (assert= (fuzzy/nearest ["reduce" "map"] "zzqqxx") ()))
   (test "answers the same in many processes at once"
-    (assert= (into #{} (concurrently 8 (fn (_) (fuzzy/nearest "reduc" nearest-corpus))))
+    (assert= (into #{} (concurrently 8 (fn (_) (fuzzy/nearest nearest-corpus "reduc"))))
       #{(list "reduce")})))

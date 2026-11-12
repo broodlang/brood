@@ -29,7 +29,7 @@
   ;; `mode con`'s `Lines:` or `Columns:` value, read as that field: a `30` or `100` found
   ;; anywhere in the output (the keyboard rate, a code page) proved nothing. The spaces
   ;; between name and value may arrive as cursor moves, which the strip removes.
-  (let (found (regex/find (str name ":\\s*(\\d+)") out))
+  (let (found (regex/find out (str name ":\\s*(\\d+)")))
     (when found (get (first (get found :groups)) :text))))
 
 (defn- pty-await (child acc want)

@@ -6,6 +6,18 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Breaking: `regex` and `fuzzy` take the subject first (ADR-717). Read every call: it does not
+raise.**
+- `(regex/find s pattern)`, as are `match?`, `matches?`, `find-all`, `replace`, `split` and
+  `tokens`.
+- `(regex/rope-find r pattern from)` and the other `rope-*` calls.
+- `(regex/paint s prefix pattern suffix)`.
+- `(fuzzy/match cand query)`, `(fuzzy/filter cands query)`, `(fuzzy/top cands query …)` and
+  `(fuzzy/nearest candidates name)`.
+
+Both arguments are strings, so a call left in the old order returns a wrong answer and
+raises nothing.
+
 **Breaking: the surface pass (ADR-716).** Names that broke a rule an earlier ADR set are
 renamed or removed. Each one is in the rename ledger, so a stale caller's error and `nest check`
 name the replacement, and `nest check --fix-renames` applies the renames.
