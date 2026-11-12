@@ -1236,6 +1236,11 @@ impl Heap {
         if arm.compile_epoch.load(Acquire) != epoch {
             return None;
         }
+        // Tier work only an entry does (an upgrade to queue or to swap in): leave the call to
+        // the driver, which does it and settles the arm, then link.
+        if crate::eval::compile::needs_tier_entry(arm, code) {
+            return None;
+        }
         // Two-stage tiering: the frame the *installed* native runs against — the inlined
         // upgrade (post-swap) needs the larger `inline_nslots`.
         //
@@ -1289,8 +1294,10 @@ impl Heap {
     }
 
     /// Whether call-site `site`'s entry names an arm whose native code is INSTALLED right
-    /// now — `false` for one demoted since the mirror was published (`BAILED` by the
-    /// deopt-thrash latch, `null`/`QUEUED` by ADR-372's re-lowering), `None` with no entry.
+    /// now and linkable — `false` for one demoted since the mirror was published (`BAILED` by
+    /// the deopt-thrash latch, `null`/`QUEUED` by ADR-372's re-lowering) or one whose upgrade
+    /// landed since and waits for the entry that swaps it in (`needs_tier_entry`; this
+    /// process clears such links on its next driver entry), `None` with no entry.
     /// The debug cross-check's third legitimate reason for a mirror the entry refuses: a
     /// demotion never clears the mirror (`vm_fast_link_clear_site`'s doc — the old native is
     /// still valid code, it only deopts), so the mirror outlives the entry's willingness to
@@ -1303,7 +1310,41 @@ impl Heap {
         let e = t.get(abs)?.as_ref()?;
         let (arm, _) = e.arm()?;
         let code = arm.jit_code.load(Acquire);
-        Some(!(code.is_null() || code == crate::jit::BAILED || code == crate::jit::QUEUED))
+        Some(
+            !(code.is_null()
+                || code == crate::jit::BAILED
+                || code == crate::jit::QUEUED
+                || crate::eval::compile::needs_tier_entry(arm, code)),
+        )
+    }
+
+    /// Clear every [`FastLink`] mirror slot whose call-site entry names an arm that now
+    /// needs a tier entry (`needs_tier_entry`: an upgrade landed for it after it was linked),
+    /// so its next call misses, takes the driver and swaps the upgrade in. Run when
+    /// `INLINE_LANDED` moved past [`Self::inline_landed_seen`] — once per landing, not per
+    /// call.
+    #[cfg(feature = "jit")]
+    #[cold]
+    pub(crate) fn unlink_arms_needing_tier_entry(&self) {
+        use std::sync::atomic::Ordering::Acquire;
+        let t = self.vm_call_ics.borrow();
+        let mut fls = self.vm_fast_links.borrow_mut();
+        for (abs, fl) in fls.iter_mut().enumerate() {
+            if fl.code == 0 || fl.nslots == u32::MAX {
+                continue;
+            }
+            let Some((arm, _)) = t.get(abs).and_then(|e| e.as_ref()).and_then(|e| e.arm()) else {
+                continue;
+            };
+            let code = arm.jit_code.load(Acquire);
+            if !code.is_null()
+                && code != crate::jit::BAILED
+                && code != crate::jit::QUEUED
+                && crate::eval::compile::needs_tier_entry(arm, code)
+            {
+                *fl = FastLink::EMPTY;
+            }
+        }
     }
 
     /// Grow the IR-readable [`FastLink`] mirror far enough to hold absolute site `abs`,

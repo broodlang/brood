@@ -2590,6 +2590,120 @@ fn an_unrelated_def_does_not_cost_a_leaf_derivation_its_inlined_body() {
     }
 }
 
+/// A callee whose every call comes from native code still gets its inlined upgrade. Native
+/// callers link to it, and a link skips the entry that queues the upgrade and later swaps it
+/// in (`needs_tier_entry`). So after a reset, `sum-sq` above re-tiered onto its small native,
+/// was linked by `warm` and never went through that entry again: its inlined body was never
+/// queued, and an upgrade that landed after the link was never swapped in. rr caught both
+/// under chaos scheduling (2026-11-10). Here the reset is forced, so the only calls `sum-sq`
+/// gets are `warm`'s.
+#[test]
+fn a_callee_reached_only_through_native_links_still_gets_its_inlined_upgrade() {
+    use std::sync::atomic::Ordering::Acquire;
+    if crate::eval::compile::tier_ceiling() != crate::eval::compile::Tier::Native {
+        return;
+    }
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str(
+            "(def unrelated 0)
+             (defn leaf-sq (x) (* x x))
+             (defn sum-sq (n acc) (if (= n 0) acc (sum-sq (- n 1) (+ acc (leaf-sq n)))))
+             (defn warm (k) (if (< k 1) :ok (do (sum-sq 20 0) (warm (- k 1)))))",
+        )
+        .expect("define");
+    let id = match interp.eval_str("sum-sq").expect("read sum-sq").unpack() {
+        ValueRef::Fn(id) => id,
+        _ => panic!("`sum-sq` should be a closure"),
+    };
+    let arm = compiled_arm_for(&interp.heap, id, 2).expect("sum-sq/2 compiles");
+    let arm = arm.arc().clone();
+    let state = |arm: &CompiledArm| {
+        format!(
+            "jit_code {:?}, inline_code {:?}, inline_queued {}, settled {:?}, native_resets {}",
+            arm.jit_code.load(Acquire),
+            arm.inline_code.load(Acquire),
+            arm.inline_queued.load(Acquire),
+            arm.settled_code.load(Acquire),
+            arm.native_resets.load(Acquire),
+        )
+    };
+    // A compile in flight: the small native queued, or the upgrade queued and not landed. An
+    // upgrade that landed and sits unswapped is NOT in flight — that is the bug, and it must
+    // time out rather than wait forever.
+    let upgrade_queued = |arm: &CompiledArm| {
+        (arm.inline_queued.load(Acquire) && arm.inline_code.load(Acquire).is_null())
+            || arm.jit_code.load(Acquire) == crate::jit::QUEUED
+    };
+    wait_for_tier(
+        || arm.inline_installed.load(Acquire),
+        || upgrade_queued(&arm),
+        || {
+            interp.eval_str("(warm 200)").expect("warm");
+        },
+        || {
+            format!(
+                "`sum-sq` never installed its inlined body the first time ({})",
+                state(&arm)
+            )
+        },
+    );
+    // `warm` must itself be native, or its calls are the VM's, which enter through the
+    // driver: it is entered once per round, so tier it by calling it.
+    let warm_id = match interp.eval_str("warm").expect("read warm").unpack() {
+        ValueRef::Fn(id) => id,
+        _ => panic!("`warm` should be a closure"),
+    };
+    let warm = compiled_arm_for(&interp.heap, warm_id, 1).expect("warm/1 compiles");
+    let warm = warm.arc().clone();
+    let native = |arm: &CompiledArm| {
+        let code = arm.jit_code.load(Acquire);
+        !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED
+    };
+    wait_for_tier(
+        || native(&warm),
+        || warm.jit_code.load(Acquire) == crate::jit::QUEUED,
+        || {
+            interp.eval_str("(warm 1)").expect("warm");
+        },
+        || format!("`warm` never tiered ({})", state(&warm)),
+    );
+    // Move the epoch first, so the re-tier finds nothing current in the shared caches to
+    // adopt in the one driver entry it takes (it would swap the old upgrade back in there).
+    // One warm round re-stamps the arm and its leaf derivation at the new epoch (an
+    // unrelated def changes nothing it baked in); a derivation left behind would bail the
+    // upgrade's lowering instead.
+    interp.eval_str("(def unrelated 1)").expect("def");
+    interp.eval_str("(warm 200)").expect("warm");
+    crate::eval::compile::reset_native_state(&arm);
+    // The links `warm` holds still name the old inlined pointer at the live epoch; drop them
+    // so its next call reaches the re-tiered arm, as a reset's epoch move would.
+    interp
+        .heap
+        .invalidate_fast_links_for(crate::core::value::intern("sum-sq"));
+    wait_for_tier(
+        || arm.inline_installed.load(Acquire),
+        || upgrade_queued(&arm),
+        || {
+            interp.eval_str("(warm 200)").expect("warm");
+        },
+        || {
+            format!(
+                "`sum-sq`, called only by `warm`'s native code after a reset, never installed \
+                 its inlined body again ({})",
+                state(&arm)
+            )
+        },
+    );
+    assert_eq!(
+        interp
+            .eval_str("(sum-sq 20 0)")
+            .expect("run inlined")
+            .as_int(),
+        Some(2870)
+    );
+}
+
 /// Warm until `done`, failing after a minute of waiting with no compile in flight. The
 /// background compiler serves its whole process, and `cargo test` — the nightly ASAN job —
 /// runs every lib test as a thread of ONE process: there, under ASAN, the queue backed up

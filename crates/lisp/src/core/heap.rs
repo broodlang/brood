@@ -1220,6 +1220,11 @@ pub struct Heap {
     /// here.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     vm_fast_links: RefCell<Vec<FastLink>>,
+    /// The `INLINE_LANDED` count this process last cleared its fast links at (see
+    /// `needs_tier_entry`): a driver entry that finds the count moved clears the links to
+    /// arms with an upgrade waiting, so their next call takes the entry that swaps it in.
+    #[cfg(feature = "jit")]
+    pub(crate) inline_landed_seen: u64,
     /// DEBUG ONLY: per-call-site source position, recorded at compile time and indexed
     /// by the same site id as [`Self::vm_call_ics`]. Lets a crash map a runtime call site
     /// back to its `.blsp` file:line (call-site ids are positional + reset on
@@ -2018,6 +2023,8 @@ impl Heap {
             next_gic_base: std::cell::Cell::new(0),
             tw_reentry_depth: std::cell::Cell::new(0),
             vm_fast_links: RefCell::new(Vec::new()),
+            #[cfg(feature = "jit")]
+            inline_landed_seen: 0,
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),

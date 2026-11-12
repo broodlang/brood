@@ -1466,3 +1466,24 @@ used to install anyway) and picks the musl build where there is no glibc; `insta
 Windows one-liner; `nest update-brood` asks the binary what it is (`system/target`, new)
 rather than `uname`. `release.yml` gained a dry run, and a manual run for a tag builds the tag
 (it built main's head). hive serves `/install.ps1` once deployed.
+
+2026-11-12. **A callee reached only through native links never took its inlined upgrade.** The
+two-stage tiering queues an arm's inlined (or re-lowered) body and swaps it in from
+`jit_tier_in_frame`'s slow path, but native-to-native calls (the IR's `FastLink` mirror,
+`jit_dispatch_call`'s native path, a higher-order callback's native entry) enter the code
+without it. An arm re-tiered after a reset and then called only from a native caller was
+linked at once and never queued its upgrade; one whose upgrade landed after it was linked
+never swapped it in. rr chaos runs caught both states in
+`an_unrelated_def_does_not_cost_a_leaf_derivation_its_inlined_body`, the once-only timeout
+watch item. Every linker now asks `needs_tier_entry` first (an upgrade not queued yet, or
+waiting to be swapped in) and leaves such a call to the driver, which does the work and
+settles the arm. While an upgrade compiles, linking stays allowed, so a spawn storm keeps its
+links. A landing bumps `INLINE_LANDED`, and each process clears its links to arms waiting for
+the swap on its next driver entry. `a_callee_reached_only_through_native_links_still_gets_its_inlined_upgrade`
+forces the reset and fails in each of rr's two states with the matching half of the fix
+sabotaged.
+The bug was live on a benchmark row: `json`'s `num-end`, `int-end` and `frac-end` never
+swapped in their inlined bodies, and now do. `make ab` reads `json` +5% because it pins every
+row to one CPU, where the background compiler now builds those three upgrades. The worker
+thread runs about 3% fewer instructions, and unpinned the row is 0.4% faster. `make ab-vm` is
+flat.

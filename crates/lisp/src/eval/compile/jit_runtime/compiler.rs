@@ -521,6 +521,9 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                         return false;
                     }
                     if still_valid(arm) {
+                        if inlined {
+                            super::INLINE_LANDED.fetch_add(1, SeqCst);
+                        }
                         return true;
                     }
                     let _ = slot.compare_exchange(ptr, expected, SeqCst, SeqCst);

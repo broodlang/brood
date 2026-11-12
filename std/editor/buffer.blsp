@@ -1733,30 +1733,63 @@ it too. What a revert needs, so a file read back costs none of the history befor
 ;; shell's output, an agent's reply above its prompt — would be taken back by undoing your own
 ;; typing, and come back on redo. `insert-program-output` writes such text as though it had always been
 ;; there: into the buffer and into every snapshot of its history, at the same position, with
-;; nothing recorded. Exact when the text before that position is the same in every snapshot —
-;; the shape every program buffer has, its output above the input you edit; elsewhere a
-;; snapshot gets it at the same offset, clamped.
+;; nothing recorded. `replace-program-output` does the same for text that REPLACES what the
+;; program wrote before — a progress counter's carriage return rewriting its line. Exact when
+;; the text before that position (and the replaced text) is the same in every snapshot — the
+;; shape every program buffer has, its output above the input you edit; elsewhere a snapshot
+;; gets it at the same offsets, clamped.
 
-(defn- output-into (state:buffer at:int text:string properties -> buffer)
-  "`state` with `text` inserted at `at` (clamped), recording nothing and refusing nothing:
-point and mark past it move along, its markers and text properties move as any insertion
-moves them, its narrowing moves with the text (the regions after `at` slide)."
+(defn- output-into (state:buffer from:int to:int text:string properties -> buffer)
+  "`state` with `[from, to)` (clamped) replaced by `text`, recording nothing and refusing
+nothing: point and mark past the range move by the change in length, one inside it lands at
+its start, its markers and text properties move as any edit moves them, its narrowing moves
+with the text (the regions after the range slide) and a read-only buffer — narrowed to no
+region — stays read-only."
   (let (regions (get state :editable)
         point (buffer-point state)
         mark (get state :mark)
-        open (dissoc (assoc state :undo-disabled true :read-only false) :editable)
-        place (buffer-clamp 0 (buffer-length open) at)
+        open (dissoc (assoc state :undo-disabled true) :editable)
+        lo (buffer-clamp 0 (buffer-length open) from)
+        hi (buffer-clamp lo (buffer-length open) to)
         width (string/length text)
         shift (fn (position)
-                (if (and (int? position) (>= position place)) (+ position width) position))
-        inserted (insert (goto-char open place) text properties)
-        placed (assoc (goto-char inserted (if (>= point place) (+ point width) point))
-                 :mark (shift mark)
-                 :read-only (get state :read-only))
-        narrowed (if regions
-                   (buffer-adjust-editable (assoc placed :editable regions) :insert place width)
-                   placed))
+                (cond
+                  (not (int? position)) position
+                  (>= position hi) (+ position (- width (- hi lo)))
+                  (> position lo) lo
+                  else position))
+        replaced (replace-region open lo hi text properties)
+        placed (assoc (goto-char replaced (shift point)) :mark (shift mark))
+        narrowed (cond
+                   (nil? regions) placed
+                   ;; read-only: narrowed to no region, which nothing moves
+                   (empty? regions) (assoc placed :editable regions)
+                   else (buffer-adjust-editable
+                          (buffer-adjust-editable (assoc placed :editable regions) :delete lo hi)
+                          :insert
+                          lo
+                          width)))
     (if (get state :undo-disabled) narrowed (dissoc narrowed :undo-disabled))))
+
+(defn replace-program-output (buf:buffer from:int to:int text:string &optional (properties nil) -> buffer)
+  "`buf` with `[from, to)` replaced by `text` — what a program wrote, over what it wrote
+before (a carriage return rewriting a progress line) — as though it had always been there:
+in the text and in every snapshot of its undo history, recording nothing, so undo and redo of
+what YOU typed step over it. Point and mark past the range move by the change in length, one
+inside it lands at its start; markers, narrowing and text properties move as any edit moves
+them; `properties` (`{key spans}` relative to `text`) come with it. Exact when the text up to
+`to` is the same in every snapshot — a program's output above the input you edit. A read-only
+or narrowed buffer takes it too: it is the program's, not an edit.
+
+    (editor/buffer/buffer-text (editor/buffer/undo (editor/buffer/replace-program-output (editor/buffer/insert (editor/buffer/insert-program-output (editor/buffer/make-buffer \"\") 0 \"10%\\n\") \"typed\") 0 3 \"20%\")))   ;=> \"20%\\n\""
+  (let (through (fn (snapshots)
+                  (map (or snapshots '())
+                    (fn (snapshot)
+                      (buffer-snapshot (output-into (buffer-restore buf snapshot)
+                                         from to text properties))))))
+    (assoc (output-into buf from to text properties)
+      :undo (through (get buf :undo))
+      :pending-undo (through (get buf :pending-undo)))))
 
 (defn insert-program-output (buf:buffer at:int text:string &optional (properties nil) -> buffer)
   "`buf` with `text` — what a program wrote — inserted at `at` as though it had always been
@@ -1766,16 +1799,10 @@ narrowing and text properties move as any insertion moves them; `properties` (`{
 relative to `text`) come with it. Exact when the text before `at` is the same in every
 snapshot — a program's output above the input you edit, as a shell or an agent's chat has
 it. A read-only or narrowed buffer takes it too: it is the program's, not an edit.
+[[replace-program-output]] over an empty range.
 
     (editor/buffer/buffer-text (editor/buffer/undo (editor/buffer/insert-program-output (editor/buffer/insert (editor/buffer/make-buffer \"\") \"typed\") 0 \"out \")))   ;=> \"out \""
-  (let (through (fn (snapshots)
-                  (map (or snapshots '())
-                    (fn (snapshot)
-                      (buffer-snapshot (output-into (buffer-restore buf snapshot)
-                                         at text properties))))))
-    (assoc (output-into buf at text properties)
-      :undo (through (get buf :undo))
-      :pending-undo (through (get buf :pending-undo)))))
+  (replace-program-output buf at at text properties))
 
 (defn- property-change-range (buf:buffer lo:int width:int -> (tuple int int))
   "`[from to]`: the range `[lo, lo + width)` a property change names, clamped into `buf`."

@@ -446,7 +446,7 @@ fn reset_arm_untried(heap: &Heap, arm: &CompiledArm) {
 /// this, a re-lowering that came due in the same exit as a suspend-host latch (the deopt
 /// feedback runs after it, in `native_feedback_slow`) put the arm back to untried, and it
 /// re-tiered onto the native code the latch had just taken it off (KI-309).
-pub(super) fn reset_native_state(arm: &CompiledArm) {
+pub(crate) fn reset_native_state(arm: &CompiledArm) {
     use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
     if arm.jit_code.load(Acquire) == crate::jit::BAILED {
         return;
@@ -525,6 +525,44 @@ pub(crate) fn jit_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
         }
     }
 }
+
+/// Whether `arm`, running `code`, has tier work left that only an entry through
+/// [`super::jit_tier_in_frame`] does: an inlined or re-lowered upgrade not queued yet (or no
+/// slow entry at all since the arm last tiered, so it never settled), or an upgrade compiled
+/// and waiting to be swapped in. While an upgrade compiles the answer is `false`: nothing is
+/// left for an entry to do until it lands.
+///
+/// A native-to-native link — the IR's `FastLink` mirror,
+/// `jit_dispatch_call`'s native path, a higher-order callback's native entry — enters the
+/// code without that entry, so linking such an arm leaves its upgrade undone for as long as
+/// every call it gets comes from native code: a callee re-tiered after a reset and then
+/// reached only through its callers' links never queued its inlined body at all, and one
+/// whose upgrade landed after it was linked never swapped it in (rr, 2026-11-10). Every
+/// linker asks this first and sends the call through the driver instead, which does the
+/// work and settles the arm; [`INLINE_LANDED`] clears the links a landing finds in place.
+#[cfg(feature = "jit")]
+#[inline]
+pub(crate) fn needs_tier_entry(arm: &CompiledArm, code: *mut u8) -> bool {
+    use std::sync::atomic::Ordering::{Acquire, Relaxed};
+    if code == arm.settled_code.load(Relaxed) {
+        return false;
+    }
+    if !arm.inline_queued.load(Relaxed) {
+        return true;
+    }
+    let ic = arm.inline_code.load(Acquire);
+    !ic.is_null() && ic != crate::jit::BAILED && ic != crate::jit::QUEUED
+}
+
+/// Bumped each time an upgrade lands in some arm's `inline_code` (the compiler thread's
+/// install, or an adopt from the shared inline cache). A process whose
+/// `Heap::inline_landed_seen` is behind it clears the fast links to arms that now
+/// [need a tier entry](needs_tier_entry) on its next driver entry
+/// (`Heap::unlink_arms_needing_tier_entry`), so a callee that callers linked while its upgrade
+/// compiled gets the entry that swaps it in.
+#[cfg(feature = "jit")]
+pub(crate) static INLINE_LANDED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// The frame size the code pointer `code` runs against — the **non-racy** counterpart of
 /// [`CompiledArm::frame_size_for_new_entry`]. It keys on the pointer the caller is about to

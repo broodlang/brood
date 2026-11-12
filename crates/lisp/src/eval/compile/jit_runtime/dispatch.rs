@@ -271,6 +271,8 @@ pub(crate) fn jit_dispatch_call(
                 && arm.rest_slot.is_none()
                 && !link_over_cap
                 && arm.compile_epoch.load(Acquire) == epoch
+                // Tier work only an entry does goes the slow way below, through the driver.
+                && !needs_tier_entry(&arm, code)
             {
                 // Build the callee frame at `stage_base`. For an elided head the args are
                 // already in place (`[stage_base, stage_base+argc)`); for a computed head the
