@@ -102,9 +102,10 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
 
 General-purpose gap 2, the release half.
 
-- 🟡 **Platforms.** macOS and Windows smoke sets run in CI, and Windows has been a gate since
-  2026-11-04. Remaining: the full suite on macOS, and a decision on whether Windows runs the
-  full suite or the smoke set at 1.0. Write that decision down as the supported-platform list.
+- ✅ **Platforms** (ADR-715, 2026-11-12). Tier 1, the full suite: Linux x86_64. Tier 2,
+  the platform smoke set on every push: macOS arm64 and Windows x86_64. Tier 3, built and
+  published only: Linux aarch64, static musl, macOS x86_64. The full suite on macOS or
+  Windows is not needed for 1.0; moving a platform up a tier is additive.
 - ✅ **Release runtimes** (ADR-714, 2026-11-11). `release.yml` builds toolchains and lean
   runtimes for six targets, Windows x86_64 and static musl x86_64 among them, each with a
   `.sha256`; `nest release --target` downloads the runtime it lacks and refuses one whose

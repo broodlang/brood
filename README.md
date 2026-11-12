@@ -109,6 +109,10 @@ Windows (x86_64), in PowerShell, into `%LOCALAPPDATA%\brood\bin`:
 irm https://brood.fly.dev/install.ps1 | iex
 ```
 
+How well each is tested (ADR-715): Linux x86_64 runs the full suite; macOS arm64 and
+Windows x86_64 run the platform smoke set on every push; the others are built by each
+release and not tested beyond that.
+
 To build from source instead: it requires a Rust toolchain (via `rustup`). The build is a Cargo workspace; a
 **`Makefile`** wraps the common commands (`make help` lists them all), and an
 autotools-style `./configure` records build options.
