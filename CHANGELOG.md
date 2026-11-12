@@ -6,6 +6,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Fixed.**
+- **The terminal display draws text over what is painted**, as a window does: a `[:text …]` op whose
+  face names no background keeps the cell's, so text over a `[:rect …]` (a current-line band, a
+  selection bar) no longer punches the default background through it. In bedit -nw the selected
+  completion read dark on dark and the bar showed only around it.
+
 **Breaking: duplicates and doubled prefixes (ADR-718).**
 - `bytes/length`, `text/length` and `table/count` are removed: use `count`.
 - `decimal/number->` is removed: use `decimal/of`, which now takes a ratio too. On a float,

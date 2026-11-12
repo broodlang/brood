@@ -345,6 +345,10 @@ impl Screen {
     /// Draw `text` from `row`, `col` in `style` (`[:text …]`): grapheme by grapheme, a wide
     /// one taking two cells, clipped to the screen. A wide grapheme cut by an edge draws as
     /// a blank in its place.
+    ///
+    /// A `style` that names no background draws OVER the cell, as a window draws text over
+    /// what is already painted: the cell keeps its background — a `[:rect …]` under it (a
+    /// current-line band, a selection bar), else the default face the frame cleared to.
     pub fn put_text(&mut self, row: i64, col: i64, text: &str, style: Style) {
         if row < 0 || row >= self.rows as i64 {
             return;
@@ -359,6 +363,14 @@ impl Screen {
             if width == 0 {
                 continue;
             }
+            let style = if style.bg.is_some() || at < 0 {
+                style
+            } else {
+                Style {
+                    bg: self.cell(row, (at.min(self.cols as i64 - 1)) as u16).style.bg,
+                    ..style
+                }
+            };
             let end = at + width as i64;
             if at < 0 || end > self.cols as i64 {
                 // a wide grapheme cut by the left or right edge: its visible cell is blank
@@ -763,6 +775,43 @@ mod tests {
         let mut screen = Screen::new(3, 1);
         screen.clear(default);
         assert_eq!(screen.cell(0, 2).style, default);
+    }
+
+    #[test]
+    fn text_with_no_background_keeps_the_rect_under_it() {
+        // a current-line band or a selection bar, then the line's text in a face naming only
+        // a foreground (or none): the band stays under the text, as a window draws it
+        let default = Style {
+            bg: Some(Colour::Rgb(30, 30, 46)),
+            ..Style::default()
+        };
+        let band = Style {
+            bg: Some(Colour::Rgb(49, 50, 68)),
+            ..Style::default()
+        };
+        let mut screen = Screen::new(8, 2);
+        screen.clear(default);
+        screen.fill(0, 0, 8, 1, band);
+        screen.put_text(0, 1, "hello", red());
+        screen.put_text(1, 1, "world", red());
+        assert_eq!(screen.row_text(0), " hello  ");
+        for col in 0..8 {
+            assert_eq!(screen.cell(0, col).style.bg, band.bg, "the band under column {col}");
+        }
+        assert_eq!(screen.cell(0, 2).style.fg, red().fg);
+        // off the band, the text is on the background the frame cleared to
+        assert_eq!(screen.cell(1, 2).style.bg, default.bg);
+        // a face that names its own background still paints it
+        let own = Style {
+            bg: Some(Colour::Indexed(4)),
+            ..red()
+        };
+        screen.put_text(0, 1, "x", own);
+        assert_eq!(screen.cell(0, 1).style.bg, Some(Colour::Indexed(4)));
+        // a wide grapheme over the band keeps it in both of its cells
+        screen.put_text(0, 4, "日", red());
+        assert_eq!(screen.cell(0, 4).style.bg, band.bg);
+        assert_eq!(screen.cell(0, 5).style.bg, band.bg);
     }
 
     #[test]
