@@ -90,20 +90,11 @@ blsp_touched=$(printf '%s\n' "$changed" | grep -c '\.blsp$')
 types_touched=$(printf '%s\n' "$changed" | grep -c '^crates/lisp/src/types/')
 
 # ---- 3. the BROOD_* flag catalogue -------------------------------------------------
-catalogue=crates/lisp/src/diagnostics/debug_flags.rs
-missing=""
-# The Rust test's scope exactly: `crates/` and `std/`, minus the test/bench/example trees,
-# whose `"BROOD_…"` literals are fixtures (an env var a test sets), not runtime flags.
-for f in $(printf '%s\n' "$changed" | grep -E '^(crates|std)/.*\.(rs|blsp)$' \
-                                    | grep -vE '(^|/)(target|tests|benches|examples)/'); do
-    [ -f "$f" ] || continue
-    [ "$f" = "$catalogue" ] && continue
-    for flag in $(grep -oE '"BROOD_[A-Z0-9_]+"' "$f" 2>/dev/null | sort -u); do
-        grep -qF -- "$flag" "$catalogue" || missing="$missing $flag ($f)"
-    done
-done
-[ -n "$missing" ] && fail "BROOD_* flag read by the runtime but absent from the catalogue:$missing
-  add an f(NAME, GROUP, \"…\") entry — or NON_FLAGS if it is not an env flag — in $catalogue"
+# The changed files only; `make check-desktop` runs the same script over every file.
+if [ -n "$changed" ]; then
+    # shellcheck disable=SC2086
+    scripts/check-flag-catalogue.sh $changed || fail "the BROOD_* flag catalogue (above)"
+fi
 
 # ---- 3b. CI's Rust source gates, on the lines this push ADDS -----------------------
 added_rs() { # the added lines of changed .rs files under $1, prefixed `path:`

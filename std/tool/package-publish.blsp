@@ -308,7 +308,7 @@ published is refused. Backs `nest publish`.
 (defn- registry-publish-external (base token source-url)
   ;; Fetch the external tarball ONCE — to hash its bytes into the checksum and prove the URL
   ;; is reachable now — then POST metadata only; no bytes cross to the registry.
-  (let (bytes (package/package-fetch-bytes source-url)
+  (let (bytes (package/fetch-bytes source-url)
         checksum (hash/sha256-bytes bytes)
         sig (package-sign-checksum checksum))
     (report-brood-constraint project/*brood*)

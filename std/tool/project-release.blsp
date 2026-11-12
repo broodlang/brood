@@ -581,6 +581,59 @@ Linux so a gnu + musl matrix cannot collide.
     (project-release/release-windows-triple? \"x86_64-unknown-linux-gnu\") ;=> false"
   (includes? triple "windows"))
 
+;; --- the runtime a release publishes (ADR-714) ---------------------------------
+;; Every Brood release carries, per target, the lean runtime `nest release` appends an app
+;; to, with a `.sha256` beside it. A `--target` with no runtime on this machine downloads
+;; the one from the release matching this `nest`, checks it, and keeps it.
+
+;; Where releases are downloaded from: a directory of `v<version>/` directories. Dynamic so
+;; a test can point it at a `file://` directory instead of the network.
+(defdyn project-release/*release-download-base*
+  "https://github.com/broodlang/brood/releases/download")
+
+(defn release-runtime-url (version:string triple:string -> string)
+  "Where the Brood release `version` publishes its lean runtime for `triple`.
+
+    (project-release/release-runtime-url \"0.51.0\" \"x86_64-unknown-linux-musl\") ;=> \"https://github.com/broodlang/brood/releases/download/v0.51.0/brood-runtime-v0.51.0-x86_64-unknown-linux-musl\"
+    (project-release/release-runtime-url \"0.51.0\" \"x86_64-pc-windows-msvc\") ;=> \"https://github.com/broodlang/brood/releases/download/v0.51.0/brood-runtime-v0.51.0-x86_64-pc-windows-msvc.exe\""
+  (str project-release/*release-download-base*
+    "/v"
+    version
+    "/brood-runtime-v"
+    version
+    "-"
+    triple
+    (if (release-windows-triple? triple) ".exe" "")))
+
+(defn release-checksum-of (sidecar:string -> string)
+  "The digest a `.sha256` sidecar names: its first word, as `sha256sum` writes it.
+
+    (project-release/release-checksum-of \"ab12  brood-runtime-v0.51.0-x\\n\") ;=> \"ab12\""
+  (first (string/split (string/trim sidecar) " ")))
+
+(defn fetch-runtime (version:string triple:string path:string -> string)
+  "Download the lean runtime the Brood release `version` publishes for `triple`, check it
+against the release's `.sha256` for it, and write it to `path`, returning `path`. Raises
+naming the URL when either download fails, and refuses bytes whose digest differs, writing
+nothing. Called by `nest release --target` when no runtime for the target is on this machine.
+
+    (project-release/fetch-runtime \"0.51.0\" \"x86_64-pc-windows-msvc\" \"/tmp/brood.exe\")   ;~> \"/tmp/brood.exe\""
+  ;; `binding` names its variable without looking it up, so `http` must be loaded first;
+  ;; loaded here, not in the defmodule, because a bundled app loads this module and never
+  ;; downloads anything.
+  (require-one 'http)
+  (let (url (release-runtime-url version triple)
+        ;; a runtime with the window is tens of megabytes, past the default response cap
+        runtime (binding (http/*max-response-bytes* (* 512 1024 1024)) (package/fetch-bytes url))
+        expected (release-checksum-of (string/bytes-> (package/fetch-bytes (str url ".sha256"))))
+        got (hash/sha256-bytes runtime))
+    (when (not (= expected got))
+      (error "the runtime at "
+        url " hashes to " got ", but its .sha256 says " expected "; nothing was written"))
+    (file/mkdir (path/dirname path))
+    (file/replace path runtime)
+    path))
+
 (defn release-plain-filename? (s:string -> bool)
   "Is `s` a bare filename, safe to use as a DEFAULTED output path?
 

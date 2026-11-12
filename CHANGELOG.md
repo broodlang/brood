@@ -6,7 +6,16 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.51.0 — warnings with categories, nodes within one minor, Windows and static Linux builds
+
 **Added.**
+- **Windows and static Linux builds, and `nest release --target` with no other machine**
+  (ADR-714): every release publishes the toolchain and the lean runtime for Linux x86_64 and
+  aarch64, Linux x86_64 musl (static, headless), macOS arm64 and x86_64, and Windows x86_64,
+  each with a `.sha256`. `nest release --target T` downloads the runtime it lacks from the
+  release matching its version, refuses one whose digest differs, and keeps it under
+  `runtimes/v<version>/T/`. Windows installs with `irm https://brood.fly.dev/install.ps1 | iex`.
+  `system/target` names the triple a runtime was built for.
 - **`nest test --doc FILE…`** (and `nest doctest FILE.blsp…`) checks the docstring examples of
   the named source files only, each failure as `FILE:LINE:` at the example's own line, private
   helpers included; inside a project its image is loaded first, so it works downstream
@@ -101,6 +110,14 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   failure, not a `{:status 0 :error …}` map (ADR-617).
 
 **Fixed.**
+- **`install.sh` refuses a download nothing checked** (a missing `.sha256` used to install
+  anyway) and gives a Linux without glibc the static build; **`nest update-brood`** fetches the
+  build it is (it read `uname`, which cannot tell musl and does not exist on Windows); a manual
+  `release.yml` run for a tag builds the tag, not main's head.
+- **`contains?` on a vector and `map` over a string name themselves**: they reported
+  `%map-get: …` and `first: …`, and now say `contains?: expected a map or set` and
+  `expected a sequence, got string`, each with a hint. **Hover shows a deprecation and a beta
+  mark**, which only completion and `nest doc` showed. The freeze list is restated as ADR-713.
 - **A bare type name in a `sig` means its own module's type** (ADR-633). Under contracts, a
   `(sig parse-body (conn -> conn))` over a module's own record `conn` was checked against another
   module's `(deftype conn …)` and rejected the record. A bare name now resolves in the module that

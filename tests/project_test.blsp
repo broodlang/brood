@@ -33,6 +33,7 @@
 (purge-stale-temp "brood-manifest-")
 (purge-stale-temp "brood-p2-")
 (purge-stale-temp "brood-projmods-")
+(purge-stale-temp "brood-runtime-")
 (purge-stale-temp "brood-shadow-")
 (purge-stale-temp "brood-skip-")
 (purge-stale-temp "brood-walk-")
@@ -325,6 +326,42 @@
     (assert= (project-release/project-bundle-name "/p/src/" "/p/src/a/b/c.blsp") "a/b/c"))
   (test "a path not under the source dir falls back to its bare stem"
     (assert= (project-release/project-bundle-name "/other" "/p/src/x.blsp") "x")))
+
+;; A release directory as `file://` serves it: `v<version>/<runtime>` and its `.sha256`,
+;; the sidecar naming `digest` (the runtime's own unless a test lies).
+(defn- runtime-release-dir (root version triple runtime digest)
+  (let (dir (path/join root (str "v" version))
+        file (str "brood-runtime-v" version "-" triple))
+    (file/mkdir dir)
+    (file/spit (path/join dir file) runtime)
+    (file/spit (path/join dir (str file ".sha256")) (str digest "  " file "\n"))
+    (str "file://" root)))
+
+(describe "project: the runtime a release publishes (ADR-714)"
+  (test "fetch-runtime keeps a runtime whose digest matches its .sha256"
+    (let (root (temp-dir "brood-runtime-")
+          base (runtime-release-dir root "9.9.9" "riscv64-test" "RUNTIME" (hash/sha256 "RUNTIME"))
+          kept (path/join root "cache" "v9.9.9" "riscv64-test" "brood"))
+      (binding (project-release/*release-download-base* base)
+        (assert= (project-release/fetch-runtime "9.9.9" "riscv64-test" kept) kept))
+      (assert= (file/slurp kept) "RUNTIME")))
+
+  (test "fetch-runtime refuses a runtime whose digest differs, and writes nothing"
+    (let (root (temp-dir "brood-runtime-")
+          base (runtime-release-dir root "9.9.9" "riscv64-test" "TAMPERED" (hash/sha256 "RUNTIME"))
+          kept (path/join root "cache" "brood"))
+      (binding (project-release/*release-download-base* base)
+        (is (includes? (error-of (project-release/fetch-runtime "9.9.9" "riscv64-test" kept))
+              "nothing was written")))
+      (is (not (file/exists? kept)))))
+
+  (test "a missing runtime is an error naming its URL"
+    (let (root (temp-dir "brood-runtime-"))
+      (binding (project-release/*release-download-base* (str "file://" root))
+        (is (includes? (error-of (project-release/fetch-runtime "9.9.9"
+                                   "riscv64-test"
+                                   (path/join root "kept")))
+              "brood-runtime-v9.9.9-riscv64-test"))))))
 
 (describe "project: namespace-aware duplicate global detection (ADR-065)"
   (test "project-check/project-file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"

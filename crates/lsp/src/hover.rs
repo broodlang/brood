@@ -69,7 +69,13 @@ pub fn hover(
             // (builtins/prelude/imports), whereas a buffer def isn't loaded, so its sig
             // would be stale/absent.
             let ty = introspect::type_signature(interp, &resolved);
-            render_global(name, sig, ty, doc)?
+            // Stability facts (ADR-283) go under the signature: a deprecation names its
+            // replacement, a beta mark its reason. Completion carries the same notes.
+            let notes = [
+                introspect::deprecation(interp, &resolved),
+                introspect::beta(interp, &resolved),
+            ];
+            render_global(name, sig, ty, &notes, doc)?
         }
         Resolution::NotASymbol => return None,
     };
@@ -104,6 +110,7 @@ fn render_global(
     name: &str,
     sig: Option<String>,
     ty: Option<String>,
+    notes: &[Option<String>],
     doc: Option<String>,
 ) -> Option<String> {
     if sig.is_none() && ty.is_none() && doc.is_none() {
@@ -112,6 +119,9 @@ fn render_global(
     let mut s = code(sig.as_deref().unwrap_or(name));
     if let Some(ty) = ty {
         s.push_str(&format!("\n\n`{ty}`"));
+    }
+    for note in notes.iter().flatten() {
+        s.push_str(&format!("\n\n**{note}**"));
     }
     if let Some(doc) = doc {
         s.push_str("\n\n");
@@ -163,6 +173,41 @@ mod tests {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup hover"),
         })
+    }
+
+    #[test]
+    fn hover_names_a_deprecation_and_its_replacement() {
+        // The prelude deprecates `not=` in favour of `not` (ADR-283).
+        let md = hover_at("(not= 1 2)", "not=").expect("hover on not=");
+        assert!(
+            md.contains("deprecated since") && md.contains("`not`"),
+            "hover must carry the deprecation and its replacement: {md}"
+        );
+    }
+
+    #[test]
+    fn hover_names_a_beta_mark_and_its_reason() {
+        let src = "(wobbly 1)";
+        let mut interp = Interp::new();
+        interp
+            .eval_str(
+                "(defn wobbly (x) \"A test surface.\" x) (meta wobbly :beta \"still settling\")",
+            )
+            .expect("define the beta name");
+        let root = cst::parse(src);
+        let tree = scope::analyze(&root, src);
+        let index = LineIndex::new(src);
+        let md = match hover(&mut interp, src, &root, &tree, &index, 1)
+            .expect("hover on wobbly")
+            .contents
+        {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup hover"),
+        };
+        assert!(
+            md.contains("beta — still settling"),
+            "hover must carry the beta reason: {md}"
+        );
     }
 
     #[test]

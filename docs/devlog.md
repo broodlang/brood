@@ -1447,6 +1447,26 @@ freezes the shipped rows, checks `docs/error-codes.md` against them and checks r
 Also: `cpu_time_test` read a worker's CPU time before the quantum that did the work was booked
 (CI, run 42981945904); it now waits for the figure under a deadline.
 
+2026-11-11 (road-to-1.0 §A, §B6). ADR-713 restates ADR-170's freeze list as it stands at 1.0,
+each row checked by evaluating the refused form: ratios and multiple dispatch dropped (shipped),
+"nominal types" restated after ADR-542, continuations added. Two refusals raised from an
+internal and now name the function called: `(contains? [1 2] 1)` said `%map-get: …`, and
+`(map "ab" f)` said `first: …` (`%defseq` now walks `%fold-source`, as `fold` does). No name in
+`std/` is `:beta` any more; the editor now shows a beta mark in hover and completion, and hover
+shows a deprecation, which only completion and `nest doc` did.
+
+2026-11-11 (ADR-714, road-to-1.0 §D). A release builds six targets through one script
+(`scripts/ci/release-build.sh`, since the Windows runner has no `make`), adding Windows x86_64
+and static musl x86_64, and publishes beside each toolchain the lean runtime its `nest` embeds,
+every file with a `.sha256`. `nest release --target T` downloads the runtime it lacks from the
+release matching its version (`project-release/fetch-runtime`, over the package manager's
+`fetch-bytes`, now public), refuses one whose digest differs, and keeps it under
+`runtimes/v<version>/T/`. `install.sh` now refuses an unchecked download (a missing sidecar
+used to install anyway) and picks the musl build where there is no glibc; `install.ps1` is the
+Windows one-liner; `nest update-brood` asks the binary what it is (`system/target`, new)
+rather than `uname`. `release.yml` gained a dry run, and a manual run for a tag builds the tag
+(it built main's head). hive serves `/install.ps1` once deployed.
+
 2026-11-12. **A callee reached only through native links never took its inlined upgrade.** The
 two-stage tiering queues an arm's inlined (or re-lowered) body and swaps it in from
 `jit_tier_in_frame`'s slow path, but native-to-native calls (the IR's `FastLink` mirror,

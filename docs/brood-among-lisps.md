@@ -164,7 +164,8 @@ no toolchain on the target, as Janet's `jpm quickbin` does.
 
 ## What a Lisper will reach for and not find
 
-Every row is a decision with an ADR, not a gap. ADR-170 is the ratified list.
+Every row is a decision with an ADR, not a gap. ADR-713 is the ratified list, as it stands at
+1.0.
 
 | From | Reaches for | Brood instead |
 |---|---|---|
@@ -198,9 +199,9 @@ Every row is a decision with an ADR, not a gap. ADR-170 is the ratified list.
 ## What this means for 1.0
 
 A Lisper judging a 1.0 looks for four things. The first is whether the surface will hold
-still, and today the README says it will not. The second is whether the docs match the
-implementation; `language.md` has a stale paragraph on arity dispatch (ADR-047 versus
-ADR-619), and ADR-170's table predates ADR-542. The third is whether it runs on their machine:
+still: the README states what holds before 1.0 and what ADR-673 promises from 1.0.0. The
+second is whether the docs match the implementation; `language.md` was swept against it and
+the freeze list restated (ADR-713) on 2026-11-11. The third is whether it runs on their machine:
 release binaries cover Linux and macOS, not Windows or musl. The fourth is how to reach a C
 library, where the answer is WASM, with build-on-fetch still open. Each of these is an item in
 [`road-to-1.0.md`](road-to-1.0.md).

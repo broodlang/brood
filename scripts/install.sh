@@ -3,9 +3,12 @@
 #   curl -fsSL https://brood.fly.dev/install.sh | sh
 #
 # Downloads the prebuilt brood + nest + brood-lsp for your OS/arch from the latest
-# GitHub release and installs them. Override with env vars:
+# GitHub release, checks it against the release's .sha256, and installs them. A Linux
+# without glibc (Alpine) gets the static musl build. On Windows, use install.ps1. Override
+# with env vars:
 #   BROOD_VERSION=v0.1.0     install a specific release (default: latest)
 #   BROOD_INSTALL_DIR=/path  install location (default: $HOME/.local/bin)
+#   BROOD_TARGET=triple      the build to install (default: this machine's)
 set -eu
 
 REPO="broodlang/brood"
@@ -18,17 +21,32 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # --- detect platform ---------------------------------------------------------
 os="$(uname -s)"
 arch="$(uname -m)"
-case "$os" in
-  Linux)  os_part="unknown-linux-gnu" ;;
-  Darwin) os_part="apple-darwin" ;;
-  *) die "unsupported OS '$os' (Linux and macOS only; on Windows use WSL or build from source)" ;;
-esac
 case "$arch" in
   x86_64|amd64)  arch_part="x86_64" ;;
   aarch64|arm64) arch_part="aarch64" ;;
   *) die "unsupported architecture '$arch'" ;;
 esac
-target="${arch_part}-${os_part}"
+case "$os" in
+  Linux)
+    # glibc or musl: a musl system cannot run the glibc build. `ldd --version` names its
+    # libc; with no ldd at all, a missing glibc loader says the same. Each glob is tested
+    # on its own: Fedora has /lib64's loader and no /lib/<triple>/ directory.
+    glibc_loader=""
+    for loader in /lib*/ld-linux*.so* /lib/*/ld-linux*.so*; do
+      [ -e "$loader" ] && glibc_loader="$loader"
+    done
+    if { ldd --version 2>&1 || true; } | grep -qi musl || [ -z "$glibc_loader" ]; then
+      os_part="unknown-linux-musl"
+      [ "$arch_part" = x86_64 ] || die "the static musl build is x86_64 only; on $arch, use a glibc Linux or build from source"
+    else
+      os_part="unknown-linux-gnu"
+    fi ;;
+  Darwin) os_part="apple-darwin" ;;
+  MINGW*|MSYS*|CYGWIN*)
+    die "on Windows, install with PowerShell: irm https://brood.fly.dev/install.ps1 | iex" ;;
+  *) die "unsupported OS '$os' (Linux, macOS and Windows)" ;;
+esac
+target="${BROOD_TARGET:-${arch_part}-${os_part}}"
 
 # --- downloader --------------------------------------------------------------
 if have curl; then dl() { curl -fsSL "$1"; }; dlo() { curl -fsSL "$1" -o "$2"; }
@@ -53,16 +71,16 @@ trap 'rm -rf "$tmp"' EXIT
 say "downloading ${name}…"
 dlo "$url" "$tmp/pkg.tar.gz" || die "download failed: $url"
 
-if sum_url="${url}.sha256"; dl "$sum_url" > "$tmp/pkg.sha256" 2>/dev/null && [ -s "$tmp/pkg.sha256" ]; then
-  expected="$(cut -d' ' -f1 < "$tmp/pkg.sha256")"
-  if have sha256sum; then actual="$(sha256sum "$tmp/pkg.tar.gz" | cut -d' ' -f1)"
-  elif have shasum;   then actual="$(shasum -a 256 "$tmp/pkg.tar.gz" | cut -d' ' -f1)"
-  else actual=""; fi
-  if [ -n "$actual" ] && [ "$expected" != "$actual" ]; then
-    die "checksum mismatch (expected $expected, got $actual)"
-  fi
-  [ -n "$actual" ] && say "checksum ok"
-fi
+# The check is not optional: a sidecar that will not download, or no tool to hash with,
+# stops the install rather than installing what nothing has checked.
+dl "${url}.sha256" > "$tmp/pkg.sha256" 2>/dev/null && [ -s "$tmp/pkg.sha256" ] \
+  || die "could not download ${url}.sha256 to check the archive against"
+expected="$(cut -d' ' -f1 < "$tmp/pkg.sha256")"
+if have sha256sum; then actual="$(sha256sum "$tmp/pkg.tar.gz" | cut -d' ' -f1)"
+elif have shasum;   then actual="$(shasum -a 256 "$tmp/pkg.tar.gz" | cut -d' ' -f1)"
+else die "need sha256sum or shasum to check the download"; fi
+[ "$expected" = "$actual" ] || die "checksum mismatch (expected $expected, got $actual)"
+say "checksum ok"
 
 # --- install -----------------------------------------------------------------
 tar -C "$tmp" -xzf "$tmp/pkg.tar.gz"

@@ -25,17 +25,18 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
     deprecated in stage 1 (2026-11-10) and removed in stage 2 (2026-11-11), with the migration
     that rewrote them; each is in the rename ledger, so its unbound error names the replacement.
     `match*` became the internal `%match`. `case`, `with-out-str` and `with-err-str` stay.
-  - **Thread 5, a declared shadow for root functions.** Adding the warning later would be a new
-    lint. Under ADR-673 §5 that is advisory and so additive, but only once structured
-    severities exist (B3). Otherwise decide it now.
+  - ✅ **Thread 5, a declared shadow for root functions: after 1.0** (2026-11-11). The warning
+    would be a new lint, and since structured severities exist (B3, ADR-698) a new lint
+    starts advisory, so it is additive and nothing needs deciding before 1.0.
   - **Thread 10, operators that can be shadowed locally.** This is a relaxation, so it is
     additive and can wait.
   - **Threads 1, 3, 4, 7, 8, 9 and 11** are additive (warning controls, regex groups, URL
     resolution, the non-tail lint, view patterns, parametric abilities, function modifiers).
     They can come after 1.0, except that thread 1 is needed by B3.
-- ⬜ **Re-ratify ADR-170.** Two rows are stale. The "nominal types" row says `type-of` is
-  `:map`, which ADR-542 superseded. Continuations are refused in practice, but the table does
-  not list them. Restate the table as it stands at 1.0.
+- ✅ **Re-ratify ADR-170** (2026-11-11): ADR-713 restates the table, every row checked against
+  the running language. Ratios and multiple dispatch dropped (shipped), "nominal types" restated
+  after ADR-542, continuations added. Two refusals that raised from an internal now name the
+  function called (`contains?` on a vector, `map` over a string).
 
 ## B. Mechanism the promise needs (kernel and std)
 
@@ -66,10 +67,12 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
    in `--help` and drops out of completion. Guard: `tests/nest_test.blsp` "a deprecated flag".
    Was: `nest`'s flags are data in `std/tool/nest.blsp`, so they can
    carry `:deprecated` the way names do. Today nothing can retire a flag gently.
-6. 🟡 **Stability metadata in use.** `:since`, `:deprecated` and `:beta` exist (ADR-283), and
-   `std/` uses them about 22 times. Nothing is `:beta` at 1.0, so clear the three existing
-   `:beta` marks before the release candidates: settle each name or remove it. `:since` stays
-   implicit for names that exist at 1.0. Make `nest doc` show "beta" for names added later.
+6. ✅ **Stability metadata in use** (2026-11-11). No name in `std/` carries `:beta` (the marks
+   this item counted were gone; the only `:beta` left is a docstring example and a test).
+   `:since` stays implicit for names that exist at 1.0. A beta name added later shows as beta
+   everywhere it surfaces: `nest doc` printed it already, and the editor now does too, in hover
+   and in completion's detail line (hover shows a deprecation as well, which it did not).
+   Guards: `crates/lsp/src/hover.rs` and `completion.rs` tests.
 7. ✅ **"An error keeps its code."** (2026-11-11) `error_codes::KINDS` declares each code's
    kind; `crates/lisp/tests/error_code_kinds.rs` freezes the shipped rows, checks
    `error-codes.md` against them and checks real raises. Was: `error-codes.md` promises only that a code is never reused.
@@ -102,10 +105,17 @@ General-purpose gap 2, the release half.
 - 🟡 **Platforms.** macOS and Windows smoke sets run in CI, and Windows has been a gate since
   2026-11-04. Remaining: the full suite on macOS, and a decision on whether Windows runs the
   full suite or the smoke set at 1.0. Write that decision down as the supported-platform list.
-- ⬜ **Release runtimes.** `release.yml` should publish Windows and musl runtimes, and
-  `nest release --target` should download the matching runtime with a hash check instead of
-  reading a hand-copied one. This changes ADR-038, so it needs an ADR.
-- ⬜ **Install.** A one-line install per platform that needs no Rust toolchain.
+- ✅ **Release runtimes** (ADR-714, 2026-11-11). `release.yml` builds toolchains and lean
+  runtimes for six targets, Windows x86_64 and static musl x86_64 among them, each with a
+  `.sha256`; `nest release --target` downloads the runtime it lacks and refuses one whose
+  digest differs. v0.51.0 published all 24 files; a released `nest` on Linux built a Windows
+  and a static musl app from them, and the musl one ran. A dry run (`gh workflow run
+  release.yml -f tag=… -f dry_run=true`) tries a change to the release before a tag.
+- 🟡 **Install** (2026-11-11). `install.sh` picks the static build where there is no glibc
+  and refuses an unchecked download; `install.ps1` is Windows' one line; `nest
+  update-brood` fetches the build it is (`system/target`). `install.sh` installed v0.51.0's
+  glibc and musl builds; brood.fly.dev serves both installers (hive deployed 2026-11-12).
+  Remaining: `install.ps1` has not yet run on a Windows machine.
 
 ## E. Evidence, not features
 

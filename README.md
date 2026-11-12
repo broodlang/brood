@@ -94,12 +94,19 @@ closure-shipping.
 
 ## Install
 
-Prebuilt `brood`, `nest` and `brood-lsp` for Linux and macOS (x86_64 and aarch64), from
-the latest GitHub release into `~/.local/bin`:
+Prebuilt `brood`, `nest` and `brood-lsp` from the latest GitHub release, checked against
+its SHA-256 — Linux (x86_64 and aarch64; a static x86_64 build where there is no glibc) and
+macOS (arm64 and x86_64) into `~/.local/bin`:
 
 ```bash
 curl -fsSL https://brood.fly.dev/install.sh | sh
 nest update-brood           # later: move to the newest release (--check only reports)
+```
+
+Windows (x86_64), in PowerShell, into `%LOCALAPPDATA%\brood\bin`:
+
+```powershell
+irm https://brood.fly.dev/install.ps1 | iex
 ```
 
 To build from source instead: it requires a Rust toolchain (via `rustup`). The build is a Cargo workspace; a
@@ -451,7 +458,7 @@ docs/          architecture, language reference, roadmap, decisions, dev log
   that can also be a server" approach
 - [docs/language.md](docs/language.md) — the language reference
 - [docs/archive/roadmap-for-v1.md](docs/archive/roadmap-for-v1.md) — the 1.0 language-freeze
-  gate (closed 2026-08-29); the list of what Brood permanently *is not* is ADR-170
+  gate (closed 2026-08-29); the list of what Brood permanently *is not* is ADR-713
 - [ROADMAP.md](ROADMAP.md) — milestones and status
 - [docs/benchmarking.md](docs/benchmarking.md) — how performance is measured;
   archived runs in [docs/benchmarks/](docs/benchmarks/)

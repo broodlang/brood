@@ -664,12 +664,18 @@ pub const FLAGS: &[DebugFlag] = &[
 ];
 
 /// `BROOD_*` names that are **not** runtime environment flags, so the completeness test
-/// below must not demand a catalogue line for them. All three are BUILD-time: the first two
-/// are stamped by `crates/lisp/build.rs` and read back with `env!`, and the third is read by
-/// `crates/nest/build.rs` to pick the `brood` binary a `nest` embeds (ADR-038). Setting any
-/// of them for a *run* does nothing.
+/// below must not demand a catalogue line for them. All four are BUILD-time: `BROOD_GIT_SHA`,
+/// `BROOD_STDLIB_HASH` and `BROOD_TARGET` (the triple `system/target` reports, ADR-714) are
+/// stamped by `crates/lisp/build.rs` and read back with `env!`, and `BROOD_EMBED_RUNTIME` is
+/// read by `crates/nest/build.rs` to pick the `brood` binary a `nest` embeds (ADR-038).
+/// Setting any of them for a *run* does nothing.
 #[cfg(test)]
-const NON_FLAGS: &[&str] = &["BROOD_GIT_SHA", "BROOD_STDLIB_HASH", "BROOD_EMBED_RUNTIME"];
+const NON_FLAGS: &[&str] = &[
+    "BROOD_GIT_SHA",
+    "BROOD_STDLIB_HASH",
+    "BROOD_TARGET",
+    "BROOD_EMBED_RUNTIME",
+];
 
 /// `BROOD_JIT_BAIL_TRACE` is set — read once. The one reader: the trace is asked at twenty
 /// sites across the tiering code.
