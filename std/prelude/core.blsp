@@ -991,7 +991,9 @@ since its clause either always runs or never does. `else` must be the last test.
     (if (or (= (string/substring ts 0 1) "?") (not (bound? '%sealed-members)))
       true
       (let (slash (%str-last-index-of ts "/")
-            leaf (if (%eq slash -1) t (symbol (string/substring ts (inc slash) (count ts))))
+            leaf (if (%eq slash -1)
+                   t
+                   (symbol (string/substring ts (inc slash) (%string-length ts))))
             members (or (%sealed-members t) (%sealed-members leaf))
             id (record-id v))
         (cond

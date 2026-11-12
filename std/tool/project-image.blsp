@@ -12,14 +12,14 @@ takes; everything else is the mechanism behind it.")
 ;; line, written beside the image. Part of the staleness key (KI-275): the image holds what
 ;; a module built from that text, and a `.blsp`-only key served the old text after an edit.
 ;; Read before anything loads — which is why it is a file, not something the image carries.
-(def- *project-image-includes-file* ".brood/image.includes")
+(def- *includes-file* ".brood/image.includes")
 
 ;; What the partial rebuild needs to know about the image beside it (ADR-419), one readable
 ;; map: the fingerprint the image was stamped with (to open it after the tree moved on), its
 ;; global key (the build, the contract mode, the dependency and included files), each source
 ;; file's stamp, the registrations each project module's load wrote, and the modules whose
 ;; load evaluated source text. Read only when the full fingerprint misses.
-(def- *project-image-modules-file* ".brood/image.modules")
+(def- *modules-file* ".brood/image.modules")
 
 ;; A registry global is one that LOADING mutates rather than creates — `*impls*`,
 ;; `*methods*`, `*module-docs*`, … They already exist after the prelude, so the "names that
@@ -127,7 +127,7 @@ come from `*module-files*`).
 ;; The included files the last image write recorded for this project, or none.
 (defn- project-included-files ()
   (let (root (when (bound? 'project/*root*) project/*root*)
-        listing (when root (path/join root *project-image-includes-file*)))
+        listing (when root (path/join root *includes-file*)))
     (if (and listing (file/exists? listing))
       (seq/reject (string/split (file/slurp listing) "\n") empty?)
       (list))))
@@ -398,7 +398,7 @@ the record the next partial rebuild reads.
   (let (dir (path/dirname (image-path root)))
     (when (not (file/dir? dir)) (file/mkdir dir))
     ;; Before the fingerprint below, which reads this list back.
-    (file/spit (path/join root *project-image-includes-file*)
+    (file/spit (path/join root *includes-file*)
       (string/join (%included-files) "\n"))
     (let (fp (project-image-fingerprint root)
           previous (if reloaded (read-modules-record root) nil)
@@ -449,7 +449,7 @@ the record the next partial rebuild reads.
                               (fn (m)
                                 (and (not (contains? reloaded m)) (contains? *module-files* m))))))))))
 
-(defn- modules-record-path (root) (path/join root *project-image-modules-file*))
+(defn- modules-record-path (root) (path/join root *modules-file*))
 
 ;; Best-effort, like the image: a record that cannot be written costs the next edit a full
 ;; rebuild, never a wrong answer.

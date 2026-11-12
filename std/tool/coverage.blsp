@@ -47,8 +47,10 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 
 ;; The functions instrumented for this run, as a list of
 ;; `{:name symbol :file string :line int}` — the DENOMINATOR. Captured before the
-;; suite runs, because instrumentation itself must not change what we count.
-(def- *targets* nil)
+;; suite runs, because instrumentation itself must not change what we count. Not
+;; `*targets*`: bedit declares that name with a root `defdyn`, which would take this
+;; binding over whenever std loads from source (KI-383).
+(def- *instrumented* nil)
 
 ;; --- discovering what to count -----------------------------------------------
 
@@ -108,7 +110,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (let (targets (coverage-targets source-dirs)
         hits (table/new))
     (def- *hits* hits)
-    (def- *targets* targets)
+    (def- *instrumented* targets)
     (fold targets nil (fn (_ target) (coverage-instrument (get target :name) hits)))
     hits))
 
@@ -124,7 +126,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   (if (nil? *hits*)
     nil
     (let (snapshot (table/snapshot *hits*))
-      (map *targets*
+      (map *instrumented*
         (fn (target) (assoc target :hits (or (get snapshot (->string (get target :name))) 0)))))))
 
 (defn- coverage-covered (results) (seq/filter results (fn (r) (> (get r :hits) 0))))

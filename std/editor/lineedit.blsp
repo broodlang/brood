@@ -602,10 +602,10 @@ next (newer) history entry (↓ / C-n).
 ;; indent), and a `{…}` map at + 1 so its keys align under the first key. That is the
 ;; whole rule; no per-form table is needed for it.
 
-;; No `sig`: a downstream `(defdyn *indent-width* …)` makes the name ambient for the
-;; checker, which then read this declaration as the root global's type (bedit's
-;; conventions.blsp). The literal types it anyway.
-(def- *indent-width* 2)
+;; A constant, not a knob, so no earmuffs: a downstream `(defdyn *indent-width* …)`
+;; declares that name ambient everywhere, and an earmuffed private here was taken over by
+;; it whenever std loaded from source (bedit's conventions.blsp; KI-383).
+(def- body-indent 2)
 
 (defn- lineedit-indent-for (text pos)
   "The column a fresh line beginning at offset `pos` should be indented to: two past
@@ -616,7 +616,7 @@ the column of the innermost unclosed `(`/`[`, one past a `{`, and 0 at top level
       (let (col (- open (lineedit-line-start text open)))
         (if (= (string/char-at text open) "{")
           (inc col)
-          (+ col *indent-width*))))))
+          (+ col body-indent))))))
 
 (defn lineedit-newline-and-indent (state)
   "Insert a newline and indent the new line to its structural column.

@@ -499,8 +499,8 @@ fn type_errors_are_self_identifying() {
         "type error: first: expected list, vector, set, map or bytes, got int (5)"
     );
     assert_eq!(
-        err("(%string-length :k)"),
-        "type error: %string-length: expected string, got keyword (:k)"
+        err("(string/upper :k)"),
+        "type error: string/upper: expected string, got keyword (:k)"
     );
 }
 

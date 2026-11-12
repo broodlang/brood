@@ -7,7 +7,7 @@
 //! *flat* global, not a member of any module — so a `/`-named primitive whose prefix is not
 //! a real module breaks all three (`map/get` was swept into `(:use map)` and shadowed the
 //! prelude ops; `vector/ref` made `nest test` die on `require: cannot find module 'vector'`
-//! for every project that touched a vector). `string/substring` is fine ONLY because `string`
+//! for every project that touched a vector). `string/upper` is fine ONLY because `string`
 //! is a real module. So: kernel primitives use flat dash names; a slash namespace is
 //! reserved for a real module-backed one. This test fails the moment a primitive violates
 //! it — at CI, not three deploys later.

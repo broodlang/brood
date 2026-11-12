@@ -95,7 +95,7 @@
 
 (describe "doc catalogue: across processes"
   :isolated (test "workers derive the same categories as the parent"
-    (let (names ["+" "spawn" "cons" "last" "count" "no-such-name-xyzzy"]
+    (let (names ["+" "spawn" "cons" "last" "string/upper" "no-such-name-xyzzy"]
           expected (map names doc-catalog/category-of)
           results (concurrently 8 (fn (_) (map names doc-catalog/category-of))))
       (assert= (count results) 8)

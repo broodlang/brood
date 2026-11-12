@@ -328,7 +328,7 @@
     (assert= (reflect/expr-type "1") "1")
     (assert= (reflect/expr-type ":score") ":score")
     (assert= (reflect/expr-type "(+ 1 2)") "3")
-    (assert= (reflect/expr-type "(+ 1 (count (str 1)))") "int[1..]"))
+    (assert= (reflect/expr-type "(+ 1 (%string-length (str 1)))") "int[1..]"))
 
   (test "the type follows the call, not the arguments"
     (assert= (reflect/expr-type "(str 1 2)") "string"))
@@ -380,7 +380,7 @@
           hit (first sigs))
       (assert= (count sigs) 1)
       (assert= (:name hit) "ixs-len")
-      ;; a string's length is never negative (ADR-350).
+      ;; `%string-length` is never negative (ADR-350).
       (assert= (:sig hit) "(string -> (int 0 _))")
       (assert= (:declared? hit) false)
       (assert= (:informative? hit) true)))

@@ -60,7 +60,7 @@
       (is (agree? src))))
 
   (test "an impossible type predicate on a NAME (ADR-315)"
-    (let (src "(defmodule t)\n(defn a (s) (if (failure? (count s)) 0 1))\n")
+    (let (src "(defmodule t)\n(defn a (s) (if (failure? (%string-length s)) 0 1))\n")
       (is (both-report src "failure?: this can never be true"))
       (is (agree? src))))
 

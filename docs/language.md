@@ -3569,8 +3569,8 @@ Every operation whose **subject is a string** lives in the `string` module
 `string/break-opportunities`
 
 Bare in the prelude — these operate on *any* collection, so they are **not**
-string-library ops: `count`  `str`  `pr-str`  `index-of`  `includes?`. A string's length is
-`(count s)`, in characters (code points); there is no `string/length` (ADR-718).
+string-library ops: `str`  `pr-str`  `count`  `index-of`  `includes?`. A string's
+length in chars is `(count s)`; there is no `string/length`.
 
 Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
 `string/format`  `string/interp`  `string/display-width`. Number-to-text is `math/->fixed`.
@@ -3581,7 +3581,8 @@ Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
   1-char string, so `(string/char-at s i)` and the elements of `(string/->list s)` are
   strings. All indices are **char-based**, matching `count` (so they are
   correct for multi-byte UTF-8, not byte offsets).
-- `string/substring` and `string/char-at` are the char-indexed accessors, and `count` the length;
+- `string/substring` and `string/char-at` are the char-indexed accessors, and `count` is
+  the length they index against;
   `string/->list` / `string/list->` bridge to and from a list of chars.
 - `string/->codepoints` gives the chars as a **vector of integer codepoints** in
   one O(n) native pass — the random-access form text parsers index with `nth`

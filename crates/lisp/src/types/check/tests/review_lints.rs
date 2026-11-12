@@ -207,7 +207,7 @@ fn a_qualified_name_read_for_its_load_before_a_statement_is_not_flagged() {
         0,
         "{w:?}"
     );
-    let call_syntax = file_warnings("(defn f (s) (do %string-length(s) 1))");
+    let call_syntax = file_warnings("(defn f (s) (do string/upper(s) 1))");
     assert_eq!(
         count_containing(&call_syntax, "evaluated here and discarded"),
         1,

@@ -202,7 +202,7 @@
     (tcp/send c big)
     (tcp/close c)
     (let (r (receive ([:p40-received s] s) (after 15000 :timeout)))
-      (io/puts "P40: sent:" (string/length big) "received:" (string/length r))
+      (io/puts "P40: sent:" (count big) "received:" (count r))
       (io/puts "P40-correct:" (= big r)))))
 
 ;;; ---- P41: tcp/local-port after close returns nil ----

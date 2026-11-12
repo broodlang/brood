@@ -20,12 +20,12 @@
 ;;     `->float`; the reverse direction is `str`, which is bare and generic.
 ;;
 ;; Kernel seam: the low-level primitives are Rust builtins registered directly under
-;; their `string/…` names — `count` `string/substring` `string/split`
+;; their `string/…` names — `string/substring` `string/split`
 ;; `string/upper` `string/lower` `string/normalize` `string/span`/`span-until`
 ;; `string/grapheme-*`/`substring-graphemes` `string/->codepoints`/`->graphemes`.
 ;; The functions below are pure Brood over those. Brood has no distinct char type, so
 ;; a "character" is a 1-char string; all indices are char-based, matching
-;; `count`. The helpers are tail-recursive (stack-safe over long strings).
+;; `count` of a string. The helpers are tail-recursive (stack-safe over long strings).
 ;;
 ;; This module is `require`d by the prelude itself (its own `get`/`path-*`/`fmt`
 ;; helpers call `string/char-at`/`string/starts-with?`/… by late binding), so it is
@@ -34,7 +34,7 @@
 (defmodule string
   "The string-manipulation library — every operation whose subject is a string:
 trimming, padding, case folding, search, split/join, and char-content conversions.
-The low-level primitives (`count` `string/substring` `string/split`
+The low-level primitives (`string/substring` `string/split`
 `string/upper` `string/lower` …) are Rust builtins; the rest is pure Brood over them.
 Bare-in-the-prelude by contrast: the generic collection ops (`map`/`filter`/`count`/
 `contains?`/`includes?`/`index-of`). The scalar bridges that reinterpret a string as

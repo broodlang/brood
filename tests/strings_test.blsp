@@ -411,14 +411,14 @@
   (test "last-index-of on an empty haystack"
     (assert= (string/last-index-of "" "a") -1)
     (assert= (string/last-index-of "" "") -1))
-  ;; `string-length` reads a char count cached on the heap slot (it used to be a full
+  ;; A string's `count` reads a char count cached on the heap slot (it used to be a full
   ;; `chars().count()` scan). The cache is written at construction and must survive every
   ;; way a string can move: GC promotion to the old generation, `def` into the shared
   ;; RUNTIME region, and a deep copy across a process boundary. A stale or missing count
   ;; would show as a wrong length or a wrong index — and, because the same field doubles
   ;; as the "is this pure ASCII" test for char↔byte conversion, as wrong SEARCH results on
   ;; non-ASCII text specifically.
-  (test "string-length counts code points, not bytes"
+  (test "a string's count is code points, not bytes"
     (assert= 5 (count "hello"))
     (assert= 5 (count "héllo"))
     (assert= 3 (count "a😀b"))

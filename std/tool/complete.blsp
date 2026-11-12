@@ -214,13 +214,13 @@ suggestions\", never to an error on the user's command line."
 ;; quote, bracket, paren or backslash came from surrounding syntax rather than from a
 ;; tag — the scan is textual, so it can pick up a `:tags` inside a string literal and
 ;; produce a candidate like `fast"`. Offering that is worse than offering nothing.
-(def- *complete-tag-reject* "\"'()[]{}\\;`,")
+(def- *tag-reject* "\"'()[]{}\\;`,")
 
 (defn- complete-tag-name? (name)
   (and (not (= name ""))
     (fold (string/split name "")
       true
-      (fn (ok ch) (and ok (not (includes? *complete-tag-reject* ch)))))))
+      (fn (ok ch) (and ok (not (includes? *tag-reject* ch)))))))
 
 (defn tags ()
   "Every tag name declared with `:tags [...]` anywhere in the project's test files, de-duplicated and sorted. Textual scan — see the file header on why.

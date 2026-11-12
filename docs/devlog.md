@@ -1509,15 +1509,26 @@ The audit now counts `pattern`/`query`/`rules` as subjects, and `audit_test` nam
 That rename found `eval-server` binding its own `*test-formatter*`, which the test runner
 never read.
 
-2026-11-12 (ADR-718 addendum, road-to-1.0 §F). **`string/length` is removed for `count`.** It
-was the last per-type length beside the bare one; ADR-718 had left it open over its call sites.
-The primitive is now the private `%string-length`, which `count` calls; `count` on a string
-was already inlined by the VM and the JIT, so nothing is slower. The ledger points
-`string/length` at `count`. About 650 call sites in brood moved to `count`; the Rust tests and
-the checker's length rules use `%string-length`, so a test that needs a string-only callee
-keeps one, and the docs' type examples use `string/upper`. One checker gap surfaced: a private
-helper passed as a value read its typed parameter as whatever its body demanded (`count`
-demands any countable), widening its result, which `string/length`'s exact `string` demand had
-hidden. The return inference now meets each parameter with its declaration
-(`a_typed_parameter_bounds_the_return_of_a_private_helper_used_as_a_value`, red with the meet
-removed). §F is done.
+2026-11-12 (ADR-718, KI-383, KI-384). The rest of the surface pass. `string/length` goes for
+`count`: about 1,100 sites in brood and 700 in bedit, and the primitive is `%string-length`
+internally. 19 private settings lose their doubled prefix. `(seq/drop-last xs 1)` gets
+`seq/but-last`'s checker precision back. `refer_excluded_all` again excludes every `fuzzy`
+public. CI's bedit smoke found the cost of shortening: bedit's unqualified
+`(defdyn *indent-width* nil)` declares a root name, which then took over lineedit's private
+`*indent-width*` whenever std loaded from source (in the checker: `nil` not assignable to
+`int`). That collision and coverage's `*targets*` are renamed out of reach. The general hazard
+is KI-383, whose fix (an unqualified `defdyn` in a module is module-scoped) waits on a
+decision. Moving to `count` widened what the checker infers for parameters that only
+`string/length` had pinned to string, in `package-git-tag-version` and the dectest
+helpers; those leaves now declare `string`. KI-384 records a contracts-only checker
+difference in bedit's terminal.blsp.
+
+2026-11-12. **The checker now honours a typed parameter in a private helper passed as a value.**
+The same `string/length` → `count` rename was done twice in parallel; the merge kept the
+upstream one whole. What it left: the parameters that only `string/length` had pinned to string
+widened because the return inference for a private helper with no caller-derived types
+(one passed as a value: `(map xs helper)`) bound each parameter to its body's demand alone and
+ignored a declared type, so declaring `w:string` did not help. It now meets each parameter with
+its declaration as well as with the caller-derived type. Guard:
+`a_typed_parameter_bounds_the_return_of_a_private_helper_used_as_a_value`, red with the meet
+removed.

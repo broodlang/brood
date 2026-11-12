@@ -9,8 +9,8 @@
 //! (perfectly healthy). The guard against false positives was `is_embedded_module`, which
 //! excuses a USER module that excludes everything and not a std one.
 //!
-//! bedit trips exactly that: `src/completion.blsp` opens with
-//! `(:use fuzzy :exclude [filter match])` — `fuzzy`'s only two publics — and calls
+//! bedit tripped exactly that: `src/completion.blsp` opened with
+//! `(:use fuzzy :exclude [filter match])` — then `fuzzy`'s only two publics — and calls
 //! `fuzzy/filter` qualified. Every cold `nest check` of the flagship downstream project
 //! printed a line claiming no public `fuzzy/` global was bound while both were. It reads as
 //! a one-off because the run that shows it is the one that has to rebuild `.brood/image.bin`;
@@ -35,12 +35,14 @@ fn stderr_of(dir: &std::path::Path, name: &str, src: &str) -> String {
 #[test]
 fn excluding_every_public_name_of_a_std_module_is_not_reported_as_missing_globals() {
     let dir = temp_dir("refer-exclude-all");
-    // `fuzzy` is an embedded std module whose entire public surface is `filter` and
-    // `match`; excluding both is bedit's shape.
+    // `fuzzy` is an embedded std module; this excludes every public function it has (its
+    // `*settings*` are written qualified, never referred). When fuzzy grows a public
+    // function, add it here, or this stops excluding EVERY name and proves nothing.
     let err = stderr_of(
         &dir.path,
         "exclude_all.blsp",
-        "(defmodule exclude-all-probe (:use fuzzy :exclude [filter match]))\n\
+        "(defmodule exclude-all-probe (:use fuzzy :exclude [match scorer top filter ranker \
+         rank-async ranker-candidates ranker-stop edit-distance nearest]))\n\
          (io/puts (fuzzy/match \"a-b\" \"ab\"))\n",
     );
     assert!(

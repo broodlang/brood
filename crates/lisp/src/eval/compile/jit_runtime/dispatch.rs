@@ -131,7 +131,7 @@ pub(crate) fn jit_dispatch_call(
         // `[stage_base, n)` — the same discipline the VM's `Inst::Call` uses),
         // invoke the native fn pointer, park any error. This is the native-callee
         // fast path: no `env_get`, no `dispatch` (passthrough loop + `apply`
-        // unfold + arity re-checks, ~55–75 ns/call) for `str`/`string-length` and
+        // unfold + arity re-checks, ~55–75 ns/call) for `str`/`%string-length` and
         // friends called from JIT'd code. `apply` itself
         // has a real native body (`apply_builtin`), so direct invocation is exact.
         macro_rules! call_native_direct {

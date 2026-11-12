@@ -574,7 +574,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // wrappers still lower to their `PrimOp`. `(:use math)` for bare access.
     embedded_module!("math", "std/math.blsp"),
     // Bitwise ops on integers + the IEEE-754 float/bit reinterpretations. The operations
-    // are kernel primitives registered as `bit/*` (the `%string-length` pattern); this
+    // are kernel primitives registered as `bit/*` (the `string/upper` pattern); this
     // module declares the namespace they live in — ten names for one idea is what a
     // namespace is for, and bare is the scarce resource.
     // The less common functions over functions (ADR-506): complement, constantly, juxt,

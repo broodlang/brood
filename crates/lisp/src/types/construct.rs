@@ -817,7 +817,7 @@ impl Ty {
             }
             return Range::at_least(1);
         }
-        // A string literal set knows its lengths — chars, as `%string-length` counts — so
+        // A string literal set knows its lengths — chars, as `count` counts — so
         // `"abc"` fits `(len string _ 3)` and `(into [] "abc")` has a length.
         if self.tags & COUNT_BITS == STR_BIT
             && let Some(LitSet::In(set)) = self.lit_str.as_deref()

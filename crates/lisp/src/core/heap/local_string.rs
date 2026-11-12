@@ -1,7 +1,7 @@
 //! The LOCAL string representation — child of heap.
 //!
 //! What a string slab entry IS and how it is read: [`LocalString`] (inline UTF-8 or a
-//! shared blob, plus the cached char count that makes `string-length` O(1) and the pure-ASCII
+//! shared blob, plus the cached char count that makes a string's `count` O(1) and the pure-ASCII
 //! test free), its lazily-built side tables ([`StrAux`], the sparse char→byte [`CharIndex`]
 //! that keeps a rising-index scan linear on non-ASCII text), and `Heap`'s six string readers
 //! (`str_metrics`, the two index conversions, `str_scan_table`, `with_string_slot`, `string`).
@@ -19,7 +19,7 @@ use super::*;
 ///
 /// Caching the count fixes the class rather than the instances. It is free to compute
 /// (construction already walks the bytes to copy them) and it buys two things:
-///   * `string-length` becomes O(1) instead of a full scan;
+///   * a string's `count` becomes O(1) instead of a full scan;
 ///   * `chars == as_str().len()` **is** the pure-ASCII test, and for an ASCII string a
 ///     char index *is* its byte offset — so the conversion in both directions is O(1).
 ///

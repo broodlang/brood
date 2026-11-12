@@ -31,7 +31,7 @@ transitively-closed lock file and puts each dep's source on *load-path*."
 ;; content) and .brood-pkg.blsp (the cache stamp we write *into* the dir post-clone
 ;; — excluding it keeps the tree hash invariant whether or not the stamp is present,
 ;; so a re-resolve of an unchanged commit produces the same hash).
-(def- *package-hash-skip* (list "_deps" ".git" ".brood-pkg.blsp"))
+(def- *hash-skip* (list "_deps" ".git" ".brood-pkg.blsp"))
 
 ;; The file paths under `dir`, relative to it, sorted. Recurses into subdirs.
 (defn- package-tree-files (dir) (sort (package-tree-files-walk dir "" nil)))
@@ -40,7 +40,7 @@ transitively-closed lock file and puts each dep's source on *load-path*."
   (fold (file/ls dir)
     found
     (fn (acc entry)
-      (if (includes? *package-hash-skip* entry)
+      (if (includes? *hash-skip* entry)
         acc
         (let (full (path/join dir entry)
               relative (if (= prefix "") entry (str prefix "/" entry)))
@@ -587,7 +587,7 @@ transitively-closed lock file and puts each dep's source on *load-path*."
 
 ;; A tag's candidate version: strip one optional leading `v` (so `v1.2.0` and
 ;; `1.2.0` both read as the version 1.2.0). Returns the string as-is otherwise.
-(defn- package-git-tag-version (tag:string)
+(defn- package-git-tag-version (tag:string -> string)
   (if (and (> (count tag) 0) (= (string/substring tag 0 1) "v"))
     (string/substring tag 1)
     tag))
@@ -688,7 +688,7 @@ transitively-closed lock file and puts each dep's source on *load-path*."
 ;; (release assets 302 to a CDN). Like git, the cache's .brood-pkg.blsp stamp lets a
 ;; plain `nest run` skip a re-download when the locked sha still matches.
 
-(def- *package-max-redirects* 5)
+(def- *max-redirects* 5)
 
 (defn- package-http-fetch (url redirects-left)
   (let (resp (http/fetch url)
@@ -708,14 +708,14 @@ transitively-closed lock file and puts each dep's source on *load-path*."
 
 (defn fetch-bytes (url)
   "The bytes at `url`: a `file://` path is read directly (offline / local artifact);
-an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and its
+an http(s) URL is GET'd (following up to *max-redirects* redirects) and its
 2xx body returned. Throws on a non-2xx status or a transport error. Shared by the
 package manager and `nest release --target`'s runtime download.
 
     (package/fetch-bytes \"https://github.com/broodlang/brood/releases/download/v0.51.0/x.sha256\")   ;~> #b\"…\""
   (if (string/starts-with? url "file://")
     (file/slurp-bytes (string/substring url 7))
-    (package-http-fetch url *package-max-redirects*)))
+    (package-http-fetch url *max-redirects*)))
 
 (defn- package-tarball-cache-current? (target sha)
   (let (meta (package-pkg-meta-path target))

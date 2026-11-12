@@ -354,7 +354,7 @@ load-bearing design choice (see `CLAUDE.md` and `docs/decisions.md`).
 - the float→int crossing `math/floor`, and the floating-point functions (`%f64-sqrt %sin %exp` …)
 - pairs/vectors `cons first rest empty? vector %vector-ref %vector-length`
 - maps `%hash-map %map-get %map-assoc %map-dissoc %map-pairs %map-count`
-- strings `count string/substring string/upper string/lower string/->number`
+- strings `%string-length string/substring string/upper string/lower string/->number`
 - reflection/checking `type-of %check`; value↔text & IO `str pr-str %render %write-out %write-err`
 - self-hosting `reflect/eval reflect/eval-string reflect/load %read-string %builtin-module apply`; macros `reflect/macroexpand-1 reflect/gensym`
 - filesystem/system `file/cwd file/exists? file/dir? file/ls file/mkdir file/spit file/slurp %getenv %run-process`

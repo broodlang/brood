@@ -486,7 +486,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], int),
         &["s"],
-        "The number of characters in string s: what `count` answers for a string.",
+        "The number of characters in string s — the string arm of `count`, which is the public name (ADR-253). O(1): the char count is cached on the slot.",
         string_length,
     );
     primitives.def(
@@ -494,7 +494,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 3),
         Sig::with_optional(vec![string], vec![int, int], int),
         &["s", "start-col", "tab-width"],
-        "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0, a tab the cells to its next stop, a glyphless character such as U+200B 0 — or its `<200b>` escape's cells when the dynamic *glyphless-display* is :hex-code, ADR-556). The width-aware counterpart to %string-length. The optional start-col (default 0) is the column s is laid out from — a chunk of a longer line passes its column so its tabs land on the LINE's stops — and tab-width the distance between stops — by default the dynamic *tab-width* (8 unless a binding says otherwise).\n\n    (string/display-width \"Hi there\")   ;=> 8\n    (binding (*tab-width* 4) (string/display-width \"\\tx\"))   ;=> 5\n    (string/display-width \"a\\tb\")       ;=> 9\n    (string/display-width \"\\tx\" 3)      ;=> 6\n    (binding (*glyphless-display* :hex-code) (string/display-width \"a\\u{200b}b\"))   ;=> 8",
+        "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0, a tab the cells to its next stop, a glyphless character such as U+200B 0 — or its `<200b>` escape's cells when the dynamic *glyphless-display* is :hex-code, ADR-556). The width-aware counterpart to count. The optional start-col (default 0) is the column s is laid out from — a chunk of a longer line passes its column so its tabs land on the LINE's stops — and tab-width the distance between stops — by default the dynamic *tab-width* (8 unless a binding says otherwise).\n\n    (string/display-width \"Hi there\")   ;=> 8\n    (binding (*tab-width* 4) (string/display-width \"\\tx\"))   ;=> 5\n    (string/display-width \"a\\tb\")       ;=> 9\n    (string/display-width \"\\tx\" 3)      ;=> 6\n    (binding (*glyphless-display* :hex-code) (string/display-width \"a\\u{200b}b\"))   ;=> 8",
         display_width);
     // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
     // (std/prelude.blsp) over this one reflective primitive.
@@ -812,8 +812,8 @@ pub(crate) fn is_empty(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResul
         // routed through `Seqable`: `->seq` is a LIST view, so a rope would have to
         // materialise every character to answer a question its length already
         // answers — and a rope is on the editor's hot path. A rope sizes in
-        // characters, which is what `count` and `%string-length` already report for
-        // the string it stands for.
+        // characters, which is what `count` already reports for the string it
+        // stands for.
         Value::Rope(_) => {
             let r = expect_rope_ref(heap, "empty?", x)?;
             Ok(Value::boolean(r.len_chars() == 0))
@@ -1818,15 +1818,17 @@ pub(super) fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     let v = arg(args, 0);
     match v {
         // O(1): the char count is cached on the slot, so a loop bounded by
-        // `(%string-length s)` is not quadratic before it does anything else.
+        // `(count s)` is not quadratic before it does anything else.
         Value::Str(id) => Ok(Value::int(heap.str_metrics(id).0 as i64)),
-        _ => Err(LispError::wrong_type(heap, "%string-length", "string", v)),
+        // Named for `count`, the public name a program calls: `%string-length` is only
+        // the string arm `count` dispatches to (ADR-253).
+        _ => Err(LispError::wrong_type(heap, "count", "string", v)),
     }
 }
 
 /// The display width of a string in terminal/grid cells, counted in grapheme
 /// clusters (an emoji / flag / CJK char is 2, a combining mark 0, a tab the cells to
-/// its next stop). The width-aware counterpart to `string-length` (which counts
+/// its next stop). The width-aware counterpart to `count` (which counts
 /// codepoints) — the editor's column / cursor math uses it so a wide glyph advances
 /// two columns. The GUI renderer advances the cell grid by the same measure
 /// (`crate::host::text_width`). The optional `start-col` / `tab-width` are the tab

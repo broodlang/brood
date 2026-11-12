@@ -282,7 +282,7 @@ fn feature_loaded_reads_the_feature_registry_not_the_namespace() {
     // `file` has 18 `file/…` kernel primitives but its .blsp is not loaded yet — the
     // exact shape that fooled the old namespace-presence test. `string` is the same
     // shape twice over since ADR-246: its `.blsp` no longer loads at boot, while
-    // `string/split`, `%string-length`, … are kernel primitives AND the prelude binds
+    // `string/split`, `string/upper`, … are kernel primitives AND the prelude binds
     // `string/join` and friends to autoload stubs. Neither may read as the module.
     for module in ["file", "string"] {
         assert!(

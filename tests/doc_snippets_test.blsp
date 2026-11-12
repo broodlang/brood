@@ -43,6 +43,7 @@
    "table-get" "table/get"
    "table-put" "table/put"
    "string-length" "count"
+   "string/length" "count"
    "os/getenv" "os/env"})
 
 (defn- fenced-blocks (lines in-block acc cur)

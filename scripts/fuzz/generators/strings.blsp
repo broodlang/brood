@@ -90,7 +90,7 @@
         (+ acc (chk \"string/substring\" (string/substring s i j) (ref-sub i j))
            (chk \"string/char-at\" (string/char-at s i) (nth cps i)))))))
 
-;; count agrees with the code-point count, and the whole string round-trips
+;; the string's count agrees with the code-point count, and the whole string round-trips
 (def errs0 (+ (chk \"count\" n (count cps))
               (chk \"roundtrip\" s (apply str cps))
               (chk \"substring-all\" (string/substring s 0 n) s)))

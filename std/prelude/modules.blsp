@@ -913,7 +913,7 @@ writing process's count while `require` reads source."
 ;; The short module name of a rooted bundle key: `store/repo` -> `repo`, `sp/wire/bytes` ->
 ;; `wire/bytes` (everything after the FIRST `/`, i.e. the package prefix).
 (defn- %bundle-key-short (key pkg)
-  (symbol (string/substring key (+ 1 (count pkg)) (count key))))
+  (symbol (string/substring key (+ 1 (%string-length pkg)) (%string-length key))))
 
 ;; True if SHORT module name `short` is provided by MORE THAN ONE registered package — a genuine
 ;; cross-dependency name collision (two deps each shipping a `parser`). Only such a name needs

@@ -160,8 +160,8 @@ fn brood_contracts_zero_opts_out_of_the_default() {
         "with BROOD_CONTRACTS=0 a declaration is advisory and the lie flows through:\n{}",
         ran.out
     );
-    // The std call still fails — on `%string-length`'s own type check, which is not a
-    // contract and carries no blame.
+    // The std call still fails — on the `count` of its argument inside `pad-left`, which
+    // is not a contract and carries no blame.
     assert!(
         !ran.out.contains("blame=:") && ran.out.contains("std: RAISED blame=nil"),
         "with BROOD_CONTRACTS=0 nothing may raise a contract error:\n{}",
