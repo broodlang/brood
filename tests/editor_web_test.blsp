@@ -7,7 +7,7 @@
 ;; until then, and two connections arriving together would each make one (KI-374).
 (describe "the tab table"
   (test "is there before the first connection, so no two of them can make it"
-    (assert= (table? *web-tabs*) true)))
+    (assert= (table? editor/web/*tabs*) true)))
 
 (describe "frame-json"
   (test "a frame's ops become JSON arrays, keywords as strings"
@@ -67,7 +67,7 @@
           tab (spawn (editor/web/tab-run nil id old-loop)))
       (send tab [:session supervisor])
       ;; the post waits for the stream to know the tab: it answers 404 until then
-      (eventually "the stream knows the tab" (fn () (= (table/get *web-tabs* id nil) tab)))
+      (eventually "the stream knows the tab" (fn () (= (table/get editor/web/*tabs* id nil) tab)))
       (assert= (:status (web-post id "\"a\"")) 204)
       (assert= (web-next :old) [:key "a" false 1])
       ;; the dead loop took none; the restart and a post race to the stream

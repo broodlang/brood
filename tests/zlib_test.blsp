@@ -12,7 +12,7 @@
       (assert= b (zlib/gunzip (zlib/gzip b)))))
   (test "compresses repetitive data smaller than the input"
     (let (s (big "ababababab" 100))
-      (is (< (bytes/length (zlib/gzip s)) (bytes/length (string/->bytes s))))))
+      (is (< (count (zlib/gzip s)) (count (string/->bytes s))))))
   (test "output carries the gzip magic bytes (0x1f 0x8b)"
     (let (gz (zlib/gzip "x"))
       (assert= 31 (bytes/at gz 0))
@@ -35,7 +35,7 @@
     (assert= "payload" (string/bytes-> (zlib/unzip (zlib/zip "payload")))))
   (test "raw deflate is smaller than gzip for the same data (no header/checksum)"
     (let (s (big "compress me " 50))
-      (is (<= (bytes/length (zlib/zip s)) (bytes/length (zlib/gzip s)))))))
+      (is (<= (count (zlib/zip s)) (count (zlib/gzip s)))))))
 
 (describe "compression level (optional arg, 0-9)"
   (test "level 9 round-trips like the default"
@@ -44,15 +44,15 @@
   (test "level 0 (store) round-trips and is larger than level 9"
     (let (s (big "the quick brown fox " 80))
       (assert= s (string/bytes-> (zlib/gunzip (zlib/gzip s 0))))
-      (is (> (bytes/length (zlib/gzip s 0)) (bytes/length (zlib/gzip s 9))))))
+      (is (> (count (zlib/gzip s 0)) (count (zlib/gzip s 9))))))
   (test "level 9 is no larger than the default for repetitive data"
     (let (s (big "ababababab " 100))
-      (is (<= (bytes/length (zlib/gzip s 9)) (bytes/length (zlib/gzip s))))))
+      (is (<= (count (zlib/gzip s 9)) (count (zlib/gzip s))))))
   (test "level applies to zlib/compress and zlib/zip too"
     (let (s (big "payload " 60))
       (assert= s (string/bytes-> (zlib/uncompress (zlib/compress s 9))))
       (assert= s (string/bytes-> (zlib/unzip (zlib/zip s 9))))
-      (is (> (bytes/length (zlib/zip s 0)) (bytes/length (zlib/zip s 9))))))
+      (is (> (count (zlib/zip s 0)) (count (zlib/zip s 9))))))
   (test "an out-of-range level raises"
     ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
     (is (= :raised (try (do (zlib/gzip "x" 10) :ok) (catch _e :raised))))
@@ -67,14 +67,14 @@
       (assert= b (zlib/unbrotli (zlib/brotli b)))))
   (test "compresses repetitive data smaller than the input"
     (let (s (big "ababababab " 100))
-      (is (< (bytes/length (zlib/brotli s)) (bytes/length (string/->bytes s))))))
+      (is (< (count (zlib/brotli s)) (count (string/->bytes s))))))
   (test "quality 11 is no larger than quality 0 for repetitive data"
     (let (s (big "the quick brown fox " 80))
       (assert= s (string/bytes-> (zlib/unbrotli (zlib/brotli s 11))))
-      (is (<= (bytes/length (zlib/brotli s 11)) (bytes/length (zlib/brotli s 0))))))
+      (is (<= (count (zlib/brotli s 11)) (count (zlib/brotli s 0))))))
   (test "beats gzip on repetitive text"
     (let (s (big "compress this text " 200))
-      (is (<= (bytes/length (zlib/brotli s 11)) (bytes/length (zlib/gzip s 9))))))
+      (is (<= (count (zlib/brotli s 11)) (count (zlib/gzip s 9))))))
   (test "empty input round-trips"
     (assert= "" (string/bytes-> (zlib/unbrotli (zlib/brotli "")))))
   (test "unbrotli raises on data that isn't brotli"

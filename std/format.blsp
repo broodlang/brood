@@ -110,7 +110,7 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 ;; uniformly at +2, which is the only style that's both simple and obviously
 ;; idempotent. (We're not in the business of aligning args under the head; that
 ;; reflows on every rename.)
-(def *format-headers*
+(def- *headers*
   {'defn 2
    ; name params (a multi-arity defn has no params list: the arms are the body — see
    ; `multi-arity-defn?`, which trims this to 1 so every arm gets its own line)
@@ -189,15 +189,15 @@ project/plugin table (`format/*headers-extra*`) first, then the built-ins.
     (format/head-header-count [:int \"1\"])         ;=> -1"
   (if (= (node-kind head-node) :symbol)
     (let (sym (symbol (node-text head-node)))
-      (get format/*headers-extra* sym (get *format-headers* sym -1)))
+      (get format/*headers-extra* sym (get *headers* sym -1)))
     -1))
 
 ;; Forms whose FIRST header arg is a pair-list (alternating name/value). When
 ;; that list breaks across lines, we group each name+value on one line and
 ;; align them under the opening element — the canonical let/binding shape.
-(def *format-pair-bindings*
+(def- *pair-bindings*
   {'let true 'letrec true 'binding true 'loop true})
-(sig *format-pair-bindings* (map symbol bool))
+(sig *pair-bindings* (map symbol bool))
 
 ;; Forms whose body args (after the header) are emitted as test+body pairs,
 ;; one pair per line. Comments between clauses are kept on their own lines.
@@ -212,7 +212,7 @@ project/plugin table (`format/*headers-extra*`) first, then the built-ins.
     (format/pair-bindings? [:symbol \"let\"])   ;=> true
     (format/pair-bindings? [:symbol \"do\"])    ;=> false"
   (and (= (node-kind head-node) :symbol)
-    (get *format-pair-bindings* (symbol (node-text head-node)) false)))
+    (get *pair-bindings* (symbol (node-text head-node)) false)))
 
 (defn pair-body? (head-node:vector -> bool)
   "True if `head-node` names a form whose body emits in pairs.
@@ -224,11 +224,11 @@ project/plugin table (`format/*headers-extra*`) first, then the built-ins.
 ;; The `defn` family: forms whose second header arg is a PARAMS list — unless the
 ;; function is multi-arity/multi-pattern, in which case that slot holds the first ARM
 ;; (`((x) …)` / `([x] …)`: a list whose first element is itself a list or vector).
-(def *format-defn-family* {'defn true 'defn- true 'defmacro true 'defmacro- true})
+(def- *defn-family* {'defn true 'defn- true 'defmacro true 'defmacro- true})
 
 (defn- defn-family? (head-node)
   (and (= (node-kind head-node) :symbol)
-    (get *format-defn-family* (symbol (node-text head-node)) false)))
+    (get *defn-family* (symbol (node-text head-node)) false)))
 
 (defn- first-structural-child (n)
   (first (seq/filter (vec->list (node-children n)) (fn (c) (not (trivia? c))))))
@@ -455,7 +455,7 @@ keyword (`:next`) is not one.
   ;; intent (capped at 1) between body items.
   ;;
   ;; Two layout shapes ride on top of the default:
-  ;;   - `let`-family forms (`*format-pair-bindings*`): the first header arg
+  ;;   - `let`-family forms (`*pair-bindings*`): the first header arg
   ;;     is rendered as a pair-list (name+value per line, aligned under the
   ;;     bindings list's opening element).
   ;;   - `cond`/`case` (`format/*pair-body*`): body args are emitted two per

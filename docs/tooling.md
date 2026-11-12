@@ -235,7 +235,7 @@ see whitespace and comments.
 The layout, in one paragraph: every form is emitted on a single line if it fits
 within the width budget (`format/*width*`, 100 cols by default); otherwise it
 breaks across lines with each body argument on its own line at +2 indent. A small
-table of *header counts* (`*format-headers*`) keeps a fixed prefix of args on the
+table of *header counts* (format's private `*headers*`) keeps a fixed prefix of args on the
 first line of certain forms — `defn` keeps `name params`, `let` keeps the bindings
 list, `if`/`when` keep the predicate, etc. — so the body indents under
 a recognisable header. Comments inside a list force the multi-line shape; they

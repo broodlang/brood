@@ -919,7 +919,7 @@
 
 ;; A key held down is not idle: before its first repeat no input arrives, yet an idle beat,
 ;; a debounce or a caret blink must not run in that gap. Idle timers wait for the key to come
-;; up, at most `*ui-held-quiet-ms*` (2000) past the last input; other timers are untouched.
+;; up, at most `editor/ui`'s `*held-quiet-ms*` (2000) past the last input; other timers are untouched.
 (describe "idle timers while a key is held"
   (test "an idle deadline is at least the held quiet past the last input; others keep theirs"
     (assert= (editor/ui/ui-deadline {:after 100 :idle? true} 1000 nil 1500 true) 3500)

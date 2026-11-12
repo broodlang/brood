@@ -430,7 +430,7 @@
                 (make-buffer "")
                 (fn (acc _) (undo-group acc (fn (inner) (insert (insert inner "a") "b"))))))
         (is (< (count (get b :undo)) 30))
-        (is (every? (get b :undo) (fn (snapshot) (math/even? (text/length (get snapshot :rope))))))
+        (is (every? (get b :undo) (fn (snapshot) (math/even? (count (get snapshot :rope))))))
         (assert= (buffer-text (undo b)) (string/repeat "ab" 29)))))
   (test "the newest step is kept whatever it costs"
     (binding (editor/buffer/*undo-limit* 0 editor/buffer/*undo-strong-limit* 0)
@@ -1339,7 +1339,7 @@ suite run. `test/*wait-ms*` is a failure deadline, reached only if a relay never
 
   (test "a huge rewrite degrades to whole-span undo instead of hanging"
     ;; past the char budget the span is treated as one change — bounded, not frozen
-    (let (big (apply str (map (range (+ 10 *undo-region-char-budget*)) (fn (_i) "x")))
+    (let (big (apply str (map (range (+ 10 editor/undo-region/*char-budget*)) (fn (_i) "x")))
           b0 (make-buffer "seed")
           b1 (insert (goto-char b0 4) big))
       (assert= (buffer-text (undo-in-region (uir-sel b1 0 (buffer-length b1)))) "seed"))))

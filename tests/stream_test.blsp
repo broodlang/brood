@@ -165,19 +165,19 @@ full budget still yields the failing value, while a merely slow one is forgiven.
     (assert= []
       (stream/->vector (stream/chunk (stream/empty) 3)))))
 
-(describe "concat"
+(describe "append"
   (test "sequences two streams"
     (assert= [1 2 3 4 5 6]
-      (stream/->vector (stream/concat (stream/list-> [1 2 3]) (stream/list-> [4 5 6])))))
+      (stream/->vector (stream/append (stream/list-> [1 2 3]) (stream/list-> [4 5 6])))))
   (test "first empty"
     (assert= [4 5 6]
-      (stream/->vector (stream/concat (stream/empty) (stream/list-> [4 5 6])))))
+      (stream/->vector (stream/append (stream/empty) (stream/list-> [4 5 6])))))
   (test "second empty"
     (assert= [1 2 3]
-      (stream/->vector (stream/concat (stream/list-> [1 2 3]) (stream/empty)))))
+      (stream/->vector (stream/append (stream/list-> [1 2 3]) (stream/empty)))))
   (test "both empty"
     (assert= []
-      (stream/->vector (stream/concat (stream/empty) (stream/empty))))))
+      (stream/->vector (stream/append (stream/empty) (stream/empty))))))
 
 (describe "lines"
   (test "LF-terminated lines"

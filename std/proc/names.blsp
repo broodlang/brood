@@ -164,7 +164,7 @@ that is not running. A key goes when its last holder unregisters or its death is
   (let (entries (gen/%via-table registry))
     (if entries
       (check-allow :discarded-catch
-        (try (table/count entries) (catch _ 0)))
+        (try (/count entries) (catch _ 0)))
       0)))
 
 (defn whereis (registry:keyword key:any)

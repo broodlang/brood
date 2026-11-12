@@ -104,7 +104,7 @@
                                 :usage "u"
                                 :summary "s"
                                 :handler (fn (_) nil)})))
-    (assert= 1 (count (seq/filter *repl-commands* (fn (c) (includes? (get c :names) "rt-dup")))))
+    (assert= 1 (count (seq/filter repl/*commands* (fn (c) (includes? (get c :names) "rt-dup")))))
     ;; …while distinct names all survive.
     (reg-fan 64
       (fn (i)
@@ -115,19 +115,19 @@
     (assert= 64
       (count (seq/filter (range 64)
                (fn (i)
-                 (any? *repl-commands* (fn (c) (includes? (get c :names) (str "rt-c" i)))))))))
+                 (any? repl/*commands* (fn (c) (includes? (get c :names) (str "rt-c" i)))))))))
 
   (test "telemetry attach — concurrent attaches to one event all survive"
     (reg-fan 64 (fn (i) (attach (str "rt-h" i) :rt/evt (fn (_e _m _md) nil))))
-    (assert= 64 (count (get *telemetry-handlers* :rt/evt))))
+    (assert= 64 (count (get telemetry/*handlers* :rt/evt))))
 
   (test "telemetry attach — re-attaching an id replaces it across every bucket"
     (attach "rt-solo" :rt/one (fn (_e _m _md) nil))
     (attach "rt-solo" :rt/two (fn (_e _m _md) nil))
     (assert= 0
-      (count (seq/filter (get *telemetry-handlers* :rt/one) (fn (h) (= (get h :id) "rt-solo")))))
+      (count (seq/filter (get telemetry/*handlers* :rt/one) (fn (h) (= (get h :id) "rt-solo")))))
     (assert= 1
-      (count (seq/filter (get *telemetry-handlers* :rt/two) (fn (h) (= (get h :id) "rt-solo"))))))
+      (count (seq/filter (get telemetry/*handlers* :rt/two) (fn (h) (= (get h :id) "rt-solo"))))))
 
   (test "register-system-layer — idempotent even when two processes race the same ref"
     ;; The membership test has to be inside the transform: outside it, both processes

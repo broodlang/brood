@@ -130,13 +130,6 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The positive denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer.",
         prim_denominator,
     );
-    primitives.def(
-        "decimal/number->",
-        Arity::exact(1),
-        Sig::new(vec![num], decimal_ty),
-        &["x"],
-        "A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision.",
-        prim_to_decimal);
     // `floor` is the single irreducible Float→Int crossing; ceil/round/pow/
     // sqrt are all Brood over it + rem/`/`/`*`/`<` (std/prelude.blsp).
     primitives.def(
@@ -229,14 +222,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The binary64 float whose bit pattern is n (0 <= n < 2^64). The inverse of float->bits.\n\n    (bit/->float 12)   ;=> 6e-323",
         bits_to_float,
     );
-    // `decimal` constructs an exact base-10 decimal from a string ("1.50"), an
-    // int (3), or a float (inexact source — uses its shortest round-trip form).
+    // `decimal/of` is THE way to a decimal (ADR-718): a string ("1.50"), an int (3), a
+    // bignum, a ratio (exact when it terminates), or a float (its shortest round-trip form).
     primitives.def(
         "decimal/of",
         Arity::exact(1),
         Sig::new(vec![string.union(num)], decimal_ty),
         &["x"],
-        "Construct an exact arbitrary-precision base-10 decimal from x: a string (\"1.50\"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M.\n\n    (decimal/of \"1.50\")   ;=> 1.50M",
+        "Construct an exact arbitrary-precision base-10 decimal from x: a string (\"1.50\"), an int (3), a bignum, a ratio (exact when it terminates, `1/2` → `0.5M`; a non-terminating one rounds to the default precision), or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M.\n\n    (decimal/of \"1.50\")   ;=> 1.50M\n    (decimal/of 1/2)   ;=> 0.5M",
         prim_decimal);
     primitives.def(
         "decimal/->string",
@@ -801,34 +794,6 @@ pub(super) fn prim_denominator(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     }
 }
 
-/// `(decimal/number-> x)` — a number as an exact base-10 `Decimal`. Exact for an integer or
-/// a terminating ratio (`1/2` → `0.5M`); a non-terminating ratio (`1/3`) rounds to
-/// `bigdecimal`'s default precision. A `Float` coerces through its decimal form.
-pub(super) fn prim_to_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use bigdecimal::BigDecimal;
-    let x = arg(args, 0);
-    match x {
-        Value::Decimal(_) => Ok(x),
-        Value::Int(i) => Ok(heap.alloc_decimal(BigDecimal::from(i))),
-        Value::BigInt(id) => {
-            let n = heap.bigint(id).clone();
-            Ok(heap.alloc_decimal(BigDecimal::from(n)))
-        }
-        Value::Ratio(id) => {
-            let r = heap.ratio(id).clone();
-            let d = BigDecimal::from(r.numer().clone()) / BigDecimal::from(r.denom().clone());
-            Ok(heap.alloc_decimal(d))
-        }
-        Value::Float(f) => match BigDecimal::try_from(f) {
-            Ok(d) => Ok(heap.alloc_decimal(d)),
-            Err(_) => Err(LispError::runtime(
-                "decimal/number->: cannot convert a non-finite float",
-            )),
-        },
-        _ => Err(LispError::wrong_type(heap, "decimal/number->", "number", x)),
-    }
-}
-
 /// The shared `division by zero` error (`/` raises rather than returning IEEE ∞).
 fn div_by_zero() -> LispError {
     LispError::runtime("division by zero")
@@ -1212,11 +1177,11 @@ pub(super) fn bit_shift_right(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 
 // ---------- decimal ----------
 
-/// `(decimal/of x)` — construct an exact base-10 `Decimal` from a string ("1.50"),
-/// an int (3), or a float. A string parses exactly; an int is exact; a float is
+/// `(decimal/of x)` — the one way to an exact base-10 `Decimal` (ADR-718). A string parses
+/// exactly; an int or `BigInt` is exact; a ratio is exact when it terminates; a float is
 /// converted from its *shortest round-trip* decimal text (an f64 is inexact, so
-/// `(decimal/of 0.1)` is the decimal `0.1`, the value the literal `0.1` denotes,
-/// not the full binary expansion). A `BigInt` is also accepted (exact).
+/// `(decimal/of 0.1)` is the decimal `0.1`, the value the literal `0.1` denotes, not the
+/// full binary expansion — which is what the removed `decimal/number->` gave).
 pub(super) fn prim_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use std::str::FromStr;
     let v = arg(args, 0);
@@ -1225,6 +1190,13 @@ pub(super) fn prim_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
         Value::Decimal(_) => return Ok(v),
         Value::Int(n) => bigdecimal::BigDecimal::from(n),
         Value::BigInt(id) => bigdecimal::BigDecimal::from(heap.bigint(id).clone()),
+        // Exact when the ratio terminates (`1/2` → `0.5M`); `1/3` rounds to bigdecimal's
+        // default precision.
+        Value::Ratio(id) => {
+            let ratio = heap.ratio(id).clone();
+            bigdecimal::BigDecimal::from(ratio.numer().clone())
+                / bigdecimal::BigDecimal::from(ratio.denom().clone())
+        }
         Value::Float(f) => {
             if !f.is_finite() {
                 return Err(LispError::runtime(format!(

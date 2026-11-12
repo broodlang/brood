@@ -301,7 +301,7 @@ and, per row, the rows of its cell the `x` inks."
 each — detail two pixels a cell (the half blocks a terminal shows) cannot keep."
   {:width side
    :height side
-   :rgba (bytes/concat (for (index (range 0 (* side side)))
+   :rgba (bytes/append (for (index (range 0 (* side side)))
                          (conj (if (math/even? index) stripe-red stripe-blue) 255)))})
 
 (defn- stripes-at (image x0 y count)
@@ -347,7 +347,7 @@ each — detail two pixels a cell (the half blocks a terminal shows) cannot keep
                                           2
                                           {:width 1
                                            :height 1
-                                           :rgba (bytes/concat [0 200 0 255])})]
+                                           :rgba (bytes/append [0 200 0 255])})]
                       (capture-spec))
               [cell-w _] (:cell image)
               left (+ 6 cell-w)
@@ -364,7 +364,7 @@ each — detail two pixels a cell (the half blocks a terminal shows) cannot keep
   (test "a source that is not a picture paints nothing"
     (when-gui (fn ()
                 (let (image (gui/render-frame [[:clear]
-                                                (editor/display/image 0 0 4 2 (bytes/concat "no"))]
+                                                (editor/display/image 0 0 4 2 (bytes/append "no"))]
                               (capture-spec)))
                   (is (= (gui/pixel image 10 5) capture-bg)))))))
 
@@ -384,7 +384,7 @@ each — detail two pixels a cell (the half blocks a terminal shows) cannot keep
   (test "a pixel outside the picture is nil"
     (let (image {:width 1
                  :height 1
-                 :rgba (bytes/concat (bytes/int-> 1 1)
+                 :rgba (bytes/append (bytes/int-> 1 1)
                          (bytes/int-> 2 1)
                          (bytes/int-> 3 1)
                          (bytes/int-> 255 1))})

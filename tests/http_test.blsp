@@ -38,24 +38,24 @@
     (let (r (parse-request "GET / HTTP/1.0"))
       (assert= (get r :method) "GET")
       (assert= (get r :path) "/")
-      (assert= (bytes/length (get r :body)) 0))))
+      (assert= (count (get r :body)) 0))))
 
 (describe "http: response rendering"
   (test "status line, Content-Length, and body (render-response is an iolist — ADR-139)"
-    (let (s (string/bytes-> (bytes/concat (render-response (ok "<p>hi</p>")))))
+    (let (s (string/bytes-> (bytes/append (render-response (ok "<p>hi</p>")))))
       (is (includes? s "HTTP/1.0 200 OK"))
       (is (includes? s "Content-Length: 9"))
       (is (includes? s "\r\n\r\n<p>hi</p>"))))
   (test "Content-Length is the body's BYTE count, not codepoints (the UTF-8 bug)"
     ;; "héllo ☃" = 7 codepoints, 10 UTF-8 bytes — the old string-length render
     ;; said 7 and spec-honoring clients truncated the body.
-    (let (s (string/bytes-> (bytes/concat (render-response (text-response "héllo ☃"))))
-          b (bytes/concat (render-response {:status 200 :body (bytes 1 2 3)})))
+    (let (s (string/bytes-> (bytes/append (render-response (text-response "héllo ☃"))))
+          b (bytes/append (render-response {:status 200 :body (bytes 1 2 3)})))
       (is (includes? s "Content-Length: 10"))
       ;; a binary bytes body rides the plain-response path verbatim
       (is (= (match b ((bytes _ & _r) (bytes/slice b (- (count b) 3))) (_ :no)) (bytes 1 2 3)))))
   (test "not-found renders a 404"
-    (is (includes? (string/bytes-> (bytes/concat (render-response (not-found)))) "404 Not Found"))))
+    (is (includes? (string/bytes-> (bytes/append (render-response (not-found)))) "404 Not Found"))))
 
 (describe "http: CR/LF can never be spliced into the wire format"
   ;; Header names/values and the request target are rendered verbatim into a
@@ -71,8 +71,8 @@
     (assert= (render-headers {"X-Test" "ok"}) "X-Test: ok\r\n"))
   (test "the SERVER response path refuses an injected header too"
     ;; render-response / render-head both go through render-headers
-    (assert-error (bytes/concat (render-response (response 200 {"X-Test" "a\r\nEvil: yes"} "hi"))))
-    (assert-error (bytes/concat (render-head 200 {"X-Test" "a\r\nEvil: yes"}))))
+    (assert-error (bytes/append (render-response (response 200 {"X-Test" "a\r\nEvil: yes"} "hi"))))
+    (assert-error (bytes/append (render-head 200 {"X-Test" "a\r\nEvil: yes"}))))
   (test "a CRLF in the request TARGET is rejected (parse-url happily keeps it)"
     ;; url parsing does not sanitise, so the render must: this used to inject a
     ;; header into the outgoing request line.
@@ -111,15 +111,15 @@
     (assert= (string/bytes-> (get (parse-request "POST / HTTP/1.0\r\nContent-Length: 3\r\n\r\nabcdefgh")
                                :body))
       "abc")
-    (assert= (bytes/length (get (parse-request "POST / HTTP/1.0\r\n\r\nstray") :body)) 0)))
+    (assert= (count (get (parse-request "POST / HTTP/1.0\r\n\r\nstray") :body)) 0)))
 
 (describe "http: reason phrases"
   (test "standard codes get their own phrase, never a borrowed OK"
-    (is (includes? (string/bytes-> (bytes/concat (render-response (response 503 {} ""))))
+    (is (includes? (string/bytes-> (bytes/append (render-response (response 503 {} ""))))
           "503 Service Unavailable"))
-    (is (includes? (string/bytes-> (bytes/concat (render-head 413 {}))) "413 Content Too Large")))
+    (is (includes? (string/bytes-> (bytes/append (render-head 413 {}))) "413 Content Too Large")))
   (test "an unknown code gets a neutral phrase"
-    (let (line (string/bytes-> (bytes/concat (render-head 599 {}))))
+    (let (line (string/bytes-> (bytes/append (render-head 599 {}))))
       (is (includes? line "599 Status"))
       (is (not (includes? line "OK"))))))
 
@@ -135,7 +135,7 @@
         (file/rmdir dir)
         (assert= (get resp :status) 200)
         (assert= (get (get resp :headers) "Content-Type") "image/png")
-        (assert= (bytes/concat (get resp :body)) png)))))
+        (assert= (bytes/append (get resp :body)) png)))))
 
 (describe "http: client response size accounting"
   ;; The client-collect byte cap measures chunks by type — plaintext chunks are
@@ -214,7 +214,7 @@
 
 (describe "http: streaming responses (the connection-handoff seam)"
   (test "render-head emits the status line + custom headers, no Content-Length"
-    (let (h (string/bytes-> (bytes/concat (render-head 200 {"Content-Type" "text/event-stream"}))))
+    (let (h (string/bytes-> (bytes/append (render-head 200 {"Content-Type" "text/event-stream"}))))
       (is (includes? h "HTTP/1.0 200 OK"))
       (is (includes? h "Content-Type: text/event-stream"))
       (is (includes? h "\r\n\r\n"))
@@ -322,7 +322,7 @@
       (is (bytes? (get r :body)))
       (assert= (body-text r) "hi there")))
   (test "parse-response takes wire bytes and keeps a binary body byte-faithful"
-    (let (r (parse-response (bytes/concat ["HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n"
+    (let (r (parse-response (bytes/append ["HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n"
                                             (bytes 255
                                               0 128)])))
       (assert= (get r :status) 200)
@@ -535,13 +535,13 @@
       (let (port (receive ([:port p] p) (after test/*wait-ms* :timeout)))
         (let (c (tcp/connect "127.0.0.1" port)
               ;; 70 KiB of header-ish bytes, never a blank line
-              junk (bytes/concat (map (range 0 1750)
+              junk (bytes/append (map (range 0 1750)
                                    (fn (_) "X-Junk: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n"))))
           (tcp/send c ["GET / HTTP/1.0\r\n" junk])
           ;; the server gives up and closes without ever responding
           (let (got (drain c))
             (tcp/close c)
-            (assert= (bytes/length got) 0)))))))
+            (assert= (count got) 0)))))))
 
 (describe "http: a binary RESPONSE body survives byte-faithfully (client side)"
   ;; The client reads in binary mode (ADR-141), so a response body that isn't
@@ -614,7 +614,7 @@
       (is (includes? resp "413 Content Too Large"))))
   (test "one byte over the limit is refused; a body under it is read"
     ;; a spawned worker reads the defaults, so the boundary is the default limit
-    (let (port (start-test-server (fn (req) (text-response (str (bytes/length (get req :body))))))
+    (let (port (start-test-server (fn (req) (text-response (str (count (get req :body))))))
           over (exchange port
                  (str "POST / HTTP/1.0\r\nContent-Length: " (+ http/*max-body-bytes* 1) "\r\n\r\n"))
           under (exchange port "POST / HTTP/1.0\r\nContent-Length: 10\r\n\r\n0123456789"))

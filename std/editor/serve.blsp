@@ -466,7 +466,7 @@ which the loop reads as a timeout)."
         (serve-report state)
         (serve-tell-attached state client)
         (serve-replay state client)
-        (when key (proc/set-quit-key [:key key] editor/ui/*ui-quit-busy-ms* client))
+        (when key (proc/set-quit-key [:key key] editor/ui/*quit-busy-ms* client))
         [:client-back]))))
 
 ;; How long a session asked to hand itself over waits for its present client to say it is

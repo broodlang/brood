@@ -35,8 +35,9 @@ seam SSE / long-poll / chunked downloads build on). A request body is framed by
 Brood."
   (:use file))
 
-;; How long a connection may stall mid-request before we give up.
-(def *http-read-timeout-ms* 15000)
+;; How long a connection may stall mid-request before we give up. A setting, like the
+;; size limits below: `(def http/*read-timeout-ms* 60000)` to wait longer.
+(def *read-timeout-ms* 15000)
 
 ;; The client reads UNTRUSTED server output: a malicious/endless response body
 ;; (no Content-Length, just steady bytes) would otherwise grow the accumulator
@@ -67,7 +68,7 @@ Brood."
 ;; `chunks` is the chunks in reverse, `have` their running byte total, and `tail` the
 ;; last (byte-length marker - 1) bytes accumulated — so a marker straddling a chunk
 ;; boundary is still found while each inbound chunk is scanned exactly once, against
-;; `[tail | chunk]`. ONE `bytes-concat`, at return.
+;; `[tail | chunk]`. ONE `bytes/append`, at return.
 ;;
 ;; ADR-142 fixed the *scan* half of this with a start offset but still rebuilt the
 ;; whole buffer per chunk, which is the same O(head²) in copying — the slow-loris
@@ -76,31 +77,31 @@ Brood."
   (if (> have http/*max-head-bytes*)
     nil
     (receive
-      ([:tcp ^sock d] (let (probe (bytes/concat tail d)
-                            k (math/max 0 (- (bytes/length marker) 1))
-                            pn (bytes/length probe))
+      ([:tcp ^sock d] (let (probe (bytes/append tail d)
+                            k (math/max 0 (- (count marker) 1))
+                            pn (count probe))
                         (if (>= (bytes/index-of probe marker) 0)
-                          (apply bytes/concat (reverse (cons d chunks)))
+                          (apply bytes/append (reverse (cons d chunks)))
                           (http-read-until sock
                             (cons d chunks)
-                            (+ have (bytes/length d))
+                            (+ have (count d))
                             (if (<= pn k) probe (bytes/slice probe (- pn k) pn))
                             marker))))
-      ([:tcp-closed ^sock] (if (= have 0) nil (apply bytes/concat (reverse chunks))))
-      (after *http-read-timeout-ms* (if (= have 0) nil (apply bytes/concat (reverse chunks)))))))
+      ([:tcp-closed ^sock] (if (= have 0) nil (apply bytes/append (reverse chunks))))
+      (after *read-timeout-ms* (if (= have 0) nil (apply bytes/append (reverse chunks)))))))
 
 ;; Body read, O(n): collect chunks in a list (O(1) per chunk) and join **once** at
-;; the end — never re-copy the growing buffer per chunk (that `(bytes-concat acc d)`
+;; the end — never re-copy the growing buffer per chunk (that `(bytes/append acc d)`
 ;; loop is O(n²), which a large upload turns pathological). `chunks` is the reversed
 ;; chunk list (head first), `have` the bytes gathered so far, `target` the total to
 ;; reach (head end + Content-Length).
 (defn- http-read-to-length (sock chunks have target)
   (if (>= have target)
-    (apply bytes/concat (reverse chunks))
+    (apply bytes/append (reverse chunks))
     (receive
-      ([:tcp ^sock d] (http-read-to-length sock (cons d chunks) (+ have (bytes/length d)) target))
-      ([:tcp-closed ^sock] (apply bytes/concat (reverse chunks)))
-      (after *http-read-timeout-ms* (apply bytes/concat (reverse chunks))))))
+      ([:tcp ^sock d] (http-read-to-length sock (cons d chunks) (+ have (count d)) target))
+      ([:tcp-closed ^sock] (apply bytes/append (reverse chunks)))
+      (after *read-timeout-ms* (apply bytes/append (reverse chunks))))))
 
 ;; The response a request the server refuses to read is answered with.
 (defn- http-refusal (status message)
@@ -147,7 +148,7 @@ Brood."
                   ;; the chunk that completed the header); seed the chunk list with it.
                   (http-read-to-length sock
                     (list head)
-                    (bytes/length head)
+                    (count head)
                     (+ marker 4 length))))))))))
 
 (defn read-request (sock:socket -> any)
@@ -249,7 +250,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
         ;; No blank-line terminator (a bare request line, or truncated): the
         ;; whole thing is the head and the body is empty — never `(subbytes raw
         ;; 0 -1)`, which throws. Mirrors `parse-response`'s guard.
-        head-end (if (< marker 0) (bytes/length raw) marker)
+        head-end (if (< marker 0) (count raw) marker)
         head (string/bytes-> (bytes/slice raw 0 head-end))
         body (if (< marker 0)
                #b""
@@ -258,7 +259,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
                                 ([:length length] length)
                                 (_ 0)))
                  (let (end (+ start declared)
-                       available (bytes/length raw))
+                       available (count raw))
                    (bytes/slice raw start (if (< end available) end available)))))
         lines (string/split head "\r\n")
         req (string/split (first lines) " ")
@@ -273,7 +274,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
 ;; ---- responses --------------------------------------------------------------
 ;; The standard reason phrases (RFC 9110 §15). A code missing here renders with the
 ;; neutral `http-reason` fallback, never a wrong phrase like `503 OK`.
-(def *http-status-text*
+(def- *status-text*
   {100 "Continue"
    101 "Switching Protocols"
    200 "OK"
@@ -325,7 +326,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
 ;; The reason phrase for `status`: the standard one, else a neutral word — never "OK"
 ;; for a status that is not.
 (defn- http-reason (status)
-  (/get *http-status-text* status "Status"))
+  (/get *status-text* status "Status"))
 
 ;; ---- responses: the Response ability ----------------------------------------
 ;;
@@ -412,7 +413,7 @@ request/response splitting).
 
 (defn render-response (resp)
   "Render a response map into the HTTP/1.0 wire **iolist** (ADR-139) — hand it to
-`tcp/send`; `(bytes-concat …)` materialises it for inspection. Adds Connection:
+`tcp/send`; `(bytes/append …)` materialises it for inspection. Adds Connection:
 close and Content-Length as the body's **byte** count (UTF-8 bytes for a string
 body — `string-length` counts codepoints and understated the length of any
 non-ASCII body, truncating it at spec-honoring clients). The `:body` may be any
@@ -422,7 +423,7 @@ bytes can never disagree.
 
     (http/render-response (http/ok \"hi\"))   ;~> an iolist: the status line, headers, blank line and body bytes"
   (let (status (/get resp :status 200)
-        body-bytes (bytes/concat (or (/get resp :body) ""))
+        body-bytes (bytes/append (or (/get resp :body) ""))
         headers (assoc (or (/get resp :headers) {})
                   "Content-Length" (str (count body-bytes))
                   "Connection" "close"))
@@ -438,7 +439,7 @@ bytes can never disagree.
   "Render just the HTTP/1.0 status line + `headers` + the blank line as a wire
 **iolist** (ADR-139) — no body and no Content-Length. For a streaming response
 whose body is written incrementally over the socket afterwards (see
-`stream-response`). `(bytes-concat …)` materialises it for inspection.
+`stream-response`). `(bytes/append …)` materialises it for inspection.
 
     (http/render-head 200 (sse/headers))   ;~> an iolist: \"HTTP/1.0 200 OK\\r\\n\" … the headers … \"\\r\\n\""
   ["HTTP/1.0 "
@@ -468,7 +469,7 @@ rather than closed after a body. An identity check on the record, not a key snif
   (and (record? resp) (= (record-id resp) :http/stream-response)))
 
 ;; ---- static files -----------------------------------------------------------
-(def *http-mime*
+(def- *mime*
   {".html" "text/html; charset=utf-8"
    ".htm" "text/html; charset=utf-8"
    ".css" "text/css"
@@ -486,7 +487,7 @@ rather than closed after a body. An identity check on the record, not a key snif
   "A guessed Content-Type for `path` based on its extension.
 
     (http/mime-type \"index.html\")   ;=> \"text/html; charset=utf-8\""
-  (/get *http-mime* (path/extension path) "application/octet-stream"))
+  (/get *mime* (path/extension path) "application/octet-stream"))
 
 (defn serve-file (path)
   "A 200 response serving the file at `path` with a guessed Content-Type, or 404 if it is
@@ -524,7 +525,7 @@ missing. The body is the file's raw bytes, so an image or an archive is served a
 ;;
 ;; Compose them outermost-first: `(loopback-only (require-token t (router {…})))`.
 
-(def *http-loopback-hosts* ["localhost" "127.0.0.1" "[::1]"])
+(def- *loopback-hosts* ["localhost" "127.0.0.1" "[::1]"])
 
 (defn- http-forbidden ()
   (response 403 {"Content-Type" "text/plain; charset=utf-8"} "Forbidden"))
@@ -542,7 +543,7 @@ loopback interface.
 
     (http/loopback-host? \"localhost:5000\")   ;=> true
     (http/loopback-host? \"evil.example\")   ;=> false"
-  (includes? *http-loopback-hosts* (string/lower (http-host-name (or hostport "")))))
+  (includes? *loopback-hosts* (string/lower (http-host-name (or hostport "")))))
 
 (defn- http-loopback-origin? (origin)
   ;; check-allow :discarded-catch — `url/parse` raises on a malformed authority
@@ -550,7 +551,7 @@ loopback interface.
   (let (u (check-allow :discarded-catch (try (url/parse origin) (catch _ nil))))
     (and (map? u)
       (includes? ["http" "https"] (/get u :scheme))
-      (includes? *http-loopback-hosts* (string/lower (or (/get u :host) ""))))))
+      (includes? *loopback-hosts* (string/lower (or (/get u :host) ""))))))
 
 (defn loopback-only (handler)
   "Wrap `handler` so it answers only requests a page served FROM this loopback server
@@ -704,9 +705,9 @@ keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
     (http/parse-response \"HTTP/1.0 200 OK\\r\\n\\r\\nhi\")   ;~> a `response` record: status 200, body #b\"hi\""
   (let (raw (if (string? raw) (string/->bytes raw) raw)
         marker (bytes/index-of raw #b"\r\n\r\n")
-        head-end (if (< marker 0) (bytes/length raw) marker)
+        head-end (if (< marker 0) (count raw) marker)
         head (string/bytes-> (bytes/slice raw 0 head-end))
-        body (if (< marker 0) #b"" (bytes/slice raw (+ marker 4) (bytes/length raw)))
+        body (if (< marker 0) #b"" (bytes/slice raw (+ marker 4) (count raw)))
         lines (string/split head "\r\n")
         status (string/split (first lines) " "))
     ;; `or`, not `(if (nil? n) …)`: since ADR-310 an unparsable status token comes back
@@ -731,16 +732,16 @@ knows the body is text — the map itself always carries byte-faithful `bytes`.
       else (error "body-text: the body is neither bytes nor a string: " (pr-str b)))))
 
 ;; The size of one response chunk in bytes — plaintext chunks are `bytes`, TLS
-;; chunks are strings (both land byte-faithfully through the iolist `bytes-concat`
+;; chunks are strings (both land byte-faithfully through the iolist `bytes/append`
 ;; below), so measure by type. `string-length` (codepoints) slightly under-counts
 ;; a multibyte string, which only loosens the cap — fine for a DoS bound.
 
 (defn- http-chunk-size (d)
-  (if (string? d) (string/length d) (bytes/length d)))
+  (if (string? d) (string/length d) (count d)))
 
 ;; Collect the response delivered as messages until close; [:ok bytes] or
 ;; [:error msg]. `acc` is the chunks in reverse, `have` their running byte total;
-;; ONE `bytes-concat` at close (the reversed chunk list is an iolist, so plaintext
+;; ONE `bytes/append` at close (the reversed chunk list is an iolist, so plaintext
 ;; `bytes` chunks and TLS string chunks both land byte-faithfully). Per-chunk
 ;; concatenation was O(body²). Bounded by `http/*max-response-bytes*` so an endless
 ;; server body can't OOM the client.
@@ -752,7 +753,7 @@ knows the body is text — the map itself always carries byte-faithful `bytes`.
                           (tcp/close sock)
                           [:error "http: response exceeded http/*max-response-bytes*"])
                         (http-collect sock (cons d acc) have2))))
-    ([:tcp-closed ^sock] [:ok (bytes/concat (reverse acc))])
+    ([:tcp-closed ^sock] [:ok (bytes/append (reverse acc))])
     ([:tcp-error ^sock msg] [:error msg])
     (after 30000 [:error "http: timed out waiting for a response"])))
 
@@ -823,7 +824,7 @@ response); the root process counts."
         _ (when (nil? (/get u :host))
             (error "http/request: expected an absolute http or https URL, got " (pr-str url)))
         body (or (/get opts :body) "")
-        body-bytes (bytes/concat body)
+        body-bytes (bytes/append body)
         headers (request-headers u body-bytes (/get opts :headers))
         head (request-head method u headers)
         ;; Binary mode before the request goes out (both transports): the peer
@@ -875,7 +876,7 @@ response map (`:body` is `bytes`; see `body-text`).
 ;; request. A socket the server closed while idle is replaced, and a request it was sent
 ;; on is tried once more on the new one.
 
-(def *http-connection-timeout-ms* 30000)
+(def *connection-timeout-ms* 30000)
 ;; The idle wait for each part of a response on a `connection` (the head, a chunk, a body).
 
 (defn- http-framed (result)
@@ -886,18 +887,18 @@ response map (`:body` is `bytes`; see `body-text`).
 
 (defn- http-read-exactly (sock n seed)
   ;; [exactly n bytes, rest] off `seed` (bytes already read) and then the socket
-  (if (>= (bytes/length seed) n)
-    [(bytes/slice seed 0 n) (bytes/slice seed n (bytes/length seed))]
+  (if (>= (count seed) n)
+    [(bytes/slice seed 0 n) (bytes/slice seed n (count seed))]
     (let (more (http-framed (tcp/read-n sock
-                              (- n (bytes/length seed))
-                              {:timeout-ms *http-connection-timeout-ms*
+                              (- n (count seed))
+                              {:timeout-ms *connection-timeout-ms*
                                :max-bytes http/*max-response-bytes*})))
-      (if (failure? more) more [(bytes/concat seed (first more)) (second more)]))))
+      (if (failure? more) more [(bytes/append seed (first more)) (second more)]))))
 
 (defn- http-read-line (sock seed)
   (http-framed (tcp/read-until sock
                  "\r\n"
-                 {:seed seed :timeout-ms *http-connection-timeout-ms* :max-bytes 8192})))
+                 {:seed seed :timeout-ms *connection-timeout-ms* :max-bytes 8192})))
 
 (defn- http-read-chunks (sock seed acc have)
   ;; a chunked body: `size[;ext]CRLF data CRLF` until a zero size, then trailers to a blank
@@ -912,7 +913,7 @@ response map (`:body` is `bytes`; see `body-text`).
           (or (not (int? size)) (< size 0)) (failure (str "http: a bad chunk size: " text))
           (> (+ have size) http/*max-response-bytes*)
             (failure "http: response exceeded http/*max-response-bytes*")
-          (= size 0) (http-read-trailers sock rest (bytes/concat (reverse acc)))
+          (= size 0) (http-read-trailers sock rest (bytes/append (reverse acc)))
           else
             (let (chunk (http-read-exactly sock (+ size 2) rest))
               (if (failure? chunk)
@@ -926,15 +927,15 @@ response map (`:body` is `bytes`; see `body-text`).
   (let (line (http-read-line sock seed))
     (cond
       (failure? line) line
-      (= (bytes/length (first line)) 2) [body (second line)]
+      (= (count (first line)) 2) [body (second line)]
       else (http-read-trailers sock (second line) body))))
 
 (defn- http-read-to-close (sock seed)
   ;; a body with no framing: everything until the server closes
   (receive
-    ([:tcp ^sock d] (http-read-to-close sock (bytes/concat seed d)))
+    ([:tcp ^sock d] (http-read-to-close sock (bytes/append seed d)))
     ([:tcp-closed ^sock] [seed #b""])
-    (after *http-connection-timeout-ms* (failure "http: timed out reading the body"))))
+    (after *connection-timeout-ms* (failure "http: timed out reading the body"))))
 
 (defn read-response (sock &optional (seed #b"") (method "GET"))
   "Read one HTTP/1.1 response off `sock` (which the caller owns, in binary mode), framed as
@@ -947,7 +948,7 @@ nothing but its close.
     (http/read-response sock)   ;~> {:response #response{…} :rest #b\"\" :close? false}"
   (let (head (http-framed (tcp/read-until sock
                             "\r\n\r\n"
-                            {:seed seed :timeout-ms *http-connection-timeout-ms* :max-bytes 65536})))
+                            {:seed seed :timeout-ms *connection-timeout-ms* :max-bytes 65536})))
     (if (failure? head)
       head
       (let ([head-bytes rest] head
@@ -982,11 +983,11 @@ nothing but its close.
 
 (defn- http-exchange (sock u method target ropts)
   ;; send one request on `sock` and read its response: the `read-response` map or a failure
-  (let (body (bytes/concat (or (/get ropts :body) ""))
+  (let (body (bytes/append (or (/get ropts :body) ""))
         target-u (parse-url (str "http://h"
                               (if (string/starts-with? target "/") target (str "/" target))))
         headers (merge {"Host" (http-host-header u) "User-Agent" "brood" "Connection" "keep-alive"}
-                  (if (= (bytes/length body) 0) {} {"Content-Length" (str (bytes/length body))})
+                  (if (= (count body) 0) {} {"Content-Length" (str (count body))})
                   (or (/get ropts :headers) {}))
         head (request-head method target-u headers "HTTP/1.1"))
     (try
@@ -1075,7 +1076,7 @@ as for `request`. `opts`: `:headers` (merged over Host, User-Agent and
     (send conn [:http-request (self) ref method target opts])
     (receive
       ([:http-response ^ref resp] resp)
-      (after (* 3 *http-connection-timeout-ms*)
+      (after (* 3 *connection-timeout-ms*)
         (failure "http: the connection did not answer")))))
 
 (defn close-connection (conn)

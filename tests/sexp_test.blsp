@@ -383,13 +383,13 @@ through edits, as an editor's does."
         built (fold pieces
                 (text/string-> "")
                 (fn (rope piece)
-                  (let (end (text/length rope))
+                  (let (end (count rope))
                     ;; type a marker, then replace it with the real piece
                     (text/insert (text/delete (text/insert rope end "#") end (inc end))
                       end
                       (string/join piece "")))))
-        middle (math/quot (text/length built) 2)
-        moved (text/slice built middle (math/min (text/length built) (+ middle 5))))
+        middle (math/quot (count built) 2)
+        moved (text/slice built middle (math/min (count built) (+ middle 5))))
     ;; and a stretch in the middle cut out and typed back
     (text/insert (text/delete built middle (+ middle (string/length moved))) middle moved)))
 

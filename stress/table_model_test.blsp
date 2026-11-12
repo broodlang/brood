@@ -97,7 +97,7 @@
 ;; Full agreement check: count, snapshot as a map, spot gets over the model keys.
 (defn agree (t m)
   (do
-    (assert= (table/count t) (count m))
+    (assert= (count t) (count m))
     (assert= (table/snapshot t) m)
     (fold (keys m) nil (fn (_ k) (assert= (table/get t k :absent) (get m k :absent))))))
 
@@ -122,14 +122,14 @@
             (table/put t
               i
               (if (= (math/rem i 3) 0) nil (if (= (math/rem i 3) 1) false (* i 7))))))
-        (assert= (table/count t) 5000)
+        (assert= (count t) 5000)
         ; stored nil, NOT absent
         (assert= (table/get t 0 :absent) nil)
         (assert= (table/contains? t 0) true)
         (assert= (table/get t 1 :absent) false)
         (assert= (table/get t 2 :absent) 14)
         (fold (range 2500) nil (fn (_ i) (table/delete t i)))
-        (assert= (table/count t) 2500)
+        (assert= (count t) 2500)
         (assert= (table/contains? t 100) false)
         (table/drop t)
         true)))
@@ -147,6 +147,6 @@
         (assert= (table/get t 0) 1152921504606846975)
         (assert= (table/get t 1) (- 0 1152921504606846976))
         (assert= (table/get t 2) 1152921504606846976)
-        (assert= (table/count t) 5)
+        (assert= (count t) 5)
         (table/drop t)
         true))))

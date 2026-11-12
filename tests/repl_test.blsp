@@ -63,14 +63,14 @@
     (assert= (repl/repl-history->text '()) "")
     (assert= (repl/repl-history<-text "") '())))
 
-;; The meta-command registry: `,cmd`s live in `*repl-commands*`, dispatched by name,
+;; The meta-command registry: `,cmd`s live in `*commands*`, dispatched by name,
 ;; with `register-repl-command` as the extension seam (the debugger adds `,resume`/
 ;; `,step` through it). These run in-process (a fresh registration is a global rebind,
 ;; so keep the block non-`:isolated` and restore nothing — the built-ins re-register on
 ;; the next module load; tests here only ADD and query).
-(describe "repl/*repl-commands* — the meta-command registry"
+(describe "repl/*commands* — the meta-command registry"
   :isolated
-  ;; These REGISTER into `*repl-commands*`, a shared mutable global, which the framework
+  ;; These REGISTER into `*commands*`, a shared mutable global, which the framework
   ;; explicitly warns against doing from a parallel test: the registry is a
   ;; read-modify-write, so a concurrent registration in another unit can lose this one's
   ;; update, and "re-registering replaces rather than duplicates" then sees two entries.
@@ -108,8 +108,7 @@
                                  :summary "two"
                                  :handler (fn (_r) nil)})
     (assert= 1
-      (count (seq/filter repl/*repl-commands*
-               (fn (c) (repl/repl-has-name? (get c :names) "rt-dup")))))
+      (count (seq/filter repl/*commands* (fn (c) (repl/repl-has-name? (get c :names) "rt-dup")))))
     (assert= "two" (get (repl/repl-command-for "rt-dup") :summary)))
 
   (test "a `:hidden` command is dispatchable but absent from the help table"

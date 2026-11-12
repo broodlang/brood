@@ -22,7 +22,7 @@
   (do (def *calls* (inc *calls*)) (* n factor)))
 
 (defmemo text-length 2 (rope)
-  (do (def *calls* (inc *calls*)) (text/length rope)))
+  (do (def *calls* (inc *calls*)) (count rope)))
 
 (defmemo wrapped 4 (value)
   (do (def *calls* (inc *calls*)) [value]))

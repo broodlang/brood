@@ -245,7 +245,7 @@ close, `Content-Length`, the cap or the timeout, then report it with `refused`."
                           watch
                           head
                           (cons d chunks)
-                          (+ have (bytes/length (string/->bytes d)))))
+                          (+ have (count (string/->bytes d)))))
         ([:tcp-closed ^sock] (refused sock subscriber head chunks))
         ([:tcp-error ^sock _] (refused sock subscriber head chunks))
         ([:down ^watch _ _] (tcp/close sock))
@@ -278,7 +278,7 @@ for the refusal."
                                 watch
                                 head
                                 (list rest)
-                                (bytes/length (string/->bytes rest))))))))
+                                (count (string/->bytes rest))))))))
     ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
     ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))
     ([:down ^watch _ _] (tcp/close sock))))
@@ -327,7 +327,7 @@ here, in the caller. Sent as HTTP/1.0 (see the module notes).
 
     (sse/connect \"https://example.com/events\" (self))   ;~> the reader's pid; [:sse-open 200], [:sse {…}]… follow"
   (let (u (http/parse-url url)
-        body (bytes/concat (or (get opts :body) ""))
+        body (bytes/append (or (get opts :body) ""))
         headers (http/request-headers u
                   body
                   (merge {"Accept" "text/event-stream" "Cache-Control" "no-cache"}

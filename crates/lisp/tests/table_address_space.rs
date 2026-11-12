@@ -68,9 +68,7 @@ fn a_far_key_maps_its_own_chunk_only() {
     let grew_mb = vm_size_kb().saturating_sub(before) / 1024;
     assert!(grew_mb < 8, "two chunks are 1 MB; grew {grew_mb} MB");
     let got = interp
-        .eval_str(
-            "[(table/get t 0) (table/get t 8388607) (table/get t 4000000 :none) (table/count t)]",
-        )
+        .eval_str("[(table/get t 0) (table/get t 8388607) (table/get t 4000000 :none) (count t)]")
         .expect("get");
     assert_eq!(interp.print(got), "[1 2 :none 2]");
 }

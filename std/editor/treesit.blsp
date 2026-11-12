@@ -728,9 +728,6 @@ to test it for nil.
 ;; file. With a held tree a rope query reads only the lines it inspects; without one, the
 ;; parse needs the string anyway and the rope is converted for it.
 
-(defn- ts-source-length (src)
-  (if (rope? src) (text/length src) (string/length src)))
-
 (defn- ts-slice (src from:int to:int -> string)
   "Characters `[from, to)` of `src`, a string or a rope, as a string."
   (if (rope? src) (text/slice src from to) (string/substring src from to)))
@@ -748,7 +745,7 @@ ends)."
     (let (line (text/char->line src at))
       (if (< (inc line) (text/line-count src))
         (dec (text/line->char src (inc line)))
-        (text/length src)))
+        (count src)))
     (let (i (index-of src "\n" at)) (if (< i 0) (string/length src) i))))
 
 (defn- ts-string (src)
@@ -1014,7 +1011,7 @@ comment in Python, and stopping at the blank put the comment in column 0."
   (letrec (scan (fn (from)
                   (let (next-bol (inc (ts-line-end text from)))
                     (cond
-                      (>= next-bol (ts-source-length text)) nil
+                      (>= next-bol (count text)) nil
                       (= "" (string/trim (ts-slice text next-bol (ts-line-end text next-bol))))
                         (scan next-bol)
                       else next-bol))))

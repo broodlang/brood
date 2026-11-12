@@ -16,11 +16,8 @@ const PROGRAM: &str = r#"
 ;; The bytes literal is the whole point: without it this compiles either way.
 (defn waits (tag)
   (let (marker #b"\r\n")
-    (receive ([^tag v] (+ v (bytes/length marker))) (after 5000 :timeout))))
+    (receive ([^tag v] (+ v (count marker))) (after 5000 :timeout))))
 (io/puts (str "compiled=" (not (nil? (%vm-arm-ops waits 1)))))
-;; Load `bytes` here, before the children exist: fifty first uses racing one module's load wait
-;; inside the native `require`, which is a dirty block too, and not the one this counts.
-(bytes/length #b"")
 (def kids (map (range 0 50) (fn (i) (spawn (send me [:r (waits :go)])))))
 ;; Every child reaches its `receive` before `:go` exists, so all fifty park: the thing under
 ;; test happens fifty times rather than whenever the scheduler happens to be slow.

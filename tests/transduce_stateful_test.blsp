@@ -13,7 +13,7 @@
 (defn- dropped? (seen)
   ;; check-allow :discarded-catch — a dropped table is exactly the error this asks about
   (check-allow :discarded-catch
-    (try (do (table/count (table/get seen :run)) false) (catch _ true))))
+    (try (do (count (table/get seen :run)) false) (catch _ true))))
 
 (describe "xtake"
   (test "passes the first n inputs and stops the run there"

@@ -8,23 +8,16 @@
     (bytes/at #b\"hi\" 0)        ;=> 104"
   (%byte-at b i))
 
-(defn length (b:bytes -> int)
-  "The number of bytes in b. O(1).
-
-    (bytes/length #b\"hi\")      ;=> 2"
-  (%byte-length b))
-;; Inferred verbatim; the pre-flight's cost, not a fact (KI-150, see `encoding`).
-
 (defn slice (b:bytes start:int & more:int -> bytes)
   "The byte slice [start, end) of b as a fresh bytes value (end defaults to the length). Errors if the range is out of bounds.
 
     (bytes/slice #b\"abcd\" 1 3)  ;=> #b\"bc\""
   (if (empty? more) (%subbytes b start) (%subbytes b start (first more))))
 
-(defn concat (& more:any -> bytes)
-  "One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model.
+(defn append (& more:any -> bytes)
+  "One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model. Shadows the bare `append`, which returns a list, as `stream/map` shadows `map` (ADR-253).
 
-    (bytes/concat #b\"a\" #b\"b\") ;=> #b\"ab\""
+    (bytes/append #b\"a\" #b\"b\") ;=> #b\"ab\""
   (apply %bytes-concat more))
 
 (defn index-of (haystack:bytes needle:bytes & more:int -> int)
@@ -35,9 +28,9 @@
     (%bytes-index-of haystack needle)
     (%bytes-index-of haystack needle (first more))))
 
-; `bytes/append` lived here and took a PATH: it appended an iolist to a FILE, which is not a
-; bytes operation at all — it is `file/spit-bytes`'s append counterpart, and the name also
-; read as the bytes analogue of the bare `append`. It is `file/spit-bytes-append`.
+; An older `bytes/append` took a PATH: it appended an iolist to a FILE, which is not a bytes
+; operation at all — that is `file/spit-bytes-append`. The name now means what it reads as,
+; the bytes analogue of the bare `append` (above).
 
 (defn int (bs:bytes off:int n:int -> int)
   "Read `n` bytes (1–8) of `bs` at `off` as a big-endian signed (two's-complement) integer.

@@ -90,7 +90,7 @@ unmodified: `text` is its baseline (`buffer-modified?`).
 ;; error message) is never what was wanted. `inspect` adds point/mark for debugging.
 (impl Display
   editor/buffer/buffer
-  (->string (b) (str "#<buffer " (get b :name) " " (text/length (get b :rope)) " chars>")))
+  (->string (b) (str "#<buffer " (get b :name) " " (count (get b :rope)) " chars>")))
 
 (impl Inspect
   editor/buffer/buffer
@@ -98,7 +98,7 @@ unmodified: `text` is its baseline (`buffer-modified?`).
     (str "#<buffer "
       (get b :name)
       " "
-      (text/length (get b :rope))
+      (count (get b :rope))
       " chars"
       " point="
       (get b :point)
@@ -111,7 +111,7 @@ unmodified: `text` is its baseline (`buffer-modified?`).
 (defn buffer-rope (buf)
   "The buffer's underlying rope (process-local).
 
-    (text/length (editor/buffer/buffer-rope (editor/buffer/make-buffer \"hi\")))   ;=> 2"
+    (count (editor/buffer/buffer-rope (editor/buffer/make-buffer \"hi\")))   ;=> 2"
   (get buf :rope))
 (defn buffer-text (buf)
   "The buffer's full text as a string.
@@ -165,7 +165,7 @@ it. O(1) when nothing changed: an unchanged rope and property map are the same v
   "The number of characters in the buffer.
 
     (editor/buffer/buffer-length (editor/buffer/make-buffer \"héllo\"))   ;=> 5"
-  (text/length (get buf :rope)))
+  (count (get buf :rope)))
 (defn buffer-line-count (buf)
   "The number of lines in the buffer.
 

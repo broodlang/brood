@@ -976,6 +976,81 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "reflect/scan-form-start-and-previous",
         "ADR-716",
     ),
+    // ADR-718 — the surface pass, second batch. A per-type count the bare `count` already
+    // answers, one decimal constructor, `append` for `concat`, and settings that no longer
+    // repeat their module's name. A setting made private points at a call shape (it has a
+    // space), so `--fix-renames` names it and leaves it: a qualified reference to a private
+    // name from another module is refused at load.
+    ("bytes/length", "count", "ADR-718"),
+    ("text/length", "count", "ADR-718"),
+    ("table/count", "count", "ADR-718"),
+    ("bytes/concat", "bytes/append", "ADR-718"),
+    ("stream/concat", "stream/append", "ADR-718"),
+    ("decimal/number->", "decimal/of", "ADR-718"),
+    (
+        "telemetry/*telemetry-handlers*",
+        "telemetry/*handlers*",
+        "ADR-718",
+    ),
+    (
+        "telemetry/*telemetry-metrics*",
+        "telemetry/*metrics*",
+        "ADR-718",
+    ),
+    (
+        "telemetry/*telemetry-validate*",
+        "(telemetry/validate true)",
+        "ADR-718",
+    ),
+    ("editor/web/*web-tabs*", "editor/web/*tabs*", "ADR-718"),
+    (
+        "editor/lineedit/*lineedit-candidates*",
+        "editor/lineedit/*candidates*",
+        "ADR-718",
+    ),
+    (
+        "editor/lineedit/*lineedit-completion-max-rows*",
+        "editor/lineedit/*completion-max-rows*",
+        "ADR-718",
+    ),
+    (
+        "editor/ui/*ui-quit-busy-ms*",
+        "editor/ui/*quit-busy-ms*",
+        "ADR-718",
+    ),
+    ("test/*test-slow-ms*", "test/*slow-ms*", "ADR-718"),
+    ("test/*test-formatter*", "test/*formatter*", "ADR-718"),
+    ("repl/*repl-commands*", "repl/*commands*", "ADR-718"),
+    (
+        "http/*http-read-timeout-ms*",
+        "http/*read-timeout-ms*",
+        "ADR-718",
+    ),
+    (
+        "http/*http-connection-timeout-ms*",
+        "http/*connection-timeout-ms*",
+        "ADR-718",
+    ),
+    (
+        "editor/ui/*ui-slow-ms*",
+        "private now; set the app model's :slow-ms",
+        "ADR-718",
+    ),
+    (
+        "editor/ui/*ui-fold-budget-ms*",
+        "private now; set the app model's :fold-budget-ms",
+        "ADR-718",
+    ),
+    (
+        "editor/ui/*ui-event-ceiling-ms*",
+        "private now; set the app model's :event-ceiling-ms",
+        "ADR-718",
+    ),
+    (
+        "format/*format-pair-bindings*",
+        "private now (format's own table)",
+        "ADR-718",
+    ),
 ];
 
 /// Where `old` went, if it is a ledgered rename: `(new, adr)`.

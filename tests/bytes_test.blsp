@@ -21,9 +21,9 @@
     (is (= (first (try (bytes -1) (catch _ [:error]))) :error))))
 
 (describe "bytes: sequence protocol"
-  (test "count / byte-length"
+  (test "count"
     (is (= (count (bytes 1 2 3)) 3))
-    (is (= (bytes/length #b"hello") 5))
+    (is (= (count #b"hello") 5))
     (is (= (count #b"") 0)))
   (test "nth / get / byte-at yield ints 0–255"
     (let (b (bytes 10 20 30))
@@ -38,13 +38,13 @@
     (is (empty? #b""))
     (refute (empty? #b"x"))))
 
-(describe "bytes: slicing, concat, conversions"
+(describe "bytes: slicing, append, conversions"
   (test "subbytes"
     (is (= (bytes/slice #b"hello" 1 3) #b"el"))
     (is (= (bytes/slice #b"hello" 2) #b"llo")))
-  (test "bytes-concat (literals and constructed)"
-    (is (= (bytes/concat #b"ab" (bytes 67) #b"\xff") #b"abC\xff"))
-    (is (= (bytes/concat) #b"")))
+  (test "bytes/append (literals and constructed)"
+    (is (= (bytes/append #b"ab" (bytes 67) #b"\xff") #b"abC\xff"))
+    (is (= (bytes/append) #b"")))
   (test "string<->bytes is UTF-8"
     (is (= (string/->bytes "AB") #b"AB"))
     (is (= (string/->bytes "é") #b"\xc3\xa9"))
@@ -77,7 +77,7 @@
   (test "a promoted (global) bytes survives collection"
     (dev/gc-collect)
     (is (= *global-bytes* (bytes 1 2 3 255)))
-    (is (= (bytes/length *global-bytes*) 4))))
+    (is (= (count *global-bytes*) 4))))
 
 (describe "bytes: pattern matching (binary destructuring)"
   (test "literal pattern matches by content"
@@ -134,7 +134,7 @@
   (test "(_ :u32) skips the segment's width"
     (is (= (match (bytes 9 9 9 9 7) ((bytes (_ :u32) x) x) (_ :no)) 7)))
   (test "a typed length prefix drives a sized segment (TLV with :u16 length)"
-    (is (= (match (bytes/concat [(bytes/int-> 3 2) #b"ABC" (bytes 9)])
+    (is (= (match (bytes/append [(bytes/int-> 3 2) #b"ABC" (bytes 9)])
              ((bytes (len :u16) (body len) & rest) [len (string/bytes-> body) rest])
              (_ :no))
           [3 "ABC" (bytes 9)])))
@@ -142,7 +142,7 @@
     (is (= (match (bytes 0 5 0 5) ((bytes (a :u16) (a :u16)) :equal) (_ :diff)) :equal))
     (is (= (match (bytes 0 5 0 6) ((bytes (a :u16) (a :u16)) :equal) (_ :diff)) :diff)))
   (test "mixes with literals, one-byte binders, and & rest — a mini frame header"
-    (is (= (match (bytes/concat [(bytes 127 2) (bytes/int-> 5 2) #b"hello" #b"!"])
+    (is (= (match (bytes/append [(bytes 127 2) (bytes/int-> 5 2) #b"hello" #b"!"])
              ((bytes 127 kind (len :u16) (payload len) & more) [kind
                                                                  len
                                                                  (string/bytes-> payload)
@@ -179,25 +179,25 @@
     (let (parent (self))
       (spawn (fn ()
                (send parent
-                 (match (bytes/concat [(bytes/int-> 7 2) #b"payload"])
+                 (match (bytes/append [(bytes/int-> 7 2) #b"payload"])
                    ((bytes (n :u16) & body) [n (string/bytes-> body)])
                    (_ :no)))))
       (is (= (receive (m m)) [7 "payload"])))))
 
 ;; ---- iolists (ADR-139): nested trees flattened once at the write boundary ----
 (describe "iolists"
-  (test "bytes-concat flattens nesting, strings (UTF-8), bytes, and byte ints"
-    (is (= (bytes/concat ["ab" ["cd" nil "e"] (bytes 102) 103]) #b"abcdefg"))
-    (is (= (bytes/concat "x" [(bytes 121)] [[122]]) #b"xyz")))
+  (test "bytes/append flattens nesting, strings (UTF-8), bytes, and byte ints"
+    (is (= (bytes/append ["ab" ["cd" nil "e"] (bytes 102) 103]) #b"abcdefg"))
+    (is (= (bytes/append "x" [(bytes 121)] [[122]]) #b"xyz")))
   (test "empty iolists yield empty bytes"
-    (is (= (bytes/concat) #b""))
-    (is (= (bytes/concat nil [] [nil [nil]]) #b"")))
+    (is (= (bytes/append) #b""))
+    (is (= (bytes/append nil [] [nil [nil]]) #b"")))
   (test "an improper tail is a final leaf of the iolist"
-    (is (= (bytes/concat (cons "x" "y")) #b"xy")))
+    (is (= (bytes/append (cons "x" "y")) #b"xy")))
   (test "a non-leaf value is rejected"
-    (is (= (try (bytes/concat [1.5]) (catch _e :rejected)) :rejected))
-    (is (= (try (bytes/concat [999]) (catch _e :rejected)) :rejected))
-    (is (= (try (bytes/concat [:kw]) (catch _e :rejected)) :rejected)))
+    (is (= (try (bytes/append [1.5]) (catch _e :rejected)) :rejected))
+    (is (= (try (bytes/append [999]) (catch _e :rejected)) :rejected))
+    (is (= (try (bytes/append [:kw]) (catch _e :rejected)) :rejected)))
   (test "spit/slurp round-trips an iolist tree; spit-append appends one"
     (let (path (str "/tmp/brood-iolist-" (rand/token 8) ".txt"))
       (file/spit path ["a" ["b" nil "c"] (bytes 100) 101])
@@ -215,4 +215,4 @@
     ;; kernel's promote/GC/equal/hash walkers survive this depth too — see
     ;; tests/deep_values_test.blsp for the dedicated coverage.
     (let (deep (fold (range 40000) (list "x") (fn (acc _) (list acc))))
-      (is (= (bytes/concat deep) #b"x")))))
+      (is (= (bytes/append deep) #b"x")))))

@@ -29,7 +29,7 @@ are derived on demand from the buffer's snapshot history by a line and character
 ;; Granularity is the LINE (that is the unit a line diff — and the user's "these
 ;; lines" — speaks in); a whole-buffer region reproduces a plain undo exactly.
 
-(def *undo-region-char-budget* 4000)
+(def- *char-budget* 4000)
 ;; The largest changed SPAN (in chars) a region undo will diff character-by-character.
 ;; The LCS diff is O(n²) in time and space, so an unbounded char diff on a huge rewrite
 ;; would hang the editor; past this the span is treated as one change (undone whole if it
@@ -95,7 +95,7 @@ the diff only ever runs over the span that actually changed."
       ;; nothing changed
       (and (= o-mid "") (= n-mid "")) [new whole]
       ;; too large to diff character-wise: treat the whole span as one change
-      (> (math/max (string/length o-mid) (string/length n-mid)) *undo-region-char-budget*)
+      (> (math/max (string/length o-mid) (string/length n-mid)) *char-budget*)
         (if (and (< pre hi) (> (+ pre (string/length n-mid)) lo))
           [(str head o-mid tail)
             (reverse (region-piece-push (region-piece-push (region-piece-push () :new 0 pre)
@@ -161,7 +161,7 @@ for the current text's — laid end to end. Nil when there are none."
           (undo-region-candidate text lo hi (rest snaps) (dec depth))
           [undone (rest snaps) snapshot pieces]))))
 
-(def *undo-region-search-depth* 200)
+(def- *search-depth* 200)
 ;; How far back a region undo will look for a change that touched the region. Bounded
 ;; so a long history can't turn one keystroke into an unbounded scan.
 
@@ -186,7 +186,7 @@ whole thing back.
                     lo
                     hi
                     (get buf :undo)
-                    *undo-region-search-depth*))
+                    *search-depth*))
         (if (nil? found)
           buf
           ;; record the pre-state (so this is itself undoable), then swap the text.
@@ -237,8 +237,8 @@ whole thing back.
                 (if (get buf :undo-disabled)
                   (get pushed :undo-size)
                   (fold tail 0 (fn (acc kept) (+ acc (or (get kept :cost) 0)))))
-              :point (math/min (get buf :point) (text/length rope))
+              :point (math/min (get buf :point) (count rope))
               ;; `bounds` being non-nil says the mark is set; the `or` says so to the
               ;; checker (`:mark` reads `nil | int` on its own), with point as the
               ;; never-taken fallback.
-              :mark (math/min (or (get buf :mark) (get buf :point)) (text/length rope)))))))))
+              :mark (math/min (or (get buf :mark) (get buf :point)) (count rope)))))))))

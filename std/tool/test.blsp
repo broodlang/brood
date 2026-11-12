@@ -810,12 +810,12 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; Suppressed under `:trace`, which already prints a line per test: the two together
 ;; would just be noise.
 (defn progress-mark (results)
-  "Print one live-progress character per result in `results` — a green `.` for a pass, red `F` for a failure, orange `○` for a skip — flushed as they arrive. Suppressed under `test/*trace*` (which already prints a line per test) and under a machine `*test-formatter*` (whose output must stay parseable).
+  "Print one live-progress character per result in `results` — a green `.` for a pass, red `F` for a failure, orange `○` for a skip — flushed as they arrive. Suppressed under `test/*trace*` (which already prints a line per test) and under a machine `*formatter*` (whose output must stay parseable).
 
     (test/progress-mark results)   ;~> one . F or ○ per result printed, flushed"
   ;; Suppressed under `:trace` (which prints a line per test) and under a machine
   ;; `--formatter` (whose output must stay parseable — no stray dots).
-  (when (not (or test/*trace* *test-formatter*))
+  (when (not (or test/*trace* *formatter*))
     (fold results
       nil
       (fn (_ r)
@@ -900,7 +900,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 
 ;; Two per-test wall-clock thresholds, in milliseconds — distinct on purpose:
 ;;
-;; - `*test-slow-ms*` (default 1s) — **informational**. A test that takes longer is
+;; - `*slow-ms*` (default 1s) — **informational**. A test that takes longer is
 ;;   listed (name + duration) under the summary. It still PASSES; this only surfaces
 ;;   where the time goes. Override: `(run-tests :slow-over MS)`.
 ;; - `test/*timeout-ms*` (default 120s) — **a hard ceiling**. A test that runs longer
@@ -911,9 +911,9 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;;   is effectively per-test (per-unit for `:serial`/`:isolated`).
 ;;
 ;; So: slow ≤ duration < timeout → listed but passes; duration ≥ timeout → killed +
-;; failed. Keep `*test-slow-ms*` < `test/*timeout-ms*` (a slow test you still want to
+;; failed. Keep `*slow-ms*` < `test/*timeout-ms*` (a slow test you still want to
 ;; see before it's a hard failure).
-(def *test-slow-ms* 1000)
+(def *slow-ms* 1000)
 ;; 120s: headroom for legitimately slow tests (the adversarial heap-allocation
 ;; cases take ~15s in a debug build, and far longer when `make test` runs the whole
 ;; in-language suite concurrently with the rest of the workspace under nextest).
@@ -985,8 +985,8 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; The active output formatter name (`nest test --formatter NAME`), or nil for the
 ;; default human report. A `def`-global (like `test/*trace*`) so a worker reads it to
 ;; suppress the live progress dots under a machine formatter. See the formatter registry
-;; below (`*test-formatters*`).
-(def *test-formatter* nil)
+;; below (`*formatters*`).
+(def *formatter* nil)
 
 ;; The active filter spec (see "test selection" above) — nil runs everything.
 ;; A global rather than a threaded argument because `drain-current` is reached
@@ -1112,7 +1112,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; UCD normalisation file alone is ~19,000 x 6 forms), and tagging each new corpus
 ;; `:slow` as well is a step the next author will forget. Everything untagged keeps
 ;; the 120 s ceiling, which is what catches a genuinely hung test.
-(def *test-long-tags* [:slow :conformance])
+(def- *long-tags* [:slow :conformance])
 
 ;; Is any unit in this batch tagged for the raised budget? (`workers` is a list of
 ;; `(pid unit)`, a unit is `(mode group tests)`, and a test's meta carries its tags.)
@@ -1120,7 +1120,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
   (any? workers
     (fn (w)
       (any? (third (second w))
-        (fn (t) (any? (test-select/test-tags t) (fn (tag) (includes? *test-long-tags* tag))))))))
+        (fn (t) (any? (test-select/test-tags t) (fn (tag) (includes? *long-tags* tag))))))))
 
 (defn collect-units (workers acc)
   "Collect the results of one batch of spawned `workers` (a list of `(pid unit)`), accumulating onto `acc`. Waits for each worker's `:unit-result` AND its monitor `:down` (a batch is done when every worker has EXITED, not merely reported) under a fresh per-batch deadline, hard-killing and failing any straggler that overruns. A `:slow`/`:conformance`-tagged batch runs under the raised `test/*slow-timeout-ms*` budget.
@@ -1572,13 +1572,13 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;;                                               (mix --repeat-until-failure)
 (defn- test-apply-opts (opts)
   (def test/*timeout-ms* (option-value :timeout opts test/*timeout-ms*))
-  (def *test-slow-ms* (option-value :slow-over opts *test-slow-ms*))
+  (def *slow-ms* (option-value :slow-over opts *slow-ms*))
   ;; `BROOD_TEST_TRACE` arms `--trace` from the environment, for a runner nobody passes
   ;; flags to: the nextest wrapper (`crates/lisp/tests/suite.rs`) prints only progress marks,
   ;; so a run killed at its cap has never named the tests that failed (KI-120). Under trace
   ;; each result is a line as it lands, which survives the kill.
   (def test/*trace* (or (option? :trace opts) (not (nil? (os/env "BROOD_TEST_TRACE")))))
-  (def *test-formatter* (option-value :formatter opts nil))
+  (def *formatter* (option-value :formatter opts nil))
   (def test/*filter* (option-value :filter opts nil))
   (def test/*max-failures* (option-value :max-failures opts 0)))
 
@@ -1608,14 +1608,14 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; selects it. Each is a fn `(results elapsed)` that PRINTS the run; raising on failure
 ;; (for the exit code) stays the runner's job. `register-test-formatter` is the seam an
 ;; external tool adds its own with — same shape as the REPL command registry.
-(def *test-formatters* {})
+(def- *formatters* {})
 
 (defn register-test-formatter (name formatter)
   "Register a named `nest test --formatter` output formatter: `name` (a string) →
 `formatter`, a fn `(results elapsed)` that prints the run. The built-ins are `tap` and
 `json`; the default (no `--formatter`) is the human report. Raising on failure is the
 runner's job, not the formatter's. Returns `name`."
-  (def *test-formatters* (assoc *test-formatters* name formatter))
+  (def- *formatters* (assoc *formatters* name formatter))
   name)
 
 (defn- test-fmt-tap (results elapsed)
@@ -1671,16 +1671,16 @@ suite programmatically. Printed once, at the end, so parallel ordering is irrele
 (register-test-formatter "json" test-fmt-json)
 
 (defn- test-report-formatted (results elapsed)
-  "Emit `results` through the selected `*test-formatter*`, then raise on any failure so
+  "Emit `results` through the selected `*formatter*`, then raise on any failure so
 the exit code still reflects the run. An unknown formatter name is a clean error."
   ;; NB not `fmt` — that's the prelude string-template MACRO, and a macro in call-head
   ;; position wins over a local binding, so `(fmt …)` would expand as the template.
-  (let (formatter-fn (get *test-formatters* *test-formatter*))
+  (let (formatter-fn (get *formatters* *formatter*))
     (if (nil? formatter-fn)
       (error (str "unknown --formatter '"
-               *test-formatter*
+               *formatter*
                "' (available: "
-               (string/join (sort (keys *test-formatters*)) ", ")
+               (string/join (sort (keys *formatters*)) ", ")
                ")"))
       (do
         (formatter-fn results elapsed)
@@ -1692,7 +1692,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
   ;; `--failed` tracking happens on every path (the interesting run is the failing one).
   (def test/*last-ran* (map results full-name))
   (def test/*last-failed* (map (seq/filter results result-failed?) full-name))
-  (if *test-formatter*
+  (if *formatter*
     (test-report-formatted results elapsed)
     (test-report-human results elapsed opts extra)))
 
@@ -1758,7 +1758,7 @@ read the un-imaged path as evidence about the imaged one."
       (io/puts "warning: no tests matched the given filters — 0 tests ran (check the selector, or a stale --failed record naming tests that no longer exist)"
         :to *err*))
     (report-failures results)
-    (report-slow-over results *test-slow-ms*)
+    (report-slow-over results *slow-ms*)
     (when slowest (report-slow results slowest))
     (io/puts "")
     ;; Built as one string rather than `io/puts`'s space-joined arguments, so the

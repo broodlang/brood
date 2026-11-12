@@ -606,7 +606,7 @@ is read from a rope.
     (editor/highlight/closer-redundant? \"(a)\" 2 \")\")   ;=> true
     (editor/highlight/closer-redundant? \"(a\" 2 \")\")    ;=> false
     (editor/highlight/closer-redundant? (text/string-> \"(a)\") 2 \")\")   ;=> true"
-  (and (< pos (text/length full))
+  (and (< pos (count full))
     (= (text/slice full pos (inc pos)) c)
     ;; From the start of the top-level form `pos` is in, not from 0: there nothing is open and
     ;; no string or comment is, so the scan answers exactly what one from 0 would — and a

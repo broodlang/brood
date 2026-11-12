@@ -924,18 +924,18 @@ code paints to a terminal or a GUI window unchanged.
   `proc/send-priority` / `proc/take-priority`), and its `:poll-tagged` answers
   `[message input?]` (`proc/receive-lane`); the loop asks input first, only input holds
   `:idle?` timers back, and a `:coalesce-input? true` app folds background only
-  `*ui-fold-budget-ms*` (8) per turn before rendering. State that matters only at its newest value goes out with
+  8 ms (the model's `:fold-budget-ms`) per turn before rendering. State that matters only at its newest value goes out with
   `(proc/send-latest pid key msg)`: a queued older message with that key is replaced. Both
   lanes cross a node link (ADR-492), and a served window client paints only its newest frame. An
-  `update`/`view` slower than `*ui-slow-ms*` (50) is reported with the input's tag and how much of it was GC
+  `update`/`view` slower than 50 ms (the model's `:slow-ms`) is reported with the input's tag and how much of it was GC
   (`:gc-ms`, from `proc/gc-us`) — to the model's `:on-slow` `(fn (report) …)`, else stderr.
 - **Quit** (ADR-491) = `update` and `view` run in an interrupt window, and `ui-run` arms the
   kernel's quit key: C-g (`:ctrl-g` — a window and the terminal deliver it on the priority
   lane, a served session as `[:key :ctrl-g]`) arriving while a turn has run past
-  `*ui-quit-busy-ms*` (300) STOPS it at its next safepoint, inside long builtins too — an
+  `editor/ui/*quit-busy-ms*` (300) STOPS it at its next safepoint, inside long builtins too — an
   interrupted `update` keeps the old model, an interrupted `view` the last frame — and is
   then folded as an ordinary key. A window shows the wait cursor meanwhile. A BACKGROUND
-  message's fold is stopped past `*ui-event-ceiling-ms*` (2000); a user's command never is.
+  message's fold is stopped past 2000 ms (the model's `:event-ceiling-ms`); a user's command never is.
   Both are reported to `:on-slow` with `:interrupted true` and `:input` (true for the user's
   turn — say "Quit" only then). Model keys: `:quit-key` (nil: none), `:quit-busy-ms`,
   `:event-ceiling-ms` (nil: none). Outside `ui-run`: `(proc/interruptible ceiling-ms
@@ -1223,7 +1223,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   **`/` is exact** (ADR-196): `(/ 1 2)` → `1/2` (a **ratio**, not a float),
   `(/ 6 3)` → `2` (divides evenly → int). `1/2` is a literal; ratios do the full
   tower (ratio+decimal is exact, ratio+float contagion). Reach for `->float`
-  (or `decimal/number->`) for an inexact result; `math/numerator`/`math/denominator` read the parts.
+  for an inexact result (or `decimal/of` for an exact decimal); `math/numerator`/`math/denominator` read the parts.
   Number types: `int` (bignum on overflow) · `float` · `decimal` (`1.50M`, exact
   base-10) · `ratio` (`1/2`, exact rational). `number?`/`ratio?`/`decimal?` test them.
 - **Text → number: `(string/->number s)`, and it picks the type from the digits.**

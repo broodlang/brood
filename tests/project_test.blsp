@@ -668,7 +668,7 @@
       (file/mkdir root)
       (let (data (path/join (or root "") "blob.bin")
             ;; a NUL, a byte that is not UTF-8, a quote and a backslash
-            contents (bytes/concat (bytes/int-> 0 1) (bytes/int-> 255 1) (string/->bytes "\"\\")))
+            contents (bytes/append (bytes/int-> 0 1) (bytes/int-> 255 1) (string/->bytes "\"\\")))
         (file/spit-bytes data contents)
         (assert= (reflect/eval (list 'include-bytes data)) contents)
         (let (out (project-release/inline-includes (str "(def *blob* (include-bytes "

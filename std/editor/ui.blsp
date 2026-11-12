@@ -54,18 +54,18 @@ synthesized back-compat timer below and any app that hasn't moved to named timer
 ;; model: it's wall-clock reality, so it never rolls back when a view/update crash
 ;; rolls the model back.
 
-(def *ui-idle-cap* 60000)
+(def- *idle-cap* 60000)
 ;; The longest the loop will park when no live timer needs servicing sooner — a
 ;; ceiling on the poll timeout so a far-future (or fired-and-done) timer can't make
 ;; the loop oversleep. Input still wakes it immediately; this only bounds the idle wait.
 
-(def *ui-input-batch* 1024)
+(def- *input-batch* 1024)
 ;; The most inputs `ui-drain-input` folds into ONE render when a `:coalesce-input?`
 ;; app has a backlog (see below) — a ceiling so a self-feeding source (an `update`
 ;; that re-enqueues to itself) can't starve the render forever; hitting it just renders
 ;; and the next iteration drains the rest.
 
-(def *ui-fold-budget-ms* 8)
+(def- *fold-budget-ms* 8)
 ;; How long one turn of a `:coalesce-input?` app may spend folding BACKGROUND messages
 ;; before it renders and looks for input again (ADR-490); a model's `:fold-budget-ms`
 ;; overrides it. Half a 60 Hz frame: a flood of any size then shows its progress at
@@ -74,32 +74,32 @@ synthesized back-compat timer below and any app that hasn't moved to named timer
 ;; after only a few folds, so a burst costs many frames — the cost coalescing exists to
 ;; avoid; much larger and typing during a flood is visibly late.
 
-(def *ui-slow-ms* 50)
+(def- *slow-ms* 50)
 ;; The watchdog's line (ADR-490): an `update` fold or a `view` slower than this is
 ;; reported, naming what it was folding (`ui-input-tag`). Three frames — past it a
 ;; stall is something a user sees, and below it the report would be noise from GC
 ;; pauses and a busy machine. A model's `:slow-ms` overrides it.
 
-(def *ui-quit-key* :ctrl-g)
+(def- *quit-key* :ctrl-g)
 ;; The input that QUITS a turn stuck in `update` or `view` (ADR-491) — Emacs's
 ;; `quit-char`. A window delivers C-g as `:ctrl-g` on the priority lane; `ui-run` hands it
 ;; to the kernel (`proc/set-quit-key`), which interrupts the running fold or view when it
-;; arrives while the turn is past `*ui-quit-busy-ms*`. A model's `:quit-key` overrides it,
+;; arrives while the turn is past `*quit-busy-ms*`. A model's `:quit-key` overrides it,
 ;; nil turning it off.
 
-(def *ui-quit-busy-ms* 300)
+(def *quit-busy-ms* 300)
 ;; How long a turn must have been running before its quit key interrupts it rather than
 ;; just queueing (ADR-491): a C-g typed during a normal fast turn is an ordinary key for
 ;; the app. A model's `:quit-busy-ms` overrides it.
 
-(def *ui-event-ceiling-ms* 2000)
+(def- *event-ceiling-ms* 2000)
 ;; The longest the loop lets the fold of a BACKGROUND message (a reply, a stream line, a
 ;; timer) run before it interrupts it itself (ADR-491): no user asked for that work, so
 ;; nobody is there to press C-g for it. A user's own command is never stopped this way —
 ;; only C-g stops it, as in Emacs. A model's `:event-ceiling-ms` overrides it, nil
 ;; turning it off.
 
-(def *ui-slow-update-quiet-ms* 1000)
+(def- *slow-update-quiet-ms* 1000)
 ;; At most one slow-UPDATE report per this many ms (an interrupted one is always reported:
 ;; it is what an editor says "Quit" for). A run of slow folds — a reply stream each of
 ;; whose folds is just over the line — would otherwise report once per fold, and an app
@@ -109,7 +109,7 @@ synthesized back-compat timer below and any app that hasn't moved to named timer
 ;; The loop's watchdog bookkeeping, a table bound for the loop's life: when it last reported
 ;; a slow update (`:update-at`). nil outside a loop, where nothing is rate-limited.
 
-(def *ui-slow-view-quiet-ms* 5000)
+(def- *slow-view-quiet-ms* 5000)
 ;; At most one slow-VIEW report per this many ms. A view has no input to name and is
 ;; slow for as long as what it draws is big, so a report per frame would be a flood of
 ;; its own — and an app that logs the report into its model makes the next frame, which
@@ -125,7 +125,7 @@ off a scripted clock deterministically, with no real sleeping."
   "A timer spec's interval in ms — its `:every` (repeating) or `:after` (one-shot)."
   (or (get spec :every) (get spec :after)))
 
-(def *ui-held-quiet-ms* 2000)
+(def- *held-quiet-ms* 2000)
 ;; While a key is held, an `:idle?` timer waits at least this long after the last input.
 ;; Held is not idle: under the OS repeat each repeat is an input and pushes the timer out
 ;; anyway, but the desktop's delay before the FIRST repeat (250 ms to over a second) is a
@@ -140,13 +140,13 @@ from its last fire (or, before the first fire, from `armed`); a one-shot always 
 from `armed`, so its deadline is fixed and it fires exactly once per arming. An
 `:idle?` timer counts from the later of that base and `last-input`, so a real key
 pushes it out — it fires only after input settles — and, while `held?` (a key is down),
-no sooner than `*ui-held-quiet-ms*` after that input."
+no sooner than `*held-quiet-ms*` after that input."
   (let (ms (ui-timer-ms spec)
         idle? (get spec :idle?)
         base0 (if (contains? spec :every) (or fired armed) armed)
         deadline (+ (if idle? (math/max base0 last-input) base0) ms))
     (if (and idle? held?)
-      (math/max deadline (+ last-input *ui-held-quiet-ms*))
+      (math/max deadline (+ last-input *held-quiet-ms*))
       deadline)))
 
 (defn- ui-timer-live? (fired deadline)
@@ -172,7 +172,7 @@ removed-then-re-added timer re-arms clean and stale entries can't leak), and sta
 
 (defn- ui-poll-ms (timers clock now)
   "How long to park the poll: the soonest *live* timer deadline minus `now` (at least
-1ms), or `*ui-idle-cap*` when no live timer is pending — capped at the idle ceiling so
+1ms), or `*idle-cap*` when no live timer is pending — capped at the idle ceiling so
 a far-future timer can't oversleep a responsive app."
   (let (last-input (get clock :last-input)
         held? (get clock :key-held?)
@@ -190,8 +190,8 @@ a far-future timer can't oversleep a responsive app."
                      d
                      acc)))))
     (if (nil? best)
-      *ui-idle-cap*
-      (math/max 1 (math/min *ui-idle-cap* (- best now))))))
+      *idle-cap*
+      (math/max 1 (math/min *idle-cap* (- best now))))))
 
 (defn- ui-command-timer? (timers event)
   "Whether the `[:timer name]` firing `event` continues the user's own command — its spec says
@@ -244,13 +244,13 @@ whatever it throws is logged, never kept from the exit. nil, so the loop stops."
         ;; terminal is given back and the runtime exits (129, as a SIGHUP death would)
         (let (watchdog (spawn (receive
                                 (:hook-done nil)
-                                (after *ui-hangup-grace-ms* (do (term/leave) (system/halt 129))))))
+                                (after *hangup-grace-ms* (do (term/leave) (system/halt 129))))))
           (do
             (try (hook model (second input)) (catch e (ui-log-error "on-hangup" e)))
             (send watchdog :hook-done))))))
   nil)
 
-(def *ui-hangup-grace-ms* 10000)
+(def- *hangup-grace-ms* 10000)
 ;; How long a model's `:on-hangup` may run before the runtime exits anyway (ADR-586).
 
 (defn- display-repaint-due? (display)
@@ -420,13 +420,13 @@ swallow it (it is sticky)."
 
 (defn- ui-event-ceiling-ms (model)
   "How long the fold of a background message may run before the loop interrupts it: the
-model's `:event-ceiling-ms` when it has the key (nil: never), else `*ui-event-ceiling-ms*`."
-  (if (contains? model :event-ceiling-ms) (get model :event-ceiling-ms) *ui-event-ceiling-ms*))
+model's `:event-ceiling-ms` when it has the key (nil: never), else `*event-ceiling-ms*`."
+  (if (contains? model :event-ceiling-ms) (get model :event-ceiling-ms) *event-ceiling-ms*))
 
 (defn- ui-quit-key (model)
   "The quit key `ui-run` arms for `model`: its `:quit-key` when it has the key (nil: none),
-else `*ui-quit-key*`."
-  (if (contains? model :quit-key) (get model :quit-key) *ui-quit-key*))
+else `*quit-key*`."
+  (if (contains? model :quit-key) (get model :quit-key) *quit-key*))
 
 (defn- ui-quit-message (display key)
   "The message the kernel watches for as `display`'s quit `key`: the key itself — what a
@@ -442,7 +442,7 @@ throwing `update` is logged (`ui-log-error`) and drops that one input, returning
 `model` unchanged. Every fold in the loop and the drain goes through here.
 
 **Interruptible (ADR-491).** The fold runs in an interrupt window: the quit key (a
-window's C-g) stops it once the turn is past `*ui-quit-busy-ms*`, and the fold of a
+window's C-g) stops it once the turn is past `*quit-busy-ms*`, and the fold of a
 BACKGROUND message (`input?` false) is stopped by the loop itself past
 `ui-event-ceiling-ms`. An interrupted fold drops its input like a throwing one, keeps the
 previous model, and is reported through the watchdog with `:interrupted true`."
@@ -472,8 +472,8 @@ previous model, and is reported through the watchdog with `:interrupted true`."
 ;; its TAG, never by printing it (a diagnostics batch or a paste would cost what it reports).
 
 (defn- ui-slow-ms (model)
-  "The watchdog's line for `model`: its `:slow-ms`, else `*ui-slow-ms*`."
-  (or (get model :slow-ms) *ui-slow-ms*))
+  "The watchdog's line for `model`: its `:slow-ms`, else `*slow-ms*`."
+  (or (get model :slow-ms) *slow-ms*))
 
 (defn ui-input-tag (input)
   "What a slow-fold report calls `input`, small whatever `input` is: a key or keyword as
@@ -531,29 +531,29 @@ crash of its own. nil."
 
 (defn- ui-slow-update-due? ()
   "Whether a slow update may be reported now: none was in the last
-`*ui-slow-update-quiet-ms*` (wall clock) — stamping now as the last when so. Always true
+`*slow-update-quiet-ms*` (wall clock) — stamping now as the last when so. Always true
 outside a loop (`editor/ui/*slow-reports*` nil)."
   (let (reports editor/ui/*slow-reports*
         now (os/now)
         last (if (nil? reports) nil (table/get reports :update-at nil)))
-    (if (or (nil? last) (>= (- now last) *ui-slow-update-quiet-ms*))
+    (if (or (nil? last) (>= (- now last) *slow-update-quiet-ms*))
       (do (when reports (table/put reports :update-at now)) true)
       false)))
 
 (defn- ui-watch-view (model clock ms gc-ms)
   "The watchdog on a `view` of `ms` (`gc-ms` of it collecting): report it when it is slow and
-no view report was made in the last `*ui-slow-view-quiet-ms*` (wall clock, `os/now`),
+no view report was made in the last `*slow-view-quiet-ms*` (wall clock, `os/now`),
 stamping the report time on `clock` (`:slow-view-at`). The clock, unchanged when nothing was reported."
   (let (now (os/now)
         last (get clock :slow-view-at))
-    (if (and (> ms (ui-slow-ms model)) (or (nil? last) (>= (- now last) *ui-slow-view-quiet-ms*)))
+    (if (and (> ms (ui-slow-ms model)) (or (nil? last) (>= (- now last) *slow-view-quiet-ms*)))
       (do (ui-report-slow model "view" :view ms gc-ms false true) (assoc clock :slow-view-at now))
       clock)))
 
 (defn- ui-fold-budget-ns (model)
-  "The background fold budget of one turn (`*ui-fold-budget-ms*`, or the model's
+  "The background fold budget of one turn (`*fold-budget-ms*`, or the model's
 `:fold-budget-ms`), in ns — the unit `os/now-ns` deadlines are in."
-  (* 1000000 (or (get model :fold-budget-ms) *ui-fold-budget-ms*)))
+  (* 1000000 (or (get model :fold-budget-ms) *fold-budget-ms*)))
 
 (defn- ui-pending? (model raw)
   "Whether `raw` is a control message the LOOP acts on (`:close` it owns, `:focus`), which
@@ -615,7 +615,7 @@ every budget and looks for input between every fold. Once an input is folded the
 folds no more background, so its frame is drawn behind no more than the fold already
 running — except the ONE arrival-order fold every turn makes (`state`, see above), which
 keeps background moving while input never stops. Past the deadline even input waits for
-the render, and is the first thing the next turn takes. `fuel` (`*ui-input-batch*`) is
+the render, and is the first thing the next turn takes. `fuel` (`*input-batch*`) is
 the ceiling on any one turn, and `:done` stops it early."
   (if (or (<= fuel 0) (get model :done))
     [model nil state]
@@ -846,7 +846,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                                     display
                                     cols
                                     rows
-                                    *ui-input-batch*
+                                    *input-batch*
                                     deadline
                                     (if (ui-tagged-input? display tagged) :owed :budget))
                                   [next0 nil nil])
@@ -905,7 +905,7 @@ poll until the soonest is due and folds `[:timer name]` when it fires — so a s
 animation timer and several idle one-shots coexist, each on its own clock. An idle timer
 waits for input to settle, and a key held down is not settled: while the display's
 `:key-held?` says one is down (a GUI window does), idle timers wait for it to come up, at
-most `*ui-held-quiet-ms*` past the last input. A model
+most `*held-quiet-ms*` past the last input. A model
 with no `:timers` key keeps the legacy single beat (`:tick-ms`, default 1000 ms),
 delivered as the bare keyword `:tick`. See `ui-loop` and the named-timers section.
 
@@ -924,7 +924,7 @@ exactly as before.
 the display's `:poll-input` (`display-poll-input`): what a window delivers on the
 mailbox's priority lane, the terminal's keyboard, a thin client's keys — so a key is never
 queued behind a language server's diagnostics or a test stream. A coalescing app folds
-background only for `*ui-fold-budget-ms*` per turn (the model's `:fold-budget-ms`), then
+background only for `*fold-budget-ms*` per turn (the model's `:fold-budget-ms`), then
 renders and looks again: a flood of any size delays a keystroke by about one budget plus
 one fold. Every turn still makes one arrival-order fold (a non-coalescing app: the turn
 after one whose input jumped the queue), so background keeps moving while input never
@@ -933,19 +933,19 @@ display says whether what it parked for was input (`:poll-tagged`, `display-poll
 so an idle beat still comes during a flood. A producer whose message only matters at its
 newest value sends it with `proc/send-latest`, so a newer one replaces it while it waits.
 
-**The watchdog (ADR-490).** An `update` fold or a `view` slower than `*ui-slow-ms*` (the
+**The watchdog (ADR-490).** An `update` fold or a `view` slower than `*slow-ms*` (the
 model's `:slow-ms`) is reported, naming the input it folded by its tag (`ui-input-tag`) —
 to the model's `:on-slow` hook, `(fn (report) …)` with `report` a `{:phase :tag :ms :input}` map (`:input` true for the user's own input),
-or as a line on stderr. A slow view is reported at most every `*ui-slow-view-quiet-ms*`, a
-slow update every `*ui-slow-update-quiet-ms*`; an interrupted one always.
+or as a line on stderr. A slow view is reported at most every `*slow-view-quiet-ms*`, a
+slow update every `*slow-update-quiet-ms*`; an interrupted one always.
 
 **Quit (ADR-491).** Each `update` and `view` runs in an interrupt window
 (`proc/interruptible`), and the loop arms the kernel's quit key: the frontend's C-g
-(`*ui-quit-key*`, `:ctrl-g`; the model's `:quit-key`, nil for none) arriving while a turn
-has run past `*ui-quit-busy-ms*` (the model's `:quit-busy-ms`) STOPS it, wherever it is —
+(`*quit-key*`, `:ctrl-g`; the model's `:quit-key`, nil for none) arriving while a turn
+has run past `*quit-busy-ms*` (the model's `:quit-busy-ms`) STOPS it, wherever it is —
 deep in a loop, inside a tree-sitter parse. An interrupted `update` drops its input and
 keeps the previous model; an interrupted `view` keeps the last frame on screen. The fold of
-a BACKGROUND message is also stopped by the loop itself past `*ui-event-ceiling-ms*` (the
+a BACKGROUND message is also stopped by the loop itself past `*event-ceiling-ms*` (the
 model's `:event-ceiling-ms`, nil for none); a user's own command never is — only C-g stops
 that, as in Emacs. Either is reported like a slow turn, with `:interrupted true` in the
 report, whose `:input` says whether the turn was the user's. A catch-all inside `update`
@@ -996,7 +996,7 @@ non-blocking window. The shared loop behind the observer (and the editor)."
     ;; a key from another node counts only from the client the display serves (`:quit-from`,
     ;; a served session's), or a full peer — never a guest link that reaches this pid
     (proc/set-quit-key (ui-quit-message display (ui-quit-key model))
-      (or (get model :quit-busy-ms) *ui-quit-busy-ms*)
+      (or (get model :quit-busy-ms) *quit-busy-ms*)
       (get display :quit-from))
     (try
       (do

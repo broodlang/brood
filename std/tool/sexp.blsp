@@ -128,7 +128,7 @@ cost of ~three forms, not the whole buffer.
 
     (sexp/narrow \"(a)\\n(b)\\n(c)\\n(d)\" 9)   ;=> [4 \"(b)\\n(c)\\n(d)\"]
     (sexp/narrow (text/string-> \"(a)\\n(b)\\n(c)\\n(d)\") 9)   ;=> [4 \"(b)\\n(c)\\n(d)\"]"
-  (let (n (text/length text)
+  (let (n (count text)
         p (math/max 0 (math/min point n))
         ;; ONE lexical pass for both offsets — two `scan-form-start` calls would re-walk
         ;; the same prefix, the dominant cost of every structural motion.
@@ -549,7 +549,7 @@ string or a rope.
     (sexp/point-kill-end (text/string-> \"(a\\n b)\") 1)  ;=> 2"
   ;; The enclosing list from the narrowed window around point ([[sexp-site]]), not a parse
   ;; of the whole text: a C-k in a 44k-line file parsed all of it, 140-230 ms a keystroke.
-  (let (n (text/length text)
+  (let (n (count text)
         le (sexp-line-end text point)
         site (sexp-site text point))
     (if (sexp-top-level? site)

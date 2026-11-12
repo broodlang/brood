@@ -26,7 +26,7 @@
         (table/put t "force-migration" :now)
         (assert= (await-n 8) :ok)
         (assert= (verify-range t 0 200000 0) 0)
-        (assert= (table/count t) 200001)
+        (assert= (count t) 200001)
         (table/drop t)
         true))))
 

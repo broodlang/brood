@@ -504,7 +504,7 @@ overridable as above):
 
 | knob | default | effect |
 | --- | --- | --- |
-| `*test-slow-ms*` | 1000 | a test over this is **listed** (name + duration) under the summary — still **passes**; informational only |
+| `test/*slow-ms*` | 1000 | a test over this is **listed** (name + duration) under the summary — still **passes**; informational only |
 | `test/*timeout-ms*` | 120000 | a test over this is **hard-killed** (`(exit worker :kill)`) and **fails** as `test timed out after Ns` |
 
 So a test between the two (1s ≤ t < 120s) is listed but passes; at/over the timeout it's killed and fails. Keep slow < timeout.

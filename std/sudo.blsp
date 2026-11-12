@@ -247,7 +247,7 @@ rename where it can, else by a copy into it that puts the old text back if it do
 whole (see the module doc). True, or a failure as `sudo/read` gives one.
 
     (sudo/write \"/etc/hosts\" text {:password typed})   ;~> true, or a failure"
-  (let (written (if (string? content) (string/->bytes content) (bytes/concat content))
+  (let (written (if (string? content) (string/->bytes content) (bytes/append content))
         result (run-as opts
                  "write"
                  ["sh"
@@ -255,7 +255,7 @@ whole (see the module doc). True, or a failure as `sudo/read` gives one.
                    write-script
                    "sh"
                    path
-                   (str (bytes/length written))
+                   (str (count written))
                    (hash/sha256-bytes written)]
                  written
                  #{0 4}))

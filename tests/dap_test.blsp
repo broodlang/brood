@@ -21,7 +21,7 @@
                                            :type "request"
                                            :command command
                                            :arguments arguments})))
-    (tcp/send sock [(str "Content-Length: " (bytes/length body) "\r\n\r\n") body])))
+    (tcp/send sock [(str "Content-Length: " (count body) "\r\n\r\n") body])))
 
 (defn- parse-frames (buf acc)
   (let (marker (bytes/index-of buf (string/->bytes "\r\n\r\n")))
@@ -31,9 +31,9 @@
             length (string/->number (string/trim (or (second (string/split head ":")) "0")))
             n (if (int? length) length 0)
             start (+ marker 4))
-        (if (< (bytes/length buf) (+ start n))
+        (if (< (count buf) (+ start n))
           [(reverse acc) buf]
-          (parse-frames (bytes/slice buf (+ start n) (bytes/length buf))
+          (parse-frames (bytes/slice buf (+ start n) (count buf))
             (cons (json/decode (string/bytes-> (bytes/slice buf start (+ start n)))) acc)))))))
 
 (defn- await-message (sock inbox pred)
@@ -45,7 +45,7 @@
     (if (>= hit-at 0)
       [(nth queue hit-at) (assoc inbox :queue (seq/subvec queue (inc hit-at) (count queue)))]
       (receive
-        ([:tcp ^sock d] (let ([messages rest] (parse-frames (bytes/concat (:buf inbox) d) nil))
+        ([:tcp ^sock d] (let ([messages rest] (parse-frames (bytes/append (:buf inbox) d) nil))
                           (await-message sock
                             {:queue (into [] (append queue messages)) :buf rest}
                             pred)))

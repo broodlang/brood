@@ -30,7 +30,7 @@
       (table/put t :a 1)
       (table/put t :a "two")
       (assert= (table/get t :a) "two")
-      (assert= (table/count t) 1)))
+      (assert= (count t) 1)))
 
   (test "put returns the table handle for threading"
     (let (t (table/new))
@@ -86,7 +86,7 @@
       (assert= (table/get t 'sym) :symbol)
       (assert= (table/get t true) :bool)
       (assert= (table/get t nil) :nil-key)
-      (assert= (table/count t) 7)))
+      (assert= (count t) 7)))
 
   (test "id-stable handle keys round-trip: ref and pid"
     (let (t (table/new) r (ref) p (self))
@@ -129,21 +129,21 @@
     (let (t (table/new))
       (table/put t :a 1)
       (table/delete t :missing)
-      (assert= (table/count t) 1)
+      (assert= (count t) 1)
       (table/delete t :a)
       (table/delete t :a)
-      (assert= (table/count t) 0)))
+      (assert= (count t) 0)))
 
   (test "count tracks live entries across put/overwrite/delete"
     (let (t (table/new))
-      (assert= (table/count t) 0)
+      (assert= (count t) 0)
       (table/put t :a 1)
       (table/put t :b 2)
       ; overwrite, not +1
       (table/put t :a 9)
-      (assert= (table/count t) 2)
+      (assert= (count t) 2)
       (table/delete t :a)
-      (assert= (table/count t) 1))))
+      (assert= (count t) 1))))
 
 ;; ---- atomic incr ------------------------------------------------------------
 (describe "table: incr"
@@ -237,7 +237,7 @@
       (assert-error (table/contains? t :a))
       (assert-error (table/delete t :a))
       (assert-error (table/incr t :a))
-      (assert-error (table/count t))
+      (assert-error (count t))
       (assert-error (table/snapshot t))))
 
   (test "a stale handle never reaches the table that reuses its slot"
@@ -333,7 +333,7 @@
   (test "500 entries: count, gets, snapshot are all correct"
     (let (t (table/new))
       (tt-fill t 500)
-      (assert= (table/count t) 500)
+      (assert= (count t) 500)
       (assert= (table/get t 7) 49)
       (assert= (table/get t 499) (* 499 499))
       (assert= (table/get t 500) nil)
@@ -380,7 +380,7 @@
     (let (t (table/new) me (self) n 100)
       (fold (range n) nil (fn (_ i) (spawn (do (table/put t i (* i i)) (send me :done)))))
       (assert= (await-done n) :ok)
-      (assert= (table/count t) n)
+      (assert= (count t) n)
       (assert= (table/get t 7) 49)
       (assert= (table/get t 99) (* 99 99)))))
 
@@ -395,20 +395,20 @@
       (is (table/contains? t 5))
       (assert= (table/get t 5 :dflt) nil)
       (assert= (table/get t 6 :dflt) :dflt)
-      (assert= (table/count t) 1)))
+      (assert= (count t) 1)))
   (test "overwrite and delete keep the count exact"
     (let (t (table/new))
       (table/put t 3 true)
       (table/put t 3 42)
-      (assert= (table/count t) 1)
+      (assert= (count t) 1)
       (table/delete t 3)
-      (assert= (table/count t) 0)
+      (assert= (count t) 0)
       (is (not (table/contains? t 3)))))
   (test "a string key migrates dense -> hashed with every entry intact"
     (let (t (table/new))
       (fold (range 500) nil (fn (_ i) (table/put t i (* i 2))))
       (table/put t "s" :str)
-      (assert= (table/count t) 501)
+      (assert= (count t) 501)
       (assert= (table/get t 250) 500)
       (assert= (table/get t "s") :str)))
   (test "an out-of-range / negative key migrates and both worlds read back"
@@ -445,16 +445,15 @@
 
 ;; ---- a table is a sized collection (ADR-253) ----------------------------------
 ;; `count` and `empty?` used to raise `empty?: expected collection, got table`, so a
-;; table could not join the bare collection vocabulary: you had to reach for
-;; `table/count` where every other collection answers `count`.
+;; table could not join the bare collection vocabulary. The bare `count` is now the only
+;; way to size a table: the per-type duplicate is gone.
 (describe "a table counts and tests empty like any other collection"
-  (test "count matches table/count, and tracks mutation"
+  (test "count tracks mutation"
     (let (t (table/new))
       (assert= (count t) 0)
       (table/put t :a 1)
       (table/put t :b 2)
       (assert= (count t) 2)
-      (assert= (count t) (table/count t))
       (table/delete t :a)
       (assert= (count t) 1)))
 

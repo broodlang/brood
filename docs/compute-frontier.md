@@ -458,7 +458,7 @@ suite goes red naming the assertion (5151 in-language tests, 1 failed). The poin
 2-arg case separately is that a wrong arm would leave every existing many-arg test green while
 silently changing the answer at the arity everyone uses.
 
-**Not done, deliberately:** `bytes/concat` and `hash-map` are the only other single-clause
+**Not done, deliberately:** `bytes/append` and `hash-map` are the only other single-clause
 `(& rest)` wrappers over an `apply` in `std/`. Neither is shown to be hot, and adding arms on
 speculation is how a codebase accumulates changes nobody can point at a measurement for. They are
 candidates if a row ever implicates them.

@@ -16,7 +16,7 @@
 
 (defn- block (k)
   "64 KiB whose content names `k`, so a reordered or dropped block is a mismatch."
-  (bytes/concat (string/repeat (str (string/pad-left (str k) 7 "0") "|") 8192)))
+  (bytes/append (string/repeat (str (string/pad-left (str k) 7 "0") "|") 8192)))
 
 (defn- blocks (n) (map (range n) block))
 
@@ -61,7 +61,7 @@
 (defn- drain-rest (s acc)
   (receive
     ([:tcp ^s data] (drain-rest s (cons data acc)))
-    (after 500 (bytes/concat (reverse acc)))))
+    (after 500 (bytes/append (reverse acc)))))
 
 (defn- finished ()
   "How the writer ended: `:written`, or `:hung` if it did not within the wait."
@@ -85,7 +85,7 @@
           (tcp/close c)
           (tcp/close s)
           (tcp/close ls)
-          (is (= got (bytes/concat payload))))))))
+          (is (= got (bytes/append payload))))))))
 
 (describe "tcp send backpressure: the wait ends with the connection"
   :isolated (test "a writer parked on a peer that closes is woken, and does not hang"

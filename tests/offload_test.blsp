@@ -29,7 +29,7 @@
              (catch _e :caught))
           :caught)))
   (test "a native outside the allow list is refused"
-    (is (= (try (%offload bytes/concat [[]]) (catch _e :refused)) :refused)))
+    (is (= (try (%offload bytes/append [[]]) (catch _e :refused)) :refused)))
   (test "a Brood closure is not a native — wrong type"
     (is (= (try (%offload includes? [(list 1) 1]) (catch _e :not-native)) :not-native))))
 

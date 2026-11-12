@@ -23,7 +23,7 @@
       (udp/close b)))
   (test "every byte value survives: a datagram is bytes"
     (let ([a b] (pair)
-          all (bytes/concat (into [] (map (range 256) (fn (i) (bytes/int-> i 1))))))
+          all (bytes/append (into [] (map (range 256) (fn (i) (bytes/int-> i 1))))))
       (udp/send a "localhost" (port-of b) all)
       (assert= all (:data (udp/recv b 2000)))))
   (test "text mode, as for a TCP socket"

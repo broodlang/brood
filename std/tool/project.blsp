@@ -115,10 +115,10 @@ identity and may override those paths. The rest of the tool is its siblings:
 ; `nest test`/dev and on the dev load path, but excluded from a release bundle. Each
 ; carries `:dev true`. Kept separate from project/*dependencies* so a release build (and
 ; a published package's declared deps) never pulls a test-only dependency.
-(def *project-format-headers* nil)
+(def- *format-headers* nil)
 ; the manifest's :format-headers map ({head-symbol → header-count}) — extra formatter
 ; rules for this project's own macros; nil when unset
-(def *project-format-plugins* nil)
+(def- *format-plugins* nil)
 ; the manifest's :format-plugins vector ([dep-name …]) — deps whose own
 ; :format-headers this project pulls in (so a framework ships its macro shapes)
 (defdyn project/*format-paths* nil)
@@ -570,8 +570,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; drop them. Kept in their own slot, never mixed into *project-dependencies*.
   (def project/*dev-dependencies*
     (map (parse-deps (plist-get opts :dev-dependencies)) (fn (d) (assoc d :dev true))))
-  (def *project-format-headers* (plist-get opts :format-headers))
-  (def *project-format-plugins* (plist-get opts :format-plugins))
+  (def- *format-headers* (plist-get opts :format-headers))
+  (def- *format-plugins* (plist-get opts :format-plugins))
   (def project/*width* (plist-get opts :format-width))
   project/*name*)
 
@@ -1041,10 +1041,10 @@ A declared-but-unfetched dep stays silent — that's the ordinary offline case."
   "The extra formatter-header table for this project: each `:format-plugins` dep's
 rules merged in declaration order, then this project's own `:format-headers` on top
 (so a project can retune a framework rule). {} when none are declared."
-  (let (from-plugins (fold (or *project-format-plugins* (list))
+  (let (from-plugins (fold (or *format-plugins* (list))
                        {}
                        (fn (acc plugin) (merge acc (project-plugin-format-headers root plugin))))
-        own (or *project-format-headers* {}))
+        own (or *format-headers* {}))
     (merge from-plugins own)))
 
 ;; Read + apply one manifest file, with errors that point AT THE MANIFEST: an unparseable

@@ -1498,3 +1498,13 @@ the private `test/r-ms` by its qualified name (now the public `test/result-ms`),
 `agent/start` option read `(get options :link)` inside a module where `get` is `agent/get`,
 which sent a message to the options map. agent_test caught it, and the `:link` test fails with
 the option ignored.
+
+2026-11-12 (ADR-717, ADR-718, road-to-1.0 §F). `regex` and `fuzzy` take the subject first, with
+every call in brood and bedit read by hand, since a swapped pattern and subject raise nothing.
+The audit now counts `pattern`/`query`/`rules` as subjects, and `audit_test` names
+`regex/split` when its old order is restored. Then the duplicates: `bytes/length`,
+`text/length` and `table/count` give way to `count`; `decimal/number->` gives way to
+`decimal/of`, which settles a real disagreement on floats; `concat` becomes `append` in
+`bytes` and `stream`; and 47 settings drop their doubled prefix, 31 of them going private.
+That rename found `eval-server` binding its own `*test-formatter*`, which the test runner
+never read.

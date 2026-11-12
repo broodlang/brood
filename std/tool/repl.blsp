@@ -50,7 +50,7 @@ plain byte, so a blocked TUI needs a `kill -INT` from another terminal, which
 also recovers the session); results print through `pr-str-bounded` under
 `*print-length*` / `*print-level*` (use `(pr-str *1)` for the whole value).
 Startup files `~/.broodrc.blsp` (or `$BROOD_RC`) then `./.broodrc.blsp` load once
-per runtime — the place for `lineedit-bind`, `(def *lineedit-candidates* …)`,
+per runtime — the place for `lineedit-bind`, `(def editor/lineedit/*candidates* …)`,
 `(def repl/*interruptible* false)`, and other customisations.
 
 Nestable: `pry` (std/tool/debug.blsp) calls `(run)` mid-session. The prompts
@@ -62,26 +62,26 @@ are the dynamic vars `repl/*prompt*` / `repl/*cont-prompt*`; rebind them with
 
 (defdyn repl/*prompt* "brood> ")
 (defdyn repl/*cont-prompt* "  ...   ")
-(def *repl-banner*
+(def- *banner*
   ;; A plain one-liner (printed only on an interactive TTY); the hint is dimmed.
   "brood — \e[90m,help for commands · Ctrl-D to exit\e[0m")
 
 ;; Persistent history: an interactive session loads its history on start and saves
-;; it (capped to the most recent *repl-history-max* entries) after each submitted
+;; it (capped to the most recent *history-max* entries) after each submitted
 ;; form, so ↑/↓ and C-r span sessions. The file is `$BROOD_HISTORY`, else
 ;; `$HOME/.brood_history`; one entry per line, oldest first. A test run points
 ;; `BROOD_HISTORY` into its scratch home (ADR-608), so a test never writes the user's.
-(def *repl-history-max* 1000)
+(def- *history-max* 1000)
 
 ;; The reader's INCOMPLETE_INPUT error code (error_codes::INCOMPLETE_INPUT, ADR-049)
 ;; — an unclosed form or string, i.e. "read another line", as opposed to a genuine
 ;; syntax error. A stable code, so matching it is robust (no delimiter re-scanning).
-(def *repl-incomplete-code* "E0002")
+(def- *incomplete-code* "E0002")
 
 ;; Slow-eval timing: when an interactive eval takes at least this many ms, the loop
 ;; prints a dim `; N ms` note after the value — feedback on what's expensive, hidden
 ;; for the snappy common case.
-(def *repl-slow-ms* 200)
+(def- *slow-ms* 200)
 
 ;; ---- result history + last error ---------------------------------------------
 ;; `*1` `*2` `*3` are the three most recent result values (newest first) and `*e` the
@@ -170,7 +170,7 @@ highlights. Used to colour a printed result on an interactive TTY."
 ;; `:names` is the command plus any aliases, `:handler` takes the trimmed argument
 ;; string, `:usage`/`:summary` render the `,help` table (a `:hidden` entry is dispatched
 ;; but not listed). The debugger uses this seam to add `,resume`/`,step` under `pry`.
-(defonce *repl-commands* (list))
+(defonce *commands* (list))
 
 (defn- repl-meta-parts (line)
   "Split a `,cmd arg…` line (sans the leading `,`) into `[cmd rest]`, `rest` trimmed."
@@ -186,7 +186,7 @@ highlights. Used to colour a printed result on an interactive TTY."
 
 (defn- repl-command-for (cmd)
   "The registered command whose `:names` include `cmd`, or nil."
-  (seq/find *repl-commands* (fn (c) (repl-has-name? (get c :names) cmd))))
+  (seq/find *commands* (fn (c) (repl-has-name? (get c :names) cmd))))
 
 (defn register-repl-command (spec)
   "Register a `,cmd` meta-command. `spec` is `{:names (->string alias…) :usage str
@@ -200,7 +200,7 @@ registration order, the new one last). The extension seam tools use to add comma
     ;; Filter-then-append as ONE transform: as two steps, two concurrent registrations
     ;; of the same name would each filter the old list and each append, leaving the
     ;; duplicate this promises to replace (KI-23).
-    (%swap-registry! repl/*repl-commands*
+    (%swap-registry! repl/*commands*
       (fn (l)
         (append (seq/filter l
                   (fn (c) (not (any? (get c :names) (fn (n) (repl-has-name? names n))))))
@@ -222,7 +222,7 @@ registration order, the new one last). The extension seam tools use to add comma
   "Print the `,help` table — generated from the command registry (skipping `:hidden`
 entries) plus the static Tab / `*1 *2 *3` footer."
   (io/puts (str "\e[90m"
-             (string/join (map (seq/filter *repl-commands* (fn (c) (not (get c :hidden))))
+             (string/join (map (seq/filter *commands* (fn (c) (not (get c :hidden))))
                             repl-command-help-line)
                "\n")
              "\n"
@@ -403,7 +403,7 @@ fresh prompt without echoing `nil`."
   "True when caught value `e` is the reader's *incomplete input* error (EOF inside
 a form or string) — the signal to read another line. Matches the stable error
 code rather than re-scanning delimiters (ADR-049)."
-  (and (map? e) (= (get e :code) *repl-incomplete-code*)))
+  (and (map? e) (= (get e :code) *incomplete-code*)))
 
 (defn- repl-trace-lines (tr)
   "Render an error map's :trace entries as `  at fn (file:line:col)` lines,
@@ -485,7 +485,7 @@ reporting a real error. Never lets an error escape the loop."
           ms (- (os/now) started))
       (repl-remember-value v)
       (repl-print-value v)
-      (when (and (os/stdout-tty?) (>= ms *repl-slow-ms*))
+      (when (and (os/stdout-tty?) (>= ms *slow-ms*))
         (io/puts (str "\e[90m; " ms " ms\e[0m")))
       :ok)
     (catch e
@@ -545,7 +545,7 @@ reporting a real error. Never lets an error escape the loop."
 ;; How long the parent parks between interrupt polls. Short enough that Ctrl-C feels
 ;; instant, long enough to cost nothing: the parent is parked in `receive`, so this is
 ;; a timer, not a spin.
-(def *repl-interrupt-poll-ms* 40)
+(def- *interrupt-poll-ms* 40)
 
 ;; NESTED sessions and interrupt ownership. `pry` (std/tool/debug.blsp) launches
 ;; `run` *inside* an outer REPL's evaluation — so two loops are alive at once, and
@@ -593,7 +593,7 @@ innermost interrupt owner, so a nested session's Ctrl-C is never stolen by an ou
 loop. Returns `:ok` normally, `:interrupted` when we killed it."
   (receive
     ([:down ^ref ^child _] (if killed (do (io/puts "\e[90m; interrupted\e[0m") :interrupted) :ok))
-    (after *repl-interrupt-poll-ms*
+    (after *interrupt-poll-ms*
       (if (and (repl-interrupt-owner?) (%interrupt-taken?))
         (if killed
           ;; The kill didn't land — a native builtin that never reaches a reduction
@@ -650,9 +650,9 @@ session is armed, else inline. The meta-command counterpart of `repl-eval`."
 
 (defn- repl-history->text (history)
   "Serialize `history` (newest first) to file text: the most recent
-`*repl-history-max*` entries, oldest first, one per line. (Pure — the testable core
+`*history-max*` entries, oldest first, one per line. (Pure — the testable core
 of `repl-save-history`.)"
-  (string/join (reverse (take history *repl-history-max*)) "\n"))
+  (string/join (reverse (take history *history-max*)) "\n"))
 
 (defn- repl-history<-text (text)
   "Parse history-file `text` into a history list (newest first), dropping blank
@@ -668,7 +668,7 @@ read error — a missing or unreadable history file must never stop the REPL sta
     (catch _e '())))
 
 (defn- repl-save-history (history)
-  "Write the most recent `*repl-history-max*` entries to the history file (oldest
+  "Write the most recent `*history-max*` entries to the history file (oldest
 first, one per line). Best-effort: a write failure is swallowed, never breaking the
 loop."
   ;; check-allow :discarded-catch — best-effort history / rc / cwd / half-typed input: nothing to report yet
@@ -762,7 +762,7 @@ Returns (and the process exits) at end of input."
 ;; completion source, every command — which was worth nothing while there was no
 ;; place to *put* a redefinition: each customisation died with the session. The rc
 ;; file is that place, and it's the payoff on ADR-048's premise rather than a new
-;; feature: `(lineedit-bind :ctrl-x 'my-cmd)`, `(def *lineedit-candidates* …)`,
+;; feature: `(lineedit-bind :ctrl-x 'my-cmd)`, `(def editor/lineedit/*candidates* …)`,
 ;; `(def *print-length* 20)` all become permanent by living in a file.
 ;;
 ;; Two files, user then project, both optional and both loaded in that order so a
@@ -820,11 +820,11 @@ the loop spawns so its `def`s are in place for the first prompt."
 ;; sets it to the project's `:main` module (the interactive half of package rooting,
 ;; ADR-070); it is rooted through the ambient package context in the loop process. A
 ;; plain `def` (not a `defdyn`) so it reaches the spawned loop across `spawn`.
-(def *repl-start-ns* nil)
+(def- *start-ns* nil)
 ;; `(or symbol nil)`, declared rather than inferred (placement is free since ADR-381).
 ;; `nest repl` rebinds it through `start-in` below (ADR-322), so inference would otherwise
 ;; pin it to its initializer and call the `symbol?` guard dead.
-(sig *repl-start-ns* (or symbol nil))
+(sig *start-ns* (or symbol nil))
 
 (defn start-in (ns)
   "Make the next `run` start in module `ns` (a symbol, rooted through the ambient package
@@ -832,7 +832,7 @@ context) instead of the root namespace — what `nest repl` does with the projec
 module so its bare names resolve at the prompt. `nil` restores the default.
 
     (repl/start-in 'myapp)   ;~> myapp"
-  (def *repl-start-ns* ns)
+  (def- *start-ns* ns)
   ns)
 
 (defn run ()
@@ -871,24 +871,24 @@ by the outermost invocation only.
         prompt repl/*prompt*
         cont-prompt repl/*cont-prompt*
         history (if interactive (repl-load-history) '()))
-    (when (os/stdout-tty?) (io/write (str *repl-banner* "\n") :to *err*))
+    (when (os/stdout-tty?) (io/write (str *banner* "\n") :to *err*))
     ;; A process spawned at the prompt and left to crash reports itself (ADR-305).
     (%crash-report-arm-default)
     ;; `%in-ns` must run in the LOOP process (its persistent `compile_ns` is what each
     ;; `reflect/eval-string` inherits), not the parent — and only there does it see the ambient
-    ;; package context that roots the module name. A no-op when `*repl-start-ns*` is nil
+    ;; package context that roots the module name. A no-op when `*start-ns*` is nil
     ;; (the plain `brood` REPL, or `nest repl` outside a project).
     (repl-await
       (spawn
         (binding (repl/*prompt* prompt repl/*cont-prompt* cont-prompt)
-          ;; Guard on `symbol?`, not on truthiness. `*repl-start-ns*` is a
+          ;; Guard on `symbol?`, not on truthiness. `*start-ns*` is a
           ;; redefinable global, so it types as `dynamic()`; `(when *x* …)` only
           ;; rules out nil/false, which is not enough for the checker to conclude
           ;; `%in-ns` gets a symbol — it warned on both the direct read and on a
           ;; plain `let` binding of it. A type predicate is what occurrence typing
           ;; narrows on, and it is the better guard anyway: a non-symbol value
           ;; here (someone `def`s it to a string) now skips rather than erroring.
-          (let (start-ns *repl-start-ns*)
+          (let (start-ns *start-ns*)
             (when (symbol? start-ns) (%in-ns start-ns)))
           (repl-loop interactive history))))
     (when (and owner (= *repl-sigint-owner* token))

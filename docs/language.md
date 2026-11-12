@@ -94,7 +94,7 @@ Lisps and lists, with the decision behind each, what a Lisper will look for and 
 | Integer | `0`, `42`, `-7`, `0xFF`, `0b1010`, `0o17` | 64-bit; arithmetic is overflow-checked. A radix prefix (`0x` hex, `0b` binary, `0o` octal, either case, sign in front) is spelling only — `0xFF` *is* `255`, `:int`, and prints as decimal. A result out of `i64` range promotes to an arbitrary-precision **bignum** rather than wrapping, and demotes back when it fits again — so the integer type is unbounded in practice. |
 | Float | `3.14`, `-0.5`, `1e3`, `inf`, `nan` | 64-bit. **`inf`, `-inf` and `nan` are reader literals** — those three bare tokens are floats, not symbols, so they can't be used as names (the digit-required rule below has these three exceptions). Test them with `math/infinite?` / `math/nan?`; `=` reports NaN as equal to nothing, per IEEE. |
 | Decimal | `1.50M`, `0M`, `-3.14M` | Exact arbitrary-precision base-10, for money and Postgres `numeric` — values a float can't hold (`(+ 0.1M 0.2M)` *is* `0.3M`). The literal is a trailing `M`; `(decimal/of x)` builds one from a string, int, bignum or float. Scale is significant in arithmetic (see [Arithmetic](#arithmetic)) but **not** in `=`, which compares values (`1.5M` = `1.50M`). |
-| Ratio | `1/2`, `-3/4`, `22/7` | Exact rational (`num_rational::BigRational`), always **reduced** with a positive denominator (ADR-196). `1/2` is a literal; **`/` on integers is exact** — `(/ 1 2)` is `1/2`, `(/ 6 3)` is `2` (a denominator of 1 demotes to an integer, so `4/2` IS `2`). Does the full arithmetic tower: ratio+int/ratio → ratio, ratio+decimal → ratio (lossless), ratio+float → float (contagion). `->float`/`decimal/number->` convert out; `math/numerator`/`math/denominator` read the parts. `=` is by value (`1/2` = `2/4`). |
+| Ratio | `1/2`, `-3/4`, `22/7` | Exact rational (`num_rational::BigRational`), always **reduced** with a positive denominator (ADR-196). `1/2` is a literal; **`/` on integers is exact** — `(/ 1 2)` is `1/2`, `(/ 6 3)` is `2` (a denominator of 1 demotes to an integer, so `4/2` IS `2`). Does the full arithmetic tower: ratio+int/ratio → ratio, ratio+decimal → ratio (lossless), ratio+float → float (contagion). `->float`/`decimal/of` convert out; `math/numerator`/`math/denominator` read the parts. `=` is by value (`1/2` = `2/4`). |
 | String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control), `\xHH` (two-hex-digit byte), `\u{H..H}` (1–6-hex-digit Unicode codepoint). A malformed `\x`/`\u{}` is a read error, and so is an unknown **alphabetic** escape (`\d`, `\w`, `\s`, …) — that's almost always a regex class written in a plain string, where dropping the backslash would silently break the pattern, so write `\\d`. A `\X` escape of punctuation or a digit (`\.`, `\/`, `\1`) is literal `X` (how you write a literal metacharacter in a regex string). Readable printing is the inverse: it re-escapes `\n \t \r \e \0 \\ \"` by name and any other control char as `\u{H..H}`, so a printed string always re-reads to the same value. |
 | Symbol | `foo`, `+`, `my-fn`, `empty?`, `++`, `...` | Names; interned. **A token that leads with a digit — or a sign/dot immediately followed by a digit — must be a number** (ADR-169): if it isn't one Brood has (`0x1F`, `1_000`, `1N`, `1+`, `12-34`; but `1/2` *is* a ratio now — ADR-196) it's a *reader error*, never a symbol, so those tokens stay reserved for future numeric syntax. A sign or dot with **no** digit behind it is not digit-led and stays a symbol — `+`, `-`, `...`, `.foo`, `foo.`, `--5`, `++`. A symbol whose name isn't a clean token — one built via `(symbol "a b")` with whitespace, delimiters, an empty name, or a spelling that would read as a number/keyword (including a reserved one, `(symbol "1+")`) — prints (readably) and reads back as a `\|…\|` **bar-quoted** symbol (`\|a b\|`, `\|1+\|`, `\|\|` for empty; `\|`/`\\` escape a literal bar/backslash), so every symbol round-trips through `pr-str`/`read`. |
 | Keyword | `:ok`, `:else`, `:\|a b\|` | Self-evaluating named constants. Like symbols, a keyword whose name isn't a clean token (e.g. `(keyword "a b")`, `(keyword "")`) prints and reads as `:\|…\|`. |
@@ -234,7 +234,7 @@ a Rust-backed opaque handle (genuine mutable state, never a mutable `Value`):
 (table/contains? t :hits)         ;=> true
 (table/incr t :hits)              ;=> 1   ; atomic; default delta 1
 (table/incr t :hits 10)           ;=> 11
-(table/count t)                   ;=> 1
+(count t)                         ;=> 1   ; a table is a sized collection
 (table/snapshot t)                ;=> {:hits 11}  ; an immutable map
 (table/delete t :hits)
 (table/drop t)                    ; free it now (else it goes when this process exits)
@@ -3809,7 +3809,7 @@ to something that needs a number is what `nest check --strict` flags. The answer
 
 The byte-producing write boundaries — `tcp/send`, `%proc-send`, `file/spit`,
 `file/spit-append`, `file/spit-bytes`, `file/spit-bytes-append`, and the in-memory materialiser
-`bytes/concat` — accept any **iolist** (ADR-139): a
+`bytes/append` — accept any **iolist** (ADR-139): a
 **string**, a **`bytes`** value, a **byte int 0–255**, or an arbitrarily nested
 **list/vector** of iolists (`nil` is empty; an improper tail is a final leaf).
 Describe the output as a tree and nothing is copied until the single flatten at
@@ -3817,7 +3817,7 @@ the write:
 
 ```lisp fragment
 (tcp/send sock [status-line headers "\r\n\r\n" body])   ; no (str …) accumulation
-(bytes/concat ["ab" ["cd" nil "e"] (bytes 102) 103])    ; => #b"abcdefg"
+(bytes/append ["ab" ["cd" nil "e"] (bytes 102) 103])    ; => #b"abcdefg"
 ```
 
 String leaves are UTF-8 at text boundaries; a **binary**-mode socket/child
@@ -3826,7 +3826,7 @@ must be 0–255. Anything else as a leaf (a float, a keyword, an int > 255) is a
 type error. This deletes the O(n²) `(str acc chunk)` accumulation class:
 collect parts in a list and hand the tree to the boundary. `str`/`string/join` are
 **not** iolist-aware — they render display forms (a list argument prints as a
-list); use `bytes/concat` (or `string/bytes->` of it) to materialise an
+list); use `bytes/append` (or `string/bytes->` of it) to materialise an
 iolist in memory.
 
 ### Time & memory
@@ -4239,7 +4239,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 |--------|---------------|-----------------|
 | `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `spit-atomic`, `regular?`, `list-files`, `list-dirs`, `walk-files`, `copy-tree`, `move` (across filesystems too) and `trash` (the freedesktop.org trash, `~/.Trash` on macOS, the Windows recycle bin through `%file-recycle`). Pure path-string ops (`path/extension`, `path/stem`, …) live in `path` (ADR-234). Brood (ADR-006) but the recycle bin |
 | `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`emit`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `port->fn`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of a fixed stdout. Also the writers themselves: `io/write`, `io/puts`, `io/inspect`, each taking an optional trailing `:to <port>` (see also `std/log.blsp`) |
-| `std/text.blsp` | `'text` | The rope text surface over the `%rope-*` primitives: `string->`, `->string`, `insert`, `delete`, `slice`, `length`, `line`, `line-count`, `char->line`, `line->char`, the grapheme motions `next-grapheme`/`prev-grapheme`, `skip-forward`/`skip-backward`. (Greedy word-wrap is `string/fill`.) |
+| `std/text.blsp` | `'text` | The rope text surface over the `%rope-*` primitives: `string->`, `->string`, `insert`, `delete`, `slice`, `line`, `line-count`, `char->line`, `line->char`, the grapheme motions `next-grapheme`/`prev-grapheme`, `skip-forward`/`skip-backward`; a rope's length in characters is the bare `count`. (Greedy word-wrap is `string/fill`.) |
 | `std/seq.blsp` | `'seq` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. Also `filter`/`reject`/`keep`/`filterv`/`rejectv`/`distinct`/`zip`/`find`/`flatten` and the transducer + lazy stages. The core ops (`map`/`reduce`/`fold`/`take`/`drop`/`sort`) stay bare in the prelude, and `take-while`/`partition`/`repeat`/`sort-by`/`mapv` are here (ADR-506); `(:use seq)` for bare access or call qualified |
 | `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `reduce-kv`, `merge-with`, `update-vals`, `update-keys`, `select-keys`, `zipmap`, and the path functions `get-in`/`assoc-in`/`update-in`/`dissoc-in` (ADR-506). The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`update`/`merge`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |
 | `std/math.blsp` | `'math` | The derived **math library** (ADR-227): `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates (`positive?`/`negative?`/`even?`/`odd?`), and the constants `pi`/`e`. Only the **operators** (`+` `-` `*` `/` `<` `=` …) and `inc`/`dec` stay bare in the prelude — `quot`/`mod`/`rem`/`floor`/`min`/`max` are derived arithmetic and live here too, so they are `math/quot`, `math/min`, … unless `(:use math)` brings them back bare |
@@ -4249,7 +4249,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/tempo.blsp` | `'tempo` | **Time as an interval, not an instant** (adapted from Tempo, Apache-2.0 — see `docs/tempo.md`). One resolution-carrying value type whose span is half-open, so `2026-06` *is* `[2026-06-01, 2026-07-01)`: `new`/`parse`/`->iso` at any precision, `relation` (Allen's thirteen) with the predicates over it, an interval-set algebra (`union`, `intersection`, `difference`, `gaps`, `total-width`), unit-implied enumeration (`parts`) and `shift`/`next`/`prev`. The open `Spanning` ability admits your own types; `datetime/date` and `datetime/datetime` already impl it. Joins `datetime`'s `Temporal`, so one `->iso` covers all four temporal types. Layered on `datetime` for the calendar arithmetic |
 | `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode over strings (`hex-encode`, `hex-decode`, `base64-encode`, `base64-decode`) and byte vectors (`hex-encode-bytes`, `hex-decode-bytes`, `base64-encode-bytes`, `base64-decode-bytes`, plus URL-safe forms — byte-faithful, no UTF-8 round-trip) |
 | `std/stats.blsp` | `'stats` | Descriptive statistics: `mean`, `median`, `variance`, `stddev`, `percentile`, `quantile`, `mode`, `min`, `max`, `range-of`, `sample-variance`, `sample-stddev` (`mode` uses `seq/frequencies` internally) |
-| `std/stream.blsp` | `'stream` | Process-based pull streams (lazy, I/O-friendly): sources (`list->`, `range`, `socket->`, `fn->`, `singleton`), transformers (`map`, `filter`, `take`, `drop`, `chunk`, `lines`, `concat`), terminals (`fold`, `each`, `->list`, `->vector`, `->socket`, `pipe`) |
+| `std/stream.blsp` | `'stream` | Process-based pull streams (lazy, I/O-friendly): sources (`list->`, `range`, `socket->`, `fn->`, `singleton`), transformers (`map`, `filter`, `take`, `drop`, `chunk`, `lines`, `append`), terminals (`fold`, `each`, `->list`, `->vector`, `->socket`, `pipe`) |
 | `std/url.blsp` | `'url` | URL encoding/parsing: `percent-encode`, `percent-decode`, `query-encode`, `query-decode`, `parse`, `build` |
 | `std/csv.blsp` | `'csv` | CSV parse and emit: `decode`, `decode-maps`, `encode`, `encode-maps` |
 | `std/uuid.blsp` | `'uuid` | UUID generation: `v4` (random), `v7` (time-ordered, RFC 9562), `v3`/`v5` (name-based), `zero`, `valid?` |

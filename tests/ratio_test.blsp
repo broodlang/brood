@@ -74,10 +74,12 @@
     (assert= (math/denominator 3/4) 4)
     (assert= (math/numerator 5) 5)
     (assert= (math/denominator 5) 1))
-  (test "->float and decimal/number-> escape hatches"
+  (test "->float and decimal/of escape hatches"
     (assert= (->float 1/2) 0.5)
     (assert= (->float 3/4) 0.75)
-    (assert= (decimal/number-> 1/2) 0.5M)
+    (assert= (decimal/of 1/2) 0.5M)
+    ;; one converter, one answer for a float: its shortest round-trip form (ADR-718)
+    (assert= (decimal/of 0.1) 0.1M)
     (assert= (math/rational 3 6) 1/2)))
 
 ;; ---- across processes -------------------------------------------------------

@@ -25,13 +25,6 @@ is read only where it is sliced.
     (text/slice \"abcd\" 1 3)   ;=> \"bc\""
   (if (rope? r) (%rope-slice r start end) (string/substring r start end)))
 
-(defn length (r)
-  "The number of characters in `r`, a rope or a string.
-
-    (text/length (text/string-> \"hi\"))   ;=> 2
-    (text/length \"hé\")   ;=> 2"
-  (if (rope? r) (%rope-length r) (string/length r)))
-
 (defn line (r n)
   "The text of line n (0-based) of rope r, including any trailing newline.
 

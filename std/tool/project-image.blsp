@@ -6,7 +6,7 @@ write every module's bindings to one sectioned image, and materialise them on th
 run instead of re-evaluating source. `load-sources-cached` is the entry `project/setup`
 takes; everything else is the mechanism behind it.")
 
-(def *project-image-file* ".brood/image.bin")
+(def- *file* ".brood/image.bin")
 
 ;; The files the modules in the image spliced in with `include-str`, one absolute path per
 ;; line, written beside the image. Part of the staleness key (KI-275): the image holds what
@@ -33,7 +33,7 @@ takes; everything else is the mechanism behind it.")
 ;; added later is carried without anyone remembering to, and what is left below is an
 ;; EXCLUSION list — where forgetting an entry costs speed or a redundant load, never a wrong
 ;; answer.
-(def *project-image-registry-exclusions*
+(def- *registry-exclusions*
   ;; `*features*` — with a sectioned image (ADR-218) `require` is what materialises a
   ;; module, so restoring a `*features*` that already lists every module makes `require-one`
   ;; early-return: nothing is ever loaded and the modules silently do not exist. `require`
@@ -60,7 +60,7 @@ takes; everything else is the mechanism behind it.")
   "Where `root`'s startup image lives.
 
     (project-image/image-path \"/app\")   ;=> \"/app/.brood/image.bin\""
-  (path/join root *project-image-file*))
+  (path/join root *file*))
 
 ;; The staleness key: every source file's path + size + mtime, plus the running
 ;; binary's build id. Any edit, add or delete changes it, as does a new `brood`.
@@ -166,7 +166,7 @@ come from `*module-files*`).
 (defn- project-image-registry-names (seen carried?)
   (seq/reject (%registry-names)
     (fn (n)
-      (or (includes? *project-image-registry-exclusions* n)
+      (or (includes? *registry-exclusions* n)
         (and (not (contains? seen n))
           (let (mod (project-image-section-of n))
             (and mod (carried? mod))))))))
@@ -469,7 +469,7 @@ the record the next partial rebuild reads.
            :owners (project-module-owners reloaded previous)
            ;; the registries the root section carries — see `project-redeclare-registries!`
            :registries (seq/filter (%registry-names)
-                         (fn (n) (not (includes? *project-image-registry-exclusions* n))))
+                         (fn (n) (not (includes? *registry-exclusions* n))))
            :pinned (project-pinned-modules reloaded previous)}))
       (catch _ nil))))
 

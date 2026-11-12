@@ -47,11 +47,11 @@
 
 (defn- label-bytes (label)
   "One DNS label: a length byte, then the label's bytes."
-  (bytes/concat (bytes (string/length label)) (string/->bytes label)))
+  (bytes/append (bytes (string/length label)) (string/->bytes label)))
 
 (defn- encode-name (host)
   "A hostname as length-prefixed labels terminated by a zero byte — `QNAME`."
-  (bytes/concat (apply bytes/concat (map (string/split host ".") label-bytes))
+  (bytes/append (apply bytes/append (map (string/split host ".") label-bytes))
     (bytes 0)))
 
 (defn- u16 (n)
@@ -63,7 +63,7 @@
 
   Flags `0x0100` is RD (recursion desired) — we are asking a resolver to do the walking, which
   is the whole point of asking it rather than the root."
-  (bytes/concat (u16 22136)
+  (bytes/append (u16 22136)
     (u16 256)
     (u16 1)
     (u16 0)
@@ -85,7 +85,7 @@
   points back into the message — the pointer is the end of the name here, since we only need to
   step over it. Without handling pointers this walks off into the middle of a record: every
   answer after the first uses one."
-  (when (< off (bytes/length msg))
+  (when (< off (count msg))
     (let (b (bytes/at msg off))
       (cond
         (= b 0) (+ off 1)
@@ -112,13 +112,13 @@
   (let (after-name (when (> n 0) (skip-name msg off)))
     (cond
       (<= n 0) (reverse acc)
-      (or (nil? after-name) (> (+ after-name 10) (bytes/length msg))) nil
+      (or (nil? after-name) (> (+ after-name 10) (count msg))) nil
       else
         (let (rtype (bytes/uint msg after-name 2)
               rdlen (bytes/uint msg (+ after-name 8) 2)
               rdata (+ after-name 10)
               value (cond
-                      (> (+ rdata rdlen) (bytes/length msg)) :truncated
+                      (> (+ rdata rdlen) (count msg)) :truncated
                       (not (= rtype qtype)) nil
                       (and (= rtype *a*) (= rdlen 4)) (ipv4 msg rdata)
                       (and (= rtype *aaaa*) (= rdlen 16)) (ipv6 msg rdata)
@@ -131,7 +131,7 @@
 (defn- decode-reply (body qtype)
   "The addresses in reply `body`, or the empty list for one too short to hold them."
   ;; the question is echoed back before the answers; step over it
-  (let (after-question (when (>= (bytes/length body) 12) (skip-name body 12)))
+  (let (after-question (when (>= (count body) 12) (skip-name body 12)))
     (if after-question
       (read-answers body (+ after-question 4) (bytes/uint body 6 2) qtype (list))
       (list))))
@@ -141,11 +141,11 @@
 (defn- read-body (sock len surplus timeout-ms)
   "`len` bytes of body, using whatever `read-n` already handed back before asking for more —
   or `:closed`/`:timeout` when the rest never arrives."
-  (let (have (bytes/length surplus))
+  (let (have (count surplus))
     (if (>= have len)
       (bytes/slice surplus 0 len)
       (let ([more _] (tcp/read-n sock (- len have) {:timeout-ms timeout-ms}))
-        (if (bytes? more) (bytes/concat surplus more) more)))))
+        (if (bytes? more) (bytes/append surplus more) more)))))
 
 (defn- exchange (sock host qtype timeout-ms)
   "Send one query on `sock` and decode the reply; the empty list when no whole reply arrives."
@@ -155,7 +155,7 @@
   (let (msg (query-message host qtype)
         sent (check-allow :discarded-catch
                (try
-                 (tcp/send sock (bytes/concat (u16 (bytes/length msg)) msg))
+                 (tcp/send sock (bytes/append (u16 (count msg)) msg))
                  true
                  (catch _e false)))
         ;; TCP framing: two bytes of length, then the message. `read-n`'s surplus is

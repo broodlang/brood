@@ -305,7 +305,7 @@ entry (the terminal) accepts and ignores the upload.
 
     (gui/sound-seconds (editor/frontend/display-sound {} [0 0 0 0] 2))   ;=> 1.0"
   (let (ch (or channels 1)
-        n (if (bytes? pcm) (bytes/length pcm) (count pcm))
+        n (count pcm)
         snd (gui/alloc-sound (->float (/ (math/quot n 2) (* rate ch)))))
     (when (get display :sound) ((get display :sound) snd pcm rate ch))
     snd))

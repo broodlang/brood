@@ -390,18 +390,18 @@ The last vector may be shorter if the source isn't a multiple of `n`.
                           (done-loop))))
         ([:stream-err m] (send r [:stream-err m]))))))
 
-(defn concat (s1 s2)
-  "A stream yielding all elements of `s1` then all elements of `s2`.
+(defn append (s1 s2)
+  "A stream yielding all elements of `s1` then all elements of `s2`. Shadows the bare `append`, which returns a list, as `stream/map` shadows `map` (ADR-253).
 
-    (stream/->list (stream/concat (stream/list-> [1 2]) (stream/list-> [3])))   ;=> (1 2 3)"
-  (spawn (concat-loop s1 s2)))
+    (stream/->list (stream/append (stream/list-> [1 2]) (stream/list-> [3])))   ;=> (1 2 3)"
+  (spawn (append-loop s1 s2)))
 
-(defn- concat-loop (s1 s2)
+(defn- append-loop (s1 s2)
   (receive
     ([:next r] (send s1 [:next (self)])
       (receive
         ([:stream-val v] (send r [:stream-val v])
-          (concat-loop s1 s2))
+          (append-loop s1 s2))
         (:stream-done
           ;; s1 exhausted — serve pending r from s2, then passthrough s2
           (send s2 [:next (self)])

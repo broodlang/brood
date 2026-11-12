@@ -291,13 +291,12 @@ literal — no constructor call.
 |  | `%ln` | 1 | The natural logarithm of x. x must be positive; raises otherwise. |
 |  | `%log2` | 1 | The base-2 logarithm of x. x must be positive; raises otherwise. |
 |  | `%log10` | 1 | The base-10 logarithm of x. x must be positive; raises otherwise. |
-| **Decimal** (exact base-10 for money — the `1.50M` literal) | `decimal/of` | 1 | Construct an exact arbitrary-precision base-10 decimal from x: a string ("1.50"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M. |
+| **Decimal** (exact base-10 for money — the `1.50M` literal) | `decimal/of` | 1 | Construct an exact arbitrary-precision base-10 decimal from x: a string ("1.50"), an int (3), a bignum, a ratio (exact when it terminates, `1/2` → `0.5M`; a non-terminating one rounds to the default precision), or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M. |
 |  | `decimal/->string` | 1 | The canonical decimal string of decimal d (no M suffix). |
 |  | `decimal/->float` | 1 | Decimal d as an (inexact) float. |
 |  | `%->fixed` | 2 | Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0. |
 | **Ratio** (exact rational — the `1/2` literal; `/` on integers is exact, ADR-196) | `math/numerator` | 1 | The numerator of a ratio (`(math/numerator 3/4)` → 3), or an integer itself. |
-|  | `math/denominator` | 1 | The positive denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer. |
-|  | `decimal/number->` | 1 | A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision. (`->float`, `ratio?`, and `math/rational` are prelude functions.) |
+|  | `math/denominator` | 1 | The positive denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer. (`decimal/of` turns a ratio into a decimal; `->float`, `ratio?`, and `math/rational` are prelude functions.) |
 | **Set** (`#{…}`; CHAMP-backed. `%`-internal — `std/set.blsp` is the library) | `%set` | any | Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `%set` library's constructor is Brood over this. |
 |  | `%set-add` | 2 | A fresh set like s with element x added (a set already holding x is returned unchanged). O(log n). |
 |  | `%set-remove` | 2 | A fresh set like s with element x removed (absent → unchanged). O(log n). |

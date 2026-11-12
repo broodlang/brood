@@ -2921,7 +2921,7 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
   debugger pane.
   ✅ **`,resume` / `,step` REPL meta-commands + a REPL command registry — shipped 2026-08-01.**
   `std/tool/repl.blsp`'s `,cmd`s moved from a hardcoded name-list + dispatch `cond` into a
-  registry (`*repl-commands*`) with `register-repl-command` as the extension seam; `pry`
+  registry (`repl/*commands*`) with `register-repl-command` as the extension seam; `pry`
   registers `,resume [N]` (resume all / the Nth parked) and `,step` (advance one) against the
   `*debug-session*` it binds, so you drive a debug session without typing full forms.
 - ✅ **Test coverage — both tiers** — function-level `nest test --cover` (2026-07-24)

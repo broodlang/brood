@@ -34,15 +34,15 @@ debugger breaks at (`debug/break-fn`); stepping is not supported.")
             start (+ marker 4))
         (cond
           ;; a header with no length: drop it rather than wait forever
-          (nil? n) (take-messages (bytes/slice buf start (bytes/length buf)) acc)
-          (< (bytes/length buf) (+ start n)) [(reverse acc) buf]
+          (nil? n) (take-messages (bytes/slice buf start (count buf)) acc)
+          (< (count buf) (+ start n)) [(reverse acc) buf]
           else
-            (take-messages (bytes/slice buf (+ start n) (bytes/length buf))
+            (take-messages (bytes/slice buf (+ start n) (count buf))
               (cons (json/decode (string/bytes-> (bytes/slice buf start (+ start n)))) acc)))))))
 
 (defn- write-message (sock message)
   (let (body (string/->bytes (json/encode message)))
-    (tcp/send sock [(str "Content-Length: " (bytes/length body) "\r\n\r\n") body])))
+    (tcp/send sock [(str "Content-Length: " (count body) "\r\n\r\n") body])))
 
 ;; ---- the session: one editor connection ----------------------------------------------
 ;; State: {:sock :buf :seq :dbg :program :function :fn-bps [names] :line-bps {path [names]}
@@ -262,7 +262,7 @@ debugger breaks at (`debug/break-fn`); stepping is not supported.")
     (do (release state) (tcp/close (:sock state)) (debug/stop-debugger (:dbg state)))
     (let (sock (:sock state))
       (receive
-        ([:tcp ^sock data] (let ([messages rest] (take-messages (bytes/concat (:buf state) data)
+        ([:tcp ^sock data] (let ([messages rest] (take-messages (bytes/append (:buf state) data)
                                                    nil))
                              (session-loop (fold messages (assoc state :buf rest) handle))))
         ([:tcp-closed ^sock] (session-loop (assoc state :done true)))

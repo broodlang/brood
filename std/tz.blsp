@@ -65,7 +65,7 @@ in autumn) are resolved by `->utc`'s `prefer` (see there).")
 
 (defn- tzif-footer (b at)
   ;; the POSIX rule between the two newlines at `at`, or nil
-  (if (or (>= at (bytes/length b)) (not (= 10 (bytes/at b at))))
+  (if (or (>= at (count b)) (not (= 10 (bytes/at b at))))
     nil
     (let (end (bytes/index-of b (bytes/int-> 10 1) (inc at)))
       (if (< end 0) nil (string/bytes-> (bytes/slice b (inc at) end) :lossy)))))
@@ -76,7 +76,7 @@ is not one. What `zone` does after reading the file; public for a file read else
 embedded copy, a bundle).
 
     (failure? (tz/parse-tzif (string/->bytes \"not a zone\") \"x\"))   ;=> true"
-  (if (or (< (bytes/length b) 44) (not (= (bytes/slice b 0 4) (string/->bytes "TZif"))))
+  (if (or (< (count b) 44) (not (= (bytes/slice b 0 4) (string/->bytes "TZif"))))
     (failure (str "tz: not a TZif file: " name))
     (let (version (bytes/at b 4)
           c1 (tzif-counts b 0)

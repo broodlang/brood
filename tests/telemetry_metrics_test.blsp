@@ -23,7 +23,7 @@
 ;; First in the file: a table made on first use is nil until a metric is touched (KI-375).
 (describe "telemetry metrics: the table"
   (test "is there before the first metric, so no two processes can make it"
-    (assert= (table? *telemetry-metrics*) true)))
+    (assert= (table? *metrics*) true)))
 
 (describe "telemetry metrics: reset-metrics"
   :isolated (test "a counter still attached goes on counting from zero"
@@ -344,9 +344,9 @@
     (assert= nil (telemetry/telemetry-check-event [:undeclared] {} {})))
   (test "validate flips the listener flag"
     (validate true)
-    (assert= true *telemetry-validate*)
+    (assert= true telemetry/*validate*)
     (validate false)
-    (assert= false *telemetry-validate*)))
+    (assert= false telemetry/*validate*)))
 
 ;; ---- unified runtime vitals (snapshot builtins → one stream) -----------------
 (describe "telemetry — runtime-snapshot + watch-vitals"

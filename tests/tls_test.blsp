@@ -108,7 +108,7 @@
   (let (me (self)
         port (or (tcp/local-port ls) (error "the TLS listener reported no local port"))
         client (spawn (let (s (tls/request "localhost" port request cert true))
-                        (send me [:received (self) (bytes/length (drain s))])))
+                        (send me [:received (self) (count (drain s))])))
         s (receive ([:tcp-accept ^ls cs] cs) (after test/*wait-ms* (error "no TLS accept"))))
     (tcp/controlling-process s (self))
     (receive ([:tcp ^s _] nil) (after test/*wait-ms* (error "the TLS client never wrote")))

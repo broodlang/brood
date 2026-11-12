@@ -52,12 +52,6 @@
     (let (t (table/new)) (do (table/incr t :n 5) (table/get t :n)))   ;=> 5"
   (if delta (%table-incr t k delta) (%table-incr t k)))
 
-(defn count (t:table -> int)
-  "The number of entries in table t.
-
-    (let (t (table/new)) (do (table/put t :a 1) (table/put t :b 2) (table/count t)))   ;=> 2"
-  (%table-count t))
-
 (defn snapshot (t:table -> (map any any))
   "A consistent point-in-time copy of the whole table t as an immutable map. Atomic; the returned map is unaffected by later mutation of t. Use map ops (keys/vals/get/reduce) on it. O(n).
 

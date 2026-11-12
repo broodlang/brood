@@ -516,7 +516,7 @@
                    [(str "(defn dig (k n s)\n"
                       "  (if (>= k n) s\n"
                       "    (dig (+ k 1) n (bit/xor s (* (+ k 1) (table/get t k 0))))))")
-                     (str "(io/puts \"digest\" acc (dig 0 " key-modulus " 0) (table/count t))")]))
+                     (str "(io/puts \"digest\" acc (dig 0 " key-modulus " 0) (count t))")]))
     (str (string/join sections "\n") "\n")))
 
 ;; ---- running ------------------------------------------------------------------

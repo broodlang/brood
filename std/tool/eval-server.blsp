@@ -681,9 +681,11 @@ unit itself, so a test's `def`s roll back without the session having to."
         ;; twenty-seven verdicts went missing that way before this line, and the six were
         ;; whichever ones happened to follow a flush.
         ;;
-        ;; `*test-formatter*` is the documented switch for exactly this: "a machine
+        ;; `test/*formatter*` is the documented switch for exactly this: "a machine
         ;; formatter, whose output must stay parseable" (`test/progress-mark`). This is one.
-        _ (def *test-formatter* :evsrv)
+        ;; Spelled qualified: a bare `*formatter*` here would bind `eval-server/*formatter*`,
+        ;; which the test runner never reads.
+        _ (def test/*formatter* :evsrv)
         ;; a `defdyn` set outside any `%isolate`, so it survives into the isolated units —
         ;; which is the whole reason a verdict can be reported as it lands
         _ (def test/*report-sink*
@@ -703,7 +705,7 @@ unit itself, so a test's `def`s roll back without the session having to."
                     (test/run-tests-structured)
                     (test/run-tests-structured :filter {:lines lines}))))
     (def test/*report-sink* nil)
-    (def *test-formatter* nil)
+    (def test/*formatter* nil)
     {:id id
      :ok true
      :summary {:total (get summary :total 0)
@@ -721,7 +723,7 @@ or killed — because they are ROOT globals: left installed, the next run's verd
 streamed against an id that has already been answered."
   (def test/*report-sink* nil)
   (def *spy-sink* nil)
-  (def *test-formatter* nil))
+  (def test/*formatter* nil))
 
 (defn answer-test (req)
   "The reply map for a `:test` request — see [[evsrv-encode-test]]. The per-test lines have

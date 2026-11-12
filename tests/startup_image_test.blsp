@@ -283,7 +283,7 @@
       (let (idx (%image-index p "fp-table2")) (si-load-all p idx))
       (assert= 1 (table/get si-tab2 :a))
       (assert= [2 3] (table/get si-tab2 "b"))
-      (assert= 2 (table/count si-tab2))))
+      (assert= 2 (count si-tab2))))
 
   (test "the restored table is a FRESH store — writing it does not touch the original"
     (def si-tab3 (table/new))

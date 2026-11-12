@@ -229,7 +229,7 @@ pub(super) fn bytes_make(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 /// `(byte-length b)` — the number of bytes. O(1).
 pub(super) fn byte_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::int(
-        as_bytes(heap, "bytes/length", arg(args, 0))?.len() as i64,
+        as_bytes(heap, "count", arg(args, 0))?.len() as i64
     ))
 }
 
@@ -280,7 +280,7 @@ pub(super) fn subbytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 pub(super) fn bytes_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let mut out = Vec::new();
     for &v in args {
-        flatten_iolist(heap, "bytes/concat", v, &mut out)?;
+        flatten_iolist(heap, "bytes/append", v, &mut out)?;
     }
     Ok(heap.alloc_bytes(SharedBlob::new(&out)))
 }

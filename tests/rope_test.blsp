@@ -40,13 +40,13 @@
   (test "round-trips through a string"
     (assert= (text/->string (text/string-> "hello\nworld\n")) "hello\nworld\n")
     (assert= (text/->string (text/string-> "")) ""))
-  (test "empty rope" (assert= (text/length (text/string-> "")) 0)))
+  (test "empty rope" (assert= (count (text/string-> "")) 0)))
 
 (describe "rope measurement"
-  (test "length is the character count"
-    (assert= (text/length (text/string-> "hello")) 5)
+  (test "count is the character count"
+    (assert= (count (text/string-> "hello")) 5)
     ; multi-byte chars count as 1 (char-indexed, like strings)
-    (assert= (text/length (text/string-> "héllo")) 5))
+    (assert= (count (text/string-> "héllo")) 5))
   (test "line-count counts lines (a trailing newline ends a line)"
     (assert= (text/line-count (text/string-> "")) 1)
     (assert= (text/line-count (text/string-> "one line")) 1)

@@ -139,9 +139,9 @@ Everything ADR-673 would forbid after 1.0 is cheapest in 0.5x:
   entries (2026-11-11).
 - 🟡 Rename anything the surface pass finds to be misnamed. A rename after 1.0 costs a full
   deprecation window. First batch done (ADR-716, 2026-11-12): about 40 names that broke a rule
-  already set, all ledgered. Still to decide: regex and fuzzy data-first, module-prefixed
-  settings, per-type length/count and other duplicates, and when an `editor/*` name keeps its
-  module prefix.
+  already set, all ledgered. Then regex and fuzzy data-first (ADR-717), and duplicates and
+  doubled-prefix settings (ADR-718). Still open: when an `editor/*` name keeps its module
+  prefix, and whether `string/length` stays beside `count`.
 
 ## Out of scope for 1.0 (additive, ADR-011)
 

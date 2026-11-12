@@ -42,7 +42,7 @@ agreed. `buffer-from-file` and `save-buffer` stamp it; `buffer-file-changed?` re
       {:text text :eol :lf}
       (let (rope (text/string-> decoded)
             ;; the line the end is on counts the newlines before it
-            newlines (text/char->line rope (text/length rope)))
+            newlines (text/char->line rope (count rope)))
         (if (= newlines removed) {:text decoded :eol :crlf} {:text text :eol :lf})))))
 
 (defn eol-encode (text eol)

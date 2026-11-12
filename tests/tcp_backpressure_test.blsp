@@ -22,7 +22,7 @@
 
 (defn- block (k)
   "64 KiB whose content names `k`, so a reordered or dropped block is a mismatch."
-  (bytes/concat (string/repeat (str (string/pad-left (str k) 7 "0") "|") 8192)))
+  (bytes/append (string/repeat (str (string/pad-left (str k) 7 "0") "|") 8192)))
 
 (defn- blocks (n) (map (range n) block))
 
@@ -60,13 +60,13 @@
         sender (spawn (send-then-hold me port payload))
         s (accept-binary ls))
     (receive ([:queued ^sender] nil) (after 60000 (error "sender never queued")))
-    (let ([queued early] (queued-while-idle :tcp s bytes/length))
+    (let ([queued early] (queued-while-idle :tcp s count))
       (send sender [:close])
       (let (rest (drain s))
         (send sender [:done])
         (tcp/close s)
         (tcp/close ls)
-        [queued (= (bytes/concat [early rest]) (bytes/concat payload))]))))
+        [queued (= (bytes/append [early rest]) (bytes/append payload))]))))
 
 (describe "tcp backpressure: an owner that does not read"
   :isolated (test "the owner's mailbox stays under the high-water mark; nothing is lost"
@@ -90,8 +90,8 @@
           (send sender [:done])
           (tcp/close s)
           (tcp/close ls)
-          (assert= (bytes/length surplus) 0)
-          (is (= data (bytes/concat payload)))
+          (assert= (count surplus) 0)
+          (is (= data (bytes/append payload)))
           (assert= closed :closed)))))
   (test "a slow chunk-at-a-time consumer still gets every byte"
     (let (payload (blocks 64)
@@ -104,13 +104,13 @@
       (letrec (slow (fn (acc)
                       (receive
                         ([:tcp ^s d] (do (proc/sleep 1) (slow (cons d acc))))
-                        ([:tcp-closed ^s] (bytes/concat (reverse acc)))
+                        ([:tcp-closed ^s] (bytes/append (reverse acc)))
                         (after 20000 :timeout))))
         (let (got (slow nil))
           (send sender [:done])
           (tcp/close s)
           (tcp/close ls)
-          (is (= got (bytes/concat payload))))))))
+          (is (= got (bytes/append payload))))))))
 
 (describe "tcp backpressure: ownership handoff"
   :isolated (test "handing a paused socket to a new owner resumes it for that owner"
@@ -134,7 +134,7 @@
           (tcp/close s)
           (tcp/close ls)
           (is (bytes? rest))
-          (is (= (bytes/concat [early rest]) (bytes/concat payload))))))))
+          (is (= (bytes/append [early rest]) (bytes/append payload))))))))
 
 (describe "tcp backpressure: across processes"
   :isolated (test "four socket pairs in parallel owners each stay bounded and intact"
@@ -172,9 +172,9 @@
           [port cert] (receive ([:ready p ct] [p ct]) (after 20000 (error "no tls server")))
           s (tls/request "localhost" port "go" cert true))
       (receive ([:queued] nil) (after 60000 (error "tls server never queued")))
-      (let ([queued early] (queued-while-idle :tcp s bytes/length))
+      (let ([queued early] (queued-while-idle :tcp s count))
         (send server [:close])
         (let (rest (drain s))
           (send server [:done])
           (is (<= queued high-water-bound))
-          (is (= (bytes/concat [early rest]) (bytes/concat payload))))))))
+          (is (= (bytes/append [early rest]) (bytes/append payload))))))))

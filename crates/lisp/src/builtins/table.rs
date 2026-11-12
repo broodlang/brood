@@ -181,7 +181,7 @@ pub(super) fn table_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 }
 
 pub(super) fn table_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_table(heap, "table/count", arg(args, 0))?;
+    let id = expect_table(heap, "count", arg(args, 0))?;
     Ok(Value::int(crate::core::table::count(id)?))
 }
 

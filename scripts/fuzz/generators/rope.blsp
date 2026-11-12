@@ -1,7 +1,7 @@
 ;; Rope property fuzzer. A rope must ALWAYS equal the plain string it represents. Apply a
 ;; random sequence of insert/delete edits to both a rope (threaded via `->` in the program)
 ;; and a reference character vector here; assert `(text/->string r)` equals the reference,
-;; plus `text/length` and a sample `text/slice`. Both index by code point. Includes newlines
+;; plus `count` and a sample `text/slice`. Both index by code point. Includes newlines
 ;; and unicode. Each program prints OK / BAD.
 ;;
 ;;   brood scripts/fuzz/generators/rope.blsp -- <count> <base-seed> <outdir>
@@ -74,7 +74,7 @@
       "    (io/puts (if (and (= s "
       (literal reference)
       ")\n"
-      "                      (= (text/length r) "
+      "                      (= (count r) "
       (count reference)
       ")\n"
       "                      (= (text/slice r "
@@ -84,7 +84,7 @@
       ") "
       (literal (seq/subvec reference slice-start slice-end))
       "))\n"
-      "               \"OK\" (str \"BAD len=\" (text/length r) \" s=\" (pr-str s))))))\n")))
+      "               \"OK\" (str \"BAD len=\" (count r) \" s=\" (pr-str s))))))\n")))
 
 ;; ---- driver
 (defn argument-int (text)

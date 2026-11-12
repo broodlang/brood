@@ -13,7 +13,7 @@
 ;;    dispatch: we accept one listener as a serialization point in exchange for total
 ;;    emitter isolation. Keep handlers cheap, or `forward` heavy work to your own
 ;;    process — the listener only dispatches.
-;;  - The handler table is a `def`-rebound global (`*telemetry-handlers*`), so it
+;;  - The handler table is a `def`-rebound global (`*handlers*`), so it
 ;;    survives a listener restart (the listener is a stateless executor that reads it)
 ;;    and a handler attached in one process is visible to the listener (ADR-013).
 ;;    attach/detach are configuration-time data ops (they never run handler code), so
@@ -36,7 +36,7 @@ process you own."
 
 ;; The shared handler table: event → list of {:id … :fn …}. A `def`-rebound global so
 ;; it survives a listener restart and is visible across processes (ADR-013).
-(defonce *telemetry-handlers* {})
+(defonce *handlers* {})
 
 ;; ---- table helpers (pure) ---------------------------------------------------
 
@@ -59,7 +59,7 @@ LISTENER process."
 
 (defn- telemetry-run-handlers (event measurements metadata)
   "Dispatch `event` to its handlers and detach any that threw. Runs in the listener."
-  (when *telemetry-validate*
+  (when *validate*
     (doseq (problem (telemetry-check-event event measurements metadata))
       (io/puts (str "telemetry: event "
                  (pr-str event)
@@ -68,13 +68,13 @@ LISTENER process."
                  " missing key "
                  (pr-str (second problem)))
         :to *err*)))
-  (let (bucket (get *telemetry-handlers* event nil))
+  (let (bucket (get *handlers* event nil))
     (when bucket
       (let (failed (telemetry-dispatch bucket event measurements metadata))
         (when (not (empty? failed))
           ;; Auto-detach the handlers that threw. Same shape as `detach`: fold the removals
           ;; over whatever the registry holds NOW, not over the copy this dispatch read.
-          (%swap-registry! telemetry/*telemetry-handlers*
+          (%swap-registry! telemetry/*handlers*
             (fn (m) (fold failed m telemetry-without-id))))))))
 
 ;; ---- the listener process ---------------------------------------------------
@@ -156,7 +156,7 @@ fast — `forward` heavy work to a process you own.
     (telemetry/attach :log-req [:http :request] (fn (e m md) (log/info \"req\" m)))   ;~> :log-req"
   ;; Strip any earlier handler with this id from EVERY bucket, then cons onto this
   ;; event's — one transform, so a concurrent attach cannot land between the two halves.
-  (%swap-registry! telemetry/*telemetry-handlers*
+  (%swap-registry! telemetry/*handlers*
     (fn (m)
       (let (cleaned (telemetry-without-id m id))
         (assoc cleaned event (cons {:id id :fn handler} (get cleaned event nil))))))
@@ -166,14 +166,14 @@ fast — `forward` heavy work to a process you own.
   "Remove the handler attached under `id`. Returns nil; no-op if no such id.
 
     (telemetry/detach :log-req)   ;~> nil"
-  (%swap-registry! telemetry/*telemetry-handlers* (fn (m) (telemetry-without-id m id)))
+  (%swap-registry! telemetry/*handlers* (fn (m) (telemetry-without-id m id)))
   nil)
 
 (defn detach-all ()
   "Remove every handler (resets the table). Returns nil.
 
     (telemetry/detach-all)   ;~> nil"
-  (def *telemetry-handlers* {})
+  (def *handlers* {})
   nil)
 
 (defn forward (id event pid)
@@ -186,7 +186,7 @@ handler logic in a process you own, off even the listener. Returns `id`.
 
 (defn handlers ()
   "The handler table as a map of event → list of `{:id :fn}` (introspection)."
-  *telemetry-handlers*)
+  *handlers*)
 
 ;; ---- declared events (defevent) — events as data with a checked schema -------
 ;; A plain event is a bare keyword with no declared shape: a handler and the
@@ -196,7 +196,7 @@ handler logic in a process you own, off even the listener. Returns `id`.
 ;; emitter function* whose signature carries the measurement + metadata types, so calling
 ;; the emitter is an ordinary typed call the advisory checker validates — no new checker
 ;; machinery. The schema is also registered for introspection (`event-schema`) and optional
-;; runtime presence-checking (`*telemetry-validate*`), and raw `emit` still works for
+;; runtime presence-checking (`validate`), and raw `emit` still works for
 ;; undeclared events.
 
 (defonce *events* {})
@@ -236,11 +236,11 @@ introspection + runtime-validation registry `defevent` populates. Returns `event
 define a typed EMITTER function `name` the checker validates. `opts`:
 `:measurements ((field type) …)` and `:metadata ((field type) …)` (each field a bare symbol
 = `any`, or `(symbol type)`), plus an optional `:doc`. Expands to a schema registration
-(`*events*`, for `event-schema` + `*telemetry-validate*`), a `(sig name …)`, and
+(`*events*`, for `event-schema` + `validate`), a `(sig name …)`, and
 `(defn name (m-fields… md-fields…) (emit event {measurements} {metadata}))`. So
 `(request-stop 42 \"/\" 200)` is checked like any typed call — 'events as data with a
 declared schema', delivered through the `sig` seam (the same trick `defrecord` uses for
-field types). Raw `(emit event …)` still works; enable `*telemetry-validate*` for a
+field types). Raw `(emit event …)` still works; `(validate true)` enables a
 runtime presence-check of a declared event.
 
     (defevent request-stop [:http :request :stop]
@@ -281,9 +281,9 @@ runtime presence-check of a declared event.
 ;; secondary net for the RAW `emit` path, off by default. It runs in the LISTENER (never
 ;; the emitter), checks only key PRESENCE (types are the checker's job), and warns to
 ;; stderr — it never blocks dispatch. A `def`-global (not a `binding`) because the listener
-;; is a separate process: like `*telemetry-handlers*`, it's read THERE, so enabling it must
-;; be visible across processes — set it with `(def *telemetry-validate* true)`.
-(def *telemetry-validate* false)
+;; is a separate process: like `*handlers*`, it's read THERE, so enabling it must
+;; be visible across processes — set it with `(validate true)`.
+(def- *validate* false)
 
 (defn validate (on)
   "Enable (`true`) or disable runtime schema presence-checking of declared events. Off by
@@ -291,7 +291,7 @@ default. Must be a function (not a bare `def` from your module) so the rebind la
 telemetry's own global, which the listener process reads. Returns `on`.
 
     (telemetry/validate true)   ;~> true"
-  (def *telemetry-validate* on)
+  (def- *validate* on)
   on)
 
 (defn- telemetry-missing-keys (schema-map actual)
@@ -604,21 +604,21 @@ the caller. Returns `body`'s value."
 
 ;; Bound once, at load: an aggregator's handler holds this table, so it stays the same table
 ;; for the life of the runtime, and `reset-metrics` empties it (KI-375).
-(defonce *telemetry-metrics* (table/new))
+(defonce *metrics* (table/new))
 
 (defn reset-metrics ()
   "Drop every aggregated metric. Does NOT detach the handlers, which go on counting from
 zero — call `detach`/`detach-all` for that. Returns nil.
 
     (telemetry/reset-metrics)   ;~> nil"
-  (doseq (key (keys (table/snapshot *telemetry-metrics*)))
-    (table/delete *telemetry-metrics* key))
+  (doseq (key (keys (table/snapshot *metrics*)))
+    (table/delete *metrics* key))
   nil)
 
 (defn counter (id event)
   "Count each emit of `event` under metric `id`. `(metric id)` → `{:kind :counter
 :count n}`. Returns `id`."
-  (let (t *telemetry-metrics*)
+  (let (t *metrics*)
     (attach id
       event
       (fn (_e _m _md)
@@ -628,7 +628,7 @@ zero — call `detach`/`detach-all` for that. Returns nil.
 (defn sum (id event key)
   "Sum measurement `key` across each emit of `event` under metric `id`. Float-safe.
 `(metric id)` → `{:kind :sum :sum s}`. Returns `id`."
-  (let (t *telemetry-metrics*)
+  (let (t *metrics*)
     (attach id
       event
       (fn (_e m _md)
@@ -638,7 +638,7 @@ zero — call `detach`/`detach-all` for that. Returns nil.
 (defn last-value (id event key)
   "Track the latest value of measurement `key` (a gauge) under metric `id`.
 `(metric id)` → `{:kind :gauge :value v}`. Returns `id`."
-  (let (t *telemetry-metrics*)
+  (let (t *metrics*)
     (attach id
       event
       (fn (_e m _md)
@@ -649,7 +649,7 @@ zero — call `detach`/`detach-all` for that. Returns nil.
 5-number fold (count/sum/sum-of-squares/min/max), no samples retained. `(metric id)`
 → `{:kind :summary :count :sum :min :max :mean :stddev}` (mean/stddev derived on
 read). Returns `id`."
-  (let (t *telemetry-metrics*)
+  (let (t *metrics*)
     (attach id
       event
       (fn (_e m _md)
@@ -689,7 +689,7 @@ first bound ≥ it, or an overflow bucket above the last. Bounded (per-bucket co
 no samples). `(metric id)` → `{:kind :distribution :count :sum :min :max :mean
 :buckets [{:le b :count c}… {:le :inf :count c}]}`; estimate quantiles with
 `metric-percentile`. Returns `id`."
-  (let (t *telemetry-metrics*
+  (let (t *metrics*
         bounds (into [] (sort buckets)))
     (attach id
       event
@@ -764,14 +764,14 @@ others pass through."
 derived), or nil if no such metric has recorded anything yet.
 
     (telemetry/metric :no-such-metric)   ;=> nil"
-  (let (state (table/get *telemetry-metrics* id nil))
+  (let (state (table/get *metrics* id nil))
     (when state (telemetry-present state))))
 
 (defn metrics-snapshot ()
   "A point-in-time map of every metric `id` → its reader value (see `metric`).
 Atomic; safe to poll from any process (this is the stream-folded replacement for
 scraping N snapshot builtins). Empty map if no metrics recorded."
-  (let (snap (table/snapshot *telemetry-metrics*))
+  (let (snap (table/snapshot *metrics*))
     (map/reduce-kv snap {} (fn (acc id state) (assoc acc id (telemetry-present state))))))
 
 (defn- telemetry-quantile (bounds counts nb rank i prev-cum prev-bound maxv)
@@ -796,7 +796,7 @@ bucketed counts — linear interpolation within the containing bucket, the stand
 Returns nil unless `id` is a `distribution` with at least one observation.
 
     (telemetry/metric-percentile :no-such-metric 0.5)   ;=> nil"
-  (let (state (table/get *telemetry-metrics* id nil))
+  (let (state (table/get *metrics* id nil))
     (when (and state (= (get state :kind) :distribution) (> (get state :count) 0))
       (let (bounds (get state :bounds)
             counts (get state :counts))
@@ -816,5 +816,5 @@ not a PRNG), so it never loses count. Compose with an aggregator's handler, or a
 attach handler. Returns the wrapped handler.
 
     (telemetry/sample-every :req-sample 100 handler)   ;~> a handler that runs on every 100th event"
-  (let (t *telemetry-metrics* k [id :sample-seen])
+  (let (t *metrics* k [id :sample-seen])
     (fn (e m md) (when (= 0 (math/rem (table/incr t k 1) n)) (handler e m md)))))

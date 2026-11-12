@@ -19,7 +19,7 @@
       (assert= (get t :height) 2)
       ; :rgba is a width*height*4 bytes value
       (is (bytes? (get t :rgba)))
-      (assert= (bytes/length (get t :rgba)) 16)
+      (assert= (count (get t :rgba)) 16)
       ; the first pixel is the fixture colour (10,20,30), fully opaque
       (let (px (get t :rgba))
         (assert= [(bytes/at px 0) (bytes/at px 1) (bytes/at px 2) (bytes/at px 3)]
@@ -30,7 +30,7 @@
     (let (t (gui/image-thumb *png-2x2* 1 1))
       (assert= (get t :width) 1)
       (assert= (get t :height) 1)
-      (assert= (bytes/length (get t :rgba)) 4)))
+      (assert= (count (get t :rgba)) 4)))
 
   (test "non-image bytes and non-positive dims degrade to nil, never throw"
     (is (nil? (gui/image-thumb (string/->bytes "not an image") 8 8)))

@@ -334,10 +334,10 @@
 
 (describe "test formatters: registry"
   (test "the built-ins are registered and register-test-formatter adds more"
-    (is (not (nil? (get test/*test-formatters* "tap"))))
-    (is (not (nil? (get test/*test-formatters* "json"))))
+    (is (not (nil? (get test/*formatters* "tap"))))
+    (is (not (nil? (get test/*formatters* "json"))))
     (register-test-formatter "tsel-custom" (fn (_r _e) nil))
-    (is (not (nil? (get test/*test-formatters* "tsel-custom"))))))
+    (is (not (nil? (get test/*formatters* "tsel-custom"))))))
 
 (describe "test formatters: TAP"
   (test "emits a version line, a plan, and ok/not ok per test"

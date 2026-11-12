@@ -416,13 +416,13 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
 (defn write-png (image path &optional opts)
   "Write `image` — a {:width :height :rgba} map, as gui/render-frame, gui/capture and gui/image-thumb return — to `path` as a PNG, and return `path`. `opts`: `:crop [x y w h]` keeps that rectangle (clipped to the image) and `:scale n` (1..16) enlarges it n times by repeating pixels, so the spacing of a few pixels can be looked at without a blur. Errors when `:rgba` is not width*height*4 bytes or the file cannot be written.
 
-    (gui/write-png {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 255 1) (bytes/int-> 0 1) (bytes/int-> 0 1) (bytes/int-> 255 1))} \"/tmp/red.png\")   ;~> \"/tmp/red.png\""
+    (gui/write-png {:width 1 :height 1 :rgba (bytes/append (bytes/int-> 255 1) (bytes/int-> 0 1) (bytes/int-> 0 1) (bytes/int-> 255 1))} \"/tmp/red.png\")   ;~> \"/tmp/red.png\""
   (%image-write-png image path opts))
 
 (defn pixel (image x y)
   "The colour of pixel (`x`, `y`) of `image` (a {:width :height :rgba} map) as `[r g b]`, or nil outside it. What a test reads a picture with.
 
-    (gui/pixel {:width 1 :height 1 :rgba (bytes/concat (bytes/int-> 30 1) (bytes/int-> 30 1) (bytes/int-> 46 1) (bytes/int-> 255 1))} 0 0)   ;=> [30 30 46]"
+    (gui/pixel {:width 1 :height 1 :rgba (bytes/append (bytes/int-> 30 1) (bytes/int-> 30 1) (bytes/int-> 46 1) (bytes/int-> 255 1))} 0 0)   ;=> [30 30 46]"
   (when (and (>= x 0) (>= y 0) (< x (:width image)) (< y (:height image)))
     (let (rgba (:rgba image)
           at (math/round (* 4 (+ x (* y (:width image))))))
@@ -507,7 +507,7 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 
     (try (gui/sound 0 [1 2 3] 22050) (catch e :odd))   ;=> :odd   ; PCM16 is two bytes a sample"
   (let (ch (or channels 1)
-        n (if (bytes? pcm) (bytes/length pcm) (count pcm))
+        n (count pcm)
         snd (alloc-sound (->float (/ (math/quot n 2) (* rate ch)))))
     (%gui-sound id snd rate ch pcm)
     snd))

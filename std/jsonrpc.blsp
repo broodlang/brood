@@ -42,7 +42,7 @@ UTF-8 BYTE count, which is what the header means — not its character count, wh
 as soon as the body carries a character outside ASCII.
 
     (jsonrpc/frame \"{}\")   ;=> \"Content-Length: 2\\r\\n\\r\\n{}\""
-  (str "Content-Length: " (bytes/length (string/->bytes body)) "\r\n\r\n" body))
+  (str "Content-Length: " (count (string/->bytes body)) "\r\n\r\n" body))
 
 (defn request (id method params)
   "A framed request: `{\"jsonrpc\": \"2.0\", \"id\", \"method\", \"params\"}`. The peer answers
@@ -94,7 +94,7 @@ line), or nil when it is absent or not a number."
           [(reverse acc) buf] ; a malformed header: stop here, the caller keeps the buffer
           (let (body-start (+ separator 4) ; the header is ASCII: char index = byte offset
                 bytes (string/->bytes buf)
-                total (bytes/length bytes))
+                total (count bytes))
             (if (< (- total body-start) body-length)
               [(reverse acc) buf] ; the body's bytes have not all arrived
               (let (body-end (+ body-start body-length)

@@ -6,6 +6,19 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Breaking: duplicates and doubled prefixes (ADR-718).**
+- `bytes/length`, `text/length` and `table/count` are removed: use `count`.
+- `decimal/number->` is removed: use `decimal/of`, which now takes a ratio too. On a float,
+  the two gave different answers; `decimal/of`'s shortest round-trip form (`0.1` → `0.1M`)
+  is the one kept.
+- `bytes/concat` → `bytes/append`, and `stream/concat` → `stream/append`.
+- 47 settings drop their module prefix, for example `editor/ui/*ui-slow-ms*` →
+  `*slow-ms*`, `http/*http-read-timeout-ms*` → `http/*read-timeout-ms*` and
+  `test/*test-slow-ms*` → `test/*slow-ms*`. 31 of them, which nothing outside their module
+  read, are now private; the editor watchdog defaults are set through the app model's keys.
+- Fixed: `eval-server` silenced the test runner's progress output by binding a global the
+  runner never read.
+
 **Breaking: `regex` and `fuzzy` take the subject first (ADR-717). Read every call: it does not
 raise.**
 - `(regex/find s pattern)`, as are `match?`, `matches?`, `find-all`, `replace`, `split` and

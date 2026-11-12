@@ -9,7 +9,7 @@
 ;;
 ;; Names follow the conversion idiom the rest of the library uses: inside module `M`,
 ;; `M/->x` reads "M to x" and `M/x->` reads "x to M". So `decimal/->string` is a decimal to
-;; a string, and `decimal/number->` is a number to a decimal.
+;; a string. The way in is `decimal/of`, which takes every kind of number and a string.
 
 (defmodule decimal
   "Exact arbitrary-precision base-10 decimals — for money and anything else a float
@@ -18,11 +18,11 @@ cannot hold exactly (`0.1 + 0.2` is `0.30000000000000004` in binary floating poi
     (decimal/of \"1.50\")             ;=> 1.50M
     (decimal/of 3)                  ;=> 3M
     (decimal/->string (decimal/of \"1.50\"))   ;=> \"1.50\"
-    (decimal/number-> 1/2)          ;=> 0.5M
+    (decimal/of 1/2)                ;=> 0.5M
     (decimal? (decimal/of \"1\"))     ;=> true
 
 The literal form is a trailing `M` — `1.50M` — so most code never calls `decimal/of` at
-all. `decimal/of` takes a string, an int, a bignum, or a float; `decimal/number->` takes a
-number and is exact for an integer or a terminating ratio. `decimal/->float` crosses back
+all. `decimal/of` takes a string, an int, a bignum, a ratio (exact when it terminates) or a
+float (its shortest round-trip form, so `(decimal/of 0.1)` is `0.1M`). `decimal/->float` crosses back
 to an inexact float, and `decimal/->string` renders the exact value, trailing zeros and
 all. Arithmetic uses the ordinary operators: a decimal operand keeps the result exact.")

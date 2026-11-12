@@ -133,13 +133,13 @@ The bytes are queued and written as the peer takes them, so a write failure show
     (tcp/drain sock)   ;~> #b\"HTTP/1.0 200 OK\\r\\n…\" — every byte up to the peer's close"
   (drain-acc sock nil))
 
-;; `acc` is the chunks in reverse; ONE `bytes-concat` at close (the reversed chunk
+;; `acc` is the chunks in reverse; ONE `bytes/append` at close (the reversed chunk
 ;; list is itself an iolist). Per-chunk concatenation rebuilt the whole accumulator
 ;; each message — O(total²) over a large response.
 (defn- drain-acc (sock acc)
   (receive
     ([:tcp ^sock d] (drain-acc sock (cons d acc)))
-    ([:tcp-closed ^sock] (bytes/concat (reverse acc)))))
+    ([:tcp-closed ^sock] (bytes/append (reverse acc)))))
 
 (defn drain-timeout (sock ms)
   "Like `drain`, but give up after `ms` milliseconds of silence and return whatever was collected (tagged `[:timeout acc]` vs `[:closed acc]` so the caller can tell; `acc` is a `bytes` value).
@@ -150,8 +150,8 @@ The bytes are queued and written as the peer takes them, so a write failure show
 (defn- drain-to (sock acc ms)
   (receive
     ([:tcp ^sock d] (drain-to sock (cons d acc) ms))
-    ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))])
-    (after ms [:timeout (bytes/concat (reverse acc))])))
+    ([:tcp-closed ^sock] [:closed (bytes/append (reverse acc))])
+    (after ms [:timeout (bytes/append (reverse acc))])))
 
 ;; ---- framed reads: the input-side twin of iolists (ADR-139) ----------------
 ;; The recurring stream-parsing shapes — read a delimited frame (an HTTP request
@@ -159,7 +159,7 @@ The bytes are queued and written as the peer takes them, so a write failure show
 ;; payload) — as reusable combinators, so a protocol needn't re-implement the
 ;; receive+accumulate+split loop each time (the manual `cons`/`reverse`/`join`
 ;; idiom, written five ways across an HTTP/WS stack). Both accumulate chunks in a
-;; reversed list and `bytes-concat` **once**, never per-chunk (no O(total²) rebuild),
+;; reversed list and `bytes/append` **once**, never per-chunk (no O(total²) rebuild),
 ;; and return the frame plus any surplus already read past it, so the caller keeps
 ;; the leftover for the next frame. Pure Brood over `receive` — no mutable buffer
 ;; (ADR-026); the accumulator is an ordinary immutable list. Binary mode
@@ -253,9 +253,9 @@ The bytes are queued and written as the peer takes them, so a write failure show
 
     (tcp/read-until sock \"\\r\\n\\r\\n\" {:timeout-ms 5000})   ;~> [head-bytes surplus-bytes], or [:closed acc] / [:timeout acc]"
   (let ([ms maxb end] (read-limits opts)
-        sepb (bytes/concat sep)
+        sepb (bytes/append sep)
         seed (get opts :seed))
-    (if (or (nil? seed) (= (bytes/length seed) 0))
+    (if (or (nil? seed) (= (count seed) 0))
       (read-until-loop sock sepb nil 0 #b"" ms maxb end)
       ;; Feed the seed through the same step the loop runs on an arriving chunk, so a
       ;; delimiter inside it — or straddling it and the next chunk — is found by exactly the
@@ -268,15 +268,14 @@ The bytes are queued and written as the peer takes them, so a write failure show
 ;; against `[tail | chunk]` (O(chunk + |sep|)), and the accumulator is concatenated
 ;; ONCE — only on the delimiter, when the caller actually needs the bytes.
 ;;
-;; This used to `bytes-concat` the whole accumulator and rescan it from 0 on EVERY
+;; This used to `bytes/append` the whole accumulator and rescan it from 0 on EVERY
 ;; chunk, which is O(total²) in both copying and scanning: 250 KB arriving as 4000
 ;; chunks took 1.57 s, and 16× the chunk count cost 169× the time. There is no size
 ;; cap here (the caller frames what it reads), so that was also remotely triggerable
 ;; by a peer that drip-feeds and never sends the delimiter.
 ;;
-;; `byte-length`, not `count`, throughout: these are byte counts, and `count` reaches
-;; bytes only at the bottom of a five-deep type-predicate `cond` (514ns vs 36ns) — a
-;; per-chunk cost in a loop this shape.
+;; The byte counts are the bare `count`: compiled, it is the `PrimOp1::Count` inline, which
+;; answers a `bytes` from its length without walking the prelude `cond` (KI-301).
 ;; Only the `receive` SHAPE differs between the bounded and unbounded cases — `after`
 ;; needs a real millisecond count, so there is no way to write "no timeout" as an
 ;; `after` clause. The two receives therefore differ in that one clause and hand every
@@ -291,36 +290,36 @@ The bytes are queued and written as the peer takes them, so a write failure show
     (if w
       (receive
         ([:tcp ^sock d] (read-until-step sock sep acc have tail ms maxb end d))
-        ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))])
-        (after w [:timeout (bytes/concat (reverse acc))]))
+        ([:tcp-closed ^sock] [:closed (bytes/append (reverse acc))])
+        (after w [:timeout (bytes/append (reverse acc))]))
       (receive
         ([:tcp ^sock d] (read-until-step sock sep acc have tail ms maxb end d))
-        ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))])))))
+        ([:tcp-closed ^sock] [:closed (bytes/append (reverse acc))])))))
 
 (defn- read-until-step (sock sep acc have tail ms maxb end d)
-  (let (probe (bytes/concat tail d)
+  (let (probe (bytes/append tail d)
         i (bytes/index-of probe sep))
     (if (>= i 0)
       ;; probe byte 0 sits at absolute (have - |tail|); a match must
       ;; include a byte of `d` (|tail| < |sep|), so it is never one
       ;; we already reported past.
-      (let (cut (+ (- have (bytes/length tail)) i (bytes/length sep)))
+      (let (cut (+ (- have (count tail)) i (count sep)))
         ;; The cap is checked against the COMPLETED frame, so a head that lands
         ;; exactly on `:max-bytes` is delivered rather than rejected off-by-one.
         (if (and maxb (> cut maxb))
-          [:too-large (bytes/concat (reverse (cons d acc)))]
-          (let (buf (bytes/concat (reverse (cons d acc))))
-            [(bytes/slice buf 0 cut) (bytes/slice buf cut (bytes/length buf))])))
-      (let (have (+ have (bytes/length d)))
+          [:too-large (bytes/append (reverse (cons d acc)))]
+          (let (buf (bytes/append (reverse (cons d acc))))
+            [(bytes/slice buf 0 cut) (bytes/slice buf cut (count buf))])))
+      (let (have (+ have (count d)))
         ;; No delimiter yet: stop as soon as what we hold already exceeds the cap,
         ;; rather than waiting for a delimiter that may never come.
         (if (and maxb (> have maxb))
-          [:too-large (bytes/concat (reverse (cons d acc)))]
+          [:too-large (bytes/append (reverse (cons d acc)))]
           (read-until-loop sock
             sep
             (cons d acc)
             have
-            (straddle probe (bytes/length sep))
+            (straddle probe (count sep))
             ms
             maxb
             end))))))
@@ -328,12 +327,12 @@ The bytes are queued and written as the peer takes them, so a write failure show
 ;; The last (|sep|-1) bytes of `probe` — everything a delimiter spanning the next
 ;; chunk boundary could need, and nothing more.
 (defn- straddle (probe sep-len)
-  (let (n (bytes/length probe)
+  (let (n (count probe)
         k (math/max 0 (- sep-len 1)))
     (if (<= n k) probe (bytes/slice probe (- n k) n))))
 
 (defn read-n (sock n &optional (opts {}))
-  "Receive `[:tcp sock data]` chunks until at least `n` bytes have arrived; return `[data rest]` where `data` is exactly the first `n` bytes and `rest` any surplus already received (both `bytes`). Return `[:closed acc]` if the socket closes with fewer than `n` bytes (`acc` = what arrived). For a length-prefixed body — a Content-Length payload, one chunk of a chunked transfer, a WebSocket frame payload. O(total): the running byte count means no rescanning and a single `bytes-concat` at the end. Assumes binary mode (chunk byte lengths).
+  "Receive `[:tcp sock data]` chunks until at least `n` bytes have arrived; return `[data rest]` where `data` is exactly the first `n` bytes and `rest` any surplus already received (both `bytes`). Return `[:closed acc]` if the socket closes with fewer than `n` bytes (`acc` = what arrived). For a length-prefixed body — a Content-Length payload, one chunk of a chunked transfer, a WebSocket frame payload. O(total): the running byte count means no rescanning and a single `bytes/append` at the end. Assumes binary mode (chunk byte lengths).
 
   `opts` takes the same limits as `read-until`, all off by default: `:timeout-ms`, the IDLE wait for the next chunk, returning `[:timeout acc]`; `:max-bytes`, returning `[:too-large #b\"\"]` **before reading anything** when the declared `n` exceeds it — a `Content-Length: 4000000000` is refused rather than read; and `:deadline-ms`, a TOTAL budget for the whole body measured from the call, also returning `[:timeout acc]`. Prefer `:timeout-ms` alone for a large body — slowness there is usually honest — and reach for `:deadline-ms` when the protocol bounds the body small. Must be called by the socket's owning process.
 
@@ -348,7 +347,7 @@ The bytes are queued and written as the peer takes them, so a write failure show
 
 (defn- read-n-loop (sock n have acc ms end)
   (if (>= have n)
-    (let (buf (bytes/concat (reverse acc)))
+    (let (buf (bytes/append (reverse acc)))
       [(bytes/slice buf 0 n) (bytes/slice buf n (count buf))])
     ;; As in `read-until-loop`: `after` needs a concrete ms, so the bounded and
     ;; unbounded cases are two receives over the same body, and the wait is recomputed
@@ -357,8 +356,8 @@ The bytes are queued and written as the peer takes them, so a write failure show
       (if w
         (receive
           ([:tcp ^sock d] (read-n-loop sock n (+ have (count d)) (cons d acc) ms end))
-          ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))])
-          (after w [:timeout (bytes/concat (reverse acc))]))
+          ([:tcp-closed ^sock] [:closed (bytes/append (reverse acc))])
+          (after w [:timeout (bytes/append (reverse acc))]))
         (receive
           ([:tcp ^sock d] (read-n-loop sock n (+ have (count d)) (cons d acc) ms end))
-          ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))]))))))
+          ([:tcp-closed ^sock] [:closed (bytes/append (reverse acc))]))))))

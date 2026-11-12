@@ -154,8 +154,8 @@ fn a_large_bytes_value_sent_repeatedly_arrives_intact_every_time() {
         r#"
 (node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (node/connect "a@127.0.0.1:{port_a}")
-(def page (bytes/concat (string/repeat "picture!" 8000)))
-(def other (bytes/concat (string/repeat "another." 9000)))
+(def page (bytes/append (string/repeat "picture!" 8000)))
+(def other (bytes/append (string/repeat "another." 9000)))
 (defn round (b)
   (send {{:name :mirror :node :a@127.0.0.1}} [:bytes (self) b])
   (receive
