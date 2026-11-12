@@ -58,7 +58,9 @@ fn lint_binders_walk(heap: &Heap, root: Value, root_lint: bool, out: &mut Vec<Fi
                 };
                 // `Value` has no `PartialEq`; the definition's value is positionally items[2].
                 let mut definition_value: Option<usize> = None;
+                let mut binders_at: Option<(usize, BinderList)> = None;
                 if let Some(&Value::Sym(head)) = items.first() {
+                    binders_at = binder_list(heap, head, &items);
                     // Quoted/quasiquoted subtrees are data, and `comment` never runs.
                     if value::symbol_is(head, kw::QUOTE)
                         || value::symbol_is(head, kw::QUASIQUOTE)
@@ -80,11 +82,66 @@ fn lint_binders_walk(heap: &Heap, root: Value, root_lint: bool, out: &mut Vec<Fi
                     }
                 }
                 for (i, it) in items.into_iter().enumerate() {
-                    work.push((it, definition_value != Some(i)));
+                    match binders_at {
+                        Some((at, kind)) if at == i => work.extend(
+                            binder_list_expressions(heap, it, kind)
+                                .into_iter()
+                                .map(|expression| (expression, true)),
+                        ),
+                        _ => work.push((it, definition_value != Some(i))),
+                    }
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// What a form's binder list holds besides its binders.
+#[derive(Clone, Copy)]
+enum BinderList {
+    /// `(pattern expr pattern expr …)`: every second element is an expression.
+    Bindings,
+    /// A `fn` parameter list: only its `&optional` defaults are expressions.
+    Parameters,
+}
+
+/// Where a form keeps its binding or parameter list, which the walk must not read as a
+/// call: its first element is a binder, not an operator. `(let (match (get m :a) …) …)` is
+/// not a `match` form, nor is `(fn (catch e) …)` a `catch`, and walking either as one
+/// reported the expression after the name as an unused binder.
+fn binder_list(heap: &Heap, head: Symbol, items: &[Value]) -> Option<(usize, BinderList)> {
+    match value::symbol_name_ref(head) {
+        "let" | "letrec" | "with" | "if-let" | "when-let" | "if-some" | "when-some" | "doseq"
+        | "for" | "fold-for" => Some((1, BinderList::Bindings)),
+        _ if walk::is_fn_head(head) => {
+            let at = if matches!(items.get(1), Some(Value::Str(_))) && items.len() > 2 {
+                2
+            } else {
+                1
+            };
+            let forms = items.get(at..)?;
+            let is_parameter_list = matches!(forms.first(), Some(Value::Pair(_)))
+                && !forms
+                    .iter()
+                    .all(|&form| crate::eval::macros::is_clause(heap, form));
+            is_parameter_list.then_some((at, BinderList::Parameters))
+        }
+        _ => None,
+    }
+}
+
+/// The expressions inside a binder list, which the walk does read.
+fn binder_list_expressions(heap: &Heap, list: Value, kind: BinderList) -> Vec<Value> {
+    match kind {
+        BinderList::Bindings => heap
+            .list_or_vector_items(list)
+            .unwrap_or_default()
+            .into_iter()
+            .skip(1)
+            .step_by(2)
+            .collect(),
+        BinderList::Parameters => optional_defaults(heap, list),
     }
 }
 

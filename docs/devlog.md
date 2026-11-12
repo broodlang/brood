@@ -1537,6 +1537,14 @@ cross-module caller reads (`infer_sig`) had the same gap and gets the same meet;
 removed. Also filed KI-385: `nest check --fix-renames` is not scope-aware and rewrote hatch's
 local `name` bindings to `node/name`.
 
+2026-11-12. **The unused-binder lint reads a binder list as data.** Bringing the downstream
+projects up to date turned up `unused pattern binding: if` in pong2: since parameter and
+binding lists are lists (ADR-512), the lint's walk read `(let (match (get m :a) match (if …))
+…)`'s binding list as a `match` form, and would read `(fn (catch e) …)`'s parameters as a
+`catch`. A form's binding or parameter list is now walked only for the expressions in it.
+Guard: `unused_let_binding_lint`'s binder-list cases, red with the skip disabled; the `catch`
+case warns on the binary from before the fix.
+
 2026-11-12 (KI-385, KI-386, KI-387). `nest check --fix-renames` rewrites only the places the
 checker reported (`codemod/cst-rename-at-text`), not every symbol spelled like the stale name,
 so a parameter, `let` binder or pattern variable of that spelling is left alone. The checker
