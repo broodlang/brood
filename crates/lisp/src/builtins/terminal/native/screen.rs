@@ -367,7 +367,10 @@ impl Screen {
                 style
             } else {
                 Style {
-                    bg: self.cell(row, (at.min(self.cols as i64 - 1)) as u16).style.bg,
+                    bg: self
+                        .cell(row, (at.min(self.cols as i64 - 1)) as u16)
+                        .style
+                        .bg,
                     ..style
                 }
             };
@@ -796,7 +799,11 @@ mod tests {
         screen.put_text(1, 1, "world", red());
         assert_eq!(screen.row_text(0), " hello  ");
         for col in 0..8 {
-            assert_eq!(screen.cell(0, col).style.bg, band.bg, "the band under column {col}");
+            assert_eq!(
+                screen.cell(0, col).style.bg,
+                band.bg,
+                "the band under column {col}"
+            );
         }
         assert_eq!(screen.cell(0, 2).style.fg, red().fg);
         // off the band, the text is on the background the frame cleared to
