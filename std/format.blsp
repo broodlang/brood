@@ -197,7 +197,6 @@ project/plugin table (`format/*headers-extra*`) first, then the built-ins.
 ;; align them under the opening element — the canonical let/binding shape.
 (def- *pair-bindings*
   {'let true 'letrec true 'binding true 'loop true})
-(sig *pair-bindings* (map symbol bool))
 
 ;; Forms whose body args (after the header) are emitted as test+body pairs,
 ;; one pair per line. Comments between clauses are kept on their own lines.

@@ -272,7 +272,8 @@
   (test "dragging it to a row makes that row the upper pane's last"
     (let (tree (pane-split (pane-single {:buf 0}) :row {:buf 1})
           l (pane-layout tree [0 0 80 24] {:row-seam 0})
-          moved (pane-set-ratio tree () (pane-ratio-for (first (get l :dividers)) [7 40]))
+          divider (or (first (get l :dividers)) (error "the split laid out no divider"))
+          moved (pane-set-ratio tree () (pane-ratio-for divider [7 40]))
           rects (map (get (pane-layout moved [0 0 80 24] {:row-seam 0}) :panes)
                   (fn (p) (get p :rect))))
       (assert= rects (list [0 0 80 8] [0 8 80 16]))))
