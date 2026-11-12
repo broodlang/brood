@@ -6,6 +6,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Added.**
+- **`editor/buffer/replace-program-output`**: program output that replaces what the program wrote
+  before (a carriage return rewriting a progress line), in the buffer and every snapshot of its
+  undo history, recording nothing. `insert-program-output` is it over an empty range (ADR-712).
+
 ## v0.51.0 — warnings with categories, nodes within one minor, Windows and static Linux builds
 
 **Added.**
