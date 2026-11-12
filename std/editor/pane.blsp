@@ -386,8 +386,9 @@ from the geometry `pane-layout` already computed.
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
-  (defn- pane-layout-go (node path rect)
-    "Lay `node` (at `path`) into `rect`, returning `{:panes (…) :dividers (…)}`."
+  (defn- pane-layout-go (node path rect row-seam)
+    "Lay `node` (at `path`) into `rect`, returning `{:panes (…) :dividers (…)}`. A `:row`
+split reserves `row-seam` rows (1 or 0) for its divider, a `:col` split always one column."
     (if (pane-leaf? node)
       {:panes (list {:path path
                      :payload (get node :payload)
@@ -396,34 +397,47 @@ from the geometry `pane-layout` already computed.
        :dividers ()}
       (let ([x y w h] rect
             col? (= (get node :dir) :col)
-            ;; the extent split between the two children (less the 1-cell divider),
+            ;; the cells reserved for the divider: a column, or `row-seam` rows
+            seam (if col? 1 row-seam)
+            ;; the extent split between the two children (less the divider's seam),
             ;; and child a's share of it, clamped so neither pane vanishes
-            ext (- (if col? w h) 1)
+            ext (- (if col? w h) seam)
             a-ext (pane-clampi (round (* ext (get node :ratio))) 1 (math/max 1 (- ext 1)))
             arect (if col? [x y a-ext h] [x y w a-ext])
-            drect (if col? [(+ x a-ext) y 1 h] [x (+ y a-ext) w 1])
+            ;; with no seam the divider is child a's LAST row — where a terminal frontend
+            ;; draws its own separator (a mode line), and where a drag takes hold of it
+            drect (cond
+                    col? [(+ x a-ext) y 1 h]
+                    (= seam 0) [x (+ y a-ext -1) w 1]
+                    else [x (+ y a-ext) w 1])
             brect (if col?
                     [(+ x a-ext 1) y (- w a-ext 1) h]
-                    [x (+ y a-ext 1) w (- h a-ext 1)])
-            la (pane-layout-go (get node :a) (append path (list :a)) arect)
-            lb (pane-layout-go (get node :b) (append path (list :b)) brect))
+                    [x (+ y a-ext seam) w (- h a-ext seam)])
+            la (pane-layout-go (get node :a) (append path (list :a)) arect row-seam)
+            lb (pane-layout-go (get node :b) (append path (list :b)) brect row-seam))
         {:panes (append (get la :panes) (get lb :panes))
-         :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect}
+         :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect :seam seam}
                      (append (get la :dividers) (get lb :dividers)))}))))
 
 ;; Outside the `check-allow` wrapper, so the declaration is a top-level form the checker and
 ;; the runtime both read plainly (its placement relative to the `defn-` is free, ADR-381).
-(sig pane-layout-go (any list rect -> layout))
+(sig pane-layout-go (any list rect int -> layout))
 
-(defn pane-layout (tree rect)
+(defn pane-layout (tree rect &optional (opts nil))
   "Lay `tree` out in `rect` (`[x y w h]` cells): a map `{:panes :dividers}` where
 each pane is `{:path :payload :selected :rect}` and each divider is `{:path :dir
-:rect :split-rect}` (`:rect` the 1-cell divider line, `:split-rect` the whole rect
-that split feeds `pane-ratio-for`). Pure — the frontend paints each pane's payload
-into its rect and the dividers between them.
+:rect :split-rect :seam}` (`:rect` the 1-cell divider line, `:split-rect` the whole rect
+that split feeds `pane-ratio-for`, `:seam` the cells reserved for it). Pure — the frontend
+paints each pane's payload into its rect and the dividers between them.
 
-    (map (get (editor/pane/pane-layout (editor/pane/pane-split (editor/pane/pane-single :a) :col :b) [0 0 20 10]) :panes) (fn (p) (get p :rect)))   ;=> ([0 0 10 10] [11 0 9 10])"
-  (pane-layout-go tree () rect))
+`opts` `{:row-seam 0}` reserves NO row between panes stacked by a `:row` split, as a
+terminal editor lays them out (Emacs, vim): the upper pane's last row — its mode line — is
+the separator, and that row is the divider's `:rect`, so a drag on it resizes. The default,
+1, reserves a row for a divider of its own (a window draws a hairline in it).
+
+    (map (get (editor/pane/pane-layout (editor/pane/pane-split (editor/pane/pane-single :a) :col :b) [0 0 20 10]) :panes) (fn (p) (get p :rect)))   ;=> ([0 0 10 10] [11 0 9 10])
+    (map (get (editor/pane/pane-layout (editor/pane/pane-split (editor/pane/pane-single :a) :row :b) [0 0 20 10] {:row-seam 0}) :panes) (fn (p) (get p :rect)))   ;=> ([0 0 20 5] [0 5 20 5])"
+  (pane-layout-go tree () rect (if (= (get opts :row-seam) 0) 0 1)))
 
 ;; ---- hit-testing + resize (drag-to-resize over :drag mouse events) ----------
 
@@ -463,9 +477,11 @@ i.e. dragging the divider to the pointer. Feed the result to `pane-set-ratio`.
 
     (editor/pane/pane-ratio-for (editor/pane/divider-at (editor/pane/pane-layout (editor/pane/pane-split (editor/pane/pane-single :a) :col :b) [0 0 20 10]) [3 10]) [3 5])   ;=> 5/19"
   (let ([x y w h] (get divider :split-rect) [row col] point)
-    (if (= (get divider :dir) :col)
-      (/ (- col x) (math/max 1 (- w 1)))
-      (/ (- row y) (math/max 1 (- h 1))))))
+    (cond
+      (= (get divider :dir) :col) (/ (- col x) (math/max 1 (- w 1)))
+      ;; no seam: the divider is the upper pane's last row, so the pointer's row ends it
+      (= (get divider :seam) 0) (/ (+ (- row y) 1) (math/max 1 h))
+      else (/ (- row y) (math/max 1 (- h 1))))))
 
 (defn pane-set-ratio (tree path ratio)
   "Set the `:ratio` of the split at `path` (clamped to `[0.1 0.9]` so neither pane

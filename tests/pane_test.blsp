@@ -253,3 +253,31 @@
           narrow (pane-layout (pane-set-ratio t '(:a) 0.3) [0 0 80 24]))
       (assert= (get (pane-neighbor even pc :up) :path) pa)
       (assert= (get (pane-neighbor narrow pc :up) :path) pb))))
+
+(describe "a :row split with no seam ({:row-seam 0}, a terminal's layout)"
+  (test "the panes share the height with no row between them"
+    (let (l (pane-layout (pane-split (pane-single {:buf 0}) :row {:buf 1})
+              [0 0 80 24]
+              {:row-seam 0})
+          rects (map (get l :panes) (fn (p) (get p :rect))))
+      (assert= rects (list [0 0 80 12] [0 12 80 12]))))
+  (test "the divider is the upper pane's last row, and a press there finds it"
+    (let (l (pane-layout (pane-split (pane-single {:buf 0}) :row {:buf 1})
+              [0 0 80 24]
+              {:row-seam 0})
+          divider (first (get l :dividers)))
+      (assert= (get divider :rect) [0 11 80 1])
+      (assert= (get divider :seam) 0)
+      (assert= (get (divider-at l [11 40]) :path) (get divider :path))))
+  (test "dragging it to a row makes that row the upper pane's last"
+    (let (tree (pane-split (pane-single {:buf 0}) :row {:buf 1})
+          l (pane-layout tree [0 0 80 24] {:row-seam 0})
+          moved (pane-set-ratio tree () (pane-ratio-for (first (get l :dividers)) [7 40]))
+          rects (map (get (pane-layout moved [0 0 80 24] {:row-seam 0}) :panes)
+                  (fn (p) (get p :rect))))
+      (assert= rects (list [0 0 80 8] [0 8 80 16]))))
+  (test "a :col split still reserves its column"
+    (let (l (pane-layout (pane-split (pane-single {:buf 0}) :col {:buf 1})
+              [0 0 80 24]
+              {:row-seam 0}))
+      (assert= (map (get l :panes) (fn (p) (get p :rect))) (list [0 0 40 24] [41 0 39 24])))))

@@ -702,7 +702,14 @@ fn paint_ops(
             let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
             let text = expect_string(heap, "%term-draw", arg(&parts, 3))?;
             let face = parts.get(4).copied().unwrap_or(Value::nil());
-            target.put_text(row, col, &text, style_of(heap, face).over(default_face));
+            // the default face gives a missing foreground; a missing background is the
+            // cell's own (`put_text`), so text over a rect keeps the rect, as in a window
+            let style = style_of(heap, face);
+            let style = screen::Style {
+                fg: style.fg.or(default_face.fg),
+                ..style
+            };
+            target.put_text(row, col, &text, style);
         } else if tag == image_t {
             // `[:image …]` (ADR-686): no pixels here, so the picture in half-block cells —
             // `▀` in its top pixel's colour over its bottom pixel's — and a cell the picture
