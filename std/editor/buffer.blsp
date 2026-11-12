@@ -1754,24 +1754,25 @@ region — stays read-only."
         width (string/length text)
         shift (fn (position)
                 (cond
-                  (not (int? position)) position
                   (>= position hi) (+ position (- width (- hi lo)))
                   (> position lo) lo
                   else position))
         replaced (replace-region open lo hi text properties)
-        placed (assoc (goto-char replaced (shift point)) :mark (shift mark))
+        placed (assoc (goto-char replaced (shift point))
+                 :mark (if (int? mark) (shift mark) mark))
         narrowed (cond
                    (nil? regions) placed
                    ;; read-only: narrowed to no region, which nothing moves
                    (empty? regions) (assoc placed :editable regions)
-                   else (buffer-adjust-editable
-                          (buffer-adjust-editable (assoc placed :editable regions) :delete lo hi)
-                          :insert
-                          lo
-                          width)))
+                   else
+                     (buffer-adjust-editable (buffer-adjust-editable (assoc placed
+                                                                       :editable regions)
+                                               :delete lo hi)
+                       :insert lo width)))
     (if (get state :undo-disabled) narrowed (dissoc narrowed :undo-disabled))))
 
-(defn replace-program-output (buf:buffer from:int to:int text:string &optional (properties nil) -> buffer)
+(defn replace-program-output
+  (buf:buffer from:int to:int text:string &optional (properties nil) -> buffer)
   "`buf` with `[from, to)` replaced by `text` — what a program wrote, over what it wrote
 before (a carriage return rewriting a progress line) — as though it had always been there:
 in the text and in every snapshot of its undo history, recording nothing, so undo and redo of
