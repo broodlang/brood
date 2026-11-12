@@ -657,16 +657,8 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "project-check/*project-cache-pruned*",
         "ADR-325",
     ),
-    (
-        "project/*project-image-file*",
-        "project-image/*project-image-file*",
-        "ADR-325",
-    ),
-    (
-        "project/*project-image-registry-exclusions*",
-        "project-image/*project-image-registry-exclusions*",
-        "ADR-325",
-    ),
+    // `project/*project-image-file*` and `*project-image-registry-exclusions*` moved to
+    // project-image here, then went private (ADR-718): no public home left to point at.
     ("project/all-files", "project-check/all-files", "ADR-325"),
     (
         "project/build-info",
@@ -901,16 +893,7 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "editor/undo-region/undo-in-region",
         "ADR-687",
     ),
-    (
-        "editor/buffer/*undo-region-char-budget*",
-        "editor/undo-region/*undo-region-char-budget*",
-        "ADR-687",
-    ),
-    (
-        "editor/buffer/*undo-region-search-depth*",
-        "editor/undo-region/*undo-region-search-depth*",
-        "ADR-687",
-    ),
+    // The two `*undo-region-…*` budgets moved here too, then went private (ADR-718).
     // ADR-674 stage 2 — the forms "reduce before adding" deprecated are removed. `dolist`
     // took exactly `doseq`'s `(x xs) body…`, so the bare name is a true rename and
     // `--fix-renames` applies it. The other three change shape: `dotimes` gains a `range`,
@@ -950,11 +933,8 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "editor/buffer-server/stop-buffer",
         "ADR-716",
     ),
-    (
-        "io/fn-port",
-        "the function itself (fn-port was identity)",
-        "ADR-716",
-    ),
+    // `fn-port` WAS `identity`; pass the function itself.
+    ("io/fn-port", "identity", "ADR-716"),
     ("io/port-fn", "io/port->fn", "ADR-716"),
     ("seq/but-last", "seq/drop-last xs 1", "ADR-716"),
     ("debug/dbg-stop", "debug/stop-debugger", "ADR-716"),
@@ -978,9 +958,8 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     ),
     // ADR-718 — the surface pass, second batch. A per-type count the bare `count` already
     // answers, one decimal constructor, `append` for `concat`, and settings that no longer
-    // repeat their module's name. A setting made private points at a call shape (it has a
-    // space), so `--fix-renames` names it and leaves it: a qualified reference to a private
-    // name from another module is refused at load.
+    // repeat their module's name. A setting that went PRIVATE has no public home to point at,
+    // so it is not here (a target's first word must be a bound name — renames_test).
     ("bytes/length", "count", "ADR-718"),
     ("text/length", "count", "ADR-718"),
     ("table/count", "count", "ADR-718"),
@@ -999,7 +978,7 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     ),
     (
         "telemetry/*telemetry-validate*",
-        "(telemetry/validate true)",
+        "telemetry/validate true",
         "ADR-718",
     ),
     ("editor/web/*web-tabs*", "editor/web/*tabs*", "ADR-718"),
@@ -1029,26 +1008,6 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     (
         "http/*http-connection-timeout-ms*",
         "http/*connection-timeout-ms*",
-        "ADR-718",
-    ),
-    (
-        "editor/ui/*ui-slow-ms*",
-        "private now; set the app model's :slow-ms",
-        "ADR-718",
-    ),
-    (
-        "editor/ui/*ui-fold-budget-ms*",
-        "private now; set the app model's :fold-budget-ms",
-        "ADR-718",
-    ),
-    (
-        "editor/ui/*ui-event-ceiling-ms*",
-        "private now; set the app model's :event-ceiling-ms",
-        "ADR-718",
-    ),
-    (
-        "format/*format-pair-bindings*",
-        "private now (format's own table)",
         "ADR-718",
     ),
 ];
