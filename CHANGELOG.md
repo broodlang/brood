@@ -12,6 +12,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   is the separator and the divider's `:rect`, so a drag there resizes. Dividers carry `:seam`.
 
 **Fixed.**
+- **`nest check --fix-renames` leaves a local alone.** It rewrites only the references the checker
+  reported, so a parameter or `let` binder spelled like the renamed name is no longer renamed with
+  it. A place it cannot match to one reference, or one under a macro the checker could not
+  resolve, is printed as `by hand:` (KI-385).
+- **`nest check` reports an unbound name in a branch it judges unreachable** (KI-387), and no
+  longer types a function called only by itself from its own self-call (KI-386). Together they
+  had hidden every warning in such a branch, a stale renamed call included.
 - **The terminal display draws text over what is painted**, as a window does: a `[:text …]` op whose
   face names no background keeps the cell's, so text over a `[:rect …]` (a current-line band, a
   selection bar) no longer punches the default background through it. In bedit -nw the selected

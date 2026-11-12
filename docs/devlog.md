@@ -1536,3 +1536,26 @@ cross-module caller reads (`infer_sig`) had the same gap and gets the same meet;
 `a_loaded_typed_function_returns_within_its_declared_parameter`, each red with its meet
 removed. Also filed KI-385: `nest check --fix-renames` is not scope-aware and rewrote hatch's
 local `name` bindings to `node/name`.
+
+2026-11-12 (KI-385, KI-386, KI-387). `nest check --fix-renames` rewrites only the places the
+checker reported (`codemod/cst-rename-at-text`), not every symbol spelled like the stale name,
+so a parameter, `let` binder or pattern variable of that spelling is left alone. The checker
+reports an unbound reference at the innermost form holding it, after expansion, and never
+reports a local: in a reported form the direct children spelled the name are renamed, a
+macro-moved reference is renamed when it is the only one below, and anything else is printed
+`by hand:`. A form headed by a name still unbound after the renames is left for a human, since
+the checker reads an unresolved macro's binders as references (hatch's `defhtml` in a test that
+does not import it). Replaying hatch's ADR-716/718 migration from `5eb6cd5` now reproduces the
+hand-fixed result.
+
+The replay also found four stale `bytes/concat` calls in hatch's `websocket.blsp` that no check
+had reported, and two checker bugs behind them. KI-386: the caller-derived pass seeds only live
+candidates, but each round derived every function with a site, so a public function called only
+by itself took its parameter's type from its own self-call, `(if y … (f y))` typing `y`
+nil|false and leaving the then branch dead and unchecked. KI-387: `check_if` skipped a branch it
+judged dead, and "dead" rests on inferred types, so every unbound name behind such a branch went
+unreported. A dead branch is now walked for its unbound names only. Guards:
+`fix_renames_leaves_a_local_spelled_like_the_renamed_name_alone`,
+`a_self_call_does_not_make_the_branch_beside_it_dead` and
+`an_unbound_name_in_a_branch_typed_dead_is_still_reported`, each red with its fix removed.
+std/, tests/, examples/ and every downstream repo still check clean.

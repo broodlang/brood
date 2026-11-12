@@ -296,6 +296,48 @@ fn fix_renames_rewrites_references_only() {
 }
 
 #[test]
+fn fix_renames_leaves_a_local_spelled_like_the_renamed_name_alone() {
+    // KI-385: the rewrite renamed every symbol spelled like the stale name, so a parameter,
+    // a `let` binder and a pattern variable spelled `int->char` became `string/int->char`
+    // along with their uses. Only the references the checker reports are rewritten now —
+    // including one a macro moved (`->` reports its own form, not the symbol).
+    let tmp = project("fixscope");
+    let root = &tmp.path;
+    write(
+        &root.join("src/scope.blsp"),
+        "(defmodule scope \"a stale global beside locals spelled the same\")\n\n\
+         (defn moved (n) (int->char n))\n\
+         (defn threaded (n) (-> n int->char))\n\
+         (defn param (int->char) (str int->char))\n\
+         (defn binder (n) (let (int->char (+ n 1)) (* int->char 2)))\n\
+         (defn pattern (v) (match v ([int->char] int->char) (_ (int->char 66))))\n",
+    );
+
+    let (_code, out) = nest(root, &["check", "--fix-renames"]);
+    assert!(
+        out.contains("fix:  int->char → string/int->char"),
+        "expected the fix to apply:\n{out}"
+    );
+
+    let after = std::fs::read_to_string(root.join("src/scope.blsp")).unwrap();
+    for expected in [
+        "(defn moved (n) (string/int->char n))",
+        "(defn threaded (n) (-> n string/int->char))",
+        "(defn param (int->char) (str int->char))",
+        "(defn binder (n) (let (int->char (+ n 1)) (* int->char 2)))",
+        "(defn pattern (v) (match v ([int->char] int->char) (_ (string/int->char 66))))",
+    ] {
+        assert!(
+            after.contains(expected),
+            "expected `{expected}` in:\n{after}"
+        );
+    }
+
+    let (code, out) = nest(root, &["check"]);
+    assert_eq!(code, 0, "the rewritten project checks clean:\n{out}");
+}
+
+#[test]
 fn fix_renames_is_quiet_and_clean_on_a_healthy_project() {
     // The negative control. Without it the assertions above could all be satisfied by a
     // tool that reports rot unconditionally.

@@ -253,3 +253,51 @@
     (assert= (missing-uses "(defmodule a\n  (:use x)\n  (:use y :only [f]))"
                "(defmodule b (:use x))")
       '("(:use y :only [f])"))))
+
+(describe "cst-rename-at-text — only where the checker reported a reference (KI-385)"
+  (test "a parameter and a let binder spelled like the name are not references"
+    (let (src "(defn f (name) (let (name 1) (str name)))")
+      (assert= [src []] (cst-rename-at-text src []))))
+
+  (test "a reported call form renames its head, and nothing spelled the same elsewhere"
+    (assert= ["(defn g (old) (str old))\n(defn h (x) (new x))" []]
+      (cst-rename-at-text "(defn g (old) (str old))\n(defn h (x) (old x))" [[2 13 "old" "new"]])))
+
+  (test "a reported form renames every direct child spelled the name"
+    (assert= ["(map [x] new)" []] (cst-rename-at-text "(map [x] old)" [[1 1 "old" "new"]])))
+
+  (test "a macro that moved the reference deeper: its one occurrence below is renamed"
+    (assert= ["(when x (-> y [new]))" []]
+      (cst-rename-at-text "(when x (-> y [old]))" [[1 9 "old" "new"]])))
+
+  (test "nested reported forms are each renamed"
+    (assert= ["(new (new 1))" []]
+      (cst-rename-at-text "(old (old 1))" [[1 1 "old" "new"] [1 6 "old" "new"]])))
+
+  (test "columns count characters, not bytes"
+    (assert= ["(str \"ééé\" (new x))" []]
+      (cst-rename-at-text "(str \"ééé\" (old x))" [[1 12 "old" "new"]])))
+
+  (test "a place with no single reference is missed and left as it was"
+    (let (src "(m (k old) (j old))")
+      (assert= [src [[1 1 "old" "new"]]] (cst-rename-at-text src [[1 1 "old" "new"]]))))
+
+  (test "a place that is no form at all is missed"
+    (assert= ["(a b)" [[3 1 "a" "z"]]] (cst-rename-at-text "(a b)" [[3 1 "a" "z"]])))
+
+  (test "quoted data is not a reference; an unquote inside a template is"
+    (assert= ["(f 'old `(old ~new))" []]
+      (cst-rename-at-text "(f 'old `(old ~old))" [[1 1 "old" "new"]])))
+
+  (test "a later line's column is counted from that line"
+    (assert= ["(defn h (x)\n  (new x))" []]
+      (cst-rename-at-text "(defn h (x)\n  (old x))" [[2 3 "old" "new"]])))
+
+  (test "a form an unresolved macro heads is left alone, its places missed"
+    (let (src "(defhtml greet (name) [:p (str name)])")
+      (assert= [src [[1 1 "name" "node/name"] [1 28 "name" "node/name"]]]
+        (cst-rename-at-text src [[1 1 "name" "node/name"] [1 28 "name" "node/name"]] #{"defhtml"}))))
+
+  (test "and a reference beside such a form is still renamed"
+    (assert= ["(do (m (old)) (new 1))" [[1 7 "old" "new"]]]
+      (cst-rename-at-text "(do (m (old)) (old 1))" [[1 7 "old" "new"] [1 15 "old" "new"]] #{"m"}))))

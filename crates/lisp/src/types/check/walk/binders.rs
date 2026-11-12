@@ -1059,15 +1059,36 @@ pub(super) fn check_if(
         // …and a comparison's intervals, lengths and index bounds (ADR-350).
         apply_comparison_facts(heap, test, ctx, t, e)
     };
-    // A branch whose scope is contradicted by its own test cannot run: don't check it.
-    if !then_ctx.is_dead() {
-        check_value_leaf(heap, then_form, form, &then_ctx, out);
-        check_into(heap, then_form, &then_ctx, out);
+    // A branch whose scope is contradicted by its own test cannot run: its TYPES say
+    // nothing, so only its unbound names are reported (see `check_dead_branch`).
+    for (branch, branch_ctx) in [(then_form, &then_ctx), (else_form, &else_ctx)] {
+        if branch_ctx.is_dead() {
+            check_dead_branch(heap, branch, form, branch_ctx, out);
+        } else {
+            check_value_leaf(heap, branch, form, branch_ctx, out);
+            check_into(heap, branch, branch_ctx, out);
+        }
     }
-    if !else_ctx.is_dead() {
-        check_value_leaf(heap, else_form, form, &else_ctx, out);
-        check_into(heap, else_form, &else_ctx, out);
-    }
+}
+
+/// Walk a branch the checker judged unreachable, keeping only its unbound-symbol findings.
+///
+/// Every other finding there is about types the branch can never hold, so it is dropped.
+/// An unbound name is a fact about the NAME, not the path: the judgement that the branch
+/// cannot run rests on inferred types — a caller-derived parameter, a return still at the
+/// fixpoint's floor, a scrutinee whose patterns cannot match — and when that judgement is
+/// wrong, or the code it rests on changes, the name raises at run time. Skipping the branch
+/// outright hid exactly that: a rename wave's stale `bytes/concat` behind a `match` clause
+/// typed dead read as a clean `nest check` and failed in production.
+fn check_dead_branch(heap: &Heap, branch: Value, form: Value, ctx: &Ctx, out: &mut Vec<Finding>) {
+    let mut scratch = Vec::new();
+    check_value_leaf(heap, branch, form, ctx, &mut scratch);
+    check_into(heap, branch, ctx, &mut scratch);
+    out.extend(
+        scratch
+            .into_iter()
+            .filter(|finding| finding.lint == Lint::Unbound),
+    );
 }
 
 /// The scope after ONE `let` binding `(pat rhs)`, given the RHS's type as read in the

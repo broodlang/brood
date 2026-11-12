@@ -281,6 +281,159 @@ counterpart to `rename`. Prints each changed file and returns the count.
     (io/puts (count changed) " file(s) changed")
     (count changed)))
 
+;; ---- renaming the references the checker found (`nest check --fix-renames`) --------------
+;; `cst-rename-text` renames by SPELLING, so it cannot tell a reference to the global
+;; `name` from a parameter or a `let` binder spelled the same: renaming `name → node/name`
+;; rewrote `(defn f (name) (str name))` into `(defn f (node/name) (str node/name))` (KI-385).
+;; Scope is the checker's knowledge, not the CST's, and the checker already reports each
+;; unbound reference where it is: at the innermost form that holds it, after macro expansion
+;; (`(-> x old)` reports the `->` form). A local never appears there. So this renames only
+;; at the reported places:
+;;   - a reported SYMBOL is renamed;
+;;   - in a reported FORM, every direct child spelled `old` is renamed (the call head, an
+;;     argument — they share the form's scope);
+;;   - a reported form with no such child is a macro that moved the reference deeper; its
+;;     one occurrence anywhere below is renamed when there is exactly one;
+;;   - anything else is returned as missed, for a human, rather than guessed at.
+;; One case the checker gets wrong: a form whose head is an UNRESOLVED macro reads to it as a
+;; call, so the names the macro binds come back as unbound references (`(defhtml greet
+;; (name) … name …)` with `defhtml` unimported reports `name` twice). A form headed by a name
+;; still unbound after the renames is therefore left alone — its places are missed.
+
+(defn- advance (at text)
+  "The `[line col]` (1-based, columns in characters) just past `text` when it starts at `at`."
+  (let (lines (string/split text "\n")
+        breaks (dec (count lines)))
+    (if (= breaks 0)
+      [(first at) (+ (second at) (count text))]
+      [(+ (first at) breaks) (inc (count (last lines)))])))
+
+(defn- quoting (kind in-quote?)
+  ;; whether the node a wrapper of `kind` holds is quoted data; `:frozen` (inside a form an
+  ;; unresolved macro heads) stays frozen through an unquote
+  (cond
+    (= in-quote? :frozen) :frozen
+    (includes? [:unquote :splice] kind) false
+    (includes? [:quote :quasi] kind) true
+    else in-quote?))
+
+(defn- form-head (kind kids)
+  "The spelling of a list's head symbol, or nil."
+  (let (head (first (seq/filter kids
+                      (fn (k) (not (includes? [:whitespace :comment] (node-kind k)))))))
+    (if (and (= kind :list) head (= (node-kind head) :symbol)) (node-payload head) nil)))
+
+(defn- kids-quoting (kind kids in-quote? opaque)
+  ;; how a container's kids are read: frozen under a head in `opaque`
+  (if (contains? opaque (form-head kind kids)) :frozen in-quote?))
+
+(check-allow :non-tail-recursion
+  (defn- occurrences (node name in-quote? opaque)
+    "How many live symbols spelled `name` are in `node`'s subtree — not quoted, and not under
+a head in `opaque`."
+    (let (kind (node-kind node)
+          payload (node-payload node))
+      (cond
+        (= kind :symbol) (if (and (not in-quote?) (= payload name)) 1 0)
+        (includes? *container-kinds* kind)
+          (let (inner (kids-quoting kind payload in-quote? opaque))
+            (fold payload 0 (fn (n kid) (+ n (occurrences kid name inner opaque)))))
+        (string? payload) 0
+        else (occurrences payload name (quoting kind in-quote?) opaque)))))
+
+(defn- emit (acc original written)
+  "`acc` with `written` output in place of `original`, the position advanced past `original`
+(reported places are positions in the original text)."
+  (assoc acc :at (advance (get acc :at) original) :out (cons written (get acc :out))))
+
+(defn- place-plan (node here in-quote? opaque)
+  "For a container at a reported place whose names are `here` (old → new): `[direct deep]`,
+the renames for its direct children and the ones to apply anywhere below."
+  (fold (keys here)
+    [{} {}]
+    (fn (plan name)
+      (let (kids (node-payload node)
+            direct? (any? kids
+                      (fn (kid) (and (= (node-kind kid) :symbol) (= (node-payload kid) name)))))
+        (cond
+          direct? [(assoc (first plan) name (get here name)) (second plan)]
+          (= (occurrences node name in-quote? opaque) 1)
+            [(first plan) (assoc (second plan) name (get here name))]
+          else plan)))))
+
+(check-allow :non-tail-recursion
+  (defn- rename-at-node (acc node want in-quote? direct deep)
+    "Walk one CST node: `want` maps a reported `[line col]` to its renames (old → new),
+`direct` holds the renames for this node as a direct child of a reported form, `deep` the
+ones for anything below one. `acc` carries `:at`, `:out` (reversed), `:hit` (the
+`[line col old]` places handled) and `:opaque`, the heads whose forms are left alone."
+    (let (kind (node-kind node)
+          payload (node-payload node)
+          at (get acc :at))
+      (cond
+        (= kind :symbol)
+          (let (here (get want at)
+                to (if in-quote?
+                     nil
+                     (or (get here payload) (get direct payload) (get deep payload))))
+            (if (nil? to)
+              (emit acc payload payload)
+              (let (done (emit acc payload to))
+                (if (get here payload)
+                  (assoc done :hit (conj (get done :hit) [(first at) (second at) payload]))
+                  done))))
+        (includes? *container-kinds* kind)
+          (let (inner-quote (kids-quoting kind payload in-quote? (get acc :opaque))
+                found (get want at)
+                here (if (and (not inner-quote) (map? found)) found nil)
+                plan (if here (place-plan node here in-quote? (get acc :opaque)) [{} {}])
+                handled (append (keys (first plan)) (keys (second plan)))
+                marked (fold handled
+                         acc
+                         (fn (a name)
+                           (assoc a :hit (conj (get a :hit) [(first at) (second at) name]))))
+                below (merge deep (second plan))
+                opened (emit marked (open-delim kind) (open-delim kind))
+                inner (fold payload
+                        opened
+                        (fn (a kid) (rename-at-node a kid want inner-quote (first plan) below))))
+            (emit inner (close-delim kind) (close-delim kind)))
+        (string? payload) (emit acc payload payload)
+        else
+          (let (sigil (get *wrapper-sigils* kind))
+            (when (nil? sigil)
+              (error "codemod: unknown CST node kind "
+                (pr-str kind)
+                " — add it to *wrapper-sigils* (or *container-kinds*); emitting it blind"
+                " would silently drop source text"))
+            (rename-at-node (emit acc sigil sigil) payload want (quoting kind in-quote?) {} deep))))))
+
+(defn cst-rename-at-text (text renames &optional (opaque #{}))
+  "`text` with symbols renamed only at the places a checker reported them: `renames` is a
+list of `[line col old new]`, `line`/`col` 1-based with columns in characters, as `nest check`
+reports an unbound reference — the reference itself, or the innermost form holding it. Answers
+`[text missed]`, `missed` the `[line col old new]` entries no single reference could be found
+for, which are left as they were. A parameter or a local spelled `old` is never touched,
+because the checker never reports one. `opaque` names heads whose forms are left alone —
+macros the checker could not resolve, whose bindings it reports as references.
+
+    (codemod/cst-rename-at-text \"(defn f (name) (str name))\" [])                   ;=> [\"(defn f (name) (str name))\" []]
+    (codemod/cst-rename-at-text \"(defn g (x) (old x))\" [[1 13 \"old\" \"new\"]])     ;=> [\"(defn g (x) (new x))\" []]"
+  (let (want (fold renames
+               {}
+               (fn (m r)
+                 (let (place [(nth r 0) (nth r 1)])
+                   (assoc m place (assoc (get m place {}) (nth r 2) (nth r 3))))))
+        done (rename-at-node {:at [1 1] :out nil :hit #{} :opaque opaque}
+               (reflect/parse-source text)
+               want
+               false
+               {}
+               {})
+        hit (get done :hit))
+    [(apply str (reverse (get done :out)))
+      (vec (seq/filter renames (fn (r) (not (contains? hit [(nth r 0) (nth r 1) (nth r 2)])))))]))
+
 ;; ---- moving definitions between modules (`nest move`) ------------------------------
 ;; Splitting a large module by hand is a rename wave in disguise: every definition cut out
 ;; of `from` and pasted into `to` leaves `from/NAME` (and `'from/NAME` in a keymap or a

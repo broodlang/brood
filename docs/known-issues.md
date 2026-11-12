@@ -96,28 +96,6 @@ module declares `mod/*x*`, and only the prelude (or an explicit root spelling) d
 ambient name. That would also have caught the `project-release/*…*` slip (ADR-714). It changes
 the meaning of bedit's 116 `defdyn`s, so it waits on a decision.
 
-## KI-385 — `nest check --fix-renames` rewrites local bindings that share the renamed name
-
-**Seen** 2026-11-12, applying ADR-716/718's renames to hatch. hatch calls a bare `name` that
-no longer resolves; the image search found one public module defining `name` (`node`) and
-planned `name → node/name`, and `codemod/cst-rename … :refs-only` then rewrote every symbol
-`name` in the project that is not a definition head, including parameters and `let`
-binders: `(defn mint-token (user-id node/name …))`, `(let (node/name (get part :name)) …)`.
-Nothing raised; a binder spelled `node/name` reads as a different name from its uses only
-where the rewrite missed one. The same applies to a ledgered bare rename.
-
-**Reproduction.**
-
-```
-(codemod/cst-rename-text "(defn f (name) (str name))" "name" "node/name" :refs-only)
-;=> "(defn f (node/name) (str node/name))"   — should be unchanged
-```
-
-**Fix direction.** A rename of a global must skip every symbol a binding form in scope binds
-(parameters, `let`/`letrec`/`loop` binders, destructuring, `fn` clauses, pattern variables),
-and the references under it. Until then, read a `--fix-renames` diff for binder lines before
-committing it, especially for a short bare name.
-
 ## KI-384 — `nest check` answers differently with `BROOD_CONTRACTS=1`
 
 **Seen** 2026-11-12. bedit's check is clean, but with `BROOD_CONTRACTS=1` it reports four
@@ -144,7 +122,9 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
-| KI-385 | **`nest check --fix-renames` rewrites local bindings that share the renamed name** — `codemod/cst-rename-text … :refs-only` is not scope-aware, so a parameter or `let` binder spelled like the old name is rewritten too | ⚠️ **open 2026-11-12** — one-line reproduction in the section; hit in hatch, undone by hand there |
+| KI-387 | **`nest check` dropped every unbound name in a branch it judged unreachable** — `check_if` skipped a dead branch outright, and "dead" rests on inferred types (a caller-derived parameter, a `match` whose patterns cannot meet its scrutinee), so a stale `bytes/concat` behind such a clause passed the check and raised at run time | ✅ **FIXED 2026-11-12** — a dead branch is still walked and keeps its unbound-symbol findings only (`check_dead_branch`). Guard: `scope_and_guards::an_unbound_name_in_a_branch_typed_dead_is_still_reported` (red with the skip back) |
+| KI-386 | **A function called only by itself was typed from its own self-call** — the caller-derived pass seeds only LIVE candidates, but each round derived every function with a site; `(defn f (y) (if y … (f y)))` typed `y` nil|false, the then branch went dead and nothing in it was checked | ✅ **FIXED 2026-11-12** — a round derives only the live candidates (`caller_derived_params`). Guard: `scope_and_guards::a_self_call_does_not_make_the_branch_beside_it_dead` (red without the filter) |
+| KI-385 | **`nest check --fix-renames` rewrote local bindings that share the renamed name** — the rewrite renamed every symbol spelled like the stale name, parameters and `let` binders included | ✅ **FIXED 2026-11-12** — only the places the checker reports are rewritten (`codemod/cst-rename-at-text`), and a form an unresolved macro heads is left for a human. Guards: `boot_check_and_renames::fix_renames_leaves_a_local_spelled_like_the_renamed_name_alone` (red with the old rewrite back), `codemod_test` § cst-rename-at-text; replaying hatch's ADR-716/718 migration reproduces the hand-fixed result. Was: open |
 | KI-384 | **`nest check` answers differently with `BROOD_CONTRACTS=1`** — four warnings in bedit's terminal.blsp only with contracts armed | ⚠️ **open 2026-11-12** — reproduction in the section; not reproduced in a small file; no gate runs that mode |
 | KI-383 | **A downstream root `defdyn` takes over a std module's setting of the same name** — an unqualified `defdyn` in a module declares a root ambient name, which then resolves every module's `*x*` to root | ⚠️ **open 2026-11-12** — the two live collisions fixed (lineedit `body-indent`, coverage `*instrumented*`); the language-level fix (module-scoped `defdyn`) waits on a decision |
 | KI-382 | **Under AddressSanitizer, a dozen JIT tier assertions fail on the suite's first try and pass on its retry** — `settle` reads `:bailed` or `:untried` where `:native` is pinned, and deopt counts run high | ✅ **FIXED 2026-11-10** — every bail read `native-depth-exceeded`: the native stack guard tripped on a frame on another stack (a `stacker` segment, common on a cold-cache first try under ASan); `c5177a2b4` re-stamps the limit for the frame's stack before deopting. Guards: `jit_runtime::support::stack_recheck_tests`. Was: open, cause unknown |

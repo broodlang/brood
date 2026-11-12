@@ -1474,29 +1474,70 @@ reaches is `nest check`/`nest test`'s business.
 ;;   2. **A name this project itself defines is never touched.** `nest rename` is NOT
 ;;      scope-aware: renaming `register` in hive also renamed hive's own sign-up handler,
 ;;      producing `(defn proc/register …)` — a reserved name, so the module stopped
-;;      defining anything at all. That cost a revert. Rewriting only REFERENCES
-;;      (`:refs-only`, so no `defn` head moves) removes half that hazard; declining a name
-;;      the project owns removes the other half.
+;;      defining anything at all. That cost a revert. Rewriting only the references the
+;;      checker REPORTED (so no `defn` head moves, and no parameter or `let` binder spelled
+;;      the same — KI-385) removes half that hazard; declining a name the project owns
+;;      removes the other half.
 ;;   3. **A `%`-private target is named, never applied.** `map-pairs` → `%map-pairs` has
 ;;      no hint precisely because the name was withdrawn on purpose. Printing the target
 ;;      ends the guesswork against `std/` — which was the actual complaint — without
 ;;      quietly rewriting a caller onto something the stdlib took away.
 
+(defn- unbound-name (d)
+  "The name diagnostic `d` reports unbound, or nil when it reports something else. The
+message may carry a trailing ` — hint`, so the name is the first word after the prefix."
+  (let (prefix "unbound symbol: "
+        msg (get d :message))
+    (when (string/starts-with? msg prefix)
+      ;; `index-of` answers -1, not nil, when the needle is absent.
+      (let (tail (string/substring msg (count prefix))
+            space (index-of tail " ")
+            nm (if (< space 0) tail (string/substring tail 0 space)))
+        (if (string/blank? nm) nil nm)))))
+
 (defn- unbound-names (diags)
-  "The set of every name `diags` reported unbound — bare and qualified alike. The
-diagnostic may carry a trailing ` — hint`, so the name is the first word after the prefix."
-  (let (prefix "unbound symbol: ")
-    (fold diags
-      #{}
-      (fn (acc d)
-        (let (msg (get d :message))
-          (if (not (string/starts-with? msg prefix))
-            acc
-            ;; `index-of` answers -1, not nil, when the needle is absent.
-            (let (tail (string/substring msg (count prefix))
-                  space (index-of tail " ")
-                  nm (if (< space 0) tail (string/substring tail 0 space)))
-              (if (string/blank? nm) acc (conj acc nm)))))))))
+  "The set of every name `diags` reported unbound — bare and qualified alike."
+  (fold diags #{} (fn (acc d) (let (nm (unbound-name d)) (if (nil? nm) acc (conj acc nm))))))
+
+(defn- fix-sites (diags targets)
+  "`{file [[line col old new] …]}`: every place `diags` reported a name `targets` (old → new)
+renames, by file — the places `codemod/cst-rename-at-text` rewrites."
+  (fold diags
+    {}
+    (fn (acc d)
+      (let (nm (unbound-name d)
+            to (if (nil? nm) nil (get targets nm)))
+        (if (nil? to)
+          acc
+          (assoc acc
+            (get d :file) (conj (get acc (get d :file) []) [(get d :line) (get d :col) nm to])))))))
+
+(defn- apply-fix-sites (sites opaque)
+  "Rewrite each file in `sites` (from `fix-sites`) at its reported places, leaving alone any
+form headed by a name in `opaque` (still unbound — an unresolved macro's bindings read as
+references); print each changed file and each place left. Answers the left places' count."
+  (fold (sort (keys sites))
+    0
+    (fn (missed file)
+      (let (before (file/slurp file)
+            [after left] (codemod/cst-rename-at-text before (get sites file) opaque))
+        (when (not (= before after))
+          (file/spit file after)
+          (io/puts (str "  changed: " file)))
+        (for (r left)
+          (io/puts (str "  by hand: "
+                     file
+                     ":"
+                     (nth r 0)
+                     ":"
+                     (nth r 1)
+                     ": "
+                     (nth r 2)
+                     " → "
+                     (nth r 3)
+                     " — no single reference to it in the form reported there, or under a"
+                     " head still unbound")))
+        (+ missed (count left))))))
 
 (defn- unbound-bare-names (diags)
   "The set of BARE names `diags` reported unbound. A QUALIFIED miss (`mod/foo`) is excluded:
@@ -1557,8 +1598,9 @@ the global table. A scan per name would be O(names × globals) against a table o
 (defn fix-renames (apply?)
   "Apply the unambiguous half of a rename wave's recovery. For each BARE name `nest check`
 reports unbound, find the single public `mod/name` that now defines it and rewrite this
-project's REFERENCES (never a definition head) to the qualified name. With `apply?` false,
-print the plan and change nothing. Returns the count of names left for a human.
+project's references to the qualified name — only at the places the checker reported, so a
+parameter or local spelled the same is never touched (KI-385). With `apply?` false, print the
+plan and change nothing. Returns the count of names and places left for a human.
 
 Declines — with the reason printed — a name this project itself defines, a name defined in
 more than one namespace, and a name that moved behind `%`. Backs `nest check --fix-renames`.
@@ -1600,16 +1642,22 @@ more than one namespace, and a name that moved behind `%`. Backs `nest check --f
                      (first p)
                      " → "
                      (second (second p))
-                     (or (nth (second p) 2 nil) "")))
-          (when apply? (codemod/cst-rename (first p) (second (second p)) :refs-only)))
+                     (or (nth (second p) 2 nil) ""))))
         (for (p skips) (io/puts (str "  skip: " (first p) " — " (second (second p)))))
-        (io/puts (str "fix-renames: "
-                   (count fixes)
-                   (if apply? " applied" " applicable")
-                   ", "
-                   (count skips)
-                   " left for you"))
-        (count skips)))))
+        ;; Only the places the checker reported are rewritten — never every symbol spelled
+        ;; the same, which also renamed parameters and `let` binders (KI-385).
+        (let (targets (fold fixes {} (fn (m p) (assoc m (first p) (second (second p)))))
+              still-unbound (fold (unbound-names diags)
+                              #{}
+                              (fn (acc nm) (if (contains? targets nm) acc (conj acc nm))))
+              missed (if apply? (apply-fix-sites (fix-sites diags targets) still-unbound) 0))
+          (io/puts (str "fix-renames: "
+                     (count fixes)
+                     (if apply? " applied" " applicable")
+                     ", "
+                     (+ (count skips) missed)
+                     " left for you"))
+          (+ (count skips) missed))))))
 
 ;; --- `nest check --suggest-sigs` — the `sig` adoption aid ---------------------
 ;;

@@ -1058,3 +1058,38 @@ fn a_type_of_equality_guards_like_the_predicate() {
         "table | {}"
     );
 }
+
+#[test]
+fn a_self_call_does_not_make_the_branch_beside_it_dead() {
+    // `y` is a public function's parameter: unknown. The only call the file holds is the
+    // function's own, from the else branch, where `y` is nil or false — which is no evidence
+    // about `y` at all. Read as evidence, it typed `y` nil|false, the then branch went dead,
+    // and nothing in it was checked: an unbound call and a type error went unreported.
+    let ws = file_warnings("(defn b2 (y) (if y (no-such (+ 1 \"s\")) (b2 y)))");
+    assert!(
+        ws.iter().any(|w| w.starts_with("unbound symbol: no-such")),
+        "the unbound call in the live branch must be reported: {ws:?}"
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("+") && w.contains("\"s\"")),
+        "the type error in the live branch must be reported: {ws:?}"
+    );
+}
+
+#[test]
+fn an_unbound_name_in_a_branch_typed_dead_is_still_reported() {
+    // A string never matches a vector pattern, so both clauses are dead by the checker's
+    // types — and a dead branch's types say nothing. Its names still do: `zz` raises the
+    // moment the inference behind "dead" is wrong, so it is reported, and nothing else is.
+    let ws = file_warnings(
+        "(defn top (buf) (match (str buf) ([:ok a] (+ a \"s\")) ([:incomplete] (zz buf))))",
+    );
+    assert!(
+        ws.iter().any(|w| w.starts_with("unbound symbol: zz")),
+        "the unbound call in a dead clause must be reported: {ws:?}"
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("+:")),
+        "a dead clause's type findings stay unreported: {ws:?}"
+    );
+}

@@ -102,7 +102,12 @@ pub(in crate::types::check) fn caller_derived_params(
         names.sort_by_key(|name| value::symbol_name_ref(*name));
         for name in names {
             let sites = collected.sites_of(name);
-            if collected.escaped(name) || sites.is_empty() {
+            // Only a LIVE candidate is derived: one whose only sites are its own recursion
+            // (or that escapes, or has none) is not in `live` and must stay unknown. Derived
+            // from its self-call alone, it took whatever the call's branch narrowed its
+            // argument to — `(if y … (f y))` typed `y` nil|false — and the branch beside the
+            // call went dead, unchecked: every warning in it was lost.
+            if !live.contains_key(&name) || collected.escaped(name) || sites.is_empty() {
                 continue;
             }
             let arity = sites[0].arity();

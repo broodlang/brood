@@ -5,6 +5,78 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-387 — `nest check` dropped every unbound name in a branch it judged unreachable ✅ closed 2026-11-12
+
+**Seen** 2026-11-12, replaying hatch's rename migration: four `bytes/concat` calls in
+`src/http/websocket.blsp` stayed unreported after every other stale name was fixed. Reduced:
+`(defn top (buf) (match (str buf) ([:ok a] a) ([:incomplete] (zz buf))))` reports nothing.
+
+**Cause.** `check_if` (which `match` and `cond` lower to) did not walk a branch whose narrowed
+scope is empty. "Empty" rests on inferred types: a caller-derived parameter, a return still at
+the joint fixpoint's floor, a scrutinee whose patterns cannot match it. In hatch, the only
+call site of `recv-frame-fill` is inside a `match` clause the derivation typed dead, so its
+arguments derived `never` and its whole body, both branches, went unchecked.
+
+**Fix.** A dead branch is walked and keeps only its unbound-symbol findings
+(`check_dead_branch`). Its type findings stay dropped, since they are about values the branch
+cannot hold; an unbound name is a fact about the name, and raises the moment the inference is
+wrong. **Guard:** `scope_and_guards::an_unbound_name_in_a_branch_typed_dead_is_still_reported`
+(red with the skip back).
+
+## KI-386 — A function called only by itself was typed from its own self-call ✅ closed 2026-11-12
+
+**Seen** 2026-11-12, beside KI-387: `(defn b2 (y) (if y (no-such (+ 1 "s")) (b2 y)))` reports
+nothing, neither the unbound call nor the type error.
+
+**Cause.** The caller-derived pass (ADR-341) seeds only the LIVE candidates, those with a site
+other than their own recursion, and `live_private_functions` says why: a function whose only
+sites are its own recursion would derive from them alone. But each round derived EVERY function
+with a site, live or not. `b2`'s self-call is in the else branch, where `y` is nil or false, so
+`y` derived nil|false, the then branch went dead, and nothing in it was checked.
+
+**Fix.** A round derives only the live candidates (`caller_derived_params`). **Guard:**
+`scope_and_guards::a_self_call_does_not_make_the_branch_beside_it_dead` (red without the filter).
+
+## KI-385 — `nest check --fix-renames` rewrote local bindings that share the renamed name ✅ closed 2026-11-12
+
+**Seen** 2026-11-12, applying ADR-716/718's renames to hatch. hatch calls a bare `name` that
+no longer resolves; the image search found one public module defining `name` (`node`) and
+planned `name → node/name`, and `codemod/cst-rename … :refs-only` then rewrote every symbol
+`name` in the project that is not a definition head, including parameters and `let`
+binders: `(defn mint-token (user-id node/name …))`, `(let (node/name (get part :name)) …)`.
+Nothing raised; a binder spelled `node/name` reads as a different name from its uses only
+where the rewrite missed one. The same applies to a ledgered bare rename.
+
+**Reproduction.**
+
+```
+(codemod/cst-rename-text "(defn f (name) (str name))" "name" "node/name" :refs-only)
+;=> "(defn f (node/name) (str node/name))"   — should be unchanged
+```
+
+**Fix direction.** A rename of a global must skip every symbol a binding form in scope binds
+(parameters, `let`/`letrec`/`loop` binders, destructuring, `fn` clauses, pattern variables),
+and the references under it. Until then, read a `--fix-renames` diff for binder lines before
+committing it, especially for a short bare name.
+
+**Fix** (2026-11-12). Scope is the checker's knowledge, and it already reports each unbound
+reference at the innermost form that holds it, after expansion. `--fix-renames` now rewrites
+only those places (`codemod/cst-rename-at-text`): a reported symbol; in a reported form, its
+direct children spelled the name; when a macro moved the reference deeper, its one occurrence
+below; anything else is printed as `by hand:` and left alone. One case the checker reports
+wrongly is excluded too: under a head that is itself still unbound (an unresolved macro,
+hatch's `defhtml` in a test that does not import it) the macro's own binders read as
+references, so such a form is left for a human.
+
+**Verified** by replaying hatch's ADR-716/718 migration from `5eb6cd5`: the result matches the
+hand-fixed `116d8e8` except for the hand-added `s:string`, with the `defhtml` template's two
+places reported. The replay also surfaced KI-386 and KI-387: four stale `bytes/concat` calls in
+`websocket.blsp` that the checker never reported.
+
+**Guards.** `boot_check_and_renames::fix_renames_leaves_a_local_spelled_like_the_renamed_name_alone`
+(a parameter, a `let` binder, a pattern variable and a `->`-moved reference; red with the
+spelling-based rewrite back), and `tests/codemod_test.blsp` § cst-rename-at-text.
+
 ## KI-370 — `nest check` reported a warning on `examples/life_bands.blsp` once, then never again ✅ closed 2026-11-12
 
 **Seen** 2026-11-05, once: a full `nest check std/ tests/ examples/` printed
