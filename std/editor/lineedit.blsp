@@ -602,8 +602,10 @@ next (newer) history entry (↓ / C-n).
 ;; indent), and a `{…}` map at + 1 so its keys align under the first key. That is the
 ;; whole rule; no per-form table is needed for it.
 
+;; No `sig`: a downstream `(defdyn *indent-width* …)` makes the name ambient for the
+;; checker, which then read this declaration as the root global's type (bedit's
+;; conventions.blsp). The literal types it anyway.
 (def- *indent-width* 2)
-(sig *indent-width* int)
 
 (defn- lineedit-indent-for (text pos)
   "The column a fresh line beginning at offset `pos` should be indented to: two past
