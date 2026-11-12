@@ -69,6 +69,13 @@
       (assert= (buffer-text rewritten) "1\n> hi")
       (assert= (editable-regions rewritten) [[4 6]])
       (assert= (editable-regions (undo rewritten)) [[4 4]])))
+  (test "a read-only buffer takes it and stays read-only"
+    (let (locked (set-read-only (insert-program-output (make-buffer "") 0 "10%\n") true)
+          inserted (insert-program-output locked 4 "more\n")
+          rewritten (replace-program-output inserted 0 3 "20%"))
+      (is (read-only? inserted))
+      (is (read-only? rewritten))
+      (assert= (buffer-text rewritten) "20%\nmore\n")))
   (test "nothing is recorded"
     (let (output (replace-program-output (insert-program-output (make-buffer "") 0 "a\n") 0 1 "b"))
       (assert= (buffer-text (undo output)) "b\n"))))

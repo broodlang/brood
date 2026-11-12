@@ -1743,11 +1743,12 @@ it too. What a revert needs, so a file read back costs none of the history befor
   "`state` with `[from, to)` (clamped) replaced by `text`, recording nothing and refusing
 nothing: point and mark past the range move by the change in length, one inside it lands at
 its start, its markers and text properties move as any edit moves them, its narrowing moves
-with the text (the regions after the range slide)."
+with the text (the regions after the range slide) and a read-only buffer — narrowed to no
+region — stays read-only."
   (let (regions (get state :editable)
         point (buffer-point state)
         mark (get state :mark)
-        open (dissoc (assoc state :undo-disabled true :read-only false) :editable)
+        open (dissoc (assoc state :undo-disabled true) :editable)
         lo (buffer-clamp 0 (buffer-length open) from)
         hi (buffer-clamp lo (buffer-length open) to)
         width (string/length text)
@@ -1758,16 +1759,16 @@ with the text (the regions after the range slide)."
                   (> position lo) lo
                   else position))
         replaced (replace-region open lo hi text properties)
-        placed (assoc (goto-char replaced (shift point))
-                 :mark (shift mark)
-                 :read-only (get state :read-only))
-        narrowed (if regions
-                   (buffer-adjust-editable
-                     (buffer-adjust-editable (assoc placed :editable regions) :delete lo hi)
-                     :insert
-                     lo
-                     width)
-                   placed))
+        placed (assoc (goto-char replaced (shift point)) :mark (shift mark))
+        narrowed (cond
+                   (nil? regions) placed
+                   ;; read-only: narrowed to no region, which nothing moves
+                   (empty? regions) (assoc placed :editable regions)
+                   else (buffer-adjust-editable
+                          (buffer-adjust-editable (assoc placed :editable regions) :delete lo hi)
+                          :insert
+                          lo
+                          width)))
     (if (get state :undo-disabled) narrowed (dissoc narrowed :undo-disabled))))
 
 (defn replace-program-output (buf:buffer from:int to:int text:string &optional (properties nil) -> buffer)
