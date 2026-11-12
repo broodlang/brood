@@ -176,6 +176,21 @@ fn unused_let_binding_lint() {
         file_warnings("(match (list 1 2) ([_a _b] :vec) (_ :other))").is_empty(),
         "`_`-prefixed match pattern variables are exempt"
     );
+    // A binder list is data, not a call: a local named after a binding form, first in the
+    // list, was read as that form, and the expression after it reported as its binder.
+    assert!(
+        file_warnings("(fn (m) (let (match (get m :a) match (if m 1 2)) match))").is_empty(),
+        "a let whose first local is `match` is not a match form"
+    );
+    assert!(
+        file_warnings("(fn (catch e) (list catch e))").is_empty(),
+        "a parameter list beginning with `catch` is not a catch form"
+    );
+    // …while what the list evaluates is still walked.
+    assert_eq!(
+        file_warnings("(let (f (fn (a b) a)) (f 1 2))"),
+        ["unused parameter: b"],
+    );
     // Nested let: inner binding used only in inner body.
     assert!(
         file_warnings("(let (x 1) (let (y x) y))").is_empty(),
