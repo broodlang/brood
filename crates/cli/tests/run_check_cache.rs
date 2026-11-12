@@ -18,6 +18,82 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// A hit replays only the modules the PROGRAM names. The walk also loads what those modules'
+/// own bodies name (ADR-370's transitive scan, for its inference); recorded too, every hit paid
+/// for them — once `os/user-name` called `seq/find`, a program reading `os/env` replayed `seq`,
+/// `map` and `table` on every run, ~15M instructions on nearly every benchmark row.
+///
+/// The precondition is asserted, not assumed: the miss must load a module the program does not
+/// name (read from `BROOD_IMAGE_TRACE`), or this test proves nothing — if `os` stops reaching
+/// one, pick a program whose module still does. Sabotage: record every load → red.
+#[test]
+fn a_hit_replays_only_the_modules_the_program_names() {
+    let sb = Sandbox::new("named");
+    std::fs::write(
+        sb.dir.join("build-image.blsp"),
+        "(require-one 'stdimage) (stdimage/build)\n",
+    )
+    .unwrap();
+    let built = Command::new(env!("CARGO_BIN_EXE_brood"))
+        .current_dir(&sb.dir)
+        .env("XDG_CACHE_HOME", sb.cache_home())
+        .env("BROOD_NO_CHECK", "1")
+        .env("BROOD_TIER", "2")
+        .env_remove("BROOD_NO_STDIMAGE")
+        .env_remove("BROOD_NO_PRELUDE_IMAGE")
+        .arg("build-image.blsp")
+        .output()
+        .expect("build the stdlib image");
+    assert!(
+        built.status.success(),
+        "building the sandbox's stdlib image failed:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let prog = sb.write("named.blsp", "(io/puts (string? (os/env \"HOME\")))\n");
+    let p = prog.to_str().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_brood"))
+        .current_dir(&sb.dir)
+        .env("XDG_CACHE_HOME", sb.cache_home())
+        .env("BROOD_NO_CRASH_REPORT", "1")
+        .env("BROOD_IMAGE_TRACE", "1")
+        .env("BROOD_TIER", "2")
+        .env_remove("BROOD_NO_CHECK")
+        .env_remove("BROOD_NO_CHECK_CACHE")
+        .env_remove("BROOD_NO_STDIMAGE")
+        .env_remove("BROOD_NO_PRELUDE_IMAGE")
+        .arg(p)
+        .output()
+        .expect("run brood");
+    let miss = String::from_utf8_lossy(&out.stderr).into_owned();
+    let loaded: Vec<&str> = miss
+        .lines()
+        .filter_map(|l| l.strip_prefix("[image] "))
+        .filter(|m| {
+            !m.is_empty()
+                && m.chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '/' || c == '-')
+        })
+        .collect();
+    assert!(
+        loaded.iter().any(|m| !["io", "os"].contains(m)),
+        "precondition: the walk must load a module the program does not name, or this test \
+         cannot see the filter — loaded {loaded:?}:\n{miss}"
+    );
+    let entries = sb.entries();
+    assert_eq!(entries.len(), 1, "{miss}");
+    let text = std::fs::read_to_string(&entries[0]).unwrap();
+    let recorded: Vec<&str> = text
+        .lines()
+        .nth(1)
+        .and_then(|l| l.strip_prefix("loads"))
+        .map(|l| l.split('\t').filter(|m| !m.is_empty()).collect())
+        .unwrap_or_default();
+    assert!(
+        recorded.iter().all(|m| ["io", "os"].contains(m)),
+        "a hit must replay only the modules the program names (io, os), recorded {recorded:?}"
+    );
+}
+
 const WARNING_PROGRAM: &str = "(defn f (x) (+ x 1))\n(io/puts (%string-length 3))\n";
 const WARNING_LINE: &str = "warning: %string-length: argument 1 expects string, got 3 (3)";
 

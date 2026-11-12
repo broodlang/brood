@@ -424,7 +424,31 @@
   (test "no OTHER data is callable — map/vector/set keep their hints"
     (assert-error (reflect/eval-string "({:a 1} :a)"))
     (assert-error (reflect/eval-string "([10 20] 1)"))
-    (assert-error (reflect/eval-string "(#{1 2} 1)"))))
+    (assert-error (reflect/eval-string "(#{1 2} 1)")))
+  ;; A literal `(:k x)` compiles to `get`'s inline probe, with `%keyword-get` as the fallback
+  ;; for whatever the probe does not answer — so a hot, native reader must give the keyword's
+  ;; answers, not `get`'s: a record's field or miss, a set's element, nil's default, and an
+  ;; error that names the KEYWORD.
+  (test "a hot compiled reader answers as the keyword does, error included"
+    (assert= [1 nil 3 nil :x nil nil] (recur-kw-read 3000 nil))
+    (check-allow :type-mismatch
+      (let (msg (try (kw-read-x [1 2]) (catch e (error-message e))))
+        (is (includes? msg ":x:"))
+        (is (includes? msg "map, record, set or nil"))))))
+
+(defrecord kw-pt (x y))
+(defn kw-read-x (c) (:x c))
+(defn recur-kw-read (n acc)
+  (if (= n 0)
+    acc
+    (recur-kw-read (- n 1)
+      [(kw-read-x {:x 1})
+        (kw-read-x {:y 2})
+        (kw-read-x (kw-pt 3 4))
+        (kw-read-x (kw-pt nil 4))
+        (kw-read-x #{:x})
+        (kw-read-x #{:z})
+        (kw-read-x nil)])))
 
 ;; ---- explicit concurrency / parallelism (spawn, send, copy-on-send) ----------
 ;; :isolated so these run against a private globals copy and don't contend with

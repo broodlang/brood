@@ -354,10 +354,21 @@ fn check_one_file(interp: &mut Interp, path: &str, src: &str, for_run: bool) -> 
             } else {
                 Vec::new()
             };
+            let referenced = if for_run {
+                brood::cli_support::run_check_referenced_modules(&interp.heap, &just_forms)
+            } else {
+                Default::default()
+            };
             let w = brood::types::check::check_file(&mut interp.heap, &just_forms);
             interp.heap.set_current_file(prev);
             if for_run {
-                brood::cli_support::run_check_cache_write(&interp.heap, src, &before, &w);
+                brood::cli_support::run_check_cache_write(
+                    &interp.heap,
+                    src,
+                    &before,
+                    &referenced,
+                    &w,
+                );
             }
             w
         }

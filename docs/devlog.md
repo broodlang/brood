@@ -1567,3 +1567,34 @@ unreported. A dead branch is now walked for its unbound names only. Guards:
 `a_self_call_does_not_make_the_branch_beside_it_dead` and
 `an_unbound_name_in_a_branch_typed_dead_is_still_reported`, each red with its fix removed.
 std/, tests/, examples/ and every downstream repo still check clean.
+
+2026-11-12 (the 0.43 → 0.51 slowdown). The refreshed Brood column read most rows 3–8% slower
+than at 0.43 and `regex` 34%. Instruction counts (images verified `:live` on both arms: a
+bisect's image builds evict the baseline's, which then boots from source at five times the
+cost) put it at a fixed per-run cost plus a per-call one, and three causes accounted for most
+of it. (1) The run pre-flight replays the modules its walk loaded. Since `os/user-name` began
+calling `seq/find`, any program reading `os/env` replayed `seq`, `map` and `table` (~15M
+instructions), and a program spelling a prelude name such as `seq/lmap` replayed `seq` (~10M).
+A hit now replays only the modules the program would load itself
+(`cli_support::run_check_referenced_modules`). (2) A keyword call `(:k m)` took the generic
+call path, which the JIT refuses (`call-mediated-boxed`), at ~2000 instructions a call over
+`(get m :k)`; `regex-opts-pattern` reads `(:fold? opts)` on every match. It now compiles to
+`get`'s `MapGet` probe with `%keyword-get` (the keyword's own rule) as the fallback, and
+`apply_keyword` no longer prints the keyword on every call. (3) Every `&optional` arm took
+`push_frame`; a frame whose omitted optionals all default to nil is just the args then nil,
+which every fast frame builds, so those calls now take them (`frame_is_args_then_nil`). The
+JIT's inline fast frame nils nothing and leaves the optionals to the caller, so the fast-link
+mirror admits only a call that supplies every optional to an arm with no flag slot
+(`frame_is_exactly_args`); the first cut gated it on the broader rule and thirteen std modules
+failed to load at tier 2 in release, which every test missed because the test profile compiles
+that path out and every whole-library load swallows a failing module.
+`scripts/load-every-module.blsp` now runs in CI's release job, and `every_module_loads.rs` on the
+test build. `regex`'s `opts` default to nil, and `MapGet` answers a nil receiver inline (a nil
+`opts` otherwise deopted until its arm latched off the JIT). Measured against 0.43 after:
+`pipeline` +5.1% (was +22%), `regex` +18% (was +32%), `strings` +6% (was +15%), `reduce` +10.7%
+(was +19%), most of the remaining rows within the startup growth, which is +11.7M instructions
+(8660 std bindings against 6859). `json` (+13%) and `base64` (+15%) are not yet explained.
+Guards: `a_hit_replays_only_the_modules_the_program_names`, the keyword-call semantics check at
+every tier, `an_optional_arm_takes_a_fast_frame_only_when_nothing_omitted_needs_a_default`,
+`optional_defaults_test`'s hot-call case and the load-every-module gate, each red with its
+change undone where it can be.

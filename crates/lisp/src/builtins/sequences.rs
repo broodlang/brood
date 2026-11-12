@@ -269,6 +269,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         hash_map,
     );
     primitives.def(
+        "%keyword-get",
+        Arity::range(2, 3),
+        Sig::with_rest(vec![any, kw], any, any),
+        &["coll", "k", "default"],
+        "What calling keyword k on coll answers — (k coll) or (k coll default): the value at k in a map or record, the element in a set, default for nil, a type error naming k for anything else. The fallback of a compiled keyword call, whose inline probe answers only a map's present value.",
+        keyword_get,
+    );
+    primitives.def(
         "%map-get",
         Arity::range(2, 3),
         Sig::with_rest(vec![fields_ty.clone(), any], any, any),
@@ -1704,6 +1712,17 @@ pub(super) fn registry_cas(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
 pub(super) fn registry_names(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let names: Vec<Value> = heap.registry_names().into_iter().map(Value::Sym).collect();
     Ok(heap.list(names))
+}
+
+/// `(%keyword-get coll k [default])` — `(k coll [default])`, by the one rule a called keyword
+/// has (`eval::apply_keyword`). A compiled 1-argument keyword call is a `PrimOp::MapGet` whose
+/// fallback head is this, so a call the inline probe does not answer — a record's or a plain
+/// map's miss, a set, nil, a wrong receiver — gets the keyword's own answer and error.
+pub(super) fn keyword_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let argv: Vec<Value> = std::iter::once(arg(args, 0))
+        .chain(args.get(2).copied())
+        .collect();
+    crate::eval::apply_keyword(heap, arg(args, 1), &argv)
 }
 
 /// `(%map-get m k [default])` — the value `k` maps to, or `default` (nil if

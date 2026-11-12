@@ -842,6 +842,13 @@ impl Drop for RawTermGuard {
 // the walk, and a hit `require`s them first — from the image, a millisecond — leaving the
 // runtime in the state a walk would have left it.
 //
+// Only the modules the PROGRAM names are recorded (`run_check_referenced_modules`). The walk
+// also loads, transitively, what those modules' own bodies name — for its inference, not the
+// program's (ADR-370's scan) — and replaying that made every hit pay for it: once `os/user-name`
+// called `seq/find`, a program that read `os/env` replayed `seq`, `map` and `table` on every run,
+// ~15M instructions, a fixed cost on nearly every benchmark row. A module only the walk wanted
+// loads lazily if the program ever reaches it, which is correct (KI-167).
+//
 // What it will NOT cache: a check that loaded a module from OUTSIDE the binary — a
 // `(:use foo)` found on the load-path — because that file's content is not in the key
 // and an edit to it must re-derive the verdict. `*features*` after the check names every
@@ -910,13 +917,75 @@ pub fn run_check_cache_replay_loads(interp: &mut Interp, loads: &[String]) {
     }
 }
 
+/// The modules a program would load itself: the prefix of every qualified symbol in `forms`
+/// that is not yet bound (`os/env` → `os`, `editor/buffer/point` → `editor/buffer`) — a bound
+/// one, a prelude function such as `seq/lmap` or a native such as `string/->number`, loads
+/// nothing when the program calls it — and every symbol in a `(:use …)`, `(:alias …)`,
+/// `(require …)` or `(require-one …)` form. Read BEFORE the walk. What a hit replays is held
+/// to this set (see the module comment): the walk also loads what it needs for its own
+/// inference — `seq` for a program that only spells `seq/lmap`, ~10M instructions replayed
+/// on every run of the `pipeline` benchmark row — and the program never needs that.
+pub fn run_check_referenced_modules(
+    heap: &crate::core::heap::Heap,
+    forms: &[crate::core::value::Value],
+) -> std::collections::HashSet<String> {
+    use crate::core::value::{self, Value};
+    let mut out = std::collections::HashSet::new();
+    let mut work: Vec<(Value, bool)> = forms.iter().map(|&f| (f, false)).collect();
+    while let Some((v, naming)) = work.pop() {
+        match v {
+            Value::Sym(s) => {
+                let name = value::symbol_name_ref(s);
+                if let Some(slash) = name.rfind('/').filter(|&slash| slash > 0) {
+                    if naming || heap.env_get(heap.global(), s).is_none() {
+                        out.insert(name[..slash].to_string());
+                    }
+                } else if naming {
+                    out.insert(name.to_string());
+                }
+            }
+            Value::Pair(_) => {
+                let items = heap.list_to_vec(v).unwrap_or_default();
+                let names_modules = match items.first() {
+                    Some(Value::Sym(h)) => {
+                        let h = value::symbol_name_ref(*h);
+                        h == "require" || h == "require-one"
+                    }
+                    Some(Value::Keyword(k)) => {
+                        let k = value::symbol_name_ref(*k);
+                        matches!(k.trim_start_matches(':'), "use" | "alias" | "require")
+                    }
+                    _ => false,
+                };
+                work.extend(
+                    items
+                        .into_iter()
+                        .map(|item| (item, naming || names_modules)),
+                );
+            }
+            Value::Vector(id) => work.extend(heap.vector(id).iter().map(|&item| (item, naming))),
+            Value::Map(id) => {
+                for (k, item) in heap.map_entries(id) {
+                    work.push((k, naming));
+                    work.push((item, naming));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Record the pre-flight's verdict for `src` — unless the check loaded a module from
 /// outside the binary (see the module comment), or there is nowhere to write. Best-effort:
 /// a cache that cannot be written is a check that runs next time, never an error.
+/// `referenced` is [`run_check_referenced_modules`] of the program: only a module it names
+/// is recorded for a hit to replay.
 pub fn run_check_cache_write(
     heap: &crate::core::heap::Heap,
     src: &str,
     features_before: &[String],
+    referenced: &std::collections::HashSet<String>,
     warnings: &[(Option<crate::error::Pos>, String)],
 ) {
     let Some(path) = run_check_cache_path(heap, src) else {
@@ -927,7 +996,7 @@ pub fn run_check_cache_write(
     }
     let loads: Vec<String> = crate::builtins::provided_features(heap)
         .into_iter()
-        .filter(|m| features_before.binary_search(m).is_err())
+        .filter(|m| features_before.binary_search(m).is_err() && referenced.contains(m))
         .collect();
     let mut text = String::from(RUN_CHECK_CACHE_MAGIC);
     text.push('\n');

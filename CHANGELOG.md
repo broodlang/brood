@@ -12,6 +12,18 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   is the separator and the divider's `:rect`, so a drag there resizes. Dividers carry `:seam`.
 
 **Fixed.**
+- **A run no longer pays for modules only its pre-flight check wanted.** A cached check replays
+  only the modules the program itself would load (an unbound qualified name, a `:use` or a
+  `require`), not what the check loaded for its own inference: once `os/user-name` called
+  `seq/find`, every program that read `os/env` replayed `seq`, `map` and `table` on every run,
+  about 15M instructions (~4 ms) on nearly every benchmark row.
+- **A keyword call compiles like `get`.** `(:k m)` with one argument is the same inline map probe
+  `(get m k)` is, falling back to the keyword's own rule (records, sets, nil, its error), so a
+  function that reads a field this way is no longer refused by the JIT (~2000 instructions a call).
+  `(get nil k)` and `(:k nil)` answer inline too.
+- **Calling an `&optional` function takes the fast call paths** when every optional it omits
+  defaults to nil (or none is omitted), where it always took the slow frame setup (~1300
+  instructions a call). `regex`'s options default to nil for that reason.
 - **`nest check --fix-renames` leaves a local alone.** It rewrites only the references the checker
   reported, so a parameter or `let` binder spelled like the renamed name is no longer renamed with
   it. A place it cannot match to one reference, or one under a macro the checker could not

@@ -325,9 +325,11 @@ fn eval_tail_loop(
 /// An integer-indexed collection is deliberately in that last group: `(:name deps)`
 /// where `deps` is a list of maps is the single most likely misuse of this feature
 /// (see ADR-164, which made the same shape loud for `get`).
-fn apply_keyword(heap: &mut Heap, kw: Value, argv: &[Value]) -> LispResult {
-    let shown = crate::syntax::printer::print(heap, kw);
+pub(crate) fn apply_keyword(heap: &mut Heap, kw: Value, argv: &[Value]) -> LispResult {
+    // Spelled only on the way to an error: printing it on every call cost a string
+    // allocation per `(:k m)`, the hot accessor this exists for.
     if argv.is_empty() || argv.len() > 2 {
+        let shown = crate::syntax::printer::print(heap, kw);
         return Err(LispError::type_err(format!(
             "{shown}: a keyword accessor takes 1 or 2 arguments, got {}",
             argv.len()
@@ -351,6 +353,7 @@ fn apply_keyword(heap: &mut Heap, kw: Value, argv: &[Value]) -> LispResult {
         other => {
             // Same shape as `LispError::wrong_type` — `who: expected …, got tag (val)`
             // — but built by hand so `who` is the keyword the caller wrote.
+            let shown = crate::syntax::printer::print(heap, kw);
             let got = crate::syntax::printer::print(heap, other);
             let tag = crate::core::value::tag(other).name();
             Err(LispError::type_err(format!(

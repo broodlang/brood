@@ -125,9 +125,10 @@ pub(super) fn emit_nil_locals(
         // A missing `&optional` default's flag is live at entry too: `push_frame` set it,
         // and the arm's prologue reads it to decide whether to run the default. Nilling it
         // here skipped every default, natively and again after a deopt, which re-runs this
-        // frame from the top. Only `push_frame` enters an arm with optionals (a direct
-        // native call refuses one, `vm_direct_eligible`), and it zero-fills the frame, so a
-        // flag it did not set is already nil.
+        // frame from the top. An arm with optionals is entered by `push_frame`, or by a fast
+        // frame that nils everything past the args (`CompiledArm::frame_is_args_then_nil`),
+        // so a flag nobody set is already nil. The JIT's inline fast frame nils nothing, so
+        // it never enters an arm with a flag or an omitted optional (`frame_is_exactly_args`).
         if arm.optional_flags.contains(&(slot as u32)) {
             continue;
         }

@@ -68,10 +68,12 @@ pub enum PrimOp {
     /// most of Brood. `get`'s own source calls its map branch "the hottest path in the
     /// language (4796 call sites)".
     ///
-    /// Inlines **only a present, non-nil value**; a non-map receiver, an absent key and a
-    /// stored `nil` all defer to the real `get`, which owns the set / string / integer-index
-    /// branches and the `%lookup-miss` path (a record whose contents are not its fields
-    /// resolves its miss through the `Lookup` ability — policy that stays in Brood).
+    /// Inlines what `get` answers without policy (`Heap::map_get_inline`): a map's value or
+    /// its miss (nil), a record's present non-nil field, and nil for a nil receiver; every
+    /// other receiver, and a record's miss, defers to the real `get`, which owns the set /
+    /// string / integer-index branches and the `%lookup-miss` path (a record whose contents
+    /// are not its fields resolves its miss through the `Lookup` ability — policy that stays
+    /// in Brood). A compiled keyword call `(:k m)` is this op too, deferring to `%keyword-get`.
     ///
     /// `BROOD_NO_MAPGET=1` disables the lowering (`debug_flags::map_get_lowering`).
     MapGet,
@@ -1052,6 +1054,39 @@ pub(crate) fn gsite_reservation(gsites: u32, sites: u32) -> u32 {
 }
 
 impl CompiledArm {
+    /// Whether a frame for a call with `argc` arguments is just those arguments followed by
+    /// nil — what every fast frame builds (the native link, the VM's in-place call, the
+    /// VM→native direct entry) instead of running `push_frame`. True for a fixed arity
+    /// called with exactly it, and for an `&optional` arm when every optional the call
+    /// omits defaults to nil: `push_frame` would place the provided ones in order and leave
+    /// the rest nil, with no flag to set. A real default (a flag slot that `push_frame` sets
+    /// for its prologue) or a `&` rest list (a list to build) needs the slow path. Before
+    /// optional arms were admitted they always took it, at ~1300 instructions a call
+    /// (`regex/matches?`, every `&optional` std function).
+    #[inline]
+    pub(crate) fn frame_is_args_then_nil(&self, argc: usize) -> bool {
+        self.rest_slot.is_none()
+            && argc >= self.nrequired
+            && argc <= self.nrequired + self.noptional
+            && self.optional_flags[argc - self.nrequired..]
+                .iter()
+                .all(|&flag| flag == u32::MAX)
+    }
+
+    /// [`Self::frame_is_args_then_nil`] for the JIT's INLINE fast frame, which nils nothing:
+    /// it sets the roots length past the frame and leaves the callee's prologue to nil its
+    /// own locals (`entry::emit_nil_locals`), which starts above the parameters AND the
+    /// optionals and skips every optional's flag slot — slots `push_frame` fills. So the call
+    /// must fill every optional itself (`argc` covers them all) and the arm must have no flag
+    /// slot at all (no optional with a real default), or a stale value in the roots buffer's
+    /// spare capacity reads as an argument, or as a flag that runs a default over a provided
+    /// one. The fast-link mirror (`vm_cache`'s `fast_link_from_entry`) publishes only these.
+    #[inline]
+    pub(crate) fn frame_is_exactly_args(&self, argc: usize) -> bool {
+        self.rest_slot.is_none()
+            && argc == self.nrequired + self.noptional
+            && self.optional_flags.iter().all(|&flag| flag == u32::MAX)
+    }
     /// The local the call at `pos` calls, when its head is a local (`local_call_heads`).
     pub(crate) fn local_call_head(&self, pos: crate::error::Pos) -> Option<Symbol> {
         self.local_call_heads

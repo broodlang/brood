@@ -86,6 +86,30 @@
     (assert= 5000050000 (sum-down 100000 0))
     (assert= 5000050010 (sum-down 100000 10))))
 
+(defn opt-nil (a &optional b c) (if (nil? c) (if (nil? b) 0 1) 2))
+
+(defn opt-mixed (a &optional (b 10) c) (if (nil? c) b (+ b c)))
+
+(defn hot-calls (i acc)
+  ;; Native callers re-entered thousands of times, so every call path into an optional arm
+  ;; is taken: the fast frames (`frame_is_args_then_nil`) for an omitted nil default or a
+  ;; full argument list, `push_frame` for an omitted real default.
+  (if (>= i 20000)
+    acc
+    (hot-calls (+ i 1)
+      (+ acc
+        (opt-nil i)
+        (opt-nil i 1)
+        (opt-nil i 1 2)
+        (opt-mixed i)
+        (opt-mixed i 2)
+        (opt-mixed i 2 3)))))
+
+(describe "&optional arms on the fast call paths"
+  (test "an omitted nil default reads nil and a real default runs, however hot the call"
+    ;; per round: 0 + 1 + 2 + 10 + 2 + 5 = 20
+    (assert= 400000 (hot-calls 0 0))))
+
 (describe "&optional defaults across processes"
   :isolated (test "workers calling one function with and without its optionals agree"
     (let (me (self))

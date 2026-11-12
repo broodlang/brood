@@ -260,15 +260,15 @@ pub(crate) fn jit_dispatch_call(
             let installed =
                 !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED;
             // `nslots > 0` mirrors `jit_lower_arm`'s return-via-`roots[base]` requirement;
-            // no-optional/no-rest keeps the inline frame setup trivial and infallible. The
+            // a frame that is the args then nil (`frame_is_args_then_nil`: no rest, no omitted
+            // optional with a real default) keeps the inline frame setup trivial and infallible. The
             // epoch guard mirrors `jit_tier`. Over the recursion cap → skip (the slow path
             // drains on the VM via `jit_force_vm`).
             // Not a receive loop: its native code is the driver's alone (ADR-410).
             if installed
                 && arm.nslots > 0
                 && !arm.receive_at_head
-                && arm.noptional == 0
-                && arm.rest_slot.is_none()
+                && arm.frame_is_args_then_nil(argc)
                 && !link_over_cap
                 && arm.compile_epoch.load(Acquire) == epoch
                 // Tier work only an entry does goes the slow way below, through the driver.

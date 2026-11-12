@@ -707,6 +707,17 @@ pub(crate) fn resolve_prim(heap: &Heap, h: Symbol) -> Option<(PrimOp, [usize; 2]
             _ => None,
         };
     }
+    // A compiled keyword call `(:k m)` (see `compile_keyword_call`): the same probe as `get`,
+    // with the keyword's own fallback. Accepted while `%keyword-get` is the kernel native.
+    if value::symbol_is(h, "%keyword-get") {
+        if !crate::diagnostics::debug_flags::map_get_lowering() {
+            return None;
+        }
+        return match v.unpack() {
+            ValueRef::Native(_) => Some((PrimOp::MapGet, [0, 1])),
+            _ => None,
+        };
+    }
     if value::symbol_is(h, "nth") {
         return match v.unpack() {
             ValueRef::Fn(id) if id.region() == crate::core::value::PRELUDE => {
@@ -1057,6 +1068,33 @@ fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -
         ValueRef::Pair(_) => {
             let items = heap.list_to_vec(form).ok()?;
             let head = *items.first()?;
+            // `(:k m)` — a keyword called on one argument, the accessor shape (ADR-165).
+            // Compiled as a call it took the generic call path, and the JIT refuses an arm
+            // holding a call it cannot mediate (`call-mediated-boxed`): every function that
+            // read a field this way stayed on the VM, ~2000 instructions a call more than the
+            // same read spelled `(get m :k)`. It compiles to `get`'s own probe instead; the
+            // fallback head is `%keyword-get`, so whatever the probe does not answer runs the
+            // keyword's rule, its record and set answers and its error included.
+            if let ValueRef::Keyword(_) = head.unpack()
+                && items.len() == 2
+            {
+                let h = value::intern("%keyword-get");
+                if scope.lookup(h).is_none()
+                    && let Some((PrimOp::MapGet, [0, 1])) = resolve_prim(heap, h)
+                {
+                    let a = compile_node(heap, items[1], scope, false)?;
+                    return Some(Node::Prim2 {
+                        op: PrimOp::MapGet,
+                        a: Box::new(a),
+                        b: Box::new(const_node(heap, head)),
+                        map: [0, 1],
+                        head: h,
+                        guard: AtomicU64::new(heap.global_epoch()),
+                        pos: heap.form_pos_only(form),
+                        broot: false,
+                    });
+                }
+            }
             if let ValueRef::Sym(h) = head.unpack() {
                 if value::symbol_is(h, kw::IF) {
                     // (if cond then) or (if cond then else)

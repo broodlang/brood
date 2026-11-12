@@ -510,6 +510,18 @@ jobs:
       - name: Check .blsp formatting (nest format)
         run: ./target/release/nest format --check
 
+      # Every std module loads in one process, from source, on the native tier — on the
+      # RELEASE build, the only build with the JIT's inline fast frame (the test profile's
+      # debug assertions compile it out). Every other whole-library load swallows a module
+      # that fails: the first cut of the optional-argument fast frame (caught locally) dropped
+      # thirteen modules out of the stdlib image with every test green. See the script's header.
+      - name: Every std module loads (release, native tier, from source)
+        env:
+          BROOD_TIER: 2
+          BROOD_NO_STDIMAGE: 1
+          BROOD_NO_CHECK: 1
+        run: ./target/release/brood scripts/load-every-module.blsp
+
       # STATIC pass over the same trees, and it is not redundant with the two RUN-based gates
       # below. Those execute the programs, so they only ever see a dead name on a path a run
       # actually takes; this resolves every name in the file. With both of them green on

@@ -198,9 +198,7 @@ pub(crate) fn vm_direct_eligible(heap: &Heap, arm: &CompiledArm, argc: usize) ->
     // A receive loop's native code is entered only by the driver (ADR-410): its park leaves
     // native code as a re-run from ip 0, which only the driver can take.
     if heap.jit_force_vm
-        || arm.nrequired != argc
-        || arm.noptional != 0
-        || arm.rest_slot.is_some()
+        || !arm.frame_is_args_then_nil(argc)
         || !arm.capture_names.is_empty()
         || arm.receive_at_head
     {

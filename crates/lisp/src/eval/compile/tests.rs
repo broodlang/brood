@@ -3000,3 +3000,63 @@ fn nothing_stores_over_an_arms_code_but_the_latch() {
         offenders.join("\n")
     );
 }
+
+/// Which calls may skip `push_frame` into an `&optional` arm. A fast frame is the args then
+/// nil, so it stands in for `push_frame` exactly when nothing omitted needs a default run:
+/// every omitted optional defaults to nil (`frame_is_args_then_nil`). The JIT's INLINE fast
+/// frame nils nothing — the callee's prologue nils its locals above the optionals and skips
+/// their flags — so it also needs the call to supply every optional and the arm to have no
+/// flag slot (`frame_is_exactly_args`, the fast-link mirror's gate). The release-only inline
+/// path itself is covered by `scripts/load-every-module.blsp` in CI's release job, which went
+/// red (13 modules) with the mirror gated on the first predicate.
+#[test]
+fn an_optional_arm_takes_a_fast_frame_only_when_nothing_omitted_needs_a_default() {
+    let mut interp = crate::Interp::new();
+    let mut arm_of = |source: &str, name: &str, argc: usize| {
+        interp.eval_str(source).expect("define the function");
+        let f = interp.eval_str(name).expect("read the function back");
+        let crate::core::value::ValueRef::Fn(id) = f.unpack() else {
+            panic!("{name} is not a closure");
+        };
+        let arm = compiled_arm_for(&interp.heap, id, argc).expect("the arm compiles");
+        (
+            arm.frame_is_args_then_nil(argc),
+            arm.frame_is_exactly_args(argc),
+        )
+    };
+    // fixed arity: both, at its arity
+    assert_eq!(
+        arm_of("(defn fp-fixed (a b) b)", "fp-fixed", 2),
+        (true, true)
+    );
+    // nil-default optional, omitted: args then nil, but not exactly the args
+    assert_eq!(
+        arm_of("(defn fp-nil (a &optional b) b)", "fp-nil", 1),
+        (true, false)
+    );
+    assert_eq!(
+        arm_of("(defn fp-nil (a &optional b) b)", "fp-nil", 2),
+        (true, true)
+    );
+    // a real default, omitted: neither — `push_frame` must set its flag
+    assert_eq!(
+        arm_of("(defn fp-def (a &optional (b 10)) b)", "fp-def", 1),
+        (false, false)
+    );
+    // a real default, supplied: args then nil (its flag stays nil), but the arm has a flag
+    // slot the inline frame would leave stale
+    assert_eq!(
+        arm_of("(defn fp-def (a &optional (b 10)) b)", "fp-def", 2),
+        (true, false)
+    );
+    // a nil default omitted after a supplied real default
+    assert_eq!(
+        arm_of("(defn fp-mix (a &optional (b 10) c) [b c])", "fp-mix", 2),
+        (true, false)
+    );
+    // a rest list must be built
+    assert_eq!(
+        arm_of("(defn fp-rest (a & r) r)", "fp-rest", 1),
+        (false, false)
+    );
+}

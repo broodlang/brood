@@ -1113,9 +1113,7 @@ pub(crate) fn exec_chunk(
                 if !*tail
                     && !direct_native
                     && let Some((ref farm, _, _)) = fast
-                    && farm.nrequired == argc
-                    && farm.noptional == 0
-                    && farm.rest_slot.is_none()
+                    && farm.frame_is_args_then_nil(argc)
                 {
                     if drop_base + argc < n {
                         for k in 0..argc {

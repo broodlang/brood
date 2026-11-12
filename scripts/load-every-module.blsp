@@ -1,0 +1,24 @@
+;; Load every baked-in std module, one after another, in this one process, and raise naming
+;; each one that failed. Every other whole-library load (`stdimage/build`, the surface ledger,
+;; the image differential) swallows a failing module, so a module that stops loading reads as
+;; a smaller library rather than as a failure.
+;;
+;;     BROOD_TIER=2 BROOD_NO_STDIMAGE=1 brood scripts/load-every-module.blsp
+;;
+;; Run from source and at the native tier, the load is long enough for the loader's own
+;; helpers to go native and call each other on the native paths. CI runs it on the RELEASE
+;; build (the `examples` job), the one place the JIT's inline fast frame exists: the test
+;; profile keeps debug assertions, which compile that path out. `cli/tests/every_module_loads.rs`
+;; runs it on the test build.
+
+(def failures
+  (fold (reflect/builtin-modules)
+    []
+    (fn (acc m)
+      (let (failed (check-allow :discarded-catch
+                     (try (do (require-one m) nil) (catch e (error-message e)))))
+        (if failed (conj acc (str m ": " failed)) acc)))))
+
+(io/puts (str "loaded " (count (reflect/builtin-modules)) " modules, " (count failures) " failed"))
+(when (not (empty? failures))
+  (error "std modules failed to load:\n" (string/join failures "\n")))

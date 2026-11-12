@@ -583,6 +583,9 @@ a literal, and the engine caches its compiled form under exactly this text."
         src))))
 
 ;; ---- does it match? -------------------------------------------------------------
+;; `opts` defaults to nil, the empty map, rather than `{}`: every option is read with a keyword,
+;; which answers the same for both, and an omitted optional that defaults to nil keeps the call
+;; on the fast frame (`CompiledArm::frame_is_args_then_nil`) — `{}` was ~1300 instructions a call.
 ;; Every string search takes an optional `opts` map, as the rope searches do: `{:fold? true}`
 ;; ignores case, the same as writing `(?i)` at the pattern's start — which is all it does, so
 ;; a string search and a rope search under the same flag agree character for character.
@@ -591,7 +594,7 @@ a literal, and the engine caches its compiled form under exactly this text."
   "`pattern` with what `opts` asks for written into it: `(?i)` in front under `:fold?`."
   (if (= true (:fold? opts)) (str "(?i)" pattern) pattern))
 
-(defn match? (s:string pattern:any &optional (opts:map {}) -> bool)
+(defn match? (s:string pattern:any &optional opts: (or map nil) -> bool)
   "True if `pattern` matches anywhere in `s` (a search). `^`/`$` anchor to the
 start/end of the whole string, so e.g. `(match? name \"\\\\.blsp$\")` tests a suffix.
 `opts`: `{:fold? true}` ignores case (as `(?i)` does), here and in every string search.
@@ -601,7 +604,7 @@ start/end of the whole string, so e.g. `(match? name \"\\\\.blsp$\")` tests a su
     (regex/match? \"Password:\" \"(?i)password:\")    ;=> true"
   (%regex-match? (regex-search-src (regex-opts-pattern pattern opts)) s))
 
-(defn matches? (s:string pattern:any &optional (opts:map {}) -> bool)
+(defn matches? (s:string pattern:any &optional opts: (or map nil) -> bool)
   "True if `pattern` matches the **entire** string `s` (anchored both ends).
 
     (regex/matches? \"a1b22\" \"[0-9]+\")   ;=> false   ; the WHOLE string must match"
@@ -609,7 +612,7 @@ start/end of the whole string, so e.g. `(match? name \"\\\\.blsp$\")` tests a su
 
 ;; ---- where, and with which groups -----------------------------------------------
 
-(defn find (s:string pattern:any &optional (opts:map {}) -> (or nil (map keyword any)))
+(defn find (s:string pattern:any &optional opts: (or map nil) -> (or nil (map keyword any)))
   "The leftmost match of `pattern` in `s`, or nil. The match is
 `{:start :end :text :groups [...]}` — half-open char offsets, the matched text, and
 one entry per `(...)` group in the pattern (each itself `{:start :end :text}`, or
@@ -625,7 +628,7 @@ Leftmost-first, like Perl and unlike POSIX: of two matches starting at the same
 place, the one the pattern's own alternation and greediness prefer wins."
   (%regex-find (regex-search-src (regex-opts-pattern pattern opts)) s 0))
 
-(defn find-all (s:string pattern:any &optional (opts:map {}) -> (vector (map keyword any)))
+(defn find-all (s:string pattern:any &optional opts: (or map nil) -> (vector (map keyword any)))
   "Every non-overlapping match of `pattern` in `s`, left to right, as a vector of the
 maps `find` returns (empty when there are none). Scanning resumes at each match's
 end, and steps one character past an EMPTY match so a pattern that can match nothing
@@ -687,7 +690,7 @@ false). Memoised by the pattern and its flags."
         (table/put regex-rope-cache key src)
         src))))
 
-(defn rope-find (r pattern from &optional (opts {}))
+(defn rope-find (r pattern from &optional opts)
   "The first non-empty match of `pattern` in rope `r` starting at or after char index
 `from`, as the map [[find]] answers (`{:start :end :text :groups}`, char offsets into the
 rope), or nil. Searches the rope in place: the cost is the distance to the match, not the
@@ -706,7 +709,7 @@ the text past it (Emacs's BOUND, what a search confined to a region wants; ADR-5
     (regex/rope-find (text/string-> \"foo bar\") \"o$\" 0 {:bound 3})               ;=> nil"
   (%rope-regex-find r (regex-rope-src pattern opts) from (= true (:empty? opts)) (:bound opts)))
 
-(defn rope-find-backward (r pattern before &optional (opts {}))
+(defn rope-find-backward (r pattern before &optional opts)
   "The non-empty match of `pattern` in rope `r` that starts LAST while ending at or before
 char index `before` — Emacs's `re-search-backward` — as the map [[find]] answers, or nil.
 Reads backward from `before`, so the cost is the distance to the match. `opts` as
@@ -717,7 +720,7 @@ Reads backward from `before`, so the cost is the distance to the match. `opts` a
     (get (regex/rope-find-backward (text/string-> \"foo boo\") \"o+\" 7) :start)      ;=> 6"
   (%rope-regex-rfind r (regex-rope-src pattern opts) before (= true (:empty? opts))))
 
-(defn rope-count (r pattern from limit &optional (opts {}))
+(defn rope-count (r pattern from limit &optional opts)
   "`[n resume]`: how many non-overlapping, non-empty matches of `pattern` in rope `r`, scanned
 from char index `from`, START before `limit`. `resume` is where the next slice begins — the
 first match starting at or past `limit`, or the first point past it where no match is in
@@ -732,7 +735,7 @@ responsive. `(rope-count r p 0 at)` is how many matches start before `at`. `opts
     (regex/rope-count (text/string-> \"ab ab ab\") \"ab\" 0 6)     ;=> [2 6]"
   (%rope-regex-count r (regex-rope-src pattern opts) from limit))
 
-(defn rope-spans (r pattern from to &optional (opts {}))
+(defn rope-spans (r pattern from to &optional opts)
   "Every non-overlapping, non-empty match of `pattern` in rope `r` that starts in char range
 `[from, to)`, as a vector of `[start end]` (an end may lie past `to`) — at most 4096. What
 highlighting the matches in a window wants: the cost is the window, not the rope. `opts` as
@@ -848,7 +851,7 @@ empty pattern `\"\"` is an absent prefix or suffix.
         (str acc (string/substring s at (get m :start)) piece)
         replacement))))
 
-(defn replace (s pattern replacement &optional (opts {}))
+(defn replace (s pattern replacement &optional opts)
   "Replace every non-overlapping match of `pattern` in `s`. `replacement` is either a
 template string, where `$0` is the whole match, `$1`..`$9` are the groups and `$$` is
 a literal dollar, or a FUNCTION of the match map — which is the one to reach for when
@@ -870,7 +873,7 @@ A group that did not participate expands to the empty string."
         (get m :end)
         (into acc [(string/substring s at (get m :start))])))))
 
-(defn split (s:string pattern:any &optional (opts:map {}) -> any)
+(defn split (s:string pattern:any &optional opts: (or map nil) -> any)
   "Split `s` on every non-overlapping match of `pattern`, returning the pieces between
 them — the regex counterpart of `string/split`, which separates on a literal.
 

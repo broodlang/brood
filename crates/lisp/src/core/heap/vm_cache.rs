@@ -904,6 +904,10 @@ impl Heap {
             Value::Record { fields, .. } => {
                 self.map_get(fields, k).filter(|v| !matches!(v, Value::Nil))
             }
+            // `nil` is the empty collection: `(get nil k)` and `(:k nil)` are nil for every
+            // key. Declined, an optional `opts` left nil deopted every read of it until the
+            // arm latched off the JIT (`regex-opts-pattern`, `table-read-declined`).
+            Value::Nil => Some(Value::nil()),
             _ => None,
         }
     }
@@ -920,6 +924,8 @@ impl Heap {
             Value::Record { fields, .. } => {
                 self.map_get(fields, k).filter(|v| !matches!(v, Value::Nil))
             }
+            // `(get nil k default)` is `default`, as `map_get_inline` answers nil for nil.
+            Value::Nil => Some(default),
             _ => None,
         }
     }
@@ -1009,8 +1015,8 @@ impl Heap {
 
     /// Fast-link probe for the JIT's native-to-native call path — like
     /// [`Self::vm_call_ic_probe`] but does the *entire* fast-link validation (sym/argc/
-    /// epoch match, native code installed + epoch-current, simple arm: `nslots > 0`, no
-    /// optional, no rest) inside the borrow and returns only **Copy** data: the native
+    /// epoch match, native code installed + epoch-current, simple arm: `nslots > 0` and a
+    /// frame that is exactly the args — `CompiledArm::frame_is_exactly_args`) inside the borrow and returns only **Copy** data: the native
     /// entry pointer, the frame `nslots`, and the captured env. **No `Arc` clone** — the
     /// one real atomic-RMW the hot recursive call (`fib` &c.) otherwise pays per call
     /// (~30M times). Returns `None` when not fast-linkable; the caller falls back to the
@@ -1219,7 +1225,9 @@ impl Heap {
             return None;
         }
         // A receive loop's native code is the driver's alone (ADR-410): never fast-linked.
-        if arm.nslots == 0 || arm.noptional != 0 || arm.rest_slot.is_some() || arm.receive_at_head {
+        // `frame_is_exactly_args`, not `frame_is_args_then_nil`: what this publishes is also
+        // what the JIT's inline fast frame enters, which leaves the optionals to the caller.
+        if arm.nslots == 0 || !arm.frame_is_exactly_args(argc as usize) || arm.receive_at_head {
             return None;
         }
         // A closure WITH captures can't fast-link: the fast-link / fast-frame frame setup
