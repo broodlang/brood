@@ -104,7 +104,7 @@
     (assert= (string/substring "hello" 0) "hello")
     (assert= (string/substring "hello" 5) ""))
   (test "two-arg form is equivalent to passing the length"
-    (assert= (string/substring "hello" 2) (string/substring "hello" 2 (string/length "hello")))))
+    (assert= (string/substring "hello" 2) (string/substring "hello" 2 (count "hello")))))
 
 (describe "string/display-width"
   (test "ASCII is one cell per character (like string-length)"
@@ -116,7 +116,7 @@
     (assert= (string/display-width "中文") 4))
   (test "a multi-codepoint emoji cluster is one double-width glyph"
     ;; string-length counts codepoints (>1); string/display-width counts cells (2).
-    (is (> (string/length "👨‍👩‍👧") 1))
+    (is (> (count "👨‍👩‍👧") 1))
     (assert= (string/display-width "👨‍👩‍👧") 2))
   (test "a layout past the caps raises instead of wrapping or aborting"
     ;; From i64::MAX the column sum wrapped to i64::MIN; a 10^11 tab width asked the
@@ -148,7 +148,7 @@
     (let (s "ab😀c👨‍👩‍👧d"
           boundaries (fold (string/->graphemes s)
                        [0]
-                       (fn (acc g) (conj acc (+ (last acc) (string/length g))))))
+                       (fn (acc g) (conj acc (+ (last acc) (count g))))))
       (is (every? boundaries
             (fn (i)
               (let (prefix (string/substring s 0 i))
@@ -261,7 +261,7 @@
 (describe "grapheme-count / grapheme-at / substring-graphemes"
   (test "cluster count differs from the codepoint count"
     (assert= (string/grapheme-count gr-s) 4)
-    (assert= (string/length gr-s) 5)
+    (assert= (count gr-s) 5)
     (assert= (string/grapheme-count "") 0)
     (assert= (string/grapheme-count "abc") 3))
   (test "grapheme-at reads the i-th cluster whole"
@@ -419,23 +419,23 @@
   ;; as the "is this pure ASCII" test for char↔byte conversion, as wrong SEARCH results on
   ;; non-ASCII text specifically.
   (test "string-length counts code points, not bytes"
-    (assert= 5 (string/length "hello"))
-    (assert= 5 (string/length "héllo"))
-    (assert= 3 (string/length "a😀b"))
-    (assert= 0 (string/length ""))
-    (assert= 2 (string/length "😀😀")))
+    (assert= 5 (count "hello"))
+    (assert= 5 (count "héllo"))
+    (assert= 3 (count "a😀b"))
+    (assert= 0 (count ""))
+    (assert= 2 (count "😀😀")))
   (test "the length is right for a freshly built string, not just a literal"
-    (assert= 11 (string/length (str "héllo" " " "wörld")))
-    (assert= 4 (string/length (string/substring "héllo wörld" 0 4)))
-    (assert= 3 (string/length (apply str (seq/repeat 3 "é"))))
+    (assert= 11 (count (str "héllo" " " "wörld")))
+    (assert= 4 (count (string/substring "héllo wörld" 0 4)))
+    (assert= 3 (count (apply str (seq/repeat 3 "é"))))
     ;; 1300 chars / 2600 BYTES, and over SHARED_BLOB_THRESHOLD — so this also covers the
     ;; shared-blob construction path, where the count is measured through the blob rather
     ;; than an inline String.
-    (assert= 1300 (string/length (apply str (seq/repeat 1300 "é")))))
+    (assert= 1300 (count (apply str (seq/repeat 1300 "é")))))
   (test "the length survives a round-trip through another process"
     ;; A send deep-copies into the receiver's heap, rebuilding the slot — and so its count.
     (let (me (self))
-      (spawn (send me [:len (string/length "héllo 😀 wörld")]))
+      (spawn (send me [:len (count "héllo 😀 wörld")]))
       (assert= 13 (receive ([:len n] n) (after 5000 :timeout)))))
 
   ;; `substring` takes an ASCII fast path (char index == byte offset → a direct slice)
@@ -447,7 +447,7 @@
   (test "substring matches a char-level reference over every range"
     (let (ref-sub (fn (s i j) (apply str (take (drop (string/->list s) i) (- j i))))
           chk (fn (s)
-                (let (n (string/length s))
+                (let (n (count s))
                   (every? (range 0 (inc n))
                     (fn (i)
                       (every? (range i (inc n))
@@ -477,7 +477,7 @@
   (test "search on non-ASCII text agrees with the char count"
     ;; If the ASCII flag were computed wrongly, these would return byte offsets.
     (let (s "héllo wörld héllo")
-      (assert= 17 (string/length s))
+      (assert= 17 (count s))
       (assert= 12 (index-of s "héllo" 1))
       (assert= 12 (string/last-index-of s "héllo"))
       (assert= 7 (index-of s "ö"))))
@@ -578,8 +578,8 @@
     (assert= (string/pad-left "toolong" 3) "toolong")
     (assert= (string/pad-right "toolong" 3) "toolong"))
   (test "pad-* are exact-width at the boundary"
-    (assert= (string/length (string/pad-left "ab" 2)) 2)
-    (assert= (string/length (string/pad-right "ab" 5)) 5)))
+    (assert= (count (string/pad-left "ab" 2)) 2)
+    (assert= (count (string/pad-right "ab" 5)) 5)))
 
 (describe "->fixed (fixed-decimal rendering)"
   (test "renders exactly n decimal places"
@@ -758,14 +758,14 @@
 
 (describe "long multi-byte strings (indexed char<->byte conversion)"
   (test "every char index agrees with the code-point reference"
-    (assert= (into [] (map (range 0 (string/length mb-text)) (fn (i) (string/char-at mb-text i))))
+    (assert= (into [] (map (range 0 (count mb-text)) (fn (i) (string/char-at mb-text i))))
       mb-chars))
   (test "substring from a rising start is the reference tail"
     (assert= (into [] (map [0 1 31 32 33 100 495] (fn (i) (string/substring mb-text i (+ i 5)))))
       (into [] (map [0 1 31 32 33 100 495] (fn (i) (apply str (seq/subvec mb-chars i (+ i 5))))))))
   (test "substring to the end, and the whole string"
     (assert= (string/substring mb-text 497) "漢🙂x")
-    (assert= (string/substring mb-text 0 (string/length mb-text)) mb-text))
+    (assert= (string/substring mb-text 0 (count mb-text)) mb-text))
   (test "an incremental scan finds every occurrence at its char index"
     ;; `🙂` is char 3 of each 5-char unit. This is the `inc-scan` sweep row's shape.
     (assert= (into [] (mb-scan mb-text "🙂" 0 nil))
@@ -834,10 +834,10 @@
   (test "one character in, one character out — which `string/lower` does NOT guarantee"
     ;; `İ` (U+0130) lowercases to two characters in full Unicode. A search that folded a
     ;; document with `string/lower` would land every match after it one column left.
-    (assert= (string/length (string/lower "İ")) 2)
-    (assert= (string/length (string/fold-case "İ")) 1)
+    (assert= (count (string/lower "İ")) 2)
+    (assert= (count (string/fold-case "İ")) 1)
     (doseq (s (list "İstanbul" "ÅNGSTRÖM" "straße" "ΣΟΦΟΣ" "日本語" "a1[]"))
-      (assert= (string/length (string/fold-case s)) (string/length s)))))
+      (assert= (count (string/fold-case s)) (count s)))))
 
 (describe "string/has-upper?"
   (test "true only when a character actually has a lower-case form it is not in"

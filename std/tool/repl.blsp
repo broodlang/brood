@@ -209,7 +209,7 @@ registration order, the new one last). The extension seam tools use to add comma
 
 (defn- repl-meta? (line)
   "True when `line` is a recognised `,cmd` meta-command (a leading `,` + a registered name)."
-  (and (> (string/length line) 0)
+  (and (> (count line) 0)
     (= (string/char-at line 0) ",")
     (let ([cmd _] (repl-meta-parts (string/substring line 1)))
       (not (nil? (repl-command-for cmd))))))
@@ -315,7 +315,7 @@ forms into the eval rather than fail cleanly."
 line, so a multi-paragraph doc doesn't turn one search hit into a screenful."
   (let (line (first (string/split (or s "") "\n"))
         max 96)
-    (if (> (string/length line) max) (str (string/substring line 0 max) "…") line)))
+    (if (> (count line) max) (str (string/substring line 0 max) "…") line)))
 
 (defn- repl-meta-expand (expr all)
   "Print `expr` macroexpanded — fully when `all`, one step otherwise — syntax-coloured
@@ -696,7 +696,7 @@ Returns `{:eof false :history h}`."
                      {:eof false :history h2})))
     (cond
       (repl-meta? form) (do (repl-run-meta form) (remember))
-      (not (repl-content? form 0 (string/length form) false)) {:eof false :history history}
+      (not (repl-content? form 0 (count form) false)) {:eof false :history history}
       else (do (repl-eval form) (remember)))))
 
 (defn- repl-read-eval-interactive (history)
@@ -725,7 +725,7 @@ complete, echoing the prompt only when stdout is a TTY. Recurses on an incomplet
               (io/write "error: incomplete input at end of input\n" :to *err*))
             {:eof true :history history})
         (and (= acc "") (repl-meta? line)) (do (repl-run-meta line) {:eof false :history history})
-        (and (= acc "") (not (repl-content? line 0 (string/length line) false)))
+        (and (= acc "") (not (repl-content? line 0 (count line) false)))
           {:eof false
            :history history}
         else

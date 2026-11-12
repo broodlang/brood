@@ -29,7 +29,7 @@
     (assert= (doc-catalog/category-of "match") :patterns)
     (assert= (doc-catalog/category-of "assoc") :maps))
   (test "a qualified name takes its module's category"
-    (assert= (doc-catalog/category-of "string/length") :strings)
+    (assert= (doc-catalog/category-of "string/upper") :strings)
     (assert= (doc-catalog/category-of "path/join") :filesystem)
     (assert= (doc-catalog/category-of "editor/buffer/insert") :other))
   (test "a kernel primitive is placed by the kernel table"
@@ -95,7 +95,7 @@
 
 (describe "doc catalogue: across processes"
   :isolated (test "workers derive the same categories as the parent"
-    (let (names ["+" "spawn" "cons" "last" "string/length" "no-such-name-xyzzy"]
+    (let (names ["+" "spawn" "cons" "last" "count" "no-such-name-xyzzy"]
           expected (map names doc-catalog/category-of)
           results (concurrently 8 (fn (_) (map names doc-catalog/category-of))))
       (assert= (count results) 8)

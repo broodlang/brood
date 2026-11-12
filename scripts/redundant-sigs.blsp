@@ -26,16 +26,14 @@ checker infers verbatim that stays anyway, because `brood file`'s pre-flight che
 for the inference on every run (KI-150). Listed nowhere, removed never."
   (let (before (string/substring text 0 (math/max 0 (dec line-start)))
         nl (string/last-index-of before "\n")
-        previous (string/trim (string/substring before
-                                (if (< nl 0) 0 (inc nl))
-                                (string/length before))))
+        previous (string/trim (string/substring before (if (< nl 0) 0 (inc nl)) (count before))))
     (and (string/starts-with? previous ";") (includes? previous "kept for cost"))))
 
 (defn- sig-spans (text)
   "`[start end name]` for every top-level-looking `(sig NAME …)` form in `text`: the
 char range of the whole form (balanced parens from the `(sig`) and the declared name.
 A sig under a `kept for cost` comment (KI-150) is not a candidate."
-  (let (n (string/length text))
+  (let (n (count text))
     (letrec (scan (fn (i acc)
                     (let (at (index-of text "(sig " i))
                       (if (< at 0)
@@ -79,14 +77,14 @@ A sig under a `kept for cost` comment (KI-150) is not a candidate."
     (fn (e)
       (let (n (:name e)
             bare (let (i (string/last-index-of n "/"))
-                   (if (< i 0) n (string/substring n (inc i) (string/length n)))))
+                   (if (< i 0) n (string/substring n (inc i) (count n)))))
         (or (= n name) (= bare name))))))
 
 (defn- blank-span (text start end)
   "`text` with `[start end)` replaced by spaces — the form gone, every position kept."
   (str (string/substring text 0 start)
     (string/repeat " " (- end start))
-    (string/substring text end (string/length text))))
+    (string/substring text end (count text))))
 
 (defn- check-file (path)
   (let (text (file/slurp path)
@@ -129,10 +127,10 @@ A sig under a `kept for cost` comment (KI-150) is not a candidate."
     text
     (fn (t [start end _])
       (let (ls (line-start-of t start)
-            after (if (and (< end (string/length t)) (= "\n" (string/substring t end (inc end))))
+            after (if (and (< end (count t)) (= "\n" (string/substring t end (inc end))))
                     (inc end)
                     end))
-        (str (string/substring t 0 ls) (string/substring t after (string/length t)))))))
+        (str (string/substring t 0 ls) (string/substring t after (count t)))))))
 
 (defn- strict-count (path)
   "How many strict findings `nest check --strict` reports for `path` alone — the gate a
@@ -162,7 +160,7 @@ hands its caller, and without it `(+ bol target)` reads `number`. Only the gate 
                   {}
                   (fn (acc l)
                     (let (path (first (string/split l ":"))
-                          tail (string/substring l (inc (string/length path)) (string/length l))
+                          tail (string/substring l (inc (count path)) (count l))
                           name (nth (string/split tail " ") 1 ""))
                       (assoc acc path (cons name (get acc path '())))))))
     (doseq (kv (%map-pairs by-file))

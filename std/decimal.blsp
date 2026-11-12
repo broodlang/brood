@@ -1,7 +1,7 @@
 ;; std/decimal.blsp — exact, arbitrary-precision base-10 decimals.
 ;;
 ;; The operations are kernel primitives (`crates/lisp/src/builtins/numeric.rs`), registered
-;; under this module's name the way `string/length` and `bit/and` are: Rust supplies the
+;; under this module's name the way `count` and `bit/and` are: Rust supplies the
 ;; mechanism, the namespace is Brood's. This file declares the namespace.
 ;;
 ;; `decimal?` stays bare, with every other type predicate — a predicate belongs beside

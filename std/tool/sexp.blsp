@@ -476,7 +476,7 @@ the new open — paredit's `wrap-round` for any delimiter pair (`wrap-square`, `
            (string/substring text ns ne)
            close
            (string/substring text ne))
-          (+ ns (string/length open))]))))
+          (+ ns (count open))]))))
 
 (defn point-wrap-round (text point)
   "Wrap the form at or after `point` in a fresh `( … )`, point landing just inside the
@@ -497,7 +497,7 @@ the selection IS the form the user means.
      (string/substring text lo hi)
      close
      (string/substring text hi))
-    (+ lo (string/length open))])
+    (+ lo (count open))])
 
 (defn point-transpose (text:string point:any -> (or nil (vector any)))
   "Interchange the sexp before `point` with the one after it, point landing just past both
@@ -536,7 +536,7 @@ that newline — not through its line index, which also breaks lines at a form f
 CR, where this asks for a `\\n` alone."
   (if (rope? text)
     (text/skip-forward text at "\n" false)
-    (let (newline (index-of text "\n" at)) (if (< newline 0) (string/length text) newline))))
+    (let (newline (index-of text "\n" at)) (if (< newline 0) (count text) newline))))
 
 ; list spans lines → kill to end of line
 (defn point-kill-end (text point)

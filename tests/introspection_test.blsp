@@ -328,7 +328,7 @@
     (assert= (reflect/expr-type "1") "1")
     (assert= (reflect/expr-type ":score") ":score")
     (assert= (reflect/expr-type "(+ 1 2)") "3")
-    (assert= (reflect/expr-type "(+ 1 (string/length (str 1)))") "int[1..]"))
+    (assert= (reflect/expr-type "(+ 1 (count (str 1)))") "int[1..]"))
 
   (test "the type follows the call, not the arguments"
     (assert= (reflect/expr-type "(str 1 2)") "string"))
@@ -376,11 +376,11 @@
 ;; mid-edit is not on disk, and neither is one form a live evaluator just ran.
 (describe "source-signatures"
   (test "a definition's inferred signature, in source syntax"
-    (let (sigs (reflect/source-signatures "(defn ixs-len (s) (string/length s))")
+    (let (sigs (reflect/source-signatures "(defn ixs-len (s) (%string-length s))")
           hit (first sigs))
       (assert= (count sigs) 1)
       (assert= (:name hit) "ixs-len")
-      ;; `string/length` is never negative (ADR-350).
+      ;; a string's length is never negative (ADR-350).
       (assert= (:sig hit) "(string -> (int 0 _))")
       (assert= (:declared? hit) false)
       (assert= (:informative? hit) true)))

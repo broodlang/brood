@@ -31,7 +31,7 @@ spellings of one instant.")
     (if (< n 0)
       (str "-" (dt-zero-pad (- n) (- width 1)))
       (let (s (str n)
-            pad (- width (string/length s)))
+            pad (- width (count s)))
         (if (> pad 0) (str (string/repeat "0" pad) s) s)))))
 (sig dt-zero-pad (int int -> string))
 
@@ -278,7 +278,7 @@ milliseconds.
 %H hour (00-23), %M minute (00-59), %S second (00-59), %f ms (000-999), %% literal %.
 
     (datetime/format (datetime/parse-date \"2026-08-27\") \"%Y/%m/%d\")   ;=> \"2026/08/27\""
-  (dt-fmt-loop dt fmt 0 (string/length fmt) ""))
+  (dt-fmt-loop dt fmt 0 (count fmt) ""))
 
 ;; ---- parsing ----------------------------------------------------------------
 
@@ -343,7 +343,7 @@ normalising to a March date).
   ;; `(first (string/split s "Z"))` threw away everything after the FIRST Z, so
   ;; "12:00:00Zjunk" parsed as 12:00:00. Only a trailing Z is a UTC designator.
   (or (cond
-        (string/ends-with? s "Z") (dt-parse-time-str (string/substring s 0 (- (string/length s) 1)))
+        (string/ends-with? s "Z") (dt-parse-time-str (string/substring s 0 (- (count s) 1)))
         (>= (index-of s "Z") 0) nil
         else (dt-parse-time-str s))
     (failure "datetime/parse-time: not HH:MM:SS[.mmm][Z]: " (pr-str s))))
@@ -366,8 +366,8 @@ normalising to a March date).
   "The signed milliseconds a zone designator denotes — `+02:00`, `-05:30`, `+0200`, `+02` —
   or nil when it is not one. `Z` never reaches here; `parse-time` consumes it."
   (let (sign (if (string/starts-with? o "-") -1 1)
-        body (string/substring o 1 (string/length o))
-        n (string/length body)
+        body (string/substring o 1 (count o))
+        n (count body)
         ;; Checked by SHAPE, and before the colon is removed. Stripping it first let "+2:0"
         ;; collapse to "20" and parse as +20:00 — a string that means nothing accepted as a
         ;; specific, wrong offset, which is worse than the nil this was meant to stop
@@ -410,7 +410,7 @@ produces is UTC.
             (let (t (parse-time time-part))
               (when (and (not (failure? d)) (not (failure? t))) (date+time d t)))
             (let (t (parse-time (string/substring time-part 0 oi))
-                  off (dt-parse-offset-ms (string/substring time-part oi (string/length time-part))))
+                  off (dt-parse-offset-ms (string/substring time-part oi (count time-part))))
               ;; subtract: a local time east of UTC names an EARLIER UTC instant
               (when (and (not (failure? d)) (not (failure? t)) off)
                 (add (date+time d t) (- off))))))))

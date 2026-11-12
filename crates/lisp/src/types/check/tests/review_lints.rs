@@ -207,7 +207,7 @@ fn a_qualified_name_read_for_its_load_before_a_statement_is_not_flagged() {
         0,
         "{w:?}"
     );
-    let call_syntax = file_warnings("(defn f (s) (do string/length(s) 1))");
+    let call_syntax = file_warnings("(defn f (s) (do %string-length(s) 1))");
     assert_eq!(
         count_containing(&call_syntax, "evaluated here and discarded"),
         1,
@@ -219,11 +219,11 @@ fn a_qualified_name_read_for_its_load_before_a_statement_is_not_flagged() {
 
 #[test]
 fn a_type_misuse_inside_a_try_body_is_reported() {
-    let w = file_warnings("(defn f () (try (string/length 6) (catch e e)))");
-    assert_eq!(count_containing(&w, "string/length"), 1, "{w:?}");
-    let handler = file_warnings("(defn f () (try 1 (catch e (string/length 6))))");
+    let w = file_warnings("(defn f () (try (%string-length 6) (catch e e)))");
+    assert_eq!(count_containing(&w, "%string-length"), 1, "{w:?}");
+    let handler = file_warnings("(defn f () (try 1 (catch e (%string-length 6))))");
     assert_eq!(
-        count_containing(&handler, "string/length"),
+        count_containing(&handler, "%string-length"),
         1,
         "{handler:?}"
     );
@@ -232,9 +232,9 @@ fn a_type_misuse_inside_a_try_body_is_reported() {
 #[test]
 fn error_testing_forms_still_provoke_their_failure_quietly() {
     let w = file_warnings(
-        "(defmodule t (:use test)) (defn f () (assert-error (string/length 6)) (error-of (string/length 6)))",
+        "(defmodule t (:use test)) (defn f () (assert-error (%string-length 6)) (error-of (%string-length 6)))",
     );
-    assert_eq!(count_containing(&w, "string/length"), 0, "{w:?}");
+    assert_eq!(count_containing(&w, "%string-length"), 0, "{w:?}");
     let unbound = file_warnings("(defmodule t (:use test)) (defn f () (error-of (no-such-fn 1)))");
     assert_eq!(
         count_containing(&unbound, "no-such-fn"),

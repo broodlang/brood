@@ -408,7 +408,7 @@ collection, and the lever is what the process keeps alive, not the code that ran
 
 (defn- ui-abbrev (s)
   "`s` cut to 72 characters for a trace line (an input can carry a paste or a task reply)."
-  (if (> (string/length s) 72) (str (string/substring s 0 72) "…") s))
+  (if (> (count s) 72) (str (string/substring s 0 72) "…") s))
 
 (defn- ui-interruptible (ceiling thunk)
   "`(thunk)` inside an interrupt window (ADR-491, `proc/interruptible`), with `ceiling` ms
@@ -486,7 +486,7 @@ itself, a vector by its leading keyword — and its second, when that is one too
     (editor/ui/ui-input-tag \"x\")   ;=> \"x\""
   (cond
     (keyword? input) input
-    (string? input) (if (> (string/length input) 16) :string input)
+    (string? input) (if (> (count input) 16) :string input)
     (record? input) (record-id input)
     (and (vector? input) (not (empty? input)) (keyword? (first input)))
       (if (and (> (count input) 1) (keyword? (second input)))

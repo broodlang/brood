@@ -312,7 +312,7 @@ own declared type is disjoint from `x`'s, while deferring on a dynamic value
 - A declared sig is consulted **first** — ahead of primitive / curated / inferred
   sigs — in the call-check path (`walk`) and in `expr_ty` (for the result type).
   So `(foo "x")` is flagged against the declared params, and
-  `(string/length (foo 3))` against the declared result.
+  `(string/upper (foo 3))` against the declared result.
 - Arity falls back to the declared param count when the callee isn't otherwise
   resolvable (a file-local `defn` the read-only checker can't inspect).
 
@@ -467,7 +467,7 @@ decides the check.
 - **Slice 12 — return types + value-position globals.** A `(sig f (P… -> R))` checks the
   body's last form yields a value consistent with `R` (`(sig f (int -> string))` with body
   `(+ x 1)` flags — `number ∩ string = ⊥`). And `expr_ty` now surfaces a declared global's
-  type, so `(string/length g)` with `(sig g int)` is caught.
+  type, so `(string/upper g)` with `(sig g int)` is caught.
 - **Slice 13 — precise sig-param returns.** A `(sig …)`-typed parameter carries its *exact*
   contract type, so returning one where it's *merely wider* than `R` is caught:
   `(sig f (number -> int)) (defn f (x) x)` flags. This is the first diagnostic the

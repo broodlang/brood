@@ -481,10 +481,7 @@ shebang. The version suffix is kept (`python3`), a trailing newline and argument
     (editor/layers/shebang-interpreter \"echo hi\")                  ;=> nil"
   (if (not (string/starts-with? line "#!"))
     nil
-    (let (words (seq/reject (string/split (string/trim (string/substring line
-                                                         2
-                                                         (string/length line)))
-                              " ")
+    (let (words (seq/reject (string/split (string/trim (string/substring line 2 (count line))) " ")
                   (fn (w) (= w "")))
           ;; `string?` on the word itself, not `empty?` on the list: both reject the same
           ;; input, but only this one narrows `(first words)` from `nil | string` for the

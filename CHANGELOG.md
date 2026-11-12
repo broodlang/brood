@@ -18,7 +18,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   completion read dark on dark and the bar showed only around it.
 
 **Breaking: duplicates and doubled prefixes (ADR-718).**
-- `bytes/length`, `text/length` and `table/count` are removed: use `count`.
+- `bytes/length`, `text/length`, `table/count` and `string/length` are removed: use `count`.
+  `nest check --fix-renames` rewrites a qualified `string/length`; a bare `length` under
+  `(:use string)` is reported unbound, naming `count`.
 - `decimal/number->` is removed: use `decimal/of`, which now takes a ratio too. On a float,
   the two gave different answers; `decimal/of`'s shortest round-trip form (`0.1` → `0.1M`)
   is the one kept.
@@ -29,6 +31,9 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   read, are now private; the editor watchdog defaults are set through the app model's keys.
 - Fixed: `eval-server` silenced the test runner's progress output by binding a global the
   runner never read.
+- Fixed: `nest check` read a private helper's typed parameter as whatever its body demanded
+  when the helper was passed as a value, so `(defn- f (w:string) (count w) …)` typed `w` as any
+  countable and widened `f`'s result.
 
 **Breaking: `regex` and `fuzzy` take the subject first (ADR-717). Read every call: it does not
 raise.**

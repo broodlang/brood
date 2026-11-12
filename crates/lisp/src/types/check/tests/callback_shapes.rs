@@ -18,14 +18,14 @@ fn has(ws: &[String], needle: &str) -> bool {
 fn a_keyword_callback_types_as_its_accessor() {
     let ws = file_warnings(
         "(sig bad ((list (record :x int)) -> any))\n\
-         (defn bad (ps) (string/length (first (map ps :x))))\n\
+         (defn bad (ps) (%string-length (first (map ps :x))))\n\
          (sig good ((list (record :x string)) -> any))\n\
-         (defn good (ps) (string/length (or (first (map ps :x)) \"\")))",
+         (defn good (ps) (%string-length (or (first (map ps :x)) \"\")))",
     );
     assert!(
         has(
             &ws,
-            "string/length: argument 1 expects string, got nil | int"
+            "%string-length: argument 1 expects string, got nil | int"
         ),
         "`(map ps :x)` over int fields is a list of ints: {ws:?}"
     );
@@ -38,7 +38,7 @@ fn a_named_callback_is_held_to_the_element_it_is_handed() {
         "(sig bad ((vector string) -> any))\n\
          (defn bad (xs) (map xs inc))\n\
          (sig good ((vector string) -> any))\n\
-         (defn good (xs) (map xs string/length))",
+         (defn good (xs) (map xs %string-length))",
     );
     assert!(
         has(
@@ -47,21 +47,25 @@ fn a_named_callback_is_held_to_the_element_it_is_handed() {
         ),
         "{ws:?}"
     );
-    assert_eq!(ws.len(), 1, "`string/length` over strings is clean: {ws:?}");
+    assert_eq!(
+        ws.len(),
+        1,
+        "`%string-length` over strings is clean: {ws:?}"
+    );
 }
 
 #[test]
 fn a_composed_callback_is_checked_at_both_ends_and_between_its_stages() {
     let ws = file_warnings(
         "(sig bad ((vector string) -> any))\n\
-         (defn bad (xs) (map xs (comp string/length inc)))\n\
+         (defn bad (xs) (map xs (comp %string-length inc)))\n\
          (sig good ((vector string) -> any))\n\
-         (defn good (xs) (map xs (comp inc string/length)))",
+         (defn good (xs) (map xs (comp inc %string-length)))",
     );
     assert!(
         has(
             &ws,
-            "comp: inc returns number, but string/length takes string"
+            "comp: inc returns number, but %string-length takes string"
         ),
         "the stage chain is broken: {ws:?}"
     );
@@ -72,7 +76,7 @@ fn a_composed_callback_is_checked_at_both_ends_and_between_its_stages() {
     assert_eq!(
         ws.len(),
         2,
-        "`(comp inc string/length)` over strings is clean: {ws:?}"
+        "`(comp inc %string-length)` over strings is clean: {ws:?}"
     );
 }
 
@@ -80,14 +84,14 @@ fn a_composed_callback_is_checked_at_both_ends_and_between_its_stages() {
 fn apply_holds_the_applied_function_to_what_it_spreads() {
     let ws = file_warnings(
         "(sig bad ((list int) -> any))\n\
-         (defn bad (xs) (apply string/length xs))\n\
+         (defn bad (xs) (apply %string-length xs))\n\
          (sig good ((list string) -> any))\n\
-         (defn good (xs) (apply string/length xs))",
+         (defn good (xs) (apply %string-length xs))",
     );
     assert!(
         has(
             &ws,
-            "apply: string/length takes string at position 1, but is handed nil | int"
+            "apply: %string-length takes string at position 1, but is handed nil | int"
         ),
         "{ws:?}"
     );
@@ -111,7 +115,7 @@ fn a_record_collection_with_its_own_iteration_is_not_judged_by_its_fields() {
 fn a_destructured_tag_narrows_its_sibling() {
     let ws = strict_warnings(
         "(sig f ((or (tuple :ok int) (tuple :err string)) -> int))\n\
-         (defn f (r) (let ([tag v] r) (if (= tag :ok) (inc v) (string/length v))))",
+         (defn f (r) (let ([tag v] r) (if (= tag :ok) (inc v) (%string-length v))))",
     );
     assert!(
         ws.is_empty(),
@@ -119,10 +123,10 @@ fn a_destructured_tag_narrows_its_sibling() {
     );
     let ws = strict_warnings(
         "(sig f ((or (tuple :ok int) (tuple :err string)) -> int))\n\
-         (defn f (r) (let ([tag v] r) (if (= tag :ok) (string/length v) 0)))",
+         (defn f (r) (let ([tag v] r) (if (= tag :ok) (%string-length v) 0)))",
     );
     assert!(
-        has(&ws, "string/length: argument 1 expects string, got int"),
+        has(&ws, "%string-length: argument 1 expects string, got int"),
         "and a wrong use under the narrowing is still found: {ws:?}"
     );
 }
@@ -131,7 +135,7 @@ fn a_destructured_tag_narrows_its_sibling() {
 fn a_match_arm_returns_its_own_alternative_to_the_return_check() {
     let ws = strict_warnings(
         "(sig f ((or (tuple :ok int) (tuple :err string)) -> int))\n\
-         (defn f (r) (match r ([:ok v] (inc v)) ([:err m] (string/length m))))",
+         (defn f (r) (match r ([:ok v] (inc v)) ([:err m] (%string-length m))))",
     );
     assert!(ws.is_empty(), "each arm is int: {ws:?}");
 }

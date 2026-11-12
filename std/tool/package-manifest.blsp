@@ -113,7 +113,7 @@ take one out, keeping the rest of the file and its comments, then re-resolve the
 
 ;; A CLI spec token: ":path"/":git"/":ref" → keyword; anything else → the string.
 (defn- package-spec-token (tok)
-  (if (string/starts-with? tok ":") (keyword (string/substring tok 1 (string/length tok))) tok))
+  (if (string/starts-with? tok ":") (keyword (string/substring tok 1 (count tok))) tok))
 
 (defn- package-has-dep? (deps name) (any? deps (fn (d) (= (get d :name) name))))
 

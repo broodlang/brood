@@ -528,7 +528,7 @@
     (doseq (c (fc-bad-inputs))
       (let (m (error-message ((second c))))
         (is (string? m))
-        (is (> (string/length m) 0)))))
+        (is (> (count m) 0)))))
   (test "good input is unaffected — none of the above touches the happy path"
     (assert= 42 (string/->number "42"))
     (assert= 31 (string/->number "1F" 16))

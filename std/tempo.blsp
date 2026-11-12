@@ -273,8 +273,8 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
   ;; \"2026-+6\" through as June. The sign a year may legitimately carry is
   ;; stripped by `parse` before any field reaches here.
   (and (string? s)
-    (> (string/length s) 0)
-    (every? (range 0 (string/length s))
+    (> (count s) 0)
+    (every? (range 0 (count s))
       (fn (i) (>= (index-of "0123456789" (string/char-at s i)) 0)))))
 
 (defn- tp-int (s: (or string nil) -> (or int nil))

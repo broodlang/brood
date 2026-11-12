@@ -38,7 +38,7 @@
                              (fn (line)
                                (let (t (string/trim line))
                                  (if (string/starts-with? t "nameserver")
-                                   (string/trim (string/substring t 10 (string/length t)))
+                                   (string/trim (string/substring t 10 (count t)))
                                    nil))))
                  (fn (v) (and v (not (= v ""))))))
       "127.0.0.1")))
@@ -47,7 +47,7 @@
 
 (defn- label-bytes (label)
   "One DNS label: a length byte, then the label's bytes."
-  (bytes/append (bytes (string/length label)) (string/->bytes label)))
+  (bytes/append (bytes (count label)) (string/->bytes label)))
 
 (defn- encode-name (host)
   "A hostname as length-prefixed labels terminated by a zero byte — `QNAME`."

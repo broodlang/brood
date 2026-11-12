@@ -291,7 +291,7 @@ keyword (`:next`) is not one.
     (format/label-node? [:symbol \"next:\"])    ;=> true
     (format/label-node? [:keyword \":next\"])   ;=> false"
   (and (= (node-kind c) :symbol)
-    (let (t (node-text c)) (and (> (string/length t) 1) (string/ends-with? t ":")))))
+    (let (t (node-text c)) (and (> (count t) 1) (string/ends-with? t ":")))))
 
 (defn labelled-body? (forms)
   "True when any of the body `forms` (the args after a head) is a label.
@@ -382,7 +382,7 @@ keyword (`:next`) is not one.
   ;; Reader-macro wrappers don't introduce their own break: render the child at
   ;; the current column. (A long `'(foo bar)` will break inside the list, which
   ;; is what we want.)
-  (str prefix (render child (+ indent (string/length prefix)))))
+  (str prefix (render child (+ indent (count prefix)))))
 
 (defn- render-seq (n indent open close)
   ;; Try single-line; if it fits the remaining budget at this indent, take it.
@@ -406,7 +406,7 @@ keyword (`:next`) is not one.
   (let (keep-broken (had-author-newlines? n)
         one (if keep-broken nil (single-line n)))
     (cond
-      (and one (<= (+ indent (string/length one)) (width))) one
+      (and one (<= (+ indent (count one)) (width))) one
       (= (node-kind n) :map) (render-pair-break (node-children n) indent "{" "}")
       else (render-break (node-children n) indent open close))))
 
@@ -632,7 +632,7 @@ if you are reintroducing hoisting, they are what you have to write back.
 (defn- render-head-line-build
   (items: (or nil list) pair-bind-first?:bool slot:keyword indent:int acc:string col:int -> string)
   ;; `col` is the column the head line currently ends at — tracked rather than
-  ;; derived from `(string/length acc)`, because once an arg has dropped only the
+  ;; derived from `(count acc)`, because once an arg has dropped only the
   ;; LAST line of `acc` matters. `slot` walks a `defn`-family header: `:name`,
   ;; then `:params` (the one slot allowed to drop), then `:rest`; a non-defn head
   ;; starts at `:rest`.
@@ -653,7 +653,7 @@ if you are reintroducing hoisting, they are what you have to write back.
       (let (item (first items)
             at (+ col 1)
             flat (single-line item)
-            fits (and flat (<= (+ at (string/length flat)) (width)))
+            fits (and flat (<= (+ at (count flat)) (width)))
             next-slot (if (= slot :name) :params :rest))
         (cond
           fits
@@ -662,7 +662,7 @@ if you are reintroducing hoisting, they are what you have to write back.
               next-slot
               indent
               (str acc " " flat)
-              (+ at (string/length flat)))
+              (+ at (count flat)))
           (and (= slot :params) (= (node-kind item) :list))
             (let (body-ind (+ indent 1)
                   part (render item body-ind))
@@ -684,7 +684,7 @@ if you are reintroducing hoisting, they are what you have to write back.
 (defn- last-line-length (s)
   ;; The length of `s` past its last newline (the whole string when it has none).
   (let (parts (string/split s "\n"))
-    (string/length (last parts))))
+    (count (last parts))))
 
 ;; ---- layout items -----------------------------------------------------------
 ;; Every walker below reads a node's children the same way: whitespace only counts
@@ -751,7 +751,7 @@ if you are reintroducing hoisting, they are what you have to write back.
   (let (keep-broken (had-author-newlines? n)
         one (if keep-broken nil (single-line n)))
     (cond
-      (and one (<= (+ indent (string/length one)) (width))) one
+      (and one (<= (+ indent (count one)) (width))) one
       else (render-pair-break (node-children n) indent "(" ")"))))
 
 (defn- render-pair-break (kids:vector indent:int open:string close:string -> string)
@@ -796,7 +796,7 @@ if you are reintroducing hoisting, they are what you have to write back.
         (pairs-with-next? items k)
           (let (name (render (get item :node) pair-ind)
                 value-item (nth items (inc k))
-                value (render (get value-item :node) (+ pair-ind (string/length name) 1)))
+                value (render (get value-item :node) (+ pair-ind (count name) 1)))
             (render-pair-walk items
               (+ k 2)
               pair-ind
@@ -866,9 +866,9 @@ if you are reintroducing hoisting, they are what you have to write back.
                 ;; the author broke stays broken (`render` honours those newlines),
                 ;; and gluing it to the key on the strength of a flat form that fits
                 ;; left `else (let (x 1)` with the body hanging deep beneath.
-                vrendr (render vnode (+ body-ind (string/length arendr) 1))
+                vrendr (render vnode (+ body-ind (count arendr) 1))
                 pair-fits (and (not (includes? vrendr "\n"))
-                            (<= (+ body-ind (string/length arendr) 1 (string/length vrendr))
+                            (<= (+ body-ind (count arendr) 1 (count vrendr))
                               (width)))
                 value-ind (+ body-ind 2)
                 pair-str (if pair-fits
@@ -977,7 +977,7 @@ if you are reintroducing hoisting, they are what you have to write back.
               next-k (if kw-value (+ k 2) (inc k))
               trailing (get last-item :trailing)
               single (not (includes? form-rendr "\n"))
-              w (string/length form-rendr)
+              w (count form-rendr)
               ;; Ride onto the current line when: filling is allowed, the
               ;; previous item left a fillable column, this arg is single-line,
               ;; no blank line or trailing comment forces a break, and it fits.

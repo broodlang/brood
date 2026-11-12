@@ -12,7 +12,7 @@
                   (send me [:lexed line])
                   (cond
                     (= line "```") [[[0 3 :fence]] (if (= state :code) :text :code)]
-                    (= state :code) [[[0 (string/length line) :code]] :code]
+                    (= state :code) [[[0 (count line) :code]] :code]
                     else [[] :text])))
     :text))
 

@@ -407,7 +407,7 @@ grammar; `\"1 +* 2\"` in Elixir is `[:err \"unexpected `*`\"]`, and the suite's 
           :ok
           ;; A MISSING node is never the broken case, whatever its position: it IS the
           ;; grammar saying "you have not typed this yet".
-          (let (tail (string/length (string/trim-right text))
+          (let (tail (count (string/trim-right text))
                 broken (seq/find errs
                          (fn (e) (and (not (get e :missing?)) (< (get e :end) tail)))))
             (cond
@@ -450,7 +450,7 @@ anonymous tokens, operators/punctuation as anonymous non-alphabetic ones.
     (editor/treesit/anonymous-keyword? {:named false :text \"+\"})     ;=> false"
   (and (not (get node :named))
     (let (t (get node :text))
-      (and (not (nil? t)) (> (string/length t) 0) (ts-alpha? (string/char-at t 0))))))
+      (and (not (nil? t)) (> (count t) 0) (ts-alpha? (string/char-at t 0))))))
 
 (defn face-of-syntax (kind->face-name)
   "Like `face-of-kinds`, plus the cross-language rule that an anonymous alphabetic
@@ -626,7 +626,7 @@ text, in char offsets: one `[start old-end new-end]`, a sequence of them in the 
 were made, or nil to have the kernel find the change by comparing the two texts — cheap
 (prefix and suffix, chunk by chunk) and exact for any single contiguous edit, so nil is
 the right default for a caller that does not already know. A splice `[lo hi repl]` is the
-edit `[lo hi (+ lo (string/length repl))]`.
+edit `[lo hi (+ lo (count repl))]`.
 
 That comparison reads both texts up to the change from each end — linear in the document
 per call. A caller holding the splices it made (`editor/buffer/buffer-splices-since`, nil
@@ -634,7 +634,7 @@ when the log cannot say) passes them instead and the reparse costs the edit alon
 kernel composes a sequence into the one range it covers, and refuses an edit whose lengths
 do not fit the two texts rather than build a wrong tree.
 
-    (editor/treesit/update-tree tree rope :elixir (map splices (fn ([lo hi repl]) [lo hi (+ lo (string/length repl))])))   ;~> a new handle, reparsed without comparing the texts
+    (editor/treesit/update-tree tree rope :elixir (map splices (fn ([lo hi repl]) [lo hi (+ lo (count repl))])))   ;~> a new handle, reparsed without comparing the texts
 
     (editor/treesit/update-tree tree new-text :elixir)   ;~> a new handle; tree still answers for the old text
     (fn? editor/treesit/update-tree)   ;=> true"
@@ -746,7 +746,7 @@ ends)."
       (if (< (inc line) (text/line-count src))
         (dec (text/line->char src (inc line)))
         (count src)))
-    (let (i (index-of src "\n" at)) (if (< i 0) (string/length src) i))))
+    (let (i (index-of src "\n" at)) (if (< i 0) (count src) i))))
 
 (defn- ts-string (src)
   ;; the text-keyed kernel queries parse a string
@@ -793,7 +793,7 @@ children, so the pair is read from it rather than found by scanning the text bet
   ;; A line beginning with something other than whitespace. `i` may sit one past the end —
   ;; a window whose last line has no newline, or an empty buffer — and `string/char-at`
   ;; raises there rather than answering nil, so the bound is checked here.
-  (and (< i (string/length src))
+  (and (< i (count src))
     (let (c (string/char-at src i))
       (and (not (= c " ")) (not (= c "\t")) (not (= c "\n")) (not (= c "\r"))))))
 
@@ -805,7 +805,7 @@ children, so the pair is read from it rather than found by scanning the text bet
   (let (i (index-of src needle from))
     (if (or (< i 0) (>= i upto))
       acc
-      (ts-count-upto src needle upto (inc acc) (+ i (string/length needle))))))
+      (ts-count-upto src needle upto (inc acc) (+ i (count needle))))))
 ;; Declared because the body is SELF-RECURSIVE, and the checker deliberately does not
 ;; specialize those (it would type an accumulator loop from its first base case). Undeclared,
 ;; the count read `number`, and `column0-restart`'s `(math/rem opened 2)` — which wants an
@@ -874,9 +874,7 @@ restart is never wrong where the lead-in is right, and is right everywhere the l
   ;; the COLUMN `line`'s text starts at: its leading whitespace's display width, a tab
   ;; reaching the next stop of the ambient `*tab-width*` (ADR-537). A character count was
   ;; read as a column, so a line indented with two tabs came back as column 2
-  (string/display-width (string/substring line
-                          0
-                          (- (string/length line) (string/length (string/trim-left line))))))
+  (string/display-width (string/substring line 0 (- (count line) (count (string/trim-left line))))))
 
 (defn- ts-prev-nonblank (text: (or string rope) bol:int -> (or nil (tuple int string)))
   ;; `[indent last-token]` of the nearest non-blank line before `bol`, or nil when there is
@@ -909,10 +907,10 @@ already left.
 The boundary is asked of a token that ENDS in a word character only. A punctuation token
 has no word to run on into — JSX's `</` closes an element whatever tag name follows it."
   (let (t (string/trim-left line)
-        n (string/length token)
+        n (count token)
         word-char? (fn (c) (regex/matches? c "[A-Za-z0-9_]")))
     (and (string/starts-with? t token)
-      (or (= (string/length t) n)
+      (or (= (count t) n)
         (not (word-char? (string/substring token (dec n) n)))
         (not (word-char? (string/substring t n (inc n))))))))
 
@@ -934,13 +932,13 @@ table was the bug that came with making delimiters self-deciding — the entries
 removed from the tables as redundant, and with them went the only thing that recognised
 those lines as closing at all, so every `}` on its own line stopped dedenting."
   (let (t (string/trim-left line)
-        first-char (when (> (string/length t) 0) (string/substring t 0 1)))
+        first-char (when (> (count t) 0) (string/substring t 0 1)))
     (if (and first-char (includes? ")]}" first-char))
       first-char
       (seq/find (ts-dedent-tokens dedent) (fn (d) (ts-opens-with? line d))))))
 
 (defn- ts-delimiter? (token)
-  (and token (= 1 (string/length token)) (includes? ")]}" token)))
+  (and token (= 1 (count token)) (includes? ")]}" token)))
 
 (defn- ts-dedent-levels (spec token brackets-counted)
   "How many levels `token` backs out of.
@@ -1085,7 +1083,7 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
         closing-token (ts-closing-token line (get spec :dedent #{}))
         closing (not (nil? closing-token))
         ;; an ordinary line measures at its first non-blank, a closing line at the line start
-        at (if closing bol (+ bol (- (string/length line) (string/length (string/trim-left line)))))
+        at (if closing bol (+ bol (- (count line) (count (string/trim-left line)))))
         blocks (get spec :blocks #{})
         chain (ts-chain-at text lang at tree)
         broken (get (first chain) :broken)
@@ -1330,7 +1328,7 @@ children, so an Elixir `call`'s callee is taken lexically from its start rather 
 a first child — which is the same token either way, and does not require the tree."
   (let (from (ts-start node)
         head (ts-slice text from (math/min (ts-end node) (+ from 32)))
-        limit (string/length head))
+        limit (count head))
     (letrec (scan (fn (i)
                     (if (or (>= i limit)
                           (not (regex/matches? (string/char-at head i) "[A-Za-z0-9_?!]")))
@@ -1492,7 +1490,7 @@ node does not — while a rebuild by another compiler, which changes the library
 nothing a language can see, keeps it. The identity worth comparing when the question is
 \"will my tables still fit\".
 
-    (string/length (editor/treesit/grammar-fingerprint {:abi 14 :named #{:a} :anonymous #{} :fields #{}}))   ;=> 64"
+    (count (editor/treesit/grammar-fingerprint {:abi 14 :named #{:a} :anonymous #{} :fields #{}}))   ;=> 64"
   (let (names (fn (key prefix)
                 (map (seq/sort-by (or (get info key) #{}) ->string)
                   (fn (name) (str prefix (->string name))))))

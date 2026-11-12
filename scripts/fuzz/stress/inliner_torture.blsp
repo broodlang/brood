@@ -31,7 +31,7 @@
     (send parent :done)
     (do
       (check-allow :discarded-catch
-        (try (string/length (r-str 8)) (catch e nil))
+        (try (count (r-str 8)) (catch e nil))
         (try (r-throw 15) (catch e nil))
         (try (count (r-vec 6)) (catch e nil))
         (try (r-big 10) (catch e nil))

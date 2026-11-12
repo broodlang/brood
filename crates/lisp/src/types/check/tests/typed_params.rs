@@ -93,3 +93,20 @@ fn a_misspelled_parameter_type_is_reported() {
         "{ws:?}"
     );
 }
+
+/// A private helper passed as a value has no caller-derived parameter types, so its return
+/// is read under what its body demands. Its declaration bounds that too: `count` demands
+/// only a countable, and `w` read as one widened `unq`'s result past the `string` it is
+/// declared over, so a truthiness test on it warned about lists and vectors. Found when
+/// `string/length` (whose demand is `string`, which hid this) became `count`.
+#[test]
+fn a_typed_parameter_bounds_the_return_of_a_private_helper_used_as_a_value() {
+    let ws = file_warnings(
+        "(defn- unq (w:string) (if (> (count w) 1) (string/substring w 1 2) w))\n\
+         (defn use (xs) (or (first (map xs unq)) \"\"))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("for truthiness")),
+        "`unq` is declared over strings, so its result is a string: {ws:?}"
+    );
+}

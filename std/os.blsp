@@ -312,7 +312,7 @@ owner dying closes them all, as for any child.
   ;; `line` with its trailing newlines and carriage returns dropped — and nothing else: a
   ;; trailing SPACE is part of a cmd line (`set /p secret=Secret: ` prompts with it)
   (if (or (string/ends-with? line "\n") (string/ends-with? line "\r"))
-    (without-line-ends (string/substring line 0 (dec (string/length line))))
+    (without-line-ends (string/substring line 0 (dec (count line))))
     line))
 
 (defn- windows-line (line)

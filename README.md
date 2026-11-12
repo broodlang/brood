@@ -333,7 +333,7 @@ hand-kept table. No annotation is needed to catch this:
 
 ```clojure
 (reflect/check
-  '(defn g (x) (string/length (+ 1 2))))   ;=> ("string/length: argument 1 expects string, got 3 ((+ 1 2))")
+  '(defn g (x) (string/upper (+ 1 2))))   ;=> ("string/upper: argument 1 expects string, got 3 ((+ 1 2))")
 ```
 
 Where you want more, `(sig …)` adds function **arrows** (`(sig area (number -> number))`),

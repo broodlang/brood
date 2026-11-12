@@ -587,8 +587,8 @@ transitively-closed lock file and puts each dep's source on *load-path*."
 
 ;; A tag's candidate version: strip one optional leading `v` (so `v1.2.0` and
 ;; `1.2.0` both read as the version 1.2.0). Returns the string as-is otherwise.
-(defn- package-git-tag-version (tag)
-  (if (and (> (string/length tag) 0) (= (string/substring tag 0 1) "v"))
+(defn- package-git-tag-version (tag:string)
+  (if (and (> (count tag) 0) (= (string/substring tag 0 1) "v"))
     (string/substring tag 1)
     tag))
 
@@ -772,7 +772,7 @@ package manager and `nest release --target`'s runtime download.
 
 (defn- registry-trim (url)
   "`url` without a trailing slash."
-  (if (string/ends-with? url "/") (string/substring url 0 (- (string/length url) 1)) url))
+  (if (string/ends-with? url "/") (string/substring url 0 (- (count url) 1)) url))
 
 (defn- registry-base-for (index)
   "The registry base URL: `index` when given, else the configured `:registry`."

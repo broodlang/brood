@@ -263,7 +263,7 @@ fn curated_equality_and_string_sigs() {
         );
         // Result is string — safe to pass to string-length.
         assert!(
-            warnings(&format!("(string/length ({f} s))")).is_empty(),
+            warnings(&format!("(%string-length ({f} s))")).is_empty(),
             "{f}: result should type as string"
         );
     }
@@ -283,7 +283,7 @@ fn curated_equality_and_string_sigs() {
             .any(|w| w.contains("format") && w.contains("string"))
     );
     // format returns a string.
-    assert!(warnings("(string/length (string/format \"hi %s\" x))").is_empty());
+    assert!(warnings("(%string-length (string/format \"hi %s\" x))").is_empty());
     // index-of/index-where/string/last-index-of return int — safe to add.
     // (The curated `last-index-of` entry is keyed qualified; the bare name is unbound.)
     assert!(warnings("(+ 1 (index-of coll x))").is_empty());
@@ -437,9 +437,9 @@ fn descending_into_a_literal_does_not_read_data_as_code() {
 #[test]
 fn only_unbound_survives_an_error_testing_form() {
     for src in [
-        "(error-of (cons 1))",              // arity
-        "(try (first 5) (catch e e))",      // type misuse
-        "(assert-error (string/length 5))", // sig mismatch
+        "(error-of (cons 1))",               // arity
+        "(try (first 5) (catch e e))",       // type misuse
+        "(assert-error (%string-length 5))", // sig mismatch
     ] {
         assert!(
             warnings(src).is_empty(),

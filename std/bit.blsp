@@ -1,7 +1,7 @@
 ;; std/bit.blsp — bitwise operations on integers.
 ;;
 ;; The operations themselves are kernel primitives (`crates/lisp/src/builtins/numeric.rs`),
-;; registered under this module's name the way `string/length` and `file/spit-private` are:
+;; registered under this module's name the way `count` and `file/spit-private` are:
 ;; Rust supplies the mechanism, the namespace is Brood's. This file is the module the
 ;; qualified names belong to — it declares the namespace and documents the surface.
 ;;

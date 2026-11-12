@@ -61,8 +61,8 @@ are derived on demand from the buffer's snapshot history by a line and character
   ;; emitted says which text it came from, so its properties can come from there too.
   (let (adds (undo-hunk-chars hunk :insert)
         dels (undo-hunk-chars hunk :delete)
-        na (string/length adds)
-        nd (string/length dels)
+        na (count adds)
+        nd (count dels)
         overlap (if (> na 0)
                   (and (< n hi) (> (+ n na) lo))
                   (and (>= n lo) (<= n hi)))
@@ -87,20 +87,20 @@ the diff only ever runs over the span that actually changed."
   (let ([pre old-end n-mid] (%str-splice-diff old new)
         o-mid (string/substring old pre old-end)
         head (string/substring new 0 pre)
-        new-length (string/length new)
-        tail-from (+ (string/length head) (string/length n-mid))
+        new-length (count new)
+        tail-from (+ (count head) (count n-mid))
         tail (string/substring new tail-from new-length)
         whole (list [:new 0 new-length]))
     (cond
       ;; nothing changed
       (and (= o-mid "") (= n-mid "")) [new whole]
       ;; too large to diff character-wise: treat the whole span as one change
-      (> (math/max (string/length o-mid) (string/length n-mid)) *char-budget*)
-        (if (and (< pre hi) (> (+ pre (string/length n-mid)) lo))
+      (> (math/max (count o-mid) (count n-mid)) *char-budget*)
+        (if (and (< pre hi) (> (+ pre (count n-mid)) lo))
           [(str head o-mid tail)
             (reverse (region-piece-push (region-piece-push (region-piece-push () :new 0 pre)
                                           :old pre
-                                          (string/length o-mid))
+                                          (count o-mid))
                        :new tail-from
                        (- new-length tail-from)))]
           [new whole])
@@ -211,7 +211,7 @@ whole thing back.
                 carried (editor/buffer/buffer-carry-markers pushed
                           same-lo
                           same-hi
-                          (string/length changed))
+                          (count changed))
                 swapped (assoc (if (nil? properties)
                                  (dissoc carried :properties)
                                  (assoc carried :properties properties))

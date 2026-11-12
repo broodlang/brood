@@ -519,33 +519,33 @@ fn path_narrowing_through_a_record_field_guard() {
     // `(if (int? (get r :age)) …)` narrows the *path* `(get r :age)` to `int`
     // in the then-branch — so feeding it to `string-length` (wants string) is
     // caught, the miss occurrence typing on bare symbols couldn't reach.
-    let w = file_warnings("(defn f (r) (if (int? (get r :age)) (string/length (get r :age)) 0))");
+    let w = file_warnings("(defn f (r) (if (int? (get r :age)) (%string-length (get r :age)) 0))");
     assert!(
         w.iter()
-            .any(|m| m.contains("string/length") && m.contains("got int")),
+            .any(|m| m.contains("%string-length") && m.contains("got int")),
         "an int-narrowed path fed to string-length must warn: {w:?}"
     );
     // A **nested** path narrows too: `(get (get cfg :db) :port)`.
     let nested = file_warnings(
         "(defn n (cfg) (if (int? (get (get cfg :db) :port)) \
-             (string/length (get (get cfg :db) :port)) 0))",
+             (%string-length (get (get cfg :db) :port)) 0))",
     );
     assert!(
         nested
             .iter()
-            .any(|m| m.contains("string/length") && m.contains("got int")),
+            .any(|m| m.contains("%string-length") && m.contains("got int")),
         "an int-narrowed nested path must warn: {nested:?}"
     );
     // Uses consistent with the narrowed type — and an unguarded access (wide
     // type) — must NOT warn.
     for src in [
         "(defn g (r) (if (int? (get r :age)) (+ 1 (get r :age)) 0))",
-        "(defn h (r) (if (string? (get r :n)) (string/length (get r :n)) 0))",
-        "(defn m (r) (string/length (get r :age)))",
+        "(defn h (r) (if (string? (get r :n)) (%string-length (get r :n)) 0))",
+        "(defn m (r) (%string-length (get r :age)))",
         // else-branch use of a `¬string`-narrowed path must not misfire.
         "(defn k (r) (if (string? (get r :x)) :s (get r :x)))",
         // a *different* nested path than the one narrowed must not warn.
-        "(defn p (c) (if (int? (get (get c :db) :port)) (string/length (get (get c :web) :h)) 0))",
+        "(defn p (c) (if (int? (get (get c :db) :port)) (%string-length (get (get c :web) :h)) 0))",
     ] {
         let w = file_warnings(src);
         assert!(
@@ -560,22 +560,22 @@ fn path_narrowing_through_index_paths() {
     // `(nth t 0)` / `(first t)` / `(second …)` / `(third …)` narrow like a
     // field path: an int-narrowed index fed to `string-length` is caught.
     for src in [
-        "(defn f (t) (if (int? (nth t 0)) (string/length (nth t 0)) 0))",
-        "(defn f (t) (if (int? (first t)) (string/length (first t)) 0))",
+        "(defn f (t) (if (int? (nth t 0)) (%string-length (nth t 0)) 0))",
+        "(defn f (t) (if (int? (first t)) (%string-length (first t)) 0))",
         // mixed field + index path.
-        "(defn f (r) (if (int? (nth (get r :xs) 0)) (string/length (nth (get r :xs) 0)) 0))",
+        "(defn f (r) (if (int? (nth (get r :xs) 0)) (%string-length (nth (get r :xs) 0)) 0))",
     ] {
         let w = file_warnings(src);
         assert!(
             w.iter()
-                .any(|m| m.contains("string/length") && m.contains("got int")),
+                .any(|m| m.contains("%string-length") && m.contains("got int")),
             "an int-narrowed index path must warn ({src}): {w:?}"
         );
     }
     // A *different* index than the one narrowed must not warn (index-specific),
     // and a consistent use must not warn.
     for src in [
-        "(defn f (t) (if (int? (nth t 0)) (string/length (nth t 1)) 0))",
+        "(defn f (t) (if (int? (nth t 0)) (%string-length (nth t 1)) 0))",
         "(defn f (t) (if (int? (nth t 0)) (+ 1 (nth t 0)) 0))",
     ] {
         let w = file_warnings(src);
@@ -753,17 +753,17 @@ fn undeclared_global_current_type_gates_its_use() {
     // Gap A (docs/type-gating.md): an *undeclared* global defined exactly once
     // by `(def g 5)` gets its inferred current-image type (`int`), so misusing
     // it is caught — via `dynamic_within` (the `∩` relation), reload-safe.
-    let w = file_warnings("(def g 5) (defn f () (string/length g))");
+    let w = file_warnings("(def g 5) (defn f () (%string-length g))");
     assert!(
         w.iter()
-            .any(|m| m.contains("string/length") && m.contains("got 5")),
+            .any(|m| m.contains("%string-length") && m.contains("got 5")),
         "an undeclared int global misused must warn: {w:?}"
     );
     // Consistent use, a redefined (ambiguous) global, and a function global
     // must NOT warn.
     for src in [
         "(def g 5) (defn f () (+ 1 g))", // int used as int
-        "(def g 5) (def g \"s\") (defn f () (string/length g))", // redefined → dynamic
+        "(def g 5) (def g \"s\") (defn f () (%string-length g))", // redefined → dynamic
         "(defn g (x) x) (defn f () (+ 1 (g 2)))", // function global, not a value
     ] {
         let w = file_warnings(src);
@@ -782,10 +782,10 @@ fn private_global_current_type_gates_its_use_like_a_public_one() {
     // an `int`, so `(+ x k)` read as `number` and tripped every int consumer after it
     // (`math/quot`, `string/char-at`, a declared `int` parameter). Both spellings must
     // type alike, both ways: the misuse warns, and int arithmetic over it stays int.
-    let w = file_warnings("(def- g 5) (defn f () (string/length g))");
+    let w = file_warnings("(def- g 5) (defn f () (%string-length g))");
     assert!(
         w.iter()
-            .any(|m| m.contains("string/length") && m.contains("got 5")),
+            .any(|m| m.contains("%string-length") && m.contains("got 5")),
         "a private int global misused must warn like a public one: {w:?}"
     );
     let w = file_warnings("(def- k 10) (defn f (x) (math/quot (+ x k) 2)) (sig f (int -> int))");
@@ -803,26 +803,26 @@ fn cross_file_undeclared_global_gates_via_loaded_image() {
     // the def, then checks a separate form (the cross-context path).
     // Typed by its KIND, not the literal: the value is what this process computed,
     // and a literal would let a proof rest on one run.
-    let w = check_with_defs(&["(def gg 5)"], "(string/length gg)");
+    let w = check_with_defs(&["(def gg 5)"], "(%string-length gg)");
     assert!(
         w.iter()
-            .any(|m| m.contains("string/length") && m.contains("got int")),
+            .any(|m| m.contains("%string-length") && m.contains("got int")),
         "a cross-file undeclared int global misused must warn: {w:?}"
     );
     // An observed nil is the placeholder case — an unset env var, a not-yet-set cache —
     // and says nothing about what the global holds when the program runs.
-    let w = check_with_defs(&["(def tok nil)"], "(string/length tok)");
+    let w = check_with_defs(&["(def tok nil)"], "(%string-length tok)");
     assert!(
         w.iter().all(|m| !m.contains("expects")),
         "a global observed as nil must stay unknown: {w:?}"
     );
     // A **dynamic variable** must be excluded — its heap value is only the
     // default; `binding` rebinds it to any type, so typing a use against the
-    // default would false-positive. `(binding (*dv* "s") (string/length *dv*))`
+    // default would false-positive. `(binding (*dv* "s") (%string-length *dv*))`
     // is valid and must NOT warn.
     let w = check_with_defs(
         &["(defdyn *dv* 0)"],
-        "(binding (*dv* \"s\") (string/length *dv*))",
+        "(binding (*dv* \"s\") (%string-length *dv*))",
     );
     assert!(
         w.iter().all(|m| !m.contains("expects")),
@@ -840,10 +840,10 @@ fn cross_file_undeclared_global_gates_via_loaded_image() {
 fn declared_global_type_flows_into_value_position() {
     // `(sig g int)` makes `g`'s declared type visible where it's used, so a
     // disjoint use is caught — even though `g` is a redefinable global.
-    let w = file_warnings("(sig g int) (def g 5) (def r (string/length g))");
+    let w = file_warnings("(sig g int) (def g 5) (def r (%string-length g))");
     assert!(
         w.iter()
-            .any(|m| m.contains("string/length") && m.contains("int")),
+            .any(|m| m.contains("%string-length") && m.contains("int")),
         "a declared int global used where a string is wanted must warn: {w:?}"
     );
     // A compatible use defers (int ⊆ number).

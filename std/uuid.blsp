@@ -65,7 +65,7 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
 
     (uuid/valid? (uuid/v4))   ;=> true
     (uuid/valid? \"nope\")      ;=> false"
-  (and (= (string/length s) 36)
+  (and (= (count s) 36)
     (every? (range 36)
       (fn (i)
         (let (c (string/char-at s i))

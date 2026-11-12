@@ -309,7 +309,7 @@
   ;; `(apply str (map (range n) …))` built an n-element list AND an n-argument call:
   ;; fifty million characters asked for sixteen gigabytes and aborted.
   (test "fifty million characters build in one pass"
-    (assert= (string/length (string/repeat "x" 50000000)) 50000000)
+    (assert= (count (string/repeat "x" 50000000)) 50000000)
     (assert= (string/repeat "ab" 3) "ababab")
     (assert= (string/repeat "ab" 0) "")
     (assert= (string/repeat "" 1000000000) ""))

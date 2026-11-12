@@ -28,7 +28,7 @@
     "     [:text 2 0 (str \"event:\" (:event m))]\n"
     "     [:rect 3 0 cols (- rows 3) {:bg \"#202040\"}]\n"
     "     [:text 4 2 \"日本\" {:fg :yellow}]\n"
-    "     [:cursor 0 (+ 5 (string/length (:text m))) :bar]])\n"
+    "     [:cursor 0 (+ 5 (count (:text m))) :bar]])\n"
     "  (fn (m input cols rows)\n"
     "    (cond\n"
     "      (= input \"q\") (assoc m :done true)\n"
@@ -55,7 +55,7 @@ child exited."
                          (assoc state
                            :vt (vt/feed (:vt state) data)
                            :raw (str (:raw state "") data)
-                           :bytes (+ (:bytes state) (string/length data)))
+                           :bytes (+ (:bytes state) (count data)))
                          pred
                          ms))
       ([:proc-closed ^p _] (assoc state :closed true))

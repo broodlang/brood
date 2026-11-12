@@ -38,8 +38,8 @@
 
 ;; A decimal literal dectest can hand us and Brood can hold: digits, sign, point,
 ;; exponent. Excludes NaN / sNaN / Infinity / the `#` null operand by construction.
-(defn- dt-numeric? (s)
-  (and (> (string/length s) 0)
+(defn- dt-numeric? (s:string)
+  (and (> (count s) 0)
     (let (cs (string/->list s))
       (and (nil? (first (seq/reject cs (fn (c) (includes? "0123456789+-.eE" c)))))
         ;; at least one digit — rules out a bare sign and dectest's `#` null
@@ -53,9 +53,9 @@
     (or (< i 0)
       (< (abs (let (n (string/->number (string/substring s (inc i)))) (if (failure? n) 0 n))) 400))))
 
-(defn- dt-unquote (w)
-  (if (and (> (string/length w) 1) (or (string/starts-with? w "'") (string/starts-with? w "\"")))
-    (string/substring w 1 (dec (string/length w)))
+(defn- dt-unquote (w:string)
+  (if (and (> (count w) 1) (or (string/starts-with? w "'") (string/starts-with? w "\"")))
+    (string/substring w 1 (dec (count w)))
     w))
 
 ;; Split on runs of whitespace, dropping the trailing `-- comment` if any.

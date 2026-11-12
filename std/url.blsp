@@ -126,7 +126,7 @@ where a decoded query stops being decodable is the query, not one field."
               v
               (if (< eq 0)
                 ""
-                (url-qdecode-str (string/substring part (+ eq 1) (string/length part)))))
+                (url-qdecode-str (string/substring part (+ eq 1) (count part)))))
         (url-parse-query-pairs (rest parts) (assoc acc k v))))))
 
 (defn query-decode (s:string -> (or map failure))
@@ -150,7 +150,7 @@ invalid %XX sequence (the failure propagates rather than landing in the map).
   (let (i (index-of s sep))
     (if (< i 0)
       nil
-      [(string/substring s 0 i) (string/substring s (+ i (string/length sep)) (string/length s))])))
+      [(string/substring s 0 i) (string/substring s (+ i (count sep)) (count s))])))
 
 ;; An RFC-3986 authority is `[userinfo@]host[:port]`, and `host` may be a **bracketed
 ;; IPv6 literal** (`[::1]`) — which itself contains colons, so neither split is on the
@@ -165,16 +165,16 @@ a bracketed IPv6 literal. `port-str` is nil when no `:port` is present."
       (if (< close 0)
         (error "url: unterminated IPv6 literal in authority: " (pr-str hostport))
         (let (host (string/substring hostport 0 (+ close 1))
-              tail (string/substring hostport (+ close 1) (string/length hostport)))
+              tail (string/substring hostport (+ close 1) (count hostport)))
           (cond
             (= tail "") [host nil]
-            (string/starts-with? tail ":") [host (string/substring tail 1 (string/length tail))]
+            (string/starts-with? tail ":") [host (string/substring tail 1 (count tail))]
             else (error "url: junk after the IPv6 literal in authority: " (pr-str hostport))))))
     (let (colon (index-of hostport ":"))
       (if (< colon 0)
         [hostport nil]
         [(string/substring hostport 0 colon)
-          (string/substring hostport (+ colon 1) (string/length hostport))]))))
+          (string/substring hostport (+ colon 1) (count hostport))]))))
 
 (defn- url-parse-port (port-str)
   ;; An unparseable port raises: nil would read as "no port given" and fall back to the
@@ -215,7 +215,7 @@ header and a `build` round-trip both need); `:userinfo` is nil when absent and
   (let (at (string/last-index-of auth "@")
         ;; the LAST `@` — userinfo may itself contain an encoded one
         userinfo (if (< at 0) nil (string/substring auth 0 at))
-        hostport (if (< at 0) auth (string/substring auth (+ at 1) (string/length auth)))
+        hostport (if (< at 0) auth (string/substring auth (+ at 1) (count auth)))
         [host port-str] (url-authority-split hostport))
     {:userinfo userinfo :host host :port (url-parse-port port-str)}))
 
@@ -252,7 +252,7 @@ well-formed (a letter, then letters, digits, `+`, `-`, `.`), so `/r/https://x/` 
             network-path? (and (nil? scheme) (string/starts-with? before-q "//"))
             rest-url (cond
                        scheme (second scheme-split)
-                       network-path? (string/substring before-q 2 (string/length before-q))
+                       network-path? (string/substring before-q 2 (count before-q))
                        else before-q)
             has-authority? (or scheme network-path?))
         ;; 4. split authority from path
@@ -264,7 +264,7 @@ well-formed (a letter, then letters, digits, `+`, `-`, `.`), so `/r/https://x/` 
               path (cond
                      (not has-authority?) rest-url
                      (< slash 0) "/"
-                     else (string/substring rest-url slash (string/length rest-url)))
+                     else (string/substring rest-url slash (count rest-url)))
               auth-map (if (= authority "")
                          {:host nil :port nil}
                          (url-parse-authority authority)))

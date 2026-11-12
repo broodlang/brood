@@ -44,7 +44,7 @@ written binary stay in the `nest` binary, which hosts the runtime it embeds."
 ;; replacements concatenated. A `""` replacement is a deletion, which is what
 ;; `strip-test-forms` asks for; `inline-includes` asks for a substitution.
 (defn- string-splice-spans (source spans)
-  (let (n (string/length source))
+  (let (n (count source))
     (letrec (go (fn (pos spans acc)
                   (if (empty? spans)
                     (str acc (string/substring source pos n))
@@ -367,9 +367,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
                        nil
                        (fn (acc key)
                          (if (string/starts-with? key marker)
-                           (cons (symbol (string/substring key
-                                           (string/length marker)
-                                           (string/length key)))
+                           (cons (symbol (string/substring key (count marker) (count key)))
                              acc)
                            acc))))
           (when shorts (%register-package-modules! pkg shorts)))))
@@ -429,7 +427,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
     (if (and (not (= segment key))
           (contains? *package-modules-of* segment)
           (nil? (%bundle-module-package key)))
-      (let (short (string/substring key (+ 1 (string/length segment)) (string/length key)))
+      (let (short (string/substring key (+ 1 (count segment)) (count key)))
         (if (%builtin-module? short) key short))
       key)))
 

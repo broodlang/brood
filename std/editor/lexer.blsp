@@ -159,7 +159,7 @@ newline, `base` its character offset in `src`. The walk every line-oriented mode
 the result is the whole source's spans in order.
 
     (editor/lexer/lexer-walk-lines \"ab\\ncd\" (fn (line base) (list [base (+ base 1) :x])))   ;=> ([0 1 :x] [3 4 :x])"
-  (lexer-walk src 0 (string/length src) line-spans '()))
+  (lexer-walk src 0 (count src) line-spans '()))
 
 (defn lexer-spans (grammar:map src:string -> any)
   "Lexically tokenize `src` with `grammar` (from `lexer-grammar`) into `[start end face]`

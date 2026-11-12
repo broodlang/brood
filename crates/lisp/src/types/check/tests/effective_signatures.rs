@@ -6,7 +6,7 @@ use super::*;
 fn file_signatures_reports_what_the_checker_inferred() {
     // The buffer is never loaded, which is exactly why hover cannot answer this and
     // the form-based inference can.
-    let sigs = signatures("(defn f (s) (string/length s))");
+    let sigs = signatures("(defn f (s) (%string-length s))");
     assert_eq!(sigs.len(), 1, "{sigs:?}");
     assert_eq!(sigs[0].0, "f");
     assert!(sigs[0].1.contains("string"), "{sigs:?}");
@@ -78,7 +78,7 @@ fn a_lambda_is_walked_under_the_arrow_its_callee_declares() {
          (sig each3 ((list (tuple int int int)) (int int int int -> int) -> int))\n\
          (defn use-it (xs) (each3 xs (fn (acc a b c) (math/quot (+ a b) c))))\n\
          (sig use-it ((list (tuple int int int)) -> int))\n\
-         (defn wrong (xs) (each3 xs (fn (acc a b c) (string/length a))))";
+         (defn wrong (xs) (each3 xs (fn (acc a b c) (%string-length a))))";
     let strict = file_warnings_mode(src, true);
     assert!(
         !strict.iter().any(|w| w.contains("math/quot")),
@@ -88,7 +88,7 @@ fn a_lambda_is_walked_under_the_arrow_its_callee_declares() {
     assert!(
         strict
             .iter()
-            .any(|w| w.contains("string/length: argument 1 expects string, got int")),
+            .any(|w| w.contains("%string-length: argument 1 expects string, got int")),
         "{strict:?}"
     );
 }
@@ -229,7 +229,7 @@ fn a_declared_callback_signature_is_honoured_by_the_combinators() {
     // same-file declaration, not only the loaded image.
     let sigs = signatures(
         "(sig g (string -> int))
-(defn g (v) (string/length v))
+(defn g (v) (%string-length v))
          (defn h (xs) (first (map xs g)))",
     );
     let h = sigs.iter().find(|s| s.0 == "h").expect("h");
@@ -258,11 +258,11 @@ fn file_signatures_costs_nothing_when_unarmed() {
     // The capture is a no-op on the ordinary checking path — pinned because it runs
     // inside `check_file`, which every diagnostic request goes through.
     assert!(
-        file_warnings("(defn f (s) (string/length s))")
+        file_warnings("(defn f (s) (%string-length s))")
             .iter()
             .all(|w| !w.contains("panic"))
     );
-    let ws = file_warnings("(defn f (s) (string/length s))\n(defn c () (f 5))");
+    let ws = file_warnings("(defn f (s) (%string-length s))\n(defn c () (f 5))");
     assert!(ws.iter().any(|w| w.contains("expects string")), "{ws:?}");
 }
 
@@ -274,7 +274,7 @@ fn a_module_private_function_is_inferred_and_its_call_sites_are_checked() {
     let warnings = file_warnings(
         r#"
         (defmodule privacy-demo)
-        (defn- widen (s) (string/length s))
+        (defn- widen (s) (%string-length s))
         (defn use-it () (widen 42))
         "#,
     );
@@ -296,7 +296,7 @@ fn a_macros_generated_temporary_is_never_typed() {
     // `tests/linmap_soundness_test.blsp` caught it live; this pins the rule.
     let generated = file_warnings(
         r#"
-        (do (def helper__42 (fn (s) (string/length s))) (io/puts "generated"))
+        (do (def helper__42 (fn (s) (%string-length s))) (io/puts "generated"))
         (defn consume () (helper__42 3))
         "#,
     );
@@ -321,22 +321,22 @@ fn a_failed_equality_test_narrows_the_else_branch_for_a_literal() {
     let w = file_warnings(
         r#"
         (defn describe (tag)
-          (if (%eq tag :ok) "fine" (string/length tag)))
+          (if (%eq tag :ok) "fine" (%string-length tag)))
         (sig describe ((or :ok :err) -> any))
         "#,
     );
     assert!(
         w.iter()
-            .any(|s| s.contains("string/length") && s.contains(":err")),
+            .any(|s| s.contains("%string-length") && s.contains(":err")),
         "the else branch should know `tag` is `:err`, got {w:?}"
     );
 
     // …and the narrowing must not over-claim: a value the guard says nothing about
     // stays unnarrowed. `of_value` leaves a string literal flat (no heap for the
     // bytes), so `(= m "x")` proves only `m : string` and its negation proves nothing.
-    let w = warnings(r#"(if (%eq m "x") :yes (string/length m))"#);
+    let w = warnings(r#"(if (%eq m "x") :yes (%string-length m))"#);
     assert!(
-        w.iter().all(|s| !s.contains("string/length")),
+        w.iter().all(|s| !s.contains("%string-length")),
         "a non-literal guard type must stay one-sided: {w:?}"
     );
 }
@@ -350,39 +350,39 @@ fn a_record_shape_survives_keys_vals_assoc_and_dissoc() {
     // `assoc` adds the field it definitely puts there…
     let w = file_warnings(
         r#"
-        (defn widen (r) (string/length (get (assoc r :count 1) :count)))
+        (defn widen (r) (%string-length (get (assoc r :count 1) :count)))
         (sig widen ((record :name string) -> any))
         "#,
     );
     assert!(
         w.iter()
-            .any(|s| s.contains("string/length") && s.contains("1")),
+            .any(|s| s.contains("%string-length") && s.contains("1")),
         "assoc should carry the shape forward with :count added, got {w:?}"
     );
 
     // …`dissoc` removes it, so reading it back is `nil`…
     let w = file_warnings(
         r#"
-        (defn drop-it (r) (string/length (get (dissoc r :count) :count)))
+        (defn drop-it (r) (%string-length (get (dissoc r :count) :count)))
         (sig drop-it ((record :name string :count int) -> any))
         "#,
     );
     assert!(
         w.iter()
-            .any(|s| s.contains("string/length") && s.contains("nil")),
+            .any(|s| s.contains("%string-length") && s.contains("nil")),
         "dissoc should remove :count, so reading it yields nil, got {w:?}"
     );
 
     // …`keys` on a CLOSED record yields exactly the declared names…
     let w = file_warnings(
         r#"
-        (defn ks (r) (string/length (first (keys r))))
+        (defn ks (r) (%string-length (first (keys r))))
         (sig ks ((record :name string :count int) -> any))
         "#,
     );
     assert!(
         w.iter()
-            .any(|s| s.contains("string/length") && s.contains(":count")),
+            .any(|s| s.contains("%string-length") && s.contains(":count")),
         "keys should be the declared keyword literals, got {w:?}"
     );
 
@@ -391,13 +391,13 @@ fn a_record_shape_survives_keys_vals_assoc_and_dissoc() {
     // and a union containing `string` is not disjoint from it.)
     let w = file_warnings(
         r#"
-        (defn vs (r) (string/length (first (vals r))))
+        (defn vs (r) (%string-length (first (vals r))))
         (sig vs ((record :count int :flag bool) -> any))
         "#,
     );
     assert!(
         w.iter()
-            .any(|s| s.contains("string/length") && s.contains("int")),
+            .any(|s| s.contains("%string-length") && s.contains("int")),
         "vals should union the declared field types, got {w:?}"
     );
 }
@@ -409,12 +409,12 @@ fn an_open_record_declines_the_exhaustive_sinks() {
     // the flat rule rather than claim a set it cannot know.
     let w = file_warnings(
         r#"
-        (defn ks (r) (string/length (first (keys r))))
+        (defn ks (r) (%string-length (first (keys r))))
         (sig ks ((record &open :name string) -> any))
         "#,
     );
     assert!(
-        w.iter().all(|s| !s.contains("string/length")),
+        w.iter().all(|s| !s.contains("%string-length")),
         "an open record's keys are not exhaustively known: {w:?}"
     );
 }
@@ -427,12 +427,12 @@ fn assoc_widens_the_map_refinement_to_what_it_adds() {
     // operation everyone uses to build a map.
     let w = file_warnings(
         r#"
-        (defn widen (m) (string/length (get (assoc m :extra "text") :extra)))
+        (defn widen (m) (%string-length (get (assoc m :extra "text") :extra)))
         (sig widen ((map keyword int) -> any))
         "#,
     );
     assert!(
-        w.iter().all(|s| !s.contains("string/length")),
+        w.iter().all(|s| !s.contains("%string-length")),
         "assoc must widen V to include the value it adds: {w:?}"
     );
 
@@ -440,12 +440,12 @@ fn assoc_widens_the_map_refinement_to_what_it_adds() {
     // `int`, so a string read out of it is still flagged.
     let w = file_warnings(
         r#"
-        (defn keep (m) (string/length (get (assoc m :extra 1) :extra)))
+        (defn keep (m) (%string-length (get (assoc m :extra 1) :extra)))
         (sig keep ((map keyword int) -> any))
         "#,
     );
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "adding an int must not widen V away: {w:?}"
     );
 }
@@ -518,12 +518,12 @@ fn an_arrow_parameter_describes_the_call_it_heads() {
     let w = file_warnings(
         r#"
         (sig apply-it ((int -> string) -> any))
-        (defn apply-it (f) (string/length (f 1)))
+        (defn apply-it (f) (%string-length (f 1)))
         "#,
     );
     assert!(
         w.iter()
-            .all(|s| !s.contains("apply-it") && !s.contains("string/length")),
+            .all(|s| !s.contains("apply-it") && !s.contains("%string-length")),
         "a correct use of an arrow parameter must be silent: {w:?}"
     );
 
@@ -532,7 +532,7 @@ fn an_arrow_parameter_describes_the_call_it_heads() {
     let w = file_warnings(
         r#"
         (sig helper (string -> int))
-        (defn helper (s) (string/length s))
+        (defn helper (s) (%string-length s))
         (sig shadow ((int -> string) -> any))
         (defn shadow (helper) (helper 1))
         "#,
@@ -697,13 +697,13 @@ fn a_computed_callee_with_an_arrow_type_describes_the_call_it_heads() {
     let w = file_warnings(
         r#"
         (sig cur (int -> (string -> int)))
-        (defn cur (n) (fn (s) (+ n (string/length s))))
-        (defn use-it () (string/length ((cur 1) "x")))
+        (defn cur (n) (fn (s) (+ n (%string-length s))))
+        (defn use-it () (%string-length ((cur 1) "x")))
         "#,
     );
     assert!(
         w.iter()
-            .any(|s| s.contains("string/length: argument 1 expects string, got int")),
+            .any(|s| s.contains("%string-length: argument 1 expects string, got int")),
         "the call's result should be the arrow's return type: {w:?}"
     );
 
@@ -711,7 +711,7 @@ fn a_computed_callee_with_an_arrow_type_describes_the_call_it_heads() {
     let w = file_warnings(
         r#"
         (sig cur (int -> (string -> int)))
-        (defn cur (n) (fn (s) (+ n (string/length s))))
+        (defn cur (n) (fn (s) (+ n (%string-length s))))
         (defn use-it () ((cur 1) 2))
         "#,
     );
@@ -723,7 +723,7 @@ fn a_computed_callee_with_an_arrow_type_describes_the_call_it_heads() {
     let w = file_warnings(
         r#"
         (sig cur (int -> (string -> int)))
-        (defn cur (n) (fn (s) (+ n (string/length s))))
+        (defn cur (n) (fn (s) (+ n (%string-length s))))
         (defn use-it () ((cur 1) "a" "b"))
         "#,
     );
@@ -736,13 +736,13 @@ fn a_computed_callee_with_an_arrow_type_describes_the_call_it_heads() {
     // A handler read from a record of lambdas: the literal's own arrow, `(any… -> R)`.
     let w = file_warnings(
         r#"
-        (defn handlers () {:len (fn (s) (string/length s)) :neg (fn (n) (- 0 n))})
-        (defn use-it (h) (string/length ((get (handlers) :len) "x")))
+        (defn handlers () {:len (fn (s) (%string-length s)) :neg (fn (n) (- 0 n))})
+        (defn use-it (h) (%string-length ((get (handlers) :len) "x")))
         "#,
     );
     assert!(
         w.iter()
-            .any(|s| s.contains("string/length: argument 1 expects string, got int")),
+            .any(|s| s.contains("%string-length: argument 1 expects string, got int")),
         "a record field's arrow types the call: {w:?}"
     );
 
@@ -750,7 +750,7 @@ fn a_computed_callee_with_an_arrow_type_describes_the_call_it_heads() {
     let w = file_warnings(
         r#"
         (sig cur (int -> (string -> int)))
-        (defn cur (n) (fn (s) (+ n (string/length s))))
+        (defn cur (n) (fn (s) (+ n (%string-length s))))
         (defn use-it (g) (+ ((cur 1) "x") ((g 1) 2)))
         "#,
     );

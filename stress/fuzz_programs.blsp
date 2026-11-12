@@ -183,7 +183,7 @@
     [name
       1
       (str "(defn "
-        name " (x) " "(let (t (str x \"-\" (* x 3))) " "(+ (string/length t) (bit/and x 7))))")]))
+        name " (x) " "(let (t (str x \"-\" (* x 3))) " "(+ (count t) (bit/and x 7))))")]))
 
 (defn- map-helper ()
   ;; CHAMP construction + traversal; the digest sums over keys, so iteration order cannot
@@ -772,7 +772,7 @@
         (assoc options :start (count-argument "--start" (second args))))
     else (error "fuzz_programs: unknown argument: " (first args))))
 
-(defn- clip (text width) (if (> (string/length text) width) (string/substring text 0 width) text))
+(defn- clip (text width) (if (> (count text) width) (string/substring text 0 width) text))
 
 (defn- last-line-prefix (text width) (clip (last (string/split (string/trim text) "\n")) width))
 
@@ -813,7 +813,7 @@
         (do (report-checker seed path (soundness-warnings path)) [:checker true])
       (> (count (seq/distinct outputs)) 1)
         (if (confirmed-divergence? path)
-          (let (original-size (string/length (file/slurp path)))
+          (let (original-size (count (file/slurp path)))
             (io/puts (str "DIVERGENCE seed=" seed " (" path " kept):"))
             (map ran
               (fn (entry)
@@ -827,7 +827,7 @@
                          " ("
                          oracle-runs
                          " oracle runs, "
-                         (string/length (file/slurp minimal-path))
+                         (count (file/slurp minimal-path))
                          " bytes from "
                          original-size
                          ")")))

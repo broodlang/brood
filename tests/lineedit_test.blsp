@@ -251,12 +251,12 @@
     (let (rows (editor/lineedit/lineedit-completion-rows (list "map" "max" "mapcat") 12))
       ; colw 8, room 11 -> 1 column
       (assert= (count rows) 3)
-      (is (every? rows (fn (r) (<= (string/length r) 11))))))
+      (is (every? rows (fn (r) (<= (count r) 11))))))
   (test "a candidate wider than the terminal is truncated, not wrapped"
     (let (rows (editor/lineedit/lineedit-completion-rows (list (string/repeat "x" 50)
                                                            (string/repeat "y" 50))
                  20))
-      (is (every? rows (fn (r) (<= (string/length r) 19))))))
+      (is (every? rows (fn (r) (<= (count r) 19))))))
   (test "an over-long list is capped with a trailing count of the remainder"
     ;; one column (colw 12 in a 13-column room) x 6 max rows = 6 shown of 9.
     (let (cands (map (range 0 9) (fn (i) (str "candidate-" i)))
@@ -338,7 +338,7 @@
           mk (fn (text)
                (assoc (editor/lineedit/lineedit-init "x> " '() {:complete? complete?})
                  :text text
-                 :point (string/length text))))
+                 :point (count text))))
       ;; incomplete form: Enter adds a newline INDENTED to the structural column
       ;; (opener at col 0 -> continuation at col 2), and does NOT submit
       (let (st (editor/lineedit/lineedit-submit (mk "(defn f") nil))

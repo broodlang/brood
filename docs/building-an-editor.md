@@ -158,8 +158,8 @@ value — the buffer plus the top visible line (the viewport) — and render it:
               (buffer-line-at (get ed :buffer) line-idx)
               "~")                       ; past end-of-buffer
         ;; strip the trailing newline rope-line includes
-        s (if (string/ends-with? raw "\n") (string/substring raw 0 (dec (string/length raw))) raw))
-    (text row 0 (if (> (string/length s) cols) (string/substring s 0 cols) s))))
+        s (if (string/ends-with? raw "\n") (string/substring raw 0 (dec (count raw))) raw))
+    (text row 0 (if (> (count s) cols) (string/substring s 0 cols) s))))
 
 (defn render-frame (ed cols rows)
   "Pure: render editor state `ed` ({:buffer :top}) on a `cols`×`rows` terminal —
@@ -232,7 +232,7 @@ A **command** is a function `editor -> editor` (or `editor -> :quit` to exit). A
 unbound key is a no-op. Returns a new editor state, or `:quit`."
   (cond
     (contains? *keymap* key) ((get *keymap* key) ed)
-    (and (string? key) (= (string/length key) 1))
+    (and (string? key) (= (count key) 1))
       ((cmd-on-buffer (fn (b) (insert b key))) ed)
     else ed))
 ```
@@ -306,7 +306,7 @@ Everything except the loop is pure, so test it like any other Brood code:
     (let (f (render-frame {:buffer (make-buffer "one\ntwo") :top 0 :height 5} 20 6))
       (is (vector? f))
       (is (every? f (fn (op) (or (not (= (first op) :text))
-                                 (<= (string/length (nth op 3)) 20))))))))
+                                 (<= (count (nth op 3)) 20))))))))
 ```
 
 ## 8. Where to grow it

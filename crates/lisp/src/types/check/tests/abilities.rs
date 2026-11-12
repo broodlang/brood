@@ -226,11 +226,11 @@ fn ability_op_return_type_flows_to_call_site() {
         "\
          (defability Size (size (self) :-> int))\n\
          (impl Size :int (size (n) n))\n\
-         (defn bad () (string/length (size 5)))",
+         (defn bad () (%string-length (size 5)))",
     );
     assert!(
         ws.iter()
-            .any(|w| w.contains("string/length") && w.contains("int")),
+            .any(|w| w.contains("%string-length") && w.contains("int")),
         "the op's :-> int return should flow so string-length flags it: {ws:?}"
     );
 }
@@ -459,10 +459,10 @@ fn sealed_ability_type_in_op_return_position() {
          (defability Shape :sealed [circle rect] (area (self) :-> float))\n\
          (defability Scaled (scaled (self) :-> Shape))\n\
          (impl Scaled :int (scaled (n) (circle n)))\n\
-         (defn bad (x) (string/length (scaled x)))",
+         (defn bad (x) (%string-length (scaled x)))",
     );
     assert!(
-        ws.iter().any(|w| w.contains("string/length")),
+        ws.iter().any(|w| w.contains("%string-length")),
         "a `:-> Shape` return should flow as the member union: {ws:?}"
     );
 }

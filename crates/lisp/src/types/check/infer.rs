@@ -202,7 +202,7 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
         // A bare symbol is a variable reference — looked up in the local ctx
         // (let-bound RHS / if-guard narrowing). A miss falls back to a `(sig x T)`
         // value-type declaration on a *global*: a redefinable global with a declared
-        // type contributes `T` to the disjointness check, so `(string/length g)` for
+        // type contributes `T` to the disjointness check, so `(%string-length g)` for
         // `(sig g int)` is caught. Sound — the disjointness check only warns on a
         // provable mismatch with the declared (contract) type and defers on overlap,
         // exactly `dynamic(T)`'s behaviour (contract #4). A lexical local shadows it.
@@ -363,7 +363,7 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 // **Keyword accessor** `(:key coll [default])` (ADR-165) — the same
                 // record-field rule the `(get m :k)` case below applies, so the two
                 // spellings type identically. Without this, `(:x p)` on a typed record
-                // had NO result type, and `(string/length (:x p))` went uncaught while
+                // had NO result type, and `(%string-length (:x p))` went uncaught while
                 // the `get` spelling was flagged. `V | nil` for a `map<K,V>`, since a
                 // key may be absent; an unknown key on a record falls through (records
                 // are open, so the type is genuinely unknown, not an error).
@@ -1489,7 +1489,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         | "seq/drop-last" => {
             list_result(expr_ty(heap, *items.get(1)?, ctx).and_then(|t| t.elem_ty_union()))
         }
-        "count" | "string/length" if len == 2 => count_ty(heap, items, ctx),
+        "count" | "%string-length" if len == 2 => count_ty(heap, items, ctx),
         "range" if len >= 2 => range_ty(heap, items, ctx),
         // `(range)` with no bound still produces numbers.
         "range" => list_result(Some(Ty::NUMBER)),
@@ -2143,7 +2143,7 @@ fn merge_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
 
 /// `(apply f a b … coll)` — `f` applied to `a`, `b`, … and one more operand of `coll`'s
 /// element type, so a callee's type variable binds through the spread as it does in the
-/// written-out call (KI-140): `(apply math/max 1 (map xs string/length))` under `(& ?A ->
+/// written-out call (KI-140): `(apply math/max 1 (map xs %string-length))` under `(& ?A ->
 /// ?A)` is an `int`. The spread's COUNT is unknown, so a ring operator's result is its
 /// closure, never one step's interval (`(apply + [1 2])` is an int, not `int[1..2]`). A
 /// lambda literal types as its body with its inputs unknown — the flat return.
@@ -2726,7 +2726,7 @@ fn reduce_ty(heap: &Heap, is_reduce: bool, items: &[Value], ctx: &Ctx) -> Option
     // `h` as `any` read `(* h 31)` as `number`. Not stable → the `any`-seeded reading
     // (sound: the accumulator is over-approximated).
     // An unknown element is `any` here — still sound, and the accumulator's own closure
-    // (`(fn (m s) (math/max m (string/length s)))` over an untyped `lines`) is what
+    // (`(fn (m s) (math/max m (%string-length s)))` over an untyped `lines`) is what
     // matters.
     // A FEW steps, not one: a tuple accumulator whose slots feed each other stabilises
     // one step later than a scalar — `[0 '()]` under `[(inc j) (cons j acc)]` goes

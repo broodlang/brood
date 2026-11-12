@@ -116,13 +116,12 @@ is `T-new`, `[method]T.f` and `[static]T.f` are `T-f`.
     (wasm/native-name \"brood:sqlite/db#[method]connection.query\")   ;=> \"connection-query\"
     (wasm/native-name \"db#[constructor]connection\")            ;=> \"connection-new\""
   (let (at (index-of export "#")
-        bare (if (< at 0) export (string/substring export (inc at) (string/length export))))
+        bare (if (< at 0) export (string/substring export (inc at) (count export))))
     (cond
       (string/starts-with? bare "[constructor]")
         (str (string/drop-prefix bare "[constructor]") "-new")
       (or (string/starts-with? bare "[method]") (string/starts-with? bare "[static]"))
-        (str (string/replace (string/substring bare (inc (index-of bare "]")) (string/length bare))
-               "." "-"))
+        (str (string/replace (string/substring bare (inc (index-of bare "]")) (count bare)) "." "-"))
       else bare)))
 
 (defn use-native (inst)

@@ -221,8 +221,8 @@
 (describe "ADR-315: a `failure?` test that can never be true is reported"
   (test "on a value whose type has no way to be a failure"
     ;; the guard reads as doing work and is not — the branch behind it is dead
-    (assert= (impossible-count "(defn b (s) (if (failure? (string/length s)) 0 1))") 1)
-    (assert= (impossible-count "(defn c (s) (let (n (string/length s)) (if (failure? n) 0 n)))") 1))
+    (assert= (impossible-count "(defn b (s) (if (failure? (count s)) 0 1))") 1)
+    (assert= (impossible-count "(defn c (s) (let (n (count s)) (if (failure? n) 0 n)))") 1))
 
   (test "a written-out literal is reported too"
     ;; ADR-312 recorded a lint that warned in the editor and not on the command line, so
@@ -243,8 +243,8 @@
     ;; root namespace", so `(nil? (reflect/current-ns))` read as dead; a `nil?` guarded a
     ;; function documented to answer -1; a `nil?` sat behind a `pair?` that already
     ;; excluded nil. All three were live code the checker had never had a way to mention.
-    (assert= (impossible-count-of "(defn a (s) (if (nil? (string/length s)) 0 1))" "nil?") 1)
-    (assert= (impossible-count-of "(defn b (s) (if (map? (string/length s)) 0 1))" "map?") 1)
+    (assert= (impossible-count-of "(defn a (s) (if (nil? (count s)) 0 1))" "nil?") 1)
+    (assert= (impossible-count-of "(defn b (s) (if (map? (count s)) 0 1))" "map?") 1)
     (assert= (impossible-count-of "(defn c (m) (if (map? m) 0 1))" "map?") 0))
 
   (test "nor on a macro's own guard, which the author did not write"

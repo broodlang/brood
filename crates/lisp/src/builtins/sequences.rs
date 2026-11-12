@@ -17,7 +17,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     let fields_ty = map_ty.union(crate::types::Ty::of(crate::core::value::Tag::Record));
     use crate::core::value::Arity;
     use crate::types::Sig;
-    // pair / sequence — `empty?` is Brood (type dispatch over string/length /
+    // pair / sequence — `empty?` is Brood (type dispatch over %string-length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
     // accessors (car/cdr), so they stay. `rest` always yields a list (a vector's
     // tail is built via `heap.list`), never a vector.
@@ -482,11 +482,11 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     );
     // string
     primitives.def(
-        "string/length",
+        "%string-length",
         Arity::exact(1),
         Sig::new(vec![string], int),
         &["s"],
-        "The number of characters in string s.\n\n    (string/length \"Hi there\")   ;=> 8",
+        "The number of characters in string s: what `count` answers for a string.",
         string_length,
     );
     primitives.def(
@@ -494,7 +494,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 3),
         Sig::with_optional(vec![string], vec![int, int], int),
         &["s", "start-col", "tab-width"],
-        "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0, a tab the cells to its next stop, a glyphless character such as U+200B 0 — or its `<200b>` escape's cells when the dynamic *glyphless-display* is :hex-code, ADR-556). The width-aware counterpart to string/length. The optional start-col (default 0) is the column s is laid out from — a chunk of a longer line passes its column so its tabs land on the LINE's stops — and tab-width the distance between stops — by default the dynamic *tab-width* (8 unless a binding says otherwise).\n\n    (string/display-width \"Hi there\")   ;=> 8\n    (binding (*tab-width* 4) (string/display-width \"\\tx\"))   ;=> 5\n    (string/display-width \"a\\tb\")       ;=> 9\n    (string/display-width \"\\tx\" 3)      ;=> 6\n    (binding (*glyphless-display* :hex-code) (string/display-width \"a\\u{200b}b\"))   ;=> 8",
+        "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0, a tab the cells to its next stop, a glyphless character such as U+200B 0 — or its `<200b>` escape's cells when the dynamic *glyphless-display* is :hex-code, ADR-556). The width-aware counterpart to %string-length. The optional start-col (default 0) is the column s is laid out from — a chunk of a longer line passes its column so its tabs land on the LINE's stops — and tab-width the distance between stops — by default the dynamic *tab-width* (8 unless a binding says otherwise).\n\n    (string/display-width \"Hi there\")   ;=> 8\n    (binding (*tab-width* 4) (string/display-width \"\\tx\"))   ;=> 5\n    (string/display-width \"a\\tb\")       ;=> 9\n    (string/display-width \"\\tx\" 3)      ;=> 6\n    (binding (*glyphless-display* :hex-code) (string/display-width \"a\\u{200b}b\"))   ;=> 8",
         display_width);
     // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
     // (std/prelude.blsp) over this one reflective primitive.
@@ -812,7 +812,7 @@ pub(crate) fn is_empty(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResul
         // routed through `Seqable`: `->seq` is a LIST view, so a rope would have to
         // materialise every character to answer a question its length already
         // answers — and a rope is on the editor's hot path. A rope sizes in
-        // characters, which is what `count` and `string/length` already report for
+        // characters, which is what `count` and `%string-length` already report for
         // the string it stands for.
         Value::Rope(_) => {
             let r = expect_rope_ref(heap, "empty?", x)?;
@@ -1818,9 +1818,9 @@ pub(super) fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     let v = arg(args, 0);
     match v {
         // O(1): the char count is cached on the slot, so a loop bounded by
-        // `(string/length s)` is not quadratic before it does anything else.
+        // `(%string-length s)` is not quadratic before it does anything else.
         Value::Str(id) => Ok(Value::int(heap.str_metrics(id).0 as i64)),
-        _ => Err(LispError::wrong_type(heap, "string/length", "string", v)),
+        _ => Err(LispError::wrong_type(heap, "%string-length", "string", v)),
     }
 }
 

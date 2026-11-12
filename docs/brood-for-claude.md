@@ -1166,7 +1166,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   There is no `dotimes`, `dolist` or `unless` (removed by ADR-674): write `doseq` and
   `(when (not t) …)`.
 - **string**: the string surface lives in the `string` module (ADR-230), so these are
-  **`string/`-qualified** unless listed as bare below: `string/length`
+  **`string/`-qualified** unless listed as bare below (a string's length is the bare `count`): `string/substring`
   `string/substring` `string/char-at` (returns a 1-char *string* — Brood has no char
   type) `string/split` `string/join` `string/replace` `string/trim` `string/trim-left`
   `string/trim-right` `string/blank?` `string/upper` `string/lower`

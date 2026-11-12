@@ -113,7 +113,7 @@ A new helper `callback_ret(heap, callback_form, elem_in, ctx) -> Option<Ty>`:
 - **Soundness rule:** uncertain → flat. Empty-input → include `nil`. Element type
   computed as a superset (unknown → unrefined). `is_disjoint` unchanged (tags-only).
 - **Unit tests** (`check/tests/`): `(first (map [1 2 3] inc)) : number` (no
-  warn against a number sink); `(string/length (first (map [1 2 3] inc)))` *warns* (number ≠
+  warn against a number sink); `(string/upper (first (map [1 2 3] inc)))` *warns* (number ≠
   string); `(first (seq/filter [1 2 3] math/even?)) : int`; identity lambda preserves
   element type; unknown callback / branchy lambda / unknown coll → no refinement, no
   warning.

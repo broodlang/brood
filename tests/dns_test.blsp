@@ -93,7 +93,7 @@
   (test "answers something usable even with no resolv.conf"
     (let (ns (dns/nameserver))
       (is (string? ns))
-      (is (> (string/length ns) 0)))))
+      (is (> (count ns) 0)))))
 
 (describe "dns/lookup-all"
   (test "a name that cannot resolve is an empty list in both families"

@@ -30,7 +30,7 @@ fn project() -> TempDir {
         "(defmodule main \"d\")\n\
          (sig p (string -> (or nil string)))\n\
          (defn p (s) s)\n\
-         (defn q (s) (string/length (p s)))\n",
+         (defn q (s) (%string-length (p s)))\n",
     )
     .unwrap();
     temp

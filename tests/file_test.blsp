@@ -337,7 +337,7 @@
       (is (not (= a b)))
       ;; long enough that it cannot be guessed and pre-created as a symlink by
       ;; another user on the machine — the reason a fixed /tmp name is unsafe
-      (is (>= (- (string/length a) (string/length "/tmp/x-")) 32))))
+      (is (>= (- (count a) (count "/tmp/x-")) 32))))
 
   (test "it creates nothing — the caller decides file or directory"
     (is (not (file/exists? (path/temp "unmade-"))))))

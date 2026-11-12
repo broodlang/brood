@@ -67,7 +67,7 @@
       ; not the in-docstring (x)
       (let ([base _sub] (narrow src dp))
         (assert= base 0))
-      (assert= (point-forward src dp) (string/length src)))))
+      (assert= (point-forward src dp) (count src)))))
 ;; Structural motion narrows to the forms around point (`sexp/narrow`) so it's
 ;; O(neighbouring forms), not O(buffer). These pin that the narrowed answer equals the
 ;; whole-buffer one, including deep in a file with many preceding top-level forms (where
@@ -120,7 +120,7 @@
   (def many
     (str (string/join (map (range 300) (fn (i) (str "(defn f" i " () " i ")\n"))) "")
       "(map g (h x))"))
-  (def n (string/length many))
+  (def n (count many))
   (test "narrowed motion matches the whole-buffer walk at many points (incl. deep + boundaries)"
     (doseq (p-raw [0 1 25 (- n 13) (- n 12) (- n 7) (- n 6) (- n 1)])
       ;; the literal's elements widen to `number` through the vector; these are offsets
@@ -130,8 +130,8 @@
   (test "narrow genuinely slices (base ≤ point, slice shorter than the whole text)"
     (let ([base sub] (narrow many (math/floor (- n 6))))
       (is (<= base (- n 6)))
-      (is (> (string/length sub) 0))
-      (is (< (string/length sub) n)))))
+      (is (> (count sub) 0))
+      (is (< (count sub) n)))))
 
 ;; `scan-form-end` is the native forward window-end scan `narrow` uses (it replaced an
 ;; interpreted `char-at` loop that was ~85% of every structural motion). It counts
@@ -177,8 +177,8 @@
   (test "the answer holds past a safepoint, in a text long enough to carry a table"
     (let (filler (string/join (map (range 400) (fn (i) (str "(def |x(" i "| " i ")\n"))) "")
           text (str filler "(last)"))
-      (assert= (reflect/scan-form-start text (string/length text))
-        (- (string/length text) 6)))))
+      (assert= (reflect/scan-form-start text (count text))
+        (- (count text) 6)))))
 
 (describe "sexp buffer commands"
   (test "forward moves point to the end of the next sexp"
@@ -297,7 +297,7 @@
           bad (fold texts
                 nil
                 (fn (acc text)
-                  (fold (range 0 (+ 2 (string/length text)))
+                  (fold (range 0 (+ 2 (count text)))
                     acc
                     (fn (a p)
                       (if (= (pair-old text p) (reflect/scan-form-start-and-previous text p))
@@ -359,7 +359,7 @@
 
 (defn- rope-disagreements (text rope)
   "Every `[what point]` where a query over `rope` differs from the same query over `text`."
-  (fold (range 0 (inc (string/length text)))
+  (fold (range 0 (inc (count text)))
     '()
     (fn (acc p)
       (let (scans [[:start (reflect/scan-form-start text p) (reflect/scan-form-start rope p)]
@@ -391,7 +391,7 @@ through edits, as an editor's does."
         middle (math/quot (count built) 2)
         moved (text/slice built middle (math/min (count built) (+ middle 5))))
     ;; and a stretch in the middle cut out and typed back
-    (text/insert (text/delete built middle (+ middle (string/length moved))) middle moved)))
+    (text/insert (text/delete built middle (+ middle (count moved))) middle moved)))
 
 (describe "sexp over a rope — the string's answers, at every point"
   (test "every scan, motion and the closer test agree on a rope from a string"
@@ -405,10 +405,10 @@ through edits, as an editor's does."
           start (text/string-> doc)
           ;; each edit is asked about at points around it and far from it; the rope's table
           ;; is carried from the previous rope's
-          edits [[(math/quot (string/length doc) 2) 0 "x"]
+          edits [[(math/quot (count doc) 2) 0 "x"]
                   [40 0 "\""]
                   [40 1 ""]
-                  [(math/quot (string/length doc) 2) 0 "("]
+                  [(math/quot (count doc) 2) 0 "("]
                   [0 0 "(new)\n"]
                   [3000 5 ""]]
           probes (fn (n at)
@@ -430,7 +430,7 @@ through edits, as an editor's does."
                              [at removed inserted] edit
                              next (text/insert (text/delete rope at (+ at removed)) at inserted)
                              s (text/->string next)
-                             wrong (seq/filter (probes (string/length s) at)
+                             wrong (seq/filter (probes (count s) at)
                                      (fn (p)
                                        (not (and (= (reflect/scan-form-start-and-previous s p)
                                                    (reflect/scan-form-start-and-previous next p))

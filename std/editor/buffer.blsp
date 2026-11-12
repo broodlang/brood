@@ -49,7 +49,7 @@ cross a process boundary: `editor/buffer-server` is the process that owns one."
   "The column at the end of `line` — its length excluding any trailing newline.
 Where `end-of-line` lands and the rightmost column point can hold on that line."
   (let (lt (text/line (get buf :rope) line))
-    (if (string/ends-with? lt "\n") (dec (string/length lt)) (string/length lt))))
+    (if (string/ends-with? lt "\n") (dec (count lt)) (count lt))))
 
 ;; ---- construction -----------------------------------------------------------
 ;;
@@ -1141,7 +1141,7 @@ passed through. Propertied text joins a run only by appending (its properties la
 the run's); a delete back into the run clips the run's. A redaction or a property change
 is never merged, into or onto."
   (let ([r0 r1 lo hi repl mids properties] entry
-        length (string/length repl)
+        length (count repl)
         end (+ lo length)
         merged (cond
                  (not (= r1 before-rope)) nil
@@ -1213,7 +1213,7 @@ text properties carried, the inserted text given `properties` (`{key spans}` rel
 ADR-579), and the splice logged with them. The one tail every editing primitive shares."
   (let (lo a
         hi (if (= kind :insert) a b)
-        added (when (= kind :insert) (properties-normalize properties (string/length repl)))
+        added (when (= kind :insert) (properties-normalize properties (count repl)))
         logged (assoc after
                  :splices
                    (buffer-splice-log-push (or (get before :splices) ())
@@ -1243,7 +1243,7 @@ already share leaves the exact rest of the run — small, because a run is — w
       (+ lo same-lo)
       (+ lo same-hi)
       changed
-      (properties-relative properties same-lo (+ same-lo (string/length changed)))]))
+      (properties-relative properties same-lo (+ same-lo (count changed)))]))
 
 (defn- buffer-log-newer-property? (log stamp:int -> bool)
   "Whether `log` still holds a property entry stamped after `stamp`."
@@ -1364,9 +1364,9 @@ changed: nil. O(spans) when either has properties."
     (if (and (nil? before-map) (nil? after-map))
       (when text? [(nth splice 0) (nth splice 1) (nth splice 2) nil])
       (let ([lo hi repl] (if text? splice [0 0 ""])
-            inserted-end (+ lo (string/length repl))
+            inserted-end (+ lo (count repl))
             carried (if text?
-                      (properties-map-replace (or before-map {}) lo hi (string/length repl))
+                      (properties-map-replace (or before-map {}) lo hi (count repl))
                       (or before-map {}))
             difference (properties-difference carried (or after-map {})))
         (cond
@@ -1415,7 +1415,7 @@ redacted and inserted again (ADR-581)."
                         (nil? edit) nil
                         (property-change? (nth edit 3))
                           (let (to (+ (nth edit 0) (nth (nth edit 3) 1))) [(nth edit 0) to to])
-                        else (let ([lo hi repl _] edit) [lo hi (+ lo (string/length repl))]))
+                        else (let ([lo hi repl _] edit) [lo hi (+ lo (count repl))]))
               cover (when (= redactions 1) (buffer-redaction-cover after))
               [lo old-hi new-hi] (buffer-redaction-range before after changed cover)
               redaction [lo old-hi "" :redact])
@@ -1474,7 +1474,7 @@ another (`editor/buffer-client/link-propagate-buffers`).
 
 (defn- buffer-cover-of (step:splice-step -> splice-cover)
   "The cover of one splice: `[lo, hi)` of the text before it became `[lo, lo + |repl|)`."
-  (let ([lo hi repl] step) [lo hi (+ lo (string/length repl))]))
+  (let ([lo hi repl] step) [lo hi (+ lo (count repl))]))
 
 (defn- buffer-cover-step (cover:splice-cover step:splice-step -> splice-cover)
   "`cover` widened by the next splice `step`: still one range of the first splice's text that
@@ -1482,7 +1482,7 @@ became one range of the text after `step`. A position outside the cover maps acr
 by the cover's length change; one inside it widens to the cover's edge."
   (let ([cover-lo restored-hi current-hi] cover
         [lo hi repl] step
-        added (string/length repl)
+        added (count repl)
         shift (- current-hi restored-hi)
         restored-hi-of (cond
                          (<= hi cover-lo) hi
@@ -1579,15 +1579,15 @@ Without them the new text has none, even inserted inside a span (the span splits
     (editor/buffer/buffer-text (editor/buffer/insert (editor/buffer/goto-char (editor/buffer/make-buffer \"hello world\") 5) \",\"))   ;=> \"hello, world\"
     (editor/buffer/buffer-properties (editor/buffer/insert (editor/buffer/make-buffer \"ab\") \"xy\" {:face [[0 1 :red]]}) :face)   ;=> [[0 1 :red]]"
   (buffer-barf-if-read-only buf)
-  (if (= (string/length s) 0)
+  (if (= (count s) 0)
     buf
     (let (p (get buf :point)
           _ (buffer-barf-if-protected-insert buf p)
           buf (buffer-record-change buf))
       (buffer-apply-edit buf
-        (assoc buf :rope (text/insert (get buf :rope) p s) :point (+ p (string/length s)) :mark nil)
+        (assoc buf :rope (text/insert (get buf :rope) p s) :point (+ p (count s)) :mark nil)
         :insert p
-        (string/length s)
+        (count s)
         s
         properties))))
 
@@ -1635,7 +1635,7 @@ Throws if `buf` is read-only.
 bracket key: `(` types `()` and leaves you inside. One undo unit.
 
     (let (b (editor/buffer/insert-pair (editor/buffer/make-buffer \"\") \"(\" \")\")) [(editor/buffer/buffer-text b) (editor/buffer/buffer-point b)])   ;=> [\"()\" 1]"
-  (backward-char (insert buf (str open close)) (string/length close)))
+  (backward-char (insert buf (str open close)) (count close)))
 
 (defn delete-empty-pair (buf:buffer open:string close:string -> buffer)
   "When point sits between `open` and `close` with nothing in between — `(|)` — delete
@@ -1646,7 +1646,7 @@ fall through to `delete-backward-char` on the unchanged buffer.
     (editor/buffer/buffer-text (editor/buffer/delete-empty-pair (editor/buffer/insert-pair (editor/buffer/make-buffer \"\") \"(\" \")\") \"(\" \")\"))   ;=> \"\""
   (if (and (= (buffer-char-before buf) open) (= (buffer-char-after buf) close))
     (undo-group buf
-      (fn (b) (delete-char (delete-backward-char b (string/length open)) (string/length close))))
+      (fn (b) (delete-char (delete-backward-char b (count open)) (count close))))
     buf))
 
 (defn delete-region (buf)
@@ -1718,7 +1718,7 @@ it too. What a revert needs, so a file read back costs none of the history befor
     (let (open (dissoc (assoc buf :undo-amalgamate false) :editable)
           ;; point stays where it was, clamped: not after the new text
           replaced (goto-char (replace-region open 0 (buffer-length open) text)
-                     (math/min (buffer-point buf) (string/length text)))
+                     (math/min (buffer-point buf) (count text)))
           restored (if (contains? buf :editable)
                      (assoc replaced :editable (get buf :editable))
                      replaced))
@@ -1751,7 +1751,7 @@ region — stays read-only."
         open (dissoc (assoc state :undo-disabled true) :editable)
         lo (buffer-clamp 0 (buffer-length open) from)
         hi (buffer-clamp lo (buffer-length open) to)
-        width (string/length text)
+        width (count text)
         shift (fn (position)
                 (cond
                   (>= position hi) (+ position (- width (- hi lo)))
@@ -1848,7 +1848,7 @@ the text, recorded for undo.
                 to (math/max from (buffer-clamp 0 length hi))
                 narrowed (assoc replaced :editable regions)
                 cut (if (< from to) (buffer-adjust-editable narrowed :delete from to) narrowed))
-            (if (= repl "") cut (buffer-adjust-editable cut :insert from (string/length repl))))))))
+            (if (= repl "") cut (buffer-adjust-editable cut :insert from (count repl))))))))
 
 (defn put-properties (buf:buffer key:any lo:int hi:int spans:seqable -> buffer)
   "`buf` with text property `key` over `[lo, hi)` set to `spans` (`[[start end value] …]` in

@@ -63,7 +63,7 @@ expands (`İ` → `i̇`), so a lowered candidate stays index-for-index with the 
 boundary test reads the original (case is what a camelCase hump is made of) at positions
 found in the lowered form, which is only sound while the two have the same length."
   (let (lowered (string/lower ch))
-    (if (= (string/length lowered) 1) lowered (string/substring lowered 0 1))))
+    (if (= (count lowered) 1) lowered (string/substring lowered 0 1))))
 
 (defn- fuzzy-fold-case (text)
   "`text` lowered character by character (`fuzzy-fold-char`)."
@@ -179,7 +179,7 @@ this function rearranged (`fuzzy-dp-row`), so the library has one definition of 
 
 (defn- fuzzy-parse-term (piece)
   "One space-separated `piece` of a query as a term (`fuzzy-make-term`), or nil."
-  (let (length (string/length piece))
+  (let (length (count piece))
     (cond
       (string/starts-with? piece "!")
         (fuzzy-make-term :exclude (string/substring piece 1 length) false false)
@@ -500,7 +500,7 @@ still `:default`. The one place the sentinel is resolved."
 (defn- fuzzy-basename (cand)
   "`cand` past its last `/` — the file name `fuzzy-basename-start` measures."
   (let (at (string/last-index-of cand "/"))
-    (if (< at 0) cand (string/substring cand (inc at) (string/length cand)))))
+    (if (< at 0) cand (string/substring cand (inc at) (count cand)))))
 
 (defn- fuzzy-exact-of (query file?)
   "A `(cand) -> bool`: whether `cand` (or its file name, for a path) is the query itself —
@@ -545,7 +545,7 @@ letter (smart case, as each term)."
   "The sort key `[(- score) segments length cand]` — best score first, then (for a path) the
 one with fewer segments, then the shorter candidate, then lexicographic. The candidate rides
 last in the key, so a ranked list is a list of keys."
-  [(- 0 score) (if file? (fuzzy-segments cand) 0) (string/length cand) cand])
+  [(- 0 score) (if file? (fuzzy-segments cand) 0) (count cand) cand])
 
 (defn- fuzzy-worse? (score cand file? worst)
   "True if `cand` scoring `score` loses to `worst`, the worst key kept. The reject test of

@@ -75,7 +75,7 @@
       needle
       "\")
 (def cps (into [] (map (string/->codepoints s) string/int->char)))
-(def n (string/length s))
+(def n (count s))
 
 (defn bad (what a b) (io/puts \"BAD\" what \"got\" (pr-str a) \"want\" (pr-str b)))
 (defn chk (what a b) (if (= a b) 0 (do (bad what a b) 1)))
@@ -90,8 +90,8 @@
         (+ acc (chk \"string/substring\" (string/substring s i j) (ref-sub i j))
            (chk \"string/char-at\" (string/char-at s i) (nth cps i)))))))
 
-;; string/length agrees with the code-point count, and the whole string round-trips
-(def errs0 (+ (chk \"string/length\" n (count cps))
+;; count agrees with the code-point count, and the whole string round-trips
+(def errs0 (+ (chk \"count\" n (count cps))
               (chk \"roundtrip\" s (apply str cps))
               (chk \"substring-all\" (string/substring s 0 n) s)))
 
@@ -101,8 +101,8 @@
     (if (< j 0)
       acc
       (chk-scan (+ j 1)
-        (+ acc (chk \"index-of-at\" (string/substring s j (math/min n (+ j (string/length needle))))
-                 (if (<= (+ j (string/length needle)) n) needle
+        (+ acc (chk \"index-of-at\" (string/substring s j (math/min n (+ j (count needle))))
+                 (if (<= (+ j (count needle)) n) needle
                    (string/substring s j n)))
            (if (>= j from) 0 (do (bad \"index-of-order\" j from) 1)))))))
 
@@ -111,8 +111,8 @@
   (let (last (string/last-index-of s needle))
     (if (< last 0)
       (chk \"no-needle\" (index-of s needle 0) -1)
-      (+ (chk \"last-index-of-at\" (string/substring s last (math/min n (+ last (string/length needle))))
-           (if (<= (+ last (string/length needle)) n) needle (string/substring s last n)))
+      (+ (chk \"last-index-of-at\" (string/substring s last (math/min n (+ last (count needle))))
+           (if (<= (+ last (count needle)) n) needle (string/substring s last n)))
          (chk \"nothing-after-last\" (index-of s needle (+ last 1)) -1)))))
 
 ;; string/span: `e` is just PAST the maximal run of set members from `i`, so every char in
@@ -134,7 +134,7 @@
       source-lines
       " \"(defn f (a) (str \\\"x\\\" a))\\n\")))
 (defn chk-form (pos acc)
-  (if (>= pos (string/length src))
+  (if (>= pos (count src))
     acc
     (let (b (reflect/scan-form-start src pos))
       (chk-form (+ pos 3)

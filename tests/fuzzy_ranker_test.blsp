@@ -72,7 +72,7 @@ the strict checker flagged on `main` (2026-09-20), and rightly."
   (test "the session keeps the scorer that was in force when it was created"
     ;; a dynamic binding does not reach a spawned process, so `ranker` captures it — without
     ;; that, a session made under custom rules would quietly rank by the default ones
-    (let (by-length (fn (_q _options) (fn (cand) (- 0 (string/length cand))))
+    (let (by-length (fn (_q _options) (fn (cand) (- 0 (count cand))))
           session (binding (fuzzy/*scorer* by-length) (ranker ["xxx" "z" "yy"])))
       (do
         (rank-async session "q" 3)

@@ -46,7 +46,7 @@ length is still known only by what it excludes.
 
 ## Inference
 
-- `count` / `string/length` → `int` in the collection's length.
+- `count` → `int` in the collection's length.
 - `first` / `second` / `third` / `last` / `nth`: present (no `nil`) when the length proves
   it — `second` of a `[2..]`, `(nth xs 3)` of a `[4..]`, `(nth xs i)` when `i ≥ 0` and
   either a guard established `i < (count xs)` (`Ctx::index_bounds`) or `i`'s own interval

@@ -223,7 +223,7 @@ fn one_allocation_past_the_hard_limit_names_the_limit() {
 (def quarter (string/repeat "x" 100000000))
 (%gc-collect)
 (io/puts "started")
-(io/puts (string/length (str quarter quarter quarter quarter quarter)))"#,
+(io/puts (%string-length (str quarter quarter quarter quarter quarter)))"#,
         Some("500M"),
     );
     assert!(

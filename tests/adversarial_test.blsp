@@ -80,7 +80,7 @@
   :isolated (test "1 MB string allocates as a Shared blob"
     (when (bound? '%blob-ptr)
       (let (big (string/repeat "X" 1048576))
-        (assert= 1048576 (string/length big))
+        (assert= 1048576 (count big))
         (is (not (nil? (%blob-ptr big)))))))
 
   (test "30 000-element cons list build + traverse"

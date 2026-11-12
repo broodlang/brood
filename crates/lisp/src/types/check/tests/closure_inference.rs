@@ -9,7 +9,7 @@ fn primitive_sigs_are_read_from_native_fn() {
     // next to its `Arity` in `builtins.rs`. If we ever drop the sig field
     // (or set it wrong), this catches it.
     let interp = crate::Interp::new();
-    let sig = primitive_sig(&interp.heap, crate::core::value::intern("string/length"))
+    let sig = primitive_sig(&interp.heap, crate::core::value::intern("%string-length"))
         .expect("string-length is a primitive");
     assert_eq!(sig.params, vec![Ty::of(Tag::Str)]);
     assert_eq!(sig.ret, Ty::of(Tag::Int));
@@ -72,9 +72,9 @@ fn inferred_return_type_propagates() {
     // (defn bump (x) (+ x 1)) returns the number `+` returns; feeding it into
     // `string-length` (wants string) is a provable misuse. (Not `inc` — the fixture
     // is evaluated, and shipped names are reserved, ADR-166.)
-    let w = check_with_defs(&["(defn bump (x) (+ x 1))"], "(string/length (bump 1))");
+    let w = check_with_defs(&["(defn bump (x) (+ x 1))"], "(%string-length (bump 1))");
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "expected a `string-length` warning, got {:?}",
         w
     );
@@ -90,13 +90,13 @@ fn inferred_params_intersect_across_positions() {
 #[test]
 fn same_file_caller_checked_against_inferred_return() {
     // The file being checked isn't loaded, so this exercises same-file inference's form-based inference:
-    // `dbl` is inferred (same-file) to return a number, so `(string/length (dbl 5))` is caught
+    // `dbl` is inferred (same-file) to return a number, so `(%string-length (dbl 5))` is caught
     // — a same-file caller now gets the checking a loaded-function caller already did.
     let w = file_warnings(
-        "(defmodule t)\n(defn dbl (x) (+ x 1))\n(defn bad () (string/length (dbl 5)))",
+        "(defmodule t)\n(defn dbl (x) (+ x 1))\n(defn bad () (%string-length (dbl 5)))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "same-file inferred return should flow to a caller: {w:?}"
     );
 }
@@ -135,10 +135,10 @@ fn infers_a_tail_recursive_function_return_from_its_base_case() {
     // made the return uninferrable and the misuse went uncaught.
     let w = check_with_defs(
         &["(defn count-down (n) (if (<= n 0) :done (count-down (- n 1))))"],
-        "(string/length (count-down 5))",
+        "(%string-length (count-down 5))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "a recursive fn's base-case return should flow to its caller: {w:?}"
     );
 }
@@ -154,20 +154,20 @@ fn an_accumulator_loop_returns_what_the_accumulator_grows_into() {
     // a false positive.
     let w = check_with_defs(
         &["(defn sum-acc (xs acc) (if (empty? xs) acc (sum-acc (rest xs) (+ acc (first xs)))))"],
-        "(string/length (sum-acc (list 1 2) 0))",
+        "(%string-length (sum-acc (list 1 2) 0))",
     );
     assert!(
         w.iter()
-            .any(|s| s.contains("string/length: argument 1 expects string, got int[0..]")),
+            .any(|s| s.contains("%string-length: argument 1 expects string, got int[0..]")),
         "{w:?}"
     );
     // SOUNDNESS: a seed the call site does not know keeps the result unknown — the
     // fixpoint over-approximates from `inputs`, and an unknown input stays unknown.
     let w = check_with_defs(
         &["(defn sum-acc (xs acc) (if (empty? xs) acc (sum-acc (rest xs) (+ acc (first xs)))))"],
-        "(defn use-it (k) (string/length (sum-acc (list 1 2) k)))",
+        "(defn use-it (k) (%string-length (sum-acc (list 1 2) k)))",
     );
-    assert!(!w.iter().any(|s| s.contains("string/length")), "{w:?}");
+    assert!(!w.iter().any(|s| s.contains("%string-length")), "{w:?}");
 }
 
 #[test]
@@ -177,10 +177,10 @@ fn infers_a_multi_arity_return_as_the_union_of_its_arms() {
     // is a provable misuse. (Before, a multi-arity closure was skipped entirely.)
     let w = check_with_defs(
         &["(defn describe ((x) :one) ((x y) :two))"],
-        "(string/length (describe 5))",
+        "(%string-length (describe 5))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "a multi-arity fn's union return should flow: {w:?}"
     );
 }
@@ -230,10 +230,10 @@ fn infers_through_let_alias() {
     // the body is still one straight-line call — inference should work.
     let w = check_with_defs(
         &["(defn double (x) (let (y x) (* y 2)))"],
-        "(string/length (double 3))",
+        "(%string-length (double 3))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "let-alias wrapper should not block infer_sig: {:?}",
         w
     );
@@ -248,13 +248,13 @@ fn infers_through_let_alias() {
     // A non-param let (binding a computed value) isn't peeled by the precise
     // *parameter*-inferring tier — but the sound **return-only** tier still
     // infers `wrap`'s result as `number` (`wrap 3` = 8), so a real misuse of
-    // that result is caught (`(string/length 8)` genuinely errors at runtime).
+    // that result is caught (`(%string-length 8)` genuinely errors at runtime).
     let w = check_with_defs(
         &["(defn wrap (x) (let (y (+ x 1)) (* y 2)))"],
-        "(string/length (wrap 3))",
+        "(%string-length (wrap 3))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "return-only inference should type wrap's result as number: {:?}",
         w
     );
@@ -354,7 +354,7 @@ fn earmuffed_global_types_as_unknown_not_its_default() {
     // it to `nil` and flag a string-demanding use. (Regression guard for the false
     // positive the sound param-inference tier would otherwise surface at, e.g.,
     // `(path-join project/*root* rel)` after its `nil?` guard.)
-    let w = check_with_defs(&["(def *root* nil)"], "(string/length *root*)");
+    let w = check_with_defs(&["(def *root* nil)"], "(%string-length *root*)");
     assert!(
         w.is_empty(),
         "earmuffed global must type as unknown, not its default nil: {:?}",
@@ -363,9 +363,9 @@ fn earmuffed_global_types_as_unknown_not_its_default() {
     // A non-earmuffed global is still typed by its value's kind: a real disjoint use is
     // still caught. (Not a nil one — an observed nil is the placeholder case whatever the
     // name, an unset `(os/env …)` included, and stays unknown.)
-    let w = check_with_defs(&["(def plain-root 5)"], "(string/length plain-root)");
+    let w = check_with_defs(&["(def plain-root 5)"], "(%string-length plain-root)");
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "a plain (non-earmuffed) global is still typed by its value: {:?}",
         w
     );
@@ -377,10 +377,10 @@ fn return_only_inference_is_sound() {
     // union of the possible results), so misusing the *result* is caught…
     let w = check_with_defs(
         &["(defn pick (c) (if c 1 2))"],
-        "(string/length (pick true))",
+        "(%string-length (pick true))",
     );
     assert!(
-        w.iter().any(|s| s.contains("string/length")),
+        w.iter().any(|s| s.contains("%string-length")),
         "a numeric-returning branchy body's result misuse must warn: {w:?}"
     );
     // …but a parameter used as a number only *inside a guard* must NOT be
@@ -478,11 +478,11 @@ fn a_tail_recursive_accumulator_is_typed_at_its_call_site() {
     // `(number any -> any)` flat; `int` at this call.
     let ws = file_warnings(
         "(defn sum-to (i acc) (if (= i 0) acc (sum-to (- i 1) (+ acc i))))\n\
-         (defn use-it () (string/length (sum-to 10 0)))",
+         (defn use-it () (%string-length (sum-to 10 0)))",
     );
     assert!(
         ws.iter()
-            .any(|w| w.contains("string/length: argument 1 expects string, got int")),
+            .any(|w| w.contains("%string-length: argument 1 expects string, got int")),
         "{ws:?}"
     );
     // A list builder: `never` → `list<int>` → stable. The element is what the else branch
@@ -499,11 +499,11 @@ fn a_tail_recursive_accumulator_is_typed_at_its_call_site() {
     // A self-call in a NESTED position (`cons` of the recursive result): the classic map.
     let ws = file_warnings(
         "(defn my-map (xs f) (if (nil? xs) nil (cons (f (first xs)) (my-map (rest xs) f))))\n\
-         (defn use-it () (string/length (first (my-map '(1 2 3) inc))))",
+         (defn use-it () (%string-length (first (my-map '(1 2 3) inc))))",
     );
     assert!(
         ws.iter()
-            .any(|w| w.contains("string/length: argument 1 expects string, got")),
+            .any(|w| w.contains("%string-length: argument 1 expects string, got")),
         "{ws:?}"
     );
 }
@@ -520,8 +520,8 @@ fn the_recursive_fixpoint_keeps_the_correct_calls_silent() {
          (defn ok2 () (+ 1 (sum-to 10 0.5)))\n\
          (defn ok3 () (count (build 3 '())))\n\
          (defn ok4 () (map (my-map '(1 2 3) inc) (fn (n) (+ n 1))))\n\
-         (defn ok5 () (each (grow 4 '()) (fn (x) (if (string? x) (string/length x) (+ x 1)))))\n\
-         (defn ok6 (k) (string/length (sum-to 10 k)))",
+         (defn ok5 () (each (grow 4 '()) (fn (x) (if (string? x) (%string-length x) (+ x 1)))))\n\
+         (defn ok6 (k) (%string-length (sum-to 10 k)))",
     );
     // `my-map` earns the (correct) non-tail-recursion lint; only type findings matter here.
     let ws: Vec<_> = ws.into_iter().filter(|w| w.contains("expects")).collect();
@@ -534,17 +534,17 @@ fn the_recursive_fixpoint_declines_rather_than_under_approximate() {
     // call — never converges as written; the call-site fixpoint declines to the flat
     // answer, and the caller-derived one folds the nesting into a recursive type (`μX. 1 |
     // (list X)`, `Ty::fold_recursive`). Both are sound — `(nest 3 1)` is `(((1)))`, inside either — and the μ
-    // is exact: `string/length` on it is a true finding and `+` (which `1` satisfies) is
+    // is exact: `%string-length` on it is a true finding and `+` (which `1` satisfies) is
     // not.
     let ws = file_warnings(
         "(defn nest (i acc) (if (= i 0) acc (nest (- i 1) (list acc))))\n\
-         (defn use-a () (string/length (nest 3 1)))\n\
+         (defn use-a () (%string-length (nest 3 1)))\n\
          (defn use-b () (+ 1 (nest 3 1)))",
     );
     assert_eq!(
         ws,
         vec![
-            "string/length: argument 1 expects string, got (rec X 1 | (list X)) ((nest 3 1))"
+            "%string-length: argument 1 expects string, got (rec X 1 | (list X)) ((nest 3 1))"
                 .to_string()
         ],
         "{ws:?}"
@@ -552,9 +552,9 @@ fn the_recursive_fixpoint_declines_rather_than_under_approximate() {
     // Two arms fit the call's arity (a `:when` overload): declined, flat answer.
     let ws = file_warnings(
         "(defn pick ((i acc) :when (= i 0) acc) ((i acc) (pick (- i 1) (+ acc i))))\n\
-         (defn use-it () (string/length (pick 3 0)))",
+         (defn use-it () (%string-length (pick 3 0)))",
     );
-    assert!(!ws.iter().any(|w| w.contains("string/length")), "{ws:?}");
+    assert!(!ws.iter().any(|w| w.contains("%string-length")), "{ws:?}");
 }
 
 #[test]
@@ -573,11 +573,11 @@ fn a_self_call_argument_is_typed_in_its_enclosing_scope() {
                  (>= j2 (count rows)) (inc j)\n\
                  (nil? (nth rows j2)) (scan rows j2 dir n)\n\
                  else (scan rows j2 dir (dec n))))))\n\
-         (defn use-it (rows) (string/length (scan rows 3 1 1)))",
+         (defn use-it (rows) (%string-length (scan rows 3 1 1)))",
     );
     assert!(
         ws.iter()
-            .any(|w| w.contains("string/length: argument 1 expects string, got int")),
+            .any(|w| w.contains("%string-length: argument 1 expects string, got int")),
         "{ws:?}"
     );
 }
@@ -619,23 +619,23 @@ fn a_private_function_is_walked_under_what_its_callers_pass() {
 /// A function whose only sites are its own self-calls has no base for the derivation:
 /// the least fixpoint seeds every parameter at ⊥ and a self-call's arguments are typed
 /// under those parameters, so it derived ⊥ throughout, its body read as dead code, and
-/// `(string/length 5)` inside it was never reported — while the same body with one
+/// `(%string-length 5)` inside it was never reported — while the same body with one
 /// outside caller, or with no self-call at all, was. Such a function is site-less: its
 /// parameters are unknown, and its body is walked like any other.
 #[test]
 fn a_function_reached_only_through_itself_is_not_derived() {
     for shape in [
         // the lint in the self-call's own argument
-        "(defn w (xs acc) (if (empty? xs) acc (w (rest xs) (+ acc (string/length 5)))))",
+        "(defn w (xs acc) (if (empty? xs) acc (w (rest xs) (+ acc (%string-length 5)))))",
         // …beside the self-call in the recursive branch
-        "(defn w (xs) (if (empty? xs) 0 (do (string/length 5) (w (rest xs)))))",
+        "(defn w (xs) (if (empty? xs) 0 (do (%string-length 5) (w (rest xs)))))",
         // …and private, where a base case that nobody calls is the same shape
-        "(defmodule t)\n(defn- w (xs) (if (empty? xs) 0 (do (string/length 5) (w (rest xs)))))",
+        "(defmodule t)\n(defn- w (xs) (if (empty? xs) 0 (do (%string-length 5) (w (rest xs)))))",
     ] {
         let ws = file_warnings(shape);
         assert!(
             ws.iter()
-                .any(|w| w.contains("string/length: argument 1 expects string, got 5")),
+                .any(|w| w.contains("%string-length: argument 1 expects string, got 5")),
             "{shape}: {ws:?}"
         );
     }
@@ -686,7 +686,7 @@ fn a_private_functions_return_is_read_under_its_callers() {
          (defn- step3 (i) [i (+ i 1)])\n\
          (defn- step2 (i) (let ([a b] (step3 (+ i 1))) [a b]))\n\
          (defn- step1 (i) (step2 (+ i 1)))\n\
-         (defn pub (s) (step1 (string/length s)))",
+         (defn pub (s) (step1 (%string-length s)))",
     );
     let sig_of = |name: &str| {
         sigs.iter()
@@ -750,7 +750,7 @@ fn a_function_handed_to_a_combinator_is_called_with_what_it_promises() {
          (sig want-int (int -> int))\n\
          (defn want-int (x) x)\n\
          (defn- bump (i) (want-int (+ i 1)))\n\
-         (defn pub (xs) (+ (bump 3) (count (map (map xs (fn (s) (string/length s))) bump))))",
+         (defn pub (xs) (+ (bump 3) (count (map (map xs (fn (s) (%string-length s))) bump))))",
         true,
     );
     assert!(ws.is_empty(), "{ws:?}");
@@ -772,7 +772,7 @@ fn a_function_handed_to_a_combinator_is_called_with_what_it_promises() {
         "(defmodule t)\n\
          (sig want-int (int -> int))\n\
          (defn want-int (x) x)\n\
-         (defn- add (acc x) (want-int (+ acc (string/length x))))\n\
+         (defn- add (acc x) (want-int (+ acc (%string-length x))))\n\
          (defn pub (xs) (fold xs 0 add))",
         true,
     );
@@ -838,7 +838,7 @@ fn a_falsy_or_refutes_every_disjunct_in_the_else_branch() {
         "(defmodule t)\n\
          (sig want-int (int -> int))\n\
          (defn want-int (x) x)\n\
-         (defn pub (x) (if (or (and (string? x) (> (string/length x) 3)) false) 0 (want-int x)))\n\
+         (defn pub (x) (if (or (and (string? x) (> (%string-length x) 3)) false) 0 (want-int x)))\n\
          (defn go () (pub (if (> (count (os/args)) 0) \"s\" 1)))",
         true,
     );
@@ -1015,7 +1015,7 @@ fn a_site_inside_a_let_bound_lambda_hands_the_derived_type() {
              (defn- blank? (text line) (= \"\" (string/trim (string/substring text line))))\n\
              (sig run (string int int -> int))\n\
              (defn run (text line dir)\n\
-               (let (n (string/length text)\n\
+               (let (n (%string-length text)\n\
                      step (fn (l)\n\
                             (let (next (+ l dir))\n\
                               (if (and (>= next 0) (< next n) (blank? text next)) (step next) l))))\n\
@@ -1077,9 +1077,9 @@ fn a_let_bound_lambdas_result_folds_its_self_call_away() {
     let ws = file_warnings_mode(
         "\
          (defmodule t)\n\
-         (defn- blank? (text line) (= line (string/length text)))\n\
+         (defn- blank? (text line) (= line (%string-length text)))\n\
          (defn- run (text line dir)\n\
-           (let (n (string/length text)\n\
+           (let (n (%string-length text)\n\
                  step (fn (l)\n\
                         (let (next (+ l dir))\n\
                           (if (and (>= next 0) (< next n) (blank? text next)) (step next) l))))\n\
@@ -1088,7 +1088,7 @@ fn a_let_bound_lambdas_result_folds_its_self_call_away() {
          (defn use (text)\n\
            (let (first (run text 3 -1)\n\
                  last (run text 3 1))\n\
-             (string/length (string/substring text (inc first) last))))",
+             (%string-length (string/substring text (inc first) last))))",
         true,
     );
     assert!(
@@ -1117,7 +1117,7 @@ fn a_fold_accumulator_keeps_its_fields_through_the_ascent() {
         "\
          (defmodule t)\n\
          (defn- clip (s n)\n\
-           (if (> (string/length s) n) (string/substring s 0 (math/max 0 n)) s))\n\
+           (if (> (%string-length s) n) (string/substring s 0 (math/max 0 n)) s))\n\
          (sig layout ((list string) int int -> map))\n\
          (defn layout (segments x w)\n\
            (fold segments\n\
@@ -1125,7 +1125,7 @@ fn a_fold_accumulator_keeps_its_fields_through_the_ascent() {
              (fn (a s)\n\
                (let (scol (:col a)\n\
                      label (clip s (math/max 0 (- (+ x w) scol))))\n\
-                 (assoc a :col (+ scol (string/length label)) :ops (conj (:ops a) label))))))",
+                 (assoc a :col (+ scol (%string-length label)) :ops (conj (:ops a) label))))))",
         true,
     );
     assert!(

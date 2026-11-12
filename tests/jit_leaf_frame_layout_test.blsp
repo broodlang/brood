@@ -71,4 +71,4 @@
     ;; `%repeat-acc` in std/prelude/seq.blsp is `(%repeat-acc (dec n) x (cons x acc))` —
     ;; the same spliced-leaf self-tail loop. It returned 28033 of 200000 elements.
     (is (= 200000 (count (seq/repeat 200000 :a))))
-    (is (= 200000 (string/length (apply str (seq/repeat 200000 "x")))))))
+    (is (= 200000 (count (apply str (seq/repeat 200000 "x")))))))

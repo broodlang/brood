@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn a_defn_gets_the_type_the_checker_inferred() {
         // The buffer is never loaded, so this can only come from form-based inference.
-        let ls = labels(&hints("(defn f (s) (string/length s))"));
+        let ls = labels(&hints("(defn f (s) (%string-length s))"));
         assert!(
             ls.iter().any(|l| l.contains("string") && l.contains("->")),
             "got: {ls:?}"
@@ -359,13 +359,13 @@ mod tests {
 
     #[test]
     fn a_known_return_alone_reads_as_an_arrow() {
-        let ls = labels(&hints("(defn f (x) (string/length \"lit\"))"));
+        let ls = labels(&hints("(defn f (x) (%string-length \"lit\"))"));
         assert!(ls.iter().any(|l| l.starts_with("→ ")), "got: {ls:?}");
     }
 
     #[test]
     fn the_hint_sits_at_the_end_of_the_parameter_list() {
-        let src = "(defn f (s) (string/length s))";
+        let src = "(defn f (s) (%string-length s))";
         let hs = hints(src);
         let hint = hs
             .iter()

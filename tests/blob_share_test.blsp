@@ -74,7 +74,7 @@
   :isolated (test "a >= 256 B string is allocated as Shared (has a non-nil blob ptr)"
     (when (bound? '%blob-ptr)
       (let (big (string/repeat "x" 1024))
-        (assert= 1024 (string/length big))
+        (assert= 1024 (count big))
         (is (not (nil? (%blob-ptr big)))))))
 
   (test "a < 256 B string is inline (returns nil from %blob-ptr)"

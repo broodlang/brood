@@ -137,12 +137,12 @@ Everything ADR-673 would forbid after 1.0 is cheapest in 0.5x:
 - Clear CHANGELOG's Unreleased breaks in a 0.51 release.
 - ✅ Land ADR-674's stage 2: remove `dotimes`, `dolist`, `unless` and `match*`, with ledger
   entries (2026-11-11).
-- 🟡 Rename anything the surface pass finds to be misnamed. A rename after 1.0 costs a full
+- ✅ Rename anything the surface pass finds to be misnamed. A rename after 1.0 costs a full
   deprecation window. First batch done (ADR-716, 2026-11-12): about 40 names that broke a rule
   already set, all ledgered. Then regex and fuzzy data-first (ADR-717), and duplicates and
   doubled-prefix settings (ADR-718); an `editor/*` accessor keeps its module's noun, because
-  apps `:use` those modules bare (ADR-719). Still open: whether `string/length` stays beside
-  `count`.
+  apps `:use` those modules bare (ADR-719). `string/length` went too: a string's length is
+  `count`, like every other collection's (ADR-718 addendum, 2026-11-12).
 
 ## Out of scope for 1.0 (additive, ADR-011)
 

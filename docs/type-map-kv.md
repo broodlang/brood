@@ -140,7 +140,7 @@ In `contract_test.blsp`:
 ```
 
 Static (slice 2) checker test: `(get (map-of-keyword-int) :k) : int | nil`
-doesn't warn against a `number` sink; `(string/length (get m k))` warns when
+doesn't warn against a `number` sink; `(string/upper (get m k))` warns when
 `m : (map keyword int)`.
 
 ## Slicing order

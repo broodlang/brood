@@ -79,7 +79,7 @@ line), or nil when it is absent or not a number."
   (let (i (index-of header "Content-Length:"))
     (if (< i 0)
       nil
-      (let (after (string/substring header (+ i 15) (string/length header))
+      (let (after (string/substring header (+ i 15) (count header))
             eol (index-of after "\r")
             token (string/trim (if (< eol 0) after (string/substring after 0 eol)))
             n (string/->number token))

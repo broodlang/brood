@@ -87,7 +87,7 @@ a wrong-typed one.
       (nil? coll) nil
       (string? coll)
         (if (int? k)
-          (if (and (>= k 0) (< k (string/length coll))) (string/char-at coll k) nil)
+          (if (and (>= k 0) (< k (count coll))) (string/char-at coll k) nil)
           (%get-unanswerable coll k))
       (int? k) (nth coll k nil)
       else (%get-unanswerable coll k)))
@@ -106,7 +106,7 @@ a wrong-typed one.
                       (nil? coll) default
                       (string? coll)
                         (if (int? k)
-                          (if (and (>= k 0) (< k (string/length coll)))
+                          (if (and (>= k 0) (< k (count coll)))
                             (string/char-at coll k)
                             default)
                           (%get-unanswerable coll k))

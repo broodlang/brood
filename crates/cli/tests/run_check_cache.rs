@@ -18,8 +18,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const WARNING_PROGRAM: &str = "(defn f (x) (+ x 1))\n(io/puts (string/length 3))\n";
-const WARNING_LINE: &str = "warning: string/length: argument 1 expects string, got 3 (3)";
+const WARNING_PROGRAM: &str = "(defn f (x) (+ x 1))\n(io/puts (%string-length 3))\n";
+const WARNING_LINE: &str = "warning: %string-length: argument 1 expects string, got 3 (3)";
 
 struct Sandbox {
     dir: PathBuf,
@@ -109,7 +109,7 @@ fn a_hit_replays_the_recorded_verdict_and_a_miss_records_one() {
     // doctored text is what it prints. Sabotage-proof by construction — a re-walk prints
     // the true warning and cannot contain this string.
     let text = std::fs::read_to_string(&entries[0]).expect("read entry");
-    let doctored = text.replace("string/length", "CACHED-VERDICT-MARKER");
+    let doctored = text.replace("%string-length", "CACHED-VERDICT-MARKER");
     assert_ne!(
         text, doctored,
         "the entry carries the warning text:\n{text}"
@@ -285,7 +285,7 @@ fn the_off_switch_neither_reads_nor_writes_and_check_never_reads() {
     let text = std::fs::read_to_string(&entries[0]).unwrap();
     std::fs::write(
         &entries[0],
-        text.replace("string/length", "CACHED-VERDICT-MARKER"),
+        text.replace("%string-length", "CACHED-VERDICT-MARKER"),
     )
     .unwrap();
     let off = sb.brood(&sb.dir, &[p], &[("BROOD_NO_CHECK_CACHE", "1")]);

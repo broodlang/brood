@@ -1508,3 +1508,16 @@ The audit now counts `pattern`/`query`/`rules` as subjects, and `audit_test` nam
 `bytes` and `stream`; and 47 settings drop their doubled prefix, 31 of them going private.
 That rename found `eval-server` binding its own `*test-formatter*`, which the test runner
 never read.
+
+2026-11-12 (ADR-718 addendum, road-to-1.0 §F). **`string/length` is removed for `count`.** It
+was the last per-type length beside the bare one; ADR-718 had left it open over its call sites.
+The primitive is now the private `%string-length`, which `count` calls; `count` on a string
+was already inlined by the VM and the JIT, so nothing is slower. The ledger points
+`string/length` at `count`. About 650 call sites in brood moved to `count`; the Rust tests and
+the checker's length rules use `%string-length`, so a test that needs a string-only callee
+keeps one, and the docs' type examples use `string/upper`. One checker gap surfaced: a private
+helper passed as a value read its typed parameter as whatever its body demanded (`count`
+demands any countable), widening its result, which `string/length`'s exact `string` demand had
+hidden. The return inference now meets each parameter with its declaration
+(`a_typed_parameter_bounds_the_return_of_a_private_helper_used_as_a_value`, red with the meet
+removed). §F is done.

@@ -963,6 +963,7 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     ("bytes/length", "count", "ADR-718"),
     ("text/length", "count", "ADR-718"),
     ("table/count", "count", "ADR-718"),
+    ("string/length", "count", "ADR-718"),
     ("bytes/concat", "bytes/append", "ADR-718"),
     ("stream/concat", "stream/append", "ADR-718"),
     ("decimal/number->", "decimal/of", "ADR-718"),

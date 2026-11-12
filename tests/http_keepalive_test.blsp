@@ -14,7 +14,7 @@
       "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
     "/close" "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
     "/empty" "HTTP/1.1 204 No Content\r\n\r\n"
-    (str "HTTP/1.1 200 OK\r\nContent-Length: " (string/length path) "\r\n\r\n" path)))
+    (str "HTTP/1.1 200 OK\r\nContent-Length: " (count path) "\r\n\r\n" path)))
 
 (defn- serve-conn (sock seed)
   (let (head (tcp/read-until sock "\r\n\r\n" {:seed seed :timeout-ms 5000}))

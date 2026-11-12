@@ -1388,8 +1388,7 @@ and the pre-flight would 'check' the manifest and warn on it."
   (let (n (->string feat)
         prefix (cond (nil? project/*name*) nil else (str project/*name* "/"))
         rel (cond
-              (and prefix (string/starts-with? n prefix))
-                (string/substring n (string/length prefix))
+              (and prefix (string/starts-with? n prefix)) (string/substring n (count prefix))
               else n)
         p (%require-find (str rel ".blsp") *load-path*))
     (when (and p (any? srcdirs (fn (d) (string/starts-with? p d)))) p)))
@@ -1494,7 +1493,7 @@ diagnostic may carry a trailing ` — hint`, so the name is the first word after
           (if (not (string/starts-with? msg prefix))
             acc
             ;; `index-of` answers -1, not nil, when the needle is absent.
-            (let (tail (string/substring msg (string/length prefix))
+            (let (tail (string/substring msg (count prefix))
                   space (index-of tail " ")
                   nm (if (< space 0) tail (string/substring tail 0 space)))
               (if (string/blank? nm) acc (conj acc nm)))))))))
@@ -1698,7 +1697,7 @@ wrapper — `(check-allow :kw (defn f …) (sig f …))` — and mean something 
   "The site whose definition declares `name`, trying the reported spelling and its bare
 tail (see `sig-defn-spelling`), or nil."
   (let (bare (let (i (index-of name "/"))
-               (if (and i (>= i 0)) (string/substring name (inc i) (string/length name)) name)))
+               (if (and i (>= i 0)) (string/substring name (inc i) (count name)) name)))
     (seq/find sites (fn (s) (or (= (first s) name) (= (first s) bare))))))
 
 (defn- sig-insertions (path text)

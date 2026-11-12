@@ -88,7 +88,7 @@ no edit is sent.
 
     (editor/buffer-client/text-apply-splice \"hello\" [3 5 \"p\"])   ;=> \"help\""
   (let ([lo hi repl] splice)
-    (str (string/substring text 0 lo) repl (string/substring text hi (string/length text)))))
+    (str (string/substring text 0 lo) repl (string/substring text hi (count text)))))
 
 (defn text-apply-action (text:string action:any -> string)
   "`text` with the CONTENT half of a `link-fold` action applied — `[:splice s _]` by
@@ -200,7 +200,7 @@ untouched, so its splice is empty) is sent, and counted over the RANGE it change
     (let ([lo hi repl] splice
           in-flight (if (property-change? properties)
                       (let (width (math/max 0 (nth properties 1))) [lo (+ lo width) width])
-                      [lo hi (string/length repl)]))
+                      [lo hi (count repl)]))
       (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version) properties)
       (assoc link :pending (append (or (get link :pending) ()) (list in-flight))))))
 
@@ -284,7 +284,7 @@ cursor-only delta is `:noop`."
                            (let ([plo phi plen] p
                                  [flo fhi frepl] splice
                                  [nlo nhi _] (splice-transform [plo phi ""]
-                                               [flo fhi (string/length frepl)]))
+                                               [flo fhi (count frepl)]))
                              [nlo nhi plen])))
                      (and splice
                        (not own?)) ()

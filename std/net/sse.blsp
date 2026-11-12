@@ -103,7 +103,7 @@ are ignored. One optional space after the colon is stripped."
   ;; A blank line and a `:` comment both have the empty field name, so they fall to `else`.
   (let (i (index-of line ":")
         field (if (< i 0) line (string/substring line 0 i))
-        raw (if (< i 0) "" (string/substring line (+ i 1) (string/length line)))
+        raw (if (< i 0) "" (string/substring line (+ i 1) (count line)))
         val (string/drop-prefix raw " "))
     (cond
       (= field "data")
@@ -131,7 +131,7 @@ line, which ends an event in the middle."
   (let ([buffer carry] state
         raw (str carry chunk)
         held (if (string/ends-with? raw "\r") "\r" "")
-        whole (if (= held "") raw (string/substring raw 0 (- (string/length raw) 1)))
+        whole (if (= held "") raw (string/substring raw 0 (- (count raw) 1)))
         [blocks remainder] (frames (str buffer (normalize whole))))
     [(map (seq/reject blocks (fn (block) (= block ""))) parse-event) [remainder held]]))
 
@@ -142,8 +142,8 @@ line, which ends an event in the middle."
         lf (index-of text "\n\n"))
     (cond
       (and (>= crlf 0) (or (< lf 0) (< crlf lf)))
-        [(string/substring text 0 crlf) (string/substring text (+ crlf 4) (string/length text))]
-      (>= lf 0) [(string/substring text 0 lf) (string/substring text (+ lf 2) (string/length text))]
+        [(string/substring text 0 crlf) (string/substring text (+ crlf 4) (count text))]
+      (>= lf 0) [(string/substring text 0 lf) (string/substring text (+ lf 2) (count text))]
       else nil)))
 
 (defn- parse-head (head)
@@ -164,7 +164,7 @@ lower-cased. Pure."
                       headers
                       (assoc headers
                         (string/lower (string/trim (string/substring line 0 i)))
-                          (string/trim (string/substring line (+ i 1) (string/length line))))))))}))
+                          (string/trim (string/substring line (+ i 1) (count line))))))))}))
 
 (defn- success? (status) (and (>= status 200) (< status 300)))
 
@@ -220,7 +220,7 @@ Ends with `[:sse-closed reason]` when the socket closes or errors. Tail-recursiv
     ([:tcp ^sock d] (let ([events next] (feed state d))
                       (doseq (ev events)
                         (send subscriber [:sse ev]))
-                      (if (> (string/length (first next)) *max-buffer-bytes*)
+                      (if (> (count (first next)) *max-buffer-bytes*)
                         (do (tcp/close sock) (send subscriber [:sse-closed :buffer-overflow]))
                         (stream sock subscriber watch next))))
     ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
@@ -259,7 +259,7 @@ for the refusal."
     ([:tcp ^sock d] (let (text (str buf d)
                           split (split-head text))
                       (cond
-                        (and (nil? split) (> (string/length text) *max-buffer-bytes*))
+                        (and (nil? split) (> (count text) *max-buffer-bytes*))
                           (do
                             (tcp/close sock)
                             (send subscriber [:sse-closed :buffer-overflow]))

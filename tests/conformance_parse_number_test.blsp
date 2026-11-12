@@ -25,7 +25,7 @@
 
 ;; nil when the line round-trips, else [input expected-hex actual-hex] for the report.
 (defn- pn-mismatch (line)
-  (if (< (string/length line) 32)
+  (if (< (count line) 32)
     nil
     (let (input (pn-input line)
           want (pn-expected line)
@@ -38,7 +38,7 @@
 (defn- pn-scan ()
   "Every vendored case as [cases-checked mismatches]."
   (corpus-tally (apply append (map (corpus-files "parse-number") corpus-lines))
-    (fn (line) (if (< (string/length line) 32) nil (or (pn-mismatch line) true)))))
+    (fn (line) (if (< (count line) 32) nil (or (pn-mismatch line) true)))))
 
 (describe "parse-number-fxx: decimal text -> binary64 is bit-exact"
   :tags [:conformance :slow]

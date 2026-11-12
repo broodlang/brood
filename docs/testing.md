@@ -214,7 +214,7 @@ A failure therefore names its `:size` beside its seed, and replaying one trial t
     (fn (xs) (= (count (reverse xs)) (count xs)))))
 (test "a pair of strings joins to their combined length"
   (check-property 100 (property/tuple (property/string) (property/string-of "ab\n"))
-    (fn ([a b]) (= (string/length (str a b)) (+ (string/length a) (string/length b))))))
+    (fn ([a b]) (= (count (str a b)) (+ (count a) (count b))))))
 ```
 
 A failing run reads:

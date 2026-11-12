@@ -426,7 +426,7 @@ instead of being inferred from a run that looked wrong.
                       [])
             ;; The id sits between the `std-image-` prefix and the `.bin` suffix.
             ids (apply vector
-                  (map present (fn (e) (string/substring e 10 (- (string/length e) 4)))))
+                  (map present (fn (e) (string/substring e 10 (- (count e) 4)))))
             idx (%image-index path want)
             inst (%std-image-installed)
             sections (if (nil? idx) nil (count idx)))

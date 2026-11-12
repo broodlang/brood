@@ -96,11 +96,11 @@ eight atoms joined by `;` — a fixed list, since the seed is."
   ;; a write pads its line out to the cursor, so an unbounded `C` was a memory bomb:
   ;; `ESC[1000000Cx` rendered a million spaces, `ESC[999999999C` a gigabyte
   (test "a forward motion stops at the column limit"
-    (assert= (string/length (ansi/render "" "\e[1000000Cx")) 4097)
-    (assert= (string/length (ansi/render "ab" "\e[999999999Cx")) 4097))
+    (assert= (count (ansi/render "" "\e[1000000Cx")) 4097)
+    (assert= (count (ansi/render "ab" "\e[999999999Cx")) 4097))
   (test "an absolute column does too"
-    (assert= (string/length (ansi/render "" "\e[999999999Gx")) 4097))
+    (assert= (count (ansi/render "" "\e[999999999Gx")) 4097))
   (test "a downward motion stops a bounded way past the text"
-    (is (< (string/length (ansi/render "a" "\e[999999999Bx\e[999999999Ey")) 20000)))
+    (is (< (count (ansi/render "a" "\e[999999999Bx\e[999999999Ey")) 20000)))
   (test "an ordinary motion is unchanged"
     (assert= (ansi/render "" "ab\e[3Cx") "ab   x")))

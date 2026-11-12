@@ -225,7 +225,7 @@ fn a_type_variable_inside_or_binds_to_the_rest_of_the_argument() {
 #[test]
 fn an_unguarded_failure_is_reported_in_both_modes() {
     let producer = "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n";
-    let flows_into_a_native = format!("{producer}(defn q (s) (string/length (p s)))");
+    let flows_into_a_native = format!("{producer}(defn q (s) (%string-length (p s)))");
     for strict in [false, true] {
         let ws = file_warnings_mode(&flows_into_a_native, strict);
         assert!(
@@ -340,7 +340,7 @@ fn a_handled_or_merely_unknown_failure_is_not_reported() {
     let producer = "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n";
     // 1. guarded with `failure?` — the whole point of the value being one
     let guarded =
-        format!("{producer}(defn q (s) (let (v (p s)) (if (failure? v) 0 (string/length v))))");
+        format!("{producer}(defn q (s) (let (v (p s)) (if (failure? v) 0 (%string-length v))))");
     assert!(file_warnings_mode(&guarded, false).is_empty(), "{guarded}");
     // 2. a position that ACCEPTS a failure: `failure?` and `error-message` take any, and
     //    `=` compares anything — a test asserting a failure came back must stay silent
@@ -353,8 +353,8 @@ fn a_handled_or_merely_unknown_failure_is_not_reported() {
     // 3. the language's OWN failure mechanisms (ADR-315). A lint that fired on `ok->` and
     //    `with` would be fighting the two idioms the answer to it is written in.
     let mechanisms = format!(
-        "{producer}(defn q (s) (ok-> s (p) (string/length)))\n\
-         (defn r (s) (with (v (p s)) (string/length v)))"
+        "{producer}(defn q (s) (ok-> s (p) (%string-length)))\n\
+         (defn r (s) (with (v (p s)) (%string-length v)))"
     );
     assert!(
         file_warnings_mode(&mechanisms, false).is_empty(),
@@ -371,7 +371,7 @@ fn a_handled_or_merely_unknown_failure_is_not_reported() {
     // 5. an UNANNOTATED value. `any` admits a failure the way it admits everything; a
     //    bound known only by exclusion says nothing positive, so neither may be read as
     //    "this can fail" — that would fire on every unannotated parameter in the language.
-    let unknown = "(defmodule t)\n(defn q (x) (string/length x))\n                   (defn r (x) (when x (string/length x)))";
+    let unknown = "(defmodule t)\n(defn q (x) (%string-length x))\n                   (defn r (x) (when x (%string-length x)))";
     assert!(file_warnings_mode(unknown, false).is_empty(), "{unknown}");
 }
 

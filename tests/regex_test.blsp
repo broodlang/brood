@@ -492,7 +492,7 @@
           r (text/string-> text)
           at (index-of text "w2999"))
       (assert= (get (rope-find r "w2999\\b" 0) :start) at)
-      (assert= (first (rope-count r "w\\d+" 0 (string/length text))) 3000)))
+      (assert= (first (rope-count r "w\\d+" 0 (count text))) 3000)))
   (test "line mode: ^ $ and . stay on a line unless :lines? is false"
     (let (r (text/string-> "ab\ncd\nab"))
       (assert= (get (rope-find r "^ab" 1) :start) 6)
@@ -640,7 +640,7 @@
       (doseq (pattern ["(?i)beta"
                         "x(?i:bc)" "[[:upper:]]+" "[[:alpha:]]+:" "(?i)password:" "[^[:space:]]+"
                         "[[:punct:]]"])
-        (assert= (map (rope-spans r pattern 0 (string/length text) {:lines? false})
+        (assert= (map (rope-spans r pattern 0 (count text) {:lines? false})
                    (fn (span) (string/substring text (first span) (second span))))
           (map (find-all text pattern) :text)))))
   (test ":fold? and (?i) agree on a rope"

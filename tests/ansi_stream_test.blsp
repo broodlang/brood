@@ -30,7 +30,7 @@ when the cut fell inside a run."
 (defn- split-everywhere-agrees? (s)
   "Whether every two-way cut of `s`, and the one-character-at-a-time feed, decode as `s` whole."
   (let (expected (whole s)
-        n (string/length s))
+        n (count s))
     (and (every? (range (inc n))
            (fn (i)
              (= expected

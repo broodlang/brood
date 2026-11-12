@@ -2,7 +2,7 @@
 
 (describe "uuid-v4"
   (test "produces a 36-character string"
-    (assert= 36 (string/length (uuid/v4))))
+    (assert= 36 (count (uuid/v4))))
   (test "has dashes at positions 8 13 18 23"
     (let (u (uuid/v4))
       (is (= (string/char-at u 8) "-"))
@@ -28,7 +28,7 @@
 
 (describe "uuid-v7"
   (test "produces a 36-character string"
-    (assert= 36 (string/length (uuid/v7))))
+    (assert= 36 (count (uuid/v7))))
   (test "has dashes at positions 8 13 18 23"
     (let (u (uuid/v7))
       (is (= (string/char-at u 8) "-"))
@@ -54,7 +54,7 @@
 
 (describe "uuid-v3"
   (test "produces a 36-character string"
-    (assert= 36 (string/length (uuid/v3 uuid/ns-dns "example.com"))))
+    (assert= 36 (count (uuid/v3 uuid/ns-dns "example.com"))))
   (test "version nibble is 3"
     (assert= "3" (string/char-at (uuid/v3 uuid/ns-dns "example.com") 14)))
   (test "variant nibble is 8/9/a/b"
@@ -73,7 +73,7 @@
 
 (describe "uuid-v5"
   (test "produces a 36-character string"
-    (assert= 36 (string/length (uuid/v5 uuid/ns-dns "example.com"))))
+    (assert= 36 (count (uuid/v5 uuid/ns-dns "example.com"))))
   (test "version nibble is 5"
     (assert= "5" (string/char-at (uuid/v5 uuid/ns-dns "example.com") 14)))
   (test "variant nibble is 8/9/a/b"

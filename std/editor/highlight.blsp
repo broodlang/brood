@@ -271,7 +271,7 @@ editor on its next re-lex."
       (or (= true (get specials head))
         (doc-form? head)
         (and (string/ends-with? head "-")
-          (= true (get specials (string/substring head 0 (dec (string/length head))))))))))
+          (= true (get specials (string/substring head 0 (dec (count head))))))))))
 
 (defn- hl-name-place? (stack pass)
   "True when the form starting here is the NAME place of a definer: the second form of a
@@ -436,7 +436,7 @@ its face into the state."
 
 (defn- hl-lex-line (line state pass)
   (let ([stack string-face] state
-        n (string/length line))
+        n (count line))
     (if (nil? string-face)
       (hl-lex-code line 0 n stack '() pass)
       (let (close (hl-string-close line 0 n))
@@ -616,7 +616,7 @@ is read from a rope.
     (let (start (reflect/scan-form-start full pos)
           window (text/slice full start (inc pos))
           at (- pos start)
-          open (hl-close-scan window 0 at (string/length window) '()))
+          open (hl-close-scan window 0 at (count window) '()))
       (and (int? open)
         (>= open 0)
         (= (hl-closer-of (string/char-at window open)) c)))))
@@ -635,7 +635,7 @@ cursor opens.
 
     (editor/highlight/bracket-match \"(a (b))\" 3)   ;=> [3 5]
     (editor/highlight/bracket-match \"((x) y)\" 1)   ;=> [1 3]"
-  (let (n (string/length full)
+  (let (n (count full)
         before (when (> pos 0) (string/char-at full (dec pos)))
         after (when (< pos n) (string/char-at full pos))
         bi (cond
@@ -672,7 +672,7 @@ newline an auto-indenter handles.
 
     (editor/highlight/enclosing-open \"(a (b c\" 6)   ;=> 3
     (editor/highlight/enclosing-open \"a b\" 1)       ;=> -1"
-  (hl-enc-scan full (safe-restart full pos) pos (string/length full) '()))
+  (hl-enc-scan full (safe-restart full pos) pos (count full) '()))
 
 ;; ---- enclosing call (for signature hints) -----------------------------------
 
@@ -719,7 +719,7 @@ eldoc O(enclosing-form) instead of O(pos) — instant versus a multi-second stal
 cursor sits deep in a large file.
 
     (editor/highlight/enclosing-call \"(foo a b\" 8)   ;=> [\"foo\" 1]"
-  (let (n (string/length full)
+  (let (n (count full)
         op (enclosing-open full pos))
     (if (or (< op 0) (not (= (string/char-at full op) "(")))
       nil
@@ -782,13 +782,13 @@ does — `(map|` reads as `map`, since that is where point lands after typing on
 
     (editor/highlight/symbol-at \"(foo bar)\" 6)   ;=> [5 \"bar\"]"
   (let (start (hl-sym-start full pos)
-        end (hl-atom-end full pos (string/length full))
+        end (hl-atom-end full pos (count full))
         text (string/substring full start end))
     (when (not (= text "")) [start text])))
 
 (defn- hl-cp2 (a b)
   "The longest common prefix of two strings."
-  (hl-cp2-at a b 0 (math/min (string/length a) (string/length b))))
+  (hl-cp2-at a b 0 (math/min (count a) (count b))))
 (defn- hl-cp2-at (a b i n)
   (if (or (>= i n) (not (= (string/char-at a i) (string/char-at b i))))
     (string/substring a 0 i)

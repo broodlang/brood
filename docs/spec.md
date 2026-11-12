@@ -60,7 +60,7 @@ symbol  = symbolchar { symbolchar } ;   (* any token that is none of the above *
 `symbolchar` is any non-delimiter character. A token is classified in this
 order: `nil`/`true`/`false`, then integer, then float (only if it lexically
 looks numeric), then keyword (leading `:`), otherwise a symbol. Thus `+`, `-`,
-`->`, `empty?`, `%add`, `string/length` are all symbols.
+`->`, `empty?`, `%add`, `string/upper` are all symbols.
 
 ## 3. Syntax (reader grammar)
 
@@ -354,7 +354,7 @@ load-bearing design choice (see `CLAUDE.md` and `docs/decisions.md`).
 - the float→int crossing `math/floor`, and the floating-point functions (`%f64-sqrt %sin %exp` …)
 - pairs/vectors `cons first rest empty? vector %vector-ref %vector-length`
 - maps `%hash-map %map-get %map-assoc %map-dissoc %map-pairs %map-count`
-- strings `string/length string/substring string/upper string/lower string/->number`
+- strings `count string/substring string/upper string/lower string/->number`
 - reflection/checking `type-of %check`; value↔text & IO `str pr-str %render %write-out %write-err`
 - self-hosting `reflect/eval reflect/eval-string reflect/load %read-string %builtin-module apply`; macros `reflect/macroexpand-1 reflect/gensym`
 - filesystem/system `file/cwd file/exists? file/dir? file/ls file/mkdir file/spit file/slurp %getenv %run-process`

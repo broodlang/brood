@@ -20,12 +20,12 @@
 ;;     `->float`; the reverse direction is `str`, which is bare and generic.
 ;;
 ;; Kernel seam: the low-level primitives are Rust builtins registered directly under
-;; their `string/…` names — `string/length` `string/substring` `string/split`
+;; their `string/…` names — `count` `string/substring` `string/split`
 ;; `string/upper` `string/lower` `string/normalize` `string/span`/`span-until`
 ;; `string/grapheme-*`/`substring-graphemes` `string/->codepoints`/`->graphemes`.
 ;; The functions below are pure Brood over those. Brood has no distinct char type, so
 ;; a "character" is a 1-char string; all indices are char-based, matching
-;; `string/length`. The helpers are tail-recursive (stack-safe over long strings).
+;; `count`. The helpers are tail-recursive (stack-safe over long strings).
 ;;
 ;; This module is `require`d by the prelude itself (its own `get`/`path-*`/`fmt`
 ;; helpers call `string/char-at`/`string/starts-with?`/… by late binding), so it is
@@ -34,7 +34,7 @@
 (defmodule string
   "The string-manipulation library — every operation whose subject is a string:
 trimming, padding, case folding, search, split/join, and char-content conversions.
-The low-level primitives (`string/length` `string/substring` `string/split`
+The low-level primitives (`count` `string/substring` `string/split`
 `string/upper` `string/lower` …) are Rust builtins; the rest is pure Brood over them.
 Bare-in-the-prelude by contrast: the generic collection ops (`map`/`filter`/`count`/
 `contains?`/`includes?`/`index-of`). The scalar bridges that reinterpret a string as
@@ -46,7 +46,7 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
   "Return `s` with the first character upper-cased and the rest lower-cased.
 
     (string/capitalize \"hi there\")   ;=> \"Hi there\""
-  (if (= (string/length s) 0)
+  (if (= (count s) 0)
     s
     (str (string/upper (string/substring s 0 1)) (string/lower (string/substring s 1)))))
 
@@ -203,7 +203,7 @@ leaves `s` unchanged.
 ;; because that one is polymorphic over strings, lists and vectors.
 (defn last-index-of (s:any needle:any &optional before:any -> int)
   "The 0-based char index of the **last** occurrence of `needle` in string `s` whose
-start is strictly **before** `before` (default `(string/length s)`), or -1 if there is
+start is strictly **before** `before` (default `(count s)`), or -1 if there is
 none. The backward counterpart of `(index-of s needle from)` — what reverse
 incremental search rides on.
 
@@ -213,7 +213,7 @@ incremental search rides on.
     (string/last-index-of \"abc\" \"z\")   ;=> -1"
   ;; One native pass: a forward walk over `index-of` is O(matches × length), and this is
   ;; an editor hot path (reverse search, finding a line's start per keystroke).
-  (%str-last-index-of s needle (or before (string/length s))))
+  (%str-last-index-of s needle (or before (count s))))
 
 (defn starts-with? (s:string prefix:string -> bool)
   "Does string `s` begin with `prefix`?
@@ -221,15 +221,15 @@ incremental search rides on.
     (string/starts-with? \"hello\" \"he\")   ;=> true
     (string/starts-with? \"hello\" \"lo\")   ;=> false
     (string/starts-with? \"hello\" \"\")     ;=> true"
-  (let (n (string/length prefix))
-    (and (>= (string/length s) n) (= (string/substring s 0 n) prefix))))
+  (let (n (count prefix))
+    (and (>= (count s) n) (= (string/substring s 0 n) prefix))))
 
 (defn ends-with? (s:string suffix:string -> bool)
   "Does string `s` end with `suffix`?
 
     (string/ends-with? \"hello\" \"lo\")   ;=> true
     (string/ends-with? \"hello\" \"he\")   ;=> false"
-  (let (sl (string/length s) ql (string/length suffix))
+  (let (sl (count s) ql (count suffix))
     (and (>= sl ql) (= (string/substring s (- sl ql) sl) suffix))))
 
 (defn drop-prefix (s prefix)
@@ -237,7 +237,7 @@ incremental search rides on.
 
     (string/drop-prefix \"v1.2.0\" \"v\")   ;=> \"1.2.0\"
     (string/drop-prefix \"1.2.0\" \"v\")    ;=> \"1.2.0\""
-  (if (starts-with? s prefix) (string/substring s (string/length prefix)) s))
+  (if (starts-with? s prefix) (string/substring s (count prefix)) s))
 
 (defn drop-suffix (s suffix)
   "`s` without its trailing `suffix`, or `s` unchanged when it does not end with it.
@@ -245,7 +245,7 @@ incremental search rides on.
     (string/drop-suffix \"main.blsp\" \".blsp\")   ;=> \"main\"
     (string/drop-suffix \"line\\r\" \"\\r\")         ;=> \"line\"
     (string/drop-suffix \"main\" \".blsp\")        ;=> \"main\""
-  (if (ends-with? s suffix) (string/substring s 0 (- (string/length s) (string/length suffix))) s))
+  (if (ends-with? s suffix) (string/substring s 0 (- (count s) (count suffix))) s))
 
 ;; ---- whitespace: trimming & blank test --------------------------------------
 
@@ -261,14 +261,14 @@ incremental search rides on.
 
     (string/blank? \"  \")   ;=> true
     (string/blank? \" a \")  ;=> false"
-  (= (string/span s 0 whitespace-chars) (string/length s)))
+  (= (string/span s 0 whitespace-chars) (count s)))
 
 (defn trim-left (s:string -> string)
   "Remove leading whitespace from `s`.
 
     (string/trim-left \"  a\")   ;=> \"a\""
   (let (start (string/span s 0 whitespace-chars))
-    (if (= start 0) s (string/substring s start (string/length s)))))
+    (if (= start 0) s (string/substring s start (count s)))))
 
 (defn- trim-right-to (s:string n:int end:int -> string)
   (if (and (> n 0) (whitespace? (char-at s (dec n))))
@@ -279,7 +279,7 @@ incremental search rides on.
   "Remove trailing whitespace from `s`.
 
     (string/trim-right \"a  \")   ;=> \"a\""
-  (let (end (string/length s)) (trim-right-to s end end)))
+  (let (end (count s)) (trim-right-to s end end)))
 
 (defn trim (s:string -> string)
   "Remove leading and trailing whitespace from `s`.
@@ -295,13 +295,13 @@ incremental search rides on.
   "Right-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the left; `s` is returned unchanged if it is already at least `w` wide.
 
     (string/pad-left \"7\" 3)    ;=> \"  7\""
-  (let (n (string/length s)) (if (>= n w) s (str (repeat (or pad " ") (- w n)) s))))
+  (let (n (count s)) (if (>= n w) s (str (repeat (or pad " ") (- w n)) s))))
 
 (defn pad-right (s:string w:int &optional (pad:string " ") -> string)
   "Left-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the right; `s` is returned unchanged if it is already at least `w` wide.
 
     (string/pad-right \"7\" 3)   ;=> \"7  \""
-  (let (n (string/length s)) (if (>= n w) s (str s (repeat (or pad " ") (- w n))))))
+  (let (n (count s)) (if (>= n w) s (str s (repeat (or pad " ") (- w n))))))
 
 ;; ---- fitting text to SCREEN CELLS --------------------------------------------
 ;; `pad-*` and `length` count characters, and a character is not a column: an emoji or a
@@ -365,7 +365,7 @@ returns at least one piece, and the checker leans on that.
 (defn- fill-unprefix (line prefix)
   ;; `line` without `prefix` when it starts with it, else as it is
   (if (and (not (= prefix "")) (starts-with? line prefix))
-    (substring line (length prefix) (length line))
+    (substring line (count prefix) (count line))
     line))
 
 (defn fill (s:string width:any &optional (prefix:any "") -> string)
@@ -439,7 +439,7 @@ reaches its tab stop at `*tab-width*` (`string/display-width`).
 
 (defn- fill-bullet (line marker)
   ;; the list bullet after `marker` at the start of `line`, or ""
-  (fill-match fill-bullet-pattern (substring line (length marker) (length line))))
+  (fill-match fill-bullet-pattern (substring line (count marker) (count line))))
 
 (defn fill-prefixes (s:string &optional (markers:any nil) -> (tuple string string))
   "The `[first rest]` prefixes paragraph `s` fills with ([[fill]]): what its first line keeps,
@@ -491,8 +491,8 @@ the item.
   ;; Doubling — O(log n) concatenations of O(n) total work. A gibibyte is the ceiling:
   ;; past it the allocation fails as an abort, not an error, and a width that large is a
   ;; typo or an attack.
-  (when (> (* (string/length s) (math/max 0 n)) 1073741824)
-    (error "string/repeat: " (* (string/length s) n) " characters is too large (max 1073741824)"))
+  (when (> (* (count s) (math/max 0 n)) 1073741824)
+    (error "string/repeat: " (* (count s) n) " characters is too large (max 1073741824)"))
   (%repeat-doubling "" s n))
 (defn- %repeat-doubling (acc piece k)
   (cond
@@ -580,7 +580,7 @@ Module-rooted rather than bare `format` because that name is also the source FOR
 things in the same image is a name worth spending to fix.
 
     (string/format \"%s has %d items (%.1f%%)\" \"cart\" 3 42.26)   ;=> \"cart has 3 items (42.3%)\""
-  (format-loop template 0 (string/length template) args ""))
+  (format-loop template 0 (count template) args ""))
 
 (defn- format-loop (template i n args acc)
   ;; The literal run up to the next `%` is copied in one piece (`string/span-until` finds

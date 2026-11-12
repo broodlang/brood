@@ -296,7 +296,7 @@ shape `std/observer` draws by hand. Returns one `text` op.
 (defn- bar-fit (s cells align)
   "`s` fitted to exactly `cells` characters — padded with spaces (positioned per
 `align`: `:left` / `:center` / `:right`) or truncated when longer."
-  (let (n (string/length s))
+  (let (n (count s))
     (cond
       (>= n cells) (string/substring s 0 cells)
       (= align :right) (string/pad-left s cells)
@@ -442,7 +442,7 @@ terminal draws a flat panel.
 
     (editor/display/tooltip 5 10 [\"hi\"] :popup :fg 80 24)   ;=> ([:rect 4 10 4 1 :popup] [:text 4 10 \" hi \" :fg])"
   (let (n (count lines)
-        w (+ 2 (fold lines 0 (fn (m s) (math/max m (string/length s)))))
+        w (+ 2 (fold lines 0 (fn (m s) (math/max m (count s)))))
         [mr mc] (card-rect (- anchor-row n) anchor-col w n cols rows))
     (append (card-surface mr mc w n face gui? opts)
       (map (range n)
@@ -450,5 +450,5 @@ terminal draws a flat panel.
           (let (s (nth lines i))
             (text (+ mr i)
               mc
-              (str " " s (string/repeat " " (math/max 0 (- w 1 (string/length s)))))
+              (str " " s (string/repeat " " (math/max 0 (- w 1 (count s)))))
               fg)))))))

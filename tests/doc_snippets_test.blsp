@@ -42,7 +42,7 @@
    "map-pairs" "seq"
    "table-get" "table/get"
    "table-put" "table/put"
-   "string-length" "string/length"
+   "string-length" "count"
    "os/getenv" "os/env"})
 
 (defn- fenced-blocks (lines in-block acc cur)

@@ -18,7 +18,7 @@
 
 (defn- ident-at? (text pos)
   (and (>= pos 0)
-    (< pos (string/length text))
+    (< pos (count text))
     (includes? *ident* (string/char-at text pos))))
 
 (defn- boundary? (text pos) (not (ident-at? text pos)))
@@ -26,7 +26,7 @@
 (defn- tr-loop (text:string old:any new:any olen:int from:int parts:any -> any)
   (let (i (index-of text old from))
     (if (< i 0)
-      (cons (string/substring text from (string/length text)) parts)
+      (cons (string/substring text from (count text)) parts)
       (if (and (boundary? text (dec i)) (boundary? text (+ i olen)))
         (tr-loop text
           old
@@ -45,7 +45,7 @@
   "`text` with every whole-token `old` replaced by `new` (substrings left alone).
 
     (codemod/token-replace \"(foo x) (foo-bar y)\" \"foo\" \"baz\")  ;=> \"(baz x) (foo-bar y)\""
-  (apply str (reverse (tr-loop text old new (string/length old) 0 nil))))
+  (apply str (reverse (tr-loop text old new (count old) 0 nil))))
 
 (defn- apply-pairs (text pairs)
   (fold pairs text (fn (t p) (token-replace t (first p) (second p)))))
@@ -357,7 +357,7 @@ lossless otherwise.
   (fold (string/split text "\n")
     [0]
     (fn (starts line)
-      (conj starts (+ (nth starts (dec (count starts))) (string/length line) 1)))))
+      (conj starts (+ (nth starts (dec (count starts))) (count line) 1)))))
 
 (defn- marked-references (text names)
   "`text` with [[reference-mark]] in front of each symbol that reads a global among `names`:
@@ -372,13 +372,13 @@ scope analysis decides, so a parameter or a pattern that shadows one is left unm
               (fn (acc offset)
                 [(conj (first acc) (string/substring text (second acc) offset) reference-mark)
                   offset])))
-    (str (apply str (first cut)) (string/substring text (second cut) (string/length text)))))
+    (str (apply str (first cut)) (string/substring text (second cut) (count text)))))
 
 (defn- rewrite-references (text names f)
   "`text` with symbol tokens through `(f name quoted?)`, as [[rewrite-symbols-text]], but for a
 bare one of `names` (strings) that a local shadows, which stays what it is."
   (let (shadowable (into #{} names)
-        unmarked-from (string/length reference-mark)
+        unmarked-from (count reference-mark)
         rewritten (rewrite-symbols-text (marked-references text names)
                     (fn (name quoted?)
                       (cond
@@ -546,7 +546,7 @@ the whitespace between them is touched: a string keeps its blank lines."
 (defn- unqualified-in (name module)
   ;; `name` without `module/` in front, or nil when it is not that module's
   (let (prefix (str module "/"))
-    (when (string/starts-with? name prefix) (string/substring name (string/length prefix)))))
+    (when (string/starts-with? name prefix) (string/substring name (count prefix)))))
 
 (defn- publicized (text names heads)
   "`text` with the definition of each of `names` whose head (in `heads`, name -> head) is
@@ -558,7 +558,7 @@ private — `defn-`, `def-` — made public: another module reaches it now."
         (if (and head (private-head? head))
           (regex/replace acc
             (str "\\(" (regex/escape head) "(\\s+)" (regex/escape name) "([\\s)])")
-            (str "(" (string/substring head 0 (dec (string/length head))) "$1" name "$2"))
+            (str "(" (string/substring head 0 (dec (count head))) "$1" name "$2"))
           acc)))))
 
 (defn- prose-follows (text from to names)

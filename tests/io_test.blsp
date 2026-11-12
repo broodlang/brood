@@ -100,7 +100,7 @@
 (impl Port
   io-test/counting-port
   ;; The op is `emit` — `write` is the caller-facing function now.
-  (emit (p s) (emit (get p :target) (str "[" (string/length s) "] " s))))
+  (emit (p s) (emit (get p :target) (str "[" (count s) "] " s))))
 
 (describe "io: a third-party port type"
   (test "a record from another module is a port once it impls Port"

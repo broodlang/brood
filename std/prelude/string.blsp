@@ -174,12 +174,12 @@ string costs four output characters per byte, so cutting after the fact would st
 have built the flood this bound exists to prevent."
   (let (limit *print-string-length*
         bytes (= :bytes (type-of x))
-        length (if bytes (count x) (string/length x)))
+        length (if bytes (count x) (count x)))
     (if (or (nil? limit) (<= length limit))
       (pr-str x)
       (let (printed (pr-str (if bytes (%subbytes x 0 limit) (string/substring x 0 limit))))
         ;; drop the closing quote, mark the elision, close again
-        (str (string/substring printed 0 (dec (string/length printed))) "…\"")))))
+        (str (string/substring printed 0 (dec (count printed))) "…\"")))))
 
 (defn- %pr-bounded (x level)
   "`x` printed at nesting `level`, honouring every bound. Containers recurse, text

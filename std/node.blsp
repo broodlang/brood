@@ -105,7 +105,7 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
 ;; Strip trailing newlines so a hand-edited cookie file (or one written by a
 ;; tool that appends "\n") still matches the bytes we minted.
 (defn- node-chomp (s)
-  (let (n (string/length s))
+  (let (n (count s))
     (if (and (> n 0) (= (string/substring s (dec n) n) "\n"))
       (node-chomp (string/substring s 0 (dec n)))
       s)))
@@ -194,7 +194,7 @@ node — call `(node/start …)` first.
       (pr-str spec)))
   (when (= (name) :nonode)
     (error "node/connect: this runtime is not a node yet — call (node/start name) first"))
-  (let (n (string/length spec)
+  (let (n (count spec)
         at (index-of spec "@"))
     (if (< at 0)
       ;; Bare name → local Unix node. The peer's real name is `name@thishost`;

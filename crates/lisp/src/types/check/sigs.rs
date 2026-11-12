@@ -544,7 +544,7 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
 /// arm of the matching arity accepts errors as surely as a single-arm mismatch:
 ///
 /// ```lisp
-/// (defn g ((x) :when (string? x) (string/length x))
+/// (defn g ((x) :when (string? x) (%string-length x))
 ///         ((x) :when (int? x)    (+ x 1)))
 /// (g :kw)   ; no clause takes a keyword
 /// ```
@@ -1072,10 +1072,21 @@ pub(super) fn infer_return_from_form(
         // the return of every successful call — and `(+ i 1)` under `i : int` is `int`, not
         // the `number` the demand alone says.
         let derived = self_name.and_then(|n| base_ctx.derived_params(n));
+        // …and by its own declaration: `(defn- f (w:string) (count w))` demands only a
+        // countable, and a helper passed as a value has no caller-derived types, so without
+        // this its `w` read as `countable` and its return widened past the `string` it was
+        // declared over. A call outside the declaration is flagged at the call.
+        let declared = self_name
+            .filter(|_| arms.len() == 1)
+            .and_then(|n| base_ctx.declared_sig(n));
         for (index, &p) in binders.iter().enumerate() {
             let mut bound = demands.get(index).cloned().unwrap_or(Ty::ANY);
-            if let Some(Some(from_callers)) = derived.and_then(|d| d.get(index)) {
+            if let Some(from_callers) = derived.and_then(|d| d.get(index)).and_then(Option::as_ref)
+            {
                 bound = bound.intersect(from_callers.clone());
+            }
+            if let Some(declared) = declared.as_ref().and_then(|s| s.params.get(index)) {
+                bound = bound.intersect(declared.clone());
             }
             ctx = ctx.bind(p, Some(bound));
         }

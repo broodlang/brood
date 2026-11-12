@@ -160,7 +160,7 @@
 
     (defn ts-bol (text n)
       (let (lines (string/split text "\n"))
-        (fold (range n) 0 (fn (a k) (+ a (string/length (or (nth lines k) "")) 1)))))
+        (fold (range n) 0 (fn (a k) (+ a (count (or (nth lines k) "")) 1)))))
 
     (defn ts-reindents-itself? (text spec)
       ;; every line, indented from scratch, lands where the source already has it
@@ -168,7 +168,7 @@
         (every? (range (count lines))
           (fn (i)
             (let (line (nth lines i "")
-                  want (- (string/length line) (string/length (string/trim-left line))))
+                  want (- (count line) (count (string/trim-left line))))
               (or (= (string/trim line) "")
                 ; blank lines carry no claim
                 (= want (editor/treesit/indent-column text :elixir (ts-bol text i) spec))))))))
@@ -214,7 +214,7 @@
         (is (every? (range (count lines))
               (fn (i)
                 (let (line (nth lines i "")
-                      want (- (string/length line) (string/length (string/trim-left line))))
+                      want (- (count line) (count (string/trim-left line))))
                   (or (= (string/trim line) "")
                     (= want (editor/treesit/indent-column rb :ruby (ts-bol rb i) spec)))))))))
 
@@ -264,7 +264,7 @@
 
     (test "motions are no-ops with nothing to move to"
       ;; past the end, forward stays put
-      (assert= (editor/treesit/point-forward rb :ruby (string/length rb)) (string/length rb))))
+      (assert= (editor/treesit/point-forward rb :ruby (count rb)) (count rb))))
 
   ;; ---- the structural queries over a held tree (ADR-467) ----------------------
   ;; A held tree answers exactly what the text query answers — at every offset, so a
@@ -274,7 +274,7 @@
     (def ts-held-src "defmodule A do\n  # héllo — ünïcode\n  def f(x) do\n    [x, 1]\n  end\nend\n")
 
     (defn ts-held-agrees? (motion tree)
-      (every? (range (inc (string/length ts-held-src)))
+      (every? (range (inc (count ts-held-src)))
         (fn (p) (= (motion ts-held-src :elixir p) (motion ts-held-src :elixir p tree)))))
 
     (test "every motion over the tree agrees with the text query at every offset"
@@ -294,7 +294,7 @@
       (let (tree (editor/treesit/open-tree ts-held-src :elixir)
             spec {:width 2 :blocks #{:do_block :body} :dedent #{"end"}}
             starts (cons 0
-                     (seq/keep (range (string/length ts-held-src))
+                     (seq/keep (range (count ts-held-src))
                        (fn (i) (when (= (string/char-at ts-held-src i) "\n") (inc i))))))
         (is (every? starts
               (fn (bol)
@@ -313,7 +313,7 @@
             tree (editor/treesit/open-tree rope :elixir)
             spec {:width 2 :blocks #{:do_block :body} :dedent #{"end"} :brackets #{:arguments}}
             starts (cons 0
-                     (seq/keep (range (string/length ts-rope-src))
+                     (seq/keep (range (count ts-rope-src))
                        (fn (i) (when (= (string/char-at ts-rope-src i) "\n") (inc i))))))
         (is (every? starts
               (fn (bol)
@@ -326,7 +326,7 @@
       (let (rope (text/string-> ts-rope-src)
             tree (editor/treesit/open-tree rope :elixir)
             agrees? (fn (motion)
-                      (every? (range (inc (string/length ts-rope-src)))
+                      (every? (range (inc (count ts-rope-src)))
                         (fn (p)
                           (let (want (motion ts-rope-src :elixir p))
                             (and (= want (motion rope :elixir p))
@@ -363,7 +363,7 @@
             after (editor/buffer/insert (editor/buffer/delete-char before) "2, 3")
             edits (into []
                     (map (editor/buffer/buffer-splices-since before after)
-                      (fn ([lo hi repl]) [lo hi (+ lo (string/length repl))])))
+                      (fn ([lo hi repl]) [lo hi (+ lo (count repl))])))
             tree (editor/treesit/open-tree (editor/buffer/buffer-rope before) :elixir)
             updated (editor/treesit/update-tree tree
                       (editor/buffer/buffer-rope after)
@@ -371,7 +371,7 @@
             text (editor/buffer/buffer-text after))
         ;; one splice — the deletion and the typing after it are one run
         (assert= edits [[at (inc at) (+ at 4)]])
-        (is (every? (range (inc (string/length text)))
+        (is (every? (range (inc (count text)))
               (fn (p)
                 (= (editor/treesit/point-forward text :elixir p)
                   (editor/treesit/point-forward text :elixir p updated)))))
@@ -479,9 +479,9 @@
       (let (src "def go\n  foo.bar(1)\n  baz(x)\nend\n"
             table {{:field :method} :syntax/function :identifier :syntax/variable}
             tree (editor/treesit/open-tree src :ruby))
-        (assert= (%tree-sitter-tree-spans tree table false 0 (string/length src))
+        (assert= (%tree-sitter-tree-spans tree table false 0 (count src))
           (%tree-sitter-spans src :ruby table false))
-        (assert= (editor/treesit/fontify-tree tree table 0 (string/length src))
+        (assert= (editor/treesit/fontify-tree tree table 0 (count src))
           (vec (editor/treesit/fontify src :ruby table)))
         (editor/treesit/free-tree tree)))
 
@@ -619,11 +619,7 @@
     (test "the held tree answers what the text does, over the file and a window"
       (let (tree (editor/treesit/open-tree tsm-elixir-src :elixir)
             whole (%tree-sitter-spans tsm-elixir-src :elixir tsm-elixir-faces false))
-        (assert= (%tree-sitter-tree-spans tree
-                   tsm-elixir-faces
-                   false
-                   0
-                   (string/length tsm-elixir-src))
+        (assert= (%tree-sitter-tree-spans tree tsm-elixir-faces false 0 (count tsm-elixir-src))
           whole)
         (assert= (%tree-sitter-tree-spans tree tsm-elixir-faces false 13 32)
           (vec (seq/filter whole (fn (sp) (and (>= (first sp) 13) (< (first sp) 32))))))
@@ -705,7 +701,7 @@
     (test "the held tree's spans equal the text's, over the whole file and a window"
       (let (tree (editor/treesit/open-tree tsm-hcl-src :hcl)
             whole (%tree-sitter-spans tsm-hcl-src :hcl tsm-hcl-faces false))
-        (assert= (%tree-sitter-tree-spans tree tsm-hcl-faces false 0 (string/length tsm-hcl-src))
+        (assert= (%tree-sitter-tree-spans tree tsm-hcl-faces false 0 (count tsm-hcl-src))
           whole)
         ;; a window starting inside the first block still sees `ami` as an attribute
         (assert= (%tree-sitter-tree-spans tree tsm-hcl-faces false 34 61)
@@ -723,7 +719,7 @@
   (describe "HCL: verbatim heredoc lines"
     (test "a heredoc's lines keep their indentation; a blank one continues the content's"
       (let (lines (string/split tsm-hcl-src "\n")
-            bol (fn (i) (fold (take lines i) 0 (fn (acc l) (+ acc (string/length l) 1))))
+            bol (fn (i) (fold (take lines i) 0 (fn (acc l) (+ acc (count l) 1))))
             column (fn (spec i) (editor/treesit/indent-column tsm-hcl-src :hcl (bol i) spec)))
         ;; resource · ami · user_data · #!/bin/bash · blank · echo · `}` · EOT · } · locals · a · }
         (assert= (map (range 0 12) (fn (i) (column tsm-hcl-indent i)))
@@ -742,7 +738,7 @@
     (test "a heredoc line indented with tabs keeps its column, not its character count"
       (let (src "x = <<EOT\n\t\techo hi\n\t\t\nEOT\n"
             echo-bol (index-of src "\t\techo")
-            blank-bol (+ echo-bol (string/length "\t\techo hi\n")))
+            blank-bol (+ echo-bol (count "\t\techo hi\n")))
         (assert= (editor/treesit/indent-column src :hcl echo-bol tsm-hcl-indent) 16)
         (assert= (binding (*tab-width* 4)
                    (editor/treesit/indent-column src :hcl echo-bol tsm-hcl-indent))
@@ -767,7 +763,7 @@
                    :field_identifier :field}
             tree (editor/treesit/open-tree src :rust))
         (assert= (%tree-sitter-spans src :rust faces false) [[14 17 :method] [31 32 :field]])
-        (assert= (%tree-sitter-tree-spans tree faces false 0 (string/length src))
+        (assert= (%tree-sitter-tree-spans tree faces false 0 (count src))
           (%tree-sitter-spans src :rust faces false))
         (editor/treesit/free-tree tree)))))
 
@@ -885,7 +881,7 @@
                    tsm-inject-host
                    false
                    0
-                   (string/length tsm-inject-src)
+                   (count tsm-inject-src)
                    tsm-inject)
           whole)
         ;; a window inside the sigil's body still parses the whole body
@@ -919,7 +915,7 @@
         (assert= (editor/treesit/fontify-tree tree
                    host-faces
                    0
-                   (string/length tsm-inject-src)
+                   (count tsm-inject-src)
                    false
                    injections)
           (into [] spans))
@@ -929,7 +925,7 @@
       (let (tree (editor/treesit/open-tree tsm-inject-src :elixir)
             edited (str (string/substring tsm-inject-src 0 12)
                      "\""
-                     (string/substring tsm-inject-src 12 (string/length tsm-inject-src)))
+                     (string/substring tsm-inject-src 12 (count tsm-inject-src)))
             next (editor/treesit/update-tree tree edited :elixir))
         ;; the host saw a character typed; the Ruby inside it may have recoloured to its end
         (assert= (editor/treesit/tree-changes next) [[12 13]])
@@ -945,7 +941,7 @@
             tree (editor/treesit/open-tree src :elixir))
         ;; 40 KB of Ruby is past 32 KB: the whole-text query leaves it a string
         (assert= (%tree-sitter-spans src :elixir tsm-inject-host false rule)
-          [[4 (dec (string/length src)) :str]])
+          [[4 (dec (count src)) :str]])
         ;; a window parses the part it shows
         (assert= (%tree-sitter-tree-spans tree tsm-inject-host false 8 28 rule)
           [[8 17 :rb-method] [18 27 :rb-method]])
@@ -1007,7 +1003,7 @@
             [29 37 :str]
             [37 38 :py-string]
             [38 41 :str]])
-        (assert= (%tree-sitter-tree-spans tree host true 0 (string/length src) injections) spans)
+        (assert= (%tree-sitter-tree-spans tree host true 0 (count src) injections) spans)
         (editor/treesit/free-tree tree)))))
 
 ;; ---- a node's anonymous children: the parent's own tokens --------------------------------
@@ -1065,7 +1061,7 @@
             others (receive ([:opened others] others) (after test/*wait-ms* []))
             edited (str (string/substring tsm-inject-src 0 12)
                      "\""
-                     (string/substring tsm-inject-src 12 (string/length tsm-inject-src))))
+                     (string/substring tsm-inject-src 12 (count tsm-inject-src))))
         (assert= (count others) 40)
         (assert (tree-alive? tree))
         (let (next (update-tree tree edited :elixir))

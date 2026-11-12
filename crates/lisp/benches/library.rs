@@ -81,7 +81,7 @@ mod strings {
     fn join(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(string/length (string/join (map (range {n}) str) \", \"))"),
+            format!("(%string-length (string/join (map (range {n}) str) \", \"))"),
         );
     }
 
@@ -242,7 +242,7 @@ mod concurrency {
         bench_prog(
             bencher,
             format!(
-                "(defn bsf-w (p) (receive (s (send p (string/length s))))) \
+                "(defn bsf-w (p) (receive (s (send p (%string-length s))))) \
                  (defn bsf-sw (parent big k) \
                    (if (= k 0) nil \
                      (do (send (spawn (bsf-w parent)) big) \

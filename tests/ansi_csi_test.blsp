@@ -36,7 +36,7 @@
 (describe "the scan answers alike over a string and a vector"
   (test "a final, an abort and an unfinished body"
     (let (both (fn (text)
-                 (let (n (string/length text))
+                 (let (n (count text))
                    [(ansi/csi-scan text 0 n) (ansi/csi-scan (into [] (string/->list text)) 0 n)])))
       (assert= (both "3;4~x") [[:final 4] [:final 4]])
       (assert= (both "3\nx") [[:abort 1] [:abort 1]])

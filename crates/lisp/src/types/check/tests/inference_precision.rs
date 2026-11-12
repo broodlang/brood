@@ -1072,7 +1072,7 @@ fn a_moving_interval_beside_a_stable_tuple_of_the_same_tags_still_widens() {
 
 // KI-140: `apply` binds the callee's type variable from the spread operands and the
 // collection's element type, the way the written-out call does. `math/max` declares
-// `(& ?A -> ?A)`, so `(apply math/max 1 (map xs string/length))` is an `int` — it used to
+// `(& ?A -> ?A)`, so `(apply math/max 1 (map xs %string-length))` is an `int` — it used to
 // type by `apply`'s own curated signature, which knows nothing of the callee's variable, and
 // fell to the callee's flat return (`ordered`), failing a `-> int` declaration under `--strict`
 // (bedit's ratchet, four findings of this shape).
@@ -1082,9 +1082,9 @@ fn apply_binds_the_callee_type_variable_from_its_operands() {
         "\
          (defmodule t)\n\
          (sig widest (list -> int))\n\
-         (defn widest (xs) (apply math/max 1 (map xs string/length)))\n\
+         (defn widest (xs) (apply math/max 1 (map xs %string-length)))\n\
          (sig widest2 (list -> int))\n\
-         (defn widest2 (xs) (math/max 1 (string/length (first xs))))",
+         (defn widest2 (xs) (math/max 1 (%string-length (first xs))))",
         true,
     );
     assert!(ws.is_empty(), "both bodies are ints — {ws:?}");
@@ -1096,7 +1096,7 @@ fn apply_binds_the_callee_type_variable_from_its_operands() {
          (sig pick (& ?A -> ?A))\n\
          (defn pick (& xs) (first xs))\n\
          (sig use-pick (list -> int))\n\
-         (defn use-pick (xs) (apply pick 1 (map xs string/length)))",
+         (defn use-pick (xs) (apply pick 1 (map xs %string-length)))",
         true,
     );
     assert!(

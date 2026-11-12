@@ -180,7 +180,7 @@
 ;; including the sharded one, whose workers must be HANDED the scorer rather than inheriting
 ;; a dynamic binding (they don't — bindings are per-process).
 
-(def- shortest-first (fn (q _options) (fn (c) (if (includes? c q) (- 0 (string/length c)) nil))))
+(def- shortest-first (fn (q _options) (fn (c) (if (includes? c q) (- 0 (count c)) nil))))
 
 (describe "fuzzy/*scorer*"
   (test "a custom scorer replaces the rules"

@@ -83,7 +83,7 @@
   (test ":stdin feeds the child, and more than a pipe buffer does not wedge it"
     (let (big (string/repeat "x" 200000)
           r (os/cmd "cat" [] {:stdin big}))
-      (assert= (string/length (:stdout r)) 200000)))
+      (assert= (count (:stdout r)) 200000)))
   (test "without :stdin the child's stdin is empty, not ours"
     (assert= (os/cmd-out (os/cmd "sh" ["-c" "cat; echo done"])) "done"))
   (test ":timeout-ms kills the child and says so"
@@ -135,7 +135,7 @@
   (test "returns a string"
     (is (string? (os/hostname))))
   (test "is non-empty"
-    (is (> (string/length (os/hostname)) 0))))
+    (is (> (count (os/hostname)) 0))))
 
 (describe "os/shell-quote leaves a plain word readable"
   (test "safe words are unquoted; anything else is quoted"

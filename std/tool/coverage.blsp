@@ -61,8 +61,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
       (or found
         (and (not (nil? path))
           (string/starts-with? path dir)
-          (or (= (string/length path) (string/length dir))
-            (= (string/substring path (string/length dir) (+ (string/length dir) 1)) "/")))))))
+          (or (= (count path) (count dir))
+            (= (string/substring path (count dir) (+ (count dir) 1)) "/")))))))
 
 ;; Every global that is a plain function DEFINED IN this project's source dirs.
 ;; Excludes macros (they are expanded, never called — a shim would break them),
@@ -153,8 +153,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; Shorten an absolute path to a project-relative one for display.
 (defn- coverage-relative (path root)
   (if (and (not (nil? root)) (string/starts-with? path root))
-    (let (cut (+ (string/length root) 1))
-      (if (> (string/length path) cut) (string/substring path cut (string/length path)) path))
+    (let (cut (+ (count root) 1))
+      (if (> (count path) cut) (string/substring path cut (count path)) path))
     path))
 
 (defn report (root)

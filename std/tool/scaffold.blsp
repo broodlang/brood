@@ -12,9 +12,9 @@ test discovery, lints, release, config)."
 ;; index yet, and project names/paths are short).
 (defn- str-contains? (s ch)
   (cond
-    (= (string/length s) 0) false
+    (= (count s) 0) false
     (= (string/substring s 0 1) ch) true
-    else (str-contains? (string/substring s 1 (string/length s)) ch)))
+    else (str-contains? (string/substring s 1 (count s)) ch)))
 
 ;; A project name must be a single, fresh path component in the current
 ;; directory: non-empty, no path separators or whitespace, no NUL, and not
@@ -34,7 +34,7 @@ test discovery, lints, release, config)."
 ;; library module can't collide with the project's own entry module.
 (defn- project-module-name (nm)
   (let (cleaned (string/join (map (string/split nm "") project-name-char) "")
-        prefixed (if (and (> (string/length cleaned) 0)
+        prefixed (if (and (> (count cleaned) 0)
                        (includes? "0123456789"
                          (string/substring cleaned 0 1)))
                    (str "p-" cleaned)
@@ -56,7 +56,7 @@ test discovery, lints, release, config)."
   (if (includes? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" ch) ch "-"))
 
 (defn- project-valid-name? (nm)
-  (and (> (string/length nm) 0)
+  (and (> (count nm) 0)
     (not (= nm "."))
     (not (= nm ".."))
     (not (str-contains? nm "/"))
@@ -230,30 +230,30 @@ test discovery, lints, release, config)."
     "  \"Move the cursor by [drow dcol], clamped to the buffer and the target line.\"\n"
     "  (let (lines (get m :lines)\n"
     "        row (math/max 0 (math/min (dec (count lines)) (+ (get m :row) drow)))\n"
-    "        col (math/max 0 (math/min (string/length (nth lines row)) (+ (get m :col) dcol))))\n"
+    "        col (math/max 0 (math/min (count (nth lines row)) (+ (get m :col) dcol))))\n"
     "    (assoc m :row row :col col)))\n" "\n" "(defn ed-insert (m ch)\n"
     "  \"Insert the printable string `ch` at the cursor.\"\n"
     "  (let (ln (ed-line m) col (get m :col)\n"
-    "        ln2 (str (string/substring ln 0 col) ch (string/substring ln col (string/length ln))))\n"
+    "        ln2 (str (string/substring ln 0 col) ch (string/substring ln col (count ln))))\n"
     "    (assoc m :lines (ed-set-line (get m :lines) (get m :row) ln2)\n"
-    "             :col (+ col (string/length ch)))))\n" "\n" "(defn ed-newline (m)\n"
+    "             :col (+ col (count ch)))))\n" "\n" "(defn ed-newline (m)\n"
     "  \"Split the current line at the cursor into two lines.\"\n"
     "  (let (ln (ed-line m) row (get m :row) col (get m :col) lines (get m :lines))\n"
     "    (assoc m\n" "           :lines (append (take lines row)\n"
-    "                          (list (string/substring ln 0 col) (string/substring ln col (string/length ln)))\n"
+    "                          (list (string/substring ln 0 col) (string/substring ln col (count ln)))\n"
     "                          (drop lines (inc row)))\n" "           :row (inc row) :col 0)))\n"
     "\n" "(defn ed-backspace (m)\n"
     "  \"Delete the char before the cursor; at column 0, join with the previous line.\"\n"
     "  (let (row (get m :row) col (get m :col) lines (get m :lines))\n" "    (cond\n"
     "      (> col 0)\n" "        (let (ln (ed-line m))\n"
     "          (assoc m :lines (ed-set-line lines row\n"
-    "                            (str (string/substring ln 0 (dec col)) (string/substring ln col (string/length ln))))\n"
+    "                            (str (string/substring ln 0 (dec col)) (string/substring ln col (count ln))))\n"
     "                   :col (dec col)))\n" "      (> row 0)\n"
     "        (let (prev (nth lines (dec row)))\n" "          (assoc m\n"
     "                 :lines (append (take lines (dec row))\n"
     "                                (cons (str prev (ed-line m)) (drop lines (inc row))))\n"
-    "                 :row (dec row) :col (string/length prev)))\n" "      else m)))\n" "\n"
-    "(defn ed-fit (s w) \"Clip `s` to `w` columns.\" (if (> (string/length s) w) (string/substring s 0 w) s))\n"
+    "                 :row (dec row) :col (count prev)))\n" "      else m)))\n" "\n"
+    "(defn ed-fit (s w) \"Clip `s` to `w` columns.\" (if (> (count s) w) (string/substring s 0 w) s))\n"
     "\n" "(defn ed-view (m cols rows)\n"
     "  \"ui-run view: a `text` op per line, a reverse-video status bar, cursor at point.\"\n"
     "  (apply frame\n" "    (append\n" "      [(clear)]\n"
@@ -317,8 +317,7 @@ test discovery, lints, release, config)."
     "  {:count 0 :done false :tick-ms 1000})\n" "\n"
     "(defn app-step (m d) \"Change the counter by `d` (pure).\" (assoc m :count (+ (get m :count) d)))\n"
     "\n" "(defn app-center (s cols) \"Left column that centres `s` in `cols`.\"\n"
-    "  (math/max 0 (math/quot (- cols (string/length s)) 2)))\n" "\n"
-    "(defn app-view (m cols rows)\n"
+    "  (math/max 0 (math/quot (- cols (count s)) 2)))\n" "\n" "(defn app-view (m cols rows)\n"
     "  \"ui-run view: a centred title, the counter, and key hints (pure).\"\n"
     "  (let (mid   (math/quot rows 2)\n" "        title \"" nm "\"\n"
     "        count (str \"count: \" (get m :count))\n"
@@ -534,7 +533,7 @@ only one, else the one called \"default\"."
     (when (not (file/dir? dir)) (error "new: the template directory " dir " does not exist"))
     (map (sort (or (file/walk-files dir) (list)))
       (fn (path)
-        [(string/substring path (string/length prefix))
+        [(string/substring path (count prefix))
           (string/replace (string/replace (file/slurp path) "{{name}}" name)
             "{{package}}" dependency)]))))
 

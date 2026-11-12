@@ -164,21 +164,21 @@
 ;; it agrees with the string it stands for; that agreement is the property worth
 ;; pinning, since the two must never disagree about the same text.
 (describe "a rope counts and tests empty like the string it stands for"
-  (test "count is the character count, and agrees with string/length"
+  (test "count is the character count, and agrees with count"
     (assert= (count (text/string-> "hello")) 5)
     (assert= (count (text/string-> "")) 0)
     (let (s "hello world, a longer one")
-      (assert= (count (text/string-> s)) (string/length s))))
+      (assert= (count (text/string-> s)) (count s))))
 
   (test "count agrees with the string after an edit, not just at construction"
     (let (r (text/insert (text/string-> "hello") 5 " world"))
-      (assert= (count r) (string/length (text/->string r)))))
+      (assert= (count r) (count (text/->string r)))))
 
   (test "a multi-byte character counts once, as a character"
     ;; the failure this guards: counting BYTES would make a rope disagree with
-    ;; `string/length` on any non-ASCII text
+    ;; `count` on any non-ASCII text
     (let (s "héllo")
-      (assert= (count (text/string-> s)) (string/length s))
+      (assert= (count (text/string-> s)) (count s))
       (assert= (count (text/string-> s)) 5)))
 
   (test "empty? is true only for the empty rope"
