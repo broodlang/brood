@@ -104,9 +104,9 @@ also how you default deliberately: `(let (n (parse s)) (if (failure? n) 0 n))`.
     (pid? 5)        ;=> false"
   (%eq (type-of x) :pid))
 (defn rope? (x)
-  "True if `x` is a rope (editor buffer text from `text/from-string`).
+  "True if `x` is a rope (editor buffer text from `text/string->`).
 
-    (rope? (text/from-string \"hi\"))   ;=> true
+    (rope? (text/string-> \"hi\"))   ;=> true
     (rope? \"hi\")                      ;=> false   ; a plain string is not a rope"
   (%eq (type-of x) :rope))
 (defn table? (x)

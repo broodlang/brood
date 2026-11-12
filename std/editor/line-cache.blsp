@@ -373,7 +373,7 @@ buffer's splice log, `editor/buffer/buffer-splices-cover`) spares the compare of
 ropes that finding it costs. It must describe exactly that pair of texts; nil (the default)
 compares them.
 
-    (second (editor/line-cache/line-cache-update (editor/line-cache/line-cache) (editor/line-cache/stateless-lexer (fn (line) (if (string/starts-with? line \"#\") [[0 (string/length line) :c]] []))) (text/from-string \"a\\n# b\") 0 2))   ;=> ([2 5 :c])"
+    (second (editor/line-cache/line-cache-update (editor/line-cache/line-cache) (editor/line-cache/stateless-lexer (fn (line) (if (string/starts-with? line \"#\") [[0 (string/length line) :c]] []))) (text/string-> \"a\\n# b\") 0 2))   ;=> ([2 5 :c])"
   (if (:stateless? lexer)
     (lc-stateless cache lexer rope lo hi)
     (let (top (math/min hi (text/line-count rope))
@@ -459,7 +459,7 @@ goes, so asking again near the same place costs a few lines. `change` is
 stateless lexer's lines all start in its `:initial`. [[line-cache-state-within]] is the same
 question with a budget.
 
-    (second (editor/line-cache/line-cache-state (editor/line-cache/line-cache) (editor/line-cache/line-lexer (fn (line state) [[] (+ state (string/length line))]) 0) (text/from-string \"ab\\ncde\\nf\") 2))   ;=> 5"
+    (second (editor/line-cache/line-cache-state (editor/line-cache/line-cache) (editor/line-cache/line-lexer (fn (line state) [[] (+ state (string/length line))]) 0) (text/string-> \"ab\\ncde\\nf\") 2))   ;=> 5"
   (lc-state cache lexer rope line change nil))
 
 (defn line-cache-state-within (cache lexer rope line limit &optional (change nil))
@@ -471,7 +471,7 @@ state that line starts in — a caller may go on from there itself — and the c
 checkpoints the walk made, so asking
 again goes on from there; when it is in reach, as `line-cache-state`.
 
-    (second (editor/line-cache/line-cache-state-within (editor/line-cache/line-cache) (editor/line-cache/line-lexer (fn (line state) [[] (inc state)]) 0) (text/from-string \"a\\nb\\nc\\nd\") 3 1))   ;=> false"
+    (second (editor/line-cache/line-cache-state-within (editor/line-cache/line-cache) (editor/line-cache/line-lexer (fn (line state) [[] (inc state)]) 0) (text/string-> \"a\\nb\\nc\\nd\") 3 1))   ;=> false"
   (let ([walked state] (lc-state cache lexer rope line change limit))
     (if (and (vector? state) (= (first state) lc-far))
       [walked false [(nth state 1) (nth state 2)]]

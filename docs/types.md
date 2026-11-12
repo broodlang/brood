@@ -563,7 +563,7 @@ fallback. Zero new false positives across `std/` + `tests/`.
 **✅ Structural combinators (fifth slice).** The element-type flow was extended to
 the rest of the element-preserving / element-extracting sequence library:
 `second`/`third` (extract — `A | nil`, like `first`); `rest` and
-`seq/but-last`/`seq/distinct`/`seq/dedupe`/`seq/take-last`/`seq/drop-last`/`seq/reject`
+`seq/distinct`/`seq/dedupe`/`seq/take-last`/`seq/drop-last`/`seq/reject`
 (preserve — `nil | list<A>`, like `reverse`/`take`); `seq/keep` (`map`-then-drop-`nil` —
 `nil | list<B>`, like `map`); `seq/interpose` (`nil | list<A | type(sep)>`, weaving the
 separator in); and `range`

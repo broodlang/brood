@@ -628,10 +628,10 @@ order — move the helpers too. Other files are [[move-references-text]]'s.
                       (fn (i)
                         (str (apply str
                                (map (attached-comments kids i) (fn (c) (node-text (nth kids c)))))
-                          (string/trimr (str (node-text (nth kids i))
-                                          (apply str
-                                            (map (trailing-comment kids i)
-                                              (fn (c) (node-text (nth kids c))))))))))
+                          (string/trim-right (str (node-text (nth kids i))
+                                               (apply str
+                                                 (map (trailing-comment kids i)
+                                                   (fn (c) (node-text (nth kids c))))))))))
         moved-source (string/join moved-forms "\n\n")
         helpers (sort (seq/filter (keys staying-heads)
                         (fn (name) (and (helper? name) (referenced? name moved-source)))))
@@ -649,13 +649,14 @@ order — move the helpers too. Other files are [[move-references-text]]'s.
                          else name))))
     {:source (prose-follows (publicized remaining helpers staying-heads) from to (keys moved-heads))
      ;; what the destination already said of a moved name (`from/NAME`) is its own name now
-     :destination (str (string/trimr (rewrite-symbols-text destination
-                                       (fn (name quoted?)
-                                         (cond
-                                           (and quoted? (moved-in name from))
-                                             (str to "/" (moved-in name from))
-                                           quoted? name
-                                           else (or (moved-in name from) (moved-in name to) name)))))
+     :destination (str (string/trim-right (rewrite-symbols-text destination
+                                            (fn (name quoted?)
+                                              (cond
+                                                (and quoted? (moved-in name from))
+                                                  (str to "/" (moved-in name from))
+                                                quoted? name
+                                                else
+                                                  (or (moved-in name from) (moved-in name to) name)))))
                     "\n\n"
                     (prose-follows (publicized moved-text reached-later moved-heads)
                       from

@@ -262,7 +262,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `rand.blsp` (`rand`) — A seeded PRNG (xorshift32).
 - `reflect.blsp` (`reflect`) — Reading Brood source as DATA: the advisory checker, the reader's lossless CST, the string- and comment-aware scanners, and where a definition lives.
 - `regex.blsp` (`regex`) — Regular expressions: Brood's pattern language, matched by a native engine.
-- `registry.blsp` (`registry`) — Named registries a program fills as its modules load — `put!` a row under a registry id and a key, read them back with `entries` / `lookup` / `ranked`.
+- `registry.blsp` (`registry`) — Named registries a program fills as its modules load — `put` a row under a registry id and a key, read them back with `entries` / `lookup` / `ranked`.
 - `resolver.blsp` (`resolver`) — The dependency version resolver (ADR-209), a PubGrub solver.
 - `seq.blsp` (`seq`) — Sequence helpers — the derived enumeration API over the bare collection protocol.
 - `set.blsp` (`set`) — Sets — unordered collections of **unique** values with fast membership.

@@ -241,7 +241,7 @@ primitive — `activate-layer` is the hook-firing version.
 
 (defn- layers-replace-base-list (lst layer)
   "Replace the base (last) element of `lst` with `layer`, or add it if `lst` empty."
-  (if (empty? lst) (list layer) (append (seq/but-last lst) (list layer))))
+  (if (empty? lst) (list layer) (append (seq/drop-last lst 1) (list layer))))
 
 ;; ---- hooks ------------------------------------------------------------------
 

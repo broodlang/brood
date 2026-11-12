@@ -261,7 +261,7 @@ index 0000000..3333333
 
   (test "a rope diffs as its text"
     (let (old "one\ntwo\nthree\n" new "one\n2\nthree\nfour\n")
-      (assert= (diff/line-hunks (text/from-string old) (text/from-string new))
+      (assert= (diff/line-hunks (text/string-> old) (text/string-> new))
         (diff/line-hunks old new))))
 
   (test "the hunks rebuild the new text, over edits at many places"
@@ -311,7 +311,7 @@ index 0000000..3333333
   (test "one diff serves many lines, and a rope maps as its text"
     (let (old "one\ntwo\nthree\nfour\n" new "zero\none\nthree\nfour\nfive\n")
       (assert= (diff/map-lines old new [0 1 2 3]) [1 2 2 3])
-      (assert= (diff/map-lines (text/from-string old) (text/from-string new) [0 1 2 3])
+      (assert= (diff/map-lines (text/string-> old) (text/string-> new) [0 1 2 3])
         [1 2 2 3]))))
 
 (describe "hunk-changes / hunks-status"

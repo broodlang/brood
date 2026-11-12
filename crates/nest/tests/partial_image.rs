@@ -156,7 +156,7 @@ fn fixture(dir: &Path) {
         &module(
             "hooks",
             "",
-            "(registry/put! :pfx/hooks :save 1)\n(registry/put! :pfx/hooks :load 2)",
+            "(registry/put :pfx/hooks :save 1)\n(registry/put :pfx/hooks :load 2)",
         ),
     );
     write(
@@ -238,7 +238,7 @@ fn a_registration_the_edited_module_stops_making_is_gone() {
     edit(
         &dir,
         "src/hooks.blsp",
-        &module("hooks", "", "(registry/put! :pfx/hooks :save 1)"),
+        &module("hooks", "", "(registry/put :pfx/hooks :save 1)"),
     );
     let (out, loaded, answer) = nest_run(&dir);
     assert!(out.contains("Rebuilt pfx"), "{out}");

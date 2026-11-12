@@ -42,11 +42,11 @@
       (file/mkdir (path/join dir "inner"))
       (file/mkdir (path/join dir "inner/.nestedvcs"))
       (file/mkdir (path/join dir "inner/deep"))
-      (registry/put! :vcs/backends :nested {:rank 30 :marker ".nestedvcs"})
+      (registry/put :vcs/backends :nested {:rank 30 :marker ".nestedvcs"})
       (assert= (locate (path/join dir "inner/deep")) {:kind :nested :root (path/join dir "inner")})
       (assert= (kind dir) :git)
       (assert= (root (path/join dir "inner")) (path/join dir "inner"))
-      (registry/remove! :vcs/backends :nested)))
+      (registry/remove :vcs/backends :nested)))
   (test "a .git FILE (a worktree, a submodule) marks a checkout too"
     (let (dir (temp-dir "brood-vcs-worktree-"))
       (file/mkdir dir)
@@ -59,12 +59,12 @@
       (file/mkdir (path/join dir ".aheadvcs"))
       (file/mkdir (path/join dir ".behindvcs"))
       ;; one ranked before git, one after: the directory is the first one's
-      (registry/put! :vcs/backends :ahead {:rank 10 :marker ".aheadvcs"})
-      (registry/put! :vcs/backends :behind {:rank 40 :marker ".behindvcs"})
+      (registry/put :vcs/backends :ahead {:rank 10 :marker ".aheadvcs"})
+      (registry/put :vcs/backends :behind {:rank 40 :marker ".behindvcs"})
       (assert= (kind dir) :ahead)
-      (registry/remove! :vcs/backends :ahead)
+      (registry/remove :vcs/backends :ahead)
       (assert= (kind dir) :git)
-      (registry/remove! :vcs/backends :behind))))
+      (registry/remove :vcs/backends :behind))))
 
 (describe "vcs over git"
   (test "files: tracked and new, not ignored, not deleted"
@@ -132,7 +132,7 @@
     (let (dir (temp-dir "brood-vcs-fake-"))
       (file/mkdir dir)
       (file/mkdir (path/join dir ".fakevcs"))
-      (registry/put! :vcs/backends
+      (registry/put :vcs/backends
         :fake {:rank 30
          :marker ".fakevcs"
          :files 'vcs-test/fake-files
@@ -142,7 +142,7 @@
       (assert= (base-text (path/join dir "x.txt")) "before:x.txt")
       ;; a question the row does not answer is nil, not an error
       (assert= (changed dir) nil)
-      (registry/remove! :vcs/backends :fake)
+      (registry/remove :vcs/backends :fake)
       (assert= (kind dir) nil)))
   (test "a hook may be a function — a package's way to call its own globals late"
     ;; a package's module names are rooted under the package, so a quoted symbol in its row
@@ -150,7 +150,7 @@
     (let (dir (temp-dir "brood-vcs-fn-"))
       (file/mkdir dir)
       (file/mkdir (path/join dir ".fnvcs"))
-      (registry/put! :vcs/backends
+      (registry/put :vcs/backends
         :by-fn {:rank 30
          :marker ".fnvcs"
          :files (fn (root) (fake-files root))
@@ -166,7 +166,7 @@
         (spawn (send me [:asked (files dir) (id dir)]))
         (assert= (receive ([:asked fs i] [fs i]) (after test/*wait-ms* :timeout))
           [(list (str "listed-under-" (path/basename dir))) {:id "fn-id" :dirty? false}]))
-      (registry/remove! :vcs/backends :by-fn))))
+      (registry/remove :vcs/backends :by-fn))))
 
 (describe "vcs/changed over git: this branch's work, not the upstream's"
   (test "commits that landed upstream after the branch left it are not counted"

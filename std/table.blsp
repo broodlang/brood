@@ -25,7 +25,7 @@
   ;; `&optional` head is not one — it binds a default first, so `(table/get t k)` stopped
   ;; resolving to `PrimOp::TableGet` and compiled to an ordinary call. `%table-get` is
   ;; `Arity::range(2, 3)` with "default (nil if omitted)", so the 2-arg forward is exactly
-  ;; equivalent and the inline comes back. `has?` beside it never lost it, being a plain
+  ;; equivalent and the inline comes back. `contains?` beside it never lost it, being a plain
   ;; 2-ary forward — which is what made the gap invisible. See KI-58 for the same shape on
   ;; `put`, and `every_inlinable_head_still_reaches_its_primitive`, which is what caught this.
   ((t k) (%table-get t k))
@@ -34,16 +34,16 @@
 ;; two-parameter contract failed every three-argument call under BROOD_CONTRACTS=1 (KI-113).
 (sig get (table any &optional any -> any))
 
-(defn has? (t:table k:any -> bool)
+(defn contains? (t:table k:any -> bool)
   "True if table t has an entry for key k.
 
-    (let (t (table/new)) (do (table/put t :k 1) (table/has? t :k)))   ;=> true"
+    (let (t (table/new)) (do (table/put t :k 1) (table/contains? t :k)))   ;=> true"
   (%table-has? t k))
 
 (defn delete (t:table k:any -> table)
   "Remove key k from table t if present. Returns t.
 
-    (let (t (table/new)) (do (table/put t :a 1) (table/delete t :a) (table/has? t :a)))   ;=> false"
+    (let (t (table/new)) (do (table/put t :a 1) (table/delete t :a) (table/contains? t :a)))   ;=> false"
   (%table-delete t k))
 
 (defn incr (t:table k:any &optional delta:int -> int)

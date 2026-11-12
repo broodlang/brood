@@ -132,7 +132,7 @@ identity and may override those paths. The rest of the tool is its siblings:
 ; directories (every `.md` under them) and `!`-prefixed paths left out. nil = `README.md` when
 ; there is one.
 (defdyn project/*width* nil)
-; the manifest's :width (an integer column budget for `nest format`, e.g. 80);
+; the manifest's :format-width (an integer column budget for `nest format`, e.g. 80);
 ; nil = use the formatter's built-in default. Ambient so `std/format.blsp` reads it
 ; directly, like the other project knobs the formatter consults.
 
@@ -514,7 +514,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   #{:name
     :version :description :repository :brood :kind :enhances :check :main :source-paths :test-paths
     :format-paths :doc-paths :dependencies :dev-dependencies :format-headers :format-plugins
-    :width :templates :bundled-packages :project-modules :built-at :built-with})
+    :format-width :templates :bundled-packages :project-modules :built-at :built-with})
 
 ;; Warn — never fail — on a key this build does not know (road-to-1.0 §B2): a later minor
 ;; may add keys, and a manifest written for it must still load here. A typo
@@ -572,7 +572,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     (map (parse-deps (plist-get opts :dev-dependencies)) (fn (d) (assoc d :dev true))))
   (def *project-format-headers* (plist-get opts :format-headers))
   (def *project-format-plugins* (plist-get opts :format-plugins))
-  (def project/*width* (plist-get opts :width))
+  (def project/*width* (plist-get opts :format-width))
   project/*name*)
 
 ;; --- finding the project + discovering tests ---------------------------------

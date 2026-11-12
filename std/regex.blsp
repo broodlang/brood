@@ -698,12 +698,12 @@ does) where by default one is stepped over; `:bound` (a char index) is where a m
 by — a greedy pattern stops there rather than being refused, while `^`, `$` and `\\b` still read
 the text past it (Emacs's BOUND, what a search confined to a region wants; ADR-554).
 
-    (get (regex/rope-find \"o+\" (text/from-string \"foo boo\") 3) :start)                ;=> 5
-    (get (regex/rope-find \"^b\" (text/from-string \"ab\\nbc\") 0) :start)                ;=> 3
-    (get (regex/rope-find \"FOO\" (text/from-string \"a foo\") 0 {:fold? true}) :text)   ;=> \"foo\"
-    (get (regex/rope-find \"x*\" (text/from-string \"ab x\") 0 {:empty? true}) :end)   ;=> 0
-    (get (regex/rope-find \"a+\" (text/from-string \"aaaa\") 0 {:bound 2}) :end)       ;=> 2
-    (regex/rope-find \"o$\" (text/from-string \"foo bar\") 0 {:bound 3})               ;=> nil"
+    (get (regex/rope-find \"o+\" (text/string-> \"foo boo\") 3) :start)                ;=> 5
+    (get (regex/rope-find \"^b\" (text/string-> \"ab\\nbc\") 0) :start)                ;=> 3
+    (get (regex/rope-find \"FOO\" (text/string-> \"a foo\") 0 {:fold? true}) :text)   ;=> \"foo\"
+    (get (regex/rope-find \"x*\" (text/string-> \"ab x\") 0 {:empty? true}) :end)   ;=> 0
+    (get (regex/rope-find \"a+\" (text/string-> \"aaaa\") 0 {:bound 2}) :end)       ;=> 2
+    (regex/rope-find \"o$\" (text/string-> \"foo bar\") 0 {:bound 3})               ;=> nil"
   (%rope-regex-find r (regex-rope-src pattern opts) from (= true (:empty? opts)) (:bound opts)))
 
 (defn rope-find-backward (pattern r before &optional (opts {}))
@@ -712,9 +712,9 @@ char index `before` — Emacs's `re-search-backward` — as the map [[find]] ans
 Reads backward from `before`, so the cost is the distance to the match. `opts` as
 [[rope-find]].
 
-    (get (regex/rope-find-backward \"[fb]o+\" (text/from-string \"foo boo\") 7) :start)   ;=> 4
-    (get (regex/rope-find-backward \"[fb]o+\" (text/from-string \"foo boo\") 4) :start)   ;=> 0
-    (get (regex/rope-find-backward \"o+\" (text/from-string \"foo boo\") 7) :start)      ;=> 6"
+    (get (regex/rope-find-backward \"[fb]o+\" (text/string-> \"foo boo\") 7) :start)   ;=> 4
+    (get (regex/rope-find-backward \"[fb]o+\" (text/string-> \"foo boo\") 4) :start)   ;=> 0
+    (get (regex/rope-find-backward \"o+\" (text/string-> \"foo boo\") 7) :start)      ;=> 6"
   (%rope-regex-rfind r (regex-rope-src pattern opts) before (= true (:empty? opts))))
 
 (defn rope-count (pattern r from limit &optional (opts {}))
@@ -727,9 +727,9 @@ more than its length: what a search's match count runs on while the editor stays
 responsive. `(rope-count p r 0 at)` is how many matches start before `at`. `opts` as
 [[rope-find]].
 
-    (regex/rope-count \"ab\" (text/from-string \"ab ab ab\") 0 100)   ;=> [3 nil]
-    (regex/rope-count \"ab\" (text/from-string \"ab ab ab\") 0 4)     ;=> [2 5]
-    (regex/rope-count \"ab\" (text/from-string \"ab ab ab\") 0 6)     ;=> [2 6]"
+    (regex/rope-count \"ab\" (text/string-> \"ab ab ab\") 0 100)   ;=> [3 nil]
+    (regex/rope-count \"ab\" (text/string-> \"ab ab ab\") 0 4)     ;=> [2 5]
+    (regex/rope-count \"ab\" (text/string-> \"ab ab ab\") 0 6)     ;=> [2 6]"
   (%rope-regex-count r (regex-rope-src pattern opts) from limit))
 
 (defn rope-spans (pattern r from to &optional (opts {}))
@@ -738,7 +738,7 @@ responsive. `(rope-count p r 0 at)` is how many matches start before `at`. `opts
 highlighting the matches in a window wants: the cost is the window, not the rope. `opts` as
 [[rope-find]].
 
-    (regex/rope-spans \"o+\" (text/from-string \"foo boo zoo\") 0 6)   ;=> [[1 3] [5 7]]"
+    (regex/rope-spans \"o+\" (text/string-> \"foo boo zoo\") 0 6)   ;=> [[1 3] [5 7]]"
   (%rope-regex-spans r (regex-rope-src pattern opts) from to))
 
 (def- regex-escaped-chars "\\.*+?{}()[]^$|")

@@ -407,18 +407,19 @@ A string is not a sequence here — reverse its `string/->list` if you need that
         (%reverse-acc coll nil)
         (%reverse-acc (seq coll) nil)))))
 
-;; `but-last` lives HERE, in core, rather than with the rest of the sequence library —
-;; the position is load-bearing. `receive`'s macro body calls it, and `sleep` (in
-;; process.blsp) is a `receive`, so the call happens while the PRELUDE ITSELF is booting.
-;; With `but-last` defined in seq.blsp — concatenated after process.blsp — `receive` could
-;; not expand at compile time at all; it expanded lazily at first call instead, on a path
-;; that runs no namespace-resolve pass, which is what made `receive` the one prelude macro
-;; whose template could not use the `/name` root escape (KI-73). It needs only `reverse`
-;; (just above) and the kernel `rest`, so it costs nothing to define this early.
-(defn seq/but-last (xs)
+;; `%but-last` lives HERE, in core, and is private to the prelude — the position is
+;; load-bearing. `receive`'s macro body calls it, and `sleep` (in process.blsp) is a
+;; `receive`, so the call happens while the PRELUDE ITSELF is booting, long before the
+;; `seq` module (and its public `seq/drop-last`, the spelling everyone else uses) loads.
+;; Defined any later, `receive` could not expand at compile time at all; it expanded lazily
+;; at first call instead, on a path that runs no namespace-resolve pass, which is what made
+;; `receive` the one prelude macro whose template could not use the `/name` root escape
+;; (KI-73). It needs only `reverse` (just above) and the kernel `rest`, so it costs nothing
+;; to define this early. Public code writes `(seq/drop-last xs 1)` (ADR-300: one name).
+(defn- %but-last (xs)
   "All but the last item of `xs`, as a list.
 
-    (seq/but-last [1 2 3])   ;=> (1 2)"
+    (%but-last [1 2 3])   ;=> (1 2)"
   (reverse (rest (reverse xs))))
 
 (defn- %reverse-onto (coll tail)

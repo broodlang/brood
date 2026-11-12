@@ -13,7 +13,7 @@
 //!   or bound is not (a pure function may build an effectful closure without running it).
 //! - **`:total`** — the function terminates and covers its cases. Termination: every
 //!   self-call hands SOME one parameter a structural decrease of itself — `(rest p)` /
-//!   `(seq/but-last p)` of a `p` the branch knows is non-empty; `(- p k)` / `(dec p)` of a `p`
+//!   `(%but-last p)` of a `p` the branch knows is non-empty; `(- p k)` / `(dec p)` of a `p`
 //!   the branch knows is bounded below; `(+ p k)` / `(inc p)` of a `p` the branch bounds
 //!   above, by a literal or by an immutable collection's count — read in the branch scope
 //!   the call sits in (`sigs::self_call_sites`). Coverage: the walk reports a `match` failure
@@ -654,7 +654,7 @@ fn decreases(heap: &Heap, arg: Value, param: Symbol, scope: &Ctx) -> bool {
     let positive_literal = |v: &Value| matches!(v, Value::Int(n) if *n > 0);
     let negative_literal = |v: &Value| matches!(v, Value::Int(n) if *n < 0);
     match (value::symbol_name(head).as_str(), &items[1..]) {
-        ("rest" | "seq/but-last", [x]) if is_param(x) => non_empty(),
+        ("rest" | "%but-last", [x]) if is_param(x) => non_empty(),
         ("dec", [x]) if is_param(x) => bounded_below(),
         ("inc", [x]) if is_param(x) => bounded_above(),
         ("-", [x, k]) if is_param(x) && positive_literal(k) => bounded_below(),

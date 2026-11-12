@@ -88,9 +88,7 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
                    "--cover-branches" :bool
                    "--cover-min" {:value "PCT" :int [0 100]}
                    ;; keep the real XDG config / state / data homes, not a scratch one (ADR-602)
-                   "--real-home" :bool
-                   ;; FILEs are source files: check their docstring examples, not tests
-                   "--doc" :bool}
+                   "--real-home" :bool}
            :positional ["file" "test-file"]
            :many true
            :run (fn (options) (run-test options))}
@@ -614,7 +612,7 @@ so at the CLI boundary and returns false (exit 2), rather than a trace from deep
     2))
 
 (defn- run-source-doctests (files)
-  "The docstring examples of the source `files` (`nest test --doc`, `nest doctest FILE.blsp`):
+  "The docstring examples of the source `files` (`nest doctest FILE.blsp`):
 inside a project its image is loaded first, so a file's examples see the modules it uses.
 Returns the failure count."
   (load-project-image)
@@ -779,15 +777,6 @@ file) propagates for the normal error report."
         problem (shard-error flags))
     (cond
       problem (do (eputs "nest test: " problem) 2)
-      (get flags "--doc")
-        (cond
-          (empty? paths)
-            (do
-              (eputs "nest test: --doc checks the examples of named source files: nest test --doc FILE.blsp…")
-              (eputs "  For every documented example in the project: nest doctest")
-              2)
-          (not (readable-files? "test" paths)) 2
-          else (if (> (run-source-doctests paths) 0) 1 0))
       (and (empty? paths)
         (not (require-project "test"
                "To run one file outside a project: nest test <file>_test.blsp")))
@@ -1080,7 +1069,7 @@ supplies `:registry`, which a `:version` dependency resolves against."
   ;; terminal guard for a panic unwind.
   (if (load-project-image)
     (do
-      (repl/start-in! (first project/*main*))
+      (repl/start-in (first project/*main*))
       (eputs "nest repl — project sources loaded, in the project's main namespace; Ctrl-D to exit"))
     (eputs "nest repl — no project.blsp here; plain REPL (`brood` would do the same)"))
   (repl/run)
@@ -1237,7 +1226,7 @@ words, it is the program's.
 the words typed so far: the value of a flag left pending by the previous word (its
 `:complete` kind, or nothing — the shell then falls back to filenames, which beats a wrong
 list), flags when `current` starts with `-` (the command's own plus the global
-`--max-parallel`/`--jobs`), else the positional's allowed values or the candidates of its
+`--max-parallel`), else the positional's allowed values or the candidates of its
 kind (`doc`'s module names, `check`'s `.blsp` files, `test`'s test files). Never raises;
 prints nothing when it cannot tell.
 
@@ -1271,7 +1260,7 @@ prints nothing when it cannot tell.
 
 ;; The subcommands still implemented in Rust, with the flags clap defines for them.
 (def *rust-commands*
-  {"release" {:flags {"--output" "PATH"
+  {"release" {:flags {"--out" "PATH"
                       "-o" "PATH"
                       "--runtime" "PATH"
                       "--target" "TRIPLE"
@@ -1280,7 +1269,7 @@ prints nothing when it cannot tell.
 
 ;; The one option clap owns for every subcommand (`-j` is its short form; only `--long`
 ;; spellings are offered, as before).
-(def- *global-flags* (list "--max-parallel" "--jobs"))
+(def- *global-flags* (list "--max-parallel"))
 
 (defn all-subcommands ()
   "Every subcommand `nest` accepts, hidden ones excluded, sorted: this module's plus the

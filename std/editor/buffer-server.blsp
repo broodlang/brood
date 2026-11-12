@@ -14,7 +14,7 @@ appending `s`, so a log backend can stream straight into one.
 
     (def pid (editor/buffer-server/create-buffer \"*log*\"))
     (editor/buffer-server/buffer-query pid editor/buffer/buffer-text)   ; => \"\"
-    (editor/buffer-server/delete-buffer pid)"
+    (editor/buffer-server/stop-buffer pid)"
   (:use editor/buffer)
   (:use editor/span-properties))
 
@@ -489,21 +489,14 @@ crashed, before the [:down] has been folded).
       (send bp [:stop (self) r])
       (receive ([:reply ^r v] v) (after 2000 :no-reply)))))
 
-;; ---- create / delete (the buffer-process lifecycle) -------------------------
+;; ---- create (the buffer-process lifecycle; `stop-buffer` above ends it) -------
 
 (defn create-buffer (&optional (name "*scratch*"))
   "Spawn a fresh, empty buffer process named `name` and return its **pid**. The
 process serves `buffer-edit` / `buffer-query` and accepts `[:write s]`, so it is a
 valid `io`/logger sink — `(add-backend (process-backend (create-buffer \"*log*\")))`
-streams log output straight into it. Tear it down with `delete-buffer`. It records no undo
+streams log output straight into it. Tear it down with `stop-buffer`. It records no undo
 history (`spawn-buffer`), so appends never grow one.
 
     (editor/buffer-server/create-buffer \"*log*\")   ;~> #<pid …the new, empty buffer process…>"
   (spawn-buffer (make-buffer "" name)))
-
-(defn delete-buffer (bp)
-  "Stop buffer process `bp` and free it — the symmetric name for `stop-buffer`.
-Synchronous; returns :stopped.
-
-    (editor/buffer-server/delete-buffer pid)   ;~> :stopped"
-  (stop-buffer bp))

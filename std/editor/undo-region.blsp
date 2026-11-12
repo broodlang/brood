@@ -203,7 +203,7 @@ whole thing back.
                 survivors (dec (count (get pushed :undo)))
                 consumed-at (- (count (or (get buf :undo) ())) (count tail) 1)
                 tail (apply list (take tail (math/max 0 (- survivors consumed-at 1))))
-                rope (text/from-string undone)
+                rope (text/string-> undone)
                 [same-lo same-hi changed] (%str-splice-diff text undone)
                 properties (region-pieces-properties pieces
                              (get buf :properties)

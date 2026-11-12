@@ -352,7 +352,7 @@ permanent rather than transient.
                    (fold (get regs m)
                      n
                      (fn (n2 registration)
-                       (do (stdimage/retract-registration! registration) (+ n2 1))))))
+                       (do (stdimage/retract-registration registration) (+ n2 1))))))
         n-impls (fold (seq/filter (keys impls) foreign?)
                   0
                   (fn (n m)
@@ -624,7 +624,7 @@ the record the next partial rebuild reads.
 ;; A registry enters `(%registry-names)` — the set the image writer carries in the root
 ;; section — only when this process WRITES it. A partial rebuild restores the registries from the
 ;; root section and materialises the modules that fill them, so a registry only an unchanged
-;; module writes (`registry/*registries*` filled by a module's `registry/put!` at load) is never
+;; module writes (`registry/*registries*` filled by a module's `registry/put` at load) is never
 ;; written here and would be left out of the image this rebuild writes: the run after lost every
 ;; row in it. Declare each one the record names, the way the prelude declares `*require-edges*`
 ;; — a write that marks the name and leaves the value as it was.

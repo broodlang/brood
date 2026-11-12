@@ -139,7 +139,7 @@ shape never admits it).
 
 - **Where it comes from**: `(list a b …)`, a quoted list `'(1 "s")` (each datum in its
   position; nested lists recursively), `(cons x <shape>)` and `(cons x nil)` (one longer),
-  `(rest <shape>)` / `(seq/but-last <shape>)` (one shorter, `nil` at one), a `& rest` binder
+  `(rest <shape>)` / `(%but-last <shape>)` (one shorter, `nil` at one), a `& rest` binder
   over a shape (the positions that remain). The grammar reads it: `(list int string)` —
   two or more types; one type is still the uniform `(list T)`, and a one-position shape
   has no spelling (it needs none).

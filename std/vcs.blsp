@@ -7,7 +7,7 @@
 ;;    line. In a checkout of any other VCS each of those answered nothing. This module is the
 ;;    one place that question is put, so another VCS is a row, not an edit to every caller.
 ;;  - A backend is a ROW in `std/registry` (`:vcs/backends`), so a package adds a VCS by
-;;    `registry/put!`. Its hooks are symbols called late (`reflect/call-if-bound`) or
+;;    `registry/put`. Its hooks are symbols called late (`reflect/call-if-bound`) or
 ;;    functions — a package's own module names are rooted under it, so a function that calls
 ;;    its globals is how it says "late" — and either way a redefined hook takes effect on its
 ;;    next call. git is the one row std puts; any other comes from that VCS's own package or
@@ -129,7 +129,7 @@ nil before the first commit or outside a checkout.
 ;; git ranks 20, leaving room before it: a VCS that can take over a git clone in place
 ;; registers a lower rank, so a directory holding both markers is the newer one's.
 
-(registry/put! :vcs/backends
+(registry/put :vcs/backends
   :git {:rank 20
    :marker ".git" ; a directory in a clone, a file in a worktree or submodule
    :files 'vcs/git-files

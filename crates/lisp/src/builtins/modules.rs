@@ -332,7 +332,7 @@ macro_rules! embedded_module {
 /// (ADR-038, docs/release.md). `builtin_module` consults both.
 const CORE_MODULES: &[EmbeddedModule] = &[
     // Output ports: the redirectable sink behind print/println — a port is a 1-arg
-    // string sink, with `process-port`/`fn-port` + `with-out`/`with-err`. Pairs
+    // string sink, with `process-port` + `with-out`/`with-err`. Pairs
     // with the prelude's `*out*`/`*err*` dynamic vars. Opt-in, no dependencies.
     embedded_module!("io", "std/io.blsp"),
     // Fuzzy (subsequence) string matching + ranking: `fuzzy-match` / `fuzzy-filter`,
@@ -489,7 +489,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // for-each/pipe/to-socket. Foundation for the HTTP streaming layer.
     embedded_module!("stream", "std/stream.blsp"),
     // URL encoding/decoding and parsing: percent-encode/decode, query-string
-    // encode/decode, parse-url, build. Pure Brood over string primitives.
+    // encode/decode, parse, build. Pure Brood over string primitives.
     embedded_module!("url", "std/url.blsp"),
     // CSV parsing and emitting: csv-parse, csv-parse-maps, csv-emit,
     // csv-emit-maps. Handles quoted fields, escaped quotes, \r\n endings.
@@ -535,7 +535,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Bounded memoisation for hot paths (`defmemo`): the last few calls, compared by `=`
     // — so a rope argument is matched by handle, not hashed by its whole text.
     embedded_module!("memo", "std/memo.blsp"),
-    // Named registries a program fills as its modules load (`put!` / `entries` / `ranked`):
+    // Named registries a program fills as its modules load (`put` / `entries` / `ranked`):
     // `%registry-update!`'s atomic, isolate-safe, imaged write under one global keyed by a
     // caller-chosen id, so a project module never has to spell a qualified global.
     embedded_module!("registry", "std/registry.blsp"),

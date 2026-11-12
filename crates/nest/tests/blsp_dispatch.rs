@@ -127,7 +127,7 @@ fn format_and_doctest_run_inside_a_scaffolded_project() {
 }
 
 #[test]
-fn test_doc_checks_the_examples_of_named_source_files() {
+fn doctest_checks_the_examples_of_named_source_files() {
     let proj = scaffolded("doc-files");
     // Line 5 lies, line 6 holds; another file holds throughout.
     std::fs::write(
@@ -140,31 +140,22 @@ fn test_doc_checks_the_examples_of_named_source_files() {
         "(defmodule truth)\n(defn one ()\n  \"One.\n\n    (demo/truth/one) ;=> 1\"\n  1)\n",
     )
     .expect("write truth");
-    for args in [
-        &["test", "--doc", "src/lies.blsp"][..],
-        &["doctest", "src/lies.blsp"][..],
-    ] {
-        let (code, out, err) = nest_in(&proj, args);
-        assert_eq!(
-            code, 1,
-            "{args:?}: a failing example exits 1:\n{out}\n{err}"
-        );
-        assert!(
-            out.contains("src/lies.blsp:5: ") && out.contains("got 2, documented 3"),
-            "{args:?}: the lie is placed at its line with both sides:\n{out}\n{err}"
-        );
-        assert!(
-            !out.contains("documented 2"),
-            "{args:?}: the holding example is not reported:\n{out}\n{err}"
-        );
-    }
-    let (code, out, err) = nest_in(&proj, &["test", "--doc", "src/truth.blsp"]);
+    let (code, out, err) = nest_in(&proj, &["doctest", "src/lies.blsp"]);
+    assert_eq!(code, 1, "a failing example exits 1:\n{out}\n{err}");
+    assert!(
+        out.contains("src/lies.blsp:5: ") && out.contains("got 2, documented 3"),
+        "the lie is placed at its line with both sides:\n{out}\n{err}"
+    );
+    assert!(
+        !out.contains("documented 2"),
+        "the holding example is not reported:\n{out}\n{err}"
+    );
+    let (code, out, err) = nest_in(&proj, &["doctest", "src/truth.blsp"]);
     assert_eq!(code, 0, "a file whose examples hold exits 0:\n{out}\n{err}");
     assert!(out.contains("0 failing example(s)"), "{out}\n{err}");
-    // --doc names files; without one it says so rather than running the suite.
-    let (code, _, err) = nest_in(&proj, &["test", "--doc"]);
-    assert_eq!(code, 2, "{err}");
-    assert!(err.contains("nest test --doc FILE.blsp"), "{err}");
+    // `nest test --doc` was the second spelling of this; it is gone (one name per thing).
+    let (code, _, err) = nest_in(&proj, &["test", "--doc", "src/truth.blsp"]);
+    assert_ne!(code, 0, "test --doc is no longer a flag:\n{err}");
 }
 
 #[test]
@@ -261,12 +252,12 @@ fn check_exit_code_is_the_warning_verdict_for_both_forms() {
 }
 
 #[test]
-fn the_global_jobs_option_still_reaches_a_brood_subcommand() {
+fn the_global_max_parallel_option_still_reaches_a_brood_subcommand() {
     let dir = scratch("check-jobs");
     for args in [
         &["-j", "2", "check", "--help"][..],
         &["--max-parallel", "2", "check", "--help"][..],
-        &["--jobs=2", "check", "--help"][..],
+        &["--max-parallel=2", "check", "--help"][..],
         &["-j2", "check", "--help"][..],
     ] {
         let (code, out, err) = nest_in(&dir, args);

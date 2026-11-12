@@ -201,7 +201,7 @@
 
   (test "a seed a table cannot hold runs the loop as written"
     ;; A rope, a builtin and a lazy view cannot be sent, so they cannot be table values.
-    (let (r (text/from-string "x"))
+    (let (r (text/string-> "x"))
       (assert= {:r r :a 2} (lm-idiom '(:a :a) {:r r}))
       (assert= 2 (get (lm-idiom '(:a :a) {:r r}) :a))
       (assert= :rope (type-of (get (lm-idiom '(:a) {:r r}) :r))))
@@ -246,7 +246,7 @@
     (assert= {:w 5 :a 10} (lm-fold-read '(:a :a) {:w 5}))
     ;; The seed is what it is: a rope keeps the loop as written, a record its Lookup
     ;; answers, a non-map its own error — the same as the source on every one.
-    (let (r (text/from-string "x"))
+    (let (r (text/string-> "x"))
       (assert= {:r r :a 2} (lm-fold '(:a :a) {:r r})))
     (assert= 102 (get (lm-fold '(:zz :zz) (lm-counter 5)) :zz))
     (assert-error "get: expected a collection" (lm-fold '(:a) 5))
@@ -264,7 +264,7 @@
     (assert= {:q 1} lm-reset-base))
 
   (test "a leading quoted form is the fast copy's own, not the unrewritten one's"
-    (let (r (text/from-string "x"))
+    (let (r (text/string-> "x"))
       (assert= {:a 2} (lm-fold-tagged (list :a :a) {}))
       (assert= {:r r :a 2} (lm-fold-tagged (list :a :a) {:r r}))
       (assert= {:a 2} (lm-fold-tagged (list :a :a) {}))

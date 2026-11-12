@@ -21,7 +21,7 @@ appended archive and boots `:main` instead of a REPL.
 
 ```
 nest release [-o PATH] [--runtime PATH] [--target TRIPLE]… [--no-smoke]
-  -o, --output PATH    output path (default: the manifest's :name); with several
+  -o, --out PATH       output path (default: the manifest's :name); with several
                        --targets it's the stem, each binary gets a suffix
       --runtime PATH   base runtime to append to (default: the runtime embedded
                        in nest); only valid with at most one --target

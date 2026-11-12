@@ -1484,7 +1484,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         "reverse" | "%map-pairs" | "sort" | "seq/sort-by" => same_elements_ty(heap, items, ctx),
         "seq/distinct" | "seq/dedupe" => deduplicated_ty(heap, items, ctx),
         "seq" if len == 2 => seq_ty(heap, items, ctx),
-        name @ ("rest" | "seq/but-last") => drop_one_ty(heap, name == "rest", items, ctx),
+        name @ ("rest" | "%but-last") => drop_one_ty(heap, name == "rest", items, ctx),
         "take" | "drop" | "seq/take-while" | "seq/drop-while" | "seq/take-last"
         | "seq/drop-last" => {
             list_result(expr_ty(heap, *items.get(1)?, ctx).and_then(|t| t.elem_ty_union()))
@@ -1798,7 +1798,7 @@ fn seq_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
     Some(out)
 }
 
-/// `rest` / `but-last`: the same elements, one fewer.
+/// `rest` / `%but-last`: the same elements, one fewer.
 fn drop_one_ty(heap: &Heap, is_rest: bool, items: &[Value], ctx: &Ctx) -> Option<Ty> {
     let collection_ty = expr_ty(heap, *items.get(1)?, ctx);
     // `rest` is the pair's TAIL, whatever that holds — a vector under an improper

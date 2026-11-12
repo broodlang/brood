@@ -17,9 +17,9 @@
 (defn- progress-test-at (name where) (list "g" name nil 1 false where))
 
 (defn- fails-of (r)
-  "`r`'s failure list, or a failed test. `test/r-fails` answers a union (a count, false, nil
+  "`r`'s failure list, or a failed test. `test/result-fails` answers a union (a count, false, nil
   or the list), so indexing it directly is unchecked."
-  (let (f (test/r-fails r))
+  (let (f (test/result-fails r))
     (if (pair? f) f (error "runner-progress-test: expected a failure list, got " f))))
 
 ;; The marks `results` print with trace OFF. `progress-mark` is suppressed under `test/*trace*`
@@ -69,9 +69,9 @@
   (test "a 4-element result (a dead or timed-out worker) is never a skip"
     ;; Those are synthesised elsewhere without the flag, so the accessor must not
     ;; index past the end.
-    (refute (test/r-skipped? (list "g" "t" nil 0))))
+    (refute (test/result-skipped? (list "g" "t" nil 0))))
   (test "a failure is not a skip"
-    (refute (test/r-skipped? (progress-test-fail "t")))))
+    (refute (test/result-skipped? (progress-test-fail "t")))))
 
 (describe "test runner: --trace replaces the dots"
   :isolated (test "tracing suppresses the progress marks"
@@ -123,9 +123,9 @@
                                             :line 7
                                             :col 3
                                             :message "unbound symbol: nope"}))
-      (and (is (includes? (test/r-group r) "x_test.blsp"))
-        (assert= (test/r-name r) "failed to load")
-        (is (test/r-failed? r)))))
+      (and (is (includes? (test/result-group r) "x_test.blsp"))
+        (assert= (test/result-name r) "failed to load")
+        (is (test/result-failed? r)))))
   (test "the message says what went wrong"
     (let (r (test/test-load-failure-result {:file "/nope/x.blsp"
                                             :line 1
@@ -134,16 +134,16 @@
       (is (includes? (first (second (first (fails-of r)))) "unbound symbol: nope"))))
   (test "it carries the file and line for the anchor"
     (let (r (test/test-load-failure-result {:file "/nope/x.blsp" :line 9 :col 1 :message "boom"}))
-      (is (includes? (test/r-where r) ":9"))))
+      (is (includes? (test/result-where r) ":9"))))
   (test "a plain-string error still produces a usable failure"
     ;; Not every raise is a structured map.
     (let (r (test/test-load-failure-result "just a string"))
-      (and (assert= (test/r-group r) "a test file")
-        (is (test/r-failed? r))
+      (and (assert= (test/result-group r) "a test file")
+        (is (test/result-failed? r))
         (is (includes? (first (second (first (fails-of r)))) "just a string")))))
   (test "a load failure counts as a failure, not a skip"
     (let (r (test/test-load-failure-result "boom"))
-      (and (is (test/r-failed? r)) (refute (test/r-skipped? r))))))
+      (and (is (test/result-failed? r)) (refute (test/result-skipped? r))))))
 
 ;; The anchor line is the part of a failure you act on, so it must always be present
 ;; and short. It used to open with an absolute path — burying the location — and to

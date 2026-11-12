@@ -148,7 +148,7 @@ pub(super) fn table_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 }
 
 pub(super) fn table_has(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = keyed_table(heap, "table/has?", args)?;
+    let id = keyed_table(heap, "table/contains?", args)?;
     Ok(Value::boolean(crate::core::table::has(
         heap,
         id,

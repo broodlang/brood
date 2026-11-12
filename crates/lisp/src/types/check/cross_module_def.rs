@@ -8,7 +8,7 @@
 //! lost whole modules' worth of them (a theme switch left git's diff colours on the old
 //! palette, in some builds and not others). The write is also invisible to the startup
 //! image, which carries what loading creates, not what it mutates (ADR-218). `std/registry`
-//! (`registry/put!`) is the shape that has none of this: one locked write, carried by the
+//! (`registry/put`) is the shape that has none of this: one locked write, carried by the
 //! image.
 //!
 //! Walks the **expanded** forms, unlike the other shape lints: the offending `def` is
@@ -94,7 +94,7 @@ fn walk_inner(heap: &Heap, form: Value, top: Value, own: &[String], out: &mut Ve
                      module re-binds it while it loads — two modules doing that under the \
                      parallel load each read the old value and one write is lost, and the \
                      startup image does not carry it. Register through std `registry` \
-                     (`registry/put!`), or, where this module is the only writer, say so \
+                     (`registry/put`), or, where this module is the only writer, say so \
                      with (check-allow :cross-module-def …)"
                 ),
             ));

@@ -144,13 +144,13 @@ fn filter_preserves_the_element_type() {
 
 #[test]
 fn element_type_flows_through_more_combinators() {
-    // Structured-types extension: second/third/rest/but-last/distinct/dedupe/
+    // Structured-types extension: second/third/rest/%but-last/distinct/dedupe/
     // take-last/drop-last/remove/keep/interpose/range all flow the element type,
     // so a downstream string-vs-number mismatch is caught. Each must warn here.
     for src in [
         r#"(+ 1 (second ["a" "b"]))"#,
         r#"(+ 1 (first (rest ["a" "b"])))"#,
-        r#"(+ 1 (first (seq/but-last ["a" "b"])))"#,
+        r#"(+ 1 (first (%but-last ["a" "b"])))"#,
         r#"(+ 1 (first (seq/distinct ["a" "b"])))"#,
         r#"(+ 1 (first (seq/dedupe ["a" "b"])))"#,
         r#"(+ 1 (first (seq/reject ["a" "b"] (fn (x) false))))"#,

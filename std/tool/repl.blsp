@@ -822,16 +822,16 @@ the loop spawns so its `def`s are in place for the first prompt."
 ;; plain `def` (not a `defdyn`) so it reaches the spawned loop across `spawn`.
 (def *repl-start-ns* nil)
 ;; `(or symbol nil)`, declared rather than inferred (placement is free since ADR-381).
-;; `nest repl` rebinds it through `start-in!` below (ADR-322), so inference would otherwise
+;; `nest repl` rebinds it through `start-in` below (ADR-322), so inference would otherwise
 ;; pin it to its initializer and call the `symbol?` guard dead.
 (sig *repl-start-ns* (or symbol nil))
 
-(defn start-in! (ns)
+(defn start-in (ns)
   "Make the next `run` start in module `ns` (a symbol, rooted through the ambient package
 context) instead of the root namespace — what `nest repl` does with the project's `:main`
 module so its bare names resolve at the prompt. `nil` restores the default.
 
-    (repl/start-in! 'myapp)   ;~> myapp"
+    (repl/start-in 'myapp)   ;~> myapp"
   (def *repl-start-ns* ns)
   ns)
 

@@ -171,7 +171,7 @@ pub(super) fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// keystroke in interpreted Brood on a large file (eldoc / fontify-restart / structural
 /// motion all sit on it), trivial here. Strings honour `\\` escapes; a comment runs to
 /// end-of-line — the same lexical rules as `scan-tokens`.
-/// `(scan-form-start-2 s pos)` — `[prev start]`: the greatest top-level form-start offset
+/// `(scan-form-start-and-previous s pos)` — `[prev start]`: the greatest top-level form-start offset
 /// `<= pos` (`start`, as [`scan_form_start`]) **and** the one before it (`prev`, i.e. the
 /// greatest such offset `< start`), both from a SINGLE forward pass.
 ///
@@ -695,7 +695,7 @@ fn expect_text_string<'h>(heap: &'h Heap, who: &str, v: Value) -> Result<&'h str
 }
 
 pub(super) fn scan_form_start_2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let who = "reflect/scan-form-start-2";
+    let who = "reflect/scan-form-start-and-previous";
     let pos = expect_int(heap, who, arg(args, 1))?;
     let (best, prev) = form_start_pair_of(heap, who, arg(args, 0), pos)?;
     let items = vec![Value::int(prev as i64), Value::int(best as i64)];

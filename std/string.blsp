@@ -263,29 +263,29 @@ incremental search rides on.
     (string/blank? \" a \")  ;=> false"
   (= (string/span s 0 whitespace-chars) (string/length s)))
 
-(defn triml (s:string -> string)
+(defn trim-left (s:string -> string)
   "Remove leading whitespace from `s`.
 
-    (string/triml \"  a\")   ;=> \"a\""
+    (string/trim-left \"  a\")   ;=> \"a\""
   (let (start (string/span s 0 whitespace-chars))
     (if (= start 0) s (string/substring s start (string/length s)))))
 
-(defn- trimr-to (s:string n:int end:int -> string)
+(defn- trim-right-to (s:string n:int end:int -> string)
   (if (and (> n 0) (whitespace? (char-at s (dec n))))
-    (trimr-to s (dec n) end)
+    (trim-right-to s (dec n) end)
     (if (= n end) s (string/substring s 0 n))))
 
-(defn trimr (s:string -> string)
+(defn trim-right (s:string -> string)
   "Remove trailing whitespace from `s`.
 
-    (string/trimr \"a  \")   ;=> \"a\""
-  (let (end (string/length s)) (trimr-to s end end)))
+    (string/trim-right \"a  \")   ;=> \"a\""
+  (let (end (string/length s)) (trim-right-to s end end)))
 
 (defn trim (s:string -> string)
   "Remove leading and trailing whitespace from `s`.
 
     (string/trim \"  a \")   ;=> \"a\""
-  (triml (trimr s)))
+  (trim-left (trim-right s)))
 
 ;; ---- padding & repetition ---------------------------------------------------
 ;; Column formatting for tabular/console output. `pad-*` left unchanged when the

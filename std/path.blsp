@@ -473,12 +473,12 @@ of file with your privileges. Neither is possible with a name they cannot predic
 (defn- encode-segments (text)
   (string/join (map (string/split text "/") url/percent-encode) "/"))
 
-(defn to-file-uri (p:string -> string)
+(defn ->file-uri (p:string -> string)
   "The `file:` URI (RFC 8089) of the absolute path `p`, each segment percent-encoded (a
 space is `%20`): `file:///a/b`. On Windows a drive path `C:/x` (or `C:\\x`) is
 `file:///C:/x` and a UNC path `//server/share/x` is `file://server/share/x`.
 
-    (path/to-file-uri \"/my project/a.rs\")   ;=> \"file:///my%20project/a.rs\""
+    (path/->file-uri \"/my project/a.rs\")   ;=> \"file:///my%20project/a.rs\""
   (let (text (forward-slashes p))
     (cond
       (unc-root text)
@@ -496,14 +496,14 @@ space is `%20`): `file:///a/b`. On Windows a drive path `C:/x` (or `C:\\x`) is
       [(string/substring text 2 (string/length text)) "/"]
       [(string/substring text 2 slash) (string/substring text slash (string/length text))])))
 
-(defn from-file-uri (uri:string -> (or string nil))
-  "The path a `file:` `uri` names, percent-decoded — the inverse of [[to-file-uri]] — or
+(defn file-uri-> (uri:string -> (or string nil))
+  "The path a `file:` `uri` names, percent-decoded — the inverse of [[->file-uri]] — or
 nil when `uri` is not a `file:` URI. `file:///x`, `file:/x` and `file://localhost/x` are
 `/x`; another host is a UNC path `//host/x`. On Windows a drive (`file:///C:/x`, or
 `file:///c%3A/x` as VS Code writes it) is `C:/x`, its letter upper-cased. Text that does
 not decode is left as it is.
 
-    (path/from-file-uri \"file:///my%20project/a.rs\")   ;=> \"/my project/a.rs\""
+    (path/file-uri-> \"file:///my%20project/a.rs\")   ;=> \"/my project/a.rs\""
   (when (string/starts-with? uri "file:")
     (let (after-scheme (string/substring uri 5 (string/length uri))
           [host raw] (if (string/starts-with? after-scheme "//")

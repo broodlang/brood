@@ -248,7 +248,7 @@ blank.
 proper width-driven pretty-printer, informed by Oppen (1980), Wadler's *A prettier
 printer*, and CL's XP (Waters). Four changes to the canonical layout:
 
-- **Configurable width.** A manifest `:width` (e.g. `80`) overrides the built-in 100,
+- **Configurable width.** A manifest `:format-width` (e.g. `80`) overrides the built-in 100,
   stored in `project/*width*` and read via `format/width`. `nest format`, the LSP and
   the MCP server all honour it.
 - **Linear break for collections-of-collections.** A vector or list whose args are
@@ -280,7 +280,7 @@ like a top-level block: it gets its own line, and blank lines around it survive.
 ### What is *not* in scope (yet)
 
 - **Width is not settable per invocation.** It is configurable per *project* —
-  `:width` in `project.blsp` — but there is no CLI flag to override it for
+  `:format-width` in `project.blsp` — but there is no CLI flag to override it for
   one run.
 - **No "align after head"** for generic calls — every overflow arg goes to
   `+2`, never to `(head)`-column. Simpler, idempotent under rename of the head.
@@ -405,8 +405,7 @@ It exits 1 on any failure and prints one `FAIL` line per failure, naming `file:l
 1 markdown file(s), 12 block(s) checked, 3 failing example(s)
 ```
 
-**One source file's examples:** `nest test --doc src/x.blsp std/y.blsp` (or `nest doctest
-src/x.blsp`) checks only the docstring examples of the names those files define, private
+**One source file's examples:** `nest doctest src/x.blsp std/y.blsp` checks only the docstring examples of the names those files define, private
 helpers included, each failure at the example's own line — what to run while editing a
 file, instead of the whole-image gate. Inside a project its image is loaded first, so the
 examples see every module the file uses; a standard-library module is the binary's own copy

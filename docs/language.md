@@ -231,7 +231,7 @@ a Rust-backed opaque handle (genuine mutable state, never a mutable `Value`):
 (table/put t :hits 0)             ; store (overwrites); returns t
 (table/get t :hits)               ;=> 0   ; a fresh copy
 (table/get t :missing :default)   ;=> :default
-(table/has? t :hits)              ;=> true
+(table/contains? t :hits)         ;=> true
 (table/incr t :hits)              ;=> 1   ; atomic; default delta 1
 (table/incr t :hits 10)           ;=> 11
 (table/count t)                   ;=> 1
@@ -2142,13 +2142,13 @@ expect. The point is that you can **redirect** it.
 
 `std/io.blsp` gives the port toolkit — constructors and the `with-out`/`with-err`
 scoping macros (thin wrappers over `binding`). Pull it in with `(:use io)` so the
-names read bare — otherwise a qualified `io/fn-port` reference auto-loads the
+names read bare — otherwise a qualified `io/process-port` reference auto-loads the
 module but leaves the names qualified:
 
 ```lisp fragment
 (defmodule my-app (:use io))
 
-(with-out (fn-port (fn (s) (collect s)))   ; route output to a callback
+(with-out (fn (s) (collect s))             ; a bare 1-arg fn is a port: route output to a callback
   (io/puts "captured by collect"))
 
 (with-out (process-port editor)            ; route output to another process …
@@ -2169,7 +2169,7 @@ carries its target and prints as itself (`#<port stdout>`, `#<port file /tmp/app
 `io/port?` tests it, and your own type joins with `defrecord` + `impl Port`. `*out*`/`*err*`
 still hold a plain fn, which the writers call directly — so printing pays no
 dispatch cost, `io/write` gains no special cases, and `with-out-str` is unaffected;
-`with-out`/`with-err` adapt a record port at that boundary for you (`port-fn`).
+`with-out`/`with-err` adapt a record port at that boundary for you (`port->fn`).
 
 ### Logging
 
@@ -3287,7 +3287,7 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   [Multiple dispatch](#polymorphism-multiple-dispatch-defmulti) above.
 
 ### Lists & sequences
-`cons`  `first`  `rest`  `second`  `third`  `last`  `seq/but-last`
+`cons`  `first`  `rest`  `second`  `third`  `last`
 `list`  `vector`  `vec`  `conj`  `set/disj`  `into`  `seq`
 `append`  `reverse`  `%reverse-onto`  `nth`  `count`  `empty?`
 `range`  `take`  `drop`  `seq/split-at`  `seq/take-last`  `seq/drop-last`  `seq/take-while`  `seq/drop-while`
@@ -3561,7 +3561,7 @@ Every operation whose **subject is a string** lives in the `string` module
 `string/length`  `string/substring`  `string/char-at`  `string/->list`
 `string/list->`  `string/->codepoints`  `string/codepoints->`
 `string/upper`  `string/lower`  `string/capitalize`  `string/join`
-`string/split`  `string/replace`  `string/trim`  `string/triml`  `string/trimr`
+`string/split`  `string/replace`  `string/trim`  `string/trim-left`  `string/trim-right`
 `string/blank?`  `string/starts-with?`  `string/ends-with?`  `string/repeat`
 `string/pad-left`  `string/pad-right`  `string/->graphemes`
 `string/grapheme-count`  `string/grapheme-at`  `string/substring-graphemes`
@@ -3652,7 +3652,7 @@ Defined in the prelude but still qualified: `string/->number`  `string/->symbol`
   `includes?` is the boolean form. `string/join` puts a separator between strings;
   `string/split` is its inverse (an empty separator splits into characters).
   `string/replace` swaps every occurrence of one substring for another.
-- `string/trim` / `string/triml` / `string/trimr` strip whitespace (both ends / left / right);
+- `string/trim` / `string/trim-left` / `string/trim-right` strip whitespace (both ends / left / right);
   `string/blank?` is true for an empty or all-whitespace string.
 - `string/repeat` concatenates n copies; `string/pad-left` / `string/pad-right` justify a
   string into a fixed-width field with spaces (never truncating). `->fixed`
@@ -4238,8 +4238,8 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | Module | name | What it provides |
 |--------|---------------|-----------------|
 | `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `spit-atomic`, `regular?`, `list-files`, `list-dirs`, `walk-files`, `copy-tree`, `move` (across filesystems too) and `trash` (the freedesktop.org trash, `~/.Trash` on macOS, the Windows recycle bin through `%file-recycle`). Pure path-string ops (`path/extension`, `path/stem`, …) live in `path` (ADR-234). Brood (ADR-006) but the recycle bin |
-| `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`emit`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of a fixed stdout. Also the writers themselves: `io/write`, `io/puts`, `io/inspect`, each taking an optional trailing `:to <port>` (see also `std/log.blsp`) |
-| `std/text.blsp` | `'text` | The rope text surface over the `%rope-*` primitives: `from-string`, `->string`, `insert`, `delete`, `slice`, `length`, `line`, `line-count`, `char->line`, `line->char`, the grapheme motions `next-grapheme`/`prev-grapheme`, `skip-forward`/`skip-backward`. (Greedy word-wrap is `string/fill`.) |
+| `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`emit`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `port->fn`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of a fixed stdout. Also the writers themselves: `io/write`, `io/puts`, `io/inspect`, each taking an optional trailing `:to <port>` (see also `std/log.blsp`) |
+| `std/text.blsp` | `'text` | The rope text surface over the `%rope-*` primitives: `string->`, `->string`, `insert`, `delete`, `slice`, `length`, `line`, `line-count`, `char->line`, `line->char`, the grapheme motions `next-grapheme`/`prev-grapheme`, `skip-forward`/`skip-backward`. (Greedy word-wrap is `string/fill`.) |
 | `std/seq.blsp` | `'seq` | Derived **sequence helpers** (ADR-227) layered over the bare collection protocol: `dedupe`, `distinct-by`, `group-by`, `frequencies`, `chunk-by`, `chunk-every`, `interpose`, `interleave`, `scan`, `zip-with`, `reduce-while`, `min-by`, `max-by`, `enumerate`, `index-where`. Also `filter`/`reject`/`keep`/`filterv`/`rejectv`/`distinct`/`zip`/`find`/`flatten` and the transducer + lazy stages. The core ops (`map`/`reduce`/`fold`/`take`/`drop`/`sort`) stay bare in the prelude, and `take-while`/`partition`/`repeat`/`sort-by`/`mapv` are here (ADR-506); `(:use seq)` for bare access or call qualified |
 | `std/map.blsp` | `'map` | Derived **map-transformation helpers** (ADR-227): `reduce-kv`, `merge-with`, `update-vals`, `update-keys`, `select-keys`, `zipmap`, and the path functions `get-in`/`assoc-in`/`update-in`/`dissoc-in` (ADR-506). The core map protocol (`assoc`/`dissoc`/`get`/`keys`/`vals`/`contains?`/`update`/`merge`) stays bare in the prelude; `(:use map)` for bare access or call qualified (the bare `map` *function* is unaffected) |
 | `std/math.blsp` | `'math` | The derived **math library** (ADR-227): `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates (`positive?`/`negative?`/`even?`/`odd?`), and the constants `pi`/`e`. Only the **operators** (`+` `-` `*` `/` `<` `=` …) and `inc`/`dec` stay bare in the prelude — `quot`/`mod`/`rem`/`floor`/`min`/`max` are derived arithmetic and live here too, so they are `math/quot`, `math/min`, … unless `(:use math)` brings them back bare |
@@ -4249,8 +4249,8 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/tempo.blsp` | `'tempo` | **Time as an interval, not an instant** (adapted from Tempo, Apache-2.0 — see `docs/tempo.md`). One resolution-carrying value type whose span is half-open, so `2026-06` *is* `[2026-06-01, 2026-07-01)`: `new`/`parse`/`->iso` at any precision, `relation` (Allen's thirteen) with the predicates over it, an interval-set algebra (`union`, `intersection`, `difference`, `gaps`, `total-width`), unit-implied enumeration (`parts`) and `shift`/`next`/`prev`. The open `Spanning` ability admits your own types; `datetime/date` and `datetime/datetime` already impl it. Joins `datetime`'s `Temporal`, so one `->iso` covers all four temporal types. Layered on `datetime` for the calendar arithmetic |
 | `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode over strings (`hex-encode`, `hex-decode`, `base64-encode`, `base64-decode`) and byte vectors (`hex-encode-bytes`, `hex-decode-bytes`, `base64-encode-bytes`, `base64-decode-bytes`, plus URL-safe forms — byte-faithful, no UTF-8 round-trip) |
 | `std/stats.blsp` | `'stats` | Descriptive statistics: `mean`, `median`, `variance`, `stddev`, `percentile`, `quantile`, `mode`, `min`, `max`, `range-of`, `sample-variance`, `sample-stddev` (`mode` uses `seq/frequencies` internally) |
-| `std/stream.blsp` | `'stream` | Process-based pull streams (lazy, I/O-friendly): sources (`list->`, `range`, `socket->`, `fn->`, `singleton`), transformers (`map`, `filter`, `take`, `drop`, `chunk`, `lines`, `concat`), terminals (`fold`, `for-each`, `->list`, `->vector`, `->socket`, `pipe`) |
-| `std/url.blsp` | `'url` | URL encoding/parsing: `percent-encode`, `percent-decode`, `query-encode`, `query-decode`, `parse-url`, `build` |
+| `std/stream.blsp` | `'stream` | Process-based pull streams (lazy, I/O-friendly): sources (`list->`, `range`, `socket->`, `fn->`, `singleton`), transformers (`map`, `filter`, `take`, `drop`, `chunk`, `lines`, `concat`), terminals (`fold`, `each`, `->list`, `->vector`, `->socket`, `pipe`) |
+| `std/url.blsp` | `'url` | URL encoding/parsing: `percent-encode`, `percent-decode`, `query-encode`, `query-decode`, `parse`, `build` |
 | `std/csv.blsp` | `'csv` | CSV parse and emit: `decode`, `decode-maps`, `encode`, `encode-maps` |
 | `std/uuid.blsp` | `'uuid` | UUID generation: `v4` (random), `v7` (time-ordered, RFC 9562), `v3`/`v5` (name-based), `zero`, `valid?` |
 | `std/template.blsp` | `'template` | `{{var}}` string templating: `render`, `render-all` |

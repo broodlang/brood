@@ -70,7 +70,7 @@ fn scaffold_writers(dir: &Path) {
     std::fs::write(
         src.join("hooks.blsp"),
         "(defmodule hooks)\n\
-         (registry/put! :demo-registry/rows :row 1)\n\
+         (registry/put :demo-registry/rows :row 1)\n\
          (%registry-update! 'demo-registry/*hooks* :append-new nil :appended)\n\
          (%registry-update! 'demo-registry/*hooks* :cons-new nil :consed)\n\
          (defn ready () true)\n",

@@ -57,13 +57,7 @@ mod release;
 struct Cli {
     /// Cap concurrent spawned processes (0 = unlimited). Bounds a concurrent
     /// test run; see `std/tool/test.blsp`.
-    #[arg(
-        short = 'j',
-        long = "max-parallel",
-        visible_alias = "jobs",
-        value_name = "N",
-        global = true
-    )]
+    #[arg(short = 'j', long = "max-parallel", value_name = "N", global = true)]
     max_parallel: Option<usize>,
 
     #[command(subcommand)]
@@ -100,7 +94,7 @@ enum Cmd {
     Release {
         /// Output path for the binary. Defaults to the project's `:name`; with
         /// `--target` the name gets a per-target suffix (e.g. `app-macos-arm64`).
-        #[arg(long = "output", short = 'o', value_name = "PATH")]
+        #[arg(long = "out", short = 'o', value_name = "PATH")]
         output: Option<String>,
 
         /// The base `brood` runtime to append to. Defaults to the `brood`
@@ -268,7 +262,7 @@ const BLSP_SUBCOMMANDS: &[&str] = &[
 ];
 
 /// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value
-/// of the one GLOBAL option clap owns — `-j`/`--max-parallel`/`--jobs N`, accepted before
+/// of the one GLOBAL option clap owns — `-j`/`--max-parallel N`, accepted before
 /// or after the subcommand — and the remaining words from the subcommand on, with that
 /// option removed. It is honoured here rather than in Brood because it sizes the
 /// scheduler pool, which is built once, before any Brood runs.
@@ -284,13 +278,11 @@ fn blsp_routed(args: &[String]) -> Option<(Option<usize>, Vec<String>)> {
             break;
         }
         let value = match word.as_str() {
-            "-j" | "--max-parallel" | "--jobs" => {
+            "-j" | "--max-parallel" => {
                 i += 1;
                 args.get(i)?.clone()
             }
-            w if w.starts_with("--max-parallel=") || w.starts_with("--jobs=") => {
-                w.split_once('=')?.1.to_string()
-            }
+            w if w.starts_with("--max-parallel=") => w.split_once('=')?.1.to_string(),
             w if w.starts_with("-j") && w.len() > 2 && !w.starts_with("-jo") => w[2..].to_string(),
             c if rest.is_empty() && !BLSP_SUBCOMMANDS.contains(&c) => return None,
             _ => {

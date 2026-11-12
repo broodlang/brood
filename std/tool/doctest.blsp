@@ -412,14 +412,14 @@ every example holds (or the file defines nothing documented).
 (def- *faults-prefix* "doctest-faults: ")
 
 (defn- indent-of (line)
-  (- (string/length line) (string/length (string/triml line))))
+  (- (string/length line) (string/length (string/trim-left line))))
 
 (defn- dedent (line indent)
   ;; `line` without the fence's own indent, or without whatever indent it has when that is
   ;; less — a block inside a list item is indented with the item.
   (if (string/starts-with? line (string/repeat " " indent))
     (string/substring line indent (string/length line))
-    (string/triml line)))
+    (string/trim-left line)))
 
 (defn- runnable-fence? (info)
   (let (words (seq/filter (string/split info " ") (fn (w) (not (= w "")))))
@@ -439,7 +439,7 @@ other language is never run. A block indented inside a list item loses that inde
                   (if (empty? lines)
                     blocks
                     (let (line (first lines)
-                          trimmed (string/triml line)
+                          trimmed (string/trim-left line)
                           fence? (string/starts-with? trimmed "```"))
                       (cond
                         (and (nil? open) fence?)
@@ -539,7 +539,7 @@ THIS process — `markdown-failures` gives each block a process of its own.
                                                     "  — does not read: "
                                                     (second parsed)))
                                         (let (forms (second parsed)
-                                              fault (run-setup here (seq/but-last forms)))
+                                              fault (run-setup here (seq/drop-last forms 1)))
                                           (if fault
                                             (append faults [fault])
                                             (continue (check (last forms)))))))))

@@ -363,7 +363,7 @@ An ERROR node's text runs from where the parser lost its footing to wherever it
 regained it, which for an unclosed construct is the rest of the buffer — the node for a
 half-written `Enum.map([1,2], fn x ->` is all fifteen characters of it. What the reader
 needs from that is the one token that opened, and that token is at the front."
-  (let (t (string/triml text))
+  (let (t (string/trim-left text))
     (if (= t "")
       ""
       (let (word (regex/find "^[A-Za-z_][A-Za-z_0-9]*" t))
@@ -407,7 +407,7 @@ grammar; `\"1 +* 2\"` in Elixir is `[:err \"unexpected `*`\"]`, and the suite's 
           :ok
           ;; A MISSING node is never the broken case, whatever its position: it IS the
           ;; grammar saying "you have not typed this yet".
-          (let (tail (string/length (string/trimr text))
+          (let (tail (string/length (string/trim-right text))
                 broken (seq/find errs
                          (fn (e) (and (not (get e :missing?)) (< (get e :end) tail)))))
             (cond
@@ -879,7 +879,7 @@ restart is never wrong where the lead-in is right, and is right everywhere the l
   ;; read as a column, so a line indented with two tabs came back as column 2
   (string/display-width (string/substring line
                           0
-                          (- (string/length line) (string/length (string/triml line))))))
+                          (- (string/length line) (string/length (string/trim-left line))))))
 
 (defn- ts-prev-nonblank (text: (or string rope) bol:int -> (or nil (tuple int string)))
   ;; `[indent last-token]` of the nearest non-blank line before `bol`, or nil when there is
@@ -911,7 +911,7 @@ already left.
 
 The boundary is asked of a token that ENDS in a word character only. A punctuation token
 has no word to run on into — JSX's `</` closes an element whatever tag name follows it."
-  (let (t (string/triml line)
+  (let (t (string/trim-left line)
         n (string/length token)
         word-char? (fn (c) (regex/matches? "[A-Za-z0-9_]" c)))
     (and (string/starts-with? t token)
@@ -936,7 +936,7 @@ listing: `ts-dedent-levels` works out what it closes from the chain. Requiring i
 table was the bug that came with making delimiters self-deciding — the entries were
 removed from the tables as redundant, and with them went the only thing that recognised
 those lines as closing at all, so every `}` on its own line stopped dedenting."
-  (let (t (string/triml line)
+  (let (t (string/trim-left line)
         first-char (when (> (string/length t) 0) (string/substring t 0 1)))
     (if (and first-char (includes? ")]}" first-char))
       first-char
@@ -1088,7 +1088,7 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
         closing-token (ts-closing-token line (get spec :dedent #{}))
         closing (not (nil? closing-token))
         ;; an ordinary line measures at its first non-blank, a closing line at the line start
-        at (if closing bol (+ bol (- (string/length line) (string/length (string/triml line)))))
+        at (if closing bol (+ bol (- (string/length line) (string/length (string/trim-left line)))))
         blocks (get spec :blocks #{})
         chain (ts-chain-at text lang at tree)
         broken (get (first chain) :broken)
@@ -1312,7 +1312,7 @@ kinds that are themselves definitions; `:calls` the callees whose `call` node de
 declaration for `lang`; returns `definitions`.
 
     (editor/treesit/register-definitions :doc-lang {:kinds #{:fn_item}})   ;=> {:kinds #{:fn_item}}"
-  (registry/put! :treesit/definitions lang definitions))
+  (registry/put :treesit/definitions lang definitions))
 
 (defn definitions (lang:keyword -> map)
   "What `lang` declared a definition to be (`register-definitions`), or `{}`.

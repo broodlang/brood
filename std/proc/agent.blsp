@@ -64,18 +64,23 @@ read+write primitive for compare-and-swap-style patterns.")
 
 ;; ---- public API -------------------------------------------------------------
 
-(defn start (init-fn)
-  "Spawn an agent whose initial state is `(init-fn)`. Returns the agent's pid.
+;; One entry with options rather than a `start-link` twin (ADR-433), as `gen/start` does.
+(defn start (init-fn & opts)
+  "Spawn an agent whose initial state is `(init-fn)`. Returns the agent's pid. `opts` is an
+optional map:
+  - `:link` — `spawn-link` the agent to the caller, so the agent crashes if its owner
+    crashes and vice versa
 
-    (agent/start (fn () 0))   ;~> the agent's pid, holding state 0"
-  (spawn (agent-loop (init-fn))))
-
-(defn start-link (init-fn)
-  "Like `start` but links the agent to the calling process — the agent crashes
-if its owner crashes and vice versa.
-
-    (agent/start-link (fn () {}))   ;~> the agent's pid, linked to the caller"
-  (spawn-link (agent-loop (init-fn))))
+    (agent/start (fn () 0))                 ;~> the agent's pid, holding state 0
+    (agent/start (fn () {}) {:link true})   ;~> the agent's pid, linked to the caller"
+  (let (options (or (first opts) {})
+        unknown (seq/reject (keys options) (fn (k) (= k :link))))
+    (when (not (empty? unknown))
+      (error "agent/start: unknown option " (pr-str (first unknown)) " (expected :link)"))
+    ;; `(:link options)`, not `get`: inside this module `get` is `agent/get`
+    (if (:link options)
+      (spawn-link (agent-loop (init-fn)))
+      (spawn (agent-loop (init-fn))))))
 
 ;; Every synchronous op below is `gen/call`: it monitors the agent
 ;; for the duration, so a **dead** agent raises `call: server … died: …` at once and a

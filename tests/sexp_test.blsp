@@ -173,7 +173,7 @@
   (test "an open bracket inside a bar symbol is not a form start"
     ;; literal source: (def |(| 1)\n(b)  — `(b)` is the second top-level form, at 12
     (assert= (reflect/scan-form-start "(def |(| 1)\n(b)" 13) 12)
-    (assert= (reflect/scan-form-start-2 "(def |(| 1)\n(b)" 13) [0 12]))
+    (assert= (reflect/scan-form-start-and-previous "(def |(| 1)\n(b)" 13) [0 12]))
   (test "the answer holds past a safepoint, in a text long enough to carry a table"
     (let (filler (string/join (map (range 400) (fn (i) (str "(def |x(" i "| " i ")\n"))) "")
           text (str filler "(last)"))
@@ -275,12 +275,12 @@
       (is (>= (count forms) 1))
       (assert= (get (first forms) :end) 8))))
 
-;; `scan-form-start-2` replaced the two `scan-form-start` calls `narrow` used to make, and it
+;; `scan-form-start-and-previous` replaced the two `scan-form-start` calls `narrow` used to make, and it
 ;; must return exactly what that pair returned — including for the awkward inputs the lexical
 ;; pass exists to handle (a bracket inside a comment, a string spanning a newline, an
 ;; unterminated string swallowing the rest). Checked over EVERY position of each text, because
 ;; an off-by-one at one offset is precisely how a structural motion goes subtly wrong.
-(describe "scan-form-start-2 is equivalent to the two calls it replaced"
+(describe "scan-form-start-and-previous is equivalent to the two calls it replaced"
   (test "matches (scan-form-start p) + (scan-form-start (dec start)) at every position"
     (let (pair-old (fn (text p)
                      (let (start (reflect/scan-form-start text p)
@@ -300,7 +300,7 @@
                   (fold (range 0 (+ 2 (string/length text)))
                     acc
                     (fn (a p)
-                      (if (= (pair-old text p) (reflect/scan-form-start-2 text p))
+                      (if (= (pair-old text p) (reflect/scan-form-start-and-previous text p))
                         a
                         (cons [text p] a)))))))
       (assert= 0 (count bad)))))
@@ -342,7 +342,7 @@
 ;; An editor holds a rope, and every query here takes one: the scans read it in place and carry
 ;; their safepoint table from the last rope across the edit. The answer must be the string's,
 ;; exactly, wherever point is — including a rope that was EDITED into shape (its chunks and the
-;; carried table are not what a fresh `from-string` gives) and one long enough that the table
+;; carried table are not what a fresh `text/string->` gives) and one long enough that the table
 ;; is real (past 4 KB).
 
 (def- rope-fixtures
@@ -363,7 +363,9 @@
     '()
     (fn (acc p)
       (let (scans [[:start (reflect/scan-form-start text p) (reflect/scan-form-start rope p)]
-                    [:start-2 (reflect/scan-form-start-2 text p) (reflect/scan-form-start-2 rope p)]
+                    [:start-2
+                      (reflect/scan-form-start-and-previous text p)
+                      (reflect/scan-form-start-and-previous rope p)]
                     [:end (reflect/scan-form-end text p 2) (reflect/scan-form-end rope p 2)]
                     [:narrow (narrow text p) (narrow rope p)]
                     [:closer
@@ -379,7 +381,7 @@ typed in its place) with a stretch in the middle cut out and typed back — a ro
 through edits, as an editor's does."
   (let (pieces (seq/chunk-every (string/->list text) 7)
         built (fold pieces
-                (text/from-string "")
+                (text/string-> "")
                 (fn (rope piece)
                   (let (end (text/length rope))
                     ;; type a marker, then replace it with the real piece
@@ -394,13 +396,13 @@ through edits, as an editor's does."
 (describe "sexp over a rope — the string's answers, at every point"
   (test "every scan, motion and the closer test agree on a rope from a string"
     (assert= '()
-      (mapcat rope-fixtures (fn (text) (rope-disagreements text (text/from-string text))))))
+      (mapcat rope-fixtures (fn (text) (rope-disagreements text (text/string-> text))))))
   (test "and on a rope built by edits"
     (assert= '() (mapcat rope-fixtures (fn (text) (rope-disagreements text (rope-by-edits text))))))
   (test "a document past the table's threshold, edited and re-asked: the carried table agrees"
     (let (unit "(defn f (a b)\n  \"Doc with a\n(column-0 bracket) and a ; semicolon\"\n  ; (comment)\n  (+ a [b {:k \"é\"}]))\n\n"
           doc (string/join (map (range 0 80) (fn (_) unit)) "")
-          start (text/from-string doc)
+          start (text/string-> doc)
           ;; each edit is asked about at points around it and far from it; the rope's table
           ;; is carried from the previous rope's
           edits [[(math/quot (string/length doc) 2) 0 "x"]
@@ -430,8 +432,8 @@ through edits, as an editor's does."
                              s (text/->string next)
                              wrong (seq/filter (probes (string/length s) at)
                                      (fn (p)
-                                       (not (and (= (reflect/scan-form-start-2 s p)
-                                                   (reflect/scan-form-start-2 next p))
+                                       (not (and (= (reflect/scan-form-start-and-previous s p)
+                                                   (reflect/scan-form-start-and-previous next p))
                                               (= (narrow s p) (narrow next p))
                                               (= (point-forward s p) (point-forward next p)))))))
                          [next (append acc (map wrong (fn (p) [edit p])))])))

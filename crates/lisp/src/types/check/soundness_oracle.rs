@@ -369,7 +369,7 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(reverse [1 2 3])",
         "(rest [1 2 3])",
         "(rest [1])",
-        "(seq/but-last [1 2 3])",
+        "(%but-last [1 2 3])",
         "(seq/distinct [1 1 2])",
         "(sort [3 1 2])",
         "(seq/sort-by [3 1 2] (fn (x) x))",

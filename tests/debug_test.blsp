@@ -8,7 +8,7 @@
 ;; Poll the debugger's state until `pred` holds and return true; raise if it has not
 ;; within `test/*wait-ms*`.
 (defn wait-until (dbg pred)
-  (eventually "the debugger's state to settle" (fn () (pred (dbg-state dbg)))))
+  (eventually "the debugger's state to settle" (fn () (pred (debugger-state dbg)))))
 
 ;; Release every parked step until the stepping worker reports `[:result r]`, and return
 ;; `r` — or `:timeout` once `deadline` passes.
@@ -39,7 +39,7 @@
 ;; a debugger — used to prove an adopted context does not leak onward through spawn.
 (defn leak-b (reporter)
   (receive
-    ([:go] (spawn (send reporter [:child-has (not (nil? (tc-debugger)))])))
+    ([:go] (spawn (send reporter [:child-has (not (nil? (debug/tc-debugger)))])))
     (after test/*wait-ms* nil)))
 (defn exit-count (state)
   (count (seq/filter (get state :events) (fn (e) (= (get e :kind) :span-exit)))))
@@ -61,7 +61,7 @@
                          :ok (receive ([:done] (drain (dec k))) (after test/*wait-ms* :timeout)))))
         (assert= :ok (drain 4)))
       (assert= true (wait-until dbg (fn (s) (>= (trace-count s) 4))))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 (describe "debugger — break parks without a timeout"
   :isolated (test "a parked process shows in :paused and finishes only after resume"
@@ -76,7 +76,7 @@
       ;; only resuming lets it finish
       (resume-all dbg)
       (assert= :done (receive ([:done] :done) (after test/*wait-ms* :timeout)))
-      (dbg-stop dbg)))
+      (stop-debugger dbg)))
   (test "many processes park simultaneously and all resume (no single-session limit)"
     (let (dbg (start-debugger) me (self))
       (doseq (i (range 5))
@@ -91,7 +91,7 @@
                            ([:done] (drain (dec k) (inc acc)))
                            (after test/*wait-ms* acc)))))
         (assert= 5 (drain 5 0)))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 (describe "debugger — causal tree across processes"
   :isolated (test "span-spawn nests child spans under the parent, on distinct pids"
@@ -119,7 +119,7 @@
         (assert= (count lines) 4)
         (is (string/starts-with? (str (first lines)) "root ["))
         (is (every? (rest lines) (fn (line) (string/starts-with? line "  w")))))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 (describe "debugger — transparent causal propagation (kernel-propagated *trace-context*)"
   :isolated (test "a PLAIN spawn (no span-spawn, no with-debugger in the child) inherits the context and nests"
@@ -140,7 +140,7 @@
           (let (root-pid (get root :pid)
                 child-pids (map (get root :children) (fn (c) (get c :pid))))
             (refute (any? child-pids (fn (p) (= p root-pid)))))))
-      (dbg-stop dbg)))
+      (stop-debugger dbg)))
   (test "a plain spawn hitting break inherits the debugger and parks — no rewiring"
     (let (dbg (start-debugger) me (self))
       (with-debugger dbg
@@ -149,7 +149,7 @@
       (assert= "inherited" (get (first (vals (paused dbg))) :label))
       (resume-all dbg)
       (assert= :done (receive ([:done] :done) (after test/*wait-ms* :timeout)))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 (describe "debugger — send-level causality (context follows a message)"
   :isolated (test "a server handles a request in the SENDER's causal context, across processes"
@@ -173,7 +173,7 @@
               ;; the handler ran in a DIFFERENT process (the server), yet nests under req
               (refute (= (get child :pid) (get root :pid))))))
         (send srv [:halt])
-        (dbg-stop dbg)))))
+        (stop-debugger dbg)))))
 
 (describe "debugger — an adopted context does not leak onward"
   :isolated (test "a context adopted from a message is NOT propagated to a child the adopter spawns"
@@ -184,7 +184,7 @@
         ;; b adopted a's context to handle [:go], but the child it spawns must not see it
         (assert= [:child-has false]
           (receive ([:child-has v] [:child-has v]) (after test/*wait-ms* :timeout)))
-        (dbg-stop dbg)))))
+        (stop-debugger dbg)))))
 
 (describe "debugger — single-step evaluation"
   :isolated (test "step parks at each spy node; resuming walks through them to the right value"
@@ -195,7 +195,7 @@
       (is (eventually "the stepper to park" (fn () (> (count (paused dbg)) 0))))
       ;; stepping is transparent — the expression still yields the right value
       (assert= 10 (drive-to-result dbg (+ (os/now) test/*wait-ms*)))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 (describe "debugger — eval in a paused process's captured scope"
   :isolated (test "eval-at evaluates an expression against a breakpoint's named locals"
@@ -207,7 +207,7 @@
       (assert= 22 (eval-at dbg 1 "(+ (* n 2) total)"))
       (resume-all dbg)
       (assert= :done (receive ([:done] :done) (after test/*wait-ms* :timeout)))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 (describe "debugger — aggregate / population queries"
   :isolated (test "value-distribution, modal-value and outliers summarise many workers"
@@ -224,7 +224,7 @@
       (assert= {:flag 2 :ok 8} (value-distribution dbg "(classify n)"))
       (assert= :ok (modal-value dbg "(classify n)"))
       (assert= 2 (count (outliers dbg "(classify n)")))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 (describe "debugger — data-driven breakpoints"
   :isolated (test "break-when parks only when its predicate holds"
@@ -237,7 +237,7 @@
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused))))))
       (resume-all dbg)
       (assert= :passed2 (receive ([:passed2] :passed2) (after test/*wait-ms* :timeout)))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 ;; A module-level target for the trace-fn/break-fn tests: instrumentation rebinds a
 ;; GLOBAL by name, so the subject must be one (a let-local has no name to rebind).
@@ -361,7 +361,7 @@
       (resume-all dbg)
       (assert= 36 (receive ([:result r] r) (after test/*wait-ms* :timeout)))
       (untrace-fn 'debug-test/tfn-square)
-      (dbg-stop dbg)))
+      (stop-debugger dbg)))
   ;; Two debug sessions breaking one function (two DAP clients, or one setting its
   ;; breakpoints again) wrapped the first wrapper: a call parked twice, and the second park
   ;; had no one to resume it.
@@ -375,7 +375,7 @@
       (assert= 5 (receive ([:result r] r) (after test/*wait-ms* :timeout)))
       (untrace-fn 'debug-test/tfn-broken-twice)
       (assert= 0 (count (seq/filter (traced-fns) (fn (s) (= s 'debug-test/tfn-broken-twice)))))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 ;; A tail-recursive countdown, as a GLOBAL so trace-fn has a name to rebind. The
 ;; self-call is the last thing the (n) clause does, so untraced this runs in constant
@@ -443,7 +443,7 @@
         (is (int? v)))
       ;; drive the remaining steps to completion
       (assert= 6 (drive-to-result dbg (+ (os/now) test/*wait-ms*)))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 ;; The `,resume` / `,step` REPL meta-command handlers (driven by `pry` through the REPL
 ;; command registry). They read the debugger from the `debug/*session*` dynamic that
@@ -462,7 +462,7 @@
       (assert= true (wait-until dbg (fn (s) (= 2 (count (get s :paused))))))
       (binding (debug/*session* dbg) (debug/debug-repl-resume ""))
       (assert= true (wait-until dbg (fn (s) (= 0 (count (get s :paused))))))
-      (dbg-stop dbg)))
+      (stop-debugger dbg)))
 
   (test ",resume N releases only the Nth parked process"
     (let (dbg (start-debugger) me (self))
@@ -474,7 +474,7 @@
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused))))))
       (binding (debug/*session* dbg) (debug/debug-repl-resume ""))
       (assert= true (wait-until dbg (fn (s) (= 0 (count (get s :paused))))))
-      (dbg-stop dbg)))
+      (stop-debugger dbg)))
 
   (test ",step advances a single parked process"
     (let (dbg (start-debugger) me (self))
@@ -484,7 +484,7 @@
       (binding (debug/*session* dbg) (debug/debug-repl-step ""))
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused))))))
       (binding (debug/*session* dbg) (debug/debug-repl-resume ""))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 ;; Path B (ADR-174): `break` auto-captures EVERY in-scope local via the `%scope`
 ;; compiler intrinsic, so `eval-at` evaluates against the full local scope — not just the
@@ -513,7 +513,7 @@
       (resume-all dbg)
       (assert= [:result 7 12]
         (receive ([:result s p] [:result s p]) (after test/*wait-ms* :timeout)))
-      (dbg-stop dbg)))
+      (stop-debugger dbg)))
 
   (test "an explicitly-named val overrides a captured local of the same name"
     ;; :a is passed as 99, shadowing the local a=3 in the snapshot
@@ -522,7 +522,7 @@
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused))))))
       (assert= 99 (eval-at dbg 1 "a"))
       (resume-all dbg)
-      (dbg-stop dbg)))
+      (stop-debugger dbg)))
 
   (test "break-when auto-captures scope too (only when the predicate holds)"
     (let (dbg (start-debugger) me (self))
@@ -530,7 +530,7 @@
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused))))))
       (assert= -5 (eval-at dbg 1 "x"))
       (resume-all dbg)
-      (dbg-stop dbg)))
+      (stop-debugger dbg)))
 
   (test "break-when does NOT park when the predicate is false"
     (let (dbg (start-debugger) me (self))
@@ -538,7 +538,7 @@
       ;; it should reach :ok without ever parking
       (assert= [:ok] (receive ([:ok] [:ok]) (after test/*wait-ms* :timeout)))
       (assert= 0 (count (paused dbg)))
-      (dbg-stop dbg))))
+      (stop-debugger dbg))))
 
 ;; `(proc/flag :no-break true)` — infrastructure other processes wait on (a buffer process,
 ;; a registry) must never park: whoever asked it something would freeze, and nothing could
@@ -550,7 +550,7 @@
                (fn () (proc/flag :no-break true) (break "bp" :v 1) (send me [:done]))))
       (assert= :done (receive ([:done] :done) (after test/*wait-ms* :parked)))
       (assert= 0 (count (paused dbg)))
-      (dbg-stop dbg)))
+      (stop-debugger dbg)))
   (test "the flag reads back, and is off by default"
     (let (me (self))
       (spawn (send me [:default (proc/flag :no-break)]))

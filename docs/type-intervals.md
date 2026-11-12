@@ -51,7 +51,7 @@ length is still known only by what it excludes.
   it — `second` of a `[2..]`, `(nth xs 3)` of a `[4..]`, `(nth xs i)` when `i ≥ 0` and
   either a guard established `i < (count xs)` (`Ctx::index_bounds`) or `i`'s own interval
   ends below the length. A read from exactly `nil` is `nil` (or the `nth` default).
-- `rest` / `seq/but-last` shorten the length by one; `cons` / `conj` lengthen it; `range` takes
+- `rest` / the prelude's private `%but-last` shorten the length by one; `cons` / `conj` lengthen it; `range` takes
   its length from its bound; `seq`, `reverse`, `sort`, `map`, … carry it through
   (`list_with_len`); `(list …)` and a quoted list are their arity.
 - Int-closed arithmetic carries intervals: `+ - * inc dec abs mod rem quot` (and the

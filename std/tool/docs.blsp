@@ -557,8 +557,7 @@ failure count (0 = all hold). The policy behind `nest doctest FILE.md…`."
 project image already holds as it is, any other from disk), then every `form ;=> result`
 case and `form ;~> result` illustration in the docstrings of every name it defines (private ones too) is
 checked. Prints each failure as `FILE:LINE: …` (the example's own line) and a summary, and
-returns the failure count (0 = all hold). The policy behind `nest test --doc FILE…` and
-`nest doctest FILE.blsp…`.
+returns the failure count (0 = all hold). The policy behind `nest doctest FILE.blsp…`.
 
     (docs/run-file-doctests [\"src/app.blsp\"])   ;~> 0 — after printing `1 source file(s) checked, 0 failing example(s)`"
   (let (problems (fold paths

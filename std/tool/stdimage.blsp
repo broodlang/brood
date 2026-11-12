@@ -69,12 +69,12 @@ prelude's or the root's and stays in the list's own value."
       acc
       (fn (grouped pair) (%add-reg grouped (first pair) (second pair))))))
 
-(defn retract-registration! (registration)
+(defn retract-registration (registration)
   "Take one registration [[registrations-by-module]] listed out of its registry — dissoc a
 map entry's key path (`[reg path value]`), remove a list member (`[reg nil member op]`) — and
 answer whether there was one.
 
-    (stdimage/retract-registration! ['registry/*registries* [:doc/none :k] 1])   ;=> false"
+    (stdimage/retract-registration ['registry/*registries* [:doc/none :k] 1])   ;=> false"
   (if (nil? (get registration 1))
     (%registry-update! (get registration 0) :remove [] (get registration 2) nil)
     (%registry-update! (get registration 0) :dissoc (get registration 1) nil)))
@@ -146,13 +146,13 @@ registry's own module and smuggle in every other module's (KI-136). Called insid
 `%isolate` by `build`, so the running session keeps every registration it had."
   (doseq (entry (%map-pairs (%std-regs-by-module)))
     (doseq (registration (second entry))
-      (retract-registration! registration))))
+      (retract-registration registration))))
 
 (defn registrations-by-module ()
   "Every live non-impl registration, grouped by the module that OWNS it: module name →
 vector of `[registry-symbol key-path value]` triples and `[registry-symbol nil member op]` list
 members (the grouping the stdlib image is built from, see `%std-regs-by-module`, and what
-[[retract-registration!]] takes back). Public so the PROJECT image can ask the same
+[[retract-registration]] takes back). Public so the PROJECT image can ask the same
 question at write time: a registration whose owner is a module the project image does not
 carry must not travel in it (KI-89)."
   (%std-regs-by-module))

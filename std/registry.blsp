@@ -24,7 +24,7 @@
 ;;    call, and a hook whose module has not loaded yet is simply not there.
 
 (defmodule registry
-  "Named registries a program fills as its modules load — `put!` a row under a registry id
+  "Named registries a program fills as its modules load — `put` a row under a registry id
 and a key, read them back with `entries` / `lookup` / `ranked`. Each write is atomic across
 processes, survives an `%isolate` restore and is carried by the startup image."
   (:use memo)) ; defmemo — a table's rank order, computed once per change
@@ -33,39 +33,39 @@ processes, survives an `%isolate` restore and is carried by the startup image."
 ;; module `:use`s it on an imaged start, and a plain `def` would wipe what the image restored.
 (defonce *registries* {})
 
-(defn put! (id:any key:any entry:any -> any)
+(defn put (id:any key:any entry:any -> any)
   "Register `entry` under `key` in the registry `id`, replacing any entry already there —
 so a module that registers at load is safe to reload. Returns `entry`.
 
-    (registry/put! :doc/greetings :en \"hello\")   ;=> \"hello\""
+    (registry/put :doc/greetings :en \"hello\")   ;=> \"hello\""
   (do (%registry-update! 'registry/*registries* :assoc [id key] entry) entry))
 
-(defn put-new! (id:any key:any entry:any -> bool)
+(defn put-new (id:any key:any entry:any -> bool)
   "Register `entry` under `key` in the registry `id` only when nothing is there, in one locked
 step, and answer whether it did — first one wins, so a key held this way is a runtime-wide
 slot: two windows, two processes, cannot both take it.
 
-    (registry/put-new! :doc/slots :only 1)   ;~> true the first time, false while it is held"
+    (registry/put-new :doc/slots :only 1)   ;~> true the first time, false while it is held"
   (= true (%registry-update! 'registry/*registries* :assoc-new [id key] entry)))
 
 (defn entries (id:any -> map)
   "The registry `id` as a map of key → entry — `{}` for a registry nothing has written.
 
-    (do (registry/put! :doc/colours :red 1) (registry/entries :doc/colours))   ;=> {:red 1}"
+    (do (registry/put :doc/colours :red 1) (registry/entries :doc/colours))   ;=> {:red 1}"
   (let (table (get *registries* id))
     (if (map? table) table {})))
 
-(defn remove! (id:any key:any -> bool)
+(defn remove (id:any key:any -> bool)
   "Remove `key` from the registry `id`. True when there was an entry to remove.
 
-    (do (registry/put! :doc/scratch :k 1) (registry/remove! :doc/scratch :k))   ;=> true"
+    (do (registry/put :doc/scratch :k 1) (registry/remove :doc/scratch :k))   ;=> true"
   (and (contains? (entries id) key)
     (= true (%registry-update! 'registry/*registries* :dissoc [id key] nil))))
 
 (defn lookup (id key &optional default)
   "The entry under `key` in the registry `id`, else `default` (nil).
 
-    (do (registry/put! :doc/sizes :s 1) (registry/lookup :doc/sizes :s))   ;=> 1
+    (do (registry/put :doc/sizes :s 1) (registry/lookup :doc/sizes :s))   ;=> 1
     (registry/lookup :doc/sizes :xl 0)   ;=> 0"
   (get (entries id) key default))
 
@@ -97,7 +97,7 @@ because `defmemo` defines a public function.
 number; 0 for an entry with none, or that is not a map), ties broken by the printed key —
 so the order never depends on which module happened to load first.
 
-    (do (registry/put! :doc/steps :b {:rank 2}) (registry/put! :doc/steps :a {:rank 1}) (map (registry/ranked :doc/steps) first))   ;=> (:a :b)"
+    (do (registry/put :doc/steps :b {:rank 2}) (registry/put :doc/steps :a {:rank 1}) (map (registry/ranked :doc/steps) first))   ;=> (:a :b)"
   (let (order (ranked-table (entries id))) (if (list? order) order (list))))
 
 ;; ---- who wrote an entry, and taking it back (ADR-582) --------------------------------
@@ -225,7 +225,7 @@ value being put back — or to nobody at all when `credit` is nil (never to whoe
 An operation like the write was (journalled with a load, kept by an isolate restore). True
 when it was written.
 
-    (do (registry/put! :doc/restored :k 1) (registry/restore {:global 'registry/*registries* :path [:doc/restored :k]} 2) (registry/lookup :doc/restored :k))   ;=> 2"
+    (do (registry/put :doc/restored :k 1) (registry/restore {:global 'registry/*registries* :path [:doc/restored :k]} 2) (registry/lookup :doc/restored :k))   ;=> 2"
   (= true
     (%registry-update! (:global write)
       :assoc (:path write)

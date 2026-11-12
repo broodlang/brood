@@ -497,7 +497,7 @@ Bindings are ONE flat list, exactly like `let`'s — not a list per pair. `(with
 
 ;; ---- side-effecting iteration (function form of `doseq`) --------------------
 (defn each (coll f)
-  "Apply `f` to each item of `coll` for its side effects, returning `nil`. The function-valued counterpart of `doseq`: `(each io/puts xs)`.
+  "Apply `f` to each item of `coll` for its side effects, returning `nil`. The function-valued counterpart of `doseq`: `(each xs io/puts)`.
 
     (with-out-str (each [1 2 3] io/write))   ;=> \"123\"
     (each [1 2 3] (fn (n) nil))              ;=> nil   ; the results are discarded"
@@ -630,7 +630,7 @@ clause, else `[body nil]`. A `finally` anywhere but last is an error."
         (when (empty? (rest clause))
           (reflect/error-at clause
             "try: `(finally)` has no body — write `(finally cleanup…)` or drop the clause."))
-        [(seq/but-last body) (rest clause)])
+        [(%but-last body) (rest clause)])
       (do
         ;; `any?` lives in seq.blsp, concatenated AFTER this file — walk by hand.
         (letrec (misplaced? (fn (forms)
@@ -677,7 +677,7 @@ line is EXECUTED by `doctest` (tests/doc_examples_test.blsp), so it has to be ru
   (letrec (split (fn (forms catches)
                    (let (clause (last forms))
                      (if (and (pair? clause) (= (first clause) 'catch))
-                       (split (seq/but-last forms) (cons clause catches))
+                       (split (%but-last forms) (cons clause catches))
                        [forms catches]))))
     (split body ())))
 

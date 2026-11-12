@@ -125,12 +125,12 @@
         (assert= (table/count t) 5000)
         ; stored nil, NOT absent
         (assert= (table/get t 0 :absent) nil)
-        (assert= (table/has? t 0) true)
+        (assert= (table/contains? t 0) true)
         (assert= (table/get t 1 :absent) false)
         (assert= (table/get t 2 :absent) 14)
         (fold (range 2500) nil (fn (_ i) (table/delete t i)))
         (assert= (table/count t) 2500)
-        (assert= (table/has? t 100) false)
+        (assert= (table/contains? t 100) false)
         (table/drop t)
         true)))
   (test "boundary keys and values round-trip"

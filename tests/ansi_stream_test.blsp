@@ -126,15 +126,15 @@ when the cut fell inside a run."
   (test "an empty parameter reads as 0, a reset"
     (assert= (ansi/sgr {:fg 1} (ansi/params ";1")) {:bold true}))
   (test "the cube and the grey ramp"
-    (assert= (ansi/colour 196 ansi/xterm-palette) [255 0 0])
-    (assert= (ansi/colour 232 ansi/xterm-palette) [8 8 8])
-    (assert= (ansi/colour 16 ["#000000"]) [0 0 0]))
+    (assert= (ansi/color 196 ansi/xterm-palette) [255 0 0])
+    (assert= (ansi/color 232 ansi/xterm-palette) [8 8 8])
+    (assert= (ansi/color 16 ["#000000"]) [0 0 0]))
   (test "a face resolves indexes through the caller's palette"
     (assert= (ansi/face {:fg 1 :underline true} {:colors (into [] (seq/repeat 16 "#123456"))})
       {:fg "#123456" :underline true}))
   (test "a face resolves the underline colour, and passes its style through"
-    (assert= (ansi/face {:underline true :underline-style :curly :underline-colour 1} nil)
-      {:underline true :underline-style :curly :underline-colour [205 0 0]})))
+    (assert= (ansi/face {:underline true :underline-style :curly :underline-color 1} nil)
+      {:underline true :underline-style :curly :underline-color [205 0 0]})))
 
 (describe "ansi: colon sub-parameters (ECMA-48 / ITU T.416)"
   (test "params keeps a `:` group together as one parameter"
@@ -158,9 +158,9 @@ when the cut fell inside a run."
     (assert= (ansi/sgr nil (ansi/params "38:5:196")) {:fg 196})
     (assert= (ansi/sgr nil (ansi/params "48:2::9:8:7;48:5:4")) {:bg 4}))
   (test "58 is the underline colour in either spelling; 59 resets it"
-    (assert= (ansi/sgr nil (ansi/params "58:2::1:2:3")) {:underline-colour [1 2 3]})
-    (assert= (ansi/sgr nil (ansi/params "58;5;9")) {:underline-colour 9})
-    (assert= (ansi/sgr {:underline-colour 9 :bold true} [59]) {:bold true}))
+    (assert= (ansi/sgr nil (ansi/params "58:2::1:2:3")) {:underline-color [1 2 3]})
+    (assert= (ansi/sgr nil (ansi/params "58;5;9")) {:underline-color 9})
+    (assert= (ansi/sgr {:underline-color 9 :bold true} [59]) {:bold true}))
   (test "an unknown group, or an unreadable one, changes nothing"
     (assert= (ansi/sgr {:fg 1} (ansi/params "4:9")) {:fg 1})
     (assert= (ansi/sgr {:fg 1} (ansi/params "38:7:1")) {:fg 1})

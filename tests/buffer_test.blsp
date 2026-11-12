@@ -50,7 +50,7 @@
   ;; map carrying a real rope under `:rope` (the old structural test accepted exactly
   ;; that), and a buffer is never `=` to a look-alike map.
   (test "buffer? is an identity check, not a shape check"
-    (refute (buffer? {:rope (text/from-string "hello") :point 0 :mark nil}))
+    (refute (buffer? {:rope (text/string-> "hello") :point 0 :mark nil}))
     (assert= (record-id (make-buffer "x")) :editor/buffer/buffer)
     (is (record? (make-buffer "x"))))
   (test "the identity survives every op that threads the buffer"
@@ -788,13 +788,13 @@
       (stop-buffer b)))
 
   ;; A buffer process is an `io` sink: `[:write s]` appends. create-buffer /
-  ;; delete-buffer are the lifecycle pair. Same-sender ordering makes this exact.
-  (test "create-buffer + [:write] appends; delete-buffer stops it"
+  ;; stop-buffer are the lifecycle pair. Same-sender ordering makes this exact.
+  (test "create-buffer + [:write] appends; stop-buffer stops it"
     (let (bp (create-buffer "*log*"))
       (send bp [:write "hello\n"])
       (send bp [:write "world\n"])
       (assert= (buffer-query bp buffer-text) "hello\nworld\n")
-      (assert= (delete-buffer bp) :stopped)))
+      (assert= (stop-buffer bp) :stopped)))
 
   ;; The read-then-decide edit: one closure returns [new-buf value] — the buffer is
   ;; replaced AND the caller learns what it read/removed, atomically ordered with
@@ -895,7 +895,7 @@
         (is (includes? txt "server up"))
         (is (includes? txt "disk low")))
       (log/stop-logger)
-      (delete-buffer bp))))
+      (stop-buffer bp))))
 
 ;; Markers — named positions the editing ops keep in sync as text shifts. Pure (no process).
 (describe "markers — positions that survive edits"

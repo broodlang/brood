@@ -136,8 +136,8 @@
     (assert= (:fg (:attr (fed 4 1 "\e[38;2;1;2;3m"))) [1 2 3])
     (assert= (:bg (:attr (fed 4 1 "\e[48:2::9:8:7m"))) [9 8 7])
     (assert= (:fg (:attr (fed 4 1 "\e[38:2:1:2:3m"))) [1 2 3])
-    (assert= (ansi/colour 196 ansi/xterm-palette) [255 0 0])
-    (assert= (ansi/colour 232 ansi/xterm-palette) [8 8 8]))
+    (assert= (ansi/color 196 ansi/xterm-palette) [255 0 0])
+    (assert= (ansi/color 232 ansi/xterm-palette) [8 8 8]))
   (test "a curly underline is an underline style, and 4:0 clears only it"
     (let (v (fed 4 1 "\e[1;4:3m"))
       (assert= (:attr v) {:bold true :underline true :underline-style :curly})

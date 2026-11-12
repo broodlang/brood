@@ -47,8 +47,10 @@ fn a_table_of_one_small_key_reserves_a_chunk_not_a_region() {
     // …and the keys are all there: the chunk is a real store, not a decline to the
     // hashed side.
     let ok = interp
-        .eval_str("(every? tables (fn (t) (and (table/has? t 5) (not (table/has? t 6)))))")
-        .expect("has?");
+        .eval_str(
+            "(every? tables (fn (t) (and (table/contains? t 5) (not (table/contains? t 6)))))",
+        )
+        .expect("contains?");
     assert_eq!(interp.print(ok), "true");
 }
 

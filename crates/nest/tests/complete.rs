@@ -458,7 +458,7 @@ fn help_for(args: &[&str]) -> String {
 }
 
 /// The `--long` flags a clap `--help` prints (its own and the global ones; aliases
-/// included, since `[alias: --jobs]` is a spelling the shell accepts).
+/// included, since a `[alias: --x]` is a spelling the shell accepts).
 fn long_flags_in_help(help: &str) -> Vec<String> {
     let mut flags: Vec<String> = help
         .split(|c: char| c.is_whitespace() || c == ',' || c == '[' || c == ']')

@@ -14,7 +14,7 @@
 (reflect/add-load-path *dir*)
 (file/spit (path/join *dir* "regretract-plugin.blsp")
   (str "(defmodule regretract-plugin)\n"
-    "(registry/put! :regretract/rows :plugin-row {:hook 'regretract-plugin/hook})\n"
+    "(registry/put :regretract/rows :plugin-row {:hook 'regretract-plugin/hook})\n"
     "(editor/layers/register-system-layer 'regretract-plugin/layer)\n"
     "(editor/layers/register-type-layers :regretract-type ['regretract-plugin/layer])\n"
     "(editor/layers/register-file-type \".regretract\" :regretract-type)\n"
@@ -23,7 +23,7 @@
 
 (describe "registry/written-by and retract"
   :isolated (test "every write a plugin's load made is listed, by writer, and taken back"
-    (registry/put! :regretract/rows :core-row 1)
+    (registry/put :regretract/rows :core-row 1)
     (assert= ((reflect/eval 'regretract-plugin/hook)) :ran) ; a qualified reference loads it
     (let (writes (registry/written-by #{'regretract-plugin})
           globals (into #{} (map writes :global)))
@@ -104,10 +104,10 @@
       (assert= (registry/written-by #{'regretract-pred-a}) []))))
 
 (fixture "regretract-keeper"
-  "(defmodule regretract-keeper)\n(editor/layers/register-system-layer 'regretract-keeper/layer)\n(registry/put! :regretract/kept :row :keeper)\n")
+  "(defmodule regretract-keeper)\n(editor/layers/register-system-layer 'regretract-keeper/layer)\n(registry/put :regretract/kept :row :keeper)\n")
 (def- *failing*
   (fixture "regretract-failing"
-    "(defmodule regretract-failing)\n(editor/layers/unregister-system-layer 'regretract-keeper/layer)\n(editor/layers/register-system-layer 'regretract-failing/layer)\n(registry/put! :regretract/kept :row :failing)\n(error \"regretract-failing: boom\")\n"))
+    "(defmodule regretract-failing)\n(editor/layers/unregister-system-layer 'regretract-keeper/layer)\n(editor/layers/register-system-layer 'regretract-failing/layer)\n(registry/put :regretract/kept :row :failing)\n(error \"regretract-failing: boom\")\n"))
 
 (describe "a load that throws"
   :isolated (test "changes no writer: what it removed keeps its writer, what it wrote credits nobody"
@@ -128,7 +128,7 @@
 
 (def- *loose*
   (fixture "regretract-loose"
-    "(registry/put! :regretract/loose :row 1)\n(editor/layers/register-system-layer 'regretract-loose/layer)\n(editor/face/face-set :regretract/loose-face {:fg \"#ffffff\"})\n"))
+    "(registry/put :regretract/loose :row 1)\n(editor/layers/register-system-layer 'regretract-loose/layer)\n(editor/face/face-set :regretract/loose-face {:fg \"#ffffff\"})\n"))
 
 (describe "a file without a defmodule"
   :isolated (test "credits its registry writes to the file, by its absolute path"
@@ -145,9 +145,9 @@
       (refute (includes? editor/layers/*system-layers* 'regretract-loose/layer)))))
 
 (fixture "regretract-under"
-  "(defmodule regretract-under)\n(registry/put! :regretract/stack :k :under)\n")
+  "(defmodule regretract-under)\n(registry/put :regretract/stack :k :under)\n")
 (fixture "regretract-over"
-  "(defmodule regretract-over)\n(registry/put! :regretract/stack :k :over)\n")
+  "(defmodule regretract-over)\n(registry/put :regretract/stack :k :over)\n")
 (fixture "regretract-restorer"
   "(defmodule regretract-restorer)\n(registry/restore {:global 'registry/*registries* :path [:regretract/stack :k]} :restored)\n")
 
@@ -167,7 +167,7 @@
       (is (registry/retract under))
       (is (nil? (registry/lookup :regretract/stack :k)))))
   :isolated (test "a restore with no credit leaves the entry writer-less, even inside a load"
-    (registry/put! :regretract/stack :k :before)
+    (registry/put :regretract/stack :k :before)
     (require-one 'regretract-restorer)
     (assert= (registry/lookup :regretract/stack :k) :restored)
     (is (nil? (registry/writer :regretract/stack :k)))))

@@ -57,7 +57,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(5),
         Sig::new(vec![rope, int, any, string, any], int),
         &["r", "at", "forward?", "set", "inside?"],
-        "Where a run of characters reaches from `at` in rope r: with inside? the run of characters IN set, else of characters NOT in it. Forward (forward? true) it answers the first index at or after `at` whose character ends the run; backward, the smallest index at or before `at` such that every character between it and `at` is in the run. Reads only the run, not the rope: a word motion over a large buffer costs the word. `at` is clamped to the rope.\n\n    (%rope-skip (text/from-string \"  ab cd\") 0 true \" \" true)   ;=> 2",
+        "Where a run of characters reaches from `at` in rope r: with inside? the run of characters IN set, else of characters NOT in it. Forward (forward? true) it answers the first index at or after `at` whose character ends the run; backward, the smallest index at or before `at` such that every character between it and `at` is in the run. Reads only the run, not the rope: a word motion over a large buffer costs the word. `at` is clamped to the rope.\n\n    (%rope-skip (text/string-> \"  ab cd\") 0 true \" \" true)   ;=> 2",
         rope_skip,
     );
 }

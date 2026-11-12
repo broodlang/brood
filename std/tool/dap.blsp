@@ -259,7 +259,7 @@ debugger breaks at (`debug/break-fn`); stepping is not supported.")
 (defn- session-loop (state)
   (if (:done state)
     ;; a disconnect, or an editor that closed the socket without one
-    (do (release state) (tcp/close (:sock state)) (debug/dbg-stop (:dbg state)))
+    (do (release state) (tcp/close (:sock state)) (debug/stop-debugger (:dbg state)))
     (let (sock (:sock state))
       (receive
         ([:tcp ^sock data] (let ([messages rest] (take-messages (bytes/concat (:buf state) data)

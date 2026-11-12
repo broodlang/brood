@@ -261,7 +261,7 @@ order); the output is built from `:keep` and `:insert` ops.
 
 (defn- strip-prefix-path (s)
   "A path from a `--- a/x` / `+++ b/x` line: the `a/` or `b/` dropped, nil for /dev/null."
-  (let (p (string/trimr (string/substring s 4 (string/length s)))
+  (let (p (string/trim-right (string/substring s 4 (string/length s)))
         ;; `diff -u` appends a tab and a timestamp to the path
         tab (index-of p "\t")
         p (if (< tab 0) p (string/substring p 0 tab)))

@@ -413,7 +413,8 @@ would desync the `[:up n]` cursor restore)."
         ;; `chunk-every`, not `partition`: a listing must not silently lose its last row
         rows (map (seq/chunk-every (take cands shown) ncols)
                (fn (row)
-                 (let (line (string/trimr (apply str (map row (fn (c) (string/pad-right c colw))))))
+                 (let (line (string/trim-right (apply str
+                                                 (map row (fn (c) (string/pad-right c colw))))))
                    (if (> (string/length line) room) (string/substring line 0 room) line)))))
     (if (> more 0) (append rows (list (str "… +" more " more"))) rows)))
 

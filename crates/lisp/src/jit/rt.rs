@@ -627,7 +627,7 @@ pub unsafe extern "C" fn brood_rt_table_has(
             return 1;
         };
         let key = words_to_val(k0, k1, k2);
-        let result = crate::core::table::check_key("table/has?", key)
+        let result = crate::core::table::check_key("table/contains?", key)
             .and_then(|()| crate::core::table::has(h, id, key).map(Value::Bool));
         answer_or_park(h, out, result)
     }

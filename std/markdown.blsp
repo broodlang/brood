@@ -254,7 +254,7 @@ both as element text and inside a double-quoted attribute.
           (assoc (md-flush state)
             :mode :code
             :buf nil
-            :indent (- (string/length line) (string/length (string/triml line)))))
+            :indent (- (string/length line) (string/length (string/trim-left line)))))
       (= mode :code) (assoc state :buf (cons line (get state :buf)))
       ;; an indented block continues through blank lines and ends at the first unindented
       ;; text, which is then read as the line it is

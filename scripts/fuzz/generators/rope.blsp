@@ -62,7 +62,7 @@
         ;; a sample slice for the oracle
         slice-start (if (empty? reference) 0 (draw-int 0 (- (count reference) 1)))
         slice-end (if (empty? reference) 0 (draw-int slice-start (count reference)))
-        chain (str "(-> (text/from-string "
+        chain (str "(-> (text/string-> "
                 (literal initial)
                 ")\n      "
                 (string/join steps "\n      ")

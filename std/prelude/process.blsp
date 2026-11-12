@@ -350,7 +350,7 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
 (defn- %receive-split (clauses)
   (let (lst (last clauses))
     (if (and (pair? lst) (= (first lst) 'after))
-      [(seq/but-last clauses) (second lst) `(do ~@(rest (rest lst)))]
+      [(%but-last clauses) (second lst) `(do ~@(rest (rest lst)))]
       ;; no `after`: ms nil (wait forever), so `%receive` can never return its
       ;; timeout answer and the timeout branch is provably dead — the macro omits it.
       [clauses nil nil])))

@@ -632,13 +632,13 @@ process is freshly spawned per request by [[answer]], so its mailbox holds nothi
 (defn- evsrv-test-result (r)
   "One finished test in the structured shape a client renders — the same fields
 `test/*report-sink*`'s consumers already read."
-  {:group (test/r-group r)
-   :name (test/r-name r)
-   :passed (not (test/r-failed? r))
-   :skipped (test/r-skipped? r)
-   :ms (test/r-ms r)
-   :where (test/r-where r)
-   :failures (or (map (test/r-fails r) (fn (f) {:loc (first f) :details (second f)})) [])})
+  {:group (test/result-group r)
+   :name (test/result-name r)
+   :passed (not (test/result-failed? r))
+   :skipped (test/result-skipped? r)
+   :ms (test/result-ms r)
+   :where (test/result-where r)
+   :failures (or (map (test/result-fails r) (fn (f) {:loc (first f) :details (second f)})) [])})
 
 (defn- evsrv-test-load (specs)
   "Clear the registry and (re)load each spec's file, answering the `[file line]` pairs that

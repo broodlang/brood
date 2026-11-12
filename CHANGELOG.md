@@ -6,6 +6,36 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Breaking: the surface pass (ADR-716).** Names that broke a rule an earlier ADR set are
+renamed or removed. Each one is in the rename ledger, so a stale caller's error and `nest check`
+name the replacement, and `nest check --fix-renames` applies the renames.
+- Renamed:
+  - `text/from-string` → `text/string->`
+  - `path/to-file-uri` / `from-file-uri` → `path/->file-uri` / `file-uri->`
+  - `io/port-fn` → `io/port->fn`
+  - `registry/put!`, `put-new!`, `remove!` → `put`, `put-new`, `remove`
+  - `repl/start-in!` → `start-in`; `stdimage/retract-registration!` → `retract-registration`
+  - `url/parse-url` → `url/parse`
+  - `string/triml` / `trimr` → `trim-left` / `trim-right`
+  - `gui/texture-free` / `sound-free` → `free-texture` / `free-sound`
+  - `debug/dbg-stop`, `dbg-state`, `dbg-events` → `stop-debugger`, `debugger-state`,
+    `debugger-events`
+  - `table/has?` → `table/contains?`
+  - `stream/for-each` → `stream/each`
+  - `ansi/colour` → `ansi/color`, and the key `:underline-colour` → `:underline-color`
+  - `test/r-*`, `opt?`, `opt-val` → `result-*`, `option?`, `option-value`
+  - `reflect/scan-form-start-2` → `scan-form-start-and-previous`
+- Removed:
+  - `agent/start-link`: use `(agent/start f {:link true})`
+  - `editor/buffer-server/delete-buffer`: use `stop-buffer`
+  - `io/fn-port`: it was `identity`, so pass the function itself
+  - `seq/but-last`: use `(seq/drop-last xs 1)`
+- `nest`:
+  - `release --output` → `--out`
+  - `--jobs` removed: use `--max-parallel` (`-j`)
+  - `test --doc FILE` removed: use `nest doctest FILE`
+  - The manifest key `:width` → `:format-width`
+
 **Added.**
 - **`editor/buffer/replace-program-output`**: program output that replaces what the program wrote
   before (a carriage return rewriting a progress line), in the buffer and every snapshot of its

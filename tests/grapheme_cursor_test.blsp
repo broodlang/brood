@@ -10,7 +10,7 @@
 
 (describe "the rope and string boundaries"
   (test "next and previous boundaries cross whole clusters, on a rope"
-    (let (r (text/from-string sample))
+    (let (r (text/string-> sample))
       (assert= '(1 3 8 9) (map [0 1 3 8] (fn (i) (text/next-grapheme r i))))
       (assert= '(0 1 3 8) (map [1 3 8 9] (fn (i) (text/prev-grapheme r i))))
       (assert= 9 (text/next-grapheme r 9))
@@ -46,8 +46,7 @@
     (let (me (self)
           text (string/join (map (range 50) (fn (_) sample)) ""))
       (doseq (w (range 4))
-        (spawn (fn ()
-                 (send me [w (text/forward-graphemes (text/from-string text) 0 (* 4 (+ w 1)))]))))
+        (spawn (fn () (send me [w (text/forward-graphemes (text/string-> text) 0 (* 4 (+ w 1)))]))))
       (let (got (fold (range 4) {} (fn (acc _) (receive ([w at] (assoc acc w at))))))
         (doseq (w (range 4))
           ;; every four clusters is one `sample` of nine code points

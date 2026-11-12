@@ -174,7 +174,7 @@ Returns the coverage percentage (nil when none was measured)."
                   (project-run-suite files (project-resolve-test-opts root opts))
                   (catch e [:raised e])))
     (project-write-failed root test/*last-ran* test/*last-failed*)
-    (when (test/opt? :stale opts) (project-write-stale root files))
+    (when (test/option? :stale opts) (project-write-stale root files))
     (let (percent (project-coverage-report root opts))
       (match outcome
         ([:raised e] (throw e))
@@ -188,7 +188,7 @@ Returns the coverage percentage (nil when none was measured)."
         all-files (project-test-files root)
         ;; `--stale` drops any test file whose transitive deps are unchanged since it last
         ;; ran; the record is refreshed after the run. Whole-project only.
-        files (if (test/opt? :stale opts) (project-stale-run-set root all-files) all-files))
+        files (if (test/option? :stale opts) (project-stale-run-set root all-files) all-files))
     ;; Advisory type-check (warnings to stderr), INSIDE an isolate that discards its loads:
     ;; `check` loads every test module, and leaving them bound would make every per-file
     ;; snapshot of the scoped run O(N) — the whole run O(N²).
@@ -196,8 +196,8 @@ Returns the coverage percentage (nil when none was measured)."
     ;; Coverage instrumentation goes on after the sources load and after `check`, whose
     ;; isolate would roll the rebindings back. One line pre-pass serves both line and
     ;; branch coverage.
-    (when (test/opt? :cover opts) (project-coverage-begin root))
-    (when (or (test/opt? :cover-lines opts) (test/opt? :cover-branches opts))
+    (when (test/option? :cover opts) (project-coverage-begin root))
+    (when (or (test/option? :cover-lines opts) (test/option? :cover-branches opts))
       (project-coverage-lines-begin root))
     (let (percent (project-run-recorded root files opts))
       (project-doctest-gate)
@@ -229,11 +229,11 @@ Returns the coverage percentage (nil when none was measured)."
 ;; different things (was a function entered vs did a line run) — in which case the
 ;; LINE percentage is what `--cover-min` gates on, being the stricter number.
 (defn- project-coverage-report (root opts)
-  (let (fn-percent (if (test/opt? :cover opts) (coverage/report root) nil)
-        line-percent (if (test/opt? :cover-lines opts)
+  (let (fn-percent (if (test/option? :cover opts) (coverage/report root) nil)
+        line-percent (if (test/option? :cover-lines opts)
                        (project-coverage-lines-finish root)
                        nil)
-        branch-percent (if (test/opt? :cover-branches opts)
+        branch-percent (if (test/option? :cover-branches opts)
                          (project-coverage-branches-finish root)
                          nil))
     ;; `--cover-min` gates on the strictest number present: branch > line > function.
@@ -260,7 +260,7 @@ Returns the coverage percentage (nil when none was measured)."
 ;; Runs AFTER the suite-failure re-raise, so a red suite reports its own failure
 ;; first rather than being masked by a coverage complaint.
 (defn- project-coverage-gate (percent opts)
-  (let (minimum (test/opt-val :cover-min opts nil))
+  (let (minimum (test/option-value :cover-min opts nil))
     (if (and (not (nil? percent)) (not (nil? minimum)) (< percent minimum))
       ;; Print the verdict, then raise the same verdict a red suite does: falling short of
       ;; a floor is an expected outcome, already reported, not a crash.
@@ -271,14 +271,14 @@ Returns the coverage percentage (nil when none was measured)."
       :ok)))
 
 ;; Expand `:failed` in a `nest test` option plist into the `:filter` spec's
-;; `:names`. The resolved `:filter` is CONSed on the front: `opt-val` returns the
+;; `:names`. The resolved `:filter` is CONSed on the front: `option-value` returns the
 ;; first match, so a prepended entry shadows the original without rebuilding the
 ;; plist.
 (defn- project-resolve-test-opts (root opts)
-  (if (not (test/opt? :failed opts))
+  (if (not (test/option? :failed opts))
     opts
     (cons :filter
-      (cons (project-failed-filter root (test/opt-val :filter opts nil)) opts))))
+      (cons (project-failed-filter root (test/option-value :filter opts nil)) opts))))
 
 (defn run-named-tests (paths & opts)
   "Run the NAMED test files — the `nest test FILE…` path — file-by-file, each loaded inside
@@ -292,12 +292,12 @@ alone.
   (let (root (project/find-root (file/cwd)))
     (if (nil? root)
       (do
-        (when (test/opt? :cover opts)
+        (when (test/option? :cover opts)
           (io/puts "warning: --cover needs a project (no project.blsp found) — running without coverage"
             :to *err*))
         (project-run-suite paths opts))
       (do
-        (when (test/opt? :cover opts) (project-coverage-begin root))
+        (when (test/option? :cover opts) (project-coverage-begin root))
         (project-coverage-gate (project-run-recorded root paths opts) opts)))))
 
 (defn run-tests-structured (& opts)

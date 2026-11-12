@@ -292,7 +292,7 @@
 ;; A SEQUENCE of structural motions across one buffer — the editor's repeated
 ;; `forward-sexp`, not one motion — over ONE held text value (the tooling/LSP shape; the
 ;; editor's fresh-string-per-motion buffer path is a separate story, see the header).
-;; Each motion calls `sexp/narrow`: `scan-form-start-2` for the window START (a backward
+;; Each motion calls `sexp/narrow`: `scan-form-start-and-previous` for the window START (a backward
 ;; form-start scan, O(point) by design but resumed from a safepoint table cached on the
 ;; string value, so linear over one held text — ADR-214) and `scan-form-end` for the
 ;; window END (the forward ~3-form scan, one native byte pass since 2026-08-07; it was an

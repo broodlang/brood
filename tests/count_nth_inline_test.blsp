@@ -70,7 +70,7 @@
     (assert= 2 (cn-count (cn-box 1 2)))
     (assert= 3 (cn-count (cn-tally 3)))
     (assert= 3 (cn-count (seq/lmap [1 2 3] inc)))
-    (assert= 2 (cn-count (text/from-string "hi")))
+    (assert= 2 (cn-count (text/string-> "hi")))
     (let (t (table/new))
       (table/put t :k 1)
       (assert= 1 (cn-count t)))

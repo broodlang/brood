@@ -5,7 +5,7 @@
 ;;
 ;;   - a bare **1-arg fn** `(fn (s) …)` that consumes a ready string. This was the whole
 ;;     definition of a port originally, and it still is one: `(impl Port :fn …)` below is
-;;     what keeps `%write-out`, `fn-port`, and every hand-written sink working.
+;;     what keeps `%write-out` and every hand-written sink working.
 ;;   - a **port record** — `standard-port` / `process-port` / `file-port` — which carries
 ;;     its target (a label, a pid, a path), prints as itself (`#<port stdout>`), and can
 ;;     own its write policy. This is the "richer port value (named, introspectable)"
@@ -17,7 +17,7 @@
 ;;
 ;; `*out*`/`*err*` (declared in the prelude) still hold a plain **1-arg fn** — the
 ;; prelude's `io/write`/`io/puts` call it directly, so printing pays no dispatch cost.
-;; `port-fn` is the adapter at that boundary, and `with-out`/`with-err` apply it for
+;; `port->fn` is the adapter at that boundary, and `with-out`/`with-err` apply it for
 ;; you, so a record port installs just as a fn port does.
 ;;
 ;; The buffer case — an editor showing output in its `*Messages*` buffer — is a
@@ -31,11 +31,11 @@ A port is any value implementing the **`Port`** ability: a 1-arg fn
 `(fn (s) …)` that consumes a ready string, or a port record. `*out*`/`*err*` (declared
 in the prelude) hold the current stdout/stderr ports.
 
-Build one with `stdout-port`/`stderr-port`/`process-port`/`file-port`/`fn-port`, then
-redirect output for a dynamic extent with `with-out`/`with-err`:
+Build one with `stdout-port`/`stderr-port`/`process-port`/`file-port`, or pass a 1-arg fn
+as it is, then redirect output for a dynamic extent with `with-out`/`with-err`:
 
     (with-out (process-port editor) (io/puts \"into the editor's buffer\"))
-    (with-out (fn-port (fn (s) (collect s))) (io/puts \"into a callback\"))
+    (with-out (fn (s) (collect s)) (io/puts \"into a callback\"))
 
 A `process-port` sends `[:write s]` to its target — async and share-nothing, so
 output crosses process boundaries with no shared mutable state. (Dynamic bindings
@@ -60,7 +60,7 @@ plainer name.
   (emit (self s) :-> nil))
 
 ;; A bare 1-arg sink fn is a port — the original representation, still first-class.
-;; This impl is what keeps `%write-out`, `fn-port`, and every hand-written `(fn (s) …)`
+;; This impl is what keeps `%write-out` and every hand-written `(fn (s) …)`
 ;; working unchanged.
 (impl Port :fn (emit (f s) (f s)))
 ;; A NATIVE 1-arg sink is a port too. The prelude's default `*out*`/`*err*` are the
@@ -102,15 +102,6 @@ capture. (The prelude's default `*out*` is the bare `%write-out` fn this wraps.)
 
     (io/stderr-port)   ;~> a standard-port record, displayed as #<port stderr>"
   (standard-port "stderr" %write-err))
-
-(defn fn-port (f)
-  "A port that hands each written string to the 1-arg callback `f` — which is to say,
-`f` itself: a bare fn is already a port (the `:fn` impl of `Port`). The general adapter,
-kept as a name because it *documents* the intent at a call site; `f` may buffer, filter,
-count, or forward however it likes.
-
-    (io/fn-port (fn (s) (send logger [:line s])))   ;~> that same fn, usable as a port"
-  f)
 
 (defrecord process-port (pid))
 
@@ -206,23 +197,23 @@ rather than writing it — that one belongs with `pr-str`, this one with the wri
 
 ;; ---- installing a port for a dynamic extent ---------------------------------
 
-(defn port-fn (port)
+(defn port->fn (port)
   "`port` as a bare 1-arg sink fn: itself when it already is one, else a closure that
 `write`s to it. The adapter at the `*out*`/`*err*` boundary — those dynamic vars hold
 a plain fn so the prelude can call it directly with no dispatch, while a record
 port still reaches them through this. `with-out`/`with-err` apply it for you.
 
-    (io/port-fn (io/file-port \"log.txt\"))   ;~> a 1-arg fn appending each string to log.txt"
+    (io/port->fn (io/file-port \"log.txt\"))   ;~> a 1-arg fn appending each string to log.txt"
   (if (fn? port) port (fn (s) (emit port s))))
 
 (defmacro with-out (port & body)
   "Evaluate `body` with `*out*` bound to `port` (a fn port or a port record — adapted
-with `port-fn`), restoring the previous port on exit (even on error). `io/write`/`io/puts`
+with `port->fn`), restoring the previous port on exit (even on error). `io/write`/`io/puts`
 inside `body` write to `port`."
-  `(binding (*out* (port-fn ~port)) ~@body))
+  `(binding (*out* (port->fn ~port)) ~@body))
 
 (defmacro with-err (port & body)
   "Evaluate `body` with `*err*` bound to `port` (a fn port or a port record — adapted
-with `port-fn`), restoring the previous port on exit (even on error). `io/write`/`io/puts` with `:to *err*`
+with `port->fn`), restoring the previous port on exit (even on error). `io/write`/`io/puts` with `:to *err*`
 inside `body` write to `port`."
-  `(binding (*err* (port-fn ~port)) ~@body))
+  `(binding (*err* (port->fn ~port)) ~@body))

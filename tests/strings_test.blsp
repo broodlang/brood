@@ -556,9 +556,9 @@
     (assert= (string/trim "  hi there  ") "hi there")
     (assert= (string/trim "\n\thi\n") "hi")
     (assert= (string/trim "no-padding") "no-padding"))
-  (test "triml / trimr remove one end"
-    (assert= (string/triml "  hi  ") "hi  ")
-    (assert= (string/trimr "  hi  ") "  hi"))
+  (test "trim-left / trim-right remove one end"
+    (assert= (string/trim-left "  hi  ") "hi  ")
+    (assert= (string/trim-right "  hi  ") "  hi"))
   (test "all-whitespace trims to empty" (assert= (string/trim "    ") "")))
 
 (describe "padding & repetition"

@@ -29,7 +29,7 @@
 
 (describe ":credit"
   :isolated (test "credits a map entry and a list member that are there, and nothing else"
-    (registry/put! :regwriters/rows :row 1)
+    (registry/put :regwriters/rows :row 1)
     (%registry-update! 'registry-writers-test/*credited* :append-new nil :first)
     (%registry-update! 'registry-writers-test/*credited* :append-new nil :second)
     (is (%registry-update! 'registry/*registries* :credit [:regwriters/rows :row] nil 'somebody))
@@ -54,7 +54,7 @@
     "(%registry-update! 'registry-writers-test/*hooks* :cons-new nil :consed-1)\n"
     "(%registry-update! 'registry-writers-test/*hooks* :append-new nil :appended-2)\n"
     "(%registry-update! 'registry-writers-test/*hooks* :cons-new nil :consed-2)\n"
-    "(registry/put! :regwriters/lists :row :from-lists)\n"))
+    "(registry/put :regwriters/lists :row :from-lists)\n"))
 
 (describe "a list member through the stdlib image's record"
   :isolated (test "each member keeps its op, and replaying the record rebuilds the list"
@@ -80,7 +80,7 @@
             '(:appended-1 :appended-2 :consed-1 :consed-2))
           (is (any? record (fn (registration) (= (get registration 1) [:regwriters/lists :row]))))
           ;; the image is written with every module's registrations taken out …
-          (doseq (registration record) (is (stdimage/retract-registration! registration)))
+          (doseq (registration record) (is (stdimage/retract-registration registration)))
           (assert= registry-writers-test/*hooks* '(:core))
           (is (nil? (registry/lookup :regwriters/lists :row)))
           ;; … and materialising the module replays them: the same list, the same writers
@@ -89,12 +89,12 @@
           (assert= (members-of 'registry-writers-test/*hooks*) source-members)
           (assert= (registry/writer :regwriters/lists :row) 'regwriters-lists)
           ;; and taken back again, so no later file meets this fixture's rows
-          (doseq (registration record) (stdimage/retract-registration! registration)))))))
+          (doseq (registration record) (stdimage/retract-registration registration)))))))
 
 (fixture "regwriters-spawner"
   (str "(defmodule regwriters-spawner)\n"
     "(defn- work ()\n" "  (receive ([:go parent]\n"
-    "            (do (registry/put! :regwriters/spawned :row :from-worker)\n"
+    "            (do (registry/put :regwriters/spawned :row :from-worker)\n"
     "                (%registry-update! 'registry-writers-test/*spawned* :append-new nil (fn () :worker))\n"
     "                (send parent :done)))))\n" "(def worker (spawn (work)))\n"
     "(defn hook () (fn () :anonymous))\n"))
@@ -122,16 +122,16 @@
   :isolated (test "with-acting-writer credits the extent, and every process it starts"
     (registry/with-acting-writer 'regwriters-plugin
       (fn ()
-        (registry/put! :regwriters/acting :direct 1)
+        (registry/put :regwriters/acting :direct 1)
         (let (me (self))
           ;; a grandchild too: a timer or a task is a process some helper spawned
-          (spawn (spawn (do (registry/put! :regwriters/acting :spawned 2) (send me :spawned))))
+          (spawn (spawn (do (registry/put :regwriters/acting :spawned 2) (send me :spawned))))
           (receive (:spawned nil) (after 5000 (error "the spawned process never wrote"))))))
     ;; and a process spawned after the extent does not
     (let (me (self))
-      (spawn (do (registry/put! :regwriters/acting :later 4) (send me :later)))
+      (spawn (do (registry/put :regwriters/acting :later 4) (send me :later)))
       (receive (:later nil) (after 5000 (error "the later process never wrote"))))
-    (registry/put! :regwriters/acting :after 3)
+    (registry/put :regwriters/acting :after 3)
     (assert= (registry/writer :regwriters/acting :direct) 'regwriters-plugin)
     (assert= (registry/writer :regwriters/acting :spawned) 'regwriters-plugin)
     (is (nil? (registry/writer :regwriters/acting :later)))
@@ -217,13 +217,13 @@
         (reflect/set-source-location 'regwriters-sited nil)
         (is (nil? (reflect/source-location 'regwriters-sited)))))))
 
-(describe "registry/put-new!"
+(describe "registry/put-new"
   :isolated (test "the first one wins, until the key is free again"
-    (is (registry/put-new! :regwriters/slots :only {:holder 1}))
-    (refute (registry/put-new! :regwriters/slots :only {:holder 2}))
+    (is (registry/put-new :regwriters/slots :only {:holder 1}))
+    (refute (registry/put-new :regwriters/slots :only {:holder 2}))
     (assert= (registry/lookup :regwriters/slots :only) {:holder 1})
-    (registry/remove! :regwriters/slots :only)
-    (is (registry/put-new! :regwriters/slots :only {:holder 3}))))
+    (registry/remove :regwriters/slots :only)
+    (is (registry/put-new :regwriters/slots :only {:holder 3}))))
 
 (describe "the root escape names a global exactly"
   :isolated (test "in reflect/source-location and reflect/undef"

@@ -73,7 +73,7 @@
   (test "per-backend :min-level filters independently of the logger level"
     (let (me (self))
       (start-logger {:level :debug
-                     :backends [(backend (fn-port (fn (s) (send me [:line s])))
+                     :backends [(backend (fn (s) (send me [:line s]))
                                   {:min-level :warn})]})
       (info "below")
       (error "above")
@@ -85,9 +85,9 @@
     (let (me (self))
       ;; two category backends on ONE logger: each writes only its own records.
       (start-logger {:level :debug
-                     :backends [(backend (fn-port (fn (s) (send me [:line :lsp s])))
+                     :backends [(backend (fn (s) (send me [:line :lsp s]))
                                   {:filter (fn (r) (= (get (get r :meta) :category) :lsp))})
-                                 (backend (fn-port (fn (s) (send me [:line :other s])))
+                                 (backend (fn (s) (send me [:line :other s]))
                                    {:filter (fn (r)
                                               (not (= (get (get r :meta) :category) :lsp)))})]})
       (info "to-lsp" {:category :lsp})
@@ -182,7 +182,7 @@
 
 (describe "log: the stock backend is a record"
   (test "backend builds a line-backend with the documented defaults"
-    (let (b (backend (fn-port (fn (s) s))))
+    (let (b (backend (fn (s) s)))
       (is (record? b))
       (assert= (record-id b) :log/line-backend)
       (assert= (get b :min-level) :debug)

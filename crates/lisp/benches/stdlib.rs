@@ -354,7 +354,7 @@ mod csv {
 mod url {
     use super::*;
 
-    /// `parse-url` `n` times.
+    /// `url/parse` `n` times.
     #[divan::bench(args = [100, 1_000])]
     fn parse(bencher: divan::Bencher, n: usize) {
         bench_prog(
@@ -362,7 +362,7 @@ mod url {
             format!(
                 "\
                  (doseq (i (range {n})) \
-                   (url/parse-url \"https://example.com/path/to/page?foo=bar&baz=qux#section\"))"
+                   (url/parse \"https://example.com/path/to/page?foo=bar&baz=qux#section\"))"
             ),
         );
     }

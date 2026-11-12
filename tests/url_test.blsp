@@ -96,11 +96,11 @@
   (test "bare key gets empty value"
     (assert= {"flag" ""} (url/query-decode "flag"))))
 
-;; ---- parse-url --------------------------------------------------------------
+;; ---- parse ------------------------------------------------------------------
 
-(describe "parse-url"
+(describe "parse"
   (test "full URL with port, query, fragment"
-    (let (u (url/parse-url "https://example.com:8080/path?q=1#frag"))
+    (let (u (url/parse "https://example.com:8080/path?q=1#frag"))
       (assert= "https" (get u :scheme))
       (assert= "example.com" (get u :host))
       (assert= 8080 (get u :port))
@@ -108,7 +108,7 @@
       (assert= "q=1" (get u :query))
       (assert= "frag" (get u :fragment))))
   (test "URL without port"
-    (let (u (url/parse-url "http://example.com/hello"))
+    (let (u (url/parse "http://example.com/hello"))
       (assert= "http" (get u :scheme))
       (assert= "example.com" (get u :host))
       (assert= nil (get u :port))
@@ -116,17 +116,17 @@
       (assert= nil (get u :query))
       (assert= nil (get u :fragment))))
   (test "URL without path"
-    (let (u (url/parse-url "https://example.com"))
+    (let (u (url/parse "https://example.com"))
       (assert= "https" (get u :scheme))
       (assert= "example.com" (get u :host))
       (assert= "/" (get u :path))))
   (test "URL with query but no fragment"
-    (let (u (url/parse-url "https://x.com/search?q=hello+world"))
+    (let (u (url/parse "https://x.com/search?q=hello+world"))
       (assert= "/search" (get u :path))
       (assert= "q=hello+world" (get u :query))
       (assert= nil (get u :fragment))))
   (test "relative path (no scheme)"
-    (let (u (url/parse-url "/foo/bar"))
+    (let (u (url/parse "/foo/bar"))
       (assert= nil (get u :scheme))
       (assert= nil (get u :host))
       (assert= "/foo/bar" (get u :path)))))
@@ -151,7 +151,7 @@
       (url/build {:scheme "https" :host "x.com" :path "/page" :fragment "top"})))
   (test "parse-build roundtrip"
     (let (original "https://example.com:8080/path?q=1")
-      (let (parsed (url/parse-url original))
+      (let (parsed (url/parse original))
         (assert= original
           (url/build {:scheme (get parsed :scheme)
                       :host (get parsed :host)
@@ -181,88 +181,88 @@
 ;; allow-list / logged origin / SSRF guard reading `:host` sees a DIFFERENT host than
 ;; the one a real client connects to.
 
-(describe "parse-url — userinfo"
+(describe "parse —userinfo"
   (test "userinfo is separated from the host"
-    (let (u (url/parse-url "https://user:pass@example.com/p"))
+    (let (u (url/parse "https://user:pass@example.com/p"))
       (assert= "example.com" (get u :host))
       (assert= "user:pass" (get u :userinfo))
       (assert= nil (get u :port))
       (assert= "/p" (get u :path))))
   (test "the @-in-authority phishing shape reports the REAL host"
-    (assert= "good.com" (get (url/parse-url "https://evil.com@good.com/") :host)))
+    (assert= "good.com" (get (url/parse "https://evil.com@good.com/") :host)))
   (test "userinfo alongside a port"
-    (let (u (url/parse-url "https://u@h.com:8443/x"))
+    (let (u (url/parse "https://u@h.com:8443/x"))
       (assert= "h.com" (get u :host))
       (assert= "u" (get u :userinfo))
       (assert= 8443 (get u :port))))
   (test "no userinfo means nil, not an empty string"
-    (assert= nil (get (url/parse-url "https://example.com/p") :userinfo))))
+    (assert= nil (get (url/parse "https://example.com/p") :userinfo))))
 
-(describe "parse-url — bracketed IPv6 hosts"
+(describe "parse —bracketed IPv6 hosts"
   (test "an IPv6 literal with a port"
-    (let (u (url/parse-url "http://[::1]:8080/p"))
+    (let (u (url/parse "http://[::1]:8080/p"))
       (assert= "[::1]" (get u :host))
       (assert= 8080 (get u :port))
       (assert= "/p" (get u :path))))
   (test "an IPv6 literal without a port"
-    (let (u (url/parse-url "http://[2001:db8::1]/"))
+    (let (u (url/parse "http://[2001:db8::1]/"))
       (assert= "[2001:db8::1]" (get u :host))
       (assert= nil (get u :port))))
   (test "an IPv6 literal with userinfo"
-    (let (u (url/parse-url "http://bob@[::1]:99/"))
+    (let (u (url/parse "http://bob@[::1]:99/"))
       (assert= "[::1]" (get u :host))
       (assert= "bob" (get u :userinfo))
       (assert= 99 (get u :port))))
   (test "an unterminated IPv6 literal raises"
-    (assert-error (url/parse-url "http://[::1:8080/p"))))
+    (assert-error (url/parse "http://[::1:8080/p"))))
 
-(describe "parse-url — port validation"
+(describe "parse —port validation"
   (test "an unparseable port raises instead of reading as absent"
     ;; nil for both `absent` and `garbage` meant http:// silently fell back to 80
-    (assert-error (url/parse-url "http://h:8o80/p"))
-    (assert-error (url/parse-url "http://h:-1/p"))
-    (assert-error (url/parse-url "http://h:99999/p"))
-    (assert-error (url/parse-url "http://h:8.5/p")))
+    (assert-error (url/parse "http://h:8o80/p"))
+    (assert-error (url/parse "http://h:-1/p"))
+    (assert-error (url/parse "http://h:99999/p"))
+    (assert-error (url/parse "http://h:8.5/p")))
   (test "an empty port is the scheme default (nil), per RFC 3986 3.2.3"
-    (assert= nil (get (url/parse-url "http://h:/p") :port)))
+    (assert= nil (get (url/parse "http://h:/p") :port)))
   (test "a normal port still parses"
-    (assert= 8080 (get (url/parse-url "http://h:8080/p") :port))))
+    (assert= 8080 (get (url/parse "http://h:8080/p") :port))))
 
 (describe "build — userinfo round-trip"
   (test "parse then build is lossless for a full authority"
     (assert= "https://u:p@h.com:8443/x"
-      (url/build (url/parse-url "https://u:p@h.com:8443/x"))))
+      (url/build (url/parse "https://u:p@h.com:8443/x"))))
   (test "an IPv6 authority round-trips"
     (assert= "http://[::1]:8080/p"
-      (url/build (url/parse-url "http://[::1]:8080/p")))))
+      (url/build (url/parse "http://[::1]:8080/p")))))
 
-(describe "parse-url — scheme and network-path references (RFC 3986 3.1, 4.2)"
+(describe "parse —scheme and network-path references (RFC 3986 3.1, 4.2)"
   (test "a network-path reference has a host and no scheme"
     ;; it used to read as the PATH `//evil.com/x` with a nil host, hiding the host from
     ;; any check made on `:host`
-    (let (u (url/parse-url "//evil.com/x"))
+    (let (u (url/parse "//evil.com/x"))
       (assert= nil (get u :scheme))
       (assert= "evil.com" (get u :host))
       (assert= "/x" (get u :path)))
-    (assert= 8080 (get (url/parse-url "//h:8080/p?q=1") :port)))
+    (assert= 8080 (get (url/parse "//h:8080/p?q=1") :port)))
   (test "a `://` after a slash is a path, not a scheme"
-    (let (u (url/parse-url "/r/https://evil.com/"))
+    (let (u (url/parse "/r/https://evil.com/"))
       (assert= nil (get u :scheme))
       (assert= nil (get u :host))
       (assert= "/r/https://evil.com/" (get u :path))))
   (test "a scheme must start with a letter and use only letters, digits, + - ."
-    (assert= nil (get (url/parse-url "1http://h/") :scheme))
-    (assert= nil (get (url/parse-url "ht_tp://h/") :scheme))
-    (assert= "svn+ssh" (get (url/parse-url "svn+ssh://h/r") :scheme)))
+    (assert= nil (get (url/parse "1http://h/") :scheme))
+    (assert= nil (get (url/parse "ht_tp://h/") :scheme))
+    (assert= "svn+ssh" (get (url/parse "svn+ssh://h/r") :scheme)))
   (test "a plain relative path is unchanged"
-    (let (u (url/parse-url "a/b"))
+    (let (u (url/parse "a/b"))
       (assert= nil (get u :host))
       (assert= "a/b" (get u :path)))))
 
-(describe "parse-url — a port is digits only"
+(describe "parse —a port is digits only"
   (test "a signed port raises"
-    (assert-error (url/parse-url "http://h:+80/p"))
-    (assert-error (url/parse-url "http://h: 80/p"))))
+    (assert-error (url/parse "http://h:+80/p"))
+    (assert-error (url/parse "http://h: 80/p"))))
 
 (describe "percent-decode — bytes that are not UTF-8 are a failure, not a raise"
   (test "%FF answers a failure value"

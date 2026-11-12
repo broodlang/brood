@@ -466,7 +466,7 @@ reader sees, which a multi-line string's one span and its per-line spans agree o
 
 (describe "lisp-line-lexer — highlight-spans a line at a time"
   (test "every window colours as the whole source does"
-    (let (rope (text/from-string ll-source)
+    (let (rope (text/string-> ll-source)
           lines (text/line-count rope)
           whole (highlight-spans ll-source)
           lexer (lisp-line-lexer))

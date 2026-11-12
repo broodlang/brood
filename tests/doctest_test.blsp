@@ -207,7 +207,7 @@
         1
         "(defn arrow-doc ()\n  \"Doc.\n\n    (arrow-doc)   ;=> 99\n    a → b\"\n  1)\n(arrow-doc)   ;=> 1"))))
 
-;; `nest test --doc FILE` / `nest doctest FILE.blsp`: one source file's examples, each failure
+;; `nest doctest FILE.blsp`: one source file's examples, each failure
 ;; placed at the example's own line.
 (describe "failures-in-file"
   (test "a wrong example is reported at its line, a holding one is not"

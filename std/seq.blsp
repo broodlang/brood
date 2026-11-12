@@ -23,7 +23,7 @@
 
 The core ops (`map` `reduce` `fold` `into` `count` `take` `drop` `sort` …) stay bare in the
 prelude and need no import; `take-while`, `drop-while`, `partition`, `repeat`, `sort-by`,
-`mapv` and `but-last` are here (ADR-506). `filter` is NOT bare: it is [[filter]] here, beside its
+`mapv` and `drop-last` are here (ADR-506). `filter` is NOT bare: it is [[filter]] here, beside its
 complement [[reject]] (ADR-330), so the pair shares one home. `distinct`, `zip`, `find`
 and `flatten` are not bare either —
 they are `seq/distinct` and friends, defined here. This module adds the higher-level helpers: grouping

@@ -57,7 +57,7 @@ counts its recomputations by sending from the thunk on purpose, and opts out wit
 read in the branch scope the call sits in (`sigs::self_call_sites`, which types a site in
 its `if` branch):
 
-- `(rest p)` / `(seq/but-last p)` of a `p` the branch knows is non-empty — length at least 1
+- `(rest p)` / `(%but-last p)` of a `p` the branch knows is non-empty — length at least 1
   and no `nil` (`(nil? xs)`'s else, `(not (empty? xs))`);
 - `(- p k)` / `(dec p)` / `(+ p -k)` of a `p` the branch bounds below — `(<= n 0)`'s else
   says `n ≥ 1`; `(= n 0)`'s else says only `n ≠ 0`, and is reported;

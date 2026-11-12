@@ -453,7 +453,7 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
     (try (gui/size-px 0) (catch e :no-window))   ;=> :no-window   ; no window 0 is open"
   (%gui-size-px id))
 
-(defn texture "Upload an image as a texture of window id for its [:sprite …] ops and return its handle (an int). Either `(gui/texture id image)` with the {:width :height :rgba} map gui/image-thumb decodes, or `(gui/texture id rgba w h)` with raw bytes — w*h*4 of them, row-major, straight alpha (a bytes value or a vector of 0-255 ints). The handle is allocated HERE, in Brood, and the texture's size remembered beside it, which is what lets gui/sprite turn a source rect in texture pixels into the UV rect the renderer wants without asking the GUI thread. Errors when the byte count is not w*h*4; on the CPU render target (a build without `gui-gpu`, or BROOD_GUI_GPU=0) the upload is a silent no-op and a sprite naming the handle draws nothing. Pair with gui/texture-free.
+(defn texture "Upload an image as a texture of window id for its [:sprite …] ops and return its handle (an int). Either `(gui/texture id image)` with the {:width :height :rgba} map gui/image-thumb decodes, or `(gui/texture id rgba w h)` with raw bytes — w*h*4 of them, row-major, straight alpha (a bytes value or a vector of 0-255 ints). The handle is allocated HERE, in Brood, and the texture's size remembered beside it, which is what lets gui/sprite turn a source rect in texture pixels into the UV rect the renderer wants without asking the GUI thread. Errors when the byte count is not w*h*4; on the CPU render target (a build without `gui-gpu`, or BROOD_GUI_GPU=0) the upload is a silent no-op and a sprite naming the handle draws nothing. Pair with gui/free-texture.
 
     (try (gui/texture 0 {:width 1 :height 1 :rgba [1 2 3]}) (catch e :bad-size))   ;=> :bad-size   ; 1×1 needs 4 bytes"
   ((id image) (texture id (get image :rgba) (get image :width) (get image :height)))
@@ -512,10 +512,10 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
     (%gui-sound id snd rate ch pcm)
     snd))
 
-(defn sound-free (id snd)
+(defn free-sound (id snd)
   "Forget sound snd of window id. Idempotent. Returns nil.
 
-    (try (do (gui/sound-free 0 1) (gui/sound-seconds 1)) (catch e nil))   ;=> nil"
+    (try (do (gui/free-sound 0 1) (gui/sound-seconds 1)) (catch e nil))   ;=> nil"
   (table/delete *sounds* snd)
   (%gui-sound-free id snd))
 
@@ -525,10 +525,10 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
     (try (gui/input :w :pixels) (catch e :bad-id))   ;=> :bad-id   ; a window id is an int"
   (%gui-input! id mode))
 
-(defn texture-free (id tex)
+(defn free-texture (id tex)
   "Release texture tex of window id and forget its size; a later [:sprite …] naming it draws nothing. Idempotent. Returns nil.
 
-    (try (do (gui/texture-free 0 1) (gui/texture-size 1)) (catch e nil))   ;=> nil   ; forgotten, whether or not a window/backend exists"
+    (try (do (gui/free-texture 0 1) (gui/texture-size 1)) (catch e nil))   ;=> nil   ; forgotten, whether or not a window/backend exists"
   (table/delete *textures* tex)
   (%gui-texture-free id tex))
 

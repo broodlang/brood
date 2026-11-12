@@ -254,7 +254,7 @@ fn curated_equality_and_string_sigs() {
             .any(|w| w.contains("string/blank?") && w.contains("string"))
     );
     // String transforms require string args and return strings.
-    for f in ["string/trim", "string/triml", "string/trimr"] {
+    for f in ["string/trim", "string/trim-left", "string/trim-right"] {
         assert!(
             warnings(&format!("({f} 5)"))
                 .iter()

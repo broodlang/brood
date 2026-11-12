@@ -40,7 +40,7 @@ agreed. `buffer-from-file` and `save-buffer` stamp it; `buffer-file-changed?` re
         removed (- (string/length text) (string/length decoded)))
     (if (= removed 0)
       {:text text :eol :lf}
-      (let (rope (text/from-string decoded)
+      (let (rope (text/string-> decoded)
             ;; the line the end is on counts the newlines before it
             newlines (text/char->line rope (text/length rope)))
         (if (= newlines removed) {:text decoded :eol :crlf} {:text text :eol :lf})))))

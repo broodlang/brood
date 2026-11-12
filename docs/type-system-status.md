@@ -40,7 +40,7 @@ below:
   reads the guard's domain.
 - **Names and argument order** (ADR-506, ADR-507, with ADR-308): code in the dated sections
   uses the names and order of its day. `filter` is `seq/filter` and `remove` is `seq/reject`
-  (ADR-330), `sort-by`, `take-while`, `but-last`, `assoc-in`, `update-in` and friends are
+  (ADR-330), `sort-by`, `take-while`, `drop-last`, `assoc-in`, `update-in` and friends are
   qualified, and the collection comes first. A parameter list is a list everywhere (ADR-512).
 - **Removed since:** the KI-17 unrequired-module lint (2026-10-14, see
   [auto-derived-imports.md](auto-derived-imports.md)). **Fixed since:** KI-165, a `deftype`

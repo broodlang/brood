@@ -54,15 +54,23 @@
     (let (a (agent/start (fn () nil)))
       (assert= :ok (agent/stop a)))))
 
-(describe "agent/start-link"
-  (test "start-link returns a pid"
-    (let (a (agent/start-link (fn () 0)))
+(describe "agent/start {:link true}"
+  (test "a linked start returns a pid"
+    (let (a (agent/start (fn () 0) {:link true}))
       (is (pid? a))
       (agent/stop a)))
-  (test "start-link agent behaves like start"
-    (let (a (agent/start-link (fn () 10)))
+  (test "a linked agent behaves like an unlinked one"
+    (let (a (agent/start (fn () 10) {:link true}))
       (assert= 20 (agent/get a (fn (n) (* n 2))))
-      (agent/stop a))))
+      (agent/stop a)))
+  (test "a linked agent's crash reaches its owner"
+    (proc/trap-exit true)
+    (let (a (agent/start (fn () 0) {:link true}))
+      (exit a :boom)
+      (assert= :boom (receive ([:EXIT ^a reason] reason) (after 5000 :no-exit-signal))))
+    (proc/trap-exit false))
+  (test "an unknown option is an error, not ignored"
+    (assert-error "unknown option :linked" (agent/start (fn () 0) {:linked true}))))
 
 (describe "agent with map state"
   (test "counter map"

@@ -23,12 +23,12 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 (def *width* 100)
 ; column budget for the single-line attempt (the built-in default)
 
-;; The effective column budget: a project's manifest `:width` (ambient
+;; The effective column budget: a project's manifest `:format-width` (ambient
 ;; `project/*width*`, set by `setup`) when present, else the built-in
 ;; default. So `nest format` / the LSP / `nest mcp` all honour a project that pins,
-;; say, `:width 80`, and a bare `brood`-run format uses the default.
+;; say, `:format-width 80`, and a bare `brood`-run format uses the default.
 (defn width ()
-  "The effective column budget: the project's `:width` when set, else the built-in default.
+  "The effective column budget: the project's `:format-width` when set, else the built-in default.
 
     (format/width)   ;=> 100   ; the column the formatter wraps at"
   (or project/*width* *width*))
@@ -1089,7 +1089,7 @@ if you are reintroducing hoisting, they are what you have to write back.
     (fn (file)
       (let (parts (path/split (path/relative-to file dir)))
         (and (format-source-file? (path/basename file))
-          (not (any? (seq/but-last parts) format-ignored-dir?)))))))
+          (not (any? (seq/drop-last parts 1) format-ignored-dir?)))))))
 
 ;; The root's OWN .blsp files, non-recursively — `project.blsp` and any top-level
 ;; script. Non-recursive on purpose: descending is exactly what the whitelist is

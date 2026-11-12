@@ -76,7 +76,7 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
 unmodified: `text` is its baseline (`buffer-modified?`).
 
     (editor/buffer/buffer-point (editor/buffer/make-buffer \"hi\"))   ;=> 0"
-  (mark-buffer-saved (buffer (text/from-string text) 0 nil name file () ())))
+  (mark-buffer-saved (buffer (text/string-> text) 0 nil name file () ())))
 
 (defn buffer? (x)
   "True if `x` is a buffer value — by record identity, not by shape.

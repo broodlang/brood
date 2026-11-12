@@ -24,7 +24,7 @@ transformers, and terminals — each transformer adds one green process.
 
   ;; HTTP body line-by-line (with http):
   (let (body-stream (socket-> sock))
-    (for-each (lines body-stream) io/puts))
+    (each (lines body-stream) io/puts))
 
   ;; Lazy integer processing:
   (->list
@@ -506,14 +506,14 @@ Raises on a stream error.
     (stream/->vector (stream/range 0 3))   ;=> [0 1 2]"
   (into [] (->list s)))
 
-(defn for-each (s f)
+(defn each (s f)
   "Apply `f` to each element of `s` for side effects. Returns nil.
 
-    (stream/for-each (stream/range 0 3) (fn (_) nil))   ;=> nil"
+    (stream/each (stream/range 0 3) (fn (_) nil))   ;=> nil"
   (match (next s)
     (:done nil)
-    ([:ok v] (do (f v) (for-each s f)))
-    (failed (error "for-each: " (error-message failed)))))
+    ([:ok v] (do (f v) (each s f)))
+    (failed (error "each: " (error-message failed)))))
 
 (defn count (s)
   "Count the elements in `s`, consuming it.
@@ -538,7 +538,7 @@ then `:stream-eof` when done (or `[:stream-err msg]` + `:stream-eof` on error).
   "Drain stream `s`, writing each chunk to `sock` with `tcp/send`. Returns nil.
 
     (stream/->socket (stream/socket-> upstream) sock)   ;~> nil, once every chunk is written to sock"
-  (for-each s (fn (chunk) (tcp/send sock chunk))))
+  (each s (fn (chunk) (tcp/send sock chunk))))
 
 ;; (restored: this is stream's take-while, not the sequence one)
 (defn take-while (s pred)

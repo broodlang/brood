@@ -14,15 +14,15 @@
   titles and hyperlinks, DCS, charset selection) is consumed. Emacs's `ansi-color` with
   its `ansi-color-context`.
 - [[sgr]] / [[params]] — the SGR attribute fold, `{:fg :bg :bold :dim :italic :underline
-  :underline-style :underline-colour :inverse :strike}`, `:` sub-parameters (`4:3`,
-  `38:2::r:g:b`) read per ECMA-48 / ITU T.416; [[colour]] / [[face]] / [[xterm-palette]] — an attribute as display
+  :underline-style :underline-color :inverse :strike}`, `:` sub-parameters (`4:3`,
+  `38:2::r:g:b`) read per ECMA-48 / ITU T.416; [[color]] / [[face]] / [[xterm-palette]] — an attribute as display
   colours. `vt` (the terminal emulator) uses the same model.
 - [[strip]] — the escapes and carriage returns removed from a whole string.
 - [[render]] — the cursor and erase sequences a line editor emits, applied.")
 
 ;; ---- SGR: the attribute state ------------------------------------------------------------
 ;; An attribute is nil (the default face) or a map of the keys set: `:fg` / `:bg` /
-;; `:underline-colour` a palette index (0–255) or a true colour `[r g b]`, the flags `:bold
+;; `:underline-color` a palette index (0–255) or a true colour `[r g b]`, the flags `:bold
 ;; :dim :italic :underline :inverse :strike`, and `:underline-style` — `:double :curly
 ;; :dotted :dashed` beside `:underline true` (a single underline has no style key). `vt`
 ;; keeps one per cell; the decoder keeps the current one.
@@ -43,7 +43,7 @@
    29 [[:strike nil]]
    39 [[:fg nil]]
    49 [[:bg nil]]
-   59 [[:underline-colour nil]]})
+   59 [[:underline-color nil]]})
 
 (def- underline-styles
   ;; the `4:n` sub-parameter (ITU T.416, as kitty / VTE / iTerm2 read it) -> the pairs it sets
@@ -56,7 +56,7 @@
 
 (def- colour-keys
   ;; the extended-colour parameter -> the key its colour goes to
-  {38 :fg 48 :bg 58 :underline-colour})
+  {38 :fg 48 :bg 58 :underline-color})
 
 (defn- attr-pairs (attr: (or nil map) pairs: (or nil vector) -> (or nil map))
   (fold pairs attr (fn (a kv) (attr-set a (first kv) (second kv)))))
@@ -211,13 +211,13 @@ spelling). A group it does not know changes nothing."
 (defn- cube-level (n:int -> int)
   (if (= n 0) 0 (+ 55 (* n 40))))
 
-(defn colour (c:any palette:vector -> any)
-  "Colour `c` — a palette index or `[r g b]` — as a colour: 0–15 from `palette` (16
+(defn color (c:any palette:vector -> any)
+  "Color `c` — a palette index or `[r g b]` — as a color: 0–15 from `palette` (16
 entries, each `[r g b]` or a hex string), 16–231 the 6×6×6 cube, 232–255 the grey ramp.
 
-    (ansi/colour 1 ansi/xterm-palette)   ;=> [205 0 0]
-    (ansi/colour 196 ansi/xterm-palette)   ;=> [255 0 0]
-    (ansi/colour [1 2 3] ansi/xterm-palette)   ;=> [1 2 3]"
+    (ansi/color 1 ansi/xterm-palette)   ;=> [205 0 0]
+    (ansi/color 196 ansi/xterm-palette)   ;=> [255 0 0]
+    (ansi/color [1 2 3] ansi/xterm-palette)   ;=> [1 2 3]"
   (cond
     (not (int? c)) c
     (< c 16) (nth palette c)
@@ -232,7 +232,7 @@ entries, each `[r g b]` or a hex string), 16–231 the 6×6×6 cube, 232–255 t
   "The SGR `attr` as a display face `{:fg [r g b] :bg … :bold …}`, colours through
 `palette` — `{:colors <16 entries> :fg <default fg> :bg <default bg>}`, the defaults used
 when inverse video needs a colour the text never set (nil: xterm's colours). An
-`:underline-colour` resolves the same way; the other keys (`:underline-style` among them)
+`:underline-color` resolves the same way; the other keys (`:underline-style` among them)
 pass through. Nil for the default face.
 
     (ansi/face {:fg 1 :bold true} nil)   ;=> {:bold true :fg [205 0 0]}
@@ -240,15 +240,15 @@ pass through. Nil for the default face.
   (if (nil? attr)
     nil
     (let (colors (or (:colors palette) xterm-palette)
-          fg (if (nil? (:fg attr)) nil (colour (:fg attr) colors))
-          bg (if (nil? (:bg attr)) nil (colour (:bg attr) colors))
+          fg (if (nil? (:fg attr)) nil (color (:fg attr) colors))
+          bg (if (nil? (:bg attr)) nil (color (:bg attr) colors))
           [fg2 bg2] (if (:inverse attr) [(or bg (:bg palette)) (or fg (:fg palette))] [fg bg])
-          underline (:underline-colour attr)
-          flags (dissoc attr :fg :bg :inverse :underline-colour))
+          underline (:underline-color attr)
+          flags (dissoc attr :fg :bg :inverse :underline-color))
       (attr-pairs flags
         [[:fg fg2]
           [:bg bg2]
-          [:underline-colour (if (nil? underline) nil (colour underline colors))]]))))
+          [:underline-color (if (nil? underline) nil (color underline colors))]]))))
 
 ;; ---- the streaming decoder ---------------------------------------------------------------
 ;; Output arrives in chunks the reader did not choose, so an escape may be cut anywhere:

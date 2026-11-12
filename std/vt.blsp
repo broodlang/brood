@@ -33,7 +33,7 @@ host owns the pty and the scrollback."
 ;; ---- the shape -----------------------------------------------------------------
 ;; A cell is `[grapheme attr]`; `attr` is nil for the default face, else the SGR map
 ;; `{:fg :bg :bold :dim :italic :underline :inverse :strike}` (and the underline's
-;; `:underline-style` / `:underline-colour`, see `ansi/sgr`) with colours as a palette
+;; `:underline-style` / `:underline-color`, see `ansi/sgr`) with colours as a palette
 ;; index (0–255) or an `[r g b]` vector. A wide grapheme's second cell is `["" attr]`.
 ;; The terminal itself is the record below — declared, so the checker knows its cursor
 ;; and bounds are ints wherever the arithmetic reads them.
@@ -699,7 +699,7 @@ near the bottom), blanks enter at the bottom when it grows."
 
 ;; ---- reading the screen back ------------------------------------------------------------------------
 
-;; A cell's attribute becomes a display face through `ansi/face` (and `ansi/colour`,
+;; A cell's attribute becomes a display face through `ansi/face` (and `ansi/color`,
 ;; `ansi/xterm-palette`): the colours are the attribute model's, not the screen's.
 
 (defn- shown-cells (row:row keep:int -> int)

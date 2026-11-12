@@ -1,6 +1,6 @@
 ;; table — the in-memory shared mutable store (ADR-107). A thorough suite:
 ;; put/get/default/overwrite, absent-vs-stored-nil, structural + handle keys, the
-;; key-must-be-data guard, has?/delete/count, atomic table/incr, snapshot
+;; key-must-be-data guard, contains?/delete/count, atomic table/incr, snapshot
 ;; (empty/after-mutation/as-a-real-map), identity equality, drop + use-after-drop on
 ;; every op, table independence, value round-trip (incl. closures + nested data),
 ;; error paths (unsendable value, closure key), and the two that matter most — a
@@ -41,9 +41,9 @@
     (let (t (table/new))
       (table/put t :a nil)
       (assert= (table/get t :a :DEFAULT) nil)
-      (is (table/has? t :a))
+      (is (table/contains? t :a))
       (assert= (table/get t :b :DEFAULT) :DEFAULT)
-      (is (not (table/has? t :b)))))
+      (is (not (table/contains? t :b)))))
 
   (test "false and 0 and empty-string round-trip as values"
     (let (t (table/new))
@@ -67,8 +67,8 @@
       (assert= (table/get t {:a 1}) :map)
       (assert= (table/get t [[1] [2 3]]) :nested)
       ;; a vector key and an equal-looking list key are distinct (Brood = distinguishes)
-      (is (table/has? t [1 2]))
-      (is (table/has? t (list 1 2)))))
+      (is (table/contains? t [1 2]))
+      (is (table/contains? t (list 1 2)))))
 
   (test "scalar key types: int, float, string, keyword, symbol, bool, nil"
     (let (t (table/new))
@@ -102,7 +102,7 @@
       (assert-error (table/put t (fn () 1) :v))
       ;; get/has/delete reject it too (consistent, loud)
       (assert-error (table/get t (fn () 1)))
-      (assert-error (table/has? t (fn () 1)))
+      (assert-error (table/contains? t (fn () 1)))
       (assert-error (table/delete t (fn () 1)))))
 
   (test "NaN cannot be a key (it never equals itself)"
@@ -114,15 +114,15 @@
       (assert-error (table/get t nv))
       (assert-error (table/incr t nv)))))
 
-;; ---- has? / delete / count --------------------------------------------------
-(describe "table: has?/delete/count"
-  (test "has? and delete"
+;; ---- contains? / delete / count ---------------------------------------------
+(describe "table: contains?/delete/count"
+  (test "contains? and delete"
     (let (t (table/new))
       (table/put t :a 1)
-      (is (table/has? t :a))
-      (is (not (table/has? t :b)))
+      (is (table/contains? t :a))
+      (is (not (table/contains? t :b)))
       (table/delete t :a)
-      (is (not (table/has? t :a)))
+      (is (not (table/contains? t :a)))
       (assert= (table/get t :a) nil)))
 
   (test "delete of an absent key is a no-op; delete is idempotent"
@@ -234,7 +234,7 @@
       (table/drop t)
       (assert-error (table/get t :a))
       (assert-error (table/put t :a 1))
-      (assert-error (table/has? t :a))
+      (assert-error (table/contains? t :a))
       (assert-error (table/delete t :a))
       (assert-error (table/incr t :a))
       (assert-error (table/count t))
@@ -392,7 +392,7 @@
   (test "stored nil is present (Empty vs Nil stays exact)"
     (let (t (table/new))
       (table/put t 5 nil)
-      (is (table/has? t 5))
+      (is (table/contains? t 5))
       (assert= (table/get t 5 :dflt) nil)
       (assert= (table/get t 6 :dflt) :dflt)
       (assert= (table/count t) 1)))
@@ -403,7 +403,7 @@
       (assert= (table/count t) 1)
       (table/delete t 3)
       (assert= (table/count t) 0)
-      (is (not (table/has? t 3)))))
+      (is (not (table/contains? t 3)))))
   (test "a string key migrates dense -> hashed with every entry intact"
     (let (t (table/new))
       (fold (range 500) nil (fn (_ i) (table/put t i (* i 2))))

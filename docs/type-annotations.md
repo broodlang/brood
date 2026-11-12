@@ -179,7 +179,7 @@ owner's macro and expanded in the user's module — is a read-modify-write with 
 the parallel cold load (ADR-426) two modules doing it at once each read the old value and one
 write is lost; the write is also missing from the startup image, which carries what loading
 creates (ADR-218). bedit's theme registered every feature's faces this way, and an image built
-in the pool dropped whole modules' worth of them. Use `std/registry` (`registry/put!`: one
+in the pool dropped whole modules' worth of them. Use `std/registry` (`registry/put`: one
 locked write, carried by the image). Read on the EXPANDED forms (the write is the owner's own
 in the macro's template), at load time only (not inside a `fn`), and only for a global that is
 already bound: a fresh name with a slash in it (the linmap rewrite's `fn/linmap-loop__N`) is a

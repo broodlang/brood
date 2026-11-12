@@ -33,15 +33,11 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 ;; sender's context per message). So `break`/`span` just work and nest under the
 ;; parent with no explicit hand-off. Zero cost + fully compiled out when unused
 ;; (`#[cfg(dev-tools)]` slot + primitives). Both accessors are nil-safe.
-(defn tc-debugger ()
-  "The debugger pid in the current process's trace context, or nil.
-
-    (debug/tc-debugger)   ;~> the debugger's pid, or nil outside a debug scope"
+(defn- tc-debugger ()
+  "The debugger pid in the current process's trace context, or nil."
   (get (%trace-context) :debugger))
-(defn tc-span ()
-  "The current span id in this process's trace context, or nil.
-
-    (debug/tc-span)   ;~> the current span id, or nil outside a span"
+(defn- tc-span ()
+  "The current span id in this process's trace context, or nil."
   (get (%trace-context) :span))
 
 ;; Scope a trace context around `thunk`, restoring the previous one even on error —
@@ -180,7 +176,7 @@ named at `break` (`:vals`, which win on a name clash). A step-park has no `:scop
 the traced node's `value`.
 
     (debug/locals-of d 1)   ;~> {:n 7 :acc ()}"
-  (let (entries (vec (get (dbg-state dbg) :paused)))
+  (let (entries (vec (get (debugger-state dbg) :paused)))
     (when (and (>= n 1) (<= n (count entries)))
       (let (snap (second (nth entries (dec n))))
         (merge (or (get snap :scope) {}) (or (get snap :vals) {}))))))
@@ -476,21 +472,21 @@ A name nobody holds is left alone — an untraced name, or one already restored 
   (spawn (span label thunk)))
 
 ;; ---- inspection / control (round-trip queries to the debugger) --------------
-(defn dbg-state (dbg: (or map pid) -> any)
+(defn debugger-state (dbg: (or map pid) -> any)
   "The debugger's full state snapshot: `{:events :paused :seq}`.
 
-    (debug/dbg-state d)   ;~> {:events […] :paused {…} :seq 17}"
+    (debug/debugger-state d)   ;~> {:events […] :paused {…} :seq 17}"
   (let (me (self)) (send dbg [:query me]) (receive ([:state s] s))))
 (defn paused (dbg)
   "The map of currently parked processes: `pid -> snapshot`.
 
     (debug/paused d)   ;~> {<pid> {:label \"checkpoint\" …}}"
-  (get (dbg-state dbg) :paused))
-(defn dbg-events (dbg)
+  (get (debugger-state dbg) :paused))
+(defn debugger-events (dbg)
   "The ordered event log the debugger has collected.
 
-    (debug/dbg-events d)   ;~> the collected events, oldest first"
-  (get (dbg-state dbg) :events))
+    (debug/debugger-events d)   ;~> the collected events, oldest first"
+  (get (debugger-state dbg) :events))
 (defn resume (dbg: (or map pid) pid:any -> nil)
   "Release one parked process.
 
@@ -502,10 +498,10 @@ A name nobody holds is left alone — an untraced name, or one already restored 
 
     (debug/resume-all d)   ;~> how many were parked, e.g. 3"
   (let (me (self)) (send dbg [:resume-all me]) (receive ([:resumed n] n))))
-(defn dbg-stop (dbg: (or map pid) -> :ok)
+(defn stop-debugger (dbg: (or map pid) -> :ok)
   "Stop the debugger process.
 
-    (debug/dbg-stop d)   ;~> :ok"
+    (debug/stop-debugger d)   ;~> :ok"
   (let (me (self)) (send dbg [:stop me]) (receive ([:stopped] :ok))))
 
 ;; ---- aggregate / statistical querying (debug the population, not one hit) ----
@@ -516,7 +512,7 @@ A name nobody holds is left alone — an untraced name, or one already restored 
   "The raw `:trace` events the debugger collected (each `{:pid :entry :seq …}`).
 
     (debug/trace-entries d)   ;~> ({:pid <pid> :entry {:spy :call …} :seq 4} …)"
-  (seq/filter (dbg-events dbg) (fn (e) (= (get e :kind) :trace))))
+  (seq/filter (debugger-events dbg) (fn (e) (= (get e :kind) :trace))))
 
 (defn observations (dbg)
   "Every `spy` node observation, flattened to `{:pid :form :value}`.
@@ -568,7 +564,7 @@ list of root nodes, each `{:span :label :pid :value :children [...]}`. A span st
 running shows `:value :running`.
 
     (debug/causal-tree d)   ;~> ({:span 1 :label \"req\" :pid <pid> :value :ok :children […]})"
-  (let (events (dbg-events dbg)
+  (let (events (debugger-events dbg)
         enters (seq/filter events (fn (e) (= (get e :kind) :span-enter)))
         exits (seq/filter events (fn (e) (= (get e :kind) :span-exit)))
         value-of (fn (id)
@@ -607,7 +603,7 @@ running shows `:value :running`.
 cross-process causal tree, and the hottest traced forms. Rendered by both the
 `io/puts`-based `report` (cooked mode) and the cursor-positioned `attach`
 (raw mode, where `\\n` would not return to column 0)."
-  (let (state (dbg-state dbg))
+  (let (state (debugger-state dbg))
     (append (cons "── parked processes ──"
               (map (get state :paused)
                 (fn (entry)
@@ -733,7 +729,7 @@ the Nth if a number is given (`,resume 2`). No-op note when no session is active
       (let (r (string/trim rest))
         (if (= r "")
           (io/puts (str "resumed " (resume-all dbg) " parked"))
-          (let (entries (vec (get (dbg-state dbg) :paused)))
+          (let (entries (vec (get (debugger-state dbg) :paused)))
             ;; check-allow :discarded-catch — best-effort over user-typed input, or a name that was never traced
             (io/puts (debug-resume-nth dbg
                        entries
@@ -745,7 +741,7 @@ under `step`/`stepping-sink` it re-parks at the next node). Note when nothing is
   (let (dbg debug/*session*)
     (if (nil? dbg)
       (io/puts "\e[90m(no active debug session)\e[0m")
-      (let (entries (vec (get (dbg-state dbg) :paused)))
+      (let (entries (vec (get (debugger-state dbg) :paused)))
         (if (empty? entries)
           (io/puts "\e[90m(nothing parked)\e[0m")
           (do
@@ -779,7 +775,7 @@ re-implementation; it registers the `,resume`/`,step` commands via the REPL regi
 ;; A TYPING interface (cooked mode — no raw terminal, works even piped): prints the
 ;; state, then a `debug>` prompt. Line commands:
 ;;   <Enter>  refresh      r    resume ALL parked     r N   resume the Nth parked
-;;   q        quit         (any Brood expr) evaluate it — e.g. (debug/dbg-events d)
+;;   q        quit         (any Brood expr) evaluate it — e.g. (debug/debugger-events d)
 (defn- debug-numbered (entries)
   (letrec (go (fn (es i acc)
                 (if (empty? es)
@@ -807,7 +803,7 @@ Enter refresh, `q` quit, or any Brood expression to evaluate. Cooked mode, so it
 no raw-terminal setup and works when piped.
 
     (debug/repl-session d)   ;~> a cooked prompt; `r` resumes, `q` quits"
-  (let (entries (vec (get (dbg-state dbg) :paused)))
+  (let (entries (vec (get (debugger-state dbg) :paused)))
     (io/puts "── parked processes ──")
     (doseq (line (debug-numbered entries)) (io/puts line))
     (doseq (line (cons "── causal tree ──" (causal-lines (causal-tree dbg) 0))) (io/puts line))

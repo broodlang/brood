@@ -599,23 +599,23 @@ the test rather than hanging the run.
     `(check-property-run ~n ~gen ~pred (quote ~loc) ~(if (empty? options) {} (first options)))))
 
 ;; --- small text/list helpers for the trace and slow-test output --------------
-(defn opt? (flag opts)
+(defn option? (flag opts)
   "True if the boolean flag `flag` is present anywhere in the `run-tests` option list `opts` (e.g. `:trace`).
 
-    (test/opt? :trace '(:slow :trace))   ;=> true
-    (test/opt? :trace '(:timeout 5000))   ;=> false"
+    (test/option? :trace '(:slow :trace))   ;=> true
+    (test/option? :trace '(:timeout 5000))   ;=> false"
   (includes? opts flag))
 
-(defn opt-val (key opts default)
+(defn option-value (key opts default)
   "The value following `key` in the `run-tests` option list `opts` (e.g. `5000` for `:timeout 5000`), or `default` when `key` is absent.
 
-    (test/opt-val :timeout '(:trace :timeout 5000) 1000)   ;=> 5000
-    (test/opt-val :timeout '(:trace) 1000)   ;=> 1000"
+    (test/option-value :timeout '(:trace :timeout 5000) 1000)   ;=> 5000
+    (test/option-value :timeout '(:trace) 1000)   ;=> 1000"
   ; the value following `key` in the run-tests args (e.g. `:timeout 5000`), or default.
   (cond
     (empty? opts) default
     (= key (first opts)) (second opts)
-    else (opt-val key (rest opts) default)))
+    else (option-value key (rest opts) default)))
 
 ;; --- the verdict of a red run -------------------------------------------------
 ;; A run that fails raises a structured verdict rather than a sentence, so a caller (`nest
@@ -642,45 +642,49 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; A result is (group name fails ms): `fails` is the list of failure records for
 ;; that test (empty = passed). A failure record is (loc detail-lines); `loc` is
 ;; (file line col) or nil, captured per-assertion (see `fail-loc`).
-(defn r-group (r)
+(defn result-group (r)
   "The group (describe) name of a result tuple `(group name fails ms …)`, or \"\" when ungrouped.
 
-    (test/r-group '(\"math\" \"adds\" () 3))   ;=> \"math\""
+    (test/result-group '(\"math\" \"adds\" () 3))   ;=> \"math\""
   (first r))
-(defn r-name (r)
+(defn result-name (r)
   "The test name of a result tuple `(group name fails ms …)`.
 
-    (test/r-name '(\"math\" \"adds\" () 3))   ;=> \"adds\""
+    (test/result-name '(\"math\" \"adds\" () 3))   ;=> \"adds\""
   (second r))
-(defn r-fails (r)
+(defn result-fails (r)
   "The list of failure records for a result — empty means the test passed. Each record is `(loc detail-lines)`.
 
-    (test/r-fails '(\"math\" \"adds\" ((nil (\"boom\"))) 3))   ;=> ((nil (\"boom\")))"
+    (test/result-fails '(\"math\" \"adds\" ((nil (\"boom\"))) 3))   ;=> ((nil (\"boom\")))"
   (third r))
-(defn- r-ms (r) (nth r 3))
-(defn r-failed? (r)
-  "True if the result has at least one failed assertion (a non-empty `r-fails`).
+(defn result-ms (r)
+  "How long the test took, in milliseconds (the result's 4th field).
 
-    (test/r-failed? '(\"math\" \"adds\" ((nil (\"boom\"))) 3))   ;=> true
-    (test/r-failed? '(\"math\" \"adds\" () 3))   ;=> false"
-  (not (empty? (r-fails r))))
+    (test/result-ms '(\"math\" \"adds\" () 3))   ;=> 3"
+  (nth r 3))
+(defn result-failed? (r)
+  "True if the result has at least one failed assertion (a non-empty `result-fails`).
+
+    (test/result-failed? '(\"math\" \"adds\" ((nil (\"boom\"))) 3))   ;=> true
+    (test/result-failed? '(\"math\" \"adds\" () 3))   ;=> false"
+  (not (empty? (result-fails r))))
 ;; Read defensively: results synthesised elsewhere (a dead or timed-out worker) are
 ;; 4-element tuples, and those are never skips.
-(defn r-skipped? (r)
+(defn result-skipped? (r)
   "True if the result is a skipped test — its 5th field is `true`. Read defensively: a 4-element result (a dead or timed-out worker) is never a skip.
 
-    (test/r-skipped? '(\"math\" \"adds\" () 0 true))   ;=> true
-    (test/r-skipped? '(\"math\" \"adds\" () 3))   ;=> false"
+    (test/result-skipped? '(\"math\" \"adds\" () 0 true))   ;=> true
+    (test/result-skipped? '(\"math\" \"adds\" () 3))   ;=> false"
   (and (> (count r) 4) (= (nth r 4) true)))
 ;; Where the test was declared, as `file:line`, or "" when the position wasn't
 ;; recorded (a body whose first form is a bare literal carries no position).
-(defn r-where (r)
+(defn result-where (r)
   "Where the test was declared, as `file:line` (the result's 6th field), or \"\" when no position was recorded.
 
-    (test/r-where '(\"math\" \"adds\" () 3 false \"tests/m_test.blsp:4\"))   ;=> \"tests/m_test.blsp:4\"
-    (test/r-where '(\"math\" \"adds\" () 3))   ;=> \"\""
+    (test/result-where '(\"math\" \"adds\" () 3 false \"tests/m_test.blsp:4\"))   ;=> \"tests/m_test.blsp:4\"
+    (test/result-where '(\"math\" \"adds\" () 3))   ;=> \"\""
   (if (> (count r) 5) (or (nth r 5) "") ""))
-(defn- full-name (r) (label (r-group r) (r-name r)))
+(defn- full-name (r) (label (result-group r) (result-name r)))
 
 ;; The seed for this run, or nil. Read straight off the active filter so the
 ;; file-order shuffle below and the unit-order shuffle above can't disagree.
@@ -744,24 +748,24 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
                (trace-label r)
                "  "
                (test-dim (trace-timing r))
-               (if (= (r-where r) "") "" (str "  " (test-dim (r-where r))))
+               (if (= (result-where r) "") "" (str "  " (test-dim (result-where r))))
                (trace-failure-count r))))
   r)
 
 (defn- trace-glyph (r)
   (cond
-    (r-skipped? r) (test-orange "○")
-    (r-failed? r) (test-red "✗")
+    (result-skipped? r) (test-orange "○")
+    (result-failed? r) (test-red "✗")
     else (test-green "✓")))
 
 ;; The group is dimmed so the test's own name is what stands out in a long run.
 (defn- trace-label (r)
-  (str (if (= (r-group r) "") "" (test-dim (str (r-group r) " › "))) (r-name r)))
+  (str (if (= (result-group r) "") "" (test-dim (str (result-group r) " › "))) (result-name r)))
 
-(defn- trace-timing (r) (if (r-skipped? r) "skipped" (str (r-ms r) "ms")))
+(defn- trace-timing (r) (if (result-skipped? r) "skipped" (str (result-ms r) "ms")))
 
 (defn- trace-failure-count (r)
-  (let (n (count (r-fails r)))
+  (let (n (count (result-fails r)))
     (cond
       (= n 0) ""
       (= n 1) (test-red "  (1 failure)")
@@ -816,8 +820,8 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
       nil
       (fn (_ r)
         (io/write (cond
-                    (r-skipped? r) (test-orange "○")
-                    (r-failed? r) (test-red "F")
+                    (result-skipped? r) (test-orange "○")
+                    (result-failed? r) (test-red "F")
                     else (test-green ".")))))))
 
 ;; Run one (name thunk) and produce its result (group name fails ms). The thunk
@@ -1412,7 +1416,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 
     (test/run-tests-scoped (map files (fn (f) (fn () (reflect/load f)))))   ;~> the summary printed; raises when any test failed"
   (test-apply-opts opts)
-  (test-repeat (opt-val :repeat opts 1) (fn () (run-tests-scoped-pass loaders opts))))
+  (test-repeat (option-value :repeat opts 1) (fn () (run-tests-scoped-pass loaders opts))))
 
 ;; One pass of a scoped (file-by-file) suite. Split out so `:repeat` can re-run
 ;; it — each pass re-`reflect/load`s every file in its own rolled-back scope, so a
@@ -1464,7 +1468,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; only `test failed: group › name` with nothing to jump to; it now falls back to the
 ;; test's own declaration site, which the result carries.
 (defn fail-where (r failure-record)
-  "Where a failure occurred, as `file:line:col` relative to the working directory. Uses the failure record `rec`'s own captured position when it has one; otherwise falls back to result `r`'s declaration site (`r-where`), and \"\" only when neither is known.
+  "Where a failure occurred, as `file:line:col` relative to the working directory. Uses the failure record `rec`'s own captured position when it has one; otherwise falls back to result `r`'s declaration site (`result-where`), and \"\" only when neither is known.
 
     (test/fail-where '(\"g\" \"a\" () 1 false \"tests/m_test.blsp:4\") '(nil (\"x\")))   ;=> \"tests/m_test.blsp:4\""
   (let (loc (fail-loc-of failure-record))
@@ -1472,14 +1476,14 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
       loc (str (test-relative-path (first loc)) ":" (second loc) ":" (third loc))
       ;; No per-assertion position (a body form the reader recorded no position for) —
       ;; point at the test instead of nowhere.
-      (not (= (r-where r) "")) (r-where r)
+      (not (= (result-where r) "")) (result-where r)
       else "")))
 
 ;; Print every failure of a result: a blank line, the anchor, then its fields
 ;; indented. The leading blank separates consecutive failures, which otherwise run
 ;; together into a wall that is hard to scan.
 (defn- print-failure (indent r)
-  (fold (r-fails r)
+  (fold (result-fails r)
     nil
     (fn (_ failure-record)
       (io/puts "")
@@ -1500,13 +1504,13 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; Emit one editor-parseable block per failed assertion. There is a single
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
 (defn- report-failures (results)
-  (let (failed (seq/filter results r-failed?))
+  (let (failed (seq/filter results result-failed?))
     (when (not (empty? failed)) (fold failed nil (fn (_ r) (print-failure "    " r))))))
 
 (defn- report-slow (results n)
   (io/puts "")
   (io/puts (str "Slowest " n " tests:"))
-  (let (timings (map results (fn (r) [(full-name r) (r-ms r)])))
+  (let (timings (map results (fn (r) [(full-name r) (result-ms r)])))
     (fold (take (sort-by-ms timings) n)
       nil
       (fn (_ entry)
@@ -1525,7 +1529,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;; nothing when every test is under the threshold — the common, fast case stays
 ;; quiet.
 (defn- report-slow-over (results over)
-  (let (slow (seq/filter (map results (fn (r) [(full-name r) (r-ms r)]))
+  (let (slow (seq/filter (map results (fn (r) [(full-name r) (result-ms r)]))
                (fn (p) (> (second p) over))))
     (when (not (empty? slow))
       (io/puts "")
@@ -1540,16 +1544,16 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 
     (test/count-failed '((\"g\" \"a\" () 1) (\"g\" \"b\" ((nil (\"x\"))) 1)))   ;=> 1"
   ; tests with at least one failed assertion
-  (fold results 0 (fn (acc r) (if (r-failed? r) (+ acc 1) acc))))
+  (fold results 0 (fn (acc r) (if (result-failed? r) (+ acc 1) acc))))
 (defn count-skipped (results:seqable -> int)
   "Count the results in `results` that were skipped — registered with `:skip` but never run.
 
     (test/count-skipped '((\"g\" \"a\" () 0 true) (\"g\" \"b\" () 1)))   ;=> 1"
   ; tests that registered but were never run (`:skip`)
-  (fold results 0 (fn (acc r) (if (r-skipped? r) (+ acc 1) acc))))
+  (fold results 0 (fn (acc r) (if (result-skipped? r) (+ acc 1) acc))))
 (defn- count-failures (results)
   ; total failed assertions across tests
-  (fold results 0 (fn (acc r) (+ acc (count (r-fails r))))))
+  (fold results 0 (fn (acc r) (+ acc (count (result-fails r))))))
 
 ;; --- entry point -------------------------------------------------------------
 ;; Every entry point takes the same option plist, so `nest test`'s flags mean the
@@ -1567,22 +1571,22 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
 ;;   :repeat N        run the suite up to N times, stopping at the first failure
 ;;                                               (mix --repeat-until-failure)
 (defn- test-apply-opts (opts)
-  (def test/*timeout-ms* (opt-val :timeout opts test/*timeout-ms*))
-  (def *test-slow-ms* (opt-val :slow-over opts *test-slow-ms*))
+  (def test/*timeout-ms* (option-value :timeout opts test/*timeout-ms*))
+  (def *test-slow-ms* (option-value :slow-over opts *test-slow-ms*))
   ;; `BROOD_TEST_TRACE` arms `--trace` from the environment, for a runner nobody passes
   ;; flags to: the nextest wrapper (`crates/lisp/tests/suite.rs`) prints only progress marks,
   ;; so a run killed at its cap has never named the tests that failed (KI-120). Under trace
   ;; each result is a line as it lands, which survives the kill.
-  (def test/*trace* (or (opt? :trace opts) (not (nil? (os/env "BROOD_TEST_TRACE")))))
-  (def *test-formatter* (opt-val :formatter opts nil))
-  (def test/*filter* (opt-val :filter opts nil))
-  (def test/*max-failures* (opt-val :max-failures opts 0)))
+  (def test/*trace* (or (option? :trace opts) (not (nil? (os/env "BROOD_TEST_TRACE")))))
+  (def *test-formatter* (option-value :formatter opts nil))
+  (def test/*filter* (option-value :filter opts nil))
+  (def test/*max-failures* (option-value :max-failures opts 0)))
 
 ;; How many slowest tests to list: `:slowest N`, or 5 for the legacy `:slow`
 ;; flag, else nil (list none). `:slowest 0` is nil too — otherwise the reporter
 ;; printed a "Slowest 0 tests:" heading with nothing under it.
 (defn- test-slowest-n (opts)
-  (let (n (opt-val :slowest opts (if (opt? :slow opts) 5 nil)))
+  (let (n (option-value :slowest opts (if (option? :slow opts) 5 nil)))
     (if (and (not (nil? n)) (> n 0)) n nil)))
 
 ;; Run one pass thunk up to `n` times, stopping at the first failing pass. A pass
@@ -1623,10 +1627,10 @@ order (deterministic — the results are already collected)."
   (fold results
     0
     (fn (i r)
-      (let (status (if (r-failed? r) "not ok" "ok"))
-        (io/puts (str status " " (+ i 1) " - " (full-name r) (if (r-skipped? r) " # SKIP" "")))
-        (when (r-failed? r)
-          (fold (r-fails r)
+      (let (status (if (result-failed? r) "not ok" "ok"))
+        (io/puts (str status " " (+ i 1) " - " (full-name r) (if (result-skipped? r) " # SKIP" "")))
+        (when (result-failed? r)
+          (fold (result-fails r)
             nil
             (fn (_ failure-record)
               (fold (fail-lines-of failure-record) nil (fn (_ line) (io/puts (str "# " line)))))))
@@ -1636,12 +1640,12 @@ order (deterministic — the results are already collected)."
 (defn- test-result->data (result)
   "One result as a JSON-ready map. Every list field defaults to `[]`, never nil, so it
 renders as JSON `[]` rather than `null`."
-  {:group (r-group result)
-   :name (r-name result)
-   :passed (not (r-failed? result))
-   :skipped (r-skipped? result)
-   :ms (r-ms result)
-   :failures (or (map (r-fails result)
+  {:group (result-group result)
+   :name (result-name result)
+   :passed (not (result-failed? result))
+   :skipped (result-skipped? result)
+   :ms (result-ms result)
+   :failures (or (map (result-fails result)
                    (fn (record) {:loc (fail-loc-of record) :details (fail-lines-of record)}))
                [])})
 
@@ -1687,7 +1691,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
 (defn- test-report-pass (results elapsed opts extra)
   ;; `--failed` tracking happens on every path (the interesting run is the failing one).
   (def test/*last-ran* (map results full-name))
-  (def test/*last-failed* (map (seq/filter results r-failed?) full-name))
+  (def test/*last-failed* (map (seq/filter results result-failed?) full-name))
   (if *test-formatter*
     (test-report-formatted results elapsed)
     (test-report-human results elapsed opts extra)))
@@ -1791,7 +1795,7 @@ read the un-imaged path as evidence about the imaged one."
   ;; Option overrides are global rebinds — the spawned driver reads them from the
   ;; shared table.
   (test-apply-opts opts)
-  (test-repeat (opt-val :repeat opts 1) (fn () (run-tests-pass opts))))
+  (test-repeat (option-value :repeat opts 1) (fn () (run-tests-pass opts))))
 
 ;; One pass of the registered suite: select, drain, report, raise. Split out of
 ;; `run-tests` so `:repeat` can run it more than once.

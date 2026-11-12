@@ -51,7 +51,7 @@
     "{:hot 10 :other 3}" "{0 1.5 :hot 2.5}" "{1 \"s\"}" "{:hot 9223372036854775807}"
     "{2 100000000000000000000}" "{:hot -9223372036854775808}"
     ;; seeds a table cannot stand in for: the wrapper must run the loop as written
-    "{:r (text/from-string \"x\") :hot 1}" "{:f string/length}"
+    "{:r (text/string-> \"x\") :hot 1}" "{:f string/length}"
     "{:v (seq/lmap (list 0 1 2) inc) :hot 2}" "(lm-rec 5)"])
 
 (def base-cases ["m" "(get m :hot :none)" "(count m)" "(get m 0)"])

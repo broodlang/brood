@@ -37,7 +37,7 @@ fn fixture(tag: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         dir.join("src/regs.blsp"),
-        "(defmodule regs)\n(def here true)\n(registry/put! :pl/hooks :a 1)\n(registry/put! :pl/hooks :b 2)\n",
+        "(defmodule regs)\n(def here true)\n(registry/put :pl/hooks :a 1)\n(registry/put :pl/hooks :b 2)\n",
     )
     .unwrap();
     std::fs::write(dir.join("src/loose.blsp"), "(def loose-k 7)\n").unwrap();

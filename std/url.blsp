@@ -10,7 +10,7 @@
     (url/percent-decode \"hello%20world\") ;; => \"hello world\"
     (url/query-encode {:q \"hello world\" :n \"42\"}) ;; => \"n=42&q=hello+world\"
     (url/query-decode \"q=hello+world&n=42\") ;; => {\"q\" \"hello world\" \"n\" \"42\"}
-    (url/parse-url \"https://example.com:8080/path?q=1#frag\")
+    (url/parse \"https://example.com:8080/path?q=1#frag\")
     ;; => {:scheme \"https\" :host \"example.com\" :port 8080 :path \"/path\"
     ;;     :query \"q=1\" :fragment \"frag\"}
     (url/build {:scheme \"https\" :host \"example.com\" :path \"/search\"
@@ -141,7 +141,7 @@ invalid %XX sequence (the failure propagates rather than landing in the map).
 
 ;; ---- URL parsing ------------------------------------------------------------
 ;;
-;; parse-url returns {:scheme :host :port :path :query :fragment}
+;; parse returns {:scheme :host :port :path :query :fragment}
 ;; port is an integer when present in the URL, nil otherwise.
 
 (defn- url-split-first (s sep)
@@ -219,7 +219,7 @@ header and a `build` round-trip both need); `:userinfo` is nil when absent and
         [host port-str] (url-authority-split hostport))
     {:userinfo userinfo :host host :port (url-parse-port port-str)}))
 
-(defn parse-url (s)
+(defn parse (s)
   "Parse URL string `s` into a map
 `{:scheme :userinfo :host :port :path :query :fragment}`.
 `:port` is an integer when present, nil otherwise (an unparseable one **raises**,
@@ -232,8 +232,8 @@ the `@`, or nil — it is **not** part of `:host`, so an allow-list or SSRF chec
 `//host/path`, which has a host and no scheme. A scheme is recognised only when it is
 well-formed (a letter, then letters, digits, `+`, `-`, `.`), so `/r/https://x/` is a path.
 
-    (:host (url/parse-url \"//evil.com/x\"))           ;=> \"evil.com\"
-    (:scheme (url/parse-url \"/r/https://evil.com/\"))  ;=> nil"
+    (:host (url/parse \"//evil.com/x\"))           ;=> \"evil.com\"
+    (:scheme (url/parse \"/r/https://evil.com/\"))  ;=> nil"
   ;; 1. strip fragment
   (let (frag-split (url-split-first s "#")
         before-frag (if frag-split (first frag-split) s)
@@ -277,7 +277,7 @@ well-formed (a letter, then letters, digits, `+`, `-`, `.`), so `/r/https://x/` 
 `{:scheme :userinfo :host :port :path :query-params :query :fragment}`.
 `:query-params` is a map encoded via `query-encode`; `:query` is a raw query string
 (used only when `:query-params` is absent). `:userinfo`, `:port` and `:fragment` are
-optional — `:userinfo` is emitted as `userinfo@` before the host, so a `parse-url`
+optional — `:userinfo` is emitted as `userinfo@` before the host, so a `parse`
 round-trip is lossless.
 
     (url/build {:scheme \"https\" :host \"example.com\" :path \"/a\" :query-params {:q \"x y\"}})   ;=> \"https://example.com/a?q=x+y\"

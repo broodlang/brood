@@ -53,7 +53,7 @@
     (assert= *calls* 2))
   :isolated (test "the same rope is a hit; a rope made by an edit is not"
     (def *calls* 0)
-    (let (rope (text/from-string "abc")
+    (let (rope (text/string-> "abc")
           edited (text/insert rope 3 "d"))
       (text-length rope)
       (text-length rope)

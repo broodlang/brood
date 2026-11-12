@@ -1111,7 +1111,7 @@ A runtime crash is a bug to report, not to work around:
    - `BROOD_GC_VERIFY=1` — walk the live graph before each collection; names a stale
      handle and the cell that holds it.
    - `BROOD_TIER=1` (no JIT) / `BROOD_TIER=0` (tree-walker) — which execution tier.
-   - `BROOD_J=1` (one scheduler worker) or `nest test --jobs 1` (at most one spawned
+   - `BROOD_J=1` (one scheduler worker) or `nest test --max-parallel 1` (at most one spawned
      process running at a time) — rules the scheduler in or out.
 4. **File it** with the repro, the dump block and which knobs change the verdict.
 
@@ -1145,7 +1145,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `(defmemo rows-of 8 (rope width) …)`: a `defn` that remembers its last N calls compared
   by `=` — bounded, and immediate for the same big value: each process keeps its store
   uncopied, so the caller's own vector or map hits by identity, ADR-670) ·
-  `registry` for tables your modules fill as they load (`(registry/put! :app/hooks :save
+  `registry` for tables your modules fill as they load (`(registry/put :app/hooks :save
   'app/on-save)`, read with `registry/entries` / `registry/lookup` / `registry/ranked` — by an
   entry's `:rank`): atomic across processes and carried by the image, which a `defonce` + `def`
   table is not. Store hooks as symbols and call them with `(reflect/call-if-bound sym
@@ -1168,8 +1168,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **string**: the string surface lives in the `string` module (ADR-230), so these are
   **`string/`-qualified** unless listed as bare below: `string/length`
   `string/substring` `string/char-at` (returns a 1-char *string* — Brood has no char
-  type) `string/split` `string/join` `string/replace` `string/trim` `string/triml`
-  `string/trimr` `string/blank?` `string/upper` `string/lower`
+  type) `string/split` `string/join` `string/replace` `string/trim` `string/trim-left`
+  `string/trim-right` `string/blank?` `string/upper` `string/lower`
   `string/starts-with?` `string/ends-with?` `string/->list` `string/list->`
   `string/->bytes` `string/bytes->`.
   **Bare (core, not in the module):** `str` `pr-str` `index-of` `includes?`

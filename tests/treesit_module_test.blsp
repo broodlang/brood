@@ -168,7 +168,7 @@
         (every? (range (count lines))
           (fn (i)
             (let (line (nth lines i "")
-                  want (- (string/length line) (string/length (string/triml line))))
+                  want (- (string/length line) (string/length (string/trim-left line))))
               (or (= (string/trim line) "")
                 ; blank lines carry no claim
                 (= want (editor/treesit/indent-column text :elixir (ts-bol text i) spec))))))))
@@ -214,7 +214,7 @@
         (is (every? (range (count lines))
               (fn (i)
                 (let (line (nth lines i "")
-                      want (- (string/length line) (string/length (string/triml line))))
+                      want (- (string/length line) (string/length (string/trim-left line))))
                   (or (= (string/trim line) "")
                     (= want (editor/treesit/indent-column rb :ruby (ts-bol rb i) spec)))))))))
 
@@ -278,7 +278,7 @@
         (fn (p) (= (motion ts-held-src :elixir p) (motion ts-held-src :elixir p tree)))))
 
     (test "every motion over the tree agrees with the text query at every offset"
-      (let (tree (editor/treesit/open-tree (text/from-string ts-held-src) :elixir))
+      (let (tree (editor/treesit/open-tree (text/string-> ts-held-src) :elixir))
         (is (ts-held-agrees? editor/treesit/point-forward tree))
         (is (ts-held-agrees? editor/treesit/point-backward tree))
         (is (ts-held-agrees? editor/treesit/point-list-forward tree))
@@ -309,7 +309,7 @@
       "defmodule A do\n  # héllo — ünïcode\n\n  def f(x) do\n    g(x,\n      1)\n  end\nend\n")
 
     (test "indent-column over a rope agrees with the string on every line"
-      (let (rope (text/from-string ts-rope-src)
+      (let (rope (text/string-> ts-rope-src)
             tree (editor/treesit/open-tree rope :elixir)
             spec {:width 2 :blocks #{:do_block :body} :dedent #{"end"} :brackets #{:arguments}}
             starts (cons 0
@@ -323,7 +323,7 @@
         (editor/treesit/free-tree tree)))
 
     (test "every motion over a rope agrees with the string at every offset"
-      (let (rope (text/from-string ts-rope-src)
+      (let (rope (text/string-> ts-rope-src)
             tree (editor/treesit/open-tree rope :elixir)
             agrees? (fn (motion)
                       (every? (range (inc (string/length ts-rope-src)))
@@ -795,7 +795,7 @@
         [[0 3 :c] [4 21 :s]]))
 
     (test "a rope answers as the string does, and ranges are sorted and merged"
-      (assert= (%tree-sitter-range-spans (text/from-string tsm-split)
+      (assert= (%tree-sitter-range-spans (text/string-> tsm-split)
                  :ruby [[12 17] [0 8] [2 5]]
                  {:string :s}
                  true)

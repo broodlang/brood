@@ -1720,7 +1720,7 @@ fn every_inlinable_head_still_reaches_its_primitive() {
         ("%vector-ref", PrimOp::VectorRef),
         ("get", PrimOp::MapGet),
         ("table/get", PrimOp::TableGet),
-        ("table/has?", PrimOp::TableHas),
+        ("table/contains?", PrimOp::TableHas),
     ] {
         assert_eq!(
             resolve_prim(&interp.heap, value::intern(head)).map(|(op, _)| op),

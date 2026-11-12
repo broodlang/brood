@@ -83,10 +83,10 @@ full budget still yields the failing value, while a merely slow one is forgiven.
   (test "empty stream returns init"
     (assert= 99 (stream/fold (stream/empty) 99 +))))
 
-(describe "for-each"
+(describe "each"
   (test "side effects in order"
     (let (me (self))
-      (stream/for-each (stream/list-> [1 2 3]) (fn (x) (send me x)))
+      (stream/each (stream/list-> [1 2 3]) (fn (x) (send me x)))
       (assert= 1 (receive))
       (assert= 2 (receive))
       (assert= 3 (receive)))))

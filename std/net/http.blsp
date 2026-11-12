@@ -545,9 +545,9 @@ loopback interface.
   (includes? *http-loopback-hosts* (string/lower (http-host-name (or hostport "")))))
 
 (defn- http-loopback-origin? (origin)
-  ;; check-allow :discarded-catch — `parse-url` raises on a malformed authority
+  ;; check-allow :discarded-catch — `url/parse` raises on a malformed authority
   ;; (`http://[bad`), and an origin that does not parse is simply not a loopback one
-  (let (u (check-allow :discarded-catch (try (url/parse-url origin) (catch _ nil))))
+  (let (u (check-allow :discarded-catch (try (url/parse origin) (catch _ nil))))
     (and (map? u)
       (includes? ["http" "https"] (/get u :scheme))
       (includes? *http-loopback-hosts* (string/lower (or (/get u :host) ""))))))
@@ -680,7 +680,7 @@ socket is registered *passive* (no reader until the worker calls
 (defn parse-url (url)
   "Parse `url` into {:scheme :host :port :path} with HTTP defaults applied: scheme
 http, port 80/443 by scheme, path \"/\". The RFC-3986 parsing itself lives in one
-place — `url/parse-url` (the full parser); a scheme-less input is treated as an
+place — `url/parse` (the full parser); a scheme-less input is treated as an
 `http://` authority so a bare `host[:port]/path` still parses as a host, and a
 network-path reference `//host/path` takes the scheme alone.
 
@@ -689,7 +689,7 @@ network-path reference `//host/path` takes the scheme alone.
                       (>= (index-of url "://") 0) url
                       (string/starts-with? url "//") (str "http:" url)
                       else (str "http://" url))
-        u (url/parse-url with-scheme)
+        u (url/parse with-scheme)
         scheme (or (/get u :scheme) "http")
         path (let (p (/get u :path)) (if (or (nil? p) (= p "")) "/" p))
         port (or (/get u :port) (if (= scheme "https") 443 80)))

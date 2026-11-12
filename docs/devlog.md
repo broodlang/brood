@@ -1487,3 +1487,14 @@ swapped in their inlined bodies, and now do. `make ab` reads `json` +5% because 
 row to one CPU, where the background compiler now builds those three upgrades. The worker
 thread runs about 3% fewer instructions, and unpinned the row is 0.4% faster. `make ab-vm` is
 flat.
+2026-11-12 (ADR-716, road-to-1.0 §F). The surface pass's first batch: about 40 public names that
+broke a rule an earlier ADR set are renamed or removed, each one ledgered. Breaks: conversions
+take the arrow (`text/string->`, `path/->file-uri`), bangs go from names that do not raise
+(`registry/put`), aliases go (`agent/start-link` for `{:link true}`, `delete-buffer`,
+`io/fn-port`, `seq/but-last`, `nest --jobs`, `nest test --doc`), and pairs are spelled alike
+(`trim-left`, `free-texture`, `stop-debugger`, `table/contains?`, `stream/each`, `--out`,
+`:format-width`, `ansi/color`). Two bugs surfaced on the way: `eval-server` and bedit called
+the private `test/r-ms` by its qualified name (now the public `test/result-ms`), and the new
+`agent/start` option read `(get options :link)` inside a module where `get` is `agent/get`,
+which sent a message to the options map. agent_test caught it, and the `:link` test fails with
+the option ignored.

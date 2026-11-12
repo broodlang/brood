@@ -25,9 +25,9 @@
       (with-out (process-port me) (io/write "a" "b" 42))
       (assert= (receive ([:write s] s) (after test/*wait-ms* :timeout)) "a b 42")))
 
-  (test "fn-port hands each written string to a callback"
+  (test "a bare fn is a port: it is handed each written string"
     (let (me (self))
-      (with-out (fn-port (fn (s) (send me [:write s]))) (io/puts "cb"))
+      (with-out (fn (s) (send me [:write s])) (io/puts "cb"))
       (assert= (receive ([:write s] s) (after test/*wait-ms* :timeout)) "cb\n")))
 
   (test "write writes a string straight to a port"
@@ -84,15 +84,15 @@
     (is (includes? (->string (process-port (self))) "#<port process ")))
   (test "a stdout port record still routes through the capture stack"
     (assert= (with-out-str (emit (stdout-port) "captured")) "captured"))
-  (test "port-fn adapts a record port to the bare fn *out* holds"
+  (test "port->fn adapts a record port to the bare fn *out* holds"
     (let (me (self)
-          f (port-fn (process-port me)))
+          f (port->fn (process-port me)))
       (is (fn? f))
       (f "adapted")
       (assert= (receive ([:write s] s) (after test/*wait-ms* :timeout)) "adapted")))
-  (test "port-fn passes a fn port straight through"
+  (test "port->fn passes a fn port straight through"
     (let (f (fn (s) s))
-      (is (= (port-fn f) f)))))
+      (is (= (port->fn f) f)))))
 
 ;; A port defined *outside* std/io — the point of the ability. `counting-port` wraps
 ;; another port and rewrites what is written, with no change to io.blsp.

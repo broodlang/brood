@@ -691,7 +691,7 @@ fn a_list_call_and_a_quoted_list_are_positional_shapes() {
     assert_eq!(ty_str("(rest (list 1 \"s\"))"), "(list \"s\")");
     assert_eq!(ty_str("(rest (list 1))"), "nil");
     assert_eq!(ty_str("(rest [])"), "nil");
-    assert_eq!(ty_str("(seq/but-last [1])"), "nil");
+    assert_eq!(ty_str("(%but-last [1])"), "nil");
     assert_eq!(ty_str("(count (list 1 \"s\"))"), "2");
     assert_eq!(ty_str("(cons :k (list 1 \"s\"))"), "(list :k, 1, \"s\")");
     assert_eq!(ty_str("(cons :k nil)"), "(list :k)");

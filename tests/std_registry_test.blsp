@@ -7,46 +7,46 @@
 
 (defmodule std-registry-test (:use test) (:use registry))
 
-(describe "registry: put!, lookup, entries"
+(describe "registry: put, lookup, entries"
   (test "an entry put under a key reads back"
-    (put! :std-registry-test/basic :a {:value 1})
+    (put :std-registry-test/basic :a {:value 1})
     (assert= {:value 1} (lookup :std-registry-test/basic :a)))
   (test "re-registering a key replaces it — a module reloaded registers again"
-    (put! :std-registry-test/replace :a 1)
-    (put! :std-registry-test/replace :a 2)
+    (put :std-registry-test/replace :a 1)
+    (put :std-registry-test/replace :a 2)
     (assert= {:a 2} (entries :std-registry-test/replace)))
   (test "a registry nothing wrote is empty, and a missing key answers the default"
     (assert= {} (entries :std-registry-test/never-written))
     (assert= :fallback (lookup :std-registry-test/never-written :k :fallback)))
   (test "registries are separate"
-    (put! :std-registry-test/left :k :left)
-    (put! :std-registry-test/right :k :right)
+    (put :std-registry-test/left :k :left)
+    (put :std-registry-test/right :k :right)
     (assert= :left (lookup :std-registry-test/left :k))
     (assert= :right (lookup :std-registry-test/right :k)))
-  (test "remove! drops one key and says whether there was one"
-    (put! :std-registry-test/remove :a 1)
-    (put! :std-registry-test/remove :b 2)
-    (is (remove! :std-registry-test/remove :a))
-    (refute (remove! :std-registry-test/remove :a))
+  (test "remove drops one key and says whether there was one"
+    (put :std-registry-test/remove :a 1)
+    (put :std-registry-test/remove :b 2)
+    (is (remove :std-registry-test/remove :a))
+    (refute (remove :std-registry-test/remove :a))
     (assert= {:b 2} (entries :std-registry-test/remove))))
 
 (describe "registry: ranked"
   (test "rows come back in rank order, whatever order they were registered in"
-    (put! :std-registry-test/ranked :late {:rank 30})
-    (put! :std-registry-test/ranked :early {:rank 10})
-    (put! :std-registry-test/ranked :middle {:rank 20})
+    (put :std-registry-test/ranked :late {:rank 30})
+    (put :std-registry-test/ranked :early {:rank 10})
+    (put :std-registry-test/ranked :middle {:rank 20})
     (assert= (list :early :middle :late) (map (ranked :std-registry-test/ranked) first)))
   (test "an entry without a rank sorts as 0, and ties break on the key, not load order"
-    (put! :std-registry-test/ties :zebra "z")
-    (put! :std-registry-test/ties :apple "a")
-    (put! :std-registry-test/ties :first {:rank -1})
+    (put :std-registry-test/ties :zebra "z")
+    (put :std-registry-test/ties :apple "a")
+    (put :std-registry-test/ties :first {:rank -1})
     (assert= (list :first :apple :zebra) (map (ranked :std-registry-test/ties) first)))
   ;; `ranked` remembers the order it computed for a table; a registration makes a new
   ;; table, so the next read must see it rather than the order remembered for the old one
   (test "a registration after a read is in the next read"
-    (put! :std-registry-test/fresh :b {:rank 2})
+    (put :std-registry-test/fresh :b {:rank 2})
     (assert= (list :b) (map (ranked :std-registry-test/fresh) first))
-    (put! :std-registry-test/fresh :a {:rank 1})
+    (put :std-registry-test/fresh :a {:rank 1})
     (assert= (list :a :b) (map (ranked :std-registry-test/fresh) first))))
 
 ;; The reason this module exists rather than a `defonce` + `def`: two processes registering
@@ -62,13 +62,13 @@
           (fn (w)
             (spawn (do
                      (each (range per-worker)
-                       (fn (i) (put! :std-registry-test/concurrent [w i] (+ (* w 100) i))))
+                       (fn (i) (put :std-registry-test/concurrent [w i] (+ (* w 100) i))))
                      (send me [:done w])))))
         (each (range workers) (fn (_) (receive ([:done _] nil) (after 10000 (throw :timeout)))))
         (assert= (* workers per-worker) (count (entries :std-registry-test/concurrent)))
         (assert= 1507 (lookup :std-registry-test/concurrent [15 7])))))
   :isolated (test "a registry written in one process is read in another"
-    (put! :std-registry-test/shared :k "from the parent")
+    (put :std-registry-test/shared :k "from the parent")
     (let (me (self))
       (do
         (spawn (send me [:saw (lookup :std-registry-test/shared :k)]))
@@ -85,7 +85,7 @@
   (test "an unbound name answers the fallback instead of raising"
     (assert= :unbound (reflect/call-if-bound 'std-registry-test/no-such-hook :unbound 7)))
   (test "a hook stored in a registry follows a redefinition"
-    (put! :std-registry-test/hooks :scale 'std-registry-test/registry-test-redefined-hook)
+    (put :std-registry-test/hooks :scale 'std-registry-test/registry-test-redefined-hook)
     (let (hook (lookup :std-registry-test/hooks :scale))
       (do
         (assert= 20 (reflect/call-if-bound hook nil 2))

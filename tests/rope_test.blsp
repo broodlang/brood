@@ -1,4 +1,4 @@
-;; Ropes (ADR-045): the editor buffer's text storage — `text/from-string` plus the
+;; Ropes (ADR-045): the editor buffer's text storage — `text/string->` plus the
 ;; rope-* primitive kernel (count / line-count / insert / delete / slice / line
 ;; / char<->line). Immutable like every Brood value: every edit returns a
 ;; *fresh* rope and leaves its input untouched. Process-local: a rope lives in
@@ -19,7 +19,7 @@
 ;; This *is* the process body — `spawn` wraps the call form in a thunk, so
 ;; `(spawn (rt-editor me "x"))` runs this in the new process.
 (defn rt-editor (parent text)
-  (let (r (text/from-string text)
+  (let (r (text/string-> text)
         r2 (text/insert r 0 ">> "))
     (send parent (text/->string r2))))
 
@@ -32,56 +32,56 @@
     ([:stop reply] (send reply :stopped))))
 
 (describe "rope construction & predicates"
-  (test "text/from-string builds a rope"
-    (is (rope? (text/from-string "hello")))
-    (assert= (type-of (text/from-string "x")) :rope)
+  (test "text/string-> builds a rope"
+    (is (rope? (text/string-> "hello")))
+    (assert= (type-of (text/string-> "x")) :rope)
     (refute (rope? "hello"))
     (refute (rope? 3)))
   (test "round-trips through a string"
-    (assert= (text/->string (text/from-string "hello\nworld\n")) "hello\nworld\n")
-    (assert= (text/->string (text/from-string "")) ""))
-  (test "empty rope" (assert= (text/length (text/from-string "")) 0)))
+    (assert= (text/->string (text/string-> "hello\nworld\n")) "hello\nworld\n")
+    (assert= (text/->string (text/string-> "")) ""))
+  (test "empty rope" (assert= (text/length (text/string-> "")) 0)))
 
 (describe "rope measurement"
   (test "length is the character count"
-    (assert= (text/length (text/from-string "hello")) 5)
+    (assert= (text/length (text/string-> "hello")) 5)
     ; multi-byte chars count as 1 (char-indexed, like strings)
-    (assert= (text/length (text/from-string "héllo")) 5))
+    (assert= (text/length (text/string-> "héllo")) 5))
   (test "line-count counts lines (a trailing newline ends a line)"
-    (assert= (text/line-count (text/from-string "")) 1)
-    (assert= (text/line-count (text/from-string "one line")) 1)
-    (assert= (text/line-count (text/from-string "a\nb")) 2)
-    (assert= (text/line-count (text/from-string "a\nb\n")) 3)))
+    (assert= (text/line-count (text/string-> "")) 1)
+    (assert= (text/line-count (text/string-> "one line")) 1)
+    (assert= (text/line-count (text/string-> "a\nb")) 2)
+    (assert= (text/line-count (text/string-> "a\nb\n")) 3)))
 
 (describe "rope edits are immutable (return a fresh rope)"
   (test "insert returns a fresh rope; the original is unchanged"
-    (let (r (text/from-string "hello"))
+    (let (r (text/string-> "hello"))
       (let (r2 (text/insert r 5 " world"))
         (assert= (text/->string r2) "hello world")
         (assert= (text/->string r) "hello"))))
   (test "insert at the front and middle"
-    (assert= (text/->string (text/insert (text/from-string "ello") 0 "h")) "hello")
-    (assert= (text/->string (text/insert (text/from-string "helo") 3 "l")) "hello"))
+    (assert= (text/->string (text/insert (text/string-> "ello") 0 "h")) "hello")
+    (assert= (text/->string (text/insert (text/string-> "helo") 3 "l")) "hello"))
   (test "delete returns a fresh rope; the original is unchanged"
-    (let (r (text/from-string "hello world"))
+    (let (r (text/string-> "hello world"))
       (let (r2 (text/delete r 5 11))
         (assert= (text/->string r2) "hello")
         (assert= (text/->string r) "hello world"))))
   (test "delete an empty range is a no-op (fresh, equal)"
-    (assert= (text/->string (text/delete (text/from-string "hello") 2 2)) "hello"))
+    (assert= (text/->string (text/delete (text/string-> "hello") 2 2)) "hello"))
   (test "insert then delete composes"
-    (let (r (text/from-string "abc"))
+    (let (r (text/string-> "abc"))
       ; "abc" -insert@1-> "aXYZbc" -delete[0,2)-> "YZbc"
       (assert= (text/->string (text/delete (text/insert r 1 "XYZ") 0 2)) "YZbc"))))
 
 (describe "rope slicing & lines"
   (test "slice returns the char range as a string"
-    (let (r (text/from-string "hello world"))
+    (let (r (text/string-> "hello world"))
       (assert= (text/slice r 0 5) "hello")
       (assert= (text/slice r 6 11) "world")
       (assert= (text/slice r 0 0) "")))
   (test "text/line returns each line including its trailing newline"
-    (let (r (text/from-string "alpha\nbeta\ngamma"))
+    (let (r (text/string-> "alpha\nbeta\ngamma"))
       (assert= (text/line r 0) "alpha\n")
       (assert= (text/line r 1) "beta\n")
       (assert= (text/line r 2) "gamma"))))
@@ -89,42 +89,42 @@
 (describe "rope char<->line mapping"
   ; 'f'
   (test "char->line finds the line containing a char index"
-    (let (r (text/from-string "ab\ncd\nef"))
+    (let (r (text/string-> "ab\ncd\nef"))
       ; 'a'
       (assert= (text/char->line r 0) 0)
       ; 'c'
       (assert= (text/char->line r 3) 1)
       (assert= (text/char->line r 7) 2)))
   (test "line->char finds where a line begins"
-    (let (r (text/from-string "ab\ncd\nef"))
+    (let (r (text/string-> "ab\ncd\nef"))
       (assert= (text/line->char r 0) 0)
       (assert= (text/line->char r 1) 3)
       (assert= (text/line->char r 2) 6)))
   (test "char->line and line->char round-trip on line starts"
-    (let (r (text/from-string "ab\ncd\nef"))
+    (let (r (text/string-> "ab\ncd\nef"))
       (assert= (text/char->line r (text/line->char r 1)) 1)
       (assert= (text/char->line r (text/line->char r 2)) 2))))
 
 (describe "rope equality"
   (test "ropes are = by text content, not identity"
-    (is (= (text/from-string "abc") (text/from-string "abc")))
-    (refute (= (text/from-string "abc") (text/from-string "abd"))))
+    (is (= (text/string-> "abc") (text/string-> "abc")))
+    (refute (= (text/string-> "abc") (text/string-> "abd"))))
   (test "an edit that reproduces the text is = to the original text's rope"
-    (let (r (text/from-string "ab"))
-      (is (= (text/delete (text/insert r 2 "Xc") 2 3) (text/from-string "abc")))))
+    (let (r (text/string-> "ab"))
+      (is (= (text/delete (text/insert r 2 "Xc") 2 3) (text/string-> "abc")))))
   (test "a rope is not = to the equivalent string (distinct types)"
-    (refute (= (text/from-string "abc") "abc"))))
+    (refute (= (text/string-> "abc") "abc"))))
 
 (describe "rope out-of-bounds errors"
-  (test "insert past the end raises" (assert-error (text/insert (text/from-string "ab") 99 "x")))
+  (test "insert past the end raises" (assert-error (text/insert (text/string-> "ab") 99 "x")))
   (test "insert at a negative index raises"
-    (assert-error (text/insert (text/from-string "ab") -1 "x")))
-  (test "delete past the end raises" (assert-error (text/delete (text/from-string "ab") 0 99)))
-  (test "delete with end < start raises" (assert-error (text/delete (text/from-string "abc") 2 1)))
-  (test "slice past the end raises" (assert-error (text/slice (text/from-string "ab") 0 99)))
-  (test "line past the end raises" (assert-error (text/line (text/from-string "ab") 5)))
+    (assert-error (text/insert (text/string-> "ab") -1 "x")))
+  (test "delete past the end raises" (assert-error (text/delete (text/string-> "ab") 0 99)))
+  (test "delete with end < start raises" (assert-error (text/delete (text/string-> "abc") 2 1)))
+  (test "slice past the end raises" (assert-error (text/slice (text/string-> "ab") 0 99)))
+  (test "line past the end raises" (assert-error (text/line (text/string-> "ab") 5)))
   (test "char->line past the end raises"
-    (assert-error (text/char->line (text/from-string "ab") 99))))
+    (assert-error (text/char->line (text/string-> "ab") 99))))
 
 (describe "ropes across processes"
   :isolated
@@ -132,7 +132,7 @@
   ;; A rope is process-local: sending one directly is a clean error, not a
   ;; silent copy. The blessed path is to send its content as a string.
   (test "sending a rope in a message raises"
-    (assert-error (send (self) (text/from-string "nope"))))
+    (assert-error (send (self) (text/string-> "nope"))))
 
   ;; Workers each build + edit a rope on their own core and send back strings;
   ;; the parent fans them in. Proves rope ops run concurrently across cores and
@@ -150,7 +150,7 @@
   ;; loop, mutates by looping with a fresh rope, and serves its text on request.
   (test "a buffer process holds a rope and serves edits"
     (let (me (self)
-          buf (spawn (rt-buffer (text/from-string "hello"))))
+          buf (spawn (rt-buffer (text/string-> "hello"))))
       (send buf [:insert 5 " world"])
       (send buf [:insert 0 ">> "])
       (send buf [:text me])
@@ -165,36 +165,36 @@
 ;; pinning, since the two must never disagree about the same text.
 (describe "a rope counts and tests empty like the string it stands for"
   (test "count is the character count, and agrees with string/length"
-    (assert= (count (text/from-string "hello")) 5)
-    (assert= (count (text/from-string "")) 0)
+    (assert= (count (text/string-> "hello")) 5)
+    (assert= (count (text/string-> "")) 0)
     (let (s "hello world, a longer one")
-      (assert= (count (text/from-string s)) (string/length s))))
+      (assert= (count (text/string-> s)) (string/length s))))
 
   (test "count agrees with the string after an edit, not just at construction"
-    (let (r (text/insert (text/from-string "hello") 5 " world"))
+    (let (r (text/insert (text/string-> "hello") 5 " world"))
       (assert= (count r) (string/length (text/->string r)))))
 
   (test "a multi-byte character counts once, as a character"
     ;; the failure this guards: counting BYTES would make a rope disagree with
     ;; `string/length` on any non-ASCII text
     (let (s "héllo")
-      (assert= (count (text/from-string s)) (string/length s))
-      (assert= (count (text/from-string s)) 5)))
+      (assert= (count (text/string-> s)) (string/length s))
+      (assert= (count (text/string-> s)) 5)))
 
   (test "empty? is true only for the empty rope"
-    (is (empty? (text/from-string "")))
-    (is (not (empty? (text/from-string "x")))))
+    (is (empty? (text/string-> "")))
+    (is (not (empty? (text/string-> "x")))))
 
   (test "across processes: a rope built in a spawned process counts there"
     ;; a rope is process-local, so the COUNT crosses, not the rope
     (let (me (self)
           _ (spawn (fn ()
-                     (let (r (text/from-string "hello world"))
+                     (let (r (text/string-> "hello world"))
                        (send me
                          [:counted
                            (count r)
                            (empty? r)
-                           (empty? (text/from-string ""))]))))
+                           (empty? (text/string-> ""))]))))
           reply (receive ([:counted n e1 e2] [n e1 e2])))
       (assert= reply [11 false true]))))
 
@@ -205,36 +205,36 @@
 
 (describe "text/skip-forward and skip-backward"
   (test "forward over a run IN the set stops at the first character outside it"
-    (assert= (text/skip-forward (text/from-string "  \tab") 0 " \t" true) 3))
+    (assert= (text/skip-forward (text/string-> "  \tab") 0 " \t" true) 3))
   (test "forward over a run NOT in the set stops at the first character inside it"
-    (assert= (text/skip-forward (text/from-string "word, next") 0 " ," false) 4))
+    (assert= (text/skip-forward (text/string-> "word, next") 0 " ," false) 4))
   (test "backward stops where the run began"
-    (assert= (text/skip-backward (text/from-string "one two") 7 " " false) 4)
-    (assert= (text/skip-backward (text/from-string "one   two") 6 " " true) 3))
+    (assert= (text/skip-backward (text/string-> "one two") 7 " " false) 4)
+    (assert= (text/skip-backward (text/string-> "one   two") 6 " " true) 3))
   (test "a run that reaches the edge of the text stops there"
-    (assert= (text/skip-forward (text/from-string "aaa") 0 "a" true) 3)
-    (assert= (text/skip-backward (text/from-string "aaa") 3 "a" true) 0))
+    (assert= (text/skip-forward (text/string-> "aaa") 0 "a" true) 3)
+    (assert= (text/skip-backward (text/string-> "aaa") 3 "a" true) 0))
   (test "no run at all answers where it started"
-    (assert= (text/skip-forward (text/from-string "ab") 1 " " true) 1)
-    (assert= (text/skip-backward (text/from-string "ab") 1 " " true) 1))
+    (assert= (text/skip-forward (text/string-> "ab") 1 " " true) 1)
+    (assert= (text/skip-backward (text/string-> "ab") 1 " " true) 1))
   (test "an index past the end is clamped, not an error"
-    (assert= (text/skip-forward (text/from-string "ab") 99 " " true) 2))
+    (assert= (text/skip-forward (text/string-> "ab") 99 " " true) 2))
   (test "indices are CHARACTERS, not bytes"
     ;; é is two bytes: a byte walk would answer 5
-    (assert= (text/skip-forward (text/from-string "ééé x") 0 " " false) 3)))
+    (assert= (text/skip-forward (text/string-> "ééé x") 0 " " false) 3)))
 
 (describe "rope search past the end"
   ;; An empty needle with `before` past the rope's end looped forever: the forward scan
   ;; clamps a start past the end back to the end, so it never advanced. Reached from the
   ;; editor's backward search with an empty pattern at a stale position.
   (test "an empty needle answers the last index strictly before `before`, clamped"
-    (let (r (text/from-string "ab"))
+    (let (r (text/string-> "ab"))
       (assert= (%rope-rfind r "" 3 false) 2)
       (assert= (%rope-rfind r "" 1000 true) 2)
       (assert= (%rope-rfind r "" 2 false) 1)
       (assert= (%rope-rfind r "" 0 false) -1)
       (assert= (editor/buffer/buffer-search-backward (editor/buffer/make-buffer "ab") "" 3) 2)))
   (test "a non-empty needle with `before` past the end finds the last match"
-    (let (r (text/from-string "abcabc"))
+    (let (r (text/string-> "abcabc"))
       (assert= (%rope-rfind r "abc" 1000 false) 3)
       (assert= (%rope-rfind r "ABC" 1000 true) 3))))

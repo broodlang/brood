@@ -251,7 +251,7 @@
     (let (me (self))
       (send me [:input :boom])
       (send me [:input :quit])
-      (let (logged (with-err (fn-port (fn (s) (send me [:err s])))
+      (let (logged (with-err (fn (s) (send me [:err s]))
                      (ui-run {:n 0}
                        (fn (_m _c _r) [])
                        (fn (m input _c _r)

@@ -219,7 +219,7 @@
                 (for (x [1 2 3]) x)")
       (list 1 2 3)))
 
-  ;; `receive` was the last holdout: it could not use the escape until `but-last` moved
+  ;; `receive` was the last holdout: it could not use the escape until `%but-last` moved
   ;; into core.blsp and `sleep` moved below `receive`, because until then `sleep`'s
   ;; `(receive …)` expanded lazily at first call, where no resolve pass runs.
   (test "a module defining `nil?`/`nth` does not capture `receive`"
