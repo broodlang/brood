@@ -631,6 +631,12 @@ pub(crate) struct HeapExtras {
     /// arguments, set by [`Heap::redirect`] and taken by that engine at once, before anything
     /// allocates. Never held across a collection, so not traced.
     pub(crate) pending_redirect: Option<(Value, SmallVec<[Value; 4]>)>,
+    /// The drain epoch this process last copied its data out for
+    /// ([`Heap::rehome_drain_pins`], ADR-720): at most once a drain, so data that stays
+    /// pinned another way (a current-generation cell embedding an old handle, shared and not
+    /// this process's to rewrite) falls back to the throttled re-walk. Here, not on the heap:
+    /// only a process that pinned a drain ever writes it.
+    pub(crate) rehomed_epoch: Option<u64>,
 }
 
 /// [`Heap::type_alias_cache`]'s contents: `(declared_sigs_version, name → alias key)`.
@@ -1133,22 +1139,15 @@ pub struct Heap {
     /// Plain `Cell`s: the `Heap` is single-threaded.
     p2_dirty_epoch: Cell<u64>,
     p2_dirty_tick: Cell<u32>,
-    /// **The drain epoch for which this process's data is to be copied out** (ADR-091,
-    /// [`rehome_drain_pins`](Self::rehome_drain_pins)); `None` when none is asked. Set by
-    /// the drain self-report when the probe finds this process dirty; taken by the next
-    /// point that may rewrite the heap (its own collection, or the parked-process
-    /// inspector). While it stands, the report re-walks only on the stale-dirty throttle's
-    /// stride: until the copy is made, a walk finds what the last one found.
-    rehome_asked: Cell<Option<u64>>,
-    /// The drain epoch this process last re-homed for: at most once a drain, so data that
-    /// stays pinned another way (a current-generation cell embedding an old handle, which
-    /// is shared and not this process's to rewrite) falls back to the throttled re-walk.
-    rehomed_epoch: Cell<Option<u64>>,
     /// **Phase-1 dirty re-validation throttle**, the deep-recursion counterpart of the
-    /// Phase-2 pair above. Armed only while this process's Phase-1 seed exceeds
-    /// [`P1_LARGE_SEED`] — a `roots` stack that has grown with recursion depth — so a
-    /// shallow process is never throttled and keeps acking on its very next safepoint.
-    /// See [`P1_REVALIDATE_STRIDE`].
+    /// Phase-2 pair above: the drain epoch the probe last found this process dirty in via
+    /// Phase 1, `u64::MAX` once it finds it clean. It throttles only while the Phase-1 seed
+    /// exceeds [`P1_LARGE_SEED`] — a `roots` stack that has grown with recursion depth — so
+    /// a shallow process keeps acking on its very next safepoint; see
+    /// [`P1_REVALIDATE_STRIDE`]. With `p2_dirty_epoch` it is also what asks for a drain
+    /// re-home ([`rehome_drain_pins`](Self::rehome_drain_pins)): either one at the open
+    /// drain's epoch says this process holds the draining generation. No field of its own,
+    /// so a process that never pins a drain pays nothing for the re-home (`process_floor`).
     p1_dirty_epoch: Cell<u64>,
     p1_dirty_tick: Cell<u32>,
     /// **Receive-mark** (ADR-195): the most recent `(ref)` this process minted, paired with
@@ -2024,8 +2023,6 @@ impl Heap {
             drain_report_tick: Cell::new(0),
             p2_dirty_epoch: Cell::new(u64::MAX),
             p2_dirty_tick: Cell::new(0),
-            rehome_asked: Cell::new(None),
-            rehomed_epoch: Cell::new(None),
             p1_dirty_epoch: Cell::new(u64::MAX),
             p1_dirty_tick: Cell::new(0),
             recv_mark: Cell::new((0, 0)),

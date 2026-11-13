@@ -314,17 +314,18 @@ impl Heap {
     /// (`RuntimeCode::drain_forward`) — the copy the migrated globals already hold, so `=`
     /// still sees one function — and the process reports clean at its next safepoint.
     ///
-    /// Asked for by the drain self-report ([`rehome_asked`](Self::rehome_asked)), done
-    /// where the heap may be rewritten: at the end of this process's own collection
-    /// (`extra_roots` / `extra_envs` are that collection's, so nothing it holds is missed)
-    /// and by the parked-process inspector over a parked heap. At most once a drain.
+    /// Asked for by the drain self-report — the probe found this process dirty in the open
+    /// drain ([`rehome_due`](Self::rehome_due)) — and done where the heap may be rewritten:
+    /// at the end of this process's own collection (`extra_roots` / `extra_envs` are that
+    /// collection's, so nothing it holds is missed) and by the parked-process inspector over
+    /// a parked heap. At most once a drain.
     ///
     /// **Not while the process runs draining-generation code** ([`runs_draining_code`]).
     /// Its live compiled arms embed handles too, and on a shared runtime an arm can be
     /// shared with other processes, so they are not rewritten here (compaction rewrites
-    /// them only because it owns the whole runtime). Such a process is left as it was, and
-    /// the report asks again once the probe next finds it dirty — the code it runs is
-    /// current once those calls return, as before.
+    /// them only because it owns the whole runtime). Such a process is left as it was and
+    /// asked again at its next collection — the code it runs is current once those calls
+    /// return, as before.
     ///
     /// Sound for the free: the copy holds only current-generation handles, nothing is
     /// freed here, and the drain still frees only once every live process has reported clean
@@ -352,7 +353,7 @@ impl Heap {
         });
         // Once a drain, copied or not: with no map for this drain (one armed without a
         // migration) there is nothing to copy through, and the throttled re-walk stands.
-        self.rehomed_epoch.set(Some(epoch));
+        self.extras_mut().rehomed_epoch = Some(epoch);
         if copied.is_none() {
             return false;
         }
@@ -366,19 +367,20 @@ impl Heap {
         true
     }
 
-    /// The drain `(epoch, generation)` a re-home was asked for, when it may run now: taken
-    /// from [`rehome_asked`](Self::rehome_asked) (asked once, answered once), for the drain
-    /// still open, not already re-homed for, and with no draining-generation code running
-    /// here ([`runs_draining_code`](Self::runs_draining_code)).
+    /// The open drain's `(epoch, generation)` when this process should copy its data out of
+    /// it now: the probe last found it dirty in this drain (`p1_dirty_epoch` /
+    /// `p2_dirty_epoch` at the drain's epoch — the ask, kept in fields the probe already
+    /// has), it has not re-homed for this drain yet, and no draining-generation code runs
+    /// here ([`runs_draining_code`](Self::runs_draining_code)). Two field reads and an
+    /// atomic load for a process that pins nothing.
     fn rehome_due(&self) -> Option<(u64, usize)> {
-        let asked = self.rehome_asked.take()?;
         if !self.drain_active() {
             return None;
         }
         let (epoch, generation) = self.drain_identity();
-        let due = asked == epoch
-            && self.rehomed_epoch.get() != Some(epoch)
-            && !self.runs_draining_code(generation);
+        let asked = self.p1_dirty_epoch.get() == epoch || self.p2_dirty_epoch.get() == epoch;
+        let rehomed = self.extras().and_then(|extras| extras.rehomed_epoch) == Some(epoch);
+        let due = asked && !rehomed && !self.runs_draining_code(generation);
         due.then_some((epoch, generation))
     }
 
@@ -790,12 +792,13 @@ impl Heap {
             &mut visited,
             &mut visited_env,
         ) {
-            // Arm / keep the re-validation throttle for this epoch (large seeds only).
-            if p1_large && self.p1_dirty_epoch.get() != epoch {
+            // Note the epoch the process is dirty in: what throttles a large seed's re-walk
+            // (the check above is gated on `p1_large`, so a shallow process still re-walks
+            // at once) and what asks for a re-home (`rehome_due`), for every process.
+            if self.p1_dirty_epoch.get() != epoch {
                 self.p1_dirty_epoch.set(epoch);
                 self.p1_dirty_tick.set(0);
             }
-            self.ask_rehome(epoch);
             return true;
         }
         // Clean via Phase 1 — disarm so a later re-dirty is caught at once.
@@ -825,12 +828,12 @@ impl Heap {
             &mut visited_env,
         );
         if dirty {
-            // Arm / keep the re-validation throttle for this epoch.
+            // Arm / keep the re-validation throttle for this epoch (also the re-home's ask,
+            // `rehome_due`).
             if self.p2_dirty_epoch.get() != epoch {
                 self.p2_dirty_epoch.set(epoch);
                 self.p2_dirty_tick.set(0);
             }
-            self.ask_rehome(epoch);
         } else {
             // Clean via Phase 2 — disarm so a later re-dirty re-walks at once. (Belt-and-
             // braces: the caller acks a clean process, and the ack `Cell` then short-circuits
@@ -955,14 +958,6 @@ impl Heap {
                 work.push(v);
                 v
             });
-        }
-    }
-
-    /// Ask for this process's data to be copied out of the draining generation
-    /// ([`rehome_drain_pins`](Self::rehome_drain_pins)) — once a drain.
-    fn ask_rehome(&self, epoch: u64) {
-        if self.rehomed_epoch.get() != Some(epoch) {
-            self.rehome_asked.set(Some(epoch));
         }
     }
 
