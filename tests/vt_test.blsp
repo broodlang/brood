@@ -300,3 +300,24 @@
     (let (s (vt/screen (fed 10 2 "\e[?1002h\e[?1049h") nil))
       (assert= (:mouse s) 1002)
       (assert= (:alt-screen s) true))))
+
+(describe "vt: hyperlinks (OSC 8)"
+  (test "a link's text is one run carrying its uri, and the text is untouched"
+    (let (s (vt/screen (fed 20 1 "see \e]8;;https://x.dev\e\\here\e]8;;\e\\ ok") nil))
+      (assert= (:text s) "see here ok")
+      (assert= (:links s) [[4 8 "https://x.dev"]])
+      (assert= (:spans s) [])))
+  (test "an SGR reset inside a link keeps the link, and the link stays one run"
+    (let (s (vt/screen (fed 20 1 "\e]8;id=1;file:///a\x07\e[31mred\e[0m plain\e]8;;\x07 after") nil))
+      (assert= (:links s) [[0 9 "file:///a"]])
+      (assert= (:spans s) [[0 3 {:fg [205 0 0]}]])))
+  (test "a link over two rows is a run on each"
+    (assert= (:links (vt/screen (fed 6 2 "\e]8;;u\e\\abc\r\ndef\e]8;;\e\\") nil))
+      [[0 3 "u"] [4 7 "u"]]))
+  (test "a screen with no link has none, and a closed link leaves no attribute behind"
+    (let (v (fed 10 1 "\e[1mb\e[0m \e]8;;u\e\\l\e]8;;\e\\x"))
+      (assert= (:links (vt/screen (fed 10 1 "\e[1mbold") nil)) [])
+      (assert= (second (nth (nth (:grid v) 0) 3)) nil)))
+  (test "a scrollback line carries no link in its faces"
+    (assert= (vt/line (nth (:grid (fed 9 1 "\e]8;;u\e\\\e[1mB\e[0mx\e]8;;\e\\")) 0 []) nil)
+      ["Bx" [[0 1 {:bold true}]]])))

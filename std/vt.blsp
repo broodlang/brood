@@ -14,8 +14,8 @@
 ;; motion and erase, insert/delete lines and characters, DECSTBM scroll regions, the
 ;; alternate screen (1047/1049), DECSC/DECRC, SGR with 16 / 256 / true colour, cursor
 ;; visibility and shape, bracketed paste, application cursor keys, the DSR and DA queries
-;; a program blocks on, and the OSC title. Everything else parses (so a sequence never
-;; leaks into the text) and does nothing.
+;; a program blocks on, the OSC title and OSC 8 hyperlinks. Everything else parses (so a
+;; sequence never leaks into the text) and does nothing.
 ;;
 ;; A chunk may end mid-sequence — a pipe cuts wherever it likes — so the unfinished tail
 ;; is carried (`:carry`) into the next `feed`. Wide graphemes (CJK, emoji) take two cells,
@@ -23,18 +23,19 @@
 
 (defmodule vt
   "A virtual terminal as pure data: `(vt/feed vt chunk)` folds a program's output — cursor
-motion, erases, scroll regions, the alternate screen, SGR colour, the modes and queries an
-interactive program relies on — into a screen of cells, and `(vt/screen vt palette)` reads
-it back as `{:text :spans :cursor …}` for a buffer to show. `(vt/key->bytes key vt)`
-encodes an editor key as the bytes the program expects. Pure: no IO, no process — the
-host owns the pty and the scrollback."
+motion, erases, scroll regions, the alternate screen, SGR colour, OSC 8 hyperlinks, the modes
+and queries an interactive program relies on — into a screen of cells, and `(vt/screen vt
+palette)` reads it back as `{:text :spans :links :cursor …}` for a buffer to show.
+`(vt/key->bytes key vt)` encodes an editor key as the bytes the program expects. Pure: no IO,
+no process — the host owns the pty and the scrollback."
   (:use math))
 
 ;; ---- the shape -----------------------------------------------------------------
 ;; A cell is `[grapheme attr]`; `attr` is nil for the default face, else the SGR map
 ;; `{:fg :bg :bold :dim :italic :underline :inverse :strike}` (and the underline's
 ;; `:underline-style` / `:underline-color`, see `ansi/sgr`) with colours as a palette
-;; index (0–255) or an `[r g b]` vector. A wide grapheme's second cell is `["" attr]`.
+;; index (0–255) or an `[r g b]` vector, and `:link` the URI of the OSC 8 hyperlink the cell
+;; is in. A wide grapheme's second cell is `["" attr]`.
 ;; The terminal itself is the record below — declared, so the checker knows its cursor
 ;; and bounds are ints wherever the arithmetic reads them.
 
@@ -334,9 +335,21 @@ per grapheme, which is what a frame used to cost."
 ;; The attribute model — what each SGR parameter sets, 16 / 256 / true colour — is `ansi`'s
 ;; (`ansi/sgr`), shared with the streaming decoder line-mode output is read with.
 
+(defn- with-link (attr:attr uri:string -> attr)
+  "`attr` linking to `uri` (`:link`, what an OSC 8 hyperlink sets), or with no link when `uri`
+is empty — nil when nothing else is left, so an unlinked default cell stays nil."
+  (cond
+    (not (= uri "")) (assoc (or attr {}) :link uri)
+    (nil? attr) nil
+    else (let (rest (dissoc attr :link)) (if (empty? rest) nil rest))))
+
 (defn- sgr (vt:terminal params:vector -> terminal)
-  "SGR: `params` folded into the current attributes; an empty list is a reset."
-  (assoc vt :attr (ansi/sgr (:attr vt) params)))
+  "SGR: `params` folded into the current attributes; an empty list is a reset. A hyperlink
+is not an SGR attribute: a reset keeps it (only OSC 8 closes it), as xterm does."
+  (let (attr (:attr vt)
+        link (when attr (:link attr))
+        folded (ansi/sgr attr params))
+    (assoc vt :attr (if (nil? link) folded (with-link folded link)))))
 
 ;; ---- the saved cursor and the alternate screen ------------------------------------------------
 
@@ -527,15 +540,25 @@ their own sequences rather than flags on `h`, `c` and `q`."
       "t" (if (= (selector params) 18) (reply vt (str "\e[8;" (:rows vt) ";" (:cols vt) "t")) vt)
       vt)))
 
-;; ---- OSC: the title, and nothing else ---------------------------------------------------------
+;; ---- OSC: the title and hyperlinks ------------------------------------------------------------
 
 (defn- osc (vt:terminal body:string -> terminal)
+  ;; `0`/`2` set the title; `8;params;uri` opens a hyperlink (an empty uri closes it), which
+  ;; the cells printed meanwhile carry in their attribute as `:link`
   (let (sep (index-of body ";"))
     (if (< sep 0)
       vt
       (let (code (string/substring body 0 sep)
             arg (string/substring body (inc sep) (count body)))
-        (if (includes? ["0" "2"] code) (assoc vt :title arg) vt)))))
+        (cond
+          (includes? ["0" "2"] code) (assoc vt :title arg)
+          (= code "8")
+            (let (uri-at (index-of arg ";"))
+              (if (< uri-at 0)
+                vt
+                (assoc vt
+                  :attr (with-link (:attr vt) (string/substring arg (inc uri-at) (count arg))))))
+          else vt)))))
 
 ;; ---- the parser ------------------------------------------------------------------------------------
 ;; Over a GRAPHEME vector, so a wide glyph is one unit and a combining mark never splits a
@@ -717,29 +740,43 @@ fewer than `keep` (the cursor's column, so its position exists in the text)."
   "The chars the graphemes of `cells` take in a string (a continuation cell takes none)."
   (fold cells 0 (fn (n cell) (+ n (count (first cell))))))
 
-(defn- cells-line (cells:row base:int palette:any -> (tuple string list int))
-  "`[text spans end]` for `cells` whose text starts at buffer offset `base`: the graphemes
-concatenated, `spans` the `[start end face]` runs of one attribute (reversed, consed),
-`end` the offset past the text."
-  (letrec (go (fn (i pos cur start texts spans)
+(defn- run-of (attr:attr start:int end:int palette:any spans:list links:list -> (tuple list list))
+  "`[spans links]` with the run `[start, end)` of one attribute `attr` added: its face to
+`spans` (none for a cell styled by nothing but a link) and its hyperlink to `links` as
+`[start end uri]` — joined to the run before when that one is the same link and ends here,
+so a link whose colour changes partway is still one run. Both consed, last first."
+  (let (link (when attr (:link attr))
+        face (ansi/face (if (nil? link) attr (with-link attr "")) palette)
+        previous (first links))
+    [(if (nil? face) spans (cons [start end face] spans))
+      (cond
+        (nil? link) links
+        (and previous (= (nth previous 1) start) (= (nth previous 2) link))
+          (cons [(first previous) end link] (rest links))
+        else (cons [start end link] links))]))
+
+(defn- cells-line (cells:row base:int palette:any -> (tuple string list int list))
+  "`[text spans end links]` for `cells` whose text starts at buffer offset `base`: the
+graphemes concatenated, `spans` the `[start end face]` runs of one attribute, `end` the
+offset past the text, and `links` the `[start end uri]` runs of one hyperlink (both
+reversed, consed). The links are read in the pass the faces already make: a screen with
+none pays one key lookup a run."
+  (letrec (go (fn (i pos cur start texts spans links)
                 (if (>= i (count cells))
-                  [(string/join (reverse texts) "")
-                    (if (nil? cur) spans (cons [start pos (ansi/face cur palette)] spans))
-                    pos]
+                  (let ([spans2 links2] (if (nil? cur)
+                                          [spans links]
+                                          (run-of cur start pos palette spans links)))
+                    [(string/join (reverse texts) "") spans2 pos links2])
                   (let ([g attr] (nth cells i)
                         next (+ pos (count g))
                         texts2 (cons g texts))
                     (cond
-                      (= attr cur) (go (inc i) next cur start texts2 spans)
-                      (nil? cur) (go (inc i) next attr pos texts2 spans)
+                      (= attr cur) (go (inc i) next cur start texts2 spans links)
+                      (nil? cur) (go (inc i) next attr pos texts2 spans links)
                       else
-                        (go (inc i)
-                          next
-                          attr
-                          pos
-                          texts2
-                          (cons [start pos (ansi/face cur palette)] spans)))))))
-    (go 0 base nil base () ())))
+                        (let ([spans2 links2] (run-of cur start pos palette spans links))
+                          (go (inc i) next attr pos texts2 spans2 links2)))))))
+    (go 0 base nil base () () ())))
 
 (defn line (row:row palette:any -> (tuple string vector))
   "A row of cells — one of `:evicted`, or `(nth (:grid vt) r)` — as `[text spans]`:
@@ -747,7 +784,7 @@ its text with trailing blanks trimmed and the `[start end face]` spans over it f
 offset 0, faces through `palette` (see `ansi/face`). What a host appends to its scrollback.
 
     (vt/line (nth (:grid (vt/feed (vt/make 6 1) \"\\e[32mok\")) 0) nil)   ;=> [\"ok\" [[0 2 {:fg [0 205 0]}]]]"
-  (let ([text spans _] (cells-line (seq/subvec row 0 (shown-cells row 0)) 0 palette))
+  (let ([text spans _ _] (cells-line (seq/subvec row 0 (shown-cells row 0)) 0 palette))
     [text (into [] (reverse spans))]))
 
 (defn lines (vt:terminal -> (vector string))
@@ -757,18 +794,22 @@ offset 0, faces through `palette` (see `ansi/face`). What a host appends to its 
   (into [] (map (:grid vt) (fn (row) (first (line row nil))))))
 
 (defn screen (vt:terminal palette:any -> map)
-  "The screen as a buffer would show it: `{:text :spans :cursor :cursor-visible
-:cursor-style :title :mouse :alt-screen}` — rows joined by newlines with trailing blanks trimmed, `:spans`
-the `[start end face]` faces over that text (the `highlight-spans` shape, ascending and
-non-overlapping) through `palette` (see `ansi/face`), and `:cursor` the char offset of the
-cursor in it (its row is padded out to the cursor, so the offset always exists).
+  "The screen as a buffer would show it: `{:text :spans :links :cursor :cursor-visible
+:cursor-style :title :mouse :alt-screen}` — rows joined by newlines with trailing blanks
+trimmed, `:spans` the `[start end face]` faces over that text (the `highlight-spans` shape,
+ascending and non-overlapping) through `palette` (see `ansi/face`), `:links` the
+`[start end uri]` runs an OSC 8 hyperlink covers (ascending, one per row it spans), and
+`:cursor` the char offset of the cursor in it (its row is padded out to the cursor, so the
+offset always exists).
 
     (:text (vt/screen (vt/feed (vt/make 4 2) \"ab\\r\\ncd\") nil))   ;=> \"ab\\ncd\"
-    (:cursor (vt/screen (vt/feed (vt/make 4 2) \"ab\\r\\ncd\") nil))   ;=> 5"
-  (letrec (go (fn (r pos texts spans cursor)
+    (:cursor (vt/screen (vt/feed (vt/make 4 2) \"ab\\r\\ncd\") nil))   ;=> 5
+    (:links (vt/screen (vt/feed (vt/make 9 1) \"see \\e]8;;https://x.dev\\e\\\\here\\e]8;;\\e\\\\\") nil))   ;=> [[4 8 \"https://x.dev\"]]"
+  (letrec (go (fn (r pos texts spans links cursor)
                 (if (>= r (:rows vt))
                   {:text (string/join (reverse texts) "\n")
                    :spans (into [] (reverse spans))
+                   :links (into [] (reverse links))
                    :cursor cursor
                    :cursor-visible (mode vt :cursor-visible)
                    :cursor-style (:cursor-style vt)
@@ -780,14 +821,19 @@ cursor in it (its row is padded out to the cursor, so the offset always exists).
                   (let (row (row-at vt r)
                         at-cursor? (= r (:row vt))
                         shown (shown-cells row (if at-cursor? (:col vt) 0))
-                        [text spans2 end] (cells-line (seq/subvec row 0 shown) pos palette)
+                        [text spans2 end links2] (cells-line (seq/subvec row 0 shown) pos palette)
                         cursor2 (if at-cursor?
                                   (+ pos (text-length (seq/subvec row 0 (:col vt))))
                                   cursor))
-                    ;; `spans2` is consed, last-first, which is the order the accumulator
-                    ;; keeps for the one `reverse` at the end
-                    (go (inc r) (inc end) (cons text texts) (append spans2 spans) cursor2)))))
-    (go 0 0 () () 0)))
+                    ;; `spans2` and `links2` are consed, last-first, which is the order the
+                    ;; accumulators keep for the one `reverse` at the end
+                    (go (inc r)
+                      (inc end)
+                      (cons text texts)
+                      (append spans2 spans)
+                      (if (empty? links2) links (append links2 links))
+                      cursor2)))))
+    (go 0 0 () () () 0)))
 
 ;; ---- input: an editor key as the bytes a program expects ---------------------------------------------
 

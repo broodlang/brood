@@ -20,7 +20,8 @@ manipulation (extension, stem, basename, join) is the `path` module's job — `f
 primitives. The kernel also provides the always-available file primitives
 `file/slurp`/`file/spit`/`file/mkdir`/`file/exists?`/`file/dir?`/`file/ls`/`file/mtime`/`file/size`/
 `file/rm`/`file/rmdir`/`file/rename`/`file/cp`/`file/cwd`, links and permission bits
-(`file/read-link`/`file/symlink`/`file/chmod`).")
+(`file/read-link`/`file/symlink`/`file/chmod`), and the advisory lock a running program holds
+(`file/lock`/`file/unlock`/`file/locked?`).")
 
 ;; --- whole-file read / write ------------------------------------------------
 ;; Whole-file I/O is the kernel's `file/slurp` / `file/spit` / `file/spit-append` (Clojure

@@ -37,6 +37,8 @@ portable=(
   # The clipboard seam with no display: nil, never a raise (the editor's kill ring
   # stands on it).
   tests/clipboard_test.blsp
+  # file/lock across two programs: flock on Unix, LockFileEx on Windows — the same answers.
+  tests/file_lock_test.blsp
 )
 
 # Unix only: these assume a POSIX userland (`sh`, `pwd`, `/tmp` as a directory, a pty).
