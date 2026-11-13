@@ -1544,8 +1544,15 @@ pub(super) fn lock_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 /// `(file/unlock path)` — release this program's lock on `path`; nil either way.
 pub(super) fn unlock_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file/unlock", arg(args, 0))?;
-    // dropping the `File` closes it, and closing releases its lock
-    crate::core::sync::lock(&HELD_LOCKS).remove(&lock_key(&path));
+    // Released explicitly, not by the drop. A `flock` lock belongs to the open file
+    // description, and a child another process is spawning shares that description from its
+    // fork until its exec closes it: closing OUR descriptor in that window leaves the lock
+    // held, and `file/locked?` straight after answered true (in a full suite run, where
+    // other tests spawn all the time; 315 of 3000 unlocks with spawners running). `LOCK_UN`
+    // releases the description's lock whoever else still refers to it.
+    if let Some(file) = crate::core::sync::lock(&HELD_LOCKS).remove(&lock_key(&path)) {
+        let _ = file.unlock();
+    }
     Ok(Value::nil())
 }
 
@@ -1560,10 +1567,17 @@ pub(super) fn file_locked(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let Ok(file) = std::fs::File::open(&key) else {
         return Ok(Value::boolean(false));
     };
-    Ok(Value::boolean(matches!(
-        file.try_lock_shared(),
-        Err(std::fs::TryLockError::WouldBlock)
-    )))
+    Ok(Value::boolean(match file.try_lock_shared() {
+        // Released explicitly, as `file/unlock` does: a child mid-spawn would otherwise keep
+        // this probe's shared lock past the drop, and a `file/lock` straight after would be
+        // refused as though another program held the file.
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(_)) => false,
+    }))
 }
 
 /// The user name for `uid` via `getpwuid`, or `None` if it doesn't resolve. The libc

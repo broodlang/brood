@@ -1678,3 +1678,11 @@ edited module from source but always restores the root, brought the deleted `sig
 wrote it into the new image. The root now leaves each named section's sigs and uses to that
 section. Found when bedit kept warning about a `sig` that was no longer in its source. Guard
 in `check_incremental`, red with the old root.
+
+2026-11-13 (KI-392). `file_lock_test` failed in every full-suite CI job and passed alone.
+`file/unlock` released by dropping the `File`, but a `flock` lock lives on the open file
+description, which a child mid-spawn shares from fork to exec, so the lock outlived the close
+whenever another test was starting a program. `file/locked?`'s shared probe had the same window
+and could refuse the next `file/lock`. Both release with `LOCK_UN` now. Reproduced at 315 of
+3000 cycles with four spawners, then 0 of 9000. The guard runs 1500 cycles beside spawners and
+went red 3/3 with each release removed on its own.

@@ -36,6 +36,29 @@ a lock a moment after it is started or closed."
       (assert= (file/lock path) true)
       (file/unlock path)
       (is (not (file/locked? path)))))
+  (test "an unlock is seen at once while other processes start programs"
+    ;; A child being spawned shares the lock's open file description from its fork until its
+    ;; exec closes it, so an unlock that only CLOSED the file left the lock held for that
+    ;; window: in a full suite run, where other tests spawn all the time, `file/locked?`
+    ;; straight after `file/unlock` answered true (CI, 2026-11-13). The spawners make the
+    ;; window common; ~10% of these cycles failed before `file/unlock` (and `file/locked?`'s
+    ;; probe) released explicitly.
+    (when (not (= (os/type) :windows))
+      (letrec (spawner (fn (n) (when (> n 0) (os/cmd "true" []) (spawner (- n 1))))
+               cycle (fn (i still)
+                       (if (= i 0)
+                         still
+                         (let (path (lock-path (str "race-" i)))
+                           (file/lock path)
+                           (file/unlock path)
+                           ;; …and the probe's own shared lock must not outlive it either: a
+                           ;; lock taken right after the probe is refused if it does
+                           (let (seen (file/locked? path)
+                                 retaken (file/lock path))
+                             (file/unlock path)
+                             (cycle (- i 1) (if (or seen (failure? retaken)) (+ still 1) still)))))))
+        (doseq (_ (range 4)) (spawn (spawner 150)))
+        (assert= 0 (cycle 1500 0)))))
   (test "a missing file is not locked, and unlocking what is not held is nil"
     (let (path (lock-path "missing"))
       (is (not (file/locked? path)))

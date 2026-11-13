@@ -127,6 +127,27 @@ example still agrees with the serial step. If the non-strict sighting came from 
 reading a type as precise, that is the checker's ordinary mode rule, which a now-dropped
 sig fed, not a defect in the checker.
 
+## KI-392 — `file/unlock` could leave the lock held while another test spawned a program ✅ closed 2026-11-13
+
+**Seen** 2026-11-13, CI on three jobs (the contracts-armed suite, the bedit smoke, and locally
+in `make test`): `file_lock_test` "this program takes the lock, holds it, takes it again, and
+releases it" failed at `(is (not (file/locked? path)))` straight after `file/unlock`. Alone,
+the file passed every time.
+
+**Cause.** `file/unlock` released by dropping the `File`. A `flock(2)` lock belongs to the open
+file description, not the descriptor, and a child that another green process is spawning
+shares every description from its `fork` until its `exec`, where close-on-exec drops them.
+Closing our descriptor inside that window left the description, and its lock, alive in the
+child until it exec'd. `file/locked?` probes with a shared lock it then dropped, so the same
+window could keep the probe's lock and refuse a `file/lock` taken right after it. A full suite
+spawns programs constantly; a script with four spawners reproduced it in 315 of 3000 cycles.
+
+**Fix.** Both release explicitly with `File::unlock` (`LOCK_UN`), which releases the
+description's lock whoever else still refers to it. **Guard:** `file_lock_test` "an unlock is
+seen at once while other processes start programs" (1500 lock/unlock/probe/relock cycles
+beside four spawners); red 3/3 with the unlock's release removed, and 3/3 with only the
+probe's.
+
 ## KI-391 — a `sig` deleted from a project module kept applying ✅ fixed 2026-11-13
 
 **Seen** 2026-11-13, fixing bedit's strict findings: a `sig` added to `linkview` and then
