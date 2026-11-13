@@ -1686,3 +1686,11 @@ whenever another test was starting a program. `file/locked?`'s shared probe had 
 and could refuse the next `file/lock`. Both release with `LOCK_UN` now. Reproduced at 315 of
 3000 cycles with four spawners, then 0 of 9000. The guard runs 1500 cycles beside spawners and
 went red 3/3 with each release removed on its own.
+
+2026-11-13 (KI-393). The bedit smoke's doctest gate was the last red. A docstring example ran
+`(binding (vcsproc/*vcs-entry-output-max-lines* 2) …)` at root inside bedit, and `binding`'s
+expansion-time `%resolve-name` (ADR-722) did not root the short qualifier the way every other
+reference at root does: the same example's call spelled `vcsproc/…` worked. `%resolve-name`
+roots at root now. bedit's example was also qualified (`de751fd`), which a project's doctest
+needs either way since a docstring is evaluated outside its module. Guard: `nest eval` in a
+project, red with the rooting removed.

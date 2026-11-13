@@ -208,3 +208,26 @@ fn the_root_project_roots_its_own_modules_under_its_name() {
         "the checker should resolve rooted intra-project imports, not flag them:\n{check_text}"
     );
 }
+
+#[test]
+fn root_code_binds_a_project_modules_dynamic_variable_by_its_short_qualifier() {
+    // Root code inside a project (a docstring example, `nest eval`, the REPL) has the package
+    // context, and a qualified reference there roots like any other: `(cfg/depth)` calls
+    // `rootdyn/cfg/depth`. `binding` resolves its names at expansion time (ADR-722), and that
+    // resolution was the identity at root, so `(binding (cfg/*depth* 5) …)` named an unbound
+    // `cfg/*depth*` and raised "not a dynamic variable" — bedit's doctest gate, 2026-11-13.
+    let parent = temp_dir("rooted-root-binding");
+    let app = parent.path.join("rootdyn");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::write(app.join("project.blsp"), "(project :name rootdyn)\n").unwrap();
+    std::fs::write(
+        app.join("src/cfg.blsp"),
+        "(defmodule cfg)\n(defdyn *depth* 1)\n(defn depth () *depth*)\n",
+    )
+    .unwrap();
+    let (text, ok) = nest(&app, &["eval", "(binding (cfg/*depth* 5) (cfg/depth))"]);
+    assert!(
+        ok && text.lines().any(|line| line.trim() == "5"),
+        "root code could not bind a project module's dynamic variable by its short qualifier:\n{text}"
+    );
+}

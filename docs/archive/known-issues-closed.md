@@ -127,6 +127,25 @@ example still agrees with the serial step. If the non-strict sighting came from 
 reading a type as precise, that is the checker's ordinary mode rule, which a now-dropped
 sig fed, not a defect in the checker.
 
+## KI-393 — Root code in a project could not bind a project module's dynamic variable by its short qualifier ✅ closed 2026-11-13
+
+**Seen** 2026-11-13, CI's bedit smoke: the doctest gate reported
+`(binding (vcsproc/*vcs-entry-output-max-lines* 2) (vcsproc/vcs-entry-tail "a\nb\nc"))` as
+raising "`vcsproc/*vcs-entry-output-max-lines*` is not a dynamic variable", where bedit's
+modules are rooted under `bedit/`. The call beside it, spelled the same way, worked.
+
+**Cause.** Since ADR-722, `binding` quotes the names it rebinds and resolves each at expansion
+time with `%resolve-name`. That calls `resolve_reference`, which inside a module roots an
+intra-package `mod/name` to `pkg/mod/name` (ADR-070) and at root is the identity. Root code
+inside a project, such as a docstring example under the doctest gate, `nest eval` or the
+REPL, still has the package context, and every other reference there roots. So `binding` alone
+named the unrooted, unbound `vcsproc/*…*`.
+
+**Fix.** `%resolve-name` applies `root_qualified_ref` at root, as a reference there does.
+**Guard:** `package_rooted_namespaces::root_code_binds_a_project_modules_dynamic_variable_by_its_short_qualifier`
+(`nest eval '(binding (cfg/*depth* 5) (cfg/depth))'` in a project), red with the rooting
+removed with the same error bedit's gate printed.
+
 ## KI-392 — `file/unlock` could leave the lock held while another test spawned a program ✅ closed 2026-11-13
 
 **Seen** 2026-11-13, CI on three jobs (the contracts-armed suite, the bedit smoke, and locally

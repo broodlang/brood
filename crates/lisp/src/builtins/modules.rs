@@ -1549,6 +1549,17 @@ pub(super) fn mark_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 pub(super) fn resolve_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_symbol(heap, "%resolve-name", arg(args, 0))?;
     let resolved = crate::eval::macros::resolve_reference(heap, name);
+    // Inside a module `resolve_reference` already roots an intra-package `mod/name` to
+    // `pkg/mod/name` (ADR-070). At root it is the identity, yet root code inside a project
+    // (a docstring example, `nest eval`, the REPL) has the package context too, and every
+    // other reference there roots: `(vcsproc/vcs-entry-tail …)` reached bedit's function
+    // while `(binding (vcsproc/*vcs-entry-output-max-lines* 2) …)` named an unbound
+    // `vcsproc/*…*` and raised "not a dynamic variable" (bedit's doctest gate, 2026-11-13).
+    let resolved = if heap.compile_ns().is_none() {
+        heap.root_qualified_ref(resolved).unwrap_or(resolved)
+    } else {
+        resolved
+    };
     // At root there is no namespace pass to strip a `/name` escape, so strip it here.
     let spelling = crate::core::value::symbol_name_ref(resolved);
     Ok(Value::symbol(match spelling.strip_prefix('/') {
