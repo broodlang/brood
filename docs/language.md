@@ -3850,13 +3850,15 @@ iolist in memory.
 - `(dev/gc-stats)` returns a snapshot map of this process's garbage collection —
   `{:collections :copied :reclaimed :live :live-bytes :threshold
   :pause-total-us :pause-max-us :pause-last-us :debug-build :runtime-threshold
-  :runtime-closures}` —
+  :runtime-closures :runtime-aged :runtime-draining}` —
   for observing reclamation *and* pause behaviour: the `:pause-*` trio is
   cumulative wall time spent in this process's collections, the worst single
   pause, and the most recent one (µs). `:runtime-closures`/`:runtime-threshold` describe
-  the shared code region instead, the same in every process. `:debug-build` is `true` when the binary
-  carries debug assertions (i.e. *not* a performance build); `proc/info`
-  carries the per-process `:collections` count too.
+  the shared code region instead, the same in every process. `:runtime-aged` counts the
+  generations that region has aged and `:runtime-draining` says a drain of the aged one is
+  still open (ADR-091, ADR-720): one that stays `true` names a process that will not let go.
+  `:debug-build` is `true` when the binary carries debug assertions (i.e. *not* a performance
+  build); `proc/info` carries the per-process `:collections` count too.
 - `(dev/vm-stats)` returns the VM **work-attribution** counters — `:vm-apply`,
   `:tail-call`/`:self-tail`, `:tw-defer` (tree-walker fallbacks),
   `:call-ic-hit`/`:call-ic-miss`, `:global-ic-*`, `:prim1-*`/`:prim2-*`,

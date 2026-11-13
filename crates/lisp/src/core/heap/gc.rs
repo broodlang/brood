@@ -61,6 +61,12 @@ impl Heap {
         let runs_before = self.gc_runs;
         let started = web_time::Instant::now();
         self.collect_inner(extra_roots, extra_envs);
+        // A RUNTIME drain this process's data pins: copy it out now, with the collection's
+        // roots in hand and the garbage already gone (ADR-091, `rehome_drain_pins`). Inside
+        // the timed span, so a slow one shows as collector time where the pause is measured.
+        if self.rehome_asked.get().is_some() {
+            self.rehome_drain_pins(extra_roots, extra_envs);
+        }
         if self.gc_runs != runs_before {
             let ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
             let extras = self.extras_mut();

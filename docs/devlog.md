@@ -1598,3 +1598,20 @@ Guards: `a_hit_replays_only_the_modules_the_program_names`, the keyword-call sem
 every tier, `an_optional_arm_takes_a_fast_frame_only_when_nothing_omitted_needs_a_default`,
 `optional_defaults_test`'s hot-call case and the load-every-module gate, each red with its
 change undone where it can be.
+
+2026-11-12 (KI-388, KI-389, ADR-720). **A drain a process's data pinned never ended, and the
+process walked its whole heap while it waited.** bedit was slow to type into, and its slow-turn
+log blamed functions that do nothing. perf on a build with symbols placed it: 33% of the
+performance cores' samples in the drain's Phase-2 probe (`seed_phase2_and_walk`) and 25% in
+`memmove` under the `realloc` of the `Vec` that probe filled with every value in the heap. The
+editor's loop holds its model for the session, the model held closures and strings from
+before an aging, and so the drain stayed open and the loop re-walked the heap every 64
+reports. Now a dirty process copies its pins out at its next collection (a parked one, from
+the inspector) through one forwarding map per drain, so a copy is the handle the migrated
+global holds and `=` still sees one function. The probe reads cells in place. Reading the
+walk turned up KI-389: it passed over strings, numbers, ropes and ranges of the draining
+generation, and keyed the cells it had read by index alone, across slabs that each count from
+0. Either could ack a process clean that still held the generation about to be freed. `dev/gc-stats` now
+reports `:runtime-aged` and `:runtime-draining`. Written on the desktop. The guards are
+**not yet run or sabotage-verified**: that is for CI and the test machine, before KI-388/389
+close.

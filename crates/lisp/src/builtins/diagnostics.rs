@@ -531,6 +531,17 @@ pub(super) fn gc_stats_map(heap: &mut Heap) -> Value {
             value::kw("runtime-threshold"),
             Value::int(heap.rt_gc_threshold() as i64),
         ),
+        // How many times the shared region has aged a generation (ADR-091), and whether a
+        // drain of the aged one is still open — so a program can tell a collector that
+        // cycles from one whose drain never ends (KI-388). Runtime-wide, like the two above.
+        (
+            value::kw("runtime-aged"),
+            Value::int(heap.runtime_aged_count() as i64),
+        ),
+        (
+            value::kw("runtime-draining"),
+            Value::boolean(heap.drain_active()),
+        ),
         // True iff this binary was built with debug assertions (the GC tripwire /
         // verifier / poison bits are compiled in) — so a benchmark can confirm
         // it's measuring a clean release build, not a debug-armed one. `false`

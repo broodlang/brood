@@ -708,6 +708,117 @@ fn cross_process_drain_union() {
     );
 }
 
+/// A process whose DATA pins the draining generation — an old closure and an old string
+/// in a vector it keeps — **copies them out at its next collection**, and the drain
+/// completes. Before, a pin held in data lasted as long as the data did: a long-lived
+/// process (an editor's loop and its model) held the drain open for good, and every report
+/// meanwhile walked its whole heap — most of what a pinned editor spent its time on. The
+/// copies are the ones the migrated globals hold (one forwarding map for the drain), so
+/// `=` still sees one function, and they work.
+#[test]
+fn a_process_pinning_the_drain_through_its_data_copies_it_out() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    interp
+        .eval_str("(defn f (x) (* x 2)) (def s \"pinned text\")")
+        .expect("define f and s in gen 0");
+    let f_gen0 = interp.eval_str("f").expect("resolve f");
+    let s_gen0 = interp.eval_str("s").expect("resolve s");
+
+    // Another process of the same runtime keeps both in a LOCAL vector — data, not a
+    // root of its own (the root is the vector, a LOCAL handle the shared walk passes over).
+    let mut child = Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    let held = child.alloc_vector(vec![f_gen0, s_gen0]);
+    child.push_root(held);
+
+    // A collector cycle: age, migrate the globals into gen 1, arm the drain of gen 0.
+    assert!(interp.heap.age_runtime(), "age to gen 1");
+    interp.heap.migrate_live_globals(0);
+    interp.heap.collect(&mut [], &mut []);
+    const MAIN: u64 = 1;
+    const CHILD: u64 = 2;
+    interp.heap.begin_gen_drain(0);
+
+    interp.heap.report_gen_liveness(MAIN);
+    child.report_gen_liveness(CHILD);
+    assert!(
+        !interp.heap.gen_drained(&[MAIN, CHILD]),
+        "the child's vector holds gen-0 values: it pins the drain",
+    );
+
+    // Its next collection copies them out; its next report is clean.
+    child.collect(&mut [], &mut []);
+    child.report_gen_liveness(CHILD);
+    assert!(
+        interp.heap.gen_drained(&[MAIN, CHILD]),
+        "after its collection the child holds no gen-0 value and the drain completes",
+    );
+
+    // The vector now holds the very values the migrated globals hold.
+    let held = child.root_at(0);
+    let f_now = child
+        .nth3_inline(
+            held,
+            brood::core::value::Value::Int(0),
+            brood::core::value::Value::Nil,
+        )
+        .expect("element 0");
+    let s_now = child
+        .nth3_inline(
+            held,
+            brood::core::value::Value::Int(1),
+            brood::core::value::Value::Nil,
+        )
+        .expect("element 1");
+    let f_global = interp.eval_str("f").expect("resolve f after migration");
+    let s_global = interp.eval_str("s").expect("resolve s after migration");
+    assert!(
+        interp.heap.equal(f_now, f_global),
+        "the copied closure IS the migrated global f (`=` is handle identity for functions)",
+    );
+    assert!(
+        interp.heap.equal(s_now, s_global),
+        "the copied string is the migrated global s",
+    );
+    assert_eq!(
+        interp.print(s_now),
+        "\"pinned text\"",
+        "the text came across"
+    );
+}
+
+/// The drain probe counts a value of the draining generation **whatever its kind**. It
+/// once followed closures, pairs, vectors and maps and passed over everything else, so a
+/// process holding only an old-generation STRING (a constant read from a global) reported
+/// clean — and the free left it a handle into a freed slab.
+#[test]
+fn an_old_generation_string_pins_the_drain() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    interp
+        .eval_str("(def s \"a constant\")")
+        .expect("define s in gen 0");
+    let s_gen0 = interp.eval_str("s").expect("resolve s");
+    assert!(interp.heap.age_runtime(), "age to gen 1");
+    interp.heap.migrate_live_globals(0);
+
+    let mut child = Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    child.push_root(s_gen0);
+    assert!(
+        child.runtime_gen_referenced(0),
+        "a process holding a gen-0 string references gen 0",
+    );
+    child.truncate_roots(0);
+    assert!(
+        !child.runtime_gen_referenced(0),
+        "and holds nothing of it once the string is dropped",
+    );
+}
+
 /// Stage 3c — the drain report **wired through the live scheduler**. A real spawned
 /// process running under the worker pool participates in the union via the eval / VM
 /// safepoint (its report) and the scheduler registry (the live set). A worker that

@@ -1149,9 +1149,16 @@ fn report_parked_liveness() {
         .filter(|(_, mb)| mb.status.load(Ordering::Relaxed) == ST_WAITING)
         .collect();
     for (pid, mailbox) in parked {
-        let state = crate::core::sync::lock(&mailbox.state);
-        if let Some(proc) = state.waiter.as_ref() {
+        let mut state = crate::core::sync::lock(&mailbox.state);
+        if let Some(proc) = state.waiter.as_mut() {
             proc.heap.report_gen_liveness(pid);
+            // Found pinning the drain through its data: copy that data out here and report
+            // again (`Heap::rehome_drain_pins`). A parked process does not collect until it
+            // wakes, and a server parked for good would otherwise pin the drain for good. Its
+            // heap is quiescent and held under this lock, as the report relies on too.
+            if proc.heap.rehome_drain_pins(&mut [], &mut []) {
+                proc.heap.report_gen_liveness(pid);
+            }
         }
     }
 }
