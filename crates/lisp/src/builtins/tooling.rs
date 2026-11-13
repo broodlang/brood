@@ -579,6 +579,8 @@ const WORLD_EFFECTS: &[&str] = &[
     "file/spit-private",
     "file/set-mtime",
     "file/chmod",
+    "file/lock",
+    "file/unlock",
     "file/symlink",
     "file/write-lines",
     "file/cp",

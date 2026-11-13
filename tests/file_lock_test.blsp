@@ -1,0 +1,62 @@
+;; file/lock, file/unlock and file/locked? — an advisory lock a program holds for its life,
+;; which the OS drops when the program exits. The cases that matter take two programs, so
+;; a child `brood` holds the lock here and the test asks about it from outside.
+
+(defmodule file-lock-test (:use test))
+
+(defn- lock-path (name)
+  "A file no other run uses: in this run's scratch home, else under the temp directory."
+  (let (scratch (test/scratch-dir))
+    (if (nil? scratch)
+      (path/temp (str "brood-lock-" name "-"))
+      (path/join scratch (str "lock-" name "-" (rand/token 4))))))
+
+(defn- held-by-child (path)
+  "A child `brood` that has taken `path`'s lock and is waiting to be closed: its subprocess,
+once it has said it holds the lock."
+  (let (script (str path ".blsp"))
+    ;; the path as an argument, not spliced into the source: a Windows path's backslashes
+    ;; would be read as string escapes
+    (file/spit script
+      "(io/puts (file/lock (first (system/script-args))))\n(receive (:never nil))\n")
+    (let (child (os/spawn (os/exe-path) [script "--" path]))
+      (letrec (await (fn (seen)
+                       (if (includes? seen "true")
+                         child
+                         (receive
+                           ([:proc ^child data] (await (str seen data)))
+                           (after 10000 child)))))
+        (await "")))))
+
+(defn- released-within (path ms)
+  "Whether `path` is unlocked within `ms` — a closed child's exit takes a moment."
+  (letrec (poll (fn (left)
+                  (cond
+                    (not (file/locked? path)) true
+                    (<= left 0) false
+                    else (do (proc/sleep 10) (poll (- left 10))))))
+    (poll ms)))
+
+(describe "file/lock"
+  (test "this program takes the lock, holds it, takes it again, and releases it"
+    (let (path (lock-path "own"))
+      (assert= (file/lock path) true)
+      (is (file/locked? path))
+      (assert= (file/lock path) true)
+      (file/unlock path)
+      (is (not (file/locked? path)))))
+  (test "another program's lock refuses this one's, and goes when that program does"
+    (let (path (lock-path "other")
+          child (held-by-child path))
+      (is (file/locked? path))
+      (let (refused (file/lock path))
+        (is (failure? refused))
+        (is (includes? (error-message refused) "another program holds it")))
+      (os/close child)
+      (is (released-within path 5000))
+      (assert= (file/lock path) true)
+      (file/unlock path)))
+  (test "a missing file is not locked, and unlocking what is not held is nil"
+    (let (path (lock-path "missing"))
+      (is (not (file/locked? path)))
+      (assert= (file/unlock path) nil))))
