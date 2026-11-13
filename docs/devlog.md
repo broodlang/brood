@@ -1598,3 +1598,24 @@ Guards: `a_hit_replays_only_the_modules_the_program_names`, the keyword-call sem
 every tier, `an_optional_arm_takes_a_fast_frame_only_when_nothing_omitted_needs_a_default`,
 `optional_defaults_test`'s hot-call case and the load-every-module gate, each red with its
 change undone where it can be.
+
+2026-11-13 (KI-389). **A one-file `nest test` on hatch, 220 ms → 100 ms.** Asked whether startup
+needs a compiler: measured first, and nothing in the cycle was slow code. The bare binary boots in
+10 ms; the rest was work the run did not need. (1) **KI-389**: the project image never carried a
+dependency module the app names by its short name. A uniquely-named dep module loads at root by
+basename (`(:alias repo)` binds `repo/…`), while `project-module-carried?` asked only
+`*module-files*`, whose keys are rooted (`store/repo`), so the `repo` section was dropped at write
+time and every imaged run loaded `store`'s five modules from source (~100 ms). The existing
+dependency case spelled the module rooted, which is why it never saw it. (2) `nest test FILE`
+installed the image the tooling way, materialising every section; it installs it lazily now, as
+`nest run` does, so a file pays for the modules it reaches (hatch's 70-module image: 88 → 38 ms
+for the project load, peak 42 → 29 MB). (3) The check cache's week-old sweep ran on every process
+that touched it: 2 067 entries on this machine, 18 ms of every run, more than the file's tests
+took. It runs once a day now, from a stamp file's mtime. What remains, one file on hatch: ~20 ms to
+reach `nest/main`, ~25 ms materialising the tool modules (`package`, `project-image`, `test`) from
+the std image, 23 ms of tests, ~10 ms for config and the image install. Old and new binaries give
+identical results naming every test file of hatch, mur-forge, mail, store, s3, observe, pong and
+brood-life. Guards: `startup_image::a_dependency_module_named_by_its_short_name_is_imaged`,
+`startup_image::a_named_test_file_materialises_only_what_it_reaches`,
+`check_cache_prune::the_check_cache_is_swept_once_a_day_not_on_every_run` (both directions), each
+red with its change undone.

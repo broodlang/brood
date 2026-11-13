@@ -204,6 +204,59 @@ fn a_path_dependency_is_imaged_and_its_edits_invalidate() {
     let _ = std::fs::remove_dir_all(&dep);
 }
 
+/// The way an app actually names a dependency's module: by its SHORT name, `(:use util)`,
+/// which finds `util.blsp` by basename on the load path and binds `util/…` at root (a
+/// uniquely-named dependency module never roots — `%bundle-module-package`). The case above
+/// spells it rooted, `libdep/util`, and passed throughout while every app that wrote the
+/// short form reloaded its dependencies from source on every run: the image writer asked
+/// only whether `util` was in `*module-files*`, whose keys are all rooted, and dropped the
+/// section. Met on hatch, whose five `store` modules were ~100 ms of a 220 ms one-file
+/// `nest test` (2026-11-13).
+#[test]
+fn a_dependency_module_named_by_its_short_name_is_imaged() {
+    let dep = scratch("short-dep-lib");
+    let dir = scratch("short-dep-app");
+    write(&dep, "project.blsp", "(project :name shortlib)\n");
+    write(
+        &dep,
+        "src/util.blsp",
+        "(defmodule util)\n\
+         (io/puts \"SOURCE-LOAD: util\")\n\
+         (defn double (x) (* 2 x))\n",
+    );
+    write(
+        &dir,
+        "project.blsp",
+        &format!(
+            "(project\n  :name shortapp\n  :main app\n  :dependencies [[shortlib :path \"../{}\"]])\n",
+            dep.file_name().unwrap().to_string_lossy()
+        ),
+    );
+    write(
+        &dir,
+        "src/app.blsp",
+        "(defmodule app (:use util))\n\
+         (defn main () (io/puts (str \"ANSWER: \" (double 21))))\n",
+    );
+
+    let cold = nest_run(&dir);
+    assert!(cold.contains("SOURCE-LOAD: util"), "cold:\n{cold}");
+    assert!(cold.contains("ANSWER: 42"), "cold:\n{cold}");
+
+    let warm = nest_run(&dir);
+    assert!(warm.contains("ANSWER: 42"), "warm:\n{warm}");
+    // The precondition the absence below rests on: this run was served by the image.
+    assert!(!warm.contains("Building shortapp"), "the warm run rebuilt:\n{warm}");
+    assert!(
+        !warm.contains("SOURCE-LOAD: util"),
+        "the dependency module named by its short name was re-evaluated instead of \
+         materialised from the image:\n{warm}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dep);
+}
+
 /// Loading MUTATES registries (`*impls*`, `*methods*`, `*method-from*`, `*module-docs*`, …)
 /// rather than creating them, so the `(reflect/global-names)` diff an image is built from cannot
 /// see them and each has to be carried deliberately. They were named by hand and the list
@@ -591,6 +644,58 @@ fn the_image_is_keyed_by_contract_mode() {
     assert!(
         armed.contains("RESULT: :contract"),
         "an armed run was served the unarmed image and lost its contract:\n{armed}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `nest test FILE` installs the image LAZILY, as `nest run` does: the named file's header and
+/// its first use of a name materialise what it reaches, and nothing else. It used to take the
+/// tooling path, which materialises every section — on hatch 90 ms of a 220 ms one-file run,
+/// most of a TDD cycle spent on modules the file never touches (2026-11-13).
+///
+/// `lib` reaches `helper` only through a qualified call inside a function body, so `helper`
+/// is materialised on FIRST USE, not by a header — the half of lazy loading a header-only
+/// project would never exercise. `other` is reached by nothing.
+#[test]
+fn a_named_test_file_materialises_only_what_it_reaches() {
+    let dir = scratch("named-lazy");
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    write(&dir, "project.blsp", "(project\n  :name lazydemo)\n");
+    write(&dir, "src/helper.blsp", "(defmodule helper)\n(defn inc2 (x) (+ x 2))\n");
+    write(&dir, "src/lib.blsp", "(defmodule lib)\n(defn f (x) (helper/inc2 x))\n");
+    write(&dir, "src/other.blsp", "(defmodule other)\n(defn g () :unreached)\n");
+    write(
+        &dir,
+        "tests/lib_test.blsp",
+        "(defmodule lib-test (:use test) (:use lib))\n\
+         (describe \"lib\"\n\
+           (test \"reaches helper on first use\" (assert= 3 (f 1))))\n",
+    );
+    let run = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_nest"))
+            .args(["test", "tests/lib_test.blsp"])
+            .current_dir(&dir)
+            .env("BROOD_IMAGE_TRACE", "1")
+            .output()
+            .expect("spawn nest");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    let cold = run();
+    assert!(cold.contains("1 tests, 1 passed"), "cold:\n{cold}");
+    let warm = run();
+    assert!(warm.contains("1 tests, 1 passed"), "warm:\n{warm}");
+    // The precondition the absence below rests on: the warm run materialised from the image.
+    assert!(
+        warm.contains("[image] lazydemo/lib\n") && warm.contains("[image] lazydemo/helper\n"),
+        "the warm run did not materialise what the test reaches from the image:\n{warm}"
+    );
+    assert!(
+        !warm.contains("[image] lazydemo/other\n"),
+        "a named test file materialised a module it never reaches:\n{warm}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

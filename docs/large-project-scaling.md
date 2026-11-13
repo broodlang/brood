@@ -86,6 +86,9 @@ start (image install, nothing materialised), `warm all` the `nest test`/`nest ch
 | 500 | 14.4 s / 1 226 MB | 19.4 s / 1 400 MB | 74 MB | 1.75 s / 797 MB | **0.09 s / 132 MB** |
 | 1 000 | 27.6 s / 2 286 MB | 55.1 s / 2 803 MB | 149 MB | 4.23 s / 1 471 MB | **0.14 s / 134 MB** |
 
+Since 2026-11-13 `nest test FILE…` takes the `warm lazy` start too, materialising only what the
+named files reach; the whole-suite `nest test` and `nest check` are still `warm all`.
+
 One reading in that table to attribute before believing: at N=1000 the image WRITE costs
 27 s under `brood` (55.1 − 27.6) where `nest run`'s cold build on the same tree reported
 `+4.2s image` minutes earlier — reproduced twice under the script. Not this item's; it is a

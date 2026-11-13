@@ -193,11 +193,26 @@ come from `*module-files*`).
   (and (contains? *module-files* k)
     (not (= (first (string/split k "/")) (if project/*name* (->string project/*name*) nil)))))
 
-;; Whether module `k` is one a project image carries: the project's own or a dependency's —
-;; both live in `*module-files*` (a project roots its own modules under its `:name` too,
-;; ADR-070). A release bundle's image (ADR-484) asks the same question of its own module
-;; set, which is why every writer below takes the predicate rather than reading the registry.
-(defn- project-module-carried? (k) (contains? *module-files* k))
+;; Whether module `k` is one a project image carries: the project's own or a dependency's.
+;; Both are registered in `*module-files*` under rooted keys (ADR-070) — but a uniquely-named
+;; dependency module does not LOAD under its rooted key: a consumer's `(:alias repo)` finds
+;; `repo.blsp` by basename on the load path and binds `repo/…` at root (the dev-run parity
+;; `%bundle-module-package` describes). So `store`'s `repo` is in `*features*` as `repo`, its
+;; globals group into a section named `repo`, and asking only `*module-files*` dropped that
+;; section from every image: each imaged run then loaded the dependency from source again
+;; (hatch: five store modules, ~100 ms of a ~220 ms one-file `nest test`). A short name counts
+;; when a registered package provides it — unless std embeds a module of that name, which
+;; then wins the name at load and is served from the std image, never from this one.
+;; A release bundle's image (ADR-484) asks the same question of its own module set, which is
+;; why every writer below takes the predicate rather than reading the registry.
+(defn- project-module-carried? (k)
+  (or (contains? *module-files* k)
+    (and (not (%builtin-module? k))
+      (let (short (symbol k))
+        (any? (%map-pairs *package-modules-of*)
+          (fn (entry)
+            (and (includes? (second entry) short)
+              (contains? *module-files* (str (first entry) "/" k)))))))))
 
 ;; Group the image's globals into per-module sections, so `require` can materialise one
 ;; module at a time (ADR-218). The `""` section is the one the loader always materialises,

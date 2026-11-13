@@ -789,9 +789,11 @@ file) propagates for the normal error report."
           (run-suite (fn () (apply project-run/run-tests (test-opts flags lines)))))
       else
       ;; Named files, each in its own rolled-back scope (`run-named-tests`). Inside a
-      ;; project its image is loaded first so cross-module names resolve.
+      ;; project its image is installed first, LAZILY: a test file's header and its first
+      ;; use of a name materialise what it reaches, so one file of a large project does not
+      ;; pay to materialise all of it (hatch: 90 ms of a 220 ms one-file run, 2026-11-13).
         (do
-          (load-project-image)
+          (load-project-image-lazily)
           (require-one 'test)
           (run-suite (fn () (apply project-run/run-named-tests paths (test-opts flags lines))))))))
 
@@ -802,6 +804,18 @@ outside one, nil."
     (when root
       (project/load-config)
       (project/setup-tooling-image root))))
+
+(defn- load-project-image-lazily ()
+  "Inside a project, load its config and install its image WITHOUT materialising a module —
+`require` brings each in on first use, as `nest run` does — and return the root; outside one,
+nil. With no current image the sources load (and write one) as usual."
+  (let (root (project/find-root (file/cwd)))
+    (when root
+      (project/load-config)
+      (project/setup root)
+      (when (nil? (project-image/setup-lazy-image root))
+        (project-image/load-sources-cached root :lazy))
+      root)))
 
 ;; `nest run` -------------------------------------------------------------------------
 

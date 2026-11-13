@@ -5,6 +5,28 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-389 — A project image dropped every dependency module the app names by its short name ✅ closed 2026-11-13
+
+**Seen** 2026-11-13, timing a one-file `nest test` on hatch (220 ms): after the image was read,
+`store`'s five modules still opened and loaded from source on every run, ~100 ms of it.
+
+**Cause.** A uniquely-named dependency module loads at root, found by basename on the load path:
+hatch's `(:alias repo)` binds `repo/…`, and `*features*` holds `"repo"` (`%bundle-module-package`
+documents this dev-run parity). `*module-files*` registers the same module under its ROOTED key,
+`store/repo`. The image writer groups globals into sections by prefix (`repo`) and keeps a section
+only when `project-module-carried?` says so — and that asked `*module-files*` alone, so the `repo`
+section was dropped at every write and each imaged start (`nest run`, `nest test`) loaded the
+dependency from source again. Answers stayed right; only the time was wrong.
+
+**Why it survived.** The dependency case in `startup_image.rs` spelled the module rooted
+(`(:use libdep/util)`), the one form that loads under the rooted key. Apps write the short form.
+
+**Fix.** `project-module-carried?` also counts a short name a registered package provides (its
+rooted key is in `*module-files*`), unless std embeds a module of that name, which wins the name
+at load and is served from the std image. **Guard:**
+`startup_image::a_dependency_module_named_by_its_short_name_is_imaged` (red with the old predicate
+back).
+
 ## KI-387 — `nest check` dropped every unbound name in a branch it judged unreachable ✅ closed 2026-11-12
 
 **Seen** 2026-11-12, replaying hatch's rename migration: four `bytes/concat` calls in

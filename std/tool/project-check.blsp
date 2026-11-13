@@ -1007,12 +1007,17 @@ Returns nil when there is nothing to report.
 ;; moved — thousands of unreachable directories within days. The boot cache prunes by age
 ;; (`prelude_image_prune` in boot.rs); this is the same policy for its sibling.
 ;;
-;; Once per run, not per file: `*cache-pruned*` latches. Never prunes the directory
-;; in use. Best-effort throughout — a cache is an optimisation, so a prune that cannot read
-;; the directory or delete an entry simply leaves it (and a concurrent `nest` deleting the
-;; same entry is a no-op, since `file/rmdir` treats NotFound as success).
+;; Once per run, not per file: `*cache-pruned*` latches. And once per DAY, not per run: the
+;; sweep stats every entry, and on a machine that runs tests the directory holds thousands
+;; (2 067 here, 2026-11-13) — 18 ms of every `nest test`, more than a small test file's
+;; tests take. The stamp file's mtime says when the last sweep ran; a week's age limit loses
+;; nothing to a day's delay. Never prunes the directory in use. Best-effort throughout — a
+;; cache is an optimisation, so a prune that cannot read the directory or delete an entry
+;; simply leaves it (and a concurrent `nest` deleting the same entry is a no-op, since
+;; `file/rmdir` treats NotFound as success).
 ;; Milliseconds: both `now` and `file/mtime` report ms since the epoch.
 (def- *cache-max-age-ms* (* 7 24 3600 1000))
+(def- *cache-prune-every-ms* (* 24 3600 1000))
 (def- *cache-pruned* false)
 
 (defn- project-cache-prune (base in-use)
@@ -1020,15 +1025,23 @@ Returns nil when there is nothing to report.
     (def- *cache-pruned* true)
     (check-allow :discarded-catch
       (try
-        (let (cutoff (- (os/now) *cache-max-age-ms*))
-          (fold (file/ls base)
-            nil
-            (fn (_ entry)
-              (let (p (path/join base entry))
-                (when (and (not (= p in-use)) (file/dir? p) (< (or (file/mtime p) 0) cutoff))
-                  ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
-                  (check-allow :discarded-catch (try (file/rmdir p) (catch _ nil))))))))
+        (let (now (os/now)
+              stamp (path/join base ".last-prune")
+              cutoff (- now *cache-max-age-ms*))
+          (when (>= (- now (or (file/mtime stamp) 0)) *cache-prune-every-ms*)
+            ;; Stamped BEFORE the sweep: concurrent runs that start while one sweeps skip it.
+            (file/spit stamp "")
+            (project-cache-sweep base in-use cutoff)))
         (catch _ nil)))))
+
+(defn- project-cache-sweep (base in-use cutoff)
+  (fold (file/ls base)
+    nil
+    (fn (_ entry)
+      (let (p (path/join base entry))
+        (when (and (not (= p in-use)) (file/dir? p) (< (or (file/mtime p) 0) cutoff))
+          ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
+          (check-allow :discarded-catch (try (file/rmdir p) (catch _ nil))))))))
 
 (defn project-cache-dir (root:string -> (or string nil))
   "The per-project cache directory (`$XDG_CACHE_HOME/brood/<project>` or `~/.cache/…`) the
