@@ -6,7 +6,28 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.52.0 — module-scoped dynamic variables, the surface pass, `nest eval` and `nest test --watch`
+
+**Breaking: a module's `defdyn` is the module's own (ADR-722).**
+- Inside module `m`, `(defdyn *x* v)` defines `m/*x*`, like any other definition: bare inside
+  `m`, `m/*x*` or (after `(:use m)`) bare elsewhere, for a read and for `binding` alike. It used
+  to declare a ROOT name, so a downstream module's `(defdyn *indent-width* …)` took over a std
+  module's private setting of the same name (KI-383).
+- Root dynamic variables come from root code only: the prelude, a file with no `defmodule`, or
+  a `/name` head, which every definition now accepts (`(def /*out* port)` sets the root port
+  from inside a module).
+- A bare definition head that names a root or imported dynamic variable is an error inside a
+  module, with the fix in the message: it used to set that variable, and reading it as a new
+  `m/*x*` would change the program silently. To migrate, import the variables a module reads
+  from another (`(:use theme :only [*red*])`) and write `/*x*` or `other/*x*` where it sets one.
+
 **Added.**
+- **`nest eval 'EXPR'`** answers one expression from the shell, in the project
+  (`--in MODULE` for a private name, `--test` for a scratch home, `-` for stdin) (ADR-723).
+- **`file/lock`, `file/unlock` and `file/locked?`**: a program says it is running by holding an
+  OS advisory lock on a file, which the OS drops however the program exits (ADR-721).
+- **`dev/gc-stats` reports `:runtime-rehomed`**: how many times a process copied its data out of
+  a draining generation.
 - **`nest test --watch`** stays up and reruns on every save: the named files, or the test files a
   change reaches. Changed source files are reloaded in place, a changed macro's callers with it,
   so a TDD cycle costs the tests' own time instead of a process start (ADR-724).
@@ -15,6 +36,17 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   is the separator and the divider's `:rect`, so a drag there resizes. Dividers carry `:seam`.
 
 **Fixed.**
+- **A process whose data held an aged generation no longer keeps its drain open.** It copies the
+  data out at its next collection (a parked one, from the inspector), so the shared code region's
+  old generation is freed; bedit's loop had spent 58% of its CPU re-walking its heap while it
+  waited (KI-388, ADR-720). The drain probe also counts strings, numbers and ropes of that
+  generation, which it used to pass over (KI-389).
+- **`nest check` answers the same with contracts armed** (`BROOD_CONTRACTS=1`): it inferred a
+  contracted function from its checking shim, which returns `any` (KI-384).
+- **A `sig` deleted from a project module stops applying.** The project image's root section
+  carried every declared sig, so a partial rebuild brought a deleted one back (KI-391).
+- **`file/unlock` releases the lock** even while a child process is mid-spawn (KI-392), and root
+  code in a project can `binding` a module's dynamic variable by its short qualifier (KI-393).
 - **A one-file `nest test` starts in less than half the time** (hatch: 220 → 100 ms). The project
   image now carries a dependency module the app names by its short name (`(:alias repo)`), which
   it used to drop, so every run loaded that dependency from source again (KI-390); `nest test
