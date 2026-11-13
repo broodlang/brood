@@ -55,16 +55,21 @@ impl Session {
         self.out.lock().unwrap().len()
     }
 
-    /// Wait until the output after byte `from` holds `needle` (and the banner that ends a
-    /// cycle after it), returning that part; panic with the whole transcript on timeout.
-    fn wait_for(&self, from: usize, needle: &str) -> String {
+    /// Wait until the output after byte `from` holds `needle`, and `then` after it when one is
+    /// given, returning that part; panic with the whole transcript on timeout.
+    ///
+    /// `then` must be printed on the SAME stream as `needle`. stdout (the run's report) and
+    /// stderr (the watcher's banner) reach this buffer through two threads, so their relative
+    /// order is not the process's: on CI the banner landed before the report it followed, and a
+    /// wait for "report, then banner" never ended (2026-11-13).
+    fn wait_for_then(&self, from: usize, needle: &str, then: Option<&str>) -> String {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             {
                 let text = self.out.lock().unwrap();
                 let tail = &text[from..];
                 if let Some(at) = tail.find(needle)
-                    && tail[at..].contains("save to rerun")
+                    && then.is_none_or(|after| tail[at..].contains(after))
                 {
                     return tail.to_string();
                 }
@@ -76,6 +81,12 @@ impl Session {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// Wait for a line of the run's report. An edit may follow at once: the watcher takes its
+    /// stamps before a run, so a save made while it is still printing is the next change.
+    fn wait_for(&self, from: usize, needle: &str) -> String {
+        self.wait_for_then(from, needle, None)
     }
 }
 
@@ -137,8 +148,9 @@ fn a_watch_reruns_what_a_save_reaches_and_survives_a_broken_save() {
     );
 
     let session = Session::start(dir);
-    let first = session.wait_for(0, "4 tests, 4 passed");
-    assert!(first.contains("watching"), "{first}");
+    session.wait_for(0, "4 tests, 4 passed");
+    // The banner is the watcher's own word that it is watching (stderr, so waited for alone).
+    session.wait_for(0, "save to rerun");
 
     // A breaking edit: the run after it reads the new `add`, and reruns calc_test ALONE —
     // other_test's two tests would make it "3 tests".
@@ -180,7 +192,8 @@ fn a_watch_reruns_what_a_save_reaches_and_survives_a_broken_save() {
         "src/calc.blsp",
         "(defmodule calc)\n(defn add (a b) (+ a b)\n",
     );
-    let bad = session.wait_for(at, "does not load");
+    // Both on stderr, so "reported, then the cycle ended" is an order this buffer keeps.
+    let bad = session.wait_for_then(at, "does not load", Some("save to rerun"));
     assert!(!bad.contains("tests, "), "a broken save ran tests:\n{bad}");
     let at = session.len();
     write(
