@@ -115,10 +115,14 @@ fn parked_process_whose_data_pins_the_drain_copies_it_out() {
               (receive
                 (:tick (do (send root :ticked) (wait-loop held)))
                 (:go (send root [(= (first held) f) ((first held) 21) (nth held 1)]))))
-            (def worker (spawn (fn () (wait-loop [f s]))))
+            (def worker (spawn (fn () (let (held [f s]) (send root :ready) (wait-loop held)))))
+            (receive (:ready :ok))
             "#,
         )
         .expect("seed gen 0 and start the worker");
+    // `:ready` comes after the worker built `held`: a spawn starts when the scheduler gets to
+    // it, and a worker that read `f` and `s` only after the migration below held gen-1
+    // values, pinned nothing, and let the drain complete with no re-home at all (KI-388).
 
     // The collector cycle: age, migrate the globals (wait-loop, f and s among them) into
     // gen 1. Then one tick, so the worker re-enters `wait-loop` through the migrated global
@@ -130,6 +134,7 @@ fn parked_process_whose_data_pins_the_drain_copies_it_out() {
         .expect("the worker re-parks in gen-1 code");
     interp.heap.collect(&mut [], &mut []);
 
+    let rehomed_before = interp.heap.runtime_rehomed_count();
     interp.heap.begin_gen_drain(0);
     interp.eval_str("(f 3)").expect("root safepoint report");
 
@@ -147,6 +152,15 @@ fn parked_process_whose_data_pins_the_drain_copies_it_out() {
         drained,
         "the parked worker's gen-0 data is copied out by the inspector and it acks clean — \
          a waiting process must not hold the drain open for as long as it waits",
+    );
+    // …and it ended BECAUSE the worker copied out. A drain also completes when the probe
+    // finds nothing pinning it, and the woken worker's closure still runs while the old
+    // generation is not yet freed, so without this the test passed with every re-home
+    // removed (KI-388).
+    assert!(
+        interp.heap.runtime_rehomed_count() > rehomed_before,
+        "the drain completed without the parked worker copying its data out: the worker \
+         never pinned it, or the probe missed what it holds",
     );
 
     let answer = interp

@@ -194,6 +194,13 @@ impl Heap {
         self.runtime.aged_count.load(Ordering::Relaxed)
     }
 
+    /// How many times a process of this runtime copied its data out of a draining
+    /// generation ([`rehome_drain_pins`](Self::rehome_drain_pins)) — diagnostic, lets a test
+    /// confirm a drain completed BECAUSE a pinning process copied out (KI-388).
+    pub fn runtime_rehomed_count(&self) -> u64 {
+        self.runtime.rehomed_count.load(Ordering::Relaxed)
+    }
+
     /// The RUNTIME code region's current generation slot (0 or 1). Diagnostic /
     /// test observation of the [`age_runtime`](Self::age_runtime) flip.
     pub fn runtime_cur_gen(&self) -> usize {
@@ -360,6 +367,7 @@ impl Heap {
         // A local closure keeps its handle while its body moved, and the compiled-code cache
         // is keyed by that handle: what it holds was compiled from the old body.
         self.clear_private_code_caches();
+        runtime.rehomed_count.fetch_add(1, Ordering::Relaxed);
         // The next report walks again (and finds the process clean), and soon.
         self.p1_dirty_epoch.set(u64::MAX);
         self.p2_dirty_epoch.set(u64::MAX);

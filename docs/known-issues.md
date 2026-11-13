@@ -121,14 +121,15 @@ process that re-homes writes: nothing is added per process.
 **Sabotage, run 2026-11-13 (targeted, on the desktop; all 27 tests of `runtime_collector` and
 `runtime_drain` green on f8873f9c0).** Dropping the `rehome_drain_pins` call in `Heap::collect`
 reds `a_process_pinning_the_drain_through_its_data_copies_it_out`; dropping the scheduler's
-parked-process re-home as well reds `drain_report_wires_through_the_scheduler`. **Still open:
-`runtime_drain::parked_process_whose_data_pins_the_drain_copies_it_out` stays green under both,
-and under KI-389's sabotage too** (a probe that never sees the draining generation): it asserts
-only that the drain completes and that the woken worker's closure runs, and a probe that
-reports every process clean satisfies the first while the unfreed old generation satisfies the
-second. It needs an assertion that discriminates — that the worker was dirty before the
-inspector ran, or that its held values are of the current generation after — which no
-accessor exposes yet. The `copy_through_drain_map` sabotage is not yet run.
+parked-process re-home as well reds `drain_report_wires_through_the_scheduler`.
+`runtime_drain::parked_process_whose_data_pins_the_drain_copies_it_out` stayed green under
+both, and under KI-389's sabotage too: its worker built `[f s]` whenever the scheduler first
+ran it, which could be after the migration, so it held gen-1 values and pinned nothing, and
+the drain completed with no re-home at all. The worker now reports `:ready` after building its
+data and the test ages only then, and it asserts the drain completed BECAUSE a process copied
+out (`:runtime-rehomed`, `Heap::runtime_rehomed_count`). With the scheduler's re-home dropped it
+goes red ("a waiting process must not hold the drain open"). The `copy_through_drain_map`
+sabotage is not yet run.
 
 ## KI-389 — the drain probe passed over old-generation strings, numbers and ropes, and keyed the cells it read by index alone
 
@@ -171,7 +172,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 | KI-391 | **A `sig` deleted from a project module kept applying** — the project image's root section carried every declared sig, and the partial rebuild restored it over the reloaded module | ✅ **FIXED 2026-11-13** — the root carries only the sigs and uses of modules no named section carries (`boot/image.rs` `encode_section`). Guard: `check_incremental::a_deleted_sig_stops_applying_after_the_partial_rebuild` |
 | KI-390 | **A project image dropped every dependency module the app names by its short name** — a uniquely-named dep module loads at root by basename (`(:alias repo)` binds `repo/…`, not `store/repo/…`), but the image writer counted a section as carried only when its key was in `*module-files*`, whose keys are all rooted, so `repo`'s section was never written and every imaged run (`nest run`, `nest test`) loaded the dependency from source again. hatch's five `store` modules were ~100 ms of a 220 ms one-file `nest test` | ✅ **FIXED 2026-11-13** — `project-module-carried?` also counts a short name a registered package provides, unless std embeds a module of that name. Guard: `startup_image::a_dependency_module_named_by_its_short_name_is_imaged` (red with the old predicate back); the existing dep case named the module rooted (`libdep/util`), which is why it never saw this |
 | KI-389 | **The drain probe passed over old-generation strings, numbers and ropes, and keyed the cells it read by index alone** — either could report a process clean that still held a value of the generation about to be freed | ⚠️ **open 2026-11-12** — fixed in code (every RUNTIME kind counts; `visited` keyed by slab); guard sabotage-verified 2026-11-13 (targeted); repeated runs on the test machine before it closes |
-| KI-388 | **A process whose data held the draining generation kept the drain open, and walked its whole heap while it did** — bedit's loop: 58% of its CPU in the Phase-2 probe while typing | ⚠️ **open 2026-11-12** — fixed in code (a dirty process copies its pins out at its next collection, ADR-720); the collector and scheduler guards sabotage-verified 2026-11-13; `runtime_drain`'s parked-worker guard cannot fail as written (see the section) |
+| KI-388 | **A process whose data held the draining generation kept the drain open, and walked its whole heap while it did** — bedit's loop: 58% of its CPU in the Phase-2 probe while typing | ⚠️ **open 2026-11-12** — fixed in code (a dirty process copies its pins out at its next collection, ADR-720); the collector, scheduler and parked-worker guards sabotage-verified 2026-11-13 (the parked one after its setup was fixed to pin at all); repeated runs on the test machine before it closes |
 | KI-387 | **`nest check` dropped every unbound name in a branch it judged unreachable** — `check_if` skipped a dead branch outright, and "dead" rests on inferred types (a caller-derived parameter, a `match` whose patterns cannot meet its scrutinee), so a stale `bytes/concat` behind such a clause passed the check and raised at run time | ✅ **FIXED 2026-11-12** — a dead branch is still walked and keeps its unbound-symbol findings only (`check_dead_branch`). Guard: `scope_and_guards::an_unbound_name_in_a_branch_typed_dead_is_still_reported` (red with the skip back) |
 | KI-386 | **A function called only by itself was typed from its own self-call** — the caller-derived pass seeds only LIVE candidates, but each round derived every function with a site; `(defn f (y) (if y … (f y)))` typed `y` nil|false, the then branch went dead and nothing in it was checked | ✅ **FIXED 2026-11-12** — a round derives only the live candidates (`caller_derived_params`). Guard: `scope_and_guards::a_self_call_does_not_make_the_branch_beside_it_dead` (red without the filter) |
 | KI-385 | **`nest check --fix-renames` rewrote local bindings that share the renamed name** — the rewrite renamed every symbol spelled like the stale name, parameters and `let` binders included | ✅ **FIXED 2026-11-12** — only the places the checker reports are rewritten (`codemod/cst-rename-at-text`), and a form an unresolved macro heads is left for a human. Guards: `boot_check_and_renames::fix_renames_leaves_a_local_spelled_like_the_renamed_name_alone` (red with the old rewrite back), `codemod_test` § cst-rename-at-text; replaying hatch's ADR-716/718 migration reproduces the hand-fixed result. Was: open |

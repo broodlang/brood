@@ -712,6 +712,11 @@ pub struct RuntimeCode {
     /// confirm the multi-generation collector aged, even when a full free is timing-
     /// dependent.
     pub(super) aged_count: AtomicU64,
+    /// How many times a process copied its data out of a draining generation
+    /// ([`Heap::rehome_drain_pins`], ADR-720); surfaced via [`Heap::runtime_rehomed_count`]
+    /// so a test can tell a drain that completed because a pinning process copied out from
+    /// one that completed because nothing was found pinning it (KI-388).
+    pub(super) rehomed_count: AtomicU64,
     /// **The current drain's forwarding map** (old-generation handle → its copy in the
     /// current generation). [`Heap::migrate_live_globals`] fills it while it copies the
     /// live globals out of the aged generation, and it is kept for the whole drain so
@@ -932,6 +937,7 @@ impl Default for RuntimeCode {
             stale_gen: AtomicU64::new(0),
             aging: AtomicBool::new(false),
             aged_count: AtomicU64::new(0),
+            rehomed_count: AtomicU64::new(0),
             drain_forward: Mutex::new(None),
             promote_lock: RwLock::new(()),
         }
@@ -1087,6 +1093,7 @@ impl RuntimeCode {
             stale_gen: AtomicU64::new(0),
             aging: AtomicBool::new(false),
             aged_count: AtomicU64::new(0),
+            rehomed_count: AtomicU64::new(0),
             drain_forward: Mutex::new(None),
             promote_lock: RwLock::new(()),
         }

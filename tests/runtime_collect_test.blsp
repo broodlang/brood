@@ -34,7 +34,8 @@
         (is (> (get s :runtime-threshold) 0))
         ;; how many generations it has aged, and whether a drain of one is open
         (is (int? (get s :runtime-aged)))
-        (is (bool? (get s :runtime-draining))))))
+        (is (bool? (get s :runtime-draining)))
+        (is (int? (get s :runtime-rehomed))))))
 
   (test "(runtime-collect) is a safe no-op while the runtime is shared (:ran false)"
     ;; a parked process guarantees >1 holder of the runtime Arc, so the collector's

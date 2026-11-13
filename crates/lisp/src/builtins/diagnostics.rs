@@ -542,6 +542,12 @@ pub(super) fn gc_stats_map(heap: &mut Heap) -> Value {
             value::kw("runtime-draining"),
             Value::boolean(heap.drain_active()),
         ),
+        // How many times a process copied its data out of a draining generation (ADR-720):
+        // a drain that ends with this unchanged ended because nothing pinned it.
+        (
+            value::kw("runtime-rehomed"),
+            Value::int(heap.runtime_rehomed_count() as i64),
+        ),
         // True iff this binary was built with debug assertions (the GC tripwire /
         // verifier / poison bits are compiled in) — so a benchmark can confirm
         // it's measuring a clean release build, not a debug-armed one. `false`
