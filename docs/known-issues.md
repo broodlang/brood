@@ -68,6 +68,75 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-388 — a process whose data held the draining generation kept the drain open, and walked its whole heap while it did
+
+**Seen** 2026-11-12, profiling bedit (a release bundle on 0.51.0, `perf record --call-graph
+dwarf` on a build with symbols) while typing into a terminal buffer was slow: 33% of the
+performance cores' samples in `Heap::seed_phase2_and_walk` and 25% in `memmove` under
+`realloc`. The editor's slow-turn log showed functions that do nothing (`(when (int? x) …)`,
+a one-line `assoc`) taking 50 ms of the loop's own CPU, with 0 ms of GC, and the loop's
+thread taking ~6 000 fresh page faults in one burst. No aging, migration or JIT work in the
+30-second profile: one drain had stayed open.
+
+**Cause.** A drain (ADR-091) ends when every live process reports clean. A process that
+HOLDS a value of the draining generation — a callback in its state, a closure in a vector,
+a string read from a global before the migration — is dirty until that value dies, and a
+long-lived process keeps its state for good: bedit's loop holds its model for the session.
+So the drain never ended. Meanwhile each dirty process re-ran the Phase-2 probe every
+`P2_REVALIDATE_STRIDE` reports, a walk of its WHOLE local heap that first copied every
+value in it into one growing `Vec` (the `realloc` / `memmove`), and the parked-process
+inspector did the same for every parked one. On an editor's heap that is tens of ms, landing
+on whatever function the loop was in.
+
+**Why it survived.** The drain tests run small heaps that let go of what they hold; the
+throttle (KI-14's shape) bounded how *often* the walk ran, not that it ran forever. The
+editor's slow-turn log names the function a slow turn was in, and the walk ran at a
+safepoint inside an unrelated one. `proc/gc-us` does not count the probe.
+
+**Fix.** A process found dirty asks for a **re-home** (`Heap::rehome_drain_pins`): at its
+next collection (the roots in hand, the garbage gone) — or, parked, from the inspector under
+its mailbox lock — every draining-generation handle it holds privately is rewritten to the
+value's copy in the current generation, and it reports clean. The copies go through ONE
+forwarding map per drain (`RuntimeCode::drain_forward`, filled by `migrate_live_globals`),
+so a closure the globals hold and the same closure in a process's data stay one handle
+(`=` on functions is handle identity). Not while the process runs draining-generation code
+(its live arms can be shared; they end when the calls return). Until the copy, the existing
+throttles bound the re-walks as before. The Phase-2 seed reads each cell in place and queues
+only RUNTIME handles. ADR-720.
+
+**Guard.** `runtime_collector::a_process_pinning_the_drain_through_its_data_copies_it_out`
+(two heaps, deterministic: pinned, collects, drained; the copies `=` the migrated globals)
+and `runtime_drain::parked_process_whose_data_pins_the_drain_copies_it_out` (a real parked
+worker; drained within 5 s; woken, its copy `=` `f`, runs, and keeps its text). **Not yet run
+or sabotage-verified** — written on the desktop, where brood's tests do not run; on the test
+machine or CI before this closes (sabotage: drop the call in `Heap::collect`, and make
+`RuntimeCode::copy_through_drain_map` copy through a fresh map).
+
+## KI-389 — the drain probe passed over old-generation strings, numbers and ropes, and keyed the cells it read by index alone
+
+**Seen** 2026-11-12, by reading `walk_reaches_gen` while fixing KI-388. Never observed.
+
+**Cause.** Two holes, each able to report a process clean while it holds a value of the
+draining generation, after which the free leaves it a handle into an empty slab. (1) The walk
+matched closures, pairs, vectors and maps and passed over everything else, so a string,
+bignum, decimal, ratio, bytes, rope, range or seq-view of the draining generation — every
+one of which `flush_rt_value` shows living in a generation — did not count. (2) `visited`
+was keyed `(generation, index)`, but each slab numbers its cells from 0: once pair 5 was
+read, vector 5, map 5 and closure 5 of the same generation were skipped unread, and so was
+any old handle inside them.
+
+**Why it survived.** The drain tests pin with closures, and the collisions need two live
+cells of different kinds at one index with the pin in the second.
+
+**Fix.** The walk asks any RUNTIME handle its generation first (`runtime_gen_of`), whatever
+its kind, and follows every compound kind (a range and a seq-view are a vector cell);
+`visited` is keyed `(SlabKind, generation, index)`.
+
+**Guard.** `runtime_collector::an_old_generation_string_pins_the_drain` for (1). (2) has no
+test that can place two cells at one index on demand; it rests on construction (the key
+names the slab). **Not yet run or sabotage-verified** — as KI-388 (sabotage: drop the
+generation check before the `match`).
+
 ## KI-383 — a downstream root `defdyn` takes over a std module's setting of the same name
 
 **Seen** 2026-11-12, in CI's bedit smoke: `bedit/src/conventions.blsp:43: *indent-width*: value
@@ -122,7 +191,9 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
-| KI-389 | **A project image dropped every dependency module the app names by its short name** — a uniquely-named dep module loads at root by basename (`(:alias repo)` binds `repo/…`, not `store/repo/…`), but the image writer counted a section as carried only when its key was in `*module-files*`, whose keys are all rooted, so `repo`'s section was never written and every imaged run (`nest run`, `nest test`) loaded the dependency from source again. hatch's five `store` modules were ~100 ms of a 220 ms one-file `nest test` | ✅ **FIXED 2026-11-13** — `project-module-carried?` also counts a short name a registered package provides, unless std embeds a module of that name. Guard: `startup_image::a_dependency_module_named_by_its_short_name_is_imaged` (red with the old predicate back); the existing dep case named the module rooted (`libdep/util`), which is why it never saw this |
+| KI-390 | **A project image dropped every dependency module the app names by its short name** — a uniquely-named dep module loads at root by basename (`(:alias repo)` binds `repo/…`, not `store/repo/…`), but the image writer counted a section as carried only when its key was in `*module-files*`, whose keys are all rooted, so `repo`'s section was never written and every imaged run (`nest run`, `nest test`) loaded the dependency from source again. hatch's five `store` modules were ~100 ms of a 220 ms one-file `nest test` | ✅ **FIXED 2026-11-13** — `project-module-carried?` also counts a short name a registered package provides, unless std embeds a module of that name. Guard: `startup_image::a_dependency_module_named_by_its_short_name_is_imaged` (red with the old predicate back); the existing dep case named the module rooted (`libdep/util`), which is why it never saw this |
+| KI-389 | **The drain probe passed over old-generation strings, numbers and ropes, and keyed the cells it read by index alone** — either could report a process clean that still held a value of the generation about to be freed | ⚠️ **open 2026-11-12** — fixed in code (every RUNTIME kind counts; `visited` keyed by slab); guard written, not yet run or sabotage-verified |
+| KI-388 | **A process whose data held the draining generation kept the drain open, and walked its whole heap while it did** — bedit's loop: 58% of its CPU in the Phase-2 probe while typing | ⚠️ **open 2026-11-12** — fixed in code (a dirty process copies its pins out at its next collection, ADR-720); guards written, not yet run or sabotage-verified |
 | KI-387 | **`nest check` dropped every unbound name in a branch it judged unreachable** — `check_if` skipped a dead branch outright, and "dead" rests on inferred types (a caller-derived parameter, a `match` whose patterns cannot meet its scrutinee), so a stale `bytes/concat` behind such a clause passed the check and raised at run time | ✅ **FIXED 2026-11-12** — a dead branch is still walked and keeps its unbound-symbol findings only (`check_dead_branch`). Guard: `scope_and_guards::an_unbound_name_in_a_branch_typed_dead_is_still_reported` (red with the skip back) |
 | KI-386 | **A function called only by itself was typed from its own self-call** — the caller-derived pass seeds only LIVE candidates, but each round derived every function with a site; `(defn f (y) (if y … (f y)))` typed `y` nil|false, the then branch went dead and nothing in it was checked | ✅ **FIXED 2026-11-12** — a round derives only the live candidates (`caller_derived_params`). Guard: `scope_and_guards::a_self_call_does_not_make_the_branch_beside_it_dead` (red without the filter) |
 | KI-385 | **`nest check --fix-renames` rewrote local bindings that share the renamed name** — the rewrite renamed every symbol spelled like the stale name, parameters and `let` binders included | ✅ **FIXED 2026-11-12** — only the places the checker reports are rewritten (`codemod/cst-rename-at-text`), and a form an unresolved macro heads is left for a human. Guards: `boot_check_and_renames::fix_renames_leaves_a_local_spelled_like_the_renamed_name_alone` (red with the old rewrite back), `codemod_test` § cst-rename-at-text; replaying hatch's ADR-716/718 migration reproduces the hand-fixed result. Was: open |

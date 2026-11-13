@@ -14,7 +14,7 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 **Fixed.**
 - **A one-file `nest test` starts in less than half the time** (hatch: 220 → 100 ms). The project
   image now carries a dependency module the app names by its short name (`(:alias repo)`), which
-  it used to drop, so every run loaded that dependency from source again (KI-389); `nest test
+  it used to drop, so every run loaded that dependency from source again (KI-390); `nest test
   FILE` materialises only the modules the file reaches, as `nest run` does; and the check cache is
   swept of week-old entries once a day instead of on every run.
 - **A run no longer pays for modules only its pre-flight check wanted.** A cached check replays

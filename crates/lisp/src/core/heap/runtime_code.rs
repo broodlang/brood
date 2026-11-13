@@ -712,6 +712,16 @@ pub struct RuntimeCode {
     /// confirm the multi-generation collector aged, even when a full free is timing-
     /// dependent.
     pub(super) aged_count: AtomicU64,
+    /// **The current drain's forwarding map** (old-generation handle → its copy in the
+    /// current generation). [`Heap::migrate_live_globals`] fills it while it copies the
+    /// live globals out of the aged generation, and it is kept for the whole drain so
+    /// every later copy of the same old value — a process re-homing what its own data
+    /// still holds ([`Heap::rehome_drain_pins`]), a `def` of an old-generation value
+    /// ([`Heap::rehome_to_current_locked`]) — lands on the SAME new handle. `=` on
+    /// functions is handle identity, so one old closure copied twice would compare
+    /// unequal to itself. Dropped when the drain ends; `None` when no drain has a map
+    /// (a drain armed without a migration — a test's, never the collector's).
+    pub(super) drain_forward: Mutex<Option<super::gc_runtime::RuntimeForward>>,
     /// **RUNTIME collector — Stage 4 (promote⇄age mutual exclusion, ADR-091).** A
     /// generation flip ([`Heap::age_runtime`]) must not interleave with an in-flight
     /// [`Heap::promote`] on another process: promote reserves a slot in the current
@@ -922,6 +932,7 @@ impl Default for RuntimeCode {
             stale_gen: AtomicU64::new(0),
             aging: AtomicBool::new(false),
             aged_count: AtomicU64::new(0),
+            drain_forward: Mutex::new(None),
             promote_lock: RwLock::new(()),
         }
     }
@@ -1076,6 +1087,7 @@ impl RuntimeCode {
             stale_gen: AtomicU64::new(0),
             aging: AtomicBool::new(false),
             aged_count: AtomicU64::new(0),
+            drain_forward: Mutex::new(None),
             promote_lock: RwLock::new(()),
         }
     }

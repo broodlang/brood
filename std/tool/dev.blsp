@@ -44,7 +44,7 @@
   (%gc-collect))
 
 (defn gc-stats ()
-  "A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the timing tier) for the caller's own LOCAL heap; :runtime-closures and :runtime-threshold for the *shared* RUNTIME code region (its promoted-closure count + next auto-compact trigger — same for every process); and :debug-build (true if built with debug assertions — not a perf build). The LOCAL figures are per-process; use (runtime-collect) for the RUNTIME live/reclaimable split.
+  "A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the timing tier) for the caller's own LOCAL heap; :runtime-closures, :runtime-threshold, :runtime-aged and :runtime-draining for the *shared* RUNTIME code region (its promoted-closure count, next auto-compact trigger, generations aged, and whether a drain is open — same for every process); and :debug-build (true if built with debug assertions — not a perf build). The LOCAL figures are per-process; use (runtime-collect) for the RUNTIME live/reclaimable split.
 
     (map? (dev/gc-stats))      ;=> true"
   (%gc-stats))

@@ -7,6 +7,21 @@
 //! `use super::*`, exactly like `gc.rs`.
 use super::*;
 
+/// Which slab a RUNTIME cell lives in, for the drain probe's `visited` set: each slab
+/// numbers its cells from 0, so a cell is its slab, its generation and its index.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SlabKind {
+    Closure,
+    Pair,
+    /// vectors, and the ranges and seq-views a vector cell backs
+    Vector,
+    /// the CHAMP store maps, sets, failures and records share
+    Map,
+}
+
+/// The RUNTIME cells a drain probe has read: `(slab, generation, index)`.
+type Visited = HashSet<(SlabKind, usize, usize)>;
+
 impl Heap {
     /// Number of closures in the shared, append-only RUNTIME region. For
     /// introspection / tests of hot-reload growth (Stage 5 dedup): redefining a
@@ -269,29 +284,160 @@ impl Heap {
         }
         let old_guard = self.runtime.gens[g].load();
         let dst_guard = self.runtime.gens[cur].load();
-        let mut forward = RuntimeForward::for_gens(g, cur);
-        let moved = flush_rt_value(&old_guard, &dst_guard, &mut forward, v);
-        // The re-homed code is new pairs; its source positions must follow it, as aging's
-        // migration carries them. Without this a definition published after an aging flip —
-        // a module load in flight in another process when the generation turned — kept its
-        // code and lost every inner position: an error inside it reported the CALLER's line
-        // (the 2026-10-23 parallel cold load lost them on ~1 module in 25).
-        self.carry_positions(&forward, g, cur);
-        moved
+        let copy =
+            |forward: &mut RuntimeForward| flush_rt_value(&old_guard, &dst_guard, forward, v);
+        // Through the drain's map when it is for these generations, so the copy is the one
+        // the globals and every re-homed process hold; a fresh map otherwise. Either way
+        // the re-homed code's source positions follow it, as aging's migration carries
+        // them: without that, a definition published after an aging flip — a module load in
+        // flight in another process when the generation turned — kept its code and lost
+        // every inner position, and an error inside it reported the CALLER's line (the
+        // 2026-10-23 parallel cold load lost them on ~1 module in 25).
+        self.runtime
+            .copy_through_drain_map(g, cur, copy)
+            .unwrap_or_else(|| {
+                let mut fresh = RuntimeForward::for_gens(g, cur);
+                let moved = copy(&mut fresh);
+                self.runtime.carry_positions(&fresh.pair_log, g, cur);
+                moved
+            })
     }
 
-    /// Copy the `(form-pos …)` entry of every pair `forward` moved from `old_gen` to its new
-    /// index in `dest_gen`. The old entries stay for as long as `old_gen` is retained.
-    fn carry_positions(&self, forward: &RuntimeForward, old_gen: usize, dest_gen: usize) {
-        let mut p = self
-            .runtime
-            .positions
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        for (&old_idx, &new_idx) in forward.pairs.iter() {
-            if let Some(entry) = p.get(&rt_pos_key(old_idx as usize, old_gen)).cloned() {
-                p.insert(rt_pos_key(new_idx as usize, dest_gen), entry);
+    /// **RUNTIME collector — a drain this process's data pins, ended by copying.** A process
+    /// that still HOLDS a value of the draining generation — a callback kept in its state, a
+    /// closure in a memo table, a function in a message it has not read — pins that
+    /// generation for as long as it keeps the value, and a long-lived process (an editor's
+    /// loop holding its model) keeps it for good: the drain never ends, and every report
+    /// meanwhile walks the process's whole heap to find the same answer. So it copies out
+    /// instead: every draining-generation handle it holds privately is rewritten to the
+    /// value's copy in the current generation, through the drain's own forwarding map
+    /// (`RuntimeCode::drain_forward`) — the copy the migrated globals already hold, so `=`
+    /// still sees one function — and the process reports clean at its next safepoint.
+    ///
+    /// Asked for by the drain self-report ([`rehome_asked`](Self::rehome_asked)), done
+    /// where the heap may be rewritten: at the end of this process's own collection
+    /// (`extra_roots` / `extra_envs` are that collection's, so nothing it holds is missed)
+    /// and by the parked-process inspector over a parked heap. At most once a drain.
+    ///
+    /// **Not while the process runs draining-generation code** ([`runs_draining_code`]).
+    /// Its live compiled arms embed handles too, and on a shared runtime an arm can be
+    /// shared with other processes, so they are not rewritten here (compaction rewrites
+    /// them only because it owns the whole runtime). Such a process is left as it was, and
+    /// the report asks again once the probe next finds it dirty — the code it runs is
+    /// current once those calls return, as before.
+    ///
+    /// Sound for the free: the copy holds only current-generation handles, nothing is
+    /// freed here, and the drain still frees only once every live process has reported clean
+    /// by the same probe as before — this only makes that report come true. Returns whether
+    /// it copied.
+    ///
+    /// [`runs_draining_code`]: Self::runs_draining_code
+    pub(crate) fn rehome_drain_pins(
+        &mut self,
+        extra_roots: &mut [Value],
+        extra_envs: &mut [EnvId],
+    ) -> bool {
+        let Some((epoch, generation)) = self.rehome_due() else {
+            return false;
+        };
+        let runtime = Arc::clone(&self.runtime);
+        // The promote lock, as `rehome_to_current_locked`'s caller holds it: no aging flip
+        // while this appends to the current generation.
+        let _promote = crate::core::sync::read(&runtime.promote_lock);
+        let dest_gen = runtime.cur_gen();
+        let old = runtime.gens[generation].load();
+        let new = runtime.gens[dest_gen].load();
+        let copied = runtime.copy_through_drain_map(generation, dest_gen, |forward| {
+            self.rewrite_private_rt_handles(&old, &new, forward, extra_roots, extra_envs)
+        });
+        // Once a drain, copied or not: with no map for this drain (one armed without a
+        // migration) there is nothing to copy through, and the throttled re-walk stands.
+        self.rehomed_epoch.set(Some(epoch));
+        if copied.is_none() {
+            return false;
+        }
+        // A local closure keeps its handle while its body moved, and the compiled-code cache
+        // is keyed by that handle: what it holds was compiled from the old body.
+        self.clear_private_code_caches();
+        // The next report walks again (and finds the process clean), and soon.
+        self.p1_dirty_epoch.set(u64::MAX);
+        self.p2_dirty_epoch.set(u64::MAX);
+        self.drain_report_next_safepoint();
+        true
+    }
+
+    /// The drain `(epoch, generation)` a re-home was asked for, when it may run now: taken
+    /// from [`rehome_asked`](Self::rehome_asked) (asked once, answered once), for the drain
+    /// still open, not already re-homed for, and with no draining-generation code running
+    /// here ([`runs_draining_code`](Self::runs_draining_code)).
+    fn rehome_due(&self) -> Option<(u64, usize)> {
+        let asked = self.rehome_asked.take()?;
+        if !self.drain_active() {
+            return None;
+        }
+        let (epoch, generation) = self.drain_identity();
+        let due = asked == epoch
+            && self.rehomed_epoch.get() != Some(epoch)
+            && !self.runs_draining_code(generation);
+        due.then_some((epoch, generation))
+    }
+
+    /// Rewrite every RUNTIME handle this process holds PRIVATELY through `forward`, copying
+    /// what it names from `old` into `new` on first sight: its roots, the delivered-message
+    /// slots, env roots, dynamic bindings, the caught-error payloads and memo stores, the
+    /// caller's `extra_roots` / `extra_envs`, and both generations of its LOCAL heap. Not
+    /// the shared globals and not its live compiled arms — what compaction adds around this
+    /// ([`runtime_collect_with`](Self::runtime_collect_with)) and what a drain re-home must
+    /// leave alone ([`rehome_drain_pins`](Self::rehome_drain_pins)).
+    fn rewrite_private_rt_handles(
+        &mut self,
+        old: &CodeSlabs,
+        new: &CodeSlabs,
+        forward: &mut RuntimeForward,
+        extra_roots: &mut [Value],
+        extra_envs: &mut [EnvId],
+    ) {
+        for v in self.roots.iter_mut() {
+            *v = flush_rt_value(old, new, forward, *v);
+        }
+        // Delivered-message slots (L1). A shared RUNTIME closure sent to a parked receiver
+        // is handed over BY HANDLE (`copy_cross_heap`'s share-fn path) and parked directly
+        // in this slot table — it is not in any LOCAL slab, so the slab rewrite below cannot
+        // see it. Without this a queued message's closure is relocated out from under its
+        // slot and the `receive` that finally pops it dispatches a stranger (or panics on a
+        // dead handle). The LOCAL collector has always treated these as roots.
+        for v in self.msg_roots.iter_mut().flat_map(|t| t.slots.iter_mut()) {
+            *v = flush_rt_value(old, new, forward, *v);
+        }
+        for e in self.env_roots.iter_mut() {
+            *e = flush_rt_env(old, new, forward, *e);
+        }
+        for (_, v) in self.dynamics.iter_mut() {
+            *v = flush_rt_value(old, new, forward, *v);
+        }
+        #[cfg(feature = "dev-tools")]
+        if let Some(v) = self.extras.as_mut().and_then(|e| e.trace_context.as_mut()) {
+            *v = flush_rt_value(old, new, forward, *v);
+        }
+        if let Some(extras) = self.extras.as_mut() {
+            for origin in extras.caught.iter_mut() {
+                origin.payload = flush_rt_value(old, new, forward, origin.payload);
             }
+            for store in extras.memo_stores.iter_mut() {
+                store.entries = flush_rt_value(old, new, forward, store.entries);
+            }
+        }
+        // ...and the caller's extra live roots (the auto path's `expr`/`env`).
+        for v in extra_roots.iter_mut() {
+            *v = flush_rt_value(old, new, forward, *v);
+        }
+        for e in extra_envs.iter_mut() {
+            *e = flush_rt_env(old, new, forward, *e);
+        }
+        // The LOCAL heap (both generations) — any slot may embed a RUNTIME handle.
+        rewrite_local_rt_handles(&mut self.local, old, new, forward);
+        if let Some(o) = self.old.as_deref_mut() {
+            rewrite_local_rt_handles(o, old, new, forward);
         }
     }
 
@@ -338,7 +484,8 @@ impl Heap {
 
         // (b2) Carry `(form-pos …)` entries for every forwarded pair to its new index,
         // so source positions resolve on the migrated code too. Mirrors compaction.
-        self.carry_positions(&forward, old_gen, dest_gen);
+        self.runtime
+            .carry_positions(&forward.pair_log, old_gen, dest_gen);
 
         // (c) Reconcile under the write locks: install a migrated handle only where the
         // binding still points into `old_gen` (a concurrent redefinition wins).
@@ -364,6 +511,10 @@ impl Heap {
                 }
             }
         }
+        // (d) Keep the map for the drain that follows: whatever still holds an `old_gen`
+        // value copies it through THIS map, so it lands on the handle the globals now
+        // hold (`=` on functions is handle identity). See `RuntimeCode::drain_forward`.
+        *crate::core::sync::lock(&self.runtime.drain_forward) = Some(forward);
 
         // Bump the version so every process's version-stamped caches (global_ic, the
         // call/global ICs, the shared JIT caches) re-resolve to the migrated handles;
@@ -373,6 +524,15 @@ impl Heap {
         self.runtime.version.fetch_add(1, Ordering::Relaxed);
         self.runtime.code_epoch.fetch_add(1, Ordering::Relaxed);
         self.runtime.relocations.fetch_add(1, Ordering::Release);
+        self.clear_private_code_caches();
+        migrated
+    }
+
+    /// Drop this process's own caches of compiled code and resolved call targets — the
+    /// `vm_cache` (keyed on closure handle bits), the global and call-site ICs, the fast
+    /// links and the per-arm block registry — after something rewrote the handles they
+    /// key on or hold. Peers' caches are version-stamped and clear themselves lazily.
+    fn clear_private_code_caches(&self) {
         self.vm_cache.write().clear();
         self.global_ic.borrow_mut().clear();
         self.vm_call_ics.borrow_mut().clear();
@@ -391,7 +551,6 @@ impl Heap {
         // on unique ids).
         self.next_ic_base.set(0);
         self.next_gic_base.set(0);
-        migrated
     }
 
     /// **RUNTIME collector — Stage 4 (free a drained generation).** Reclaim the
@@ -502,26 +661,9 @@ impl Heap {
         // anything.
         self.runtime.free_epoch.fetch_add(1, Ordering::Release);
         // Eagerly clear this process's caches (peers clear lazily on their next use).
-        self.vm_cache.write().clear();
+        self.clear_private_code_caches();
         self.seen_free_epoch
             .set(self.runtime.free_epoch.load(Ordering::Relaxed));
-        self.global_ic.borrow_mut().clear();
-        self.vm_call_ics.borrow_mut().clear();
-        self.vm_fast_links.borrow_mut().clear();
-        #[cfg(debug_assertions)]
-        self.dbg_site_pos.borrow_mut().clear();
-        self.vm_global_ics.borrow_mut().clear();
-        // ADR-175 Phase A: the per-arm block registry indexes the tables just cleared,
-        // so it clears in lockstep. Live arms re-resolve fresh blocks on their next
-        // activation; the currently-executing arm's stale cursors are benign (probes
-        // bounds-check → miss, and every entry validates sym+argc+epoch).
-        self.arm_ic_blocks.borrow_mut().clear();
-        // M2b: base counters reset in lockstep with the registry + tables, so
-        // recycled site-id space starts at 0 exactly as it did when bases came
-        // from `table.len()` (ADR-096's guards rely on the epoch/sym checks, not
-        // on unique ids).
-        self.next_ic_base.set(0);
-        self.next_gic_base.set(0);
         // Drop the shared JIT-code caches (the version bump already epoch-invalidated
         // them; clearing reclaims the memory and prevents a recycled id lingering).
         if let Ok(mut c) = self.runtime.jit_code_cache.write() {
@@ -602,7 +744,7 @@ impl Heap {
         if self.runtime.gens[generation].load().is_empty() {
             return false;
         }
-        let mut visited: HashSet<(usize, usize)> = HashSet::new();
+        let mut visited: Visited = HashSet::new();
         let mut visited_env: HashSet<(usize, usize)> = HashSet::new();
         let mut work: Vec<Value> = Vec::new();
         let mut env_work: Vec<EnvId> = Vec::new();
@@ -615,7 +757,9 @@ impl Heap {
 
         // **A cached stale-dirty verdict short-circuits the WHOLE probe, Phase 1 included**:
         // the verdict is `true` regardless of what Phase 1 would find, and Phase 1 is not
-        // cheap for a deeply recursing process (KI-14).
+        // cheap for a deeply recursing process (KI-14). (A re-home asked for and not yet
+        // made needs no throttle of its own: a process dirty via Phase 2 has this one, and
+        // one dirty via Phase 1 is cheap to re-walk or has the Phase-1 throttle below.)
         if self.p2_dirty_epoch.get() == epoch {
             let t = self.p2_dirty_tick.get().wrapping_add(1);
             self.p2_dirty_tick.set(t);
@@ -651,6 +795,7 @@ impl Heap {
                 self.p1_dirty_epoch.set(epoch);
                 self.p1_dirty_tick.set(0);
             }
+            self.ask_rehome(epoch);
             return true;
         }
         // Clean via Phase 1 — disarm so a later re-dirty is caught at once.
@@ -685,6 +830,7 @@ impl Heap {
                 self.p2_dirty_epoch.set(epoch);
                 self.p2_dirty_tick.set(0);
             }
+            self.ask_rehome(epoch);
         } else {
             // Clean via Phase 2 — disarm so a later re-dirty re-walks at once. (Belt-and-
             // braces: the caller acks a clean process, and the ack `Cell` then short-circuits
@@ -705,7 +851,7 @@ impl Heap {
         }
         // `visited` keys on (gen, index): the two generations share one index space,
         // so a bare slab index would conflate gen-0 #5 with gen-1 #5.
-        let mut visited: HashSet<(usize, usize)> = HashSet::new();
+        let mut visited: Visited = HashSet::new();
         let mut visited_env: HashSet<(usize, usize)> = HashSet::new();
         let mut work: Vec<Value> = Vec::new();
         let mut env_work: Vec<EnvId> = Vec::new();
@@ -739,7 +885,7 @@ impl Heap {
         include_shared: bool,
         work: &mut Vec<Value>,
         env_work: &mut Vec<EnvId>,
-        visited: &mut HashSet<(usize, usize)>,
+        visited: &mut Visited,
         visited_env: &mut HashSet<(usize, usize)>,
     ) -> bool {
         // --- Shared roots: globals + declared `(sig …)` type-exprs. Skipped by the
@@ -793,6 +939,13 @@ impl Heap {
         // `runtime_gen_referenced_private` bound how often the probe runs, while this bounds
         // what a single run costs. (It iterates in place: no `Vec<Arc<_>>` clone, so no
         // atomic increment per active frame.)
+        self.push_live_arm_handles(work);
+        self.walk_reaches_gen(generation, work, env_work, visited, visited_env)
+    }
+
+    /// Queue every RUNTIME literal the compiled arms live on this process's stack embed,
+    /// each distinct arm once.
+    fn push_live_arm_handles(&self, work: &mut Vec<Value>) {
         let mut seen_arms: HashSet<*const crate::eval::compile::CompiledArm> = HashSet::new();
         for arm in self.live_vm_arms.iter() {
             if !seen_arms.insert(Arc::as_ptr(arm.arc())) {
@@ -803,49 +956,98 @@ impl Heap {
                 v
             });
         }
-        self.walk_reaches_gen(generation, work, env_work, visited, visited_env)
+    }
+
+    /// Ask for this process's data to be copied out of the draining generation
+    /// ([`rehome_drain_pins`](Self::rehome_drain_pins)) — once a drain.
+    fn ask_rehome(&self, epoch: u64) {
+        if self.rehomed_epoch.get() != Some(epoch) {
+            self.rehome_asked.set(Some(epoch));
+        }
+    }
+
+    /// Is this process RUNNING draining-generation code — a compiled arm live on its
+    /// stack, or an open module load's staged binding, reaches the generation? What a
+    /// drain re-home ([`rehome_drain_pins`](Self::rehome_drain_pins)) waits out: those are
+    /// not this process's alone to rewrite, and they end when the calls return.
+    fn runs_draining_code(&self, generation: usize) -> bool {
+        let mut work: Vec<Value> = self.staged_values().collect();
+        self.push_live_arm_handles(&mut work);
+        self.walk_reaches_gen(
+            generation,
+            &mut work,
+            &mut Vec::new(),
+            &mut Visited::new(),
+            &mut HashSet::new(),
+        )
     }
 
     /// **Phase 2** of the RUNTIME-generation reachability probe — the LOCAL heap (both
-    /// generations): immutable data can embed a captured RUNTIME closure handle, the one
-    /// place the shared-root walk can't reach. Only worth running when the cheap roots
-    /// (Phase 1) didn't already pin the gen. Every cell is seeded directly (a LOCAL handle
-    /// is never gen-tagged RUNTIME, so the walk only ever follows RUNTIME sub-handles).
+    /// generations): immutable data can embed a captured RUNTIME handle, the one place the
+    /// shared-root walk can't reach. Only worth running when the cheap roots (Phase 1)
+    /// didn't already pin the gen. Every cell is read in place: a LOCAL handle or an atom
+    /// is passed over where it lies, a handle in the draining generation answers at once,
+    /// and only a RUNTIME handle of another generation is queued, for the walk to follow.
+    /// Queuing every value first held the whole heap in one growing vector per probe —
+    /// most of what a pinned editor's loop spent its time on.
     fn seed_phase2_and_walk(
         &self,
         generation: usize,
         work: &mut Vec<Value>,
         env_work: &mut Vec<EnvId>,
-        visited: &mut HashSet<(usize, usize)>,
+        visited: &mut Visited,
         visited_env: &mut HashSet<(usize, usize)>,
     ) -> bool {
+        // `true` when `v` is in the draining generation; a RUNTIME handle elsewhere queued
+        let mut note = |v: Value| match runtime_gen_of(v) {
+            Some(g) if g == generation => true,
+            Some(_) => {
+                work.push(v);
+                false
+            }
+            None => false,
+        };
+        let mut note_env = |e: EnvId| {
+            if e == EnvId::GLOBAL || e.region() != RUNTIME {
+                return false;
+            }
+            if e.code_gen() == generation {
+                return true;
+            }
+            env_work.push(e);
+            false
+        };
         for slabs in [Some(&self.local), self.old_opt()].into_iter().flatten() {
             for (a, b) in slabs.pairs.iter() {
-                work.push(*a);
-                work.push(*b);
+                if note(*a) || note(*b) {
+                    return true;
+                }
             }
             for vec in slabs.vectors.iter() {
-                work.extend(vec.iter().copied());
+                if vec.iter().any(|x| note(*x)) {
+                    return true;
+                }
             }
             for node in slabs.maps.iter() {
-                for (k, v) in node.data.iter() {
-                    work.push(*k);
-                    work.push(*v);
+                if node.data.iter().any(|(k, v)| note(*k) || note(*v)) {
+                    return true;
                 }
             }
             for cl in slabs.closures.iter() {
                 for arm in cl.arms.iter() {
-                    work.extend(arm.body.iter().copied());
-                    work.extend(arm.optionals.iter().map(|(_, d)| *d));
+                    if arm.body.iter().any(|x| note(*x))
+                        || arm.optionals.iter().any(|(_, d)| note(*d))
+                    {
+                        return true;
+                    }
                 }
-                if let Some(e) = cl.env {
-                    env_work.push(e);
+                if cl.env.is_some_and(&mut note_env) {
+                    return true;
                 }
             }
             for fr in slabs.envs.iter() {
-                work.extend(fr.vars.iter().map(|(_, v)| *v));
-                if let Some(p) = fr.parent {
-                    env_work.push(p);
+                if fr.vars.iter().any(|(_, v)| note(*v)) || fr.parent.is_some_and(&mut note_env) {
+                    return true;
                 }
             }
         }
@@ -856,12 +1058,19 @@ impl Heap {
     /// fixpoint, following every RUNTIME sub-handle; return `true` the instant a handle in
     /// generation `gen` is seen. Shared by both phases of `runtime_gen_referenced_impl`
     /// (the `visited` sets carry across phases so Phase 2 never re-walks Phase 1's graph).
+    ///
+    /// EVERY kind counts: a string, a bignum, a rope, a range in the draining generation
+    /// is freed with it as surely as a closure is, so a process holding one is not clean.
+    /// (The walk once matched only closures, pairs, vectors and maps, and passed over the
+    /// rest — a constant string read from a global into a process's data did not pin.)
+    /// What `visited` records is keyed by the SLAB too: pair 5 and vector 5 are different
+    /// cells, and keying by index alone let one stand in for the other and go unread.
     fn walk_reaches_gen(
         &self,
         generation: usize,
         work: &mut Vec<Value>,
         env_work: &mut Vec<EnvId>,
-        visited: &mut HashSet<(usize, usize)>,
+        visited: &mut Visited,
         visited_env: &mut HashSet<(usize, usize)>,
     ) -> bool {
         // --- Transitive walk. Detect generation `gen`; follow every RUNTIME sub-handle
@@ -883,12 +1092,18 @@ impl Heap {
                 }
             }
             let Some(v) = work.pop() else { break };
+            let Some(handle) = v.heap_handle().filter(|h| h.region() == RUNTIME) else {
+                continue;
+            };
+            if handle.code_gen() == generation {
+                return true;
+            }
+            // A cell of the other generation: read what it holds, once.
+            let mut first_visit =
+                |slab: SlabKind| visited.insert((slab, handle.code_gen(), handle.index()));
             match v.unpack() {
-                ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => {
-                    if id.code_gen() == generation {
-                        return true;
-                    }
-                    if visited.insert((id.code_gen(), id.index())) {
+                ValueRef::Fn(id) | ValueRef::Macro(id) => {
+                    if first_visit(SlabKind::Closure) {
                         let cl = self.closure(id);
                         for arm in cl.arms.iter() {
                             work.extend(arm.body.iter().copied());
@@ -899,40 +1114,32 @@ impl Heap {
                         }
                     }
                 }
-                ValueRef::Pair(id) if id.region() == RUNTIME => {
-                    if id.code_gen() == generation {
-                        return true;
-                    }
-                    if visited.insert((id.code_gen(), id.index())) {
+                ValueRef::Pair(id) => {
+                    if first_visit(SlabKind::Pair) {
                         let (h, t) = self.pair(id);
                         work.push(h);
                         work.push(t);
                     }
                 }
-                ValueRef::Vector(id) if id.region() == RUNTIME => {
-                    if id.code_gen() == generation {
-                        return true;
-                    }
-                    if visited.insert((id.code_gen(), id.index())) {
+                // A range and a seq-view are a vector cell behind a wrapper.
+                ValueRef::Vector(id) | ValueRef::Range(id) | ValueRef::SeqView(id) => {
+                    if first_visit(SlabKind::Vector) {
                         work.extend(self.vector(id).iter().copied());
                     }
                 }
                 ValueRef::Map(id)
                 | ValueRef::Set(id)
                 | ValueRef::Failure(id)
-                | ValueRef::Record { fields: id, .. }
-                    if id.region() == RUNTIME =>
-                {
-                    if id.code_gen() == generation {
-                        return true;
-                    }
-                    if visited.insert((id.code_gen(), id.index())) {
+                | ValueRef::Record { fields: id, .. } => {
+                    if first_visit(SlabKind::Map) {
                         self.fold_entries(id, &mut |k, val| {
                             work.push(k);
                             work.push(val);
                         });
                     }
                 }
+                // A string, number, bytes or rope holds no handle: only its own generation
+                // mattered, and that was answered above.
                 _ => {}
             }
         }
@@ -965,11 +1172,17 @@ impl Heap {
         // Arm the arming process's self-report to fire on its very next safepoint (rather than
         // up to a stride later), so a drain it starts completes promptly — the drain-completion
         // path drives progress off this process. Other processes fire within a stride, which is
-        // ample for a lingering fan-out. `wrapping_sub(1)` so the next `drain_report_due` tick
-        // lands on a stride boundary.
+        // ample for a lingering fan-out.
+        self.drain_report_next_safepoint();
+        epoch
+    }
+
+    /// Make this process's next safepoint run its drain self-report
+    /// ([`drain_report_due`](Self::drain_report_due)) instead of waiting out the stride.
+    fn drain_report_next_safepoint(&self) {
+        // the next tick lands on a stride boundary
         self.drain_report_tick
             .set(DRAIN_REPORT_STRIDE.wrapping_sub(1));
-        epoch
     }
 
     /// **RUNTIME collector — Stage 3b (end a drain).** Disarm the current drain
@@ -983,6 +1196,9 @@ impl Heap {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        // Its forwarding map names handles in a generation about to be freed (or one no
+        // drain is reclaiming any more): nothing may copy through it again.
+        *crate::core::sync::lock(&rt.drain_forward) = None;
     }
 
     /// Is a cooperative generation drain currently armed? A single relaxed atomic
@@ -1296,50 +1512,9 @@ impl Heap {
                 *v = flush_rt_value(&old_code, &new, &mut forward, *v);
             }
         }
-        // 2. This process's roots, env roots, and dynamic bindings.
-        for v in self.roots.iter_mut() {
-            *v = flush_rt_value(&old_code, &new, &mut forward, *v);
-        }
-        // 2b. Delivered-message slots (L1). A shared RUNTIME closure sent to a parked
-        // receiver is handed over BY HANDLE (`copy_cross_heap`'s share-fn path) and
-        // parked directly in this slot table — it is not in any LOCAL slab, so step 3
-        // below cannot see it. Without this rewrite a queued message's closure is
-        // relocated out from under its slot and the `receive` that finally pops it
-        // dispatches a stranger (or panics on a dead handle). The LOCAL collector has
-        // always treated these as roots; the RUNTIME side never did.
-        for v in self.msg_roots.iter_mut().flat_map(|t| t.slots.iter_mut()) {
-            *v = flush_rt_value(&old_code, &new, &mut forward, *v);
-        }
-        for e in self.env_roots.iter_mut() {
-            *e = flush_rt_env(&old_code, &new, &mut forward, *e);
-        }
-        for (_, v) in self.dynamics.iter_mut() {
-            *v = flush_rt_value(&old_code, &new, &mut forward, *v);
-        }
-        #[cfg(feature = "dev-tools")]
-        if let Some(v) = self.extras.as_mut().and_then(|e| e.trace_context.as_mut()) {
-            *v = flush_rt_value(&old_code, &new, &mut forward, *v);
-        }
-        if let Some(extras) = self.extras.as_mut() {
-            for origin in extras.caught.iter_mut() {
-                origin.payload = flush_rt_value(&old_code, &new, &mut forward, origin.payload);
-            }
-            for store in extras.memo_stores.iter_mut() {
-                store.entries = flush_rt_value(&old_code, &new, &mut forward, store.entries);
-            }
-        }
-        // ...and the caller's extra live roots (the auto path's `expr`/`env`).
-        for v in extra_roots.iter_mut() {
-            *v = flush_rt_value(&old_code, &new, &mut forward, *v);
-        }
-        for e in extra_envs.iter_mut() {
-            *e = flush_rt_env(&old_code, &new, &mut forward, *e);
-        }
-        // 3. The LOCAL heap (both generations) — any slot may embed a RUNTIME handle.
-        rewrite_local_rt_handles(&mut self.local, &old_code, &new, &mut forward);
-        if let Some(o) = self.old.as_deref_mut() {
-            rewrite_local_rt_handles(o, &old_code, &new, &mut forward);
-        }
+        // 2–3. Everything this process holds privately: its roots, the delivered-message
+        // slots, env roots, dynamic bindings, the caller's extra roots and its LOCAL heap.
+        self.rewrite_private_rt_handles(&old_code, &new, &mut forward, extra_roots, extra_envs);
         // 3b. The LIVE compiled-VM arms on this process's execution stack. Their
         // `Arc`'d node trees are off the GC root graph (and held by `&Node` during
         // execution, so the `Arc` can't be swapped), but they embed promoted RUNTIME
@@ -1398,7 +1573,7 @@ impl Heap {
         // cleared `vm_cache` recompiles its node trees); a still-live arm's old site
         // id then either falls out of range (ignored) or aliases a fresh site, which
         // the probe's sym+argc+epoch validation makes harmless (ADR-096).
-        self.vm_cache.write().clear();
+        self.clear_private_code_caches();
         // ...and the RUNTIME-shared compiled closures (ADR-175). The live arms above were
         // rewritten because they are on this process's execution stack; a merely *cached*
         // shared arm is on no stack, so its embedded RUNTIME handles still address the
@@ -1406,25 +1581,6 @@ impl Heap {
         // (already rewritten) AST. Safe unconditionally — compaction holds `Arc::get_mut`
         // on the runtime, so this is the only process.
         self.shared_closures_clear();
-        self.global_ic.borrow_mut().clear();
-        self.vm_call_ics.borrow_mut().clear();
-        // Clear the IR-readable mirror in lockstep (recycled sites get a fresh slot; a
-        // live arm's now-out-of-range site id is caught by the JIT's `site < len` guard).
-        self.vm_fast_links.borrow_mut().clear();
-        #[cfg(debug_assertions)]
-        self.dbg_site_pos.borrow_mut().clear();
-        self.vm_global_ics.borrow_mut().clear();
-        // ADR-175 Phase A: the per-arm block registry indexes the tables just cleared,
-        // so it clears in lockstep. Live arms re-resolve fresh blocks on their next
-        // activation; the currently-executing arm's stale cursors are benign (probes
-        // bounds-check → miss, and every entry validates sym+argc+epoch).
-        self.arm_ic_blocks.borrow_mut().clear();
-        // M2b: base counters reset in lockstep with the registry + tables, so
-        // recycled site-id space starts at 0 exactly as it did when bases came
-        // from `table.len()` (ADR-096's guards rely on the epoch/sym checks, not
-        // on unique ids).
-        self.next_ic_base.set(0);
-        self.next_gic_base.set(0);
 
         debug_assert!(
             verify_rt_slabs(&new),
@@ -1630,8 +1786,12 @@ impl Heap {
 /// Old→new RUNTIME index maps, one per slab kind (the RUNTIME counterpart of
 /// [`FlushForward`] — but no generation epoch: RUNTIME handles are region+index).
 #[derive(Default)]
-struct RuntimeForward {
+pub(super) struct RuntimeForward {
     pairs: HashMap<u32, u32>,
+    /// Every `pairs` entry in the order it was made, so a caller copying more into a
+    /// map that is kept (the drain's, `RuntimeCode::drain_forward`) can carry the source
+    /// positions of just the pairs its own copy added (`RuntimeCode::carry_positions`).
+    pair_log: Vec<(u32, u32)>,
     vectors: HashMap<u32, u32>,
     maps: HashMap<u32, u32>,
     strings: HashMap<u32, u32>,
@@ -1663,6 +1823,56 @@ impl RuntimeForward {
             old_gen,
             dest_gen,
             ..RuntimeForward::default()
+        }
+    }
+
+    /// Does this map copy from `old_gen` into `dest_gen`?
+    fn is_for(&self, old_gen: usize, dest_gen: usize) -> bool {
+        self.old_gen == old_gen && self.dest_gen == dest_gen
+    }
+}
+
+impl RuntimeCode {
+    /// Run `copy` through the open drain's forwarding map ([`drain_forward`]) when it is
+    /// the map for `old_gen → dest_gen`, then carry the source positions of the pairs that
+    /// copy added; `None`, with nothing run, when there is no such map. Every copy of an
+    /// aged value made during a drain goes through here, so each lands on the one handle
+    /// the migrated globals hold.
+    ///
+    /// The caller holds `promote_lock`, so the generations cannot flip under the copy.
+    ///
+    /// [`drain_forward`]: RuntimeCode::drain_forward
+    fn copy_through_drain_map<R>(
+        &self,
+        old_gen: usize,
+        dest_gen: usize,
+        copy: impl FnOnce(&mut RuntimeForward) -> R,
+    ) -> Option<R> {
+        let mut shared = crate::core::sync::lock(&self.drain_forward);
+        let forward = shared
+            .as_mut()
+            .filter(|forward| forward.is_for(old_gen, dest_gen))?;
+        let first_new_pair = forward.pair_log.len();
+        let copied = copy(forward);
+        self.carry_positions(&forward.pair_log[first_new_pair..], old_gen, dest_gen);
+        Some(copied)
+    }
+
+    /// Copy the `(form-pos …)` entry of every pair in `moved` (`[old index, new index]`: a
+    /// forwarding map's `pair_log`, or the part of it one copy added) from `old_gen` to its
+    /// new index in `dest_gen`. The old entries stay for as long as `old_gen` is retained.
+    fn carry_positions(&self, moved: &[(u32, u32)], old_gen: usize, dest_gen: usize) {
+        if moved.is_empty() {
+            return;
+        }
+        let mut positions = crate::core::sync::write(&self.positions);
+        for &(old_index, new_index) in moved {
+            if let Some(entry) = positions
+                .get(&rt_pos_key(old_index as usize, old_gen))
+                .cloned()
+            {
+                positions.insert(rt_pos_key(new_index as usize, dest_gen), entry);
+            }
         }
     }
 }
@@ -1826,6 +2036,7 @@ fn flush_rt_pair(
         let new_car = flush_rt_value(old, new, forward, car);
         let new_idx = new.pairs.push((new_car, next));
         forward.pairs.insert(key, new_idx as u32);
+        forward.pair_log.push((key, new_idx as u32));
         next = Value::pair(PairId::runtime_gen(new_idx, dest));
     }
     match next.unpack() {

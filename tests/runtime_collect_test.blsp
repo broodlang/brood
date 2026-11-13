@@ -31,7 +31,10 @@
         ;; the churn promoted closures into the shared region, so it's grown past 0
         (is (> (get s :runtime-closures) 0))
         ;; the threshold is the live count that triggers the next auto-compaction
-        (is (> (get s :runtime-threshold) 0)))))
+        (is (> (get s :runtime-threshold) 0))
+        ;; how many generations it has aged, and whether a drain of one is open
+        (is (int? (get s :runtime-aged)))
+        (is (bool? (get s :runtime-draining))))))
 
   (test "(runtime-collect) is a safe no-op while the runtime is shared (:ran false)"
     ;; a parked process guarantees >1 holder of the runtime Arc, so the collector's

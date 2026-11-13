@@ -5,7 +5,7 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
-## KI-389 — A project image dropped every dependency module the app names by its short name ✅ closed 2026-11-13
+## KI-390 — A project image dropped every dependency module the app names by its short name ✅ closed 2026-11-13
 
 **Seen** 2026-11-13, timing a one-file `nest test` on hatch (220 ms): after the image was read,
 `store`'s five modules still opened and loaded from source on every run, ~100 ms of it.
