@@ -221,11 +221,12 @@ define it in a `(defmodule your/mod …)` — that makes `your/mod/get`, which i
 Inside that module your definition wins every bare call, even over a prelude **macro**
 (`(defn when …)` → `(when x)` calls yours; `/when` reaches the macro). Defining a prelude
 macro's name warns at load unless the header says `(:shadow when)` (ADR-423).
-The rule reserves shipped **functions**; a `defdyn` name is never reserved whatever it
-holds, and it is ambient (root) — so `(def *print-length* 3)` from any module rebinds the
-one root binding, and `(def *out* my-port)` still redirects output permanently. A plain
-`def`'d prelude global that is not a `defdyn` (`*load-path*`) is NOT reachable that way:
-inside a module, `(def *load-path* …)` defines `your/mod/*load-path*`.
+The rule reserves shipped **functions**; a dynamic variable is never reserved whatever it
+holds. Inside a module, set a root one with the `/name` root escape —
+`(def /*print-length* 3)`, `(def /*out* my-port)` redirects output permanently; a bare
+`(def *out* …)` there is an error naming that fix. A plain `def`'d prelude global that is
+not dynamic (`*load-path*`) is NOT reachable that way: inside a module,
+`(def *load-path* …)` defines `your/mod/*load-path*`; use its setter.
 
 ## Naming & docstrings
 
@@ -1412,12 +1413,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   and `b/parse` are distinct globals, and `nest run`/`nest test` no longer
   false-flag them. From *outside* a module (e.g. the REPL or `nest mcp` eval),
   reach a `defn` by its qualified name: `(life/step …)`, found via `reflect/apropos`.
-  **The one exception is a name declared with `defdyn`** — it is *ambient*
-  (root, never namespaced), so `(def *print-length* 3)` from any module rebinds the
-  one root binding. An earmuffed name that is *not* declared is namespaced like
-  everything else: a plain `(def *width* 10)` in module `a` is `a/*width*`. So
-  earmuffs are a naming convention, not a scoping rule (ADR-151) — declare the
-  knob with `defdyn` if other modules must reach it.
+  **There is no exception, dynamic variables included** (ADR-722): `(defdyn *width* 10)`
+  in module `a` is `a/*width*` — bare inside `a`, `a/*width*` or (after `(:use a)`) bare
+  elsewhere, in a read or a `binding` alike. Root names come from root code only: the
+  prelude, a file with no `defmodule`, or a `/name` head (`(defdyn /*1 nil)`,
+  `(def /*print-length* 3)` to set the prelude's knob from a module). Earmuffs are a
+  naming convention, not a scoping rule (ADR-151).
 - **Importing a module**: there is **no `require` form** — you load a module by
   *referencing* it. Inside `defmodule`, a `(:use mod)` clause both **loads** `mod`
   and refers its public names **bare** (`(:use mod :only [a b])` for a subset).

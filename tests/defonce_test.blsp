@@ -21,8 +21,10 @@
     (assert= *dx* :first)) ; not :second — the second defonce saw *dx* already bound
   (test "…whereas a plain def overwrites (the contrast)"
     (assert= *dy* :second))
-  (test "%defonce-qualified-name prefixes the current module, passes bare/qualified through"
+  (test "%def-name prefixes the current module, passes bare/qualified through, strips a root escape"
     ;; at runtime current-ns is nil, so a bare name passes through unchanged…
-    (assert= (%defonce-qualified-name '*z*) '*z*)
-    ;; …and an already-qualified one is never doubled
-    (assert= (%defonce-qualified-name 'foo/*z*) 'foo/*z*)))
+    (assert= (%def-name '*z*) '*z*)
+    ;; …an already-qualified one is never doubled…
+    (assert= (%def-name 'foo/*z*) 'foo/*z*)
+    ;; …and `/*z*` names the root `*z*`, as a `def` head spelled so binds it (ADR-722)
+    (assert= (%def-name '/*z*) '*z*)))

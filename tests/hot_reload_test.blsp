@@ -30,7 +30,7 @@
     ;; This test changes an arity ON PURPOSE, so the kernel's reload diagnostic is
     ;; expected rather than informative — silence it for this test's scope so it
     ;; doesn't look like a problem in the suite's output.
-    (def *reload-diagnostics* false)
+    (def /*reload-diagnostics* false)
     (def hr-c (fn (x) x))
     (def hr-c (fn (x y) (+ x y)))
     ; 1-arg call against the new 2-arg fn
@@ -165,14 +165,14 @@
       (hrn-warm pid)
       (when (%native-tier?) (assert= :native (hrn-tier hrn-d 500)))
       (proc/sleep 20)
-      (def *spy-sink* (fn (e) (send me [:spy (get e :spy)])))
+      (def /*spy-sink* (fn (e) (send me [:spy (get e :spy)])))
       (trace-fn 'hot-reload-test/hrn-d)
       (send pid [:add 1])
       (send pid [:add 1])
       (assert= 3002 (hrn-total pid))
       (assert= true (>= (count (seq/filter (hrn-spy-kinds (list)) (fn (k) (= k :call)))) 2))
       (untrace-fn 'hot-reload-test/hrn-d)
-      (def *spy-sink* nil)
+      (def /*spy-sink* nil)
       (send pid [:add 1])
       (assert= 3003 (hrn-total pid))
       (assert= (list) (hrn-spy-kinds (list)))

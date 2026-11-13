@@ -242,7 +242,7 @@ pub(super) fn infer_same_file_functions(
     let mut clause_defs: Vec<(Symbol, Vec<Value>)> = Vec::new();
     for &form in forms {
         if let Some((name, clauses)) = defn_clauses(heap, form) {
-            let qualified = qualify_decl_name(heap, ctx, file_ns_name, name);
+            let qualified = qualify_decl_name(ctx, file_ns_name, name);
             if let Some(arms) = sigs::infer_overload_from_clauses(heap, &clauses, ctx) {
                 ctx.add_inferred_overload(qualified, arms);
             }

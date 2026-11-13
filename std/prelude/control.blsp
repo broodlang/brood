@@ -785,32 +785,34 @@ message it carries, and anything else its printed form.
 ;; child (it starts from the defaults). The kernel supplies only `%declare-dynamic`,
 ;; `%binding`, and `reflect/dynamic?`; the surface is these two macros (the `try` precedent).
 
-;; (defdyn *x* 10) => declare *x* dynamic, then def its default.
+;; (defdyn *x* 10) in module m => declare m/*x* dynamic, then def its default.
 (defmacro defdyn (name default)
-  "Declare `name` a dynamic (process-scoped special) variable with the given default, rebindable via `binding`. Also marks the name **ambient** — never namespaced, so a `def` of it from any module rebinds this one root binding."
-  (do
-    ;; Declare at EXPANSION time as well as at run time. `defdyn` is the *only* door
-    ;; to an ambient (never-namespaced) name, and the compile pass resolves
-    ;; namespaces AFTER macroexpansion — so the mark has to exist before the `def`
-    ;; head below is qualified, or `(defdyn *x* 0)` inside a module would define
-    ;; `mod/*x*` while `binding` and every reader looked for bare `*x*`. The runtime
-    ;; `%declare-dynamic` stays for a `defdyn` form built and `reflect/eval`'d dynamically.
-    (%declare-dynamic name)
-    `(do (%declare-dynamic '~name) (def ~name ~default))))
+  "Declare `name` a dynamic (process-scoped special) variable with the given default, rebindable via `binding`. It is named like any definition: inside a module `*x*` is `mod/*x*`, read from elsewhere as `mod/*x*` or through `(:use mod)`; only root code (the prelude, a file with no `defmodule`, or a `/*x*` name) declares a root one."
+  ;; The name the `def` below binds, by `def`'s own rule (ADR-722). It is marked at
+  ;; EXPANSION time as well as at run time, so a `binding` later in the same file, which
+  ;; expands before this form runs, already sees a dynamic variable. The runtime mark stays
+  ;; for a `defdyn` form built and `reflect/eval`'d dynamically.
+  (let (bound (%def-name name))
+    (%declare-dynamic bound)
+    `(do (%declare-dynamic '~bound) (def ~name ~default))))
 
 ;; Split a flat binding list (*a* va *b* vb) into its names and value forms, at
 ;; expansion time (like the threading-macro helpers above).
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %binding-names (b) (if (nil? b) nil (cons (first b) (%binding-names (rest (rest b)))))))
+  (defn- %binding-names (b)
+    (if (nil? b) nil (cons (%resolve-name (first b)) (%binding-names (rest (rest b)))))))
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
   (defn- %binding-vals (b) (if (nil? b) nil (cons (second b) (%binding-vals (rest (rest b)))))))
 
-;; (binding (*a* 1 *b* 2) body...) => (%binding '(*a* *b*) [1 2] (fn () body...))
+;; (binding (*a* 1 *b* 2) body...) => (%binding '(m/*a* *b*) [1 2] (fn () body...))
 ;; The names go out as a quoted list and the values as a vector literal — both
 ;; reader/evaluator syntax, never function calls — so a locally-shadowed `list`
-;; or `map` can't break the expansion (`fn`/`quote` are special forms).
+;; or `map` can't break the expansion (`fn`/`quote` are special forms). A quoted
+;; symbol is never resolved, so each name is resolved here, at expansion time, to the
+;; variable the same spelling reads: the module's own `m/*a*`, an import, or a root one
+;; (ADR-722).
 (defmacro binding (bindings & body)
   "Rebind the dynamic variables in `bindings` (a flat `name value ...` list) for the dynamic extent of `body`, restoring them on exit (even on error).
 
@@ -820,4 +822,6 @@ message it carries, and anything else its printed form.
       " Brood is lists-for-code, vectors-for-data (unlike Clojure).")
     (if (= 1 (%rem (count bindings) 2))
       (reflect/error-at bindings "binding: bindings must be name/value pairs, got " bindings)
-      `(%binding (quote ~(%binding-names bindings)) [~@(%binding-vals bindings)] (fn () ~@body)))))
+      `(%binding (quote ~(%binding-names bindings))
+         [~@(%binding-vals bindings)]
+         (fn () ~@body)))))

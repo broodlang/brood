@@ -64,10 +64,14 @@ thread_local! {
     /// Bare names the current compile pass used that are `(:use …)`-imported from two or
     /// more modules at once (ADR-235): `(bare, sorted candidate qualifieds)`. Recorded by
     /// `resolve_sym` at the point the ambiguous name is referenced, raised as a use-site
-    /// error by [`take_ambiguous_error`]. Only armed under `RECORDING` (the read-only LSP
+    /// error by [`take_resolve_error`]. Only armed under `RECORDING` (the read-only LSP
     /// path must not hard-error a hover).
     static PENDING_AMBIGUOUS: RefCell<Vec<(Symbol, Vec<Symbol>)>> =
         const { RefCell::new(Vec::new()) };
+    /// A bare definition head in a module that spells a dynamic variable visible there from
+    /// elsewhere (ADR-722): `(bare, the variable it names, module)`. Recorded by the resolve
+    /// pass, raised by [`take_resolve_error`].
+    static PENDING_DYNAMIC_DEF: Cell<Option<(Symbol, Symbol, Symbol)>> = const { Cell::new(None) };
     /// Set by [`ensure_required`] for the load it is about to run, consumed by the loader's
     /// next `%require-record-edge!` (via [`take_skip_next_edge`]): an inferred load is not a
     /// load-time edge. One-shot, so the edges of the loaded module's OWN header clauses are
@@ -298,7 +302,7 @@ fn record_module(module: Symbol, name: Symbol) {
 /// `(:use …)`-imported from more than one module (`candidates`), so it cannot resolve
 /// unambiguously (ADR-235). A no-op unless recording is armed (the read-only LSP resolve
 /// must not raise). Pure — pushes to a thread-local, no heap/GC — so it is safe under
-/// `resolve_sym`'s GC/macro blocks. Drained and raised by [`take_ambiguous_error`].
+/// `resolve_sym`'s GC/macro blocks. Drained and raised by [`take_resolve_error`].
 pub fn record_ambiguous(bare: Symbol, candidates: Vec<Symbol>) {
     if !RECORDING.with(|recording| recording.get()) {
         return;
@@ -311,12 +315,59 @@ pub fn record_ambiguous(bare: Symbol, candidates: Vec<Symbol>) {
     });
 }
 
+/// Record that a definition in `module` is headed by the bare `bare`, which names the dynamic
+/// variable `target` there: a ROOT one (`target == bare`) or one `(:use …)`-imported from
+/// another module (ADR-722), a `defdyn` head included. Until ADR-722 that spelling set the
+/// variable, which was root;
+/// now it would define `module/bare` and leave every reader of `target` unchanged, so it is
+/// refused rather than reinterpreted (ADR-152). Same channel discipline as
+/// [`record_ambiguous`]: armed only under `RECORDING`, raised by [`take_resolve_error`].
+pub fn record_dynamic_def(bare: Symbol, target: Symbol, module: Symbol) {
+    if RECORDING.with(|recording| recording.get()) {
+        PENDING_DYNAMIC_DEF.with(|pending| {
+            if pending.get().is_none() {
+                pending.set(Some((bare, target, module)));
+            }
+        });
+    }
+}
+
+/// The error the current resolve pass recorded, if any: a definition head that spells a
+/// dynamic variable visible from elsewhere, then an ambiguous bare name (ADR-235). Called
+/// right after `resolve` in the macroexpand driver, so the error points at the offending
+/// form. Always clears both channels (so a caught error does not leak into the next pass).
+pub fn take_resolve_error() -> Option<LispError> {
+    let dynamic_def = PENDING_DYNAMIC_DEF.with(|pending| pending.take());
+    let ambiguous = take_ambiguous_error();
+    match dynamic_def {
+        Some((bare, target, module)) if bare == target => {
+            let bare = value::symbol_name_ref(bare);
+            let module = value::symbol_name_ref(module);
+            Some(LispError::runtime(format!(
+                "`{bare}` is a root dynamic variable, so `{module}` cannot define its own \
+                 `{bare}`: write `/{bare}` to set the root variable, or give the module's \
+                 variable another name."
+            )))
+        }
+        Some((bare, target, module)) => {
+            let bare = value::symbol_name_ref(bare);
+            let target = value::symbol_name_ref(target);
+            let module = value::symbol_name_ref(module);
+            Some(LispError::runtime(format!(
+                "`{bare}` is `{target}` in `{module}`, a dynamic variable it imports: write \
+                 `{target}` to set it, or `:exclude` it from the `(:use …)` to define the \
+                 module's own."
+            )))
+        }
+        None => ambiguous,
+    }
+}
+
 /// If the current compile pass referenced any ambiguous bare name (ADR-235), take the
 /// first and turn it into a use-site clash error naming the candidate modules; else `None`.
-/// Called right after `resolve` in the macroexpand driver, so the error points at the form
-/// that used the name. Always clears the channel (so a caught error does not leak into the
-/// next pass). Candidates are sorted by their qualified spelling for a stable message.
-pub fn take_ambiguous_error() -> Option<LispError> {
+/// Always clears the channel. Candidates are sorted by their qualified spelling for a
+/// stable message.
+fn take_ambiguous_error() -> Option<LispError> {
     let first = PENDING_AMBIGUOUS.with(|pending| {
         let mut pending = pending.borrow_mut();
         if pending.is_empty() {

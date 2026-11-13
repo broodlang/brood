@@ -947,10 +947,9 @@ fn isolate_impl(args: &[Value], env: EnvId, heap: &mut Heap, replay_loads: bool)
     // The global *binding* table is not the whole image. Two mark registries live beside
     // it — the runtime's `defdyn` set and its `defn-` private set — and neither is covered by `snapshot_globals`, so without this a mark made inside the thunk would
     // survive the rollback while its binding did not. That is not cosmetic: a leaked dynamic mark
-    // makes the name permanently *ambient* for namespace resolution (`macros::is_ambient`,
-    // so a later module's `(def *q* …)` stays bare instead of being qualified) and
-    // permanently exempt from the reserved-name check (`heap::is_sealed` excludes
-    // dynamics). Snapshot both and put them back with the bindings.
+    // leaves the name rebindable by `binding` and permanently exempt from the reserved-name
+    // check (`heap::is_sealed` excludes dynamics). Snapshot both and put them back with the
+    // bindings.
     // Both sets belong to THIS runtime (KI-224): a restore here cannot drop a mark another
     // runtime in the same OS process made meanwhile.
     let saved_dynamics = heap.dynamic_names();

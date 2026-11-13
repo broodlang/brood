@@ -80,7 +80,7 @@ fn requiring_complete_does_not_load_the_scaffolder() {
 fn the_template_completion_still_works_through_the_call_time_require() {
     // The other half of the contract: making the dependency lazy must not make the
     // feature disappear. `scaffold` is absent above; here it must load on demand and
-    // the ambient it defines must be readable.
+    // the dynamic variable it defines must be readable.
     let mut interp = Interp::new();
     interp
         .eval_str("(require-one 'complete)")

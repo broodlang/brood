@@ -767,6 +767,18 @@ impl Ctx {
     pub(super) fn is_file_global(&self, sym: Symbol) -> bool {
         self.file.file_globals.contains(&sym)
     }
+    /// Does a lexical binder spelled `sym` shadow one of this file's globals, under the
+    /// bare spelling or the module-qualified one a `def` head inside the module binds
+    /// (`*dt*` → `mod/*dt*`; a module's `defdyn` is one since ADR-722)?
+    pub(super) fn shadows_file_global(&self, heap: &crate::core::heap::Heap, sym: Symbol) -> bool {
+        use crate::core::value::{intern, symbol_name_ref};
+        self.is_file_global(sym)
+            || heap.compile_ns().is_some_and(|ns| {
+                let spelling = symbol_name_ref(sym);
+                !spelling.contains('/')
+                    && self.is_file_global(intern(&format!("{}/{spelling}", symbol_name_ref(ns))))
+            })
+    }
     /// A copy of this ctx with the given lint categories additionally suppressed
     /// (a `(check-allow …)` scope entered). ORs into any already-suppressed set.
     /// The file's ability facts, if any (`None` unless `set_ability` ran at file level).

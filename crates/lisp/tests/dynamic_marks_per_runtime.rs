@@ -95,7 +95,7 @@ fn an_isolate_restore_keeps_another_runtimes_new_mark() {
 /// A mark made inside A's isolate never reaches B, and is gone from A after the restore.
 ///
 /// The thunk runs `defdyn`'s run-time half rather than `defdyn` itself: the macro ALSO marks
-/// at expansion time (so a module's `def` head stays ambient), and expanding the `%isolate`
+/// at expansion time (so a `binding` later in the file sees it), and expanding the `%isolate`
 /// form happens before the isolate takes its snapshot — a mark the isolate never owned.
 #[test]
 fn a_mark_inside_an_isolate_stays_in_its_runtime_and_is_rolled_back() {

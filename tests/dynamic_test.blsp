@@ -98,8 +98,10 @@
     (assert= (try (binding (*dt* 5) (throw :raised)) (catch e e)) :raised))
 
   (test "dynamic? reports declared dynamics only"
-    (is (reflect/dynamic? '*dt*))
-    (is (reflect/dynamic? '*dt2*))
+    ;; a module's `defdyn` declares its qualified name, not a root one (ADR-722)
+    (is (reflect/dynamic? 'dynamic-test/*dt*))
+    (is (reflect/dynamic? 'dynamic-test/*dt2*))
+    (refute (reflect/dynamic? '*dt*))
     (refute (reflect/dynamic? 'dt-read))
     ; an ordinary global fn
     (refute (reflect/dynamic? 'never-declared))

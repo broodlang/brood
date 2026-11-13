@@ -25,8 +25,8 @@ use super::*;
 //   `receive` pattern) — over-approximated over the whole template, so a binder the walk
 //   misreads can only leave a head unescaped, never rename a local.
 // - Never a special form: those are bound nowhere, so "names a root binding" excludes them.
-// - `%name`s are not escaped (a user cannot define one, ADR-250), nor `defdyn`-declared
-//   ambient names (always root), nor `x#` auto-gensyms or the `~`/`~@` markers.
+// - `%name`s are not escaped (a user cannot define one, ADR-250), nor `x#` auto-gensyms or
+//   the `~`/`~@` markers. A root dynamic variable is escaped like any root name (ADR-722).
 // - `~` holes are macro-time code: not escaped, but a quasiquote nested inside one is
 //   another template of the same macro and is escaped in turn.
 // - A template nested in a template (ADR-503) is escaped at every level: its heads are what
@@ -151,8 +151,7 @@ fn escapes(heap: &Heap, s: Symbol, binders: &HashSet<Symbol>) -> bool {
         || (name.len() > 1 && name.ends_with('#'))
         || value::symbol_is(s, kw::UNQUOTE)
         || value::symbol_is(s, kw::UNQUOTE_SPLICING)
-        || binders.contains(&s)
-        || is_ambient(heap, s))
+        || binders.contains(&s))
         && heap.env_get(heap.global(), s).is_some()
 }
 

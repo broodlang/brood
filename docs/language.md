@@ -181,8 +181,8 @@ a binding is made, it never changes. Concretely:
   prelude's *data* registries such as `*load-path*` (prelude functions do that
   themselves — the rule reserves shipped **functions**, not every shipped name). A
   **dynamic variable is never reserved**, whatever it holds: `defdyn` declares a name
-  rebindable, so `(def *out* my-port)` — a permanent output redirect — still works
-  alongside the scoped `binding` form.
+  rebindable, so `(def *out* my-port)` at the root, or `(def /*out* my-port)` inside a
+  module — a permanent output redirect — still works alongside the scoped `binding` form.
 
   **Where redefinition stops**, in one place:
 
@@ -192,7 +192,7 @@ a binding is made, it never changes. Concretely:
   | `(def get …)`, `(defmacro when …)` — the prelude, a builtin | refused: reserved (ADR-166) |
   | `(def string/join …)` — an embedded std module's function | refused, whether or not `string` has loaded yet: the `def` loads it first |
   | `(def if …)` — one of the eight special forms | refused: `(if …)` is always the form, so the global could never be called |
-  | `(def *load-path* …)`, a `defdyn` name | redefines: shipped *data* and dynamic variables are not reserved |
+  | `(def *load-path* …)`, a dynamic variable (`/*out*` inside a module) | redefines: shipped *data* and dynamic variables are not reserved |
   | `(defn get …)` inside `(defmodule app/x …)` | defines `app/x/get`, a new name of yours |
   | `(let (get …) …)`, a `fn` parameter named `get` | a local; nothing global changes |
   | redefine a `defmethod` / `impl` | ordinary hot reload into the dispatch registry |
@@ -2089,16 +2089,18 @@ through every intermediate call.
 
 - **`(defdyn *name* default)`** declares `*name*` dynamic and gives it a default.
   The earmuffs (`*…*`) are convention, not syntax. Reading the var anywhere
-  yields the default until a `binding` overrides it. The declaration also makes the
-  name **ambient** — never namespaced, so a `def` of it from *any* module rebinds
-  this one root binding (see [Namespaces](#namespaces)). Declare it before the
-  first use in a file.
+  yields the default until a `binding` overrides it. It is named like any other
+  definition (ADR-722): inside module `m` it is `m/*name*`, bare within `m` and read or
+  bound from elsewhere as `m/*name*` or, after `(:use m)`, bare. Only root code — the
+  prelude, a file with no `defmodule`, or a `/*name*` head — declares a root one (see
+  [Namespaces](#namespaces)). Declare it before the first use in a file.
 - **`(binding (*a* va *b* vb …) body…)`** evaluates the value expressions, binds
   each dynamic var for the duration of `body`, and **restores the previous values
   on exit — even if the body throws**. Bindings nest; the innermost wins. A
   reference resolves *dynamically*, at the moment it's evaluated, against the
   caller's bindings — not lexically where the function was defined.
-- **`(reflect/dynamic? x)`** is true when `x` is a symbol declared with `defdyn`.
+- **`(reflect/dynamic? x)`** is true when `x` is a symbol declared with `defdyn` — the
+  qualified one for a module's variable: `(reflect/dynamic? 'm/*name*)`.
 
 `binding` only accepts a variable previously declared with `defdyn`; rebinding an
 undeclared global is an error (it's almost always a typo, and silently shadowing a
@@ -4089,24 +4091,32 @@ docstring on the floor.)
 (defn open (path) (insert (new-buffer) 0 (file/slurp path)))   ; insert → text/insert
 ```
 
-**Ambient names are ambient by declaration, not by spelling** (ADR-151). A name
-declared with **`defdyn`** is never namespaced: a `(def *load-path* …)` in any
-module rebinds that one root binding, reachable bare everywhere (and so it must be
-project-unique). **Every other name is namespaced, earmuffs included** — a plain
-`(def *width* 10)` inside module `a` defines `a/*width*`, private to `a`'s
-namespace like any other definition.
+**Every name inside a module is namespaced, earmuffs and dynamic variables included**
+(ADR-151, ADR-722). A plain `(def *width* 10)` inside module `a` defines `a/*width*`,
+and so does `(defdyn *width* 10)`: a dynamic variable is an ordinary public name of
+its module, read and bound bare inside it, as `a/*width*` from elsewhere, or bare
+after `(:use a)`. **Root names come only from root code**: the prelude (`*out*`,
+`*print-length*`, `*load-path*`), a file with no `defmodule`, or a definition spelled
+with the `/name` root escape — `(defdyn /*1 nil)` in the REPL module, `(def /*out* p)`
+to redirect output from inside one.
 
-The earmuff spelling used to grant ambient status on its own, which made an
-ordinary module-local constant silently global: module `a` and module `b` could
-each write `(def *width* …)`, share one root binding, and the second load would
-clobber the first with no diagnostic — `(a/a-width)` then returned *b*'s value.
-Earmuffs remain the convention for a knob (and the checker still reads them as
-one); they just no longer change scoping.
+Each rule closed a silent takeover. The earmuff spelling once made a name root on its
+own, so modules `a` and `b` that each wrote `(def *width* …)` shared one binding and
+the second load clobbered the first. Then a `defdyn` made its name root wherever it
+was declared, so a downstream module's `(defdyn *indent-width* nil)` took over a std
+module's private `*indent-width*` (KI-383). Earmuffs remain the convention for a knob
+(and the checker still reads them as one); they do not change scoping.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
-- To let other modules read or set your knob, declare it: `(defdyn *my-knob* v)`.
-  A knob only its own module touches needs nothing.
+- To let other modules read or bind your knob, make it public: `(defdyn *my-knob* v)`.
+  A knob only its own module touches can be `def-`.
+- Inside a module, a bare definition head (a `defdyn` one included) that names a dynamic
+  variable visible from elsewhere — a **root** one or an **imported** one — is an error,
+  not a new module name: `(def *out* p)` says to write `/*out*` (which sets the root
+  port), `(def *x* v)` under `(:use m)` says to write `m/*x*`, and `:exclude`-ing the
+  import lets the module define its own. Each used to set the variable, and reading it
+  as `mod/*x*` instead would change the program silently (ADR-152).
 - A **root** registry can only be rebound by root code, so the prelude exposes
   setters for the ones tooling extends — `(reflect/set-load-path dirs)` /
   `(reflect/add-load-path dir…)` for `*load-path*`, `(%record-module-doc! mod doc)` for

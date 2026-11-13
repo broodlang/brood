@@ -744,8 +744,7 @@ against the fully-loaded state is also what a live image would see. Returns nil.
 ;; excluded — it registers a module feature, not a clashing value binding.
 (def- *def-heads* ["def" "def-" "defn" "defn-" "defmacro" "defdyn" "defonce"])
 
-;; `[head name]` for a recognised def-style form (both strings), else nil. The head
-;; is what says whether the name is ambient, so the two travel together.
+;; The name of a recognised def-style form (a string), else nil.
 (defn- project-def-entry (list-node)
   (let (kids (seq/filter (project-node-val list-node)
                (fn (c) (not (includes? [:whitespace :comment] (project-node-kind c))))))
@@ -754,14 +753,7 @@ against the fully-loaded state is also what a live image would see. Returns nil.
         (when (and (= (project-node-kind head) :symbol)
                 (includes? *def-heads* (project-node-val head))
                 (= (project-node-kind nm) :symbol))
-          [(project-node-val head) (project-node-val nm)])))))
-
-;; An **ambient** name — root regardless of any enclosing namespace, mirroring the
-;; kernel resolver's `is_ambient`. It is a *declaration*, not a spelling: `defdyn`
-;; declares one (an `*earmuffed*` name does not get it for free — otherwise two modules
-;; that each write `(def *width* …)` would share, and clobber, one root binding).
-(defn- project-ambient? (head name)
-  (or (= head "defdyn") (reflect/dynamic? (symbol name))))
+          (project-node-val nm))))))
 
 ;; The namespace a top-level `(defmodule ns …)` node declares (a string), or nil
 ;; if the node isn't a `defmodule`. The file-level shape of `project-def-entry`.
@@ -775,16 +767,17 @@ against the fully-loaded state is also what a live image would see. Returns nil.
                 (= (project-node-kind nm) :symbol))
           (project-node-val nm))))))
 
-;; The effective *global* key a def binds, mirroring the kernel resolver
-;; (`eval::macros`): `ns/name` under a file's `(defmodule ns)` (ADR-065), but
-;; left bare for an already-qualified name, an ambient `*earmuff*`, or a file
-;; with no module header (the root namespace). This is what makes the duplicate
-;; check namespace-sound — two files' same short name in different namespaces no
-;; longer collide.
-(defn- project-qualify (ns head name)
-  (if (or (nil? ns) (project-ambient? head name) (includes? name "/"))
-    name
-    (str ns "/" name)))
+;; The effective *global* key a def binds, mirroring the kernel's `qualify_name`:
+;; `ns/name` under a file's `(defmodule ns)` (ADR-065), the root name for a `/name`
+;; escape, and left as written for an already-qualified name or a file with no module
+;; header (the root namespace). A `defdyn` is no exception (ADR-722). This is what makes
+;; the duplicate check namespace-sound — two files' same short name in different
+;; namespaces no longer collide.
+(defn- project-qualify (ns name)
+  (cond
+    (and (string/starts-with? name "/") (> (count name) 1)) (string/substring name 1)
+    (or (nil? ns) (includes? name "/")) name
+    else (str ns "/" name)))
 
 ;; Every global *key* defined at top level in the file at `path` — each a fully
 ;; resolved `ns/name` (or bare, per `project-qualify`), in source order.
@@ -794,8 +787,7 @@ against the fully-loaded state is also what a live image would see. Returns nil.
   (let (nodes (seq/filter (project-node-val (reflect/parse-source (file/slurp path)))
                 (fn (c) (= (project-node-kind c) :list)))
         ns (first (seq/keep nodes project-module-name)))
-    (map (seq/keep nodes project-def-entry)
-      (fn (entry) (project-qualify ns (first entry) (second entry))))))
+    (map (seq/keep nodes project-def-entry) (fn (name) (project-qualify ns name)))))
 
 ;; Warning strings for a *qualified* global key (`ns/name`, per
 ;; `project-file-def-names`) defined across more than one source file. Under

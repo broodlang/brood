@@ -133,7 +133,7 @@ identity and may override those paths. The rest of the tool is its siblings:
 ; there is one.
 (defdyn project/*width* nil)
 ; the manifest's :format-width (an integer column budget for `nest format`, e.g. 80);
-; nil = use the formatter's built-in default. Ambient so `std/format.blsp` reads it
+; nil = use the formatter's built-in default. Public, so `std/format.blsp` reads it
 ; directly, like the other project knobs the formatter consults.
 
 ;; (plist-get '(:a 1 :b 2) :b) => 2 — the value after key k in a flat kv list, or nil.

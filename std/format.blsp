@@ -20,18 +20,19 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
   (:use project))
 
 ;; ---- knobs ------------------------------------------------------------------
-(def *width* 100)
-; column budget for the single-line attempt (the built-in default)
+;; The column budget for the single-line attempt when no project pins one. A constant,
+;; so no earmuffs: `project/*width*` is the setting, and this module imports it.
+(def- default-width 100)
 
-;; The effective column budget: a project's manifest `:format-width` (ambient
-;; `project/*width*`, set by `setup`) when present, else the built-in
+;; The effective column budget: a project's manifest `:format-width`
+;; (`project/*width*`, set by `setup`) when present, else the built-in
 ;; default. So `nest format` / the LSP / `nest mcp` all honour a project that pins,
 ;; say, `:format-width 80`, and a bare `brood`-run format uses the default.
 (defn width ()
   "The effective column budget: the project's `:format-width` when set, else the built-in default.
 
     (format/width)   ;=> 100   ; the column the formatter wraps at"
-  (or project/*width* *width*))
+  (or project/*width* default-width))
 
 ;; ---- CST node accessors -----------------------------------------------------
 ;; Every node is a vector [kind payload]. For leaves payload is the raw source
@@ -923,7 +924,7 @@ if you are reintroducing hoisting, they are what you have to write back.
   ;; and the first body item (a blank there would be ugly and isn't user intent).
   ;;
   ;; `fill?` (true only for a **generic call** — never a body/special form) packs
-  ;; consecutive single-line args onto one line up to `*width*`, so an
+  ;; consecutive single-line args onto one line up to `(width)`, so an
   ;; overflowing `(error "a: " x " b: " y …)` wraps as a few filled lines rather
   ;; than one tall stack. The +2 indent is kept (no align-to-head, which would
   ;; reflow on every rename). `col` = the column the next arg would fill to, or nil
