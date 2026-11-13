@@ -819,14 +819,42 @@ fn an_old_generation_string_pins_the_drain() {
     );
 }
 
+/// Whether the current drain completes (`process::old_gen_drained`, which drives the
+/// parked-process inspector) within a few seconds — polled, since a spawned process
+/// reaches its `receive` and parks a hair after the message that says it is ready.
+///
+/// 5 s is generous for an ordinary build and NOT for an instrumented one: under ASAN
+/// every allocation is intercepted and the whole runtime moves at roughly a tenth speed,
+/// so a worker's park or exit loses the race with this deadline and the test reports a
+/// scheduler conclusion drawn from a stopwatch. Found by the nightly's first ASAN run
+/// (2026-09-02).
+fn drained_within_budget(heap: &Heap) -> bool {
+    #[cfg(brood_asan)]
+    let budget = Duration::from_secs(60);
+    #[cfg(not(brood_asan))]
+    let budget = Duration::from_secs(5);
+    let deadline = Instant::now() + budget;
+    loop {
+        if process::old_gen_drained(heap) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Stage 3c — the drain report **wired through the live scheduler**. A real spawned
 /// process running under the worker pool participates in the union via the eval / VM
 /// safepoint (its report) and the scheduler registry (the live set). A worker that
-/// captured the old generation's code and parked pins it — `old_gen_drained` stays
-/// `false` until the worker releases the reference and exits, at which point the root
-/// (having reported clean at its own safepoint) is the only pinner left and the
-/// generation is dead. Genuinely concurrent (default worker pool); the outcome is
-/// deterministic because it hinges on process *liveness*, not scheduling order.
+/// captured the old generation's closure and parked holding it is found by the
+/// parked-process inspector, which `old_gen_drained` drives: the closure is the worker's
+/// DATA, so the inspector copies it into the current generation and acks the worker
+/// (ADR-720, KI-388) — the drain completes with the worker still parked, and the worker,
+/// released, runs its copy. Until ADR-720 the worker pinned the generation until it exited.
+/// Genuinely concurrent (default worker pool); the outcome is deterministic because it
+/// hinges on process *liveness*, not scheduling order.
 #[test]
 fn drain_report_wires_through_the_scheduler() {
     LazyLock::force(&MEM_GUARD);
@@ -836,7 +864,7 @@ fn drain_report_wires_through_the_scheduler() {
     // Define `f` (gen 0). Spawn a worker that captures the gen-0 `f` in a closure and
     // parks on `receive` holding it — a live process pinning gen 0 that the root's
     // single-process view can't see. It reports its pid in `:ready` (so the root can
-    // release it later) and only replies `:released` after dropping the reference.
+    // release it later) and, released, replies with what its held closure answers.
     interp
         .eval_str(
             r#"
@@ -845,7 +873,7 @@ fn drain_report_wires_through_the_scheduler() {
             (defn worker (held)
               (do
                 (send root [:ready (self)])
-                (receive (:release (send root :released)))))
+                (receive (:release (send root [:released (held 5)])))))
             (spawn (fn () (worker f)))
             (receive ([:ready wp] (def worker-pid wp)))
             "#,
@@ -882,49 +910,28 @@ fn drain_report_wires_through_the_scheduler() {
     interp.heap.begin_gen_drain(0);
     interp.eval_str("(f 3)").expect("root safepoint report");
 
-    // The worker (parked, holding the gen-0 closure) is in the live set but has no
-    // ack for this epoch, so the generation is NOT drained — the whole point of the
-    // cross-process union.
+    // The worker (parked, holding the gen-0 closure) is in the live set and cannot report
+    // for itself. `old_gen_drained` drives the parked-process inspector over it, which finds
+    // the closure in its data, copies it out and acks it — the union is complete with the
+    // worker still parked. (Polled only for the worker to reach its `receive`.)
     assert!(
         process::live_pids().len() >= 2,
         "root and the parked worker are both live",
     );
     assert!(
-        !process::old_gen_drained(&interp.heap),
-        "the parked worker still pins gen 0",
+        drained_within_budget(&interp.heap),
+        "the parked worker's held gen-0 closure was copied out, so gen 0 is dead",
     );
 
-    // Release the worker: it drops the captured gen-0 closure, replies, and exits.
-    interp
-        .eval_str("(do (send worker-pid :release) (receive (:released :ok)))")
-        .expect("release the worker and await its acknowledgement");
-
-    // Once the worker has left the registry, the root is the only live process and it
-    // already acked clean → gen 0 is drained. Poll briefly for the worker's exit to
-    // finish (its `:released` send races a hair ahead of deregistration).
-    // 5 s is generous for an ordinary build and NOT for an instrumented one: under ASAN
-    // every allocation is intercepted and the whole runtime moves at roughly a tenth speed,
-    // so the worker's exit-and-deregister loses the race with this deadline and the test
-    // reports "gen 0 is dead" — a scheduler conclusion drawn from a stopwatch. Found by the
-    // nightly's first ASAN run (2026-09-02); it is not reachable locally because the `jit`
-    // binary ahead of it exhausts any sane local timeout first.
-    #[cfg(brood_asan)]
-    let budget = Duration::from_secs(60);
-    #[cfg(not(brood_asan))]
-    let budget = Duration::from_secs(5);
-    let deadline = Instant::now() + budget;
-    let drained = loop {
-        if process::old_gen_drained(&interp.heap) {
-            break true;
-        }
-        if Instant::now() >= deadline {
-            break false;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    assert!(
-        drained,
-        "after the worker exits, every live process has reported clean → gen 0 is dead",
+    // Release the worker: it calls its copy of the closure — gen-0 `f`'s code, now in gen 1
+    // — replies with the answer, and exits.
+    let answer = interp
+        .eval_str("(do (send worker-pid :release) (receive ([:released v] v)))")
+        .expect("release the worker and await its answer");
+    assert_eq!(
+        interp.print(answer),
+        "10",
+        "the copied closure is gen-0 f (x * 2), not the redefined one",
     );
 }
 

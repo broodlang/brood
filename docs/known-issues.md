@@ -107,9 +107,17 @@ only RUNTIME handles. ADR-720.
 **Guard.** `runtime_collector::a_process_pinning_the_drain_through_its_data_copies_it_out`
 (two heaps, deterministic: pinned, collects, drained; the copies `=` the migrated globals)
 and `runtime_drain::parked_process_whose_data_pins_the_drain_copies_it_out` (a real parked
-worker; drained within 5 s; woken, its copy `=` `f`, runs, and keeps its text). **Not yet run
-or sabotage-verified** — written on the desktop, where brood's tests do not run; on the test
-machine or CI before this closes (sabotage: drop the call in `Heap::collect`, and make
+worker; drained within 5 s; woken, its copy `=` `f`, runs, and keeps its text).
+`runtime_collector::drain_report_wires_through_the_scheduler` asserted the old contract — a
+parked worker holding a gen-0 closure pins the drain until it exits — and now asserts the new
+one: the drain completes with the worker parked, and the worker, released, runs its copy.
+
+CI's first run of the fix (`9791aaac4`) also redded `process_floor`: two `Cell<Option<u64>>`
+on every heap (the ask and the once-a-drain mark) put a parked process at 2 728 B against the
+2 700 B floor. The ask is now read from the probe's own `p1_dirty_epoch` / `p2_dirty_epoch`
+(`Heap::rehome_due`), and the mark lives in the lazily boxed `HeapExtras`, which only a
+process that re-homes writes: nothing is added per process. **The new guards are not yet
+sabotage-verified** (sabotage: drop the call in `Heap::collect`, and make
 `RuntimeCode::copy_through_drain_map` copy through a fresh map).
 
 ## KI-389 — the drain probe passed over old-generation strings, numbers and ropes, and keyed the cells it read by index alone

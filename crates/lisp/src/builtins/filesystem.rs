@@ -208,6 +208,27 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Set the permission bits of path to mode (an int, `0o755`; the low 12 bits, setuid/setgid/sticky included), following a symlink as chmod(1) does. Returns nil, or a failure saying why (missing, not this user's file). What file/stat's :mode and :exec? read back. On Windows a file has no permission bits, only a read-only attribute: it is set when mode lacks the owner-write bit (0o200) and cleared when mode has it; the rest of mode is ignored, and file/stat's :mode stays 0 there (ADR-697).\n\n    (failure? (file/chmod \"/nonexistent-brood-xyz\" 0o644))   ;=> true",
         watched!("file/chmod", change_mode, 1));
     primitives.def(
+        "file/lock",
+        Arity::exact(1),
+        Sig::new(vec![string], bool_ty.union(Ty::of(Tag::Failure))),
+        &["path"],
+        "Take an exclusive advisory lock on the file at path (created when missing) and hold it for as long as this program runs, or until file/unlock: true once it is held (already holding it is true too), or a failure saying why — another program holds it, or the file cannot be opened. The operating system drops the lock when the program exits, however it exits, so a lock still held means the program that took it is still running: what a program announcing itself in a shared directory locks, and what file/locked? asks others about. Advisory: it stops another file/lock, not a read or a write.\n\n    (file/lock (path/join (file/cwd) \"target/brood-lock-doc\"))   ;~> true",
+        watched!("file/lock", lock_file, 1));
+    primitives.def(
+        "file/unlock",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        &["path"],
+        "Release the lock file/lock took on path, so another program may take it. nil, held or not.\n\n    (file/unlock \"/nonexistent-brood-xyz\")   ;=> nil",
+        watched!("file/unlock", unlock_file, 1));
+    primitives.def(
+        "file/locked?",
+        Arity::exact(1),
+        Sig::new(vec![string], bool_ty),
+        &["path"],
+        "Whether some program — this one included — holds a file/lock on path: false when no program does, or the file is missing. Asking holds a shared lock on the file for an instant, so a file/lock racing the question may be refused once.\n\n    (file/locked? \"/nonexistent-brood-xyz\")   ;=> false",
+        watched!("file/locked?", file_locked, 1));
+    primitives.def(
         "file/rm",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
@@ -1472,6 +1493,77 @@ fn set_mode(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
     let mut permissions = std::fs::metadata(path)?.permissions();
     permissions.set_readonly(mode & 0o200 == 0);
     std::fs::set_permissions(path, permissions)
+}
+
+/// The files this program holds a `file/lock` on, by absolute path: each open `File` keeps
+/// its lock, and dropping it (`file/unlock`) releases it. Program-wide, not per process —
+/// the lock says the PROGRAM is alive, and the OS releases every one when it exits.
+static HELD_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, std::fs::File>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// `path` made absolute, so `file/lock` and `file/unlock` agree on a file however it was
+/// spelled (the working directory is the program's).
+fn lock_key(path: &str) -> std::path::PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| std::path::PathBuf::from(path))
+}
+
+/// `(file/lock path)` — an exclusive advisory lock on `path`, held for the program's life:
+/// true, or a failure (another program holds it; the file cannot be opened).
+pub(super) fn lock_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file/lock", arg(args, 0))?;
+    let key = lock_key(&path);
+    let mut held = crate::core::sync::lock(&HELD_LOCKS);
+    if held.contains_key(&key) {
+        return Ok(Value::boolean(true));
+    }
+    let opened = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&key);
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) => return Ok(heap.alloc_failure(&format!("file/lock: {path}: {error}"))),
+    };
+    Ok(match file.try_lock() {
+        Ok(()) => {
+            held.insert(key, file);
+            Value::boolean(true)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => {
+            heap.alloc_failure(&format!("file/lock: {path}: another program holds it"))
+        }
+        Err(std::fs::TryLockError::Error(error)) => {
+            heap.alloc_failure(&format!("file/lock: {path}: {error}"))
+        }
+    })
+}
+
+/// `(file/unlock path)` — release this program's lock on `path`; nil either way.
+pub(super) fn unlock_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file/unlock", arg(args, 0))?;
+    // dropping the `File` closes it, and closing releases its lock
+    crate::core::sync::lock(&HELD_LOCKS).remove(&lock_key(&path));
+    Ok(Value::nil())
+}
+
+/// `(file/locked? path)` — whether any program, this one included, holds a lock on `path`.
+/// A shared lock taken and dropped at once: it is refused only while an exclusive one is held.
+pub(super) fn file_locked(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file/locked?", arg(args, 0))?;
+    let key = lock_key(&path);
+    if crate::core::sync::lock(&HELD_LOCKS).contains_key(&key) {
+        return Ok(Value::boolean(true));
+    }
+    let Ok(file) = std::fs::File::open(&key) else {
+        return Ok(Value::boolean(false));
+    };
+    Ok(Value::boolean(matches!(
+        file.try_lock_shared(),
+        Err(std::fs::TryLockError::WouldBlock)
+    )))
 }
 
 /// The user name for `uid` via `getpwuid`, or `None` if it doesn't resolve. The libc

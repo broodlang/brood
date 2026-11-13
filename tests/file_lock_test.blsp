@@ -1,0 +1,62 @@
+;; file/lock, file/unlock and file/locked? — an advisory lock a program holds for its life,
+;; which the OS drops when the program exits. The case that matters takes two programs: the
+;; other one here is util-linux's `flock`, which takes the same `flock(2)` lock as
+;; `File::try_lock` on Unix (no brood binary to start: under `nest test` or `cargo test` the
+;; running program is not `brood`). Where there is no `flock` — macOS, Windows — that case is
+;; not run, and the rest still is.
+
+(defmodule file-lock-test (:use test))
+
+;; found on PATH by the spawn, as `os/which` finds it
+(def- flock-program "flock")
+(def- flock? (and (not (= (os/type) :windows)) (not (nil? (os/which flock-program)))))
+
+(defn- lock-path (name)
+  "A file no other run uses: in this run's scratch home, else under the temp directory."
+  (let (scratch (test/scratch-dir))
+    (if (nil? scratch)
+      (path/temp (str "brood-lock-" name "-"))
+      (path/join scratch (str "lock-" name "-" (rand/token 4))))))
+
+(defn- locked-within (path want ms)
+  "Whether `(file/locked? path)` answers `want` within `ms`: another program takes or drops
+a lock a moment after it is started or closed."
+  (letrec (poll (fn (left)
+                  (cond
+                    (= (file/locked? path) want) true
+                    (<= left 0) false
+                    else (do (proc/sleep 10) (poll (- left 10))))))
+    (poll ms)))
+
+(describe "file/lock in one program"
+  (test "this program takes the lock, holds it, takes it again, and releases it"
+    (let (path (lock-path "own"))
+      (assert= (file/lock path) true)
+      (is (file/locked? path))
+      (assert= (file/lock path) true)
+      (file/unlock path)
+      (is (not (file/locked? path)))))
+  (test "a missing file is not locked, and unlocking what is not held is nil"
+    (let (path (lock-path "missing"))
+      (is (not (file/locked? path)))
+      (assert= (file/unlock path) nil))))
+
+(when flock?
+  (describe "file/lock between programs"
+    (test "another program's lock refuses this one's, and goes when that program does"
+      (let (path (lock-path "other")
+            holder (os/spawn flock-program ["--exclusive" path "sleep" "60"]))
+        (is (locked-within path true 5000))
+        (let (refused (file/lock path))
+          (is (failure? refused))
+          (is (includes? (error-message refused) "another program holds it")))
+        (os/close holder)
+        (is (locked-within path false 5000))
+        (assert= (file/lock path) true)
+        (file/unlock path)))
+    (test "a lock this program holds is seen by another, and freed for it"
+      (let (path (lock-path "seen"))
+        (file/lock path)
+        (is (not (os/cmd-ok? (os/cmd flock-program ["--nonblock" path "true"]))))
+        (file/unlock path)
+        (is (os/cmd-ok? (os/cmd flock-program ["--nonblock" path "true"])))))))
