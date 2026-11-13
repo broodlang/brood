@@ -110,9 +110,11 @@
 ; the source text: a string reaches `reflect/eval-string` after this module's compile-time
 ; namespace qualification, so a bare `ex-spin` would be unbound at runtime. The eval'd
 ; source first sends `:spinning` to `*exit-test-announce-to*`, so a test kills the spin
-; only once it is inside the eval.
+; only once it is inside the eval. That one is qualified too: a module's `defdyn` is the
+; module's own (ADR-722).
 (defdyn *exit-test-announce-to* nil)
-(def ex-spin-source "(do (send *exit-test-announce-to* :spinning) (exit-test/ex-spin))")
+(def ex-spin-source
+  "(do (send exit-test/*exit-test-announce-to* :spinning) (exit-test/ex-spin))")
 (defn ex-spin-eval-string (parent)
   (binding (*exit-test-announce-to* parent) (reflect/eval-string ex-spin-source)))
 (defn ex-spin-eval-form (parent)

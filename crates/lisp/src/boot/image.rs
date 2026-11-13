@@ -246,16 +246,21 @@ fn get_str(r: &mut Cursor<Vec<u8>>) -> Option<String> {
 /// Encode one section: the global bindings named by `syms`, plus their declared sigs.
 /// Returns the section bytes and how many entries went in.
 ///
-/// `all_sigs` asks for EVERY declared sig rather than just this section's. That is the
-/// root/project section's shape (one unnamed section carrying the whole image). A NAMED
-/// section carries the sigs of its own symbols: the stdlib image is one named section per
-/// module, and a module restored without its sigs would come back bound but **unsigned**,
-/// silently weakening `nest check`.
+/// `root_of` makes this the ROOT section of a write whose NAMED sections are the given
+/// modules: it carries every declared sig (and module uses) except those of a module one of
+/// them carries. A NAMED section (`None`) carries the sigs of its own symbols: the stdlib
+/// image is one named section per module, and a module restored without its sigs would come
+/// back bound but **unsigned**, silently weakening `nest check`.
+///
+/// The root must not carry a named section's sigs too. A partial rebuild (ADR-419) installs
+/// the old image without an edited module's section and loads that module from source, and
+/// the root is always restored: a `sig` deleted from the module's source came back from the
+/// root, was written into the new image, and held every caller to the old signature for good.
 fn encode_section(
     heap: &mut Heap,
     section: &str,
     syms: &[Value],
-    all_sigs: bool,
+    root_of: Option<&std::collections::HashSet<String>>,
     ns_to_msg: &mut u64,
     ns_encode: &mut u64,
     tables_seen: &mut std::collections::HashMap<u64, String>,
@@ -345,8 +350,17 @@ fn encode_section(
     // with no global behind it, and matching on globals alone dropped every alias std
     // declared — a module restored from the image came back with its sigs but with every
     // `pane` in them an unknown type.
-    let sig_pairs: Vec<(value::Symbol, Value)> = if all_sigs {
+    // The module a declared name belongs to: everything before its last `/`.
+    let module_of = |sym: value::Symbol| {
+        value::symbol_name(sym)
+            .rsplit_once('/')
+            .map(|(module, _)| module.to_string())
+    };
+    let sig_pairs: Vec<(value::Symbol, Value)> = if let Some(named) = root_of {
         heap.declared_sigs_snapshot()
+            .into_iter()
+            .filter(|(sym, _)| !module_of(*sym).is_some_and(|m| named.contains(&m)))
+            .collect()
     } else {
         let mine: std::collections::HashSet<value::Symbol> = syms
             .iter()
@@ -372,10 +386,14 @@ fn encode_section(
             .map_err(|e| LispError::runtime(format!("%image-write: sig encode: {e}")))?;
         count += 1;
     }
-    // Uses, on the sigs' rule: the root section carries every module's, a named section its
-    // own module's — so the uses arrive with the sigs that read them.
-    let uses: Vec<(value::Symbol, Vec<value::Symbol>)> = if all_sigs {
+    // Uses, on the sigs' rule: the root section carries every module's but the named
+    // sections', a named section its own module's — so the uses arrive with the sigs that
+    // read them.
+    let uses: Vec<(value::Symbol, Vec<value::Symbol>)> = if let Some(named) = root_of {
         heap.module_uses_snapshot()
+            .into_iter()
+            .filter(|(ns, _)| !named.contains(&value::symbol_name(*ns)))
+            .collect()
     } else {
         let ns = value::intern(section);
         vec![(ns, heap.module_uses(ns))]
@@ -451,6 +469,17 @@ pub(crate) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let mut tables_seen: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
     // The macro names the image now at `path` indexes, read once if a section is copied.
     let mut old_footer_macros: Option<Vec<String>> = None;
+    // Every named section of this write, copied ones included: the modules whose sigs and
+    // uses the root section leaves to them (see `encode_section`).
+    let mut named_sections: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for sv in &sections {
+        if let Some(&name) = seq_items(heap, *sv)?.first() {
+            let name = expect_string(heap, "%image-write", name)?;
+            if !name.is_empty() {
+                named_sections.insert(name);
+            }
+        }
+    }
     for sv in sections {
         let pair = seq_items(heap, sv)?;
         if pair.len() != 2 {
@@ -497,13 +526,13 @@ pub(crate) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
                 macro_names.push(value::symbol_name(s));
             }
         }
-        // The unnamed root/project section takes every sig; a named one takes its own.
-        let all_sigs = name.is_empty();
+        // The unnamed root/project section takes every sig but the named sections'; a named
+        // one takes its own.
         let (bytes, n) = encode_section(
             heap,
             &name,
             &syms,
-            all_sigs,
+            name.is_empty().then_some(&named_sections),
             &mut ns_to_msg,
             &mut ns_encode,
             &mut tables_seen,
@@ -1338,7 +1367,7 @@ pub(crate) fn prelude_image_bytes(
         heap,
         "",
         &syms,
-        true,
+        Some(&std::collections::HashSet::new()),
         &mut 0u64,
         &mut 0u64,
         &mut std::collections::HashMap::new(),

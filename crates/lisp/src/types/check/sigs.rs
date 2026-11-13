@@ -564,7 +564,7 @@ pub(super) fn infer_overload_of(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
 }
 
 fn infer_overload_inner(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
-    let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
+    let Value::Fn(cid) = super::deps::obs_function(heap, sym)? else {
         return None;
     };
     let closure = heap.closure(cid);
@@ -860,7 +860,7 @@ fn self_ascent(
 }
 
 fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
-    let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
+    let Value::Fn(cid) = super::deps::obs_function(heap, sym)? else {
         return None;
     };
     let closure = heap.closure(cid);
@@ -1468,7 +1468,7 @@ fn with_image_sig_form<T>(
 /// optional + an optional rest tail (`Symbol`). So min = required, max =
 /// required + optional unless there's a rest (then no max).
 pub(super) fn arity_of(heap: &Heap, sym: Symbol) -> Option<Arity> {
-    let Some(global) = super::deps::obs_global(heap, sym) else {
+    let Some(global) = super::deps::obs_function(heap, sym) else {
         // Not in the heap — an imaged module's function the check did not load (ADR-370):
         // the arity the image recorded from the live closure at build time (the signature
         // TEXT is not it: an inferred sig carries no rest parameter).
@@ -1496,7 +1496,7 @@ pub(super) fn arity_of(heap: &Heap, sym: Symbol) -> Option<Arity> {
 /// lookup so the checker's arity warning can name what is missing, exactly as the runtime
 /// error does.
 pub(super) fn param_names_of(heap: &Heap, sym: Symbol) -> Option<String> {
-    match super::deps::obs_global(heap, sym)? {
+    match super::deps::obs_function(heap, sym)? {
         Value::Native(id) => {
             let p = heap.native(id).params;
             (!p.is_empty()).then(|| p.join(" "))

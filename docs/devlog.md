@@ -1664,3 +1664,17 @@ projects takes 1–2 ms. Guard `nest::test_watch`, driving a live session: a bre
 red and runs the one affected file, the fix reads green, a macro edit reaches its caller, and
 a broken save is survived. Four sabotages went red: no reload, every test file rerun, no
 macro dependents, a broken save escaping the loop.
+
+2026-11-13 (KI-384). **`nest check` read a contracted function's result from its shim.** With
+contracts armed a `sig`'d global holds the checking shim, and the checker inferred results,
+arms and arity from that, so `os/shell-spawn-pty` returned `any`; bedit's terminal narrowed it
+with `vector?`, threaded it through a precisely typed state map, and `os/write` saw `(not (nil
+| vector | false))`. The checker now reads the original under the uncontracted alias
+(`deps::obs_function`). Guard `check_contracts_agree`, red with the shim read back.
+
+2026-11-13 (KI-391). **A `sig` deleted from a project module kept applying.** The project
+image's root section carried every declared sig, so the partial rebuild, which reloads an
+edited module from source but always restores the root, brought the deleted `sig` back and
+wrote it into the new image. The root now leaves each named section's sigs and uses to that
+section. Found when bedit kept warning about a `sig` that was no longer in its source. Guard
+in `check_incremental`, red with the old root.

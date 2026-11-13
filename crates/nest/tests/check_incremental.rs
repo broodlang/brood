@@ -349,3 +349,45 @@ fn an_impl_added_in_another_file_moves_the_cached_verdict() {
         "the impl must re-check the file whose verdict it moves:\n{out}"
     );
 }
+
+/// A `sig` deleted from a module stops applying after the partial rebuild. The project
+/// image's root section carried EVERY declared sig, and the partial rebuild (ADR-419) always
+/// restores the root: the edited module was reloaded from source without its `sig`, the old
+/// one came back from the root, and the rewritten image kept it — every caller stayed held
+/// to a signature no source declared, across every later run.
+#[test]
+fn a_deleted_sig_stops_applying_after_the_partial_rebuild() {
+    let dir = scratch("deleted-sig");
+    write(&dir, "project.blsp", "(project\n  :name dsig)\n");
+    write(
+        &dir,
+        "src/lib.blsp",
+        "(defmodule lib)\n(sig same (int -> int))\n(defn same (x) x)\n",
+    );
+    write(
+        &dir,
+        "src/app.blsp",
+        "(defmodule app (:use lib))\n(defn go () (same \"s\"))\n",
+    );
+    let (code, out) = nest_check(&dir);
+    assert!(
+        code == 1 && out.contains("expects int"),
+        "the sig holds the call to int:\n{out}"
+    );
+
+    write(&dir, "src/lib.blsp", "(defmodule lib)\n(defn same (x) x)\n");
+    let (code, out) = nest_check(&dir);
+    assert!(
+        built_from_source(&out),
+        "the edit rebuilds the image:\n{out}"
+    );
+    assert!(
+        code == 0 && !out.contains("expects int"),
+        "the deleted sig must not apply:\n{out}"
+    );
+    let (code, out) = nest_check(&dir);
+    assert!(
+        code == 0 && !out.contains("expects int"),
+        "nor in the run after, from the rewritten image:\n{out}"
+    );
+}
