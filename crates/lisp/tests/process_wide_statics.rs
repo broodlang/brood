@@ -79,6 +79,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("process/timer.rs", "TIMERS", OneMachine),
     ("process/sysmon.rs", "MONITORS", OneMachine),
     ("builtins/io.rs", "STDIN_READER", OneMachine),
+    // `file/lock`'s held locks (ADR-721): an OS lock belongs to the OS process, and a second
+    // runtime taking its own lock on the same file would be refused by its sibling.
+    ("builtins/filesystem.rs", "HELD_LOCKS", OneMachine),
     // The terminal's input forwarder (ADR-491): one thread reading the one tty this OS process
     // has, delivering to whichever process asked for its input.
     ("builtins/terminal/native.rs", "FORWARDER", OneMachine),
