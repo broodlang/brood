@@ -1636,3 +1636,10 @@ arms and arity from that, so `os/shell-spawn-pty` returned `any`; bedit's termin
 with `vector?`, threaded it through a precisely typed state map, and `os/write` saw `(not (nil
 | vector | false))`. The checker now reads the original under the uncontracted alias
 (`deps::obs_function`). Guard `check_contracts_agree`, red with the shim read back.
+
+2026-11-13 (KI-390). **A `sig` deleted from a project module kept applying.** The project
+image's root section carried every declared sig, so the partial rebuild, which reloads an
+edited module from source but always restores the root, brought the deleted `sig` back and
+wrote it into the new image. The root now leaves each named section's sigs and uses to that
+section. Found when bedit kept warning about a `sig` that was no longer in its source. Guard
+in `check_incremental`, red with the old root.

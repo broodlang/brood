@@ -105,6 +105,32 @@ example still agrees with the serial step. If the non-strict sighting came from 
 reading a type as precise, that is the checker's ordinary mode rule, which a now-dropped
 sig fed, not a defect in the checker.
 
+## KI-390 — a `sig` deleted from a project module kept applying ✅ fixed 2026-11-13
+
+**Seen** 2026-11-13, fixing bedit's strict findings: a `sig` added to `linkview` and then
+removed still produced `declared return type … is trusted, not verified` and held a test's
+call to its `pane` parameter, run after run, until `.brood/image.*` was deleted. Reduced: module
+`lib` declares `(sig same (int -> int))`, `app` calls `(same "s")`; delete the `sig`, and every
+later `nest check` still reports `expects int`.
+
+**Cause.** The project image's unnamed ROOT section carried every declared sig and module
+uses entry (`encode_section`'s `all_sigs`), on top of each named section carrying its own. The
+partial rebuild (ADR-419) installs the old image without an edited module's section and loads
+that module from source; the root is always restored, so the `sig` the source no longer had
+came back from it, and the rewritten image carried it on.
+
+**Why it survived.** A deleted function is gone after a rebuild (its binding lives only in its
+section), which is the case `check_incremental` covered; a declaration is a side fact, and no
+test removed one. A whole rebuild hides it, and every new binary forces one.
+
+**Fix.** The root section carries the sigs and uses of every module except those a named
+section of the same write carries (copied sections included), so a module's declarations
+travel only with its own section.
+
+**Guard.** `check_incremental::a_deleted_sig_stops_applying_after_the_partial_rebuild`: check
+with the `sig`, delete it, and the next two checks must be clean. Sabotaged by letting the root
+keep every sig again: red with "the deleted sig must not apply".
+
 ## KI-384 — `nest check` answers differently with `BROOD_CONTRACTS=1` ✅ fixed 2026-11-13
 
 **Seen** 2026-11-12. bedit's check is clean, but with `BROOD_CONTRACTS=1` it reports four
