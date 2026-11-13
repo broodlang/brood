@@ -108,6 +108,19 @@ behind a long-lived loop has changed since it started.
           (let (result (thunk)) (restore) result)
           (catch e (restore) (throw e)))))))
 
+(defn reload-file (path)
+  "Re-evaluate the top-level definitions of `path` now (`system/reload-defs`) under its package
+context, and bump the code generation; returns `path`. Raises when the file does not load — a
+caller that keeps running (a watcher) catches and reports it.
+
+    (reload/reload-file \"src/greeter.blsp\")   ;~> \"src/greeter.blsp\" — its definitions rebound"
+  (reload-in-package-context path (fn () (system/reload-defs path)))
+  ;; Bumped BEFORE any on-reload hook runs, so a hook (or a loop the hook wakes) that reads
+  ;; `(code-version)` already sees the new value. The push hand-off — `(gen/code-change pid)`
+  ;; per affected server — is the hook's job; this is the pull signal for loops that poll.
+  (def *code-version* (+ 1 *code-version*))
+  path)
+
 (defn- reload-loop (path last &optional on-reload)
   (let (now (file/mtime path))
     (cond
@@ -124,12 +137,7 @@ behind a long-lived loop has changed since it started.
         (do
           (try
             (do
-              (reload-in-package-context path (fn () (system/reload-defs path)))
-              ;; Bump the code generation BEFORE the on-reload hook, so a hook (or a
-              ;; loop the hook wakes) that reads `(code-version)` already sees the new
-              ;; value. The push hand-off — `(gen/code-change pid)` per affected server —
-              ;; is the on-reload hook's job; this is the pull signal for loops that poll.
-              (def *code-version* (+ 1 *code-version*))
+              (reload-file path)
               (io/puts "[reload]" path)
               (when on-reload
                 (try

@@ -139,6 +139,22 @@ than the last recorded run. Whole-project runs only (it has no meaning for an
 explicit file list). The complement of `--failed`: `--failed` re-runs what *broke*,
 `--stale` re-runs what *changed*.
 
+**`--watch`** stays up and reruns on every save, so a TDD cycle costs the tests' own time
+rather than a process start (on hatch a one-file run is ~100 ms, of which the tests are ~25).
+It polls the project's source and test files; on a change it re-evaluates the changed source
+files' definitions and reruns the named files, or with none named the test files whose
+require-closure reaches the change (every test file when the change is a helper the graph
+cannot place). A changed macro also re-evaluates the source files that expanded it. A save
+that does not load is reported and runs nothing; the next one runs again. Each test file
+still runs in its own rolled-back scope, as in any run. It skips the whole-suite run's
+check pre-flight and docstring gate, and does not combine with coverage, `--stale` or
+`--repeat-until-failure`. Ctrl-C ends it.
+
+```bash
+nest test --watch tests/parse_test.blsp   # rerun this file on every save
+nest test --watch                         # rerun what each save reaches
+```
+
 ### Skipping a test
 
 `:skip` on a `test` or a `describe` registers the case but never runs its body:

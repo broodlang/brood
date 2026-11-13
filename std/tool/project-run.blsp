@@ -300,6 +300,157 @@ alone.
         (when (test/option? :cover opts) (project-coverage-begin root))
         (project-coverage-gate (project-run-recorded root paths opts) opts)))))
 
+;; --- `nest test --watch`: one process, a run per save ---------------------------
+;; A TDD cycle in a fresh process pays the boot, the tool modules and the project's setup
+;; every time — most of a one-file run (hatch, 2026-11-13: ~75 of 100 ms; the tests 23).
+;; The watcher pays them once: it stays up, and on a save re-evaluates the changed source
+;; files' definitions (`reload/reload-file`) and reruns the tests. Each test file still runs
+;; in its own rolled-back scope (`project-run-suite`), exactly as a one-shot run does, so a
+;; run cannot leave state behind for the next.
+;;
+;; Which tests rerun: the named files, every time; with none named, the test files whose
+;; require-closure reaches a changed file (the `--stale` graph), or every test file when a
+;; changed file is one the graph cannot place (a helper beside the tests).
+;;
+;; One loop polling mtimes, not `reload/on-change`'s watcher per file: a save that touches
+;; several files is one rerun, and a reload always lands before the run that should see it.
+
+(def- *watch-poll-ms* 200)
+(def- *watch-settle-ms* 50)
+
+(defn- watch-absolute (p) (path/absolute p (file/cwd)))
+
+(defn- watch-test-tree (root)
+  ;; every `.blsp` under the test paths — helpers too, not only `*_test.blsp`
+  (apply append
+    (map (map project/*test-paths* (fn (d) (path/join root d)))
+      (fn (dir)
+        (if (file/dir? dir)
+          (seq/filter (file/walk-files dir) (fn (f) (string/ends-with? f ".blsp")))
+          nil)))))
+
+(defn- watch-files (root named)
+  (seq/distinct (append (if root (append (project/source-files root) (watch-test-tree root)) nil)
+                  named)))
+
+(defn- watch-stamps (files) (fold files {} (fn (m f) (assoc m f (file/mtime f)))))
+
+(defn- watch-changed (files before after)
+  ;; present now, and not with the stamp it had (a new file counts; a deleted one does not)
+  (seq/filter files
+    (fn (f) (let (now (get after f)) (and (not (nil? now)) (not (= now (get before f))))))))
+
+(defn- watch-affected (root tests changed)
+  (let (all (project-check/all-files root)
+        known (into #{} all)
+        changed-set (into #{} changed))
+    (if (any? changed (fn (f) (not (contains? known f))))
+      tests
+      (let (closures (project-check/project-require-closures all)
+            module->file (project-module-file-index (project-check/project-module-infos all)))
+        (seq/filter tests
+          (fn (tf)
+            (any? (seq (project-test-dep-files tf closures module->file))
+              (fn (f) (contains? changed-set f)))))))))
+
+(defn- watch-run (root files opts)
+  ;; one run, whatever its verdict: a red run is the normal state of a TDD cycle
+  (try
+    (if root (project-run-recorded root files opts) (project-run-suite files opts))
+    (catch e
+      (when (not (test/suite-failed? e))
+        (io/puts (str "nest test --watch: the run raised: " (error-message e)) :to *err*)))))
+
+(defn- watch-banner (files)
+  (io/puts (str "\nwatching " (count files) " files — save to rerun, Ctrl-C to stop") :to *err*))
+
+(defn- watch-reload (sources)
+  ;; true when every changed source reloaded; a file that does not load is reported and the
+  ;; run waits for the next save rather than testing a half-applied edit
+  (fold sources
+    true
+    (fn (ok f)
+      (try
+        (do (reload/reload-file f) ok)
+        (catch e
+          (do
+            (io/puts (str "nest test --watch: " f " does not load: " (error-message e)) :to *err*)
+            false))))))
+
+(defn- watch-macro-dependents (root sources)
+  ;; The project source files that require a changed file defining a macro: they hold that
+  ;; macro's OLD expansion, and late binding does not reach inside an expansion, so they are
+  ;; reloaded after it. A changed function needs no such pass — calls look their target up.
+  (let (macro-files (seq/filter sources
+                      (fn (f)
+                        (let (text (file/slurp f))
+                          (and (string? text) (includes? text "(defmacro")))))
+        all (project/source-files root))
+    (if (empty? macro-files)
+      nil
+      (let (infos (project-check/project-module-infos all)
+            closures (project-check/project-require-closures all)
+            changed-modules (into #{} (seq/keep macro-files (fn (f) (get (get infos f) :module)))))
+        (seq/filter all
+          (fn (f)
+            (and (not (includes? sources f))
+              (any? (or (get closures f) []) (fn (m) (contains? changed-modules m))))))))))
+
+(defn- watch-cycle (root named opts changed sources)
+  (when (let (dependents (if root (watch-macro-dependents root sources) nil))
+          (if (empty? dependents)
+            (watch-reload sources)
+            ;; the kernel's "callers keep the old expansion — re-eval them" is answered here:
+            ;; those callers are the dependents, reloaded right after
+            (binding (*reload-diagnostics* false) (watch-reload (append sources dependents)))))
+    (let (tests (if (empty? named) (watch-affected root (project-test-files root) changed) named))
+      (if (empty? tests)
+        (io/puts "no test file reaches it" :to *err*)
+        (watch-run root tests opts)))))
+
+(defn- watch-loop (root named opts stamps)
+  (proc/sleep *watch-poll-ms*)
+  (let (files (watch-files root named)
+        now (watch-stamps files)
+        changed (watch-changed files stamps now))
+    (if (empty? changed)
+      (watch-loop root named opts now)
+      (do
+        ;; an editor's save can be several writes; let them land, then read the stamps again
+        (proc/sleep *watch-settle-ms*)
+        (let (settled (watch-stamps files)
+              changed (watch-changed files stamps settled)
+              sources (if root
+                        (let (src (into #{} (project/source-files root)))
+                          (seq/filter changed (fn (f) (contains? src f))))
+                        nil))
+          (io/puts (str "\n── "
+                     (string/join (map changed (fn (f) (path/relative-to f (file/cwd)))) ", ")
+                     " changed")
+            :to *err*)
+          ;; A cycle that raises (a bug here, a broken graph) is reported, and the watch goes on.
+          (try
+            (watch-cycle root named opts changed sources)
+            (catch e
+              (io/puts (str "nest test --watch: this cycle raised: " (error-message e)) :to *err*)))
+          (watch-banner files)
+          (watch-loop root named opts settled))))))
+
+(defn watch-tests (paths & opts)
+  "Run the tests, then keep running them: on every save, re-evaluate the changed source files'
+definitions and rerun — the named `paths` each time, or with none named the test files a change
+reaches. Never returns; Ctrl-C ends it. Backs `nest test --watch`.
+
+    (project-run/watch-tests [\"tests/parse_test.blsp\"])   ;~> never returns — reruns on each save"
+  (let (root (project/find-root (file/cwd))
+        named (map paths watch-absolute))
+    (when (and root (empty? named)) (project-load-for-tests "test --watch"))
+    (let (files (watch-files root named)
+          stamps (watch-stamps files))
+      (watch-run root (if (empty? named) (project-test-files root) named) opts)
+      (watch-banner files)
+      (watch-loop root named opts stamps))))
+
 (defn run-tests-structured (& opts)
   "Like `run-tests` — the same discovery, each file in its own rolled-back scope — but
 returns the structured result `{:total :passed :failed :failed-assertions :ms :results [...]}`

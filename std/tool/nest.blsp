@@ -68,7 +68,7 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
             ;; caller and leave the rest.
             :no-positional-with ["--fix-renames"]
             :run (fn (options) (run-check options))}
-   "test" {:about "Run the project's tests (every `tests/**/*_test.blsp`), or specific test files — `FILE`, or `FILE:LINE` for the one test at that line. `--doc FILE…` checks the `form ;=> result` docstring examples of those SOURCE files instead, each failure as FILE:LINE."
+   "test" {:about "Run the project's tests (every `tests/**/*_test.blsp`), or specific test files — `FILE`, or `FILE:LINE` for the one test at that line. `--watch` stays up and reruns on every save: the named files, or the test files a change reaches. `--doc FILE…` checks the `form ;=> result` docstring examples of those SOURCE files instead, each failure as FILE:LINE."
            :flags {"--only" {:value "SELECTOR" :repeat true :complete "selector"}
                    "--exclude" {:value "SELECTOR" :repeat true :complete "selector"}
                    "--include" {:value "SELECTOR" :repeat true :complete "selector"}
@@ -88,9 +88,17 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
                    "--cover-branches" :bool
                    "--cover-min" {:value "PCT" :int [0 100]}
                    ;; keep the real XDG config / state / data homes, not a scratch one (ADR-602)
-                   "--real-home" :bool}
+                   "--real-home" :bool
+                   "--watch" :bool}
            :positional ["file" "test-file"]
            :many true
+           ;; a watch reruns per save; these each want one run's whole result
+           :conflicts [["--watch" "--cover"]
+                        ["--watch" "--cover-lines"]
+                        ["--watch" "--cover-branches"]
+                        ["--watch" "--cover-min"]
+                        ["--watch" "--repeat-until-failure"]
+                        ["--watch" "--stale"]]
            :run (fn (options) (run-test options))}
    "run" {:about "Run the project's entry point (`:main`, default `main/main`), or a `.blsp` FILE with the project's sources reachable; a non-`.blsp` FILE is handed to `:main` as a document. Outside a project FILE is required and runs like `brood FILE`. Trailing words go to the entry function as strings."
           :flags {"--watch" {:value "PATH" :repeat true}
@@ -782,6 +790,11 @@ file) propagates for the normal error report."
                "To run one file outside a project: nest test <file>_test.blsp")))
         2
       (not (readable-files? "test" paths)) 2
+      (get flags "--watch")
+        (do
+          (if (empty? paths) (project/load-config) (load-project-image-lazily))
+          (require-one 'test)
+          (apply project-run/watch-tests paths (test-opts flags lines)))
       (empty? paths)
         (do
           (require-one 'test)

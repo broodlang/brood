@@ -1636,3 +1636,17 @@ brood-life. Guards: `startup_image::a_dependency_module_named_by_its_short_name_
 `startup_image::a_named_test_file_materialises_only_what_it_reaches`,
 `check_cache_prune::the_check_cache_is_swept_once_a_day_not_on_every_run` (both directions), each
 red with its change undone.
+
+2026-11-13 (ADR-722). **`nest test --watch`.** After the startup fixes above a one-file run is
+~100 ms and the tests ~25, and the remainder is fixed cost a fresh process pays: reaching
+`nest/main`, the tool modules, the project's setup. Not slow code, so a compiler would not touch it.
+The watch pays it once. One loop polls the source and test files' mtimes; a change
+re-evaluates the changed sources (`reload/reload-file`, now public and shared with the
+per-file reloader) and reruns the named files, or the test files whose require-closure reaches
+the change. A changed macro re-evaluates the files that expanded it, since late binding does not
+reach an expansion. The kernel's "re-eval them" note is silenced for exactly that reload. A broken save is reported
+and runs nothing, and a cycle that raises is reported without ending the watch. A rerun on the test's
+projects takes 1–2 ms. Guard `nest::test_watch`, driving a live session: a breaking edit reads
+red and runs the one affected file, the fix reads green, a macro edit reaches its caller, and
+a broken save is survived. Four sabotages went red: no reload, every test file rerun, no
+macro dependents, a broken save escaping the loop.
