@@ -145,24 +145,6 @@ test that can place two cells at one index on demand; it rests on construction (
 names the slab). **Not yet run or sabotage-verified** — as KI-388 (sabotage: drop the
 generation check before the `match`).
 
-## KI-384 — `nest check` answers differently with `BROOD_CONTRACTS=1`
-
-**Seen** 2026-11-12. bedit's check is clean, but with `BROOD_CONTRACTS=1` it reports four
-`type-mismatch` warnings in `src/terminal.blsp` (lines 100, 135, 182, 185), for example
-`os/write: argument 1 expects subprocess, got (not (nil | vector | false)) (proc)`. Here
-`proc` is `(:proc state)` narrowed by `(and proc …)`. Without contracts it reads as unknown
-and nothing is reported; with them, the argument reads as precise. The `vector` in that type
-comes from nowhere in the file.
-
-**Likely mechanism.** Under contracts a `sig` rebinds its name to a checking wrapper
-(KI-81, KI-113), so the image the checker reads differs. Not reproduced in a small file
-(`(defn- f (state b) (let (proc (:proc state)) (when (and proc …) (os/write proc b))))`
-is clean both ways), so it depends on something bedit's state reaches.
-
-**Reproduce:** in bedit, run `BROOD_CONTRACTS=1 BROOD_NO_CHECK_CACHE=1 nest check src/terminal.blsp`.
-That file alone gives 4 warnings with contracts and 0 without, so the case is self-contained.
-No gate runs bedit's check with contracts armed (the smoke uses `SMOKE_CONTRACTS=0`).
-
 None other open (2026-11-12).
 
 ## Index — status per issue
@@ -176,7 +158,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 | KI-387 | **`nest check` dropped every unbound name in a branch it judged unreachable** — `check_if` skipped a dead branch outright, and "dead" rests on inferred types (a caller-derived parameter, a `match` whose patterns cannot meet its scrutinee), so a stale `bytes/concat` behind such a clause passed the check and raised at run time | ✅ **FIXED 2026-11-12** — a dead branch is still walked and keeps its unbound-symbol findings only (`check_dead_branch`). Guard: `scope_and_guards::an_unbound_name_in_a_branch_typed_dead_is_still_reported` (red with the skip back) |
 | KI-386 | **A function called only by itself was typed from its own self-call** — the caller-derived pass seeds only LIVE candidates, but each round derived every function with a site; `(defn f (y) (if y … (f y)))` typed `y` nil|false, the then branch went dead and nothing in it was checked | ✅ **FIXED 2026-11-12** — a round derives only the live candidates (`caller_derived_params`). Guard: `scope_and_guards::a_self_call_does_not_make_the_branch_beside_it_dead` (red without the filter) |
 | KI-385 | **`nest check --fix-renames` rewrote local bindings that share the renamed name** — the rewrite renamed every symbol spelled like the stale name, parameters and `let` binders included | ✅ **FIXED 2026-11-12** — only the places the checker reports are rewritten (`codemod/cst-rename-at-text`), and a form an unresolved macro heads is left for a human. Guards: `boot_check_and_renames::fix_renames_leaves_a_local_spelled_like_the_renamed_name_alone` (red with the old rewrite back), `codemod_test` § cst-rename-at-text; replaying hatch's ADR-716/718 migration reproduces the hand-fixed result. Was: open |
-| KI-384 | **`nest check` answers differently with `BROOD_CONTRACTS=1`** — four warnings in bedit's terminal.blsp only with contracts armed | ⚠️ **open 2026-11-12** — reproduction in the section; not reproduced in a small file; no gate runs that mode |
+| KI-384 | **`nest check` answers differently with `BROOD_CONTRACTS=1`** — four warnings in bedit's terminal.blsp only with contracts armed | ✅ **FIXED 2026-11-13** — the checker inferred a `sig`'d function's result from its contract shim, which returns `any`; it now reads the original under the uncontracted alias (`deps::obs_function`). Guard: `crates/nest/tests/check_contracts_agree.rs`. Was: ⚠️ open 2026-11-12 — reproduction in the section; not reproduced in a small file; no gate runs that mode |
 | KI-383 | **A downstream root `defdyn` takes over a std module's setting of the same name** — an unqualified `defdyn` in a module declares a root ambient name, which then resolves every module's `*x*` to root | ✅ **FIXED 2026-11-13** — a module's `defdyn` declares `mod/*x*` and no name is ambient (ADR-722); root names come from root code or a `/name` head, and a bare module head naming a root dynamic is refused. Guard: `syntax_finalization_test` § "a module's defdyn cannot take over another module's name (KI-383)". Was: ⚠️ open 2026-11-12 — the two live collisions fixed (lineedit `body-indent`, coverage `*instrumented*`); the language-level fix (module-scoped `defdyn`) waits on a decision |
 | KI-382 | **Under AddressSanitizer, a dozen JIT tier assertions fail on the suite's first try and pass on its retry** — `settle` reads `:bailed` or `:untried` where `:native` is pinned, and deopt counts run high | ✅ **FIXED 2026-11-10** — every bail read `native-depth-exceeded`: the native stack guard tripped on a frame on another stack (a `stacker` segment, common on a cold-cache first try under ASan); `c5177a2b4` re-stamps the limit for the frame's stack before deopting. Guards: `jit_runtime::support::stack_recheck_tests`. Was: open, cause unknown |
 | KI-381 | **`dual_listen_serves_tcp_and_unix_at_once` failed: `no pong over tcp`** — a client dialing one node over TCP and then the Unix socket; each end keeps the link it registered first, so the two ends can keep different links and both die | ✅ **FIXED 2026-11-10** — an equal-connector duplicate keeps the link this end opened first (its id is taken before the handshake writes), which both ends agree on. Guard: `dist::tests::one_connectors_two_links_keep_the_one_opened_first_whatever_registers_first` (red with "existing wins" back). Was: open — mechanism diagnosed from the code |

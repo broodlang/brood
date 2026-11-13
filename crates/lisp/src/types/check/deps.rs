@@ -64,6 +64,22 @@ pub(super) fn obs_global(heap: &Heap, sym: Symbol) -> Option<Value> {
     heap.env_get(heap.global(), rooted)
 }
 
+/// Record + read the FUNCTION a global names, for a reading of its body or its arms: the
+/// original closure when a contract shim stands in its place (ADR-381/383), else the
+/// global itself. With contracts armed a `sig`'d global holds the shim, whose body only
+/// checks and forwards — inferring from it read every such function's result as `any`,
+/// and a narrowing of that (`(not vector)` after a `vector?` test) then failed a precise
+/// demand that the unarmed check, inferring from the real body, met (KI-384). The kernel
+/// keeps the original under the uncontracted alias exactly while the shim exists.
+pub(super) fn obs_function(heap: &Heap, sym: Symbol) -> Option<Value> {
+    let global = obs_global(heap, sym)?;
+    let original = crate::builtins::contracts::uncontracted_alias(sym).and_then(|alias| {
+        heap.rec_check_dep_sym(alias);
+        heap.env_get(heap.global(), alias)
+    });
+    Some(original.unwrap_or(global))
+}
+
 /// Record + read a global's declared `(sig …)` type-expression value — the type-form
 /// alone, unwrapped from the properties a `(sig name T :pure …)` stores beside it
 /// (ADR-351; `None` for a name that declared properties and no type).

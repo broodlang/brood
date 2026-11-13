@@ -105,6 +105,39 @@ example still agrees with the serial step. If the non-strict sighting came from 
 reading a type as precise, that is the checker's ordinary mode rule, which a now-dropped
 sig fed, not a defect in the checker.
 
+## KI-384 — `nest check` answers differently with `BROOD_CONTRACTS=1` ✅ fixed 2026-11-13
+
+**Seen** 2026-11-12. bedit's check is clean, but with `BROOD_CONTRACTS=1` it reports four
+`type-mismatch` warnings in `src/terminal.blsp` (lines 100, 135, 202, 205), for example
+`os/write: argument 1 expects subprocess, got (not (nil | vector | false)) (proc)`.
+
+**Cause.** Under contracts a `sig`'d global holds its contract shim (ADR-381), whose body
+only checks and forwards. The checker inferred a function's result, arms and arity from
+whatever closure the global held (`sigs::infer_sig_inner` and its siblings), so it read
+`os/shell-spawn-pty` (a typed parameter, an open return) as returning `any` rather than the
+subprocess its body returns. terminal.blsp spawns inside a `try` whose `catch` answers a
+vector, and continues only when `(vector? spawned)` is false: unarmed that narrows
+`subprocess | vector` to `subprocess`, armed it narrows `any | vector` to `(not vector)`. The
+value then travels in the state map that `term-connect` builds and `term-loop` threads, and
+same-file inference types that map precisely, so the readers saw `(not (nil | vector |
+false))` against `os/write`'s `subprocess`.
+
+**Why it survived.** No gate runs a check with contracts armed (bedit's smoke uses
+`SMOKE_CONTRACTS=0`), and the shape needs all three parts: a shimmed callee with an open
+return, a narrowing of its result, and a map literal from a same-file entry point that makes
+the threaded state precise. Without `term-connect`'s literal the state stays unknown and
+nothing is reported, which is why the first small reproductions were clean.
+
+**Fix.** `deps::obs_function` reads the original closure under the uncontracted alias the
+kernel binds exactly while a shim exists (ADR-383), and the four readers of a global's
+closure (`infer_sig_inner`, `infer_overload_inner`, `arity_of`, `param_names_of`) use it.
+bedit's full check is clean with contracts armed.
+
+**Guard.** `crates/nest/tests/check_contracts_agree.rs`: a twelve-line project of that shape
+must check clean with `BROOD_CONTRACTS` at 0 and at 1. Sabotaged by making `obs_function`
+answer the shim again: red with `os/write: argument 1 expects subprocess, got (not (nil |
+vector | false)) (proc)`.
+
 ## KI-383 — a downstream root `defdyn` takes over a std module's setting of the same name ✅ fixed 2026-11-13
 
 **Seen** 2026-11-12, in CI's bedit smoke: `bedit/src/conventions.blsp:43: *indent-width*: value

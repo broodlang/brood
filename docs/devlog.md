@@ -1629,3 +1629,10 @@ module-qualified globals. bedit's migration (44 `:only` imports, `/*spy-sink*`, 
 cross-module write, which the checker then flagged as a lost-update race and which now goes
 through `complete-add-auto-trigger!`), brood-life's and mur-forge's tests. Guards in
 `syntax_finalization_test` and `modules_test`, each red with its half undone.
+
+2026-11-13 (KI-384). **`nest check` read a contracted function's result from its shim.** With
+contracts armed a `sig`'d global holds the checking shim, and the checker inferred results,
+arms and arity from that, so `os/shell-spawn-pty` returned `any`; bedit's terminal narrowed it
+with `vector?`, threaded it through a precisely typed state map, and `os/write` saw `(not (nil
+| vector | false))`. The checker now reads the original under the uncontracted alias
+(`deps::obs_function`). Guard `check_contracts_agree`, red with the shim read back.
