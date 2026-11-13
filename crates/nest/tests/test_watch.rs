@@ -97,10 +97,26 @@ fn a_watch_reruns_what_a_save_reaches_and_survives_a_broken_save() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::create_dir_all(dir.join("tests")).unwrap();
     write(dir, "project.blsp", "(project :name watchdemo)\n");
-    write(dir, "src/calc.blsp", "(defmodule calc)\n(defn add (a b) (+ a b))\n");
-    write(dir, "src/other.blsp", "(defmodule other)\n(defn one () 1)\n");
-    write(dir, "src/mac.blsp", "(defmodule mac)\n(defmacro twice (x) `(* 2 ~x))\n");
-    write(dir, "src/usemac.blsp", "(defmodule usemac (:use mac))\n(defn eight () (twice 4))\n");
+    write(
+        dir,
+        "src/calc.blsp",
+        "(defmodule calc)\n(defn add (a b) (+ a b))\n",
+    );
+    write(
+        dir,
+        "src/other.blsp",
+        "(defmodule other)\n(defn one () 1)\n",
+    );
+    write(
+        dir,
+        "src/mac.blsp",
+        "(defmodule mac)\n(defmacro twice (x) `(* 2 ~x))\n",
+    );
+    write(
+        dir,
+        "src/usemac.blsp",
+        "(defmodule usemac (:use mac))\n(defn eight () (twice 4))\n",
+    );
     write(
         dir,
         "tests/calc_test.blsp",
@@ -127,18 +143,30 @@ fn a_watch_reruns_what_a_save_reaches_and_survives_a_broken_save() {
     // A breaking edit: the run after it reads the new `add`, and reruns calc_test ALONE —
     // other_test's two tests would make it "3 tests".
     let at = session.len();
-    write(dir, "src/calc.blsp", "(defmodule calc)\n(defn add (a b) (- a b))\n");
+    write(
+        dir,
+        "src/calc.blsp",
+        "(defmodule calc)\n(defn add (a b) (- a b))\n",
+    );
     let broke = session.wait_for(at, "1 tests, 0 passed, 1 failed");
     assert!(broke.contains("calc › adds"), "{broke}");
 
     let at = session.len();
-    write(dir, "src/calc.blsp", "(defmodule calc)\n(defn add (a b) (+ a b))\n");
+    write(
+        dir,
+        "src/calc.blsp",
+        "(defmodule calc)\n(defn add (a b) (+ a b))\n",
+    );
     session.wait_for(at, "1 tests, 1 passed");
 
     // A changed macro reaches its caller: `eight` expands `twice`, and reads 12 only if
     // `usemac` was re-evaluated after `mac`.
     let at = session.len();
-    write(dir, "src/mac.blsp", "(defmodule mac)\n(defmacro twice (x) `(* 3 ~x))\n");
+    write(
+        dir,
+        "src/mac.blsp",
+        "(defmodule mac)\n(defmacro twice (x) `(* 3 ~x))\n",
+    );
     let mac = session.wait_for(at, "1 failed");
     assert!(
         mac.contains("usemac › eight") && mac.contains("12"),
@@ -147,10 +175,18 @@ fn a_watch_reruns_what_a_save_reaches_and_survives_a_broken_save() {
 
     // A save that does not load is reported and runs nothing; the next good save runs again.
     let at = session.len();
-    write(dir, "src/calc.blsp", "(defmodule calc)\n(defn add (a b) (+ a b)\n");
+    write(
+        dir,
+        "src/calc.blsp",
+        "(defmodule calc)\n(defn add (a b) (+ a b)\n",
+    );
     let bad = session.wait_for(at, "does not load");
     assert!(!bad.contains("tests, "), "a broken save ran tests:\n{bad}");
     let at = session.len();
-    write(dir, "src/calc.blsp", "(defmodule calc)\n(defn add (a b) (+ a b))\n");
+    write(
+        dir,
+        "src/calc.blsp",
+        "(defmodule calc)\n(defn add (a b) (+ a b))\n",
+    );
     session.wait_for(at, "1 tests, 1 passed");
 }

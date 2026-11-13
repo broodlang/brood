@@ -403,7 +403,10 @@ alone.
             ;; the kernel's "callers keep the old expansion — re-eval them" is answered here:
             ;; those callers are the dependents, reloaded right after
             (binding (*reload-diagnostics* false) (watch-reload (append sources dependents)))))
-    (let (tests (if (empty? named) (watch-affected root (project-test-files root) changed) named))
+    (let (tests (cond
+                  (not (empty? named)) named
+                  (nil? root) named
+                  else (watch-affected root (project-test-files root) changed)))
       (if (empty? tests)
         (io/puts "no test file reaches it" :to *err*)
         (watch-run root tests opts)))))
@@ -447,7 +450,12 @@ reaches. Never returns; Ctrl-C ends it. Backs `nest test --watch`.
     (when (and root (empty? named)) (project-load-for-tests "test --watch"))
     (let (files (watch-files root named)
           stamps (watch-stamps files))
-      (watch-run root (if (empty? named) (project-test-files root) named) opts)
+      (watch-run root
+        (cond
+          (not (empty? named)) named
+          (nil? root) named
+          else (project-test-files root))
+        opts)
       (watch-banner files)
       (watch-loop root named opts stamps))))
 

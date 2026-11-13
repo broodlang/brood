@@ -246,7 +246,10 @@ fn a_dependency_module_named_by_its_short_name_is_imaged() {
     let warm = nest_run(&dir);
     assert!(warm.contains("ANSWER: 42"), "warm:\n{warm}");
     // The precondition the absence below rests on: this run was served by the image.
-    assert!(!warm.contains("Building shortapp"), "the warm run rebuilt:\n{warm}");
+    assert!(
+        !warm.contains("Building shortapp"),
+        "the warm run rebuilt:\n{warm}"
+    );
     assert!(
         !warm.contains("SOURCE-LOAD: util"),
         "the dependency module named by its short name was re-evaluated instead of \
@@ -661,9 +664,21 @@ fn a_named_test_file_materialises_only_what_it_reaches() {
     let dir = scratch("named-lazy");
     std::fs::create_dir_all(dir.join("tests")).unwrap();
     write(&dir, "project.blsp", "(project\n  :name lazydemo)\n");
-    write(&dir, "src/helper.blsp", "(defmodule helper)\n(defn inc2 (x) (+ x 2))\n");
-    write(&dir, "src/lib.blsp", "(defmodule lib)\n(defn f (x) (helper/inc2 x))\n");
-    write(&dir, "src/other.blsp", "(defmodule other)\n(defn g () :unreached)\n");
+    write(
+        &dir,
+        "src/helper.blsp",
+        "(defmodule helper)\n(defn inc2 (x) (+ x 2))\n",
+    );
+    write(
+        &dir,
+        "src/lib.blsp",
+        "(defmodule lib)\n(defn f (x) (helper/inc2 x))\n",
+    );
+    write(
+        &dir,
+        "src/other.blsp",
+        "(defmodule other)\n(defn g () :unreached)\n",
+    );
     write(
         &dir,
         "tests/lib_test.blsp",
