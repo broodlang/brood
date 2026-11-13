@@ -139,7 +139,7 @@ pub fn compile(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     };
     // A bare name used in this form that is `(:use …)`-imported from two or more modules is
     // a use-site clash (ADR-235) — raise it now, at the point of use, naming the candidates.
-    if let Some(error) = crate::eval::derive::take_ambiguous_error() {
+    if let Some(error) = crate::eval::derive::take_resolve_error() {
         return Err(error);
     }
     // `drain_pending` loads any inferred modules, which collects — so `resolved`
@@ -579,11 +579,6 @@ pub fn scan_def_names(heap: &Heap, forms: &[Value]) -> HashSet<Symbol> {
 /// reference to one correctly falls through to root instead of misqualifying to `M/name`.
 pub fn scan_regions(heap: &Heap, forms: &[Value]) -> HashMap<Symbol, HashSet<Symbol>> {
     let mut by_module: HashMap<Symbol, HashSet<Symbol>> = HashMap::new();
-    // `defdyn`-declared names are ambient (never namespaced), so they must not be a known
-    // ns-local name in ANY region — even when a region also `def`s the knob. Collected
-    // file-wide and subtracted at the end, so declaration order is irrelevant (a module
-    // may read a knob near its top, declare it in the middle, and set it near the bottom).
-    let mut ambient: HashSet<Symbol> = HashSet::new();
     let mut current: Option<Symbol> = None;
     for &form in forms {
         if let Some(m) = defmodule_form_name(heap, form) {
@@ -592,24 +587,14 @@ pub fn scan_regions(heap: &Heap, forms: &[Value]) -> HashMap<Symbol, HashSet<Sym
             continue; // the `defmodule` form itself declares no module-level names
         }
         if let Some(m) = current {
-            scan_def_form(heap, form, by_module.entry(m).or_default(), &mut ambient);
+            scan_def_form(heap, form, by_module.entry(m).or_default());
         }
         // else: a root-region form (before the first `defmodule`) — tracked by no module.
-    }
-    for names in by_module.values_mut() {
-        for a in &ambient {
-            names.remove(a);
-        }
     }
     by_module
 }
 
-fn scan_def_form(
-    heap: &Heap,
-    form: Value,
-    names: &mut HashSet<Symbol>,
-    ambient: &mut HashSet<Symbol>,
-) {
+fn scan_def_form(heap: &Heap, form: Value, names: &mut HashSet<Symbol>) {
     let items = match heap.list_items(form) {
         Some(i) => i,
         None => return,
@@ -627,24 +612,16 @@ fn scan_def_form(
     ) || defines_by_convention(hn))
         && let Some(ValueRef::Sym(name)) = items.get(1).map(|v| v.unpack())
     {
-        // An AMBIENT name is never namespaced, so it must not be pre-recorded as
-        // a namespace-local name — that would qualify every reference in the file
-        // to `ns/*name*` and lose the single root binding. Two ways to be
-        // ambient: this form is the `defdyn` that declares it (the scan runs
-        // before evaluation, so the runtime mark isn't set yet), or the name was
-        // already declared dynamic elsewhere — e.g. `(def *load-path* …)` in a
-        // module, rebinding the prelude's knob.
-        if hn == kw::DEFDYN || heap.is_dynamic(name) {
-            ambient.insert(name);
-        } else if !value::symbol_name_ref(name).contains('/') {
-            // Only bare names get pre-recorded; an already-qualified def head
-            // needs no forward-ref help.
+        // Only bare names get pre-recorded; an already-qualified def head (or a `/name`
+        // root one) needs no forward-ref help. A `defdyn` is no exception (ADR-722): in a
+        // module it defines `mod/*x*`, like any other definition.
+        if !value::symbol_name_ref(name).contains('/') {
             names.insert(name);
         }
     }
     // Recurse so a def nested in a top-level `(do …)`/`(when …)` is still found.
     for &it in &items[1..] {
-        scan_def_form(heap, it, names, ambient);
+        scan_def_form(heap, it, names);
     }
 }
 
@@ -767,27 +744,21 @@ pub fn resolve_bound_global(heap: &Heap, s: value::Symbol, root: EnvId) -> Optio
     }
 }
 
-/// An **ambient** name — one that is never namespaced, so a `def` of it in any
-/// module rebinds the single *root* binding (what makes `(def *load-path* …)` from
-/// anywhere change the path the loader reads).
+/// Qualify a definition head: `bar` -> `ns/bar`; an already-qualified `mod/bar` is taken
+/// as-is, and a `/bar` root escape defines the root `bar`, as the same spelling reads it
+/// (`resolve_sym`). Shared with `Heap::def_form_name` so def-site keys match.
 ///
-/// Ambient status comes from a **declaration**, not a spelling: the name must have
-/// been declared with `defdyn`. A spelling rule would make an ordinary module-local
-/// constant silently global — two modules that each wrote `(def *width* …)` would
-/// share one binding. Earmuffs remain the *convention* for a knob (and the checker
-/// reads them as one), but they do not change scoping: an
-/// undeclared `(def *width* 10)` inside a module is `mod/*width*`, like every other
-/// definition.
-pub(crate) fn is_ambient(heap: &Heap, sym: value::Symbol) -> bool {
-    heap.is_dynamic(sym)
-}
-
-/// Qualify a definition head: `bar` -> `ns/bar`; an already-`/`-qualified name, or
-/// an ambient (`defdyn`-declared) name, is taken as-is. Shared with
-/// `Heap::def_form_name` so def-site keys match.
-pub fn qualify_name(heap: &Heap, ns_name: &str, name: value::Symbol) -> value::Symbol {
+/// Every bare head is qualified, a `defdyn` one included (ADR-722): no name is *ambient*
+/// any more. A module's dynamic variable is `mod/*x*`, reached from elsewhere like any
+/// other public name, and only root code (the prelude, a file with no `defmodule`, or a
+/// `/*x*` head) declares a root one. While a `defdyn` name was root wherever it was
+/// declared, a downstream module's `(defdyn *x* …)` took over every std module's `*x*`
+/// (KI-383).
+pub fn qualify_name(ns_name: &str, name: value::Symbol) -> value::Symbol {
     let spelling = value::symbol_name_ref(name);
-    if spelling.contains('/') || is_ambient(heap, name) {
+    if is_root_escape(name) {
+        value::intern(&spelling[1..])
+    } else if spelling.contains('/') {
         name
     } else {
         value::intern(&format!("{}/{}", ns_name, spelling))
@@ -887,11 +858,9 @@ pub(super) fn resolve_sym(
         crate::eval::derive::record_qualified(name, ns_name);
         return s; // already qualified, no alias
     }
-    if is_ambient(heap, s) {
-        return s; // declared with `defdyn` — ambient/root, never namespaced
-    }
     // Own namespace first (a same-named local def shadows an import), then a
-    // `(:use …)` import, then root/prelude fall-through (left bare).
+    // `(:use …)` import, then root/prelude fall-through (left bare). A dynamic variable
+    // takes the same path as any other name (ADR-722).
     if let Some(own) = own_definition(heap, s, ns_name, name) {
         own
     } else if let Some(candidates) = heap.ambiguous_import_of(s) {
@@ -1390,14 +1359,25 @@ fn resolve_def(
             // unexpanded form), so without this a `(defn counter … (counter …))`
             // that came from a macro would bind `ns/counter` but recurse on bare
             // `counter` → unbound. Harmless for an already-qualified name.
-            // …but never for an ambient (`defdyn`-declared) name: it stays bare, so
-            // registering it would qualify the rest of the file's references to a
-            // namespace-local name that is never defined.
-            if !value::symbol_name_ref(name).contains('/') && !is_ambient(heap, name) {
+            if !value::symbol_name_ref(name).contains('/') {
+                // A bare head that names a dynamic variable visible here from elsewhere —
+                // a ROOT one (marked under the bare name; a module's own is marked under
+                // its qualified name) or an imported one — used to set that variable,
+                // `defdyn` heads included (a `defdyn` re-run as an assignment). Refuse it
+                // rather than quietly define `ns/name` (ADR-722).
+                let visible = if heap.is_dynamic(name) {
+                    Some(name)
+                } else {
+                    heap.import_of(name)
+                        .filter(|&imported| heap.is_dynamic(imported))
+                };
+                if let Some(target) = visible {
+                    crate::eval::derive::record_dynamic_def(name, target, value::intern(ns_name));
+                }
                 warn_macro_shadow(heap, ns_name, name);
                 heap.add_ns_known_name(name);
             }
-            out.push(Value::symbol(qualify_name(heap, ns_name, name)));
+            out.push(Value::symbol(qualify_name(ns_name, name)));
         }
         Some(other) => out.push(other), // not a symbol — leave (eval will complain)
         None => return reuse_or_rebuild(heap, form, items, out),

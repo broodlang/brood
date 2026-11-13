@@ -89,29 +89,28 @@ are the dynamic vars `repl/*prompt*` / `repl/*cont-prompt*`; rebind them with
 ;; to name is simply gone — you retype the expression and recompute it, which for
 ;; anything expensive or effectful is the wrong answer.
 ;;
-;; They are `defdyn`s because that is the ONLY door to an ambient name (ADR-151): a
-;; plain `(def *1 …)` inside `(defmodule repl …)` would define `repl/*1`, while the
-;; user typing `*1` at the prompt means the bare root name. `defdyn` marks it never-
-;; namespaced, and — per its own docstring — a `def` of it from any module then
-;; rebinds that one root binding, which is what `repl-remember-*` below do. We `def`
-;; rather than `binding` on purpose: the value has to outlive the form that produced
-;; it, and a dynamic binding would unwind at the end of the very eval that set it.
-(defdyn *1 nil)
-(defdyn *2 nil)
-(defdyn *3 nil)
-(defdyn *e nil)
+;; They are ROOT names, spelled `/*1`: a plain `*1` inside `(defmodule repl …)` would be
+;; `repl/*1`, while the user typing `*1` at the prompt means the bare root name. They
+;; are declared dynamic because a dynamic variable is never a reserved name, so the
+;; `def`s below may keep rebinding them (`RuntimeCode::is_sealed`). We `def` rather than
+;; `binding` on purpose: the value has to outlive the form that produced it, and a
+;; dynamic binding would unwind at the end of the very eval that set it.
+(defdyn /*1 nil)
+(defdyn /*2 nil)
+(defdyn /*3 nil)
+(defdyn /*e nil)
 
 (defn- repl-remember-value (v)
   "Shift `v` into the result history (`*1` newest, `*3` oldest). Returns `v`."
   (do
-    (def *3 *2)
-    (def *2 *1)
-    (def *1 v)
+    (def /*3 /*2)
+    (def /*2 /*1)
+    (def /*1 v)
     v))
 
 (defn- repl-remember-error (e)
   "Record caught value `e` as `*e` so the prompt can inspect the last failure."
-  (do (def *e e) e))
+  (do (def /*e e) e))
 
 ;; ---- colourised output (TTY only) -------------------------------------------
 ;; The printed result is re-lexed with the *same* highlighter the line editor paints

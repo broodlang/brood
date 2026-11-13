@@ -130,8 +130,8 @@ impl Heap {
     /// image). The snapshot half of [`Heap::restore_dynamic_names`].
     ///
     /// A mark is not cosmetic, which is why `%isolate` restores it with the bindings: it
-    /// makes a name *ambient* for namespace resolution (`macros::is_ambient`) and exempt
-    /// from the reserved-name check (`RuntimeCode::is_sealed`).
+    /// decides what `binding` may rebind and exempts the name from the reserved-name check
+    /// (`RuntimeCode::is_sealed`).
     pub fn dynamic_names(&self) -> Vec<Symbol> {
         let mut names = self.runtime.dynamics_snapshot();
         names.sort_by_cached_key(|&sym| value::symbol_name(sym));

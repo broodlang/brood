@@ -654,6 +654,84 @@ fn repl_evaluates_piped_forms_outside_and_inside_a_project() {
     );
 }
 
+// ── `eval` (2026-11-13). One expression answered with the project loaded, inside a module
+// with `--in`, as a test sees the world with `--test`, from stdin with `-`.
+
+fn nest_eval_stdin(dir: &std::path::Path, input: &str) -> (i32, String, String) {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nest"))
+        .current_dir(dir)
+        .env("BROOD_NO_STDIMAGE", "1")
+        .args(["eval", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn nest eval -");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn eval_answers_one_expression_in_the_project_a_module_or_a_test_run() {
+    let proj = scaffolded("eval-proj");
+    std::fs::write(
+        proj.join("src").join("secret.blsp"),
+        "(defmodule secret)\n\n(defn- hidden () 41)\n",
+    )
+    .expect("a module with a private function");
+    // The value, re-readable, after what the code printed; every word is the expression's.
+    let (code, out, err) = nest_in(&proj, &["eval", "(io/puts \"printed\")", "(+ 40 2)"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(out, "printed\n42\n", "{err}");
+    let (code, out, err) = nest_in(&proj, &["eval", "(str \"a\" \"b\")"]);
+    assert_eq!((code, out.as_str()), (0, "\"ab\"\n"), "{err}");
+    // `--in`: inside the module, its private names resolve bare.
+    let (code, out, err) = nest_in(&proj, &["eval", "--in", "secret", "(inc (hidden))"]);
+    assert_eq!((code, out.as_str()), (0, "42\n"), "{err}");
+    // `--test`: a test run's mark and scratch home; without it, neither.
+    let (code, out, err) = nest_in(
+        &proj,
+        &[
+            "eval",
+            "--test",
+            "[(test/running?) (string? (test/scratch-dir))]",
+        ],
+    );
+    assert_eq!((code, out.as_str()), (0, "[true true]\n"), "{err}");
+    let (code, out, err) = nest_in(&proj, &["eval", "(test/running?)"]);
+    assert_eq!((code, out.as_str()), (0, "false\n"), "{err}");
+    // A `--test` inside the expression is the expression's, not the flag.
+    let (code, out, err) = nest_in(&proj, &["eval", "(test/running?)", "\"--test\""]);
+    assert_eq!((code, out.as_str()), (0, "\"--test\"\n"), "{err}");
+    // `-` reads the expression from stdin: quotes need no shell escaping.
+    let (code, out, err) = nest_eval_stdin(&proj, "(def s \"a \\\"q\\\"\")\n(str s \"!\")\n");
+    assert_eq!((code, out.as_str()), (0, "\"a \\\"q\\\"!\"\n"), "{err}");
+    // An error is reported and exits 1; nothing to evaluate is a usage error.
+    let (code, _, err) = nest_in(&proj, &["eval", "(/ 1 0)"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("division by zero"), "{err}");
+    let (code, _, err) = nest_in(&proj, &["eval", "--in", "no-such/module", "1"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("cannot find module"), "{err}");
+    let (code, _, err) = nest_in(&proj, &["eval"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("nothing to evaluate"), "{err}");
+    // Outside a project it is plain Brood.
+    let (code, out, err) = nest_in(&scratch("eval-plain"), &["eval", "(+ 1 1)"]);
+    assert_eq!((code, out.as_str()), (0, "2\n"), "{err}");
+}
+
 // ── `observe` / `attach` (moved 2026-09-05). `missing_file.rs` pins the no-tty boundary
 // message for both through the real binary. Pinned here: the arity and the option surface.
 

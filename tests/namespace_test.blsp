@@ -200,7 +200,7 @@
   (test "a default mixing an earlier param and a module global"
     (%load-string "(defmodule nsopt7) (def lim 5) (defn f (w &optional (h lim) (area (* w h))) area)")
     (assert= (nsopt7/f 2) 10))
-  (test "a defdyn knob keeps working from a default (it is ambient, never namespaced)"
+  (test "a module's defdyn knob works from a default (it is the module's own, ADR-722)"
     (%load-string "(defmodule nsopt8) (defdyn *dlim* 9) (defn f (&optional (n *dlim*)) n)")
     (assert= (nsopt8/f) 9)))
 

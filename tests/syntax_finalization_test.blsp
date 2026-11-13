@@ -100,22 +100,53 @@
         (refute (bound? '*sf-width*))
         (is (bound? 'sfa/*sf-width*)))))
 
-  (test "a defdyn name IS ambient: one root binding any module can set"
+  :isolated (test "a defdyn in a module is the module's own, bound bare inside and qualified outside (ADR-722)"
     (let (dir (temp-dir "brood-ambient2-"))
       (file/mkdir dir)
       (let (f (path/join dir "sfc.blsp"))
-        (defdyn *sf-knob* 1)
         (file/spit f
-          "(defmodule sfc)\n(defn read-knob () *sf-knob*)\n(defn bump () (def *sf-knob* 42))\n")
+          (str "(defmodule sfc)\n(defdyn *sf-knob* 1)\n(defn read-knob () *sf-knob*)\n"
+            "(defn bound-read () (binding (*sf-knob* 7) (read-knob)))\n"))
         (reflect/load f)
+        (is (reflect/dynamic? 'sfc/*sf-knob*))
+        (refute (bound? '*sf-knob*))
         (assert= (sfc/read-knob) 1)
-        (sfc/bump)
-        (assert= *sf-knob* 42)
-        (assert= (binding (*sf-knob* 7) (sfc/read-knob)) 7))))
+        (assert= (sfc/bound-read) 7)
+        (assert= (binding (sfc/*sf-knob* 3) (sfc/read-knob)) 3))))
 
-  (test "dynamic? reports the declaration, and binding still requires one"
+  :isolated (test "a module's defdyn cannot take over another module's name (KI-383)"
+    ;; Was: an unqualified `defdyn` in any module declared the ROOT name, so every
+    ;; module's `*x*` became that one root variable — bedit's `*indent-width*` took over
+    ;; lineedit's private setting of the same name.
+    (let (dir (temp-dir "brood-ambient2-"))
+      (file/mkdir dir)
+      (let (fd (path/join dir "sfd.blsp") fe (path/join dir "sfe.blsp"))
+        (file/spit fd "(defmodule sfd)\n(defdyn *sf-indent* :downstream)\n")
+        (file/spit fe "(defmodule sfe)\n(def- *sf-indent* 2)\n(defn indent () *sf-indent*)\n")
+        (reflect/load fd)
+        (reflect/load fe)
+        (assert= (sfe/indent) 2)
+        (assert= sfd/*sf-indent* :downstream)
+        (refute (bound? '*sf-indent*)))))
+
+  :isolated (test "a root dynamic is set from a module as /*x*; a bare *x* head is refused"
+    (let (dir (temp-dir "brood-ambient2-"))
+      (file/mkdir dir)
+      (defdyn /*sf-root-knob* 0)
+      (let (good (path/join dir "sfg.blsp") bad (path/join dir "sfh.blsp"))
+        (file/spit good "(defmodule sfg)\n(defn set-it () (def /*sf-root-knob* 5))\n")
+        (file/spit bad "(defmodule sfh)\n(defn set-it () (def *sf-root-knob* 5))\n")
+        (is (reflect/dynamic? '*sf-root-knob*))
+        (reflect/load good)
+        (sfg/set-it)
+        (assert= /*sf-root-knob* 5)
+        (is (includes? (try (do (reflect/load bad) nil) (catch e (error-message e)))
+              "write `/*sf-root-knob*` to set the root variable")))))
+
+  :isolated (test "dynamic? reports the declaration, and binding still requires one"
     (defdyn *sf-declared* 0)
-    (is (reflect/dynamic? '*sf-declared*))
+    (is (reflect/dynamic? 'syntax-finalization-test/*sf-declared*))
+    (assert= (binding (*sf-declared* 4) *sf-declared*) 4)
     (refute (reflect/dynamic? '*sf-never-declared*))
     (assert-error (reflect/eval (reflect/read-string "(binding (*sf-never-declared* 1) nil)")))))
 

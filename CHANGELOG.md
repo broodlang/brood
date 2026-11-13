@@ -9,7 +9,7 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 **Added.**
 - **`nest test --watch`** stays up and reruns on every save: the named files, or the test files a
   change reaches. Changed source files are reloaded in place, a changed macro's callers with it,
-  so a TDD cycle costs the tests' own time instead of a process start (ADR-722).
+  so a TDD cycle costs the tests' own time instead of a process start (ADR-724).
 - **`editor/pane/pane-layout` takes `{:row-seam 0}`**: panes stacked by a `:row` split share the height with
   no row between them, as a terminal editor lays them out — the upper pane's last row (its mode line)
   is the separator and the divider's `:rect`, so a drag there resizes. Dividers carry `:seam`.

@@ -1330,7 +1330,7 @@ pub(super) fn check_let(
                 // name being shadowed.)
                 let shadows_global = is_globally_bound(heap, name)
                     || has_curated_sig(name)
-                    || ctx.is_file_global(name);
+                    || ctx.shadows_file_global(heap, name);
                 if !nm.starts_with('_') && !is_gensym && !shadows_global {
                     // letrec: also scan preceding elements (mutual recursion).
                     let preceding_used =

@@ -208,10 +208,9 @@ the write never comes, which is what these cases actually test."
 ;; `%isolate` restores the global BINDING table, but two Rust-side mark registries live
 ;; beside it — the `defdyn` set (`core::value::DYNAMICS`) and the `defn-` private set
 ;; (`RuntimeCode::private`) — and neither used to be rolled back. A leaked dynamic mark is
-;; not cosmetic: it makes the name permanently *ambient* for namespace resolution
-;; (`macros::is_ambient`) and permanently exempt from the reserved-name check
-;; (`heap::is_sealed` excludes dynamics), so an isolated test could silently change how a
-;; later module's names resolve.
+;; not cosmetic: it leaves the name rebindable by `binding` and permanently exempt from the
+;; reserved-name check (`heap::is_sealed` excludes dynamics), and a leaked root mark makes a
+;; later module's `def` of that name an error (ADR-722).
 ;;
 ;; These use `reflect/eval-string` rather than a literal `defdyn`, which matters: the whole file
 ;; is compiled before it runs, and the compile pass registers the mark — so a literal

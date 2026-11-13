@@ -145,34 +145,6 @@ test that can place two cells at one index on demand; it rests on construction (
 names the slab). **Not yet run or sabotage-verified** — as KI-388 (sabotage: drop the
 generation check before the `match`).
 
-## KI-383 — a downstream root `defdyn` takes over a std module's setting of the same name
-
-**Seen** 2026-11-12, in CI's bedit smoke: `bedit/src/conventions.blsp:43: *indent-width*: value
-of type nil is not assignable to declared type int`, after ADR-718 shortened lineedit's private
-`*lineedit-indent-width*` to `*indent-width*`.
-
-**Cause.** A name is ambient (root, never namespaced) once anything declares it with `defdyn`
-(`resolve.rs`, `is_ambient` reads `heap.is_dynamic`). An unqualified `(defdyn *x* …)` inside a
-module declares the ROOT `*x*`, and bedit does that 116 times. From then on, every module's
-`*x*` resolves to root, both its `def` head and its references. With std loaded from source
-(the contracts suite, any module outside the stdlib image), lineedit's
-`(def- *indent-width* 2)` became bedit's root variable: `editor/lineedit/*indent-width*` was
-never bound, and lineedit read `nil`. Probe:
-`(defmodule d) (defdyn *indent-width* nil) (require-one 'editor/lineedit)` with
-`BROOD_NO_STDIMAGE=1` leaves lineedit's binding unbound. The checker saw the same thing,
-which is how it surfaced.
-
-**Fixed for the two live collisions** (lineedit's `*indent-width*` and coverage's
-`*targets*`, both shortened by ADR-718). lineedit's is a constant, `body-indent`, with no
-earmuffs, so no `defdyn` can claim it. coverage's is `*instrumented*`. No other std
-module-level earmuffed name matches one of bedit's root `defdyn`s.
-
-**Still open: the hazard itself.** Any std module setting can be taken over by a downstream
-root `defdyn` of the same name. The language-level fix: an unqualified `defdyn` inside a
-module declares `mod/*x*`, and only the prelude (or an explicit root spelling) declares an
-ambient name. That would also have caught the `project-release/*…*` slip (ADR-714). It changes
-the meaning of bedit's 116 `defdyn`s, so it waits on a decision.
-
 ## KI-384 — `nest check` answers differently with `BROOD_CONTRACTS=1`
 
 **Seen** 2026-11-12. bedit's check is clean, but with `BROOD_CONTRACTS=1` it reports four
@@ -206,7 +178,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 | KI-386 | **A function called only by itself was typed from its own self-call** — the caller-derived pass seeds only LIVE candidates, but each round derived every function with a site; `(defn f (y) (if y … (f y)))` typed `y` nil|false, the then branch went dead and nothing in it was checked | ✅ **FIXED 2026-11-12** — a round derives only the live candidates (`caller_derived_params`). Guard: `scope_and_guards::a_self_call_does_not_make_the_branch_beside_it_dead` (red without the filter) |
 | KI-385 | **`nest check --fix-renames` rewrote local bindings that share the renamed name** — the rewrite renamed every symbol spelled like the stale name, parameters and `let` binders included | ✅ **FIXED 2026-11-12** — only the places the checker reports are rewritten (`codemod/cst-rename-at-text`), and a form an unresolved macro heads is left for a human. Guards: `boot_check_and_renames::fix_renames_leaves_a_local_spelled_like_the_renamed_name_alone` (red with the old rewrite back), `codemod_test` § cst-rename-at-text; replaying hatch's ADR-716/718 migration reproduces the hand-fixed result. Was: open |
 | KI-384 | **`nest check` answers differently with `BROOD_CONTRACTS=1`** — four warnings in bedit's terminal.blsp only with contracts armed | ⚠️ **open 2026-11-12** — reproduction in the section; not reproduced in a small file; no gate runs that mode |
-| KI-383 | **A downstream root `defdyn` takes over a std module's setting of the same name** — an unqualified `defdyn` in a module declares a root ambient name, which then resolves every module's `*x*` to root | ⚠️ **open 2026-11-12** — the two live collisions fixed (lineedit `body-indent`, coverage `*instrumented*`); the language-level fix (module-scoped `defdyn`) waits on a decision |
+| KI-383 | **A downstream root `defdyn` takes over a std module's setting of the same name** — an unqualified `defdyn` in a module declares a root ambient name, which then resolves every module's `*x*` to root | ✅ **FIXED 2026-11-13** — a module's `defdyn` declares `mod/*x*` and no name is ambient (ADR-722); root names come from root code or a `/name` head, and a bare module head naming a root dynamic is refused. Guard: `syntax_finalization_test` § "a module's defdyn cannot take over another module's name (KI-383)". Was: ⚠️ open 2026-11-12 — the two live collisions fixed (lineedit `body-indent`, coverage `*instrumented*`); the language-level fix (module-scoped `defdyn`) waits on a decision |
 | KI-382 | **Under AddressSanitizer, a dozen JIT tier assertions fail on the suite's first try and pass on its retry** — `settle` reads `:bailed` or `:untried` where `:native` is pinned, and deopt counts run high | ✅ **FIXED 2026-11-10** — every bail read `native-depth-exceeded`: the native stack guard tripped on a frame on another stack (a `stacker` segment, common on a cold-cache first try under ASan); `c5177a2b4` re-stamps the limit for the frame's stack before deopting. Guards: `jit_runtime::support::stack_recheck_tests`. Was: open, cause unknown |
 | KI-381 | **`dual_listen_serves_tcp_and_unix_at_once` failed: `no pong over tcp`** — a client dialing one node over TCP and then the Unix socket; each end keeps the link it registered first, so the two ends can keep different links and both die | ✅ **FIXED 2026-11-10** — an equal-connector duplicate keeps the link this end opened first (its id is taken before the handshake writes), which both ends agree on. Guard: `dist::tests::one_connectors_two_links_keep_the_one_opened_first_whatever_registers_first` (red with "existing wins" back). Was: open — mechanism diagnosed from the code |
 | KI-370 | **`nest check` reported `send: … got nil \| pid` on `examples/life_bands.blsp` once** — a non-strict warning on an overlapping type, in a file that changed nothing, right after a rebuild | ✅ **CLOSED 2026-11-12** — the warning is strict mode's own and was true (`(nth pids k)` can be `nil`); the example now sends to each pid it walks, so neither mode has anything to report. `nest check --strict examples/*.blsp` is clean; the old file still warns. Was: watching, 0 of 45 re-runs |

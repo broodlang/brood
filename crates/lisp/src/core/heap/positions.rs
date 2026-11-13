@@ -677,7 +677,6 @@ impl Heap {
             ValueRef::Sym(name) => {
                 let qualified = match self.compile_ns() {
                     Some(ns) => crate::eval::macros::qualify_name(
-                        self,
                         &crate::core::value::symbol_name(ns),
                         name,
                     ),

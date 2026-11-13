@@ -327,16 +327,17 @@ since the prelude is always present.
                       (and (not (includes? (->string g) "/"))
                         (nil? (%map-get owner-of g nil))
                         (not (%prelude-global? g))))))
-        ;; A `defdyn` is the other way to get here, and the message above would send you the
-        ;; wrong way: it is AMBIENT — always a root name, so no module can own it, from a fresh
-        ;; process or not (`*transduce-run*` in std/seq, 2026-10-22). Name that case and its fix.
+        ;; A root `defdyn` (`/*x*`) in a std module is the other way to get here, and the
+        ;; message below would send you the wrong way: no module can own a root name, from a
+        ;; fresh process or not (`*transduce-run*` in std/seq, 2026-10-22, when every
+        ;; `defdyn` was root). Name that case and its fix.
         dynamic-orphans (seq/filter orphans reflect/dynamic?)
         _ (when (not (empty? dynamic-orphans))
             (error "stdimage/build: "
               (string/join (sort (map dynamic-orphans ->string)) " ")
-              " — declared with `defdyn` in a std module. A dynamic var is ambient (always a "
-              "root name), so no module's image section can carry it. Declare it in "
-              "std/prelude/ instead, and record it under `dynamic` in docs/bare-names.md; "
+              " — a root dynamic variable declared in a std module, so no module's image "
+              "section can carry it. Drop the `/` to make it the module's own (ADR-722), or "
+              "declare it in std/prelude/ and record it under `dynamic` in docs/bare-names.md; "
               "nothing was written."))
         _ (when (not (empty? orphans))
             (error "stdimage/build: "

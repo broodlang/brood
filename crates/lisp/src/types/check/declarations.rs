@@ -9,17 +9,12 @@ use super::*;
 /// the resolve pass qualifies a def head — but only with the same *positive
 /// evidence* the resolver requires: the file actually defines `ns/name` (recorded
 /// as a file-global in pass 2). A name the file doesn't define (an imported/prelude
-/// name), an already-`ns/`-qualified name, or an ambient `*earmuffed*` name is left
-/// as written, so it still matches the bare/qualified head the call resolves to.
-pub(super) fn qualify_decl_name(
-    heap: &Heap,
-    ctx: &Ctx,
-    file_ns: Option<&str>,
-    name: Symbol,
-) -> Symbol {
+/// name) or an already-`ns/`-qualified name is left as written, so it still matches
+/// the bare/qualified head the call resolves to.
+pub(super) fn qualify_decl_name(ctx: &Ctx, file_ns: Option<&str>, name: Symbol) -> Symbol {
     match file_ns {
         Some(ns) => {
-            let qualified = crate::eval::macros::qualify_name(heap, ns, name);
+            let qualified = crate::eval::macros::qualify_name(ns, name);
             if ctx.is_file_global(qualified) {
                 qualified
             } else {
@@ -40,11 +35,11 @@ fn register_declared_sig(heap: &Heap, ctx: &mut Ctx, file_ns: Option<&str>, form
     if let Some((name, _, props)) = annot::sig_decl_head(heap, form)
         && !props.is_empty()
     {
-        let qn = qualify_decl_name(heap, ctx, file_ns, name);
+        let qn = qualify_decl_name(ctx, file_ns, name);
         ctx.add_declared_props(qn, &props);
     }
     if let Some((name, sig)) = annot::parse_sig_decl(heap, form) {
-        let qn = qualify_decl_name(heap, ctx, file_ns, name);
+        let qn = qualify_decl_name(ctx, file_ns, name);
         ctx.add_declared_sig(qn, sig);
         // `(T… -> _)` — the result is left to inference (ADR-420).
         if let Some((_, Some(type_form), _)) = annot::sig_decl_head(heap, form)
@@ -54,19 +49,19 @@ fn register_declared_sig(heap: &Heap, ctx: &mut Ctx, file_ns: Option<&str>, form
         }
     }
     if let Some((name, sv)) = annot::parse_sig_decl_with_vars(heap, form) {
-        let qn = qualify_decl_name(heap, ctx, file_ns, name);
+        let qn = qualify_decl_name(ctx, file_ns, name);
         ctx.add_declared_sig_with_vars(qn, sv);
     }
     // An overloaded sig — `(and (int -> int) (bool -> bool))` — has no single `Sig`,
     // so `parse_sig_decl` above yields nothing for it; record it separately (ADR-116).
     if let Some((name, sigs)) = annot::parse_sig_decl_overload(heap, form) {
-        let qn = qualify_decl_name(heap, ctx, file_ns, name);
+        let qn = qualify_decl_name(ctx, file_ns, name);
         ctx.add_declared_overload(qn, sigs);
     }
     // Non-arrow `(sig x T)` value-type declarations — consumed by the gradual-
     // assignment check on `(def x …)` (the first `GradualTy` consumer).
     if let Some((name, ty)) = annot::parse_value_sig_decl(heap, form) {
-        let qn = qualify_decl_name(heap, ctx, file_ns, name);
+        let qn = qualify_decl_name(ctx, file_ns, name);
         ctx.add_declared_value_ty(qn, ty);
     }
 }
@@ -130,7 +125,7 @@ pub(super) fn check_sig_declarations(
             ));
             continue; // the rest reads the parsed sig, which doesn't exist
         }
-        let qualified = qualify_decl_name(heap, ctx, file_ns, name);
+        let qualified = qualify_decl_name(ctx, file_ns, name);
         // 2. Does it annotate anything? A sig for a name this file never defines (and
         //    that isn't bound anywhere in the image) annotates nothing — usually a
         //    rename that moved the `defn` and left the declaration behind.
@@ -303,7 +298,7 @@ pub(super) fn register_declarations(
             let Some((name, sig)) = annot::parse_sig_decl(heap, form) else {
                 continue;
             };
-            let id = value::symbol_name(qualify_decl_name(heap, ctx, file_ns_name, name));
+            let id = value::symbol_name(qualify_decl_name(ctx, file_ns_name, name));
             if let Some(fields) = sig.ret.record_fields() {
                 field_types.entry(id).or_insert_with(|| fields.clone());
             }

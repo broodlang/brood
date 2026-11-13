@@ -205,6 +205,15 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
    "repl" {:about "Start a REPL. Inside a project every source file is pre-loaded and the prompt starts in the project's main namespace, so its functions are callable bare; outside one, the plain language REPL (`brood` would do the same). Ctrl-D exits."
            :flags {}
            :run (fn (options) (run-repl options))}
+   "eval" {:about "Evaluate EXPRESSION once, with the project loaded as `nest repl` loads it, and print the value: a question about the project answered without a probe file. `--in MODULE` evaluates inside that module, its private names visible as they are to its own code (what a test's `:use-internals` gives). `--test` runs it as a test sees the world: a test run's mark (`test/running?`) and its scratch home, so nothing it does reaches your real config. `-` reads the expression from stdin, so a heredoc needs no shell quoting. Every form is evaluated and the last one's value printed, re-readable (`pr-str`); what the code prints comes first. An error is reported as `nest run` reports one, exit 1."
+           :flags {"--in" "MODULE"
+                   "--test" :bool}
+           :positional ["expression" nil]
+           :many true
+           ;; everything after the first word of the expression is the expression's, so
+           ;; `--` and hyphens inside it are never read as flags
+           :trailing true
+           :run (fn (options) (run-eval options))}
    "observe" {:about "Open a live process observer — a full-screen TUI of processes, status, mailbox and memory (ADR-046). With no `--connect`, a standalone demo over a fresh runtime's own processes; with `--connect name@host:port`, attach to a RUNNING program over the node link (it must have called `node-start` + `observe-serve`). `q`/Esc/Ctrl-C quits."
               :flags {"--connect" "NODE" "--cookie" "COOKIE"}
               :run (fn (options) (run-observe options))}
@@ -359,7 +368,8 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
       (cond
         (= word "--") (assoc acc :positionals (append (get acc :positionals) rest-words))
         (or (= word "--help") (= word "-h")) (parse-words spec rest-words (assoc acc :help true))
-        (string/starts-with? word "-")
+        ;; a lone `-` is a positional — stdin, by the Unix convention clap follows too
+        (and (string/starts-with? word "-") (not (= word "-")))
           (let (resolved (resolve-flag spec word)
                 [canon kind warning] (or resolved [nil nil nil])
                 acc (if warning (assoc acc :warnings (conj (get acc :warnings []) warning)) acc))
@@ -1101,6 +1111,44 @@ supplies `:registry`, which a `:version` dependency resolves against."
     (eputs "nest repl — no project.blsp here; plain REPL (`brood` would do the same)"))
   (repl/run)
   0)
+
+;; `nest eval` ------------------------------------------------------------------------
+;; One expression, answered: what an agent (or a person at a shell) wants to know about a
+;; project without writing a throwaway test file to ask it. The project loads as `nest repl`
+;; loads it; `--in` moves into a module first; `--test` (armed in Rust before the runtime
+;; exists, `arm_test_env`) gives a test run's scratch home.
+
+(defn- stdin-text ()
+  ;; all of stdin, its lines joined back with newlines
+  (letrec (gather (fn (lines)
+                    (let (line (io/read-line))
+                      (if (nil? line) (string/join (reverse lines) "\n") (gather (cons line lines))))))
+    (gather '())))
+
+(defn eval-source (words)
+  "The source `nest eval` evaluates, from its expression `words`: the words joined by spaces,
+or all of stdin when the one word is `-`.
+
+    (nest/eval-source (list \"(+\" \"1\" \"2)\"))   ;=> \"(+ 1 2)\""
+  (if (= (vec words) ["-"]) (stdin-text) (string/join words " ")))
+
+(defn- run-eval (options)
+  (let (flags (get options :flags)
+        source (eval-source (or (get options :positionals) []))
+        module (get flags "--in"))
+    (if (= (string/trim source) "")
+      (do
+        (eputs "nest eval: nothing to evaluate — give an expression, or `-` to read one from stdin")
+        2)
+      (do
+        (load-project-image)
+        ;; into the module, loaded first: its private names and its imports resolve bare
+        (when (string? module)
+          (let (name (symbol module))
+            (require-one name)
+            (%in-ns name)))
+        (io/puts (pr-str (reflect/eval-string source)))
+        0))))
 
 ;; `nest observe` / `nest attach` — the full-screen frontends -------------------------
 

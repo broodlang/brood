@@ -129,6 +129,32 @@ when the runtime crashes); `std/prelude/*.blsp` is the canonical idiomatic code.
 Don't probe names one at a time: `nest doc --all` prints every builtin and prelude
 function; `nest doc seq` one module.
 
+## Ask the project with `nest eval`, never a probe file
+
+To learn what an expression does in this project — a function's answer, a value's shape,
+whether a name is bound — evaluate it. Don't write a test file to ask.
+
+```bash
+nest eval '(seq/sort-by ["bb" "a" "ccc"] count)'   # the value, printed re-readable
+nest eval --in my/module '(helper 3)'              # inside a module: its private names and imports resolve bare
+nest eval --test '(test/scratch-dir)'              # as a test sees it: test/running? true, a scratch home
+nest eval - <<'EOF'                                # several forms from stdin, no shell quoting
+(def words (string/split "a b c" " "))
+(count words)
+EOF
+```
+
+- The project loads as `nest repl` loads it, in about half a second even for a big project.
+  Contracts are armed, as under `nest test`.
+- What the code prints comes first. The last line is the value of the last form, `pr-str`'d.
+  An error is reported on stderr, with exit 1.
+- Use **`--test`** when the code could write state (config, history, anything under the XDG
+  directories). Without it the code runs against the real home.
+- **Never write a throwaway `tests/zz_probe_test.blsp`, or any scratch file in the tree, to
+  ask a question.** Other sessions and tools read the tree while you work. A file that appears
+  and vanishes breaks their `nest check` and `nest test` runs, and it can be committed by
+  accident. `nest eval` leaves nothing behind.
+
 ## The MCP server is your coding loop
 
 A Brood project's `.mcp.json` points at `nest mcp`, a server over the **live image**

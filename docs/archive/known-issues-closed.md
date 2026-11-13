@@ -127,6 +127,43 @@ example still agrees with the serial step. If the non-strict sighting came from 
 reading a type as precise, that is the checker's ordinary mode rule, which a now-dropped
 sig fed, not a defect in the checker.
 
+## KI-383 — a downstream root `defdyn` takes over a std module's setting of the same name ✅ fixed 2026-11-13
+
+**Seen** 2026-11-12, in CI's bedit smoke: `bedit/src/conventions.blsp:43: *indent-width*: value
+of type nil is not assignable to declared type int`, after ADR-718 shortened lineedit's private
+`*lineedit-indent-width*` to `*indent-width*`.
+
+**Cause.** A name was ambient (root, never namespaced) once anything declared it with `defdyn`
+(`resolve.rs`, `is_ambient` read `heap.is_dynamic`). An unqualified `(defdyn *x* …)` inside a
+module declared the ROOT `*x*`, and bedit did that 116 times. From then on, every module's
+`*x*` resolved to root, both its `def` head and its references. With std loaded from source
+(the contracts suite, any module outside the stdlib image), lineedit's
+`(def- *indent-width* 2)` became bedit's root variable: `editor/lineedit/*indent-width*` was
+never bound, and lineedit read `nil`. Probe:
+`(defmodule d) (defdyn *indent-width* nil) (require-one 'editor/lineedit)` with
+`BROOD_NO_STDIMAGE=1` left lineedit's binding unbound. The checker saw the same thing,
+which is how it surfaced.
+
+**Why it survived.** std never collided with itself: every std module spells its settings
+qualified (`test/*filter*`), so the only root `defdyn`s in std were the prelude's. The hazard
+needed a downstream declaration with the same short name, and the stdlib image hid it, since
+an imaged module's references were compiled before the downstream declaration existed.
+
+**Fix** (ADR-722). First the two live collisions (lineedit's constant `body-indent`, coverage's
+`*instrumented*`), then the language-level one: a dynamic variable is named like any other
+definition. Inside module `m`, `(defdyn *x* v)` defines `m/*x*`; `binding` resolves the names
+it quotes at expansion time; root names come only from root code or a `/name` head; and a bare
+module head that names a root dynamic variable is refused with the `/name` fix in the message,
+so code written for the old meaning fails loudly instead of quietly defining `m/*x*`.
+
+**Guard.** `tests/syntax_finalization_test.blsp` § "a module's defdyn cannot take over another
+module's name (KI-383)": module `sfd` declares `*sf-indent*`, module `sfe` defines a private
+`*sf-indent*`, and each keeps its own. Sabotaged by restoring the root-declaring `defdyn`
+(`(let (bound name) …)`): the file goes red (`failed to load`), as the old declaration makes
+the new definition a root-dynamic head. Beside it, § "a defdyn in a module is the module's
+own…", § "a root dynamic is set from a module as /*x*…", `modules_test` § "a module's defdyn is
+imported like any public name", and `project_test`'s duplicate-definition cases.
+
 ## KI-382 — under AddressSanitizer, JIT tier assertions fail on the suite's first try and pass on its retry ✅ fixed 2026-11-10
 
 **Symptom.** The Nightly's AddressSanitizer job, `brood::suite brood_suite_passes`, TRY 1:

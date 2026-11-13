@@ -127,7 +127,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(0),
         // `(or symbol nil)`, not `symbol`: the docstring below has always said "nil at the
         // root namespace", and the signature did not. That is not cosmetic — the checker
-        // read `(nil? (reflect/current-ns))` in `%defonce-qualified-name` as a test that
+        // read `(nil? (reflect/current-ns))` in `%def-name` as a test that
         // can never be true, i.e. it called a load-bearing guard dead. Found by the
         // impossible-predicate lint (ADR-315).
         Sig::new(vec![], sym.union(Ty::of(Tag::Nil))),
@@ -258,6 +258,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &[],
         "",
         mark_private,
+    );
+    primitives.def(
+        "%resolve-name",
+        Arity::exact(1),
+        Sig::new(vec![sym], sym),
+        &[],
+        "",
+        resolve_name,
     );
     // `(:alias mod [:as short])` lowers to this — register a module alias so a later
     // `short/name` reference resolves to `mod/name`.
@@ -1532,6 +1540,23 @@ pub(super) fn mark_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     Ok(Value::symbol(qualified))
 }
 
+/// `(%resolve-name 'name)` — the global a reference spelled `name` names in the namespace
+/// being compiled now: the module's own definition, an import, an alias or the `/name` root
+/// escape, else the bare root name. A macro calls it at EXPANSION time to name a variable it
+/// must quote: `binding` quotes the names it rebinds, and a quoted symbol is never resolved,
+/// so without this a module's `(binding (*x* 1) …)` would reach for a root `*x*` instead of
+/// its own `mod/*x*` (ADR-722).
+pub(super) fn resolve_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_symbol(heap, "%resolve-name", arg(args, 0))?;
+    let resolved = crate::eval::macros::resolve_reference(heap, name);
+    // At root there is no namespace pass to strip a `/name` escape, so strip it here.
+    let spelling = crate::core::value::symbol_name_ref(resolved);
+    Ok(Value::symbol(match spelling.strip_prefix('/') {
+        Some(root) if !root.is_empty() => crate::core::value::intern(root),
+        _ => resolved,
+    }))
+}
+
 /// Add one `(:use …)` import (bare → qualified) to the current file's table,
 /// enforcing the two import rules:
 ///
@@ -1552,13 +1577,8 @@ fn refer_add(
     qualified: value::Symbol,
     mod_name: &str,
 ) -> Result<(), LispError> {
-    // An ambient (`defdyn`) name always resolves bare/root — the resolver's `is_ambient`
-    // check short-circuits before it ever consults the import table — so an import for
-    // one is inert, and it can neither clash nor shadow. Skip it: no entry, no error, no
-    // warning (a dynamic knob like `*width*` shared by two modules must not read as one).
-    if heap.is_dynamic(bare) {
-        return Ok(());
-    }
+    // A module's dynamic variable (`mod/*x*`) is imported like any other public name
+    // (ADR-722); no import is skipped for being dynamic.
     // Clash → ambiguous, not an error (ADR-235). A `One` from a different module or an
     // existing `Ambiguous` both fold this candidate in; the resolver reports it only if the
     // bare name is used. Re-`:use` of the same module (same qualified) stays a no-op.

@@ -103,13 +103,13 @@
     (assert= :allowed (rn-try "(def *err* %write-err)"))
     (assert= :allowed (rn-try "(def *reload-diagnostics* true)")))
   (test "a permanent redirect of *out* works, and print follows it"
-    ;; `(def *out* …)` rebinds the ROOT binding even from inside a module, because a
-    ;; dynamic name is ambient by declaration (ADR-151).
+    ;; Inside a module the root port is spelled `/*out*` (ADR-722); a bare `*out*` head
+    ;; is refused there rather than read as a new `mod/*out*`.
     (let (sink (table/new))
-      (def *out* (fn (s) (table/put sink :last s)))
+      (def /*out* (fn (s) (table/put sink :last s)))
       (io/write "redirected")
       ; restore BEFORE asserting
-      (def *out* %write-out)
+      (def /*out* %write-out)
       (assert= "redirected" (table/get sink :last))))
   (test "the scoped form is unaffected"
     (assert= "scoped" (with-out-str (io/write "scoped")))))

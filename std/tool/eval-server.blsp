@@ -696,7 +696,7 @@ unit itself, so a test's `def`s roll back without the session having to."
         ;; Without it the warm runner and the cold one disagree about what `spy` does in a
         ;; test — the same project, the same key, different output — which is exactly the
         ;; drift a shared runner exists to prevent.
-        _ (def *spy-sink*
+        _ (def /*spy-sink*
             (fn (e)
               (io/puts (evsrv-encode-reply {:id id :more true :spy (eval-server-spy-entry e)}))))
         summary (if (empty? specs)
@@ -722,7 +722,7 @@ unit itself, so a test's `def`s roll back without the session having to."
 or killed — because they are ROOT globals: left installed, the next run's verdicts would be
 streamed against an id that has already been answered."
   (def test/*report-sink* nil)
-  (def *spy-sink* nil)
+  (def /*spy-sink* nil)
   (def test/*formatter* nil))
 
 (defn answer-test (req)

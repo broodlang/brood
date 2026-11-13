@@ -364,16 +364,17 @@
               "brood-runtime-v9.9.9-riscv64-test"))))))
 
 (describe "project: namespace-aware duplicate global detection (ADR-065)"
-  (test "project-check/project-file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"
+  (test "project-check/project-file-def-names resolves names to ns/name (a /root escape stays root; defmodule skipped)"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
       (let (f (path/join dir "a.blsp"))
         (file/spit f
-          "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n(defn helper (y) y)\n")
-        ;; Under `(defmodule a)` every binding resolves to `a/…`, except the
-        ;; ambient `*d*` earmuff which stays root (mirrors the kernel resolver).
+          (str "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n"
+            "(defdyn /*r* 0)\n(defn helper (y) y)\n"))
+        ;; Under `(defmodule a)` every binding resolves to `a/…`, a `defdyn` included
+        ;; (ADR-722); only the `/*r*` root escape stays root (mirrors `qualify_name`).
         (assert= (sort (project-check/project-file-def-names f))
-          (sort ["*d*" "a/helper" "a/k" "a/m" "a/main"])))))
+          (sort ["*r*" "a/*d*" "a/helper" "a/k" "a/m" "a/main"])))))
   (test "the same short name in two DIFFERENT namespaces is not a collision"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
@@ -392,15 +393,16 @@
           (assert= (count warns) 1)
           (is (includes? (first warns) "shared/main"))
           (refute (includes? (first warns) "only-a"))))))
-  (test "an ambient *earmuff* name collides across namespaces (it stays root)"
+  (test "a defdyn is namespaced, so two modules' *cfg* do not collide; two root ones do"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
       (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
-        (file/spit fa "(defmodule alpha)\n(defdyn *cfg* 1)\n")
-        (file/spit fb "(defmodule beta)\n(defdyn *cfg* 2)\n")
+        (file/spit fa "(defmodule alpha)\n(defdyn *cfg* 1)\n(defdyn /*root-cfg* 1)\n")
+        (file/spit fb "(defmodule beta)\n(defdyn *cfg* 2)\n(defdyn /*root-cfg* 2)\n")
         (let (warns (project-check/project-duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
-          (is (includes? (first warns) "*cfg*"))))))
+          (is (includes? (first warns) "*root-cfg*"))
+          (refute (includes? (first warns) "alpha/*cfg*"))))))
   (test "files with no defmodule share the root namespace — same name still collides"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)

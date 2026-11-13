@@ -208,6 +208,7 @@ from a project directory (`nest new <name>` scaffolds one):
 | `nest format` | Reformat every `.blsp` under `src/` and `tests/` in place. |
 | `nest doc [module]` | Emit Markdown docs for the project, or one module. |
 | `nest repl` | A REPL with every project module pre-loaded. |
+| `nest eval EXPR` | Evaluate one expression with the project loaded and print its value: `--in MODULE` inside a module (its private names visible), `--test` as a test sees the world (a scratch home), `-` from stdin. What an assistant uses instead of a throwaway test file. |
 | `nest add`/`remove`/`fetch`/`update`/`tree` | Dependency management (ADR-037). |
 | `nest publish`/`search` | Publish a version to, and search, the git-backed package registry index (ADR-147). |
 | `nest completions [shell]` | Print a shell integration script enabling TAB completion for `nest`. |

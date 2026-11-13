@@ -289,12 +289,30 @@
         " (defn orig (x) (/inc x))")) ; /inc still reaches prelude
     (assert= (shdcons/mine 5) (list :shd 5))
     (assert= (shdcons/orig 5) 6))
-  (test "an ambient (defdyn) name is never imported, so it neither clashes nor shadows"
-    ;; Two modules each declaring `*dynknob*` would clash if imported; because the
-    ;; resolver never consults imports for a dynamic, the `:use` is inert (no error).
-    (%load-string "(defmodule dynprov) (defdyn *dynknob* 1)")
-    (%load-string "(defmodule dyncons (:use dynprov)) (defn f () :ok)")
-    (assert= (dyncons/f) :ok)))
+  (test "a module's defdyn is imported like any public name (ADR-722)"
+    ;; Bare inside the importer, both to read and to `binding`; an importer that excludes
+    ;; the name may declare its own.
+    (%load-string "(defmodule dynprov) (defdyn *dynknob* 1) (defn knob () *dynknob*)")
+    (%load-string (str "(defmodule dyncons (:use dynprov))"
+                    " (defn read () *dynknob*)" " (defn bound () (binding (*dynknob* 9) (knob)))"))
+    (%load-string (str "(defmodule dynown (:use dynprov :exclude [*dynknob*]))"
+                    " (defdyn *dynknob* :own) (defn read () *dynknob*)"))
+    (assert= (dyncons/read) 1)
+    (assert= (dyncons/bound) 9)
+    (assert= (dynown/read) :own)
+    (assert= dynprov/*dynknob* 1))
+  (test "a bare def or defdyn of an imported dynamic is refused, the qualified one sets it (ADR-722)"
+    ;; Each used to set the one root variable; read as a new `dynset/*setknob*` it would
+    ;; change the program silently.
+    (%load-string "(defmodule setprov) (defdyn *setknob* 1)")
+    (doseq (body ["(defn set-it () (def *setknob* 5))" "(defdyn *setknob* 5)"])
+      (is (includes? (try
+                       (do (%load-string (str "(defmodule dynset (:use setprov)) " body)) nil)
+                       (catch e (error-message e)))
+            "write `setprov/*setknob*` to set it")))
+    (%load-string "(defmodule dynset2 (:use setprov)) (defn set-it () (def setprov/*setknob* 5))")
+    (dynset2/set-it)
+    (assert= setprov/*setknob* 5)))
 
 ;; A genuine circular `(:use …)` refer-all can't import a complete public set (the
 ;; other module is still mid-load), so it's a clear error rather than a silent

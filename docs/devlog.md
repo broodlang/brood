@@ -1616,6 +1616,20 @@ reports `:runtime-aged` and `:runtime-draining`. Written on the desktop. The gua
 **not yet run or sabotage-verified**: that is for CI and the test machine, before KI-388/389
 close.
 
+2026-11-13 (KI-383, ADR-722). **A module's `defdyn` is the module's own; no name is ambient.**
+An unqualified `defdyn` in any module used to declare a ROOT name, so a downstream module's
+`(defdyn *indent-width* …)` took over lineedit's private setting. Now `defdyn` qualifies its
+head like `def` (`%def-name`, which `defonce` already used), `binding` resolves the names it
+quotes at expansion time (`%resolve-name`), and `/name` heads define root names (the REPL's
+`/*1`…`/*e`, eval-server's `/*spy-sink*`). `is_ambient` is gone from the resolver, pre-scan,
+import table and template escape. A bare definition head naming a root or imported dynamic
+variable is refused with the fix in the message, because it used to set that variable and
+would otherwise quietly define a new one. The unused-`let` lint's shadow exemption learned the
+module-qualified globals. bedit's migration (44 `:only` imports, `/*spy-sink*`, and cape's
+cross-module write, which the checker then flagged as a lost-update race and which now goes
+through `complete-add-auto-trigger!`), brood-life's and mur-forge's tests. Guards in
+`syntax_finalization_test` and `modules_test`, each red with its half undone.
+
 2026-11-13 (KI-390). **A one-file `nest test` on hatch, 220 ms → 100 ms.** Asked whether startup
 needs a compiler: measured first, and nothing in the cycle was slow code. The bare binary boots in
 10 ms; the rest was work the run did not need. (1) **KI-390**: the project image never carried a
@@ -1637,7 +1651,7 @@ brood-life. Guards: `startup_image::a_dependency_module_named_by_its_short_name_
 `check_cache_prune::the_check_cache_is_swept_once_a_day_not_on_every_run` (both directions), each
 red with its change undone.
 
-2026-11-13 (ADR-722). **`nest test --watch`.** After the startup fixes above a one-file run is
+2026-11-13 (ADR-724). **`nest test --watch`.** After the startup fixes above a one-file run is
 ~100 ms and the tests ~25, and the remainder is fixed cost a fresh process pays: reaching
 `nest/main`, the tool modules, the project's setup. Not slow code, so a compiler would not touch it.
 The watch pays it once. One loop polls the source and test files' mtimes; a change
