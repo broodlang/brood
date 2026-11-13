@@ -252,6 +252,7 @@ const BLSP_SUBCOMMANDS: &[&str] = &[
     "key",
     "ws",
     "repl",
+    "eval",
     "observe",
     "attach",
     "mcp",
@@ -311,6 +312,14 @@ fn blsp_routed(args: &[String]) -> Option<(Option<usize>, Vec<String>)> {
 ///   * The default memory ceiling (ADR-043), so a runaway test can't OOM the host; an
 ///     explicit `BROOD_MEM_LIMIT` still wins.
 fn arm_test_env(argv: &[String], armed: bool) {
+    // `nest eval --test`: the test run's mark and scratch home (what a test sees of the
+    // world), and none of a suite's knobs — no coverage, no suite memory ceiling.
+    if argv.first().map(String::as_str) == Some("eval") {
+        if !armed && eval_asks_for_test_run(&argv[1..]) {
+            brood::cli_support::arm_test_run(false);
+        }
+        return;
+    }
     if argv.first().map(String::as_str) != Some("test") {
         return;
     }
@@ -356,6 +365,24 @@ fn arm_test_env(argv: &[String], armed: bool) {
     );
 }
 
+/// Whether `nest eval`'s words (after the subcommand) ask for `--test`: only among the flags
+/// before the expression, so an expression that spells `--test` is not read as the flag.
+/// `--in` takes a value, which is skipped.
+fn eval_asks_for_test_run(words: &[String]) -> bool {
+    let mut words = words.iter();
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "--test" => return true,
+            "--in" => {
+                words.next();
+            }
+            flag if flag.starts_with("--") => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Runtime contracts are ON by default in dev mode (ADR-381): `nest run` and `nest test`
 /// arm contracts unless `BROOD_CONTRACTS` says otherwise, so every `(sig …)`
 /// in the project and in std is enforced while the code is being developed and tested, and
@@ -367,7 +394,10 @@ fn arm_test_env(argv: &[String], armed: bool) {
 /// which runs before `std/tool/nest.blsp` could say anything. The policy — which commands
 /// are dev mode — is this list and nothing else.
 fn arm_contracts_default(argv: &[String]) {
-    if !matches!(argv.first().map(String::as_str), Some("run" | "test")) {
+    if !matches!(
+        argv.first().map(String::as_str),
+        Some("run" | "test" | "eval")
+    ) {
         return;
     }
     // A process flag, not `set_var`: the default is THIS process's, and an exported

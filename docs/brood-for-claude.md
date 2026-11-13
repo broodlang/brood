@@ -1544,6 +1544,49 @@ is **unevaluated data**, so write these as bare symbols — *not* `:main 'app`
 `--for DURATION` (e.g. `nest run --for 2s`) to run a loop/TUI for a bounded
 time and exit cleanly.
 
+## Asking the project a question (`nest eval`)
+
+`nest eval EXPRESSION` evaluates once, with the project loaded as `nest repl` loads it, and
+prints the value. Use it whenever you want to know what code does rather than guess: what a
+function answers, what shape a value has, whether a name is bound, what a private helper
+returns. It is the shell-side twin of the MCP server's `eval` tool, for a session with no MCP
+server attached.
+
+```bash
+nest eval '(+ 1 2)'                               # 3
+nest eval '(io/puts "hi")' '(* 6 7)'              # hi, then 42: output first, the value last
+nest eval --in my/parser '(tokenize "a b")'       # inside a module: private names, its imports
+nest eval --test '(my/config/load)'               # as a test sees the world (see below)
+nest eval - <<'EOF'                               # stdin: several forms, no shell quoting
+(def raw "a \"quoted\" word")
+(count (string/split raw " "))
+EOF
+```
+
+- **The words are the expression.** Everything after the flags is joined with spaces and
+  read as Brood: several forms run in order, and the last one's value is printed with
+  `pr-str` (a string comes back quoted, a map as a literal). A `--test` written inside the
+  expression is the expression's, not the flag.
+- **`--in MODULE`** loads `MODULE` and evaluates inside it, as its own code would. Its private
+  (`defn-`) names and the names its `(:use …)` imports resolve bare, the way a test's
+  `(:use-internals …)` gives them.
+- **`--test`** arms a test run first, as `nest test` does: `test/running?` is true, and
+  `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_DATA_HOME` point into a fresh scratch home
+  (`test/scratch-dir`), removed when the command exits. Use it for any code that could write
+  state. Without it the code runs against your real home.
+- **`-`** reads the expression from stdin, so a heredoc carries quotes and newlines as they are.
+- **Contracts are armed**, as under `nest run` and `nest test`: a `sig` that does not hold
+  raises.
+- **Exit codes:** 0 with the value printed; 1 when the code raised (reported on stderr as
+  `nest run` reports an error, the module not found included); 2 with nothing to evaluate.
+- Outside a project it evaluates in plain Brood.
+
+**Do not write a throwaway test file to ask a question** (`tests/zz_probe_test.blsp` and the
+like). Tests are found by globbing the tree, and other sessions and tools read it while you
+work: a file that appears and vanishes breaks their `nest check` and `nest test` runs, and a
+forgotten one gets committed. `nest eval` leaves nothing behind. Write a test only for what
+should stay tested.
+
 ## When in doubt
 
 `std/prelude/*.blsp` is the canonical example of idiomatic Brood — almost

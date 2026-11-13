@@ -171,6 +171,9 @@ make help                         # every target
   warnings`); every `unsafe` block and impl needs a `// SAFETY:` comment.
 - **`make check-desktop`** runs CI's static gates on a machine that runs no suites;
   **`make affected-tests`** prints the tests that name the current change.
+- **To ask what code does, `nest eval 'EXPR'`** (`--in MODULE` for a private name,
+  `--test` for a scratch home, `-` for stdin): evaluating is not a test run, so it is fine
+  here. Never a throwaway `tests/zz_probe_test.blsp`, which other sessions' runs then trip on.
 - **Never benchmark on this machine**; `docs/benchmarking.md` has the rules for where you can.
 - The reasons behind each, plus nextest, perf builds, the debug flags, the use-after-GC
   tripwire and verifier and the crash artifacts, are in
