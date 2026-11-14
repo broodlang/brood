@@ -731,6 +731,57 @@ pub(crate) fn global_miss(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispResul
     Err(crate::eval::unbound_error(heap, sym))
 }
 
+/// The global `sym` names for `bound?` (and `reflect/call-if-bound` above it): bound now, or
+/// bound once the PROJECT IMAGE section of its module is materialised. A module the installed
+/// project image carries is part of the program as surely as one loaded from source; under a
+/// lazy install (`nest run`, `nest test FILE`) its section is only materialised on first use,
+/// and a `bound?` that read the table alone answered `false` for a name every reference would
+/// find — so a late-bound hook kept as a symbol (a menu item's command, a Ctrl+wheel handler)
+/// silently did nothing in an imaged run and worked from source. A module the image does NOT
+/// carry is still not loaded: `bound?` answers for what the program has, not for what it could
+/// load. A short project spelling (`killing/cmd-copy-region`) is rooted first, as a reference
+/// is (ADR-070).
+pub(crate) fn bound_or_imaged(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispResult {
+    if heap.env_get(env, sym).is_some() {
+        return Ok(Value::boolean(true));
+    }
+    let rooted = heap.root_qualified_ref(sym).unwrap_or(sym);
+    if rooted != sym && heap.env_get(env, rooted).is_some() {
+        return Ok(Value::boolean(true));
+    }
+    let Some(module) = module_of_resolved(rooted) else {
+        return Ok(Value::boolean(false));
+    };
+    if heap.compile_ns() == Some(module) || !imaged_and_unmaterialized(heap, module) {
+        return Ok(Value::boolean(false));
+    }
+    let env_base = heap.env_roots_len();
+    let env_root = heap.root_env(env);
+    let loaded = ensure_required(heap, env, module);
+    let env = heap.read_root_env(env_root);
+    heap.truncate_env_roots(env_base);
+    loaded?;
+    Ok(Value::boolean(heap.env_get(env, rooted).is_some()))
+}
+
+/// Whether the installed project image carries a section for `module` that has not been
+/// materialised yet: a key of `*image-sections*` absent from `*features*`.
+fn imaged_and_unmaterialized(heap: &Heap, module: Symbol) -> bool {
+    let name = value::symbol_name_ref(module);
+    let holds = |registry: &str| match heap.env_get(heap.global(), value::intern(registry)) {
+        Some(Value::Map(id)) => {
+            heap.map_entries(id)
+                .into_iter()
+                .any(|(key, _)| match key.unpack() {
+                    ValueRef::Str(s) => heap.string(s) == name,
+                    _ => false,
+                })
+        }
+        _ => false,
+    };
+    holds("*image-sections*") && !holds(crate::core::registries::FEATURES)
+}
+
 /// The module of `sym` when ANOTHER live process is loading it right now — the one case in
 /// which [`global_miss`] has to wait. That wait is a `receive` (`%require-await`), and from
 /// here it would run under this native frame: a receive that cannot park, so it blocks its

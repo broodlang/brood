@@ -6,6 +6,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Fixed.**
+- **`bound?` answers for a project module the startup image has not materialised yet**, and
+  so `reflect/call-if-bound` calls a late-bound hook in an imaged `nest run` or `nest test FILE`
+  as it does from source. A module the image does not carry is still not loaded (KI-394).
+
 ## v0.52.0 — module-scoped dynamic variables, the surface pass, `nest eval` and `nest test --watch`
 
 **Breaking: a module's `defdyn` is the module's own (ADR-722).**

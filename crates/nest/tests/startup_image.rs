@@ -714,3 +714,55 @@ fn a_named_test_file_materialises_only_what_it_reaches() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `bound?` answers for a module the project image carries before it is materialised. A
+/// late-bound hook kept as a symbol (a menu item's command, a Ctrl+wheel handler) names a
+/// module the code that holds it never `:use`s, and under a lazy install that module is still
+/// on disk: `bound?` read the table alone and answered `false`, so `reflect/call-if-bound`
+/// skipped the hook in an imaged run and called it from source. bedit's menu and zoom tests
+/// failed on every warm `nest test FILE` and passed on the run after an edit.
+#[test]
+fn bound_answers_for_an_imaged_module_not_yet_materialised() {
+    let dir = scratch("bound-imaged");
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    write(&dir, "project.blsp", "(project\n  :name bounddemo)\n");
+    write(
+        &dir,
+        "src/hooks.blsp",
+        "(defmodule hooks)\n(defn on-save () :saved)\n",
+    );
+    write(&dir, "src/lib.blsp", "(defmodule lib)\n(defn f () 1)\n");
+    write(
+        &dir,
+        "tests/lib_test.blsp",
+        "(defmodule lib-test (:use test) (:use lib))\n\
+         (describe \"hooks\"\n\
+           (test \"an unreached module's name is bound, by either spelling\"\n\
+             (is (bound? 'hooks/on-save))\n\
+             (is (bound? 'bounddemo/hooks/on-save))\n\
+             (assert= :saved (reflect/call-if-bound 'hooks/on-save :skipped))\n\
+             (is (not (bound? 'hooks/no-such-hook)))))\n",
+    );
+    let run = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_nest"))
+            .args(["test", "tests/lib_test.blsp"])
+            .current_dir(&dir)
+            .env("BROOD_IMAGE_TRACE", "1")
+            .output()
+            .expect("spawn nest");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    let cold = run();
+    assert!(cold.contains("1 tests, 1 passed"), "cold:\n{cold}");
+    let warm = run();
+    assert!(
+        warm.contains("[image] bounddemo/lib\n"),
+        "the warm run did not start from the image:\n{warm}"
+    );
+    assert!(warm.contains("1 tests, 1 passed"), "warm:\n{warm}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

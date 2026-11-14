@@ -127,6 +127,33 @@ example still agrees with the serial step. If the non-strict sighting came from 
 reading a type as precise, that is the checker's ordinary mode rule, which a now-dropped
 sig fed, not a defect in the checker.
 
+## KI-394 — `bound?` answered `false` for a project module the image had not materialised ✅ fixed 2026-11-14
+
+**Seen** 2026-11-13, releasing bedit 0.9.0: on this machine `panes_projects_test` failed three
+tests on every warm `nest test FILE` and passed on the run after an edit. "an item names its
+command by symbol" read a menu item's `killing/cmd-copy-region` as unbound; both Ctrl+wheel zoom
+tests read one pixel short, the zoom handler never having run.
+
+**Cause.** `bound?` was `env_get` and nothing else. 1b7546804 made `nest test FILE` install the
+project image lazily, as `nest run` always had, so a module the test file never reaches stays on
+disk until first use. A reference to one of its names materialises it on the miss path; `bound?`
+did not, and `reflect/call-if-bound` is built on `bound?`, so a hook kept as a symbol was skipped
+in an imaged run and called from source. The run after an edit rebuilt the image by loading every
+module from source, which is why it passed.
+
+**Why it survived.** CI's bedit jobs build the image from source on every run (a fresh checkout),
+so the warm path never ran there; the brood tests run outside any project image.
+
+**Fix.** `bound?` roots a short project spelling, as a reference is rooted (ADR-070), and when the
+installed project image carries a section for the name's module that is not yet materialised, it
+materialises it before answering (`derive::bound_or_imaged`). A module the image does not carry is
+still not loaded: `bound?` answers for what the program has, as `call-if-bound`'s doc says.
+
+**Guard.** `startup_image::bound_answers_for_an_imaged_module_not_yet_materialised`: a test file
+that never reaches module `hooks` asks `bound?` of its name by both spellings and calls it through
+`call-if-bound`, cold and then warm from the image. Sabotaged with the old `bound?`: the warm run
+goes red on both `bound?` assertions. bedit's three tests pass on three consecutive warm runs.
+
 ## KI-393 — Root code in a project could not bind a project module's dynamic variable by its short qualifier ✅ closed 2026-11-13
 
 **Seen** 2026-11-13, CI's bedit smoke: the doctest gate reported

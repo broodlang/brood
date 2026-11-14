@@ -1694,3 +1694,11 @@ reference at root does: the same example's call spelled `vcsproc/…` worked. `%
 roots at root now. bedit's example was also qualified (`de751fd`), which a project's doctest
 needs either way since a docstring is evaluated outside its module. Guard: `nest eval` in a
 project, red with the rooting removed.
+
+2026-11-14 (KI-394). **`bound?` answers for an imaged module not yet materialised.** Since a
+named `nest test FILE` installs the project image lazily, a module the file never reaches stays
+on disk, and `bound?` (an `env_get`) called its names unbound while every reference found them:
+bedit's menu and Ctrl+wheel zoom tests failed on each warm run and passed after an edit, since
+that run rebuilt from source. `bound?` now roots a short project spelling and materialises the
+module's image section when the installed image carries one; a module the image does not carry
+is still not loaded. Guard in `startup_image`, red on the warm run with the old `bound?`.

@@ -199,7 +199,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![sym], bool_ty),
         &["sym"],
-        "Whether sym is bound in scope. Quote it: (bound? 'foo).\n\n    (bound? 'first)   ;=> true\n    (bound? 'nope)    ;=> false",
+        "Whether sym is bound in scope. Quote it: (bound? 'foo). A name of a module the project's startup image carries counts even before that module is materialised (it is, to answer); a module the program has not loaded is not loaded to find out.\n\n    (bound? 'first)   ;=> true\n    (bound? 'nope)    ;=> false",
         bound_p,
     );
     primitives.def(
@@ -907,7 +907,7 @@ pub(super) fn global_names(_args: &[Value], _env: EnvId, heap: &mut Heap) -> Lis
 /// reaches the global table). Takes a symbol, so quote it: `(bound? 'foo)`.
 pub(super) fn bound_p(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
-        Value::Sym(s) => Ok(Value::boolean(heap.env_get(env, s).is_some())),
+        Value::Sym(s) => crate::eval::derive::bound_or_imaged(heap, env, s),
         other => Err(LispError::wrong_type(heap, "bound?", "symbol", other)),
     }
 }
