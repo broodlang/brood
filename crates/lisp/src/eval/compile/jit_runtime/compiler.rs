@@ -389,7 +389,7 @@ pub(super) fn trace_lower_declined(arm: &CompiledArm, inlined: bool) -> String {
     // nothing, which no path should do. Seeing it in a trace is itself the finding.
     let (reason, detail) =
         super::take_mid_emit_reason().unwrap_or(("lowering-returned-none", None));
-    let detail = detail.map(|d| format!(":{d}")).unwrap_or_default();
+    let detail = detail.map_or_default(|detail| format!(":{detail}"));
     if crate::diagnostics::debug_flags::jit_bail_trace() {
         let name = arm.dbg_label();
         eprintln!(

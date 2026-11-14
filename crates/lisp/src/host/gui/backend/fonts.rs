@@ -219,9 +219,8 @@ impl FontShared {
             if let Some(face_id) = query_face(system, &family, *weight, *style)
                 && let Some((source, _)) = system.face_source(face_id)
             {
-                faces[slot] = source_path(&source)
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default();
+                faces[slot] =
+                    source_path(&source).map_or_default(|path| path.display().to_string());
             }
         }
         self.load_family(&family);
@@ -372,8 +371,7 @@ impl FontShared {
         let candidates = system
             .blocks
             .get(&(chars[0] as u32 >> 7))
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+            .map_or_default(Vec::as_slice);
         let found = scan_system(&system.db, candidates, chars);
         let Some((family, path)) = found else {
             self.fallback_for.insert(key, None);
@@ -476,9 +474,7 @@ fn scan_system(
         let face = system.face(id)?;
         let family = face.families.first().map(|(name, _)| name.clone())?;
         covered.then(|| {
-            let path = source_path(&face.source)
-                .map(|path| path.display().to_string())
-                .unwrap_or_default();
+            let path = source_path(&face.source).map_or_default(|path| path.display().to_string());
             (family, path)
         })
     })

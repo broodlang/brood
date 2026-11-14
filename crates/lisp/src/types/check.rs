@@ -736,8 +736,8 @@ fn expand_and_load(
     // Layout on the root stack: `forms` at `roots_base..+n`, expansions at `+n..+2n`.
     let read_rooted = |heap: &Heap| -> (Vec<Value>, Vec<Value>) {
         (
-            (0..n).map(|j| heap.root_at(roots_base + j)).collect(),
-            (0..n).map(|j| heap.root_at(roots_base + n + j)).collect(),
+            Vec::from_fn(n, |index| heap.root_at(roots_base + index)),
+            Vec::from_fn(n, |index| heap.root_at(roots_base + n + index)),
         )
     };
     // Which modules the file names that nothing could load. Asked HERE, before the final

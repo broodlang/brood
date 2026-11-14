@@ -1066,8 +1066,7 @@ pub(super) fn infer_return_from_form(
     let demands = (arms.len() == 1)
         .then(|| infer_params_from_form(heap, fn_form, base_ctx))
         .flatten()
-        .map(|d| d.params)
-        .unwrap_or_default();
+        .map_or_default(|demands| demands.params);
     let mut ret: Option<Ty> = None;
     for (binders, tail) in &arms {
         let mut ctx = match self_name {

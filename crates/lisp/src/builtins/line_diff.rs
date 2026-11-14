@@ -68,10 +68,7 @@ fn lines_of(text: &str) -> Vec<&str> {
     if text.is_empty() {
         return Vec::new();
     }
-    text.strip_suffix('\n')
-        .unwrap_or(text)
-        .split('\n')
-        .collect()
+    text.trim_suffix('\n').split('\n').collect()
 }
 
 /// The hunks `(old-start old-count new-start new-count)` turning `old`'s lines into `new`'s.

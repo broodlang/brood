@@ -319,7 +319,7 @@ fn bundled_boot_check_resolves_an_application_without_starting_it() {
         .current_dir(&cwd);
     support::dies_with_parent(&mut cmd);
     let out = run_bundle(&mut cmd);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stdout = String::from_utf8_lossy_owned(out.stdout);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -382,7 +382,7 @@ fn embed_image(
     let image = std::fs::read(&image_path).expect("the build wrote the image");
     let archive = brood::bundle::serialize(manifest, &owned, Some(&image));
     brood::bundle::write_release(&base, &archive, app).expect("write imaged release binary");
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    String::from_utf8_lossy_owned(out.stdout)
 }
 
 /// Run `app` (with `args`, and `BROOD_NO_BUNDLE_IMAGE` when `without_image`), asserting it
@@ -406,7 +406,7 @@ fn run_ok(
         out.status.code(),
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    String::from_utf8_lossy_owned(out.stdout)
 }
 
 /// A bundle's modules, each announcing at load time that its SOURCE was evaluated — a

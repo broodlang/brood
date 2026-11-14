@@ -45,10 +45,7 @@ pub(crate) fn split_host_port(address: &str) -> io::Result<(&str, u16)> {
         )
     };
     let (host, port) = address.rsplit_once(':').ok_or_else(invalid)?;
-    let host = host
-        .strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-        .unwrap_or(host);
+    let host = host.strip_circumfix('[', ']').unwrap_or(host);
     Ok((host, port.parse().map_err(|_| invalid())?))
 }
 

@@ -46,8 +46,8 @@ fn run(no_jit: bool) -> (String, String) {
         .env("BROOD_TIER", if no_jit { "1" } else { "2" });
     let out = cmd.arg(&path).output().expect("run brood");
     (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
+        String::from_utf8_lossy_owned(out.stdout),
+        String::from_utf8_lossy_owned(out.stderr),
     )
 }
 

@@ -379,7 +379,7 @@ impl Heap {
 
     fn hash_value_into_grown<H: std::hash::Hasher>(&self, v: Value, h: &mut H) {
         use std::hash::{Hash, Hasher};
-        HASH_WORK.with(|work| work.set(work.get().wrapping_add(1)));
+        HASH_WORK.update(|work| work.wrapping_add(1));
         // A leading byte tags the variant so a `Sym(0)` and an `Int(0)` never
         // collide on the *exact* same hash by accident.
         match v.unpack() {

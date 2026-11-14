@@ -1714,3 +1714,16 @@ the purity walk use it; `bound?` never raises and does not wait on another proce
 `pane-leaf-paths` ends on a tree with a hole (it ran a process out of memory). Stale
 "ambient" wording removed from std comments, scaffold's project notes and docs. Each new
 guard red with its change undone.
+
+2026-11-14 (dependencies and Rust 1.100). `cargo update` (51 compatible updates) on the new
+stable 1.100, and `rust-version` raised 1.97 → 1.100 deliberately, to adopt what 1.98-1.100
+stabilised across the kernel and the Rust tests: `from_utf8_lossy_owned` at 88 sites,
+`trim_prefix`/`trim_suffix`/`strip_circumfix` 21, `LocalKey::update` 16, `map_or_default` 44,
+`Vec::from_fn` 9, `Path::is_empty` 5, a `DropGuard` for the VM's top-level guard,
+`fs::set_times` for `file/set-mtime` (three per-platform versions and an `unsafe` libc block
+gone) and `format_into` in the signal-safe crash writer. Cargo's new `unused_dependencies`
+lint caught mimalloc unused under `--all-features`: `system-alloc` was a feature, and features
+only add; it is `--cfg brood_system_alloc` now, which also drops mimalloc's C build from the
+sanitizer runs. `num-bigint` held at 0.4 (its consumers have not moved). Downstream: sqlite's
+component on rusqlite 0.42 / wit-bindgen 0.63 (SQLite 3.54.1), mur's lock updated,
+zubr-relay on wasm-bindgen 0.2.130. Windows-only edits compile first on CI.

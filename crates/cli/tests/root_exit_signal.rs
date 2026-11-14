@@ -72,8 +72,8 @@ fn run_once(label: &str, tier: &str, path: &std::path::Path) -> Run {
     let output = child.wait_with_output().expect("collect output");
     Run {
         label: label.to_string(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout: String::from_utf8_lossy_owned(output.stdout),
+        stderr: String::from_utf8_lossy_owned(output.stderr),
         code: status.code(),
     }
 }

@@ -155,8 +155,7 @@ pub(super) fn close_through_std(heap: &mut Heap, mods: &mut HashSet<String>) {
             None => {
                 let direct = match crate::builtins::modules::embedded_module_source(&name) {
                     Some(source) => crate::syntax::reader::read_all(heap, source)
-                        .map(|forms| module_direct_requires(heap, &forms).1)
-                        .unwrap_or_default(),
+                        .map_or_default(|forms| module_direct_requires(heap, &forms).1),
                     None => Vec::new(),
                 };
                 cache

@@ -92,8 +92,7 @@ pub(crate) fn module_signature_index(heap: &mut Heap, key: &str, source: &str) -
             sigs.get(&name)
                 .copied()
                 .filter(|&form| image_carried_sig(heap, form).is_some())
-                .map(|form| crate::syntax::printer::print(heap, form))
-                .unwrap_or_default()
+                .map_or_default(|form| crate::syntax::printer::print(heap, form))
         };
         out.push(SigEntry {
             name,

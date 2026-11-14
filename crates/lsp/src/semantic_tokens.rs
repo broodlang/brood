@@ -304,7 +304,7 @@ fn emit(node: &Node, src: &str, index: &LineIndex, ttype: u32, tmods: u32, out: 
         // it's not part of the visible token, so drop it before measuring the
         // UTF-16 length (otherwise the token over-runs by one unit). The byte
         // cursor below still advances over the full part incl. the '\r'.
-        let visible = part.strip_suffix('\r').unwrap_or(part);
+        let visible = part.trim_suffix('\r');
         if !visible.is_empty() {
             let pos = index.position(src, byte);
             let len: u32 = visible.chars().map(|c| c.len_utf16() as u32).sum();

@@ -76,9 +76,9 @@ jobs:
 
       - name: Build (release, the system allocator)
         env:
-          RUSTFLAGS: "-C force-frame-pointers=yes"
+          RUSTFLAGS: "-C force-frame-pointers=yes --cfg brood_system_alloc"
           CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
-        run: cargo build --release -p cli --features brood/system-alloc --target-dir target/system-alloc
+        run: cargo build --release -p cli --target-dir target/system-alloc
 
       # mimalloc v3 is what the `mimalloc` crate builds by default; v2 is its other line. The
       # switch is made in this checkout only, so the shipped manifest keeps one allocator.

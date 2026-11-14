@@ -21,8 +21,8 @@ fn run(args: &[&str]) -> (String, String, bool) {
         .output()
         .expect("run brood");
     (
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        String::from_utf8_lossy_owned(output.stdout),
+        String::from_utf8_lossy_owned(output.stderr),
         output.status.success(),
     )
 }

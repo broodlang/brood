@@ -51,8 +51,7 @@ struct Ref {
 fn collect(interp: &mut Interp, docs: &Documents, current: &Uri, name: &str) -> (String, Vec<Ref>) {
     let cur_text = docs
         .get(current)
-        .map(|d| d.text.clone())
-        .unwrap_or_default();
+        .map_or_default(|document| document.text.clone());
     let target = introspect::resolve_in_source(interp, &cur_text, name);
     let short = short_name(&target).to_string();
     let target_qualified = target.contains('/');

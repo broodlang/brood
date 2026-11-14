@@ -29,7 +29,7 @@ fn run_into_full_stdout(script: &str) -> (Option<i32>, String) {
     let _ = std::fs::remove_dir_all(&directory);
     (
         output.status.code(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        String::from_utf8_lossy_owned(output.stderr),
     )
 }
 

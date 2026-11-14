@@ -570,8 +570,7 @@ pub fn spawn_root_program(
         capture: CURRENT.with(|c| {
             c.borrow()
                 .as_ref()
-                .map(|ctx| ctx.capture.clone())
-                .unwrap_or_default()
+                .map_or_default(|ctx| ctx.capture.clone())
         }),
         queued_at: 0,
         spawns_since_park: 0,

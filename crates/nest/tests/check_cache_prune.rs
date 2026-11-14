@@ -18,9 +18,7 @@ use support::temp_dir;
 
 fn set_age(path: &Path, days: u64) {
     let when = SystemTime::now() - Duration::from_secs(days * 24 * 3600);
-    std::fs::File::open(path)
-        .and_then(|file| file.set_modified(when))
-        .expect("set mtime");
+    std::fs::set_times(path, std::fs::FileTimes::new().set_modified(when)).expect("set mtime");
 }
 
 fn nest_test(project: &Path, cache: &Path) -> String {

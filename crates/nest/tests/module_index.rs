@@ -73,8 +73,8 @@ fn nest_run(dir: &Path) -> (String, String) {
         .current_dir(dir)
         .output()
         .expect("spawn nest");
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy_owned(out.stdout);
+    let stderr = String::from_utf8_lossy_owned(out.stderr);
     assert!(
         out.status.success(),
         "nest run failed: status={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",

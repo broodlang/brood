@@ -10,8 +10,7 @@ fn excluded_of<T: Ord, F: Fn(&T) -> String>(
     let mut out: Vec<String> = slot
         .as_deref()
         .and_then(LitSet::excluded)
-        .map(|set| set.iter().map(&render).collect())
-        .unwrap_or_default();
+        .map_or_default(|set| set.iter().map(&render).collect());
     out.sort();
     out
 }
@@ -86,8 +85,8 @@ pub(crate) fn range_suffix(r: Range) -> String {
     if let Some(n) = r.as_point() {
         return format!("[{n}]");
     }
-    let lo = r.lo.map(|n| n.to_string()).unwrap_or_default();
-    let hi = r.hi.map(|n| n.to_string()).unwrap_or_default();
+    let lo = r.lo.map_or_default(|bound| bound.to_string());
+    let hi = r.hi.map_or_default(|bound| bound.to_string());
     format!("[{lo}..{hi}]")
 }
 
@@ -123,7 +122,7 @@ impl fmt::Display for Ty {
                 rec_name(depth)
             });
             let body = self.body_for_display().to_string();
-            REC_DEPTH.with(|d| d.set(d.get() - 1));
+            REC_DEPTH.update(|depth| depth - 1);
             return write!(f, "(rec {name} {body})");
         }
         if self.is_rec_ref() {
@@ -571,7 +570,7 @@ impl Ty {
                 rec_name(depth)
             });
             let body = self.body_for_display().to_source();
-            REC_DEPTH.with(|d| d.set(d.get() - 1));
+            REC_DEPTH.update(|depth| depth - 1);
             return body.map(|b| format!("(rec {name} {b})"));
         }
         if self.is_rec_ref() {
@@ -689,8 +688,7 @@ impl Ty {
             // Both halves may be unions of their own; one flat `(or …)` reads best.
             fn flat(source: String) -> String {
                 source
-                    .strip_prefix("(or ")
-                    .and_then(|r| r.strip_suffix(')'))
+                    .strip_circumfix("(or ", ')')
                     .map(str::to_string)
                     .unwrap_or(source)
             }

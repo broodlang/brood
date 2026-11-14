@@ -426,7 +426,7 @@ fn common_bytes<'r>(
         let shared = part_a.as_ptr() == part_b.as_ptr();
         #[cfg(test)]
         if !shared {
-            COMPARED_BYTES.with(|compared| compared.set(compared.get() + n));
+            COMPARED_BYTES.update(|compared| compared + n);
         }
         if !shared && part_a != part_b {
             let mut pairs = part_a.iter().zip(part_b);

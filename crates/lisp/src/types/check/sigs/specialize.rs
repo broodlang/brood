@@ -43,12 +43,12 @@ pub(in crate::types::check) fn specialize_call(
     {
         return None;
     }
-    SPEC_ARG_NEST.with(|n| n.set(n.get() + 1));
+    SPEC_ARG_NEST.update(|nest| nest + 1);
     let inputs: Vec<Option<Ty>> = args
         .iter()
         .map(|&a| expr_ty(heap, a, ctx).or_else(|| global_fn_arrow(heap, a, ctx)))
         .collect();
-    SPEC_ARG_NEST.with(|n| n.set(n.get() - 1));
+    SPEC_ARG_NEST.update(|nest| nest - 1);
     specialized_ret(heap, sym, &inputs, ctx)
 }
 
@@ -259,7 +259,7 @@ pub(in crate::types::check) fn specialized_ret(
         return None;
     }
     let Some(_guard) = SpecializeGuard::enter(sym) else {
-        REFUSALS.with(|c| c.set(c.get().saturating_add(1)));
+        REFUSALS.update(|refusals| refusals.saturating_add(1));
         return None;
     };
     let Some((arms, stable)) = fixed_arms_of(heap, sym, ctx) else {

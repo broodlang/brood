@@ -244,7 +244,7 @@ enum Shape {
 
 fn binding_shape(head: value::Symbol) -> Option<Shape> {
     let name = value::symbol_name_ref(head);
-    match name.strip_prefix('/').unwrap_or(name) {
+    match name.trim_prefix('/') {
         "when-let" | "when-some" | "for" | "fold-for" | "doseq" | "with" => Some(Shape::Pairs),
         "if-let" | "if-some" => Some(Shape::PairsThenElse),
         "match" => Some(Shape::Clauses(2)),

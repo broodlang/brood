@@ -6,7 +6,23 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed.**
+- **Building Brood needs Rust 1.100** (was 1.97), to use what 1.98-1.100 stabilised:
+  `String::from_utf8_lossy_owned` (no copy for valid UTF-8), `str`/`Path::trim_prefix` and
+  `strip_circumfix`, `LocalKey::update`, `map_or_default`, `bool::ok_or_else`, `Vec::from_fn`,
+  `core::mem::DropGuard`, `fs::set_times` (`file/set-mtime` is one std call, no hand-written
+  `utimensat`), and `{integer}::format_into` in the crash handler (no hand-written formatter).
+- **Dependencies at their latest**: every crate updated within its version requirement
+  (tree-sitter 0.27.2, wgpu 30.0.2, wasm-tools 0.263, rustls-webpki 0.103.17, …). `num-bigint`
+  stays 0.4: `num-rational` and `bigdecimal`, the newest of each, still build on it.
+- **The sanitizer, Miri and fuzz builds select the system allocator with `--cfg
+  brood_system_alloc`**, not the `system-alloc` feature: features only add, so
+  `--all-features` built mimalloc and left it unused, and Cargo 1.100's `unused_dependencies`
+  lint said so. Native builds cannot lose mimalloc to a feature combination now.
+
 **Fixed.**
+- **No warnings on the lean builds**: `--no-default-features` and the wasm targets no longer
+  report three helpers only native or JIT code calls as dead.
 - **`bound?` answers for a project module the startup image has not materialised yet**, and
   so `reflect/call-if-bound` calls a late-bound hook in an imaged `nest run` or `nest test FILE`
   as it does from source. A module the image does not carry is still not loaded (KI-394).

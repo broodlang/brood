@@ -82,11 +82,7 @@ fn only_frame_builders_read_the_racy_active_frame_size() {
             if calls == 0 {
                 continue;
             }
-            let rel = path
-                .strip_prefix(&root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = path.trim_prefix(&root).to_string_lossy().replace('\\', "/");
             if !ALLOWED.iter().any(|(f, _)| rel.ends_with(f)) {
                 offenders.push(format!("  {rel} ({calls} call(s))"));
             }

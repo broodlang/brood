@@ -32,7 +32,7 @@ fn cache_paths(xdg: &str, home: &std::path::Path) -> String {
         "brood failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    String::from_utf8_lossy_owned(out.stdout)
 }
 
 #[test]

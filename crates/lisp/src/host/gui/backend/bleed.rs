@@ -174,7 +174,10 @@ fn bleed_ops(
                 bleed_ops(ops, m, vertical, known, used).map(|ops| Op::AboveSeam { ops }),
                 Vec::new(),
             ),
-            _ => (None, band(op).map_or(Vec::new(), |b| b.pieces(m, vertical))),
+            _ => (
+                None,
+                band(op).map_or_default(|band| band.pieces(m, vertical)),
+            ),
         };
         if replaced.is_none() && pieces.is_empty() {
             if let Some(out) = out.as_mut() {

@@ -117,16 +117,14 @@ pub(super) fn run_git(args: &[&str], cwd: Option<&str>) -> Result<std::process::
 /// `LispError` carrying git's stderr.
 pub(super) fn git_or_err(args: &[&str], cwd: Option<&str>) -> Result<(), LispError> {
     let out = run_git(args, cwd)?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(LispError::runtime(format!(
+    out.status.success().ok_or_else(|| {
+        LispError::runtime(format!(
             "git {} failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&out.stderr).trim()
         ))
-        .with_code(error_codes::SUBPROCESS_FAILED))
-    }
+        .with_code(error_codes::SUBPROCESS_FAILED)
+    })
 }
 
 /// The commit `git ls-remote` output names for EXACTLY `ref`. A ls-remote pattern
@@ -294,7 +292,7 @@ pub(super) fn git_clone(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     reject_option_like("%git-clone", "commit", &commit)?;
 
     if let Some(parent) = std::path::Path::new(&dest).parent()
-        && !parent.as_os_str().is_empty()
+        && !parent.is_empty()
     {
         std::fs::create_dir_all(parent).map_err(|e| {
             LispError::runtime(format!(
@@ -419,7 +417,7 @@ fn reject_unsafe_members(archive_path: &str) -> Result<(), LispError> {
             ))
             .with_code(error_codes::SUBPROCESS_FAILED));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(String::from_utf8_lossy_owned(output.stdout))
     };
     let refuse = |member: &str, why: &str| {
         Err(LispError::runtime(format!(

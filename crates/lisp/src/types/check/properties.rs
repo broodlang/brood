@@ -452,10 +452,7 @@ fn fn_bodies(heap: &Heap, fn_form: Value) -> Vec<Value> {
         (Some(Value::Str(_)), Some(_)) => 3,
         _ => 2,
     };
-    items
-        .get(body_start..)
-        .map(<[Value]>::to_vec)
-        .unwrap_or_default()
+    items.get(body_start..).map_or_default(<[Value]>::to_vec)
 }
 
 /// Every symbol a binding pattern binds (a bare name, or the names inside a

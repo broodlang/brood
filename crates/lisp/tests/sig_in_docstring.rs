@@ -71,7 +71,7 @@ fn no_sig_hides_inside_a_docstring() {
             // At column 0 only: an INDENTED `(sig …)` is a doc example (`sig`'s own
             // docstring shows its spelling that way), a slipped declaration never is.
             if doc.lines().any(|line| line.starts_with("(sig ")) {
-                let rel = path.strip_prefix(&root).unwrap_or(&path).display();
+                let rel = path.trim_prefix(&root).display();
                 offenders.push(format!(
                     "{rel} — the docstring of `{}`",
                     symbol_name_ref(*name)

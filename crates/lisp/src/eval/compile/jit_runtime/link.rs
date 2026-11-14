@@ -55,7 +55,7 @@ pub(crate) fn jit_run_fast_link(
     // here too — catch a corrupt arg at the earliest native frame entry (bug #2).
     #[cfg(debug_assertions)]
     {
-        let args: Vec<Value> = (0..argc).map(|k| heap.root_at(stage_base + k)).collect();
+        let args = Vec::from_fn(argc, |index| heap.root_at(stage_base + index));
         dbg_check_args(
             &args,
             &format!(

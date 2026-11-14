@@ -1603,7 +1603,7 @@ fn arm_handle_clone_does_not_touch_the_shared_arm_refcount() {
     );
 
     // Now simulate the hot path: many per-call clones of the handle.
-    let clones: Vec<Arc<ArmHandle>> = (0..1000).map(|_| handle.clone()).collect();
+    let clones = Vec::from_fn(1000, |_| handle.clone());
 
     assert_eq!(
         Arc::strong_count(&shared),

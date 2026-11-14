@@ -210,7 +210,7 @@ jobs:
       # (~600 s), and jobs run in parallel — so the gui build lands in the slack here and
       # costs zero wall clock, where in the test job it would add to the critical path.
       # Features stay NARROW (`gui,gui-gpu`) for the same reason: with sharing impossible,
-      # `--all-features` would only build more (audio, system-alloc, loom-model) for nothing.
+      # `--all-features` would only build more (audio, loom-model, shuttle-model) for nothing.
       - name: Test (gui renderer — feature-gated, not covered by the nextest run)
         run: cargo test -p brood --features gui,gui-gpu --lib gui
 

@@ -39,8 +39,8 @@ fn run_with_soft_limit(name: &str, script: &str, soft: Option<&str>) -> (String,
         .expect("run brood");
     let _ = std::fs::remove_dir_all(&directory);
     (
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        String::from_utf8_lossy_owned(output.stdout),
+        String::from_utf8_lossy_owned(output.stderr),
     )
 }
 

@@ -453,8 +453,7 @@ impl Heap {
     pub fn imports_snapshot(&self) -> Vec<(Symbol, ImportEntry)> {
         let mut out: Vec<(Symbol, ImportEntry)> = self
             .cold()
-            .map(|c| c.imports.iter().map(|(k, v)| (*k, v.clone())).collect())
-            .unwrap_or_default();
+            .map_or_default(|cold| cold.imports.iter().map(|(k, v)| (*k, v.clone())).collect());
         out.sort_by_key(|(bare, _)| crate::core::value::symbol_name(*bare));
         out
     }

@@ -62,8 +62,8 @@ fn run(tier: &str, imaged: bool) -> (String, String) {
     let out = cmd.arg("program.blsp").output().expect("run brood");
     let _ = std::fs::remove_dir_all(&dir);
     (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
+        String::from_utf8_lossy_owned(out.stdout),
+        String::from_utf8_lossy_owned(out.stderr),
     )
 }
 

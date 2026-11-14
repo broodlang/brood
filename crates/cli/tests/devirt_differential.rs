@@ -35,8 +35,8 @@ fn run_brood(arguments: &[&str], tier: u8, extra_environment: &[(&str, &str)]) -
     support::dies_with_parent(&mut command);
     let output = command.output().expect("run brood");
     Run {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        stdout: String::from_utf8_lossy_owned(output.stdout),
+        stderr: String::from_utf8_lossy_owned(output.stderr),
         success: output.status.success(),
     }
 }

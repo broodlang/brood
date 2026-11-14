@@ -25,7 +25,7 @@ fn run_stderr(path: &std::path::Path, engine_env: &[(&str, &str)]) -> String {
     }
     support::dies_with_parent(&mut cmd);
     let out = cmd.output().expect("run brood");
-    String::from_utf8_lossy(&out.stderr).into_owned()
+    String::from_utf8_lossy_owned(out.stderr)
 }
 
 /// Every engine's stderr on a top-level error must be byte-identical.

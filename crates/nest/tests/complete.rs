@@ -63,8 +63,8 @@ fn complete_in(dir: &Path, words: &[&str]) -> Completion {
         .output()
         .expect("run nest complete");
     Completion {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        stdout: String::from_utf8_lossy_owned(out.stdout),
+        stderr: String::from_utf8_lossy_owned(out.stderr),
         code: out.status.code(),
     }
 }
@@ -347,7 +347,7 @@ fn completions_for(shell: &str) -> String {
         .output()
         .expect("run nest completions");
     assert!(out.status.success(), "nest completions {shell} failed");
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    String::from_utf8_lossy_owned(out.stdout)
 }
 
 #[test]
@@ -454,7 +454,7 @@ fn help_for(args: &[&str]) -> String {
         .output()
         .expect("run nest --help");
     assert!(out.status.success(), "nest {args:?} --help failed");
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    String::from_utf8_lossy_owned(out.stdout)
 }
 
 /// The `--long` flags a clap `--help` prints (its own and the global ones; aliases

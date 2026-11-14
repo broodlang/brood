@@ -183,7 +183,7 @@ fn closure_constructs_record(heap: &Heap, cid: ClosureId, id: Value) -> bool {
 
 /// Is `v` the symbol `name`, bare or root-qualified (`/name`)?
 fn is_symbol_named(v: Value, name: &str) -> bool {
-    matches!(v, Value::Sym(s) if value::symbol_name(s).strip_prefix('/').unwrap_or(&value::symbol_name(s)) == name)
+    matches!(v, Value::Sym(s) if value::symbol_name(s).trim_prefix('/') == name)
 }
 
 /// The `[ability op]` key closure `cid` dispatches on, iff it is the op `defability` emitted

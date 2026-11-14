@@ -92,9 +92,8 @@ fn lint_duplicate_defs_in_inner(
     let pos = heap.form_pos_only(form);
     match seen.get(&name) {
         Some(first) if !allowed => {
-            let where_first = first
-                .map(|p| format!(" at line {}", p.line))
-                .unwrap_or_default();
+            let where_first =
+                first.map_or_default(|position| format!(" at line {}", position.line));
             out.push(Finding::new(
                 Lint::DuplicateDef,
                 pos,

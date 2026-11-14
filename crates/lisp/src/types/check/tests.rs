@@ -192,8 +192,7 @@ fn arg_ty_of(src: &str, needle: &str, arg_index: usize) -> Option<Ty> {
 
 fn field_names(ty: &Ty) -> Vec<String> {
     ty.record_fields()
-        .map(|f| f.keys().map(|&s| value::symbol_name(s)).collect())
-        .unwrap_or_default()
+        .map_or_default(|fields| fields.keys().map(|&s| value::symbol_name(s)).collect())
 }
 
 fn planted_name(src: &str) -> String {

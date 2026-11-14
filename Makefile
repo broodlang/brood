@@ -415,16 +415,18 @@ runtime-soak: ## Boot the concurrency soak fresh, round after round, for SOAK_SE
 # ASAN_OPTIONS=symbolize=0 because the system llvm-symbolizer stalls ~90 s at
 # EVERY exit against the 65 MB sancov binary (found 2026-07-23 — it made the
 # loop look like 4 execs/min). A crash artifact can be re-run symbolized:
-#   cd crates/lisp && cargo +nightly fuzz run <T> fuzz/artifacts/<T>/<file>
+#   cd crates/lisp && RUSTFLAGS="--cfg brood_system_alloc" cargo +nightly fuzz run <T> fuzz/artifacts/<T>/<file>
+# `--cfg brood_system_alloc`: the system allocator, so ASAN owns allocation (fuzz/Cargo.toml).
 fuzz: ## Run one libFuzzer target briefly: make fuzz T=wire SECS=60 (targets: reader eval json wire bundle)
-	cd crates/lisp && ASAN_OPTIONS=symbolize=0 cargo +nightly fuzz run $(or $(T),reader) -- -max_total_time=$(or $(SECS),60) -rss_limit_mb=4096
+	cd crates/lisp && ASAN_OPTIONS=symbolize=0 RUSTFLAGS="--cfg brood_system_alloc" cargo +nightly fuzz run $(or $(T),reader) -- -max_total_time=$(or $(SECS),60) -rss_limit_mb=4096
 
 # What both sanitizer targets run under their own RUSTFLAGS: an instrumented std, and the system
-# allocator so the sanitizer sees allocations mimalloc would hide in its un-instrumented arena.
-SANITIZER_TEST := cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc
+# allocator (`--cfg brood_system_alloc`, in each target's RUSTFLAGS) so the sanitizer sees
+# allocations mimalloc would hide in its un-instrumented arena.
+SANITIZER_TEST := cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release
 
-tsan: ## ThreadSanitizer over the concurrency-sensitive Rust tests (needs nightly + rust-src; system-alloc feature so mimalloc's un-instrumented internals don't report phantom races)
-	RUSTFLAGS="-Zsanitizer=thread" $(SANITIZER_TEST) --test table_tsan --test concurrency_race --test preemption --test live_migration --test local_send_race --test gc
+tsan: ## ThreadSanitizer over the concurrency-sensitive Rust tests (needs nightly + rust-src; the system allocator so mimalloc's un-instrumented internals don't report phantom races)
+	RUSTFLAGS="-Zsanitizer=thread --cfg brood_system_alloc" $(SANITIZER_TEST) --test table_tsan --test concurrency_race --test preemption --test live_migration --test local_send_race --test gc
 
 loom: ## Loom model-check of the dense-table migration protocol (exhaustive interleavings of a faithful model)
 	cargo test -p brood --release --features brood/loom-model --test loom_table_protocol
@@ -440,8 +442,8 @@ MIRI_MODULES ?= core::value core::alloc core::map_champ core::table core::heap::
 miri: ## Miri (undefined-behaviour interpreter) over the kernel unit tests that hold `unsafe` (needs nightly + the miri component; MIRI_MODULES narrows)
 	@for m in $(MIRI_MODULES); do \
 	  echo ">>> miri $$m"; \
-	  MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -q -p brood --lib \
-	    --no-default-features --features system-alloc $$m || exit 1; \
+	  MIRIFLAGS="-Zmiri-disable-isolation" RUSTFLAGS="--cfg brood_system_alloc" \
+	    cargo +nightly miri test -q -p brood --lib --no-default-features $$m || exit 1; \
 	done
 
 # Mutation testing: cargo-mutants breaks one thing at a time in F (flips a comparison, deletes
@@ -467,7 +469,7 @@ RR ?= rr
 rr-hunt: ## Record a test binary under `rr record --chaos` until it fails, keeping that recording: make rr-hunt RR_TEST="target/debug/deps/brood-HASH case_name" RR_RUNS=50 [RR=/path/to/rr, 5.10+ on glibc 2.42+]
 	@RR="$(RR)" scripts/rr-hunt.sh $(RR_RUNS) $(RR_TEST)
 
-asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly + rust-src + cargo-nextest; system-alloc so ASAN can intercept allocations instead of mimalloc's un-instrumented arena). Catches genuine OOB / use-after-free in the unsafe substrate (mmap table, JIT codegen buffers) that TSAN and the logical GC tripwires miss. Through nextest, which also skips doctests (they don't LINK under ASAN + build-std, a toolchain quirk).
+asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly + rust-src + cargo-nextest; the system allocator so ASAN can intercept allocations instead of mimalloc's un-instrumented arena). Catches genuine OOB / use-after-free in the unsafe substrate (mmap table, JIT codegen buffers) that TSAN and the logical GC tripwires miss. Through nextest, which also skips doctests (they don't LINK under ASAN + build-std, a toolchain quirk).
 	# `--cfg brood_asan` sizes `WORKER_STACK_BYTES` to 64 MiB for this build, because ASAN's
 	# redzones roughly double every Rust frame: the instrumented prelude boot measured
 	# 16 768 736 bytes against the ordinary 16 MiB stack. Raise the stack, never
@@ -483,12 +485,13 @@ asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly +
 	# a child beside the harness (`sibling-binary`, a doctest markdown block, a terminal app
 	# under `nest run`), and with `-p brood` alone there was none to find.
 	$(REQUIRE_NEXTEST)
-	CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="-Zsanitizer=address --cfg brood_asan" \
-		cargo +nightly build --release --target x86_64-unknown-linux-gnu \
-		-p cli -p nest --features brood/system-alloc
-	CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="-Zsanitizer=address --cfg brood_asan" \
+	CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
+		RUSTFLAGS="-Zsanitizer=address --cfg brood_asan --cfg brood_system_alloc" \
+		cargo +nightly build --release --target x86_64-unknown-linux-gnu -p cli -p nest
+	CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
+		RUSTFLAGS="-Zsanitizer=address --cfg brood_asan --cfg brood_system_alloc" \
 		cargo +nightly nextest run --profile asan --no-fail-fast --target x86_64-unknown-linux-gnu \
-		-p brood --release --features brood/system-alloc
+		-p brood --release
 
 repl: ## Start the REPL
 	$(CLI)

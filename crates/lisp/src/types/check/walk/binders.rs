@@ -467,9 +467,7 @@ pub(super) fn check_fn_seeded(
         // so few signatures were declared; adopting them across `std/` surfaced it.
         // The argument check has carried the same skip, for the same reason, all
         // along.
-        let who = name
-            .map(|n| format!("{}: ", name_of(n)))
-            .unwrap_or_default();
+        let who = name.map_or_default(|name| format!("{}: ", name_of(name)));
         if !g.bound.is_never()
             && !g.consistent_with_mode(s.ret.clone(), ctx.strict())
             && !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_TYPE_MISMATCH)

@@ -299,10 +299,7 @@ fn a_purge_keeps_a_live_runs_home_however_old_and_takes_a_dead_ones() {
     std::fs::File::create(dead.join("run.lock")).unwrap();
     let ancient = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
     for dir in [&live, &dead] {
-        std::fs::File::open(dir)
-            .unwrap()
-            .set_modified(ancient)
-            .unwrap();
+        std::fs::set_times(dir, std::fs::FileTimes::new().set_modified(ancient)).unwrap();
     }
     let temp = temp_root.to_string_lossy().to_string();
 

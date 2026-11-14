@@ -635,7 +635,7 @@ fn the_image_is_keyed_by_contract_mode() {
             .env("BROOD_CONTRACTS", armed)
             .output()
             .expect("spawn nest");
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        String::from_utf8_lossy_owned(out.stdout)
     };
     assert!(run("1").contains("RESULT: :contract"), "armed, cold");
     let unarmed = run("0");

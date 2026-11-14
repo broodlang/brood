@@ -314,7 +314,7 @@ fn windows_path_text(text: &str) -> String {
     let unprefixed = if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{share}")
     } else {
-        text.strip_prefix(r"\\?\").unwrap_or(text).to_string()
+        text.trim_prefix(r"\\?\").to_string()
     };
     unprefixed.replace('\\', "/")
 }
@@ -338,7 +338,7 @@ fn windows_path_text(text: &str) -> String {
 /// Found via `introspection_test.blsp`'s `os/exe-path` case failing three consecutive
 /// full-suite runs and never solo — the runs that followed a `cargo build` (KI-130).
 fn strip_deleted_marker(path: &str) -> &str {
-    path.strip_suffix(" (deleted)").unwrap_or(path)
+    path.trim_suffix(" (deleted)")
 }
 
 pub(super) fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -590,7 +590,7 @@ fn replace_temp_with(
 ) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
     let directory = target
         .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+        .filter(|parent| !parent.is_empty())
         .unwrap_or(std::path::Path::new("."));
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -686,7 +686,7 @@ fn replace_file(
     }
     // the rename is not durable until the directory is on disk; a filesystem that cannot
     // sync a directory still did the rename
-    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+    if let Some(parent) = target.parent().filter(|parent| !parent.is_empty()) {
         let _ = std::fs::File::open(parent).and_then(|directory| directory.sync_all());
     }
     Ok(())
@@ -816,11 +816,7 @@ fn replace_by_move(temp: &std::path::Path, target: &std::path::Path) -> std::io:
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
     };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    (moved != 0).ok_or_else(std::io::Error::last_os_error)
 }
 
 /// `ReplaceFileW`: the temp file takes `target`'s place and keeps what the old file had —
@@ -845,11 +841,7 @@ fn replace_by_replace_file(
             std::ptr::null(),
         )
     };
-    if done == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    (done != 0).ok_or_else(std::io::Error::last_os_error)
 }
 
 /// A filesystem with no `ReplaceFileW` (FAT, some network shares) answers one of these.
@@ -1220,53 +1212,13 @@ pub(super) fn set_file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
         std::time::UNIX_EPOCH.checked_sub(offset)
     }
     .ok_or_else(|| LispError::runtime(format!("file/set-mtime: {ms} ms is out of range")))?;
-    set_modified_at(&path, ms, when).map_err(failed)?;
+    // By PATH, as `touch -t` does, needing only that the caller may change the file's times
+    // (it owns it), never write access — a 0444 file, or a directory, is dated like any
+    // other. Unix: `utimensat`, the access time left alone; Windows: the file opened for
+    // FILE_WRITE_ATTRIBUTES alone — which a read-only file grants its owner — with backup
+    // semantics so a directory opens too.
+    std::fs::set_times(&path, std::fs::FileTimes::new().set_modified(when)).map_err(failed)?;
     Ok(Value::nil())
-}
-
-/// Set `path`'s modification time as `touch -t` does: by PATH, needing only that the caller
-/// may change the file's times (it owns it), never write access — a 0444 file, or a
-/// directory, is dated like any other. Unix: `utimensat`, the access time left alone.
-#[cfg(unix)]
-fn set_modified_at(path: &str, ms: i64, _when: std::time::SystemTime) -> std::io::Result<()> {
-    let name = std::ffi::CString::new(path)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "a NUL in the path"))?;
-    let times = [
-        libc::timespec {
-            tv_sec: 0,
-            tv_nsec: libc::UTIME_OMIT,
-        },
-        libc::timespec {
-            tv_sec: ms.div_euclid(1000) as libc::time_t,
-            tv_nsec: (ms.rem_euclid(1000) * 1_000_000) as _,
-        },
-    ];
-    // SAFETY: a NUL-terminated path and a two-entry timespec array, both live for the call.
-    let result = unsafe { libc::utimensat(libc::AT_FDCWD, name.as_ptr(), times.as_ptr(), 0) };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Windows: the file opened for FILE_WRITE_ATTRIBUTES alone — which a read-only file grants
-/// its owner — with backup semantics so a directory opens too; then its time set.
-#[cfg(windows)]
-fn set_modified_at(path: &str, _ms: i64, when: std::time::SystemTime) -> std::io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .access_mode(windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES)
-        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
-    file.set_modified(when)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn set_modified_at(path: &str, _ms: i64, when: std::time::SystemTime) -> std::io::Result<()> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)?
-        .set_modified(when)
 }
 
 /// `(file-stat path)` — one `stat` for `path` as a map, or `nil` if it is missing.
@@ -1429,7 +1381,7 @@ fn symlink_replacing(target: &str, link: &std::path::Path) -> std::io::Result<()
     }
     let directory = link
         .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+        .filter(|parent| !parent.is_empty())
         .unwrap_or(std::path::Path::new("."));
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

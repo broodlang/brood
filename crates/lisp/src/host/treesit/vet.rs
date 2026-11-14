@@ -318,11 +318,7 @@ impl Verdict {
     /// strings without escapes (every string is written `literal_safe`), integers. `None` for
     /// anything else.
     fn parse(text: &str) -> Option<Verdict> {
-        let mut rest = text
-            .trim()
-            .strip_prefix('{')?
-            .strip_suffix('}')?
-            .trim_start();
+        let mut rest = text.trim().strip_circumfix('{', '}')?.trim_start();
         let mut verdict = Verdict::new();
         while !rest.is_empty() {
             let key_end = rest

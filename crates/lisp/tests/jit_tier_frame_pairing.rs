@@ -112,11 +112,7 @@ fn only_justified_readers_touch_the_racy_inline_installed_flag() {
             if reads == 0 {
                 continue;
             }
-            let rel = path
-                .strip_prefix(&root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = path.trim_prefix(&root).to_string_lossy().replace('\\', "/");
             if !ALLOWED.iter().any(|(f, _)| rel.ends_with(f)) {
                 offenders.push(format!("  {rel} ({reads} mention(s))"));
             }

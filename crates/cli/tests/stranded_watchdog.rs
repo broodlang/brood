@@ -35,8 +35,8 @@ fn run(path: &std::path::Path, fault: bool) -> (String, String, bool, std::time:
     }
     let output = cmd.arg(path).output().expect("run brood");
     (
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        String::from_utf8_lossy_owned(output.stdout),
+        String::from_utf8_lossy_owned(output.stderr),
         output.status.success(),
         started.elapsed(),
     )

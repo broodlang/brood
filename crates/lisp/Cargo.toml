@@ -12,9 +12,6 @@ name = "brood"
 path = "src/lib.rs"
 
 [features]
-# Sanitizer runs: route allocations through the system allocator so TSAN can
-# see free/alloc happens-before (mimalloc's C internals are un-instrumented).
-system-alloc = []
 # Loom model-check of the table migration protocol (tests/loom_table_protocol.rs);
 # a feature (not --cfg loom) so the global cfg doesn't break boxcar's own loom hooks.
 loom-model = []
@@ -403,11 +400,17 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_IO"] }
 
-# Non-wasm substrate: mimalloc (its C build + per-thread heaps don't cross to wasm,
-# where core/alloc.rs BACKEND falls back to the system allocator) and mio (its
-# epoll/kqueue socket reactor has no wasm backend; the wasm net stub needs none).
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# mimalloc, the global allocator's backend (core/alloc.rs), except where the system allocator
+# stands in: wasm (no C build, no threads for its per-thread heaps) and the sanitizer, Miri and
+# fuzz builds, which set `--cfg brood_system_alloc` so the sanitizer sees every allocation that
+# mimalloc's un-instrumented arena would hide. A cfg rather than a feature: features only add,
+# so `--all-features` built mimalloc and left it unused (Cargo's `unused_dependencies` lint).
+[target.'cfg(all(not(target_arch = "wasm32"), not(brood_system_alloc)))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
+
+# Non-wasm substrate: mio (its epoll/kqueue socket reactor has no wasm backend; the wasm net
+# stub needs none).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 mio = { version = "1", features = ["net", "os-poll"] }
 crossterm = "0.29"
 # TLS stack (crate::net only) — see the comment where these were declared. The

@@ -1240,8 +1240,7 @@ mod resolve_tests {
     fn region(regions: &HashMap<Symbol, HashSet<Symbol>>, m: &str) -> Vec<String> {
         let mut v: Vec<String> = regions
             .get(&value::intern(m))
-            .map(|s| s.iter().map(|&n| value::symbol_name(n)).collect())
-            .unwrap_or_default();
+            .map_or_default(|names| names.iter().map(|&n| value::symbol_name(n)).collect());
         v.sort();
         v
     }

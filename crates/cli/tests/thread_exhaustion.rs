@@ -53,8 +53,8 @@ fn run_with_thread_limit(directory: &Path, limit: u32) -> Outcome {
     let output = child.wait_with_output().expect("collect brood's output");
     Outcome {
         status: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout: String::from_utf8_lossy_owned(output.stdout),
+        stderr: String::from_utf8_lossy_owned(output.stderr),
     }
 }
 

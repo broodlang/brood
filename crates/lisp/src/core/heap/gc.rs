@@ -151,7 +151,7 @@ impl Heap {
         let tenure = self.local_live_count() >= min_tenure();
         // Where the old generation's buffer slabs end before a tenure appends to them, so
         // the bytes it adds are measured over what it copied, not the whole old generation.
-        let old_mark = self.old_opt().map(buffer_mark).unwrap_or_default();
+        let old_mark = self.old_opt().map_or_default(buffer_mark);
         self.minor_collect(tenure, extra_roots, extra_envs);
         // The old generation's buffer bytes, kept in the extras: only a collection touches
         // them, and `collect` boxes the extras for its pause timing anyway.
@@ -296,7 +296,7 @@ impl Heap {
         // Flip: survivors go to a fresh nursery that becomes the new `local`.
         let (mut dest, epoch, dest_old) = if tenure {
             (
-                self.old.take().map(|b| *b).unwrap_or_default(),
+                self.old.take().map_or_default(|boxed| *boxed),
                 self.old_epoch,
                 true,
             )
@@ -456,7 +456,7 @@ impl Heap {
         self.old_epoch = self.old_epoch.wrapping_add(1);
         // Every old-generation handle is about to name something else (ADR-480).
         self.type_verdicts_forget_local();
-        let mut old_src = self.old.take().map(|b| *b).unwrap_or_default();
+        let mut old_src = self.old.take().map_or_default(|boxed| *boxed);
         let mut dest = Slabs::default();
         let mut forward = FlushForward::for_source(&old_src);
         forward.epoch = self.old_epoch;

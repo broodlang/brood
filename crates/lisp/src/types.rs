@@ -537,14 +537,12 @@ impl Ty {
 
     /// The int interval's rendering, `[0..]`, for the renderer; empty without one.
     pub(crate) fn int_suffix(&self) -> String {
-        self.int_range
-            .map(display::range_suffix)
-            .unwrap_or_default()
+        self.int_range.map_or_default(display::range_suffix)
     }
 
     /// The length's rendering, `[3]` / `[1..]`, for the renderer; empty without one.
     pub(crate) fn len_suffix(&self) -> String {
-        self.len.map(display::range_suffix).unwrap_or_default()
+        self.len.map_or_default(display::range_suffix)
     }
 
     /// The suffix for one tag of a term: its int interval for `int`, its length for a

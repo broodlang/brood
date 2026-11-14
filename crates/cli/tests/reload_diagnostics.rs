@@ -46,8 +46,8 @@ fn run(files: &[(&str, &str)], tier: &str, env: &[(&str, &str)]) -> Run {
     let output = command.output().expect("run brood");
     let _ = std::fs::remove_dir_all(&directory);
     let run = Run {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout: String::from_utf8_lossy_owned(output.stdout),
+        stderr: String::from_utf8_lossy_owned(output.stderr),
     };
     assert!(
         output.status.success(),

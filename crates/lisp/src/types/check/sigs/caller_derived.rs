@@ -722,8 +722,7 @@ fn collect_form_sites(
                 let mut inner = scope.clone();
                 let params = items
                     .get(1)
-                    .map(|&p| super::walk::fn_params(heap, p))
-                    .unwrap_or_default();
+                    .map_or_default(|&params| super::walk::fn_params(heap, params));
                 let single_arm = fixed_arms_of_form(heap, form).is_some_and(|arms| arms.len() == 1);
                 // What the WALK binds this body's parameters to: a DECLARED sig's types,
                 // seeded by the one rule `check_fn_seeded` uses (`seeded_param_types` —

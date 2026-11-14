@@ -823,8 +823,7 @@ fn record_latency(
                     .map(|(name, us)| format!(" {name}={:.2}ms", ms(us)))
                     .collect::<String>()
             })
-            .map(|named| format!(" |{named}"))
-            .unwrap_or_default();
+            .map_or_default(|named| format!(" |{named}"));
         eprintln!(
             "[gui-latency] input->present {:.2}ms (to paint {:.2}ms, paint {:.2}ms){phases}",
             ms(sample.total_us),

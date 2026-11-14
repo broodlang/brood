@@ -61,7 +61,7 @@ fn serve_raw(dir: &Path, input: &str) -> Session {
         .write_all(input.as_bytes())
         .unwrap();
     let output = child.wait_with_output().expect("wait for nest mcp");
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stdout = String::from_utf8_lossy_owned(output.stdout);
     let replies = stdout
         .lines()
         .map(|line| {
@@ -72,7 +72,7 @@ fn serve_raw(dir: &Path, input: &str) -> Session {
     Session {
         replies,
         stdout,
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stderr: String::from_utf8_lossy_owned(output.stderr),
         code: output.status.code(),
     }
 }

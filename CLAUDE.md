@@ -148,7 +148,7 @@ details, the debug tooling and the rename checklist this file points to.
 
 ## Commands
 
-**Minimum Rust: 1.97** (`rust-version` in `Cargo.toml`). CI tracks `stable`, so this is a
+**Minimum Rust: 1.100** (`rust-version` in `Cargo.toml`). CI tracks `stable`, so this is a
 declaration, not a pin; raise it only deliberately, after building on that version.
 
 ```bash

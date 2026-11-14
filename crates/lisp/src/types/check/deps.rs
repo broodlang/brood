@@ -325,7 +325,7 @@ fn definition_digest(heap: &Heap, sym: Symbol) -> Option<u64> {
 fn closure_digest(heap: &Heap, closure: &value::Closure) -> Option<u64> {
     let mut digest = Digest::new();
     let mut gensyms = std::collections::HashMap::new();
-    digest.text(&closure.name.map(value::symbol_name).unwrap_or_default());
+    digest.text(&closure.name.map_or_default(value::symbol_name));
     for arm in closure.arms.iter() {
         digest.text("arm");
         for &param in &arm.params {

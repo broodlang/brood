@@ -29,7 +29,7 @@ fn stderr_of(dir: &std::path::Path, name: &str, src: &str) -> String {
     let out = support::spawn_brood_env(dir, name, src, &[])
         .wait_with_output()
         .expect("run brood");
-    String::from_utf8_lossy(&out.stderr).into_owned()
+    String::from_utf8_lossy_owned(out.stderr)
 }
 
 #[test]
