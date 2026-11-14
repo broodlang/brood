@@ -27,6 +27,91 @@ at load and is served from the std image. **Guard:**
 `startup_image::a_dependency_module_named_by_its_short_name_is_imaged` (red with the old predicate
 back).
 
+## KI-389 — the drain probe passed over old-generation strings, numbers and ropes, and keyed the cells it read by index alone ✅ fixed 2026-11-14
+
+**Seen** 2026-11-12, by reading `walk_reaches_gen` while fixing KI-388. Never observed.
+
+**Cause.** Two holes, each able to report a process clean while it holds a value of the
+draining generation, after which the free leaves it a handle into an empty slab. (1) The walk
+matched closures, pairs, vectors and maps and passed over everything else, so a string,
+bignum, decimal, ratio, bytes, rope, range or seq-view of the draining generation — every
+one of which `flush_rt_value` shows living in a generation — did not count. (2) `visited`
+was keyed `(generation, index)`, but each slab numbers its cells from 0: once pair 5 was
+read, vector 5, map 5 and closure 5 of the same generation were skipped unread, and so was
+any old handle inside them.
+
+**Why it survived.** The drain tests pin with closures, and the collisions need two live
+cells of different kinds at one index with the pin in the second.
+
+**Fix.** The walk asks any RUNTIME handle its generation first (`runtime_gen_of`), whatever
+its kind, and follows every compound kind (a range and a seq-view are a vector cell);
+`visited` is keyed `(SlabKind, generation, index)`.
+
+**Guard.** `runtime_collector::an_old_generation_string_pins_the_drain` for (1). (2) has no
+test that can place two cells at one index on demand; it rests on construction (the key
+names the slab). Sabotage-verified 2026-11-13: with the generation check before the `match`
+dropped, `an_old_generation_string_pins_the_drain` goes red (with
+`old_generation_liveness_probe`, `cross_process_drain_union` and
+`free_reclaims_after_cross_process_drain`). **Proven green 2026-11-14** with KI-388's runs below.
+
+## KI-388 — a process whose data held the draining generation kept the drain open, and walked its whole heap while it did ✅ fixed 2026-11-14
+
+**Seen** 2026-11-12, profiling bedit (a release bundle on 0.51.0, `perf record --call-graph
+dwarf` on a build with symbols) while typing into a terminal buffer was slow: 33% of the
+performance cores' samples in `Heap::seed_phase2_and_walk` and 25% in `memmove` under
+`realloc`. The editor's slow-turn log showed functions that do nothing (`(when (int? x) …)`,
+a one-line `assoc`) taking 50 ms of the loop's own CPU, with 0 ms of GC, and the loop's
+thread taking ~6 000 fresh page faults in one burst. No aging, migration or JIT work in the
+30-second profile: one drain had stayed open.
+
+**Cause.** A drain (ADR-091) ends when every live process reports clean. A process that
+HOLDS a value of the draining generation — a callback in its state, a closure in a vector,
+a string read from a global before the migration — is dirty until that value dies, and a
+long-lived process keeps its state for good: bedit's loop holds its model for the session.
+So the drain never ended. Meanwhile each dirty process re-ran the Phase-2 probe every
+`P2_REVALIDATE_STRIDE` reports, a walk of its WHOLE local heap that first copied every
+value in it into one growing `Vec` (the `realloc` / `memmove`), and the parked-process
+inspector did the same for every parked one. On an editor's heap that is tens of ms, landing
+on whatever function the loop was in.
+
+**Why it survived.** The drain tests run small heaps that let go of what they hold; the
+throttle (KI-14's shape) bounded how *often* the walk ran, not that it ran forever. The
+editor's slow-turn log names the function a slow turn was in, and the walk ran at a
+safepoint inside an unrelated one. `proc/gc-us` does not count the probe.
+
+**Fix.** A process found dirty asks for a **re-home** (`Heap::rehome_drain_pins`): at its
+next collection (the roots in hand, the garbage gone) — or, parked, from the inspector under
+its mailbox lock — every draining-generation handle it holds privately is rewritten to the
+value's copy in the current generation, and it reports clean. The copies go through ONE
+forwarding map per drain (`RuntimeCode::drain_forward`, filled by `migrate_live_globals`),
+so a closure the globals hold and the same closure in a process's data stay one handle
+(`=` on functions is handle identity). Not while the process runs draining-generation code
+(its live arms can be shared; they end when the calls return). Until the copy, the existing
+throttles bound the re-walks as before. The Phase-2 seed reads each cell in place and queues
+only RUNTIME handles. ADR-720. CI's first run of the fix (`9791aaac4`) also redded
+`process_floor`; the ask is read from the probe's own dirty epochs (`Heap::rehome_due`) and the
+once-a-drain mark lives in the lazily boxed `HeapExtras`, so nothing is added per process.
+
+**Guard.** `runtime_collector::a_process_pinning_the_drain_through_its_data_copies_it_out`
+(two heaps, deterministic: pinned, collects, drained; the copies `=` the migrated globals),
+`runtime_collector::drain_report_wires_through_the_scheduler` (the drain completes with the
+worker parked, which runs its copy when released) and
+`runtime_drain::parked_process_whose_data_pins_the_drain_copies_it_out` (a real parked worker;
+the drain completes because it copied out, `:runtime-rehomed`). That last one first passed
+with every re-home removed: its worker built `[f s]` whenever the scheduler first ran it, which
+could be after the migration; it now reports `:ready` before the test ages (f6a27f509).
+
+Sabotage-verified 2026-11-13/14 (targeted): dropping the `rehome_drain_pins` call in
+`Heap::collect` reds the first; dropping the scheduler's parked re-home as well reds the second
+and the third; copying through a fresh map instead of `drain_forward` reds the first and the
+third (the copy is no longer the migrated global).
+
+**Proven green 2026-11-14** on the development machine (with the user's permission): 30
+consecutive runs of `runtime_collector`, `runtime_drain`, `runtime_multigen` and
+`jit_runtime_compaction` (31 tests each), all green; five runs of the first three under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, all green; `tests/runtime_collect_test.blsp` five times
+under the same flags, all green.
+
 ## KI-387 — `nest check` dropped every unbound name in a branch it judged unreachable ✅ closed 2026-11-12
 
 **Seen** 2026-11-12, replaying hatch's rename migration: four `bytes/concat` calls in
