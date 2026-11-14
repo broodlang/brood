@@ -477,14 +477,16 @@ asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly +
 	# the integration tests shared one process and its process-wide scheduler knobs, and
 	# `preemption_shapes` failed for no reason ASAN found. CARGO_UNSTABLE_BUILD_STD is
 	# `-Zbuild-std`, which nextest does not pass through as a flag.
+	# Line tables (CARGO_PROFILE_RELEASE_DEBUG) on both steps, so a leak or fault report names
+	# its frames; the two steps must agree or the second rebuilds.
 	# The `brood` and `nest` binaries first, into the same target directory: suite tests run
 	# a child beside the harness (`sibling-binary`, a doctest markdown block, a terminal app
 	# under `nest run`), and with `-p brood` alone there was none to find.
 	$(REQUIRE_NEXTEST)
-	CARGO_UNSTABLE_BUILD_STD=std RUSTFLAGS="-Zsanitizer=address --cfg brood_asan" \
+	CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="-Zsanitizer=address --cfg brood_asan" \
 		cargo +nightly build --release --target x86_64-unknown-linux-gnu \
 		-p cli -p nest --features brood/system-alloc
-	CARGO_UNSTABLE_BUILD_STD=std RUSTFLAGS="-Zsanitizer=address --cfg brood_asan" \
+	CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="-Zsanitizer=address --cfg brood_asan" \
 		cargo +nightly nextest run --profile asan --no-fail-fast --target x86_64-unknown-linux-gnu \
 		-p brood --release --features brood/system-alloc
 

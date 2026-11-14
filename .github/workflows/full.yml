@@ -294,6 +294,14 @@ jobs:
         with:
           tool: cargo-nextest@0.9.150
 
+      # A sanitizer report is only actionable with names in its stacks: the build carries
+      # line tables (`make asan`), and this puts a symbolizer where ASAN looks for one.
+      - name: Install llvm-symbolizer
+        run: |
+          sudo apt-get install -y --no-install-recommends llvm
+          symbolizer=$(command -v llvm-symbolizer || ls /usr/bin/llvm-symbolizer-* | sort -V | tail -1)
+          echo "ASAN_SYMBOLIZER_PATH=$symbolizer" >> "$GITHUB_ENV"
+
       - name: make asan
         run: make asan
 
