@@ -369,10 +369,12 @@ fn encode_section(
                 _ => None,
             })
             .collect();
-        let prefix = format!("{section}/");
+        // Keyed in exactly this module, not merely under its prefix: section `web` must not
+        // carry `web/admin`'s sigs, or a sig deleted from `web/admin` comes back from the kept
+        // `web` section on a partial rebuild (KI-391, the nested case).
         heap.declared_sigs_snapshot()
             .into_iter()
-            .filter(|(sym, _)| mine.contains(sym) || value::symbol_name(*sym).starts_with(&prefix))
+            .filter(|(sym, _)| mine.contains(sym) || module_of(*sym).as_deref() == Some(section))
             .collect()
     };
     for (sym, tv) in sig_pairs {

@@ -1702,3 +1702,15 @@ bedit's menu and Ctrl+wheel zoom tests failed on each warm run and passed after 
 that run rebuilt from source. `bound?` now roots a short project spelling and materialises the
 module's image section when the installed image carries one; a module the image does not carry
 is still not loaded. Guard in `startup_image`, red on the warm run with the old `bound?`.
+
+2026-11-14 (review of the day's work). Three independent reviews of ADR-722, KI-384/391/394
+and bedit's changes. Fixed: a template's `binding` names are pinned to a root binding like a
+call head (a root macro's `*print-length*` rebound a caller's own `m/*print-length*`);
+`defonce` computes its name at expansion; an ambiguously imported dynamic is refused as a
+bare head and is an import clash in `binding`; `binding` of a non-symbol says so; KI-391's
+named sections take sigs by exact module, not prefix (`web` carried `web/admin`'s);
+`obs_function` reads `shim_original`, so root and `sig!` names count, and specialisation and
+the purity walk use it; `bound?` never raises and does not wait on another process's load;
+`pane-leaf-paths` ends on a tree with a hole (it ran a process out of memory). Stale
+"ambient" wording removed from std comments, scaffold's project notes and docs. Each new
+guard red with its change undone.

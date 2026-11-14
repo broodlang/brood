@@ -752,7 +752,14 @@ pub(crate) fn bound_or_imaged(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispR
     let Some(module) = module_of_resolved(rooted) else {
         return Ok(Value::boolean(false));
     };
-    if heap.compile_ns() == Some(module) || !imaged_and_unmaterialized(heap, module) {
+    // A module this process is loading, or one another process is mid-load of, is answered
+    // from the table as it stands: waiting for the other load would be a `receive` under this
+    // native frame, which cannot park and would block its OS worker (see
+    // `module_to_load_off_native`).
+    if heap.compile_ns() == Some(module)
+        || module_loading_elsewhere(heap, rooted).is_some()
+        || !imaged_and_unmaterialized(heap, module)
+    {
         return Ok(Value::boolean(false));
     }
     let env_base = heap.env_roots_len();
@@ -760,26 +767,19 @@ pub(crate) fn bound_or_imaged(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispR
     let loaded = ensure_required(heap, env, module);
     let env = heap.read_root_env(env_root);
     heap.truncate_env_roots(env_base);
-    loaded?;
-    Ok(Value::boolean(heap.env_get(env, rooted).is_some()))
+    // `bound?` answers a question and never raises: a section that fails to materialise
+    // leaves the name unbound, as it is (a reference to it will raise the real error).
+    Ok(Value::boolean(
+        loaded.is_ok() && heap.env_get(env, rooted).is_some(),
+    ))
 }
 
 /// Whether the installed project image carries a section for `module` that has not been
 /// materialised yet: a key of `*image-sections*` absent from `*features*`.
-fn imaged_and_unmaterialized(heap: &Heap, module: Symbol) -> bool {
-    let name = value::symbol_name_ref(module);
-    let holds = |registry: &str| match heap.env_get(heap.global(), value::intern(registry)) {
-        Some(Value::Map(id)) => {
-            heap.map_entries(id)
-                .into_iter()
-                .any(|(key, _)| match key.unpack() {
-                    ValueRef::Str(s) => heap.string(s) == name,
-                    _ => false,
-                })
-        }
-        _ => false,
-    };
-    holds("*image-sections*") && !holds(crate::core::registries::FEATURES)
+fn imaged_and_unmaterialized(heap: &mut Heap, module: Symbol) -> bool {
+    let name = heap.alloc_string(value::symbol_name_ref(module));
+    heap.registry_member(value::intern("*image-sections*"), name)
+        && !heap.registry_member(value::intern(crate::core::registries::FEATURES), name)
 }
 
 /// The module of `sym` when ANOTHER live process is loading it right now — the one case in

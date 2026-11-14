@@ -97,7 +97,7 @@
 ; True if module `from` belongs to the current project's OWN package (ADR-172): its
 ; `project/*ns-package*` entry (set at project setup) equals `project/*name*`. Guarded with `bound?`
 ; so abilities still work when no project is loaded (a bare `brood script.blsp` — those
-; ambients are undeclared then). Root/REPL (`from` = nil) is handled by the caller as the app.
+; settings are unbound then). Root/REPL (`from` = nil) is handled by the caller as the app.
 (defn- %impl-app? (from)
   (and from
     (bound? 'project/*name*)

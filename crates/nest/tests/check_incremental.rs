@@ -391,3 +391,47 @@ fn a_deleted_sig_stops_applying_after_the_partial_rebuild() {
         "nor in the run after, from the rewritten image:\n{out}"
     );
 }
+
+/// The nested case: section `web` took sigs by PREFIX, so it carried `web/admin`'s too, and a
+/// sig deleted from `web/admin` came back from the kept `web` section on the partial rebuild.
+#[test]
+fn a_deleted_sig_in_a_nested_module_stops_applying() {
+    let dir = scratch("deleted-nested-sig");
+    write(&dir, "project.blsp", "(project\n  :name nsig)\n");
+    std::fs::create_dir_all(dir.join("src/web")).unwrap();
+    write(
+        &dir,
+        "src/web.blsp",
+        "(defmodule web)\n(defn home () :home)\n",
+    );
+    write(
+        &dir,
+        "src/web/admin.blsp",
+        "(defmodule web/admin)\n(sig same (int -> int))\n(defn same (x) x)\n",
+    );
+    write(
+        &dir,
+        "src/app.blsp",
+        "(defmodule app (:use web/admin))\n(defn go () (same \"s\"))\n",
+    );
+    let (code, out) = nest_check(&dir);
+    assert!(
+        code == 1 && out.contains("expects int"),
+        "the sig holds the call to int:\n{out}"
+    );
+    write(
+        &dir,
+        "src/web/admin.blsp",
+        "(defmodule web/admin)\n(defn same (x) x)\n",
+    );
+    let (code, out) = nest_check(&dir);
+    assert!(
+        code == 0 && !out.contains("expects int"),
+        "the deleted sig must not come back from the kept `web` section:\n{out}"
+    );
+    let (code, out) = nest_check(&dir);
+    assert!(
+        code == 0 && !out.contains("expects int"),
+        "nor in the run after:\n{out}"
+    );
+}

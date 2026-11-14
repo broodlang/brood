@@ -258,9 +258,8 @@ and an unbounded silent spin is far harder to place than an error."
 ;; nothing reads.
 ;;
 ;; The std/ callers are not namespaced: the prelude's own registries and `*protocols*` (std/protocol.blsp is CORE — loaded in the prelude with
-;; no `defmodule`, so its globals are root) are bare and root, `editor/face`'s `editor/face/*faces*` is
-;; `defdyn` and therefore ambient (root, never namespaced, ADR-151), and the rest are
-;; written out qualified. So this resolution must not disturb any of them — which is why it
+;; no `defmodule`, so its globals are root) are bare and root, `editor/face`'s
+;; `editor/face/*faces*` is a `defdyn` written out qualified, and the rest are qualified too. So this resolution must not disturb any of them — which is why it
 ;; checks rather than assumes: an already-qualified name passes through untouched, and
 ;; between the qualified and bare forms it picks whichever is actually BOUND. Root registries
 ;; keep resolving to root; a module's own registry resolves to the module.
@@ -279,7 +278,7 @@ and an unbounded silent spin is far harder to place than an error."
 `(%swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))`.
 
 Write `registry` the way you would refer to it in ordinary code: bare inside the module
-that defines it, qualified from outside, and bare for a `defdyn` (which is ambient). The
+that defines it, qualified (or imported) from outside, a module's `defdyn` included. The
 macro resolves it to the name `def` actually binds (`%registry-global-name`) at expansion
 time, so a module does not have to know its own namespace — or, inside a published
 package, its package prefix. It is quoted for the kernel *and* spliced as a live reference
@@ -324,11 +323,10 @@ one call site is inside `defmodule`'s template — see the note there."
   doc)
 
 ;; The hot-reload `def` diagnostics switch. The kernel reads it by BARE name from
-;; root (`eval::reload_diagnostics_on`), so it has to be ambient by declaration —
-;; a plain `(def *reload-diagnostics* false)` inside a module would define
-;; `mod/*reload-diagnostics*` and silence nothing. Declared here (default `true`,
-;; matching the kernel's unbound-means-on) so any module or test can turn it off
-;; for its own scope with an ordinary `def`.
+;; root (`eval::reload_diagnostics_on`), so it is a root dynamic, declared here in the
+;; prelude (default `true`, matching the kernel's unbound-means-on). Root code turns it
+;; off with `(def *reload-diagnostics* false)`; a module writes `/*reload-diagnostics*`
+;; (a bare head there is refused, ADR-722), or scopes it with `binding`.
 (defdyn *reload-diagnostics* true)
 
 ;; ---- deprecation ------------------------------------------------------------

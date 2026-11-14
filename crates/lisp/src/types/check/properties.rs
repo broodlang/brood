@@ -70,7 +70,7 @@ pub(crate) fn effect_of(heap: &Heap, name: Symbol) -> Option<String> {
     // Then the global's OWN body — not `effect_of_global`, which trusts a `:pure`
     // declaration on the name itself and would answer `None` for exactly the functions a
     // reader most wants described.
-    let Some(Value::Fn(cid)) = super::deps::obs_global(heap, name) else {
+    let Some(Value::Fn(cid)) = super::deps::obs_function(heap, name) else {
         return None;
     };
     let bodies: Vec<Value> = heap
@@ -325,7 +325,7 @@ impl Purity<'_> {
             return None;
         }
         // A loaded closure: its arms' bodies, as the heap holds them.
-        let Value::Fn(cid) = super::deps::obs_global(self.heap, name)? else {
+        let Value::Fn(cid) = super::deps::obs_function(self.heap, name)? else {
             return None;
         };
         let closure = self.heap.closure(cid);

@@ -110,8 +110,8 @@
 ;; it binds `*x*` and marks `mod/*x*`. Harmless today because nothing takes that path (the
 ;; stdlib-image setters are called from the image BUILDER, whose marks are then re-derived
 ;; from the built image; compare KI-111). Fixing it properly means qualifying at
-;; expansion time, which needs `qualify_name`'s ambient/already-qualified rules restated in
-;; Brood — a second copy of a kernel rule, for a case with no live symptom.
+;; expansion time with `%def-name` (below: `qualify_name`'s rules restated in Brood, which
+;; `defonce` and `defdyn` use) — not yet done here, for a case with no live symptom.
 (defmacro defn- (name & clauses)
   "Define a MODULE-PRIVATE function `name` (ADR-146) — like `defn`, but the name is not exported and a cross-module reference to it is a compile error."
   (%defn-check-name 'defn- name)
@@ -652,9 +652,9 @@ inlines, while this wrapper stays a call — and it does not mislead past two ar
 ;; module a bare `*x*` binds `mod/*x*`, a `/x` root escape binds the root `x`, and a
 ;; qualified name or a root context (no current-ns) passes through. A macro that names its
 ;; binding in a QUOTE needs this, because a quoted `'*x*` is data the resolver never rewrites:
-;; `defonce`'s bound? check (at load time) and `defdyn`'s mark (at expansion time) must name
-;; the binding the `def` writes. Both run while `reflect/current-ns` is the module being
-;; loaded.
+;; `defonce`'s bound? check and `defdyn`'s mark must name the binding the `def` writes. Both
+;; call this at EXPANSION time, where `reflect/current-ns` is the module being compiled — the
+;; namespace the `def` is resolved in — whenever the expanded form later runs.
 (defn- %def-name (sym)
   (let (ns (reflect/current-ns) spelling (str sym))
     (if (if (> (%string-length spelling) 1) (%eq (string/substring spelling 0 1) "/") false)
@@ -666,10 +666,11 @@ inlines, while this wrapper stays a call — and it does not mislead past two ar
 (defmacro defonce (name val)
   "Bind `name` to `val` only if it isn't already bound, so the value survives
 hot-reload (cf. Emacs `defvar`). Once bound, re-evaluating is a no-op; restart
-or re-`def` to force re-init. Works for a module-level name: the bound? check is
-resolved against the LOADING module's namespace (`%def-name`), the same
-binding `def` writes — a bare `(bound? '~name)` would read at root and miss it."
-  `(when (/not (/bound? (%def-name '~name))) (def ~name ~val)))
+or re-`def` to force re-init. Works for a module-level name: the bound? check names
+the binding `def` writes (`%def-name`, computed where the form is expanded), so a
+`defonce` inside a function run later checks its own module's name, not root's or the
+module loading at the time."
+  `(when (/not (/bound? '~(%def-name name))) (def ~name ~val)))
 
 ;; `(comment …)` — the dev-scratch block every Lisp has. Its body is read (so it
 ;; must still be balanced sexps) but never evaluated, which is the point: a

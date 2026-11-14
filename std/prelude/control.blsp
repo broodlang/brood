@@ -801,7 +801,10 @@ message it carries, and anything else its printed form.
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
   (defn- %binding-names (b)
-    (if (nil? b) nil (cons (%resolve-name (first b)) (%binding-names (rest (rest b)))))))
+    (cond
+      (nil? b) nil
+      (symbol? (first b)) (cons (%resolve-name (first b)) (%binding-names (rest (rest b))))
+      else (reflect/error-at b "binding: each name must be a symbol, got " (first b)))))
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
   (defn- %binding-vals (b) (if (nil? b) nil (cons (second b) (%binding-vals (rest (rest b)))))))

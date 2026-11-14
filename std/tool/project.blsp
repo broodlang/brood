@@ -62,8 +62,8 @@ identity and may override those paths. The rest of the tool is its siblings:
     (project/trace-with-packages (get err :trace))   ;~> ({:fn myapp/main :file \"src/app.blsp\" :line 12 :col 3 :package …} …)"
   (map trace (fn (frame) (assoc frame :package (ns-package (get frame :fn))))))
 ;; Only ever set inside `setup` (from the manifest) and read by
-;; `package` when it publishes — so they must be declared ambient here, like the
-;; slots above: ambient is a `defdyn` declaration now, not an earmuff spelling.
+;; `package` when it publishes — public dynamic variables of this module, like the slots
+;; above, which `package` reads qualified.
 (defdyn project/*description* nil)
 (defdyn project/*repository* nil)
 ;; `:brood` — the runtime-version constraint this project needs (a `std/version` string,
@@ -125,8 +125,8 @@ identity and may override those paths. The rest of the tool is its siblings:
 ; the manifest's :format-paths (a vector of directories) — EXTRA trees `nest format`
 ; owns, beyond :source-paths and :test-paths. nil = just those two. `nest format` walks
 ; a whitelist, so a directory holding .blsp the project authors but does not build from
-; (`std/`, `examples/`, `scripts/`) has to be named here to be formatted. Ambient so
-; `std/format.blsp` reads it without importing the manifest.
+; (`std/`, `examples/`, `scripts/`) has to be named here to be formatted. Public, so
+; `std/format.blsp` reads it without loading the manifest itself.
 (defdyn project/*doc-paths* nil)
 ; the manifest's :doc-paths — the markdown `nest doctest` runs the fenced examples of: files,
 ; directories (every `.md` under them) and `!`-prefixed paths left out. nil = `README.md` when

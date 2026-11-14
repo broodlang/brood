@@ -128,7 +128,7 @@ fn fixed_arms_of(heap: &Heap, sym: Symbol, ctx: &Ctx) -> Option<(Vec<FixedArm>, 
     if ctx.is_file_global(sym) {
         return None;
     }
-    let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
+    let Value::Fn(cid) = super::deps::obs_function(heap, sym)? else {
         return None;
     };
     let closure = heap.closure(cid);

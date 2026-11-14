@@ -37,7 +37,6 @@ use super::*;
 const PAIR_BINDERS: &[&str] = &[
     "let",
     "letrec",
-    "binding",
     "doseq",
     "fold-for",
     "for",
@@ -185,12 +184,14 @@ fn escape_template(heap: &mut Heap, form: Value, level: u32, binders: &HashSet<S
                     return rebuild_list(heap, form, out);
                 }
             }
+            let is_binding = head_name(&items).as_deref() == Some("binding");
             let mut out = Vec::with_capacity(items.len());
             for (i, &it) in items.iter().enumerate() {
                 let it = match it.unpack() {
                     ValueRef::Sym(s) if i == 0 && escapes(heap, s, binders) => {
                         Value::symbol(value::intern(&format!("/{}", value::symbol_name_ref(s))))
                     }
+                    _ if i == 1 && is_binding => escape_binding_names(heap, it, level, binders),
                     _ => escape_template(heap, it, level, binders),
                 };
                 out.push(it);
@@ -207,6 +208,33 @@ fn escape_template(heap: &mut Heap, form: Value, level: u32, binders: &HashSet<S
         }
         _ => form,
     })
+}
+
+/// A template's `binding` list `(name value …)`: each NAME that names a root binding is
+/// pinned to `/name`, as a call head is, and each value is escaped as template code. The
+/// names are not lexical binders — `binding` rebinds the global they resolve to, at expansion,
+/// in the CALLER's module (ADR-722) — so a prelude or std template's `(binding (*out* …) …)`
+/// left bare would rebind a caller's own `m/*out*` while the code it calls reads the root one.
+fn escape_binding_names(
+    heap: &mut Heap,
+    list: Value,
+    level: u32,
+    binders: &HashSet<Symbol>,
+) -> Value {
+    let Some(items) = heap.list_items(list) else {
+        return escape_template(heap, list, level, binders);
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for (i, &it) in items.iter().enumerate() {
+        out.push(match it.unpack() {
+            ValueRef::Sym(s) if i % 2 == 0 && escapes(heap, s, binders) => {
+                Value::symbol(value::intern(&format!("/{}", value::symbol_name_ref(s))))
+            }
+            _ if i % 2 == 0 => it,
+            _ => escape_template(heap, it, level, binders),
+        });
+    }
+    rebuild_list(heap, list, out)
 }
 
 /// Walk macro-time code (a `defmacro` body, or a `~` hole), escaping every quasiquote

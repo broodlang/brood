@@ -69,3 +69,37 @@ fn a_shimmed_callee_is_inferred_from_its_original_body() {
         );
     }
 }
+
+/// The purity walk reads a contracted callee's original body too. With contracts armed the
+/// global held the shim, which calls the original through a captured local the walk could not
+/// follow, so a `:pure` function calling a sig'd effectful one warned unarmed and was silent
+/// armed.
+#[test]
+fn a_pure_declaration_sees_through_a_shimmed_callee() {
+    let dir = temp_dir("check-contracts-pure");
+    let root = &dir.path;
+    let cache = root.join("cache");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("project.blsp"),
+        "(project :name \"purep\" :source-paths [\"src\"])\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/eff.blsp"),
+        "(defmodule eff)\n(sig log-it (string -> nil))\n(defn log-it (s) (io/puts s))\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/app.blsp"),
+        "(defmodule app)\n(sig tidy (string -> nil) :pure)\n(defn tidy (s) (eff/log-it s))\n",
+    )
+    .unwrap();
+    for contracts in ["0", "1"] {
+        let (out, _) = check(root, &cache, contracts);
+        assert!(
+            out.contains("declared :pure but performs an effect"),
+            "BROOD_CONTRACTS={contracts}: the effect behind the shim must be seen:\n{out}"
+        );
+    }
+}

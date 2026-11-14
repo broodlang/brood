@@ -312,7 +312,40 @@
             "write `setprov/*setknob*` to set it")))
     (%load-string "(defmodule dynset2 (:use setprov)) (defn set-it () (def setprov/*setknob* 5))")
     (dynset2/set-it)
-    (assert= setprov/*setknob* 5)))
+    (assert= setprov/*setknob* 5))
+  (test "a macro template's binding of a root dynamic is pinned to it, not to the caller's own"
+    ;; A root macro's `(binding (*print-length* 3) …)` expands in the CALLER's module, and
+    ;; `binding` resolves its names there: a module with its own `tbm/*print-length*` used to
+    ;; have the macro rebind that, while everything reading the root knob kept its value.
+    (%load-string "(defmacro tbm-with-pl3 (& body) `(binding (*print-length* 3) ~@body))")
+    (%load-string (str "(defmodule tbm) (defdyn tbm/*print-length* :mine)"
+                    " (defn seen () (tbm-with-pl3 [/*print-length* tbm/*print-length*]))"))
+    (assert= (tbm/seen) [3 :mine]))
+  (test "a defonce run later, inside a function, checks its own module's name"
+    (%load-string "(defmodule dfm) (defn later () (defonce *late* 9) *late*)")
+    (assert= (dfm/later) 9)
+    (def dfm/*late* 10)
+    (assert= (dfm/later) 10))
+  (test "an ambiguously imported dynamic is refused as a bare head and is a clash in binding"
+    (%load-string "(defmodule amba) (defdyn *amx* 1)")
+    (%load-string "(defmodule ambb) (defdyn *amx* 2)")
+    (is (includes? (try
+                     (do
+                       (%load-string "(defmodule ambc (:use amba) (:use ambb)) (defdyn *amx* 3)")
+                       nil)
+                     (catch e (error-message e)))
+          "a dynamic variable it imports"))
+    (is (includes? (try
+                     (do
+                       (%load-string "(defmodule ambd (:use amba) (:use ambb)) (defn f () (binding (*amx* 4) 0))")
+                       nil)
+                     (catch e (error-message e)))
+          "imported from more than one module")))
+  (test "binding names a symbol, or says so"
+    (is (includes? (try
+                     (do (reflect/eval (reflect/read-string "(binding (1 2) nil)")) nil)
+                     (catch e (error-message e)))
+          "binding: each name must be a symbol"))))
 
 ;; A genuine circular `(:use …)` refer-all can't import a complete public set (the
 ;; other module is still mid-load), so it's a clear error rather than a silent
