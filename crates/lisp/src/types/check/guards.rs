@@ -690,6 +690,14 @@ pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
 }
 
 fn branch_scopes_inner(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
+    // `(not X)` is X with its branches swapped, exactly — `not` inverts truthiness and
+    // nothing else — so everything X proves carries over and nothing below needs to see the
+    // `not`. First, too: every layer below reads the test whole, and a `(not (not …))` chain
+    // that each level re-read made this quadratic in its depth.
+    if let Some(inner) = negated_operand(heap, test, ctx) {
+        let (then_ctx, else_ctx) = branch_scopes(heap, inner, ctx);
+        return (else_ctx, then_ctx);
+    }
     let (mut then_ctx, mut else_ctx) = match guard_assertion(heap, test, ctx) {
         Some(g) => {
             let then_ctx = if g.else_only {
