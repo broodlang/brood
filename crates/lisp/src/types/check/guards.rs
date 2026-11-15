@@ -885,8 +885,8 @@ fn join_facts(a: Option<Vec<(Symbol, Ty)>>, b: Option<Vec<(Symbol, Ty)>>) -> Vec
 }
 
 /// `(contains? m :k)` false over a local KNOWN to be a map, a set or `nil`: `(get m :k)` /
-/// `(:k m)` reads `nil` in the else branch (ADR-725) — absence proven, as Elixir's
-/// `not is_map_key` proves `not_set()`. Only for those kinds: a `record` value may answer a
+/// `(:k m)` reads `nil` in the else branch (ADR-725) — the key's absence is proven, and a
+/// read of an absent key is `nil`. Only for those kinds: a `record` value may answer a
 /// read through a `Lookup` impl for a key `contains?` reports absent, and a value of unknown
 /// kind may be one, so nothing is claimed there.
 fn absent_key_read(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Symbol, Symbol)> {
