@@ -151,20 +151,7 @@ fn fixed_arms_of(heap: &Heap, sym: Symbol, ctx: &Ctx) -> Option<(Vec<FixedArm>, 
 /// Does `form` mention `sym` anywhere — as a call head or an operand, at any depth?
 /// Conservative on purpose: a function whose body names itself is treated as recursive.
 pub(super) fn form_mentions(heap: &Heap, form: Value, sym: Symbol) -> bool {
-    let mut work = vec![form];
-    while let Some(v) = work.pop() {
-        match v {
-            Value::Sym(s) if s == sym => return true,
-            Value::Pair(_) => {
-                if let Some(items) = list_items(heap, v) {
-                    work.extend(items);
-                }
-            }
-            Value::Vector(id) => work.extend(heap.vector(id).iter().copied()),
-            _ => {}
-        }
-    }
-    false
+    super::super::walk::form_mentions_any(heap, form, &[sym])
 }
 
 /// [`fixed_arms_of`] for a `(fn …)` form: a single-clause fn, or each clause of a

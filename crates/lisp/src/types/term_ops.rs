@@ -755,8 +755,9 @@ fn widen_sig(sig: &Sig, depth: usize) -> Option<Sig> {
     out.ret = sig.ret.widened_below(depth);
     // A guard names exactly the type its truthy result proves; widened, it would prove
     // more than the predicate tests.
-    if out.guard.is_some() && out.ret != sig.ret {
+    if (out.guard.is_some() || out.guard_else.is_some()) && out.ret != sig.ret {
         out.guard = None;
+        out.guard_else = None;
     }
     Some(out)
 }

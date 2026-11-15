@@ -42,6 +42,14 @@ below:
   uses the names and order of its day. `filter` is `seq/filter` and `remove` is `seq/reject`
   (ADR-330), `sort-by`, `take-while`, `drop-last`, `assoc-in`, `update-in` and friends are
   qualified, and the collection comes first. A parameter list is a list everywhere (ADR-512).
+- **Inference read off function types, both ways** (ADR-725, 2026-11-14): a predicate's guard
+  is inferred from its body (`Sig.guard` / `guard_else` — the truthy and falsy sides), and a
+  declared `(is T)` is checked against it; reverse arrows select an overload's arms by the
+  demand on its result; a parameter no argument satisfies is reported at its definition; a
+  `let`-bound test carries what it proves, `(not X)` swaps X's branches, an `if` test proves
+  what its paths agree on; a guard on a field read narrows a name bound from it; `match`
+  clauses are unreachable by type. The If-T narrowing benchmark is a test file
+  (`check/tests/if_t_benchmark.rs`): 13/13 accepts, 11/13 rejects, two silent by design.
 - **Removed since:** the KI-17 unrequired-module lint (2026-10-14, see
   [auto-derived-imports.md](auto-derived-imports.md)). **Fixed since:** KI-165, a `deftype`
   alias is enforced at run time (2026-09-18).

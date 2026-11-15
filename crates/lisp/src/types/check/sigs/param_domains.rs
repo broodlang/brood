@@ -24,6 +24,24 @@ pub(super) struct DomainScope {
     /// budget. The definition scope is kept so a `k` its own body names is the OUTER one, as
     /// `let` binds it — the walk cannot loop.
     pub(super) thunks: HashMap<Symbol, std::rc::Rc<Thunk>>,
+    /// Read every demand a callee places as admitting a `record` too — the empty-domain
+    /// report's reading, where an ability impl not yet loaded may extend a domain
+    /// (`sigs::empty_param_domains`). Off for inference.
+    pub(super) open_records: bool,
+}
+
+impl DomainScope {
+    /// What `callee` demands, as this walk reads it: under [`DomainScope::open_records`], an
+    /// operator whose domain grows with ability impls (`+`'s `numeric`, `<`'s `ordered` —
+    /// `operator_domain`) takes any record too, since an impl another module adds can bring
+    /// one in. A primitive like `string/upper` never takes a record, so its demand stands.
+    fn demand(&self, heap: &Heap, callee: Symbol, t: Ty) -> Ty {
+        if self.open_records && operator_domain(Some(heap), &value::symbol_name(callee)).is_some() {
+            t.union(Ty::of(Tag::Record))
+        } else {
+            t
+        }
+    }
 }
 
 /// A `let`-bound nullary closure the domain walk follows into (see `DomainScope::thunks`).
@@ -86,23 +104,42 @@ fn nullary_fn_body(heap: &Heap, form: Value) -> Option<Vec<Value>> {
 /// *superset* of the true domain, and an argument disjoint from it is disjoint from
 /// the truth: it genuinely errors. Never a false positive.
 pub(super) fn param_domains(heap: &Heap, body: &[Value], params: &[Symbol], ctx: &Ctx) -> Domain {
+    let mut acc = raw_param_domains(heap, body, params, ctx, false);
+    // A parameter whose demands conflict to `never` could never be called
+    // successfully at all. Rather than flag every caller, hand back `any` — the
+    // same conservative retreat the unconditional rule made. The DEFINITION is where
+    // that is reported (`walk::binders::check_def`, through `sigs::empty_param_domains`):
+    // once, at the function that cannot work, not at every call to it.
+    for t in acc.iter_mut() {
+        if t.is_never() {
+            *t = Ty::ANY;
+        }
+    }
+    acc
+}
+
+/// [`param_domains`] before its retreat: a parameter whose demands conflict reads `never`.
+/// The domain over-approximates the values a call can complete with, so `never` here means
+/// no value does — every call that reaches the conflicting uses raises. `open_records` reads
+/// every operator demand as admitting a `record` too (see [`DomainScope::open_records`]) —
+/// what the empty-domain report reads.
+pub(super) fn raw_param_domains(
+    heap: &Heap,
+    body: &[Value],
+    params: &[Symbol],
+    ctx: &Ctx,
+    open_records: bool,
+) -> Domain {
     let scope = DomainScope {
         shadowed: HashSet::new(),
         aliases: HashMap::new(),
         thunks: HashMap::new(),
+        open_records,
     };
     // The body's forms are sequenced: all of them run.
     let mut acc = any_domain(params.len());
     for &form in body {
         acc = meet(acc, domain_of(heap, form, params, &scope, ctx));
-    }
-    // A parameter whose demands conflict to `never` could never be called
-    // successfully at all. Rather than flag every caller, hand back `any` — the
-    // same conservative retreat the unconditional rule made.
-    for t in acc.iter_mut() {
-        if t.is_never() {
-            *t = Ty::ANY;
-        }
     }
     acc
 }
@@ -462,30 +499,149 @@ fn domain_of_inner(
                 if let Some(pos) = param_index(items[2], params, scope)
                     && let Some(p0) = f_sig.param(0)
                 {
-                    acc[pos] = acc[pos].clone().intersect(p0);
+                    acc[pos] = acc[pos].clone().intersect(scope.demand(heap, f, p0));
                 }
                 if let Some(pos) = param_index(coll_arg, params, scope)
                     && let Some(p1) = f_sig.param(1)
                 {
-                    acc[pos] = acc[pos].clone().intersect(seqable_of(p1));
+                    acc[pos] = acc[pos]
+                        .clone()
+                        .intersect(scope.demand(heap, f, seqable_of(p1)));
                 }
             }
         }
     }
     for (i, &arg) in items[1..].iter().enumerate() {
+        // An argument that is itself a call of an OVERLOADED function: what this position
+        // demands of its result selects that function's arms, and only those arms' domains
+        // are left for its arguments (reverse arrows, ADR-725).
+        if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(i))
+            && param_index(arg, params, scope).is_none()
+        {
+            acc = meet(
+                acc,
+                reverse_demand(heap, arg, &expected, params, scope, ctx, 0),
+            );
+        }
         if let Some(pos) = param_index(arg, params, scope) {
             if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(i)) {
-                acc[pos] = acc[pos].clone().intersect(expected);
+                acc[pos] = acc[pos].clone().intersect(scope.demand(heap, h, expected));
             }
             if i == 0
                 && let Some(dom) = op_domain.clone()
             {
-                acc[pos] = acc[pos].clone().intersect(dom);
+                acc[pos] = acc[pos].clone().intersect(scope.demand(heap, h, dom));
             }
         }
         acc = meet(acc, domain_of(heap, arg, params, scope, ctx));
     }
     acc
+}
+
+/// How deep [`reverse_demand`] follows a chain of overloaded calls. Each level is one
+/// nested call written in the source; past this the demand stays as the forward walk left it.
+const MAX_REVERSE_DEPTH: usize = 8;
+
+/// **Reverse arrows** (ADR-725): the demands a call of an OVERLOADED function places on its
+/// arguments when its RESULT must be an `expected`. Only the arms whose result can meet
+/// `expected` can be the one that ran, so each argument must lie in the union of those arms'
+/// domains at its position:
+///
+/// ```lisp
+/// (sig negate (and (int -> int) (float -> float)))
+/// (defn nr (x) (math/rem (negate x) 2))   ; rem wants an int: only the int arm fits, x : int
+/// ```
+///
+/// The forward walk alone reads `x` as `int | float` — the union of every arm — and a
+/// caller passing a float is reported only by call-site specialization, inside one file.
+/// The result of this is part of `nr`'s signature, so every caller sees it.
+///
+/// **Sound** for both readings of an overload. A declared intersection holds every arm at
+/// once, so an argument inside an arm whose result is disjoint from `expected` yields a
+/// value the outer call rejects; an inferred clause set runs the first arm that admits the
+/// argument, and that arm is among those whose domain contains it. Either way a successful
+/// call's argument is in some KEPT arm's domain, so the union over-approximates the truth.
+/// An unknown argument never rules an arm out (nothing here reads argument types), and when
+/// no arm fits, or every arm does, nothing is added: the call check reports the former, and
+/// the latter is what the forward walk already said.
+///
+/// Nested overloaded calls recurse with the narrowed position type as their `expected`.
+fn reverse_demand(
+    heap: &Heap,
+    form: Value,
+    expected: &Ty,
+    params: &[Symbol],
+    scope: &DomainScope,
+    ctx: &Ctx,
+    depth: usize,
+) -> Domain {
+    let n = params.len();
+    if depth >= MAX_REVERSE_DEPTH || expected.is_any() {
+        return any_domain(n);
+    }
+    let Some(items) = list_items(heap, form) else {
+        return any_domain(n);
+    };
+    let Some(&Value::Sym(g)) = items.first() else {
+        return any_domain(n);
+    };
+    if scope.shadowed.contains(&g) || ctx.is_lexical_local(g) {
+        return any_domain(n);
+    }
+    let Some(arms) = overload_arms(heap, g, ctx) else {
+        return any_domain(n);
+    };
+    let argc = items.len() - 1;
+    let fits_arity = |arm: &Sig| {
+        argc >= arm.params.len()
+            && (arm.rest.is_some() || argc <= arm.params.len() + arm.optional.len())
+    };
+    let arity_ok: Vec<&Sig> = arms.iter().filter(|arm| fits_arity(arm)).collect();
+    let kept: Vec<&Sig> = arity_ok
+        .iter()
+        .copied()
+        .filter(|arm| !arm.ret.is_disjoint(expected))
+        .collect();
+    if kept.is_empty() || kept.len() == arity_ok.len() {
+        return any_domain(n);
+    }
+    let mut acc = any_domain(n);
+    for (j, &arg) in items[1..].iter().enumerate() {
+        let Some(position) = kept
+            .iter()
+            .map(|arm| arm.param(j))
+            .collect::<Option<Vec<Ty>>>()
+            .and_then(|tys| tys.into_iter().reduce(Ty::union))
+        else {
+            continue;
+        };
+        match param_index(arg, params, scope) {
+            Some(pos) => acc[pos] = acc[pos].clone().intersect(scope.demand(heap, g, position)),
+            None => {
+                acc = meet(
+                    acc,
+                    reverse_demand(heap, arg, &position, params, scope, ctx, depth + 1),
+                );
+            }
+        }
+    }
+    acc
+}
+
+/// The arms of an overloaded callee — declared (this file's, then a loaded module's), else
+/// inferred from a multi-arm definition (this file's, then a loaded closure's) — the same
+/// order the overload call check reads them in. `None` for a callee with one signature.
+fn overload_arms(heap: &Heap, g: Symbol, ctx: &Ctx) -> Option<Vec<Sig>> {
+    ctx.declared_overload(g)
+        .cloned()
+        .or_else(|| declared_heap_overload(heap, g))
+        .or_else(|| ctx.inferred_overload(g))
+        .or_else(|| {
+            (!ctx.is_file_global(g))
+                .then(|| infer_overload_of(heap, g))
+                .flatten()
+        })
+        .filter(|arms| arms.len() >= 2)
 }
 
 /// `(and a b c…)` / `(or a b c…)` — each operand after the first runs only when the

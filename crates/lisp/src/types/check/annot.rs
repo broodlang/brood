@@ -1211,8 +1211,15 @@ fn guard_ret(heap: &Heap, form: Value) -> Option<Ty> {
     }
 }
 
+/// A declared `(is T)` proves `T` when truthy and `¬T` when falsy — both of the function's
+/// guard arrows (ADR-725).
 fn with_guard(sig: Sig, guard: Option<Ty>) -> Sig {
-    Sig { guard, ..sig }
+    let guard_else = guard.clone().map(Ty::negate);
+    Sig {
+        guard,
+        guard_else,
+        ..sig
+    }
 }
 
 /// Parse a type-expression form into a [`SigTerm`], tracking type-variable

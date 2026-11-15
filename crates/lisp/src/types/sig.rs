@@ -34,7 +34,14 @@ pub struct Sig {
     /// predicate whose truthy result proves its first argument is this type — and whose
     /// falsy result proves it is not — so `(if (datetime? x) …)` narrows both branches
     /// exactly as the built-in `int?`/`string?` guards do. `ret` is `bool` beside it.
+    ///
+    /// Read as the function's arrows (ADR-725): `guard` is what a TRUTHY result proves of
+    /// the first argument, [`Sig::guard_else`] what a FALSY one proves — `T` and `¬T` for a
+    /// declared `(is T)`, `int` and nothing for an inferred `(and (int? x) (pos? x))`.
     pub guard: Option<Ty>,
+    /// What a falsy result proves of the first argument; `None` when it proves nothing.
+    /// A declared `(is T)` sets it to `¬T`; inference sets it from the predicate's body.
+    pub guard_else: Option<Ty>,
 }
 
 impl Sig {
@@ -46,6 +53,7 @@ impl Sig {
             rest: None,
             ret,
             guard: None,
+            guard_else: None,
         }
     }
     /// `() -> ret` — a nullary primitive (a thunk / accessor).
@@ -56,6 +64,7 @@ impl Sig {
             rest: None,
             ret,
             guard: None,
+            guard_else: None,
         }
     }
     /// `(...rest) -> ret` — pure variadic, every argument is `rest`.
@@ -66,6 +75,7 @@ impl Sig {
             rest: Some(rest),
             ret,
             guard: None,
+            guard_else: None,
         }
     }
     /// `params... ...rest -> ret` — fixed leading params then a variadic tail.
@@ -76,6 +86,7 @@ impl Sig {
             rest: Some(rest),
             ret,
             guard: None,
+            guard_else: None,
         }
     }
     /// `params... &optional optional... -> ret` — fixed params then optional
@@ -87,6 +98,7 @@ impl Sig {
             rest: None,
             ret,
             guard: None,
+            guard_else: None,
         }
     }
     /// `params... &optional optional... & rest -> ret` — all three parameter
@@ -99,6 +111,7 @@ impl Sig {
             rest: Some(rest),
             ret,
             guard: None,
+            guard_else: None,
         }
     }
     /// `(...any) -> any` — the catch-all when a primitive's args/result aren't
@@ -107,6 +120,12 @@ impl Sig {
     /// "no useful signature" while still satisfying contract point #6.
     pub fn any() -> Sig {
         Sig::variadic(Ty::ANY, Ty::ANY)
+    }
+    /// The type a guard both proves when truthy and rules out when falsy — the one a
+    /// `(is T)` result declares — or `None` for a one-sided guard or none.
+    pub fn biconditional_guard(&self) -> Option<&Ty> {
+        let then = self.guard.as_ref()?;
+        (self.guard_else.as_ref() == Some(&then.clone().negate())).then_some(then)
     }
     /// The type expected at argument position `i` — fixed params, then
     /// `optional` params, then `rest` for anything beyond. `None` when too
@@ -229,7 +248,7 @@ impl fmt::Display for Sig {
             }
             write!(f, "...{rest}")?;
         }
-        match &self.guard {
+        match self.biconditional_guard() {
             Some(g) => write!(f, ") -> (is {g})"),
             None => write!(f, ") -> {}", self.ret),
         }

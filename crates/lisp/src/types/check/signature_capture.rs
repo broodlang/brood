@@ -177,5 +177,6 @@ fn reconcile_arity(heap: &Heap, value_form: Value, sig: Sig) -> Sig {
         rest,
         ret: sig.ret,
         guard: sig.guard,
+        guard_else: sig.guard_else,
     }
 }

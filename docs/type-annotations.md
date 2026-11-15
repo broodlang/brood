@@ -67,7 +67,9 @@ base   ::= any | never | int | float | number | string | symbol
 literal ::= <keyword> | <int> | <bool> | <string> ; a literal value, e.g. :maximized
 typevar ::= ? <name>                           ; e.g. ?A, ?el — static only
 arrow  ::= ( type* -> type )                   ; fixed arity
-         | ( type* -> (is type) )              ; a type GUARD: truthy ⇒ arg 1 is `type` (ADR-301)
+         | ( type* -> (is type) )              ; a type GUARD: truthy ⇒ arg 1 is `type`, falsy ⇒
+                                               ; it is not (ADR-301) — checked against the body,
+                                               ; and inferred for an undeclared predicate (ADR-725)
          | ( type* & type -> type )            ; fixed leading params + variadic rest
          | ( type* &optional type* -> type )   ; fixed params + optional (ADR-127)
          | ( type* &optional type* & type -> type ) ; + a trailing rest too

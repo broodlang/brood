@@ -518,6 +518,35 @@ pub(super) fn check_fn_seeded(
 /// flag `name` as an unbound *reference* (it's a binder); walk `value` as an
 /// expression. `name` is added to the file-globals accumulator inside
 /// [`check_file`], not here (which checks one form in isolation).
+/// A function no argument can satisfy: a parameter whose uses demand types that do not
+/// meet (`(defn f (x) (+ x 1) (string/upper x))`), so every call raises. Reported at the
+/// definition, once, where inference otherwise retreats to `any` and stays silent until a
+/// caller happens to pass something (`sigs::param_domains`). Sound by construction — the
+/// domain over-approximates the values a call completes with (see `empty_param_domains`).
+fn report_empty_domains(
+    heap: &Heap,
+    def_form: Value,
+    value_form: Value,
+    name: Symbol,
+    ctx: &Ctx,
+    out: &mut Vec<Finding>,
+) {
+    if ctx.is_suppressed(super::super::ctx::SUPPRESS_TYPE_MISMATCH) {
+        return;
+    }
+    for param in super::super::sigs::empty_param_domains(heap, value_form, ctx) {
+        out.push(Finding::new(
+            Lint::TypeMismatch,
+            heap.form_pos_only(value_form).or_else(|| heap.form_pos_only(def_form)),
+            format!(
+                "{}: no argument satisfies every use of `{}` — its uses demand types that do not meet, so every call fails",
+                value::symbol_name_ref(name),
+                value::symbol_name_ref(param)
+            ),
+        ));
+    }
+}
+
 pub(super) fn check_def(
     heap: &Heap,
     form: Value,
@@ -533,6 +562,7 @@ pub(super) fn check_def(
     // expands to. Seed the fn's params with the declared types so the body knows
     // them (and a guard narrowing a param to `never` becomes a dead clause).
     if let Some(&Value::Sym(name)) = items.get(1) {
+        report_empty_domains(heap, form, value_form, name, ctx, out);
         // A `:total` declaration (ADR-351) is checked BY the walk: every `match` failure
         // the body can reach has to be proven covered (`walk.rs`'s throw site), so the
         // body's scope carries the name it is held to.
@@ -572,6 +602,19 @@ pub(super) fn check_def(
             // verification. The function's own `def` was checked just above it.
             if is_contract_shim(heap, &fn_items) {
                 return;
+            }
+            // A declared `(is T)` is checked against what the body's tail proves (ADR-725) —
+            // a guard narrows every caller's branches, so one the body does not honour is a
+            // wrong type at every use (ADR-259: a declaration is checked, not trusted).
+            if let Some(why) =
+                super::super::sigs::declared_guard_contradiction(heap, value_form, &sig, ctx)
+            {
+                out.push(Finding::new(
+                    Lint::Declaration,
+                    heap.form_pos_only(value_form)
+                        .or_else(|| heap.form_pos_only(form)),
+                    format!("{}: {why}", value::symbol_name_ref(name)),
+                ));
             }
             check_fn_seeded(heap, &fn_items, ctx, out, Some(&sig), Some(name), true);
             return;
@@ -952,7 +995,11 @@ pub(super) fn check_if(
             // redefinable global, a call-result, and every macro-generated temp are
             // ruled out at the *binding*, never at the guard site — exactly how the
             // sig-param lint stays false-positive-free without inspecting positions.
-            if let Some((p, known)) = then_ctx.newly_dead_binding(ctx, g.sym) {
+            // An INFERRED guard does not judge (ADR-725): `(refute (my-pred? bad))` tests a
+            // predicate's false answer on purpose (see `Guard::inferred`).
+            if !g.inferred
+                && let Some((p, known)) = then_ctx.newly_dead_binding(ctx, g.sym)
+            {
                 out.push(Finding::new(
                     Lint::UnreachableClause,
                     heap.form_pos_only(form),
@@ -1029,36 +1076,10 @@ pub(super) fn check_if(
         }
         None => (then_ctx, else_ctx),
     };
-    // Layer **chained-guard** narrowing on top: every conjunct of an `and`-test narrows
-    // the then-branch (a truthy `and` proves all of them), every biconditional disjunct of
-    // an `or`-test narrows the else-branch by its complement (a falsy `or` refutes all of
-    // them, each on its own variable), and an `or`-test whose disjuncts are all
-    // biconditional guards over ONE variable narrows the then-branch to their union. All via intersecting `narrow`, so they compose with
-    // the single-guard and path narrowings above. Guards read against the original `ctx`
-    // (for let-alias resolution); the tightening lands on the branch ctxs.
-    let (then_ctx, else_ctx) = {
-        let mut t = then_ctx;
-        let mut e = else_ctx;
-        for g in and_conjunct_guards(heap, test, ctx) {
-            t = t.narrow(g.sym, g.ty);
-        }
-        for g in or_disjunct_guards(heap, test, ctx) {
-            e = e.narrow(g.sym, g.else_type());
-        }
-        if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
-            t = t.narrow(sym, union);
-        }
-        // `(contains? r :k)` selects among a record union's alternatives, as in
-        // `guards::branch_scopes`.
-        if let Some((sym, present, absent)) =
-            crate::types::check::guards::contains_key_narrowing(heap, test, ctx)
-        {
-            t = t.narrow(sym, present);
-            e = e.narrow(sym, absent);
-        }
-        // …and a comparison's intervals, lengths and index bounds (ADR-350).
-        apply_comparison_facts(heap, test, ctx, t, e)
-    };
+    // Layer everything else the test proves — conjuncts, disjuncts, `contains?`, bound
+    // tests, comparisons — exactly as `guards::branch_scopes` does.
+    let (then_ctx, else_ctx) =
+        crate::types::check::guards::layer_compound_facts(heap, test, ctx, then_ctx, else_ctx);
     // A branch whose scope is contradicted by its own test cannot run: its TYPES say
     // nothing, so only its unbound names are reported (see `check_dead_branch`).
     for (branch, branch_ctx) in [(then_form, &then_ctx), (else_form, &else_ctx)] {
@@ -1115,7 +1136,15 @@ pub(in crate::types::check) fn let_bind_scope(
         return bind_pattern(heap, scope, pat, rhs, rhs_ty.as_ref());
     };
     let rhs_guard = guard_assertion(heap, rhs, &scope);
+    // A test of any shape — a conjunction, a disjunction, a negated conjunction, a name
+    // bound to one — is also recorded as everything it proves (ADR-725). Beside a guard
+    // alias too: `(let (z (not y)) …)` is a guard on `y`'s truthiness, and what `y` itself
+    // was bound to prove reaches `z` only this way.
+    let test_facts = crate::types::check::guards::bound_test_facts(heap, rhs, &scope);
     let mut scope = scope.bind(name, rhs_ty.clone());
+    if let Some(facts) = test_facts {
+        scope = scope.add_cond_facts(name, facts);
+    }
     if let Some(sig) = super::super::sigs::let_bound_lambda_sig(heap, rhs, rhs_ty.as_ref(), &scope)
     {
         scope = scope.bind_let_fn_sig(name, sig);
@@ -1124,7 +1153,7 @@ pub(in crate::types::check) fn let_bind_scope(
         && !g.then_only
         && !g.else_only
     {
-        scope = scope.add_guard(name, g.sym, g.ty, g.else_ty, false);
+        scope = scope.add_guard(name, g);
     }
     // A `when`-shaped binding — `(let (src (when k (lookup k))) …)`, which is `(if k E nil)`
     // once expanded — is a guard on `k`: a truthy `src` proves `k` truthy (a falsy `k` makes
@@ -1137,7 +1166,15 @@ pub(in crate::types::check) fn let_bind_scope(
             && value::symbol_is(*head, kw::IF)
             && scope.is_lexical_local(*k)
         {
-            scope = scope.add_guard(name, *k, Ty::truthy(), None, true);
+            let then_only = crate::types::check::guards::Guard {
+                sym: *k,
+                ty: Ty::truthy(),
+                then_only: true,
+                else_only: false,
+                else_ty: None,
+                inferred: false,
+            };
+            scope = scope.add_guard(name, then_only);
         }
     }
     if let Value::Sym(target) = rhs {

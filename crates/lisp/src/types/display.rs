@@ -982,7 +982,12 @@ impl Sig {
             parts.push(rest.to_source()?);
         }
         parts.push("->".to_string());
-        parts.push(self.ret.to_source()?);
+        // A two-sided guard is what a declared `(is T)` reads back as (ADR-301); a one-sided
+        // one has no spelling, so the plain result stands in for it — weaker, still true.
+        match self.biconditional_guard().and_then(Ty::to_source) {
+            Some(guard) => parts.push(format!("(is {guard})")),
+            None => parts.push(self.ret.to_source()?),
+        }
         Some(format!("({})", parts.join(" ")))
     }
 }

@@ -338,7 +338,51 @@ pub(super) fn infer_same_file_functions(
             ctx.add_inferred_fn_sig(name, demands.into_sig(Ty::ANY));
         }
     }
+    settle_guards(heap, &candidates, ctx);
     candidates
+}
+
+/// Bound on [`settle_guards`]: one round per level of a predicate built from predicates.
+const MAX_GUARD_ROUNDS: usize = 4;
+
+/// Re-read each candidate's inferred guard (ADR-725) until none moves. The return fixpoint
+/// above re-records a signature only when its RETURN changes, and a predicate's return is
+/// `bool` from the first round — so `(defn a? (x) (b? x))` above a later `b?` kept the guard
+/// it read while `b?` had none. A guard only ever grows here (a callee's guard appearing),
+/// and the bound cuts a pathological chain at a weaker, still-true guard.
+fn settle_guards(heap: &Heap, candidates: &[(Symbol, Value)], ctx: &mut Ctx) {
+    for _ in 0..MAX_GUARD_ROUNDS {
+        let mut changed = false;
+        for &(name, rhs) in candidates {
+            let Some(current) = ctx.inferred_fn_sig(name) else {
+                continue;
+            };
+            // Only a predicate carries a guard (`ParamDemands::into_sig`): a function whose
+            // return is not a boolean, and has no guard to lose, cannot move.
+            if !sigs::is_predicate_return(&current.ret)
+                && current.guard.is_none()
+                && current.guard_else.is_none()
+            {
+                continue;
+            }
+            let Some(demands) = sigs::infer_params_from_form(heap, rhs, ctx) else {
+                continue;
+            };
+            let next = demands.into_sig(current.ret.clone());
+            if (next.guard.as_ref(), next.guard_else.as_ref())
+                != (current.guard.as_ref(), current.guard_else.as_ref())
+            {
+                let mut sig = current;
+                sig.guard = next.guard;
+                sig.guard_else = next.guard_else;
+                ctx.add_inferred_fn_sig(name, sig);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// One step of a return's ascent (ADR-349/350), shared by both return fixpoints: an

@@ -280,6 +280,7 @@ fn analyze_match(
         {
             check_coverage(heap, &items[2..], &ids, heap.form_pos_only(form), out);
         }
+        check_redundant_shapes(heap, &items[2..], out);
         walk(heap, scrutinee, ctx, namespace, out);
         for &clause in &items[2..] {
             if let Some(clause_items) = list_items(heap, clause) {
@@ -297,6 +298,149 @@ fn analyze_match(
                 }
             }
         }
+    }
+}
+
+/// **Type-based clause redundancy** (ADR-725): a clause whose pattern admits only values an
+/// earlier, unguarded clause already took can never run — `((:ok _) …)` after `((:ok _) …)`,
+/// `([:ok 5] …)` after `([:ok _] …)`. Each clause's pattern is read as the exact set of
+/// values it matches ([`exact_pattern_ty`]); a clause is redundant when its set is inside
+/// the union of the sets before it.
+///
+/// **Sound**, because both sides are exact or the clause is left alone: a pattern with no
+/// exact type (a pin, a map, a record, a rest tail, a repeated binder, a float) neither is
+/// judged nor counts as coverage, and a `:when` clause never counts (it takes its values
+/// only when the guard holds — the "surely accepted" half). The union is used only while it
+/// stays exact — at most [`MAX_EXACT_UNION`] terms, below the lattice's widening cap;
+/// past that a clause is judged against each earlier clause on its own. A bare literal is
+/// the structural duplicate lint's, and a clause after a catch-all is the match compiler's
+/// compile error, so neither is reported twice.
+fn check_redundant_shapes(heap: &Heap, clauses: &[Value], out: &mut Vec<Finding>) {
+    let mut earlier: Vec<Ty> = Vec::new();
+    for &clause in clauses {
+        let Some(clause_items) = list_items(heap, clause) else {
+            return;
+        };
+        let Some(&pattern) = clause_items.first() else {
+            return;
+        };
+        let guarded = matches!(clause_items.get(1),
+            Some(&Value::Keyword(k)) if value::symbol_is(k, "when"));
+        let exact = exact_pattern_ty(heap, pattern, &mut std::collections::HashSet::new());
+        if exact.as_ref().is_some_and(Ty::is_any) && !guarded {
+            return; // a catch-all: the compiler rejects whatever follows it
+        }
+        let structural = matches!(
+            pattern,
+            Value::Keyword(_) | Value::Int(_) | Value::Str(_) | Value::Bool(_) | Value::Nil
+        );
+        if let Some(ty) = &exact
+            && !structural
+            && !earlier.is_empty()
+            && covered_by(ty, &earlier)
+        {
+            out.push(Finding::new(
+                Lint::UnreachableClause,
+                heap.form_pos_only(clause),
+                format!(
+                    "unreachable clause: {} — every value it matches is matched by an earlier clause",
+                    crate::syntax::printer::print(heap, pattern)
+                ),
+            ));
+        }
+        if !guarded && let Some(ty) = exact {
+            earlier.push(ty);
+        }
+    }
+}
+
+/// The most terms [`covered_by`] unions before it stops trusting the union to be exact. The
+/// lattice keeps four alternatives before its widening merge (`union_of_terms.rs`).
+const MAX_EXACT_UNION: usize = 4;
+
+/// Whether `ty` lies inside the union of `earlier` — read through the union only while it is
+/// exact (see [`check_redundant_shapes`]), else against each earlier type alone.
+fn covered_by(ty: &Ty, earlier: &[Ty]) -> bool {
+    let terms: usize = earlier.iter().map(|t| t.terms_vec().len()).sum();
+    if terms <= MAX_EXACT_UNION {
+        let union = earlier
+            .iter()
+            .cloned()
+            .reduce(Ty::union)
+            .unwrap_or(Ty::NEVER);
+        return ty.is_subtype(&union);
+    }
+    earlier.iter().any(|t| ty.is_subtype(t))
+}
+
+/// The EXACT set of values a `match` pattern admits, or `None` when the lattice cannot say it
+/// exactly (std/prelude/match.blsp's grammar): `_` and a first-seen binder admit anything; a
+/// keyword, int, string, bool or `nil` literal its singleton; `(p…)` a list of exactly those
+/// elements; `[p…]` a vector of exactly those; `(or p…)` the union, when its alternatives bind
+/// nothing. A repeated binder is an equality constraint between positions — not a product of
+/// sets — so it makes the pattern inexact, as does every other form.
+fn exact_pattern_ty(
+    heap: &Heap,
+    pattern: Value,
+    seen: &mut std::collections::HashSet<value::Symbol>,
+) -> Option<Ty> {
+    match pattern {
+        Value::Sym(s) if value::symbol_is(s, "_") => Some(Ty::ANY),
+        Value::Sym(s) if value::symbol_is(s, "&") || value::symbol_is(s, "&optional") => None,
+        Value::Sym(s) => seen.insert(s).then_some(Ty::ANY),
+        Value::Keyword(_) | Value::Int(_) | Value::Bool(_) | Value::Nil => {
+            Some(Ty::of_value(pattern))
+        }
+        Value::Str(id) => Some(Ty::str_lit(heap.string(id))),
+        Value::Vector(id) => {
+            let elems = heap.vector(id).to_vec();
+            if elems.is_empty() {
+                return None;
+            }
+            let tys = elems
+                .into_iter()
+                .map(|e| exact_pattern_ty(heap, e, seen))
+                .collect::<Option<Vec<Ty>>>()?;
+            Some(Ty::tuple_of(tys))
+        }
+        Value::Pair(_) => {
+            let items = list_items(heap, pattern)?;
+            if let Some(&Value::Sym(head)) = items.first() {
+                let name = value::symbol_name_ref(head);
+                if name == "or" {
+                    // Alternatives that bind nothing — literals and wildcards — union exactly,
+                    // while the union stays below the lattice's widening cap: past it, two
+                    // alternatives merge position-wise (`[:d 4] ∪ [:e 5]` → `[(:d|:e) (4|5)]`),
+                    // which admits values the pattern does not match.
+                    let mut alts = Vec::new();
+                    for &alt in &items[1..] {
+                        let mut alt_seen = std::collections::HashSet::new();
+                        let ty = exact_pattern_ty(heap, alt, &mut alt_seen)?;
+                        if !alt_seen.is_empty() {
+                            return None;
+                        }
+                        alts.push(ty);
+                    }
+                    let terms: usize = alts.iter().map(|t| t.terms_vec().len()).sum();
+                    if terms > MAX_EXACT_UNION {
+                        return None;
+                    }
+                    return alts.into_iter().reduce(Ty::union);
+                }
+                if matches!(
+                    name,
+                    "quote" | "%pin" | "record" | "and" | "not" | "unquote" | "bytes"
+                ) {
+                    return None;
+                }
+            }
+            let tys = items
+                .into_iter()
+                .map(|e| exact_pattern_ty(heap, e, seen))
+                .collect::<Option<Vec<Ty>>>()?;
+            Some(Ty::list_shape_of(tys))
+        }
+        _ => None,
     }
 }
 

@@ -702,6 +702,7 @@ pub(super) fn infer_overload_from_clauses(
                 shadowed: HashSet::new(),
                 aliases: HashMap::new(),
                 thunks: HashMap::new(),
+                open_records: false,
             };
             let (then_slice, _) = guard_slices(heap, g, &names, &scope, ctx);
             param_tys = meet(param_tys, then_slice);
@@ -909,14 +910,10 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
         Some(_) => rest_element_demand(&param_tys.pop()?),
         None => None,
     };
-    let demands = ParamDemands {
-        params: param_tys,
-        optional: Vec::new(),
-        rest,
-    };
-
     // The return: read the body tail's type under the parameter demands.
     let tail = *arm.body.last()?;
+    let mut demands = ParamDemands::without_guard(param_tys, Vec::new(), rest);
+    demands.guard = inferred_guard(heap, tail, &params, &Ctx::default());
     // Mark the ctx as inferring `self_name`, so a self-recursive call in a branch result is
     // skipped in the return union (see `infer::branch_union`) — this is what lets a
     // tail-recursive function's return infer from its base cases instead of deferring.
@@ -1049,11 +1046,7 @@ pub(super) fn infer_return_from_form(
         }
     } else {
         let plist = *items.get(1)?;
-        let body_start = match (items.get(2), items.get(3)) {
-            (Some(Value::Str(_)), Some(_)) => 3,
-            _ => 2,
-        };
-        let tail = *items.get(body_start..).and_then(|b| b.last())?;
+        let tail = *single_clause_body(&items).last()?;
         arms.push((super::walk::fn_params(heap, plist), tail));
     }
     if arms.is_empty() {
@@ -1125,6 +1118,10 @@ pub(super) fn infer_return_from_form(
 /// `(numeric numeric & numeric -> …)`.
 pub(super) struct ParamDemands {
     pub params: Vec<Ty>,
+    /// What a truthy / falsy result proves of the first parameter — the predicate's guard
+    /// arrows, inferred from its body's tail ([`inferred_guard`]). Kept only when the
+    /// result is a `bool` (see [`ParamDemands::into_sig`]).
+    pub guard: (Option<Ty>, Option<Ty>),
     /// The `&optional` positions' demands — each already widened by its DEFAULT's type,
     /// since an omitted argument binds the default and the body runs over it all the same.
     pub optional: Vec<Ty>,
@@ -1134,12 +1131,68 @@ pub(super) struct ParamDemands {
 impl ParamDemands {
     /// The `Sig` these demands make with return `ret`.
     pub fn into_sig(self, ret: Ty) -> Sig {
+        // A guard describes a PREDICATE: only a function answering `bool` carries one, so a
+        // value-returning function (`(defn name (m) (get m :name))`, truthy when the key is
+        // there) keeps reading as the value it returns.
+        let predicate = is_predicate_return(&ret);
         let mut sig = match self.rest {
             Some(rest) => Sig::with_rest(self.params, rest, ret),
             None => Sig::new(self.params, ret),
         };
         sig.optional = self.optional;
+        if predicate {
+            (sig.guard, sig.guard_else) = self.guard;
+        }
         sig
+    }
+}
+
+/// Whether a function returning `ret` is a PREDICATE — the only kind that carries a guard.
+pub(super) fn is_predicate_return(ret: &Ty) -> bool {
+    !ret.is_never() && ret.is_subtype(&Ty::of(Tag::Bool))
+}
+
+/// What a function's result proves about its FIRST parameter, read off the body's tail
+/// (ADR-725): the tail IS the result, so a truthy result is the tail's then-branch and a
+/// falsy one its else-branch — [`super::guards::branch_scopes`], the same construction an
+/// `(if tail …)` narrows by. `(defn str-ish? (x) (string? x))` proves `string` / `¬string`;
+/// `(and (int? x) (pos? x))` proves `int` and nothing when false; `(or (int? x) (string?
+/// x))` proves `int | string` / `¬int ∩ ¬string`. Composes: a predicate calling a predicate
+/// reads the callee's guard through `predicate_guard_ty`.
+///
+/// The parameters are bound to `any`, not to their domains, so the guard states what the
+/// TEST proves and nothing the rest of the body demands — exactly the `(is T)` reading a
+/// declaration has. `(None, None)` when the tail proves nothing about the parameter.
+pub(super) fn inferred_guard(
+    heap: &Heap,
+    tail: Value,
+    params: &[Symbol],
+    ctx: &Ctx,
+) -> (Option<Ty>, Option<Ty>) {
+    let Some(&first) = params.first() else {
+        return (None, None);
+    };
+    let mut scope = ctx.clone();
+    for &p in params {
+        scope = scope.bind(p, Some(Ty::ANY));
+    }
+    let (then_ctx, else_ctx) = super::guards::branch_scopes(heap, tail, &scope);
+    let informative = |t: Option<Ty>| t.filter(|t| !t.is_any());
+    (
+        informative(then_ctx.get(first)),
+        informative(else_ctx.get(first)),
+    )
+}
+
+impl ParamDemands {
+    /// No guard: the demands alone.
+    fn without_guard(params: Vec<Ty>, optional: Vec<Ty>, rest: Option<Ty>) -> ParamDemands {
+        ParamDemands {
+            params,
+            optional,
+            rest,
+            guard: (None, None),
+        }
     }
 }
 
@@ -1236,11 +1289,7 @@ pub(super) fn infer_params_from_form(
     if params.is_empty() {
         return None;
     }
-    let body_start = match (items.get(2), items.get(3)) {
-        (Some(Value::Str(_)), Some(_)) => 3, // skip a leading docstring
-        _ => 2,
-    };
-    let body: Vec<Value> = items.get(body_start..)?.to_vec();
+    let body: Vec<Value> = single_clause_body(&items).to_vec();
     if body.is_empty() {
         return None;
     }
@@ -1267,11 +1316,147 @@ pub(super) fn infer_params_from_form(
             domain.union(default_ty)
         })
         .collect();
-    Some(ParamDemands {
-        params: demands,
-        optional,
-        rest,
-    })
+    let mut out = ParamDemands::without_guard(demands, optional, rest);
+    // The guard is on the FIRST ARGUMENT, so the first binder must be that argument's own
+    // name — not a rest list (`(& xs)`), an `&optional` marker, or a destructuring pattern.
+    let first_is_positional = matches!(raw.first(), Some(&Value::Sym(s))
+        if params.first() == Some(&s)
+            && !value::symbol_is(s, kw::AMP)
+            && !value::symbol_is(s, kw::AMP_REST)
+            && !value::symbol_is(s, kw::AMP_OPTIONAL));
+    if first_is_positional && let Some(&tail) = body.last() {
+        out.guard = inferred_guard(heap, tail, &params, ctx);
+    }
+    Some(out)
+}
+
+/// A declared type guard (`(is T)`, ADR-301) the body contradicts (ADR-725): the body's own
+/// tail proves an EXACT two-sided guard `U` / `¬U` on the first parameter
+/// ([`inferred_guard`]), and within the declared domain `D` the two disagree — the body
+/// answers true for a value outside `T` (`U ∩ D ⊄ T`) or false for one inside it (`T ∩ D ⊄
+/// U`). `(sig f (any -> (is string))) (defn f (x) (or (string? x) (number? x)))` answers
+/// true for a number. Only an exact (two-sided) inferred guard is compared: a one-sided one
+/// says only what a result implies, never which values produce it. `None` when they agree,
+/// or there is nothing to compare.
+pub(super) fn declared_guard_contradiction(
+    heap: &Heap,
+    fn_form: Value,
+    declared: &Sig,
+    ctx: &Ctx,
+) -> Option<String> {
+    let declared_then = declared.biconditional_guard()?.clone();
+    // Only a body that IS its tail: an earlier form may raise for some of the values the
+    // tail's guard admits (`(when (not (int? x)) (error …)) (number? x)` is an honest `(is
+    // int)`), and the comparison reads the tail alone.
+    if fn_body_len(heap, fn_form) != Some(1) {
+        return None;
+    }
+    let demands = infer_params_from_form(heap, fn_form, ctx)?;
+    let (Some(then), Some(els)) = demands.guard else {
+        return None;
+    };
+    let complement = then.clone().negate();
+    if !(els.is_subtype(&complement) && complement.is_subtype(&els)) {
+        return None; // one-sided: no claim about which values answer what
+    }
+    let domain = declared.params.first().cloned().unwrap_or(Ty::ANY);
+    let true_for = then.clone().intersect(domain.clone());
+    if !true_for.is_subtype(&declared_then) {
+        let extra = true_for.difference(declared_then.clone());
+        return Some(format!(
+            "declared (is {declared_then}), but the body answers true for {extra} too"
+        ));
+    }
+    let declared_in = declared_then.clone().intersect(domain);
+    if !declared_in.is_subtype(&then) {
+        let missed = declared_in.difference(then);
+        return Some(format!(
+            "declared (is {declared_then}), but the body answers false for {missed}"
+        ));
+    }
+    None
+}
+
+/// The number of body forms of a single-arity `(fn (params) [doc] body…)` form.
+fn fn_body_len(heap: &Heap, fn_form: Value) -> Option<usize> {
+    let items = super::walk::list_items(heap, fn_form)?;
+    if crate::eval::macros::fn_is_arity_multi_clause(heap, &items) {
+        return None;
+    }
+    Some(single_clause_body(&items).len())
+}
+
+/// The body forms of a single-clause `(fn params body…)` form's items, past a leading
+/// docstring (a string followed by more forms; a lone string is the body).
+fn single_clause_body(items: &[Value]) -> &[Value] {
+    let start = match (items.get(2), items.get(3)) {
+        (Some(Value::Str(_)), Some(_)) => 3,
+        _ => 2,
+    };
+    items.get(start..).unwrap_or_default()
+}
+
+/// The REQUIRED parameters of a single-arity `(fn (params) body…)` form that no value can
+/// satisfy: their uses demand types that do not meet, so every call that runs them raises.
+/// `(fn (x) (+ x 1) (string/upper x))` answers `[x]`. Empty for a multi-arity form, a
+/// destructuring head, or a body that constrains nothing to `never`.
+///
+/// Read from [`raw_param_domains`] with records open, which over-approximates the values a call can complete
+/// with — and reads every demand as admitting a `record` too, since an ability impl another
+/// module adds can bring any record into a domain like `+`'s (`numeric`). So an empty domain
+/// is empty whatever impls exist — the report cannot be a false positive. An
+/// `&optional` or rest binder is left out: its domain is widened by its default, or
+/// describes a list, and the plain demand reading does not apply.
+pub(super) fn empty_param_domains(heap: &Heap, fn_form: Value, ctx: &Ctx) -> Vec<Symbol> {
+    let Some(items) = super::walk::list_items(heap, fn_form) else {
+        return Vec::new();
+    };
+    if !matches!(items.first(), Some(&Value::Sym(s)) if super::walk::is_fn_head(s))
+        || crate::eval::macros::fn_is_arity_multi_clause(heap, &items)
+    {
+        return Vec::new();
+    }
+    let Some(&plist) = items.get(1) else {
+        return Vec::new();
+    };
+    let raw = match plist {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        _ => super::walk::list_items(heap, plist).unwrap_or_default(),
+    };
+    // Only plain symbols before any `&optional`/`&` marker: a pattern head binds names the
+    // demand walk does not see as the position's own.
+    let mut required = Vec::new();
+    for item in raw {
+        match item {
+            Value::Sym(s)
+                if value::symbol_is(s, kw::AMP_OPTIONAL)
+                    || value::symbol_is(s, kw::AMP)
+                    || value::symbol_is(s, kw::AMP_REST) =>
+            {
+                break;
+            }
+            Value::Sym(s) => required.push(s),
+            _ => return Vec::new(),
+        }
+    }
+    let params = super::walk::fn_params(heap, plist);
+    if required.is_empty()
+        || params.len() < required.len()
+        || params[..required.len()] != required[..]
+    {
+        return Vec::new();
+    }
+    let body = single_clause_body(&items);
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let domains = raw_param_domains(heap, body, &params, ctx, true);
+    required
+        .iter()
+        .zip(&domains)
+        .filter(|(name, ty)| ty.is_never() && value::symbol_name_ref(**name) != "_")
+        .map(|(&name, _)| name)
+        .collect()
 }
 
 /// The [`SigWithVars`] a loaded module declared for `sym`, when its declaration carries

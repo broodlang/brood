@@ -27,6 +27,8 @@ use std::sync::Arc;
 use crate::core::value::{Arity, Symbol, Tag, Value};
 use crate::types::{Sig, Ty};
 
+use super::guards::Guard;
+
 // ---- Type-variable representation for user-declared sigs --------------------
 
 /// A type-expression term that may contain type variables (`?A`, `?B`…).
@@ -592,6 +594,31 @@ struct FileFacts {
     bound_guarded: Arc<HashSet<Symbol>>,
 }
 
+/// What a `let`-bound test proves when its name is truthy (`then`) and when it is falsy
+/// (`else_`): each a list of `(variable, type)` narrowings. See [`Ctx::cond_facts`].
+#[derive(Clone, Default, Debug)]
+pub(super) struct CondFacts {
+    pub(super) then: Vec<(Symbol, Ty)>,
+    pub(super) else_: Vec<(Symbol, Ty)>,
+}
+
+impl CondFacts {
+    pub(super) fn is_empty(&self) -> bool {
+        self.then.is_empty() && self.else_.is_empty()
+    }
+
+    /// These facts with every one about `sym` dropped.
+    fn without(&self, sym: Symbol) -> CondFacts {
+        let kept = |list: &[(Symbol, Ty)]| -> Vec<(Symbol, Ty)> {
+            list.iter().filter(|(t, _)| *t != sym).cloned().collect()
+        };
+        CondFacts {
+            then: kept(&self.then),
+            else_: kept(&self.else_),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) struct Ctx {
     /// See [`CtxId`].
@@ -629,11 +656,17 @@ pub(super) struct Ctx {
     /// change between the guard and a use, so the assertion holds. Consulted by
     /// `guards::expr_ty`'s path lookup; empty in the common (no-guard) case.
     path_types: HashMap<(Symbol, Vec<PathKey>), Ty>,
-    /// `bound-name → (variable, type-it-asserts, what-a-falsy-result-proves, then-only)`: a
-    /// `let`-stored guard result. `then_only` marks a `when`-shaped binding — `(let (s (if k
-    /// E nil)) …)` — whose truthy value proves `k` truthy and whose falsy value proves
-    /// nothing (`E` may be nil).
-    guards: HashMap<Symbol, (Symbol, Ty, Option<Ty>, bool)>,
+    /// `bound-name → the guard its value states`: a `let`-stored guard result, biconditional
+    /// — or `then_only` for a `when`-shaped binding, `(let (s (if k E nil)) …)`, whose truthy
+    /// value proves `k` truthy and whose falsy value proves nothing (`E` may be nil).
+    guards: HashMap<Symbol, Guard>,
+    /// **Test results bound to a name** (ADR-725): `name → what a truthy / falsy `name`
+    /// proves`, for a `let` whose right-hand side is a test of any shape — `(let (ok (and
+    /// (string? x) (int? w))) (if ok …))` narrows `x` and `w` in the then-branch, where a
+    /// single-variable [`Ctx::guard`] alias cannot say it. Read off the test's own branch
+    /// scopes when the binding is made; sound under immutability, as the guard aliases are,
+    /// and dropped for a target the moment it is rebound.
+    cond_facts: HashMap<Symbol, Arc<CondFacts>>,
     /// **Count aliases** (ADR-350): `n → xs` for a `(let (n (count xs)) …)`, so a guard on
     /// `n` — `(>= n 4)`, `(< i n)` — is a fact about `xs`'s length and about `i` as an
     /// index of `xs`. Sound under immutability: `xs` never changes, so `n` is its count
@@ -746,7 +779,7 @@ impl Ctx {
         self.types.get(&sym).cloned()
     }
     /// The guard (variable + asserted type) `sym` was bound to, if any.
-    pub(super) fn guard(&self, sym: Symbol) -> Option<(Symbol, Ty, Option<Ty>, bool)> {
+    pub(super) fn guard(&self, sym: Symbol) -> Option<Guard> {
         self.guards.get(&sym).cloned()
     }
     /// Is `sym` in scope here? — a local binder (fn-param or let), a recorded
@@ -978,6 +1011,19 @@ impl Ctx {
                 c.types.insert(base, retained);
             }
         }
+        // A name BOUND to this very path — `foo` in `(let (foo (get m :foo)) (if (int? (get
+        // m :foo)) … foo …))` — is the same value (immutability), so it narrows with the
+        // path (ADR-725). The other direction — a guard on `foo` narrowing the path — is
+        // `narrow`'s path-alias step.
+        let bound_here: Vec<Symbol> = c
+            .path_aliases
+            .iter()
+            .filter(|(_, (b, ks))| *b == base && *ks == keys)
+            .map(|(alias, _)| *alias)
+            .collect();
+        for alias in bound_here {
+            c.narrow_chain(alias, known.clone());
+        }
         c.path_types.insert((base, keys), known);
         c
     }
@@ -1040,8 +1086,21 @@ impl Ctx {
         // keyed by `sym` is stale, and so is one whose TARGET is `sym` — under
         // `(let (ok (int? x)) (let (x "s") (if ok …)))` the `ok` says nothing about the
         // new `x` (narrowing it would read a live branch as dead).
-        c.guards
-            .retain(|name, (target, ..)| *name != sym && *target != sym);
+        c.guards.retain(|name, g| *name != sym && g.sym != sym);
+        // …and the same for a bound test's facts: the name's own, and every fact about the
+        // rebound variable.
+        c.cond_facts.remove(&sym);
+        if c.cond_facts.values().any(|f| {
+            f.then
+                .iter()
+                .chain(&f.else_)
+                .any(|(target, _)| *target == sym)
+        }) {
+            for facts in c.cond_facts.values_mut() {
+                *facts = Arc::new(facts.without(sym));
+            }
+            c.cond_facts.retain(|_, f| !f.is_empty());
+        }
         c.count_aliases.retain(|n, xs| *n != sym && *xs != sym);
         c.index_bounds.remove(&sym);
         for bounded in c.index_bounds.values_mut() {
@@ -1075,24 +1134,48 @@ impl Ctx {
         }
         c
     }
-    /// Record that `sym` was let-bound to the result of testing `target` for
-    /// `ty` — so a later `(if sym then else)` narrows `target` accordingly.
-    /// Self-aliasing (`(let (x (int? x)) …)` would shadow the outer `x` the
-    /// guard means to narrow) is rejected.
-    pub(super) fn add_guard(
-        &self,
-        sym: Symbol,
-        target: Symbol,
-        ty: Ty,
-        else_ty: Option<Ty>,
-        then_only: bool,
-    ) -> Ctx {
-        if sym == target {
+    /// Record that `sym` was let-bound to the result of the test `guard` reads — so a later
+    /// `(if sym then else)` narrows its variable accordingly. Self-aliasing (`(let (x (int?
+    /// x)) …)` would shadow the outer `x` the guard means to narrow) is rejected.
+    pub(super) fn add_guard(&self, sym: Symbol, guard: Guard) -> Ctx {
+        if sym == guard.sym {
             return self.clone();
         }
         let mut c = self.clone();
-        c.guards.insert(sym, (target, ty, else_ty, then_only));
+        c.guards.insert(sym, guard);
         c
+    }
+    /// Record what the test `sym` was let-bound to proves (see [`Ctx::cond_facts`]). A fact
+    /// about `sym` itself is dropped: `(let (x (and (int? x) …)) …)` names a new `x`.
+    pub(super) fn add_cond_facts(&self, sym: Symbol, facts: CondFacts) -> Ctx {
+        let facts = facts.without(sym);
+        if facts.is_empty() {
+            return self.clone();
+        }
+        let mut c = self.clone();
+        c.cond_facts.insert(sym, Arc::new(facts));
+        c
+    }
+    /// The facts a `let`-bound test named `sym` carries, if any.
+    pub(super) fn cond_facts(&self, sym: Symbol) -> Option<Arc<CondFacts>> {
+        self.cond_facts.get(&sym).cloned()
+    }
+    /// Whether any `let`-bound test's facts are in scope — the common case is none.
+    pub(super) fn has_cond_facts(&self) -> bool {
+        !self.cond_facts.is_empty()
+    }
+    /// The variables whose type `self` narrows below `base`'s, with the narrowed type — what
+    /// a branch scope learned over the scope it was built from. In name order, so two runs
+    /// record the same facts.
+    pub(super) fn narrowed_since(&self, base: &Ctx) -> Vec<(Symbol, Ty)> {
+        let mut out: Vec<(Symbol, Ty)> = self
+            .types
+            .iter()
+            .filter(|(sym, ty)| base.types.get(sym) != Some(ty))
+            .map(|(sym, ty)| (*sym, ty.clone()))
+            .collect();
+        out.sort_by_cached_key(|(sym, _)| crate::core::value::symbol_name(*sym));
+        out
     }
     /// Record `(let (n (count xs)) …)`: `n` is the length of `xs` for the scope.
     pub(super) fn add_count_alias(&self, n: Symbol, xs: Symbol) -> Ctx {

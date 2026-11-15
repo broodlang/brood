@@ -1694,3 +1694,28 @@ reference at root does: the same example's call spelled `vcsproc/…` worked. `%
 roots at root now. bedit's example was also qualified (`de751fd`), which a project's doctest
 needs either way since a docstring is evaluated outside its module. Guard: `nest eval` in a
 project, red with the rooting removed.
+
+2026-11-14 (ADR-725). **Inference read off function types, both ways.** Read Elixir's type
+series (to v1.21's "inference, narrowing and reverse arrows") against the checker; probed
+fifteen shapes and closed every gap the probe named. A user predicate is now an inferred type
+guard — `Sig` gained `guard_else`, so a predicate states what a truthy and what a falsy result
+prove (`(and (int? x) (pos? x))`: `int` and nothing), read off its body tail's branch scopes,
+settled after the return fixpoint so a predicate built on a later one narrows; a declared
+`(is T)` is checked against it. Reverse arrows in the domain walk: `(math/rem (negate x) 2)`
+over `(and (int -> int) (float -> float))` types `x : int` — part of the signature, so a caller
+in another module sees it. A parameter whose uses conflict is reported at the definition. A
+`let`-bound test of any shape carries its facts (`Ctx::cond_facts`), `(not X)` swaps X's
+branches, and an `if` used as a test proves what both paths agree on. A guard on `(get m :k)`
+narrows a name bound from it; a false `contains?` over a known map reads `nil`; `(= (count x)
+n)` false drops the length-`n` alternatives. `match` clauses are unreachable by type, not only
+by duplicate literal. The If-T narrowing benchmark is ported (`check/tests/if_t_benchmark.rs`):
+13/13 accepts silent, 11/13 rejects reported (two strict-only), two silent by the gradual
+reading of an unannotated value (pinned). One design choice made in the run: the never-true lint
+judges stated guards only, after two `refute` tests read as dead code. An independent review of
+the diff found five false positives (an `or` over a one-sided guard, an `or` pattern past the
+widening cap, `refute` through an alias, downstream `Num` impls, a raising first form) plus one
+pre-existing (a hand-written chain's binder); all fixed and pinned. A before/after `nest check`
+of twelve downstream projects surfaced a pre-existing index false positive the sharper
+narrowing exposed twice (`(nth xs (- n 2))` under `(>= n 3)`), fixed in the `nth` rule.
+Nineteen sabotages, each red. `nest check` over `std/` + `tests/` + `examples/` zero in both
+modes, no slower.

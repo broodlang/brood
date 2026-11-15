@@ -486,6 +486,17 @@ never a false positive.
 - ✅ **`defmulti` that is single dispatch** (ADR-523). A `defmulti` this file declares
   whose methods all agree past the first position is single dispatch without an ability's
   provided ops, so it is reported. `(check-allow :single-dispatch …)` opts out.
+- ✅ **Narrowing read off function types** (ADR-725). A predicate's guard is INFERRED from
+  its body's tail — what a truthy and a falsy result prove of the first argument
+  (`Sig.guard` / `Sig.guard_else`), so `(defn str-ish? (x) (string? x))` narrows like
+  `string?` and `(and (int? x) (pos? x))` narrows only its true branch; a declared `(is T)`
+  is checked against the body. **Reverse arrows**: a demand on an overloaded call's result
+  keeps only the arms that can meet it, so their domains type its arguments. A test bound by
+  `let` narrows wherever its name is tested; `(not X)` is X's branches swapped; an `if` used
+  as a test proves what both paths agree on; a guard on `(get m :k)` narrows a name bound from
+  it. A parameter whose uses conflict is reported at the definition, and a `match` clause an
+  earlier unguarded one covers is unreachable by type. The If-T narrowing benchmark is
+  `check/tests/if_t_benchmark.rs`.
 - ✅ **List truthiness** (ADR-620, `check_if`). A truthiness test whose type admits an
   empty list (`pair` and `nil`) and a vector, map, set or string answers by kind when the
   value is empty, so it is reported. `(check-allow :list-truthiness …)` opts out.

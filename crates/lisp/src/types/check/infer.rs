@@ -1682,7 +1682,18 @@ fn positional_read_ty(heap: &Heap, head: &str, items: &[Value], ctx: &Ctx) -> Op
                         };
                         let bounded_by_interval =
                             index.and_then(|r| r.hi).is_some_and(|hi| at_least(hi + 1));
-                        non_negative && (bounded_by_guard || bounded_by_interval)
+                        // …or the index is the collection's own count less a positive step —
+                        // `(nth xs (- n 2))` with `n` bound to `(count xs)`, or `(- (count xs)
+                        // 1)`, `(dec n)` — below the count by construction, so only the
+                        // interval's lower end (`n ≥ 2` there) is left to prove (ADR-725).
+                        let bounded_by_count = match arg {
+                            Value::Sym(collection) => {
+                                count_less_step(heap, index_form, collection, ctx)
+                            }
+                            _ => false,
+                        };
+                        non_negative
+                            && (bounded_by_guard || bounded_by_interval || bounded_by_count)
                     }
                 }
             }
@@ -1693,6 +1704,34 @@ fn positional_read_ty(heap: &Heap, head: &str, items: &[Value], ctx: &Ctx) -> Op
     } else {
         elem.union(nth_default().unwrap_or(Ty::of(Tag::Nil)))
     })
+}
+
+/// Whether `index` is `(- n k)` / `(dec n)` with `k ≥ 1`, where `n` is `(count collection)`
+/// — written in place, or a local a `let` bound to it (a count alias, ADR-350). Such an index
+/// is strictly below the collection's count: both are immutable, so the count `n` names is
+/// the count `nth` reads against.
+fn count_less_step(heap: &Heap, index: Value, collection: Symbol, ctx: &Ctx) -> bool {
+    let Some(items) = list_items(heap, index) else {
+        return false;
+    };
+    let Some(&Value::Sym(head)) = items.first() else {
+        return false;
+    };
+    if ctx.is_lexical_local(head) {
+        return false; // a local shadowing `-`/`dec` is not this form
+    }
+    let counted = match items[1..] {
+        [n] if value::symbol_is(head, "dec") => n,
+        [n, Value::Int(k)] if value::symbol_is(head, "-") && k >= 1 => n,
+        _ => return false,
+    };
+    match counted {
+        Value::Sym(n) => ctx.count_alias(n) == Some(collection),
+        form => list_items(heap, form).is_some_and(|parts| {
+            matches!(parts.as_slice(), [Value::Sym(c), Value::Sym(xs)]
+                if value::symbol_is(*c, "count") && !ctx.is_lexical_local(*c) && *xs == collection)
+        }),
+    }
 }
 
 /// `(seq/filter coll pred)` keeps `coll`'s element type — `nil | list<A>` (ADR-078) —

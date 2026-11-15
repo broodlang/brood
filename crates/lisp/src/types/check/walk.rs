@@ -8,8 +8,7 @@
 
 use super::ctx::{Ctx, PathKey};
 use super::guards::{
-    and_conjunct_guards, apply_comparison_facts, find_redundant_clause, guard_assertion,
-    is_syntactic_keyword, literal_eq_test_raw, or_disjunct_guards, or_same_var_narrowing,
+    find_redundant_clause, guard_assertion, is_syntactic_keyword, literal_eq_test_raw,
     path_guard_assertion, render_literal_pattern,
 };
 use super::infer::{expr_ty, global_value_ty};
@@ -1269,7 +1268,11 @@ fn never_true_predicate(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Strin
     if !author_wrote_it || ctx.is_local(predicate) {
         return None;
     }
-    let (tested, _) = super::guards::predicate_guard_ty(heap, Some(ctx), predicate)?;
+    let facts = super::guards::predicate_guard_ty(heap, Some(ctx), predicate)?;
+    let tested = facts.then;
+    if !facts.stated || tested.is_any() {
+        return None; // a truthy result proves nothing, so nothing makes it impossible
+    }
     let bound = gradual_of(heap, argument, ctx).bound;
     // A parameter bound to what its in-file callers pass (the caller-derived parameter pass) is not judged here:
     // the guard may be there for callers that do not exist yet.

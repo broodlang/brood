@@ -650,6 +650,28 @@ pub(in crate::types::check) fn list_items(heap: &Heap, mut v: Value) -> Option<V
     }
 }
 
+/// Does `form` name any of `names` anywhere — as a call head or an operand, at any depth
+/// (inside lists and vectors)? Conservative on purpose: quoted data counts too.
+pub(in crate::types::check) fn form_mentions_any(
+    heap: &Heap,
+    form: Value,
+    names: &[Symbol],
+) -> bool {
+    if names.is_empty() {
+        return false;
+    }
+    let mut work = vec![form];
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Sym(s) if names.contains(&s) => return true,
+            Value::Pair(_) => work.extend(list_items(heap, v).unwrap_or_default()),
+            Value::Vector(id) => work.extend(heap.vector(id).iter().copied()),
+            _ => {}
+        }
+    }
+    false
+}
+
 /// How many of a parameter list's binders are REQUIRED — the ones before the first
 /// `&optional` / `&` / `&rest` marker.
 pub(in crate::types::check) fn required_param_count(heap: &Heap, form: Value) -> usize {
