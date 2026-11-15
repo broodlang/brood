@@ -130,8 +130,7 @@ fn parse_def<'s>(form: &Node, src: &'s str) -> Option<Def<'s>> {
         let params = forms
             .next()
             .filter(|p| matches!(p.kind, NodeKind::List | NodeKind::Vector))
-            .map(|p| p.forms().map(|n| n.text(src)).collect())
-            .unwrap_or_default();
+            .map_or_default(|params| params.forms().map(|node| node.text(src)).collect());
         let doc = if matches!(kind, DefKind::Fn | DefKind::Macro) {
             // A leading string with more body after it (a lone string is a return value).
             let body: Vec<&Node> = forms.collect();
@@ -162,9 +161,7 @@ fn parse_def<'s>(form: &Node, src: &'s str) -> Option<Def<'s>> {
 /// Strip the surrounding quotes off a string token's source. We show the raw
 /// inner text for hover rather than decoding escapes — good enough for display.
 fn str_contents(tok: &str) -> &str {
-    tok.strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(tok)
+    tok.strip_circumfix('"', '"').unwrap_or(tok)
 }
 
 #[cfg(test)]

@@ -263,8 +263,8 @@ fn an_unarmed_startup_run_lowers_no_arm() {
         let out = cmd.output().expect("run brood");
         assert!(out.status.success(), "the program should run");
         (
-            String::from_utf8_lossy(&out.stdout).to_string(),
-            String::from_utf8_lossy(&out.stderr).to_string(),
+            String::from_utf8_lossy_owned(out.stdout),
+            String::from_utf8_lossy_owned(out.stderr),
         )
     };
     // The configuration first, in its own run: asking `stdimage/status` is itself enough

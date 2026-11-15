@@ -1867,7 +1867,7 @@ pub(crate) fn chunk_payload(carry: &mut Vec<u8>, chunk: &[u8], binary: bool) -> 
         Err(_) => work.len(),
     };
     *carry = work.split_off(valid);
-    (!work.is_empty()).then(|| Message::Str(String::from_utf8_lossy(&work).into_owned()))
+    (!work.is_empty()).then(|| Message::Str(String::from_utf8_lossy_owned(work)))
 }
 
 /// Flush any bytes still held in `carry` at end-of-stream. In text mode a leftover
@@ -1875,10 +1875,7 @@ pub(crate) fn chunk_payload(carry: &mut Vec<u8>, chunk: &[u8], binary: bool) -> 
 /// so it is delivered lossily (→ U+FFFD). Binary mode never carries, so this is a
 /// no-op there. Returns `None` when nothing is buffered.
 pub(crate) fn chunk_flush(carry: &mut Vec<u8>) -> Option<Message> {
-    (!carry.is_empty()).then(|| {
-        let v = std::mem::take(carry);
-        Message::Str(String::from_utf8_lossy(&v).into_owned())
-    })
+    (!carry.is_empty()).then(|| Message::Str(String::from_utf8_lossy_owned(std::mem::take(carry))))
 }
 
 // ===== Direct cross-heap copy (L1) ===========================================

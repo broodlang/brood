@@ -64,7 +64,7 @@ fn a_hit_replays_only_the_modules_the_program_names() {
         .arg(p)
         .output()
         .expect("run brood");
-    let miss = String::from_utf8_lossy(&out.stderr).into_owned();
+    let miss = String::from_utf8_lossy_owned(out.stderr);
     let loaded: Vec<&str> = miss
         .lines()
         .filter_map(|l| l.strip_prefix("[image] "))
@@ -86,8 +86,7 @@ fn a_hit_replays_only_the_modules_the_program_names() {
         .lines()
         .nth(1)
         .and_then(|l| l.strip_prefix("loads"))
-        .map(|l| l.split('\t').filter(|m| !m.is_empty()).collect())
-        .unwrap_or_default();
+        .map_or_default(|line| line.split('\t').filter(|m| !m.is_empty()).collect());
     assert!(
         recorded.iter().all(|m| ["io", "os"].contains(m)),
         "a hit must replay only the modules the program names (io, os), recorded {recorded:?}"
@@ -149,7 +148,7 @@ impl Sandbox {
             cmd.env(k, v);
         }
         let out = cmd.output().expect("run brood");
-        String::from_utf8_lossy(&out.stderr).into_owned()
+        String::from_utf8_lossy_owned(out.stderr)
     }
 }
 

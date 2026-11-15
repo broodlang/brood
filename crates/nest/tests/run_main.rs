@@ -43,7 +43,7 @@ fn nest_run(dir: &Path, extra: &[&str]) -> String {
         .current_dir(dir)
         .output()
         .expect("spawn nest");
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stdout = String::from_utf8_lossy_owned(out.stdout);
     assert!(
         out.status.success(),
         "nest run {extra:?} failed: status={:?}\nstdout:\n{stdout}\nstderr:\n{}",
@@ -62,7 +62,7 @@ fn nest_check(dir: &Path) -> String {
         .current_dir(dir)
         .output()
         .expect("spawn nest check");
-    String::from_utf8_lossy(&out.stderr).into_owned()
+    String::from_utf8_lossy_owned(out.stderr)
 }
 
 /// A **user-declared `(sig …)` is authoritative for callers everywhere** — both

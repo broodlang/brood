@@ -845,13 +845,12 @@ pub(crate) fn vm_run_bc(
     let _gc_block = crate::process::GcBlockGuard::enter();
     // Publish this driver's `top_level` to the `receive` gate (restored on exit, so the
     // innermost driver wins): a top-level receive captures, a native-nested one blocks.
-    struct TopLevelGuard(bool);
-    impl Drop for TopLevelGuard {
-        fn drop(&mut self) {
-            crate::process::set_capture_top_level(self.0);
-        }
-    }
-    let _top_guard = TopLevelGuard(crate::process::set_capture_top_level(top_level));
+    let _top_guard = std::mem::DropGuard::new(
+        crate::process::set_capture_top_level(top_level),
+        |previous| {
+            crate::process::set_capture_top_level(previous);
+        },
+    );
     // Loop-top **preempt/kill capture** is done only by the *top-level* body driver
     // (`run_process_body`) of a capture-mode green process (ADR-100 §8). A nested
     // `vm_apply` run (a `map`/`try`/`binding` native callback) is NOT top-level: it

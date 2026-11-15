@@ -602,9 +602,9 @@ next (newer) history entry (↓ / C-n).
 ;; indent), and a `{…}` map at + 1 so its keys align under the first key. That is the
 ;; whole rule; no per-form table is needed for it.
 
-;; A constant, not a knob, so no earmuffs: a downstream `(defdyn *indent-width* …)`
-;; declares that name ambient everywhere, and an earmuffed private here was taken over by
-;; it whenever std loaded from source (bedit's conventions.blsp; KI-383).
+;; A constant, not a knob, so no earmuffs. (It was `*indent-width*` until a downstream
+;; `(defdyn *indent-width* …)`, then a root name, took it over whenever std loaded from
+;; source — KI-383, fixed for good by ADR-722.)
 (def- body-indent 2)
 
 (defn- lineedit-indent-for (text pos)

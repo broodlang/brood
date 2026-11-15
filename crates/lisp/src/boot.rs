@@ -928,9 +928,7 @@ mod prelude_image_prune_tests {
         out
     }
     fn set_mtime(p: &std::path::Path, t: std::time::SystemTime) {
-        let f = std::fs::File::options().write(true).open(p).unwrap();
-        f.set_times(std::fs::FileTimes::new().set_modified(t))
-            .unwrap();
+        std::fs::set_times(p, std::fs::FileTimes::new().set_modified(t)).unwrap();
     }
     fn remaining(dir: &std::path::Path) -> usize {
         std::fs::read_dir(dir)

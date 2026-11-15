@@ -591,7 +591,7 @@ thread_local! {
 /// The rope's bytes `[from, to)` as a string (both char boundaries).
 fn text_of(rope: &ropey::Rope, from: usize, to: usize) -> String {
     #[cfg(test)]
-    COPIED.with(|copied| copied.set(copied.get() + (to - from)));
+    COPIED.update(|copied| copied + (to - from));
     rope.byte_slice(from..to).to_string()
 }
 

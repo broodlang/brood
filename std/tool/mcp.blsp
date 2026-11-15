@@ -70,7 +70,7 @@ process's OS user can; that process is the trust boundary.
 ;; (`ns/name`) this file defines that another
 ;; project source file also defines. Namespace-sound (ADR-065) — a short name
 ;; reused across distinct namespaces is not a collision, only a same-namespace
-;; (or ambient/root) rebinding is. Empty (and silent) outside a project.
+;; (or root) rebinding is. Empty (and silent) outside a project.
 ;; Best-effort — never raises.
 (defn- shadows-for (file)
   ;; check-allow :discarded-catch — shadow warnings are advisory: no project root means none

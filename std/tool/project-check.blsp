@@ -792,8 +792,9 @@ against the fully-loaded state is also what a live image would see. Returns nil.
 ;; Warning strings for a *qualified* global key (`ns/name`, per
 ;; `project-file-def-names`) defined across more than one source file. Under
 ;; namespaces (ADR-065) this fires only on a genuine collision — two files in
-;; the *same* namespace binding the same name, or an ambient `*earmuff*` / root
-;; name bound twice — not on a short name reused across distinct namespaces.
+;; the *same* namespace binding the same name, or a root name (a file with no
+;; `defmodule`, a `/name` head) bound twice — not on a short name reused across distinct
+;; namespaces.
 ;; `extracts` is `{path -> [mtime counts privs def-names]}`; `source-set` is
 ;; `{source-path -> true}` (only SOURCE files bind the flat namespace — a test
 ;; file's defs don't clash). Aggregates each source file's `def-names` (extract

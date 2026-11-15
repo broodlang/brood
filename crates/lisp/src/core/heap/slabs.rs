@@ -235,7 +235,7 @@ impl VecStore {
                 items: inline,
             }
         } else {
-            VecStore::spill((0..len).map(producer).collect())
+            VecStore::spill(Vec::from_fn(len, producer))
         }
     }
 

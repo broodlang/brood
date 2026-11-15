@@ -721,10 +721,7 @@ fn stdlib_tree_hash(root: &Path) -> Option<String> {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for f in &files {
         for chunk in [
-            f.strip_prefix(root)
-                .unwrap_or(f)
-                .to_string_lossy()
-                .as_bytes(),
+            f.trim_prefix(root).to_string_lossy().as_bytes(),
             &std::fs::read(f).unwrap_or_default(),
         ] {
             mix_chunk(&mut hash, chunk);
@@ -1224,12 +1221,7 @@ mod run_check_cache_tests {
 
     fn age(path: &std::path::Path, by: std::time::Duration) {
         let when = std::time::SystemTime::now() - by;
-        std::fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_modified(when)
-            .unwrap();
+        std::fs::set_times(path, std::fs::FileTimes::new().set_modified(when)).unwrap();
     }
 
     /// Record a sweep `secs` ago in `stamp`, the way a claim writes it.
@@ -1383,10 +1375,7 @@ mod test_scratch_liveness_tests {
         // Both look ancient by mtime: age must not decide it.
         let ancient = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
         for dir in [&live, &dead] {
-            std::fs::File::open(dir)
-                .unwrap()
-                .set_modified(ancient)
-                .unwrap();
+            std::fs::set_times(dir, std::fs::FileTimes::new().set_modified(ancient)).unwrap();
         }
         purge_stale_test_scratch(&root);
         assert!(live.exists(), "a live run's home was purged mid-run");
@@ -1405,10 +1394,7 @@ mod test_scratch_liveness_tests {
         std::fs::create_dir_all(&young).unwrap();
         std::fs::create_dir_all(&old).unwrap();
         let ancient = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
-        std::fs::File::open(&old)
-            .unwrap()
-            .set_modified(ancient)
-            .unwrap();
+        std::fs::set_times(&old, std::fs::FileTimes::new().set_modified(ancient)).unwrap();
         purge_stale_test_scratch(&root);
         assert!(
             young.exists(),

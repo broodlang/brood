@@ -98,7 +98,7 @@ suggestions\", never to an error on the user's command line."
 ;; to `default` when it declares none.
 ;;
 ;; Read from the manifest, not the `project/*source-paths*` / `project/*test-paths*`
-;; ambients: only `project`'s manifest loader sets those, and completion never runs it, so
+;; settings: only `project`'s manifest loader sets those, and completion never runs it, so
 ;; a project declaring `:test-paths ["spec"]` would complete none of its own test files.
 (defn- complete-manifest-dirs (root key default)
   (let (form (complete-manifest root)
@@ -325,13 +325,13 @@ suggestions\", never to an error on the user's command line."
   "The `nest new --template` names, from the scaffolder's own list.
 
     (includes? (complete/templates) \"default\")  ;=> true"
-  ;; `scaffold/*templates*` is a `scaffold` ambient, so `scaffold` must be loaded for
-  ;; it to be bound — but only HERE, on the one completion that needs it. Naming an
+  ;; `scaffold/*templates*` is a `scaffold` dynamic variable, so `scaffold` must be loaded
+  ;; for it to be bound — but only HERE, on the one completion that needs it. Naming an
   ;; export (`scaffold/new-project`) instead would auto-require it at load time
   ;; (ADR-229), which is what made every unrelated TAB press pay for `scaffold` and,
   ;; behind it, all of `project`. `require-one` at call time keeps that cost on the
-  ;; `nest new --template` path; the ambient read stays unqualified, so it resolves
-  ;; dynamically once the module is loaded.
+  ;; `nest new --template` path; the qualified read below then finds the variable that
+  ;; `require-one` just bound.
   ;; `:unbound` because that is exactly this lint's documented case: a global bound at
   ;; RUNTIME (by the `require-one` on the line above) which the source checker, reading
   ;; only this file, cannot see.

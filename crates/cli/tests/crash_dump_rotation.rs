@@ -46,7 +46,7 @@ fn run_dying_program(dir: &Path) {
 }
 
 fn read_lossy(path: &Path) -> String {
-    String::from_utf8_lossy(&fs::read(path).expect("read a dump")).into_owned()
+    String::from_utf8_lossy_owned(fs::read(path).expect("read a dump"))
 }
 
 #[test]

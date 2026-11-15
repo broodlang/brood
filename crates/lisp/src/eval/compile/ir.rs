@@ -1081,6 +1081,7 @@ impl CompiledArm {
     /// slot at all (no optional with a real default), or a stale value in the roots buffer's
     /// spare capacity reads as an argument, or as a flag that runs a default over a provided
     /// one. The fast-link mirror (`vm_cache`'s `fast_link_from_entry`) publishes only these.
+    #[cfg(feature = "jit")]
     #[inline]
     pub(crate) fn frame_is_exactly_args(&self, argc: usize) -> bool {
         self.rest_slot.is_none()

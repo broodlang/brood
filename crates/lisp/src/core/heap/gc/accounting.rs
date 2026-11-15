@@ -235,7 +235,8 @@ impl Heap {
     /// `(proc/flag :responsive)` — how this process treats a blocking native call
     /// (ADR-517). Setter returns the previous mode.
     pub(crate) fn proc_responsive(&self) -> crate::process::responsive::Responsive {
-        self.extras().map(|e| e.proc_responsive).unwrap_or_default()
+        self.extras()
+            .map_or_default(|extras| extras.proc_responsive)
     }
 
     pub(crate) fn set_proc_responsive(

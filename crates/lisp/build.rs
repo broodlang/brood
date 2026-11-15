@@ -62,10 +62,7 @@ fn main() {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for f in &files {
         for chunk in [
-            f.strip_prefix(&root)
-                .unwrap_or(f)
-                .to_string_lossy()
-                .as_bytes(),
+            f.trim_prefix(&root).to_string_lossy().as_bytes(),
             &std::fs::read(f).unwrap_or_default(),
         ] {
             mix_chunk(&mut hash, chunk);

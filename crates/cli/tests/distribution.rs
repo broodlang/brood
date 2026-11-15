@@ -248,8 +248,7 @@ fn clean_peer_exit_fires_nodedown_promptly() {
     // `connect` or `node/start` failed, and whether B was healthy is then the first question.
     let b_err = b
         .wait_with_output()
-        .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
-        .unwrap_or_default();
+        .map_or_default(|output| String::from_utf8_lossy_owned(output.stderr));
     let _ = std::fs::remove_dir_all(&dir);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -2519,9 +2518,7 @@ fn reconnect_watcher_heals_a_fallen_link() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     // B2's own output on the failure path: if the healed link never formed, whether B2 was
     // healthy is the first question, and it used to be unanswerable after the fact.
-    let b2_err = b2_out
-        .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
-        .unwrap_or_default();
+    let b2_err = b2_out.map_or_default(|output| String::from_utf8_lossy_owned(output.stderr));
     for expect in ["NODEDOWN-OK", "NOCONNECTION-OK", "NODEUP-OK", "PONG-OK"] {
         assert!(
             out.status.success() && stdout.contains(expect),
@@ -2639,10 +2636,8 @@ fn a_dropped_send_to_an_unregistered_name_warns_once() {
         let a_out = a.wait_with_output().expect("A finished");
         let _ = b.kill();
         let b_out = b.wait_with_output().ok();
-        let a_err = String::from_utf8_lossy(&a_out.stderr).to_string();
-        let b_err = b_out
-            .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
-            .unwrap_or_default();
+        let a_err = String::from_utf8_lossy_owned(a_out.stderr);
+        let b_err = b_out.map_or_default(|output| String::from_utf8_lossy_owned(output.stderr));
         (a_err, b_err)
     };
 
@@ -2884,9 +2879,7 @@ fn a_restarted_peer_reconnects_without_waiting_for_the_heartbeat() {
          --- S stdout ---\n{}\n--- S stderr ---\n{}",
         String::from_utf8_lossy(&p2_out.stderr),
         seen.join("\n"),
-        s_out
-            .map(|output| String::from_utf8_lossy(&output.stderr).to_string())
-            .unwrap_or_default()
+        s_out.map_or_default(|output| String::from_utf8_lossy_owned(output.stderr))
     );
     assert!(
         p2_out.status.success() && p2_stdout.contains("SECOND-LIFE-OK"),

@@ -159,8 +159,9 @@ fn parked_process_whose_data_pins_the_drain_copies_it_out() {
     // removed (KI-388).
     assert!(
         interp.heap.runtime_rehomed_count() > rehomed_before,
-        "the drain completed without the parked worker copying its data out: the worker \
-         never pinned it, or the probe missed what it holds",
+        "the drain completed with no process copying its data out (the counter is runtime-wide; \
+         the worker is the only process here holding gen-0 data): the worker never pinned it, \
+         or the probe missed what it holds",
     );
 
     let answer = interp

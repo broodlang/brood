@@ -77,5 +77,5 @@ fn percent_decode(s: &str) -> String {
     // `from_utf8_lossy` for the path-with-replacement-char fallback; the OS
     // won't accept a malformed-utf8 path anyway, and `String` is the public
     // shape `PathBuf::from` takes.
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8_lossy_owned(out)
 }

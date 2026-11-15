@@ -1695,6 +1695,39 @@ roots at root now. bedit's example was also qualified (`de751fd`), which a proje
 needs either way since a docstring is evaluated outside its module. Guard: `nest eval` in a
 project, red with the rooting removed.
 
+2026-11-14 (KI-394). **`bound?` answers for an imaged module not yet materialised.** Since a
+named `nest test FILE` installs the project image lazily, a module the file never reaches stays
+on disk, and `bound?` (an `env_get`) called its names unbound while every reference found them:
+bedit's menu and Ctrl+wheel zoom tests failed on each warm run and passed after an edit, since
+that run rebuilt from source. `bound?` now roots a short project spelling and materialises the
+module's image section when the installed image carries one; a module the image does not carry
+is still not loaded. Guard in `startup_image`, red on the warm run with the old `bound?`.
+
+2026-11-14 (review of the day's work). Three independent reviews of ADR-722, KI-384/391/394
+and bedit's changes. Fixed: a template's `binding` names are pinned to a root binding like a
+call head (a root macro's `*print-length*` rebound a caller's own `m/*print-length*`);
+`defonce` computes its name at expansion; an ambiguously imported dynamic is refused as a
+bare head and is an import clash in `binding`; `binding` of a non-symbol says so; KI-391's
+named sections take sigs by exact module, not prefix (`web` carried `web/admin`'s);
+`obs_function` reads `shim_original`, so root and `sig!` names count, and specialisation and
+the purity walk use it; `bound?` never raises and does not wait on another process's load;
+`pane-leaf-paths` ends on a tree with a hole (it ran a process out of memory). Stale
+"ambient" wording removed from std comments, scaffold's project notes and docs. Each new
+guard red with its change undone.
+
+2026-11-14 (dependencies and Rust 1.100). `cargo update` (51 compatible updates) on the new
+stable 1.100, and `rust-version` raised 1.97 → 1.100 deliberately, to adopt what 1.98-1.100
+stabilised across the kernel and the Rust tests: `from_utf8_lossy_owned` at 88 sites,
+`trim_prefix`/`trim_suffix`/`strip_circumfix` 21, `LocalKey::update` 16, `map_or_default` 44,
+`Vec::from_fn` 9, `Path::is_empty` 5, a `DropGuard` for the VM's top-level guard,
+`fs::set_times` for `file/set-mtime` (three per-platform versions and an `unsafe` libc block
+gone) and `format_into` in the signal-safe crash writer. Cargo's new `unused_dependencies`
+lint caught mimalloc unused under `--all-features`: `system-alloc` was a feature, and features
+only add; it is `--cfg brood_system_alloc` now, which also drops mimalloc's C build from the
+sanitizer runs. `num-bigint` held at 0.4 (its consumers have not moved). Downstream: sqlite's
+component on rusqlite 0.42 / wit-bindgen 0.63 (SQLite 3.54.1), mur's lock updated,
+zubr-relay on wasm-bindgen 0.2.130. Windows-only edits compile first on CI.
+
 2026-11-14 (ADR-725). **Inference read off function types, both ways.** Read Elixir's type
 series (to v1.21's "inference, narrowing and reverse arrows") against the checker; probed
 fifteen shapes and closed every gap the probe named. A user predicate is now an inferred type

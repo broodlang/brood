@@ -318,7 +318,7 @@ fn root_native_poll(n: u32) -> NativePoll {
 /// primitive steps (ADR-403). Nothing yields here: the next safepoint does, if this spent
 /// the budget.
 pub(crate) fn charge(n: u32) {
-    REDUCTIONS.with(|r| r.set(r.get().saturating_sub(n)));
+    REDUCTIONS.update(|reductions| reductions.saturating_sub(n));
 }
 
 /// Dirty-CPU accounting for native builtins (charged in reductions). A long-running
@@ -334,7 +334,7 @@ pub(crate) fn charge_native(t0: web_time::Instant) -> Option<u128> {
     // Below ~50 µs the call is quantum-noise — skip the TLS write.
     if us >= 50 {
         let charge = us.saturating_mul(2);
-        REDUCTIONS.with(|r| r.set(r.get().saturating_sub(charge)));
+        REDUCTIONS.update(|reductions| reductions.saturating_sub(charge));
     }
     match crate::core::heap::stall_threshold_ms() {
         Some(ms) if elapsed.as_millis() >= ms => Some(elapsed.as_millis()),

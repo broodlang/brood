@@ -80,8 +80,7 @@ impl FragmentPass {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&window)
             .filter(|cache| cache.pid == pid)
-            .map(|cache| cache.entries)
-            .unwrap_or_default();
+            .map_or_default(|cache| cache.entries);
         FragmentPass::over(previous)
     }
 

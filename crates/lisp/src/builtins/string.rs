@@ -1247,7 +1247,7 @@ pub(super) fn utf8_bytes_to_string(args: &[Value], _: EnvId, heap: &mut Heap) ->
     // Accepts a `bytes` value, or (leniently) a vector or list of byte ints.
     let bytes = super::bytes::collect_bytes("utf8-bytes->string", arg(args, 0), heap)?;
     if args.get(1).is_some_and(|lossy| crate::eval::truthy(*lossy)) {
-        return Ok(heap.alloc_string_owned(String::from_utf8_lossy(&bytes).into_owned()));
+        return Ok(heap.alloc_string_owned(String::from_utf8_lossy_owned(bytes)));
     }
     match String::from_utf8(bytes) {
         Ok(s) => Ok(heap.alloc_string_owned(s)),

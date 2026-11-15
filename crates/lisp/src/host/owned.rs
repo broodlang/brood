@@ -68,8 +68,7 @@ impl<T> OwnedTable<T> {
     pub(crate) fn owned_by(&self, owner: u64) -> Vec<u64> {
         self.by_owner
             .get(&owner)
-            .map(|ids| ids.iter().copied().collect())
-            .unwrap_or_default()
+            .map_or_default(|ids| ids.iter().copied().collect())
     }
 
     /// The process that owns entry `id`, or `None` for an unknown id.

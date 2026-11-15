@@ -161,7 +161,7 @@ pub(super) fn check_one_method_return(
     if !g.consistent_with_mode(ret.clone(), ctx.strict())
         && !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_TYPE_MISMATCH)
     {
-        let key_str = key.map(|k| format!(" for {k}")).unwrap_or_default();
+        let key_str = key.map_or_default(|key| format!(" for {key}"));
         out.push(Finding::new(
             Lint::TypeMismatch,
             heap.form_pos_only(ret_form),
@@ -265,7 +265,7 @@ pub(super) fn check_one_impl_return(
     if !g.consistent_with_mode(ret.clone(), ctx.strict())
         && !ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_TYPE_MISMATCH)
     {
-        let id_str = id.map(|i| format!(" for :{i}")).unwrap_or_default();
+        let id_str = id.map_or_default(|id| format!(" for :{id}"));
         out.push(Finding::new(
             Lint::TypeMismatch,
             heap.form_pos_only(ret_form),

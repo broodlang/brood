@@ -325,7 +325,7 @@ fn build(node: &Node, src: &str, current: usize, tree: &mut ScopeTree) {
             let names = node
                 .forms()
                 .nth(1)
-                .map_or_else(Vec::new, |pattern| pattern_binders(pattern, src));
+                .map_or_default(|pattern| pattern_binders(pattern, src));
             let scope = tree.open(node.span, None, current, names);
             for child in &node.children {
                 build(child, src, scope, tree);
@@ -399,7 +399,7 @@ fn build_clauses(node: &Node, src: &str, first: usize, current: usize, tree: &mu
         let names = clause
             .forms()
             .next()
-            .map_or_else(Vec::new, |pattern| pattern_binders(pattern, src));
+            .map_or_default(|pattern| pattern_binders(pattern, src));
         let scope = tree.open(clause.span, None, current, names);
         for inner in &clause.children {
             build(inner, src, scope, tree);

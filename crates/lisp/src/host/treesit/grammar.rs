@@ -170,7 +170,7 @@ unsafe fn open_library(
     let name = format!(".{stem}.{short_hash}.{}.so", std::process::id());
     let _held = crate::core::sync::lock(&GRAMMAR_COPY_LOCK);
     let beside = original.parent().map(|dir| {
-        if dir.as_os_str().is_empty() {
+        if dir.is_empty() {
             std::path::Path::new(".")
         } else {
             dir

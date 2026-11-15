@@ -1536,7 +1536,7 @@ temp, and the second rename would find it gone.
 ;; reads the collision check does — so it never touches the `require`/`defmodule` hot path.
 (defn record-ns-packages (pkg-dir-pairs)
   "Record the modules of each `[package-name src-dir]` pair under that package name in the
-  ambient `project/*ns-package*` map. The ability system's app-vs-library seam; called at setup.
+  `project/*ns-package*` map. The ability system's app-vs-library seam; called at setup.
 
     (package/record-ns-packages [[\"json\" \"/path/to/proj/_deps/json/src\"]])   ;~> the modules under that dir now owned by package json in project/*ns-package*"
   (def project/*ns-package*

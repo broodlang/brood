@@ -36,6 +36,12 @@
       (assert= (pane-selected-payload t) {:buf 0})))
   (test "leaves are ordered a-before-b across nesting"
     (assert= (pane-leaf-paths (wt-tree3)) (list (list :a :a) (list :a :b) (list :b))))
+  (test "a tree with a hole holds the leaves it has and ends: no leaves under nil or {}"
+    ;; A missing child used to recurse into nil for ever — the prefix growing until the
+    ;; process ran out of memory (bedit's slow-turn note over a broken model's layout).
+    (assert= (pane-leaf-paths {}) ())
+    (assert= (pane-leaf-paths nil) ())
+    (assert= (pane-leaf-paths {:a (pane-single :x)}) (list (list :a))))
 
   ; the surviving sibling
   (test "delete removes the selected pane; sibling takes the space"

@@ -836,8 +836,7 @@ fn run_one_timed(mut proc: Box<Process>) {
                     .arms
                     .first()
                     .and_then(|a| a.body.first())
-                    .map(|&f| crate::syntax::printer::print(&proc.heap, f))
-                    .unwrap_or_default();
+                    .map_or_default(|&form| crate::syntax::printer::print(&proc.heap, form));
                 let src: String = src.chars().take(120).collect();
                 format!(
                     "fn name={:?} env={:?} src={}",

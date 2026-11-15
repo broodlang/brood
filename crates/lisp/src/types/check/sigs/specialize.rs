@@ -43,12 +43,12 @@ pub(in crate::types::check) fn specialize_call(
     {
         return None;
     }
-    SPEC_ARG_NEST.with(|n| n.set(n.get() + 1));
+    SPEC_ARG_NEST.update(|nest| nest + 1);
     let inputs: Vec<Option<Ty>> = args
         .iter()
         .map(|&a| expr_ty(heap, a, ctx).or_else(|| global_fn_arrow(heap, a, ctx)))
         .collect();
-    SPEC_ARG_NEST.with(|n| n.set(n.get() - 1));
+    SPEC_ARG_NEST.update(|nest| nest - 1);
     specialized_ret(heap, sym, &inputs, ctx)
 }
 
@@ -128,7 +128,7 @@ fn fixed_arms_of(heap: &Heap, sym: Symbol, ctx: &Ctx) -> Option<(Vec<FixedArm>, 
     if ctx.is_file_global(sym) {
         return None;
     }
-    let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
+    let Value::Fn(cid) = super::deps::obs_function(heap, sym)? else {
         return None;
     };
     let closure = heap.closure(cid);
@@ -246,7 +246,7 @@ pub(in crate::types::check) fn specialized_ret(
         return None;
     }
     let Some(_guard) = SpecializeGuard::enter(sym) else {
-        REFUSALS.with(|c| c.set(c.get().saturating_add(1)));
+        REFUSALS.update(|refusals| refusals.saturating_add(1));
         return None;
     };
     let Some((arms, stable)) = fixed_arms_of(heap, sym, ctx) else {

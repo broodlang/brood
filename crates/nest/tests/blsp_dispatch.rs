@@ -17,8 +17,8 @@ fn nest_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
         .expect("run nest");
     (
         out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
+        String::from_utf8_lossy_owned(out.stdout),
+        String::from_utf8_lossy_owned(out.stderr),
     )
 }
 
@@ -512,8 +512,8 @@ fn an_image_built_through_the_dispatcher_restores_every_root_global() {
             .expect("run nest");
         (
             out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
+            String::from_utf8_lossy_owned(out.stdout),
+            String::from_utf8_lossy_owned(out.stderr),
         )
     };
     let (code, out, err) = with_cache(&dir, &["stdimage"]);
@@ -629,8 +629,8 @@ fn nest_repl(dir: &std::path::Path, input: &str) -> (i32, String, String) {
     let out = child.wait_with_output().expect("wait");
     (
         out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
+        String::from_utf8_lossy_owned(out.stdout),
+        String::from_utf8_lossy_owned(out.stderr),
     )
 }
 
@@ -677,8 +677,8 @@ fn nest_eval_stdin(dir: &std::path::Path, input: &str) -> (i32, String, String) 
     let out = child.wait_with_output().expect("wait");
     (
         out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
+        String::from_utf8_lossy_owned(out.stdout),
+        String::from_utf8_lossy_owned(out.stderr),
     )
 }
 

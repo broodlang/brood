@@ -436,8 +436,7 @@ pub(crate) fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClos
             .arms
             .first()
             .and_then(|a| a.body.first())
-            .map(|b| format!("{:?}", b.unpack()))
-            .unwrap_or_default();
+            .map_or_default(|body| format!("{:?}", body.unpack()));
         let key = match cache_key(heap, id) {
             Some(VmCacheKey::Runtime(x)) => format!("Runtime({x})"),
             Some(VmCacheKey::Body(x)) => format!("Body({x})"),

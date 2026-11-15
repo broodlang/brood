@@ -265,9 +265,9 @@ it throws a `%reduced` record that `transduce` catches and unwraps.
 ;; — the input ending, a `reduced`, a throw. No stage has to release anything, so no completion
 ;; arity is needed (Clojure's `(rf acc)` would reach the caller's own reducing function, and
 ;; `(- acc)` negates). Stateless stages never see the table.
-;; `*transduce-run*` itself is declared in the prelude (`std/prelude/seq.blsp`): a `defdyn` is an
-;; ambient ROOT name, and a std module may not define one — the stdlib image attributes every
-;; root global to the module that defines it, and `seq` is already loaded when it looks.
+;; `*transduce-run*` itself is declared in the prelude (`std/prelude/seq.blsp`), as a root
+;; dynamic, because the prelude reads it too; a std module declares only its own (`seq/…`),
+;; since the stdlib image attributes every root global to the module that defines it.
 
 (defn stage-slot (initial)
   "A slot of state for a stateful transducer stage, holding `initial` — call it when the

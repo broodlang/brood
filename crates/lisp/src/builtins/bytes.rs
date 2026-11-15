@@ -109,7 +109,8 @@ pub(super) fn base64_encode(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 }
 
 /// Padded standard-alphabet Base64 of `input`: what the terminal's kitty graphics protocol
-/// carries a picture in (ADR-695).
+/// carries a picture in (ADR-695). Native only, like that terminal.
+#[cfg(not(target_arch = "wasm32"))]
 pub(in crate::builtins) fn base64_standard(input: &[u8]) -> String {
     base64_encode_with(input, BASE64_STANDARD)
 }

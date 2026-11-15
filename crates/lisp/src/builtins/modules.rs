@@ -1549,6 +1549,28 @@ pub(super) fn mark_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 pub(super) fn resolve_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_symbol(heap, "%resolve-name", arg(args, 0))?;
     let resolved = crate::eval::macros::resolve_reference(heap, name);
+    // Still bare and imported from more than one module (ADR-235): a read of it raises the
+    // use-site clash, and so does this — quoting it bare would only defer a misleading
+    // "not a dynamic variable" to run time. Expansion records no clash, so raise it here.
+    if resolved == name
+        && let Some(mut candidates) = heap.ambiguous_import_of(name)
+    {
+        candidates.sort_by(|a, b| {
+            crate::core::value::symbol_name_ref(*a).cmp(crate::core::value::symbol_name_ref(*b))
+        });
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| format!("`{}`", crate::core::value::symbol_name_ref(*c)))
+            .collect();
+        return Err(LispError::runtime(format!(
+            "`{}` is imported from more than one module ({}) — the bare name is ambiguous. \
+             Qualify it (e.g. `{}`), or disambiguate the `(:use …)` with `:only [...]` / \
+             `:exclude [...]` / an alias.",
+            crate::core::value::symbol_name_ref(name),
+            names.join(" and "),
+            crate::core::value::symbol_name_ref(candidates[0]),
+        )));
+    }
     // Inside a module `resolve_reference` already roots an intra-package `mod/name` to
     // `pkg/mod/name` (ADR-070). At root it is the identity, yet root code inside a project
     // (a docstring example, `nest eval`, the REPL) has the package context too, and every

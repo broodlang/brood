@@ -111,8 +111,7 @@ impl ForeignCode {
         if let Some(file) = native_path(path) {
             let mut mkdirs: Vec<NativePath> = path
                 .parent()
-                .map(|dir| dir.ancestors().filter_map(native_path).collect())
-                .unwrap_or_default();
+                .map_or_default(|dir| dir.ancestors().filter_map(native_path).collect());
             mkdirs.reverse();
             self.crash_file = Some(CrashFile {
                 mkdirs,
@@ -349,14 +348,14 @@ mod windows {
             if handle == INVALID_HANDLE_VALUE {
                 return;
             }
-            let mut digits = [0u8; 40];
+            let mut digits = std::fmt::NumBuffer::<i128>::new();
             write_all(handle, &crash_file.head);
             write_all(handle, b" :signal \"");
             write_all(handle, name);
             write_all(handle, b"\" :time ");
-            write_all(handle, super::format_int(time, &mut digits));
+            write_all(handle, time.format_into(&mut digits).as_bytes());
             write_all(handle, b" :pid ");
-            write_all(handle, super::format_int(pid, &mut digits));
+            write_all(handle, pid.format_into(&mut digits).as_bytes());
             write_all(handle, &crash_file.tail);
             CloseHandle(handle);
         }
@@ -382,29 +381,10 @@ fn record_dir_from_env() -> Option<std::path::PathBuf> {
         .map(|base| base.join("brood").join("crashes"))
 }
 
-#[cfg(any(unix, windows))]
-/// `value` in decimal, written into the end of `digits`; the slice that holds it.
-pub(crate) fn format_int(value: i128, digits: &mut [u8; 40]) -> &[u8] {
-    let mut at = digits.len();
-    let negative = value < 0;
-    let mut rest = value.unsigned_abs();
-    loop {
-        at -= 1;
-        digits[at] = b'0' + (rest % 10) as u8;
-        rest /= 10;
-        if rest == 0 {
-            break;
-        }
-    }
-    if negative {
-        at -= 1;
-        digits[at] = b'-';
-    }
-    &digits[at..]
-}
-
 /// `text` safe inside a Brood string literal and on one line: a quote or backslash becomes
 /// `'` or `/`, a control character a space, and it is cut to `max` bytes on a char boundary.
+/// Only the native crash record and grammar vetting write one.
+#[cfg(any(unix, windows))]
 pub(crate) fn literal_safe(text: &str, max: usize) -> String {
     let mut out = String::new();
     for character in text.chars() {
@@ -424,8 +404,8 @@ pub(crate) fn literal_safe(text: &str, max: usize) -> String {
 
 #[cfg(unix)]
 mod unix {
-    use super::format_int;
     use std::ffi::CString;
+    use std::fmt::NumBuffer;
     use std::os::unix::ffi::OsStrExt;
     use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
@@ -575,8 +555,8 @@ mod unix {
         }
 
         fn push_int(&mut self, value: i128) {
-            let mut digits = [0u8; 40];
-            self.push(format_int(value, &mut digits));
+            let mut digits = NumBuffer::<i128>::new();
+            self.push(value.format_into(&mut digits).as_bytes());
         }
     }
 
@@ -695,7 +675,7 @@ mod unix {
         let time = now.tv_sec as i128 * 1000 + now.tv_nsec as i128 / 1_000_000;
         // SAFETY: `getpid` has no preconditions and is async-signal-safe.
         let pid = unsafe { libc::getpid() } as i128;
-        let mut digits = [0u8; 40];
+        let mut digits = NumBuffer::<i128>::new();
         // SAFETY: only async-signal-safe calls (`mkdir`, `open`, `write`, `close`) over
         // NUL-terminated paths built ahead of time by `with_crash_file`, and the descriptor
         // `open` returned, checked before use and closed once.
@@ -713,9 +693,9 @@ mod unix {
                 write_all(fd, b" :signal \"");
                 write_all(fd, signal_name(signal));
                 write_all(fd, b"\" :time ");
-                write_all(fd, format_int(time, &mut digits));
+                write_all(fd, time.format_into(&mut digits).as_bytes());
                 write_all(fd, b" :pid ");
-                write_all(fd, format_int(pid, &mut digits));
+                write_all(fd, pid.format_into(&mut digits).as_bytes());
                 write_all(fd, &crash_file.tail);
                 libc::close(fd);
             }

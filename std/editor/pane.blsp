@@ -95,11 +95,15 @@ the keybindings."
 (check-allow :non-tail-recursion
   (defn- pane-paths (node prefix)
     "All leaf paths under `node` in traversal order (a before b), each prefixed by
-  the forward-order `prefix`."
-    (if (pane-leaf? node)
-      (list prefix)
-      (append (pane-paths (get node :a) (append prefix (list :a)))
-        (pane-paths (get node :b) (append prefix (list :b)))))))
+  the forward-order `prefix`. Anything that is neither a leaf nor a split map holds no
+  leaves: a missing child (`nil`) used to recurse into `nil` for ever, the prefix growing
+  until the process ran out of memory, on any tree with a hole in it."
+    (cond
+      (pane-leaf? node) (list prefix)
+      (map? node)
+        (append (pane-paths (get node :a) (append prefix (list :a)))
+          (pane-paths (get node :b) (append prefix (list :b))))
+      else ())))
 
 (defn pane-leaf-paths (tree)
   "Every leaf's path, in left-to-right / top-to-bottom traversal order.

@@ -81,7 +81,7 @@ pub struct MacroBlockGuard;
 impl MacroBlockGuard {
     #[inline]
     pub fn enter() -> Self {
-        MACRO_BLOCK.with(|d| d.set(d.get() + 1));
+        MACRO_BLOCK.update(|depth| depth + 1);
         MacroBlockGuard
     }
 }
@@ -89,7 +89,7 @@ impl MacroBlockGuard {
 impl Drop for MacroBlockGuard {
     #[inline]
     fn drop(&mut self) {
-        MACRO_BLOCK.with(|d| d.set(d.get().saturating_sub(1)));
+        MACRO_BLOCK.update(|depth| depth.saturating_sub(1));
     }
 }
 

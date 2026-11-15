@@ -41,7 +41,7 @@ fn code_of(line: &str) -> String {
     for c in line.chars() {
         match c {
             '"' => {
-                in_str = !in_str;
+                in_str.toggle();
                 out.push(c);
             }
             _ if in_str => {}
@@ -80,7 +80,7 @@ fn an_env_mutating_test_lives_alone_in_its_binary() {
                     "{} mutates the environment and holds {tests} tests — under plain \
                      `cargo test` they share one process, so the mutation reaches its \
                      siblings (KI-86). Move the env-mutating test into its own file.",
-                    f.strip_prefix(&root).unwrap_or(f).display()
+                    f.trim_prefix(&root).display()
                 ));
             }
         }
@@ -102,7 +102,7 @@ fn an_env_mutating_test_lives_alone_in_its_binary() {
                             "{} calls set_var/remove_var inside #[cfg(test)] — the lib \
                              test binary cannot be isolated; use a per-heap setter or a \
                              constructor parameter instead (KI-86's own fix)",
-                            f.strip_prefix(&root).unwrap_or(f).display()
+                            f.trim_prefix(&root).display()
                         ));
                         break;
                     }

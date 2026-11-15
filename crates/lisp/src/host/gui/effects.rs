@@ -488,7 +488,7 @@ fn box_blur(img: &mut [[f32; 3]], w: usize, h: usize, radius: usize) {
         img[y * w..(y + 1) * w].copy_from_slice(&line);
     }
     for x in 0..w {
-        let column: Vec<[f32; 3]> = (0..h).map(|y| img[y * w + x]).collect();
+        let column = Vec::from_fn(h, |y| img[y * w + x]);
         blur_line(&mut line, &|y| column[y], h);
         for (y, c) in line.iter().enumerate() {
             img[y * w + x] = *c;

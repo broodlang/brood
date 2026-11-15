@@ -1370,6 +1370,13 @@ fn resolve_def(
                 } else {
                     heap.import_of(name)
                         .filter(|&imported| heap.is_dynamic(imported))
+                        // imported from several modules at once (ADR-235): still one this
+                        // spelling used to set, so still refused
+                        .or_else(|| {
+                            heap.ambiguous_import_of(name).and_then(|candidates| {
+                                candidates.into_iter().find(|&c| heap.is_dynamic(c))
+                            })
+                        })
                 };
                 if let Some(target) = visible {
                     crate::eval::derive::record_dynamic_def(name, target, value::intern(ns_name));

@@ -99,7 +99,7 @@ fn major_after_flip_rewrites_remembered_set() {
     let x = crate::core::value::intern("x");
     // Inflate the nursery with several frames, all rooted; the one we keep is
     // LAST so it tenures to the highest old-gen index.
-    let mut envs: Vec<EnvId> = (0..8).map(|_| h.new_env(None)).collect();
+    let mut envs = Vec::from_fn(8, |_| h.new_env(None));
     let keep_pos = envs.len() - 1;
     // Tenure them all into the old generation.
     h.minor_collect(true, &mut [], &mut envs);
@@ -384,7 +384,7 @@ fn nursery_closure_old_env_rewritten() {
     let sym = crate::core::value::intern("throb");
     // Build the "token-ops" env that captures throb=3.14.
     // Inflate: 20 decoy envs + the keeper env (all tenured).
-    let mut decoy_envs: Vec<EnvId> = (0..20).map(|_| h.new_env(None)).collect();
+    let mut decoy_envs = Vec::from_fn(20, |_| h.new_env(None));
     let keeper_env = h.new_env(None);
     h.env_define(keeper_env, sym, Value::float(1.25));
     decoy_envs.push(keeper_env);
@@ -658,7 +658,7 @@ fn nursery_env_old_parent_rewritten() {
     let mut h = Heap::new();
     let sym = crate::core::value::intern("v");
     // Inflate: 20 decoy envs + keeper parent env (all tenured).
-    let mut decoy_envs: Vec<EnvId> = (0..20).map(|_| h.new_env(None)).collect();
+    let mut decoy_envs = Vec::from_fn(20, |_| h.new_env(None));
     let parent_env = h.new_env(None);
     h.env_define(parent_env, sym, Value::int(42));
     decoy_envs.push(parent_env);

@@ -92,8 +92,8 @@
 ;; So bounding is a SEPARATE function rather than a flag on `pr-str`: nothing that
 ;; round-trips data can accidentally acquire an eliding printer, and `pr-str`
 ;; remains the escape hatch for seeing everything (`(pr-str *1)` after a truncated
-;; result). The two knobs are `defdyn`s, so they are ambient (usable bare from any
-;; namespace) and scopable with `binding`.
+;; result). The two knobs are prelude `defdyn`s, so they are root names (usable bare from
+;; any namespace) and scopable with `binding`.
 ;;
 ;; Both markers are `…`, meaning "elided here" — for length as a trailing item, for
 ;; depth in place of the subform. Deliberately ONE marker rather than Clojure's

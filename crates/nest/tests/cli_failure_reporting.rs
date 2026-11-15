@@ -36,7 +36,7 @@ fn run_for_exits_nonzero_when_the_program_dies() {
         .args(["run", "--for", "5s", "boom.blsp"])
         .output()
         .expect("run nest");
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let text = String::from_utf8_lossy_owned(out.stdout);
     assert!(
         text.contains("[exit]"),
         "expected the monitor report: {text}"
@@ -70,7 +70,7 @@ fn run_for_exits_nonzero_when_the_program_dies() {
             .args(["run", "--for", "5s", "instant.blsp"])
             .output()
             .expect("run nest");
-        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let text = String::from_utf8_lossy_owned(out.stdout);
         assert!(
             text.contains("[exit] :normal"),
             "an instant-exit program must report its real reason, not :noproc — got: {text}"
@@ -115,7 +115,7 @@ fn check_rejects_a_directory_at_the_boundary() {
         .args(["check", "src"])
         .output()
         .expect("run nest");
-    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    let err = String::from_utf8_lossy_owned(out.stderr);
     assert_eq!(out.status.code(), Some(2), "stderr: {err}");
     assert!(
         err.starts_with("nest check: src is a directory"),
@@ -163,7 +163,7 @@ fn release_deletes_a_binary_that_does_not_boot() {
         .args(["release", "-o", "app", "--runtime", "/bin/false"])
         .output()
         .expect("run nest");
-    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    let err = String::from_utf8_lossy_owned(out.stderr);
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -229,7 +229,7 @@ fn release_refuses_a_traversing_default_output_name() {
         .arg("release")
         .output()
         .expect("run nest");
-    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    let err = String::from_utf8_lossy_owned(out.stderr);
     assert_eq!(out.status.code(), Some(2), "stderr: {err}");
     assert!(
         err.contains("not a plain filename") && err.contains("nest release -o"),

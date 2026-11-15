@@ -80,8 +80,8 @@ fn run_arm(
     }
     let out = cmd.arg(program).output().expect("run brood");
     (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
+        String::from_utf8_lossy_owned(out.stdout),
+        String::from_utf8_lossy_owned(out.stderr),
     )
 }
 

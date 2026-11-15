@@ -104,7 +104,7 @@ impl DepthGuard {
         EXPR_TY_DEPTH.with(|d| {
             let n = d.get();
             if n >= MAX_EXPR_TY_DEPTH {
-                EXPR_TY_DEPTH_HITS.with(|c| c.set(c.get() + 1));
+                EXPR_TY_DEPTH_HITS.update(|hits| hits + 1);
                 None
             } else {
                 d.set(n + 1);
@@ -115,7 +115,7 @@ impl DepthGuard {
 }
 impl Drop for DepthGuard {
     fn drop(&mut self) {
-        EXPR_TY_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        EXPR_TY_DEPTH.update(|depth| depth.saturating_sub(1));
     }
 }
 
@@ -138,7 +138,7 @@ pub(super) fn with_fresh_depth<T>(f: impl FnOnce() -> T) -> T {
 /// with a known signature gets its result type; a variable returns whatever
 /// `ctx` knows about it (typically `None` for a free / global reference).
 pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
-    EXPR_TY_VISITS.with(|c| c.set(c.get().wrapping_add(1)));
+    EXPR_TY_VISITS.update(|visits| visits.wrapping_add(1));
     // Bail (defer) if the type-walk is pathologically deep — overflow guard.
     let _depth = DepthGuard::enter()?;
     let key = match form {

@@ -446,7 +446,7 @@ pub struct RuntimeCode {
     /// set.
     pub(super) private: RwLock<std::collections::HashSet<Symbol>>,
     /// The `defdyn` dynamic-variable marks: which globals `binding` may rebind, which
-    /// names are ambient for namespace resolution, and which are never IC-cached. Per
+    /// a module may not redefine bare (ADR-722), and which are never IC-cached. Per
     /// RUNTIME, not per OS process (KI-224): `%isolate` snapshots and restores this set
     /// wholesale, and a process-wide set let one runtime's restore drop the marks another
     /// runtime in the same process had added meanwhile. Seeded from the prelude's marks

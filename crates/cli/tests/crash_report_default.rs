@@ -64,7 +64,7 @@ fn stderr_until(path: &std::path::Path, marker: &str, deadline: std::time::Durat
     }
     let _ = child.kill();
     let _ = child.wait();
-    String::from_utf8_lossy(&seen).into_owned()
+    String::from_utf8_lossy_owned(seen)
 }
 
 #[test]

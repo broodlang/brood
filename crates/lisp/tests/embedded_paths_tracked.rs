@@ -135,8 +135,7 @@ fn every_embedded_file_is_tracked() {
                 };
                 let target = normalize(&base.join(&embed.path));
                 let relative = target
-                    .strip_prefix(&root)
-                    .unwrap_or(&target)
+                    .trim_prefix(&root)
                     .to_string_lossy()
                     .replace('\\', "/");
                 let present = match &tracked {
@@ -145,7 +144,7 @@ fn every_embedded_file_is_tracked() {
                 };
                 checked += 1;
                 if !present {
-                    let site = file.strip_prefix(&root).unwrap_or(file);
+                    let site = file.trim_prefix(&root);
                     missing.push(format!(
                         "{}:{} embeds {relative}",
                         site.display(),

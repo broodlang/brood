@@ -67,8 +67,8 @@ fn run(no_jit: bool) -> (String, String) {
     let out = cmd.arg(&path).output().expect("run brood");
     let _ = std::fs::remove_file(&path);
     (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
+        String::from_utf8_lossy_owned(out.stdout),
+        String::from_utf8_lossy_owned(out.stderr),
     )
 }
 

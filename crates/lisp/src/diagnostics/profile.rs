@@ -102,7 +102,7 @@ pub fn stop() -> Vec<(Box<[Symbol]>, u64)> {
         g.take()
     };
     let mut out: Vec<(Box<[Symbol]>, u64)> =
-        taken.map(|m| m.into_iter().collect()).unwrap_or_default();
+        taken.map_or_default(|counts| counts.into_iter().collect());
     out.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
     out
 }

@@ -678,8 +678,9 @@ call: `(update m :n (fnil inc 0))`.
 ;; established gain. If you reopen it, reopen the
 ;; ADR: the premise to re-test is "no gain", which predates the prelude image (ADR-314).
 ;; The run's state table while `seq/transduce` builds a transducer stack (ADR-421) — read by
-;; `seq/stage-slot`. Declared here, not in `std/seq`, because a `defdyn` is an ambient root name
-;; and the stdlib image attributes root globals to modules: the prelude is the root's home.
+;; `seq/stage-slot`. Declared here as a ROOT dynamic, not in `std/seq` (where it would be
+;; `seq/*transduce-run*`, ADR-722), and the stdlib image attributes root globals to modules:
+;; the prelude is the root's home.
 (defdyn *transduce-run* nil)
 
 (defn %xmap (f)

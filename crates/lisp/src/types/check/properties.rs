@@ -70,7 +70,7 @@ pub(crate) fn effect_of(heap: &Heap, name: Symbol) -> Option<String> {
     // Then the global's OWN body — not `effect_of_global`, which trusts a `:pure`
     // declaration on the name itself and would answer `None` for exactly the functions a
     // reader most wants described.
-    let Some(Value::Fn(cid)) = super::deps::obs_global(heap, name) else {
+    let Some(Value::Fn(cid)) = super::deps::obs_function(heap, name) else {
         return None;
     };
     let bodies: Vec<Value> = heap
@@ -325,7 +325,7 @@ impl Purity<'_> {
             return None;
         }
         // A loaded closure: its arms' bodies, as the heap holds them.
-        let Value::Fn(cid) = super::deps::obs_global(self.heap, name)? else {
+        let Value::Fn(cid) = super::deps::obs_function(self.heap, name)? else {
             return None;
         };
         let closure = self.heap.closure(cid);
@@ -452,10 +452,7 @@ fn fn_bodies(heap: &Heap, fn_form: Value) -> Vec<Value> {
         (Some(Value::Str(_)), Some(_)) => 3,
         _ => 2,
     };
-    items
-        .get(body_start..)
-        .map(<[Value]>::to_vec)
-        .unwrap_or_default()
+    items.get(body_start..).map_or_default(<[Value]>::to_vec)
 }
 
 /// Every symbol a binding pattern binds (a bare name, or the names inside a

@@ -192,7 +192,7 @@ fn every_adr_reference_resolves_to_an_adr() {
             }
             dangling.push(format!(
                 "{}: ADR-{:03}",
-                path.strip_prefix(&root).unwrap_or(&path).display(),
+                path.trim_prefix(&root).display(),
                 n
             ));
         }
@@ -234,11 +234,7 @@ fn every_ki_reference_resolves_to_a_known_issue() {
             if known.contains(&n) {
                 continue;
             }
-            dangling.push(format!(
-                "{}: KI-{}",
-                path.strip_prefix(&root).unwrap_or(&path).display(),
-                n
-            ));
+            dangling.push(format!("{}: KI-{}", path.trim_prefix(&root).display(), n));
         }
     }
     dangling.sort();

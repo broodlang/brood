@@ -69,15 +69,13 @@ pub(super) fn obs_global(heap: &Heap, sym: Symbol) -> Option<Value> {
 /// global itself. With contracts armed a `sig`'d global holds the shim, whose body only
 /// checks and forwards — inferring from it read every such function's result as `any`,
 /// and a narrowing of that (`(not vector)` after a `vector?` test) then failed a precise
-/// demand that the unarmed check, inferring from the real body, met (KI-384). The kernel
-/// keeps the original under the uncontracted alias exactly while the shim exists.
+/// demand that the unarmed check, inferring from the real body, met (KI-384). The original
+/// is read from the shim itself (`shim_original`, the closure its frame captures), so a root
+/// name, which has no uncontracted alias, and a `sig!`-forced one, whose alias IS the shim,
+/// are read through too.
 pub(super) fn obs_function(heap: &Heap, sym: Symbol) -> Option<Value> {
     let global = obs_global(heap, sym)?;
-    let original = crate::builtins::contracts::uncontracted_alias(sym).and_then(|alias| {
-        heap.rec_check_dep_sym(alias);
-        heap.env_get(heap.global(), alias)
-    });
-    Some(original.unwrap_or(global))
+    Some(crate::builtins::contracts::shim_original(heap, global).unwrap_or(global))
 }
 
 /// Record + read a global's declared `(sig …)` type-expression value — the type-form
@@ -327,7 +325,7 @@ fn definition_digest(heap: &Heap, sym: Symbol) -> Option<u64> {
 fn closure_digest(heap: &Heap, closure: &value::Closure) -> Option<u64> {
     let mut digest = Digest::new();
     let mut gensyms = std::collections::HashMap::new();
-    digest.text(&closure.name.map(value::symbol_name).unwrap_or_default());
+    digest.text(&closure.name.map_or_default(value::symbol_name));
     for arm in closure.arms.iter() {
         digest.text("arm");
         for &param in &arm.params {

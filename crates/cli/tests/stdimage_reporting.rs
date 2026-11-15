@@ -169,7 +169,7 @@ fn the_suite_summary_says_whether_this_run_used_the_stdlib_image() {
         .env_remove("BROOD_NO_PRELUDE_IMAGE");
     support::dies_with_parent(&mut cmd);
     let out = cmd.output().expect("run the probe");
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let text = String::from_utf8_lossy_owned(out.stdout);
     assert!(
         text.contains("installed=") && !text.contains("installed=nil"),
         "the same warm boot WITH the image must report a section count:\n{text}{}",
@@ -185,7 +185,7 @@ fn the_suite_summary_says_whether_this_run_used_the_stdlib_image() {
         .env_remove("BROOD_NO_PRELUDE_IMAGE");
     support::dies_with_parent(&mut cmd);
     let out = cmd.output().expect("run the probe");
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let text = String::from_utf8_lossy_owned(out.stdout);
     assert!(
         text.contains("installed=nil"),
         "a warm boot under BROOD_NO_STDIMAGE=1 must report NOTHING installed — the prelude \

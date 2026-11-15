@@ -392,7 +392,7 @@ pub(super) fn with_rec_assumption(
     });
     if spent > MAX_REC_UNROLLS {
         #[cfg(test)]
-        REC_BUDGET_EXHAUSTED.with(|count| count.set(count.get() + 1));
+        REC_BUDGET_EXHAUSTED.update(|count| count + 1);
         return false;
     }
     REC_ASSUMPTIONS.with(|s| s.borrow_mut().push((a.clone(), b.clone())));

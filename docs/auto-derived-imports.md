@@ -112,9 +112,10 @@ names a file actually uses, and only when nothing else claimed them.
    opt-in flag (a field on `EmbeddedModule`, or a hardcoded list in the index builder).
    `json`/`csv`/`set`/`http`/… stay explicit `require`/`:use` (auto-deriving them would make
    bare `parse` ambiguously conjure a module).
-2. **Lowest priority.** Resolution order stays: locals → slash/alias → ambient (`defdyn`) →
-   own-namespace → explicit `(:use …)` → prelude/root → **then auto-derive**. Local and
-   explicit always win.
+2. **Lowest priority.** Resolution order stays: locals → slash/alias → own-namespace →
+   explicit `(:use …)` → prelude/root → **then auto-derive**. Local and explicit always
+   win. (An "ambient `defdyn`" step came before own-namespace until ADR-722 made a
+   module's `defdyn` an ordinary name of its module.)
 3. **Per-name granularity.** Import the single name used (`add_import(dedupe, seq/dedupe)`),
    not a whole `(:use seq)` refer-all. Lighter, and it's what makes #B-correctness work.
 4. **Ambiguity is a loud error** naming the candidates ("qualify, or `:use` one"). Plus a test
@@ -145,7 +146,8 @@ Two decisive questions both resolved favorably, so this is **small-to-medium** w
 
 ### The resolver — where the fallback goes
 - `resolve_sym` in `crates/lisp/src/eval/macros.rs` (~1168-1238). Order as implemented: locals
-  (1174) → slash/alias/root-escape (1178-1213) → ambient `defdyn` (1214) → own-ns via
+  (1174) → slash/alias/root-escape (1178-1213) → [an ambient `defdyn` step, removed by
+  ADR-722] → own-ns via
   `ns_knows_name` or `env_get(GLOBAL, ns/name)` (1219) → `(:use …)` via `import_of` (1222) →
   `ns_assume_own` REPL-only (1224) → **fall-through `else { s }` at ~1235** ← insertion point.
 - Heap state it reads (`crates/lisp/src/core/heap.rs` ~2091-2115): `compile_ns`,
