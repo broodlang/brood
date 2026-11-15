@@ -2597,6 +2597,7 @@ fn an_unrelated_def_does_not_cost_a_leaf_derivation_its_inlined_body() {
 /// queued, and an upgrade that landed after the link was never swapped in. rr caught both
 /// under chaos scheduling (2026-11-10). Here the reset is forced, so the only calls `sum-sq`
 /// gets are `warm`'s.
+#[cfg(feature = "jit")]
 #[test]
 fn a_callee_reached_only_through_native_links_still_gets_its_inlined_upgrade() {
     use std::sync::atomic::Ordering::Acquire;
@@ -2710,6 +2711,7 @@ fn a_callee_reached_only_through_native_links_still_gets_its_inlined_upgrade() {
 /// past the flat 60 s these waits had, and three tests failed with their arm still queued
 /// (`inline_queued=true`), nothing wrong but the wait. Time spent `queued` does not spend the
 /// budget; ten minutes is the outer cap, so a compile that never finishes still fails.
+#[cfg(feature = "jit")]
 fn wait_for_tier(
     mut done: impl FnMut() -> bool,
     mut queued: impl FnMut() -> bool,
@@ -3009,6 +3011,7 @@ fn nothing_stores_over_an_arms_code_but_the_latch() {
 /// flag slot (`frame_is_exactly_args`, the fast-link mirror's gate). The release-only inline
 /// path itself is covered by `scripts/load-every-module.blsp` in CI's release job, which went
 /// red (13 modules) with the mirror gated on the first predicate.
+#[cfg(feature = "jit")]
 #[test]
 fn an_optional_arm_takes_a_fast_frame_only_when_nothing_omitted_needs_a_default() {
     let mut interp = crate::Interp::new();

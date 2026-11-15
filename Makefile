@@ -597,6 +597,7 @@ check-desktop: ## The static gates CI runs, safe on a workstation (fmt, the BROO
 	$(RUN_CAP) target/debug/nest check $$(find std tests examples -name '*.blsp' | sort)
 	$(RUN_CAP) target/debug/nest check --strict $$(find std tests examples -name '*.blsp' | sort)
 	cargo clippy --all-targets --all-features -- -D warnings
+	cargo check -p brood --lib --tests --no-default-features
 	$(if $(TEST),$(RUN_CAP) target/debug/nest test $(TEST))
 	@echo "check-desktop: clean"
 
