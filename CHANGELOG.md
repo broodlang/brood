@@ -6,6 +6,22 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.53.0 — inferred type guards and reverse arrows, Rust 1.100, a live form's type where it ran
+
+**Added: the checker reads function types both ways (ADR-725).**
+- A predicate you write is an inferred type guard: `(defn small? (x) (and (int? x) (< x 10)))`
+  narrows `x` to `int` where it is true, in this module and in any module calling it. A declared
+  `(is T)` guard is checked against what the body proves.
+- Reverse arrows: a parameter passed to an overloaded function is typed from the overloads
+  that can accept it, `(math/rem (negate x) 2)` types `x : int`, and a parameter whose uses
+  conflict is reported at the definition.
+- More narrowing: a `let`-bound test carries its facts, `(not X)` swaps X's branches, an `if`
+  used as a test proves what both paths agree on, a guard on `(get m :k)` narrows a name bound
+  from it, a false `(= (count x) n)` drops the length-`n` shapes, and a `match` clause no value
+  can reach is reported.
+- `nest check` can report findings it could not see before, `--strict` especially. bedit
+  needed one fix.
+
 **Changed.**
 - **Building Brood needs Rust 1.100** (was 1.97), to use what 1.98-1.100 stabilised:
   `String::from_utf8_lossy_owned` (no copy for valid UTF-8), `str`/`Path::trim_prefix` and
