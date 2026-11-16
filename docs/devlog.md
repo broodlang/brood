@@ -1847,3 +1847,8 @@ harvest resolves it for a flattened frame, and `ui-memo-at` lets a row be keyed 
 2026-11-16 (ADR-729). **`reflect/scan-bracket-partner`.** The show-paren's char-at walks cost
 1.7–2 ms on every key next to a bracket; the partner is now read natively by the reader's lexer
 from the bracket's top-level form (0.06–0.23 ms).
+
+2026-11-16 (ADR-730). **Text hinted as GNOME hints it.** The window's glyphs were FreeType's
+unhinted ones row for row (cosmic-text turns swash's hinting off); `gui/text-hinting` (`:auto`:
+slight at 1×, none on HiDPI) now draws outlines through skrifa's light autohinter, which matches
+FreeType's hintslight to the byte. `gui/follow-text-rendering` makes any app's text the desktop's.

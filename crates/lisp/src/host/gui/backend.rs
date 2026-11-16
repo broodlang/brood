@@ -17,6 +17,7 @@ mod gpu_ink;
 #[cfg(all(test, feature = "gui-gpu"))]
 mod gpu_replay;
 mod headless;
+mod hinted;
 mod ink;
 mod input;
 mod keyboard;
@@ -39,6 +40,7 @@ use event_loop::*;
 use exit_gate::*;
 use fonts::*;
 use headless::*;
+pub use hinted::TextHinting;
 use ink::*;
 use input::*;
 use keyboard::*;
@@ -68,7 +70,7 @@ pub use primitives::{
     fullscreen, grab, held_key, icon, input_mode, inset, key_repeat, key_repeats, latency,
     latency_histograms, ligatures, line_height, maximize, minimize, next_texture_id, open,
     register_family, register_installed_family, render_frame, settle, size, size_px, sound,
-    sound_free, text_aa, text_contrast, texture, texture_free, title, window_ids,
+    sound_free, text_aa, text_contrast, text_hinting, texture, texture_free, title, window_ids,
 };
 
 use super::{
@@ -348,6 +350,9 @@ enum UserEvent {
     /// Set how monochrome text is anti-aliased (gray / subpixel / auto) — for every
     /// open window and ones opened later. Behind `gui-text-aa!`. A pure repaint.
     TextAa { mode: TextAa },
+    /// Set how outline glyphs are hinted — for every open window and ones opened later.
+    /// Behind `gui/text-hinting` (ADR-730). A pure repaint.
+    TextHinting { mode: TextHinting },
     /// Set the text contrast exponent — for every open window and ones opened later.
     /// Behind `gui-text-contrast!`. A pure repaint.
     TextContrast { gamma: f32 },
@@ -639,6 +644,8 @@ struct RenderDefaults {
     line_height: f32,
     /// How monochrome text is anti-aliased.
     text_aa: TextAa,
+    /// How outline glyphs are hinted.
+    text_hinting: TextHinting,
     /// The text contrast exponent (`TEXT_CONTRAST`; 1.0 = no lift, the encoded lerp's weight).
     text_contrast: f32,
     /// Whether punctuation runs are shaped together (programming ligatures).
@@ -655,6 +662,7 @@ impl Default for RenderDefaults {
             fg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
+            text_hinting: TextHinting::Auto,
             text_contrast: TEXT_CONTRAST,
             ligatures: false,
         }

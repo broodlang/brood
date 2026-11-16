@@ -374,7 +374,8 @@ that is missing or fails says nothing, and so does any error. Needs no window an
 
 (defn- gnome-text (gnome)
   ;; text rendering from GNOME's interface keys (`gnome-keys`). `font-rendering` 'automatic'
-  ;; is what GTK 4 draws whatever the older keys say: grayscale, slight; 'manual', or no such
+  ;; is what GTK 4 draws whatever the older keys say: grayscale, slight hinting at a 1x scale and
+  ;; none on HiDPI (`:auto`, which the window resolves by its scale); 'manual', or no such
   ;; key (GNOME 46 and older), follows `font-antialiasing`, `font-hinting`, `font-rgba-order`
   (let (said (fn (key) (unquote-setting (get gnome key)))
         manual (not (= (said "font-rendering") "automatic"))
@@ -386,7 +387,7 @@ that is missing or fails says nothing, and so does any error. Needs no window an
      :rgba (if (string/ends-with? (said "font-rgba-order") "bgr") :bgr :rgb)
      :hinting (if manual
                 (case (said "font-hinting") "none" :none "medium" :medium "full" :full :slight)
-                :slight)
+                :auto)
      :monospace family
      :monospace-points points
      :scale (if (number? scale) scale 1.0)}))
@@ -413,10 +414,11 @@ that is missing or fails says nothing, and so does any error. Needs no window an
 (defn text-rendering-from (os answers)
   "How `answers` say text is drawn on `os` (an `os/type` keyword), or nil when no source says: a
 map of `:antialias` (`:gray`, `:subpixel` or `:none`), `:rgba` (`:rgb` or `:bgr`, the subpixel
-order), `:hinting` (`:none`, `:slight`, `:medium` or `:full`), `:monospace` (the monospace font's
+order), `:hinting` (`:none`, `:slight`, `:medium`, `:full`, or `:auto` — slight at a 1× scale and
+none on HiDPI, GTK 4's automatic), `:monospace` (the monospace font's
 family name), `:monospace-points` and `:scale` (the text scaling factor). `:gnome` is a `gsettings
 list-recursively org.gnome.desktop.interface` listing — its `font-rendering` `'automatic'` is what
-GTK 4 then draws, grayscale and slightly hinted whatever the older keys say; `'manual'`, or no
+GTK 4 then draws, grayscale and hinted `:auto` whatever the older keys say; `'manual'`, or no
 such key (GNOME 46 and older), follows `font-antialiasing`, `font-hinting` and `font-rgba-order` —
 `:kde` the text of kdeglobals (`XftAntialias`, `XftHintStyle`, `XftSubPixel`, `fixed`), and
 `:desktop` the session's `XDG_CURRENT_DESKTOP`: on KDE kdeglobals is read first, since Plasma
@@ -566,6 +568,27 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
     (gui/text-aa :gray)   ;~> nil; grayscale anti-aliasing in every window"
   (%gui-text-aa! mode))
 
+(defn text-hinting (mode)
+  "Set how outline glyphs are hinted, by fontconfig's names: :slight (FreeType's light target — strokes snapped to the pixel grid vertically only, so the baseline, the x-height and every horizontal stroke sit on whole rows and shapes keep their width: what GNOME draws at a 1× scale), :medium or :full (FreeType's normal target, horizontally too), :none (the outlines as designed), or :auto (the default: slight at a 1× scale, none on HiDPI, as GTK 4 decides). Colour glyphs (emoji) are never hinted. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil (ADR-730).
+
+    (gui/text-hinting :slight)   ;~> nil; text snapped to whole rows, as GNOME draws it"
+  (%gui-text-hinting! mode))
+
+(defn follow-text-rendering (rendering)
+  "Make every window draw text the way `rendering` says — a [[text-rendering-from]] map, what
+[[desktop-preferences]] answers under `:text-rendering` — its anti-aliasing ([[text-aa]]:
+subpixel in its `:rgba` order, else gray) and its hinting ([[text-hinting]]); nil changes
+nothing. The one call an app makes to look like the desktop it runs on; what it sets for itself
+afterwards wins. Needs --features gui. Returns nil.
+
+    (gui/follow-text-rendering (:text-rendering (gui/desktop-preferences)))   ;~> nil; text as the desktop draws it"
+  (when (map? rendering)
+    (when-let (antialias (:antialias rendering))
+      (text-aa (if (= antialias :subpixel) (if (= (:rgba rendering) :bgr) :bgr :subpixel) :gray)))
+    (when-let (hinting (:hinting rendering))
+      (text-hinting hinting)))
+  nil)
+
 (defn text-contrast (gamma)
   "Set the text contrast exponent γ: 1.4 by default, clamped to 0.5..3.0. Text blends in linear light with the weight of a lerp of the encoded colours (ADR-611); a monochrome glyph's partial coverage is first lifted to cov^(1/γ) where the text is lighter than the pixel it lands on, so γ is the perceptual gamma light-on-dark text is weighted at — 1.0 the encoded lerp's weight (thin stems on a dark ground), about 2.2 linear light's (soft). A glyph's interior and exterior, dark-on-light text and colour emoji are untouched. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.
 
@@ -581,7 +604,7 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
 ;; --- frame capture: what a window paints, as pixels (ADR-609) -------------------------
 
 (defn render-frame (frame &optional spec)
-  "Paint `frame` (a gui/draw frame) into memory as a window described by `spec` would paint it, and return the picture: `{:width :height :rgba :cell [w h] :grid [cols rows] :origin [x y] :inset px :seam row :row-tops [y …]}`, `:rgba` being width*height*4 bytes (row-major, opaque) and the rest the geometry it was painted with — the cell in physical pixels, the grid in cells, where the grid's top-left sits, the inset, the frame's `[:seam row]` (nil without one) and the pixel row every grid row starts at, then where the last one ends (`:row-tops`, `rows + 1` entries — ADR-610). It is the WINDOW's own CPU painter that paints it — the same layout rule (row 0 at the top edge, or at the inset when the frame's seam says row 0 is not a band; the inset a margin left, right and below; the leftover height at the seam or under the last row), the same edge bleed, the same glyph rasteriser — so what a test asserts about the pixels is true of the window. Needs no window and no display, so it runs headless and in `nest test`. `spec` (every key optional) is the window it stands in for: `:width`/`:height` in physical pixels (840x560), `:font` (an installed family's name, as gui/font-register's `:family-name` resolves one, or a family keyword the offscreen painter knows — the bundled `:mono` by default), `:size` (the font px, 15), `:line-height` (1.4), `:inset` (logical px, 0), `:bg` (the window colour), `:fg` (the default text colour, gui/fg), `:scale` (HiDPI, 1), `:text-aa`, `:ligatures`. Read a pixel with gui/pixel, save it with gui/write-png. Needs --features gui.
+  "Paint `frame` (a gui/draw frame) into memory as a window described by `spec` would paint it, and return the picture: `{:width :height :rgba :cell [w h] :grid [cols rows] :origin [x y] :inset px :seam row :row-tops [y …]}`, `:rgba` being width*height*4 bytes (row-major, opaque) and the rest the geometry it was painted with — the cell in physical pixels, the grid in cells, where the grid's top-left sits, the inset, the frame's `[:seam row]` (nil without one) and the pixel row every grid row starts at, then where the last one ends (`:row-tops`, `rows + 1` entries — ADR-610). It is the WINDOW's own CPU painter that paints it — the same layout rule (row 0 at the top edge, or at the inset when the frame's seam says row 0 is not a band; the inset a margin left, right and below; the leftover height at the seam or under the last row), the same edge bleed, the same glyph rasteriser — so what a test asserts about the pixels is true of the window. Needs no window and no display, so it runs headless and in `nest test`. `spec` (every key optional) is the window it stands in for: `:width`/`:height` in physical pixels (840x560), `:font` (an installed family's name, as gui/font-register's `:family-name` resolves one, or a family keyword the offscreen painter knows — the bundled `:mono` by default), `:size` (the font px, 15), `:line-height` (1.4), `:inset` (logical px, 0), `:bg` (the window colour), `:fg` (the default text colour, gui/fg), `:scale` (HiDPI, 1), `:text-aa`, `:text-hinting` (ADR-730), `:ligatures`. Read a pixel with gui/pixel, save it with gui/write-png. Needs --features gui.
 
     (gui/render-frame [[:clear] [:text 0 0 \"hi\" {:fg :red}]] {:width 200 :height 60 :inset 6})   ;~> {:width 200 :height 60 :rgba … :cell [9 21] :grid [20 2] :origin [6 0] :inset 6 :seam nil :row-tops [0 21 42]}"
   (%gui-render-frame frame spec))

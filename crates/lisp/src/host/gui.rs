@@ -208,6 +208,8 @@ pub struct RenderSpec {
     pub fg: Option<[u8; 3]>,
     pub scale: Option<f64>,
     pub text_aa: Option<TextAa>,
+    /// How outline glyphs are hinted (ADR-730); `None` leaves the window's `Auto`.
+    pub text_hinting: Option<TextHinting>,
     pub ligatures: Option<bool>,
 }
 
@@ -1440,20 +1442,20 @@ pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font,
-    font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
-    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, lose_display,
-    maximize, minimize, next_texture_id, open, register_family, register_installed_family,
-    render_frame, settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture,
-    texture_free, title, window_ids,
+    TextAa, TextHinting, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg,
+    focus, font, font_info, fullscreen, grab, headless, held_key, host_main_thread, icon,
+    input_mode, inset, key_repeat, key_repeats, latency, latency_histograms, ligatures,
+    line_height, lose_display, maximize, minimize, next_texture_id, open, register_family,
+    register_installed_family, render_frame, settle, size, size_px, sound, sound_free, text_aa,
+    text_contrast, text_hinting, texture, texture_free, title, window_ids,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    TextAa, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font,
-    font_info, fullscreen, grab, headless, held_key, host_main_thread, icon, input_mode, inset,
-    key_repeat, key_repeats, latency, latency_histograms, ligatures, line_height, lose_display,
-    maximize, minimize, next_texture_id, open, register_family, register_installed_family,
-    render_frame, settle, size, size_px, sound, sound_free, text_aa, text_contrast, texture,
-    texture_free, title, window_ids,
+    TextAa, TextHinting, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg,
+    focus, font, font_info, fullscreen, grab, headless, held_key, host_main_thread, icon,
+    input_mode, inset, key_repeat, key_repeats, latency, latency_histograms, ligatures,
+    line_height, lose_display, maximize, minimize, next_texture_id, open, register_family,
+    register_installed_family, render_frame, settle, size, size_px, sound, sound_free, text_aa,
+    text_contrast, text_hinting, texture, texture_free, title, window_ids,
 };

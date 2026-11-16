@@ -146,6 +146,7 @@ pub(super) fn build_window(
     renderer.set_fg(defaults.fg);
     renderer.set_line_height(defaults.line_height);
     renderer.set_text_aa(defaults.text_aa);
+    renderer.set_text_hinting(defaults.text_hinting);
     renderer.set_text_contrast(defaults.text_contrast);
     renderer.set_ligatures(defaults.ligatures);
     let inner = window.inner_size();

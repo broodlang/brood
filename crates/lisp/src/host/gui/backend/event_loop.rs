@@ -351,6 +351,13 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     w.window.request_redraw();
                 }
             }
+            UserEvent::TextHinting { mode } => {
+                self.defaults.text_hinting = mode;
+                for w in self.wins.values_mut() {
+                    w.renderer.set_text_hinting(mode);
+                    w.window.request_redraw();
+                }
+            }
             UserEvent::TextContrast { gamma } => {
                 self.defaults.text_contrast = gamma;
                 for w in self.wins.values_mut() {

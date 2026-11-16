@@ -234,6 +234,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     treesit::register_grammar_vetting(&mut primitives);
     // And again: the partner of a bracket, for a show-paren on every key (ADR-729).
     syntax_scan::register_bracket_partner(&mut primitives);
+    // And again: how outline glyphs are hinted (ADR-730).
+    gui::register_text_hinting(&mut primitives);
 }
 
 #[cfg(test)]

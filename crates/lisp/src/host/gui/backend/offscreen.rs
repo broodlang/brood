@@ -30,7 +30,9 @@ use super::fonts::default_families;
 use super::paint::raster_frame;
 use super::render::{CpuTexture, Renderer};
 use super::rows;
-use super::{DEFAULT_FAMILY, Families, RenderDefaults, TextAa, deliver, resize_message};
+use super::{
+    DEFAULT_FAMILY, Families, RenderDefaults, TextAa, TextHinting, deliver, resize_message,
+};
 use crate::core::sync::lock;
 use crate::core::value;
 use crate::host::gui::{FontChoice, FontInfo, FrameImage, Op, RenderSpec};
@@ -66,6 +68,7 @@ pub(super) enum Request {
     Foreground(Option<[u8; 3]>),
     LineHeight(f32),
     TextAa(TextAa),
+    TextHinting(TextHinting),
     TextContrast(f32),
     Ligatures(bool),
     RegisterFamily {
@@ -280,6 +283,10 @@ impl Painter {
                 self.defaults.text_aa = mode;
                 self.each_window(|renderer| renderer.set_text_aa(mode));
             }
+            Request::TextHinting(mode) => {
+                self.defaults.text_hinting = mode;
+                self.each_window(|renderer| renderer.set_text_hinting(mode));
+            }
             Request::TextContrast(gamma) => {
                 self.defaults.text_contrast = gamma;
                 self.each_window(|renderer| renderer.set_text_contrast(gamma));
@@ -390,6 +397,9 @@ impl Painter {
         }
         if let Some(mode) = spec.text_aa {
             renderer.set_text_aa(mode);
+        }
+        if let Some(mode) = spec.text_hinting {
+            renderer.set_text_hinting(mode);
         }
         if let Some(on) = spec.ligatures {
             renderer.set_ligatures(on);

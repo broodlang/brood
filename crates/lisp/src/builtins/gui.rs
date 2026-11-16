@@ -241,7 +241,7 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
         Arity::exact(2),
         Sig::new(vec![vec_ty, map_ty.union(nil_ty)], map_ty),
         &["frame", "spec"],
-        "Paint frame (a %gui-draw frame) into memory as a window described by spec would paint it, and return the picture {:width :height :rgba :cell [w h] :grid [cols rows] :origin [x y] :inset px :seam row :row-tops [y …]} — :rgba width*height*4 bytes, :row-tops the pixel row each grid row starts at (ADR-610). spec keys (all optional): :width/:height (physical px, 840x560), :font (an installed family's name, or a family keyword the offscreen painter knows), :size (font px, 15), :line-height (1.4), :inset (logical px, 0), :bg (a colour), :scale (1), :text-aa, :ligatures. The window's own CPU painter, layout rule and edge bleed; needs no window or display. Needs --features gui.",
+        "Paint frame (a %gui-draw frame) into memory as a window described by spec would paint it, and return the picture {:width :height :rgba :cell [w h] :grid [cols rows] :origin [x y] :inset px :seam row :row-tops [y …]} — :rgba width*height*4 bytes, :row-tops the pixel row each grid row starts at (ADR-610). spec keys (all optional): :width/:height (physical px, 840x560), :font (an installed family's name, or a family keyword the offscreen painter knows), :size (font px, 15), :line-height (1.4), :inset (logical px, 0), :bg (a colour), :scale (1), :text-aa, :text-hinting (ADR-730), :ligatures. The window's own CPU painter, layout rule and edge bleed; needs no window or display. Needs --features gui.",
         gui_render_frame);
     primitives.def(
         "%gui-capture",
@@ -347,4 +347,21 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
         &["mode"],
         "Set how monochrome text is anti-aliased: :gray (one coverage value per pixel), :subpixel (one per colour channel, each a third of a pixel apart — LCD text, three times the horizontal resolution of every stem, for a panel whose subpixels run red-green-blue), :bgr (the same for a blue-first panel), or :auto (the default: subpixel at a 1× scale where text has the fewest pixels to spend, gray on HiDPI where grayscale is already sharp and a scaled or rotated surface would turn subpixel fringes into colour noise). Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.",
         gui_text_aa);
+}
+
+/// Registered after every other primitive, for the intern-order reason
+/// `syntax_scan::register` gives.
+pub(super) fn register_text_hinting(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::{Arity, Tag};
+    use crate::types::{Sig, Ty};
+    // How outline glyphs are hinted (ADR-730): fontconfig's styles, drawn as FreeType does.
+    primitives.def(
+        "%gui-text-hinting!",
+        Arity::exact(1),
+        Sig::new(vec![Ty::of_tags(&[Tag::Keyword])], nil_ty),
+        &["mode"],
+        "Set how outline glyphs are hinted, by fontconfig's names: :slight (FreeType's light target — strokes snapped to the pixel grid vertically only, so the baseline, x-height and every horizontal stroke sit on whole rows and shapes keep their width: what GNOME draws at a 1× scale), :medium or :full (FreeType's normal target, horizontally too), :none (the outlines as designed), or :auto (the default: slight at a 1× scale, none on HiDPI, as GTK 4 decides). Colour glyphs (emoji) are never hinted. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.",
+        gui_text_hinting,
+    );
 }

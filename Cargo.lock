@@ -551,6 +551,7 @@ dependencies = [
  "sha1",
  "sha2 0.11.1",
  "shuttle",
+ "skrifa 0.44.0",
  "smallvec",
  "softbuffer",
  "stacker",

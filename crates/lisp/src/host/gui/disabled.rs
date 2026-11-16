@@ -120,6 +120,18 @@ pub fn text_aa(_mode: TextAa) -> Result<(), String> {
 pub fn text_contrast(_gamma: f32) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }
+pub fn text_hinting(_mode: TextHinting) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
+/// The hinting styles `gui/text-hinting` names, so the builtin parses its argument identically
+/// with or without the GUI compiled in.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TextHinting {
+    Auto,
+    None,
+    Slight,
+    Full,
+}
 /// The text anti-aliasing modes `gui-text-aa!` names, so the builtin parses its
 /// argument identically with or without the GUI compiled in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

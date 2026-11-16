@@ -4,8 +4,6 @@
 
 use super::*;
 
-use swash::scale::ScaleContext;
-
 /// The shared text engine on the single GUI thread: cosmic-text's `FontSystem`
 /// (font database + shaping + fallback) and `SwashCache` (glyph rasterisation,
 /// color and mono), plus the family-keyword → family-name map a `:family` resolves
@@ -23,10 +21,9 @@ use swash::scale::ScaleContext;
 pub(super) struct FontShared {
     pub(super) fs: FontSystem,
     pub(super) swash: SwashCache,
-    /// swash's own scaler, for the subpixel (LCD) raster path: cosmic-text's
-    /// `SwashCache` renders alpha masks only, so a per-channel mask is rendered here
-    /// from the same font + glyph id + hinting.
-    pub(super) scaler: ScaleContext,
+    /// Outline glyphs hinted as the window says, gray and per subpixel (ADR-730): swash
+    /// keeps the colour ones.
+    pub(super) hinted: super::hinted::HintedGlyphs,
     /// interned family keyword id → fontdb family name (`:mono` → "DejaVu Sans Mono").
     names: HashMap<u32, String>,
     /// interned family keyword id → where its faces came from (`gui-font-info`).
@@ -126,7 +123,7 @@ impl FontShared {
         FontShared {
             fs,
             swash: SwashCache::new(),
-            scaler: ScaleContext::new(),
+            hinted: super::hinted::HintedGlyphs::default(),
             names,
             resolutions,
             bundled,

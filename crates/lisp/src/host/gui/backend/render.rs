@@ -2,6 +2,7 @@
 //! software rasteriser that paints one cell (or one cluster, or a rounded rect, or the
 //! cursor) into the frame buffer.
 
+use super::hinted::{Hint, TextHinting};
 use super::rows::RowMap;
 use super::*;
 
@@ -186,6 +187,8 @@ pub(crate) struct Renderer {
     fg: Option<[u8; 3]>, // default text colour (a face with no :fg); None = DEFAULT_FG
     line_height: f32,    // cell height as a multiple of the font px (`gui-line-height!`)
     text_aa: TextAa,     // how monochrome text is anti-aliased (`gui-text-aa!`)
+    /// How outline glyphs are hinted (`gui/text-hinting`, ADR-730).
+    text_hinting: TextHinting,
     /// The text contrast exponent γ (`gui-text-contrast!`): a glyph's partial coverage
     /// is lifted to `cov^(1/γ)` where the text is lighter than what it is drawn over, so γ
     /// is the perceptual gamma light-on-dark text is weighted at (`TextInk`, ADR-611). 1.0
@@ -257,6 +260,7 @@ impl Renderer {
             fg: None,
             line_height: LINE_HEIGHT,
             text_aa: TextAa::Auto,
+            text_hinting: TextHinting::Auto,
             text_contrast: TEXT_CONTRAST,
             cov_lut: Box::new(contrast_lut(TEXT_CONTRAST)),
             ligatures: false,
@@ -591,6 +595,21 @@ impl Renderer {
         self.invalidate();
     }
 
+    /// Set how outline glyphs are hinted (behind `gui/text-hinting`, ADR-730). Drops the
+    /// cluster cache and the retained frame, as a change of anti-aliasing does; the GPU atlas
+    /// sees it through [`Renderer::font_generation`].
+    pub(super) fn set_text_hinting(&mut self, mode: TextHinting) {
+        self.text_hinting = mode;
+        self.cache.clear();
+        self.invalidate();
+    }
+
+    /// The hinting glyphs are drawn with right now: [`TextHinting`] resolved for this window's
+    /// scale.
+    pub(super) fn hint(&self) -> Hint {
+        self.text_hinting.resolve(self.scale)
+    }
+
     /// Set the text contrast exponent (behind `gui-text-contrast!`): γ in 0.5..3.0, 1.0
     /// no lift at all — the weight of the encoded lerp (`TextInk`, ADR-611). Rebuilds the coverage
     /// curve and forgets the retained frame; the glyph cache holds raw coverage and is
@@ -615,11 +634,17 @@ impl Renderer {
         self.recompute();
     }
 
-    /// The shared registration count — part of the GPU atlas key, which names a glyph
-    /// by family KEYWORD and would otherwise keep a re-registered family's old glyphs.
+    /// What the glyphs are drawn from — the shared registration count, and the hinting —
+    /// part of the GPU atlas key, which names a glyph by family KEYWORD and would otherwise
+    /// keep a re-registered family's old glyphs, or glyphs hinted another way.
     #[cfg_attr(not(feature = "gui-gpu"), allow(dead_code))]
     pub(crate) fn font_generation(&self) -> u64 {
-        self.families.borrow().generation
+        let hint = match self.hint() {
+            Hint::None => 0,
+            Hint::Light => 1,
+            Hint::Normal => 2,
+        };
+        self.families.borrow().generation * 4 + hint
     }
 
     /// Shape runs of punctuation as one unit (`on`), so a font's ligatures form, or
@@ -715,6 +740,16 @@ impl Renderer {
         // fallback glyph aligns with the surrounding text rather than floating to
         // wherever its own font's line metrics put it.
         let baseline = (self.baseline * scale as i32).max(0);
+        // A geometric mark centres on the lowercase beside it as DRAWN: hinting snaps the
+        // x-height to a whole row by the hinter's rules, which the font's numbers alone
+        // (`x_middle`) do not predict. Measured before the families are borrowed below.
+        let lowercase_middle = is_centred_symbol(g).then(|| {
+            let x = self.build_cluster("x", fid, bold, italic, scale as u16, false);
+            ink_rows(&x.rgba, x.width, x.height)
+                .map_or(self.x_middle * scale as f32, |(first, last)| {
+                    (first + last + 1) as f32 / 2.0
+                })
+        });
         let mut shared = self.families.borrow_mut();
         let shared = &mut *shared;
         let fam = shared.name_of(fid);
@@ -763,7 +798,15 @@ impl Renderer {
             // glyph fits its `cells`-wide span.
             let epx = ch.min(cw) as f32;
             let tb2 = shape_cluster(shared, g, attrs(()), epx, cw as f32, epx);
-            composite_cluster(shared, &tb2, &mut rgba, cw, ch, Placement::Center);
+            composite_cluster(
+                shared,
+                &tb2,
+                &mut rgba,
+                cw,
+                ch,
+                Placement::Center,
+                Hint::None,
+            );
             (true, false)
         } else if subpixel
             && composite_cluster_subpixel(
@@ -775,6 +818,7 @@ impl Renderer {
                 baseline,
                 grid,
                 self.text_aa == TextAa::Bgr,
+                self.hint(),
             )
         {
             (false, true)
@@ -789,14 +833,15 @@ impl Renderer {
                 cw,
                 ch,
                 Placement::Baseline { y: baseline, grid },
+                self.hint(),
             );
             (false, false)
         };
         // A geometric mark (a status dot) sits on the optical middle of the text beside it
-        // (half an x-height above the baseline), not where its font's design puts it
-        // (ADR-516, ADR-611).
-        if !color && is_centred_symbol(g) {
-            centre_ink_vertically(&mut rgba, cw, ch, self.x_middle * scale as f32);
+        // (the middle of its lowercase), not where its font's design puts it (ADR-516,
+        // ADR-611, ADR-730).
+        if !color && let Some(middle) = lowercase_middle {
+            centre_ink_vertically(&mut rgba, cw, ch, middle);
         }
         CachedGlyph {
             color,
@@ -1303,13 +1348,22 @@ pub(super) fn composite_cluster(
     cw: usize,
     ch: usize,
     place: Placement,
+    hint: Hint,
 ) {
     for run in tb.layout_runs() {
         for gl in run.glyphs.iter() {
             let phys = gl.physical((0.0, 0.0), 1.0);
-            let img = match shared.swash.get_image(&mut shared.fs, phys.cache_key) {
+            // an outline glyph hinted as the window says (ADR-730); a colour glyph as swash
+            // draws it
+            let hinted = shared
+                .hinted
+                .mask(&mut shared.fs, phys.cache_key, hint, 1.0);
+            let img = match &hinted {
                 Some(img) => img,
-                None => continue,
+                None => match shared.swash.get_image(&mut shared.fs, phys.cache_key) {
+                    Some(img) => img,
+                    None => continue,
+                },
             };
             let (iw, ih) = (img.placement.width as i32, img.placement.height as i32);
             let (ox, oy) = match place {
@@ -1369,51 +1423,22 @@ pub(super) fn composite_cluster_subpixel(
     baseline: i32,
     grid: Option<i32>,
     bgr: bool,
+    hint: Hint,
 ) -> bool {
-    use cosmic_text::CacheKeyFlags;
-    use swash::scale::{Render, Source};
-    use swash::zeno::{Angle, Format, Transform, Vector};
     let mut drew = false;
     for run in tb.layout_runs() {
         for gl in run.glyphs.iter() {
             let phys = gl.physical((0.0, 0.0), 1.0);
             let key = phys.cache_key;
-            let Some(font) = shared.fs.get_font(key.font_id, key.font_weight) else {
-                continue;
-            };
-            // The same scaler settings cosmic-text's own (alpha) rasteriser uses for
-            // this cache key — hinting, a synthesised italic for a family without an
-            // italic face, whole-pixel offsets for a pixel font — so the subpixel glyph
-            // is the gray glyph with three coverages, not a differently shaped one.
-            let flags = key.flags;
-            let mut scaler = shared
-                .scaler
-                .builder(font.as_swash())
-                .size(f32::from_bits(key.font_size_bits))
-                .hint(!flags.contains(CacheKeyFlags::DISABLE_HINTING))
-                .build();
-            let offset = if flags.contains(CacheKeyFlags::PIXEL_FONT) {
-                Vector::new(key.x_bin.as_float().round(), key.y_bin.as_float().round())
-            } else {
-                Vector::new(key.x_bin.as_float(), key.y_bin.as_float())
-            };
-            // The outline is rasterised at THREE TIMES the horizontal resolution, one
-            // coverage per subpixel, as FreeType does for LCD text — not as three
-            // whole-pixel renders shifted a third of a pixel apart, which is what swash's
-            // own `Format::Subpixel` is, and which leaves every stem edge a hard
-            // orange or blue fringe. `lcd_filter` then spreads each subpixel over its
-            // neighbours.
-            let triple = Transform::scale(LCD_OVERSAMPLE as f32, 1.0);
-            let transform = if flags.contains(CacheKeyFlags::FAKE_ITALIC) {
-                Transform::skew(Angle::from_degrees(14.0), Angle::from_degrees(0.0)).then(&triple)
-            } else {
-                triple
-            };
-            let Some(img) = Render::new(&[Source::Outline])
-                .format(Format::Alpha)
-                .offset(Vector::new(offset.x * LCD_OVERSAMPLE as f32, offset.y))
-                .transform(Some(transform))
-                .render(&mut scaler, key.glyph_id)
+            // The outline at THREE TIMES the horizontal resolution, one coverage per
+            // subpixel, as FreeType does for LCD text — not three whole-pixel renders shifted a
+            // third of a pixel apart (swash's own `Format::Subpixel`), which leaves every stem
+            // edge a hard orange or blue fringe — hinted, offset and slanted exactly as the
+            // gray glyph is (`HintedGlyphs::mask`), so it is the gray glyph with three
+            // coverages. `lcd_filter` then spreads each subpixel over its neighbours.
+            let Some(img) = shared
+                .hinted
+                .mask(&mut shared.fs, key, hint, LCD_OVERSAMPLE as f32)
             else {
                 continue;
             };

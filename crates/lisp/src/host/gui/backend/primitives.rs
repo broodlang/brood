@@ -416,6 +416,18 @@ pub fn text_aa(mode: TextAa) -> Result<(), String> {
     Ok(())
 }
 
+/// `(gui/text-hinting mode)` — set how outline glyphs are hinted on every window + the default
+/// for ones opened later (ADR-730). No-op (silently) if the GUI thread never started.
+pub fn text_hinting(mode: TextHinting) -> Result<(), String> {
+    if headless() {
+        return headless_send(|| offscreen::Request::TextHinting(mode));
+    }
+    if let Ok(g) = gui() {
+        let _ = lock(g).send_event(UserEvent::TextHinting { mode });
+    }
+    Ok(())
+}
+
 /// `(gui-text-contrast! gamma)` — set the text contrast exponent on every window + the
 /// default for ones opened later. No-op (silently) if the GUI thread never started.
 pub fn text_contrast(gamma: f32) -> Result<(), String> {

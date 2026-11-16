@@ -1506,6 +1506,9 @@ fn render_spec(heap: &Heap, spec: Value) -> Result<crate::host::gui::RenderSpec,
             ));
         }
     };
+    let text_hinting = get("text-hinting")
+        .map(|mode| text_hinting_of(heap, who, mode))
+        .transpose()?;
     Ok(RenderSpec {
         size,
         font,
@@ -1516,6 +1519,7 @@ fn render_spec(heap: &Heap, spec: Value) -> Result<crate::host::gui::RenderSpec,
         fg,
         scale: number("scale")?,
         text_aa,
+        text_hinting,
         ligatures: get("ligatures").map(crate::eval::truthy),
     })
 }
@@ -1967,5 +1971,45 @@ pub(in crate::builtins) fn gui_lose_display(
 ) -> LispResult {
     let why = expect_string(heap, "%gui-lose-display", arg(args, 0))?;
     crate::host::gui::lose_display(&why);
+    Ok(Value::nil())
+}
+
+/// The hinting style keyword `mode` names (`:auto`, `:none`, `:slight`, `:medium`, `:full` —
+/// fontconfig's names; medium draws as full, as FreeType does), or a type error naming `who`.
+fn text_hinting_of(
+    heap: &Heap,
+    who: &str,
+    mode: Value,
+) -> Result<crate::host::gui::TextHinting, LispError> {
+    use crate::host::gui::TextHinting;
+    let named = match mode {
+        Value::Keyword(k) => match value::symbol_name_ref(k) {
+            "auto" => Some(TextHinting::Auto),
+            "none" => Some(TextHinting::None),
+            "slight" => Some(TextHinting::Slight),
+            "medium" | "full" => Some(TextHinting::Full),
+            _ => None,
+        },
+        _ => None,
+    };
+    named.ok_or_else(|| {
+        LispError::wrong_type(
+            heap,
+            who,
+            "one of :auto, :none, :slight, :medium, :full",
+            mode,
+        )
+    })
+}
+
+/// `(gui/text-hinting mode)` — set how outline glyphs are hinted (ADR-730) on every open
+/// window + the default for ones opened later. GUI only; returns nil.
+pub(in crate::builtins) fn gui_text_hinting(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let mode = text_hinting_of(heap, "gui/text-hinting", arg(args, 0))?;
+    crate::host::gui::text_hinting(mode).map_err(LispError::runtime)?;
     Ok(Value::nil())
 }
