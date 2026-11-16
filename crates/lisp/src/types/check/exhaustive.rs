@@ -325,7 +325,7 @@ fn check_redundant_shapes(heap: &Heap, clauses: &[Value], out: &mut Vec<Finding>
             return;
         };
         let guarded = matches!(clause_items.get(1),
-            Some(&Value::Keyword(k)) if value::symbol_is(k, "when"));
+            Some(&Value::Keyword(marker)) if value::symbol_is(marker, "when"));
         let exact = exact_pattern_ty(heap, pattern, &mut std::collections::HashSet::new());
         if exact.as_ref().is_some_and(Ty::is_any) && !guarded {
             return; // a catch-all: the compiler rejects whatever follows it
@@ -361,7 +361,7 @@ const MAX_EXACT_UNION: usize = 4;
 /// Whether `ty` lies inside the union of `earlier` — read through the union only while it is
 /// exact (see [`check_redundant_shapes`]), else against each earlier type alone.
 fn covered_by(ty: &Ty, earlier: &[Ty]) -> bool {
-    let terms: usize = earlier.iter().map(|t| t.terms_vec().len()).sum();
+    let terms: usize = earlier.iter().map(|prior| prior.terms_vec().len()).sum();
     if terms <= MAX_EXACT_UNION {
         let union = earlier
             .iter()
@@ -370,7 +370,7 @@ fn covered_by(ty: &Ty, earlier: &[Ty]) -> bool {
             .unwrap_or(Ty::NEVER);
         return ty.is_subtype(&union);
     }
-    earlier.iter().any(|t| ty.is_subtype(t))
+    earlier.iter().any(|prior| ty.is_subtype(prior))
 }
 
 /// The EXACT set of values a `match` pattern admits, or `None` when the lattice cannot say it
@@ -385,9 +385,11 @@ fn exact_pattern_ty(
     seen: &mut std::collections::HashSet<value::Symbol>,
 ) -> Option<Ty> {
     match pattern {
-        Value::Sym(s) if value::symbol_is(s, "_") => Some(Ty::ANY),
-        Value::Sym(s) if value::symbol_is(s, "&") || value::symbol_is(s, "&optional") => None,
-        Value::Sym(s) => seen.insert(s).then_some(Ty::ANY),
+        Value::Sym(name) if value::symbol_is(name, "_") => Some(Ty::ANY),
+        Value::Sym(name) if value::symbol_is(name, "&") || value::symbol_is(name, "&optional") => {
+            None
+        }
+        Value::Sym(binder) => seen.insert(binder).then_some(Ty::ANY),
         Value::Keyword(_) | Value::Int(_) | Value::Bool(_) | Value::Nil => {
             Some(Ty::of_value(pattern))
         }
@@ -399,7 +401,7 @@ fn exact_pattern_ty(
             }
             let tys = elems
                 .into_iter()
-                .map(|e| exact_pattern_ty(heap, e, seen))
+                .map(|elem| exact_pattern_ty(heap, elem, seen))
                 .collect::<Option<Vec<Ty>>>()?;
             Some(Ty::tuple_of(tys))
         }
@@ -421,7 +423,7 @@ fn exact_pattern_ty(
                         }
                         alts.push(ty);
                     }
-                    let terms: usize = alts.iter().map(|t| t.terms_vec().len()).sum();
+                    let terms: usize = alts.iter().map(|alt| alt.terms_vec().len()).sum();
                     if terms > MAX_EXACT_UNION {
                         return None;
                     }
@@ -436,7 +438,7 @@ fn exact_pattern_ty(
             }
             let tys = items
                 .into_iter()
-                .map(|e| exact_pattern_ty(heap, e, seen))
+                .map(|item| exact_pattern_ty(heap, item, seen))
                 .collect::<Option<Vec<Ty>>>()?;
             Some(Ty::list_shape_of(tys))
         }

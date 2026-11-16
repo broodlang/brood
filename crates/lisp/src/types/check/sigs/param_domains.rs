@@ -110,9 +110,9 @@ pub(super) fn param_domains(heap: &Heap, body: &[Value], params: &[Symbol], ctx:
     // same conservative retreat the unconditional rule made. The DEFINITION is where
     // that is reported (`walk::binders::check_def`, through `sigs::empty_param_domains`):
     // once, at the function that cannot work, not at every call to it.
-    for t in acc.iter_mut() {
-        if t.is_never() {
-            *t = Ty::ANY;
+    for domain in acc.iter_mut() {
+        if domain.is_never() {
+            *domain = Ty::ANY;
         }
     }
     acc
@@ -511,11 +511,11 @@ fn domain_of_inner(
             }
         }
     }
-    for (i, &arg) in items[1..].iter().enumerate() {
+    for (position, &arg) in items[1..].iter().enumerate() {
         // An argument that is itself a call of an OVERLOADED function: what this position
         // demands of its result selects that function's arms, and only those arms' domains
         // are left for its arguments (reverse arrows, ADR-725).
-        if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(i))
+        if let Some(expected) = callee_sig.as_ref().and_then(|sig| sig.param(position))
             && param_index(arg, params, scope).is_none()
         {
             acc = meet(
@@ -524,10 +524,10 @@ fn domain_of_inner(
             );
         }
         if let Some(pos) = param_index(arg, params, scope) {
-            if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(i)) {
+            if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(position)) {
                 acc[pos] = acc[pos].clone().intersect(scope.demand(heap, h, expected));
             }
-            if i == 0
+            if position == 0
                 && let Some(dom) = op_domain.clone()
             {
                 acc[pos] = acc[pos].clone().intersect(scope.demand(heap, h, dom));
@@ -575,21 +575,21 @@ fn reverse_demand(
     ctx: &Ctx,
     depth: usize,
 ) -> Domain {
-    let n = params.len();
+    let param_count = params.len();
     if depth >= MAX_REVERSE_DEPTH || expected.is_any() {
-        return any_domain(n);
+        return any_domain(param_count);
     }
     let Some(items) = list_items(heap, form) else {
-        return any_domain(n);
+        return any_domain(param_count);
     };
-    let Some(&Value::Sym(g)) = items.first() else {
-        return any_domain(n);
+    let Some(&Value::Sym(callee)) = items.first() else {
+        return any_domain(param_count);
     };
-    if scope.shadowed.contains(&g) || ctx.is_lexical_local(g) {
-        return any_domain(n);
+    if scope.shadowed.contains(&callee) || ctx.is_lexical_local(callee) {
+        return any_domain(param_count);
     }
-    let Some(arms) = overload_arms(heap, g, ctx) else {
-        return any_domain(n);
+    let Some(arms) = overload_arms(heap, callee, ctx) else {
+        return any_domain(param_count);
     };
     let argc = items.len() - 1;
     let fits_arity = |arm: &Sig| {
@@ -603,20 +603,24 @@ fn reverse_demand(
         .filter(|arm| !arm.ret.is_disjoint(expected))
         .collect();
     if kept.is_empty() || kept.len() == arity_ok.len() {
-        return any_domain(n);
+        return any_domain(param_count);
     }
-    let mut acc = any_domain(n);
-    for (j, &arg) in items[1..].iter().enumerate() {
+    let mut acc = any_domain(param_count);
+    for (arg_index, &arg) in items[1..].iter().enumerate() {
         let Some(position) = kept
             .iter()
-            .map(|arm| arm.param(j))
+            .map(|arm| arm.param(arg_index))
             .collect::<Option<Vec<Ty>>>()
             .and_then(|tys| tys.into_iter().reduce(Ty::union))
         else {
             continue;
         };
         match param_index(arg, params, scope) {
-            Some(pos) => acc[pos] = acc[pos].clone().intersect(scope.demand(heap, g, position)),
+            Some(pos) => {
+                acc[pos] = acc[pos]
+                    .clone()
+                    .intersect(scope.demand(heap, callee, position))
+            }
             None => {
                 acc = meet(
                     acc,
@@ -631,14 +635,14 @@ fn reverse_demand(
 /// The arms of an overloaded callee — declared (this file's, then a loaded module's), else
 /// inferred from a multi-arm definition (this file's, then a loaded closure's) — the same
 /// order the overload call check reads them in. `None` for a callee with one signature.
-fn overload_arms(heap: &Heap, g: Symbol, ctx: &Ctx) -> Option<Vec<Sig>> {
-    ctx.declared_overload(g)
+fn overload_arms(heap: &Heap, callee: Symbol, ctx: &Ctx) -> Option<Vec<Sig>> {
+    ctx.declared_overload(callee)
         .cloned()
-        .or_else(|| declared_heap_overload(heap, g))
-        .or_else(|| ctx.inferred_overload(g))
+        .or_else(|| declared_heap_overload(heap, callee))
+        .or_else(|| ctx.inferred_overload(callee))
         .or_else(|| {
-            (!ctx.is_file_global(g))
-                .then(|| infer_overload_of(heap, g))
+            (!ctx.is_file_global(callee))
+                .then(|| infer_overload_of(heap, callee))
                 .flatten()
         })
         .filter(|arms| arms.len() >= 2)

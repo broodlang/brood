@@ -6,7 +6,7 @@
 use super::*;
 
 fn has(ws: &[String], needle: &str) -> bool {
-    ws.iter().any(|w| w.contains(needle))
+    ws.iter().any(|warning| warning.contains(needle))
 }
 
 // ---- a parameter whose uses conflict is reported at the definition ----
@@ -138,13 +138,13 @@ fn an_inferred_guard_renders_as_a_declarable_is_result() {
         signatures("(defn str-ish? (x) (string? x))\n(defn pos-int? (x) (and (int? x) (> x 0)))");
     assert!(
         sigs.iter()
-            .any(|(n, s, _)| n == "str-ish?" && s.ends_with("-> (is string)")),
+            .any(|(name, sig, _)| name == "str-ish?" && sig.ends_with("-> (is string)")),
         "{sigs:?}"
     );
     // A one-sided guard has no spelling: the plain result stands in.
     assert!(
         sigs.iter()
-            .any(|(n, s, _)| n == "pos-int?" && s.ends_with("-> bool")),
+            .any(|(name, sig, _)| name == "pos-int?" && sig.ends_with("-> bool")),
         "{sigs:?}"
     );
     // …and the source rendering a "Declare signature" action writes is a real `(is T)`.
@@ -181,7 +181,7 @@ fn reverse_arrows_compose_through_nested_overloaded_calls() {
     ));
     assert!(
         sigs.iter()
-            .any(|(n, s, _)| n == "nr2" && s.starts_with("(int) ->")),
+            .any(|(name, sig, _)| name == "nr2" && sig.starts_with("(int) ->")),
         "{sigs:?}"
     );
 }
@@ -195,7 +195,7 @@ fn reverse_arrows_read_inferred_clause_arms() {
     );
     assert!(
         sigs.iter()
-            .any(|(n, s, _)| n == "uses-cl" && s.starts_with("(int) ->")),
+            .any(|(name, sig, _)| name == "uses-cl" && sig.starts_with("(int) ->")),
         "{sigs:?}"
     );
 }
@@ -206,7 +206,7 @@ fn a_demand_every_arm_meets_adds_nothing() {
     let sigs = signatures(&format!("{NEGATE}(defn np (x) (+ (negate x) 1))"));
     assert!(
         sigs.iter()
-            .any(|(n, s, _)| n == "np" && !s.starts_with("(int) ->")),
+            .any(|(name, sig, _)| name == "np" && !sig.starts_with("(int) ->")),
         "{sigs:?}"
     );
 }

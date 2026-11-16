@@ -661,10 +661,10 @@ pub(in crate::types::check) fn form_mentions_any(
         return false;
     }
     let mut work = vec![form];
-    while let Some(v) = work.pop() {
-        match v {
-            Value::Sym(s) if names.contains(&s) => return true,
-            Value::Pair(_) => work.extend(list_items(heap, v).unwrap_or_default()),
+    while let Some(node) = work.pop() {
+        match node {
+            Value::Sym(name) if names.contains(&name) => return true,
+            Value::Pair(_) => work.extend(list_items(heap, node).unwrap_or_default()),
             Value::Vector(id) => work.extend(heap.vector(id).iter().copied()),
             _ => {}
         }

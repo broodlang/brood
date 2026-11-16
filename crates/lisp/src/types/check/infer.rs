@@ -1692,8 +1692,9 @@ fn positional_read_ty(heap: &Heap, head: &str, items: &[Value], ctx: &Ctx) -> Op
                             }
                             _ => false,
                         };
-                        let bounded_by_interval =
-                            index.and_then(|r| r.hi).is_some_and(|hi| at_least(hi + 1));
+                        let bounded_by_interval = index
+                            .and_then(|range| range.hi)
+                            .is_some_and(|hi| at_least(hi + 1));
                         non_negative && (bounded_by_guard || bounded_by_interval)
                     }
                 }

@@ -339,8 +339,8 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
         // so it narrows the else-branch too. A `when`-shaped alias is NOT the guard here:
         // its value is data (`(let (src (when k (lookup k))) …)`), so the test narrows
         // `src` itself by truthiness below, and `and_conjunct_guards` adds `k` beside it.
-        if let Some(g) = ctx.guard(s).filter(|g| !g.then_only) {
-            return Some(g);
+        if let Some(guard) = ctx.guard(s).filter(|guard| !guard.then_only) {
+            return Some(guard);
         }
         // **Truthiness.** A bare local as the test is itself a guard: `nil`, `false`
         // and a `failure` are falsy (`eval::truthy`), so a true test means the local is
@@ -507,7 +507,7 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     }
     let facts = predicate_guard_ty(heap, Some(ctx), head)?;
     match items[1] {
-        Value::Sym(s) => facts.guard_on(s),
+        Value::Sym(subject) => facts.guard_on(subject),
         _ => None,
     }
 }
@@ -586,13 +586,13 @@ pub(super) fn predicate_guard_ty(
     // A same-file function is not loaded while its file is checked, so its inferred
     // signature lives on the `ctx` (same-file inference), never in the heap.
     let declared = ctx
-        .and_then(|c| c.declared_sig(head))
+        .and_then(|scope| scope.declared_sig(head))
         .or_else(|| super::sigs::declared_heap_sig(heap, head))
         .or_else(|| super::sigs::image_heap_sig(heap, head))
         .filter(|sig| sig.guard.is_some());
     let stated = declared.is_some();
     let sig = declared
-        .or_else(|| ctx.and_then(|c| c.inferred_fn_sig(head)))
+        .or_else(|| ctx.and_then(|scope| scope.inferred_fn_sig(head)))
         .or_else(|| super::sigs::sig_of(heap, head))?;
     if sig.guard.is_none() && sig.guard_else.is_none() {
         return None;
@@ -760,11 +760,11 @@ pub(super) fn layer_compound_facts(
     mut then_ctx: Ctx,
     mut else_ctx: Ctx,
 ) -> (Ctx, Ctx) {
-    for g in and_conjunct_guards(heap, test, ctx) {
-        then_ctx = then_ctx.narrow(g.sym, g.ty);
+    for guard in and_conjunct_guards(heap, test, ctx) {
+        then_ctx = then_ctx.narrow(guard.sym, guard.ty);
     }
-    for g in or_disjunct_guards(heap, test, ctx) {
-        else_ctx = else_ctx.narrow(g.sym, g.else_type());
+    for guard in or_disjunct_guards(heap, test, ctx) {
+        else_ctx = else_ctx.narrow(guard.sym, guard.else_type());
     }
     if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
         then_ctx = then_ctx.narrow(sym, union);
@@ -802,7 +802,7 @@ fn layer_bound_tests(
         else_ctx = narrow_all(else_ctx, &inner_then.narrowed_since(ctx));
     }
     if ctx.has_cond_facts() {
-        let facts_of = |v: Value| match v {
+        let facts_of = |operand: Value| match operand {
             Value::Sym(name) => ctx.cond_facts(name),
             _ => None,
         };
@@ -852,9 +852,9 @@ fn if_test_facts(
     if !value::symbol_is(head, kw::IF) {
         return None;
     }
-    let (c, a) = (items[1], items[2]);
-    let b = items.get(3).copied().unwrap_or(Value::Nil);
-    let (c_then, c_else) = branch_scopes(heap, c, ctx);
+    let (cond, then_arm) = (items[1], items[2]);
+    let else_arm = items.get(3).copied().unwrap_or(Value::Nil);
+    let (c_then, c_else) = branch_scopes(heap, cond, ctx);
     // One arm's two outcomes: the facts on each, or `None` where that outcome is impossible.
     let outcomes =
         |arm: Value, scope: &Ctx| -> (Option<Vec<(Symbol, Ty)>>, Option<Vec<(Symbol, Ty)>>) {
@@ -864,13 +864,16 @@ fn if_test_facts(
                     (Some(scope.narrowed_since(ctx)), None)
                 }
                 _ => {
-                    let (t, e) = branch_scopes(heap, arm, scope);
-                    (Some(t.narrowed_since(ctx)), Some(e.narrowed_since(ctx)))
+                    let (arm_then, arm_else) = branch_scopes(heap, arm, scope);
+                    (
+                        Some(arm_then.narrowed_since(ctx)),
+                        Some(arm_else.narrowed_since(ctx)),
+                    )
                 }
             }
         };
-    let (a_truthy, a_falsy) = outcomes(a, &c_then);
-    let (b_truthy, b_falsy) = outcomes(b, &c_else);
+    let (a_truthy, a_falsy) = outcomes(then_arm, &c_then);
+    let (b_truthy, b_falsy) = outcomes(else_arm, &c_else);
     Some((join_facts(a_truthy, b_truthy), join_facts(a_falsy, b_falsy)))
 }
 
@@ -881,10 +884,11 @@ fn join_facts(a: Option<Vec<(Symbol, Ty)>>, b: Option<Vec<(Symbol, Ty)>>) -> Vec
     match (a, b) {
         (None, None) => Vec::new(),
         (Some(only), None) | (None, Some(only)) => only,
-        (Some(a), Some(b)) => a
+        (Some(first), Some(second)) => first
             .into_iter()
             .filter_map(|(sym, ty)| {
-                b.iter()
+                second
+                    .iter()
                     .find(|(other, _)| *other == sym)
                     .map(|(_, other_ty)| (sym, ty.union(other_ty.clone())))
             })
@@ -971,7 +975,7 @@ fn chain_operands(heap: &Heap, test: Value, is_and: bool) -> Vec<Value> {
     links
         .into_iter()
         .map(|(op, _)| op)
-        .filter(|op| !matches!(op, Value::Sym(s) if binders.contains(s)))
+        .filter(|op| !matches!(op, Value::Sym(name) if binders.contains(name)))
         .collect()
 }
 
@@ -983,10 +987,10 @@ fn chain_operands(heap: &Heap, test: Value, is_and: bool) -> Vec<Value> {
 /// is the hand-written case.
 fn chain_guards(heap: &Heap, test: Value, is_and: bool, ctx: &Ctx) -> Option<Vec<Option<Guard>>> {
     let (links, binders) = chain_links(heap, test, is_and)?;
-    let guards = links.into_iter().map(|(op, n)| {
-        let bound = &binders[..n];
+    let guards = links.into_iter().map(|(op, bound_count)| {
+        let bound = &binders[..bound_count];
         guard_assertion(heap, op, ctx)
-            .filter(|g| !bound.contains(&g.sym) && !form_mentions_any(heap, op, bound))
+            .filter(|guard| !bound.contains(&guard.sym) && !form_mentions_any(heap, op, bound))
     });
     Some(guards.collect())
 }
@@ -996,7 +1000,7 @@ fn chain_binder(heap: &Heap, link: Value) -> Option<Symbol> {
     let items = list_items(heap, link)?;
     let binds = list_items(heap, *items.get(1)?)?;
     match binds.first() {
-        Some(&Value::Sym(g)) => Some(g),
+        Some(&Value::Sym(binder)) => Some(binder),
         _ => None,
     }
 }
@@ -1102,20 +1106,20 @@ pub(super) fn and_conjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Gu
     // A bare local bound `when`-shaped — `(let (src (when k E)) (if src …))` — proves its
     // condition `k` truthy in the then-branch, beside its own truthiness (which
     // `guard_assertion` states). Then-only: a falsy `src` may be `E`'s own nil.
-    if let Value::Sym(s) = test
-        && let Some(g) = ctx.guard(s).filter(|g| g.then_only)
+    if let Value::Sym(name) = test
+        && let Some(guard) = ctx.guard(name).filter(|guard| guard.then_only)
     {
-        out.push(g);
+        out.push(guard);
     }
     let conjuncts = chain_guards(heap, test, true, ctx).unwrap_or_default();
     out.extend(
         conjuncts
             .into_iter()
             .flatten()
-            .filter(|g| !g.else_only)
-            .map(|g| Guard {
+            .filter(|guard| !guard.else_only)
+            .map(|guard| Guard {
                 then_only: true,
-                ..g
+                ..guard
             }),
     );
     out
@@ -1130,15 +1134,15 @@ pub(super) fn and_conjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Gu
 pub(super) fn or_same_var_narrowing(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Symbol, Ty)> {
     let mut sym: Option<Symbol> = None;
     let mut union = Ty::NEVER;
-    for g in chain_guards(heap, test, false, ctx)? {
-        let g = g.filter(|g| !g.then_only && !g.else_only)?;
-        if sym.is_some_and(|s| s != g.sym) {
+    for candidate in chain_guards(heap, test, false, ctx)? {
+        let guard = candidate.filter(|guard| !guard.then_only && !guard.else_only)?;
+        if sym.is_some_and(|seen| seen != guard.sym) {
             return None; // a different variable — no single-var narrowing
         }
-        sym = Some(g.sym);
-        union = union.union(g.ty);
+        sym = Some(guard.sym);
+        union = union.union(guard.ty);
     }
-    sym.map(|s| (s, union))
+    sym.map(|target| (target, union))
 }
 
 /// Every disjunct guard of an `or`-expansion test that a FALSY `or` refutes — the dual of
@@ -1151,16 +1155,19 @@ pub(super) fn or_same_var_narrowing(heap: &Heap, test: Value, ctx: &Ctx) -> Opti
 /// truthy `or` proves is one disjunct, not a named one (see [`or_same_var_narrowing`]).
 pub(super) fn or_disjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Guard> {
     let disjuncts = chain_guards(heap, test, false, ctx).unwrap_or_default();
-    let refuted = disjuncts.into_iter().flatten().filter(|g| !g.then_only);
+    let refuted = disjuncts
+        .into_iter()
+        .flatten()
+        .filter(|guard| !guard.then_only);
     refuted
-        .map(|g| Guard {
+        .map(|guard| Guard {
             else_only: true,
             // What a FALSY disjunct proves — its explicit else type when it has one. A
             // one-sided guard proving only when false (an inferred `(or (string? x) (opaque
             // x))` predicate: `any` / `¬string`) has a then-type of `any`, whose complement
             // is `never`.
-            else_ty: Some(g.else_type()),
-            ..g
+            else_ty: Some(guard.else_type()),
+            ..guard
         })
         .collect()
 }

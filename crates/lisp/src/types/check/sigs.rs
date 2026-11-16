@@ -1172,11 +1172,11 @@ pub(super) fn inferred_guard(
         return (None, None);
     };
     let mut scope = ctx.clone();
-    for &p in params {
-        scope = scope.bind(p, Some(Ty::ANY));
+    for &param in params {
+        scope = scope.bind(param, Some(Ty::ANY));
     }
     let (then_ctx, else_ctx) = super::guards::branch_scopes(heap, tail, &scope);
-    let informative = |t: Option<Ty>| t.filter(|t| !t.is_any());
+    let informative = |narrowed: Option<Ty>| narrowed.filter(|ty| !ty.is_any());
     (
         informative(then_ctx.get(first)),
         informative(else_ctx.get(first)),
@@ -1318,11 +1318,11 @@ pub(super) fn infer_params_from_form(
     let mut out = ParamDemands::without_guard(demands, optional, rest);
     // The guard is on the FIRST ARGUMENT, so the first binder must be that argument's own
     // name — not a rest list (`(& xs)`), an `&optional` marker, or a destructuring pattern.
-    let first_is_positional = matches!(raw.first(), Some(&Value::Sym(s))
-        if params.first() == Some(&s)
-            && !value::symbol_is(s, kw::AMP)
-            && !value::symbol_is(s, kw::AMP_REST)
-            && !value::symbol_is(s, kw::AMP_OPTIONAL));
+    let first_is_positional = matches!(raw.first(), Some(&Value::Sym(first))
+        if params.first() == Some(&first)
+            && !value::symbol_is(first, kw::AMP)
+            && !value::symbol_is(first, kw::AMP_REST)
+            && !value::symbol_is(first, kw::AMP_OPTIONAL));
     if first_is_positional && let Some(&tail) = body.last() {
         out.guard = inferred_guard(heap, tail, &params, ctx);
     }
@@ -1410,7 +1410,7 @@ pub(super) fn empty_param_domains(heap: &Heap, fn_form: Value, ctx: &Ctx) -> Vec
     let Some(items) = super::walk::list_items(heap, fn_form) else {
         return Vec::new();
     };
-    if !matches!(items.first(), Some(&Value::Sym(s)) if super::walk::is_fn_head(s))
+    if !matches!(items.first(), Some(&Value::Sym(head)) if super::walk::is_fn_head(head))
         || crate::eval::macros::fn_is_arity_multi_clause(heap, &items)
     {
         return Vec::new();
@@ -1427,14 +1427,14 @@ pub(super) fn empty_param_domains(heap: &Heap, fn_form: Value, ctx: &Ctx) -> Vec
     let mut required = Vec::new();
     for item in raw {
         match item {
-            Value::Sym(s)
-                if value::symbol_is(s, kw::AMP_OPTIONAL)
-                    || value::symbol_is(s, kw::AMP)
-                    || value::symbol_is(s, kw::AMP_REST) =>
+            Value::Sym(marker)
+                if value::symbol_is(marker, kw::AMP_OPTIONAL)
+                    || value::symbol_is(marker, kw::AMP)
+                    || value::symbol_is(marker, kw::AMP_REST) =>
             {
                 break;
             }
-            Value::Sym(s) => required.push(s),
+            Value::Sym(name) => required.push(name),
             _ => return Vec::new(),
         }
     }

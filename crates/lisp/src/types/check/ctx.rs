@@ -610,7 +610,10 @@ impl CondFacts {
     /// These facts with every one about `sym` dropped.
     fn without(&self, sym: Symbol) -> CondFacts {
         let kept = |list: &[(Symbol, Ty)]| -> Vec<(Symbol, Ty)> {
-            list.iter().filter(|(t, _)| *t != sym).cloned().collect()
+            list.iter()
+                .filter(|(target, _)| *target != sym)
+                .cloned()
+                .collect()
         };
         CondFacts {
             then: kept(&self.then),
@@ -1018,7 +1021,7 @@ impl Ctx {
         let bound_here: Vec<Symbol> = c
             .path_aliases
             .iter()
-            .filter(|(_, (b, ks))| *b == base && *ks == keys)
+            .filter(|(_, (alias_base, ks))| *alias_base == base && *ks == keys)
             .map(|(alias, _)| *alias)
             .collect();
         for alias in bound_here {
@@ -1090,10 +1093,11 @@ impl Ctx {
         // …and the same for a bound test's facts: the name's own, and every fact about the
         // rebound variable.
         c.cond_facts.remove(&sym);
-        if c.cond_facts.values().any(|f| {
-            f.then
+        if c.cond_facts.values().any(|facts| {
+            facts
+                .then
                 .iter()
-                .chain(&f.else_)
+                .chain(&facts.else_)
                 .any(|(target, _)| *target == sym)
         }) {
             for facts in c.cond_facts.values_mut() {
@@ -1141,9 +1145,9 @@ impl Ctx {
         if sym == guard.sym {
             return self.clone();
         }
-        let mut c = self.clone();
-        c.guards.insert(sym, guard);
-        c
+        let mut scope = self.clone();
+        scope.guards.insert(sym, guard);
+        scope
     }
     /// Record what the test `sym` was let-bound to proves (see [`Ctx::cond_facts`]). A fact
     /// about `sym` itself is dropped: `(let (x (and (int? x) …)) …)` names a new `x`.

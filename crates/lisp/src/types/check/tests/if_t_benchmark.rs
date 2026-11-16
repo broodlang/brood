@@ -27,26 +27,29 @@ fn strict(src: &str) -> Vec<String> {
 
 /// Accepted in both modes.
 fn accepts(item: &str, src: &str) {
-    let (p, s) = (plain(src), strict(src));
+    let (plain_ws, strict_ws) = (plain(src), strict(src));
     assert!(
-        p.is_empty() && s.is_empty(),
-        "{item}: expected silence, plain {p:?} strict {s:?}"
+        plain_ws.is_empty() && strict_ws.is_empty(),
+        "{item}: expected silence, plain {plain_ws:?} strict {strict_ws:?}"
     );
 }
 
 /// Rejected in both modes.
 fn rejects(item: &str, src: &str) {
-    let (p, s) = (plain(src), strict(src));
+    let (plain_ws, strict_ws) = (plain(src), strict(src));
     assert!(
-        !p.is_empty() && !s.is_empty(),
-        "{item}: expected a report, plain {p:?} strict {s:?}"
+        !plain_ws.is_empty() && !strict_ws.is_empty(),
+        "{item}: expected a report, plain {plain_ws:?} strict {strict_ws:?}"
     );
 }
 
 /// Rejected in strict mode; plain mode's gradual reading leaves a merely-wider value alone.
 fn rejects_strictly(item: &str, src: &str) {
-    let s = strict(src);
-    assert!(!s.is_empty(), "{item}: expected a strict report, got none");
+    let strict_ws = strict(src);
+    assert!(
+        !strict_ws.is_empty(),
+        "{item}: expected a strict report, got none"
+    );
 }
 
 #[test]
@@ -179,7 +182,10 @@ fn nesting_condition() {
         strict(src)
     );
     let ws = plain("(defn f (x y) (if (if (number? x) (string? y) (string? y)) (+ 1 y) 0))");
-    assert!(ws.iter().any(|w| w.contains("got string (y)")), "{ws:?}");
+    assert!(
+        ws.iter().any(|warning| warning.contains("got string (y)")),
+        "{ws:?}"
+    );
 }
 
 #[test]

@@ -996,7 +996,7 @@ pub(super) fn check_if(
             // An INFERRED guard does not judge (ADR-725): `(refute (my-pred? bad))` tests a
             // predicate's false answer on purpose (see `Guard::inferred`).
             if !g.inferred
-                && let Some((p, known)) = then_ctx.newly_dead_binding(ctx, g.sym)
+                && let Some((binding, known)) = then_ctx.newly_dead_binding(ctx, g.sym)
             {
                 out.push(Finding::new(
                     Lint::UnreachableClause,
@@ -1004,7 +1004,7 @@ pub(super) fn check_if(
                     format!(
                         "unreachable clause: {} is {}, which can never be {} \
                          — this branch is dead code",
-                        name_of(p),
+                        name_of(binding),
                         known,
                         g.ty,
                     ),
@@ -1148,11 +1148,11 @@ pub(in crate::types::check) fn let_bind_scope(
     {
         scope = scope.bind_let_fn_sig(name, sig);
     }
-    if let Some(g) = rhs_guard
-        && !g.then_only
-        && !g.else_only
+    if let Some(guard) = rhs_guard
+        && !guard.then_only
+        && !guard.else_only
     {
-        scope = scope.add_guard(name, g);
+        scope = scope.add_guard(name, guard);
     }
     // A `when`-shaped binding — `(let (src (when k (lookup k))) …)`, which is `(if k E nil)`
     // once expanded — is a guard on `k`: a truthy `src` proves `k` truthy (a falsy `k` makes

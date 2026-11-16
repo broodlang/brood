@@ -828,19 +828,22 @@ fn a_program_shaped_like_data_is_still_checked() {
     // not keyword/value pairs: a typo'd call, which does fail when run
     let ws = file_warnings("(prnt \"hi\")");
     assert!(
-        ws.iter().any(|w| w.contains("unbound symbol: prnt")),
+        ws.iter()
+            .any(|warning| warning.contains("unbound symbol: prnt")),
         "{ws:?}"
     );
     // a second form makes it a program
     let ws = file_warnings("(config :a 1)\n(config :b 2)");
     assert!(
-        ws.iter().any(|w| w.contains("unbound symbol: config")),
+        ws.iter()
+            .any(|warning| warning.contains("unbound symbol: config")),
         "{ws:?}"
     );
     // a dangling key is not a pair
     let ws = file_warnings("(config :a 1 :b)");
     assert!(
-        ws.iter().any(|w| w.contains("unbound symbol: config")),
+        ws.iter()
+            .any(|warning| warning.contains("unbound symbol: config")),
         "{ws:?}"
     );
 }
@@ -855,10 +858,11 @@ fn a_data_shaped_line_about_to_be_evaluated_is_still_checked() {
     let forms = crate::syntax::reader::read_all(&mut heap, "(config :a 1)").expect("parse");
     let ws: Vec<String> = super::super::check_forms_here(&mut heap, &forms)
         .into_iter()
-        .map(|(_, m)| m)
+        .map(|(_, message)| message)
         .collect();
     assert!(
-        ws.iter().any(|w| w.contains("unbound symbol: config")),
+        ws.iter()
+            .any(|warning| warning.contains("unbound symbol: config")),
         "{ws:?}"
     );
 }
