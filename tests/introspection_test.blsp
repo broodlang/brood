@@ -353,7 +353,7 @@
     (assert= (reflect/expr-type "(:x (ispt 1 2))") "1")
     (assert= (reflect/expr-type "(:y (ispt 1 2))") "2")
     ;; written by NAME, as a declaration names it, not as the raw shape
-    (assert= (reflect/expr-type "(ispt 1 2)") "ispt"))
+    (assert= (reflect/expr-type "(ispt 1 2)") "introspection-test/ispt"))
 
   (test "a lambda literal types as an arrow"
     (assert= (reflect/expr-type "(fn (n) (str n))") "(any -> string)"))
