@@ -120,12 +120,13 @@ they are; undo takes the properties back), anything else leaving `buf` as it is.
     ([:splice [lo hi repl] properties] (apply-splice buf lo hi repl properties))
     ([:text replacement properties]
       (let (wanted (or properties {})
-            current (buffer-property-map buf))
+            current (buffer-property-store buf))
         (cond
           (not (string? replacement)) buf
           (not (= replacement (buffer-text buf)))
             (apply-splice buf 0 (buffer-length buf) replacement properties)
-          (= wanted current) buf
+          ;; the wire's spans are vectors, the buffer's trees: compared as spans
+          (properties-same? wanted current) buf
           else
           ;; the same text: set every key either side has, over all of it — a key only
           ;; this copy has is cleared (`[]`); the text is what the file has no less than

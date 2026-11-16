@@ -80,7 +80,7 @@ empty change, still pushed: its sender waits for the echo)."
       ""
       [:put-properties
         (- to from)
-        (properties-changes (buffer-property-map next-buf) from to (keys normalized))]
+        (properties-changes (buffer-property-store next-buf) from to (keys normalized))]
       next-buf]))
 
 (defn- buffer-serve-splice (buf subs version recent lo hi repl origin base properties)

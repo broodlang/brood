@@ -1856,3 +1856,8 @@ FreeType's hintslight to the byte. `gui/follow-text-rendering` makes any app's t
 2026-11-16 (ADR-731). **`editor/span-tree`.** Ascending spans as a persistent balanced tree of
 relative items: carried through an edit in O(log n) (an insert before 10,000 spans 5.2 → 0.13
 ms), clipped to a range in O(log n + k), tested against the vector code on random edit runs.
+
+2026-11-16 (ADR-731 addendum). **A buffer's text properties are span trees.** Stored maps hold
+trees, data maps (wire, splice log, `buffer-property-map`) vectors; a key at the top of 10,000
+property spans 5.3 → 0.23 ms. `buffer-property-store` + `properties-in` read a range in
+O(log n + k).

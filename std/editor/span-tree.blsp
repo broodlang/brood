@@ -195,11 +195,31 @@ subtrees outside the range are never walked: O(log n + k).
     (map (reverse (collect tree 0 low high '()))
       (fn (span) (let ([start end value] span) [(math/max start low) (math/min end high) value])))))
 
+(defn overlapping (tree low high)
+  "The spans of `tree` overlapping `[low, high)` as they are, NOT cut to it (a span reaching in
+from before `low` keeps its start), as an ascending vector: O(log n + k). What a view asks for
+the lines it shows when it slices them itself.
+
+    (editor/span-tree/overlapping (editor/span-tree/from-spans [[0 2 :a] [3 6 :b]]) 1 4)   ;=> [[0 2 :a] [3 6 :b]]"
+  (into [] (reverse (collect tree 0 low high '()))))
+
 (defn span-count (tree)
   "How many spans `tree` holds.
 
     (editor/span-tree/span-count nil)   ;=> 0"
   (size tree))
+
+(defn tree? (value)
+  "Whether `value` is a non-empty span tree (the empty one is nil) — what tells a tree from a
+vector of spans, whose slots hold spans where a tree's hold its height, count and extent.
+
+    (editor/span-tree/tree? (editor/span-tree/from-spans [[0 1 :a]]))   ;=> true
+    (editor/span-tree/tree? [[0 1 :a]])   ;=> false"
+  (and (vector? value)
+    (= (count value) 8)
+    (int? (nth value 5))
+    (int? (nth value 6))
+    (int? (nth value 7))))
 
 (defn no-spans? (tree)
   "Whether `tree` holds no span.
@@ -256,13 +276,18 @@ one gap change: O(log n + k). The spans `change` answers must lie after every sp
         origin (extent before)
         [touched after] (split rest (fn (start _end) (<= (+ origin start) high)))
         old (reverse (collect touched origin origin (inc (+ origin (extent touched))) '()))
-        [new delta] (change (into [] old))
+        touched-spans (into [] old)
+        [new delta] (change touched-spans)
         middle-end (if (empty? new) origin (nth (last new) 1))
         ;; `after`'s first gap was measured from the end of the last touched span (or of
         ;; `before`): re-measure it from the end of what replaced them, moved by `delta`
         after-start (+ origin (extent touched))
         moved-after (shift-first after (- (+ after-start delta) middle-end)))
-    (concat (concat before (built-from new origin)) moved-after)))
+    ;; nothing changed (the same spans back, nothing moved): the very same tree, so a caller
+    ;; comparing the old with the new learns it at once
+    (if (and (= delta 0) (= (into [] new) touched-spans))
+      tree
+      (concat (concat before (built-from new origin)) moved-after))))
 
 ;; ---- carrying spans through text edits ----------------------------------------
 
@@ -275,35 +300,39 @@ O(log n) for an edit that touches a few spans, whatever the count.
 
     (editor/span-tree/->spans (editor/span-tree/carry (editor/span-tree/from-spans [[2 4 :red]]) :insert 3 2))   ;=> [[2 3 :red] [5 6 :red]]
     (editor/span-tree/->spans (editor/span-tree/carry (editor/span-tree/from-spans [[0 2 :a] [3 5 :a]]) :delete 2 3))   ;=> [[0 4 :a]]"
-  (if (= kind :insert)
-    (if (<= b 0)
-      tree
-      (edit tree
-        a
-        a
-        (fn (spans)
-          [(into []
-             (mapcat spans
-               (fn (span)
-                 (let ([start end value] span)
-                   (cond
-                     (<= end a) [span]
-                     (>= start a) [[(+ start b) (+ end b) value]]
-                     else [[start a value] [(+ a b) (+ end b) value]])))))
-            b])))
-    (if (<= b a)
-      tree
-      (let (width (- b a))
+  (cond
+    ;; an edit at or after the last span's end moves nothing: the same tree
+    (>= a (extent tree)) tree
+    (= kind :insert)
+      (if (<= b 0)
+        tree
         (edit tree
           a
-          b
+          a
           (fn (spans)
-            [(joined (map spans
-                       (fn (span)
-                         (let ([start end value] span
-                               moved (fn (at) (cond (< at a) at (< at b) a else (- at width))))
-                           [(moved start) (moved end) value]))))
-              (- width)]))))))
+            [(into []
+               (mapcat spans
+                 (fn (span)
+                   (let ([start end value] span)
+                     (cond
+                       (<= end a) [span]
+                       (>= start a) [[(+ start b) (+ end b) value]]
+                       else [[start a value] [(+ a b) (+ end b) value]])))))
+              b])))
+    else
+      (if (<= b a)
+        tree
+        (let (width (- b a))
+          (edit tree
+            a
+            b
+            (fn (spans)
+              [(joined (map spans
+                         (fn (span)
+                           (let ([start end value] span
+                                 moved (fn (at) (cond (< at a) at (< at b) a else (- at width))))
+                             [(moved start) (moved end) value]))))
+                (- width)]))))))
 
 (defn replace (tree from to spans)
   "`tree` with `[from, to)` cleared — a span crossing an edge cut at it — and the absolute

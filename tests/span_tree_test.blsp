@@ -15,7 +15,11 @@
     (let (tree (from-spans [[0 2 :a] [3 6 :b] [8 9 :c]]))
       (assert= (clip tree 1 4) [[1 2 :a] [3 4 :b]])
       (assert= (clip tree 6 8) [])
-      (assert= (clip tree 0 100) [[0 2 :a] [3 6 :b] [8 9 :c]]))))
+      (assert= (clip tree 0 100) [[0 2 :a] [3 6 :b] [8 9 :c]])))
+  (test "overlapping answers the spans reaching into a range, uncut"
+    (let (tree (from-spans [[0 2 :a] [3 6 :b] [8 9 :c]]))
+      (assert= (overlapping tree 1 4) [[0 2 :a] [3 6 :b]])
+      (assert= (overlapping tree 6 8) []))))
 
 (describe "span-tree — carried through an edit, Emacs's way"
   (test "an insert inside a span splits it; at either edge it stays outside"
@@ -80,17 +84,77 @@
                                (fn ([start end _])
                                  (and (< start (+ from width)) (<= end (+ from width))))))]))]))
 
+;; ---- the oracle: the vector code text properties were kept with before the tree (verbatim) ----
+;; `editor/span-properties` is built on the tree now, so the oracle is kept here, unchanged.
+
+(defn- properties-first-after (spans position)
+  "The index of the first of the ascending, non-overlapping `spans` that ENDS after
+`position` — its count when none does. A binary search: an edit after every span (an
+append to a log) costs only that."
+  (letrec (search (fn (low high)
+                    (if (>= low high)
+                      low
+                      (let (middle (math/quot (+ low high) 2))
+                        (if (> (nth (nth spans middle) 1) position)
+                          (search low middle)
+                          (search (inc middle) high))))))
+    (search 0 (count spans))))
+
+(defn- properties-push (spans span)
+  "`spans` (a vector) with `span` appended — joined to the last span when it continues it
+with the same value, so where an edit happened to cut a run never shows in the spans."
+  (let ([from to value] span
+        last-index (dec (count spans))
+        previous (when (>= last-index 0) (nth spans last-index)))
+    (if (and previous (= (nth previous 1) from) (= (nth previous 2) value))
+      (assoc spans last-index [(first previous) to value])
+      (conj spans span))))
+
+(defn- properties-carry (spans kind a b)
+  "`spans` carried through an edit — `:insert` of `b` chars at `a`, or `:delete` of `[a, b)`
+— or nil when the edit is after every span and changes none of them. Spans before the edit
+are kept as they are; only the rest are rebuilt."
+  (let (start (properties-first-after spans a))
+    (when (< start (count spans))
+      (fold (seq/subvec spans start)
+        (seq/subvec spans 0 start)
+        (fn (acc span)
+          (let ([from to value] span)
+            (if (= kind :insert)
+              ;; every span here ends after `a`: one that starts before it splits around
+              ;; the new text, the others move right past it
+              (if (< from a)
+                (conj (conj acc [from a value]) [(+ a b) (+ to b) value])
+                (conj acc [(+ from b) (+ to b) value]))
+              (let (width (- b a)
+                    moved-from (cond
+                                 (< from a) from
+                                 (< from b) a
+                                 else (- from width))
+                    moved-to (if (<= to b) a (- to width)))
+                (if (< moved-from moved-to) (properties-push acc [moved-from moved-to value]) acc)))))))))
+
+(defn- properties-replace-range (spans:vector from:int to:int laid:seqable -> vector)
+  "The ascending `spans` with `[from, to)` cleared — a span crossing an edge cut at it — and
+`laid` (ascending, absolute, inside the range) put there, joined at the edges."
+  (let (start (properties-first-after spans from)
+        crossing (when (< start (count spans)) (nth spans start))
+        head (seq/subvec spans 0 start)
+        head (if (and crossing (< (first crossing) from))
+               (conj head [(first crossing) from (nth crossing 2)])
+               head)
+        laid-in (fold laid head properties-push))
+    (fold (seq/subvec spans (properties-first-after spans to))
+      laid-in
+      (fn (out span) (let ([a b value] span) (properties-push out [(math/max a to) b value]))))))
+
 (defn- oracle-step (spans step)
   ;; the vector code's answer for `step` over the vector `spans`
   (case (first step)
-    :replace
-      (let ([_ from to laid] step
-            relative (into []
-                       (map laid (fn ([start end value]) [(- start from) (- end from) value]))))
-        (get (editor/span-properties/properties-with-changes {:k spans} from to {:k relative})
-          :k []))
-    (let ([kind a b] step)
-      (get (editor/span-properties/properties-map-carry {:k spans} kind a b) :k []))))
+    :replace (let ([_ from to laid] step) (properties-replace-range spans from to laid))
+    (let ([kind a b] step
+          moved (properties-carry spans kind a b))
+      (if (nil? moved) spans moved))))
 
 (defn- tree-step (tree step)
   (case (first step)

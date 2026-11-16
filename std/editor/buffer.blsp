@@ -1047,13 +1047,22 @@ where no span of the buffer's is — an insert leaves a gap) laid in, joined to 
 that continues one in the same value."
   (assoc buf :properties (properties-map-add (or (get buf :properties) {}) lo added)))
 
+(defn buffer-property-store (buf:buffer -> map)
+  "`buf`'s text properties as it keeps them — `{key spans}`, each key's spans an
+`editor/span-tree` — or `{}` for none: what the `editor/span-properties` functions take, which
+read a key in O(log n + k). Opaque otherwise; [[buffer-property-map]] is the data.
+
+    (editor/buffer/buffer-property-store (editor/buffer/make-buffer \"abc\"))   ;=> {}"
+  (let (properties (get buf :properties)) (if (map? properties) properties {})))
+
 (defn buffer-property-map (buf:buffer -> map)
-  "Every text property of `buf` as `{key [[start end value] …]}` — per key its ascending,
+  "Every text property of `buf` as data, `{key [[start end value] …]}` — per key its ascending,
 non-overlapping spans — or `{}` when it has none. What a holder ships with the text (a buffer
-process's seed, another frame's copy) so the copy has them too.
+process's seed, another frame's copy) so the copy has them too. O(spans): a view reading a
+range asks [[buffer-properties-in]].
 
     (editor/buffer/buffer-property-map (editor/buffer/make-buffer \"abc\"))   ;=> {}"
-  (let (properties (get buf :properties)) (if (map? properties) properties {})))
+  (properties->data (buffer-property-store buf)))
 
 (defn buffer-properties (buf:buffer key:any -> vector)
   "The spans `[[start end value] …]` of text property `key` in `buf`, ascending and
@@ -1062,14 +1071,15 @@ are now: every edit carries them (ADR-579).
 
     (editor/buffer/buffer-properties (editor/buffer/insert (editor/buffer/insert (editor/buffer/make-buffer \"\") \"ab\" {:face [[0 2 :red]]}) \"!\") :face)   ;=> [[0 2 :red]]
     (editor/buffer/buffer-properties (editor/buffer/insert (editor/buffer/goto-char (editor/buffer/insert (editor/buffer/make-buffer \"\") \"ab\" {:face [[0 2 :red]]}) 0) \"!\") :face)   ;=> [[1 3 :red]]"
-  (let (spans (get (buffer-property-map buf) key)) (if (vector? spans) spans [])))
+  (properties-spans (get (buffer-property-store buf) key)))
 
 (defn buffer-properties-in (buf:buffer key:any lo:int hi:int -> vector)
   "The spans of text property `key` that overlap `[lo, hi)`, clipped to it — what a view
-painting those characters needs, found by a binary search rather than a walk of them all.
+painting those characters needs, O(log n + k) whatever the count: the subtrees outside the
+range are never walked (ADR-731).
 
     (editor/buffer/buffer-properties-in (editor/buffer/insert (editor/buffer/make-buffer \"\") \"abcdef\" {:face [[0 2 :a] [3 6 :b]]}) :face 1 4)   ;=> [[1 2 :a] [3 4 :b]]"
-  (spans-clip (buffer-properties buf key) lo hi))
+  (properties-in (get (buffer-property-store buf) key) lo hi))
 
 ;; ---- the splice log: what an edit DID, not a guess from the text -------------------
 ;; A holder that mirrors this buffer somewhere else — a buffer process, a collaborator, a
@@ -1833,7 +1843,7 @@ the text, recorded for undo.
       (let ([_ width changes] properties
             [from to] (property-change-range buf lo width)
             normalized (properties-changes-normalize changes (- to from))
-            current (buffer-property-map buf)
+            current (buffer-property-store buf)
             updated (properties-with-changes current from to normalized))
         (if (or (= from to) (= updated current))
           buf
@@ -1872,7 +1882,7 @@ never sees it (`buffer-splices-since`). Unchanged properties change nothing.
                        (fn (span)
                          (let ([start end value] span) [(- start from) (- end from) value])))
             changes (properties-changes-normalize {key relative} (- to from))
-            current (buffer-property-map buf)
+            current (buffer-property-store buf)
             updated (properties-with-changes current from to changes))
         (if (= updated current)
           buf
