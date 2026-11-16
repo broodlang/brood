@@ -1,0 +1,325 @@
+;; std/editor/span-tree.blsp — ascending spans over a text, carried through an edit in O(log n).
+;;
+;; A text property, a highlight, a diagnostic: data laid over `[start, end)` of a text, the
+;; spans ascending and apart. Kept as a vector of absolute spans, every edit before the last
+;; span rewrites every span after it — O(n) a keystroke, 16 ms at ten thousand spans. Here the
+;; spans are a persistent height-balanced tree of RELATIVE items `[gap length value]`, each
+;; `gap` measured from the end of the item before (or the text's start), and every node keeps
+;; the extent and the count of what it holds. An edit changes only the items it touches: the
+;; ones after it keep their gaps, so moving them all is changing ONE gap.
+;;
+;; The tree is a join-based AVL tree (Blelloch, Ferizovic and Sun, "Just Join for Parallel
+;; Ordered Sets"): `split` and `join` are the two O(log n) primitives, and everything is built
+;; from them. [[edit]] is the one operation that changes spans — it cuts out the items touching
+;; a range, hands them to a function as plain absolute spans, and splices back what it returns,
+;; shifting every later span by a delta — so carrying an insert, a delete or laying new spans
+;; is O(log n + k) for the k spans the range touches.
+;;
+;; A node is `[left right gap length value height count extent]`, the empty tree nil. Two
+;; trees holding the same spans may differ in shape, so compare them with [[same?]], not `=`.
+
+(defmodule editor/span-tree
+  "Ascending, non-overlapping spans `[start end value]` over a text as a persistent balanced
+tree of relative items: build one with [[from-spans]], read it back with [[->spans]] or
+[[clip]], move it through an insert or a delete with [[carry]] — O(log n) whatever the count —
+and change a range with [[replace]] or the general [[edit]]. Two trees holding the same spans
+are [[same?]]; `=` compares their shapes.
+
+    (editor/span-tree/->spans (editor/span-tree/carry (editor/span-tree/from-spans [[2 4 :red] [6 8 :blue]]) :insert 0 3))   ;=> [[5 7 :red] [9 11 :blue]]")
+
+;; ---- nodes -------------------------------------------------------------------
+
+(defn- height (tree) (if (nil? tree) 0 (nth tree 5)))
+
+(defn- size (tree) (if (nil? tree) 0 (nth tree 6)))
+
+(defn- extent (tree) (if (nil? tree) 0 (nth tree 7)))
+
+(defn- node (left gap length value right)
+  ;; a node over `left`, the item `[gap length value]` and `right`, its measures computed
+  [left
+    right
+    gap
+    length
+    value
+    (inc (math/max (height left) (height right)))
+    (+ (size left) 1 (size right))
+    (+ (extent left) gap length (extent right))])
+
+(defn- left-of (tree) (nth tree 0))
+
+(defn- right-of (tree) (nth tree 1))
+
+(defn- with-children (tree left right)
+  ;; `tree`'s own item between new children
+  (node left (nth tree 2) (nth tree 3) (nth tree 4) right))
+
+(defn- rotate-left (tree)
+  (let (pivot (right-of tree))
+    (with-children pivot (with-children tree (left-of tree) (left-of pivot)) (right-of pivot))))
+
+(defn- rotate-right (tree)
+  (let (pivot (left-of tree))
+    (with-children pivot (left-of pivot) (with-children tree (right-of pivot) (right-of tree)))))
+
+;; ---- join and split ----------------------------------------------------------
+;; `join` puts an item between two trees, every item of `left` before it and every item of
+;; `right` after it, and rebalances along one spine: O(|height left - height right|). The
+;; item's gap is relative to the end of `left`'s last item, and `right`'s first gap to the end
+;; of the item — the order of the text, kept by never reordering.
+
+(defn- join-right (left item right)
+  ;; `left` taller by two or more: descend its right spine
+  (let ([gap length value] item
+        inner (right-of left))
+    (if (<= (height inner) (inc (height right)))
+      (let (joined (node inner gap length value right))
+        (if (<= (height joined) (inc (height (left-of left))))
+          (with-children left (left-of left) joined)
+          (rotate-left (with-children left (left-of left) (rotate-right joined)))))
+      (let (joined (join-right inner item right)
+            rebuilt (with-children left (left-of left) joined))
+        (if (<= (height joined) (inc (height (left-of left)))) rebuilt (rotate-left rebuilt))))))
+
+(defn- join-left (left item right)
+  ;; `right` taller by two or more: descend its left spine
+  (let ([gap length value] item
+        inner (left-of right))
+    (if (<= (height inner) (inc (height left)))
+      (let (joined (node left gap length value inner))
+        (if (<= (height joined) (inc (height (right-of right))))
+          (with-children right joined (right-of right))
+          (rotate-right (with-children right (rotate-left joined) (right-of right)))))
+      (let (joined (join-left left item inner)
+            rebuilt (with-children right joined (right-of right)))
+        (if (<= (height joined) (inc (height (right-of right)))) rebuilt (rotate-right rebuilt))))))
+
+(defn- join (left item right)
+  (cond
+    (> (height left) (inc (height right))) (join-right left item right)
+    (> (height right) (inc (height left))) (join-left left item right)
+    else (let ([gap length value] item) (node left gap length value right))))
+
+(defn- split-last (tree)
+  ;; `[rest item]`: `tree` without its last item, and that item
+  (if (nil? (right-of tree))
+    [(left-of tree) [(nth tree 2) (nth tree 3) (nth tree 4)]]
+    (let ([rest item] (split-last (right-of tree)))
+      [(join (left-of tree) [(nth tree 2) (nth tree 3) (nth tree 4)] rest) item])))
+
+(defn- concat (left right)
+  ;; every item of `left`, then every item of `right` (whose first gap is relative to the end
+  ;; of `left`'s last)
+  (if (nil? left)
+    right
+    (let ([rest item] (split-last left)) (join rest item right))))
+
+(defn- split (tree before?)
+  "`[left right]`: the items of `tree` for which `(before? start end)` holds — a predicate
+true of a prefix of the items, given each item's start and end relative to `tree`'s origin —
+and the rest. `right`'s first gap stays relative to the end of `left`'s last item: `right`'s
+origin is `(extent left)`."
+  (if (nil? tree)
+    [nil nil]
+    (let (start (+ (extent (left-of tree)) (nth tree 2))
+          end (+ start (nth tree 3))
+          item [(nth tree 2) (nth tree 3) (nth tree 4)])
+      (if (before? start end)
+        (let ([inner-left inner-right] (split (right-of tree)
+                                         (fn (s e) (before? (+ s end) (+ e end)))))
+          [(join (left-of tree) item inner-left) inner-right])
+        (let ([inner-left inner-right] (split (left-of tree) before?))
+          [inner-left (join inner-right item (right-of tree))])))))
+
+(defn- shift-first (tree delta)
+  ;; `tree` with its first item's gap moved by `delta`
+  (cond
+    (nil? tree) nil
+    (nil? (left-of tree))
+      (node nil (+ (nth tree 2) delta) (nth tree 3) (nth tree 4) (right-of tree))
+    else (with-children tree (shift-first (left-of tree) delta) (right-of tree))))
+
+;; ---- spans in and out --------------------------------------------------------
+
+(defn- build (items low high)
+  ;; a balanced tree of the relative `items` (a vector) in `[low, high)`
+  (if (>= low high)
+    nil
+    (let (middle (math/quot (+ low high) 2)
+          [gap length value] (nth items middle))
+      (node (build items low middle) gap length value (build items (inc middle) high)))))
+
+(defn- relative (spans origin)
+  ;; the absolute ascending `spans` as relative items, the first measured from `origin`
+  (second (fold spans
+            [origin []]
+            (fn (acc span)
+              (let ([previous items] acc
+                    [start end value] span)
+                [end (conj items [(- start previous) (- end start) value])])))))
+
+(defn- built-from (spans origin)
+  ;; a tree of the absolute ascending `spans`, its origin at `origin`
+  (let (items (relative spans origin)) (build items 0 (count items))))
+
+(defn from-spans (spans)
+  "A tree of `spans` — ascending, non-overlapping `[start end value]`, a vector or a list —
+built balanced in one pass.
+
+    (editor/span-tree/span-count (editor/span-tree/from-spans [[0 2 :a] [3 5 :b]]))   ;=> 2"
+  (built-from (if (vector? spans) spans (into [] spans)) 0))
+
+(defn- collect (tree origin low high acc)
+  ;; the items of `tree` (its origin at `origin`) overlapping `[low, high)`, absolute and
+  ;; consed onto `acc` last first — a subtree wholly outside the range is never entered
+  (if (or (nil? tree) (>= origin high) (<= (+ origin (extent tree)) low))
+    acc
+    (let (start (+ origin (extent (left-of tree)) (nth tree 2))
+          end (+ start (nth tree 3))
+          before (collect (left-of tree) origin low high acc)
+          here (if (and (< start high) (> end low)) (cons [start end (nth tree 4)] before) before))
+      (collect (right-of tree) end low high here))))
+
+(defn ->spans (tree)
+  "Every span of `tree`, absolute, as an ascending vector.
+
+    (editor/span-tree/->spans (editor/span-tree/from-spans [[0 2 :a]]))   ;=> [[0 2 :a]]"
+  (into [] (reverse (collect tree 0 0 (inc (extent tree)) '()))))
+
+(defn clip (tree low high)
+  "The spans of `tree` overlapping `[low, high)`, cut to it, as an ascending vector — the
+subtrees outside the range are never walked: O(log n + k).
+
+    (editor/span-tree/clip (editor/span-tree/from-spans [[0 2 :a] [3 6 :b]]) 1 4)   ;=> [[1 2 :a] [3 4 :b]]"
+  (into []
+    (map (reverse (collect tree 0 low high '()))
+      (fn (span) (let ([start end value] span) [(math/max start low) (math/min end high) value])))))
+
+(defn span-count (tree)
+  "How many spans `tree` holds.
+
+    (editor/span-tree/span-count nil)   ;=> 0"
+  (size tree))
+
+(defn no-spans? (tree)
+  "Whether `tree` holds no span.
+
+    (editor/span-tree/no-spans? (editor/span-tree/from-spans []))   ;=> true"
+  (nil? tree))
+
+(defn end (tree)
+  "Where `tree`'s last span ends — 0 for none.
+
+    (editor/span-tree/end (editor/span-tree/from-spans [[2 5 :a]]))   ;=> 5"
+  (extent tree))
+
+(defn same? (left right)
+  "Whether two trees hold the same spans, whatever their shapes — `=` compares shapes, and an
+edit and a rebuild can shape the same spans differently.
+
+    (editor/span-tree/same? (editor/span-tree/from-spans [[0 1 :a] [2 3 :b] [4 5 :c]]) (editor/span-tree/replace (editor/span-tree/from-spans [[0 1 :a] [4 5 :c]]) 2 3 [[2 3 :b]]))   ;=> true"
+  ;; the counts and extents first: two trees that differ there are never walked
+  (and (= (size left) (size right))
+    (= (extent left) (extent right))
+    (= (->spans left) (->spans right))))
+
+;; ---- the one edit ------------------------------------------------------------
+
+(defn joined (spans)
+  "Absolute ascending `spans` with every pair that meets in the same value made one, and every
+empty span dropped — the shape a tree keeps, so where an edit cut a run never shows.
+
+    (editor/span-tree/joined [[0 2 :a] [2 4 :a] [5 5 :b]])   ;=> [[0 4 :a]]"
+  (fold spans
+    []
+    (fn (out span)
+      (let ([start end value] span
+            last-index (dec (count out)))
+        (cond
+          (>= start end) out
+          (and (>= last-index 0)
+            (= (nth (nth out last-index) 1) start)
+            (= (nth (nth out last-index) 2) value))
+            (assoc out last-index [(first (nth out last-index)) end value])
+          else (conj out span))))))
+
+(defn edit (tree low high change)
+  "`tree` with the spans touching `[low, high]` — overlapping it, or ending at `low`, or starting
+at `high` — replaced: `(change spans)` gets them as an absolute ascending vector and answers
+`[spans' delta]`, the absolute ascending spans to put in their place and how far every span
+after them moves (an insert's length, a delete's negative width, 0). Only the touched spans and
+one gap change: O(log n + k). The spans `change` answers must lie after every span before
+`low` and, once moved by `delta`, before every span after `high`.
+
+    (editor/span-tree/->spans (editor/span-tree/edit (editor/span-tree/from-spans [[0 2 :a] [5 7 :b]]) 2 2 (fn (spans) [spans 1])))   ;=> [[0 2 :a] [6 8 :b]]"
+  (let ([before rest] (split tree (fn (_start end) (< end low)))
+        origin (extent before)
+        [touched after] (split rest (fn (start _end) (<= (+ origin start) high)))
+        old (reverse (collect touched origin origin (inc (+ origin (extent touched))) '()))
+        [new delta] (change (into [] old))
+        middle-end (if (empty? new) origin (nth (last new) 1))
+        ;; `after`'s first gap was measured from the end of the last touched span (or of
+        ;; `before`): re-measure it from the end of what replaced them, moved by `delta`
+        after-start (+ origin (extent touched))
+        moved-after (shift-first after (- (+ after-start delta) middle-end)))
+    (concat (concat before (built-from new origin)) moved-after)))
+
+;; ---- carrying spans through text edits ----------------------------------------
+
+(defn carry (tree kind a b)
+  "`tree` carried through an edit of its text — `:insert` of `b` characters at `a`, or `:delete`
+of `[a, b)` — with Emacs's text-property rules: text inserted INSIDE a span is not part of it
+(the span splits around it), text inserted at either edge is outside it, a delete shrinks a
+span and drops one it empties, and two spans of one value it brings together become one.
+O(log n) for an edit that touches a few spans, whatever the count.
+
+    (editor/span-tree/->spans (editor/span-tree/carry (editor/span-tree/from-spans [[2 4 :red]]) :insert 3 2))   ;=> [[2 3 :red] [5 6 :red]]
+    (editor/span-tree/->spans (editor/span-tree/carry (editor/span-tree/from-spans [[0 2 :a] [3 5 :a]]) :delete 2 3))   ;=> [[0 4 :a]]"
+  (if (= kind :insert)
+    (if (<= b 0)
+      tree
+      (edit tree
+        a
+        a
+        (fn (spans)
+          [(into []
+             (mapcat spans
+               (fn (span)
+                 (let ([start end value] span)
+                   (cond
+                     (<= end a) [span]
+                     (>= start a) [[(+ start b) (+ end b) value]]
+                     else [[start a value] [(+ a b) (+ end b) value]])))))
+            b])))
+    (if (<= b a)
+      tree
+      (let (width (- b a))
+        (edit tree
+          a
+          b
+          (fn (spans)
+            [(joined (map spans
+                       (fn (span)
+                         (let ([start end value] span
+                               moved (fn (at) (cond (< at a) at (< at b) a else (- at width))))
+                           [(moved start) (moved end) value]))))
+              (- width)]))))))
+
+(defn replace (tree from to spans)
+  "`tree` with `[from, to)` cleared — a span crossing an edge cut at it — and the absolute
+ascending `spans` (inside the range) laid there, joined to a neighbour that continues one in
+the same value. The text does not move.
+
+    (editor/span-tree/->spans (editor/span-tree/replace (editor/span-tree/from-spans [[0 4 :red]]) 1 3 [[1 2 :blue]]))   ;=> [[0 1 :red] [1 2 :blue] [3 4 :red]]"
+  (edit tree
+    from
+    to
+    (fn (old)
+      (let (outside (fn (span)
+                      (let ([start end value] span)
+                        (append (if (< start from) [[start (math/min end from) value]] [])
+                          (if (> end to) [[(math/max start to) end value]] []))))
+            kept (mapcat old outside)
+            left (seq/filter kept (fn (span) (<= (nth span 1) from)))
+            right (seq/filter kept (fn (span) (>= (first span) to))))
+        [(joined (append left spans right)) 0]))))

@@ -1,0 +1,158 @@
+;; tests/span_tree_test.blsp — ascending spans as a balanced tree (std/editor/span-tree.blsp,
+;; ADR-731): each operation, then random runs of edits against the vector code it replaces
+;; (`editor/span-properties`) as the oracle, with the tree's balance checked after every step.
+
+(defmodule span-tree-test (:use test) (:use-internals editor/span-tree))
+
+(describe "span-tree — building and reading"
+  (test "spans in are spans out, and nothing is nil"
+    (assert= (->spans (from-spans [[0 2 :a] [3 5 :b] [9 10 :c]])) [[0 2 :a] [3 5 :b] [9 10 :c]])
+    (assert= (->spans nil) [])
+    (is (no-spans? (from-spans [])))
+    (assert= (span-count (from-spans (list [1 2 :a] [4 6 :b]))) 2)
+    (assert= (end (from-spans [[1 2 :a] [4 6 :b]])) 6))
+  (test "clip cuts the spans overlapping a range to it, and only those"
+    (let (tree (from-spans [[0 2 :a] [3 6 :b] [8 9 :c]]))
+      (assert= (clip tree 1 4) [[1 2 :a] [3 4 :b]])
+      (assert= (clip tree 6 8) [])
+      (assert= (clip tree 0 100) [[0 2 :a] [3 6 :b] [8 9 :c]]))))
+
+(describe "span-tree — carried through an edit, Emacs's way"
+  (test "an insert inside a span splits it; at either edge it stays outside"
+    (let (tree (from-spans [[2 5 :a]]))
+      (assert= (->spans (carry tree :insert 3 2)) [[2 3 :a] [5 7 :a]])
+      (assert= (->spans (carry tree :insert 2 2)) [[4 7 :a]])
+      (assert= (->spans (carry tree :insert 5 2)) [[2 5 :a]])))
+  (test "an insert after every span changes nothing; one before moves them all"
+    (let (tree (from-spans [[2 5 :a] [7 8 :b]]))
+      (assert= (->spans (carry tree :insert 20 3)) [[2 5 :a] [7 8 :b]])
+      (assert= (->spans (carry tree :insert 0 3)) [[5 8 :a] [10 11 :b]])))
+  (test "a delete shrinks, drops what it empties, and joins what it brings together"
+    (let (tree (from-spans [[0 2 :a] [3 5 :a] [6 8 :b]]))
+      (assert= (->spans (carry tree :delete 2 3)) [[0 4 :a] [5 7 :b]])
+      (assert= (->spans (carry tree :delete 1 7)) [[0 1 :a] [1 2 :b]])
+      (assert= (->spans (carry tree :delete 0 20)) [])))
+  (test "replace clears a range, lays new spans in it and joins at its edges"
+    (let (tree (from-spans [[0 6 :a]]))
+      (assert= (->spans (replace tree 2 4 [[2 4 :b]])) [[0 2 :a] [2 4 :b] [4 6 :a]])
+      (assert= (->spans (replace tree 2 4 [[2 4 :a]])) [[0 6 :a]])
+      (assert= (->spans (replace tree 2 4 [])) [[0 2 :a] [4 6 :a]])))
+  (test "same? looks at the spans, not at how the tree is shaped"
+    (let (built (from-spans [[0 1 :a] [2 3 :b] [4 5 :c] [6 7 :d]])
+          edited (replace (from-spans [[0 1 :a] [4 5 :c] [6 7 :d]]) 2 3 [[2 3 :b]]))
+      (is (same? built edited))
+      (is (not (same? built (from-spans [[0 1 :a]])))))))
+
+;; ---- against the vector code, at random -----------------------------------------------
+
+(defn- spans-from-runs (runs)
+  ;; absolute spans from `[gap length value]` runs: ascending, apart, joined as both keep them
+  (joined (second (fold runs
+                    [0 []]
+                    (fn (acc run)
+                      (let ([at spans] acc
+                            [gap length value] run
+                            start (+ at gap))
+                        [(+ start length) (conj spans [start (+ start length) value])]))))))
+
+(def- span-runs
+  (property/vector-of (property/tuple (property/int 0 4)
+                        (property/int 1 5)
+                        (property/elements [:a :b :c]))
+    {:max 40}))
+
+(def- an-edit
+  (property/one-of [(property/fmap (property/tuple (property/int 0 80) (property/int 1 6))
+                      (fn ([at length]) [:insert at length]))
+                     (property/fmap (property/tuple (property/int 0 80) (property/int 1 12))
+                       (fn ([at width]) [:delete at (+ at width)]))
+                     (property/fmap (property/tuple (property/int 0 80)
+                                      (property/int 0 8)
+                                      span-runs)
+                       (fn ([from width runs])
+                         [:replace
+                           from
+                           (+ from width)
+                           (into []
+                             (seq/filter (map (spans-from-runs runs)
+                                           (fn ([start end value])
+                                             [(+ from start) (+ from end) value]))
+                               (fn ([start end _])
+                                 (and (< start (+ from width)) (<= end (+ from width))))))]))]))
+
+(defn- oracle-step (spans step)
+  ;; the vector code's answer for `step` over the vector `spans`
+  (case (first step)
+    :replace
+      (let ([_ from to laid] step
+            relative (into []
+                       (map laid (fn ([start end value]) [(- start from) (- end from) value]))))
+        (get (editor/span-properties/properties-with-changes {:k spans} from to {:k relative})
+          :k []))
+    (let ([kind a b] step)
+      (get (editor/span-properties/properties-map-carry {:k spans} kind a b) :k []))))
+
+(defn- tree-step (tree step)
+  (case (first step)
+    :replace (let ([_ from to laid] step) (replace tree from to laid))
+    (let ([kind a b] step) (carry tree kind a b))))
+
+(defn- node-height (tree) (if (nil? tree) 0 (nth tree 5)))
+
+(defn- node-size (tree) (if (nil? tree) 0 (nth tree 6)))
+
+(defn- node-extent (tree) (if (nil? tree) 0 (nth tree 7)))
+
+(defn- balanced? (tree)
+  ;; every node's children differ in height by at most one, and its cached measures are its
+  ;; own — a node is `[left right gap length value height count extent]`
+  (or (nil? tree)
+    (let (left (nth tree 0)
+          right (nth tree 1))
+      (and (<= (math/abs (- (node-height left) (node-height right))) 1)
+        (= (node-height tree) (inc (math/max (node-height left) (node-height right))))
+        (= (node-size tree) (+ (node-size left) 1 (node-size right)))
+        (= (node-extent tree) (+ (node-extent left) (nth tree 2) (nth tree 3) (node-extent right)))
+        (> (nth tree 3) 0)
+        (balanced? left)
+        (balanced? right)))))
+
+(defn- agrees? (drawn)
+  ;; every step of `drawn` (`[runs edits]`) gives the vector code's spans, and a balanced tree
+  (let ([runs edits] drawn
+        start (spans-from-runs runs))
+    (first (fold edits
+             [true start (from-spans start)]
+             (fn (acc step)
+               (let ([ok spans tree] acc
+                     next-spans (oracle-step spans step)
+                     next-tree (tree-step tree step))
+                 [(and ok (= (->spans next-tree) next-spans) (balanced? next-tree))
+                   next-spans next-tree]))))))
+
+(describe "span-tree — the same spans as the vector code, edit after edit"
+  (test "random spans through random inserts, deletes and replaces"
+    (check-property 300
+      (property/tuple span-runs (property/vector-of an-edit {:max 25}))
+      agrees?))
+  (test "clip is the vector code's spans-clip"
+    (check-property 200
+      (property/tuple span-runs (property/int 0 90) (property/int 0 30))
+      (fn ([runs low width])
+        (let (spans (spans-from-runs runs))
+          (= (clip (from-spans spans) low (+ low width))
+            (editor/span-properties/spans-clip spans low (+ low width)))))))
+  (test "a long run of edits keeps the tree shallow"
+    ;; ten thousand spans, then a thousand edits spread over them: height stays logarithmic
+    (let (spans (into [] (map (range 10000) (fn (i) [(* 3 i) (+ (* 3 i) 2) (math/mod i 5)])))
+          edited (fold (range 1000)
+                   (from-spans spans)
+                   (fn (tree i)
+                     (let (at (math/mod (* i 7919) 30000))
+                       (if (math/even? i)
+                         (carry tree :insert at 2)
+                         (carry tree :delete at (+ at 3))))))
+          rows (->spans edited))
+      (is (balanced? edited))
+      (is (<= (node-height edited) 24))
+      (is (every? (seq/zip rows (rest rows)) (fn ([a b]) (<= (nth a 1) (first b))))))))

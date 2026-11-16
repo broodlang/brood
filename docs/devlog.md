@@ -1852,3 +1852,7 @@ from the bracket's top-level form (0.06–0.23 ms).
 unhinted ones row for row (cosmic-text turns swash's hinting off); `gui/text-hinting` (`:auto`:
 slight at 1×, none on HiDPI) now draws outlines through skrifa's light autohinter, which matches
 FreeType's hintslight to the byte. `gui/follow-text-rendering` makes any app's text the desktop's.
+
+2026-11-16 (ADR-731). **`editor/span-tree`.** Ascending spans as a persistent balanced tree of
+relative items: carried through an edit in O(log n) (an insert before 10,000 spans 5.2 → 0.13
+ms), clipped to a range in O(log n + k), tested against the vector code on random edit runs.

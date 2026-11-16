@@ -619,6 +619,8 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("editor/buffer-server", "std/editor/buffer-server.blsp"),
     // Text-property spans as pure data: how they move through an edit.
     embedded_module!("editor/span-properties", "std/editor/span-properties.blsp"),
+    // Ascending spans as a persistent balanced tree: an edit carries them in O(log n).
+    embedded_module!("editor/span-tree", "std/editor/span-tree.blsp"),
     // The CLIENT half of the buffer-process protocol (ADR-134): the link record
     // + the pure push fold (echo suppression, splice transform over in-flight
     // edits, resync fallback) a subscriber uses to track a hosted document.
