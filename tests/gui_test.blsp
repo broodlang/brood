@@ -646,7 +646,7 @@ straddling two rows is two rows of grey."
                 (merge {:width 60 :height 30 :bg [0 0 0] :size 14 :line-height 1.0} spec))
         [cell-w cell-h] (:cell image))
     (count (seq/filter (range cell-h)
-             (fn (y) (any? (range cell-w) (fn (x) (>= (first (gui/pixel image x y)) 200))))))))
+             (fn (y) (any? (range cell-w) (fn (x) (>= (or (first (gui/pixel image x y)) 0) 200))))))))
 
 (describe "gui/text-hinting — text on whole rows, as the desktop draws it"
   (test "slight hinting puts each bar of an = on one row; none leaves one straddling two"
@@ -655,10 +655,13 @@ straddling two rows is two rows of grey."
                 (is (< (solid-rows {:text-hinting :none :text-aa :gray}) 2)))))
   (test "auto is slight at a 1x scale"
     (when-gui (fn ()
-                (is (= (solid-rows {:text-aa :gray}) (solid-rows {:text-hinting :slight :text-aa :gray}))))))
+                (is (= (solid-rows {:text-aa :gray})
+                      (solid-rows {:text-hinting :slight :text-aa :gray}))))))
   (test "a hinting the window does not know is refused by name"
     (when-gui (fn ()
-                (let (raised (try (gui/render-frame [[:clear]] {:text-hinting :sharp}) (catch e (error-message e))))
+                (let (raised (try
+                               (gui/render-frame [[:clear]] {:text-hinting :sharp})
+                               (catch e (error-message e))))
                   (is (includes? raised ":slight"))))))
   (test "GNOME's automatic rendering hints by scale; manual says its style"
     (is (= (:hinting (gui/text-rendering-from :linux
