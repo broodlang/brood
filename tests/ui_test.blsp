@@ -1562,3 +1562,29 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
           (is (term-quit-await-file (marker "exited") 20000))
           (os/close p)
           (file/rmdir dir))))))
+
+(describe "input waiting inside a turn (ADR-726)"
+  (test "proc/priority-pending? sees another process's priority lane, taking nothing"
+    (let (me (self)
+          waiter (spawn (fn ()
+                          (receive (:go nil))
+                          (send me [:taken (proc/take-priority)])
+                          (send me [:left (proc/priority-pending?)]))))
+      (refute (proc/priority-pending? waiter))
+      (proc/send-priority waiter :key)
+      (is (proc/priority-pending? waiter))
+      ;; an ordinary message is not input
+      (send waiter :go)
+      (assert= (receive ([:taken taken] taken) (after 2000 :timeout)) [:key])
+      (assert= (receive ([:left left] left) (after 2000 :timeout)) false)))
+  (test "a pid that is not a live local process has nothing waiting"
+    (let (gone (spawn (fn () nil)))
+      (proc/monitor gone)
+      (receive ([:down _ _ _] nil) (after 2000 nil))
+      (refute (proc/priority-pending? gone))))
+  (test "ui-input-pending? asks the loop's display, and is false outside a loop"
+    (refute (ui-input-pending?))
+    (binding (editor/ui/*display* {:input-pending? (fn () true)})
+      (is (ui-input-pending?)))
+    (binding (editor/ui/*display* {})
+      (refute (ui-input-pending?)))))

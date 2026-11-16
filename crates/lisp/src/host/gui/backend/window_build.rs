@@ -194,6 +194,7 @@ pub(super) fn build_window(
         scroll_next_tick: Instant::now(),
         particles_next: None,
         frame_period: period,
+        frame_period_at: Instant::now(),
         published_size: None,
         scroll_last_tick: Instant::now(),
         scroll_pending: false,

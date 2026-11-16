@@ -297,8 +297,9 @@ whatever it throws is logged, never kept from the exit. nil, so the loop stops."
 ;; [[ui-input-pending?]], which is the question an app asks of it.
 
 (defn ui-input-pending? ()
-  "Whether the user's input is waiting for the loop this code runs inside — a key or a click
-the display has queued and not yet handed over (`editor/frontend/display-input-pending?`).
+  "Whether the user's input is waiting for the loop this code runs inside — anything the display
+has queued as input and not yet handed over, pointer motion too
+(`editor/frontend/display-input-pending?`).
 Work that runs long INSIDE a turn — a slice of idle jobs, a chunk of background folding —
 asks this between its pieces and stops early when it says yes, so the key is folded and
 drawn next rather than after the work (ADR-490's input first, inside the turn). False outside

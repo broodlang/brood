@@ -254,7 +254,11 @@ impl FontShared {
             origin: resolution.origin,
             faces: resolution.faces,
             fallbacks: self.fallbacks.clone(),
-            system_scanned: self.system.is_some(),
+            system_scanned: self.system.is_some()
+                || self
+                    .scanning
+                    .as_ref()
+                    .is_some_and(|scan| scan.is_finished()),
             ligatures,
         }
     }
@@ -279,7 +283,9 @@ impl FontShared {
             let scanned = self.scanning.take().and_then(|handle| handle.join().ok());
             self.system = Some(scanned.unwrap_or_else(SystemFonts::scan));
         }
-        self.system.get_or_insert_with(SystemFonts::scan)
+        self.system
+            .as_ref()
+            .expect("the installed fonts were scanned just above")
     }
 
     /// Load every installed face of `family` into the shaping database, so each weight and

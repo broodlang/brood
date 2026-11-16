@@ -508,7 +508,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 update_ime_area(w);
                 // Wake the app loop so it re-renders at the new (cols, rows)
                 // now, rather than after its (possibly long) poll timeout.
-                publish_size(w);
+                publish_resize(w);
                 w.window.request_redraw();
             }
             // We deliberately ignore 0.30's `inner_size_writer` (which could
@@ -888,7 +888,8 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                         w.scroll_pending = false;
                         w.scroll_momentum_active = true;
                         w.scroll_next_tick = now;
-                        w.scroll_last_tick = now;
+                        // a refresh already spent: the first step moves at once, not a frame late
+                        w.scroll_last_tick = now.checked_sub(w.frame_period).unwrap_or(now);
                         event_loop.set_control_flow(ControlFlow::WaitUntil(now));
                     }
                     MouseScrollDelta::PixelDelta(p) => {
@@ -910,7 +911,8 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                                     w.scroll_decay = TRACKPAD_DECAY;
                                     w.scroll_momentum_active = true;
                                     w.scroll_next_tick = now;
-                                    w.scroll_last_tick = now;
+                                    w.scroll_last_tick =
+                                        now.checked_sub(w.frame_period).unwrap_or(now);
                                 } else {
                                     w.scroll_momentum_active = false;
                                     w.scroll_velocity = 0.0;
@@ -971,17 +973,13 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 let margins =
                     bleed::Margins::of(&w.renderer, inner.width as usize, inner.height as usize);
                 let frame = w.bleed.frame(&w.frame, margins);
-                // The monitor's refresh, re-read every paint (a cheap lookup): a window
-                // dragged from a 60 Hz panel to a 144 Hz one at the same scale gets no event
-                // that says so, and its coast and particles step by it.
-                w.frame_period = frame_period(&w.window);
-                // Paced by the compositor, as a GTK window's frame clock is: on Wayland this
-                // asks for a frame callback with the commit the paint makes, and winit holds
-                // the next `RedrawRequested` until it arrives. A paint after a quiet spell
-                // still goes at once (no callback pending); a burst of frames is painted once
-                // a refresh, the newest each time, instead of each one blocking on a buffer
-                // the compositor has not released. A no-op on the other platforms.
-                w.window.pre_present_notify();
+                // The monitor's refresh, re-read once a second at most: a window dragged from a
+                // 60 Hz panel to a 144 Hz one at the same scale gets no event that says so, and
+                // its coast and particles step by it.
+                if paint_start.duration_since(w.frame_period_at) >= FRAME_PERIOD_REREAD {
+                    w.frame_period = frame_period(&w.window);
+                    w.frame_period_at = paint_start;
+                }
                 let painted: Option<Option<[u64; 5]>> = match &mut w.backend {
                     Backend::Cpu { surface, .. } => {
                         paint(surface, &w.window, &mut w.renderer, frame);
@@ -1003,10 +1001,11 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     if painted.is_none() {
                         w.window.request_redraw();
                     }
-                    // The first frame is up: scan the installed fonts on a thread of their
-                    // own now, so the first glyph that needs a fallback finds them ready.
-                    w.renderer.prescan_fonts();
                 }
+                // A frame is up: the installed fonts are scanned on a thread of their own from
+                // now (once; every later call finds it started), so the first glyph that needs
+                // a fallback finds them ready — whichever way the window came to be shown.
+                w.renderer.prescan_fonts();
                 // A frame the swapchain had no image for in time is still owed: painted
                 // again, or the old image would stay up until something else drew.
                 #[cfg(feature = "gui-gpu")]
@@ -1105,18 +1104,20 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             // Time-proportional decay: `scroll_decay` per 12 ms nominal (a trackpad's
             // long coast or a wheel notch's short glide), scaled by actual elapsed so
             // the curve is independent of render throughput.
-            let elapsed_ms = now.duration_since(w.scroll_last_tick).as_secs_f64() * 1000.0;
-            let decay = w.scroll_decay.powf((elapsed_ms / 12.0).clamp(0.5, 4.0));
-            w.scroll_velocity *= decay;
             if w.scroll_velocity.abs() < 0.0005 {
                 w.scroll_momentum_active = false;
                 w.scroll_velocity = 0.0;
                 continue;
             }
+            // The distance this step's span of time moves, and the velocity it leaves: the
+            // same coast at any refresh, or when this wake came late (`coast_step`).
+            let elapsed_ms = now.duration_since(w.scroll_last_tick).as_secs_f64() * 1000.0;
+            let (moved, left) = coast_step(w.scroll_velocity, w.scroll_decay, elapsed_ms);
+            w.scroll_velocity = left;
             w.scroll_last_tick = now;
             w.scroll_next_tick = now + w.frame_period;
             w.scroll_pending = true;
-            deliver_scroll(w, w.scroll_velocity);
+            deliver_scroll(w, moved);
             next_wakeup = Some(match next_wakeup {
                 Some(t) => t.min(w.scroll_next_tick),
                 None => w.scroll_next_tick,

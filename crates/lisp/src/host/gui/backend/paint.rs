@@ -1373,6 +1373,10 @@ pub(super) fn paint(
         }
     }
     dump_canvas(&r.retained.canvas, fb_w, fb_h);
+    // Paced by the compositor (ADR-726): on Wayland the commit below asks for a frame callback
+    // and winit holds the next redraw until it comes — asked here, where a frame is surely
+    // presented, never before a paint that might return early with nothing committed.
+    window.pre_present_notify();
     let whole = rects.len() == 1 && rects[0] == full;
     if rects.is_empty() {
         // Nothing changed and the buffer is current — an expose with no new frame.

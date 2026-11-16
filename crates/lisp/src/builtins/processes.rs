@@ -76,7 +76,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(0, 1),
         Sig::new(vec![pid_ty.clone()], bool_ty.clone()),
         &["pid"],
-        "Whether a PRIORITY-lane message (`proc/send-priority`, a window's keys and clicks) is queued in pid's mailbox — the calling process's when pid is omitted — without taking it. O(1), and false for a pid that is not a live local process. What a UI loop asks between slices of long background work, so a key that arrived stops the work at the next slice instead of waiting it out (ADR-490's input-first rule, inside a turn).\n\n    (do (proc/send-priority (self) :key) [(proc/priority-pending?) (proc/take-priority) (proc/priority-pending?)])   ;=> [true [:key] false]",
+        "Whether a PRIORITY-lane message (`proc/send-priority`: whatever a window delivers as input — keys, clicks, pointer motion, scroll steps) is queued in pid's mailbox — the calling process's when pid is omitted — without taking it. O(1), and false for a pid that is not a live local process. It counts what is queued, so a key repeat taken back before it was read (`proc/take-priority` drops it) still counts until then: the answer errs towards stopping. What a UI loop asks between slices of long background work, so a key that arrived stops the work at the next slice instead of waiting it out (ADR-490's input-first rule, inside a turn).\n\n    (do (proc/send-priority (self) :key) [(proc/priority-pending?) (proc/take-priority) (proc/priority-pending?)])   ;=> [true [:key] false]",
         priority_pending);
     primitives.def(
         "proc/receive-lane",

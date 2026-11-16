@@ -642,7 +642,7 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `proc/gc-us` | 0 | The calling process's cumulative GC pause time in µs (its LOCAL heap's collections). Two reads around a step say how much of it was GC — a UI loop's slow-turn `:gc-ms` (ADR-490). |
 | `proc/interrupt` | 1 | Interrupt pid at its next safepoint (ADR-491) — Emacs's quit, from outside: its running computation raises a catchable `{:kind :interrupted …}` there. |
 | `proc/interruptible` | 2 | Run `(thunk)` in an INTERRUPT WINDOW (ADR-491): `[:ok value]`, or `[:interrupted e]` when it was stopped mid-computation — by `proc/interrupt`, by the process's quit key … |
-| `proc/priority-pending?` | 0–1 | Whether a PRIORITY-lane message (`proc/send-priority`, a window's keys and clicks) is queued in pid's mailbox — the calling process's when pid is omitted — without taking it. |
+| `proc/priority-pending?` | 0–1 | Whether a PRIORITY-lane message (`proc/send-priority`: whatever a window delivers as input — keys, clicks, pointer motion, scroll steps) is queued in pid's mailbox — the calling process's when pid is omitted — without taking it. |
 | `proc/receive-lane` | 1 | Take the oldest message of any kind, waiting up to ms (nil: forever), and say which lane it came on: `[msg :priority]` for one sent with `proc/send-priority` (a window's … |
 | `proc/send-latest` | 3 | Send msg to target, REPLACING any message sent with the same key that target has not received yet — for state that only matters at its newest value (a file's diagnostics, a … |
 | `proc/send-priority` | 2 | Send msg to target on its mailbox's PRIORITY lane: `proc/take-priority` in the receiver takes it ahead of every ordinary message queued before it, oldest priority message first. |

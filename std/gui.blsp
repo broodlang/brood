@@ -221,6 +221,11 @@
     (let (result (os/cmd prog args))
       (when (os/cmd-ok? result) (os/cmd-out result)))))
 
+(defn- kdeglobals-path ()
+  ;; where KDE keeps its settings: $XDG_CONFIG_HOME/kdeglobals, else ~/.config/kdeglobals
+  (path/join (or (os/env "XDG_CONFIG_HOME") (path/join (or (os/env "HOME") "") ".config"))
+    "kdeglobals"))
+
 (defn reduce-motion? ()
   "Whether the desktop asks apps for less animation: GNOME's \"Animations\" switch off, KDE's animation speed at instant, macOS's Reduce Motion, or Windows' \"Animation effects\" off (`gui/reduce-motion-from` reads each). Best-effort and synchronous — it runs the platform's settings tool, a few milliseconds — so read it once (at startup) rather than per frame; a source that is missing or fails counts as not asking, and so does any error. Needs no window and no GUI build (ADR-612).
 
@@ -228,9 +233,7 @@
   (check-allow :discarded-catch
     (try
       (let (os (os/type)
-            kdeglobals (path/join (or (os/env "XDG_CONFIG_HOME")
-                                    (path/join (or (os/env "HOME") "") ".config"))
-                         "kdeglobals"))
+            kdeglobals (kdeglobals-path))
         (reduce-motion-from os
           (case os
             :macos
@@ -292,9 +295,7 @@ that is missing or fails says nothing, and so does any error. Needs no window an
   (check-allow :discarded-catch
     (try
       (let (os (os/type)
-            kdeglobals (path/join (or (os/env "XDG_CONFIG_HOME")
-                                    (path/join (or (os/env "HOME") "") ".config"))
-                         "kdeglobals"))
+            kdeglobals (kdeglobals-path))
         (color-scheme-from os
           (case os
             :macos {:macos (desktop-answer "defaults" ["read" "-g" "AppleInterfaceStyle"])}
@@ -350,94 +351,120 @@ that is missing or fails says nothing, and so does any error. Needs no window an
             [(string/join (seq/drop-last words 1) " ") points]
             [text nil])))))
 
-(defn- kde-key (kdeglobals key)
-  ;; the value of `key=` in kdeglobals' text, the first line that sets it, else nil
-  (let (line (seq/find (string/split (or kdeglobals "") "\n")
-               (fn (line) (string/starts-with? (string/trim line) (str key "=")))))
-    (when line (string/trim (string/substring line (inc (index-of line "=")) (count line))))))
+(defn- kde-keys (kdeglobals)
+  ;; `{key value}` of kdeglobals' text, read once: the first line that sets a key wins (the
+  ;; font and caret keys this reads are each in one group)
+  (fold (string/split (or kdeglobals "") "\n")
+    {}
+    (fn (keys line)
+      (let (text (string/trim line)
+            at (index-of text "="))
+        (if (or (<= at 0)
+              (string/starts-with? text "[")
+              (contains? keys (string/substring text 0 at)))
+          keys
+          (assoc keys
+            (string/trim (string/substring text 0 at))
+              (string/trim (string/substring text (inc at) (count text)))))))))
+
+(defn- kde-first? (answers)
+  ;; whether the KDE source speaks first: the session is Plasma (`:desktop`, its
+  ;; XDG_CURRENT_DESKTOP), which installs GNOME's schema too, untouched
+  (includes? (string/upper (or (get answers :desktop) "")) "KDE"))
+
+(defn- gnome-text (gnome)
+  ;; text rendering from GNOME's interface keys (`gnome-keys`). `font-rendering` 'automatic'
+  ;; is what GTK 4 draws whatever the older keys say: grayscale, slight; 'manual', or no such
+  ;; key (GNOME 46 and older), follows `font-antialiasing`, `font-hinting`, `font-rgba-order`
+  (let (said (fn (key) (unquote-setting (get gnome key)))
+        manual (not (= (said "font-rendering") "automatic"))
+        [family points] (or (font-spec (said "monospace-font-name")) [nil nil])
+        scale (string/->number (said "text-scaling-factor")))
+    {:antialias (if manual
+                  (case (said "font-antialiasing") "rgba" :subpixel "none" :none :gray)
+                  :gray)
+     :rgba (if (string/ends-with? (said "font-rgba-order") "bgr") :bgr :rgb)
+     :hinting (if manual
+                (case (said "font-hinting") "none" :none "medium" :medium "full" :full :slight)
+                :slight)
+     :monospace family
+     :monospace-points points
+     :scale (if (number? scale) scale 1.0)}))
+
+(defn- kde-text (kde)
+  ;; text rendering from kdeglobals' keys (`kde-keys`), nil when it sets none of them
+  (when (any? ["XftAntialias" "XftHintStyle" "XftSubPixel" "fixed"] (fn (key) (contains? kde key)))
+    (let (subpixel (get kde "XftSubPixel" "none")
+          [family points] (or (font-spec (get kde "fixed")) [nil nil]))
+      {:antialias (cond
+                    (= (get kde "XftAntialias") "false") :none
+                    (includes? ["rgb" "bgr"] subpixel) :subpixel
+                    else :gray)
+       :rgba (if (= subpixel "bgr") :bgr :rgb)
+       :hinting (case (get kde "XftHintStyle")
+                  "hintnone" :none
+                  "hintmedium" :medium
+                  "hintfull" :full
+                  :slight)
+       :monospace family
+       :monospace-points points
+       :scale 1.0})))
 
 (defn text-rendering-from (os answers)
   "How `answers` say text is drawn on `os` (an `os/type` keyword), or nil when no source says: a
 map of `:antialias` (`:gray`, `:subpixel` or `:none`), `:rgba` (`:rgb` or `:bgr`, the subpixel
 order), `:hinting` (`:none`, `:slight`, `:medium` or `:full`), `:monospace` (the monospace font's
 family name), `:monospace-points` and `:scale` (the text scaling factor). `:gnome` is a `gsettings
-list-recursively org.gnome.desktop.interface` listing — its `font-rendering` `'automatic'` (the
-default) is what GTK 4 then draws, grayscale and slightly hinted whatever the older keys say;
-`'manual'` follows `font-antialiasing`, `font-hinting` and `font-rgba-order` — and `:kde` the text
-of kdeglobals (`XftAntialias`, `XftHintStyle`, `XftSubPixel`, `fixed`).
+list-recursively org.gnome.desktop.interface` listing — its `font-rendering` `'automatic'` is what
+GTK 4 then draws, grayscale and slightly hinted whatever the older keys say; `'manual'`, or no
+such key (GNOME 46 and older), follows `font-antialiasing`, `font-hinting` and `font-rgba-order` —
+`:kde` the text of kdeglobals (`XftAntialias`, `XftHintStyle`, `XftSubPixel`, `fixed`), and
+`:desktop` the session's `XDG_CURRENT_DESKTOP`: on KDE kdeglobals is read first, since Plasma
+installs GNOME's schema too and leaves it at its defaults.
 
     (:antialias (gui/text-rendering-from :linux {:gnome \"org.gnome.desktop.interface font-rendering 'automatic'\\norg.gnome.desktop.interface font-antialiasing 'rgba'\"}))   ;=> :gray
-    (:antialias (gui/text-rendering-from :linux {:gnome \"org.gnome.desktop.interface font-rendering 'manual'\\norg.gnome.desktop.interface font-antialiasing 'rgba'\"}))   ;=> :subpixel
+    (:antialias (gui/text-rendering-from :linux {:gnome \"org.gnome.desktop.interface font-antialiasing 'rgba'\"}))   ;=> :subpixel
     (:monospace (gui/text-rendering-from :linux {:gnome \"org.gnome.desktop.interface monospace-font-name 'Ubuntu Sans Mono 11'\"}))   ;=> \"Ubuntu Sans Mono\"
     (:hinting (gui/text-rendering-from :linux {:kde \"[General]\\nXftHintStyle=hintfull\\nfixed=Hack,10,-1,5,50,0,0,0,0,0\\n\"}))   ;=> :full
+    (:antialias (gui/text-rendering-from :linux {:desktop \"KDE\" :gnome \"org.gnome.desktop.interface font-rendering 'automatic'\" :kde \"[General]\\nXftSubPixel=rgb\\n\"}))   ;=> :subpixel
     (gui/text-rendering-from :macos {})   ;=> nil"
   (let (gnome (gnome-keys (get answers :gnome))
-        kde (get answers :kde))
+        kde (kde-keys (get answers :kde))
+        from-gnome (when (not (empty? gnome)) (gnome-text gnome))
+        from-kde (kde-text kde))
     (cond
       (not (= os :linux)) nil
-      (not (empty? gnome))
-        (let (said (fn (key) (unquote-setting (get gnome key)))
-              manual (= (said "font-rendering") "manual")
-              [family points] (or (font-spec (said "monospace-font-name")) [nil nil])
-              scale (string/->number (said "text-scaling-factor")))
-          {:antialias (if manual
-                        (case (said "font-antialiasing") "rgba" :subpixel "none" :none :gray)
-                        :gray)
-           :rgba (if (string/ends-with? (said "font-rgba-order") "bgr") :bgr :rgb)
-           :hinting (if manual
-                      (case (said "font-hinting")
-                        "none" :none
-                        "medium" :medium
-                        "full" :full
-                        :slight)
-                      :slight)
-           :monospace family
-           :monospace-points points
-           :scale (if (number? scale) scale 1.0)})
-      (any? ["XftAntialias" "XftHintStyle" "XftSubPixel" "fixed"]
-        (fn (key) (not (nil? (kde-key kde key)))))
-        (let (subpixel (or (kde-key kde "XftSubPixel") "none")
-              [family points] (or (font-spec (kde-key kde "fixed")) [nil nil]))
-          {:antialias (cond
-                        (= (kde-key kde "XftAntialias") "false") :none
-                        (includes? ["rgb" "bgr"] subpixel) :subpixel
-                        else :gray)
-           :rgba (if (= subpixel "bgr") :bgr :rgb)
-           :hinting (case (kde-key kde "XftHintStyle")
-                      "hintnone" :none
-                      "hintmedium" :medium
-                      "hintfull" :full
-                      :slight)
-           :monospace family
-           :monospace-points points
-           :scale 1.0})
-      else nil)))
+      (kde-first? answers) (or from-kde from-gnome)
+      else (or from-gnome from-kde))))
 
 (defn cursor-blink-from (os answers)
   "How `answers` say a text caret blinks on `os`, or nil when no source says: `{:blink? :interval-ms
 :timeout-ms}` — whether it blinks, how long each on or off phase lasts, and how long after the last
 key it stops (nil: never). `:gnome` is a `gsettings list-recursively org.gnome.desktop.interface`
-listing (`cursor-blink`, `cursor-blink-time` — a whole on-off cycle, so a phase is half of it —
-and `cursor-blink-timeout` in seconds), `:kde` the text of kdeglobals (`CursorBlinkRate`, a phase
-in milliseconds, 0 for none).
+listing (`cursor-blink`, `cursor-blink-time` and `cursor-blink-timeout` in seconds), `:kde` the
+text of kdeglobals (`CursorBlinkRate`, 0 for none) and `:desktop` the session's
+`XDG_CURRENT_DESKTOP`, as for [[text-rendering-from]]. Both desktops give a whole on-off cycle, so
+a phase is half of it.
 
     (gui/cursor-blink-from :linux {:gnome \"org.gnome.desktop.interface cursor-blink true\\norg.gnome.desktop.interface cursor-blink-time 1200\\norg.gnome.desktop.interface cursor-blink-timeout 10\"})   ;=> {:blink? true :interval-ms 600 :timeout-ms 10000}
+    (:interval-ms (gui/cursor-blink-from :linux {:kde \"[KDE]\\nCursorBlinkRate=1000\\n\"}))   ;=> 500
     (:blink? (gui/cursor-blink-from :linux {:kde \"[KDE]\\nCursorBlinkRate=0\\n\"}))   ;=> false
     (gui/cursor-blink-from :linux {})   ;=> nil"
   (let (gnome (gnome-keys (get answers :gnome))
-        rate (string/->number (or (kde-key (get answers :kde) "CursorBlinkRate") "")))
+        rate (string/->number (get (kde-keys (get answers :kde)) "CursorBlinkRate" ""))
+        phase (fn (cycle) (if (and (int? cycle) (> cycle 0)) (math/max 50 (math/quot cycle 2)) 600))
+        from-gnome (when (contains? gnome "cursor-blink")
+                     (let (timeout (string/->number (get gnome "cursor-blink-timeout" "")))
+                       {:blink? (= (get gnome "cursor-blink") "true")
+                        :interval-ms (phase (string/->number (get gnome "cursor-blink-time" "")))
+                        :timeout-ms (if (and (int? timeout) (> timeout 0) (< timeout 2147483))
+                                      (* timeout 1000)
+                                      nil)}))
+        from-kde (when (int? rate) {:blink? (> rate 0) :interval-ms (phase rate) :timeout-ms nil}))
     (cond
       (not (= os :linux)) nil
-      (contains? gnome "cursor-blink")
-        (let (cycle (string/->number (get gnome "cursor-blink-time" ""))
-              timeout (string/->number (get gnome "cursor-blink-timeout" "")))
-          {:blink? (= (get gnome "cursor-blink") "true")
-           :interval-ms (if (and (int? cycle) (> cycle 0)) (math/max 50 (math/quot cycle 2)) 600)
-           :timeout-ms (if (and (int? timeout) (> timeout 0) (< timeout 2147483))
-                         (* timeout 1000)
-                         nil)})
-      (int? rate) {:blink? (> rate 0) :interval-ms (math/max 50 rate) :timeout-ms nil}
-      else nil)))
+      (kde-first? answers) (or from-kde from-gnome)
+      else (or from-gnome from-kde))))
 
 (defn desktop-preferences ()
   "Everything the desktop says about how an app should look and move, read at once:
@@ -450,27 +477,22 @@ fails says nothing, and so does any error (an empty map). Needs no window and no
     (map? (gui/desktop-preferences))   ;=> true"
   (check-allow :discarded-catch
     (try
-      (let (os (os/type)
-            kdeglobals (path/join (or (os/env "XDG_CONFIG_HOME")
-                                    (path/join (or (os/env "HOME") "") ".config"))
-                         "kdeglobals")
-            kde (when (and (= os :linux) (file/exists? kdeglobals)) (file/slurp kdeglobals))
-            listing (when (= os :linux)
-                      (desktop-answer "gsettings"
-                        ["list-recursively" "org.gnome.desktop.interface"]))
-            keys (gnome-keys listing)
-            answers {:gnome listing :kde kde})
-        {:color-scheme (if (= os :linux)
-                         (color-scheme-from os
+      (if (not (= (os/type) :linux))
+        {:color-scheme (color-scheme) :reduce-motion? (reduce-motion?)}
+        (let (kdeglobals (kdeglobals-path)
+              kde (when (file/exists? kdeglobals) (file/slurp kdeglobals))
+              listing (desktop-answer "gsettings"
+                        ["list-recursively" "org.gnome.desktop.interface"])
+              keys (gnome-keys listing)
+              answers {:gnome listing :kde kde :desktop (os/env "XDG_CURRENT_DESKTOP")})
+          {:color-scheme (color-scheme-from :linux
                            {:gnome (get keys "color-scheme")
                             :gtk-theme (get keys "gtk-theme")
                             :kde kde})
-                         (color-scheme))
-         :reduce-motion? (if (= os :linux)
-                           (reduce-motion-from os {:gnome (get keys "enable-animations") :kde kde})
-                           (reduce-motion?))
-         :text-rendering (text-rendering-from os answers)
-         :cursor-blink (cursor-blink-from os answers)})
+           :reduce-motion? (reduce-motion-from :linux
+                             {:gnome (get keys "enable-animations") :kde kde})
+           :text-rendering (text-rendering-from :linux answers)
+           :cursor-blink (cursor-blink-from :linux answers)}))
       (catch _ {}))))
 
 (defn settle (id)
