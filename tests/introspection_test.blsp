@@ -328,7 +328,7 @@
     (assert= (reflect/expr-type "1") "1")
     (assert= (reflect/expr-type ":score") ":score")
     (assert= (reflect/expr-type "(+ 1 2)") "3")
-    (assert= (reflect/expr-type "(+ 1 (%string-length (str 1)))") "int[1..]"))
+    (assert= (reflect/expr-type "(+ 1 (%string-length (str 1)))") "(int 1 _)"))
 
   (test "the type follows the call, not the arguments"
     (assert= (reflect/expr-type "(str 1 2)") "string"))
@@ -358,7 +358,7 @@
       (is (includes? t "y: 2"))))
 
   (test "a lambda literal types as an arrow"
-    (assert= (reflect/expr-type "(fn (n) (str n))") "(any) -> string"))
+    (assert= (reflect/expr-type "(fn (n) (str n))") "(any -> string)"))
 
   ;; …but only when the result is knowable. Identity returns whatever it was handed, and
   ;; a call to a name the checker cannot see is unknown — nil, never a guess.

@@ -561,6 +561,14 @@ impl Ty {
     ///
     /// [`Display`] is the diagnostic rendering and deliberately reads differently
     /// (`vector<int>`, `{a: int}`); this is the one that has to parse.
+    /// The type as a reader sees it: [`Ty::to_source`], so what hover, docs and a live hint
+    /// show can be pasted into a declaration. Falls back to [`Display`] only for the few
+    /// types the grammar has no word for, where showing something beats showing nothing.
+    /// Diagnostics keep [`Display`].
+    pub fn to_source_or_display(&self) -> String {
+        self.to_source().unwrap_or_else(|| self.to_string())
+    }
+
     pub fn to_source(&self) -> Option<String> {
         // A recursive type is `(rec X body)`, its self-references `X` (ADR-349).
         if self.is_recursive() {
@@ -961,6 +969,11 @@ impl Ty {
 }
 
 impl Sig {
+    /// The signature as a reader sees it — see [`Ty::to_source_or_display`].
+    pub fn to_source_or_display(&self) -> String {
+        self.to_source().unwrap_or_else(|| self.to_string())
+    }
+
     /// This signature as source — `(P… -> R)`, the shape a `(sig …)` takes. `None`
     /// when any part cannot be written faithfully (see [`Ty::to_source`]).
     pub fn to_source(&self) -> Option<String> {

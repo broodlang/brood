@@ -173,74 +173,28 @@ A name with no recognisable pair is vacuously true.
     ;; cannot be out of order with itself.
     (or (< coll-at 0) (< subject-at 0) (= coll-at subject-at) (< coll-at subject-at))))
 
-;; ---- signature parsing: paren-aware, because a callback's own type has commas ----
-
-(defn- %audit-match-paren (text i depth)
-  ;; Index of the `)` that closes the `(` at index 0, scanning from `i` at `depth`.
-  (cond
-    (>= i (count text)) -1
-    else
-      (let (ch (string/char-at text i))
-        (cond
-          (= ch "(") (%audit-match-paren text (+ i 1) (+ depth 1))
-          (and (= ch ")") (= depth 1)) i
-          (= ch ")") (%audit-match-paren text (+ i 1) (- depth 1))
-          else (%audit-match-paren text (+ i 1) depth)))))
-
-(defn- split-top (text depth acc current out)
-  ;; Split `text` on top-level commas — `(seqable, (any, any) -> any)` is TWO params,
-  ;; not three. A naive `string/split` on "," reads a callback's own arity as extra
-  ;; parameters, which is how a type-blind check misreads `fold`. Braces and brackets
-  ;; nest too: a record shape `{day: int, ...}` is ONE parameter. Angle brackets too: a
-  ;; parametric type RENDERS as `map<any, nil | list<any>>`, one parameter with a comma
-  ;; inside. The `>` of an arrow `->` is not a close; only a `>` not preceded by `-`
-  ;; nests out.
-  (if (>= acc (count text))
-    (reverse (cons (string/trim current) out))
-    (let (ch (string/char-at text acc)
-          prev (if (> acc 0) (string/char-at text (- acc 1)) ""))
-      (cond
-        (includes? ["(" "[" "{" "<"] ch) (split-top text (+ depth 1) (+ acc 1) (str current ch) out)
-        (includes? [")" "]" "}"] ch) (split-top text (- depth 1) (+ acc 1) (str current ch) out)
-        (and (= ch ">") (not (= prev "-")))
-          (split-top text (- depth 1) (+ acc 1) (str current ch) out)
-        (and (= ch ",") (= depth 0))
-          (split-top text depth (+ acc 1) "" (cons (string/trim current) out))
-        else (split-top text depth (+ acc 1) (str current ch) out)))))
+;; ---- signature parsing: the signature is written in the type grammar, so it is data ----
 
 (defn sig-params (name:any -> any)
-  "The declared parameter TYPES of `name` as a list of strings, or nil when it declares
-no signature. Split at top level, so a callback's own `(any, any) -> any` stays one.
+  "The declared parameter TYPES of `name` as a list of strings, or nil when it declares no
+plain arrow. The signature is written in the type grammar, so the reader parses it: a
+callback's own `(any -> any)` is one element. The `&optional` and `&` markers are dropped,
+because an optional collection is still the collection: with the marker kept it matched
+nothing, and a `sort` declaring its comparator first passed on parameter names alone.
 
-    (audit/sig-params 'map)   ;=> (\"seqable\" \"(any) -> any\")"
-  (let (sig (reflect/type-signature name))
-    (when (string? sig)
-      ;; The MATCHING close paren, not the first: `(seqable, (any) -> any) -> seqable`
-      ;; closes `(any)` before the parameter list ends, and taking the first `)` read
-      ;; the callback's own type as the end of the parameters.
-      (let (close (%audit-match-paren sig 1 1))
-        (when (> close 1)
-          (let (inner (string/substring sig 1 close))
-            (if (= (string/trim inner) "") nil (split-top inner 0 0 "" nil))))))))
+    (audit/sig-params 'map)   ;=> (\"seqable\" \"(any -> any)\")"
+  (let (sig (reflect/type-signature name)
+        ;; check-allow :discarded-catch — a signature the reader cannot read declares nothing
+        form (when (string? sig)
+               (check-allow :discarded-catch (try (reflect/read-string sig) (catch _ nil)))))
+    (when (and (pair? form) (includes? form '->))
+      (map (seq/filter (seq/take-while form (fn (t) (not (= t '->))))
+             (fn (t) (not (includes? ['&optional '& '&rest] t))))
+        pr-str))))
 
-;; `&optional seqable` IS a `seqable` for the purpose of finding the collection, and
-;; without stripping the marker it matched nothing — so every function whose collection
-;; or callback is optional was invisible to the TYPE half of the judgement and fell back
-;; to parameter names. That is not academic: a `sort` whose signature declared the
-;; comparator first still passed, because `coll` sat at index 0 by name while the
-;; comparator sat at index 0 by type, and `(= coll-at subject-at)` read the outright
-;; contradiction as one parameter answering both tests.
-(defn- bare-type (t)
-  (let (t (string/trim t))
-    (cond
-      (string/starts-with? t "&optional ") (string/trim (string/substring t 10 (count t)))
-      (string/starts-with? t "&rest ") (string/trim (string/substring t 6 (count t)))
-      else t)))
-
-(defn- arrow-type? (t) (includes? (bare-type t) "->"))
+(defn- arrow-type? (t) (includes? t "->"))
 (defn- collection-type? (t)
-  (any? ["seqable" "countable" "list" "vector" "map" "string" "bytes"]
-    (fn (k) (= (bare-type t) k))))
+  (includes? ["seqable" "countable" "list" "vector" "map" "string" "bytes"] t))
 
 ;; ---- 4: does the declared signature match the function? ---------------------
 

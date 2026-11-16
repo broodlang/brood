@@ -1767,3 +1767,15 @@ names a definition `mod/f` and both matched the def site's token `f` whole. They
 segment too. Guards: `tests/eval_server_test.blsp` § "a reply's :type is derived in the
 session" (both cases red before), the LSP's `a_defn_inside_a_module_gets_its_type_too` and
 `declares_the_signature_of_a_defn_inside_a_module`, and bedit's playground test.
+
+2026-11-16 (types read as they are written). The fix above left bedit showing `calc :
+(string -> number)` beside `: int[0..]`: definitions came from `source-signatures` in the type
+grammar, expressions from `expr-type` in the checker's display form, which no source can hold.
+Both `expr-type`'s and `type-signature`'s docstrings already promised the grammar. Decided with
+the owner: what a person reads must paste. `Ty`/`Sig::to_source_or_display` is the grammar,
+falling back to the display form only for a type with no spelling (a macro or native member);
+`signature_string` (so `type-signature`, hover, `nest doc`, MCP `lookup`), `%expr-type`, the
+inlay hints and completion's field detail go through it. Diagnostics keep the display form.
+`audit/sig-params` parsed the display string by hand (a paren matcher, a comma splitter aware of
+`<…>` and `{…}`, a marker stripper); it now reads the signature with the reader, three helpers
+gone.

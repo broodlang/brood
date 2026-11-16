@@ -118,9 +118,12 @@ one server that owns the language knowledge.
 > and a buffer being edited is not loaded. The answer comes from
 > `types::check::file_signatures`, which runs the checker's own form-based
 > inference (ADR-188/190/261) and so can never describe a different type than the
-> warnings do. Deliberately quiet: nothing for a function that already carries a
+> warnings do. Written in the type grammar, `(string -> number)`, so a hint can be pasted
+> into a declaration; hover and completion details read the same way. Matched by the
+> definition's name whole or by its last segment, since a module's `defn f` is captured as
+> `mod/f`. Deliberately quiet: nothing for a function that already carries a
 > `(sig …)` (it is on screen one line up), nothing for an uninformative
-> `(any …) -> any`, and nothing the checker declined to infer.
+> `(any … -> any)`, and nothing the checker declined to infer.
 > • **`textDocument/codeAction`** also offers **"Declare signature"** on the `defn`
 > under the cursor: the same inferred signature, written into the file as a real
 > `(sig …)` line. `Ty::to_source` renders it — the inverse of the annotation

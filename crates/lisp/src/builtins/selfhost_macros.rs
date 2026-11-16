@@ -715,7 +715,7 @@ pub(super) fn expr_type(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispRes
     };
     match crate::types::check::expr_ty_of(heap, form) {
         Some(ty) => {
-            let rendered = ty.to_string();
+            let rendered = ty.to_source_or_display();
             Ok(heap.alloc_string(&rendered))
         }
         None => Ok(Value::nil()),

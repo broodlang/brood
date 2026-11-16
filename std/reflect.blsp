@@ -375,7 +375,7 @@ a module's under a Types heading.
 (defn type-signature (name)
   "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (type-signature 'map).
 
-    (reflect/type-signature 'inc)   ;=> \"(number) -> number\""
+    (reflect/type-signature 'inc)   ;=> \"(number -> number)\""
   (%type-signature name))
 
 (defn expr-type (src)

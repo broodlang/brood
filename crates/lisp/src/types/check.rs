@@ -217,7 +217,7 @@ pub fn signature_string(heap: &Heap, sym: Symbol) -> Option<String> {
         None,
         ImportScope::default(),
     );
-    sigs::sig_of(heap, sym).map(|s| s.to_string())
+    sigs::sig_of(heap, sym).map(|s| s.to_source_or_display())
 }
 
 /// Check one form, returning a warning per provable misuse. Empty when nothing is

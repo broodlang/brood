@@ -6,6 +6,14 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed.**
+- **A type you read is written the way you write one**: `reflect/type-signature`,
+  `reflect/expr-type`, hover, `nest doc`, the MCP `lookup` tool, the LSP's inlay hints and
+  completion details show `(string &optional int -> (or failure number))` and `(int 1 _)`, not
+  `(string, &optional int) -> number | failure` and `int[1..]`, so what you read pastes into a
+  `sig` or a typed parameter. Checker warnings keep their own wording. A type the grammar has
+  no word for (one including a macro or a native function) still shows the old way.
+
 ## v0.53.0 — inferred type guards and reverse arrows, Rust 1.100, a live form's type where it ran
 
 **Added: the checker reads function types both ways (ADR-725).**

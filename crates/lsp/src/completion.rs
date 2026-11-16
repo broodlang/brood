@@ -381,7 +381,7 @@ fn record_field_items(
                     continue; // the record's internal identity tag, not a user field
                 }
                 let mut it = item(format!(":{name}"), CompletionItemKind::FIELD);
-                it.detail = Some(field_ty.to_string());
+                it.detail = Some(field_ty.to_source_or_display());
                 items.push(it);
             }
         }

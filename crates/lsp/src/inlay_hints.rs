@@ -256,8 +256,9 @@ fn render_effective(sig: &brood::types::Sig) -> Option<String> {
     let ret_known = !sig.ret.is_any();
     match (params_known, ret_known) {
         (false, false) => None,
-        (false, true) => Some(format!("→ {}", sig.ret)),
-        _ => Some(format!("{sig}")),
+        // In the grammar a declaration takes, so the hint can be pasted into one.
+        (false, true) => Some(format!("→ {}", sig.ret.to_source_or_display())),
+        _ => Some(sig.to_source_or_display()),
     }
 }
 

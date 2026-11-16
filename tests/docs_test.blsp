@@ -83,11 +83,11 @@
     ;; tells one who is skimming the module not to reach for the name at all.
     (assert= (docs/docs-entry 'docs-test/doc-gone docs-test/doc-gone)
       (str "### ~~`(docs-test/doc-gone x)`~~\n\n"
-        "> **Deprecated** since 0.19.0 — use `doc-kept` instead.\n\n" "`(any) -> any`\n\n"
+        "> **Deprecated** since 0.19.0 — use `doc-kept` instead.\n\n" "`(any -> any)`\n\n"
         "The old way.\n"))
     ;; …and an ordinary name keeps its plain heading.
     (assert= (docs/docs-entry 'docs-test/doc-kept docs-test/doc-kept)
-      "### `(docs-test/doc-kept x)`\n\n`(any) -> any`\n\nThe new way.\n")))
+      "### `(docs-test/doc-kept x)`\n\n`(any -> any)`\n\nThe new way.\n")))
 
 (describe "docs: structured model (nest docs)"
   (test "docs-bare strips the module namespace to the last segment"
