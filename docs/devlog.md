@@ -1810,3 +1810,8 @@ registry, the faces bedit registered among them, and with std from source `edito
 after that, its `(defdyn *faces* {})` resetting the table. `defonce` now, as `editor/layers`
 was (ADR-218), and `tests/registry_declare_test.blsp` checks every std module declares the
 registries it writes through a registry op that way.
+
+2026-11-16 (ADR-727). **A process collects as it parks when its next collection is near.** The
+live typing probe showed bedit's young collections (6–23 ms) landing inside keys: 5 per two
+rounds, the whole p99. A parking process now collects when the young generation is past three
+quarters of its trigger, in the gap between keys: collections inside a turn 5 → 0, p99 30 → 20 ms.

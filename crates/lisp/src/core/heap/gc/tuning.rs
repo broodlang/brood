@@ -229,6 +229,22 @@ pub(in crate::core::heap) const WALKER_RED_ZONE: usize = 64 * 1024;
 /// million-deep value grows a handful of times, small enough to stay cheap.
 pub(in crate::core::heap) const WALKER_STACK_CHUNK: usize = 1024 * 1024;
 
+/// How near its trigger the young generation has to be for a parking process to collect
+/// then, instead of at the next safepoint ([`Heap::park_collect_due`], ADR-727): **0.75** by
+/// default, `BROOD_GC_PARK_EARLY` to tune (0.1..=1.0; 1.0 turns it off — the A/B lever). Lower
+/// moves more pauses out of the next burst of work at the price of more collections: at the
+/// worst, a process that parks after every small step, `1 / fraction` as many.
+pub(in crate::core::heap) fn park_collect_fraction() -> f64 {
+    static F: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        std::env::var("BROOD_GC_PARK_EARLY")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|f| (0.1..=1.0).contains(f))
+            .unwrap_or(0.75)
+    })
+}
+
 pub(in crate::core::heap) fn major_growth() -> usize {
     static G: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *G.get_or_init(|| {

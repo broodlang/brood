@@ -146,6 +146,33 @@ impl Heap {
         park_trim_due(park_trim_probe(&self.local), self.park_trim_mark)
     }
 
+    /// Is the next collection close enough to run it now, as this process parks? The young
+    /// generation past [`park_collect_fraction`] of its object trigger (`gc_threshold`), or
+    /// less than a quarter of the nursery's byte floor left in its budget. A process that
+    /// parks between bursts of work — a UI loop between keys — then collects in the gap
+    /// rather than at the safepoint inside the next burst, where the pause is the key's
+    /// latency (ADR-727). Right after a collection the young generation holds at most half its
+    /// trigger (the threshold is `growth × live`), so this cannot fire twice in a row.
+    pub fn park_collect_due(&self) -> bool {
+        let fraction = park_collect_fraction();
+        if !self.gc_enabled || fraction >= 1.0 {
+            return false;
+        }
+        let objects_near = self.local_live_count() as f64 >= self.gc_threshold as f64 * fraction;
+        // A pinned floor (`usize::MAX`) has no byte budget to run low.
+        let floor = nursery_byte_floor();
+        let bytes_near = floor != usize::MAX && self.nursery_budget_left <= budget_units(floor) / 4;
+        objects_near || bytes_near
+    }
+
+    /// The collection [`park_collect_due`](Self::park_collect_due) asks for: an ordinary one,
+    /// run as the process parks (no slab shrink — that is [`trim_parked`](Self::trim_parked)'s,
+    /// for a heap that grew). Sound for the same reason the trim is: a parked process's
+    /// continuation holds only control state over roots `collect` traces.
+    pub fn collect_on_park(&mut self) {
+        self.collect(&mut [], &mut []);
+    }
+
     /// **Trim a process that is about to park.** Returns the bytes of retained capacity
     /// handed back, or `0` if the process was below the threshold and nothing was done.
     ///

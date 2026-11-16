@@ -1234,6 +1234,15 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
             trimmed = true;
             continue;
         }
+        // And when its next collection is close, run it now (ADR-727): parked, the pause
+        // costs nothing; left to the safepoint, it lands inside the process's next burst of
+        // work — a UI loop's next key. Same ownership as the trim above, and once per park.
+        if !trimmed && proc.park_collect_due() {
+            drop(st);
+            proc.collect_on_park();
+            trimmed = true;
+            continue;
+        }
         // It blocked, so whatever it spawned before now was a spawn-then-block: forget the
         // history that would have marked it CPU-bound (see `SPAWNS_SINCE_PARK`).
         proc.spawns_since_park = 0;
