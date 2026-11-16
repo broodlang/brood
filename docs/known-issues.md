@@ -79,8 +79,8 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
     authoritative rules refuse
 
 out of `brood_rt_fast_frame` (`jit/rt.rs:1598`, which cannot unwind, so SIGABRT). Crash record
-`~/.local/state/brood/crashes/crash-2470810.blsp` on whklat. Then 18 identical runs passed (3, then
-a loop of 15): one in 19.
+`~/.local/state/brood/crashes/crash-2470810.blsp` on whklat. Then 58 identical runs passed (3, a loop
+of 15, then 40 run four at a time for contention): one in 59.
 
 **Cause.** Not known. This is the `None` arm of `debug_check_fast_link_mirror`: no authoritative
 link at the mirror's epoch, while the entry's epoch, the global epoch and the mirror's epoch are
@@ -103,7 +103,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
-| KI-395 | **The JIT fast-frame's debug cross-check fired with every epoch agreeing** — `fast-link mirror … has an entry at the same epoch that does not fast-link`, aborting a debug `nest check --strict` over the corpus once in 19 runs | ⚠️ watching 2026-11-16 — not reproducible on demand; the assertion is the armed diagnostic |
+| KI-395 | **The JIT fast-frame's debug cross-check fired with every epoch agreeing** — `fast-link mirror … has an entry at the same epoch that does not fast-link`, aborting a debug `nest check --strict` over the corpus once in 59 runs | ⚠️ watching 2026-11-16 — not reproducible on demand; the assertion is the armed diagnostic |
 | KI-394 | **`bound?` answered `false` for a name in a project module the startup image had not materialised yet** — it read the global table alone, so under a lazy install (`nest run`, `nest test FILE`) a late-bound hook kept as a symbol was skipped by `reflect/call-if-bound`: bedit's context-menu and Ctrl+wheel zoom tests failed on every warm `nest test FILE` and passed on the run after an edit | ✅ **FIXED 2026-11-14** — `bound?` roots a short project spelling and materialises the image section of the module it names when the installed project image carries one (`derive::bound_or_imaged`); a module the image does not carry is still not loaded. Guard: `startup_image::bound_answers_for_an_imaged_module_not_yet_materialised` (red on the warm run with the old `bound?`) |
 | KI-393 | **Root code in a project could not `binding` a project module's dynamic variable by its short qualifier** — `binding` resolves its names at expansion time (`%resolve-name`, ADR-722), and at root that resolution skipped the package rooting every other reference there gets, so `(binding (vcsproc/*vcs-entry-output-max-lines* 2) …)` in a docstring example, `nest eval` or the REPL raised "not a dynamic variable" while `(vcsproc/vcs-entry-tail …)` beside it worked. bedit's doctest gate went red on it | ✅ **FIXED 2026-11-13** — `%resolve-name` applies `root_qualified_ref` at root. Guard: `package_rooted_namespaces::root_code_binds_a_project_modules_dynamic_variable_by_its_short_qualifier` (red with the rooting removed, with bedit's own error) |
 | KI-392 | **`file/unlock` could leave the lock held, and `file/locked?`'s probe could refuse the next `file/lock`** — a `flock` lock belongs to the open file description, which a child mid-spawn shares from its fork until its exec; closing the file in that window left the lock in place. In a full suite run, where other tests spawn constantly, `file_lock_test` read the file still locked after `file/unlock` (CI, three jobs) | ✅ **FIXED 2026-11-13** — both release with `File::unlock` (`LOCK_UN`) instead of the drop. Guard: `file_lock_test` "an unlock is seen at once while other processes start programs", 0 of 1500 cycles, red 3/3 with either release removed (~10% of cycles failed) |
