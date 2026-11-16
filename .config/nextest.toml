@@ -377,9 +377,15 @@ command = 'scripts/build-std-image.sh'
 ## Everything else — overrides, setup scripts — comes from the default profile.
 [profile.tree-walker]
 
+## Raised 25 -> 45 min on 2026-11-16. full.yml passed at 1484 s of the 1500 s budget on
+## e03cf3c8 (2026-11-15), then on edb9962e timed out at 98.5% of the suite and passed its retry
+## in 803 s — the same suite on one runner swings 2x. The engine ratio is normal: the VM ran
+## it in 420 s in that run, so 1.9-3.6x, well under the ~10x the default profile's note calls
+## a finding. 45 min is ~1.8x the slowest pass; a hung case is still caught by the inner
+## `*test-timeout-ms*`. This budget had sat BELOW the default profile's 30 min.
 [[profile.tree-walker.overrides]]
 filter = 'binary(suite)'
-slow-timeout = { period = "60s", terminate-after = 25 }
+slow-timeout = { period = "60s", terminate-after = 45 }
 retries = 1
 
 ## The JIT tests warm with billions of calls so their arms tier; at BROOD_TIER=0 there is no

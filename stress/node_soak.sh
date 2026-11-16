@@ -10,6 +10,7 @@
 #
 # Usage: stress/node_soak.sh [SECONDS] [KILL_EVERY]     (defaults 3600, 120)
 #        BROOD=path/to/brood  SOAK_LOG_DIR=dir  DOWN_SECONDS=seconds (default 5)
+#        NODE_CAP_KB=address-space cap per node (default 8000000)
 set -u
 cd "$(dirname "$0")/.."
 BROOD=${BROOD:-target/release/brood}
@@ -28,9 +29,17 @@ alarms='STRANDED WORK|\[sched\] LEDGER|\[require\] BUG|lost: the scheduler|panic
 names=("soak1-$$" "soak2-$$" "soak3-$$")
 declare -A relay_pid
 
+# Each node runs under an address-space cap, so a node that runs away dies naming the cap
+# instead of starving the runner: on 2026-11-16 (edb9962e) the hosted runner "lost
+# communication" 74 min into this soak, which an exhausted runner looks like, and the logs
+# went down with it. The runtime reserves ~3 GB of address space before it does any work
+# (CLAUDE.md), so 8 GB is room to run and far short of the runner's memory times four.
+node_cap_kb=${NODE_CAP_KB:-8000000}
+
 start_relay() {
   local name=$1
-  "$BROOD" stress/node_soak.blsp -- relay "$name" >>"$log_dir/$name.log" 2>&1 &
+  ( ulimit -v "$node_cap_kb"; exec "$BROOD" stress/node_soak.blsp -- relay "$name" ) \
+    >>"$log_dir/$name.log" 2>&1 &
   relay_pid[$name]=$!
   echo "$(date -u +%FT%TZ) start $name pid ${relay_pid[$name]}" >>"$events"
 }
@@ -45,13 +54,26 @@ for name in "${names[@]}"; do start_relay "$name"; done
 sleep 3
 
 # The hub runs a little longer than the kill loop, so its PASS comes after the last restart.
-"$BROOD" stress/node_soak.blsp -- hub "$((duration + 30))" "${names[@]}" >"$log_dir/hub.log" 2>&1 &
+( ulimit -v "$node_cap_kb"; exec "$BROOD" stress/node_soak.blsp -- hub "$((duration + 30))" "${names[@]}" ) \
+  >"$log_dir/hub.log" 2>&1 &
 hub=$!
+
+# One line per kill cycle with every node's resident memory, to the job log as well as the
+# events file: if the runner dies, the job log up to that point is what survives.
+report_memory() {
+  local line="$(date -u +%FT%TZ) rss_kb"
+  for name in "${names[@]}"; do
+    line="$line $name=$(ps -o rss= -p "${relay_pid[$name]}" 2>/dev/null | tr -d ' ')"
+  done
+  line="$line hub=$(ps -o rss= -p "$hub" 2>/dev/null | tr -d ' ')"
+  echo "$line" | tee -a "$events"
+}
 
 deadline=$(($(date +%s) + duration))
 kills=0
 while [ "$(date +%s)" -lt "$deadline" ] && kill -0 "$hub" 2>/dev/null; do
   sleep "$kill_every"
+  report_memory
   [ "$(date +%s)" -lt "$deadline" ] || break
   kill -0 "$hub" 2>/dev/null || break
   victim=${names[$((RANDOM % 3))]}
