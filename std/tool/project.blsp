@@ -1260,7 +1260,13 @@ resolve in the advisory checker. Returns the project root.
         ".config")
       xdg)))
 (defn- config-dir () (path/join (config-base-dir) "brood"))
-(defn- config-path () (path/join (config-dir) "config.blsp"))
+(defn user-config-path ()
+  "The user config file nest reads its preferences from: `~/.config/brood/config.blsp` (under
+`$XDG_CONFIG_HOME` when set).
+
+    (project/user-config-path)   ;~> \"/home/me/.config/brood/config.blsp\""
+  (path/join (config-dir) "config.blsp"))
+(defn- config-path () (user-config-path))
 
 ;; The keys `config` accepts, each declared once (std `settings`, ADR-428): the default file
 ;; below is generated from these, and `load-config` warns about a value or a key they reject.
@@ -1277,6 +1283,9 @@ resolve in the advisory checker. Returns the project root.
    :commented? true
    :example "…"
    :doc "the Bearer token `nest publish` sends ($HIVE_TOKEN overrides it)"})
+
+;; An editor checks the open user config against these declarations (ADR-428 addendum).
+(settings/declare-file :project/user-config 'config 'project/user-config-path)
 
 (def *config-default-source*
   (settings/default-source :project/user-config

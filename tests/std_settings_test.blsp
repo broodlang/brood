@@ -142,3 +142,31 @@
     (is (not (includes? (default-source :std-settings-test/plugin 'config "") ":theirs"))))
   (test "removing what was never declared says so"
     (is (not (undefine :std-settings-test/plugin :never)))))
+
+;; A config file is data, so the type checker passes over it; an editor shows what is wrong
+;; with it against the settings of the group that declared the file (reported 2026-11-16: a
+;; registry token written under `:package/registry-token` was only flagged when nest next
+;; loaded the config, never while the file was open).
+(defn std-settings-test-file ()
+  (path/join (or (test/scratch-dir) "/tmp") "std-settings-test-config.blsp"))
+
+(describe "settings: declare-file, file-diagnostics"
+  (test "a declared file's typo'd key and bad value are placed at the key, outside comments"
+    (define :std-settings-test/filed :cursor {:type '(or :block :bar) :default :bar})
+    (file/spit (std-settings-test-file) "")
+    (declare-file :std-settings-test/filed 'config 'std-settings-test/std-settings-test-file)
+    (let (found (file-diagnostics (std-settings-test-file)
+                  "(config\n  :cursor :blockk ; not :curser\n  :curser :bar)"))
+      (assert= (map found (fn (d) [(:line d) (:col d)])) '([3 3] [2 3]))
+      (is (includes? (:message (first found)) ":curser is not a setting"))
+      (is (includes? (:message (second found)) ":cursor is :blockk"))))
+  (test "a declared file that does not read says where"
+    (let (found (first (file-diagnostics (std-settings-test-file) "(config :cursor")))
+      (assert= [(:line found) (:col found)] [1 1])
+      (is (includes? (:message found) "unclosed list"))))
+  (test "a clean declared file, and a file no group declares, say nothing"
+    (is (empty? (file-diagnostics (std-settings-test-file) "(config :cursor :block)")))
+    (is (nil? (file-claim "/no/such/settings-file.blsp")))
+    (is (empty? (file-diagnostics "/no/such/settings-file.blsp" "(config :zz 1)"))))
+  (test "nest's own user config is declared, so a typo there is flagged"
+    (assert= (:id (file-claim (project/user-config-path))) :project/user-config)))

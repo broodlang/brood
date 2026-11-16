@@ -227,6 +227,92 @@ Empty when the config is clean.
       (map unknown
         (fn (k) (str label ": " k " is not a setting (a typo, or one whose module has not loaded)"))))))
 
+;; ---- the file a group lives in -------------------------------------------
+;;
+;; A config file is data, so the type checker leaves it alone (it is one `(head :key value …)`
+;; form over a name nothing binds). What CAN be wrong with it is what `read-warnings` and
+;; `warnings` say — and an editor should say it while the file is open, not only when the
+;; program next reads it. A group declares its file here, and `file-diagnostics` answers for a
+;; path any group claims.
+
+(def- *files* :settings/files)
+
+(defn declare-file (id:any head:symbol path:symbol -> map)
+  "Declare that the settings registry `id` is read from a file whose one form is `(head …)`,
+at the path the function named `path` answers (a symbol, called late, so a module that has
+not computed its directories yet can still declare). An editor then checks that file against
+`id` ([[file-diagnostics]]). Returns the stored declaration.
+
+    (:head (settings/declare-file :doc/filed 'config 'doc/no-such-path-fn))   ;=> config"
+  (registry/put *files* id {:id id :head head :path path}))
+
+(defn- canonical (path)
+  (if (and (string? path) (file/exists? path)) (os/canonicalize path) path))
+
+(defn file-claim (path:string -> any)
+  "The declaration ([[declare-file]]) of the settings group read from `path` — `{:id :head
+:path}` — or nil when no group lives there.
+
+    (settings/file-claim \"/no/such/settings-file.blsp\")   ;=> nil"
+  (let (wanted (canonical path))
+    (seq/find (vals (registry/entries *files*))
+      (fn (claim)
+        (let (at (reflect/call-if-bound (:path claim) nil))
+          (and (string? at) (= (canonical at) wanted)))))))
+
+(defn- key-position (text key)
+  ;; `[line col]` (1-based) of the first `key` in `text` written as a key — outside a comment,
+  ;; followed by space, a bracket or the end — or [1 1]
+  (let (needle (pr-str key)
+        lines (vec (string/split text "\n")))
+    (letrec (scan (fn (i)
+                    (if (>= i (count lines))
+                      [1 1]
+                      (let (line (first (string/split (nth lines i) ";"))
+                            at (index-of line needle))
+                        (if (and (>= at 0)
+                              (let (after (+ at (count needle)))
+                                (or (>= after (count line))
+                                  (contains? #{" " "\t" ")" "]" "}"}
+                                    (string/substring line after (inc after))))))
+                          [(inc i) (inc at)]
+                          (scan (inc i)))))))
+      (scan 0))))
+
+(defn- unlabelled (message)
+  ;; a warning made with an empty label: ": msg", or ":line:col: msg" from the reader
+  (let (m (regex/find message "^:(\\d+):(\\d+): (.*)$"))
+    (if m
+      (let (groups (vec (map (get m :groups) (fn (g) (get g :text)))))
+        {:line (string/->number (nth groups 0))
+         :col (string/->number (nth groups 1))
+         :message (nth groups 2)})
+      {:line 1 :col 1 :message (string/drop-prefix message ": ")})))
+
+(defn file-diagnostics (path:string text:string -> list)
+  "What is wrong with `text` as the config file at `path`, for an editor to show while it is
+open: `{:line :col :message}` per problem (1-based), in the shape the type checker's
+structured findings take — text that does not read, a key without a value, text after the
+form ([[read-warnings]]), then each key no setting declares and each value its setting
+rejects ([[warnings]]), placed at the key. `()` when no group lives at `path` or nothing is
+wrong.
+
+    (settings/file-diagnostics \"/no/such/settings-file.blsp\" \"(config :x 1)\")   ;=> ()"
+  (let (claim (file-claim path))
+    (if (nil? claim)
+      '()
+      (let (id (:id claim)
+            head (:head claim)
+            reading (map (read-warnings text head "") unlabelled)
+            config (read-form text head)
+            keyed (mapcat (sort (keys config))
+                    (fn (key)
+                      (let ([line col] (key-position text key))
+                        (map (warnings id {key (get config key)} "")
+                          (fn (message)
+                            {:line line :col col :message (string/drop-prefix message ": ")}))))))
+        (append reading keyed)))))
+
 ;; ---- values ---------------------------------------------------------------
 
 (defn value-of (id:any config:map name:any -> any)

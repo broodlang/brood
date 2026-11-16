@@ -1790,3 +1790,23 @@ line of the same shape is still checked (it is evaluated), and so is a call that
 (`(prnt "hi")`) or a second form. Also: the missing-token error of `nest publish` named a setting
 that does not exist (`:package/registry-token`; it is `:registry-token`). Guards in
 `check/tests/lints.rs`, the data-file one red with the rule off.
+
+2026-11-16 (settings, ADR-428 addendum). **A config file's mistakes are said while it is open.**
+The checker now passes over a config file, so nothing flagged `:package/registry-token` in
+nest's config until nest next loaded it. A settings group declares its file
+(`settings/declare-file`), and `settings/file-diagnostics` places each unknown key, bad value
+or unreadable text at its line; nest's user config and bedit's init.blsp declare theirs, and
+bedit checks a declared buffer that way. Guards: `std_settings_test` "declare-file,
+file-diagnostics" (red with `file-claim` matching nothing) and bedit's modes_test "the init
+file is checked against bedit's settings" (red without its declaration).
+
+2026-11-16 (checker, ADR-725 follow-up). **Two of ADR-725's special cases became general rules.**
+(1) A one-binding `let` used as a test proves what its body proves, less facts about its binder
+(`guards::let_test_facts`), and an `if` arm its own test contradicts is an impossible path. Every
+`and`/`or` chain is such a `let` around an `if`, so the shape readers that recognised them
+(`or_disjunct_guards`, `or_same_var_narrowing`, the chain-operand loops over bound tests) are
+gone, and the hand-written-binder rule falls out of "less facts about its binder". Eleven tests
+fail with the rule off. (2) The `(nth xs (- n k))` special case is now a bound on the index's
+base: a count alias is `n - 1 < (count xs)`, an index reads as base + offset (negative too), and a
+`let` of an offset carries its base's bounds — so `(let (last (dec n)) (nth xs last))`, `(+ n -1)`
+and an offset of an offset read as elements. Both sabotage-verified.
