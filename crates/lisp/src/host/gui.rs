@@ -151,7 +151,8 @@ pub struct FontInfo {
     /// The system fonts loaded so far to draw glyphs the primary font lacks, as
     /// `(family, file)`, in the order they were first needed.
     pub fallbacks: Vec<(String, String)>,
-    /// Whether the system font database has been scanned yet (it is only on demand).
+    /// Whether the system font database has been scanned yet (in the background once the
+    /// first window has painted, or on demand if a lookup comes sooner).
     pub system_scanned: bool,
     /// Whether runs of punctuation are shaped together (`gui-ligatures!`).
     pub ligatures: bool,

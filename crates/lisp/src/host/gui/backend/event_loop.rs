@@ -5,9 +5,6 @@
 
 use super::*;
 
-/// How often a window with particles in flight repaints by itself (~60 Hz).
-const PARTICLE_FRAME: Duration = Duration::from_millis(16);
-
 impl ApplicationHandler<UserEvent> for GuiApp {
     // The loop idles (`Wait`) until a proxy or window event arrives. Window
     // creation is now safe (the display is live), so drain any `Open` that
@@ -974,6 +971,17 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 let margins =
                     bleed::Margins::of(&w.renderer, inner.width as usize, inner.height as usize);
                 let frame = w.bleed.frame(&w.frame, margins);
+                // The monitor's refresh, re-read every paint (a cheap lookup): a window
+                // dragged from a 60 Hz panel to a 144 Hz one at the same scale gets no event
+                // that says so, and its coast and particles step by it.
+                w.frame_period = frame_period(&w.window);
+                // Paced by the compositor, as a GTK window's frame clock is: on Wayland this
+                // asks for a frame callback with the commit the paint makes, and winit holds
+                // the next `RedrawRequested` until it arrives. A paint after a quiet spell
+                // still goes at once (no callback pending); a burst of frames is painted once
+                // a refresh, the newest each time, instead of each one blocking on a buffer
+                // the compositor has not released. A no-op on the other platforms.
+                w.window.pre_present_notify();
                 let painted: Option<Option<[u64; 5]>> = match &mut w.backend {
                     Backend::Cpu { surface, .. } => {
                         paint(surface, &w.window, &mut w.renderer, frame);
@@ -995,6 +1003,18 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     if painted.is_none() {
                         w.window.request_redraw();
                     }
+                    // The first frame is up: scan the installed fonts on a thread of their
+                    // own now, so the first glyph that needs a fallback finds them ready.
+                    w.renderer.prescan_fonts();
+                }
+                // A frame the swapchain had no image for in time is still owed: painted
+                // again, or the old image would stay up until something else drew.
+                #[cfg(feature = "gui-gpu")]
+                if painted.is_none()
+                    && let Backend::Gpu(gpu) = &mut w.backend
+                    && gpu.take_retry()
+                {
+                    w.window.request_redraw();
                 }
                 if let Some(split) = painted
                     && let Some((input_at, kind)) = w.draw_input.take()
@@ -1005,7 +1025,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     .renderer
                     .emitters
                     .alive()
-                    .then(|| Instant::now() + PARTICLE_FRAME);
+                    .then(|| Instant::now() + w.frame_period);
             }
             _ => {}
         }
@@ -1017,8 +1037,8 @@ impl ApplicationHandler<UserEvent> for GuiApp {
     // sends back after rendering a scroll step. Without a time guard this would
     // flood: deliver → Draw → about_to_wait → deliver → Draw → ∞. We gate each
     // delivery on `scroll_next_tick` (set to `now` when momentum starts, then
-    // advanced by 12 ms after each step) so at most one step fires per 12 ms
-    // regardless of how many times `about_to_wait` is called.
+    // advanced by one refresh, `Win::frame_period`, after each step) so at most one step
+    // fires per refresh regardless of how many times `about_to_wait` is called.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(_gate) = enter_gate() else {
             return;
@@ -1094,7 +1114,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 continue;
             }
             w.scroll_last_tick = now;
-            w.scroll_next_tick = now + Duration::from_millis(12);
+            w.scroll_next_tick = now + w.frame_period;
             w.scroll_pending = true;
             deliver_scroll(w, w.scroll_velocity);
             next_wakeup = Some(match next_wakeup {

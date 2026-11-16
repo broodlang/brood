@@ -169,6 +169,10 @@ pub struct GpuWindow {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     configured: (u32, u32),
+    /// The last paint was skipped because the swapchain had no image in time (`Timeout`),
+    /// not because the window is hidden: the frame is still owed, so the window asks for
+    /// another paint ([`GpuWindow::take_retry`]). An occluded window owes nothing.
+    retry: bool,
     viewport_buffer: wgpu::Buffer,
     viewport_bind_group: wgpu::BindGroup,
     solid_pipeline: wgpu::RenderPipeline,
@@ -260,6 +264,13 @@ impl GpuWindow {
         }
     }
 
+    /// Whether the last skipped paint is still owed (`retry`), clearing it: a frame skipped
+    /// on a swapchain `Timeout` asks for another paint, or the image on screen stays the
+    /// old one until something else draws.
+    pub(crate) fn take_retry(&mut self) -> bool {
+        std::mem::take(&mut self.retry)
+    }
+
     /// The size the next frame is drawn at: the window's, or the offscreen texture's.
     fn target_size(&self) -> (u32, u32) {
         match &self.target {
@@ -275,7 +286,7 @@ impl GpuWindow {
     /// The image to draw this frame into, and the swapchain image to present after —
     /// `None` for an offscreen target, which presents nothing. `None` altogether when the
     /// swapchain has no image to give (the frame is skipped).
-    fn acquire(&self) -> Option<(wgpu::Texture, Option<wgpu::SurfaceTexture>)> {
+    fn acquire(&mut self) -> Option<(wgpu::Texture, Option<wgpu::SurfaceTexture>)> {
         let surface = match &self.target {
             Target::Window { surface, .. } => surface,
             #[cfg(test)]
@@ -295,9 +306,13 @@ impl GpuWindow {
                     _ => return None,
                 }
             }
-            wgpu::CurrentSurfaceTexture::Timeout
-            | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Validation => return None,
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                self.retry = true;
+                return None;
+            }
+            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Validation => {
+                return None;
+            }
         };
         Some((frame_texture.texture.clone(), Some(frame_texture)))
     }

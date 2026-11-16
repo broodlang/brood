@@ -577,6 +577,11 @@ impl Renderer {
         self.recompute();
     }
 
+    /// Start the installed-font scan in the background (`FontShared::prescan`).
+    pub(super) fn prescan_fonts(&self) {
+        self.families.borrow_mut().prescan();
+    }
+
     /// Set how monochrome text is anti-aliased (behind `gui-text-aa!`). Drops the
     /// cluster cache (baked in the old mode) and the retained frame, so the next paint
     /// re-rasterises everything.

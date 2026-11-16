@@ -441,6 +441,7 @@ impl GpuWindow {
             queue,
             config,
             configured: (w, h),
+            retry: false,
             viewport_buffer,
             viewport_bind_group,
             solid_pipeline,
