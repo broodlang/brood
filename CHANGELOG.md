@@ -6,15 +6,16 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
-**Changed.**
-- **A type you read is written the way you write one**: `reflect/type-signature`,
-  `reflect/expr-type`, hover, `nest doc`, the MCP `lookup` tool, the LSP's inlay hints and
-  completion details show `(string &optional int -> (or failure number))` and `(int 1 _)`, not
-  `(string, &optional int) -> number | failure` and `int[1..]`, so what you read pastes into a
-  `sig` or a typed parameter. Checker warnings keep their own wording. A type the grammar has
-  no word for (one including a macro or a native function) still shows the old way.
+## v0.53.0 — inferred type guards and reverse arrows, types you can paste, Rust 1.100
 
-## v0.53.0 — inferred type guards and reverse arrows, Rust 1.100, a live form's type where it ran
+**Changed: a type you read is written the way you write one.**
+- `reflect/type-signature`, `reflect/expr-type`, hover, `nest doc`, the MCP `lookup` tool, the
+  LSP's inlay hints and completion details show `(string &optional int -> (or failure number))`
+  and `(int 1 _)`, not `(string, &optional int) -> number | failure` and `int[1..]`, so what you
+  read pastes into a `sig` or a typed parameter. A record reads as its name. Checker warnings
+  keep their own wording. A type the grammar has no word for (one including a macro or a
+  native function) still shows the old way.
+- A tool that parsed the old form should read the new one with the reader: it is Brood data.
 
 **Added: the checker reads function types both ways (ADR-725).**
 - A predicate you write is an inferred type guard: `(defn small? (x) (and (int? x) (< x 10)))`
@@ -67,7 +68,8 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 - **A live editor's type for a form is derived where the form ran**: an `eval-server` reply
   carries `:type`, so a definition calling an earlier form's function is typed through it,
   not as `(any -> any)`. `reflect/source-signatures` reads its text under the current module,
-  so a call to the module's own functions is typed too.
+  so a call to the module's own functions is typed too. A definition of a value, `(def limit
+  10)`, is typed by the value it binds; it had no type at all.
 - **The LSP's inferred-type hints and "Declare signature" action work in module files**: they
   looked a definition up by `f` while the checker names it `mod/f`, so neither appeared in
   any file with a `defmodule`.
