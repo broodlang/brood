@@ -261,7 +261,7 @@ registry hosts the bytes. With `:source-url URL`, publish an EXTERNAL release �
 once (to hash its bytes into the checksum and prove it is reachable), then POST metadata only;
 the registry records the URL and every downloader verifies the bytes it fetches from there
 (ADR-211). `:index` overrides the configured `:registry` base URL. Auth: a Bearer token
-($HIVE_TOKEN or the `:package/registry-token` config). Releases are immutable — a version already
+($HIVE_TOKEN or the `:registry-token` config). Releases are immutable — a version already
 published is refused. Backs `nest publish`.
 
     (package-publish/publish :index \"https://hive.example.org\")   ;~> the release posted; raises when the version is already published"
@@ -280,7 +280,7 @@ published is refused. Backs `nest publish`.
                                     (when (nil? project/*version*)
                                       (error "package: nothing to publish — the project has no :version"))
                                     (when (or (nil? token) (= token ""))
-                                      (error "package: publishing needs an auth token — set $HIVE_TOKEN (or :package/registry-token in your config)"))
+                                      (error "package: publishing needs an auth token — set $HIVE_TOKEN (or :registry-token in ~/.config/brood/config.blsp)"))
                                     (if (and source-url (not (= source-url "")))
                                       (registry-publish-external base token source-url)
                                       (registry-publish-hosted root base token)))))))
