@@ -1820,3 +1820,7 @@ quarters of its trigger, in the gap between keys: collections inside a turn 5 �
 fragment was pinned to its screen row, so a scroll missed every row's. The GUI resolves the
 block while it parses (a moved fragment shifted natively, an unmoved one last frame's), the
 harvest resolves it for a flattened frame, and `ui-memo-at` lets a row be keyed by its line.
+
+2026-11-16 (ADR-729). **`reflect/scan-bracket-partner`.** The show-paren's char-at walks cost
+1.7–2 ms on every key next to a bracket; the partner is now read natively by the reader's lexer
+from the bracket's top-level form (0.06–0.23 ms).

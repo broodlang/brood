@@ -530,35 +530,6 @@ one-char range `[pos (inc pos) face]`.
 
 ;; ---- bracket matching -------------------------------------------------------
 
-(defn- hl-fwd-match (full:string i:int n:int depth:int -> int)
-  "Scanning forward from `i` (just past an opener), the offset of the closer at
-`depth` 0, or -1. Skips strings/comments so their brackets don't count."
-  (if (>= i n)
-    -1
-    (let (c (string/char-at full i))
-      (cond
-        (= c "\"") (hl-fwd-match full (hl-string-end full (inc i) n) n depth)
-        (= c ";") (hl-fwd-match full (hl-to-eol full (inc i) n) n depth)
-        (hl-open? c) (hl-fwd-match full (inc i) n (inc depth))
-        (hl-close? c) (if (= depth 0) i (hl-fwd-match full (inc i) n (dec depth)))
-        else (hl-fwd-match full (inc i) n depth)))))
-
-(defn- hl-opener-scan (full:string i:int n:int cp:int stack: (list int) -> int)
-  "Forward scan maintaining a `stack` of opener offsets; on reaching closer `cp`,
-return the matching opener (top of stack) or -1. Skips strings/comments."
-  (if (>= i n)
-    -1
-    (let (c (string/char-at full i))
-      (cond
-        (= c "\"") (hl-opener-scan full (hl-string-end full (inc i) n) n cp stack)
-        (= c ";") (hl-opener-scan full (hl-to-eol full (inc i) n) n cp stack)
-        (hl-open? c) (hl-opener-scan full (inc i) n cp (cons i stack))
-        (hl-close? c)
-          (if (= i cp)
-            (if (empty? stack) -1 (first stack))
-            (hl-opener-scan full (inc i) n cp (rest stack)))
-        else (hl-opener-scan full (inc i) n cp stack)))))
-
 (defn- hl-closer-of (c)
   ;; the closing delimiter that pairs with opener `c`, or nil
   (cond (= c "(") ")" (= c "[") "]" (= c "{") "}" else nil))
@@ -646,13 +617,13 @@ cursor opens.
              else -1))
     (if (< bi 0)
       nil
-      (let (c (string/char-at full bi))
-        (if (hl-open? c)
-          (let (m (hl-fwd-match full (inc bi) n 0))
-            (if (< m 0) [bi :unmatched] [bi m]))
-          ;; from the top-level form the closer is in (nothing open there), not from 0
-          (let (m (hl-opener-scan full (reflect/scan-form-start full bi) n bi '()))
-            (if (< m 0) [bi :unmatched] [m bi])))))))
+      ;; the partner read natively by the reader's lexer, from the top-level form the bracket
+      ;; is in (ADR-729): a char-at walk here was 1.7-2 ms on every key next to a bracket
+      (let (partner (reflect/scan-bracket-partner full bi))
+        (cond
+          (< partner 0) [bi :unmatched]
+          (< partner bi) [partner bi]
+          else [bi partner])))))
 
 (defn enclosing-open (full pos)
   "The offset of the innermost *unclosed* opening bracket enclosing `pos`, or -1 when
@@ -701,7 +672,7 @@ level — atoms, strings, and whole bracketed forms each count once."
         (= c ";") (hl-datum-starts full (hl-to-eol full (inc i) n) end n acc)
         (= c "\"") (hl-datum-starts full (hl-string-end full (inc i) n) end n (cons i acc))
         (hl-open? c)
-          (let (m (hl-fwd-match full (inc i) n 0))
+          (let (m (reflect/scan-bracket-partner full i))
             (hl-datum-starts full (if (< m 0) end (inc m)) end n (cons i acc)))
         (hl-close? c) (hl-datum-starts full (inc i) end n acc)
         else (hl-datum-starts full (hl-atom-end full (inc i) n) end n (cons i acc))))))

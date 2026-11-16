@@ -232,6 +232,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     treesit::register_grammar_info(&mut primitives);
     // And again: vetting a grammar in a child before this process loads it (ADR-660).
     treesit::register_grammar_vetting(&mut primitives);
+    // And again: the partner of a bracket, for a show-paren on every key (ADR-729).
+    syntax_scan::register_bracket_partner(&mut primitives);
 }
 
 #[cfg(test)]

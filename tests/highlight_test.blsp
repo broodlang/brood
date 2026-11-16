@@ -331,6 +331,30 @@
     (assert= (bracket-match "(a b)" 4) [0 4])
     (assert= (bracket-match "()" 1) [0 1])))
 
+(describe "reflect/scan-bracket-partner — a bracket's partner, natively (ADR-729)"
+  (test "an opener's closer and a closer's opener, past strings, comments and bar symbols"
+    (let (text "(a \")\" ; (\n |(| (b))")
+      (assert= (reflect/scan-bracket-partner text 0) (dec (count text)))
+      (assert= (reflect/scan-bracket-partner text (dec (count text))) 0)
+      (assert= (reflect/scan-bracket-partner text 16) 18)
+      (assert= (reflect/scan-bracket-partner text 18) 16)))
+  (test "a bracket inside a string or comment, or not a bracket at all, has none"
+    (assert= (reflect/scan-bracket-partner "(a \")\")" 4) -1)
+    (assert= (reflect/scan-bracket-partner "; (x)\n(y)" 2) -1)
+    (assert= (reflect/scan-bracket-partner "(abc)" 2) -1))
+  (test "an unclosed opener and a stray closer are unmatched"
+    (assert= (reflect/scan-bracket-partner "(a (b" 0) -1)
+    (assert= (reflect/scan-bracket-partner "(a) b)" 5) -1))
+  (test "a closer deep in a later top-level form starts from that form, and a rope answers alike"
+    (let (text (str (string/join (map (range 200) (fn (i) (str "(def x" i " [1 2])"))) "\n")
+                 "\n(defn f (x) (inc x))")
+          closer (dec (count text))
+          rope (text/string-> text))
+      (assert= (reflect/scan-bracket-partner text closer) (string/last-index-of text "(defn"))
+      (assert= (reflect/scan-bracket-partner rope closer) (string/last-index-of text "(defn"))
+      (assert= (reflect/scan-bracket-partner rope (- closer 1))
+        (string/last-index-of text "(inc")))))
+
 (describe "symbol-at — what the cursor is ON"
   ;; `symbol-prefix-at`'s sibling and a different question: that one stops dead at the cursor
   ;; (what has been TYPED, which is what completion needs), this one runs to the end of the

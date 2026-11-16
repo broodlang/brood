@@ -1267,3 +1267,90 @@ mod form_scan_tests {
         assert_carried(&carried, &rope, "one keystroke");
     }
 }
+
+/// Registered after every other primitive, for the intern-order reason `register` gives.
+pub(super) fn register_bracket_partner(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    primitives.def(
+        "%scan-bracket-partner",
+        Arity::exact(2),
+        Sig::new(vec![string.union(rope), int], int),
+        &["s", "pos"],
+        "The char offset of the bracket that pairs with the one at char offset pos in s — an open bracket's close, a close bracket's open — or -1 when it has none, or pos is not a bracket outside every string, ; comment and |bar| symbol. Read with the reader's own lexer, from the top-level form pos is in (found through the same safepoint table scan-form-start keeps), so a closer costs the form it closes and an opener the text to its closer, at native speed. s may be a string or a rope. What a show-paren asks on every key next to a bracket.",
+        scan_bracket_partner,
+    );
+}
+
+/// The char offset of the bracket pairing with the one at char `pos`, lexing forward from
+/// `start` — the top-level form start at or before `pos` (depth 0 there) and its byte offset.
+/// `None` when `pos` is not a bracket token (inside a string, a comment or an atom) or the
+/// bracket is unmatched.
+fn bracket_partner<T: ScanText>(text: &mut T, start: (usize, usize), pos: usize) -> Option<usize> {
+    let (mut byte, mut ch) = start;
+    // the open brackets enclosing the cursor, innermost last
+    let mut open: Vec<usize> = Vec::new();
+    while byte < text.len() && ch <= pos {
+        let at = ch;
+        match lex(text, &mut byte, &mut ch) {
+            Lexeme::Open if at == pos => return closer_after(text, byte, ch),
+            Lexeme::Open => open.push(at),
+            Lexeme::Close if at == pos => return open.last().copied(),
+            Lexeme::Close => {
+                open.pop();
+            }
+            Lexeme::Other => {}
+        }
+    }
+    None
+}
+
+/// The char offset of the close bracket that ends the open one the cursor (`byte`, `ch`)
+/// has just stepped past, or `None` when the text ends first.
+fn closer_after<T: ScanText>(text: &mut T, mut byte: usize, mut ch: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    while byte < text.len() {
+        let at = ch;
+        match lex(text, &mut byte, &mut ch) {
+            Lexeme::Open => depth += 1,
+            Lexeme::Close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            Lexeme::Other => {}
+        }
+    }
+    None
+}
+
+/// `(%scan-bracket-partner s pos)` — see the registration.
+fn scan_bracket_partner(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "reflect/scan-bracket-partner";
+    let pos = expect_int(heap, who, arg(args, 1))?;
+    let v = arg(args, 0);
+    let Ok(pos) = usize::try_from(pos) else {
+        return Ok(Value::int(-1));
+    };
+    let (form_start, _) = form_start_pair_of(heap, who, v, pos as i64)?;
+    let h: &Heap = heap;
+    let partner = if let Value::Rope(id) = v {
+        let rope = h.rope(id);
+        if pos >= rope.len_chars() {
+            None
+        } else {
+            let start = (rope.char_to_byte(form_start), form_start);
+            bracket_partner(&mut RopeCursor::new(rope), start, pos)
+        }
+    } else {
+        let mut s = expect_text_string(h, who, v)?;
+        let start_byte = match v {
+            Value::Str(id) => h.str_char_to_byte(id, form_start),
+            _ => s.len(),
+        };
+        bracket_partner(&mut s, (start_byte, form_start), pos)
+    };
+    Ok(Value::int(partner.map_or(-1, |at| at as i64)))
+}
