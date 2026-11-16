@@ -72,6 +72,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Take the calling process's oldest PRIORITY-lane message (`proc/send-priority`, a window's input) out of its mailbox, as `[msg]` — or nil at once when none is queued. Never waits and never looks at an ordinary message, so it costs nothing in a mailbox thousands of background messages deep: the input-first half of a UI loop's poll (ADR-490).\n\n    (do (send (self) :background) (proc/take-priority))   ;=> nil",
         take_priority);
     primitives.def(
+        "proc/priority-pending?",
+        Arity::range(0, 1),
+        Sig::new(vec![pid_ty.clone()], bool_ty.clone()),
+        &["pid"],
+        "Whether a PRIORITY-lane message (`proc/send-priority`: whatever a window delivers as input — keys, clicks, pointer motion, scroll steps) is queued in pid's mailbox — the calling process's when pid is omitted — without taking it. O(1), and false for a pid that is not a live local process. It counts what is queued, so a key repeat taken back before it was read (`proc/take-priority` drops it) still counts until then: the answer errs towards stopping. What a UI loop asks between slices of long background work, so a key that arrived stops the work at the next slice instead of waiting it out (ADR-490's input-first rule, inside a turn).\n\n    (do (proc/send-priority (self) :key) [(proc/priority-pending?) (proc/take-priority) (proc/priority-pending?)])   ;=> [true [:key] false]",
+        priority_pending);
+    primitives.def(
         "proc/receive-lane",
         Arity::exact(1),
         Sig::new(vec![int.union(nil_ty.clone())], vec_ty.union(nil_ty)),
@@ -468,6 +475,27 @@ pub(super) fn receive_lane(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// `(proc/take-priority)` — the oldest priority-lane message as `[msg]`, or nil.
 pub(super) fn take_priority(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     crate::process::take_priority(heap)
+}
+
+/// `(proc/priority-pending? [pid])` — whether a priority-lane message waits in pid's mailbox
+/// (the caller's by default); false for a pid that is not a live local process.
+pub(super) fn priority_pending(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = match args.first() {
+        None => crate::process::self_pid(),
+        Some(Value::Pid { node, id }) if crate::dist::is_local(*node) => *id,
+        Some(Value::Pid { .. }) => return Ok(Value::boolean(false)),
+        Some(other) => {
+            return Err(LispError::wrong_type(
+                heap,
+                "proc/priority-pending?",
+                "pid",
+                *other,
+            ));
+        }
+    };
+    Ok(Value::boolean(
+        crate::process::priority_pending(id).unwrap_or(false),
+    ))
 }
 
 /// A non-negative millisecond count, or nil.

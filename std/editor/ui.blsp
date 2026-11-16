@@ -291,6 +291,23 @@ whatever it throws is logged, never kept from the exit. nil, so the loop stops."
 ;; this, not a registered name like `:editor`, which is true of exactly one loop — a second
 ;; window or a daemon's per-client loop would read as "no loop" and do the work inline.
 
+(defdyn editor/ui/*display* nil)
+;; The display the `ui-run` loop this code runs inside draws on and takes its input from —
+;; bound beside `*loop*` for the loop's whole life, nil outside one. Read through
+;; [[ui-input-pending?]], which is the question an app asks of it.
+
+(defn ui-input-pending? ()
+  "Whether the user's input is waiting for the loop this code runs inside — anything the display
+has queued as input and not yet handed over, pointer motion too
+(`editor/frontend/display-input-pending?`).
+Work that runs long INSIDE a turn — a slice of idle jobs, a chunk of background folding —
+asks this between its pieces and stops early when it says yes, so the key is folded and
+drawn next rather than after the work (ADR-490's input first, inside the turn). False outside
+a loop, and on a display that cannot tell.
+
+    (editor/ui/ui-input-pending?)   ;=> false"
+  (if (nil? editor/ui/*display*) false (editor/frontend/display-input-pending? editor/ui/*display*)))
+
 (defdyn editor/ui/*memo* nil)
 ;; The previous turn's memo table — `{key -> [deps ops]}` — while `view` runs inside
 ;; `ui-loop`; nil outside a loop (a test calling a view directly, a headless render),
@@ -325,6 +342,31 @@ last frame instead of parsing them again (ADR-470).
         (list [:ui/memo key deps (second prev) true])
         (list [:ui/memo key deps (thunk) false])))))
 
+(defn ui-memo-at (key:any deps:any row:int col:int thunk:fn -> any)
+  "`ui-memo` for a fragment drawn at a place that moves: `(thunk)` paints it at row 0, column
+0, and the result puts it at `row`, `col`. Key it by what it shows, not where — a buffer
+line, not a screen row — and a fragment that only moved is still a hit: a scroll repaints
+none of the rows it kept, only the ones it brought in.
+
+Inside a running `ui-run` it is a one-element list holding `[:translate row col [marker]]`
+(ADR-728); the GUI window moves the fragment while it parses (a moved row is shifted
+natively, an unmoved one is last frame's), and a display drawn the frame flattened gets it
+resolved by `ui-harvest`. Outside a loop, the thunk's ops already moved — a frame of plain
+ops at absolute cells, as `ui-memo` gives.
+
+    (editor/ui/ui-memo-at [:line 7] [\"text\"] 3 4 (fn () [[:text 0 0 \"text\"]]))   ;=> [[:text 3 4 \"text\"]]"
+  (if (or (nil? editor/ui/*memo*) (nil? key))
+    (ui-translated row col (thunk))
+    (list [:translate row col (ui-memo key deps thunk)])))
+
+(defn ui-translated (row:int col:int ops:any -> any)
+  "`ops` moved `row` rows down and `col` columns right, as plain ops at absolute cells — what
+a `[:translate row col ops]` block resolves to (ADR-728). An op pushed off the grid's top or
+left edge is dropped; one placed in pixels is left where it is.
+
+    (editor/ui/ui-translated 2 1 [[:text 0 0 \"a\"] [:rect 1 0 3 1 nil]])   ;=> [[:text 2 1 \"a\"] [:rect 3 1 3 1 nil]]"
+  (first (%ui-harvest [[:translate row col ops]])))
+
 (defn ui-memo-marker? (op)
   "True for a `[:ui/memo key deps ops reused?]` marker.
 
@@ -339,7 +381,9 @@ for the next turn. With `keep-markers?` the frame comes back as it is, markers a
 for a display whose `:fragments?` says it takes them: the GUI window parses a fragment the
 loop reused once, and shares it with the frame before (ADR-470). The loop calls it on every rendered frame; a frame without markers
 comes back as it went in, with an empty table. Recurses into a marker's ops and the ops a
-`:scroll-region`, `:cell-region` or `:above-seam` carries. Native (`%ui-harvest`): it walks every op of every frame, where a
+`:scroll-region`, `:cell-region`, `:above-seam` or `:translate` carries, and resolves a
+`[:translate row col ops]` block into its ops at absolute cells (ADR-728) unless the markers
+are kept. Native (`%ui-harvest`): it walks every op of every frame, where a
 Brood-level walk cost about a millisecond — more than the paint the memo saves.
 
     (first (editor/ui/ui-harvest [[:ui/memo :k [] [[:clear]] false]]))   ;=> [[:clear]]
@@ -1002,7 +1046,9 @@ non-blocking window. The shared loop behind the observer (and the editor)."
       (do
         ;; nil last-good: first render must succeed. {} clock: a fresh timer bookkeeping
         ;; map (last-input/armed/fired filled lazily on the first iteration).
-        (binding (editor/ui/*loop* (self) editor/ui/*slow-reports* (table/new))
+        (binding (editor/ui/*loop* (self)
+                  editor/ui/*display* display
+                  editor/ui/*slow-reports* (table/new))
           (ui-loop model nil {} view update display))
         (proc/set-quit-key nil 0)
         ((get display :leave)))

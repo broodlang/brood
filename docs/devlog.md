@@ -1813,3 +1813,37 @@ without offset propagation, the inline case red without the count alias's own bo
 bug behind it; reverted. Kept from it: a regression test for an `or` whose scope arrives dead
 (a binding at the fixpoint's `never`), which the attempt broke at a caller-derived site in
 mur-forge.
+
+2026-11-16 (ADR-726). **A window that keeps the display's time and the desktop's look.** From a
+study of bedit beside Ptyxis on GNOME 50 (one 144 Hz panel, two 60 Hz): the coast and the
+particles step once a refresh of the window's monitor instead of every 12 / 16 ms (judder on
+60 Hz, a cap of 83 on 144); paints are paced by the compositor (`pre_present_notify`), at once
+when idle and once a refresh in a burst; `[:resize]` goes only for a new grid; a GPU frame
+skipped on a swapchain timeout is painted again; the installed fonts are scanned in the
+background after the first frame, not in the paint that first needs a fallback glyph.
+`gui/desktop-preferences` reads GNOME (one `gsettings` run) or KDE for the colour scheme,
+reduced motion, the text rendering (`automatic` read as GTK 4 draws it: grayscale, slight,
+sRGB) and the caret blink. `proc/priority-pending?`, a display's `:input-pending?` and
+`editor/ui/ui-input-pending?` let work inside a turn stop for a key. Not run on the desktop:
+every test of this lands on CI.
+
+2026-11-16 (KI-396). **`editor/face`'s registry survives its own load.** bedit's Org headings
+lost their faces 5 runs in 6 under `BROOD_NO_STDIMAGE=1`: the project image restores every
+registry, the faces bedit registered among them, and with std from source `editor/face` loaded
+after that, its `(defdyn *faces* {})` resetting the table. `defonce` now, as `editor/layers`
+was (ADR-218), and `tests/registry_declare_test.blsp` checks every std module declares the
+registries it writes through a registry op that way.
+
+2026-11-16 (ADR-727). **A process collects as it parks when its next collection is near.** The
+live typing probe showed bedit's young collections (6–23 ms) landing inside keys: 5 per two
+rounds, the whole p99. A parking process now collects when the young generation is past three
+quarters of its trigger, in the gap between keys: collections inside a turn 5 → 0, p99 30 → 20 ms.
+
+2026-11-16 (ADR-728). **`[:translate drow dcol ops]` moves a rendered piece by rows.** A memo
+fragment was pinned to its screen row, so a scroll missed every row's. The GUI resolves the
+block while it parses (a moved fragment shifted natively, an unmoved one last frame's), the
+harvest resolves it for a flattened frame, and `ui-memo-at` lets a row be keyed by its line.
+
+2026-11-16 (ADR-729). **`reflect/scan-bracket-partner`.** The show-paren's char-at walks cost
+1.7–2 ms on every key next to a bracket; the partner is now read natively by the reader's lexer
+from the bracket's top-level form (0.06–0.23 ms).

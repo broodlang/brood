@@ -525,10 +525,12 @@ switch, and both should stick. When `:type` is nil (a freshly-created buffer), m
 against `*auto-type-by-interpreter*`, then falls back to `:fundamental`.
 
     (editor/layers/buffer-type-for {:type :lisp})   ;=> :lisp"
-  (let (explicit (get buf :type)
-        file (get buf :file)
-        matched (if (nil? file) nil (layers-match-file file *auto-type-by-file*)))
-    (or explicit matched (layers-match-interpreter buf) :fundamental)))
+  ;; the file patterns only when no type is set: an explicit one wins, and the scan is the cost
+  (let (file (get buf :file))
+    (or (get buf :type)
+      (when (not (nil? file)) (layers-match-file file *auto-type-by-file*))
+      (layers-match-interpreter buf)
+      :fundamental)))
 
 (defn set-buffer-type (buf type)
   "Set `buf`'s `:type` explicitly — the Brood-side override for fileless or special

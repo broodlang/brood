@@ -541,7 +541,8 @@ struct Win {
     /// `true` while kinetic momentum is running after a gesture lift-off. Cleared by the
     /// next `Started/Moved/LineDelta` event or when velocity decays below threshold.
     scroll_momentum_active: bool,
-    /// The per-12 ms velocity decay of the running momentum: `TRACKPAD_DECAY` after a
+    /// The per-12 ms velocity decay of the running momentum (time-proportional, so it is
+    /// the same curve whatever the refresh): `TRACKPAD_DECAY` after a
     /// gesture lift-off (a long coast), `WHEEL_DECAY` for a wheel notch (a short glide).
     scroll_decay: f64,
     /// When the last wheel notch arrived and how many came in quick succession —
@@ -552,8 +553,18 @@ struct Win {
     /// about_to_wait being called too frequently (e.g. on every UserEvent::Draw).
     scroll_next_tick: Instant,
     /// When to repaint next for the particles in flight (`[:emitter …]`): they move between
-    /// frames, so the window repaints on its own, about 60 times a second, while any live.
+    /// frames, so the window repaints on its own, once a refresh of its monitor, while any live.
     particles_next: Option<Instant>,
+    /// How long one refresh of the monitor the window is on lasts (`frame_period`): the step
+    /// of everything the window animates by itself — a kinetic coast, particles — so each
+    /// refresh shows exactly one step, on a 60 Hz panel and a 144 Hz one alike. Re-read by a
+    /// paint at most once every `FRAME_PERIOD_REREAD` (`frame_period_at`).
+    frame_period: Duration,
+    /// When `frame_period` was last read.
+    frame_period_at: Instant,
+    /// The size the app was last told to lay out in (`publish_size`): cells, or pixels for a
+    /// pixel-input window. None until the first `[:resize]` has gone.
+    published_size: Option<(u32, u32)>,
     /// Time the previous momentum step was delivered, used for time-proportional decay
     /// (`0.97 ^ (elapsed_ms / 12)`). Keeps the physics correct when about_to_wait
     /// fires late so the coast speed is render-throughput independent.
@@ -561,7 +572,7 @@ struct Win {
     /// `true` while a momentum scroll event is in-flight — i.e. delivered to Brood
     /// but the corresponding UserEvent::Draw has not yet arrived. A new step is never
     /// delivered while this is set, so the queue never grows beyond one pending event
-    /// even when Brood's render pipeline is slower than the 12 ms tick rate.
+    /// even when Brood's render pipeline is slower than one refresh.
     scroll_pending: bool,
     /// Whether an input method may compose in this window (`WindowSpec::ime`), where its
     /// composition stands (`Composition`), and the cursor rect last handed to it for the
@@ -834,21 +845,76 @@ fn record_latency(
     lock(&w.latency).record(sample, LATENCY_SAMPLES);
 }
 
-/// Republish a window's size to the Brood side and wake its app loop with the
-/// `[:resize …]` it expects: cells for a cell-grid window, PIXELS for a pixel-input
-/// one (`WindowSpec::pixel_input`) — the unit every other message of that window uses.
-/// Shared by the resize, scale-change and font arms so the three cannot disagree.
-fn publish_size(w: &Win) {
+/// Republish a window's size to the Brood side and wake its app loop with the `[:resize …]`
+/// it expects: cells for a cell-grid window, PIXELS for a pixel-input one
+/// (`WindowSpec::pixel_input`) — the unit every other message of that window uses. Always
+/// sent: a font, line-height, scale or layout change can keep the grid and still change
+/// what the app measures in pixels (`gui/cell-size`), and the message is the app's wake.
+/// Shared by those arms so they cannot disagree; a window RESIZE goes through
+/// [`publish_resize`].
+fn publish_size(w: &mut Win) {
+    let laid_out = republish_size(w);
+    w.published_size = Some(laid_out);
+    deliver(w.subscriber, resize_of(w.pixel_input, laid_out));
+}
+
+/// [`publish_size`] for the window being resized: the app is woken only when the size it
+/// lays out in changed. A drag that moves the edge by less than a cell sends nothing — the
+/// grid is the same, and the paint places the leftover pixels itself (`Renderer::rows`), so
+/// the app would only lay out the frame it already drew.
+fn publish_resize(w: &mut Win) {
+    let laid_out = republish_size(w);
+    if w.published_size != Some(laid_out) {
+        w.published_size = Some(laid_out);
+        deliver(w.subscriber, resize_of(w.pixel_input, laid_out));
+    }
+}
+
+/// Recompute and republish the window's cells and pixels for `gui-size`/`gui-size-px`, and
+/// answer the size its app lays out in: cells, or pixels for a pixel-input window.
+fn republish_size(w: &Win) -> (u32, u32) {
     update_cells(&w.window, &w.renderer, &w.size);
     let inner = w.window.inner_size();
     *lock(&w.size_px) = (inner.width, inner.height);
     if w.pixel_input {
-        deliver(w.subscriber, resize_message_px(inner.width, inner.height));
+        (inner.width, inner.height)
     } else {
         let (cols, rows) = *lock(&w.size);
-        deliver(w.subscriber, resize_message(cols, rows));
+        (u32::from(cols), u32::from(rows))
     }
 }
+
+/// The `[:resize …]` message for a size the app lays out in.
+fn resize_of(pixel_input: bool, (width, height): (u32, u32)) -> Message {
+    if pixel_input {
+        resize_message_px(width, height)
+    } else {
+        resize_message(width as u16, height as u16)
+    }
+}
+
+/// One refresh of the monitor `window` is on — what everything the window animates by
+/// itself steps by ([`period_of`]).
+pub(super) fn frame_period(window: &Window) -> Duration {
+    period_of(
+        window
+            .current_monitor()
+            .and_then(|monitor| monitor.refresh_rate_millihertz()),
+    )
+}
+
+/// One refresh at `millihertz`: 60 Hz's when the platform cannot say (no monitor yet, a
+/// backend that reports no rate), and a rate outside 30..=360 Hz clamped into it, so a bogus
+/// report can neither stall the window's animation nor flood it.
+fn period_of(millihertz: Option<u32>) -> Duration {
+    let rate = millihertz.unwrap_or(60_000).clamp(30_000, 360_000);
+    Duration::from_nanos(1_000_000_000_000 / u64::from(rate))
+}
+
+/// How often a window re-reads its monitor's refresh ([`frame_period`]): a move between
+/// panels at one scale sends no event, and on some platforms the read is a driver query, too
+/// dear for every paint.
+const FRAME_PERIOD_REREAD: Duration = Duration::from_secs(1);
 
 /// Recompute `(cols, rows)` from the window's physical size and the cell
 /// metrics, and publish it for `gui-size`.

@@ -212,6 +212,43 @@ example still agrees with the serial step. If the non-strict sighting came from 
 reading a type as precise, that is the checker's ordinary mode rule, which a now-dropped
 sig fed, not a defect in the checker.
 
+## KI-396 — `editor/face`'s registry reset when the module loaded after the faces were restored ✅ fixed 2026-11-16
+
+**Symptom.** bedit's full suite, run with `BROOD_NO_STDIMAGE=1` on the `ui-feel` branch, failed
+`org_test` "levels cycle through four faces" (`face-of "* a" "*"` → `nil`, expected
+`{:fg :cyan :bold true}`) in most runs. Reduced: in bedit,
+`BROOD_NO_STDIMAGE=1 nest eval --test '(editor/face/face :org/level-1)'` answered `nil` 5 runs
+in 6 — on bedit 5e626ef0 too — while every face bedit's modules register (`:org/*`,
+`:syntax/variable`) was missing and std's own (`:ui/*`, `:syntax/*`) present. With the std
+image, or without bedit's project image (`BROOD_COVERAGE=1`), it held.
+
+**Cause.** `std/editor/face.blsp` declared its registry `(defdyn editor/face/*faces* {})`, and
+`defdyn` expands to a plain `def`. An imaged project start restores every registry global from
+the image's root section — the faces bedit's modules registered among them. With the std image
+`editor/face` was loaded before that and the restore landed on it; with std from source the
+module loads afterwards, on first use, and its declaration reset the table to `{}`. Any re-run
+of its embedded source did the same. `editor/layers` had this exact bug and was fixed with
+`defonce` (ADR-218); `editor/face` was not.
+
+**Why it survived.** CI and the desktop run with the std image, where the order is the safe
+one; `BROOD_NO_STDIMAGE=1` is the setting for testing uncommitted std edits, so the failure
+showed up only for someone doing that, and read as a flaky Org test. Nothing checked how a
+registry is declared.
+
+**Fix.** `(defonce editor/face/*faces* {})`. Nothing rebinds it with `binding`, so it need not
+be dynamic. The other `defdyn` tables in std (`project/*ns-package*`, `*enhances*`, `*check*`,
+`*loaded-mtimes*`, `*require-failed*`, `mcp/*documents*`, `format/*headers-extra*`) are not
+written by other modules, and tests rebind several of them, so they stay `defdyn`.
+
+**Guard.** `tests/face_test.blsp` "REGRESSION: a face another module registered outlives a re-run
+of editor/face" re-runs the module's embedded source after a `def-face`. And
+`tests/registry_declare_test.blsp` checks every std module (not the prelude, evaluated once at
+boot) declares each registry it writes through `%registry-update!`, `%registry-cas!` or
+`%swap-registry!` with `defonce`. Both sabotage-verified: with `defdyn` the face test reads
+`actual: nil` `expect: {:fg :magenta}`, and the sweep
+`actual: ["std/editor/face.blsp: editor/face/*faces* is declared with defdyn"]`. After the fix
+the bedit reduction holds 6 runs in 6.
+
 ## KI-394 — `bound?` answered `false` for a project module the image had not materialised ✅ fixed 2026-11-14
 
 **Seen** 2026-11-13, releasing bedit 0.9.0: on this machine `panes_projects_test` failed three

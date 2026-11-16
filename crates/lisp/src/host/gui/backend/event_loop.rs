@@ -5,9 +5,6 @@
 
 use super::*;
 
-/// How often a window with particles in flight repaints by itself (~60 Hz).
-const PARTICLE_FRAME: Duration = Duration::from_millis(16);
-
 impl ApplicationHandler<UserEvent> for GuiApp {
     // The loop idles (`Wait`) until a proxy or window event arrives. Window
     // creation is now safe (the display is live), so drain any `Open` that
@@ -511,7 +508,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 update_ime_area(w);
                 // Wake the app loop so it re-renders at the new (cols, rows)
                 // now, rather than after its (possibly long) poll timeout.
-                publish_size(w);
+                publish_resize(w);
                 w.window.request_redraw();
             }
             // We deliberately ignore 0.30's `inner_size_writer` (which could
@@ -891,7 +888,8 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                         w.scroll_pending = false;
                         w.scroll_momentum_active = true;
                         w.scroll_next_tick = now;
-                        w.scroll_last_tick = now;
+                        // a refresh already spent: the first step moves at once, not a frame late
+                        w.scroll_last_tick = now.checked_sub(w.frame_period).unwrap_or(now);
                         event_loop.set_control_flow(ControlFlow::WaitUntil(now));
                     }
                     MouseScrollDelta::PixelDelta(p) => {
@@ -913,7 +911,8 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                                     w.scroll_decay = TRACKPAD_DECAY;
                                     w.scroll_momentum_active = true;
                                     w.scroll_next_tick = now;
-                                    w.scroll_last_tick = now;
+                                    w.scroll_last_tick =
+                                        now.checked_sub(w.frame_period).unwrap_or(now);
                                 } else {
                                     w.scroll_momentum_active = false;
                                     w.scroll_velocity = 0.0;
@@ -974,6 +973,13 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 let margins =
                     bleed::Margins::of(&w.renderer, inner.width as usize, inner.height as usize);
                 let frame = w.bleed.frame(&w.frame, margins);
+                // The monitor's refresh, re-read once a second at most: a window dragged from a
+                // 60 Hz panel to a 144 Hz one at the same scale gets no event that says so, and
+                // its coast and particles step by it.
+                if paint_start.duration_since(w.frame_period_at) >= FRAME_PERIOD_REREAD {
+                    w.frame_period = frame_period(&w.window);
+                    w.frame_period_at = paint_start;
+                }
                 let painted: Option<Option<[u64; 5]>> = match &mut w.backend {
                     Backend::Cpu { surface, .. } => {
                         paint(surface, &w.window, &mut w.renderer, frame);
@@ -996,6 +1002,19 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                         w.window.request_redraw();
                     }
                 }
+                // A frame is up: the installed fonts are scanned on a thread of their own from
+                // now (once; every later call finds it started), so the first glyph that needs
+                // a fallback finds them ready — whichever way the window came to be shown.
+                w.renderer.prescan_fonts();
+                // A frame the swapchain had no image for in time is still owed: painted
+                // again, or the old image would stay up until something else drew.
+                #[cfg(feature = "gui-gpu")]
+                if painted.is_none()
+                    && let Backend::Gpu(gpu) = &mut w.backend
+                    && gpu.take_retry()
+                {
+                    w.window.request_redraw();
+                }
                 if let Some(split) = painted
                     && let Some((input_at, kind)) = w.draw_input.take()
                 {
@@ -1005,7 +1024,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     .renderer
                     .emitters
                     .alive()
-                    .then(|| Instant::now() + PARTICLE_FRAME);
+                    .then(|| Instant::now() + w.frame_period);
             }
             _ => {}
         }
@@ -1017,8 +1036,8 @@ impl ApplicationHandler<UserEvent> for GuiApp {
     // sends back after rendering a scroll step. Without a time guard this would
     // flood: deliver → Draw → about_to_wait → deliver → Draw → ∞. We gate each
     // delivery on `scroll_next_tick` (set to `now` when momentum starts, then
-    // advanced by 12 ms after each step) so at most one step fires per 12 ms
-    // regardless of how many times `about_to_wait` is called.
+    // advanced by one refresh, `Win::frame_period`, after each step) so at most one step
+    // fires per refresh regardless of how many times `about_to_wait` is called.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(_gate) = enter_gate() else {
             return;
@@ -1085,18 +1104,20 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             // Time-proportional decay: `scroll_decay` per 12 ms nominal (a trackpad's
             // long coast or a wheel notch's short glide), scaled by actual elapsed so
             // the curve is independent of render throughput.
-            let elapsed_ms = now.duration_since(w.scroll_last_tick).as_secs_f64() * 1000.0;
-            let decay = w.scroll_decay.powf((elapsed_ms / 12.0).clamp(0.5, 4.0));
-            w.scroll_velocity *= decay;
             if w.scroll_velocity.abs() < 0.0005 {
                 w.scroll_momentum_active = false;
                 w.scroll_velocity = 0.0;
                 continue;
             }
+            // The distance this step's span of time moves, and the velocity it leaves: the
+            // same coast at any refresh, or when this wake came late (`coast_step`).
+            let elapsed_ms = now.duration_since(w.scroll_last_tick).as_secs_f64() * 1000.0;
+            let (moved, left) = coast_step(w.scroll_velocity, w.scroll_decay, elapsed_ms);
+            w.scroll_velocity = left;
             w.scroll_last_tick = now;
-            w.scroll_next_tick = now + Duration::from_millis(12);
+            w.scroll_next_tick = now + w.frame_period;
             w.scroll_pending = true;
-            deliver_scroll(w, w.scroll_velocity);
+            deliver_scroll(w, moved);
             next_wakeup = Some(match next_wakeup {
                 Some(t) => t.min(w.scroll_next_tick),
                 None => w.scroll_next_tick,

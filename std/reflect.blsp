@@ -285,6 +285,14 @@ each file's text; does not evaluate it.
     (reflect/scan-form-end \"(a) (b c) d\" 0 2)   ;=> 9"
   (%scan-form-end s from n-forms))
 
+(defn scan-bracket-partner (s pos)
+  "The char offset of the bracket that pairs with the one at char offset pos in s — an open bracket's close, a close bracket's open — or -1 when it has none, or pos is not a bracket outside every string, ; comment and |bar| symbol. Read with the reader's own lexer, from the top-level form pos is in (found through the same safepoint table scan-form-start keeps), so a closer costs the form it closes and an opener the text to its closer, at native speed. s may be a string or a rope. What a show-paren asks on every key next to a bracket (ADR-729).
+
+    (reflect/scan-bracket-partner \"(a (b) \\\")\\\")\" 0)   ;=> 10
+    (reflect/scan-bracket-partner \"(a (b) \\\")\\\")\" 5)   ;=> 3
+    (reflect/scan-bracket-partner \"(a (b\" 0)   ;=> -1"
+  (%scan-bracket-partner s pos))
+
 (defn scan-source-extract (src)
   "Native per-file scan for the whole-project check (ADR-119): parse src and return [counts privs def-names] — a map of every symbol's occurrence count, this file's `defn-`/`def-` privates as [bare qual], and every top-level def's qualified name. The fast path replacing the interpreted CST walk.
 

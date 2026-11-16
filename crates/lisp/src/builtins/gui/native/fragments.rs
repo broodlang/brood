@@ -24,7 +24,7 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use crate::core::heap::Heap;
 use crate::core::value::Value;
-use crate::host::gui::{FragmentOps, Op};
+use crate::host::gui::{FragmentOps, Op, translated_ops};
 
 /// One fragment of the last frame: the value its ops were parsed from, the parsed ops,
 /// and the keys of every fragment nested in it — carried forward with it on a hit, so a
@@ -35,10 +35,29 @@ pub(super) struct CachedFragment {
     nested: Vec<u64>,
 }
 
-/// A window's cache: the process that drew it and its fragments by key hash.
+/// Where a translated fragment is drawn: the fragment's parsed ops (by address) and the
+/// rows and columns it was moved.
+type TranslationKey = (usize, i32, i32);
+
+/// A fragment moved by a `[:translate drow dcol ops]` block (ADR-728): the ops it was moved
+/// from — held, so no later allocation can take the address the key names — and the moved
+/// ops, shared with the frame that drew them.
+struct Translation {
+    _source: Arc<[Op]>,
+    moved: Arc<[Op]>,
+}
+
+/// What one frame leaves for the next: its fragments by key hash and its translations.
+#[derive(Default)]
+struct Cache {
+    fragments: HashMap<u64, CachedFragment>,
+    translations: HashMap<TranslationKey, Translation>,
+}
+
+/// A window's cache: the process that drew it and what its last frame left.
 struct WindowFragments {
     pid: Option<u64>,
-    entries: HashMap<u64, CachedFragment>,
+    cache: Cache,
 }
 
 // Every window's cache, by window id. A `Value` in one is only ever compared
@@ -48,10 +67,12 @@ static CACHES: LazyLock<Mutex<HashMap<u64, WindowFragments>>> =
 
 /// One frame's parse: the previous frame's fragments (`previous`, consumed as they are
 /// reused) and this frame's (`current`), plus the keys recorded so far — the stack a
-/// fragment's `nested` list is cut from.
+/// fragment's `nested` list is cut from — and the translations of each.
 pub(super) struct FragmentPass {
     previous: HashMap<u64, CachedFragment>,
     current: HashMap<u64, CachedFragment>,
+    previous_translations: HashMap<TranslationKey, Translation>,
+    current_translations: HashMap<TranslationKey, Translation>,
     duplicated: HashSet<u64>,
     recorded: Vec<u64>,
 }
@@ -60,13 +81,15 @@ impl FragmentPass {
     /// A pass with nothing cached — every fragment parses: a frame painted once, with no
     /// window to keep its fragments for (`%gui-render-frame`, ADR-609).
     pub(super) fn empty() -> FragmentPass {
-        FragmentPass::over(HashMap::new())
+        FragmentPass::over(Cache::default())
     }
 
-    fn over(previous: HashMap<u64, CachedFragment>) -> FragmentPass {
+    fn over(previous: Cache) -> FragmentPass {
         FragmentPass {
-            previous,
+            previous: previous.fragments,
             current: HashMap::new(),
+            previous_translations: previous.translations,
+            current_translations: HashMap::new(),
             duplicated: HashSet::new(),
             recorded: Vec::new(),
         }
@@ -79,27 +102,66 @@ impl FragmentPass {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&window)
-            .filter(|cache| cache.pid == pid)
-            .map_or_default(|cache| cache.entries);
+            .filter(|cached| cached.pid == pid)
+            .map_or_default(|cached| cached.cache);
         FragmentPass::over(previous)
     }
 
     /// Keep this frame's fragments as `window`'s cache for the next frame.
     pub(super) fn store(self, window: u64) {
         let pid = crate::process::current_pid();
-        let entries = self.finish();
+        let cache = self.finish();
         CACHES
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(window, WindowFragments { pid, entries });
+            .insert(window, WindowFragments { pid, cache });
     }
 
-    /// This frame's fragments, less any key that occurred more than once.
-    fn finish(mut self) -> HashMap<u64, CachedFragment> {
+    /// What this frame leaves: its fragments, less any key that occurred more than once,
+    /// and its translations.
+    fn finish(mut self) -> Cache {
         for key in &self.duplicated {
             self.current.remove(key);
         }
-        self.current
+        Cache {
+            fragments: self.current,
+            translations: self.current_translations,
+        }
+    }
+
+    /// `ops` moved `drow` rows and `dcol` columns onto `out` (`[:translate drow dcol ops]`,
+    /// ADR-728). A block holding one fragment — a `ui-memo-at` row — is shared like one: the
+    /// same parsed fragment moved by the same amount last frame is last frame's moved ops, so
+    /// a row that kept its place costs nothing and the frame diff skips it by pointer; one
+    /// that moved is shifted here, natively, never parsed again.
+    pub(super) fn push_translated(
+        &mut self,
+        ops: Vec<Op>,
+        drow: i32,
+        dcol: i32,
+        out: &mut Vec<Op>,
+    ) {
+        if drow == 0 && dcol == 0 {
+            out.extend(ops);
+            return;
+        }
+        let [Op::Fragment(FragmentOps(source))] = ops.as_slice() else {
+            out.extend(translated_ops(&ops, drow, dcol));
+            return;
+        };
+        let key = (source.as_ptr() as usize, drow, dcol);
+        let moved = match self.previous_translations.remove(&key) {
+            Some(translation) => translation.moved,
+            None => translated_ops(source, drow, dcol).into(),
+        };
+        self.current_translations.insert(
+            key,
+            Translation {
+                _source: source.clone(),
+                moved: moved.clone(),
+            },
+        );
+        out.push(Op::Fragment(FragmentOps(moved)));
     }
 
     /// The number of fragments this frame will keep — what a test asks.
@@ -353,5 +415,108 @@ mod tests {
         assert!(matches!(parsed[0], Op::Sound { id: 3, .. }));
         assert!(matches!(parsed[1], Op::Text { .. }));
         assert_eq!(pass.kept(), 0);
+    }
+
+    fn translate(heap: &mut Heap, drow: i64, dcol: i64, ops: Vec<Value>) -> Value {
+        let ops = heap.alloc_vector(ops);
+        heap.alloc_vector(vec![
+            Value::Keyword(value::intern("translate")),
+            Value::int(drow),
+            Value::int(dcol),
+            ops,
+        ])
+    }
+
+    fn text_at(op: &Op) -> (u16, u16) {
+        match op {
+            Op::Text { row, col, .. } => (*row, *col),
+            _ => panic!("not text"),
+        }
+    }
+
+    #[test]
+    fn a_translated_row_is_moved_and_shared_while_it_stays_put() {
+        let mut heap = Heap::new();
+        let line = text(&mut heap, 0, "row");
+        let ops = heap.alloc_vector(vec![line]);
+        let first_marker = marker(&mut heap, "line", ops, false);
+        let at_five = translate(&mut heap, 5, 2, vec![first_marker]);
+        let mut pass = FragmentPass::empty();
+        let first = parse(&heap, vec![at_five], &mut pass);
+        assert_eq!(text_at(&shared(&first[0])[0]), (5, 2));
+
+        // reused in the same place: last frame's moved ops, by pointer
+        let reused = marker(&mut heap, "line", ops, true);
+        let still_five = translate(&mut heap, 5, 2, vec![reused]);
+        let mut pass = next(pass);
+        let second = parse(&heap, vec![still_five], &mut pass);
+        assert!(Arc::ptr_eq(shared(&first[0]), shared(&second[0])));
+
+        // reused one row up (a scroll): the fragment is not parsed again, only moved
+        let reused = marker(&mut heap, "line", ops, true);
+        let at_four = translate(&mut heap, 4, 2, vec![reused]);
+        let mut pass = next(pass);
+        let third = parse(&heap, vec![at_four], &mut pass);
+        assert_eq!(text_at(&shared(&third[0])[0]), (4, 2));
+        assert!(!Arc::ptr_eq(shared(&second[0]), shared(&third[0])));
+        assert_eq!(pass.kept(), 1, "the row's own fragment is still cached");
+    }
+
+    #[test]
+    fn a_translate_takes_its_ops_as_a_list_the_way_ui_memo_at_hands_them() {
+        // `ui-memo-at` answers `[:translate row col (marker)]`: the marker in a LIST. Read
+        // as a vector only, every row of the editor painted nothing.
+        let mut heap = Heap::new();
+        let line = text(&mut heap, 0, "row");
+        let ops = heap.alloc_vector(vec![line]);
+        let row = marker(&mut heap, "line", ops, false);
+        let listed = heap.list_from_slice(&[row]);
+        let block = heap.alloc_vector(vec![
+            Value::Keyword(value::intern("translate")),
+            Value::int(3),
+            Value::int(1),
+            listed,
+        ]);
+        let mut pass = FragmentPass::empty();
+        let parsed = parse(&heap, vec![block], &mut pass);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(text_at(&shared(&parsed[0])[0]), (3, 1));
+    }
+
+    #[test]
+    fn a_translate_moves_every_cell_op_and_drops_what_leaves_the_grid() {
+        let mut heap = Heap::new();
+        let below = text(&mut heap, 1, "kept");
+        let above = text(&mut heap, 0, "gone");
+        let block = translate(&mut heap, -1, 0, vec![below, above]);
+        let mut pass = FragmentPass::empty();
+        let parsed = parse(&heap, vec![block], &mut pass);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(text_at(&parsed[0]), (0, 0));
+
+        let rect = Op::Rect {
+            row: 1,
+            col: 1,
+            w: 2,
+            h: 2,
+            face: Default::default(),
+            radius: 0.0,
+        };
+        let region = Op::CellRegion {
+            x: 3,
+            y: 4,
+            w: 1,
+            h: 1,
+            px: 10.0,
+            ops: vec![rect.clone()],
+        };
+        match region.translated(2, 1) {
+            Some(Op::CellRegion {
+                x: 4, y: 6, ops, ..
+            }) => {
+                assert!(ops == vec![rect], "a region's ops are in its own grid")
+            }
+            _ => panic!("the region moves"),
+        }
     }
 }

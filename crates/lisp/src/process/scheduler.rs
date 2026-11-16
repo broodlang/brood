@@ -927,6 +927,18 @@ impl Process {
         self.heap.park_trim_due()
     }
 
+    /// Is this process's next collection near enough to run it as it parks? See
+    /// [`Heap::park_collect_due`].
+    fn park_collect_due(&self) -> bool {
+        self.heap.park_collect_due()
+    }
+
+    /// Run that collection now, while the process has nothing to do. See
+    /// [`Heap::collect_on_park`].
+    fn collect_on_park(&mut self) {
+        self.heap.collect_on_park();
+    }
+
     /// Stash a captured continuation back into the process before it parks or re-queues
     /// (so the next `run_one` resumes from it).
     fn store_resume(&mut self, s: crate::eval::compile::Continuation) {

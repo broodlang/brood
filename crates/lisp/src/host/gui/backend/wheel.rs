@@ -14,8 +14,9 @@ pub(super) fn wheel_velocity(carried: f64, streak: u32, dy: f64) -> f64 {
 }
 
 /// Where a glide starting at `v0` lines per tick ends up, in lines, decaying at `decay`
-/// per tick until the `about_to_wait` cutoff — the geometric sum, stepped as the ticker
-/// steps it (the test's oracle for the calibration constants).
+/// per tick until the `about_to_wait` cutoff — the geometric sum, stepped in whole 12 ms
+/// ticks (the test's oracle for the calibration constants; [`coast_step`] covers the same
+/// distance at any step).
 #[cfg(test)]
 pub(super) fn glide_distance(mut v: f64, decay: f64) -> f64 {
     let mut total = 0.0;
@@ -24,6 +25,20 @@ pub(super) fn glide_distance(mut v: f64, decay: f64) -> f64 {
         v *= decay;
     }
     total
+}
+
+/// The nominal tick the coast's velocity and decay are calibrated in.
+pub(super) const COAST_TICK_MS: f64 = 12.0;
+
+/// One step of a coast, `elapsed_ms` long, from `velocity` (lines per nominal tick) decaying
+/// at `decay` per tick: `(lines moved, velocity left)`. The step moves what the ticks it
+/// spans would have — `v·(1 − dʳ)/(1 − d)` for `r` ticks — and leaves `v·dʳ`, so a whole
+/// coast covers `v₀/(1 − d)` lines in the same time whether it is stepped once a 60 Hz
+/// refresh, once a 144 Hz one, or late (ADR-726).
+pub(super) fn coast_step(velocity: f64, decay: f64, elapsed_ms: f64) -> (f64, f64) {
+    let ticks = (elapsed_ms / COAST_TICK_MS).clamp(0.0, 8.0);
+    let kept = decay.powf(ticks);
+    (velocity * (1.0 - kept) / (1.0 - decay), velocity * kept)
 }
 
 /// Kinetic scrolling (`about_to_wait`): the velocity decay per nominal 12 ms tick. A

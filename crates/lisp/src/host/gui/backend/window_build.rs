@@ -4,12 +4,10 @@
 
 use super::*;
 
-/// One open window's GUI-thread-side state.
 /// A window's render backend, chosen ONCE at `build_window`. The default `gui` build
-/// only has `Cpu` (softbuffer). The `gui-gpu` build also has `Gpu` and picks it when
-/// `BROOD_GUI_GPU` is set in the environment — so ONE installed binary defaults to the
-/// CPU softbuffer (safe for every app) and a single project opts into the GPU
-/// per-process via that env var, without a separate build.
+/// only has `Cpu` (softbuffer). The `gui-gpu` build also has `Gpu` and draws on it unless
+/// `BROOD_GUI_GPU=0` asks for the CPU painter ([`gpu_enabled`]), falling back to the CPU
+/// painter when no GPU device can be made or the only adapter is a software one.
 pub(super) enum Backend {
     Cpu {
         // Keeps the softbuffer display connection alive for `surface`'s lifetime.
@@ -151,6 +149,7 @@ pub(super) fn build_window(
     renderer.set_text_contrast(defaults.text_contrast);
     renderer.set_ligatures(defaults.ligatures);
     let inner = window.inner_size();
+    let period = frame_period(&window);
     Ok(Win {
         window,
         backend,
@@ -194,6 +193,9 @@ pub(super) fn build_window(
         wheel_streak: 0,
         scroll_next_tick: Instant::now(),
         particles_next: None,
+        frame_period: period,
+        frame_period_at: Instant::now(),
+        published_size: None,
         scroll_last_tick: Instant::now(),
         scroll_pending: false,
         ime: spec.ime,

@@ -36,9 +36,13 @@ pub(super) struct FontShared {
     /// so a glyph either covers is left to it — what the renderer did before system
     /// fallback existed.
     bundled: Vec<fontdb::ID>,
-    /// Every installed face and its block index, scanned on first need (see the type's
-    /// doc, and `SystemFonts`).
+    /// Every installed face and its block index (`SystemFonts`): scanned on a thread of its
+    /// own once the first window has painted (`prescan`), so the first glyph that needs a
+    /// fallback finds it ready rather than freezing the paint for the scan — or scanned
+    /// then, the first time anything asks, when nothing started it.
     system: Option<SystemFonts>,
+    /// The background scan `prescan` started, until `system` takes its result.
+    scanning: Option<std::thread::JoinHandle<SystemFonts>>,
     /// The system faces loaded into the shaping database as fallbacks, `(family,
     /// file)`, in the order they were first needed — the first place the next missing
     /// glyph is looked for, so a screen of CJK scans the system once, not per char.
@@ -127,6 +131,7 @@ impl FontShared {
             resolutions,
             bundled,
             system: None,
+            scanning: None,
             fallbacks: Vec::new(),
             fallback_for: HashMap::new(),
             loaded_files: Default::default(),
@@ -249,14 +254,38 @@ impl FontShared {
             origin: resolution.origin,
             faces: resolution.faces,
             fallbacks: self.fallbacks.clone(),
-            system_scanned: self.system.is_some(),
+            system_scanned: self.system.is_some()
+                || self
+                    .scanning
+                    .as_ref()
+                    .is_some_and(|scan| scan.is_finished()),
             ligatures,
         }
     }
 
-    /// The installed fonts, scanned the first time anything asks — never at startup.
+    /// Start scanning the installed fonts on a thread of its own, if nothing has yet: what
+    /// the first painted window asks, so the scan is never on the paint's path and never
+    /// delays the first frame. A thread that cannot be started leaves the scan to the first
+    /// lookup, as before.
+    pub(super) fn prescan(&mut self) {
+        if self.system.is_none() && self.scanning.is_none() {
+            self.scanning = std::thread::Builder::new()
+                .name("brood-font-scan".into())
+                .spawn(SystemFonts::scan)
+                .ok();
+        }
+    }
+
+    /// The installed fonts: the background scan's result (waiting out the rest of it if a
+    /// lookup comes first), or a scan now when none was started or the thread died.
     fn system(&mut self) -> &SystemFonts {
-        self.system.get_or_insert_with(SystemFonts::scan)
+        if self.system.is_none() {
+            let scanned = self.scanning.take().and_then(|handle| handle.join().ok());
+            self.system = Some(scanned.unwrap_or_else(SystemFonts::scan));
+        }
+        self.system
+            .as_ref()
+            .expect("the installed fonts were scanned just above")
     }
 
     /// Load every installed face of `family` into the shaping database, so each weight and

@@ -263,6 +263,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "LOCAL collection threshold floor — sweep it to test whether a row is GC-frequency-bound",
     ),
     f(
+        "BROOD_GC_PARK_EARLY",
+        GC,
+        "fraction of its trigger past which a parking process collects young (default 0.75; 1.0 off) — ADR-727",
+    ),
+    f(
         "BROOD_RT_GC_FLOOR",
         GC,
         "RUNTIME code-region reclamation threshold; a huge value effectively disables compaction",

@@ -1289,3 +1289,29 @@ fn a_memo_store_is_relocated_by_every_collection_and_forgotten_by_a_reset() {
     h.reset_local_to(checkpoint);
     assert!(h.memo_store(slot, None).is_none());
 }
+
+/// A parking process collects when its next collection is near (ADR-727): not on a fresh heap,
+/// yes once the young generation passes three quarters of its trigger, and not again right
+/// after that collection — survivors are at most half the trigger, so a park cannot loop.
+#[test]
+fn park_collect_fires_near_the_trigger_and_not_twice() {
+    let mut h = Heap::new();
+    h.gc_enabled = true;
+    h.gc_threshold = 1000;
+    h.nursery_budget_left = u32::MAX;
+    assert!(
+        !h.park_collect_due(),
+        "a fresh heap is not near its trigger"
+    );
+    while (h.local_live_count() as f64) < 1000.0 * park_collect_fraction() {
+        let _ = h.alloc_pair(Value::int(1), Value::int(2));
+    }
+    assert!(h.park_collect_due(), "past three quarters of the trigger");
+    let runs_before = h.gc_runs;
+    h.collect_on_park();
+    assert_eq!(h.gc_runs, runs_before + 1, "the collection ran");
+    assert!(
+        !h.park_collect_due(),
+        "nothing kept alive: not near again at once"
+    );
+}

@@ -151,7 +151,8 @@ pub struct FontInfo {
     /// The system fonts loaded so far to draw glyphs the primary font lacks, as
     /// `(family, file)`, in the order they were first needed.
     pub fallbacks: Vec<(String, String)>,
-    /// Whether the system font database has been scanned yet (it is only on demand).
+    /// Whether the system font database has been scanned yet (in the background once the
+    /// first window has painted, or on demand if a lookup comes sooner).
     pub system_scanned: bool,
     /// Whether runs of punctuation are shaped together (`gui-ligatures!`).
     pub ligatures: bool,
@@ -990,6 +991,64 @@ pub enum Op {
     AboveSeam {
         ops: Vec<Op>,
     },
+}
+
+/// `value + delta` as a grid coordinate, or `None` when that lands before the grid's first
+/// row or column, or past the last one a `u16` can name.
+fn shifted(value: u16, delta: i32) -> Option<u16> {
+    u16::try_from(i32::from(value) + delta).ok()
+}
+
+impl Op {
+    /// This op moved `drow` rows down and `dcol` columns right — what a
+    /// `[:translate drow dcol ops]` block does to each of its ops (ADR-728). The ops placed in
+    /// cells move: text, cursor, rect, image, frect, cursor zone, vspans, cells, a cell
+    /// region's rectangle (its inner ops are in its own grid and stay), and everything a
+    /// fragment, a scroll region or an above-seam block holds. `None` for one pushed off the
+    /// grid's top or left edge: a cell op cannot start before row or column 0. The ops in
+    /// pixels (sprite, quad, text-px, light, emitter) and the frame-wide ones (clear, seam,
+    /// sounds, effects) come back unmoved: a row offset says nothing about them.
+    pub fn translated(&self, drow: i32, dcol: i32) -> Option<Op> {
+        let mut op = self.clone();
+        match &mut op {
+            Op::Text { row, col, .. }
+            | Op::Cursor { row, col, .. }
+            | Op::Rect { row, col, .. }
+            | Op::Image { row, col, .. } => {
+                *row = shifted(*row, drow)?;
+                *col = shifted(*col, dcol)?;
+            }
+            Op::VSpans { row0, col0, .. }
+            | Op::Cells { row0, col0, .. }
+            | Op::CellsRgb { row0, col0, .. } => {
+                *row0 = shifted(*row0, drow)?;
+                *col0 = shifted(*col0, dcol)?;
+            }
+            Op::CursorZone { x, y, .. } | Op::CellRegion { x, y, .. } => {
+                *y = shifted(*y, drow)?;
+                *x = shifted(*x, dcol)?;
+            }
+            Op::FRect { x, y, .. } => {
+                *y += drow as f32;
+                *x += dcol as f32;
+            }
+            Op::Fragment(FragmentOps(ops)) => {
+                *ops = translated_ops(ops, drow, dcol).into();
+            }
+            Op::ScrollRegion { ops, .. } | Op::AboveSeam { ops } => {
+                *ops = translated_ops(ops, drow, dcol);
+            }
+            _ => {}
+        }
+        Some(op)
+    }
+}
+
+/// `ops`, each [`Op::translated`] by `drow` rows and `dcol` columns, less any pushed off the grid.
+pub fn translated_ops(ops: &[Op], drow: i32, dcol: i32) -> Vec<Op> {
+    ops.iter()
+        .filter_map(|op| op.translated(drow, dcol))
+        .collect()
 }
 
 /// How an emitter emits: what an `[:emitter id x y opts]` op's map says, with defaults

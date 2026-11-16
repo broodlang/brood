@@ -65,8 +65,13 @@ theme change is visible to a running UI on its next frame (late binding).")
 
 ;; ---- the registry -----------------------------------------------------------
 
-(defdyn editor/face/*faces* {})
-; the theme: face-name (keyword) -> attribute map
+;; The theme: face-name (keyword) -> attribute map. `defonce`, as every registry other modules
+;; write into: this module can be evaluated AFTER those writes landed — an imaged project's
+;; root section restores the faces its modules registered (`:org/level-1`), and a std loaded
+;; from source then loads this file on first use — and a `def` there reset the table to `{}`,
+;; the faces gone with no error (the `editor/layers` fix of the same shape, ADR-218). Nothing
+;; rebinds it, so it need not be dynamic.
+(defonce editor/face/*faces* {})
 
 ;; Both writers are ONE map operation through `%registry-update!`, never a whole-map
 ;; `%swap-registry!`. The difference is not style: a swap writes the whole map LIVE, and

@@ -221,6 +221,11 @@
     (let (result (os/cmd prog args))
       (when (os/cmd-ok? result) (os/cmd-out result)))))
 
+(defn- kdeglobals-path ()
+  ;; where KDE keeps its settings: $XDG_CONFIG_HOME/kdeglobals, else ~/.config/kdeglobals
+  (path/join (or (os/env "XDG_CONFIG_HOME") (path/join (or (os/env "HOME") "") ".config"))
+    "kdeglobals"))
+
 (defn reduce-motion? ()
   "Whether the desktop asks apps for less animation: GNOME's \"Animations\" switch off, KDE's animation speed at instant, macOS's Reduce Motion, or Windows' \"Animation effects\" off (`gui/reduce-motion-from` reads each). Best-effort and synchronous — it runs the platform's settings tool, a few milliseconds — so read it once (at startup) rather than per frame; a source that is missing or fails counts as not asking, and so does any error. Needs no window and no GUI build (ADR-612).
 
@@ -228,9 +233,7 @@
   (check-allow :discarded-catch
     (try
       (let (os (os/type)
-            kdeglobals (path/join (or (os/env "XDG_CONFIG_HOME")
-                                    (path/join (or (os/env "HOME") "") ".config"))
-                         "kdeglobals"))
+            kdeglobals (kdeglobals-path))
         (reduce-motion-from os
           (case os
             :macos
@@ -292,9 +295,7 @@ that is missing or fails says nothing, and so does any error. Needs no window an
   (check-allow :discarded-catch
     (try
       (let (os (os/type)
-            kdeglobals (path/join (or (os/env "XDG_CONFIG_HOME")
-                                    (path/join (or (os/env "HOME") "") ".config"))
-                         "kdeglobals"))
+            kdeglobals (kdeglobals-path))
         (color-scheme-from os
           (case os
             :macos {:macos (desktop-answer "defaults" ["read" "-g" "AppleInterfaceStyle"])}
@@ -309,6 +310,190 @@ that is missing or fails says nothing, and so does any error. Needs no window an
                           ["get" "org.gnome.desktop.interface" "gtk-theme"])
              :kde (when (file/exists? kdeglobals) (file/slurp kdeglobals))})))
       (catch _ nil))))
+
+;; ---- the desktop's text rendering and caret blink -----------------------------------
+;; What a native app on the desktop reads to look and blink like the others: how text is
+;; anti-aliased and hinted, the monospace font, the caret's blink. GNOME keeps all of it in
+;; one schema, read in ONE `gsettings list-recursively` (a few milliseconds) rather than a
+;; tool run per key; KDE in kdeglobals. The readers are pure over what each source said.
+
+(defn- gnome-keys (listing)
+  ;; `{key value}` from a `gsettings list-recursively SCHEMA` listing (`schema key value` lines),
+  ;; each value as `gsettings get` prints it
+  (fold (string/split (or listing "") "\n")
+    {}
+    (fn (keys line)
+      (let (parts (string/split (string/trim line) " "))
+        (if (< (count parts) 3)
+          keys
+          (assoc keys (nth parts 1) (string/join (drop parts 2) " ")))))))
+
+(defn- unquote-setting (value)
+  ;; a gsettings string without its quotes: `'Ubuntu Sans Mono 11'` -> `Ubuntu Sans Mono 11`
+  (let (text (string/trim (or value "")))
+    (if (and (>= (count text) 2) (string/starts-with? text "'") (string/ends-with? text "'"))
+      (string/substring text 1 (dec (count text)))
+      text)))
+
+(defn- font-spec (name)
+  ;; `[family points]` of a desktop font name — `Ubuntu Sans Mono 11` (GNOME's, size last) or
+  ;; `Hack,10,-1,5,50,…` (KDE's, size second) — nil for an empty one
+  (let (text (string/trim (or name "")))
+    (cond
+      (= text "") nil
+      (includes? text ",")
+        (let (parts (string/split text ",") points (string/->number (or (nth parts 1 nil) "")))
+          [(string/trim (first parts)) (if (number? points) points nil)])
+      else
+        (let (words (string/split text " ")
+              points (string/->number (last words)))
+          (if (and (number? points) (> (count words) 1))
+            [(string/join (seq/drop-last words 1) " ") points]
+            [text nil])))))
+
+(defn- kde-keys (kdeglobals)
+  ;; `{key value}` of kdeglobals' text, read once: the first line that sets a key wins (the
+  ;; font and caret keys this reads are each in one group)
+  (fold (string/split (or kdeglobals "") "\n")
+    {}
+    (fn (keys line)
+      (let (text (string/trim line)
+            at (index-of text "="))
+        (if (or (<= at 0)
+              (string/starts-with? text "[")
+              (contains? keys (string/substring text 0 at)))
+          keys
+          (assoc keys
+            (string/trim (string/substring text 0 at))
+              (string/trim (string/substring text (inc at) (count text)))))))))
+
+(defn- kde-first? (answers)
+  ;; whether the KDE source speaks first: the session is Plasma (`:desktop`, its
+  ;; XDG_CURRENT_DESKTOP), which installs GNOME's schema too, untouched
+  (includes? (string/upper (or (get answers :desktop) "")) "KDE"))
+
+(defn- gnome-text (gnome)
+  ;; text rendering from GNOME's interface keys (`gnome-keys`). `font-rendering` 'automatic'
+  ;; is what GTK 4 draws whatever the older keys say: grayscale, slight; 'manual', or no such
+  ;; key (GNOME 46 and older), follows `font-antialiasing`, `font-hinting`, `font-rgba-order`
+  (let (said (fn (key) (unquote-setting (get gnome key)))
+        manual (not (= (said "font-rendering") "automatic"))
+        [family points] (or (font-spec (said "monospace-font-name")) [nil nil])
+        scale (string/->number (said "text-scaling-factor")))
+    {:antialias (if manual
+                  (case (said "font-antialiasing") "rgba" :subpixel "none" :none :gray)
+                  :gray)
+     :rgba (if (string/ends-with? (said "font-rgba-order") "bgr") :bgr :rgb)
+     :hinting (if manual
+                (case (said "font-hinting") "none" :none "medium" :medium "full" :full :slight)
+                :slight)
+     :monospace family
+     :monospace-points points
+     :scale (if (number? scale) scale 1.0)}))
+
+(defn- kde-text (kde)
+  ;; text rendering from kdeglobals' keys (`kde-keys`), nil when it sets none of them
+  (when (any? ["XftAntialias" "XftHintStyle" "XftSubPixel" "fixed"] (fn (key) (contains? kde key)))
+    (let (subpixel (get kde "XftSubPixel" "none")
+          [family points] (or (font-spec (get kde "fixed")) [nil nil]))
+      {:antialias (cond
+                    (= (get kde "XftAntialias") "false") :none
+                    (includes? ["rgb" "bgr"] subpixel) :subpixel
+                    else :gray)
+       :rgba (if (= subpixel "bgr") :bgr :rgb)
+       :hinting (case (get kde "XftHintStyle")
+                  "hintnone" :none
+                  "hintmedium" :medium
+                  "hintfull" :full
+                  :slight)
+       :monospace family
+       :monospace-points points
+       :scale 1.0})))
+
+(defn text-rendering-from (os answers)
+  "How `answers` say text is drawn on `os` (an `os/type` keyword), or nil when no source says: a
+map of `:antialias` (`:gray`, `:subpixel` or `:none`), `:rgba` (`:rgb` or `:bgr`, the subpixel
+order), `:hinting` (`:none`, `:slight`, `:medium` or `:full`), `:monospace` (the monospace font's
+family name), `:monospace-points` and `:scale` (the text scaling factor). `:gnome` is a `gsettings
+list-recursively org.gnome.desktop.interface` listing — its `font-rendering` `'automatic'` is what
+GTK 4 then draws, grayscale and slightly hinted whatever the older keys say; `'manual'`, or no
+such key (GNOME 46 and older), follows `font-antialiasing`, `font-hinting` and `font-rgba-order` —
+`:kde` the text of kdeglobals (`XftAntialias`, `XftHintStyle`, `XftSubPixel`, `fixed`), and
+`:desktop` the session's `XDG_CURRENT_DESKTOP`: on KDE kdeglobals is read first, since Plasma
+installs GNOME's schema too and leaves it at its defaults.
+
+    (:antialias (gui/text-rendering-from :linux {:gnome \"org.gnome.desktop.interface font-rendering 'automatic'\\norg.gnome.desktop.interface font-antialiasing 'rgba'\"}))   ;=> :gray
+    (:antialias (gui/text-rendering-from :linux {:gnome \"org.gnome.desktop.interface font-antialiasing 'rgba'\"}))   ;=> :subpixel
+    (:monospace (gui/text-rendering-from :linux {:gnome \"org.gnome.desktop.interface monospace-font-name 'Ubuntu Sans Mono 11'\"}))   ;=> \"Ubuntu Sans Mono\"
+    (:hinting (gui/text-rendering-from :linux {:kde \"[General]\\nXftHintStyle=hintfull\\nfixed=Hack,10,-1,5,50,0,0,0,0,0\\n\"}))   ;=> :full
+    (:antialias (gui/text-rendering-from :linux {:desktop \"KDE\" :gnome \"org.gnome.desktop.interface font-rendering 'automatic'\" :kde \"[General]\\nXftSubPixel=rgb\\n\"}))   ;=> :subpixel
+    (gui/text-rendering-from :macos {})   ;=> nil"
+  (let (gnome (gnome-keys (get answers :gnome))
+        kde (kde-keys (get answers :kde))
+        from-gnome (when (not (empty? gnome)) (gnome-text gnome))
+        from-kde (kde-text kde))
+    (cond
+      (not (= os :linux)) nil
+      (kde-first? answers) (or from-kde from-gnome)
+      else (or from-gnome from-kde))))
+
+(defn cursor-blink-from (os answers)
+  "How `answers` say a text caret blinks on `os`, or nil when no source says: `{:blink? :interval-ms
+:timeout-ms}` — whether it blinks, how long each on or off phase lasts, and how long after the last
+key it stops (nil: never). `:gnome` is a `gsettings list-recursively org.gnome.desktop.interface`
+listing (`cursor-blink`, `cursor-blink-time` and `cursor-blink-timeout` in seconds), `:kde` the
+text of kdeglobals (`CursorBlinkRate`, 0 for none) and `:desktop` the session's
+`XDG_CURRENT_DESKTOP`, as for [[text-rendering-from]]. Both desktops give a whole on-off cycle, so
+a phase is half of it.
+
+    (gui/cursor-blink-from :linux {:gnome \"org.gnome.desktop.interface cursor-blink true\\norg.gnome.desktop.interface cursor-blink-time 1200\\norg.gnome.desktop.interface cursor-blink-timeout 10\"})   ;=> {:blink? true :interval-ms 600 :timeout-ms 10000}
+    (:interval-ms (gui/cursor-blink-from :linux {:kde \"[KDE]\\nCursorBlinkRate=1000\\n\"}))   ;=> 500
+    (:blink? (gui/cursor-blink-from :linux {:kde \"[KDE]\\nCursorBlinkRate=0\\n\"}))   ;=> false
+    (gui/cursor-blink-from :linux {})   ;=> nil"
+  (let (gnome (gnome-keys (get answers :gnome))
+        rate (string/->number (get (kde-keys (get answers :kde)) "CursorBlinkRate" ""))
+        phase (fn (cycle) (if (and (int? cycle) (> cycle 0)) (math/max 50 (math/quot cycle 2)) 600))
+        from-gnome (when (contains? gnome "cursor-blink")
+                     (let (timeout (string/->number (get gnome "cursor-blink-timeout" "")))
+                       {:blink? (= (get gnome "cursor-blink") "true")
+                        :interval-ms (phase (string/->number (get gnome "cursor-blink-time" "")))
+                        :timeout-ms (if (and (int? timeout) (> timeout 0) (< timeout 2147483))
+                                      (* timeout 1000)
+                                      nil)}))
+        from-kde (when (int? rate) {:blink? (> rate 0) :interval-ms (phase rate) :timeout-ms nil}))
+    (cond
+      (not (= os :linux)) nil
+      (kde-first? answers) (or from-kde from-gnome)
+      else (or from-gnome from-kde))))
+
+(defn desktop-preferences ()
+  "Everything the desktop says about how an app should look and move, read at once:
+`{:color-scheme :reduce-motion? :text-rendering :cursor-blink}` — [[color-scheme-from]],
+[[reduce-motion-from]], [[text-rendering-from]] and [[cursor-blink-from]] over one read of each
+source (on GNOME one `gsettings` run for the whole schema). Best-effort and synchronous, a few
+milliseconds, so an app following a change asks it off its UI loop; a source that is missing or
+fails says nothing, and so does any error (an empty map). Needs no window and no GUI build.
+
+    (map? (gui/desktop-preferences))   ;=> true"
+  (check-allow :discarded-catch
+    (try
+      (if (not (= (os/type) :linux))
+        {:color-scheme (color-scheme) :reduce-motion? (reduce-motion?)}
+        (let (kdeglobals (kdeglobals-path)
+              kde (when (file/exists? kdeglobals) (file/slurp kdeglobals))
+              listing (desktop-answer "gsettings"
+                        ["list-recursively" "org.gnome.desktop.interface"])
+              keys (gnome-keys listing)
+              answers {:gnome listing :kde kde :desktop (os/env "XDG_CURRENT_DESKTOP")})
+          {:color-scheme (color-scheme-from :linux
+                           {:gnome (get keys "color-scheme")
+                            :gtk-theme (get keys "gtk-theme")
+                            :kde kde})
+           :reduce-motion? (reduce-motion-from :linux
+                             {:gnome (get keys "enable-animations") :kde kde})
+           :text-rendering (text-rendering-from :linux answers)
+           :cursor-blink (cursor-blink-from :linux answers)}))
+      (catch _ {}))))
 
 (defn settle (id)
   "Tell window id the app finished a turn with nothing new to draw; returns nil. What a `gui/draw` would have told the window about the app's progress, without a frame: the next wheel-glide step may fire, and the input the turn answered is dropped from `gui/latency` instead of being pinned on the next unrelated frame. `ui-run` sends it on every turn it skips (ADR-444), through the display's `:settle`. No-op headless.
@@ -332,13 +517,13 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
     (%gui-font! id-or-spec spec)))
 
 (defn font-register (name styles)
-  "Register font family name (a keyword) from styles: either an INSTALLED family by its name, {:family-name \"JetBrains Mono\"} — looked up (case-insensitively) in the system fonts, which are scanned the first time one is asked for and never at startup, with the bold / italic / bold-italic faces picked by weight and slant, and the bundled DejaVu Sans Mono standing in when nothing by that name is installed (gui/font-info says which file each style got, or :not-found) — or a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}, where only :regular is required and a missing style reuses the regular file. :family-name wins when both are given. Afterwards a face's :family <name> (or gui/font) selects it; re-registering a family a window already uses re-measures its cell. Needs --features gui. Returns name.
+  "Register font family name (a keyword) from styles: either an INSTALLED family by its name, {:family-name \"JetBrains Mono\"} — looked up (case-insensitively) in the system fonts (scanned on a background thread once the first window has painted, or when first asked for if that comes sooner), with the bold / italic / bold-italic faces picked by weight and slant, and the bundled DejaVu Sans Mono standing in when nothing by that name is installed (gui/font-info says which file each style got, or :not-found) — or a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}, where only :regular is required and a missing style reuses the regular file. :family-name wins when both are given. Afterwards a face's :family <name> (or gui/font) selects it; re-registering a family a window already uses re-measures its cell. Needs --features gui. Returns name.
 
     (gui/font-register :code {:family-name \"JetBrains Mono\"})   ;~> :code"
   (%gui-font-register name styles))
 
 (defn font-info (&optional family)
-  "Where font family `family` (a keyword; the window default when omitted) got its faces, as a map: :name (the family shaping uses), :requested (the installed name a :family-name registration asked for, or nil), :origin (:bundled, :files, :system, or :not-found — asked for by name, not installed, the bundled DejaVu standing in), :regular / :bold / :italic / :bold-italic (the file each style resolved to), :fallbacks (a vector of {:name :file} — the installed fonts loaded so far to draw glyphs the primary font lacks, CJK or symbols, in the order first needed), :system-scanned (whether the installed fonts have been scanned yet: only on demand) and :ligatures. The diagnostic for \"I asked for Iosevka, why does it look like DejaVu\". Answered on the GUI thread after every registration sent before it. Errors headless (ask `gui/headless?` first, ADR-557) and without --features gui.
+  "Where font family `family` (a keyword; the window default when omitted) got its faces, as a map: :name (the family shaping uses), :requested (the installed name a :family-name registration asked for, or nil), :origin (:bundled, :files, :system, or :not-found — asked for by name, not installed, the bundled DejaVu standing in), :regular / :bold / :italic / :bold-italic (the file each style resolved to), :fallbacks (a vector of {:name :file} — the installed fonts loaded so far to draw glyphs the primary font lacks, CJK or symbols, in the order first needed), :system-scanned (whether the installed fonts have been scanned yet: in the background after the first window paints, or on demand) and :ligatures. The diagnostic for \"I asked for Iosevka, why does it look like DejaVu\". Answered on the GUI thread after every registration sent before it. Errors headless (ask `gui/headless?` first, ADR-557) and without --features gui.
 
     (gui/font-info :code)   ;~> {:name \"JetBrains Mono\" :origin :system :regular \"/usr/share/fonts/…\" :fallbacks [] …}
     (fn? gui/font-info)   ;=> true"
