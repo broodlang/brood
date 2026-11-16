@@ -79,3 +79,16 @@
       (spawn (send me [:got (face :t/live)]))
       (assert= (receive ([:got f] f) (after test/*wait-ms* :timeout))
         {:fg :red :bold true}))))
+
+(describe "the face table survives this module loading again"
+  :isolated (test "REGRESSION: a face another module registered outlives a re-run of editor/face"
+    ;; What an imaged project with std loaded from source hits: the image's root section
+    ;; restores every face its modules registered, then the first use of `editor/face` loads
+    ;; this std file from its embedded source. Its `(defdyn *faces* {})` reset the table, and
+    ;; bedit's Org headings and semantic-token variables lost their faces with no error.
+    (def-face :t/registered-elsewhere {:fg :magenta})
+    (%load-module-source (or (%builtin-module "editor/face") (error "face-test: no module source"))
+      (%builtin-module-file "editor/face"))
+    (assert= (face :t/registered-elsewhere) {:fg :magenta})
+    ;; and the module's own faces are still there, registered again by the re-run
+    (assert= (face :ui/default) {})))

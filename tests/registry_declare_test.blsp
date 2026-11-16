@@ -1,0 +1,60 @@
+;; Every registry a std MODULE declares is declared `defonce`.
+;;
+;; A registry is a global other modules write into through `%registry-update!`,
+;; `%registry-cas!` or `%swap-registry!` (a face, a buffer type, a layer). A std module can be
+;; evaluated AFTER such writes landed: an imaged project's root section restores every
+;; registry's value, and with std loaded from source the module that declares it loads later,
+;; on first use — as does any re-run of its embedded source. A `def` or `defdyn` declaration
+;; resets the registry to its empty default then, and what the other modules registered is
+;; gone with no error: `editor/layers` lost its buffer types that way (ADR-218), and
+;; `editor/face` bedit's Org and semantic-token faces (2026-11-16). `defonce` keeps the value.
+;;
+;; The prelude is left out: it is evaluated once, at boot, before anything can write into it.
+
+(defmodule registry-declare-test (:use test))
+
+(def- *registry-op*
+  ;; a registry write naming its global as a quoted symbol, the global captured
+  "%(?:registry-update!|registry-cas!|swap-registry!) '([^\\s)]+)")
+
+(def- *declaration*
+  ;; a top-level declaration: its head and the name it binds
+  "\\((def|defdyn|defonce|def-)\\s+([^\\s)]+)")
+
+(defn- bare-name (name)
+  ;; a global's name without its module: `editor/face/*faces*` -> `*faces*`
+  (last (string/split name "/")))
+
+(defn- module-sources ()
+  ;; every std file that is a module, read: `[path text]`
+  (seq/keep (sort (file/walk-files "std"))
+    (fn (path)
+      (when (and (string/ends-with? path ".blsp") (not (string/starts-with? path "std/prelude/")))
+        ;; comment lines dropped: a comment may quote the very declaration it warns against
+        (let (text (string/join (seq/reject (string/split (file/slurp path) "\n")
+                                   (fn (line) (string/starts-with? (string/trim line) ";")))
+                     "\n"))
+          (when (includes? text "(defmodule") [path text]))))))
+
+(defn- reset-registries (path text)
+  ;; `path: name is declared with head` for each registry `text` writes that it declares
+  ;; with a head other than `defonce`
+  (let (written (into #{}
+                  (map (regex/find-all text *registry-op*)
+                    (fn (found) (bare-name (:text (first (:groups found))))))))
+    (seq/keep (regex/find-all text *declaration*)
+      (fn (found)
+        (let ([head name] (into [] (map (:groups found) :text)))
+          (when (and (contains? written (bare-name name)) (not (= head "defonce")))
+            (str path ": " name " is declared with " head)))))))
+
+(describe "registries in std modules"
+  (test "the sweep finds the registries it is meant to check"
+    ;; a guard on the guard: a regex that matched nothing would pass every module
+    (is (any? (module-sources)
+          (fn ([path text])
+            (and (= path "std/editor/layers.blsp")
+              (not (empty? (regex/find-all text *registry-op*))))))))
+  (test "every registry a module declares is declared defonce"
+    (assert= (into [] (mapcat (module-sources) (fn ([path text]) (reset-registries path text))))
+      [])))

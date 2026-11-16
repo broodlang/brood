@@ -1803,3 +1803,10 @@ reduced motion, the text rendering (`automatic` read as GTK 4 draws it: grayscal
 sRGB) and the caret blink. `proc/priority-pending?`, a display's `:input-pending?` and
 `editor/ui/ui-input-pending?` let work inside a turn stop for a key. Not run on the desktop:
 every test of this lands on CI.
+
+2026-11-16 (KI-396). **`editor/face`'s registry survives its own load.** bedit's Org headings
+lost their faces 5 runs in 6 under `BROOD_NO_STDIMAGE=1`: the project image restores every
+registry, the faces bedit registered among them, and with std from source `editor/face` loaded
+after that, its `(defdyn *faces* {})` resetting the table. `defonce` now, as `editor/layers`
+was (ADR-218), and `tests/registry_declare_test.blsp` checks every std module declares the
+registries it writes through a registry op that way.

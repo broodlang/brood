@@ -259,7 +259,7 @@ and an unbounded silent spin is far harder to place than an error."
 ;;
 ;; The std/ callers are not namespaced: the prelude's own registries and `*protocols*` (std/protocol.blsp is CORE — loaded in the prelude with
 ;; no `defmodule`, so its globals are root) are bare and root, `editor/face`'s
-;; `editor/face/*faces*` is a `defdyn` written out qualified, and the rest are qualified too. So this resolution must not disturb any of them — which is why it
+;; `editor/face/*faces*` is a `defonce` written out qualified, and the rest are qualified too. So this resolution must not disturb any of them — which is why it
 ;; checks rather than assumes: an already-qualified name passes through untouched, and
 ;; between the qualified and bare forms it picks whichever is actually BOUND. Root registries
 ;; keep resolving to root; a module's own registry resolves to the module.
