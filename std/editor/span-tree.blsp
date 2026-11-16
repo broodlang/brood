@@ -63,36 +63,42 @@ are [[same?]]; `=` compares their shapes.
     (with-children pivot (left-of pivot) (with-children tree (right-of pivot) (right-of tree)))))
 
 ;; ---- join and split ----------------------------------------------------------
+;; Every recursion here descends one spine or one path of the tree, so it is as deep as the
+;; tree is tall — logarithmic in its count (24 levels hold ten thousand spans after a thousand
+;; edits, tests/span_tree_test.blsp) — which is why the checker's non-tail-recursion note is
+;; allowed on them.
 ;; `join` puts an item between two trees, every item of `left` before it and every item of
 ;; `right` after it, and rebalances along one spine: O(|height left - height right|). The
 ;; item's gap is relative to the end of `left`'s last item, and `right`'s first gap to the end
 ;; of the item — the order of the text, kept by never reordering.
 
-(defn- join-right (left item right)
-  ;; `left` taller by two or more: descend its right spine
-  (let ([gap length value] item
-        inner (right-of left))
-    (if (<= (height inner) (inc (height right)))
-      (let (joined (node inner gap length value right))
-        (if (<= (height joined) (inc (height (left-of left))))
-          (with-children left (left-of left) joined)
-          (rotate-left (with-children left (left-of left) (rotate-right joined)))))
-      (let (joined (join-right inner item right)
-            rebuilt (with-children left (left-of left) joined))
-        (if (<= (height joined) (inc (height (left-of left)))) rebuilt (rotate-left rebuilt))))))
+(check-allow :non-tail-recursion
+  (defn- join-right (left item right)
+    ;; `left` taller by two or more: descend its right spine
+    (let ([gap length value] item
+          inner (right-of left))
+      (if (<= (height inner) (inc (height right)))
+        (let (joined (node inner gap length value right))
+          (if (<= (height joined) (inc (height (left-of left))))
+            (with-children left (left-of left) joined)
+            (rotate-left (with-children left (left-of left) (rotate-right joined)))))
+        (let (joined (join-right inner item right)
+              rebuilt (with-children left (left-of left) joined))
+          (if (<= (height joined) (inc (height (left-of left)))) rebuilt (rotate-left rebuilt)))))))
 
-(defn- join-left (left item right)
-  ;; `right` taller by two or more: descend its left spine
-  (let ([gap length value] item
-        inner (left-of right))
-    (if (<= (height inner) (inc (height left)))
-      (let (joined (node left gap length value inner))
-        (if (<= (height joined) (inc (height (right-of right))))
-          (with-children right joined (right-of right))
-          (rotate-right (with-children right (rotate-left joined) (right-of right)))))
-      (let (joined (join-left left item inner)
-            rebuilt (with-children right joined (right-of right)))
-        (if (<= (height joined) (inc (height (right-of right)))) rebuilt (rotate-right rebuilt))))))
+(check-allow :non-tail-recursion
+  (defn- join-left (left item right)
+    ;; `right` taller by two or more: descend its left spine
+    (let ([gap length value] item
+          inner (left-of right))
+      (if (<= (height inner) (inc (height left)))
+        (let (joined (node left gap length value inner))
+          (if (<= (height joined) (inc (height (right-of right))))
+            (with-children right joined (right-of right))
+            (rotate-right (with-children right (rotate-left joined) (right-of right)))))
+        (let (joined (join-left left item inner)
+              rebuilt (with-children right joined (right-of right)))
+          (if (<= (height joined) (inc (height (right-of right)))) rebuilt (rotate-right rebuilt)))))))
 
 (defn- join (left item right)
   (cond
@@ -100,12 +106,13 @@ are [[same?]]; `=` compares their shapes.
     (> (height right) (inc (height left))) (join-left left item right)
     else (let ([gap length value] item) (node left gap length value right))))
 
-(defn- split-last (tree)
-  ;; `[rest item]`: `tree` without its last item, and that item
-  (if (nil? (right-of tree))
-    [(left-of tree) [(nth tree 2) (nth tree 3) (nth tree 4)]]
-    (let ([rest item] (split-last (right-of tree)))
-      [(join (left-of tree) [(nth tree 2) (nth tree 3) (nth tree 4)] rest) item])))
+(check-allow :non-tail-recursion
+  (defn- split-last (tree)
+    ;; `[rest item]`: `tree` without its last item, and that item
+    (if (nil? (right-of tree))
+      [(left-of tree) [(nth tree 2) (nth tree 3) (nth tree 4)]]
+      (let ([rest item] (split-last (right-of tree)))
+        [(join (left-of tree) [(nth tree 2) (nth tree 3) (nth tree 4)] rest) item]))))
 
 (defn- concat (left right)
   ;; every item of `left`, then every item of `right` (whose first gap is relative to the end
@@ -114,40 +121,43 @@ are [[same?]]; `=` compares their shapes.
     right
     (let ([rest item] (split-last left)) (join rest item right))))
 
-(defn- split (tree before?)
-  "`[left right]`: the items of `tree` for which `(before? start end)` holds — a predicate
+(check-allow :non-tail-recursion
+  (defn- split (tree before?)
+    "`[left right]`: the items of `tree` for which `(before? start end)` holds — a predicate
 true of a prefix of the items, given each item's start and end relative to `tree`'s origin —
 and the rest. `right`'s first gap stays relative to the end of `left`'s last item: `right`'s
 origin is `(extent left)`."
-  (if (nil? tree)
-    [nil nil]
-    (let (start (+ (extent (left-of tree)) (nth tree 2))
-          end (+ start (nth tree 3))
-          item [(nth tree 2) (nth tree 3) (nth tree 4)])
-      (if (before? start end)
-        (let ([inner-left inner-right] (split (right-of tree)
-                                         (fn (s e) (before? (+ s end) (+ e end)))))
-          [(join (left-of tree) item inner-left) inner-right])
-        (let ([inner-left inner-right] (split (left-of tree) before?))
-          [inner-left (join inner-right item (right-of tree))])))))
+    (if (nil? tree)
+      [nil nil]
+      (let (start (+ (extent (left-of tree)) (nth tree 2))
+            end (+ start (nth tree 3))
+            item [(nth tree 2) (nth tree 3) (nth tree 4)])
+        (if (before? start end)
+          (let ([inner-left inner-right] (split (right-of tree)
+                                           (fn (s e) (before? (+ s end) (+ e end)))))
+            [(join (left-of tree) item inner-left) inner-right])
+          (let ([inner-left inner-right] (split (left-of tree) before?))
+            [inner-left (join inner-right item (right-of tree))]))))))
 
-(defn- shift-first (tree delta)
-  ;; `tree` with its first item's gap moved by `delta`
-  (cond
-    (nil? tree) nil
-    (nil? (left-of tree))
-      (node nil (+ (nth tree 2) delta) (nth tree 3) (nth tree 4) (right-of tree))
-    else (with-children tree (shift-first (left-of tree) delta) (right-of tree))))
+(check-allow :non-tail-recursion
+  (defn- shift-first (tree delta)
+    ;; `tree` with its first item's gap moved by `delta`
+    (cond
+      (nil? tree) nil
+      (nil? (left-of tree))
+        (node nil (+ (nth tree 2) delta) (nth tree 3) (nth tree 4) (right-of tree))
+      else (with-children tree (shift-first (left-of tree) delta) (right-of tree)))))
 
 ;; ---- spans in and out --------------------------------------------------------
 
-(defn- build (items low high)
-  ;; a balanced tree of the relative `items` (a vector) in `[low, high)`
-  (if (>= low high)
-    nil
-    (let (middle (math/quot (+ low high) 2)
-          [gap length value] (nth items middle))
-      (node (build items low middle) gap length value (build items (inc middle) high)))))
+(check-allow :non-tail-recursion
+  (defn- build (items low high)
+    ;; a balanced tree of the relative `items` (a vector) in `[low, high)`
+    (if (>= low high)
+      nil
+      (let (middle (math/quot (+ low high) 2)
+            [gap length value] (nth items middle))
+        (node (build items low middle) gap length value (build items (inc middle) high))))))
 
 (defn- relative (spans origin)
   ;; the absolute ascending `spans` as relative items, the first measured from `origin`
@@ -169,16 +179,17 @@ built balanced in one pass.
     (editor/span-tree/span-count (editor/span-tree/from-spans [[0 2 :a] [3 5 :b]]))   ;=> 2"
   (built-from (if (vector? spans) spans (into [] spans)) 0))
 
-(defn- collect (tree origin low high acc)
-  ;; the items of `tree` (its origin at `origin`) overlapping `[low, high)`, absolute and
-  ;; consed onto `acc` last first — a subtree wholly outside the range is never entered
-  (if (or (nil? tree) (>= origin high) (<= (+ origin (extent tree)) low))
-    acc
-    (let (start (+ origin (extent (left-of tree)) (nth tree 2))
-          end (+ start (nth tree 3))
-          before (collect (left-of tree) origin low high acc)
-          here (if (and (< start high) (> end low)) (cons [start end (nth tree 4)] before) before))
-      (collect (right-of tree) end low high here))))
+(check-allow :non-tail-recursion
+  (defn- collect (tree origin low high acc)
+    ;; the items of `tree` (its origin at `origin`) overlapping `[low, high)`, absolute and
+    ;; consed onto `acc` last first — a subtree wholly outside the range is never entered
+    (if (or (nil? tree) (>= origin high) (<= (+ origin (extent tree)) low))
+      acc
+      (let (start (+ origin (extent (left-of tree)) (nth tree 2))
+            end (+ start (nth tree 3))
+            before (collect (left-of tree) origin low high acc)
+            here (if (and (< start high) (> end low)) (cons [start end (nth tree 4)] before) before))
+        (collect (right-of tree) end low high here)))))
 
 (defn ->spans (tree)
   "Every span of `tree`, absolute, as an ascending vector.
