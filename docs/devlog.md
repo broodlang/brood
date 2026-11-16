@@ -1790,3 +1790,16 @@ line of the same shape is still checked (it is evaluated), and so is a call that
 (`(prnt "hi")`) or a second form. Also: the missing-token error of `nest publish` named a setting
 that does not exist (`:package/registry-token`; it is `:registry-token`). Guards in
 `check/tests/lints.rs`, the data-file one red with the rule off.
+
+2026-11-16 (ADR-726). **A window that keeps the display's time and the desktop's look.** From a
+study of bedit beside Ptyxis on GNOME 50 (one 144 Hz panel, two 60 Hz): the coast and the
+particles step once a refresh of the window's monitor instead of every 12 / 16 ms (judder on
+60 Hz, a cap of 83 on 144); paints are paced by the compositor (`pre_present_notify`), at once
+when idle and once a refresh in a burst; `[:resize]` goes only for a new grid; a GPU frame
+skipped on a swapchain timeout is painted again; the installed fonts are scanned in the
+background after the first frame, not in the paint that first needs a fallback glyph.
+`gui/desktop-preferences` reads GNOME (one `gsettings` run) or KDE for the colour scheme,
+reduced motion, the text rendering (`automatic` read as GTK 4 draws it: grayscale, slight,
+sRGB) and the caret blink. `proc/priority-pending?`, a display's `:input-pending?` and
+`editor/ui/ui-input-pending?` let work inside a turn stop for a key. Not run on the desktop:
+every test of this lands on CI.
