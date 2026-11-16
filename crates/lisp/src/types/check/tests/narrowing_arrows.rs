@@ -391,22 +391,22 @@ fn an_index_a_step_below_the_count_reads_an_element() {
 #[test]
 fn an_offset_bound_by_let_or_written_another_way_reads_an_element() {
     // The count-minus-k bound is a fact about the index's BASE, so it holds however the
-    // offset is spelled and wherever it is bound: a `let` of `(dec n)` or `(- n 2)`, `(+ n -1)`,
+    // offset is spelled and wherever it is bound: a `let` of `(dec size)` or `(- n 2)`, `(+ size -1)`,
     // and an offset of an offset. (The guard comes first: an index bound before it keeps the
     // interval it was bound with — relating the two is not this.)
     for src in [
-        "(defn f (xs:(vector string)) (let (n (count xs)) (if (>= n 1) (let (last (dec n)) (string/upper (nth xs last))) \"\")))",
-        "(defn f (xs:(vector string)) (let (n (count xs)) (if (>= n 1) (string/upper (nth xs (+ n -1))) \"\")))",
-        "(defn f (xs:(vector string)) (let (n (count xs)) (if (>= n 3) (let (i (- n 2) j (inc i)) (string/upper (nth xs j))) \"\")))",
-        "(defn f (xs:(vector string)) (if (>= (count xs) 1) (let (last (dec (count xs))) (string/upper (nth xs last))) \"\"))",
+        "(defn read-one (xs:(vector string)) (let (size (count xs)) (if (>= size 1) (let (last (dec size)) (string/upper (nth xs last))) \"\")))",
+        "(defn read-one (xs:(vector string)) (let (size (count xs)) (if (>= size 1) (string/upper (nth xs (+ size -1))) \"\")))",
+        "(defn read-one (xs:(vector string)) (let (size (count xs)) (if (>= size 3) (let (before (- size 2) after (inc before)) (string/upper (nth xs after))) \"\")))",
+        "(defn read-one (xs:(vector string)) (if (>= (count xs) 1) (let (last (dec (count xs))) (string/upper (nth xs last))) \"\"))",
     ] {
         let ws = file_warnings_mode(src, true);
         assert!(!has(&ws, "string/upper"), "{src}: {ws:?}");
     }
     // An offset that reaches the count itself is not an index: `nil` stays possible.
     for src in [
-        "(defn f (xs:(vector string)) (let (n (count xs)) (if (>= n 3) (let (i (- n 1) j (inc i)) (string/upper (nth xs j))) \"\")))",
-        "(defn f (xs:(vector string)) (let (n (count xs)) (if (>= n 3) (string/upper (nth xs n)) \"\")))",
+        "(defn read-one (xs:(vector string)) (let (size (count xs)) (if (>= size 3) (let (before (- size 1) after (inc before)) (string/upper (nth xs after))) \"\")))",
+        "(defn read-one (xs:(vector string)) (let (size (count xs)) (if (>= size 3) (string/upper (nth xs size)) \"\")))",
     ] {
         let ws = file_warnings_mode(src, true);
         assert!(has(&ws, "string/upper"), "{src}: {ws:?}");
@@ -419,12 +419,12 @@ fn a_scope_dead_on_arrival_does_not_close_an_ors_paths() {
     // first round; the `or` used as a test then saw both of its paths dead and claimed
     // nothing, so `size` reached `inclusion` unnarrowed and `path`'s caller-derived `end`
     // widened — a strict report on `n` that mur-forge's log.blsp raised (2026-11-16).
-    let src = "(defn count-of (x) (if (int? x) (+ x 1) 0))\n\
-         (defn- lpb (n:int) (if (<= n 2) 1 (* 2 (lpb (math/quot n 2)))))\n\
+    let src = "(defn count-of (value) (if (int? value) (+ value 1) 0))\n\
+         (defn- lpb (width:int) (if (<= width 2) 1 (* 2 (lpb (math/quot width 2)))))\n\
          (check-allow :non-tail-recursion\n\
            (defn- path (index start end)\n\
-             (let (n (- end start))\n\
-               (if (= n 1) [] (let (k (lpb n)) (if (< index k) (conj (path index start (+ start k)) k) (conj (path (- index k) (+ start k) end) k)))))))\n\
+             (let (width (- end start))\n\
+               (if (= width 1) [] (let (half (lpb width)) (if (< index half) (conj (path index start (+ start half)) half) (conj (path (- index half) (+ start half) end) half)))))))\n\
          (defn inclusion (index size) (path index 0 size))\n\
          (defn- locked (action) (action 1))\n\
          (defn proof (index size)\n\

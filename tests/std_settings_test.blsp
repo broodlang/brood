@@ -157,7 +157,7 @@
     (declare-file :std-settings-test/filed 'config 'std-settings-test/std-settings-test-file)
     (let (found (file-diagnostics (std-settings-test-file)
                   "(config\n  :cursor :blockk ; not :curser\n  :curser :bar)"))
-      (assert= (map found (fn (d) [(:line d) (:col d)])) '([3 3] [2 3]))
+      (assert= (map found (fn (diagnostic) [(:line diagnostic) (:col diagnostic)])) '([3 3] [2 3]))
       (is (includes? (:message (first found)) ":curser is not a setting"))
       (is (includes? (:message (second found)) ":cursor is :blockk"))))
   (test "a declared file that does not read says where"

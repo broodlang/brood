@@ -828,8 +828,8 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
                     // A few symbol compares, like the count alias below.
                     let index_bounds = super::guards::offset_bounds(heap, binds[i + 1], &scope);
                     scope = scope.bind(name, rhs_ty);
-                    for (xs, k) in index_bounds {
-                        scope = scope.add_index_bound(name, xs, k);
+                    for (collection, offset) in index_bounds {
+                        scope = scope.add_index_bound(name, collection, offset);
                     }
                     // A symbol RHS is the same value (the walk's `let_bind_scope` rule): a
                     // narrowing of one reaches the other. One map insert, not the

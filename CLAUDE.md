@@ -222,6 +222,10 @@ commits in this repo.**
 
 ## Conventions & invariants (don't break these)
 
+- **No single-character names** — in Rust and in Brood, for variables, parameters, closure
+  arguments and pattern binders alike. Name what the value is (`scope`, `facts`, `offset`,
+  `index`, `collection`), not `c`, `k`, `s`, `x`. A one-letter name makes the reader keep a
+  table in their head; the few extra characters are cheaper.
 - **Proper tail calls are load-bearing.** The tree-walker (`eval/machine.rs`) is a loop over
   an explicit frame stack (ADR-416). When adding a special form with a body or branches, push a
   continuation (`KontKind`) for each non-last sub-form and hand the *last* form back to the

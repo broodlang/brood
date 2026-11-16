@@ -1221,7 +1221,7 @@ impl Ctx {
     pub(super) fn is_index_bound_at(&self, i: Symbol, xs: Symbol, offset: i64) -> bool {
         self.index_bounds_of(i)
             .iter()
-            .any(|&(of, k)| of == xs && offset <= k)
+            .any(|&(bounded, proved)| bounded == xs && offset <= proved)
     }
     /// Every `(xs, k)` with `i + k < (count xs)` on this path — the guards' facts and a count
     /// alias's own (`k = -1`).
@@ -1229,7 +1229,12 @@ impl Ctx {
         let mut out: Vec<(Symbol, i64)> = self
             .index_bounds
             .get(&i)
-            .map(|m| m.iter().map(|(&xs, &k)| (xs, k)).collect())
+            .map(|by_collection| {
+                by_collection
+                    .iter()
+                    .map(|(&collection, &proved)| (collection, proved))
+                    .collect()
+            })
             .unwrap_or_default();
         if let Some(xs) = self.count_alias(i) {
             out.push((xs, -1));

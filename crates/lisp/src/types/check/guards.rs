@@ -760,13 +760,14 @@ pub(super) fn layer_compound_facts(
     mut then_ctx: Ctx,
     mut else_ctx: Ctx,
 ) -> (Ctx, Ctx) {
-    // A bare local bound `when`-shaped — `(let (src (when k E)) (if src …))` — proves its
-    // condition `k` truthy in the then-branch, beside its own truthiness (which
-    // `guard_assertion` states). Then-only: a falsy `src` may be `E`'s own nil.
-    if let Value::Sym(s) = test
-        && let Some(g) = ctx.guard(s).filter(|g| g.then_only)
-    {
+    for g in and_conjunct_guards(heap, test, ctx) {
         then_ctx = then_ctx.narrow(g.sym, g.ty);
+    }
+    for g in or_disjunct_guards(heap, test, ctx) {
+        else_ctx = else_ctx.narrow(g.sym, g.else_type());
+    }
+    if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
+        then_ctx = then_ctx.narrow(sym, union);
     }
     if let Some((sym, present, absent)) = contains_key_narrowing(heap, test, ctx) {
         then_ctx = then_ctx.narrow(sym, present);
@@ -783,10 +784,9 @@ pub(super) fn layer_compound_facts(
 ///   nothing else. The guard inversion keeps only a single-variable guard; this keeps
 ///   everything X proves, so `(not (and (int? x) (string? y)))` proves both conjuncts in
 ///   its ELSE branch.
-/// - **A name bound to a test** carries what the test proved ([`Ctx::cond_facts`]); inside an
-///   `and` or `or` it is an operand like any other, read through [`let_test_facts`].
-/// - **An `if` or a one-binding `let` used as a test** proves what its paths agree on
-///   ([`if_test_facts`], [`let_test_facts`]) — which is every `and`/`or` chain.
+/// - **A name bound to a test** carries what the test proved ([`Ctx::cond_facts`]) — as the
+///   test itself, as a conjunct of an `and` (true: every conjunct held), and as a disjunct
+///   of an `or` (false: every disjunct failed).
 ///
 /// Every narrowing intersects, so this only ever adds to what the other readers proved.
 fn layer_bound_tests(
@@ -810,54 +810,28 @@ fn layer_bound_tests(
             then_ctx = narrow_all(then_ctx, &facts.then);
             else_ctx = narrow_all(else_ctx, &facts.else_);
         }
+        // A truthy conjunction proves each conjunct; a falsy disjunction refutes each one.
+        for facts in chain_operands(heap, test, true)
+            .into_iter()
+            .filter_map(facts_of)
+        {
+            then_ctx = narrow_all(then_ctx, &facts.then);
+        }
+        for facts in chain_operands(heap, test, false)
+            .into_iter()
+            .filter_map(facts_of)
+        {
+            else_ctx = narrow_all(else_ctx, &facts.else_);
+        }
     }
     if let Some((base, key)) = absent_key_read(heap, test, ctx) {
         else_ctx = else_ctx.narrow_path(base, vec![PathKey::Field(key)], Ty::of(Tag::Nil));
     }
-    if let Some((truthy, falsy)) =
-        if_test_facts(heap, test, ctx).or_else(|| let_test_facts(heap, test, ctx))
-    {
+    if let Some((truthy, falsy)) = if_test_facts(heap, test, ctx) {
         then_ctx = narrow_all(then_ctx, &truthy);
         else_ctx = narrow_all(else_ctx, &falsy);
     }
     (then_ctx, else_ctx)
-}
-
-/// What a one-binding `(let (g E) BODY)` used AS A TEST proves: what `BODY` proves with `g`
-/// bound as `check_let` binds it ([`let_bind_scope`]: `E`'s own facts ride on `g` as a guard
-/// alias or bound-test facts), less every fact about `g` itself — inside, `g` is the new
-/// binding, not whatever the enclosing scope calls by that name. This is every short-circuit
-/// chain: `and` is `(let (g E) (if g REST g))` and `or` is `(let (g E) (if g g REST))`, so
-/// with [`if_test_facts`] it proves each conjunct of a true `and`, each disjunct's falsity
-/// for a false `or`, and the union an `or` over one variable proves — read off the forms
-/// rather than recognised as shapes, the chain's own binders handled by the same rule.
-fn let_test_facts(
-    heap: &Heap,
-    test: Value,
-    ctx: &Ctx,
-) -> Option<(Vec<(Symbol, Ty)>, Vec<(Symbol, Ty)>)> {
-    let items = list_items(heap, test)?;
-    let [Value::Sym(head), bindings, body] = items[..] else {
-        return None;
-    };
-    if !value::symbol_is(head, kw::LET) || ctx.is_lexical_local(head) {
-        return None;
-    }
-    let [Value::Sym(name), rhs] = list_items(heap, bindings)?[..] else {
-        return None;
-    };
-    let rhs_ty = expr_ty(heap, rhs, ctx);
-    let scope = super::walk::let_bind_scope(heap, ctx.clone(), Value::Sym(name), rhs, rhs_ty);
-    let (body_then, body_else) = branch_scopes(heap, body, &scope);
-    let lifted = |inner: &Ctx| -> Vec<(Symbol, Ty)> {
-        if newly_dead(inner, ctx) {
-            return Vec::new(); // an impossible branch: claim nothing rather than everything
-        }
-        let mut facts = inner.narrowed_since(ctx);
-        facts.retain(|(sym, _)| *sym != name);
-        facts
-    };
-    Some((lifted(&body_then), lifted(&body_else)))
 }
 
 /// What an `(if c a b)` used AS A TEST proves (ADR-725): a truthy result means `c` held and
@@ -881,42 +855,23 @@ fn if_test_facts(
     let (c, a) = (items[1], items[2]);
     let b = items.get(3).copied().unwrap_or(Value::Nil);
     let (c_then, c_else) = branch_scopes(heap, c, ctx);
-    if newly_dead(&c_then, ctx) && newly_dead(&c_else, ctx) {
-        return None;
-    }
     // One arm's two outcomes: the facts on each, or `None` where that outcome is impossible.
     let outcomes =
         |arm: Value, scope: &Ctx| -> (Option<Vec<(Symbol, Ty)>>, Option<Vec<(Symbol, Ty)>>) {
-            if newly_dead(scope, ctx) {
-                return (None, None); // the condition cannot go this way
-            }
             match arm {
                 Value::Nil | Value::Bool(false) => (None, Some(scope.narrowed_since(ctx))),
                 Value::Bool(true) | Value::Int(_) | Value::Keyword(_) | Value::Str(_) => {
                     (Some(scope.narrowed_since(ctx)), None)
                 }
                 _ => {
-                    // An arm scope its own test contradicts — `g` truthy on `g`'s false path, as
-                    // every `and`/`or` expansion reads its binder there — is an impossible path,
-                    // not one whose facts join in (that would drop every conjunct).
                     let (t, e) = branch_scopes(heap, arm, scope);
-                    let live = |c: Ctx| (!newly_dead(&c, ctx)).then(|| c.narrowed_since(ctx));
-                    (live(t), live(e))
+                    (Some(t.narrowed_since(ctx)), Some(e.narrowed_since(ctx)))
                 }
             }
         };
     let (a_truthy, a_falsy) = outcomes(a, &c_then);
     let (b_truthy, b_falsy) = outcomes(b, &c_else);
     Some((join_facts(a_truthy, b_truthy), join_facts(a_falsy, b_falsy)))
-}
-
-/// Whether `inner` is dead where `base`, the scope it was narrowed from, was not — a path its
-/// own test contradicts. A scope dead on arrival (a binding still at the fixpoint's `never`,
-/// early in a return's inference) proves nothing about which path is impossible, so it must
-/// not close every path: that once dropped an `or`'s facts at a call site, and the callee's
-/// caller-derived parameters widened with them.
-fn newly_dead(inner: &Ctx, base: &Ctx) -> bool {
-    inner.is_dead() && !base.is_dead()
 }
 
 /// Two paths' facts joined: a variable both paths narrowed takes the union of the two types;
@@ -1002,6 +957,22 @@ fn chain_links(
     }
     links.push((cur, binders.len()));
     Some((links, binders))
+}
+
+/// Every operand of an `and`-expansion (`is_and`) or `or`-expansion, the last one included;
+/// empty when `test` is not that expansion. An operand that is a bare name one of the chain's
+/// own links binds — `ok` in a hand-written `(let (ok (string? x)) (if ok ok ok))` — is left
+/// out: it names that inner binding, not a `let`-bound test of the enclosing scope, and the
+/// facts are looked up there.
+fn chain_operands(heap: &Heap, test: Value, is_and: bool) -> Vec<Value> {
+    let Some((links, binders)) = chain_links(heap, test, is_and) else {
+        return Vec::new();
+    };
+    links
+        .into_iter()
+        .map(|(op, _)| op)
+        .filter(|op| !matches!(op, Value::Sym(s) if binders.contains(s)))
+        .collect()
 }
 
 /// The guard each operand of an `and`- (`is_and`) or `or`-expansion states, in order; `None`
@@ -1148,6 +1119,50 @@ pub(super) fn and_conjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Gu
             }),
     );
     out
+}
+
+/// If `test` is an `or`-expansion whose disjuncts are **all** biconditional guards over
+/// the **same** variable, return `(sym, ⋃ tyᵢ)`: the then-branch narrows `sym` to the
+/// union (a truthy `or` ⇒ some disjunct holds — and only with one variable is that a
+/// statement about a named one). The else-branch is [`or_disjunct_guards`]'s, which
+/// needs no shared variable. `None` the moment a disjunct is `then_only`, targets
+/// another variable, or isn't a recognised guard.
+pub(super) fn or_same_var_narrowing(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Symbol, Ty)> {
+    let mut sym: Option<Symbol> = None;
+    let mut union = Ty::NEVER;
+    for g in chain_guards(heap, test, false, ctx)? {
+        let g = g.filter(|g| !g.then_only && !g.else_only)?;
+        if sym.is_some_and(|s| s != g.sym) {
+            return None; // a different variable — no single-var narrowing
+        }
+        sym = Some(g.sym);
+        union = union.union(g.ty);
+    }
+    sym.map(|s| (s, union))
+}
+
+/// Every disjunct guard of an `or`-expansion test that a FALSY `or` refutes — the dual of
+/// [`and_conjunct_guards`]: a falsy `or` proves **every** disjunct falsy, so each
+/// disjunct's negation narrows the *else*-branch, each on its own variable (`(or
+/// (nil? root) (empty? files))` proves `root` is not `nil` AND `files` is not `nil`
+/// after it fails). A `then_only` disjunct is left out — `(and (int? x) …)` as a
+/// disjunct being falsy proves nothing about `x` — and so is one the reader cannot
+/// name. `[]` when `test` is not an or-expansion. Returned as `else_only` guards: what a
+/// truthy `or` proves is one disjunct, not a named one (see [`or_same_var_narrowing`]).
+pub(super) fn or_disjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Guard> {
+    let disjuncts = chain_guards(heap, test, false, ctx).unwrap_or_default();
+    let refuted = disjuncts.into_iter().flatten().filter(|g| !g.then_only);
+    refuted
+        .map(|g| Guard {
+            else_only: true,
+            // What a FALSY disjunct proves — its explicit else type when it has one. A
+            // one-sided guard proving only when false (an inferred `(or (string? x) (opaque
+            // x))` predicate: `any` / `¬string`) has a then-type of `any`, whose complement
+            // is `never`.
+            else_ty: Some(g.else_type()),
+            ..g
+        })
+        .collect()
 }
 
 /// If `a` is `(type-of sym)` and `b` a keyword naming a tag, the guard `(sym, that tag)`.
@@ -1550,24 +1565,32 @@ pub(super) enum IndexBase {
 /// proved (`nth`), where the index's own interval separately decides it is not negative —
 /// unlike [`local_plus_offset`], which records facts and so refuses a negative offset.
 pub(super) fn index_base_offset(heap: &Heap, form: Value, ctx: &Ctx) -> Option<(IndexBase, i64)> {
-    let base = |v: Value| -> Option<IndexBase> {
-        match v {
-            Value::Sym(s) if ctx.is_lexical_local(s) => Some(IndexBase::Local(s)),
-            Value::Pair(_) => match list_items(heap, v)?.as_slice() {
-                [Value::Sym(c), Value::Sym(xs)]
-                    if value::symbol_is(*c, "count") && !ctx.is_lexical_local(*c) =>
+    let base = |operand: Value| -> Option<IndexBase> {
+        match operand {
+            Value::Sym(local) if ctx.is_lexical_local(local) => Some(IndexBase::Local(local)),
+            Value::Pair(_) => match list_items(heap, operand)?.as_slice() {
+                [Value::Sym(count_head), Value::Sym(collection)]
+                    if value::symbol_is(*count_head, "count")
+                        && !ctx.is_lexical_local(*count_head) =>
                 {
-                    Some(IndexBase::CountOf(*xs))
+                    Some(IndexBase::CountOf(*collection))
                 }
                 _ => None,
             },
             _ => None,
         }
     };
-    if let Some(b) = base(form)
-        && matches!(b, IndexBase::Local(_))
+    let head = match form {
+        Value::Sym(local) if ctx.is_lexical_local(local) => {
+            return Some((IndexBase::Local(local), 0));
+        }
+        Value::Pair(pair) => heap.pair(pair).0,
+        _ => return None,
+    };
+    // Every `let` binding asks: look at the head before reading the list.
+    if !matches!(head, Value::Sym(symbol) if ["inc", "dec", "+", "-"].iter().any(|name| value::symbol_is(symbol, name)))
     {
-        return Some((b, 0));
+        return None;
     }
     let items = list_items(heap, form)?;
     let Some(&Value::Sym(head)) = items.first() else {
@@ -1578,10 +1601,12 @@ pub(super) fn index_base_offset(heap: &Heap, form: Value, ctx: &Ctx) -> Option<(
     }
     let named = |name: &str| value::symbol_is(head, name);
     match items[1..] {
-        [b] if named("inc") => Some((base(b)?, 1)),
-        [b] if named("dec") => Some((base(b)?, -1)),
-        [b, Value::Int(k)] | [Value::Int(k), b] if named("+") => Some((base(b)?, k)),
-        [b, Value::Int(k)] if named("-") => Some((base(b)?, k.checked_neg()?)),
+        [operand] if named("inc") => Some((base(operand)?, 1)),
+        [operand] if named("dec") => Some((base(operand)?, -1)),
+        [operand, Value::Int(step)] | [Value::Int(step), operand] if named("+") => {
+            Some((base(operand)?, step))
+        }
+        [operand, Value::Int(step)] if named("-") => Some((base(operand)?, step.checked_neg()?)),
         _ => None,
     }
 }
@@ -1690,14 +1715,14 @@ fn side_narrowing(side: &CmpSide, r: Range) -> Option<(Symbol, Ty)> {
 /// (dec n))` does. Empty for any other right-hand side.
 pub(super) fn offset_bounds(heap: &Heap, rhs: Value, ctx: &Ctx) -> Vec<(Symbol, i64)> {
     match index_base_offset(heap, rhs, ctx) {
-        Some((IndexBase::Local(base), c)) => ctx
+        Some((IndexBase::Local(base), step)) => ctx
             .index_bounds_of(base)
             .into_iter()
-            .filter_map(|(xs, k)| Some((xs, k.checked_sub(c)?)))
+            .filter_map(|(collection, proved)| Some((collection, proved.checked_sub(step)?)))
             .collect(),
-        Some((IndexBase::CountOf(xs), c)) => (-1i64)
-            .checked_sub(c)
-            .map(|k| (xs, k))
+        Some((IndexBase::CountOf(collection), step)) => (-1i64)
+            .checked_sub(step)
+            .map(|proved| (collection, proved))
             .into_iter()
             .collect(),
         None => Vec::new(),

@@ -1197,8 +1197,8 @@ pub(in crate::types::check) fn let_bind_scope(
         scope = scope.add_count_alias(name, target);
     }
     // `(let (last (dec n)) …)`: an offset from a bounded index or count is bounded too.
-    for (xs, k) in rhs_index_bounds {
-        scope = scope.add_index_bound(name, xs, k);
+    for (collection, offset) in rhs_index_bounds {
+        scope = scope.add_index_bound(name, collection, offset);
     }
     scope
 }

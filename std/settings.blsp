@@ -265,25 +265,25 @@ not computed its directories yet can still declare). An editor then checks that 
   ;; followed by space, a bracket or the end — or [1 1]
   (let (needle (pr-str key)
         lines (vec (string/split text "\n")))
-    (letrec (scan (fn (i)
-                    (if (>= i (count lines))
+    (letrec (scan (fn (row)
+                    (if (>= row (count lines))
                       [1 1]
-                      (let (line (first (string/split (nth lines i) ";"))
+                      (let (line (first (string/split (nth lines row) ";"))
                             at (index-of line needle))
                         (if (and (>= at 0)
                               (let (after (+ at (count needle)))
                                 (or (>= after (count line))
                                   (contains? #{" " "\t" ")" "]" "}"}
                                     (string/substring line after (inc after))))))
-                          [(inc i) (inc at)]
-                          (scan (inc i)))))))
+                          [(inc row) (inc at)]
+                          (scan (inc row)))))))
       (scan 0))))
 
 (defn- unlabelled (message)
   ;; a warning made with an empty label: ": msg", or ":line:col: msg" from the reader
-  (let (m (regex/find message "^:(\\d+):(\\d+): (.*)$"))
-    (if m
-      (let (groups (vec (map (get m :groups) (fn (g) (get g :text)))))
+  (let (found (regex/find message "^:(\\d+):(\\d+): (.*)$"))
+    (if found
+      (let (groups (vec (map (get found :groups) (fn (group) (get group :text)))))
         {:line (string/->number (nth groups 0))
          :col (string/->number (nth groups 1))
          :message (nth groups 2)})

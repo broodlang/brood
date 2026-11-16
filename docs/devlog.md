@@ -1800,13 +1800,16 @@ bedit checks a declared buffer that way. Guards: `std_settings_test` "declare-fi
 file-diagnostics" (red with `file-claim` matching nothing) and bedit's modes_test "the init
 file is checked against bedit's settings" (red without its declaration).
 
-2026-11-16 (checker, ADR-725 follow-up). **Two of ADR-725's special cases became general rules.**
-(1) A one-binding `let` used as a test proves what its body proves, less facts about its binder
-(`guards::let_test_facts`), and an `if` arm its own test contradicts is an impossible path. Every
-`and`/`or` chain is such a `let` around an `if`, so the shape readers that recognised them
-(`or_disjunct_guards`, `or_same_var_narrowing`, the chain-operand loops over bound tests) are
-gone, and the hand-written-binder rule falls out of "less facts about its binder". Eleven tests
-fail with the rule off. (2) The `(nth xs (- n k))` special case is now a bound on the index's
-base: a count alias is `n - 1 < (count xs)`, an index reads as base + offset (negative too), and a
-`let` of an offset carries its base's bounds — so `(let (last (dec n)) (nth xs last))`, `(+ n -1)`
-and an offset of an offset read as elements. Both sabotage-verified.
+2026-11-16 (checker, ADR-725 follow-up). **The `nth` special case became a bound on the index's
+base; the `and`/`or` unification was measured and not kept.** (1) A count alias is
+`n - 1 < (count xs)`, an index reads as base + offset (negative too), and a `let` of an offset
+carries its base's bounds — so `(let (last (dec n)) (nth xs last))`, `(+ n -1)` and an offset
+of an offset read as elements; `count_less_step` is gone. Sabotage-verified (the let case red
+without offset propagation, the inline case red without the count alias's own bound).
++0.9% instructions on the strict corpus check. (2) Reading every `and`/`or` as "a one-binding
+`let` used as a test" in place of the shape readers worked — eleven tests pinned it — but cost
++22% instructions on the strict corpus check, +9% after a fast path for the chain shape: a
+`branch_scopes` per link where the readers read one guard. Not worth it for a cleanup with no
+bug behind it; reverted. Kept from it: a regression test for an `or` whose scope arrives dead
+(a binding at the fixpoint's `never`), which the attempt broke at a caller-derived site in
+mur-forge.

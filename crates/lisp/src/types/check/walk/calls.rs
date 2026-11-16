@@ -891,8 +891,8 @@ pub(super) fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option
                     let index_bounds =
                         crate::types::check::guards::offset_bounds(heap, binds[i + 1], &scope);
                     scope = scope.bind(name, rhs_ty);
-                    for (xs, k) in index_bounds {
-                        scope = scope.add_index_bound(name, xs, k);
+                    for (collection, offset) in index_bounds {
+                        scope = scope.add_index_bound(name, collection, offset);
                     }
                     // `(let (v el) …)` — the pattern matcher's binder over its temp — makes
                     // `v` and `el` one value, so a narrowing of `el` (through its path
