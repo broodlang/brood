@@ -1134,6 +1134,7 @@ pub(in crate::types::check) fn let_bind_scope(
         return bind_pattern(heap, scope, pat, rhs, rhs_ty.as_ref());
     };
     let rhs_guard = guard_assertion(heap, rhs, &scope);
+    let rhs_index_bounds = crate::types::check::guards::offset_bounds(heap, rhs, &scope);
     // A test of any shape — a conjunction, a disjunction, a negated conjunction, a name
     // bound to one — is also recorded as everything it proves (ADR-725). Beside a guard
     // alias too: `(let (z (not y)) …)` is a guard on `y`'s truthiness, and what `y` itself
@@ -1194,6 +1195,10 @@ pub(in crate::types::check) fn let_bind_scope(
     // two `let` binders — see `guards::count_alias_target`.
     if let Some(target) = crate::types::check::guards::count_alias_target(heap, rhs, &scope) {
         scope = scope.add_count_alias(name, target);
+    }
+    // `(let (last (dec n)) …)`: an offset from a bounded index or count is bounded too.
+    for (xs, k) in rhs_index_bounds {
+        scope = scope.add_index_bound(name, xs, k);
     }
     scope
 }

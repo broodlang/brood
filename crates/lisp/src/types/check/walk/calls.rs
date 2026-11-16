@@ -888,7 +888,12 @@ pub(super) fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option
             let rhs_ty = super::binders::let_rhs_ty(heap, &binds, i, &items, &scope);
             match binds[i] {
                 Value::Sym(name) => {
+                    let index_bounds =
+                        crate::types::check::guards::offset_bounds(heap, binds[i + 1], &scope);
                     scope = scope.bind(name, rhs_ty);
+                    for (xs, k) in index_bounds {
+                        scope = scope.add_index_bound(name, xs, k);
+                    }
                     // `(let (v el) …)` — the pattern matcher's binder over its temp — makes
                     // `v` and `el` one value, so a narrowing of `el` (through its path
                     // alias) reaches `v`, as in the walk's `let_bind_scope`.

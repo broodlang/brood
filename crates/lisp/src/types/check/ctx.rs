@@ -1215,11 +1215,26 @@ impl Ctx {
     }
     /// Does `i + offset < (count xs)` hold on this path? True when a guard proved it for
     /// `offset` or for any LARGER one (`i + offset ≤ i + k < count xs`).
+    ///
+    /// A count alias is such a bound by construction: `(let (n (count xs)) …)` makes
+    /// `n - 1 < (count xs)`, so `(nth xs (- n 2))` and a `let`-bound `(dec n)` read as indexes.
     pub(super) fn is_index_bound_at(&self, i: Symbol, xs: Symbol, offset: i64) -> bool {
-        self.index_bounds
+        self.index_bounds_of(i)
+            .iter()
+            .any(|&(of, k)| of == xs && offset <= k)
+    }
+    /// Every `(xs, k)` with `i + k < (count xs)` on this path — the guards' facts and a count
+    /// alias's own (`k = -1`).
+    pub(super) fn index_bounds_of(&self, i: Symbol) -> Vec<(Symbol, i64)> {
+        let mut out: Vec<(Symbol, i64)> = self
+            .index_bounds
             .get(&i)
-            .and_then(|m| m.get(&xs))
-            .is_some_and(|&k| offset <= k)
+            .map(|m| m.iter().map(|(&xs, &k)| (xs, k)).collect())
+            .unwrap_or_default();
+        if let Some(xs) = self.count_alias(i) {
+            out.push((xs, -1));
+        }
+        out
     }
     /// Record `(let (sym target) …)` — an undirected alias. Each side gets
     /// the other added to its neighbour-set, so a later `narrow` on either
