@@ -479,6 +479,18 @@
       (assert= (get defined :type) "evsrv-ty-probe/calc : (string -> number)")
       (is (get back :ok))))
 
+  ;; A value has no signature, so `source-signatures` says nothing, and the form's own value
+  ;; is its name: this was nil.
+  (test "a definition of a value is typed by the value it binds"
+    (answer {:id 1 :src "(defn evsrv-ty-len (s) (%string-length s))"})
+    (assert= (get (answer {:id 2 :src "(def evsrv-ty-shown (evsrv-ty-len \"x\"))"}) :type)
+      "evsrv-ty-shown : (int 0 _)")
+    (answer {:id 3 :src "(defmodule evsrv-ty-values)"})
+    (let (limit (answer {:id 4 :src "(def- limit 10)"})
+          back (answer {:id 5 :src "(%in-ns nil)"}))
+      (assert= (get limit :type) "evsrv-ty-values/limit : 10")
+      (is (get back :ok))))
+
   (test "no :type when the checker has no opinion, and none on a failed evaluation"
     (is (not (contains? (answer {:id 5 :src "(fn (x) x)"}) :type)))
     (is (not (contains? (answer {:id 6 :src "(error \"deliberate\")"}) :type)))))

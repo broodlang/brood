@@ -422,9 +422,24 @@ defines nothing."
           (string/starts-with? (->string (first form)) "def")))
       (catch _ nil))))
 
+(defn- eval-server-value-type (src)
+  "`\"limit : int\"` for a first form `(def NAME VALUE)` (or `def-`, `defonce`): the type of
+the value it binds, named as the definition roots it, or nil. A value has no signature, so
+`source-signatures` says nothing about it, and the form's own value is its name."
+  (let (form (reflect/read-first src))
+    (when (and (pair? form)
+            (includes? ['def 'def- 'defonce] (first form))
+            (= (count form) 3)
+            (symbol? (second form)))
+      (let (inferred (reflect/expr-type (pr-str (nth form 2)))
+            module (reflect/current-ns))
+        (when inferred
+          (str (if module (str module "/") "") (second form) " : " inferred))))))
+
 (defn derived-type (src)
   "How the checker types the first form of `src`, asked in THIS image: `\"f : (int -> int)\"`
-for a form that defines something, `\": int\"` for an expression, nil when it has no opinion.
+for a form that defines a function, `\"limit : int\"` for one that defines a value, `\": int\"`
+for an expression, nil when it has no opinion.
 
 It belongs here rather than in the client because the answer depends on what the image
 holds. A form calling a function an earlier request defined is typed through that
@@ -438,9 +453,10 @@ the callee is an unknown global and everything that reaches it is `any`.
       (let (hit (when (eval-server-defining-form? src)
                   (seq/find (or (reflect/source-signatures src) '())
                     (fn (entry) (string? (:sig entry))))))
-        (if hit
-          (str (:name hit) " : " (:sig hit))
-          (let (inferred (reflect/expr-type src)) (when inferred (str ": " inferred)))))
+        (cond
+          hit (str (:name hit) " : " (:sig hit))
+          (eval-server-defining-form? src) (eval-server-value-type src)
+          else (let (inferred (reflect/expr-type src)) (when inferred (str ": " inferred)))))
       (catch _ nil))))
 
 (defn- eval-server-error-reply (e)
