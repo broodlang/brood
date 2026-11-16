@@ -1779,3 +1779,14 @@ inlay hints and completion's field detail go through it. Diagnostics keep the di
 `audit/sig-params` parsed the display string by hand (a paren matcher, a comma splitter aware of
 `<…>` and `{…}`, a marker stripper); it now reads the signature with the reader, three helpers
 gone.
+
+2026-11-16 (checker). **A manifest or config file is data, not a program with an unbound
+head.** `~/.config/brood/config.blsp`, `project.blsp`, the lockfiles and bedit's init config are
+one `(head :key value …)` form each, read as data (`settings/read-form`, the manifest reader);
+opened in an editor, the checker read them as code and reported `unbound symbol: config` on a
+correct file. A whole file whose one form is a call to an unbound name over keyword/value pairs
+is now not checked: evaluated, it would fail on its first symbol, so no program means it. A REPL
+line of the same shape is still checked (it is evaluated), and so is a call that is not pairs
+(`(prnt "hi")`) or a second form. Also: the missing-token error of `nest publish` named a setting
+that does not exist (`:package/registry-token`; it is `:registry-token`). Guards in
+`check/tests/lints.rs`, the data-file one red with the rule off.

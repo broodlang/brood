@@ -425,6 +425,30 @@ fn reserved_def_warning(heap: &Heap, expanded: Value) -> Option<String> {
     })
 }
 
+/// A **data file**: its one form is a call to a name nothing binds, over keyword/value pairs
+/// — `(project :name "x" …)`, `(lock :version 1 …)`, `(config :git-init false …)`. Brood's
+/// manifests and config files are written this way and READ AS DATA (`settings/read-form`,
+/// the project manifest reader, ADR-020); evaluated as a program, such a file would fail on
+/// its first symbol, so no program means it. Checking one as code reported its head as an
+/// unbound symbol — a warning on a file that is correct, in every editor that opened it.
+/// A whole file only: a REPL line `(config :a 1)` is about to be evaluated, and that does fail.
+fn is_data_file(heap: &Heap, forms: &[Value]) -> bool {
+    let [form] = forms else { return false };
+    let Some(items) = walk::list_items(heap, *form) else {
+        return false;
+    };
+    let Some((&Value::Sym(head), pairs)) = items.split_first() else {
+        return false;
+    };
+    !pairs.is_empty()
+        && pairs.len() % 2 == 0
+        && pairs
+            .iter()
+            .step_by(2)
+            .all(|key| matches!(key, Value::Keyword(_)))
+        && !sigs::is_globally_bound(heap, head)
+}
+
 fn check_forms(
     heap: &mut Heap,
     forms: &[Value],
@@ -433,6 +457,9 @@ fn check_forms(
     inherit_context: bool,
 ) -> Vec<Finding> {
     let mut out = Vec::new();
+    if !inherit_context && is_data_file(heap, forms) {
+        return out;
+    }
     // The header's `(:check-allow …)` clauses, read while `forms` is fresh: a module load
     // during the passes may collect and move them.
     let file_allows = lint::FileAllows::read(heap, forms);

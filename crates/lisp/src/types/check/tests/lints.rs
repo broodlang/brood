@@ -803,3 +803,62 @@ fn check_allow_list_truthiness_silences_it() {
     ));
     assert_eq!(list_truthiness(&w), 0, "{w:?}");
 }
+
+// A manifest or config file — one form, a name nothing binds, keyword/value pairs — is read
+// as DATA (`settings/read-form`, the project manifest reader), so checking it as code must not
+// call its head unbound: every editor that opened `~/.config/brood/config.blsp` said
+// `unbound symbol: config` about a correct file.
+#[test]
+fn a_data_file_is_not_checked_as_code() {
+    for src in [
+        "(config :git-init false :registry-token \"abc\")",
+        "(project :name \"x\" :version \"0.1.0\" :dependencies [[agentkit :version \"^0.1.1\"]])",
+        "(lock :version 1 :dependencies [])",
+    ] {
+        assert!(
+            file_warnings(src).is_empty(),
+            "{src}: {:?}",
+            file_warnings(src)
+        );
+    }
+}
+
+#[test]
+fn a_program_shaped_like_data_is_still_checked() {
+    // not keyword/value pairs: a typo'd call, which does fail when run
+    let ws = file_warnings("(prnt \"hi\")");
+    assert!(
+        ws.iter().any(|w| w.contains("unbound symbol: prnt")),
+        "{ws:?}"
+    );
+    // a second form makes it a program
+    let ws = file_warnings("(config :a 1)\n(config :b 2)");
+    assert!(
+        ws.iter().any(|w| w.contains("unbound symbol: config")),
+        "{ws:?}"
+    );
+    // a dangling key is not a pair
+    let ws = file_warnings("(config :a 1 :b)");
+    assert!(
+        ws.iter().any(|w| w.contains("unbound symbol: config")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_data_shaped_line_about_to_be_evaluated_is_still_checked() {
+    // a REPL line or `C-x C-e` is evaluated, and `(config :a 1)` there raises
+    let interp = crate::Interp::new();
+    let mut heap =
+        crate::core::heap::Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    heap.set_global(crate::core::value::EnvId::GLOBAL);
+    let forms = crate::syntax::reader::read_all(&mut heap, "(config :a 1)").expect("parse");
+    let ws: Vec<String> = super::super::check_forms_here(&mut heap, &forms)
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect();
+    assert!(
+        ws.iter().any(|w| w.contains("unbound symbol: config")),
+        "{ws:?}"
+    );
+}
