@@ -150,22 +150,28 @@
 (defn std-settings-test-file ()
   (path/join (or (test/scratch-dir) "/tmp") "std-settings-test-config.blsp"))
 
+(defn declared-test-file ()
+  ;; each test declares its own group and file: the suite runs every test in its own process,
+  ;; in no fixed order, so one test's declaration is not another's
+  (define :std-settings-test/filed :cursor {:type '(or :block :bar) :default :bar})
+  (file/spit (std-settings-test-file) "")
+  (declare-file :std-settings-test/filed 'config 'std-settings-test/std-settings-test-file)
+  (std-settings-test-file))
+
 (describe "settings: declare-file, file-diagnostics"
   (test "a declared file's typo'd key and bad value are placed at the key, outside comments"
-    (define :std-settings-test/filed :cursor {:type '(or :block :bar) :default :bar})
-    (file/spit (std-settings-test-file) "")
-    (declare-file :std-settings-test/filed 'config 'std-settings-test/std-settings-test-file)
+    (declared-test-file)
     (let (found (file-diagnostics (std-settings-test-file)
                   "(config\n  :cursor :blockk ; not :curser\n  :curser :bar)"))
       (assert= (map found (fn (diagnostic) [(:line diagnostic) (:col diagnostic)])) '([3 3] [2 3]))
       (is (includes? (:message (first found)) ":curser is not a setting"))
       (is (includes? (:message (second found)) ":cursor is :blockk"))))
   (test "a declared file that does not read says where"
-    (let (found (first (file-diagnostics (std-settings-test-file) "(config :cursor")))
+    (let (found (first (file-diagnostics (declared-test-file) "(config :cursor")))
       (assert= [(:line found) (:col found)] [1 1])
       (is (includes? (:message found) "unclosed list"))))
   (test "a clean declared file, and a file no group declares, say nothing"
-    (is (empty? (file-diagnostics (std-settings-test-file) "(config :cursor :block)")))
+    (is (empty? (file-diagnostics (declared-test-file) "(config :cursor :block)")))
     (is (nil? (file-claim "/no/such/settings-file.blsp")))
     (is (empty? (file-diagnostics "/no/such/settings-file.blsp" "(config :zz 1)"))))
   (test "nest's own user config is declared, so a typo there is flagged"
