@@ -10,20 +10,22 @@ option book in [`runtime-frontier.md`](runtime-frontier.md) and
 to 2026-11-06 moved, unedited, to the end of
 [`archive/perf-handoff.md`](archive/perf-handoff.md).
 
-## State (2026-11-07)
+## State (2026-11-16)
 
 - **The front is language features.** Performance, runtime and editor work wait, as ROADMAP's
-  design pass set out on 2026-10-28.
-- **Released:** v0.50.0 (tag on `dc6c775f`, GitHub Release 2026-11-06); v0.49.1's changes went
-  into its changelog section. `CHANGELOG.md`'s "Unreleased" holds ADR-617..620, `file/replace`
-  and the KI-371/372 fixes.
-- **Green:** per-push CI passed on `f3ae911c` (2026-11-07). Per-push CI answers in about 12
-  minutes and leaves out the tree-walker differential, the repeat runs, GC stress, the stress
-  suite, the tier audit, the soaks and the sanitizers. Those are in `full.yml` (weekly, or
-  `gh workflow run full.yml`). Read its verdict with `make green` before the next release.
-- **Known issues:** one open, **KI-380** (a low-impact checker gap, the fix sketched in its entry).
-  One watch, **KI-370** (`nest check` warned once on `examples/life_bands.blsp`; the diagnostic for
-  the next sighting is in its entry).
+  design pass set out on 2026-10-28. Not close to a 1.0 rc: never tag one without being told.
+- **Released:** v0.52.0 (2026-11-13); the package train and the apps require `brood >= 0.52.0`.
+  `CHANGELOG.md`'s "Unreleased" holds the Rust 1.100 move, the review fixes after ADR-722 and
+  ADR-725's checker narrowing.
+- **Green:** `full.yml` passed every job on `be4836c6` (run 43688217391, 2026-11-15): sanitizers,
+  Miri, GC stress, soaks, the three suite runs. Per-push CI answers in about 12 minutes and
+  leaves those out; dispatch `gh workflow run full.yml` and read it with `make green` before
+  the next release.
+- **Known issues:** none open, none watching.
+- **Waiting on the test machine (`whklat`), not runnable on the desktop:** the
+  brood-benchmarks Brood column is still the 0.51.0 measurement, so that repo's daily `smoke`
+  is red on its Staleness step. The step-by-step refresh is in brood-benchmarks' `CLAUDE.md`,
+  "Refreshing the Brood column".
 - **bedit** is pinned by `BEDIT_REF` in `.github/workflows/ci.yml`, which moves often. Smoke with a
   grammar-enabled `nest`, or its mode tests fail on "no grammar", which is not a regression.
 - **Before pushing:** `make prepush`, and `git merge --ff-only origin/main` first if it moved.
