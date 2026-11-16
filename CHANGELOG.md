@@ -40,6 +40,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   specialisation and the purity walk too, and for a root or `sig!`-forced name (KI-384).
 - **A sig deleted from a nested project module** (`web/admin` beside `web`) stops applying after a
   partial image rebuild (KI-391).
+- **A live editor's type for a form is derived where the form ran**: an `eval-server` reply
+  carries `:type`, so a definition calling an earlier form's function is typed through it,
+  not as `(any -> any)`. `reflect/source-signatures` reads its text under the current module,
+  so a call to the module's own functions is typed too.
+- **The LSP's inferred-type hints and "Declare signature" action work in module files**: they
+  looked a definition up by `f` while the checker names it `mod/f`, so neither appeared in
+  any file with a `defmodule`.
 
 ## v0.52.0 — module-scoped dynamic variables, the surface pass, `nest eval` and `nest test --watch`
 

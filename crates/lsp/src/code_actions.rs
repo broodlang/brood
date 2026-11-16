@@ -197,7 +197,8 @@ fn buffer_signature(
     let found = forms.and_then(|forms| {
         brood::types::check::file_signatures(&mut interp.heap, &forms)
             .into_iter()
-            .find(|s| s.name == name)
+            // a module's definition is captured as `mod/name`; the def site wrote `name`
+            .find(|s| s.name == name || s.name.rsplit_once('/').is_some_and(|(_, w)| w == name))
     });
     interp.heap.reset_local_to(cp);
     found
@@ -526,6 +527,21 @@ mod tests {
     fn declares_the_inferred_signature_under_the_cursor() {
         let src = "(defn f (s) (%string-length s))";
         let titles = actions_at(src, 8);
+        assert!(
+            titles
+                .iter()
+                .any(|t| t.starts_with("Declare signature: (sig f (") && t.contains("string")),
+            "got: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn declares_the_signature_of_a_defn_inside_a_module() {
+        // Captured as `ca-mod/f`, written `f`: matching the token whole found nothing, so
+        // the action was never offered in a module file.
+        let src = "(defmodule ca-mod)\n(defn f (s) (%string-length s))";
+        let at = src.find("(defn").unwrap() as u32 + 8;
+        let titles = actions_at(src, at);
         assert!(
             titles
                 .iter()

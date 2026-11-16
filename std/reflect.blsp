@@ -116,8 +116,13 @@ doesn't parse, so a live editor buffer never errors mid-edit.
 
 The question [[expr-type]] cannot answer. A `(defn …)` form evaluates to its own NAME, so
 the type of its value says nothing about the function — which is why a live evaluator
-showing `=> foo` for a definition has nothing to put beside it. Shares one checker pass
-with [[file-signatures]], so a buffer and the file it will be saved as cannot disagree.
+showing `=> foo` for a definition has nothing to put beside it.
+
+The text is read as `eval` would read it here: when it declares no `(defmodule …)` of its
+own, under the current namespace and its imports, and against what the image already
+holds. A form taken from inside a module is typed through that module's definitions, so a
+call to the module's own `to-number` is typed through `mod/to-number`. Read as root code,
+that call is an unknown name and the function calling it is `(any -> any)`.
 
     (get (first (reflect/source-signatures \"(defn twice (x) (* 2 x))\")) :name)   ;=> \"twice\""
   (%source-signatures src))

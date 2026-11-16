@@ -9,7 +9,9 @@ use super::*;
 /// **effective-type inlay hints** (`docs/lsp.md`).
 #[derive(Clone, Debug)]
 pub struct FnSignature {
-    /// The name as written at the def site (unqualified).
+    /// The name as the definition roots it: `mod/name` inside a module, bare at root. A
+    /// caller holding the def site's token matches it whole or as the last `/` segment
+    /// (a head may carry its own module, `(defn reflect/read-string …)`).
     pub name: String,
     /// Its signature: what the author *declared*, else what the checker inferred.
     pub sig: Sig,
@@ -32,6 +34,17 @@ pub struct FnSignature {
 pub fn file_signatures(heap: &mut Heap, forms: &[Value]) -> Vec<FnSignature> {
     arm_signature_capture();
     let _ = check_file(heap, forms);
+    take_signature_capture()
+}
+
+/// [`file_signatures`] for forms evaluated HERE rather than loaded as a file — a live
+/// evaluator's form, which the checker reads under this process's compile context
+/// ([`check_forms_here`]). Inside `(defmodule calc)`, a form calling the module's own
+/// `to-number` is then typed through `calc/to-number` as `eval` resolves it, where the
+/// file reading sees an unknown root name and types everything reaching it `any`.
+pub fn source_signatures_here(heap: &mut Heap, forms: &[Value]) -> Vec<FnSignature> {
+    arm_signature_capture();
+    let _ = check_forms_here_findings(heap, forms);
     take_signature_capture()
 }
 

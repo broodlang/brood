@@ -34,7 +34,9 @@ client shares. Run `(run)` as the child's whole program; it prints
 `{:ready true}` and then answers one `pr-str`ed request map per stdin line —
 `{:id 7 :src \"(+ 1 2)\" :timeout-ms 2000}` — with one reply line:
 `{:id 7 :ok true :value \"3\" :output \"\" :ms 0}` (or `:ok false` with `:error`,
-or `:timeout true`). A request carrying `:check true` asks the CHECKER instead of the
+or `:timeout true`). A successful reply also carries `:type` when the checker has an opinion
+on the first form ([[derived-type]], asked in the session's image, where the definitions
+earlier requests made are visible). A request carrying `:check true` asks the CHECKER instead of the
 evaluator and is answered `{:id 7 :ok true :diagnostics ({:line :col :message} …) :ms}`,
 the list whole — an editor's buffer diagnostics, run in the child's image and project
 so nothing of that project is loaded into the editor. A request may carry `:trace
@@ -407,6 +409,40 @@ does not parse — or `:ok false` with `:error` when the checker itself raised. 
       {:ok true :diagnostics (or (reflect/check-string-structured src) ()) :ms (- (os/now) started)}
       (catch e {:ok false :error (error-message e) :ms (- (os/now) started)}))))
 
+(defn- eval-server-defining-form? (src)
+  "Does the first form of `src` have a head spelled `def…`? A cheap gate in front of
+`reflect/source-signatures`, which runs the whole checker and answers `()` for a form that
+defines nothing."
+  ;; text someone is mid-typing need not read: no head is the answer
+  (check-allow :discarded-catch
+    (try
+      (let (form (reflect/read-first src))
+        (and (pair? form)
+          (symbol? (first form))
+          (string/starts-with? (->string (first form)) "def")))
+      (catch _ nil))))
+
+(defn derived-type (src)
+  "How the checker types the first form of `src`, asked in THIS image: `\"f : (int -> int)\"`
+for a form that defines something, `\": int\"` for an expression, nil when it has no opinion.
+
+It belongs here rather than in the client because the answer depends on what the image
+holds. A form calling a function an earlier request defined is typed through that
+function's derived signature; asked in an editor that never evaluated the earlier request,
+the callee is an unknown global and everything that reaches it is `any`.
+
+    (eval-server/derived-type \"(defn sq (x) (* x x))\")   ;=> \"sq : (number -> number)\""
+  ;; a fragment the checker cannot read has no type, and that is the answer
+  (check-allow :discarded-catch
+    (try
+      (let (hit (when (eval-server-defining-form? src)
+                  (seq/find (or (reflect/source-signatures src) '())
+                    (fn (entry) (string? (:sig entry))))))
+        (if hit
+          (str (:name hit) " : " (:sig hit))
+          (let (inferred (reflect/expr-type src)) (when inferred (str ": " inferred)))))
+      (catch _ nil))))
+
 (defn- eval-server-error-reply (e)
   "The reply for an evaluation that raised `e`: its message, and — when the raise has them —
 where in the evaluated source it happened (`:line`/`:col`, 1-based within `src`) and the
@@ -417,7 +453,8 @@ guess where the error lies; these say."
 
 (defn eval-capturing (src &optional trace-names)
   "Evaluate source string `src` (all its forms, in order) with stdout captured;
-return `{:ok true :value <pr-str-bounded> :output <string> :ms <int>}` or
+return `{:ok true :value <pr-str-bounded> :output <string> :ms <int>}` (with `:type`, the
+first form's [[derived-type]], when the checker has one) or
 `{:ok false :error <message> :output <string> :ms <int>}` — plus `:line`/`:col`/`:hint` when
 the raise carries them ([[eval-server-error-reply]]). Never throws, and pops
 the capture buffer on every path, so a failed eval can't leave a dangling capture.
@@ -467,11 +504,13 @@ path — the per-request evaluator process dies — but worth knowing when embed
                      :spy-stop))))
         run (fn ()
               (try
-                {:ok true
-                 ;; `acc` exists exactly when `traced`; testing it says so to the checker.
-                 :value (debug/pr-str-bounded (if acc
-                                                (eval-server-eval-traced src trace-names acc)
-                                                (reflect/eval-string src)))}
+                ;; `acc` exists exactly when `traced`; testing it says so to the checker.
+                (let (value (debug/pr-str-bounded (if acc
+                                                    (eval-server-eval-traced src trace-names acc)
+                                                    (reflect/eval-string src)))
+                      ;; typed after the evaluation, so what it defined is in the image
+                      type (derived-type src))
+                  (if type {:ok true :value value :type type} {:ok true :value value}))
                 (catch e (eval-server-error-reply e))))
         _ (%capture-begin)
         r (if traced (binding (*spy-sink* sink) (run)) (run))

@@ -54,11 +54,19 @@ pub fn inlay_hints(
 /// `file_signatures` exposes. Wrapped in an arena checkpoint like the diagnostics
 /// path: the forms are LOCAL and reclaimed, so the server's heap doesn't grow per
 /// keystroke.
+///
+/// Keyed by the qualified name AND its last segment: a module's `(defn foo …)` is captured
+/// as `mod/foo` while the token at the def site is `foo`, so a qualified-only map left
+/// every module file — nearly every real file — without a hint.
 fn buffer_signatures(interp: &mut Interp, text: &str) -> HashMap<String, FnSignature> {
     let cp = interp.heap.checkpoint();
     let mut out = HashMap::new();
     if let Ok(forms) = reader::read_all(&mut interp.heap, text) {
         for sig in file_signatures(&mut interp.heap, &forms) {
+            if let Some((_, written)) = sig.name.rsplit_once('/') {
+                out.entry(written.to_string())
+                    .or_insert_with(|| sig.clone());
+            }
             out.insert(sig.name.clone(), sig);
         }
     }
@@ -336,6 +344,19 @@ mod tests {
     fn a_defn_gets_the_type_the_checker_inferred() {
         // The buffer is never loaded, so this can only come from form-based inference.
         let ls = labels(&hints("(defn f (s) (%string-length s))"));
+        assert!(
+            ls.iter().any(|l| l.contains("string") && l.contains("->")),
+            "got: {ls:?}"
+        );
+    }
+
+    #[test]
+    fn a_defn_inside_a_module_gets_its_type_too() {
+        // The capture names it `ih-mod/f` and the def site's token is `f`; keyed only by the
+        // qualified name, no module file ever got a hint.
+        let ls = labels(&hints(
+            "(defmodule ih-mod)\n(defn f (s) (%string-length s))",
+        ));
         assert!(
             ls.iter().any(|l| l.contains("string") && l.contains("->")),
             "got: {ls:?}"

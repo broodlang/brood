@@ -457,6 +457,32 @@
       (is (get back :ok))
       (assert= (get root :value) "nil"))))
 
+;; A live editor shows each form's type, and only the session can derive it: the form calls
+;; what earlier requests defined, which the editor's own process never ran. Asked there,
+;; `evsrv-ty-calc` below was `(any -> any)`.
+(describe "a reply's :type is derived in the session"
+  (test "a definition calling an earlier request's function is typed through it"
+    (answer {:id 1
+             :src "(defn evsrv-ty-num (exp) (if (failure? (string/->number exp)) 0 (string/->number exp)))"})
+    (let (defined (answer {:id 2 :src "(defn evsrv-ty-calc (exp) (evsrv-ty-num exp))"})
+          called (answer {:id 3 :src "(evsrv-ty-calc \"1 1 +\")"}))
+      (assert= (get defined :type) "evsrv-ty-calc : (string -> number)")
+      (assert= (get called :value) "0")
+      (assert= (get called :type) ": number")))
+
+  (test "inside a module, through the module's private definitions"
+    (answer {:id 1 :src "(defmodule evsrv-ty-probe)"})
+    (answer {:id 2
+             :src "(defn- to-number (exp) (if (failure? (string/->number exp)) 0 (string/->number exp)))"})
+    (let (defined (answer {:id 3 :src "(defn calc (exp) (to-number exp))"})
+          back (answer {:id 4 :src "(%in-ns nil)"}))
+      (assert= (get defined :type) "evsrv-ty-probe/calc : (string -> number)")
+      (is (get back :ok))))
+
+  (test "no :type when the checker has no opinion, and none on a failed evaluation"
+    (is (not (contains? (answer {:id 5 :src "(fn (x) x)"}) :type)))
+    (is (not (contains? (answer {:id 6 :src "(error \"deliberate\")"}) :type)))))
+
 (describe ":check requests — the checker's verdict, structured and whole"
   (test "the codec round-trips a check request, and a non-boolean :check is rejected"
     (let (line (evsrv-encode-check 3 "(+ 1 x)" 2000)

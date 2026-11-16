@@ -266,11 +266,14 @@ pub(super) fn file_signatures_builtin(args: &[Value], _env: EnvId, heap: &mut He
     })?;
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
-    Ok(signatures_of(heap, &just_forms))
+    let signatures = crate::types::check::file_signatures(heap, &just_forms);
+    Ok(signatures_of(heap, &signatures))
 }
 
 /// `(source-signatures src)` — [`file_signatures_builtin`] for source text that is not a
-/// file. Same maps, same checker pass; `()` when `src` doesn't parse.
+/// file. Same maps, same checker pass; `()` when `src` doesn't parse. The text is read
+/// under the current compile context, as `eval` would read it: a form taken from inside
+/// a module is typed through that module's definitions, not as root code.
 ///
 /// The case a file cannot cover: an editor buffer mid-edit, or a single form a live
 /// evaluator just ran. `%expr-type` answers for an *expression*, whose type is the type
@@ -288,15 +291,15 @@ pub(super) fn source_signatures(args: &[Value], _env: EnvId, heap: &mut Heap) ->
         Err(_) => return Ok(heap.list(Vec::new())),
     };
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
-    Ok(signatures_of(heap, &just_forms))
+    let signatures = crate::types::check::source_signatures_here(heap, &just_forms);
+    Ok(signatures_of(heap, &signatures))
 }
 
 /// The `{:name :sig :declared? :informative?}` list both signature builtins return.
 #[cfg(feature = "checker")]
-fn signatures_of(heap: &mut Heap, forms: &[Value]) -> Value {
-    let signatures = crate::types::check::file_signatures(heap, forms);
+fn signatures_of(heap: &mut Heap, signatures: &[crate::types::check::FnSignature]) -> Value {
     let mut out = Vec::with_capacity(signatures.len());
-    for signature in &signatures {
+    for signature in signatures {
         let name = heap.alloc_string(&signature.name);
         let rendered = match signature.sig.to_source() {
             Some(text) => heap.alloc_string(&text),

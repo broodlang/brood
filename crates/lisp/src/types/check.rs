@@ -178,7 +178,7 @@ mod unused_binders;
 pub(crate) use imports::ImportScope;
 pub use imports::module_direct_requires;
 pub use module_loading::materialise_referenced_modules;
-pub use signature_capture::{FnSignature, file_signatures};
+pub use signature_capture::{FnSignature, file_signatures, source_signatures_here};
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

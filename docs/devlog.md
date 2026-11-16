@@ -1752,3 +1752,18 @@ of twelve downstream projects surfaced a pre-existing index false positive the s
 narrowing exposed twice (`(nth xs (- n 2))` under `(>= n 3)`), fixed in the `nth` rule.
 Nineteen sabotages, each red. `nest check` over `std/` + `tests/` + `examples/` zero in both
 modes, no slower.
+
+2026-11-16 (a live form's type, derived where it ran). bedit's live buffer showed `calc :
+(any -> any)` for `(defn calc (exp) (to-number exp))` under a `to-number` typed `(string ->
+number)`. The hint was derived in the editor's process, which never ran the earlier form, so
+the callee was an unknown global. `eval-server`'s reply now carries `:type`
+(`eval-server/derived-type`), derived in the session after the form runs; bedit's
+`liveeval/value-hint` prefers it. Inside a module it was still `any`:
+`reflect/source-signatures` read its text as a root file, so a bare call to the module's own
+function missed `mod/to-number`. It now reads under the current compile context, as
+`check-string-here` does (`types::check::source_signatures_here`). The same lookup broke the
+LSP's effective-type inlay hints and its declare-sig action in every module file: the capture
+names a definition `mod/f` and both matched the def site's token `f` whole. They match the last
+segment too. Guards: `tests/eval_server_test.blsp` § "a reply's :type is derived in the
+session" (both cases red before), the LSP's `a_defn_inside_a_module_gets_its_type_too` and
+`declares_the_signature_of_a_defn_inside_a_module`, and bedit's playground test.
