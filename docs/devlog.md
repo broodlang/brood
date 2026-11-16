@@ -1815,3 +1815,8 @@ registries it writes through a registry op that way.
 live typing probe showed bedit's young collections (6–23 ms) landing inside keys: 5 per two
 rounds, the whole p99. A parking process now collects when the young generation is past three
 quarters of its trigger, in the gap between keys: collections inside a turn 5 → 0, p99 30 → 20 ms.
+
+2026-11-16 (ADR-728). **`[:translate drow dcol ops]` moves a rendered piece by rows.** A memo
+fragment was pinned to its screen row, so a scroll missed every row's. The GUI resolves the
+block while it parses (a moved fragment shifted natively, an unmoved one last frame's), the
+harvest resolves it for a flattened frame, and `ui-memo-at` lets a row be keyed by its line.

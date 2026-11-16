@@ -640,6 +640,7 @@ struct GuiOpTags {
     burst_t: value::Symbol,
     seam_t: value::Symbol,
     above_seam_t: value::Symbol,
+    translate_t: value::Symbol,
 }
 impl GuiOpTags {
     fn new() -> Self {
@@ -674,6 +675,7 @@ impl GuiOpTags {
             burst_t: value::intern("burst"),
             seam_t: value::intern("seam"),
             above_seam_t: value::intern("above-seam"),
+            translate_t: value::intern("translate"),
         }
     }
 }
@@ -979,6 +981,24 @@ fn parse_gui_ops(
                 colors,
                 default,
             });
+        } else if tag == tags.translate_t {
+            // [:translate drow dcol inner-ops] — the inner ops moved drow rows down and dcol
+            // columns right, resolved here into ops at absolute cells (ADR-728): nothing past
+            // the parse knows the block was there.
+            let (Ok(drow), Ok(dcol)) = (
+                expect_int(heap, "%gui-draw", arg(&parts, 1)),
+                expect_int(heap, "%gui-draw", arg(&parts, 2)),
+            ) else {
+                continue;
+            };
+            let (Ok(drow), Ok(dcol)) = (i32::try_from(drow), i32::try_from(dcol)) else {
+                continue;
+            };
+            if let Ok(inner_parsed) = frame_ops(heap, arg(&parts, 3), "%gui-draw", "translate ops")
+            {
+                let inner_ops = parse_gui_ops(heap, inner_parsed, tags, pass);
+                pass.push_translated(inner_ops, drow, dcol, &mut ops);
+            }
         } else if tag == tags.scroll_region_t {
             // [:scroll-region dy-frac inner-ops] — shift inner ops upward by dy_frac ×
             // cell_h pixels. Self-resetting block; ops outside are unaffected. ADR-114.

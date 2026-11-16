@@ -30,7 +30,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 2),
         Sig::with_optional(vec![any], vec![any], vec_ty),
         &["frame", "keep-markers?"],
-        "[frame' table]: frame (a vector or list of render ops) with every [:ui/memo key deps ops] (or [:ui/memo key deps ops reused?]) marker replaced by its ops — or, when keep-markers? is truthy, frame itself, markers and all (for a display that takes them: the GUI window parses a reused fragment once, ADR-470) — and a map key -> [deps ops] of the markers. Recurses into a marker's ops and into the ops a block op carries — [:scroll-region frac ops], [:cell-region x y w h px ops] and [:above-seam ops] (whose ops come back as a vector, as they went in). The pass behind editor/ui's memoised view fragments (ADR-336), native because it runs once per frame over every op.",
+        "[frame' table]: frame (a vector or list of render ops) with every [:ui/memo key deps ops] (or [:ui/memo key deps ops reused?]) marker replaced by its ops and every [:translate drow dcol ops] block by its ops moved to absolute cells (ADR-728) — or, when keep-markers? is truthy, frame itself, markers and all (for a display that takes them: the GUI window parses a reused fragment once, ADR-470) — and a map key -> [deps ops] of the markers. Recurses into a marker's ops and into the ops a block op carries — [:scroll-region frac ops], [:cell-region x y w h px ops], [:above-seam ops] and, with the markers kept, [:translate drow dcol ops] (whose ops come back as a vector, as they went in). The pass behind editor/ui's memoised view fragments (ADR-336), native because it runs once per frame over every op.",
         ui_harvest,
     );
     // The text contrast exponent (`gui-text-contrast!`, ADR-337): partial glyph coverage
@@ -117,11 +117,42 @@ struct Tags {
     scroll_region: value::Symbol,
     cell_region: value::Symbol,
     above_seam: value::Symbol,
+    translate: value::Symbol,
+    /// the ops that start `[tag row col …]`
+    row_col: [value::Symbol; 7],
+    /// the ops that start `[tag x y …]` in whole cells
+    col_row: [value::Symbol; 1],
+    frect: value::Symbol,
+}
+
+impl Tags {
+    fn new() -> Tags {
+        Tags {
+            memo: value::intern("ui/memo"),
+            scroll_region: value::intern("scroll-region"),
+            cell_region: value::intern("cell-region"),
+            above_seam: value::intern("above-seam"),
+            translate: value::intern("translate"),
+            row_col: [
+                "text",
+                "cursor",
+                "rect",
+                "image",
+                "vspans",
+                "cells",
+                "cells-rgb",
+            ]
+            .map(value::intern),
+            col_row: ["cursor-zone"].map(value::intern),
+            frect: value::intern("frect"),
+        }
+    }
 }
 
 /// Where an op that CARRIES ops keeps them — `Some(index)` for `[:scroll-region frac ops]`,
-/// `[:cell-region x y w h px ops]` and `[:above-seam ops]`, `None` for a leaf. The harvest has
-/// to recurse into those (a memo marker nested in one is still a marker) and rebuild them around the result.
+/// `[:cell-region x y w h px ops]`, `[:above-seam ops]` and `[:translate drow dcol ops]`,
+/// `None` for a leaf. The harvest has to recurse into those (a memo marker nested in one is
+/// still a marker) and rebuild them around the result.
 fn nested_ops_at(tag: value::Symbol, tags: &Tags, len: usize) -> Option<usize> {
     if tag == tags.scroll_region && len == 3 {
         Some(2)
@@ -129,9 +160,74 @@ fn nested_ops_at(tag: value::Symbol, tags: &Tags, len: usize) -> Option<usize> {
         Some(6)
     } else if tag == tags.above_seam && len == 2 {
         Some(1)
+    } else if tag == tags.translate && len == 4 {
+        Some(3)
     } else {
         None
     }
+}
+
+/// A whole-cell coordinate moved by `delta`: `None` when it lands before the grid's first
+/// row or column — the op is dropped, as the window drops it (`Op::translated`). A
+/// coordinate that is not an integer is left as it is (the op paints nothing sensible
+/// anyway).
+fn moved_cell(coordinate: Value, delta: i64) -> Option<Value> {
+    match coordinate {
+        Value::Int(n) => n.checked_add(delta).filter(|n| *n >= 0).map(Value::int),
+        other => Some(other),
+    }
+}
+
+/// A fractional-cell coordinate (an frect's) moved by `delta`, wherever it lands.
+fn moved_fraction(coordinate: Value, delta: i64) -> Value {
+    match coordinate {
+        Value::Int(n) => Value::int(n.saturating_add(delta)),
+        Value::Float(f) => Value::float(f + delta as f64),
+        other => other,
+    }
+}
+
+/// `op` moved `drow` rows down and `dcol` columns right, for a display that is drawn the
+/// frame flattened (ADR-728) — the terminal, a served client: the same move the GUI window
+/// makes while it parses (`Op::translated`), on the op as data. `None` for an op pushed off
+/// the grid's top or left edge; an op this does not place (pixels, the frame-wide ones)
+/// comes back unmoved.
+fn translated_op(heap: &mut Heap, op: Value, drow: i64, dcol: i64, tags: &Tags) -> Option<Value> {
+    let ValueRef::Vector(id) = op.unpack() else {
+        return Some(op);
+    };
+    let mut parts = heap.vector(id).to_vec();
+    let Some(Value::Keyword(tag)) = parts.first().copied() else {
+        return Some(op);
+    };
+    let (row_at, col_at) = if tags.row_col.contains(&tag) {
+        (1, 2)
+    } else if tags.col_row.contains(&tag) || (tag == tags.cell_region && parts.len() == 7) {
+        (2, 1)
+    } else if tag == tags.frect && parts.len() >= 3 {
+        parts[1] = moved_fraction(parts[1], dcol);
+        parts[2] = moved_fraction(parts[2], drow);
+        return Some(heap.alloc_vector(parts));
+    } else if let Some(at) = (tag != tags.cell_region)
+        .then(|| nested_ops_at(tag, tags, parts.len()))
+        .flatten()
+    {
+        let inner = heap.list_or_vector_items(parts[at])?;
+        let moved = inner
+            .into_iter()
+            .filter_map(|op| translated_op(heap, op, drow, dcol, tags))
+            .collect();
+        parts[at] = heap.alloc_vector(moved);
+        return Some(heap.alloc_vector(parts));
+    } else {
+        return Some(op);
+    };
+    if parts.len() <= row_at.max(col_at) {
+        return Some(op);
+    }
+    parts[row_at] = moved_cell(parts[row_at], drow)?;
+    parts[col_at] = moved_cell(parts[col_at], dcol)?;
+    Some(heap.alloc_vector(parts))
 }
 
 /// Walk `ops`, appending the flattened ops to `out` and every marker to `table`.
@@ -173,6 +269,22 @@ fn harvest_into(
             let entry = heap.alloc_vector2(deps, inner);
             table.push((key, entry));
             out.extend(flat);
+        } else if tag == tags.translate
+            && parts.len() == 4
+            && let (Value::Int(drow), Value::Int(dcol)) = (parts[1], parts[2])
+        {
+            // `[:translate drow dcol ops]`: resolved, its ops harvested and then moved to
+            // absolute cells (ADR-728) — a flattened frame has no blocks a painter must know.
+            let Some(inner_ops) = heap.list_or_vector_items(parts[3]) else {
+                continue;
+            };
+            let mut flat = Vec::with_capacity(inner_ops.len());
+            harvest_into(heap, inner_ops, tags, &mut flat, table, poll)?;
+            for op in flat {
+                if let Some(moved) = translated_op(heap, op, drow, dcol, tags) {
+                    out.push(moved);
+                }
+            }
         } else if let Some(at) = nested_ops_at(tag, tags, parts.len()) {
             // A block op that CARRIES ops (scroll-region, cell-region): harvest inside it
             // and rebuild it around the flattened ops, so a memoised fragment works just
@@ -205,12 +317,7 @@ fn ui_harvest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             frame,
         ));
     };
-    let tags = Tags {
-        memo: value::intern("ui/memo"),
-        scroll_region: value::intern("scroll-region"),
-        cell_region: value::intern("cell-region"),
-        above_seam: value::intern("above-seam"),
-    };
+    let tags = Tags::new();
     let mut table = Vec::new();
     let keep_markers = crate::eval::truthy(arg(args, 1));
     let frame = if keep_markers {
