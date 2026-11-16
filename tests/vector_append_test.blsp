@@ -134,3 +134,15 @@
         (assert= (count back) 802)
         (assert= (seq/take-last back 2) '(:a :b))
         (assert= start (vec (range 800)))))))
+
+(describe "conj onto a vector takes its tail in one append"
+  (test "several elements, none, and a vector that keeps its old versions"
+    (assert= (conj [1] 2 3) [1 2 3])
+    (assert= (conj [1]) [1])
+    (assert= (conj [] [1 2]) [[1 2]])
+    (let (base (conj [] 0)
+          left (conj base :l)
+          right (conj base :r :s))
+      (assert= base [0])
+      (assert= left [0 :l])
+      (assert= right [0 :r :s]))))
