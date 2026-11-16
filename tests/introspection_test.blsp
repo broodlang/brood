@@ -277,7 +277,7 @@
       (is (includes? sig "-> int"))
       ;; the alias was resolved to its record shape, not dropped (which would have read the
       ;; inferred `(any -> any)`-ish signature instead)
-      (is (includes? sig "a: int")))))
+      (is (includes? sig "(record &open :a int)")))))
 
 ;; check-string-here — the checker under the CURRENT compile context, for a REPL or an
 ;; editor's eval-in-buffer: the form is checked the way `eval` is about to resolve it.
@@ -351,11 +351,9 @@
   (test "a record constructor call carries its argument types, from the live image"
     (defrecord ispt (x y))
     (assert= (reflect/expr-type "(:x (ispt 1 2))") "1")
-    ;; rendered by NAME with its fields — `ispt{x: 1, y: 2}` — not as the raw shape
-    (let (t (reflect/expr-type "(ispt 1 2)"))
-      (is (includes? t "ispt{"))
-      (is (includes? t "x: 1"))
-      (is (includes? t "y: 2"))))
+    (assert= (reflect/expr-type "(:y (ispt 1 2))") "2")
+    ;; written by NAME, as a declaration names it, not as the raw shape
+    (assert= (reflect/expr-type "(ispt 1 2)") "ispt"))
 
   (test "a lambda literal types as an arrow"
     (assert= (reflect/expr-type "(fn (n) (str n))") "(any -> string)"))
