@@ -463,6 +463,27 @@ mod tests {
     }
 
     #[test]
+    fn a_translate_takes_its_ops_as_a_list_the_way_ui_memo_at_hands_them() {
+        // `ui-memo-at` answers `[:translate row col (marker)]`: the marker in a LIST. Read
+        // as a vector only, every row of the editor painted nothing.
+        let mut heap = Heap::new();
+        let line = text(&mut heap, 0, "row");
+        let ops = heap.alloc_vector(vec![line]);
+        let row = marker(&mut heap, "line", ops, false);
+        let listed = heap.list_from_slice(&[row]);
+        let block = heap.alloc_vector(vec![
+            Value::Keyword(value::intern("translate")),
+            Value::int(3),
+            Value::int(1),
+            listed,
+        ]);
+        let mut pass = FragmentPass::empty();
+        let parsed = parse(&heap, vec![block], &mut pass);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(text_at(&shared(&parsed[0])[0]), (3, 1));
+    }
+
+    #[test]
     fn a_translate_moves_every_cell_op_and_drops_what_leaves_the_grid() {
         let mut heap = Heap::new();
         let below = text(&mut heap, 1, "kept");

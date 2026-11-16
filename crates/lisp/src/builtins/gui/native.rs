@@ -994,9 +994,10 @@ fn parse_gui_ops(
             let (Ok(drow), Ok(dcol)) = (i32::try_from(drow), i32::try_from(dcol)) else {
                 continue;
             };
-            if let Ok(inner_parsed) = frame_ops(heap, arg(&parts, 3), "%gui-draw", "translate ops")
-            {
-                let inner_ops = parse_gui_ops(heap, inner_parsed, tags, pass);
+            // the ops a list or a vector: `ui-memo-at` hands its one marker as a list, as
+            // `ui-memo` answers it
+            if let Some(items) = heap.list_or_vector_items(arg(&parts, 3)) {
+                let inner_ops = parse_gui_ops(heap, tagged_ops(heap, items), tags, pass);
                 pass.push_translated(inner_ops, drow, dcol, &mut ops);
             }
         } else if tag == tags.scroll_region_t {
