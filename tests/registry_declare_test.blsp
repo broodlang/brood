@@ -32,7 +32,7 @@
       (when (and (string/ends-with? path ".blsp") (not (string/starts-with? path "std/prelude/")))
         ;; comment lines dropped: a comment may quote the very declaration it warns against
         (let (text (string/join (seq/reject (string/split (file/slurp path) "\n")
-                                   (fn (line) (string/starts-with? (string/trim line) ";")))
+                                  (fn (line) (string/starts-with? (string/trim line) ";")))
                      "\n"))
           (when (includes? text "(defmodule") [path text]))))))
 
