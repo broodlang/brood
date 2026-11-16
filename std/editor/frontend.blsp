@@ -69,6 +69,7 @@ Merge the result into the display map.
      :size term/size
      :draw term/draw
      :poll-input (fn () (ui-take-input))
+     :input-pending? (fn () (proc/priority-pending?))
      :key-held? (fn () (not (nil? (term/held-key))))
      ;; the screen was forgotten (a resize, a continue): draw though the model is unchanged
      :repaint-due? (fn () (term/repaint-due?))
@@ -220,6 +221,8 @@ replies / the other kind untouched — and return the last. A `:move` never swal
 ;; served session's from its thin client's `[:key …]` messages. Each display says which
 ;; through two entries:
 ;;   :poll-input   a 0-arg fn: the next queued INPUT or nil, at once, touching nothing else
+;;   :input-pending?  a 0-arg fn: whether `:poll-input` would answer something, taking
+;;                 nothing — what long work inside a turn asks to stop for a key
 ;;   :poll-tagged  `(fn (ms) …)`: the OLDEST message of any kind, waiting up to `ms`, as
 ;;                 `[message input?]` — nil on timeout
 ;; `:poll` stays what it always was (`:poll-tagged` without the tag), for callers outside
@@ -258,6 +261,18 @@ answers nil, so the loop folds what its `:poll` returns in arrival order, as bef
     (editor/frontend/display-poll-input {})   ;=> nil"
   (let (poll-input (get display :poll-input))
     (if poll-input (poll-input) nil)))
+
+(defn display-input-pending? (display)
+  "Whether user input is queued for `display` that [[display-poll-input]] would take — without
+taking it: its `:input-pending?`. What work that runs long inside a turn asks between its
+slices, so a key that arrived stops it at the next slice instead of waiting it out (ADR-490's
+input first, inside the turn). A display that cannot tell answers false, so the work runs to
+its end there, as before.
+
+    (editor/frontend/display-input-pending? {:input-pending? (fn () true)})   ;=> true
+    (editor/frontend/display-input-pending? {})   ;=> false"
+  (let (pending (get display :input-pending?))
+    (if (nil? pending) false (= true (pending)))))
 
 (defn display-poll-tagged (display ms)
   "The oldest message for `display`, waiting up to `ms`, as `[message input?]`, or nil on
@@ -378,6 +393,8 @@ their input. Both are deferred trade-offs (ADR-059), fine for the observer.
        ;; kind. The window delivers on the priority lane, so `:poll-input` takes its input
        ;; ahead of a background backlog (ADR-490).
        :poll-input ui-take-input
+       ;; a key or click on the priority lane, asked without taking it
+       :input-pending? (fn () (proc/priority-pending?))
        ;; Raise this window to the front + focus it (un-minimising) — `ui-run` calls
        ;; this when a `:focus` control message lands in the mailbox, so another process
        ;; can surface an already-open singleton window (e.g. a second `(observe)`).
@@ -444,7 +461,8 @@ fits everywhere. Pure Brood over the `term-*`/`gui-*` mechanism.
           :draw (fn (f) (doseq (d displays) ((get d :draw) f)))
           :settle (fn () (doseq (d displays) (when (get d :settle) ((get d :settle)))))
           :key-held? (fn () (any? displays display-key-held?))
-          :poll-input (fn () (display-poll-input-any displays))}
+          :poll-input (fn () (display-poll-input-any displays))
+          :input-pending? (fn () (any? displays display-input-pending?))}
     (display-polls (fn (ms) (display-poll-any displays ms)))))
 
 (defn with-events (display)

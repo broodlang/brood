@@ -291,6 +291,22 @@ whatever it throws is logged, never kept from the exit. nil, so the loop stops."
 ;; this, not a registered name like `:editor`, which is true of exactly one loop — a second
 ;; window or a daemon's per-client loop would read as "no loop" and do the work inline.
 
+(defdyn editor/ui/*display* nil)
+;; The display the `ui-run` loop this code runs inside draws on and takes its input from —
+;; bound beside `*loop*` for the loop's whole life, nil outside one. Read through
+;; [[ui-input-pending?]], which is the question an app asks of it.
+
+(defn ui-input-pending? ()
+  "Whether the user's input is waiting for the loop this code runs inside — a key or a click
+the display has queued and not yet handed over (`editor/frontend/display-input-pending?`).
+Work that runs long INSIDE a turn — a slice of idle jobs, a chunk of background folding —
+asks this between its pieces and stops early when it says yes, so the key is folded and
+drawn next rather than after the work (ADR-490's input first, inside the turn). False outside
+a loop, and on a display that cannot tell.
+
+    (editor/ui/ui-input-pending?)   ;=> false"
+  (if (nil? editor/ui/*display*) false (editor/frontend/display-input-pending? editor/ui/*display*)))
+
 (defdyn editor/ui/*memo* nil)
 ;; The previous turn's memo table — `{key -> [deps ops]}` — while `view` runs inside
 ;; `ui-loop`; nil outside a loop (a test calling a view directly, a headless render),
@@ -1002,7 +1018,9 @@ non-blocking window. The shared loop behind the observer (and the editor)."
       (do
         ;; nil last-good: first render must succeed. {} clock: a fresh timer bookkeeping
         ;; map (last-input/armed/fired filled lazily on the first iteration).
-        (binding (editor/ui/*loop* (self) editor/ui/*slow-reports* (table/new))
+        (binding (editor/ui/*loop* (self)
+                  editor/ui/*display* display
+                  editor/ui/*slow-reports* (table/new))
           (ui-loop model nil {} view update display))
         (proc/set-quit-key nil 0)
         ((get display :leave)))

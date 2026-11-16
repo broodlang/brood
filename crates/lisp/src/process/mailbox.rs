@@ -2524,6 +2524,16 @@ pub fn mailbox_len(pid: u64) -> Option<usize> {
     with_mailbox(pid, |mb| crate::core::sync::lock(&mb.state).queue.len())
 }
 
+/// Whether local process `pid`'s mailbox holds a PRIORITY-lane message (a window's input,
+/// `proc/send-priority`), or `None` if no live local process has that id. O(1): the count
+/// every push and removal keeps (`priority_queued`), read without taking anything — what
+/// a UI loop asks between slices of background work to stop for a key (`proc/priority-pending?`).
+pub fn priority_pending(pid: u64) -> Option<bool> {
+    with_mailbox(pid, |mb| {
+        crate::core::sync::lock(&mb.state).priority_queued > 0
+    })
+}
+
 /// Set (or with `None` clear) `pid`'s mailbox bound, returning the previous one —
 /// the `(proc/flag :max-mailbox n)` mechanism (ADR-307). Clearing also clears a
 /// pending breach, so doing it inside a `catch` genuinely rescues the process.
