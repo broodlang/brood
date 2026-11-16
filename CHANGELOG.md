@@ -6,6 +6,51 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.54.0 — a window that feels native: paced to the compositor, hinted like the desktop, edits that stay O(log n)
+
+**Added: the window keeps the desktop's time and draws its text the desktop's way (ADR-726, ADR-730).**
+- The window steps by its monitor's refresh rate and paints on the compositor's clock (Wayland
+  frame callbacks), so a burst of frames paints once per refresh instead of queueing. The
+  kinetic scroll coast covers the same distance at 60 Hz or 144 Hz. Installed fonts are
+  scanned in the background after the first paint.
+- `gui/desktop-preferences` answers the desktop's colour scheme, reduced motion, text
+  rendering and caret blink, from GNOME's gsettings or KDE's kdeglobals.
+  `gui/text-rendering-from` and `gui/cursor-blink-from` are the pure readers behind it.
+- `gui/text-hinting` (`:auto`, the default, is slight at 1× and none on HiDPI, as GTK 4 does it;
+  also `:slight`, `:medium`, `:full` and `:none`) and `:text-hinting` in a `render-frame` spec. Slight
+  hinting matches FreeType's hintslight to the byte, so text in a Brood window is drawn like
+  text in every other app on a GNOME desktop. `gui/follow-text-rendering` applies a
+  desktop's anti-aliasing and hinting in one call.
+- `proc/priority-pending?` (O(1), takes nothing) and `editor/ui/ui-input-pending?` let long work
+  inside one turn ask whether a key is waiting.
+
+**Added: pieces any app can build on.**
+- `editor/span-tree` (ADR-731): ascending `[start end value]` spans as a persistent balanced
+  tree. Inserting, deleting, replacing or clipping costs O(log n) whatever the span count.
+  Text properties use it: a key at the top of 10,000 spans went from 5.3 ms to 0.23 ms.
+  `span-properties` gains `properties->data`, `properties-same?`, `properties-in` and
+  `properties-spans`. `buffer-property-map` still answers plain data, and
+  `buffer-property-store` is the stored map.
+- `[:translate drow dcol ops]` render op and `editor/ui/ui-memo-at` (ADR-728): a memoised fragment
+  moves with a scroll instead of being rebuilt. The GUI shifts it natively, and terminals
+  and served clients get it flattened.
+- `reflect/scan-bracket-partner` (ADR-729): a bracket's partner, read with the reader's lexer.
+  bracket-match after `(` went from 1.7 ms to 0.23 ms.
+- `settings/declare-file`, `file-claim` and `file-diagnostics` (ADR-428 addendum): an editor
+  checks a config file's keys while it is open.
+
+**Faster.**
+- A process collects garbage as it parks when its next collection is near (ADR-727).
+  `BROOD_GC_PARK_EARLY` tunes it. In bedit's typing probe no collection landed inside a key's
+  turn any more, and key p99 went from 30 ms to 20 ms.
+- `conj` onto a vector is one append: 3.7× on a conj loop. `buffer-type-for` scans file
+  patterns only when no type is set.
+
+**Fixed.**
+- The face registry survives `editor/face` loading after an image restored it (KI-396).
+- The checker bounds an `nth` index by its base: `(let (last (dec n)) (nth xs last))` reads as
+  an element.
+
 ## v0.53.0 — inferred type guards and reverse arrows, types you can paste, Rust 1.100
 
 **Changed: a type you read is written the way you write one.**
