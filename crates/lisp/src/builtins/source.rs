@@ -68,7 +68,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
 /// The file a parse error from one of the string readers belongs to. Its position is
 /// a line and column INSIDE the string, so without a file of its own the file runner
 /// filled in the caller's — a lockfile's `1:1` was reported as `std/tool/package.blsp:1:1`.
-const STRING_SOURCE: &str = "<string>";
+pub(super) const STRING_SOURCE: &str = "<string>";
 
 pub(super) fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "reflect/read-string", arg(args, 0))?;

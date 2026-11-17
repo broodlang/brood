@@ -528,7 +528,15 @@ pub(super) fn dynamic_loaders(_: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 pub(super) fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let src = expect_string(heap, "reflect/eval-string", arg(args, 0))?;
     heap.note_dynamic_load_eval();
-    eval_string_inner(heap, env, &src, false)
+    // The string's forms are in no file. Left as they were, they took the name of whatever
+    // file was loading — so an error in the string reported `caller.blsp:1:25`, the string's
+    // line and column under the caller's name, a place in the caller where nothing failed.
+    // An error leaving with a position but no file is the string's (`or_file` keeps the file
+    // of one raised inside a std or project function), as `reflect/read-string`'s are.
+    let previous_file = heap.set_current_file(None);
+    let result = eval_string_inner(heap, env, &src, false);
+    heap.set_current_file(previous_file);
+    result.map_err(|error| error.or_file(super::source::STRING_SOURCE))
 }
 
 /// `(%load-string "src")` / `(%load-string "src" "name")` — the string analogue of

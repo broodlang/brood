@@ -63,3 +63,15 @@
     (let (file (try (pep-mod 7) (catch e (get e :file))))
       (is (string? file))
       (is (string/ends-with? file "math.blsp")))))
+
+;; Code evaluated from a string is in no file. Its forms took the name of whatever file was
+;; loading, so an error in it reported THIS file with the string's line and column — a place
+;; here where nothing failed (2026-11-17).
+(describe "an error in evaluated source does not name the caller's file"
+  (test "reflect/eval-string's error carries the string's position, in <string>"
+    (let (error (try (reflect/eval-string "\n\n(+ 1 :z)") (catch caught caught)))
+      (is (= 3 (get error :line)))
+      (is (= "<string>" (get error :file)))))
+  (test "an error raised inside a std function keeps that function's file"
+    (let (error (try (reflect/eval-string "(math/mod 7 0)") (catch caught caught)))
+      (is (string/ends-with? (str (get error :file)) "math.blsp")))))

@@ -23,6 +23,13 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: an error in `reflect/eval-string`'s source is located in `<string>`.** Its forms
+took the name of whatever file was loading, so an error reported the caller's file with the
+string's line and column — `caller.blsp:1:25`, a place where nothing failed — and under
+`nest eval` some errors pointed into `std/tool/nest.blsp`. They now read `<string>:1:25`, as
+`reflect/read-string`'s parse errors already did; one raised inside a std function keeps
+that function's file.
+
 **Fixed: a keyword reducer fits a multi-clause callee.** `(reduce xs {} :a)` was "no clause
 accepts these arguments": `reduce`'s call is matched against its two clauses, where a keyword
 literal read only as a keyword, though `(:a acc item)` is a lookup with a default. It now
