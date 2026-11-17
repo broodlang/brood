@@ -273,6 +273,26 @@
           "malformed &optional parameter (a 1 2)"))
     (is (= 1 ((fn (&optional (a 1)) a)))))
 
+  ;; A string is not a sequence. `(into "" xs)` answered a list and `(append "" xs)` passed
+  ;; `""` as an empty list, while a non-empty string failed inside `rest`, `apply` or
+  ;; `%raise` — every error named a function the caller never called.
+  (test "a string where a sequence belongs is refused by the function called"
+    (doseq (text ["" "ab"])
+      ;; check-allow: each call hands a string where a sequence belongs, on purpose.
+      (doseq (example (check-allow :type-mismatch
+                        [["into" (fn () (into text [1]))]
+                          ["into" (fn () (into [] text))]
+                          ["vec" (fn () (vec text))]
+                          ["reverse" (fn () (reverse text))]
+                          ["append" (fn () (append text [1]))]
+                          ["append" (fn () (append [1] text))]
+                          ["fold" (fn () (fold text 0 +))]
+                          ["reduce" (fn () (reduce text +))]
+                          ["map" (fn () (map text inc))]]))
+        (let ([who thunk] example
+              message (try (do (thunk) nil) (catch error (error-message error))))
+          (is (includes? (str message) (str who ": expected a sequence, got string")))))))
+
   (test "a sig names a type or a property"
     (is (includes? (str (expand-error '(sig malformed-sig-probe)))
           "sig malformed-sig-probe: expected a type"))))

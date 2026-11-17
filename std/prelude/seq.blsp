@@ -254,6 +254,10 @@ Always true for `n` <= 0.
 ;; onto the reversed accumulator, then reverse once — so we never materialise the
 ;; intermediate list-of-sublists nor spread it through `apply append`.
 
+;; Whether either of `into`'s arguments is a string. Its own function, untyped: inside
+;; `into` the parameters are declared `seqable`, which the checker reads as never a string.
+(defn- %string-in? (to from) (if (%eq (type-of to) :string) true (%eq (type-of from) :string)))
+(defn- %the-string (to from) (if (%eq (type-of to) :string) to from))
 (defn into (to:seqable from:seqable -> any)
   "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a **set**, items are added and duplicates collapse (set result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work.
 
@@ -273,6 +277,10 @@ Always true for `n` <= 0.
     ;; A plain map poured into an EMPTY map is the answer itself, as with vectors below.
     ;; A record target (ADR-542) conj's each item through `Conjable` (a custom collection
     ;; defines how); a record `from` is read through `seq`, its fields by default.
+    ;; A string on either side is not a sequence (`seqable` excludes it, so the checker
+    ;; reports such a call): at run time `(into "" xs)` answered a LIST, and anything else
+    ;; failed inside `rest`/`apply`/`%map-into`, naming none of them `into`.
+    (%string-in? to from) (%refuse-string "into" (%the-string to from))
     (%record? to) (fold (seq from) to %conj-one)
     (map? to)
       (cond

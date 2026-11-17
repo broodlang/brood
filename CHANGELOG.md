@@ -23,6 +23,14 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: a string where a sequence belongs is refused by the function called.** `(into ""
+xs)` answered a list and `(append "" xs)` or `(reverse "")` treated `""` as an empty list,
+while a non-empty string failed inside `rest`, `apply`, `%map-into` or `%raise`, naming a
+function the caller never called. `into`, `vec`, `reverse`, `append`, `fold`, `reduce`,
+`map` and `seq/filter` now each raise `NAME: expected a sequence, got string`, with the hint
+to walk it through `string/->list`. Found by a checker-soundness oracle: random expressions
+that run must draw no type finding, and these ran where the checker said they could not.
+
 **Fixed: two formatter bugs found by formatting random readable text.** `~ @z` — unquote
 of the symbol `@z`, since `@` is a symbol character — was printed `~@z`, which reads as a
 splice of `z`: formatting changed the code's meaning. And a list opening with a comment laid
