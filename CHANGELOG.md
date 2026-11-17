@@ -6,6 +6,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Fixed: `if-let`, `when-let`, `if-some`, `when-some` and `with` refuse a malformed
+binding.** They took `first` and `second` of it, so `(when-let (a 1 b) …)` dropped `b`,
+`(if-let (a) …)` bound `a` to nil and `(with (a) …)` ran its body; `let` already refused all
+three. Each now fails at expansion, naming the form and the binding it got.
+
 **Fixed: `(check-allow :typo …)` is reported.** A category the checker does not know
 suppressed nothing and said nothing, so a misspelt `:type-mismach` left its lint on with no
 explanation; the header's `(:check-allow …)` clause already reported one. The form now does
