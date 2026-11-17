@@ -246,7 +246,9 @@ impl<'a> TextInk<'a> {
         )
     }
 
-    /// Composite the text over pixel `dst` at coverage `cov`.
+    /// Composite the text over pixel `dst` at coverage `cov`: the blend the tables hold
+    /// ([`TextInk::over_with`]), kept as their reference.
+    #[cfg(test)]
     pub(super) fn over(&self, dst: u32, cov: u8) -> u32 {
         match cov {
             0 => dst,
@@ -263,6 +265,7 @@ impl<'a> TextInk<'a> {
     /// The subpixel sibling of [`TextInk::over`]: a coverage per colour channel (`cov[0]`
     /// red, `[1]` green, `[2]` blue), each corrected as a gray glyph's would be, so a gray
     /// and an LCD glyph side by side carry the same weight.
+    #[cfg(test)]
     pub(super) fn over_rgb(&self, dst: u32, cov: [u8; 3]) -> u32 {
         if cov == [0, 0, 0] {
             return dst;
@@ -276,6 +279,113 @@ impl<'a> TextInk<'a> {
             encode_byte(self.fg_linear[k] * a + ground[k] * (1.0 - a))
         };
         (ch(0) << 16) | (ch(1) << 8) | ch(2)
+    }
+}
+
+/// One (text colour, ground pixel, lift) pair's finished blends, by coverage: for each
+/// coverage byte the three encoded channels [`TextInk::over_rgb`] would write, filled the
+/// first time that coverage is drawn over that ground. A gray rim pixel reads its three
+/// bytes; a subpixel one reads channel `k` at `cov[k]`, as `over_rgb` blends channel `k`
+/// alone. So a rim pixel is three table reads where it was a `powf` (a gray rim) or three
+/// (a subpixel one), and the answer is the same bytes: the table holds what the blend
+/// computed.
+pub(super) struct BlendTable {
+    known: [u64; 4],
+    bytes: [[u8; 256]; 3],
+}
+
+impl BlendTable {
+    fn new() -> BlendTable {
+        BlendTable {
+            known: [0; 4],
+            bytes: [[0; 256]; 3],
+        }
+    }
+
+    /// Fill coverage `cov`'s three channels for `ink` over the ground `dst`, unless known.
+    #[inline]
+    fn ensure(&mut self, ink: &TextInk, dst: u32, cov: u8) {
+        let (word, bit) = ((cov >> 6) as usize, 1u64 << (cov & 63));
+        if self.known[word] & bit != 0 {
+            return;
+        }
+        let (ground, lum, encoded) = ink.ground(dst);
+        let a = ink.alpha(cov, lum, encoded);
+        for k in 0..3 {
+            self.bytes[k][cov as usize] =
+                encode_byte(ink.fg_linear[k] * a + ground[k] * (1.0 - a)) as u8;
+        }
+        self.known[word] |= bit;
+    }
+}
+
+/// The [`BlendTable`]s of the pairs drawn lately, by (text colour, ground pixel, lifted?).
+/// A screen of text has a few dozen pairs (each face's colour over each band it sits on), so
+/// past [`BLEND_TABLES_MAX`] the set is dropped and refilled. The lift curve is the
+/// renderer's one `cov_lut`: when it changes the tables are dropped ([`BlendTables::clear`]).
+#[derive(Default)]
+pub(super) struct BlendTables {
+    tables: HashMap<
+        (u32, u32, bool),
+        Box<BlendTable>,
+        std::hash::BuildHasherDefault<super::render::PaintHasher>,
+    >,
+}
+
+/// The most (colour, ground, lift) tables kept before the set is dropped and refilled: far
+/// past a screen's few dozen pairs, so only a frame of gradients or pictures under text
+/// reaches it, and it bounds the tables at about 3 MB (`BlendTable` is 800 bytes).
+const BLEND_TABLES_MAX: usize = 4096;
+
+impl BlendTables {
+    pub(super) fn clear(&mut self) {
+        self.tables.clear();
+    }
+
+    /// The table for `ink` over the ground pixel `dst`.
+    #[inline]
+    pub(super) fn table(&mut self, ink: &TextInk, dst: u32) -> &mut BlendTable {
+        if self.tables.len() >= BLEND_TABLES_MAX {
+            self.tables.clear();
+        }
+        self.tables
+            .entry((pack(ink.fg), dst, ink.lift.is_some()))
+            .or_insert_with(|| Box::new(BlendTable::new()))
+    }
+}
+
+impl TextInk<'_> {
+    /// [`TextInk::over`] through `table`, the blend table of this ink over `dst`.
+    #[inline]
+    pub(super) fn over_with(&self, table: &mut BlendTable, dst: u32, cov: u8) -> u32 {
+        match cov {
+            0 => dst,
+            255 => pack(self.fg),
+            _ => {
+                table.ensure(self, dst, cov);
+                let c = cov as usize;
+                ((table.bytes[0][c] as u32) << 16)
+                    | ((table.bytes[1][c] as u32) << 8)
+                    | table.bytes[2][c] as u32
+            }
+        }
+    }
+
+    /// [`TextInk::over_rgb`] through `table`, the blend table of this ink over `dst`.
+    #[inline]
+    pub(super) fn over_rgb_with(&self, table: &mut BlendTable, dst: u32, cov: [u8; 3]) -> u32 {
+        if cov == [0, 0, 0] {
+            return dst;
+        }
+        if cov == [255, 255, 255] {
+            return pack(self.fg);
+        }
+        for channel_coverage in cov {
+            table.ensure(self, dst, channel_coverage);
+        }
+        ((table.bytes[0][cov[0] as usize] as u32) << 16)
+            | ((table.bytes[1][cov[1] as usize] as u32) << 8)
+            | table.bytes[2][cov[2] as usize] as u32
     }
 }
 

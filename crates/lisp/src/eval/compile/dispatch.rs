@@ -31,10 +31,46 @@ pub(crate) fn dispatch(
 ) -> Result<Step, LispError> {
     let mut callee = callee;
     let mut argv = argv;
-    loop {
-        match dispatch_once(heap, callee, argv, tail, genv) {
+    // The `roots` slot holding a contract shim whose RESULT this call still owes a check
+    // (ADR-748), once `dispatch_once` entered one and forwarded to its original.
+    let mut result_contract: Option<usize> = None;
+    let outcome = loop {
+        match dispatch_once(heap, callee, argv, tail, genv, &mut result_contract) {
             Err(error) if error.is_redirect() => (callee, argv) = heap.take_redirect(),
-            outcome => return outcome,
+            outcome => break outcome,
+        }
+    };
+    let Some(slot) = result_contract else {
+        return outcome;
+    };
+    let shim = heap.root_at(slot);
+    heap.truncate_roots(slot);
+    match outcome? {
+        // A VM callee comes back un-run: the check goes with it, for the driver to keep
+        // as a return handler.
+        Step::Tail {
+            compiled,
+            args,
+            genv,
+            bases,
+            result_contract: None,
+        } if tail => Ok(Step::Tail {
+            compiled,
+            args,
+            genv,
+            bases,
+            result_contract: Some(shim),
+        }),
+        // Ran to completion here (a native, a tree-walked or a nested VM callee) — or
+        // un-run where the caller wanted a value: check the value now.
+        step => {
+            heap.push_root(shim);
+            let value = force(heap, step);
+            let shim = heap.root_at(slot);
+            heap.truncate_roots(slot);
+            Ok(Step::Done(crate::builtins::contracts::finish_checked(
+                heap, shim, value?,
+            )?))
         }
     }
 }
@@ -45,6 +81,7 @@ fn dispatch_once(
     argv: SmallVec<[Value; 4]>,
     tail: bool,
     genv: EnvId,
+    result_contract: &mut Option<usize>,
 ) -> Result<Step, LispError> {
     // A builtin other than `apply` — the arm-less call-IC hit's usual callee — is exactly
     // `call_native`: the passthrough loop below only redirects closures, the unfolding only
@@ -83,6 +120,37 @@ fn dispatch_once(
                 ValueRef::Fn(id) => id,
                 _ => break,
             };
+            // A contract shim (ADR-748): when every argument is vouched for, call its
+            // original in its place, and owe the caller the result check the shim's own
+            // frame would have made — one check per call: a second shim in the same chain
+            // whose result the first does not already promise is run as itself, its frame
+            // then making its own check inside the one owed. Anything the kernel cannot
+            // vouch for runs the shim, whose Brood checks blame.
+            match crate::builtins::contracts::enter_shim(heap, id, &cur_argv) {
+                Some(crate::builtins::contracts::ShimEntry::Forward {
+                    original,
+                    check_result,
+                }) => {
+                    if check_result {
+                        let owed = result_contract.map(|slot| heap.root_at(slot));
+                        match owed {
+                            None => {
+                                *result_contract = Some(heap.roots_len());
+                                heap.push_root(cur_callee);
+                            }
+                            Some(owed)
+                                if crate::builtins::contracts::same_result_type(
+                                    heap, owed, cur_callee,
+                                ) => {}
+                            Some(_) => break,
+                        }
+                    }
+                    cur_callee = original;
+                    continue;
+                }
+                Some(crate::builtins::contracts::ShimEntry::Run) => break,
+                None => {}
+            }
             let Some((head, map)) = crate::eval::passthrough_arm(heap, id, cur_argv.len()) else {
                 break;
             };
@@ -185,6 +253,7 @@ fn dispatch_once(
                     args: cur_argv,
                     genv: callee_env,
                     bases,
+                    result_contract: None,
                 });
             }
             // JIT fast path: call jit_tier directly, bypassing vm_run_bc's per-call
@@ -398,7 +467,12 @@ fn fill_captures_from(heap: &mut Heap, arm: &CompiledArm, base: usize, cenv: Env
 /// caches a wrapper's own arm instead (ADR-408), so it does not use this.
 pub(super) fn call_site_arm(heap: &Heap, v: Value, argc: usize) -> Option<(Arc<ArmHandle>, EnvId)> {
     match v.unpack() {
-        ValueRef::Fn(id) if crate::eval::passthrough_arm(heap, id, argc).is_none() => {
+        // A contract shim is the dispatcher's to enter (ADR-748), as a wrapper is its to
+        // redirect: never cached as an arm the call would run directly.
+        ValueRef::Fn(id)
+            if crate::eval::passthrough_arm(heap, id, argc).is_none()
+                && !crate::builtins::contracts::is_entered_shim(heap, id) =>
+        {
             compiled_arm_for(heap, id, argc).map(|arm| {
                 let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
                 (arm, cenv)

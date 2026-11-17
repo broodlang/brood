@@ -1178,7 +1178,6 @@ fn incr_hashed(
     key: Value,
     delta: i64,
 ) -> Result<Result<i64, IncrMiss>, LispError> {
-    let km = to_message(heap, key)?;
     let hash = heap.hash_value(key);
     let bucket = map.entry(hash).or_default();
     let idx = find_idx(heap, bucket, key);
@@ -1193,11 +1192,67 @@ fn incr_hashed(
     let Some(next) = cur.checked_add(delta) else {
         return Ok(Err(IncrMiss::Overflow));
     };
+    // The key is copied out of the heap only for an insert: a counter bumped again (the
+    // common case — a compound key like `[:calls name]` cost an allocation and a deep copy
+    // per bump) keeps the key it was stored under. A found key equals a stored one, so it
+    // is sendable and the skipped `to_message` could not have failed.
     match idx {
         Some(i) => bucket[i].1 = Message::Int(next),
-        None => bucket.push((km, Message::Int(next))),
+        None => bucket.push((to_message(heap, key)?, Message::Int(next))),
     }
     Ok(Ok(next))
+}
+
+/// `(%table-tally t k deltas)` — **atomically** add each of `deltas` to the matching field of
+/// the tally at `k`: a vector of integers as long as `deltas`, an absent key counting as all
+/// zeros. Returns the new tally as a fresh vector. One lock and one key lookup for every field
+/// — a time-and-calls counter was two `incr`s, the second under a compound `[:calls name]` key
+/// (ADR-742). Errors (leaving the table untouched) when the stored value is not a vector of
+/// that many `i64`s, or when a field would leave the ±2^63 range.
+pub fn tally(heap: &mut Heap, id: u64, key: Value, deltas: &[i64]) -> LispResult {
+    let store = lookup(id)?;
+    let totals = {
+        let mut guard = lock(&store.hashed);
+        let map = store.hashed_or_migrate(&mut guard)?;
+        let hash = heap.hash_value(key);
+        let bucket = map.entry(hash).or_default();
+        let idx = find_idx(heap, bucket, key);
+        let mut totals: Vec<i64> = match idx {
+            Some(i) => match &bucket[i].1 {
+                Message::Vector(fields)
+                    if fields.len() == deltas.len()
+                        && fields.iter().all(|field| matches!(field, Message::Int(_))) =>
+                {
+                    fields
+                        .iter()
+                        .map(|field| match field {
+                            Message::Int(n) => *n,
+                            _ => 0,
+                        })
+                        .collect()
+                }
+                _ => {
+                    return Err(LispError::type_err(format!(
+                        "table/tally: the value at this key is not a tally of {} integers",
+                        deltas.len()
+                    )));
+                }
+            },
+            None => vec![0; deltas.len()],
+        };
+        for (total, delta) in totals.iter_mut().zip(deltas) {
+            *total = total.checked_add(*delta).ok_or_else(|| {
+                LispError::runtime("table/tally: a field would exceed the ±2^63 range")
+            })?;
+        }
+        let stored = Message::Vector(totals.iter().map(|n| Message::Int(*n)).collect());
+        match idx {
+            Some(i) => bucket[i].1 = stored,
+            None => bucket.push((to_message(heap, key)?, stored)),
+        }
+        totals
+    };
+    Ok(heap.alloc_vector(totals.into_iter().map(Value::int).collect()))
 }
 
 /// `(%table-snapshot t)` — a point-in-time copy of the whole table as an immutable

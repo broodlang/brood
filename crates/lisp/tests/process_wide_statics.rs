@@ -88,6 +88,8 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // What the one tty shows now, cell by cell, and its colour depth (ADR-586): the next
     // frame writes only what differs from it, whichever runtime draws.
     ("builtins/terminal/native.rs", "TERMINAL_SCREEN", OneMachine),
+    // The one tty's presses read as click chains: the terminal sends each press alone.
+    ("builtins/terminal/native.rs", "TERMINAL_CLICKS", OneMachine),
     // The net reactor multiplexes every socket in the OS process on one thread.
     ("host/net.rs", "STARTING", OneMachine),
     // One audio thread owns the output device for the whole OS process.
@@ -206,10 +208,6 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("diagnostics/coverage.rs", "LINES", Diagnostic),
     ("diagnostics/profile.rs", "SAMPLES", Diagnostic),
     ("core/heap/features_audit.rs", "EVER_BOUND", Diagnostic),
-    // The macro-shadow warning's once-per-definition set (ADR-423): it decides only whether
-    // a line goes to stderr, which is the OS process's, so one runtime can only spare
-    // another a duplicate line.
-    ("eval/macros/resolve.rs", "WARNED", Diagnostic),
     // The tier-0 escape audit's sites already written (ADR-416 stage 1).
     ("eval/compile/vm_run_bc.rs", "SEEN", Diagnostic),
     ("core/heap/vm_cache.rs", "PUBLISHED_FAST_LINKS", Diagnostic),

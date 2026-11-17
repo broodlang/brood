@@ -130,12 +130,13 @@ pub fn completions(
     // Then the interpreter's globals (prelude + builtins + every `mod/name` for
     // explicit qualified completion).
     for name in introspect::global_names(interp) {
-        // `%`-prefixed names are the kernel primitives and the prelude's internals
+        // `%`-names are the kernel primitives and the prelude's internals, bare or qualified
+        // (`string/%orig%char-at`, a contract's uncontracted copy)
         // (ADR-250 moved 203 of the latter behind the prefix, taking `%` globals from
         // 313 to 521). They are not vocabulary a user should be offered — half the
         // completion list would be plumbing — and `apropos`/`doc-search` filter them
         // for the same reason.
-        if name.starts_with('%') {
+        if brood::introspect::is_internal_name(&name) {
             continue;
         }
         if seen.insert(name.clone()) {
@@ -491,6 +492,25 @@ mod tests {
         assert!(labels.contains(&"f".to_string()), "doc def missing");
         assert!(labels.contains(&"+".to_string()), "global missing");
         assert!(labels.contains(&"let".to_string()), "special form missing");
+    }
+
+    /// No `%`-name is offered, bare or qualified: `string/%orig%char-at` is a contract's
+    /// uncontracted copy, and the kernel's primitives are plumbing.
+    #[test]
+    fn internal_names_are_not_offered() {
+        let labels = labels_at("(defn f (x) (str x))", "str x");
+        assert!(
+            labels
+                .iter()
+                .all(|label| !brood::introspect::is_internal_name(label)),
+            "{:?}",
+            labels
+                .iter()
+                .filter(|label| label.contains('%'))
+                .take(5)
+                .collect::<Vec<_>>()
+        );
+        assert!(labels.contains(&"string/join".to_string()) || labels.contains(&"str".to_string()));
     }
 
     #[test]

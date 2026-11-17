@@ -184,11 +184,12 @@ fn a_local_binding_shadows_the_function_for_the_recursion_lint() {
 #[test]
 fn a_guard_calling_a_module_function_or_local_named_like_an_effect_is_pure() {
     let w = file_warnings(
-        "(defmodule guard1) (defn exit (s) (= s :done)) \
+        "(defmodule guard1 (:shadow exit)) (defn exit (s) (= s :done)) \
          (defn classify ((s) :when (exit s) :finished) ((s) :running)) \
          (defn pick (x) (let (send (fn (v) (> v 1))) (match x ((v) :when (send v) :big) (_ :small))))",
     );
     assert_eq!(count_containing(&w, "effectful call"), 0, "{w:?}");
+    assert_eq!(count_containing(&w, "does not compile"), 0, "{w:?}");
     let real = file_warnings("(defn pick (p x) (match x ((v) :when (send p v) :big) (_ :small)))");
     assert_eq!(
         count_containing(&real, "effectful call `send`"),
@@ -277,7 +278,7 @@ fn a_file_is_not_told_about_abilities_it_cannot_see() {
     let mut interp = crate::Interp::new();
     interp
         .eval_str(
-            "(defmodule rv-sm)\n\
+            "(defmodule rv-sm (:shadow compare-to))\n\
              (defrecord c (x))\n\
              (defrecord r (y))\n\
              (defability S :sealed [c r] (op (self) :-> int))\n\

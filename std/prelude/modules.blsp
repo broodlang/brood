@@ -454,9 +454,9 @@ one call site is inside `defmodule`'s template — see the note there."
 ;; module (ADR-673), read by the checker from the header source; the loader ignores it.
 (def- %defmodule-clause-heads [:use :use-internals :alias :load :implements :shadow :check-allow])
 
-;; `(:shadow name …)` declares that this module defines a root MACRO's name on purpose
-;; (ADR-423): inside the module its own definition wins, and the declaration silences the
-;; warning that change of meaning otherwise prints. The macro stays reachable as `/name`.
+;; `(:shadow name …)` declares that this module defines a name the language ships, function or
+;; macro (ADR-423, ADR-735): inside the module its own definition wins, and without the
+;; declaration the definition fails compilation. The root one stays reachable as `/name`.
 (defn- %defmodule-shadow-clause (clause)
   (map (rest clause) (fn (name) (list '%declare-shadow (list 'quote name)))))
 
@@ -1692,6 +1692,21 @@ call head whose lookup missed. The `apply` is a tail call the VM unfolds, so `sy
 as an ordinary frame too, and a `receive` in it parks."
   (%lazy-require module)
   (apply (reflect/eval sym) args))
+
+(defn %lazy-bound? (module sym)
+  "`bound?` of the qualified `sym` once the load of `module` another process holds has finished
+— the engine calls this in `bound?`'s place (`derive::bound_or_imaged`), so the wait parks. A
+load that fails leaves `sym` unbound, as `bound?` never raises."
+  ;; check-allow :discarded-catch — a broken load is the reference's to report, not `bound?`'s
+  (check-allow :discarded-catch (try (%lazy-require module) (catch _ nil)))
+  (bound? sym))
+
+(defn %lazy-bound-value (module sym default)
+  "`reflect/bound-value` of the qualified `sym` once the load of `module` another process holds
+has finished — `%lazy-bound?`'s twin for the one-lookup read (ADR-743)."
+  ;; check-allow :discarded-catch — a broken load is the reference's to report
+  (check-allow :discarded-catch (try (%lazy-require module) (catch _ nil)))
+  (reflect/bound-value sym default))
 
 ;; ---- library names the PRELUDE itself references -----------------------------
 ;; The prelude's own helpers call a handful of names that live in `std/string.blsp`,

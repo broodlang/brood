@@ -172,7 +172,7 @@ pub(super) fn build_window(
         cursor_at: (0.0, 0.0),
         cursor_partial: false,
         held: None,
-        last_click: None,
+        clicks: Default::default(),
         keyboard: Keyboard::new(spec.key_repeat),
         shown: false,
         drawn: false,

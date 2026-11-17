@@ -1,17 +1,25 @@
 //! Painting a frame: turn a window's render ops into pixels — incrementally. The
 //! renderer retains the last frame (its ops and the canvas they rasterised to); a new
-//! frame is diffed against it per cell row (`strip_diff`), only the rows whose op
+//! frame is diffed against it per cell row (`grid_damage`), only the rows whose op
 //! sequence changed are re-rasterised — within a row, only the columns its changed ops can
 //! paint (`strip_columns`) — and only those rects are copied to the window. A keystroke
 //! re-rasterises the cells it touched and the mode line's, not the screen.
 //! Runs on the GUI thread, where a panic takes the event loop with it — so
 //! `render_ops` is fuzzed against wild inputs here.
 
+mod bands;
+#[cfg(test)]
+mod incremental_tests;
 mod strips;
+#[cfg(test)]
+mod test_frames;
+#[cfg(test)]
+mod timings;
 
 use super::render::CpuTexture;
 use super::rows::RowMap;
 use super::*;
+use bands::*;
 #[cfg(feature = "gui-gpu")]
 pub(crate) use strips::holds_blinking_caret;
 use strips::*;
@@ -57,12 +65,31 @@ pub(super) struct RetainedFrame {
     /// Whether the blinking caret was in its hidden half for the paint that left `canvas` as
     /// it is: the CPU painter re-rasterises only the caret's rows when that changed.
     pub(super) prev_caret_hidden: bool,
+    /// The row map `canvas` was laid out on: what a resize diffs the kept canvas against
+    /// (`resize_damage`). `None` until a frame has been rasterised.
+    pub(super) prev_rows: Option<RowMap>,
     /// The changed pixel rects of recent frames, oldest first, so a present can cover the
     /// last `buffer.age()` frames.
     pub(super) damage_ring: Vec<Vec<DamageRect>>,
     /// The pixel rows the last `raster_frame` copied from the old canvas instead of drawing
-    /// (the scroll blit): a per-paint stat for the trace and the tests.
+    /// (the scroll blit), a row copied in two spans counted twice: a per-paint stat for the trace
+    /// and the tests.
     pub(super) blit_rows: usize,
+    /// The pixels the last `raster_frame` drew (the area of the rects it rasterised, a pixel
+    /// drawn twice counted twice): a per-paint stat for the tests.
+    pub(super) drawn_px: usize,
+    /// How many threads draw this renderer's rects, whatever their size: a test's override of
+    /// `gui_threads` and its threshold (`None`, the default, leaves the choice to them).
+    pub(super) threads: Option<usize>,
+    /// The bands the last paint's rects were drawn on, on as many threads (0: drawn on the GUI
+    /// thread alone): a per-paint stat for the trace and the tests.
+    pub(super) bands: usize,
+    /// The pixels the GUI thread drew again after the bands, the rows they left it (a
+    /// picture's): a per-paint stat for the tests.
+    pub(super) drawn_again_px: usize,
+    /// The rows a scroll moving strips both ways at once reads its sources into, kept between
+    /// frames (`copy_strips`).
+    pub(super) blit_scratch: Vec<u32>,
 }
 
 /// A half-open damage rectangle in physical pixels: `[x0,x1) × [y0,y1)`.
@@ -86,6 +113,134 @@ impl DamageRect {
             y0: 0,
             x1: w,
             y1: h,
+        }
+    }
+
+    /// Its pixels (0 for an empty or inverted rect).
+    pub(super) fn area(&self) -> usize {
+        self.x1.saturating_sub(self.x0) * self.y1.saturating_sub(self.y0)
+    }
+}
+
+/// The pixels `rects` cover, a pixel in two rects counted twice: what drawing them costs.
+pub(super) fn rects_area(rects: &[DamageRect]) -> usize {
+    rects.iter().map(DamageRect::area).sum()
+}
+
+/// One rectangle of a blit: `height` pixel rows from `source` copied to `destination`, the
+/// pixel columns `columns` written from the columns as wide starting at `source_left` — the
+/// two the same for a move up or down (a scroll), apart for one sideways (a pane scrolled in
+/// its columns, a zoomed pane moved). The rectangle is a whole row, one column span of it (a
+/// pane of a side-by-side split, each pane of a split scrolled its own way: `strip_blits`), or
+/// a row of a zoomed pane's own grid (`paint::zoomed_pane_plan`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct StripMove {
+    pub(super) destination: usize,
+    pub(super) source: usize,
+    pub(super) height: usize,
+    pub(super) columns: (usize, usize),
+    pub(super) source_left: usize,
+}
+
+/// Copy `moves` within `pixels` (`width` wide), each rectangle from its own rows and columns,
+/// every source read as it was before any destination is written: two panes may scroll
+/// opposite ways, a zoomed pane's rows (its own height) may move beside the window's, a pane
+/// may move sideways onto pixels another reads, so a destination may be another's source.
+///
+/// In place when the natural order reads every source before it is overwritten: the upward
+/// moves (and the ones within their rows) from the top down, then the downward ones from the
+/// bottom up, and no move's source meeting the destination of one copied before it
+/// (`overwrites`). Moves of one direction on one grid always pass (destinations are distinct
+/// strips, so each later source lies beyond every earlier destination's rows, whatever their
+/// columns), and so do two panes scrolled opposite ways, whose columns are apart; the check is
+/// what keeps every other mix exact. Otherwise every source is read into `scratch` first, which
+/// is kept between frames: a fresh buffer the size of the moved rows (8 MB at 1080p, 33 MB at
+/// 4K) was mapped and faulted in on every scroll frame.
+pub(super) fn copy_strips(
+    pixels: &mut [u32],
+    scratch: &mut Vec<u32>,
+    moves: &[StripMove],
+    width: usize,
+) {
+    let (mut ordered, mut downward): (Vec<StripMove>, Vec<StripMove>) = moves
+        .iter()
+        .copied()
+        .partition(|step| step.source >= step.destination);
+    ordered.sort_unstable_by_key(|step| step.destination);
+    downward.sort_unstable_by_key(|step| std::cmp::Reverse(step.destination));
+    ordered.extend(downward);
+    let in_order = ordered.iter().enumerate().all(|(index, step)| {
+        ordered[..index]
+            .iter()
+            .all(|earlier| !earlier.overwrites(step))
+    });
+    if in_order {
+        for step in ordered {
+            step.copy_in_place(pixels, width);
+        }
+        return;
+    }
+    scratch.clear();
+    for step in moves {
+        for line in 0..step.height {
+            scratch.extend_from_slice(&pixels[step.source_span(step.source + line, width)]);
+        }
+    }
+    let mut read = 0;
+    for step in moves {
+        let span = step.columns.1 - step.columns.0;
+        for line in 0..step.height {
+            pixels[step.span(step.destination + line, width)]
+                .copy_from_slice(&scratch[read..read + span]);
+            read += span;
+        }
+    }
+}
+
+impl StripMove {
+    /// The pixels of row `y` this move writes, in a framebuffer `width` wide.
+    fn span(&self, y: usize, width: usize) -> std::ops::Range<usize> {
+        y * width + self.columns.0..y * width + self.columns.1
+    }
+
+    /// The pixels of row `y` this move reads, in a framebuffer `width` wide.
+    fn source_span(&self, y: usize, width: usize) -> std::ops::Range<usize> {
+        let left = y * width + self.source_left;
+        left..left + (self.columns.1 - self.columns.0)
+    }
+
+    /// Whether copying this move writes a pixel `later` still has to read: this destination
+    /// meets `later`'s source, in rows and in columns.
+    fn overwrites(&self, later: &StripMove) -> bool {
+        let later_right = later.source_left + (later.columns.1 - later.columns.0);
+        self.destination < later.source + later.height
+            && later.source < self.destination + self.height
+            && self.columns.0 < later_right
+            && later.source_left < self.columns.1
+    }
+
+    /// Copy this rectangle within `pixels`, its source and destination free to overlap: one
+    /// `copy_within` when it spans whole rows that stay put across (they are contiguous), else
+    /// row by row in the move's direction, so an overlapping source row is read before it is
+    /// written (and within a row `copy_within` moves the pixels as if read first).
+    fn copy_in_place(&self, pixels: &mut [u32], width: usize) {
+        if self.destination == self.source && self.columns.0 == self.source_left {
+            return;
+        }
+        if self.columns == (0, width) && self.source_left == 0 {
+            let from = self.source * width..(self.source + self.height) * width;
+            pixels.copy_within(from, self.destination * width);
+            return;
+        }
+        let downward = self.source < self.destination;
+        for line in 0..self.height {
+            let line = if downward {
+                self.height - 1 - line
+            } else {
+                line
+            };
+            let to = self.span(self.destination + line, width).start;
+            pixels.copy_within(self.source_span(self.source + line, width), to);
         }
     }
 }
@@ -310,10 +465,10 @@ fn caret_rows(
 /// canvas band is skipped outright, so a strip repaint walks the whole frame but
 /// rasterises only what lands in the strip.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_ops(
+pub(super) fn render_ops<P: Painter>(
     ops: &[Op],
     canvas: &mut Canvas,
-    r: &mut Renderer,
+    r: &mut P,
     ox: usize,
     rows: &RowMap,
     cw: usize,
@@ -550,7 +705,7 @@ pub(super) fn render_ops(
                     height: rows.span(*row as isize, *h as isize).max(0) as usize,
                     clip_top: oy as isize,
                 };
-                paint_image(canvas, r, &picture.0, *fit, *anchor, block);
+                r.image(canvas, &picture.0, *fit, *anchor, block);
             }
             Op::FRect {
                 x,
@@ -583,7 +738,7 @@ pub(super) fn render_ops(
                 }
             }
             // A blinking caret in its hidden half (ADR-469) paints nothing.
-            Op::Cursor { blink: Some(_), .. } if r.caret_hidden => {}
+            Op::Cursor { blink: Some(_), .. } if r.caret_hidden() => {}
             // A block with the text under it, Emacs's box (ADR-515): the cell solid in the
             // caret's colour, the text over it in its own face, coloured the window background.
             Op::Cursor {
@@ -653,7 +808,7 @@ pub(super) fn render_ops(
             | Op::Burst { .. } => {}
             // Placed the rows this walk paints with (`Renderer::rows`); paints nothing itself.
             Op::Seam { .. } => {}
-            Op::Emitter { id, .. } => paint_particles(canvas, r, *id),
+            Op::Emitter { id, .. } => r.particles(canvas, *id),
             // The pixel-space ops, in software: the GPU target draws them instanced; here
             // each pixel of the quad's bounding box is turned back into the quad's own
             // frame and filled or sampled if it lands inside. Slow next to the GPU, but
@@ -677,7 +832,7 @@ pub(super) fn render_ops(
                 tint,
                 rot,
             } => {
-                if let Some(t) = r.textures.get(tex) {
+                if let Some(t) = r.texture(*tex) {
                     paint_sprite(canvas, t, *x, *y, *w, *h, *uv, *tint, *rot);
                 }
             }
@@ -927,7 +1082,7 @@ fn paint_image(
         .collect();
     for y in y0..y1 {
         let source_row = (y - picture_top) as usize * source_h / drawn_h as usize * stride;
-        let target_row = y as usize * canvas.w;
+        let target_row = y as usize * canvas.w - canvas.first;
         for (x, column) in (x0..x1).zip(&columns) {
             let at = source_row + column;
             let alpha = source[at + 3] as u32;
@@ -1018,6 +1173,7 @@ fn paint_quad(canvas: &mut Canvas, x: f32, y: f32, w: f32, h: f32, color: [u8; 4
         hits.push(py * fb_w + px)
     });
     for i in hits {
+        let i = i - canvas.first;
         canvas.buf[i] = over(canvas.buf[i], rgb, a);
     }
 }
@@ -1066,6 +1222,7 @@ fn paint_sprite(
             ((packed >> 8) & 0xff) as u8,
             (packed & 0xff) as u8,
         ];
+        let i = i - canvas.first;
         canvas.buf[i] = over(canvas.buf[i], rgb, a);
     }
 }
@@ -1099,7 +1256,7 @@ fn paint_particles(canvas: &mut Canvas, r: &Renderer, id: u32) {
                 if alpha <= 0.0 {
                     continue;
                 }
-                let i = py * fb_w + px;
+                let i = py * fb_w + px - canvas.first;
                 let rgb = [
                     (rgba[0] * 255.0) as u8,
                     (rgba[1] * 255.0) as u8,
@@ -1167,6 +1324,13 @@ fn raster_effects(
     }
 }
 
+/// Rasterise `frame` into the retained canvas at `fb_w`×`fb_h` and answer the rects whose
+/// pixels changed. The stages: keep (or resize) the canvas; a frame with effects or particles
+/// drawn whole (`raster_effects`); else a [`Plan`] — the frame relaid on other rows diffed as
+/// the old rows placed it (`resize_damage`), the whole frame (`force`, a fresh canvas, nothing
+/// retained), nothing (the same frame), or the frame diffed against the last (`diff_plan`); the
+/// plan's moves copied (`copy_strips`) and its rects drawn (`draw_rects`, on threads when
+/// large); and the frame kept for the next diff.
 pub(super) fn raster_frame(
     r: &mut Renderer,
     frame: &[Op],
@@ -1177,11 +1341,26 @@ pub(super) fn raster_frame(
     let cw = r.cell_w.max(1);
     let (ox, _) = r.grid_origin(fb_w, fb_h);
     let rows = r.rows(fb_w, fb_h);
-    let ch = rows.ch;
     let strips = Strips::new(rows, fb_h);
-    let fresh = r.retained.canvas_size != (fb_w, fb_h);
+    let bg0 = pack(r.bg());
+    let old_size = r.retained.canvas_size;
+    let fresh = old_size != (fb_w, fb_h);
+    // A resize keeps the old canvas, anchored top-left (`resized_canvas`), and a frame laid
+    // out on other rows than the canvas was — a new size, or a new seam — is diffed against
+    // the canvas as those rows placed it (`resize_damage`), when there is a frame to diff.
+    let moved = r.retained.prev_rows.is_some_and(|old| old != rows);
+    let relaid = (fresh || moved)
+        && !force
+        && gui_damage_enabled()
+        && !r.retained.prev_ops.is_empty()
+        && r.retained.prev_rows.is_some();
     if fresh {
-        r.retained.canvas = vec![0u32; fb_w * fb_h];
+        let old = std::mem::take(&mut r.retained.canvas);
+        r.retained.canvas = if relaid {
+            resized_canvas(&old, old_size, (fb_w, fb_h), bg0)
+        } else {
+            vec![0u32; fb_w * fb_h]
+        };
         r.retained.canvas_size = (fb_w, fb_h);
     }
     // Particles move between paints of the same frame, and an effect reaches every pixel,
@@ -1194,6 +1373,9 @@ pub(super) fn raster_frame(
         raster_effects(r, frame, &mut pixels, fb_w, fb_h, &fx);
         r.retained.canvas = pixels;
         r.retained.blit_rows = 0;
+        r.retained.drawn_px = fb_w * fb_h;
+        r.retained.bands = 0;
+        r.retained.drawn_again_px = 0;
         // the next frame without effects starts from a full raster, not a diff
         r.retained.prev_ops.clear();
         return vec![DamageRect::whole(fb_w, fb_h)];
@@ -1201,79 +1383,267 @@ pub(super) fn raster_frame(
     // `same`: nothing to raster — the frame is the one painted, and so is the blink phase
     // of its caret (a phase flip of an unchanged frame dirties just the caret's row).
     let same_ops = frame == r.retained.prev_ops.as_slice();
-    let same = same_ops && r.caret_hidden == r.retained.prev_caret_hidden;
-    // `changed`: every rect whose pixels differ after this raster (what the present
-    // ships); `raster`: the subset drawn; `blits`: the strips copied from old rows.
-    let whole = || vec![DamageRect::whole(fb_w, fb_h)];
-    let (changed, raster, blits) =
-        if fresh || force || r.retained.prev_ops.is_empty() || !gui_damage_enabled() {
-            (whole(), whole(), Vec::new())
-        } else if same {
-            (Vec::new(), Vec::new(), Vec::new())
-        } else {
-            let new = Leaves::of(frame, &strips, r.caret_hidden);
-            let old = Leaves::of(&r.retained.prev_ops, &strips, r.retained.prev_caret_hidden);
-            let mut dirty = strip_diff(&new, &old, &strips);
-            let blits = if gui_blit_enabled() {
-                strip_blits(&new, &old, &dirty, &strips, fb_h, cw)
+    let same = !fresh && same_ops && r.caret_hidden == r.retained.prev_caret_hidden;
+    let size = (fb_w, fb_h);
+    let across = Across {
+        ox,
+        cw,
+        ligatures: r.ligatures(),
+    };
+    let plan = if relaid {
+        let old_rows = r.retained.prev_rows.unwrap_or(rows);
+        let raster = resize_damage(r, frame, &strips, old_rows, old_size, size, across);
+        // a resized window's buffer is new: all of it is presented
+        Plan {
+            changed: if fresh {
+                vec![DamageRect::whole(fb_w, fb_h)]
             } else {
-                Vec::new()
-            };
-            // A blitted strip is copied whole; a drawn one only in its changed columns.
-            let mut columns = vec![(0, fb_w); strips.count];
-            if gui_columns_enabled() {
-                let ligatures = r.ligatures();
-                for k in (0..strips.count).filter(|&k| dirty[k]) {
-                    columns[k] = strip_columns(&new, &old, k, fb_w, ox, cw, ligatures);
-                }
-            }
-            for &(k, _) in &blits {
-                columns[k] = (0, fb_w);
-            }
-            let changed = dirty_rects(&dirty, &columns, &strips);
-            for &(k, _) in &blits {
-                dirty[k] = false;
-            }
-            (changed, dirty_rects(&dirty, &columns, &strips), blits)
-        };
-    let bg0 = pack(r.bg());
+                raster.clone()
+            },
+            raster,
+            moves: Vec::new(),
+        }
+    } else if fresh || force || r.retained.prev_ops.is_empty() || !gui_damage_enabled() {
+        Plan::whole(size)
+    } else if same {
+        Plan::nothing()
+    } else {
+        diff_plan(r, frame, &strips, size, across)
+    };
     // The canvas leaves the renderer for the duration of the raster (the primitives
     // borrow both), and comes back untouched in shape.
     let mut pixels = std::mem::take(&mut r.retained.canvas);
-    r.retained.blit_rows = blits.len() * ch;
-    // The blits first, all sources read before any destination is written: two
-    // panes can scroll opposite ways, so a destination may be another's source.
-    if !blits.is_empty() {
-        let mut sources = Vec::with_capacity(blits.len() * ch * fb_w);
-        for &(_, src_y0) in &blits {
-            sources.extend_from_slice(&pixels[src_y0 * fb_w..(src_y0 + ch) * fb_w]);
-        }
-        for (n, &(k, _)) in blits.iter().enumerate() {
-            let (y0, _) = strips.rows(k);
-            pixels[y0 * fb_w..(y0 + ch) * fb_w]
-                .copy_from_slice(&sources[n * ch * fb_w..(n + 1) * ch * fb_w]);
-        }
+    r.retained.blit_rows = plan.moves.iter().map(|step| step.height).sum();
+    r.retained.drawn_px = rects_area(&plan.raster);
+    // The moves first, every source read before any destination is written (`copy_strips`),
+    // then the rects drawn over them.
+    if !plan.moves.is_empty() {
+        copy_strips(&mut pixels, &mut r.retained.blit_scratch, &plan.moves, fb_w);
     }
-    for rect in &raster {
-        let mut canvas = Canvas::rect(
-            &mut pixels,
-            fb_w,
-            fb_h,
-            (rect.x0, rect.y0),
-            (rect.x1, rect.y1),
-        );
-        // The conventional frame opens with a full `:clear`; a frame that doesn't
-        // still expects a clean background, and a strip repaint needs one either
-        // way (the rect's old pixels are exactly what changed).
-        canvas.fill_rows(rect.y0, rect.y1 - rect.y0, bg0);
-        render_ops(frame, &mut canvas, r, ox, &rows, cw, bg0, 0);
-    }
+    let (threads, forced) = match r.retained.threads {
+        Some(threads) => (threads, true),
+        None => (gui_threads(), false),
+    };
+    draw_rects(
+        r,
+        frame,
+        &mut pixels,
+        size,
+        &plan.raster,
+        (ox, &rows, cw, bg0),
+        threads,
+        forced,
+    );
     r.retained.canvas = pixels;
     if !same_ops {
         r.retained.prev_ops = frame.to_vec();
     }
+    r.retained.prev_rows = Some(rows);
     r.retained.prev_caret_hidden = r.caret_hidden;
-    changed
+    plan.changed
+}
+
+/// What one paint does to the retained canvas: the strips it copies from old rows first
+/// (`moves`), the rects it then draws (`raster`), and every rect whose pixels differ after
+/// both (`changed`, what the present ships: the drawn rects and the copied ones).
+struct Plan {
+    changed: Vec<DamageRect>,
+    raster: Vec<DamageRect>,
+    moves: Vec<StripMove>,
+}
+
+impl Plan {
+    /// Draw the whole `fb_w`×`fb_h` framebuffer.
+    fn whole((fb_w, fb_h): (usize, usize)) -> Plan {
+        Plan {
+            changed: vec![DamageRect::whole(fb_w, fb_h)],
+            raster: vec![DamageRect::whole(fb_w, fb_h)],
+            moves: Vec::new(),
+        }
+    }
+
+    /// Leave the canvas as it is.
+    fn nothing() -> Plan {
+        Plan {
+            changed: Vec::new(),
+            raster: Vec::new(),
+            moves: Vec::new(),
+        }
+    }
+
+    /// Do `other` too: its moves copied with these (`copy_strips` orders them all), its rects
+    /// drawn and shipped with these.
+    fn extend(&mut self, other: Plan) {
+        self.changed.extend(other.changed);
+        self.raster.extend(other.raster);
+        self.moves.extend(other.moves);
+    }
+}
+
+/// The plan for a frame on the rows the canvas was laid out on, diffed against the last one
+/// (`r.retained.prev_ops`): the window's grid planned (`grid_plan`: the strips whose leaves
+/// differ, narrowed to their changed columns, the ones that are a translation of old pixels
+/// copied), then each zoomed pane's own grid the same way (`zoomed_pane_plan`). A zoomed pane
+/// that moved or changed size is planned on its grid too when both it and its old self keep
+/// their pixels to their rects (`region_extent`): its old pixels copied to its new place and
+/// diffed there (`moved_region_plan`), the window's diff leaving it to that plan; any other is
+/// compared as a value, and drawn where it differs.
+fn diff_plan(
+    r: &Renderer,
+    frame: &[Op],
+    strips: &Strips,
+    size: (usize, usize),
+    across: Across,
+) -> Plan {
+    let mut new = Leaves::of(frame, strips, r.caret_hidden);
+    let old = Leaves::of(&r.retained.prev_ops, strips, r.retained.prev_caret_hidden);
+    let mut twins = pair_regions(&mut new, &old);
+    twins.retain(|pair| {
+        if !pair.moved {
+            return true;
+        }
+        let extent = |op: &Op| {
+            let Op::CellRegion { px, .. } = op else {
+                return None;
+            };
+            let region = Renderer::metrics_at(r, *px);
+            region_extent(op, across, (region.cell_w, region.cell_h))
+        };
+        let (Some(new_extent), Some(old_extent)) =
+            (extent(new.op(pair.new)), extent(old.op(pair.old)))
+        else {
+            return false;
+        };
+        new.know_columns(pair.new, across, new_extent);
+        old.know_columns(pair.old, across, old_extent);
+        new.twin(pair.new, pair.old);
+        true
+    });
+    let switches = (gui_columns_enabled(), gui_blit_enabled());
+    let mut plan = grid_plan(
+        &new,
+        &old,
+        strips,
+        size.0,
+        across,
+        &BlitBounds::whole(size),
+        switches,
+    );
+    for &pair in &twins {
+        plan.extend(zoomed_pane_plan(
+            r, &new, &old, pair, strips, across, size, switches,
+        ));
+    }
+    plan
+}
+
+/// The plan of the zoomed pane `pair` (`pair_regions`): its ops planned on its own grid at its
+/// own cell size (`region_plan`).
+#[allow(clippy::too_many_arguments)]
+fn zoomed_pane_plan(
+    r: &Renderer,
+    new: &Leaves,
+    old: &Leaves,
+    pair: RegionPair,
+    strips: &Strips,
+    across: Across,
+    size: (usize, usize),
+    switches: (bool, bool),
+) -> Plan {
+    let Op::CellRegion { px, .. } = new.op(pair.new) else {
+        return Plan::nothing();
+    };
+    let region = Renderer::metrics_at(r, *px);
+    if region.cell_w == 0 || region.cell_h == 0 {
+        // nothing of it is drawn: where it was, the window's leaves show now
+        let rects: Vec<DamageRect> = [new.band(pair.new), old.band(pair.old)]
+            .into_iter()
+            .flatten()
+            .map(|(top, bottom)| DamageRect {
+                x0: 0,
+                y0: top.clamp(0, size.1 as isize) as usize,
+                x1: size.0,
+                y1: bottom.clamp(0, size.1 as isize) as usize,
+            })
+            .filter(|rect| !rect.is_empty())
+            .collect();
+        return Plan {
+            changed: rects.clone(),
+            raster: rects,
+            moves: Vec::new(),
+        };
+    }
+    region_plan(
+        new,
+        old,
+        pair,
+        strips,
+        across,
+        (region.cell_w, region.cell_h),
+        size,
+        switches,
+    )
+}
+
+/// The canvas of a window resized from `old_size` to `new_size`: the old pixels anchored
+/// top-left where both sizes have them, the window background where only the new one does.
+fn resized_canvas(
+    old: &[u32],
+    (old_w, old_h): (usize, usize),
+    (new_w, new_h): (usize, usize),
+    bg0: u32,
+) -> Vec<u32> {
+    let mut canvas = vec![bg0; new_w * new_h];
+    let keep = old_w.min(new_w);
+    for y in 0..old_h.min(new_h) {
+        canvas[y * new_w..y * new_w + keep].copy_from_slice(&old[y * old_w..y * old_w + keep]);
+    }
+    canvas
+}
+
+/// What a resized window rasterises over the old canvas it kept (`resized_canvas`): the frame
+/// diffed against the last one as the OLD size laid it out (`anchored_damage`, the mechanism a
+/// moved or resized zoomed pane is planned by too). A strip on the same pixel rows in both
+/// sizes is kept: whose leaves are the old ones on the same bands (`same_leaf`) keeps its
+/// pixels up to the old width, one that changed is drawn in its changed columns. A strip that
+/// moved (the rows from the seam down are anchored to the bottom) or reaches past the old
+/// height is drawn whole, and every strip past the old width. A configure therefore draws the
+/// window's new edge and what the new layout moved, not the window.
+fn resize_damage(
+    r: &Renderer,
+    frame: &[Op],
+    strips: &Strips,
+    old_rows: RowMap,
+    (old_w, old_h): (usize, usize),
+    (fb_w, fb_h): (usize, usize),
+    across: Across,
+) -> Vec<DamageRect> {
+    let old_strips = Strips::new(old_rows, old_h);
+    let new = Leaves::of(frame, strips, r.caret_hidden);
+    let old = Leaves::of(
+        &r.retained.prev_ops,
+        &old_strips,
+        r.retained.prev_caret_hidden,
+    );
+    let kept: Vec<bool> = (0..strips.count)
+        .map(|k| {
+            let (y0, y1) = strips.rows(k);
+            k < old_strips.count && old_strips.rows(k) == (y0, y1) && y1 <= old_h
+        })
+        .collect();
+    anchored_damage(
+        &new,
+        &old,
+        strips,
+        &kept,
+        Anchored {
+            area: DamageRect::whole(fb_w, fb_h),
+            kept_right: old_w.min(fb_w),
+        },
+        fb_w,
+        across,
+        gui_columns_enabled(),
+    )
 }
 
 pub(super) fn paint(
@@ -1441,6 +1811,106 @@ pub(super) fn paint(
 mod render_robustness {
     use super::*;
     use crate::host::gui::{CursorStyle, Face, Op};
+
+    /// `copy_strips` answers what copying every source out first would: up, down, both ways
+    /// at once, a strip that stays put, moves of less than a strip, moves over a span of
+    /// columns (one pane of a split) beside whole-row ones, and moves sideways — within their
+    /// rows, diagonally, onto another's source.
+    #[test]
+    fn strips_copy_as_if_every_source_were_read_first() {
+        let (width, strip_height, strips) = (5usize, 2usize, 6usize);
+        let original: Vec<u32> = (0..(width * strip_height * strips) as u32).collect();
+        let reference = |moves: &[StripMove]| {
+            let mut pixels = original.clone();
+            for step in moves {
+                for line in 0..step.height {
+                    let (x0, x1) = step.columns;
+                    let from = (step.source + line) * width + step.source_left;
+                    let to = (step.destination + line) * width;
+                    pixels[to + x0..to + x1].copy_from_slice(&original[from..from + x1 - x0]);
+                }
+            }
+            pixels
+        };
+        let whole = |pairs: &[(usize, usize)]| -> Vec<StripMove> {
+            pairs
+                .iter()
+                .map(|&(destination, source)| StripMove {
+                    destination,
+                    source,
+                    height: strip_height,
+                    columns: (0, width),
+                    source_left: 0,
+                })
+                .collect()
+        };
+        let span = |destination, source, columns: (usize, usize)| StripMove {
+            destination,
+            source,
+            height: strip_height,
+            columns,
+            source_left: columns.0,
+        };
+        // a move of its own height: a zoomed pane's row beside the window's
+        let tall = |destination, source, height, columns: (usize, usize)| StripMove {
+            destination,
+            source,
+            height,
+            columns,
+            source_left: columns.0,
+        };
+        // a move sideways: `columns` written from the columns at `source_left`
+        let sideways = |destination, source, columns, source_left| StripMove {
+            destination,
+            source,
+            height: strip_height,
+            columns,
+            source_left,
+        };
+        let mut scratch = Vec::new();
+        for moves in [
+            whole(&[(0, 2), (2, 4), (4, 6), (6, 8)]),
+            whole(&[(8, 6), (6, 4), (4, 2), (2, 0)]),
+            whole(&[(2, 0), (4, 2), (6, 4)]),
+            whole(&[(0, 2), (2, 4), (10, 8), (8, 6)]),
+            whole(&[(4, 4), (0, 2)]),
+            whole(&[(0, 1), (2, 3), (4, 5)]),
+            whole(&[(5, 4), (3, 2), (1, 0)]),
+            vec![span(0, 2, (0, 2)), span(2, 4, (0, 2)), span(4, 6, (1, 3))],
+            vec![span(5, 4, (0, 3)), span(3, 2, (0, 3)), span(1, 0, (2, 5))],
+            vec![span(2, 1, (0, 2)), span(4, 3, (0, 2))],
+            vec![span(0, 2, (0, 2)), span(4, 2, (3, 5)), span(8, 6, (0, 5))],
+            vec![span(2, 0, (0, 2)), span(0, 2, (2, 5)), span(6, 6, (1, 4))],
+            // two panes opposite ways in the same rows, their columns apart
+            vec![
+                span(0, 2, (0, 2)),
+                span(2, 4, (0, 2)),
+                span(4, 2, (3, 5)),
+                span(2, 0, (3, 5)),
+            ],
+            // moves of other heights: one reading what an earlier one writes, one apart
+            vec![tall(0, 3, 3, (0, 5)), span(4, 2, (0, 5))],
+            vec![
+                tall(1, 4, 3, (1, 4)),
+                span(6, 8, (0, 2)),
+                span(8, 10, (0, 2)),
+            ],
+            vec![span(2, 0, (0, 5)), tall(5, 3, 3, (2, 4))],
+            // sideways within their rows, one each way, and a whole row scrolled left
+            vec![sideways(0, 0, (0, 3), 2), sideways(2, 2, (2, 5), 0)],
+            vec![sideways(4, 4, (0, 4), 1), sideways(6, 6, (1, 5), 0)],
+            // diagonally, the rows overlapping: a zoomed pane moved down-right and up-left
+            vec![sideways(3, 1, (2, 5), 0), sideways(5, 3, (2, 5), 0)],
+            vec![sideways(0, 2, (0, 3), 2), sideways(2, 4, (0, 3), 2)],
+            // a sideways move onto the source of a scroll beside it, and the reverse
+            vec![sideways(0, 0, (0, 2), 3), span(2, 0, (3, 5))],
+            vec![span(0, 2, (0, 2)), sideways(2, 2, (2, 5), 0)],
+        ] {
+            let mut pixels = original.clone();
+            copy_strips(&mut pixels, &mut scratch, &moves, width);
+            assert_eq!(pixels, reference(&moves), "moves {moves:?}");
+        }
+    }
 
     /// Render `ops` into a small framebuffer. Any panic — an arithmetic overflow
     /// under debug-assertions, an out-of-bounds framebuffer write — fails the test.

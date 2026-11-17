@@ -11,6 +11,7 @@ use crate::builtins::numeric::num_to_f64;
 mod decoder;
 mod graphics;
 mod keyboard;
+mod probe;
 mod screen;
 #[cfg(unix)]
 mod tty;
@@ -52,60 +53,133 @@ pub(in crate::builtins) fn term_enter(_: &[Value], _: EnvId, _: &mut Heap) -> Li
     .map_err(term_err)?;
     // the alternate screen starts blank: the first frame is written whole
     invalidate_screen();
+    // the keyboard taken first, so a key typed while the terminal answers reaches the inbox
+    keyboard::take();
+    // What the terminal can do, asked in one write that ends with DA1 (ADR-740).
+    let answers = terminal_answers();
     // The kitty keyboard protocol, when the terminal speaks it: repeats and releases are
     // reported, so a held key stops with the hand (`keyboard`). Pushed on the alternate
     // screen (each screen has its own flag stack), only here — the inline REPL seam keeps
     // the legacy keyboard.
-    keyboard::enhance();
-    // Whether pictures can be drawn in pixels (ADR-695): asked once per process, after the
-    // keyboard query (whose reader crossterm owns), so the answer is read by Brood's.
-    if terminal_screen().graphics.is_none() {
-        let protocol = graphics::detect();
-        terminal_screen().graphics = Some(protocol);
+    keyboard::enhance(answers.keyboard_flags.is_some());
+    // Whether pictures can be drawn in pixels (ADR-695), by the same answers.
+    let taken = {
+        let mut state = terminal_screen();
+        if state.graphics.is_none() {
+            state.graphics = Some(graphics::detect(answers.graphics));
+        }
+        // grapheme clustering on where the terminal has it off (ADR-744)
+        let mut taken = state.modes_bytes(&answers);
+        // the app's title again, which the last leave (a suspend) gave back to the shell
+        if let Some(title) = state.title.clone() {
+            taken.push_str(&state.title_bytes(&title));
+        }
+        taken
+    };
+    if !taken.is_empty() {
+        let _ = write_term_bytes(taken.as_bytes());
     }
     Ok(Value::nil())
 }
 
-/// The escapes that take every picture off the screen and out of the terminal's store
-/// (ADR-695), for the paths that leave the screen. `try_lock`, as [`invalidate_screen`]:
-/// the panic path may run on the thread whose draw holds the lock.
-fn pictures_farewell() -> Vec<u8> {
+/// `(term-reported-colors)` — the terminal's own foreground and background as it reported them
+/// (OSC 10/11, ADR-744): `{:foreground [r g b] :background [r g b]}`, a key left out when the
+/// terminal did not say. What it said when first asked — at the first `term-enter`, or here
+/// when nothing has asked yet — and not the theme's colours a frame gave it since
+/// (`term-bg`). `{}` where there is no terminal to ask.
+pub(in crate::builtins) fn term_reported_colors(
+    _: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let answers = answers_before_entering();
+    let rgb = |heap: &mut Heap, (red, green, blue): (u8, u8, u8)| {
+        let channels = [red, green, blue].map(|channel| Value::int(channel as i64));
+        heap.alloc_vector(channels.to_vec())
+    };
+    let mut entries = Vec::new();
+    for (key, colour) in [
+        ("foreground", answers.foreground),
+        ("background", answers.background),
+    ] {
+        if let Some(colour) = colour {
+            let value = rgb(heap, colour);
+            entries.push((value::kw(key), value));
+        }
+    }
+    Ok(heap.map_from_pairs(entries))
+}
+
+/// The terminal's answers ([`terminal_answers`]) for a caller that may come before
+/// `term-enter`: asked then in raw mode — so the answers are read as they come, not held for
+/// a newline and echoed — which is left again after. The keys typed meanwhile are not kept.
+fn answers_before_entering() -> probe::Answers {
+    if let Some(answers) = terminal_screen().answers.clone() {
+        return answers;
+    }
+    let was_raw = matches!(crossterm::terminal::is_raw_mode_enabled(), Ok(true));
+    if !was_raw && crossterm::terminal::enable_raw_mode().is_err() {
+        return probe::Answers::default();
+    }
+    let answers = terminal_answers();
+    if !was_raw {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+    answers
+}
+
+/// What the terminal said of itself (ADR-740): asked once per process, by the first
+/// `term-enter` — the terminal does not change under a running program. Nothing is asked when
+/// stdout is no terminal or a dumb one, or where Brood does not read the tty (not Unix).
+fn terminal_answers() -> probe::Answers {
+    if let Some(answers) = terminal_screen().answers.clone() {
+        return answers;
+    }
+    use std::io::IsTerminal;
+    let askable =
+        std::io::stdout().is_terminal() && !std::env::var("TERM").is_ok_and(|term| term == "dumb");
+    #[cfg(unix)]
+    let answers = if askable {
+        probe::Answers::of(&keyboard::ask(
+            probe::QUERY,
+            probe::complete,
+            probe::PATIENCE,
+        ))
+    } else {
+        probe::Answers::default()
+    };
+    #[cfg(not(unix))]
+    let answers = {
+        let _ = askable;
+        probe::Answers::default()
+    };
+    terminal_screen().answers = Some(answers.clone());
+    answers
+}
+
+/// The escapes that undo what the screen set in the terminal, for the paths that leave it
+/// ([`TerminalScreen::farewell`]): every picture off the screen and out of the terminal's
+/// store (ADR-695), the terminal's own colours and the shell's title given back (ADR-736) —
+/// each set again when the screen is taken again. `try_lock`, as [`invalidate_screen`]: the
+/// panic path may run on the thread whose draw holds the lock.
+fn farewell_bytes() -> Vec<u8> {
     let mut state = match TERMINAL_SCREEN.try_lock() {
         Ok(state) => state,
         Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return Vec::new(),
     };
-    let mut out = Vec::new();
-    state.pictures.farewell(&mut out);
-    out
+    state.farewell()
 }
 
+/// `XTWINOPS` 22;0 and 23;0: the terminal's title (and icon name) saved on its title stack,
+/// and given back.
+const TITLE_PUSH: &str = "\x1b[22;0t";
+const TITLE_POP: &str = "\x1b[23;0t";
+
 /// `(term-leave)` — restore the terminal (show cursor, leave alternate screen,
-/// disable raw mode). The normal-path teardown for `term-enter`.
+/// disable raw mode): [`restore_terminal`], the normal-path teardown for `term-enter`.
 pub(in crate::builtins) fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    use crossterm::cursor::Show;
-    use crossterm::event::{DisableFocusChange, DisableMouseCapture};
-    use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
-    // pictures first, while still on the screen that shows them (ADR-695)
-    let farewell = pictures_farewell();
-    if !farewell.is_empty() {
-        let _ = write_term_bytes(&farewell);
-    }
-    keyboard::restore();
-    invalidate_screen();
-    // Best effort, never an error: leaving is what every exit path does, and after a hang-up
-    // the terminal is gone — a write there fails (EIO), and a leave that threw then turned a
-    // clean exit into a crash a supervisor restarted on the dead terminal.
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::cursor::SetCursorStyle::DefaultUserShape,
-        Show,
-        DisableMouseCapture,
-        DisableFocusChange,
-        crossterm::event::DisableBracketedPaste,
-        LeaveAlternateScreen
-    );
-    let _ = disable_raw_mode();
+    restore_terminal();
     Ok(Value::nil())
 }
 
@@ -117,14 +191,17 @@ pub fn restore_terminal() {
     use crossterm::cursor::Show;
     use crossterm::event::{DisableFocusChange, DisableMouseCapture};
     use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
-    // the pictures off the screen and out of the terminal's store (ADR-695)
-    let farewell = pictures_farewell();
+    // pictures, colours and title first, while still on the screen that shows them
+    let farewell = farewell_bytes();
     if !farewell.is_empty() {
         let _ = write_term_bytes(&farewell);
     }
     // before leaving the alternate screen, whose flag stack the push went on
     keyboard::restore();
     invalidate_screen();
+    // Best effort, never an error: leaving is what every exit path does, and after a hang-up
+    // the terminal is gone — a write there fails (EIO), and a leave that threw then turned a
+    // clean exit into a crash a supervisor restarted on the dead terminal.
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::cursor::SetCursorStyle::DefaultUserShape,
@@ -280,13 +357,17 @@ pub(in crate::builtins) fn mouse_value(
         ms,
     ];
     // A press carries its click-chain count as a trailing 7th element; other actions
-    // (count 0) stay 6-element. The terminal can't detect multi-click, so it reports 1
-    // for every press — keeping the GUI and terminal shapes identical.
+    // (count 0) stay 6-element, in the terminal as in the window.
     if count > 0 {
         v.push(Value::int(count as i64));
     }
     heap.alloc_vector(v)
 }
+
+/// The terminal's presses read as click chains (`ClickChain`): the terminal sends each
+/// press alone, so the count is kept here, as the window keeps its own.
+static TERMINAL_CLICKS: std::sync::Mutex<crate::host::gui::ClickChain<&'static str>> =
+    std::sync::Mutex::new(crate::host::gui::ClickChain::new());
 
 /// Translate a crossterm mouse event into the shared `[:mouse …]` vector.
 /// Press, release, drag, and vertical scroll are surfaced (the `:release`/`:drag`
@@ -304,9 +385,14 @@ pub(in crate::builtins) fn mouse_to_value(
         CB::Middle => "middle",
     };
     let (action, btn, count) = match m.kind {
-        // The terminal reports no click chain, so a press always counts as 1 (single);
-        // the trailing count keeps the terminal vector shape identical to the GUI's.
-        MK::Down(b) => ("press", Some(button(b)), 1),
+        // a press counts its click chain (double/triple click) by the window's rule
+        MK::Down(b) => {
+            let count = TERMINAL_CLICKS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .press(button(b), (m.column, m.row), std::time::Instant::now());
+            ("press", Some(button(b)), count)
+        }
         MK::Up(b) => ("release", Some(button(b)), 0),
         // Motion with a button held — a drag (e.g. resizing a divider, ADR-077).
         // Crossterm already reports this per-cell, matching the GUI's cell-granular
@@ -477,27 +563,116 @@ struct TerminalScreen {
     graphics: Option<graphics::Protocol>,
     /// The pictures the terminal holds and shows through the kitty graphics protocol.
     pictures: graphics::Kitty,
+    /// The title the last `term-title` set, set again when the screen is taken again (a
+    /// continue after a suspend), since every leave gives the shell its own back.
+    title: Option<String>,
+    /// Whether the shell's title is saved on the terminal's title stack (by a `term-title` since
+    /// the screen was taken), so a leave pops it back.
+    title_pushed: bool,
+    /// Whether the terminal's own colours are a default face's (OSC 10/11/12,
+    /// `screen::default_colours`), so a leave or another face gives them back.
+    colours_held: bool,
+    /// Whether the next frame sets the terminal's own colours to the default face's: a new
+    /// face, a new depth, or the screen taken again.
+    colours_due: bool,
+    /// What the terminal said of itself, asked by the first `term-enter` (ADR-740).
+    answers: Option<probe::Answers>,
+    /// Whether the screen turned grapheme clustering on (mode 2027, ADR-744), so a leave turns
+    /// it off again — only where the terminal had it off.
+    clusters_set: bool,
 }
 
-static TERMINAL_SCREEN: std::sync::Mutex<TerminalScreen> = std::sync::Mutex::new(TerminalScreen {
-    shown: None,
-    cursor: screen::CursorState {
-        visible: false,
-        shape: None,
-    },
-    depth: None,
-    default_face: screen::Style {
-        fg: None,
-        bg: None,
-        bold: false,
-        italic: false,
-        underline: screen::Underline::None,
-        underline_colour: None,
-        reverse: false,
-    },
-    graphics: None,
-    pictures: graphics::Kitty::new(),
-});
+/// DECSET / DECRST of grapheme clustering (mode 2027): the terminal measures a grapheme
+/// cluster as one glyph of its Unicode width.
+const CLUSTERS_ON: &str = "\x1b[?2027h";
+const CLUSTERS_OFF: &str = "\x1b[?2027l";
+
+impl TerminalScreen {
+    /// Nothing shown or known yet: the state before the first `term-enter`.
+    const fn new() -> TerminalScreen {
+        TerminalScreen {
+            shown: None,
+            title: None,
+            title_pushed: false,
+            colours_held: false,
+            colours_due: true,
+            cursor: screen::CursorState {
+                visible: false,
+                shape: None,
+            },
+            depth: None,
+            default_face: screen::Style {
+                fg: None,
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: screen::Underline::None,
+                underline_colour: None,
+                reverse: false,
+            },
+            graphics: None,
+            pictures: graphics::Kitty::new(),
+            answers: None,
+            clusters_set: false,
+        }
+    }
+
+    /// The modes the screen sets in the terminal it takes, by its `answers`: grapheme
+    /// clustering (mode 2027) where the terminal has it off — on already, or not there, it is
+    /// left alone — so a frame's clusters are measured as the cells have them ([`screen::Screen`]'s
+    /// `clusters`). Given back by [`TerminalScreen::farewell`].
+    fn modes_bytes(&mut self, answers: &probe::Answers) -> String {
+        let toggle = answers
+            .grapheme_clusters
+            .is_some_and(probe::ModeSetting::to_toggle);
+        if toggle && !self.clusters_set {
+            self.clusters_set = true;
+            return CLUSTERS_ON.to_string();
+        }
+        String::new()
+    }
+
+    /// The escapes that undo what the screen set in the terminal ([`farewell_bytes`]), and
+    /// this state as the terminal is then: no pictures, its own colours (to be set again by the
+    /// next frame), grapheme clustering as it was, the shell's title.
+    fn farewell(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.pictures.farewell(&mut out);
+        if self.colours_held {
+            out.extend_from_slice(screen::DEFAULT_COLOURS_RESET.as_bytes());
+            self.colours_held = false;
+        }
+        self.colours_due = true;
+        if std::mem::take(&mut self.clusters_set) {
+            out.extend_from_slice(CLUSTERS_OFF.as_bytes());
+        }
+        if self.title_pushed {
+            out.extend_from_slice(TITLE_POP.as_bytes());
+            self.title_pushed = false;
+        }
+        out
+    }
+
+    /// The bytes that set the terminal's title to `title` (OSC 2, its control characters
+    /// dropped so a name cannot end the sequence early), saving the shell's first when this
+    /// screen has not yet.
+    fn title_bytes(&mut self, title: &str) -> String {
+        let clean: String = title
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        let mut out = String::new();
+        if !self.title_pushed {
+            out.push_str(TITLE_PUSH);
+            self.title_pushed = true;
+        }
+        out.push_str(&format!("\x1b]2;{clean}\x1b\\"));
+        out
+    }
+}
+
+static TERMINAL_SCREEN: std::sync::Mutex<TerminalScreen> =
+    std::sync::Mutex::new(TerminalScreen::new());
 
 fn terminal_screen() -> std::sync::MutexGuard<'static, TerminalScreen> {
     TERMINAL_SCREEN
@@ -522,10 +697,18 @@ pub(in crate::builtins) fn invalidate_screen() {
     state.cursor = screen::CursorState::default();
 }
 
-/// The colour depth frames are written at: the one `term-colors` set, else what the
+/// The colour depth frames are written at: the one `term-colors` set, else true colour when
+/// the terminal said it keeps one (`probe`, ADR-740 — ssh passes no `COLORTERM`), else what the
 /// environment says ([`screen::ColorDepth::detect`]).
 fn color_depth(state: &TerminalScreen) -> screen::ColorDepth {
     state.depth.unwrap_or_else(|| {
+        if state
+            .answers
+            .as_ref()
+            .is_some_and(probe::Answers::true_colour)
+        {
+            return screen::ColorDepth::TrueColor;
+        }
         screen::ColorDepth::detect(
             std::env::var("COLORTERM").ok().as_deref(),
             std::env::var("TERM").ok().as_deref(),
@@ -585,18 +768,44 @@ pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) 
         _ => (screen::Screen::new(cols, rows), true),
     };
     next.cursor = None;
+    // a grapheme cluster drawn as the terminal measures it (ADR-744)
+    next.clusters = state
+        .answers
+        .as_ref()
+        .is_some_and(probe::Answers::grapheme_clusters);
     let pictures = paint_ops(heap, parsed, &mut next, state.default_face, cell)?;
     let depth = color_depth(&state);
     let mut out: Vec<u8> = Vec::new();
+    // the terminal's own colours the theme's, once per default face (`screen::default_colours`)
+    if state.colours_due {
+        let (colours, held) =
+            screen::default_colours_change(state.default_face, depth, state.colours_held);
+        out.extend_from_slice(colours.as_bytes());
+        state.colours_held = held;
+        state.colours_due = false;
+    }
     let TerminalScreen {
         shown,
         cursor,
         pictures: stored,
+        answers,
         ..
     } = &mut *state;
-    screen::render(shown.as_ref(), &next, depth, cursor, &mut out);
+    let mut output = screen::Output::detect(depth, std::env::var("TERM").ok().as_deref());
+    output.synchronized = answers.as_ref().is_none_or(probe::Answers::synchronized);
+    // one pane of a side-by-side split scrolled in its own columns, where the terminal has
+    // left and right margins (ADR-744)
+    output.column_margins = answers.as_ref().map_or(
+        screen::ColumnMargins::Unavailable,
+        probe::Answers::column_margins,
+    );
+    // a picture the terminal holds would move with the rows a scroll region moves, out from
+    // under the placement the graphics module keeps: no scrolling while any is shown
+    let pictures_shown = !(pictures.is_empty() && stored.is_empty());
+    output.scroll_regions &= !pictures_shown;
+    screen::render(shown.as_ref(), &next, output, cursor, &mut out);
     *shown = Some(next);
-    if !(pictures.is_empty() && stored.is_empty()) {
+    if pictures_shown {
         stored.frame(&pictures, whole, graphics::encode_png, &mut out);
     }
     drop(state);
@@ -907,6 +1116,22 @@ pub(in crate::builtins) fn term_bg(args: &[Value], _: EnvId, heap: &mut Heap) ->
         ..screen::Style::default()
     };
     state.shown = None;
+    state.colours_due = true;
+    Ok(Value::nil())
+}
+
+/// `(term-title title)` — the terminal's window (or tab) title
+/// ([`TerminalScreen::title_bytes`]). The shell's own title is saved on the first one
+/// (`CSI 22;0t`, the title stack) and given back when the screen is left ([`farewell_bytes`], every leave path); taking the screen again (a continue
+/// after a suspend) sets this title again. Returns nil.
+pub(in crate::builtins) fn term_title(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let title = expect_string(heap, "term/title", arg(args, 0))?;
+    let out = {
+        let mut state = terminal_screen();
+        state.title = Some(title.clone());
+        state.title_bytes(&title)
+    };
+    let _ = write_term_bytes(out.as_bytes());
     Ok(Value::nil())
 }
 
@@ -936,6 +1161,8 @@ pub(in crate::builtins) fn term_colors(args: &[Value], _: EnvId, heap: &mut Heap
             }
         };
         state.shown = None;
+        // the terminal's own colours follow the depth: set only at true colour
+        state.colours_due = true;
     }
     Ok(value::kw(color_depth(&state).name()))
 }
@@ -1146,9 +1373,10 @@ struct Forwarder {
 
 static FORWARDER: std::sync::Mutex<Option<Forwarder>> = std::sync::Mutex::new(None);
 
-/// How long the forwarder waits for input before it looks at its stop flag again: what
-/// stopping it can cost.
-const FORWARD_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+/// How long the forwarder waits for input before it looks at its stop flag again. A stop
+/// wakes the wait at once (`tty::wake`), so this only bounds a stop where nothing can (no
+/// wake pipe: the terminal was never taken) — an idle terminal costs no wakes.
+const FORWARD_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// `(term/forward-input pid)` — deliver every terminal input event to `pid`'s priority lane
 /// from now on (replacing any earlier target); `(term/forward-input nil)` stops, and waits
@@ -1176,6 +1404,8 @@ pub(in crate::builtins) fn term_forward_input(
         previous
             .stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(unix)]
+        tty::wake();
         let _ = previous.thread.join();
     }
     let Some(pid) = target else {
@@ -1583,5 +1813,58 @@ mod image_tests {
         let shown = &pictures[0];
         assert_eq!(shown.drawn, (32, 32));
         assert_eq!((shown.row, shown.col, shown.offset), (1, 1, (0, 0)));
+    }
+}
+
+#[cfg(test)]
+mod leave_tests {
+    use super::{CLUSTERS_OFF, CLUSTERS_ON, TITLE_POP, TITLE_PUSH, TerminalScreen, probe, screen};
+
+    /// The shell's title is saved once a screen, given back by every leave, and saved again
+    /// when the screen is taken again; a title cannot end its own sequence early.
+    #[test]
+    fn the_shells_title_is_saved_once_and_given_back() {
+        let mut state = TerminalScreen::new();
+        assert_eq!(
+            state.title_bytes("notes"),
+            format!("{TITLE_PUSH}\x1b]2;notes\x1b\\")
+        );
+        assert_eq!(state.title_bytes("a\x07b\x1bc"), "\x1b]2;abc\x1b\\");
+        assert_eq!(state.farewell(), TITLE_POP.as_bytes());
+        assert!(state.farewell().is_empty(), "given back once");
+        assert!(state.title_bytes("notes").starts_with(TITLE_PUSH));
+    }
+
+    /// A leave gives the terminal its own colours back only when a frame set the theme's, and
+    /// leaves the next frame to set them again.
+    #[test]
+    fn a_leave_gives_back_only_the_colours_it_set() {
+        let mut state = TerminalScreen::new();
+        state.colours_due = false;
+        assert!(state.farewell().is_empty());
+        assert!(state.colours_due);
+        state.colours_held = true;
+        assert_eq!(state.farewell(), screen::DEFAULT_COLOURS_RESET.as_bytes());
+        assert!(!state.colours_held && state.colours_due);
+    }
+
+    /// Grapheme clustering is turned on only where the terminal has it off, once however often
+    /// the screen is taken, and off again by a leave — never where it was on or is not there.
+    #[test]
+    fn grapheme_clustering_is_set_where_it_was_off_and_given_back() {
+        let answers = |setting: u16| probe::Answers {
+            grapheme_clusters: Some(probe::ModeSetting(setting)),
+            ..probe::Answers::default()
+        };
+        let mut state = TerminalScreen::new();
+        assert_eq!(state.modes_bytes(&answers(2)), CLUSTERS_ON);
+        assert_eq!(state.modes_bytes(&answers(2)), "");
+        assert_eq!(state.farewell(), CLUSTERS_OFF.as_bytes());
+        assert!(state.farewell().is_empty(), "given back once");
+        for setting in [0, 1, 3, 4] {
+            assert_eq!(state.modes_bytes(&answers(setting)), "", "{setting}");
+            assert!(state.farewell().is_empty());
+        }
+        assert_eq!(state.modes_bytes(&probe::Answers::default()), "");
     }
 }

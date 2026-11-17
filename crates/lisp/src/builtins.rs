@@ -236,6 +236,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     syntax_scan::register_bracket_partner(&mut primitives);
     // And again: how outline glyphs are hinted (ADR-730).
     gui::register_text_hinting(&mut primitives);
+    // And again: the terminal's title, as a window's.
+    terminal::register_title(&mut primitives);
+    // And again: a counter of several fields under one lock (ADR-742).
+    table::register_tally(&mut primitives);
+    // And again: a late-bound name's value in one lookup (ADR-743).
+    tooling::register_bound_value(&mut primitives);
+    // And again: the colours the terminal reported for itself (ADR-744).
+    terminal::register_reported_colors(&mut primitives);
 }
 
 #[cfg(test)]

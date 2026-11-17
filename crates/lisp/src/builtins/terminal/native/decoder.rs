@@ -13,11 +13,18 @@
 //! - `CSI 27 ; mods ; code ~` — xterm's `modifyOtherKeys` (modes 1 and 2);
 //! - the legacy bytes 0x1C–0x1F as the keys a terminal sends them for — `C-\`, `C-]`, `C-^`,
 //!   `C-_` (and `C-/`, which shares `C-_`'s byte) — where crossterm reads `C-4` … `C-7`;
-//! - a terminal's answers to a query (cursor position, device attributes, the kitty flags)
-//!   swallowed, never typed.
+//! - a terminal's answers to a query read as [`Reply`] values, never typed, whenever they
+//!   arrive (ADR-740): device attributes, the kitty keyboard flags, a mode report (DECRPM),
+//!   XTVERSION and DECRQSS (DCS), the terminal's colours (OSC 10/11/12), a kitty graphics
+//!   answer (APC). `ESC ]`, `ESC P` and `ESC _` are also what Meta sends on `]`, `P` and `_`:
+//!   a string sequence is an answer only while its bytes can still be one of
+//!   [`REPLY_SHAPES`] (ADR-747). The first byte no answer has there, a terminator before an
+//!   answer's head is whole, or its patience run out part-read, and it never was one: its
+//!   introducer is the Meta key and every byte after it is read again, as typed.
 //!
-//! Pure: bytes in, events out, so the decoder is tested on byte strings.
+//! Pure: bytes in, events and replies out, so the decoder is tested on byte strings.
 
+use super::probe::Reply;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MediaKeyCode,
     ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
@@ -27,7 +34,13 @@ use crossterm::event::{
 #[derive(Debug, PartialEq, Eq)]
 enum Decoded {
     Event(Event),
-    /// A terminal's answer to a query, or a sequence that names nothing: dropped.
+    /// A terminal's answer to a query: kept for whoever asked, never an event.
+    Reply(Reply),
+    /// The Meta key the first `consumed` bytes make — a string sequence's introducer that the
+    /// bytes after it showed to be no answer (`ESC ] x` is M-] and an `x`): the event, and
+    /// the bytes after them read again.
+    KeyThenRest(Event, usize),
+    /// A sequence that names nothing: dropped.
     Nothing,
 }
 
@@ -35,46 +48,87 @@ enum Decoded {
 /// sequence, or bytes that are no sequence at all (dropped).
 type Step = Result<Option<Decoded>, ()>;
 
-/// The decoder: the bytes of a sequence not yet complete, carried between reads.
+/// The most replies kept unread: a terminal answers the one batch `term-enter` asks, so only
+/// answers nobody asks for (a late one, after the batch gave up) pile up — the oldest go.
+const REPLIES_KEPT: usize = 32;
+
+/// The decoder: the bytes of a sequence not yet complete, carried between reads, the
+/// replies read and not yet taken, and whether a question to the terminal is outstanding.
 #[derive(Debug, Default)]
 pub(super) struct Decoder {
     pending: Vec<u8>,
+    replies: Vec<Reply>,
+    awaiting_replies: bool,
 }
 
 impl Decoder {
     pub(super) const fn new() -> Self {
         Decoder {
             pending: Vec::new(),
+            replies: Vec::new(),
+            awaiting_replies: false,
         }
     }
 
-    /// Decode `bytes`, one read of the tty, appending the events to `out`. `more_follows`
-    /// says the tty has more bytes waiting right now: a lone ESC at the end of the read is
-    /// then the start of a sequence, else the Escape key.
+    /// Say whether a question to the terminal is outstanding: while one is, an answer cut
+    /// between reads waits the patience of a sequence for its rest; while none is, an answer
+    /// comes whole, and a part-read one is a key time decides ([`Decoder::key_undecided`]).
+    pub(super) fn await_replies(&mut self, awaiting: bool) {
+        self.awaiting_replies = awaiting;
+    }
+
+    /// The terminal's answers read since the last take, oldest first.
+    pub(super) fn take_replies(&mut self) -> Vec<Reply> {
+        std::mem::take(&mut self.replies)
+    }
+
+    /// Decode `bytes`, one read of the tty, appending the events to `out` (and the replies
+    /// to [`Decoder::take_replies`]). `more_follows` says the tty has more bytes waiting right
+    /// now: a lone ESC at the end of the read is then the start of a sequence, else it waits
+    /// [`ESCAPE_PATIENCE`] to be the Escape key.
     pub(super) fn feed(&mut self, bytes: &[u8], more_follows: bool, out: &mut Vec<Event>) {
         for (index, byte) in bytes.iter().enumerate() {
             self.pending.push(*byte);
-            // ESC ESC: the first is the Escape key, the second starts whatever follows (an
-            // Alt chord, a sequence, another Escape) — `\x1b\x1b[A` is Escape then Up
-            if self.pending == [0x1B, 0x1B] {
-                out.push(Event::Key(KeyCode::Esc.into()));
-                self.pending.remove(0);
-            }
             let input_available = more_follows || index + 1 < bytes.len();
-            if self.in_paste() {
-                self.feed_paste(out);
-                continue;
+            self.decode_pending(input_available, out);
+        }
+    }
+    /// Decode what is pending after a byte came: complete sequences out, a part-read one
+    /// kept. A Meta key whose bytes began like a string sequence has the bytes after it fed
+    /// again, each read as typed.
+    fn decode_pending(&mut self, input_available: bool, out: &mut Vec<Event>) {
+        // ESC ESC: the first is the Escape key, the second starts whatever follows (an
+        // Alt chord, a sequence, another Escape) — `\x1b\x1b[A` is Escape then Up
+        if self.pending == [0x1B, 0x1B] {
+            out.push(Event::Key(KeyCode::Esc.into()));
+            self.pending.remove(0);
+        }
+        if self.in_paste() {
+            self.feed_paste(out);
+            return;
+        }
+        match parse(&self.pending, input_available) {
+            Ok(None) => {}
+            Ok(Some(Decoded::KeyThenRest(event, consumed))) => {
+                out.push(event);
+                let rest = self.pending.split_off(consumed);
+                self.pending.clear();
+                self.feed(&rest, input_available, out);
             }
-            match parse(&self.pending, input_available) {
-                Ok(None) => {}
-                Ok(Some(decoded)) => {
-                    self.pending.clear();
-                    if let Decoded::Event(event) = decoded {
-                        out.push(event);
+            Ok(Some(decoded)) => {
+                self.pending.clear();
+                match decoded {
+                    Decoded::Event(event) => out.push(event),
+                    Decoded::Reply(reply) => {
+                        if self.replies.len() >= REPLIES_KEPT {
+                            self.replies.remove(0);
+                        }
+                        self.replies.push(reply);
                     }
+                    _ => {}
                 }
-                Err(()) => self.pending.clear(),
             }
+            Err(()) => self.pending.clear(),
         }
     }
 
@@ -125,9 +179,26 @@ impl Decoder {
         !self.pending.is_empty()
     }
 
+    /// Whether what is part-read is a key only time decides, which [`ESCAPE_PATIENCE`] does: a
+    /// lone ESC (the Escape key, or Meta on a key still to come), or a string sequence while
+    /// no question is outstanding (Meta on `]`, `P` or `_` and keys typed after it, unless the
+    /// rest of an answer comes at once). While a question is outstanding, a part-read answer
+    /// waits as any other sequence does.
+    pub(super) fn key_undecided(&self) -> bool {
+        match self.pending[..] {
+            [0x1B] => true,
+            [0x1B, introducer, ..] if STRING_INTRODUCERS.contains(&introducer) => {
+                !self.awaiting_replies
+            }
+            _ => false,
+        }
+    }
+
     /// A part-read sequence that will not be completed — the read ended and nothing more
-    /// came: a lone ESC is the Escape key, anything else is dropped. A paste is never given
-    /// up this way ([`Decoder::in_paste`]).
+    /// came, past its patience: a lone ESC is the Escape key; a string sequence never was a
+    /// terminal's answer, so its introducer is the Meta key and the bytes after it are read
+    /// again, as typed; anything else is dropped. A paste is never given up this way
+    /// ([`Decoder::in_paste`]).
     pub(super) fn flush(&mut self, out: &mut Vec<Event>) {
         if self.in_paste() {
             return;
@@ -135,8 +206,139 @@ impl Decoder {
         if self.pending == [0x1B] {
             out.push(Event::Key(KeyCode::Esc.into()));
         }
+        if let [0x1B, introducer, ..] = self.pending[..]
+            && STRING_INTRODUCERS.contains(&introducer)
+        {
+            if let Ok(Some(Decoded::Event(event))) = meta(&[introducer], false) {
+                out.push(event);
+            }
+            let rest = self.pending.split_off(2);
+            self.pending.clear();
+            self.feed(&rest, false, out);
+            return self.flush(out);
+        }
         self.pending.clear();
     }
+}
+
+/// The bytes after ESC that begin a string sequence: OSC (`]`), DCS (`P`), APC (`_`).
+const STRING_INTRODUCERS: [u8; 3] = *b"]P_";
+
+/// One shape a terminal's answer comes in as a string sequence: its introducer, the bytes
+/// every such answer begins with, and which bytes may follow them up to its terminator.
+struct ReplyShape {
+    introducer: u8,
+    head: &'static [u8],
+    body: fn(u8) -> bool,
+}
+
+/// The answers a terminal sends as string sequences to what `term-enter` asks (ADR-740), by
+/// shape: a string sequence is one of them while its bytes can still be ([`reply_shape`]).
+const REPLY_SHAPES: &[ReplyShape] = &[
+    // OSC 10, 11, 12: the foreground, background, cursor colour
+    ReplyShape {
+        introducer: b']',
+        head: b"10;rgb:",
+        body: colour_byte,
+    },
+    ReplyShape {
+        introducer: b']',
+        head: b"11;rgb:",
+        body: colour_byte,
+    },
+    ReplyShape {
+        introducer: b']',
+        head: b"12;rgb:",
+        body: colour_byte,
+    },
+    // XTVERSION, and DECRQSS valid or not
+    ReplyShape {
+        introducer: b'P',
+        head: b">|",
+        body: text_byte,
+    },
+    ReplyShape {
+        introducer: b'P',
+        head: b"1$r",
+        body: text_byte,
+    },
+    ReplyShape {
+        introducer: b'P',
+        head: b"0$r",
+        body: text_byte,
+    },
+    // a kitty graphics answer, which names the image asked about
+    ReplyShape {
+        introducer: b'_',
+        head: b"Gi=",
+        body: text_byte,
+    },
+];
+
+/// The longest answer body waited for: an answer is a few dozen bytes.
+const REPLY_MAX: usize = 512;
+
+fn colour_byte(byte: u8) -> bool {
+    byte.is_ascii_hexdigit() || byte == b'/'
+}
+
+fn text_byte(byte: u8) -> bool {
+    byte >= 0x20 && byte != 0x7F
+}
+
+/// How far a string sequence's bytes after its introducer go toward an answer.
+#[derive(Debug, PartialEq, Eq)]
+enum Shape {
+    /// They begin an answer, not yet ended.
+    Partial,
+    /// An answer whole, ended by ST or BEL: its text, without the terminator.
+    Complete(usize),
+    /// No answer has these bytes: the introducer was the Meta key.
+    Impossible,
+}
+
+/// The one rule string sequences are read by: `body` (after the introducer) is an answer
+/// while it is a prefix of one of [`REPLY_SHAPES`] — the head, then bytes the shape's body
+/// allows, within [`REPLY_MAX`] — and complete when ST (`ESC \`) or BEL ends it after a
+/// whole head.
+fn reply_shape(introducer: u8, body: &[u8]) -> Shape {
+    let (text, terminated) = match body {
+        [text @ .., 0x07] => (text, true),
+        [text @ .., 0x1B, b'\\'] => (text, true),
+        [text @ .., 0x1B] => (text, false),
+        text => (text, false),
+    };
+    let fits = |shape: &ReplyShape| {
+        shape.introducer == introducer
+            && if text.len() < shape.head.len() {
+                !terminated && shape.head.starts_with(text)
+            } else {
+                text.starts_with(shape.head)
+                    && text[shape.head.len()..]
+                        .iter()
+                        .all(|&byte| (shape.body)(byte))
+            }
+    };
+    if text.len() > REPLY_MAX || !REPLY_SHAPES.iter().any(fits) {
+        Shape::Impossible
+    } else if terminated {
+        Shape::Complete(text.len())
+    } else {
+        Shape::Partial
+    }
+}
+
+/// Meta (Alt) on the key `rest` decodes to.
+fn meta(rest: &[u8], input_available: bool) -> Step {
+    parse(rest, input_available).map(|step| {
+        step.map(|decoded| match decoded {
+            Decoded::Event(Event::Key(mut event)) => {
+                event.modifiers |= KeyModifiers::ALT;
+                Decoded::Event(Event::Key(event))
+            }
+            other => other,
+        })
+    })
 }
 
 /// How long the tty may be completely silent in the middle of a paste before the paste is
@@ -209,13 +411,17 @@ fn parse(buffer: &[u8], input_available: bool) -> Step {
     }
 }
 
+/// How long a lone ESC waits for a key after it before it is the Escape key: what Neovim's
+/// `ttimeoutlen` is for. A terminal speaking the kitty protocol sends Escape as `CSI 27 u`,
+/// so it never waits.
+pub(super) const ESCAPE_PATIENCE: std::time::Duration = std::time::Duration::from_millis(30);
+
 fn parse_escape(buffer: &[u8], input_available: bool) -> Step {
+    // a lone ESC waits for what follows it: the key it makes Meta (`ESC f` is M-f) can arrive
+    // in the next read (a split ssh packet, a person typing ESC then f), so it is the Escape
+    // key only once [`ESCAPE_PATIENCE`] passes with nothing after it (`TtyInput`)
     if buffer.len() == 1 {
-        return if input_available {
-            Ok(None)
-        } else {
-            key(KeyCode::Esc)
-        };
+        return Ok(None);
     }
     match buffer[1] {
         b'O' => {
@@ -234,38 +440,76 @@ fn parse_escape(buffer: &[u8], input_available: bool) -> Step {
             }
         }
         b'[' => parse_csi(buffer),
-        // `ESC _ … ESC \`, an application program command: what a terminal answers a kitty
-        // graphics query with (`ESC _Gi=31;OK ESC \`, ADR-695) — swallowed, never typed
-        b'_' => parse_string_sequence(buffer),
+        // a string sequence — OSC `ESC ]`, DCS `ESC P`, APC `ESC _` — up to its terminator: a
+        // terminal's answer, while its bytes can still be one ([`reply_shape`]). Meta on `]`,
+        // `P`, `_` sends the same two bytes, so the bytes after them decide: one that no
+        // answer has there makes the introducer the Meta key, and the rest is read again;
+        // nothing after it yet, or the start of an answer, waits — an answer split across
+        // reads is still an answer, and Meta comes when its patience passes ([`Decoder::flush`])
+        introducer if STRING_INTRODUCERS.contains(&introducer) => {
+            match reply_shape(introducer, &buffer[2..]) {
+                _ if buffer.len() == 2 => Ok(None),
+                Shape::Partial => Ok(None),
+                Shape::Complete(length) => {
+                    Ok(Some(string_reply(introducer, &buffer[2..2 + length])))
+                }
+                Shape::Impossible => match meta(&buffer[1..2], true)? {
+                    Some(Decoded::Event(event)) => Ok(Some(Decoded::KeyThenRest(event, 2))),
+                    _ => Err(()),
+                },
+            }
+        }
         0x1B => key(KeyCode::Esc),
         // ESC before a key is Meta (Alt) on that key
-        _ => parse(&buffer[1..], input_available).map(|step| {
-            step.map(|decoded| match decoded {
-                Decoded::Event(Event::Key(mut event)) => {
-                    event.modifiers |= KeyModifiers::ALT;
-                    Decoded::Event(Event::Key(event))
-                }
-                other => other,
-            })
-        }),
+        _ => meta(&buffer[1..], input_available),
     }
 }
 
-/// The longest string sequence (`ESC _ …`) waited for before its bytes are dropped: a kitty
-/// graphics answer is a few dozen bytes, so only a lost terminator runs this long.
-const STRING_SEQUENCE_MAX: usize = 4096;
+/// The [`Reply`] a complete answer's text (between introducer and terminator) is, or
+/// nothing when its values are garbled (a colour channel of nine digits): dropped, not typed.
+fn string_reply(introducer: u8, body: &[u8]) -> Decoded {
+    let text = String::from_utf8_lossy(body);
+    let reply = match introducer {
+        b']' => osc_reply(&text),
+        b'P' => dcs_reply(&text),
+        _ => text.strip_prefix('G').map(|graphics| {
+            let (controls, message) = graphics.split_once(';').unwrap_or((graphics, ""));
+            Reply::Graphics {
+                controls: controls.to_string(),
+                message: message.to_string(),
+            }
+        }),
+    };
+    reply.map_or(Decoded::Nothing, Decoded::Reply)
+}
 
-/// A string sequence from its `ESC _` to its terminator (`ESC \`, or BEL as xterm also
-/// accepts): nothing, once complete — a terminal's answer, not a key.
-fn parse_string_sequence(buffer: &[u8]) -> Step {
-    let complete = buffer.ends_with(b"\x1b\\") && buffer.len() >= 4 || buffer.ends_with(b"\x07");
-    if complete {
-        Ok(Some(Decoded::Nothing))
-    } else if buffer.len() > STRING_SEQUENCE_MAX {
-        Err(())
-    } else {
-        Ok(None)
+/// `slot ; rgb:r/g/b` — an OSC colour answer (10, 11, 12), each channel one to four hex
+/// digits scaled to a byte.
+fn osc_reply(text: &str) -> Option<Reply> {
+    let (slot, spec) = text.split_once(';')?;
+    let slot: u16 = slot.parse().ok()?;
+    let mut channels = spec.strip_prefix("rgb:")?.split('/').map(|channel| {
+        if !(1..=4).contains(&channel.len()) {
+            return None;
+        }
+        let value = u32::from_str_radix(channel, 16).ok()?;
+        let most = (1u32 << (4 * channel.len())) - 1;
+        Some(((value * 255 + most / 2) / most) as u8)
+    });
+    let rgb = (channels.next()??, channels.next()??, channels.next()??);
+    Some(Reply::Colour { slot, rgb })
+}
+
+/// `> | text` (XTVERSION) or `Ps $ r text` (DECRQSS) — a DCS answer.
+fn dcs_reply(text: &str) -> Option<Reply> {
+    if let Some(version) = text.strip_prefix(">|") {
+        return Some(Reply::Version(version.to_string()));
     }
+    let (validity, setting) = text.split_once("$r")?;
+    Some(Reply::Setting {
+        valid: validity == "1",
+        text: setting.to_string(),
+    })
 }
 
 fn parse_csi(buffer: &[u8]) -> Step {
@@ -321,9 +565,23 @@ fn parse_csi(buffer: &[u8]) -> Step {
     }
     let body = std::str::from_utf8(&buffer[2..buffer.len() - 1]).map_err(|_| ())?;
     if let Some(private) = body.strip_prefix('?') {
-        // `CSI ? flags u` (the kitty flags), `CSI ? … c` (device attributes): answers
-        let _ = private;
-        return Ok(Some(Decoded::Nothing));
+        // `CSI ? flags u` (the kitty flags), `CSI ? … c` (device attributes), `CSI ? mode ;
+        // setting $ y` (a mode report): answers, never keys
+        let numbers = |text: &str| -> Vec<u16> {
+            text.split(';')
+                .filter_map(|field| field.parse().ok())
+                .collect()
+        };
+        let reply = match last {
+            b'c' => Some(Reply::DeviceAttributes(numbers(private))),
+            b'u' => private.parse().ok().map(Reply::KeyboardFlags),
+            b'y' => match numbers(private.strip_suffix('$').unwrap_or(""))[..] {
+                [mode, setting] => Some(Reply::Mode { mode, setting }),
+                _ => None,
+            },
+            _ => None,
+        };
+        return Ok(Some(reply.map_or(Decoded::Nothing, Decoded::Reply)));
     }
     match last {
         b'I' if body.is_empty() => Ok(Some(Decoded::Event(Event::FocusGained))),
@@ -789,6 +1047,21 @@ mod tests {
         );
     }
 
+    /// An ESC whose key arrives in the next read is still Meta on it: a lone ESC at a read's
+    /// end waits (the tty lets it go as Escape after `ESCAPE_PATIENCE`), it is not Escape at
+    /// once and its key a plain one.
+    #[test]
+    fn an_escape_split_from_its_key_is_still_meta() {
+        let mut decoder = Decoder::new();
+        let mut out = Vec::new();
+        decoder.feed(b"\x1b", false, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(decoder.key_undecided());
+        decoder.feed(b"f", false, &mut out);
+        assert_eq!(out, vec![pressed(KeyCode::Char('f'), ALT)]);
+        assert!(!decoder.waiting());
+    }
+
     #[test]
     fn escape_is_meta_or_the_escape_key() {
         assert_eq!(decode(b"\x1bf"), vec![pressed(KeyCode::Char('f'), ALT)]);
@@ -949,6 +1222,138 @@ mod tests {
         );
     }
 
+    /// Decode `bytes` as one read; the events and the replies.
+    fn decode_with_replies(bytes: &[u8]) -> (Vec<Event>, Vec<Reply>) {
+        let mut decoder = Decoder::new();
+        let mut out = Vec::new();
+        decoder.feed(bytes, false, &mut out);
+        decoder.flush(&mut out);
+        (out, decoder.take_replies())
+    }
+
+    /// The answers to `term-enter`'s batched question (ADR-740), each read as the reply it
+    /// is, ended by ST or BEL, with the keys typed among them still keys.
+    #[test]
+    fn a_terminals_answers_are_read_as_replies() {
+        let (events, replies) = decode_with_replies(
+            b"\x1b[?1u\x1b_Gi=31;OK\x1b\\\x1b]10;rgb:cdcd/d6d6/f4f4\x1b\\a\
+              \x1b]11;rgb:1e/1e/2e\x07\x1b[?2026;2$y\x1b[?2027;0$y\
+              \x1bP>|foot(1.16.2)\x1b\\\x1bP1$r0;38:2::1:2:3m\x1b\\\x1bP0$r\x1b\\\
+              \x1b[?62;22c",
+        );
+        assert_eq!(events, vec![pressed(KeyCode::Char('a'), NONE)]);
+        assert_eq!(
+            replies,
+            vec![
+                Reply::KeyboardFlags(1),
+                Reply::Graphics {
+                    controls: "i=31".to_string(),
+                    message: "OK".to_string()
+                },
+                Reply::Colour {
+                    slot: 10,
+                    rgb: (0xcd, 0xd6, 0xf4)
+                },
+                Reply::Colour {
+                    slot: 11,
+                    rgb: (0x1e, 0x1e, 0x2e)
+                },
+                Reply::Mode {
+                    mode: 2026,
+                    setting: 2
+                },
+                Reply::Mode {
+                    mode: 2027,
+                    setting: 0
+                },
+                Reply::Version("foot(1.16.2)".to_string()),
+                Reply::Setting {
+                    valid: true,
+                    text: "0;38:2::1:2:3m".to_string()
+                },
+                Reply::Setting {
+                    valid: false,
+                    text: String::new()
+                },
+                Reply::DeviceAttributes(vec![62, 22]),
+            ]
+        );
+    }
+
+    /// An answer that arrives in pieces — over ssh, after the batch stopped waiting — is put
+    /// back together and is still no key.
+    #[test]
+    fn an_answer_split_across_reads_is_still_an_answer() {
+        let mut decoder = Decoder::new();
+        let mut out = Vec::new();
+        decoder.feed(b"\x1b]", true, &mut out);
+        decoder.feed(b"11;rgb:00", true, &mut out);
+        decoder.feed(b"00/0000/0000\x1b", true, &mut out);
+        decoder.feed(b"\\x", false, &mut out);
+        assert_eq!(out, vec![pressed(KeyCode::Char('x'), NONE)]);
+        assert_eq!(
+            decoder.take_replies(),
+            vec![Reply::Colour {
+                slot: 11,
+                rgb: (0, 0, 0)
+            }]
+        );
+        // a colour the terminal garbled is no reply, and nothing typed
+        assert_eq!(
+            decode_with_replies(b"\x1b]11;rgb:123456789/0/0\x1b\\"),
+            (vec![], vec![])
+        );
+    }
+
+    /// `ESC ]`, `ESC P` and `ESC _` are Meta on `]`, `P` and `_` unless an answer follows.
+    #[test]
+    fn meta_on_a_string_introducer_is_still_a_key() {
+        assert_eq!(decode(b"\x1b]"), vec![pressed(KeyCode::Char(']'), ALT)]);
+        assert_eq!(decode(b"\x1b_"), vec![pressed(KeyCode::Char('_'), ALT)]);
+        assert_eq!(
+            decode(b"\x1bP"),
+            vec![pressed(KeyCode::Char('P'), ALT | SHIFT)]
+        );
+        // the key after it is read again, as itself
+        assert_eq!(
+            decode(b"\x1b]x\x1b_\x1b[A"),
+            vec![
+                pressed(KeyCode::Char(']'), ALT),
+                pressed(KeyCode::Char('x'), NONE),
+                pressed(KeyCode::Char('_'), ALT),
+                pressed(KeyCode::Up, NONE),
+            ]
+        );
+        // and an introducer that ends a read, nothing more coming, waits as a lone ESC does:
+        // the Meta key once its patience passes (the flush)
+        let mut decoder = Decoder::new();
+        let mut out = Vec::new();
+        decoder.feed(b"\x1b]", false, &mut out);
+        assert!(out.is_empty() && decoder.key_undecided());
+        decoder.flush(&mut out);
+        assert_eq!(out, vec![pressed(KeyCode::Char(']'), ALT)]);
+    }
+
+    /// The whole batch of answers, cut into two reads at every byte — each read the tty's
+    /// last for now, as a late answer over ssh arrives — is read as the same replies and
+    /// types nothing. (An answer cut right after `ESC ]` was once M-] and its text typed.)
+    #[test]
+    fn the_answers_cut_anywhere_are_still_answers() {
+        let answers: &[u8] = b"\x1b[?1u\x1b_Gi=31;OK\x1b\\\x1b]10;rgb:cdcd/d6d6/f4f4\x1b\\\
+              \x1b]11;rgb:1e/1e/2e\x07\x1b[?2026;2$y\x1bP>|foot(1.16.2)\x1b\\\
+              \x1bP1$r0;38:2::1:2:3m\x1b\\\x1b[?62;22c";
+        let (_, whole) = decode_with_replies(answers);
+        assert_eq!(whole.len(), 8);
+        for cut in 1..answers.len() {
+            let mut decoder = Decoder::new();
+            let mut out = Vec::new();
+            decoder.feed(&answers[..cut], false, &mut out);
+            decoder.feed(&answers[cut..], false, &mut out);
+            assert!(out.is_empty(), "cut at {cut}: {out:?}");
+            assert_eq!(decoder.take_replies(), whole, "cut at {cut}");
+        }
+    }
+
     #[test]
     fn a_sequence_split_across_reads_is_put_back_together() {
         let mut decoder = Decoder::new();
@@ -969,5 +1374,157 @@ mod tests {
         decoder.feed(&"日".as_bytes()[..1], true, &mut out);
         decoder.feed(&"日".as_bytes()[1..], false, &mut out);
         assert_eq!(out, vec![pressed(KeyCode::Char('日'), NONE)]);
+    }
+
+    /// The keys `text` types, one event each, no modifier (but Shift on a capital).
+    fn typed(text: &str) -> Vec<Event> {
+        text.chars()
+            .map(|character| {
+                let modifiers = if character.is_uppercase() {
+                    SHIFT
+                } else {
+                    NONE
+                };
+                pressed(KeyCode::Char(character), modifiers)
+            })
+            .collect()
+    }
+
+    /// `prefix` then `rest`: the events in order.
+    fn then(prefix: Vec<Event>, rest: Vec<Event>) -> Vec<Event> {
+        prefix.into_iter().chain(rest).collect()
+    }
+
+    /// Alt-] then a digit, in one read: the start of an OSC answer, until it is not one (ADR-747).
+    #[test]
+    fn alt_bracket_then_a_digit_is_typed() {
+        let meta_bracket = || vec![pressed(KeyCode::Char(']'), ALT)];
+        // the read ends after the digit: Meta and the digit, once its patience passes
+        assert_eq!(decode(b"\x1b]1"), then(meta_bracket(), typed("1")));
+        let mut decoder = Decoder::new();
+        let mut out = Vec::new();
+        decoder.feed(b"\x1b]1", false, &mut out);
+        assert!(out.is_empty() && decoder.key_undecided());
+        decoder.flush(&mut out);
+        assert_eq!(out, then(meta_bracket(), typed("1")));
+        // while a question is outstanding, it waits as any sequence does, and then is typed
+        decoder.await_replies(true);
+        let mut out = Vec::new();
+        decoder.feed(b"\x1b]1", false, &mut out);
+        assert!(out.is_empty() && !decoder.key_undecided() && decoder.waiting());
+        decoder.flush(&mut out);
+        assert_eq!(out, then(meta_bracket(), typed("1")));
+        // the first byte no answer has there: typed at once, nothing lost
+        assert_eq!(
+            decode(b"\x1b]11;text"),
+            then(meta_bracket(), typed("11;text"))
+        );
+        let mut decoder = Decoder::new();
+        let mut out = Vec::new();
+        decoder.feed(b"\x1b]11;t", true, &mut out);
+        assert_eq!(out, then(meta_bracket(), typed("11;t")));
+        assert!(!decoder.waiting());
+        // a number no answer has, a terminator before the head is whole, a key's sequence
+        assert_eq!(decode(b"\x1b]13"), then(meta_bracket(), typed("13")));
+        assert_eq!(
+            decode(b"\x1b]11\x07"),
+            then(
+                meta_bracket(),
+                then(typed("11"), vec![pressed(KeyCode::Char('g'), CONTROL)])
+            )
+        );
+        assert_eq!(
+            decode(b"\x1b]1\x1b[A"),
+            then(
+                meta_bracket(),
+                then(typed("1"), vec![pressed(KeyCode::Up, NONE)])
+            )
+        );
+        // a part-read answer then Escape: Meta, the digit, Escape
+        assert_eq!(
+            decode(b"\x1b]1\x1b"),
+            then(
+                meta_bracket(),
+                then(typed("1"), vec![pressed(KeyCode::Esc, NONE)])
+            )
+        );
+        // an answer longer than any is no answer
+        let mut long = b"\x1b]11;rgb:".to_vec();
+        long.extend([b'0'; REPLY_MAX]);
+        let events = decode(&long);
+        assert_eq!(events[0], pressed(KeyCode::Char(']'), ALT));
+        assert_eq!(events.len(), 1 + long.len() - 2);
+    }
+
+    /// A real OSC 11 answer cut at every byte, with and without a question outstanding,
+    /// the read before the cut the tty's last for now: still the answer, nothing typed.
+    #[test]
+    fn an_osc_answer_cut_at_every_byte_is_still_an_answer() {
+        for answer in [
+            &b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\x"[..],
+            &b"\x1b]11;rgb:1e/1e/2e\x07x"[..],
+        ] {
+            for awaiting in [false, true] {
+                for cut in 1..answer.len() {
+                    let mut decoder = Decoder::new();
+                    decoder.await_replies(awaiting);
+                    let mut out = Vec::new();
+                    decoder.feed(&answer[..cut], false, &mut out);
+                    decoder.feed(&answer[cut..], false, &mut out);
+                    assert_eq!(out, typed("x"), "cut at {cut}");
+                    assert_eq!(
+                        decoder.take_replies(),
+                        vec![Reply::Colour {
+                            slot: 11,
+                            rgb: (0x1e, 0x1e, 0x2e)
+                        }],
+                        "cut at {cut}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same for DCS and APC: Meta on `P` and `_` with the keys after them typed, and an
+    /// answer of each read whole wherever it is cut.
+    #[test]
+    fn dcs_and_apc_are_answers_only_in_an_answers_shape() {
+        let meta_p = || vec![pressed(KeyCode::Char('P'), ALT | SHIFT)];
+        let meta_underscore = || vec![pressed(KeyCode::Char('_'), ALT)];
+        assert_eq!(decode(b"\x1bP1x"), then(meta_p(), typed("1x")));
+        assert_eq!(decode(b"\x1bP>x"), then(meta_p(), typed(">x")));
+        assert_eq!(decode(b"\x1bP1$"), then(meta_p(), typed("1$")));
+        assert_eq!(decode(b"\x1b_Go"), then(meta_underscore(), typed("Go")));
+        assert_eq!(decode(b"\x1b_G"), then(meta_underscore(), typed("G")));
+        assert_eq!(decode(b"\x1b_Gi"), then(meta_underscore(), typed("Gi")));
+        for (answer, reply) in [
+            (
+                &b"\x1bP>|XTerm(390)\x1b\\"[..],
+                Reply::Version("XTerm(390)".to_string()),
+            ),
+            (
+                &b"\x1bP1$r0;38:2::1:2:3m\x1b\\"[..],
+                Reply::Setting {
+                    valid: true,
+                    text: "0;38:2::1:2:3m".to_string(),
+                },
+            ),
+            (
+                &b"\x1b_Gi=31;OK\x07"[..],
+                Reply::Graphics {
+                    controls: "i=31".to_string(),
+                    message: "OK".to_string(),
+                },
+            ),
+        ] {
+            for cut in 1..answer.len() {
+                let mut decoder = Decoder::new();
+                let mut out = Vec::new();
+                decoder.feed(&answer[..cut], false, &mut out);
+                decoder.feed(&answer[cut..], false, &mut out);
+                assert!(out.is_empty(), "cut at {cut}: {out:?}");
+                assert_eq!(decoder.take_replies(), vec![reply.clone()], "cut at {cut}");
+            }
+        }
     }
 }

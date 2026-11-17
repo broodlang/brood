@@ -623,6 +623,12 @@ impl LispError {
     ///   outermost std frame of the trace (`math/abs: <: expected number …`) — unless it
     ///   already names it;
     /// - the std raise site stays visible as the innermost trace line.
+    ///
+    /// A std file's own text that does not parse stays where it is: no std code ran, nothing
+    /// the program did made the text unreadable, and the line that does not parse is the one to
+    /// fix (ADR-740). It is told by its trace, which has no frame in that file. A parse error
+    /// std code RAISES — a regex's pattern, read by `std/regex.blsp` — has frames there and
+    /// moves to the program's call like any other.
     pub fn relocated_out_of_std(
         mut self,
         program_file: Option<&str>,
@@ -632,6 +638,14 @@ impl LispError {
             return self;
         };
         if !is_std_source(&raised_in) || program_file == Some(raised_in.as_str()) {
+            return self;
+        }
+        if self.kind == ErrorKind::Parse
+            && !self
+                .trace
+                .iter()
+                .any(|frame| frame.file.as_deref() == Some(raised_in.as_str()))
+        {
             return self;
         }
         let in_program = |frame: &TraceFrame| {
@@ -1000,5 +1014,36 @@ mod tests {
         assert!(!LispError::new(ErrorKind::Runtime, "boom").is_control());
         assert!(!LispError::type_err("nope").is_control());
         assert!(!LispError::unbound("x").is_control());
+    }
+
+    /// A std file's own text that does not parse stays at that text; a runtime error raised in
+    /// std, and a parse error std code raises, move to the program's own code (ADR-740).
+    #[test]
+    fn a_parse_error_in_std_is_not_relocated_to_the_program() {
+        let at_line = |line| Pos { line, col: 7 };
+        let parse = LispError::parse("`#` is a dispatch character")
+            .with_pos(at_line(36))
+            .or_file("std/editor/display.blsp")
+            .relocated_out_of_std(Some("src/main.blsp"), Some(at_line(3)));
+        assert_eq!(parse.file.as_deref(), Some("std/editor/display.blsp"));
+        assert_eq!(parse.pos, Some(at_line(36)));
+        let runtime = LispError::runtime("<: expected number")
+            .with_pos(at_line(36))
+            .or_file("std/editor/display.blsp")
+            .relocated_out_of_std(Some("src/main.blsp"), Some(at_line(3)));
+        assert_eq!(runtime.file.as_deref(), Some("src/main.blsp"));
+        // a parse error std CODE raised — `std/regex.blsp` rejecting the program's pattern —
+        // has run std code (a frame in that file), so it moves to the program as `runtime` did
+        let mut raised = LispError::parse("regex: {1,99999} repeats more than 1000 times")
+            .with_pos(at_line(360))
+            .or_file("std/regex.blsp");
+        raised.trace.push(TraceFrame {
+            name: Some("regex/regex-repeat"),
+            file: Some(std::sync::Arc::from("std/regex.blsp")),
+            pos: Some(at_line(395)),
+        });
+        let raised = raised.relocated_out_of_std(Some("src/main.blsp"), Some(at_line(3)));
+        assert_eq!(raised.file.as_deref(), Some("src/main.blsp"));
+        assert_eq!(raised.pos, Some(at_line(3)));
     }
 }

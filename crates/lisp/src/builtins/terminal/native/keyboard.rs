@@ -615,12 +615,9 @@ fn keyboard() -> MutexGuard<'static, TerminalKeyboard> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// After the alternate screen is entered (kitty keeps one flag stack per screen): take the
-/// keyboard, and push [`FLAGS`] when stdout is a terminal that says it speaks the protocol —
-/// else ask for xterm's `modifyOtherKeys` (KI-360), which a terminal without it ignores.
-/// Best effort; a terminal that does not answer is left as it was.
-pub(super) fn enhance() {
-    use std::io::IsTerminal;
+/// After the alternate screen is entered: take the keyboard — from now on a hold is inferred
+/// and a key-up delivered, and the keys typed while [`ask`] waits reach the inbox.
+pub(super) fn take() {
     let mut keyboard = keyboard();
     keyboard.taken = true;
     keyboard.inbox.reset(Some(Instant::now()));
@@ -630,23 +627,24 @@ pub(super) fn enhance() {
         keyboard.size = crossterm::terminal::size().ok();
         keyboard.resizes_seen = super::tty::resize_generation();
     }
+}
+
+/// Push [`FLAGS`] (kitty keeps one flag stack per screen, so after the alternate screen is
+/// entered) when stdout is a terminal that `speaks_kitty` — it answered the flags query
+/// (`probe`) — else ask for xterm's `modifyOtherKeys` (KI-360), which a terminal without it
+/// ignores. Where Brood does not read the tty itself (not Unix), crossterm is asked.
+pub(super) fn enhance(speaks_kitty: bool) {
+    use std::io::IsTerminal;
+    let mut keyboard = keyboard();
     if keyboard.enhanced || !std::io::stdout().is_terminal() {
         return;
     }
-    let speaks_kitty = matches!(
-        crossterm::terminal::supports_keyboard_enhancement(),
-        Ok(true)
-    );
-    // the query is crossterm's, read through crossterm's own reader: whatever else it read
-    // meanwhile (keys typed during the query) comes over to the inbox
-    let mut typed = Vec::new();
-    while matches!(crossterm::event::poll(Duration::ZERO), Ok(true)) {
-        match crossterm::event::read() {
-            Ok(event) => typed.push(event),
-            Err(_) => break,
-        }
-    }
-    keyboard.inbox.arrive(typed, Instant::now(), true);
+    #[cfg(not(unix))]
+    let speaks_kitty = speaks_kitty
+        || matches!(
+            crossterm::terminal::supports_keyboard_enhancement(),
+            Ok(true)
+        );
     if speaks_kitty
         && crossterm::execute!(
             std::io::stdout(),
@@ -660,43 +658,46 @@ pub(super) fn enhance() {
     }
 }
 
-/// Ask the terminal something and collect what it answers: `request` written, then the
-/// tty's bytes read until `answered` says the answer is in or `patience` runs out. Every
-/// byte read also goes through the decoder, which swallows a terminal's answers, so a key
-/// typed meanwhile reaches the inbox as typed. What `graphics` detects the kitty graphics
-/// protocol with (ADR-695). Unix only: elsewhere crossterm reads the console.
+/// Ask the terminal something and collect its answers (ADR-740): `request` written, then the
+/// tty read until `answered` says the answers are in or `patience` runs out. Every byte goes
+/// through the decoder, which reads a terminal's answers as replies, so a key typed meanwhile
+/// reaches the inbox as typed. Unix only: elsewhere crossterm reads the console.
 #[cfg(unix)]
-pub(super) fn ask_terminal(
+pub(super) fn ask(
     request: &[u8],
-    answered: impl Fn(&[u8]) -> bool,
+    answered: impl Fn(&[super::probe::Reply]) -> bool,
     patience: Duration,
-) -> Vec<u8> {
+) -> Vec<super::probe::Reply> {
     let mut keyboard = keyboard();
+    // answers read before, to no question: not this one's
+    let _ = keyboard.tty.take_replies();
+    let mut replies = Vec::new();
     let Ok(fd) = keyboard.tty.fd() else {
-        return Vec::new();
+        return replies;
     };
     if super::write_term_bytes(request).is_err() {
-        return Vec::new();
+        return replies;
     }
+    keyboard.tty.await_replies(true);
     let deadline = Instant::now() + patience;
-    let mut answer = Vec::new();
-    let mut buffer = [0u8; 1024];
-    while !answered(&answer) {
+    while !answered(&replies) {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() || !matches!(super::tty::readable(fd, left), Ok(true)) {
             break;
         }
-        // SAFETY: the buffer is valid for its length, the descriptor open.
-        let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
-        if read <= 0 {
+        let mut events = Vec::new();
+        if keyboard
+            .tty
+            .read_available(&mut events, usize::MAX)
+            .is_err()
+        {
             break;
         }
-        answer.extend_from_slice(&buffer[..read as usize]);
+        keyboard.inbox.arrive(events, Instant::now(), true);
+        replies.extend(keyboard.tty.take_replies());
     }
-    let mut events = Vec::new();
-    keyboard.tty.feed(&answer, &mut events);
-    keyboard.inbox.arrive(events, Instant::now(), true);
-    answer
+    keyboard.tty.await_replies(false);
+    replies
 }
 
 fn write_to_terminal(sequence: &str) -> std::io::Result<()> {
@@ -745,7 +746,10 @@ fn absorb(keyboard: &mut TerminalKeyboard) -> std::io::Result<()> {
 fn read_events(keyboard: &mut TerminalKeyboard) -> std::io::Result<(Vec<Event>, bool)> {
     let mut events = Vec::new();
     let generation = super::tty::resize_generation();
+    // the size is asked only when a SIGWINCH came (or it never was): asking opens /dev/tty and
+    // calls TIOCGWINSZ, which on every wake cost two opens and closes
     if keyboard.taken
+        && (keyboard.size.is_none() || keyboard.resizes_seen != generation)
         && let Ok(size) = crossterm::terminal::size()
         && (keyboard.size != Some(size) || keyboard.resizes_seen != generation)
     {
@@ -773,18 +777,30 @@ fn read_events(keyboard: &mut TerminalKeyboard) -> std::io::Result<(Vec<Event>, 
     Ok((events, drained))
 }
 
-/// Wait up to `wait` for the tty to have input, without the keyboard lock held. On Unix the
-/// wait is cut into slices, so a resize (which writes no byte) is seen within one.
+/// Wait up to `wait` for the tty to have input, without the keyboard lock held: whether it
+/// has, and whether a wake ended it. A resize (which writes no byte) or a stop request ends
+/// the wait at once through the wake pipe (`tty::wake`); the wait is cut short only while a
+/// sequence or a paste is part-read, whose patience must run out on time. An idle terminal is
+/// one poll a second, not a wake every 50 ms.
 #[cfg(unix)]
-fn wait_for_input(wait: Duration) -> std::io::Result<bool> {
-    const RESIZE_SLICE: Duration = Duration::from_millis(50);
-    let fd = keyboard().tty.fd()?;
-    super::tty::readable(fd, wait.min(RESIZE_SLICE))
+fn wait_for_input(wait: Duration) -> std::io::Result<(bool, bool)> {
+    const PART_READ_SLICE: Duration = Duration::from_millis(10);
+    const IDLE_SLICE: Duration = Duration::from_secs(1);
+    let (fd, part_read) = {
+        let mut keyboard = keyboard();
+        (keyboard.tty.fd()?, keyboard.tty.part_read())
+    };
+    let slice = if part_read {
+        PART_READ_SLICE
+    } else {
+        IDLE_SLICE
+    };
+    super::tty::readable_or_woken(fd, wait.min(slice))
 }
 
 #[cfg(not(unix))]
-fn wait_for_input(wait: Duration) -> std::io::Result<bool> {
-    crossterm::event::poll(wait)
+fn wait_for_input(wait: Duration) -> std::io::Result<(bool, bool)> {
+    crossterm::event::poll(wait).map(|input| (input, false))
 }
 
 /// What the INLINE seam (the REPL's line editor, `term-raw-enter`) takes of an event read
@@ -812,7 +828,9 @@ pub(super) fn held() -> std::io::Result<Option<KeyEvent>> {
     })
 }
 
-/// Wait up to `timeout` for input and return the next thing to deliver, `None` on timeout.
+/// Wait up to `timeout` for input and return the next thing to deliver, `None` on timeout —
+/// or as soon as a wake (`tty::wake`: a stop, a resize) brings nothing to deliver, so a
+/// forwarder told to stop looks at its flag at once.
 /// An inferred hold's key-up is due when its repeats stop, so the wait ends then too. The
 /// wait happens without the lock held.
 pub(super) fn next(timeout: Duration) -> std::io::Result<Option<Polled>> {
@@ -834,8 +852,14 @@ pub(super) fn next(timeout: Duration) -> std::io::Result<Option<Polled>> {
             };
             until.saturating_duration_since(now)
         };
-        if wait_for_input(wait)? {
+        let (input, woken) = wait_for_input(wait)?;
+        if input {
             keyboard().inbox.woke(Instant::now());
+        }
+        if woken {
+            let mut keyboard = keyboard();
+            absorb(&mut keyboard)?;
+            return Ok(keyboard.inbox.deliver());
         }
     }
 }

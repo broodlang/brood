@@ -406,15 +406,117 @@ click/hover hit-test, so a card near a screen edge stays interactive exactly whe
     (editor/display/card-rect 20 75 10 4 80 24)   ;=> [20 70]"
   [(clamp-cell row (- rows h)) (clamp-cell col (- cols w))])
 
+;; ---- highlighted text as ops: chunks, tab stops, wide glyphs, inline hints ----------
+;; A line coloured by a lexer arrives as `[substring face]` chunks (`editor/highlight`'s
+;; `fontify-runs`, `highlight-chunks`). Laying them out is the same job for an editor's rows,
+;; a REPL's minibuffer and an observer's prompt: each chunk's tabs expanded at the LINE's tab
+;; stops, each advancing by its cell width (a wide glyph two), clipped at a column. An inline
+;; hint (a parameter name, a type) is a VIRTUAL chunk, painted but not the line's: it moves no
+;; tab stop after it.
+
+(defn- chunk-op (row x shown face)
+  (if (nil? face) (text row x shown) (text row x shown face)))
+
+(defn- chunk-ops-step (row x:int col:int limit:int chunks acc)
+  (if (or (empty? chunks) (>= x limit))
+    (reverse acc)
+    (let (chunk (first chunks)
+          face (second chunk)
+          virtual? (= (nth chunk 2 nil) :virtual)
+          expanded (if virtual? (first chunk) (string/expand-tabs (first chunk) col))
+          ;; the expansion occupies exactly its display width, so that width is also the
+          ;; line-column advance
+          cells (string/display-width expanded)
+          room (- limit x))
+      (if (<= cells room)
+        (chunk-ops-step row
+          (+ x cells)
+          (if virtual? col (+ col cells))
+          limit
+          (rest chunks)
+          (cons (chunk-op row x expanded face) acc))
+        ;; overruns the limit: clipped, and the LAST op — a wide glyph that did not fit
+        ;; leaves its cells blank rather than letting the next chunk paint into them
+        (let (shown (string/clip-cells expanded room))
+          (reverse (if (= shown "") acc (cons (chunk-op row x shown face) acc))))))))
+
+(defn chunk-ops (row x chunks &optional (col 0) (limit 100000))
+  "`text` ops for `[substring face]` `chunks` laid left to right on `row` from screen column
+`x`. `col` is the LINE column the first chunk starts at (0 unless the view is scrolled
+sideways): each chunk's tabs expand at the line's tab stops, not the chunk's. Each advances by
+its cell width, so a wide glyph or a tab pushes what follows, and nothing is painted past
+screen column `limit`: a chunk that overruns it is clipped and is the last painted, so a wide
+glyph that does not fit leaves its cells blank. A chunk `[text face :virtual]`
+([[splice-inline]]) is painted but moves
+no tab stop.
+
+    (editor/display/chunk-ops 0 2 [[\"a\\tb\" :x] [\"日\" nil]])   ;=> ([:text 0 2 \"a       b\" :x] [:text 0 11 \"日\"])
+    (editor/display/chunk-ops 0 0 [[\"abcdef\" nil]] 0 3)   ;=> ([:text 0 0 \"abc\"])
+    (editor/display/chunk-ops 0 0 [[\"ab日\" nil] [\"c\" :x]] 0 3)   ;=> ([:text 0 0 \"ab\"])"
+  (chunk-ops-step row x col limit chunks '()))
+
+;; check-allow: an annotation is `[index text face]` with an int index (splice-inline's
+;; contract), which the checker cannot follow into a tuple read from a list.
+(check-allow :trusted
+  (defn- annotation-index (annotation -> int)
+    "The char of the line an inline `[index text face]` annotation is painted before."
+    (first annotation)))
+
+(defn- virtual-chunk (annotation)
+  "An inline `[index text face]` annotation as the chunk [[chunk-ops]] paints: `[text face :virtual]`."
+  [(second annotation) (nth annotation 2) :virtual])
+
+(defn- splice-inline-step (chunks inline at:int acc)
+  (cond
+    (empty? inline) (append (reverse acc) chunks)
+    ;; past the row's last char: what is anchored at its end, in order
+    (empty? chunks)
+      (append (reverse acc)
+        (map inline virtual-chunk))
+    else
+      (let (annotation (first inline)
+            index (annotation-index annotation)
+            chunk (first chunks)
+            s (first chunk)
+            n (count s))
+        (cond
+          (<= index at)
+            (splice-inline-step chunks
+              (rest inline)
+              at
+              (cons (virtual-chunk annotation) acc))
+          (>= index (+ at n)) (splice-inline-step (rest chunks) inline (+ at n) (cons chunk acc))
+          else
+            (let (cut (- index at))
+              (splice-inline-step (cons [(string/substring s cut n) (second chunk)] (rest chunks))
+                inline
+                index
+                (cons [(string/substring s 0 cut) (second chunk)] acc)))))))
+
+(defn splice-inline (chunks inline)
+  "`[substring face]` `chunks` tiling a line's text with its INLINE annotations spliced in:
+`inline` is `[index text face]`, ascending, `index` the char of the line the annotation is
+painted before (the line's length: after its last). Each becomes a virtual chunk
+`[text face :virtual]` that [[chunk-ops]] paints without moving the line's tab stops; a chunk
+an annotation falls inside is split. `chunks` itself when there are none.
+
+    (editor/display/splice-inline [[\"f(1)\" nil]] [[2 \"x: \" :dim]])   ;=> ([\"f(\" nil] [\"x: \" :dim :virtual] [\"1)\" nil])
+    (editor/display/splice-inline [[\"ab\" nil]] [[2 \" ;; int\" :dim]])   ;=> ([\"ab\" nil] [\" ;; int\" :dim :virtual])"
+  (if (empty? inline) chunks (splice-inline-step (seq chunks) (seq inline) 0 '())))
+
 (defn card-surface (row col w h face &optional (gui? false) (opts {}))
   "Render ops for a floating card's **surface** — the raised panel other overlays sit on:
 `w`×`h` cells at top-left `(row, col)`, filled in `face`. In the GUI (`gui?`) it's a rounded
 `frect` (radius `opts :radius`, default 0.5 cell); a `opts :border` face adds a crisp rounded
 hairline as a slightly larger border-coloured `frect` drawn behind the surface (a rounded
 edge, not a shadow). The terminal falls back to a flat `rect` (no radius, no border). Content
-is drawn by the caller on top.
+is drawn by the caller on top. In the terminal a `opts :border` colour draws the card's two side
+edges as `│` in it, over the surface — a card that stays told from the text under it at 16
+colours, where its fill and the background may be the same black; the caller pads its content
+at least a cell in from each side.
 
-    (editor/display/card-surface 1 2 10 3 nil)   ;=> ([:rect 1 2 10 3 nil])"
+    (editor/display/card-surface 1 2 10 3 nil)   ;=> ([:rect 1 2 10 3 nil])
+    (count (editor/display/card-surface 1 2 10 3 {:bg \"#111111\"} false {:border \"#888888\"}))   ;=> 7"
   (let (radius (get opts :radius 0.5)
         border (get opts :border))
     (if gui?
@@ -422,7 +524,12 @@ is drawn by the caller on top.
                 [(frect (- col 0.07) (- row 0.07) (+ w 0.14) (+ h 0.14) border 1.0 (+ radius 0.07))]
                 [])
         [(frect (* 1.0 col) (* 1.0 row) (* 1.0 w) (* 1.0 h) face 1.0 radius)])
-      (list (rect row col w h face)))))
+      (if (and border (>= w 2))
+        (let (edge-face {:fg border :bg (when (map? face) (get face :bg))})
+          (cons (rect row col w h face)
+            (mapcat (range row (+ row h))
+              (fn (at) (list (text at col "│" edge-face) (text at (+ col w -1) "│" edge-face))))))
+        (list (rect row col w h face))))))
 
 (defn card-pill (row col w face &optional (opts {}))
   "A rounded selection **pill** inside a card: a one-row-tall `frect` highlight at

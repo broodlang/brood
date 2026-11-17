@@ -149,6 +149,15 @@ type; `i` is the position of the first rest argument."
 ;; type's tag, a type form it can decide (`?A`, an arrow, an `or`), or a remembered
 ;; verdict — so an unchanged value costs a lookup — and only what it cannot vouch for
 ;; reaches `%contract-args!` / `%contract-check-ret`, which walk, remember and blame.
+;;
+;; **The bytecode dispatcher takes these templates apart (ADR-748).** A call of a shim
+;; whose arguments `%contract-args-known?` would vouch for never runs the template's frame:
+;; the kernel (`builtins/contracts.rs` `enter_shim`) reads the captured `%contract-name`,
+;; `%contract-orig`, `%contract-spec` and `%contract-ret`, calls the original in the
+;; shim's place, and checks the result on return exactly as below — `%type-verdict`, else
+;; this module's `%contract-check-ret`. So the parameter names, the vouch-then-check order
+;; and the `any` tail call are a contract with the kernel: change one here, change it there.
+;; Every call the kernel cannot vouch for still runs the template, which is what blames.
 (defn- %contract-shim-0 (%contract-name %contract-orig %contract-spec %contract-ret)
   (fn ()
     (if (or (%eq %contract-ret 'any) (%contract-tail? %contract-ret))

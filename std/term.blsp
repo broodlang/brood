@@ -141,11 +141,20 @@ that did not change must draw this time (ADR-586).
 (`foreground`). A theme made for a dark window is then drawn on its own background, not on
 a light terminal's. A colour is a palette keyword, `[r g b]` or `\"#rrggbb\"` (degraded to
 the terminal's depth, `term/colors`); nil is the terminal's own. The next frame repaints
-whole (ADR-586). Returns nil.
+whole (ADR-586). At true colour the terminal's OWN colours follow too (OSC 10/11, and the cursor's,
+OSC 12), so its padding and its cursor are the theme's; a leave gives them back. Returns nil.
 
     (term/bg \"#1e1e2e\" \"#cdd6f4\")   ;~> nil — the next frame drawn on the theme's base
     (term/bg nil)   ;=> nil"
   (%term-bg background foreground))
+
+(defn title (title)
+  "Set the terminal's window (or tab) title — what `gui/title` is to a window. The shell's own
+title is saved the first time and given back when the screen is left; taking it again (a
+continue after a suspend) sets this title again. Returns nil.
+
+    (term/title \"notes.txt — bedit\")   ;~> nil"
+  (%term-title title))
 
 (defn colors (&optional (depth :environment))
   "The colour depth `term/draw` writes at: `:truecolor`, `:256` or `:16`. Read from
@@ -180,3 +189,48 @@ over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down
 
     (term/emit [[:cr] [:print \"> \" {:fg :cyan}] [:clear-eol]])   ;~> nil"
   (%term-emit ops))
+
+(defn reported-colors ()
+  "The terminal's own foreground and background as it reported them (OSC 10/11, ADR-744):
+`{:foreground [r g b] :background [r g b]}`, a key left out when the terminal did not say,
+`{}` where there is no terminal to ask. What it said when first asked — by the first
+`term/enter`, or here when nothing has asked yet (raw mode taken for the moment, so the answer
+is read and not echoed) — never the theme's colours `term/bg` gave it since.
+
+    (map? (term/reported-colors))   ;=> true"
+  (%term-reported-colors))
+
+(defn- channel-light (channel)
+  ;; one sRGB channel (0–255) as linear light (WCAG 2's relative luminance)
+  (let (c (/ channel 255.0))
+    (if (<= c 0.04045) (/ c 12.92) (math/exp (* 2.4 (math/ln (/ (+ c 0.055) 1.055)))))))
+
+(defn color-scheme-of (rgb)
+  "Whether a background `rgb` (`[r g b]`, 0–255) is `:light` or `:dark`: light when black text
+on it contrasts more than white text does — its relative luminance (WCAG 2) above 0.179, where
+the two contrasts are equal. nil for no colour.
+
+    (term/color-scheme-of [255 255 255])   ;=> :light
+    (term/color-scheme-of [30 30 46])   ;=> :dark
+    (term/color-scheme-of [239 241 245])   ;=> :light
+    (term/color-scheme-of [128 128 128])   ;=> :light
+    (term/color-scheme-of [90 90 90])   ;=> :dark
+    (term/color-scheme-of nil)   ;=> nil"
+  (when rgb
+    (let ([r g b] rgb
+          luminance (+ (* 0.2126 (channel-light r))
+                      (* 0.7152 (channel-light g))
+                      (* 0.0722 (channel-light b))))
+      (if (> luminance 0.179) :light :dark))))
+
+(defn preferences ()
+  "What the terminal says about how an app should look, in the shape of
+`gui/desktop-preferences`: `{:color-scheme :foreground :background}` — the scheme its own
+background asks for (`term/color-scheme-of`) and the colours it reported
+(`term/reported-colors`); `{}` when it said nothing. An app that follows the desktop's light or
+dark setting in a window follows this in a terminal (ADR-744).
+
+    (map? (term/preferences))   ;=> true"
+  (let (colors (reported-colors)
+        scheme (color-scheme-of (:background colors)))
+    (if scheme (assoc colors :color-scheme scheme) colors)))

@@ -68,6 +68,26 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-397 — an Interp's parked waiters outlived its drop past the 30 s deadline ⚠️ watching 2026-11-17
+
+**Symptom.** `interp_teardown::dropping_an_interp_reaps_permanently_parked_waiters` failed once in
+a full `make test` on the test machine (tree at `21052af29` plus the ADR-735 work, whose change
+is compile-time module resolution only): `parked waiters survived the Interp drop` after its
+31.4 s wait. The three `(spawn (receive))` processes had parked; the drop did not bring the
+parked count back within 30 s.
+
+**Reproduction.** Not on demand: 40/40 alone, 80/80 as 16 concurrent copies for five rounds,
+on the same binary.
+
+**Cause.** Not known. The deadline was raised from 2 s to 30 s in `0ff808ac9` for a loaded
+tree-walker run; overrunning 30 s is more than load, unless the reap waits on a worker that a
+neighbouring test's process keeps busy — each nextest test is its own OS process, so nothing is
+shared but the machine.
+
+**Diagnostic armed.** The assertion now prints the parked and exit counts at the deadline
+against their values before the Interp, so a recurrence says whether none, some or all of the
+three were reaped.
+
 ## KI-395 — the JIT fast-frame's debug cross-check fired with every epoch agreeing ⚠️ watching 2026-11-16
 
 **Symptom.** `make check-desktop` aborted in its `nest check --strict $(find std tests examples
@@ -103,6 +123,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
+| KI-397 | **An Interp's three parked waiters outlived its drop past the 30 s deadline** — `interp_teardown` failed once under a full `make test` | ⚠️ watching 2026-11-17 — not reproducible on demand (40/40 alone, 80/80 contended); the assertion now reports the counts |
 | KI-396 | **`editor/face`'s face registry reset to `{}` when the module loaded after other modules' faces were restored** — with std loaded from source (`BROOD_NO_STDIMAGE=1`) an imaged bedit lost `:org/level-1` and `:syntax/variable` 5 runs in 6, its Org headings uncoloured | ✅ **FIXED 2026-11-16** — the registry is declared `defonce`, not `defdyn`, so the module's first load after the project image's root section restored the faces keeps them, as `editor/layers` was fixed (ADR-218). Guards: `tests/face_test.blsp` "a face another module registered outlives a re-run of editor/face", and `tests/registry_declare_test.blsp`, which checks every registry a std module declares is `defonce` |
 | KI-395 | **The JIT fast-frame's debug cross-check fired with every epoch agreeing** — `fast-link mirror … has an entry at the same epoch that does not fast-link`, aborting a debug `nest check --strict` over the corpus once in 59 runs | ⚠️ watching 2026-11-16 — not reproducible on demand; the assertion is the armed diagnostic |
 | KI-394 | **`bound?` answered `false` for a name in a project module the startup image had not materialised yet** — it read the global table alone, so under a lazy install (`nest run`, `nest test FILE`) a late-bound hook kept as a symbol was skipped by `reflect/call-if-bound`: bedit's context-menu and Ctrl+wheel zoom tests failed on every warm `nest test FILE` and passed on the run after an edit | ✅ **FIXED 2026-11-14** — `bound?` roots a short project spelling and materialises the image section of the module it names when the installed project image carries one (`derive::bound_or_imaged`); a module the image does not carry is still not loaded. Guard: `startup_image::bound_answers_for_an_imaged_module_not_yet_materialised` (red on the warm run with the old `bound?`) |

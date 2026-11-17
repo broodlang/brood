@@ -6,6 +6,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed (breaking): a module that defines a name the language ships declares it (ADR-735).**
+`(defmodule m) (defn get …)` now fails compilation, naming the clause to add; with
+`(defmodule m (:shadow get))` it works as before — the module's `get` inside `m`, `/get` for the
+root one. This replaces ADR-423's warning, which covered only macros. 47 std definitions now
+declare theirs; a downstream module that owns `get`, `keys`, `fields` or `update` adds one line
+to its header.
+
 **Changed (breaking): a local binding shadows a macro (ADR-734).** `(let (when f) (when x))`
 and a parameter named `cond` called as `(cond …)` now call the local, as a local named like a
 function always did; before, the macro ran and the local was silently ignored. **Binding one of
@@ -46,6 +53,43 @@ is now `float`. pong's strict findings drop from 38 to 32.
 from `regex/find`, `find-all`, `rope-find` and `rope-find-backward` carries `:named`, each
 name's keyword to its group; `regex/replace` templates read `${name}` (and `${12}` for a group
 past 9).
+
+**Added.**
+- `memo/defmemo-by`: one remembered answer per key, valid while that key's input is unchanged — a hash of a small key and one `=`, and no key evicts another (ADR-741).
+- `table/tally`: several integer counters under one key, bumped under one lock (ADR-742).
+- `reflect/bound-value`: a name's value found as `bound?` finds it, or a default, in one lookup (ADR-743).
+- `term/title` (OSC 2, the shell's title saved and given back) and `editor/frontend/display-configure`, one way to set a title in a window, a terminal or a thin client (ADR-736).
+- `editor/display/chunk-ops` and `splice-inline`: highlighted text laid out at the line's tab stops and cell widths, inline hints as virtual chunks (ADR-737).
+- `reflect/internal-name?`: a `%`-name, bare or qualified (ADR-737).
+- The terminal's answers (DA1, kitty flags, DECRPM, XTVERSION, DECRQSS, OSC 10/11/12) are read as replies, never keys; M-], M-P and M-_ are keys again (ADR-740).
+- `term/preferences`, `term/reported-colors` and `term/color-scheme-of`: the terminal's own colours as it reported them and the light or dark scheme its background asks for, in the shape of `gui/desktop-preferences` (ADR-744).
+- A keymap names itself and groups its keys: `editor/keymap/keymap-describe`, `keymap-bind`'s optional group, `keymap-name` / `keymap-groups` / `keymap-entries`; the merges carry them (ADR-745).
+- `std/vt` plays left and right margins: DECLRMM (mode 69), DECSLRM (`CSI l;r s` in it), and SU/SD, IND/RI, a line feed at the bottom margin and IL/DL confined to them; it answers DECRQM (`CSI ? n $ p`) for every mode it has, 0 for the rest. Cross-checked against the terminal tests' model on the same bytes (ADR-747).
+
+**Faster.**
+- `registry/ranked` keeps one order per registry: a hit 2.6 → 1.3 µs, sixty-one registries read in turn ~200 → ~90 µs (ADR-741). `reflect/call-if-bound` resolves its name once (ADR-743). `table/incr` copies its key only to insert it.
+- The CPU painter blends text by table: a full 1080p redraw 19 → 9 ms grayscale, 39 → 12 ms subpixel; a scroll copies its rows in place (ADR-737).
+- The CPU painter keeps its canvas through a resize and draws only what moved or is new (a 1080p configure 22 → 5 ms); one pane of a side-by-side split scrolls by copying its columns (5.5 → 1.2 ms); a keystroke in a zoomed pane draws the cells it changed (8.7 → 0.2 ms); a large draw is split into row bands on up to 8 threads (a full 1080p redraw 9.9 → 2.5 ms, 4K 41 → 12 ms; `BROOD_GUI_THREADS=1` turns it off); the glyph cache hashes with FxHash (ADR-739).
+- The CPU painter copies two panes of a split scrolled opposite ways in one frame, each its own move (1080p, one thread: 8.1 → 1.4 ms), and a scroll inside a zoomed pane (3.4 → 0.9 ms); a large draw holding a picture stays on its threads, the GUI thread drawing only the picture's rows after them (eight threads: 10.8 → 6.2 ms) (ADR-746).
+- The CPU painter copies by a two-way offset: a pane scrolled sideways (1080p, one thread: the whole window 9.2 → 2.4 ms, one pane of a split 5.0 → 2.1 ms, down and sideways at once 9.2 → 2.6 ms), and a zoomed pane moved or resized, its old pixels anchored at its new top-left as a resized window's are (1.4 M → 40–84 k px drawn) (ADR-749).
+- The terminal writes only the colour slots that change and erases blank runs: ~40% fewer bytes a session; an idle terminal no longer wakes every 20 ms (ADR-736).
+- The terminal asks everything at startup in one write ending with DA1: 2.65 → 1.03 s to the first frame on a terminal that answers nothing (ADR-740).
+- Rows that moved are moved by the terminal (`DECSTBM` + `SU`/`SD`): a wheel notch in a 120×40 terminal 6.5 → 0.55 KB (ADR-740).
+- One pane of a side-by-side split scrolls in its own columns (`DECSLRM`) where the terminal has left and right margins (xterm) (ADR-744).
+
+**Changed.**
+- The terminal takes the theme's colours for its own padding and cursor at true colour, and gives them back on exit (ADR-736).
+- A lone ESC waits 30 ms for the key it makes Meta; a double click selects a word in the terminal too (ADR-736).
+- brood-lsp's completion no longer offers qualified `%`-names (`map/%orig%merge-with`).
+- A terminal card has `│` side edges in its border colour.
+- Where the terminal has grapheme clustering (mode 2027) it is turned on, and a cluster is drawn whole; elsewhere a cluster whose code points measure otherwise (a ZWJ family, an emoji with VS16) is drawn as its first code point in the cells it was laid out in, so the text after it stays in place (ADR-744).
+- True colour is read from the terminal's answers (a 24-bit colour asked back, its XTVERSION name), not only `COLORTERM`, which ssh drops (ADR-740).
+- A parse error in a std module names the std file, not the project file that required it (ADR-740).
+- An armed contracted call whose arguments the kernel vouches for no longer runs the shim's frame: the dispatcher calls the original in its place and checks the declared result on return (a return handler on the bytecode driver), with the same errors and blame; base type names are tag sets read once. `string/char-at` armed ~8 400 → ~6 200 instructions a call, a bedit key ~6.1 → ~5.6 ms at 213×49; `BROOD_NO_CONTRACT_DISPATCH=1` restores the old path (ADR-748).
+
+**Fixed.**
+- Alt-] then a digit typed in one read is M-] and the digit, not the start of an OSC answer that swallowed the keys after it: a string sequence is a terminal's answer only while its bytes fit an answer's shape (`REPLY_SHAPES`), a part-read one waits the Meta key's 30 ms unless a question is outstanding, and one that fails is re-read as the Meta key and what was typed (ADR-747).
+- `bound?` of a name whose module another process is loading waits for that load instead of answering false mid-publish — a parallel test run's "unbound" flake (ADR-738).
 
 ## v0.54.0 — a window that feels native: paced to the compositor, hinted like the desktop, edits that stay O(log n)
 

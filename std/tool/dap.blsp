@@ -147,8 +147,8 @@ debugger breaks at (`debug/break-fn`); stepping is not supported.")
                    (let (entry (symbol function)
                          outcome (try
                                    (do
-                                     (when (and (bound? entry) (fn? (reflect/eval entry)))
-                                       ((reflect/eval entry)))
+                                     (let (main (reflect/bound-value entry))
+                                       (when (fn? main) (main)))
                                      :ok)
                                    (catch e (failure (error-message e)))))
                      (send session [:dap-done (self) outcome])))))))))

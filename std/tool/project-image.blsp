@@ -269,7 +269,7 @@ entry one or two keys deep by its key path, a list member by `[index]`."
   (fold registries
     []
     (fn (credits registry)
-      (let (value (if (bound? registry) (reflect/eval registry) nil)
+      (let (value (reflect/bound-value registry)
             credit (fn (found path)
                      (let (writer (%registry-writer registry path))
                        (if (image-credit-writer? writer carried?)
@@ -645,7 +645,7 @@ the record the next partial rebuild reads.
 ;; — a write that marks the name and leaves the value as it was.
 (defn- project-redeclare-registries! (names)
   (doseq (r (or names nil))
-    (when (and (bound? r) (map? (reflect/eval r)))
+    (when (map? (reflect/bound-value r))
       (%registry-update! r :assoc ["%declare"] nil)
       (%registry-update! r :dissoc ["%declare"] nil))))
 

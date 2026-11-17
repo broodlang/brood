@@ -179,48 +179,30 @@ pub(crate) fn internals_grant_key(mod_name: &str) -> value::Symbol {
     value::intern(&format!("/internals/{mod_name}"))
 }
 
-/// The import-table key under which `(:shadow name)` records that this file shadows the root
-/// macro `name` on purpose (ADR-423) — the same leading-`/` trick as [`internals_grant_key`].
+/// The import-table key under which `(:shadow name)` records that this file defines the root
+/// name `name` on purpose (ADR-423, ADR-735) — the same leading-`/` trick as
+/// [`internals_grant_key`].
 pub(crate) fn shadow_declared_key(name: &str) -> value::Symbol {
     value::intern(&format!("/shadow/{name}"))
 }
 
-/// A module definition of a bare name the root binds to a MACRO: inside the module its own
-/// definition now wins (ADR-423), so every bare `(name …)` there stops expanding the macro —
-/// a change of meaning worth a word, unless the header declared it with `(:shadow name)`.
-/// Shadowing a root FUNCTION stays silent: modules owning `get`/`map`/`count` is the
-/// designed style (ADR-236). Once per definition per process; `BROOD_NO_SHADOW_WARN` mutes
-/// it, as it mutes the import-shadow warning.
-fn warn_macro_shadow(heap: &Heap, ns_name: &str, name: value::Symbol) {
+/// A module definition of a bare name the language ships fails compilation unless the header
+/// declares it with `(:shadow name)` (ADR-735, extending ADR-423's macro warning to every
+/// root name and making it an error): inside the module its own definition wins, so every
+/// bare use there means something else, and that must be visible where a reader looks first.
+fn refuse_undeclared_shadow(heap: &Heap, ns_name: &str, name: value::Symbol) {
     let bare = value::symbol_name_ref(name);
     if bare.contains('/')
         || bare.starts_with('%')
-        || !matches!(
-            heap.env_get(value::EnvId::GLOBAL, name).map(|v| v.unpack()),
-            Some(ValueRef::Macro(_))
-        )
+        || !heap.is_root_name(name)
+        // a PRIVATE root name (a prelude `def-`) is unreachable outside the prelude, so a
+        // module spelling one shadows nothing a reader could have meant
+        || heap.is_private(name)
         || heap.import_of(shadow_declared_key(bare)).is_some()
-        || std::env::var_os("BROOD_NO_SHADOW_WARN").is_some()
     {
         return;
     }
-    static WARNED: std::sync::Mutex<Option<HashSet<String>>> = std::sync::Mutex::new(None);
-    let key = format!("{ns_name}/{bare}");
-    let first = WARNED
-        .lock()
-        .map(|mut w| w.get_or_insert_with(HashSet::new).insert(key.clone()))
-        .unwrap_or(true);
-    if first {
-        // Queued, not printed: resolve runs with collection and macro expansion blocked, so it
-        // cannot call the `*err*` port. `compile` writes the queue once the pass is done.
-        PENDING_WARNINGS.with(|q| {
-            q.borrow_mut().push(format!(
-                "warning: `{key}` shadows the prelude macro `{bare}`: inside `{ns_name}` a bare \
-                 `({bare} …)` now means this definition. Reach the macro as `/{bare}`; declare \
-                 the shadow with (:shadow {bare}) in the defmodule header to silence this."
-            ))
-        });
-    }
+    crate::eval::derive::record_undeclared_shadow(name, value::intern(ns_name));
 }
 
 thread_local! {
@@ -1381,7 +1363,7 @@ fn resolve_def(
                 if let Some(target) = visible {
                     crate::eval::derive::record_dynamic_def(name, target, value::intern(ns_name));
                 }
-                warn_macro_shadow(heap, ns_name, name);
+                refuse_undeclared_shadow(heap, ns_name, name);
                 heap.add_ns_known_name(name);
             }
             out.push(Value::symbol(qualify_name(ns_name, name)));

@@ -512,10 +512,8 @@ struct Win {
     /// chording two buttons isn't tracked. Revisit only if multi-button drag is
     /// ever needed.
     held: Option<MouseButton>,
-    /// The last press's click-chain state — `(count, button, cell, when)` — so a
-    /// fresh press in the same cell with the same button within `MULTI_CLICK_MS`
-    /// increments the count (double/triple-click); anything else restarts at 1.
-    last_click: Option<(u8, MouseButton, (u16, u16), Instant)>,
+    /// The presses read as click chains (double/triple click, `ClickChain`).
+    clicks: crate::host::gui::ClickChain<MouseButton>,
     /// The held key, every key down, and the gate on the OS repeat (`Keyboard`).
     keyboard: Keyboard,
     /// Cursor hot-zones from the last drawn frame (`Op::CursorZone`), flattened to

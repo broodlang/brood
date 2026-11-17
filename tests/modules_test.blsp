@@ -282,7 +282,7 @@
   ;; directly (like the reload diagnostics), not through Brood's redirectable stream,
   ;; so this checks the behaviour; reach the prelude original as `/inc`.
   (test "a :use import that shadows a prelude name is allowed (the import wins)"
-    (%load-string "(defmodule shdprov) (defn inc (x) (list :shd x))")
+    (%load-string "(defmodule shdprov (:shadow inc)) (defn inc (x) (list :shd x))")
     (%load-string
       (str "(defmodule shdcons (:use shdprov))"
         " (defn mine (x) (inc x))" ; imported shdprov/inc wins

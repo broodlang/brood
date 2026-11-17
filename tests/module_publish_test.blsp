@@ -7,10 +7,10 @@
 ;;; whose `Conjable` impl was not yet registered died on `conj`. The image branch opened that
 ;;; window for a whole module at once (KI-134's second half); a source load opens it one form
 ;;; wide. The fixture below makes the window 300 ms wide on purpose — `early` is defined,
-;;; the load sleeps, then `late` — and an observer polls with `bound?` (a plain lookup, which
-;;; never waits on a load) for any instant at which a name is bound while the feature is not
-;;; yet provided. Sabotage-verified: with staging bypassed the observer sees `early` bound for
-;;; the whole sleep.
+;;; the load sleeps, then `late` — and an observer polls the global table
+;;; (`reflect/global-names`: `bound?` waits for the load, ADR-738) for any instant at which a
+;;; name is bound while the feature is not yet provided. Sabotage-verified: with staging
+;;; bypassed the observer sees `early` bound for the whole sleep.
 
 (defmodule module-publish-test (:use test))
 
@@ -37,8 +37,9 @@
 (defn- observe (name n seen)
   (if (>= n 800)
     seen
-    (let (any-bound (or (bound? (symbol (str name "/early")))
-                      (bound? (symbol (str name "/late")))
+    (let (names (reflect/global-names)
+          any-bound (or (includes? names (symbol (str name "/early")))
+                      (includes? names (symbol (str name "/late")))
                       (contains? *record-ids* (keyword (str name "/thing"))))
           provided (contains? *features* name))
       (cond
@@ -86,6 +87,48 @@
         (assert= 2 (reflect/eval (sym "late")))
         (assert= true (contains? *record-ids* (keyword (str name "/thing"))))
         (assert= 5 (reflect/eval (list (sym "thing-n") (list (sym "thing") 5))))))))
+
+(describe "bound? while another process loads the module (ADR-738)"
+  (test "waits for that load and answers for the module it publishes"
+    (let (name (write-slow-fixture (str "modpub-wait-" (os/now-ns)))
+          me (self)
+          _loader (spawn (do (require-one (symbol name)) (send me :loaded))))
+      ;; the loader has claimed the load: the fixture sleeps inside it for 300 ms
+      (test/eventually "the loader's claim" (fn () (%registry-member? '*features-loading* name)))
+      ;; `late` is defined after the sleep, so a `bound?` that read the table as it stood
+      ;; answered false — the flake a parallel test run met for every mode another test loaded
+      (assert= true (bound? (symbol (str name "/late"))))
+      (assert= true (contains? *features* name))
+      (assert= :ok (receive (:loaded :ok) (after 5000 :timeout)))))
+  (test "answers false, and does not raise, when that load fails"
+    (let (name (str "modpub-broken-" (os/now-ns))
+          me (self))
+      ;; `early` is defined, then the load sleeps and throws: the module is never provided
+      (file/spit (path/join *dir* (str name ".blsp"))
+        (str "(defmodule "
+          name ")\n(def early 1)\n(proc/sleep 300)\n(error \"broken on purpose\")\n"))
+      (spawn (send me (try (do (require-one (symbol name)) :loaded) (catch _ :failed))))
+      (test/eventually "the loader's claim" (fn () (%registry-member? '*features-loading* name)))
+      (assert= false (bound? (symbol (str name "/early"))))
+      (assert= false (contains? *features* name))
+      (assert= :failed (receive (:failed :failed) (after 5000 :timeout)))))
+  (test "reflect/bound-value waits the same way, and reads the value the load published (ADR-743)"
+    (let (name (write-slow-fixture (str "modpub-value-" (os/now-ns)))
+          me (self)
+          _loader (spawn (do (require-one (symbol name)) (send me :loaded))))
+      (test/eventually "the loader's claim" (fn () (%registry-member? '*features-loading* name)))
+      (assert= 2 (reflect/bound-value (symbol (str name "/late")) :unbound))
+      (assert= :ok (receive (:loaded :ok) (after 5000 :timeout)))))
+  (test "reflect/bound-value answers the default, and does not raise, when that load fails"
+    (let (name (str "modpub-value-broken-" (os/now-ns))
+          me (self))
+      (file/spit (path/join *dir* (str name ".blsp"))
+        (str "(defmodule "
+          name ")\n(def early 1)\n(proc/sleep 300)\n(error \"broken on purpose\")\n"))
+      (spawn (send me (try (do (require-one (symbol name)) :loaded) (catch _ :failed))))
+      (test/eventually "the loader's claim" (fn () (%registry-member? '*features-loading* name)))
+      (assert= :unbound (reflect/bound-value (symbol (str name "/early")) :unbound))
+      (assert= :failed (receive (:failed :failed) (after 5000 :timeout))))))
 
 ;; KI-194: a module file `load`ed INSIDE an open load frame — the shape of every `require-one`,
 ;; whose `%require-force` loads the file inside `%with-load-journal` — is part of that load.

@@ -1893,3 +1893,21 @@ macro's binders arrive because it expands first) and leaves a locally bound head
 expander body runs with no locals. Binding `def do fn if let letrec quote quasiquote` fails
 compilation. `nest check --strict` over std, tests and examples reads identically with the
 scope on and off.
+
+2026-11-17 (ADR-735). **A module that owns a root name says so.** A module's `(defn get …)`
+silently changed every bare `get` in the file, and only a macro's name earned a warning a reader
+never saw. Now it fails compilation unless the header declares `(:shadow get)`, for functions and
+macros alike, through the resolve pass's existing error channel; private prelude names are
+exempt (unreachable, so nothing is shadowed). std declares 47 shadows in 24 modules; tests that
+built such modules in strings declare theirs, including the ones whose "no warning" assertions
+would otherwise have passed vacuously on a compile error.
+
+2026-11-17 (stress fuzzer hang). **A generated program's answer no longer depends on the clock.**
+Full run 44054940405 sat silent for 95 minutes in `stress/fuzz_programs.blsp`. The generated
+fan-in received with `(after 10000 -1)`: on a loaded runner the tree-walker missed the deadline,
+counted −1 for one worker (seed 4 printed exactly 15·v − 1 against 16·v) and diverged. The
+shrinker then re-ran five configs of up to 120 s each for up to 250 attempts. Generated
+`receive`s carry no `after` now, since a lost message still fails through the per-program
+`:timeout-ms`, and a shrink stops at ten minutes of wall clock. Before the fix, 4 lanes × 5
+rounds flagged seed 4 in 15 of 20 runs and timed out a whole round; after it, 6 lanes × 5 rounds
+agreed on all 25 seeds 30 times out of 30.

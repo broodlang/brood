@@ -13,7 +13,7 @@ fn an_import_warns_for_a_public_root_name_and_not_for_a_private_one() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("shadowlib.blsp"),
-        "(defmodule shadowlib)\n(def *live-registries* 1)\n(defn identity (x) x)\n",
+        "(defmodule shadowlib (:shadow identity))\n(def *live-registries* 1)\n(defn identity (x) x)\n",
     )
     .unwrap();
     std::fs::write(

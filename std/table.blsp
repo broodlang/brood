@@ -2,7 +2,8 @@
 ;; ADR-107). Policy over the %-prefixed primitives, so it lives under table/* rather than the
 ;; bare core. Note: the type predicate `table?` stays a bare core predicate (like map?/vector?).
 (defmodule table
-  "The shared, identity-mutable key-value store — Brood's one mutable value (ADR-107). The type predicate `table?` stays a bare core predicate.")
+  "The shared, identity-mutable key-value store — Brood's one mutable value (ADR-107). The type predicate `table?` stays a bare core predicate."
+  (:shadow get contains? drop))
 
 (defn new (-> table)
   "Create a new empty in-memory table: a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (table/put/table/delete) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. The table dies with the process that created it, unless a global holds it (`def`). Returns the handle.
@@ -51,6 +52,12 @@
 
     (let (t (table/new)) (do (table/incr t :n 5) (table/get t :n)))   ;=> 5"
   (if delta (%table-incr t k delta) (%table-incr t k)))
+
+(defn tally (t:table k:any deltas:vector -> vector)
+  "Atomically add each of `deltas` (a vector of integers) to the matching field of the tally at key k in table t — a vector of integers as long as `deltas`, an absent key counting as all zeros — and return the new tally. One lock and one key lookup for all the fields: a counter of several things at once — time and calls, bytes and messages — where an `incr` per field took the lock per field and wanted a key per field (ADR-742). Errors, leaving the table as it was, when the value at k is not a tally of that many integers.
+
+    (let (t (table/new)) (do (table/tally t :parse [1200 1]) (table/tally t :parse [800 1])))   ;=> [2000 2]"
+  (%table-tally t k deltas))
 
 (defn snapshot (t:table -> (map any any))
   "A consistent point-in-time copy of the whole table t as an immutable map. Atomic; the returned map is unaffected by later mutation of t. Use map ops (keys/vals/get/reduce) on it. O(n).

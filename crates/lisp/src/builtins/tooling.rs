@@ -199,7 +199,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![sym], bool_ty),
         &["sym"],
-        "Whether sym is bound in scope. Quote it: (bound? 'foo). A name of a module the project's startup image carries counts even before that module is materialised (it is, to answer); a module the program has not loaded is not loaded to find out.\n\n    (bound? 'first)   ;=> true\n    (bound? 'nope)    ;=> false",
+        "Whether sym is bound in scope. Quote it: (bound? 'foo). A name of a module the project's startup image carries counts even before that module is materialised (it is, to answer), and one another process is loading is answered once that load is done; a module the program has not loaded is not loaded to find out.\n\n    (bound? 'first)   ;=> true\n    (bound? 'nope)    ;=> false",
         bound_p,
     );
     primitives.def(
@@ -907,7 +907,7 @@ pub(super) fn global_names(_args: &[Value], _env: EnvId, heap: &mut Heap) -> Lis
 /// reaches the global table). Takes a symbol, so quote it: `(bound? 'foo)`.
 pub(super) fn bound_p(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
-        Value::Sym(s) => crate::eval::derive::bound_or_imaged(heap, env, s),
+        Value::Sym(s) => crate::eval::derive::bound_or_imaged(heap, env, s, args),
         other => Err(LispError::wrong_type(heap, "bound?", "symbol", other)),
     }
 }
@@ -1093,4 +1093,33 @@ pub(super) fn renames_ledger(_: &[Value], _env: EnvId, heap: &mut Heap) -> LispR
         pairs.push((old_value, entry));
     }
     Ok(heap.map_from_pairs(pairs))
+}
+
+/// `reflect/bound-value` (ADR-743), registered last in `builtins::register` (a new primitive
+/// takes the next slot, after every one before it).
+pub(super) fn register_bound_value(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    primitives.def(
+        "reflect/bound-value",
+        Arity::range(1, 2),
+        Sig::with_optional(vec![sym], vec![any], any),
+        &["sym", "default"],
+        "The value bound to sym, found exactly as bound? finds it — an imaged module's name counts, and a name of a module another process is loading is answered once that load is done — or default (nil) where bound? would answer false. One lookup where (if (bound? s) (reflect/eval s) default) made two: the late-bound read a hook kept as a symbol wants (reflect/call-if-bound is built on it). Quote it: (reflect/bound-value 'foo).\n\n    (reflect/bound-value 'no-such-name :none)   ;=> :none\n    (fn? (reflect/bound-value 'inc))   ;=> true",
+        bound_value,
+    );
+}
+
+/// `(reflect/bound-value 'name [default])` — see [`register_bound_value`].
+pub(super) fn bound_value(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Sym(s) => crate::eval::derive::bound_value(heap, env, s, arg(args, 1), args),
+        other => Err(LispError::wrong_type(
+            heap,
+            "reflect/bound-value",
+            "symbol",
+            other,
+        )),
+    }
 }

@@ -1,0 +1,117 @@
+;; The dispatcher enters a contract shim (ADR-748).
+;;
+;; A call of a contracted function whose arguments the kernel vouches for skips the shim's
+;; own frame: the dispatcher calls the ORIGINAL in its place and keeps the declared result's
+;; check as a return handler (or checks right after a call it runs to completion). Anything
+;; it cannot vouch for runs the shim, whose Brood checks blame. These tests hold the
+;; entered path to the shim's answers — the same values, the same blame, the same messages —
+;; and `:entered` (`%type-verdict-counts`) says the path was taken, so each test that
+;; asserts it goes red under `BROOD_NO_CONTRACT_DISPATCH=1`.
+(defmodule contract-dispatch-test
+  (:use test))
+
+(defn entered () (:entered (%type-verdict-counts)))
+
+(defn entered-by (thunk)
+  "How many contracted calls the dispatcher entered while `thunk` ran, and its value."
+  (let (before (entered) value (thunk)) [(- (entered) before) value]))
+
+(defn d-add (a b) (+ a b))
+(sig! d-add (int int -> int))
+
+(check-allow :type-mismatch
+  (defn d-lies (x) (str "not " x)))
+(sig! d-lies (int -> int))
+
+(defn d-any (x) [x x])
+(sig! d-any (int -> any))
+
+(defn d-maybe (x) (when (> x 0) (str x)))
+(sig! d-maybe (int -> (or nil string)))
+
+(defn d-sum (x & more) (reduce more x +))
+(sig! d-sum (int & int -> int))
+
+(defn d-opt (s &optional n) (str s (or n 0)))
+(sig! d-opt (string &optional int -> string))
+
+(defrecord d-point (x y))
+(defn d-make (x) (d-point x x))
+(sig! d-make (int -> d-point))
+
+(defn d-counts (n) {:n n :next (inc n)})
+(sig! d-counts (int -> (map keyword int)))
+
+(defn d-caller (n) (let (r (d-add n 1)) r))
+(defn d-lies-caller (n) (let (r (d-lies n)) r))
+
+(describe "a contracted call the dispatcher enters"
+  (test "answers what the function answers, without the shim's frame"
+    (let ([n value] (entered-by (fn () (d-caller 41))))
+      (assert= 42 value)
+      (is (>= n 1))))
+  (test "an `any` result is not checked: the call is the original's"
+    (assert= [3 3] (d-any 3)))
+  (test "a result the kernel decides by its tag passes either way"
+    (assert= nil (d-maybe 0))
+    (assert= "4" (d-maybe 4)))
+  (test "a rest and an optional shape forward every argument"
+    (assert= 10 (d-sum 1 2 3 4))
+    (assert= 1 (d-sum 1))
+    (assert= "a0" (d-opt "a"))
+    (assert= "a5" (d-opt "a" 5)))
+  (test "a result only the Brood walk can decide is walked, and passes"
+    (let ([n point] (entered-by (fn () (d-make 3))))
+      (is (>= n 1))
+      (assert= 3 (:x point)))
+    (assert= {:n 2 :next 3} (d-counts 2)))
+  (test "a call through a native caller (map, apply) is checked too"
+    (assert= [2 3 4] (vec (map [1 2 3] (fn (x) (d-add x 1)))))
+    (assert= 7 (apply d-add [3 4]))))
+
+(describe "what the entered path raises is the shim's error"
+  (test "a bad result blames the callee, with the shim's message"
+    (let ([n e] (entered-by (fn () (try (d-lies-caller 1) (catch e e)))))
+      (is (>= n 1))
+      (assert= :contract (get e :kind))
+      (assert= :callee (get e :blame))
+      (is (string/ends-with? (->string (get e :function)) "d-lies"))
+      (is (includes? (get e :message) "result expected int"))
+      (assert= "not 1" (get e :got))))
+  (test "a bad result from a tail call into the shim blames the callee too"
+    (let (e (try (d-lies 2) (catch e e)))
+      (assert= :callee (get e :blame))))
+  (test "a bad argument is not entered: the shim blames the caller"
+    (let (e (check-allow :type-mismatch (try (d-add 1 "two") (catch e e))))
+      (assert= :caller (get e :blame))
+      (assert= 2 (get e :argument))
+      (is (includes? (get e :message) "argument 2 expected int"))))
+  (test "a bad result's error is placed at the caller's call, not in the contract module"
+    (let (e (try (d-lies-caller 1) (catch e e)))
+      (is (not (includes? (->string (get e :file)) "contract.blsp")))
+      (is (not (any? (get e :trace) (fn (f) (includes? (->string (get f :file)) "contract.blsp")))))))
+  (test "a wrong arity is the shim's arity error"
+    (assert-error (check-allow :arity (reflect/eval '(contract-dispatch-test/d-add 1))))))
+
+;; Return-checked contracted tail calls stay flat (KI-216, ADR-396): a pending check for an
+;; equal result type is not stacked again, whether the frame owing it is a shim's or the
+;; dispatcher's handler.
+(defn d-ping (n) (if (= n 0) :done (d-pong (dec n))))
+(sig! d-ping (int -> keyword))
+(defn d-pong (n) (if (= n 0) :done (d-ping (dec n))))
+(sig! d-pong (int -> keyword))
+
+(check-allow :type-mismatch
+  (defn d-narrow (n) (if (= n 0) "s" (d-wide (dec n)))))
+(sig! d-narrow (int -> string))
+(check-allow :type-mismatch
+  (defn d-wide (n) (if (= n 0) 7 (d-narrow (dec n)))))
+(sig! d-wide (int -> (or int string)))
+
+(describe "contracted tail calls"
+  (test "a return-checked mutual recursion runs flat"
+    (assert= :done (d-ping 300000)))
+  (test "an unequal result type still checks: the narrower one raises"
+    (let (e (try (d-narrow 1) (catch e e)))
+      (assert= :callee (get e :blame))
+      (is (string/ends-with? (->string (get e :function)) "d-narrow")))))

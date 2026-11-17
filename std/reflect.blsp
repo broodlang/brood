@@ -305,6 +305,18 @@ each file's text; does not evaluate it.
     (reflect/scan-tokens \"(f 1)\")   ;=> [[0 1 :open \"(\"] [1 2 :symbol \"f\"] [3 4 :number \"1\"] [4 5 :close \")\"]]"
   (%scan-tokens s))
 
+(defn internal-name? (name)
+  "Whether `name` (a symbol or a string) is a `%`-name: a kernel primitive or a module's
+internal, bare (`%conj-one`) or qualified (`string/%orig%char-at`, the uncontracted copy a
+contract wraps). Never vocabulary to offer a reader — completion, `apropos`, the docs and an
+audit of the surface all leave these out, by this one rule.
+
+    (reflect/internal-name? '%conj-one)               ;=> true
+    (reflect/internal-name? \"string/%orig%char-at\")   ;=> true
+    (reflect/internal-name? 'string/join)             ;=> false"
+  (let (text (->string name))
+    (or (string/starts-with? text "%") (includes? text "/%"))))
+
 (defn resolves? (name:symbol -> bool)
   "Whether `name` — a symbol — names something that EXISTS, loading its module first if
 `name` is qualified and that module is not loaded yet.
@@ -347,7 +359,11 @@ hook in a module nobody has opened is not a hook yet (that is `resolves?`'s job)
 
     (reflect/call-if-bound 'inc 0 41)          ;=> 42
     (reflect/call-if-bound 'no-such-fn :none 1) ;=> :none"
-  (if (bound? name) (apply (reflect/eval name) args) fallback))
+  ;; One lookup (`reflect/bound-value`, ADR-743): `bound?` then `reflect/eval` resolved the
+  ;; name twice, most of a hook call's cost. The sentinel keeps a name bound to nil a call
+  ;; (which raises), as it was.
+  (let (hook (reflect/bound-value name :reflect/unbound))
+    (if (= hook :reflect/unbound) fallback (apply hook args))))
 
 (defn source-location (name)
   "Where global name was defined, as [file line col], or nil. Quote it: (source-location 'foo).

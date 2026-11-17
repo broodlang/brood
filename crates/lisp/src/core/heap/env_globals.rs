@@ -340,6 +340,16 @@ impl Heap {
         !self.in_module_load() && self.runtime.is_sealed(sym)
     }
 
+    /// Is `sym` a name the language itself ships, whatever is loading — the test a module's
+    /// definition of a bare name is held to (ADR-735). Unlike [`is_reserved_global`], true
+    /// while an embedded module loads too: a std module shadowing a root name declares it
+    /// like any other.
+    ///
+    /// [`is_reserved_global`]: Self::is_reserved_global
+    pub fn is_root_name(&self, sym: Symbol) -> bool {
+        self.runtime.is_sealed(sym)
+    }
+
     /// Reserve `sym`, so a later user `def` of it is refused. Called for every global
     /// an embedded module defines while loading.
     pub fn reserve_global(&self, sym: Symbol) {

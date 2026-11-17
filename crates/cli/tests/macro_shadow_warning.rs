@@ -1,13 +1,12 @@
-//! A module defining a root MACRO's name (ADR-423): inside the module its own definition
-//! wins, so every bare `(name …)` there stops expanding the macro — and the definition says
-//! so on stderr, unless the header declared the shadow with `(:shadow name)`. Shadowing a
-//! root FUNCTION stays silent (ADR-236's designed style). Asserted on the real binary's
-//! stderr because the warning is the kernel's, written before any Brood port exists to
-//! capture it.
+//! A module defining a name the language ships (ADR-423, ADR-735): declared with
+//! `(:shadow name)` in the header, the module's own definition wins inside it and `/name`
+//! reaches the root one; undeclared, the definition fails compilation, naming the clause to
+//! add. A function and a macro are held to the same rule. Asserted on the real binary,
+//! because a refusal a program never sees run is the whole point.
 
 use std::process::Command;
 
-fn run(dir: &std::path::Path, main: &str) -> (String, String) {
+fn run(dir: &std::path::Path, main: &str) -> (bool, String, String) {
     std::fs::write(dir.join("main.blsp"), main).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_brood"))
         .current_dir(dir)
@@ -15,53 +14,54 @@ fn run(dir: &std::path::Path, main: &str) -> (String, String) {
         .output()
         .expect("run brood");
     (
+        output.status.success(),
         String::from_utf8_lossy_owned(output.stdout),
         String::from_utf8_lossy_owned(output.stderr),
     )
 }
 
 #[test]
-fn a_root_macro_shadow_warns_unless_declared_and_the_module_definition_wins() {
-    let dir = std::env::temp_dir().join(format!("brood-macro-shadow-{}", std::process::id()));
+fn a_root_name_shadow_compiles_only_when_declared_and_then_the_module_definition_wins() {
+    let dir = std::env::temp_dir().join(format!("brood-root-shadow-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    // Undeclared: warned, and the module's own `doto` (a private one, like the case that found
-    // this) is what a bare call reaches; `/doto` still reaches the macro, which returns its argument.
-    let (stdout, stderr) = run(
+    // Undeclared, a root FUNCTION's name: refused before anything runs, naming the clause.
+    let (ok, stdout, stderr) = run(
         &dir,
         "(defmodule user)\n\
-         (defn- doto (x) [:mine x])\n\
          (defn get (m k) :mine)\n\
-         (io/puts (pr-str [(doto 1) (/doto 3)]))\n",
+         (io/puts \"ran\")\n",
     );
     assert!(
-        stdout.contains("[[:mine 1] 3]"),
-        "the module's own `doto` must win a bare call, `/doto` reach the macro:\n{stdout}\n{stderr}"
+        !ok && !stdout.contains("ran"),
+        "an undeclared shadow must not run:\n{stdout}\n{stderr}"
     );
     assert!(
-        stderr.contains("`user/doto` shadows the prelude macro `doto`"),
-        "an undeclared root-macro shadow must warn:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("`get`"),
-        "shadowing a root FUNCTION is the designed style and must stay silent:\n{stderr}"
+        stderr.contains("`user` defines `get`, a name the language ships")
+            && stderr.contains("(:shadow get)"),
+        "the refusal must name the definition and the clause to add:\n{stderr}"
     );
 
-    // Declared: the same program, silent.
-    let (stdout, stderr) = run(
+    // Undeclared, a root MACRO's name: the same refusal.
+    let (ok, _, stderr) = run(&dir, "(defmodule user)\n(defn- doto (x) [:mine x])\n");
+    assert!(
+        !ok && stderr.contains("(:shadow doto)"),
+        "a macro's name is held to the same rule:\n{stderr}"
+    );
+
+    // Declared: the module's own definitions win a bare call, `/name` reaches the root ones.
+    let (ok, stdout, stderr) = run(
         &dir,
-        "(defmodule user (:shadow doto))\n\
+        "(defmodule user (:shadow doto get))\n\
          (defn- doto (x) [:mine x])\n\
-         (io/puts (pr-str (doto 1)))\n",
+         (defn get (m k) :mine)\n\
+         (io/puts (pr-str [(doto 1) (/doto 3) (get {:a 1} :a) (/get {:a 1} :a)]))\n",
     );
     let _ = std::fs::remove_dir_all(&dir);
+    assert!(ok, "a declared shadow must compile:\n{stderr}");
     assert!(
-        stdout.contains("[:mine 1]"),
-        "the declared shadow must still win:\n{stdout}\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("shadows the prelude macro"),
-        "(:shadow doto) must silence the warning:\n{stderr}"
+        stdout.contains("[[:mine 1] 3 :mine 1]"),
+        "the module's own definitions must win a bare call, `/name` reach the root:\n{stdout}\n{stderr}"
     );
 }

@@ -55,17 +55,31 @@ impl TtyInput {
         Ok(fd)
     }
 
-    /// Decode `bytes` someone else read from the tty (`keyboard::ask_terminal`) onto `out`,
-    /// as if read here.
-    pub(super) fn feed(&mut self, bytes: &[u8], out: &mut Vec<Event>) {
-        if bytes.is_empty() {
-            return;
+    /// How long what is part-read may wait for its rest: an ESC that may be Meta on a key
+    /// still to come ([`super::decoder::ESCAPE_PATIENCE`]), any other sequence
+    /// [`SEQUENCE_PATIENCE`].
+    fn patience(&self) -> Duration {
+        if self.decoder.key_undecided() {
+            super::decoder::ESCAPE_PATIENCE
+        } else {
+            SEQUENCE_PATIENCE
         }
-        let more = self
-            .fd
-            .is_some_and(|fd| readable(fd, Duration::ZERO).unwrap_or(false));
-        self.decoder.feed(bytes, more, out);
-        self.last_bytes = Some(Instant::now());
+    }
+
+    /// Whether a sequence or a paste is part-read: its rest, or the patience that lets it go,
+    /// is due soon, so a wait for input must not outlast [`SEQUENCE_PATIENCE`].
+    pub(super) fn part_read(&self) -> bool {
+        self.decoder.waiting() || self.decoder.in_paste()
+    }
+
+    /// Say whether a question to the terminal is outstanding ([`Decoder::await_replies`]).
+    pub(super) fn await_replies(&mut self, awaiting: bool) {
+        self.decoder.await_replies(awaiting);
+    }
+
+    /// The terminal's answers the decoder has read since the last take (ADR-740).
+    pub(super) fn take_replies(&mut self) -> Vec<super::probe::Reply> {
+        self.decoder.take_replies()
     }
 
     /// Decode every byte the tty has waiting, without waiting, onto `out` — at most `room`
@@ -79,7 +93,7 @@ impl TtyInput {
                 if super::decoder::paste_stalled(self.decoder.in_paste(), silent_for) {
                     // a paste whose end marker was lost: hand it over, keys are keys again
                     self.decoder.give_up_paste(out);
-                } else if self.decoder.waiting() && silent_for >= SEQUENCE_PATIENCE {
+                } else if self.decoder.waiting() && silent_for >= self.patience() {
                     self.decoder.flush(out);
                 }
                 return Ok(true);
@@ -112,14 +126,45 @@ static RESIZE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 
 extern "C" fn count_resize(_: libc::c_int) {
     RESIZE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    wake();
 }
 
-/// Count SIGWINCH from now on (once per process; the handler only bumps a counter, which is
-/// async-signal-safe). The keyboard reads [`resize_generation`].
+/// A pipe whose read end a wait for input polls beside the tty, so a resize (which writes no
+/// byte to the tty) or a stop request ends the wait at once instead of the waiter waking
+/// every few milliseconds to look. Made once, by [`watch_resizes`]; both ends non-blocking.
+static WAKE_PIPE: std::sync::OnceLock<(RawFd, RawFd)> = std::sync::OnceLock::new();
+
+/// End any wait for input now ([`readable_or_woken`]). Async-signal-safe: one `write` to a
+/// non-blocking pipe, a full pipe being a wake already pending.
+pub(super) fn wake() {
+    if let Some(&(_, write_end)) = WAKE_PIPE.get() {
+        // SAFETY: one byte from a valid buffer to a descriptor this process owns.
+        unsafe {
+            libc::write(write_end, [1u8].as_ptr().cast(), 1);
+        }
+    }
+}
+
+/// Count SIGWINCH from now on (once per process; the handler only bumps a counter and writes
+/// to the wake pipe, both async-signal-safe). The keyboard reads [`resize_generation`].
 pub(super) fn watch_resizes() {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {
-        // SAFETY: a zeroed sigaction with a handler that touches only an atomic.
+        let mut ends = [0 as RawFd; 2];
+        // `pipe` then `fcntl`, not `pipe2`: macOS has no `pipe2` (as `os.rs`'s signal pipe).
+        // SAFETY: `ends` is a live array of two; `pipe` writes the two descriptors into it.
+        if unsafe { libc::pipe(ends.as_mut_ptr()) } == 0 {
+            for fd in ends {
+                // SAFETY: `fd` is a descriptor `pipe` just returned, owned here.
+                unsafe {
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                    let flags = libc::fcntl(fd, libc::F_GETFL);
+                    libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                }
+            }
+            let _ = WAKE_PIPE.set((ends[0], ends[1]));
+        }
+        // SAFETY: a zeroed sigaction with a handler that touches only an atomic and the pipe.
         unsafe {
             let handler: extern "C" fn(libc::c_int) = count_resize;
             let mut action: libc::sigaction = std::mem::zeroed();
@@ -135,24 +180,59 @@ pub(super) fn resize_generation() -> u64 {
     RESIZE_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether `fd` has bytes to read and whether [`wake`] was called, waiting up to `timeout`
+/// for either — a wake ends the wait at once, so the caller looks at what woke it (a resize,
+/// a stop). Without a wake pipe, [`readable`] and never woken.
+pub(super) fn readable_or_woken(fd: RawFd, timeout: Duration) -> io::Result<(bool, bool)> {
+    let Some(&(wake_end, _)) = WAKE_PIPE.get() else {
+        return readable(fd, timeout).map(|input| (input, false));
+    };
+    let mut watched = [watch(fd), watch(wake_end)];
+    wait_for_any(&mut watched, timeout)?;
+    let woken = has_input(&watched[1]);
+    if woken {
+        let mut drain = [0u8; 64];
+        // SAFETY: the buffer is valid for its length; the pipe is non-blocking.
+        while unsafe { libc::read(wake_end, drain.as_mut_ptr().cast(), drain.len()) } > 0 {}
+    }
+    Ok((has_input(&watched[0]), woken))
+}
+
 /// Whether `fd` has bytes to read, waiting up to `timeout` for some. An interrupted wait
 /// (a signal) is "nothing yet".
 pub(super) fn readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
-    let mut poll_fd = libc::pollfd {
+    let mut watched = [watch(fd)];
+    wait_for_any(&mut watched, timeout)?;
+    Ok(has_input(&watched[0]))
+}
+
+/// `fd` watched for input by [`wait_for_any`].
+fn watch(fd: RawFd) -> libc::pollfd {
+    libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
-    };
+    }
+}
+
+/// Wait up to `timeout` for any of `watched` to have input (`poll`), each then saying so by
+/// [`has_input`]. An interrupted wait (a signal) is nothing ready, not an error.
+fn wait_for_any(watched: &mut [libc::pollfd], timeout: Duration) -> io::Result<()> {
     let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
-    // SAFETY: one valid pollfd, the count says so.
-    let ready = unsafe { libc::poll(&mut poll_fd, 1, millis) };
+    // SAFETY: valid pollfds, the count says how many.
+    let ready = unsafe { libc::poll(watched.as_mut_ptr(), watched.len() as libc::nfds_t, millis) };
     if ready < 0 {
         let error = io::Error::last_os_error();
-        return if error.kind() == io::ErrorKind::Interrupted {
-            Ok(false)
-        } else {
-            Err(error)
-        };
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        watched.iter_mut().for_each(|entry| entry.revents = 0);
     }
-    Ok(ready > 0 && poll_fd.revents & (libc::POLLIN | libc::POLLHUP) != 0)
+    Ok(())
+}
+
+/// Whether a [`wait_for_any`] found input on `watched` — or a hang-up, which a read then
+/// reports.
+fn has_input(watched: &libc::pollfd) -> bool {
+    watched.revents & (libc::POLLIN | libc::POLLHUP) != 0
 }

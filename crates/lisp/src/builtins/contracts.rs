@@ -210,7 +210,7 @@ fn record_type_verdict_prim(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     Ok(Value::boolean(verdict))
 }
 
-/// `(%type-verdict-counts)` → `{:hits :misses :entries :clears :asks :vouched}` (ADR-480).
+/// `(%type-verdict-counts)` → `{:hits :misses :entries :clears :asks :vouched :entered}` (ADR-480).
 fn type_verdict_counts_prim(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let counts = heap.type_verdict_counts();
     let count = |n: u64| Value::int(i64::try_from(n).unwrap_or(i64::MAX));
@@ -221,6 +221,7 @@ fn type_verdict_counts_prim(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
         (value::kw("clears"), count(counts.clears)),
         (value::kw("asks"), count(counts.asks)),
         (value::kw("vouched"), count(counts.vouched)),
+        (value::kw("entered"), count(counts.entered)),
     ]))
 }
 
@@ -240,48 +241,56 @@ fn type_names_record_p(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 /// remembers, and blames. Walks the spec's lists in place: this runs on every contracted
 /// call, and an allocation here was a third of what it saved.
 fn contract_args_known_p(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let known = args_vouched(heap, arg(args, 0), args.get(1..).unwrap_or(&[]));
+    heap.note_contract_ask(known);
+    Ok(Value::boolean(known))
+}
+
+/// Whether every argument in `call_args` is already known to pass its declared type in
+/// `spec` (`[fixed optional rest ret]`, the shim's parsed declaration) — by a base type's
+/// tag, a type form the kernel decides, or a remembered verdict (ADR-480). Paired exactly
+/// as `%contract-args!` pairs them. False for anything unknown or failing: the caller then
+/// runs the Brood check, which walks, remembers and blames. The one reading behind both
+/// `%contract-args-known?` and the dispatcher's own entry into a shim ([`enter_shim`]).
+fn args_vouched(heap: &Heap, spec: Value, call_args: &[Value]) -> bool {
     use crate::core::heap::KnownVerdict;
-    let ValueRef::Vector(spec_id) = arg(args, 0).unpack() else {
-        return Ok(Value::boolean(false));
+    let ValueRef::Vector(spec_id) = spec.unpack() else {
+        return false;
     };
     let (fixed, optional, rest) = {
         let spec = heap.vector(spec_id);
         let at = |index: usize| spec.get(index).copied().unwrap_or(Value::nil());
         (at(0), at(1), at(2))
     };
-    let passes = |heap: &Heap, type_expression: Value, value: Value| {
+    let passes = |type_expression: Value, value: Value| {
         matches!(
             heap.type_verdict(type_expression, value),
             KnownVerdict::Known(true)
         )
     };
     // Each declared type of a list against the next argument, pairwise over the overlap.
-    let pairwise = |heap: &Heap, mut types: Value, call_args: &mut std::slice::Iter<Value>| {
+    let pairwise = |mut types: Value, call_args: &mut std::slice::Iter<Value>| {
         while let Value::Pair(id) = types {
             let Some(&value) = call_args.next() else {
                 return true;
             };
             let (type_expression, tail) = heap.pair(id);
-            if !passes(heap, type_expression, value) {
+            if !passes(type_expression, value) {
                 return false;
             }
             types = tail;
         }
         true
     };
-    let mut call_args = args.get(1..).unwrap_or(&[]).iter();
-    let known = pairwise(heap, fixed, &mut call_args) && {
+    let mut remaining = call_args.iter();
+    pairwise(fixed, &mut remaining) && {
         // The optional and rest types both start after the fixed ones; a spec has at most
         // one of them.
-        let after_fixed = call_args.clone();
-        pairwise(heap, optional, &mut call_args)
+        let after_fixed = remaining.clone();
+        pairwise(optional, &mut remaining)
             && (matches!(rest, Value::Nil)
-                || after_fixed
-                    .into_iter()
-                    .all(|&value| passes(heap, rest, value)))
-    };
-    heap.note_contract_ask(known);
-    Ok(Value::boolean(known))
+                || after_fixed.into_iter().all(|&value| passes(rest, value)))
+    }
 }
 
 /// Whether `BROOD_CONTRACTS=1` armed runtime contracts for this process. Cached: the
@@ -768,6 +777,218 @@ fn contracts_sweep_prim(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     };
     let n = sweep(heap, owner.as_deref())?;
     Ok(Value::int(n as i64))
+}
+
+// ===== the dispatcher enters a shim (ADR-748) ===============================================
+//
+// A shim is a Brood closure, and calling one cost a frame of its own on the bytecode VM —
+// three native calls, a `not`, a driver round trip for `%contract-tail?` — before its
+// original ran at all: ~5 000–10 000 instructions a contracted call, against a few hundred
+// for the call itself, and bedit's per-key path makes hundreds of them. The CHECKS were
+// never the cost: an unchanged argument is decided by its tag or a remembered verdict
+// (ADR-480). The frame was.
+//
+// So the call path takes a shim apart instead of entering it. A shim's captured frame
+// already holds everything its body reads — the name, the original, the parsed
+// declaration — and its body is the same few steps for every template. The dispatcher
+// ([`enter_shim`]) asks the one question the template asks first — is every argument
+// vouched for? — and when the answer is yes, calls the ORIGINAL in the shim's place. The
+// result check the template would have made on the way out is then the caller's: a
+// RETURN HANDLER on the bytecode driver (`HandlerKind::ContractResult`), or a check right
+// after the call where the call runs to completion ([`finish_checked`]). Anything the
+// kernel cannot vouch for — an argument it cannot decide or that fails, a call of the
+// wrong arity — runs the shim exactly as before, so every error, every blame and every
+// message comes from the same Brood code it always did. The tree-walker always runs the
+// shim. `BROOD_NO_CONTRACT_DISPATCH=1` runs it everywhere: the A/B and bisect lever.
+
+/// The lexical names the shim templates bind (`std/contract.blsp`): the declared name,
+/// the original, the parsed `[fixed optional rest ret]` declaration, its result type.
+struct ShimNames {
+    name: Symbol,
+    original: Symbol,
+    spec: Symbol,
+    ret: Symbol,
+    any: Symbol,
+    contract_module: Symbol,
+    check_ret: Symbol,
+}
+
+fn shim_names() -> &'static ShimNames {
+    static NAMES: std::sync::OnceLock<ShimNames> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| ShimNames {
+        name: value::intern("%contract-name"),
+        original: value::intern(ORIGINAL),
+        spec: value::intern("%contract-spec"),
+        ret: value::intern("%contract-ret"),
+        any: value::intern("any"),
+        contract_module: value::intern(crate::eval::compile::CONTRACT_MODULE),
+        check_ret: value::intern("contract/%contract-check-ret"),
+    })
+}
+
+/// What a shim's captured frame holds. `spec` is `None` for the zero-argument template,
+/// whose body never reads it (a compiled closure captures only what its body names).
+pub(crate) struct ShimParts {
+    pub(crate) name: Value,
+    pub(crate) original: Value,
+    pub(crate) spec: Option<Value>,
+    pub(crate) ret: Value,
+}
+
+/// Whether the dispatcher may take shims apart — off under `BROOD_NO_CONTRACT_DISPATCH=1`.
+fn dispatch_enabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !crate::diagnostics::debug_flags::is_set(&DISABLED, "BROOD_NO_CONTRACT_DISPATCH")
+}
+
+/// The parts of the shim `id`, if it is one the dispatcher may enter: a closure the
+/// contract module authored (one symbol compare for every other closure) whose captured
+/// frame binds the template's names, with a closure as its original.
+pub(crate) fn shim_parts(heap: &Heap, id: value::ClosureId) -> Option<ShimParts> {
+    let names = shim_names();
+    let closure = heap.closure(id);
+    if closure.module != Some(names.contract_module) || !dispatch_enabled() {
+        return None;
+    }
+    let env = closure.env?;
+    if env == EnvId::GLOBAL {
+        return None;
+    }
+    // One pass over the captured frame, which binds exactly the template's names: four
+    // `env_get`s were most of this function's cost, on a path every contracted call takes.
+    let (_, vars) = heap.env_frame_ref(env);
+    let (mut name, mut original, mut spec, mut ret) = (None, None, None, None);
+    for &(symbol, bound) in vars {
+        if symbol == names.original {
+            original = Some(bound);
+        } else if symbol == names.ret {
+            ret = Some(bound);
+        } else if symbol == names.spec {
+            spec = Some(bound);
+        } else if symbol == names.name {
+            name = Some(bound);
+        }
+    }
+    let original = original.filter(|value| matches!(value.unpack(), ValueRef::Fn(_)))?;
+    Some(ShimParts {
+        name: name?,
+        original,
+        spec,
+        ret: ret?,
+    })
+}
+
+/// Whether `id` is a shim the dispatcher enters — the call sites that cache a callee's
+/// compiled arm leave such a closure to `dispatch` instead, as they leave a thin wrapper.
+pub(crate) fn is_entered_shim(heap: &Heap, id: value::ClosureId) -> bool {
+    shim_parts(heap, id).is_some()
+}
+
+/// What [`enter_shim`] decided for a call of a shim.
+pub(crate) enum ShimEntry {
+    /// Every argument is vouched for: call `original` in the shim's place. When
+    /// `check_result` holds, the shim's declared result is still to be checked on the
+    /// value the call returns — the caller arranges it.
+    Forward { original: Value, check_result: bool },
+    /// Run the shim itself: an argument the kernel could not vouch for (the shim's Brood
+    /// check then walks, remembers, and blames), or a call of an arity it does not take.
+    Run,
+}
+
+/// The dispatcher's entry into the shim `id` called with `call_args` — `None` when `id`
+/// is not a shim. Asks exactly what the template asks before anything else
+/// (`%contract-args-known?`), so a `Forward` is the template's own fast path without its
+/// frame: same original, same arguments, the result check still to come unless the
+/// declared result is `any` (the template's tail call).
+pub(crate) fn enter_shim(
+    heap: &Heap,
+    id: value::ClosureId,
+    call_args: &[Value],
+) -> Option<ShimEntry> {
+    let parts = shim_parts(heap, id)?;
+    // The template's own arity: a call it would refuse runs it, so the arity error names
+    // the shim exactly as before.
+    let argc = call_args.len();
+    let accepts = heap
+        .closure(id)
+        .arms
+        .iter()
+        .any(|arm| arm.min_arity() <= argc && arm.max_arity().is_none_or(|max| argc <= max));
+    if !accepts {
+        return Some(ShimEntry::Run);
+    }
+    let vouched = match parts.spec {
+        Some(spec) => args_vouched(heap, spec, call_args),
+        None => call_args.is_empty(),
+    };
+    if !vouched {
+        return Some(ShimEntry::Run);
+    }
+    heap.note_contract_entered();
+    let any = shim_names().any;
+    Some(ShimEntry::Forward {
+        original: parts.original,
+        check_result: !matches!(parts.ret, Value::Sym(symbol) if symbol == any),
+    })
+}
+
+/// The declared result type of the shim `shim`, if it is one.
+pub(crate) fn shim_result_type(heap: &Heap, shim: Value) -> Option<Value> {
+    let ValueRef::Fn(id) = shim.unpack() else {
+        return None;
+    };
+    shim_parts(heap, id).map(|parts| parts.ret)
+}
+
+/// Whether two shims declare an equal result type — a value checked against one needs no
+/// second check against the other (the collapse ADR-396 makes for a chain of tail calls).
+pub(crate) fn same_result_type(heap: &Heap, first: Value, second: Value) -> bool {
+    match (
+        shim_result_type(heap, first),
+        shim_result_type(heap, second),
+    ) {
+        (Some(a), Some(b)) => heap.equal(a, b),
+        _ => false,
+    }
+}
+
+/// Whether `value` is vouched for against `shim`'s declared result — the template's
+/// `(%type-verdict ret r)` test. False sends the value to [`result_check_call`].
+pub(crate) fn result_vouched(heap: &Heap, shim: Value, value: Value) -> bool {
+    use crate::core::heap::KnownVerdict;
+    shim_result_type(heap, shim)
+        .is_some_and(|ret| matches!(heap.type_verdict(ret, value), KnownVerdict::Known(true)))
+}
+
+/// The call the template makes when its result is not vouched for —
+/// `(%contract-check-ret name ret value)`, which answers the value or raises the blamed
+/// `:callee` error — as a callee and its arguments, for the caller to run where the shim's
+/// own frame would have.
+pub(crate) fn result_check_call(
+    heap: &Heap,
+    shim: Value,
+    value: Value,
+) -> Result<(Value, smallvec::SmallVec<[Value; 4]>), LispError> {
+    let ValueRef::Fn(id) = shim.unpack() else {
+        return Err(LispError::runtime("a contract result check lost its shim"));
+    };
+    let parts = shim_parts(heap, id)
+        .ok_or_else(|| LispError::runtime("a contract result check lost its shim"))?;
+    let check = heap
+        .env_get(EnvId::GLOBAL, shim_names().check_ret)
+        .ok_or_else(|| LispError::runtime("contract/%contract-check-ret is not bound"))?;
+    Ok((check, smallvec::smallvec![parts.name, parts.ret, value]))
+}
+
+/// `value`, checked against `shim`'s declared result as the template checks it: vouched
+/// for by the kernel, else the Brood check — run here, nested, which is where a call that
+/// runs to completion (a native caller, a value position) already is.
+pub(crate) fn finish_checked(heap: &mut Heap, shim: Value, value: Value) -> LispResult {
+    if result_vouched(heap, shim, value) {
+        return Ok(value);
+    }
+    let (check, args) = result_check_call(heap, shim, value)?;
+    apply_engine(heap, check, &args, EnvId::GLOBAL)
 }
 
 #[cfg(test)]

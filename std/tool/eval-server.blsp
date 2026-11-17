@@ -272,7 +272,7 @@ accept a baseline taken at the first traced request.
   ;; primitives and earmuffed dynvars are excluded for the same reason they are excluded
   ;; everywhere — neither is a function you called.
   (and (not (includes? n "/"))
-    (not (string/starts-with? n "%"))
+    (not (reflect/internal-name? n))
     (not (and (string/starts-with? n "*") (string/ends-with? n "*")))))
 
 (defn session-globals ()

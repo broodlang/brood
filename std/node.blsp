@@ -7,7 +7,7 @@
   for `[:nodedown …]`. A pid is location-transparent, so `send` reaches a process on another
   machine unchanged."
   (:use file)
-  (:shadow spawn))
+  (:shadow spawn list monitor demonitor))
 
 ;; ---- node info + link ops: thin wrappers over the kernel primitives ---------
 ;; These shadow no kernel call in this file. Note `name` shadows the kernel
