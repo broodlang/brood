@@ -23,17 +23,16 @@
 ;; argument), so the checker's warning is expected and correct. It is also the exact
 ;; shape that made the cliff visible: `ack-if` is the `if` chain the old `(cond … :else x)`
 ;; lowered to, ending in `(if true x nil)`.
-(check-allow :non-tail-recursion
-  (defn ack (m k)
-    (cond
-      (= m 0) (+ k 1)
-      (= k 0) (ack (- m 1) 1)
-      else (ack (- m 1) (ack m (- k 1)))))
+(defn ack (m k)
+  (cond
+    (= m 0) (+ k 1)
+    (= k 0) (ack (- m 1) 1)
+    else (ack (- m 1) (ack m (- k 1)))))
 
-  (defn ack-if (m k)
-    (if (= m 0)
-      (+ k 1)
-      (if (= k 0) (ack-if (- m 1) 1) (if true (ack-if (- m 1) (ack-if m (- k 1))) nil)))))
+(defn ack-if (m k)
+  (if (= m 0)
+    (+ k 1)
+    (if (= k 0) (ack-if (- m 1) 1) (if true (ack-if (- m 1) (ack-if m (- k 1))) nil))))
 
 (defn classify (x)
   (cond (= x 1) :one (= x 2) :two else :other))

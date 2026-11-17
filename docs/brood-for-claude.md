@@ -1095,7 +1095,8 @@ such as `(catch {:kind :type} …)` one kind; `(error-message e)` reads whatever
 
 First tell your program's failure from the runtime's. A process that raises is
 reported by the default crash reporter (pid, reason, trace) under `brood file` /
-`nest run`, and deep recursion is a catchable `recursion too deep` error — both are
+`nest run`, and a recursion past its call-stack ceiling is a catchable `recursion too
+deep` error — both are
 *your* code. A Rust **panic** (a use-after-GC tripwire, a heap index, a runtime
 invariant) is the runtime's: it is appended to **`.brood_crash_dump`** in the working
 directory (read the **last** `=== brood crash dump ===` block; at 16 MiB it rotates to
@@ -1458,12 +1459,11 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   — handles lists, vectors, strings (substring), and maps (looks at values; use
   `contains?` for keys).
 - **`nest check` is the loop's other half.** It reports unbound names (and `nest run`
-  refuses to start over one), non-tail self-recursion, provable type misuse, a
+  refuses to start over one), provable type misuse, a
   `(catch e nil)` that discards an error unread, and always-true conditions; `nest check
   --strict` adds values merely wider than the parameter. A finding you mean — a
-  deliberately non-tail test helper, a catch whose nothing is the answer — is
-  acknowledged in code with `(check-allow :category form…)`: `:non-tail-recursion`,
-  `:discarded-catch`, `:cross-module-def`, `:constant-condition`, `:unreachable-clause`,
+  catch whose nothing is the answer — is acknowledged in code with
+  `(check-allow :category form…)`: `:discarded-catch`, `:cross-module-def`, `:constant-condition`, `:unreachable-clause`,
   `:type-mismatch`, `:unbound`, `:deprecated`, `:trusted`, `:list-truthiness`,
   `:single-dispatch` (see `docs/type-annotations.md`).
 

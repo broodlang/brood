@@ -341,8 +341,7 @@ pub(super) fn unify_term(term: &SigTerm, ty: Ty, subst: &mut HashMap<u32, Ty>) {
 /// subtree it wraps. A cheap `u8` bitset so it copies with every `Ctx` clone
 /// (`narrow`/`bind` clone the ctx per branch); the whole checker needs only a
 /// couple of bits. See `docs/type-annotations.md` and the `%lint-allow` handling
-/// in `walk.rs` / `recursion.rs`.
-pub(super) const SUPPRESS_NON_TAIL: u16 = 1 << 0;
+/// in `walk.rs`. (Bit 0 was the non-tail-recursion lint's, deleted by ADR-751.)
 pub(super) const SUPPRESS_UNREACHABLE: u16 = 1 << 1;
 /// A declared-vs-actual type mismatch the checker would otherwise warn on: a
 /// `sig`-typed function whose body yields a type disjoint from its declared

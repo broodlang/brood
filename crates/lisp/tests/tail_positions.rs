@@ -9,10 +9,11 @@
 //! [`every_special_form_is_classified`], which is the point: the rule is checked when the
 //! form lands, not when someone notices a stack overflow.
 //!
-//! The loops run deeper than either engine's non-tail frame limit (the tree-walker's
-//! `MAX_TW_FRAMES` is 2^19, the VM's 2^20), so a form that stops being tail-safe fails with
-//! `recursion too deep` rather than passing on a shallow loop. They run on the tree-walker,
-//! where the continuation discipline lives, and on the default tier.
+//! Each loop runs in a process whose call stack may hold [`CEILING`] bytes (its `:max-heap`
+//! bounds its stack too, ADR-751), and [`DEPTH`] non-tail levels need far more than that, so a
+//! form that stops being tail-safe fails with `recursion too deep` rather than passing on a
+//! shallow loop. They run on the tree-walker, where the continuation discipline lives, and on
+//! the default tier.
 
 mod support;
 
@@ -20,8 +21,12 @@ use brood::builtins::SPECIAL_FORMS;
 use brood::eval::compile::Tier;
 use support::eval_on;
 
-/// Deeper than both engines' non-tail frame limits (2^19 tree-walked, 2^20 in the VM).
+/// Deep enough that a non-tail loop's frames outgrow [`CEILING`] on both engines.
 const DEPTH: u32 = 1_100_000;
+
+/// The loop's `:max-heap`, which is its call stack's ceiling too: 64 MB, where a VM frame
+/// and its roots are over a hundred bytes and a tree-walked level more.
+const CEILING: u32 = 64_000_000;
 
 /// Each form with a tail position, and a loop body whose recursive `(spin …)` call sits in
 /// it. `spin` is `(defn spin (n) BODY)`; it must answer `:done` once `n` reaches 0.
@@ -127,7 +132,10 @@ fn every_special_form_is_classified() {
 const HIGHLIGHT_ONLY: &[&str] = &["spawn", "spawn-link"];
 
 fn run_loop(body: &str, tier: Tier) -> Result<String, String> {
-    eval_on(&format!("(defn spin (n) {body}) (spin {DEPTH})"), tier)
+    eval_on(
+        &format!("(defn spin (n) {body}) (proc/flag :max-heap {CEILING}) (spin {DEPTH})"),
+        tier,
+    )
 }
 
 #[test]
@@ -161,7 +169,8 @@ fn a_call_out_of_tail_position_fails_at_this_depth() {
         let result = run_loop(not_tail, tier);
         assert!(
             matches!(&result, Err(message) if message.contains("recursion too deep")),
-            "a non-tail loop {DEPTH} deep did not hit the frame limit on {tier:?}: {result:?}"
+            "a non-tail loop {DEPTH} deep did not pass the {CEILING}-byte ceiling on {tier:?}: \
+             {result:?}"
         );
     }
 }

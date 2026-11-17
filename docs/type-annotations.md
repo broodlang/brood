@@ -536,16 +536,12 @@ the gap without surfacing any pre-existing bugs. See ADR-126.
 ## Suppressing an advisory lint on purpose — `(check-allow :category form…)`
 
 The advisory lints are false-positive-clean, but some test code *deliberately*
-trips a correct lint: a non-tail-recursive function written to exercise the
-deep-recursion / JIT-recursive-arm path, or a redundant `match` clause proving the
+trips a correct lint: a redundant `match` clause proving the
 first match wins. The lint is right; the warning is unwanted. Comments can't
 express the opt-out — the reader strips them before the checker runs — so the
 directive is a form:
 
 ```lisp fragment
-(check-allow :non-tail-recursion
-  (defn ut-fib (n) (if (< n 2) n (+ (ut-fib (- n 1)) (ut-fib (- n 2))))))
-
 (assert= (check-allow :unreachable-clause (match 1 (1 :first) (1 :second) (_ :z)))
          :first)
 
@@ -562,11 +558,9 @@ and is a **pure runtime no-op** — `%lint-allow` just yields its body's value, 
 wrapped top-level `defn` still defines globally and a wrapped expression still
 returns its value. It wraps one form or many.
 
-The checker reads the marker: `recursion.rs` skips a `:non-tail-recursion`-tagged
-subtree entirely, and a `SUPPRESS_*` bit (see `check/ctx.rs`) threads down the walk
-so `check_if`'s redundant-clause lint declines inside an `:unreachable-clause`
-scope. Recognised categories today: **`:non-tail-recursion`**,
-**`:unreachable-clause`**, **`:type-mismatch`** (a `sig`-declared return or
+The checker reads the marker: a `SUPPRESS_*` bit (see `check/ctx.rs`) threads down
+the walk so `check_if`'s redundant-clause lint declines inside an `:unreachable-clause`
+scope. Recognised categories today: **`:unreachable-clause`**, **`:type-mismatch`** (a `sig`-declared return or
 call-site argument the wrapped code deliberately violates), **`:unbound`** (a name
 bound only at runtime), **`:deprecated`** (ADR-283), **`:discarded-catch`** (a `(catch e nil)` whose nothing is genuinely the
 answer — read by `check/discarded_catch.rs` on the un-expanded forms),

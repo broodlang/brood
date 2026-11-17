@@ -176,12 +176,11 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
 ;; The variables a clause's pattern binds, de-duplicated: a non-linear pattern (`[a a]`)
 ;; lists `a` twice, but binds it once (the repeat compiles to an equality check).
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %receive-dedupe (vars seen)
-    (cond
-      (empty? vars) nil
-      (%match-member? (first vars) seen) (%receive-dedupe (rest vars) seen)
-      else (cons (first vars) (%receive-dedupe (rest vars) (cons (first vars) seen))))))
+(defn- %receive-dedupe (vars seen)
+  (cond
+    (empty? vars) nil
+    (%match-member? (first vars) seen) (%receive-dedupe (rest vars) seen)
+    else (cons (first vars) (%receive-dedupe (rest vars) (cons (first vars) seen)))))
 (defn- %receive-clause-vars (pat) (%receive-dedupe (%pattern-vars pat) nil))
 
 ;; Pair each clause with the variables its pattern binds and its index, ONCE. Both
@@ -190,12 +189,11 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
 ;; deriving them from a shared prep keeps expansion to one walk per clause instead of
 ;; two. Shape: `[clause vars idx]`.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %receive-prep (clauses idx)
-    (if (empty? clauses)
-      nil
-      (cons [(first clauses) (%receive-clause-vars (first (first clauses))) idx]
-        (%receive-prep (rest clauses) (+ idx 1))))))
+(defn- %receive-prep (clauses idx)
+  (if (empty? clauses)
+    nil
+    (cons [(first clauses) (%receive-clause-vars (first (first clauses))) idx]
+      (%receive-prep (rest clauses) (+ idx 1)))))
 
 ;; Replace a clause's body with `[idx var…]` — the clause's index plus the values its
 ;; pattern bound. Keeps the :when guard in place, so the match compiler still gates on
@@ -213,12 +211,11 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
 ;; `(v0 (nth r 1) v1 (nth r 2) …)` — the flat `let` binding list that unpacks the
 ;; matcher's result vector back into the clause's pattern variables.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %receive-binds (vars r i)
-    (if (empty? vars)
-      nil
-      (cons (first vars)
-        (cons `(/nth ~r ~i) (%receive-binds (rest vars) r (+ i 1)))))))
+(defn- %receive-binds (vars r i)
+  (if (empty? vars)
+    nil
+    (cons (first vars)
+      (cons `(/nth ~r ~i) (%receive-binds (rest vars) r (+ i 1))))))
 
 ;; One clause's call-site code: rebind its pattern variables from the result vector,
 ;; then run its body.
@@ -235,13 +232,12 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
 ;; shape, collapses to its body with no dispatch at all. Every body sits in tail
 ;; position, so a receive loop stays O(1) stack.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %receive-dispatch (preps r)
-    (if (empty? (rest preps))
-      (%receive-body-code (first preps) r)
-      `(if (/= (/nth ~r 0) ~(nth (first preps) 2))
-         ~(%receive-body-code (first preps) r)
-         ~(%receive-dispatch (rest preps) r)))))
+(defn- %receive-dispatch (preps r)
+  (if (empty? (rest preps))
+    (%receive-body-code (first preps) r)
+    `(if (/= (/nth ~r 0) ~(nth (first preps) 2))
+       ~(%receive-body-code (first preps) r)
+       ~(%receive-dispatch (rest preps) r))))
 
 ;; The native pattern spec (ADR-409).
 ;; When every clause is a simple shape, the matcher is not a closure but a SPEC the kernel
@@ -259,36 +255,34 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
 ;; `st = [bound pins]`: the clause's binders so far, in first-occurrence order (the order the
 ;; closure's `[idx var…]` answer lists them in), and the `receive`'s pinned symbols so far.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %receive-spec-pat (pat st)
-    "`[spec st]` for `pat`, or `[:none st]`."
-    (let (bound (first st) pins (second st))
-      (cond
-        (%match-wildcard? pat) [[:any] st]
-        (%match-bind-sym? pat)
-          (let (k (%receive-index-of pat bound 0))
-            (if (nil? k) [[:bind] [(append bound (list pat)) pins]] [[:same k] st]))
-        (%match-quoted? pat) [[:eq (second pat)] st]
-        (%match-pin? pat)
-          (if (symbol? (second pat))
-            [[:pin (count pins)] [bound (append pins (list (second pat)))]]
-            [:none st])
-        (vector? pat) (%receive-spec-vec (%match-vec->list pat) st (list))
-        (or (keyword? pat) (string? pat) (number? pat) (nil? pat) (= pat true) (= pat false))
-          [[:eq pat] st]
-        else [:none st]))))
+(defn- %receive-spec-pat (pat st)
+  "`[spec st]` for `pat`, or `[:none st]`."
+  (let (bound (first st) pins (second st))
+    (cond
+      (%match-wildcard? pat) [[:any] st]
+      (%match-bind-sym? pat)
+        (let (k (%receive-index-of pat bound 0))
+          (if (nil? k) [[:bind] [(append bound (list pat)) pins]] [[:same k] st]))
+      (%match-quoted? pat) [[:eq (second pat)] st]
+      (%match-pin? pat)
+        (if (symbol? (second pat))
+          [[:pin (count pins)] [bound (append pins (list (second pat)))]]
+          [:none st])
+      (vector? pat) (%receive-spec-vec (%match-vec->list pat) st (list))
+      (or (keyword? pat) (string? pat) (number? pat) (nil? pat) (= pat true) (= pat false))
+        [[:eq pat] st]
+      else [:none st])))
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %receive-spec-vec (elems st acc)
-    (cond
-      (empty? elems) [(%receive-cons-vec :vec (reverse acc)) st]
-      (= (first elems) '&) [:none st]
-      else
-        (let (r (%receive-spec-pat (first elems) st))
-          (if (= (first r) :none)
-            [:none st]
-            (%receive-spec-vec (rest elems) (second r) (cons (first r) acc)))))))
+(defn- %receive-spec-vec (elems st acc)
+  (cond
+    (empty? elems) [(%receive-cons-vec :vec (reverse acc)) st]
+    (= (first elems) '&) [:none st]
+    else
+      (let (r (%receive-spec-pat (first elems) st))
+        (if (= (first r) :none)
+          [:none st]
+          (%receive-spec-vec (rest elems) (second r) (cons (first r) acc))))))
 
 ;; `[head x…]` as a vector VALUE — the patterns are data, quoted whole, never a form.
 (defn- %receive-cons-vec (head xs) (apply vector (cons head xs)))
@@ -302,14 +296,13 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
 
 ;; Every clause's pattern spec, threading the pins across clauses: `[specs pins]`, or nil.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %receive-spec-clauses (clauses pins acc)
-    (if (empty? clauses)
-      [(reverse acc) pins]
-      (let (r (%receive-spec-pat (first (first clauses)) [(list) pins]))
-        (if (= (first r) :none)
-          nil
-          (%receive-spec-clauses (rest clauses) (second (second r)) (cons (first r) acc)))))))
+(defn- %receive-spec-clauses (clauses pins acc)
+  (if (empty? clauses)
+    [(reverse acc) pins]
+    (let (r (%receive-spec-pat (first (first clauses)) [(list) pins]))
+      (if (= (first r) :none)
+        nil
+        (%receive-spec-clauses (rest clauses) (second (second r)) (cons (first r) acc))))))
 
 ;; The whole `receive`'s spec FORM — the spec key (a keyword the kernel parses once,
 ;; `%receive-spec-key`) when it pins nothing, else `[key pin0 …]` — or nil to keep the
@@ -367,20 +360,19 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
 ;; the filter can never skip a message some clause would have matched. Guards are
 ;; irrelevant to it — a `:when` can only reject a message the tag already admitted.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %receive-tags (clauses)
-    (if (empty? clauses)
-      nil
-      (let (pat (first (first clauses))
-            tag (if (and (vector? pat) (> (count pat) 0) (keyword? (first pat)))
-                  (first pat)
-                  nil))
-        (if (nil? tag)
-          nil ; one un-taggable clause disables the filter
-          (let (rest-tags (%receive-tags (rest clauses)))
-            (if (and (nil? rest-tags) (not (empty? (rest clauses))))
-              nil ; a later clause disabled it
-              (cons tag rest-tags))))))))
+(defn- %receive-tags (clauses)
+  (if (empty? clauses)
+    nil
+    (let (pat (first (first clauses))
+          tag (if (and (vector? pat) (> (count pat) 0) (keyword? (first pat)))
+                (first pat)
+                nil))
+      (if (nil? tag)
+        nil ; one un-taggable clause disables the filter
+        (let (rest-tags (%receive-tags (rest clauses)))
+          (if (and (nil? rest-tags) (not (empty? (rest clauses))))
+            nil ; a later clause disabled it
+            (cons tag rest-tags)))))))
 
 ;; The receive-mark hint (ADR-195): the expression EVERY clause pins, when they all pin the
 ;; same one — `([:reply ^r v] …)` yields `r`. Any clause that pins nothing, or pins something
@@ -404,24 +396,23 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
     else nil))
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %receive-pin (clauses)
-    "The **symbol** pinned by every clause, or nil when they do not agree.
+(defn- %receive-pin (clauses)
+  "The **symbol** pinned by every clause, or nil when they do not agree.
 
   Restricted to a symbol deliberately. The hint is emitted as a form that the call site
   evaluates *in addition to* the matcher's own evaluation of the same pin, so anything with a
   side effect (or a value that could differ between the two evaluations) would be run twice.
   A pinned symbol — `^r`, which is the whole idiom this exists for — reads a binding and cannot
   differ. Any other pinned expression declines the hint and scans from the front."
-    (if (empty? clauses)
-      nil
-      (let (first-pin (%receive-pinned-in (first (first clauses))))
-        (if (or (nil? first-pin) (= first-pin :none) (not (symbol? first-pin)))
-          nil
-          (if (empty? (rest clauses))
-            first-pin
-            (let (rest-pin (%receive-pin (rest clauses)))
-              (if (= rest-pin first-pin) first-pin nil))))))))
+  (if (empty? clauses)
+    nil
+    (let (first-pin (%receive-pinned-in (first (first clauses))))
+      (if (or (nil? first-pin) (= first-pin :none) (not (symbol? first-pin)))
+        nil
+        (if (empty? (rest clauses))
+          first-pin
+          (let (rest-pin (%receive-pin (rest clauses)))
+            (if (= rest-pin first-pin) first-pin nil)))))))
 
 (defmacro receive (& clauses)
   "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message, and `(receive (after ms body...))` waits `ms` without touching the mailbox.

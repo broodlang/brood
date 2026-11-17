@@ -31,24 +31,16 @@ failures. `brood --debug-flags` is the index of every `BROOD_*` knob below.
   last one, so look there too. `RUST_BACKTRACE` defaults to `1`; `full` for
   verbose.
 
-## 2. Is it non-tail recursion? (the #1 cause of "recursion too deep")
+## 2. Is it a recursion that never stops? (the cause of "recursion too deep")
 
-Deep *non-tail* recursion is a clean, catchable error, not a segfault: the VM raises
-`E0044 recursion too deep: exceeded the VM's 1048576-frame non-tail-call limit`
-(the tree-walker raises the same code at its own 262144-frame limit; a recursion that
-re-enters the evaluator through native code — `eval`, a callback — hits the native-stack
-byte budget instead, tuned by `BROOD_STACK_BUDGET`). It is still a bug — slow to reach and wasteful. Run the linter:
-
-```
-nest check path/to/file.blsp
-```
-
-It flags `recursive call in non-tail position` at `file:line:col`. Fix: make the
-self-call the **last** thing the function does (a tail-recursive accumulator), or
-drive the loop with a process. (On this machine the `blsp-check.sh` PostToolUse hook
-runs it on every Write/Edit — run it explicitly for a file you didn't just edit.) A
-deliberately non-tail helper is acknowledged with
-`(check-allow :non-tail-recursion (defn …))`.
+A recursion is as deep as memory allows (ADR-751): a tail call holds no frame, and a non-tail
+call holds its frame until it returns, on the heap. `E0044 recursion too deep: the call stack
+holds N bytes in M pending calls, past this process's C-byte ceiling` means the process's
+call stack reached its ceiling — a quarter of the memory the runtime may use, or the
+process's `:max-heap`. That is almost always a recursion with no base case reached (a wrong
+termination test, an argument that never shrinks): read the error's trace for the function
+repeating. If the depth is meant, give the process more memory (`(proc/flag :max-heap n)` is
+the ceiling when set) or carry the work in an accumulator so the call is a tail call.
 
 ## 3. Map the error code
 
@@ -57,7 +49,7 @@ A raised kernel error's `:code` tells you the class (full table in
 
 | Code | Means | Usual fix |
 |------|-------|-----------|
-| `E0044` | recursion too deep — runaway non-tail recursion | §2 — restructure to tail recursion |
+| `E0044` | recursion too deep — the call stack reached its memory ceiling | §2 — find the recursion that never stops |
 | `E0043` | crossed the soft memory limit (`BROOD_MEM_LIMIT`) | a loop accumulating without bound; bound it |
 | `E0045` / `E0046` | this process's `(proc/flag :max-heap n)` / `:max-mailbox` bound | the process is retaining too much / a receiver cannot keep up |
 | `E0020` | arity mismatch | wrong arg count — `lookup` the real arglist |

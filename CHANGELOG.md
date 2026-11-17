@@ -6,6 +6,16 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed: recursion is as deep as memory allows, and the non-tail lint is gone (ADR-751).** A
+non-tail recursion used to stop at fixed caps — about a million VM frames, half that on the
+tree-walker, and far fewer through `map`/`fold` callbacks or a `try` body. Now each process's
+call stack (its frames, and the native stack callbacks grow onto heap-backed segments) may
+hold a quarter of the memory the runtime may use, or the process's `:max-heap`; past it,
+`recursion too deep` (`E0044`) names what it held. A runtime with no memory limit takes a soft
+one from its machine. The `:non-tail-recursion` checker category is deleted: remove
+`(check-allow :non-tail-recursion …)` wrappers (the form inside stays) and the category from
+any `:check` policy or `(:check-allow …)` clause. `BROOD_STACK_BUDGET` is gone.
+
 **Fixed: `nest fetch`, `nest update` and `nest tree` cover `:dev-dependencies`.** A project
 with only dev dependencies answered "no dependencies declared" and locked nothing, and
 `nest update` in a project with both wrote a lock without the dev ones (setup re-added them

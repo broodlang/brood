@@ -20,18 +20,16 @@ The oracle is upstream's own expected output in `tests/corpus/gabriel/data/takl.
 
 ;; `shorterp` recurses in tail position; `mas` is triple non-tail recursion — the
 ;; point of the benchmark. The lint is correct and unwanted.
-(check-allow :non-tail-recursion
-  (defn shorterp (x y)
-    "Whether list `x` is shorter than list `y`."
-    (and (not (nil? y))
-      (or (nil? x)
-        (shorterp (rest x) (rest y))))))
+(defn shorterp (x y)
+  "Whether list `x` is shorter than list `y`."
+  (and (not (nil? y))
+    (or (nil? x)
+      (shorterp (rest x) (rest y)))))
 
-(check-allow :non-tail-recursion
-  (defn mas (x y z)
-    "The Takeuchi function over lists as counters."
-    (if (not (shorterp y x))
-      z
-      (mas (mas (rest x) y z)
-        (mas (rest y) z x)
-        (mas (rest z) x y)))))
+(defn mas (x y z)
+  "The Takeuchi function over lists as counters."
+  (if (not (shorterp y x))
+    z
+    (mas (mas (rest x) y z)
+      (mas (rest y) z x)
+      (mas (rest z) x y))))

@@ -54,29 +54,6 @@
 use super::*;
 use crate::core::heap::EnvRoot;
 
-/// The deepest the frame stack may grow: runaway non-tail recursion fails here, catchably,
-/// as it does at the VM's frame limit. A level of non-tail recursion costs at least one
-/// continuation and often two or three (an inline `try` pushes its `Try` frame as well as
-/// the pending call's), so `1 << 18` stopped tier 0 well short of a depth the VM reaches
-/// (`vm_nested_stack_guard_test.blsp`: 200 000 levels through `try` died near 131 000). It
-/// is not the VM's `1 << 20` either: a tree-walked level holds several KB of heap besides
-/// its frames, and at that cap a runaway `%try` recursion hit the test runner's 2 GB
-/// memory limit before this error — the catchable answer has to come first.
-const MAX_TW_FRAMES: usize = 1 << 19;
-
-/// "recursion too deep …" — the tree-walker's frame-count guard.
-fn tw_frame_depth_error(frames: usize) -> LispError {
-    LispError::runtime(format!(
-        "recursion too deep: exceeded the tree-walker's {frames}-frame non-tail-call \
-         limit (runaway non-tail recursion?)",
-    ))
-    .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
-    .with_hint(
-        "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), \
-         or drive the iteration with a process",
-    )
-}
-
 /// The operand-stack depths from before a continuation rooted anything.
 #[derive(Clone, Copy)]
 struct Marks {
@@ -843,7 +820,7 @@ impl<'e> Machine<'e> {
         eval_trace(heap, form);
         if !within {
             // Raised by the new frame, as the old nested `eval` raised it on entry.
-            return Err(tw_frame_depth_error(MAX_TW_FRAMES).or_form_pos(heap, form));
+            return Err(self.depth_error(heap).or_form_pos(heap, form));
         }
         self.expr = form;
         self.env = env;
@@ -851,7 +828,7 @@ impl<'e> Machine<'e> {
     }
 
     /// Set the running frame aside behind `kind` and clear the registers for a new frame;
-    /// `false` when that frame is past the limit (the new frame raises it).
+    /// `false` when the call stack is past its ceiling (the new frame raises it).
     fn save(&mut self, heap: &mut Heap, marks: Marks, kind: KontKind, tag: Option<Value>) -> bool {
         let form = tag.map(|f| heap.root(f));
         self.konts.push(Kont {
@@ -862,7 +839,26 @@ impl<'e> Machine<'e> {
             marks,
             kind,
         });
-        self.konts.len() <= MAX_TW_FRAMES
+        // As deep as memory allows (ADR-751): measured every `FRAME_CHECK_INTERVAL` frames.
+        !self
+            .konts
+            .len()
+            .is_multiple_of(crate::stack::FRAME_CHECK_INTERVAL)
+            || crate::stack::check_frames(heap, self.konts.len(), self.frame_bytes(heap)).is_ok()
+    }
+
+    /// The memory the frame stack holds: its continuations and the operand and env roots.
+    fn frame_bytes(&self, heap: &Heap) -> usize {
+        self.konts.len() * std::mem::size_of::<Kont>()
+            + heap.roots_len() * std::mem::size_of::<Value>()
+            + heap.env_roots_len() * std::mem::size_of::<EnvRoot>()
+    }
+
+    /// The error a frame stack past the call-stack ceiling raises ([`Self::save`] said no).
+    #[cold]
+    fn depth_error(&self, heap: &Heap) -> LispError {
+        let bytes = self.frame_bytes(heap) + crate::stack::grown_native_bytes();
+        crate::stack::call_stack_error(heap, self.konts.len(), bytes)
     }
 
     /// Continue the frame that pushed `kind`, now that its sub-form produced `v`. The
@@ -1321,7 +1317,7 @@ impl<'e> Machine<'e> {
         let env_r = heap.root_env(self.env);
         let kind = KontKind::Head { call_form_r, env_r };
         if !self.save(heap, marks, kind, Some(call_form)) {
-            return Err(tw_frame_depth_error(MAX_TW_FRAMES).or_form_pos(heap, call_form));
+            return Err(self.depth_error(heap).or_form_pos(heap, call_form));
         }
         let argv = SmallVec::from_slice(&[Value::symbol(module), Value::symbol(s)]);
         self.apply(heap, helper, argv, call_form, self.env)
@@ -1360,7 +1356,7 @@ impl<'e> Machine<'e> {
             return Ok(Step::Continue);
         }
         if !self.save(heap, marks, KontKind::Expand { env_r }, Some(call_form)) {
-            return Err(tw_frame_depth_error(MAX_TW_FRAMES).or_form_pos(heap, call_form));
+            return Err(self.depth_error(heap).or_form_pos(heap, call_form));
         }
         self.enter(heap, mid, &arg_forms, None)
     }
@@ -2143,9 +2139,7 @@ impl Machine<'_> {
                     KontKind::Interruptible { window },
                     Some(call_form),
                 ) {
-                    return Some(Err(
-                        tw_frame_depth_error(MAX_TW_FRAMES).or_form_pos(heap, call_form)
-                    ));
+                    return Some(Err(self.depth_error(heap).or_form_pos(heap, call_form)));
                 }
                 return Some(self.enter(heap, thunk, &[], None));
             }
@@ -2162,9 +2156,7 @@ impl Machine<'_> {
         };
         let (marks, kind) = kind;
         if !self.save(heap, marks, kind, Some(call_form)) {
-            return Some(Err(
-                tw_frame_depth_error(MAX_TW_FRAMES).or_form_pos(heap, call_form)
-            ));
+            return Some(Err(self.depth_error(heap).or_form_pos(heap, call_form)));
         }
         Some(self.enter(heap, thunk, &[], None))
     }
@@ -2230,7 +2222,7 @@ impl Machine<'_> {
         if let ValueRef::Fn(id) = handler.unpack() {
             // The handler's frame keeps the Try's marks: its slots go when the handler ends.
             if !self.save(heap, marks, KontKind::Callback, Some(call_form)) {
-                return Err(tw_frame_depth_error(MAX_TW_FRAMES).or_form_pos(heap, call_form));
+                return Err(self.depth_error(heap).or_form_pos(heap, call_form));
             }
             return self.enter(heap, id, &argv, None);
         }

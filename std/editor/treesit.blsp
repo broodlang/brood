@@ -1017,9 +1017,8 @@ comment in Python, and stopping at the blank put the comment in column 0."
 
 ;; check-allow: deliberately non-tail — the depth is a run of consecutive comment
 ;; lines, and it stops at the first line that is code.
-(check-allow :non-tail-recursion
-  (defn- ts-comment-column (text lang bol chain spec tree)
-    "The column for a COMMENT line — the column of the next line that is code — or nil
+(defn- ts-comment-column (text lang bol chain spec tree)
+  "The column for a COMMENT line — the column of the next line that is code — or nil
 when this line is not a comment.
 
 A comment belongs to what follows it, which is how every editor treats it and the only
@@ -1027,10 +1026,10 @@ answer that survives the grammars. Ruby's `body_statement` begins at its first
 STATEMENT, and a comment is not one, so the doc comment above a method sits outside the
 method's body and counting blocks puts it a level short — every documented method in the
 Ruby stdlib. Asking what the next code line does is right there and right everywhere."
-    (when (and (not (empty? chain))
-            (contains? editor/treesit/*comment-kinds* (get (last chain) :kind)))
-      (let (next-bol (ts-next-nonblank-bol text bol))
-        (when next-bol (indent-column text lang next-bol spec tree))))))
+  (when (and (not (empty? chain))
+          (contains? editor/treesit/*comment-kinds* (get (last chain) :kind)))
+    (let (next-bol (ts-next-nonblank-bol text bol))
+      (when next-bol (indent-column text lang next-bol spec tree)))))
 
 (defn indent-column (text lang bol spec &optional (tree nil))
   "The column the line beginning at offset `bol` should be indented to — a `:indent` service

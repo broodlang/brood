@@ -4,9 +4,8 @@
 (defmodule jit-trace-test (:use test))
 
 (defn- deep-trace-count ()
-  (check-allow :non-tail-recursion
-    (letrec (deep (fn (n) (if (= n 0) (/ 1 0) (+ 1 (deep (- n 1))))))
-      (count (try (deep 100) (catch e (get e :trace)))))))
+  (letrec (deep (fn (n) (if (= n 0) (/ 1 0) (+ 1 (deep (- n 1))))))
+    (count (try (deep 100) (catch e (get e :trace))))))
 
 (defn- first-short-run (i limit)
   (cond

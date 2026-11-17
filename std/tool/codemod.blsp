@@ -186,55 +186,54 @@ rewritten text."
 
 ;; check-allow: a CST walk is inherently non-tail — the recursion depth is the
 ;; source's NESTING depth (a handful of levels), not its length.
-(check-allow :non-tail-recursion
-  (defn- rename-node (node old new mode in-quote? is-def-name?)
-    "Rewrite one CST node, returning its (possibly rewritten) source text."
-    (let (kind (node-kind node)
-          payload (node-payload node))
-      (cond
-        ;; A symbol leaf is the ONLY thing this rewrites — strings, comments, whitespace
-        ;; and every other leaf pass through byte-for-byte, which is what makes a
-        ;; docstring mentioning the name safe.
-        ;; Under `:swap` a symbol is renamed only as the head of a call `rename-kids`
-        ;; swaps; every other mention stays.
-        (= kind :symbol)
-          (if (and (= payload old)
-                (or (not in-quote?) (mode? mode :in-quote))
+(defn- rename-node (node old new mode in-quote? is-def-name?)
+  "Rewrite one CST node, returning its (possibly rewritten) source text."
+  (let (kind (node-kind node)
+        payload (node-payload node))
+    (cond
+      ;; A symbol leaf is the ONLY thing this rewrites — strings, comments, whitespace
+      ;; and every other leaf pass through byte-for-byte, which is what makes a
+      ;; docstring mentioning the name safe.
+      ;; Under `:swap` a symbol is renamed only as the head of a call `rename-kids`
+      ;; swaps; every other mention stays.
+      (= kind :symbol)
+        (if (and (= payload old)
+              (or (not in-quote?) (mode? mode :in-quote))
+              (cond
+                (mode? mode :swap) false
+                (mode? mode :defs-only) is-def-name?
+                (mode? mode :refs-only) (not is-def-name?)
+                else true))
+          new
+          payload)
+      ;; A container's delimiters are not leaves — the CST records them in the kind, so
+      ;; they have to be re-emitted around the rewritten kids to stay lossless.
+      (includes? *container-kinds* kind)
+        (str (open-delim kind)
+          (rename-kids kind payload old new mode in-quote?)
+          (close-delim kind))
+      ;; Any other LEAF (string, comment, whitespace, number, keyword…): unchanged.
+      ;; Checked before the wrapper case, since a leaf's payload is a string.
+      (string? payload) payload
+      ;; A wrapper holds ONE node. `'x`/`` `x `` quote their subtree; `~x`/`~@x` unquote
+      ;; back into live code, so they leave quoted context.
+      else
+        (let (sigil (get *wrapper-sigils* kind))
+          (if (nil? sigil)
+            (error "codemod: unknown CST node kind "
+              (pr-str kind)
+              " — add it to *wrapper-sigils* (or *container-kinds*); emitting it blind"
+              " would silently drop source text")
+            (str sigil
+              (rename-node payload
+                old
+                new
+                mode
                 (cond
-                  (mode? mode :swap) false
-                  (mode? mode :defs-only) is-def-name?
-                  (mode? mode :refs-only) (not is-def-name?)
-                  else true))
-            new
-            payload)
-        ;; A container's delimiters are not leaves — the CST records them in the kind, so
-        ;; they have to be re-emitted around the rewritten kids to stay lossless.
-        (includes? *container-kinds* kind)
-          (str (open-delim kind)
-            (rename-kids kind payload old new mode in-quote?)
-            (close-delim kind))
-        ;; Any other LEAF (string, comment, whitespace, number, keyword…): unchanged.
-        ;; Checked before the wrapper case, since a leaf's payload is a string.
-        (string? payload) payload
-        ;; A wrapper holds ONE node. `'x`/`` `x `` quote their subtree; `~x`/`~@x` unquote
-        ;; back into live code, so they leave quoted context.
-        else
-          (let (sigil (get *wrapper-sigils* kind))
-            (if (nil? sigil)
-              (error "codemod: unknown CST node kind "
-                (pr-str kind)
-                " — add it to *wrapper-sigils* (or *container-kinds*); emitting it blind"
-                " would silently drop source text")
-              (str sigil
-                (rename-node payload
-                  old
-                  new
-                  mode
-                  (cond
-                    (includes? [:unquote :splice] kind) false
-                    (includes? [:quote :quasi] kind) true
-                    else in-quote?)
-                  false))))))))
+                  (includes? [:unquote :splice] kind) false
+                  (includes? [:quote :quasi] kind) true
+                  else in-quote?)
+                false)))))))
 
 (defn- open-delim (kind)
   (cond
@@ -327,19 +326,18 @@ counterpart to `rename`. Prints each changed file and returns the count.
   ;; how a container's kids are read: frozen under a head in `opaque`
   (if (contains? opaque (form-head kind kids)) :frozen in-quote?))
 
-(check-allow :non-tail-recursion
-  (defn- occurrences (node name in-quote? opaque)
-    "How many live symbols spelled `name` are in `node`'s subtree — not quoted, and not under
+(defn- occurrences (node name in-quote? opaque)
+  "How many live symbols spelled `name` are in `node`'s subtree — not quoted, and not under
 a head in `opaque`."
-    (let (kind (node-kind node)
-          payload (node-payload node))
-      (cond
-        (= kind :symbol) (if (and (not in-quote?) (= payload name)) 1 0)
-        (includes? *container-kinds* kind)
-          (let (inner (kids-quoting kind payload in-quote? opaque))
-            (fold payload 0 (fn (n kid) (+ n (occurrences kid name inner opaque)))))
-        (string? payload) 0
-        else (occurrences payload name (quoting kind in-quote?) opaque)))))
+  (let (kind (node-kind node)
+        payload (node-payload node))
+    (cond
+      (= kind :symbol) (if (and (not in-quote?) (= payload name)) 1 0)
+      (includes? *container-kinds* kind)
+        (let (inner (kids-quoting kind payload in-quote? opaque))
+          (fold payload 0 (fn (n kid) (+ n (occurrences kid name inner opaque)))))
+      (string? payload) 0
+      else (occurrences payload name (quoting kind in-quote?) opaque))))
 
 (defn- emit (acc original written)
   "`acc` with `written` output in place of `original`, the position advanced past `original`
@@ -361,52 +359,51 @@ the renames for its direct children and the ones to apply anywhere below."
             [(first plan) (assoc (second plan) name (get here name))]
           else plan)))))
 
-(check-allow :non-tail-recursion
-  (defn- rename-at-node (acc node want in-quote? direct deep)
-    "Walk one CST node: `want` maps a reported `[line col]` to its renames (old → new),
+(defn- rename-at-node (acc node want in-quote? direct deep)
+  "Walk one CST node: `want` maps a reported `[line col]` to its renames (old → new),
 `direct` holds the renames for this node as a direct child of a reported form, `deep` the
 ones for anything below one. `acc` carries `:at`, `:out` (reversed), `:hit` (the
 `[line col old]` places handled) and `:opaque`, the heads whose forms are left alone."
-    (let (kind (node-kind node)
-          payload (node-payload node)
-          at (get acc :at))
-      (cond
-        (= kind :symbol)
-          (let (here (get want at)
-                to (if in-quote?
-                     nil
-                     (or (get here payload) (get direct payload) (get deep payload))))
-            (if (nil? to)
-              (emit acc payload payload)
-              (let (done (emit acc payload to))
-                (if (get here payload)
-                  (assoc done :hit (conj (get done :hit) [(first at) (second at) payload]))
-                  done))))
-        (includes? *container-kinds* kind)
-          (let (inner-quote (kids-quoting kind payload in-quote? (get acc :opaque))
-                found (get want at)
-                here (if (and (not inner-quote) (map? found)) found nil)
-                plan (if here (place-plan node here in-quote? (get acc :opaque)) [{} {}])
-                handled (append (keys (first plan)) (keys (second plan)))
-                marked (fold handled
-                         acc
-                         (fn (a name)
-                           (assoc a :hit (conj (get a :hit) [(first at) (second at) name]))))
-                below (merge deep (second plan))
-                opened (emit marked (open-delim kind) (open-delim kind))
-                inner (fold payload
-                        opened
-                        (fn (a kid) (rename-at-node a kid want inner-quote (first plan) below))))
-            (emit inner (close-delim kind) (close-delim kind)))
-        (string? payload) (emit acc payload payload)
-        else
-          (let (sigil (get *wrapper-sigils* kind))
-            (when (nil? sigil)
-              (error "codemod: unknown CST node kind "
-                (pr-str kind)
-                " — add it to *wrapper-sigils* (or *container-kinds*); emitting it blind"
-                " would silently drop source text"))
-            (rename-at-node (emit acc sigil sigil) payload want (quoting kind in-quote?) {} deep))))))
+  (let (kind (node-kind node)
+        payload (node-payload node)
+        at (get acc :at))
+    (cond
+      (= kind :symbol)
+        (let (here (get want at)
+              to (if in-quote?
+                   nil
+                   (or (get here payload) (get direct payload) (get deep payload))))
+          (if (nil? to)
+            (emit acc payload payload)
+            (let (done (emit acc payload to))
+              (if (get here payload)
+                (assoc done :hit (conj (get done :hit) [(first at) (second at) payload]))
+                done))))
+      (includes? *container-kinds* kind)
+        (let (inner-quote (kids-quoting kind payload in-quote? (get acc :opaque))
+              found (get want at)
+              here (if (and (not inner-quote) (map? found)) found nil)
+              plan (if here (place-plan node here in-quote? (get acc :opaque)) [{} {}])
+              handled (append (keys (first plan)) (keys (second plan)))
+              marked (fold handled
+                       acc
+                       (fn (a name)
+                         (assoc a :hit (conj (get a :hit) [(first at) (second at) name]))))
+              below (merge deep (second plan))
+              opened (emit marked (open-delim kind) (open-delim kind))
+              inner (fold payload
+                      opened
+                      (fn (a kid) (rename-at-node a kid want inner-quote (first plan) below))))
+          (emit inner (close-delim kind) (close-delim kind)))
+      (string? payload) (emit acc payload payload)
+      else
+        (let (sigil (get *wrapper-sigils* kind))
+          (when (nil? sigil)
+            (error "codemod: unknown CST node kind "
+              (pr-str kind)
+              " — add it to *wrapper-sigils* (or *container-kinds*); emitting it blind"
+              " would silently drop source text"))
+          (rename-at-node (emit acc sigil sigil) payload want (quoting kind in-quote?) {} deep)))))
 
 (defn cst-rename-at-text (text renames &optional (opaque #{}))
   "`text` with symbols renamed only at the places a checker reported them: `renames` is a
@@ -456,45 +453,44 @@ macros the checker could not resolve, whose bindings it reports as references.
   (map-symbols node (fn (name _) name) false))
 
 ;; check-allow: a CST walk recurses to the source's nesting depth, not its length.
-(check-allow :non-tail-recursion
-  (defn- map-symbols (node f quoted?)
-    "The source text of `node` with every symbol token passed through `(f name quoted?)` — a
+(defn- map-symbols (node f quoted?)
+  "The source text of `node` with every symbol token passed through `(f name quoted?)` — a
 name in, a name out; `quoted?` is true when the token is quoted DATA (`'x`, `(quote x)`), where
 a qualified name is a value rather than a reference and must stay qualified, and `:quasi` in a
 template, which is code a macro will emit, so a name in it still calls what it names. Strings, comments
 and every other leaf come back byte for byte. A `(:use …)` clause is left as it is: a name in
 its `:only` list names what the module had."
-    (let (kind (node-kind node)
-          payload (node-payload node)
-          head (when (= kind :list) (first (significant-kids payload))))
-      (cond
-        (= kind :symbol) (f payload quoted?)
-        (and head (= (node-kind head) :keyword) (= (node-payload head) ":use"))
-          (str "("
-            (apply str (map payload (fn (kid) (map-symbols kid (fn (name _) name) quoted?))))
-            ")")
-        (includes? *container-kinds* kind)
-          (let (inner (if (and head (= (node-kind head) :symbol) (= (node-payload head) "quote"))
-                        true
-                        quoted?))
-            (str (open-delim kind)
-              (apply str (map payload (fn (kid) (map-symbols kid f inner))))
-              (close-delim kind)))
-        (string? payload) payload
-        else
-          (let (sigil (get *wrapper-sigils* kind))
-            (if (nil? sigil)
-              (error "codemod: unknown CST node kind "
-                (pr-str kind)
-                " — add it to *wrapper-sigils*")
-              (str sigil
-                (map-symbols payload
-                  f
-                  (cond
-                    (includes? [:unquote :splice] kind) false
-                    (= kind :quote) true
-                    (= kind :quasi) (or quoted? :quasi)
-                    else quoted?)))))))))
+  (let (kind (node-kind node)
+        payload (node-payload node)
+        head (when (= kind :list) (first (significant-kids payload))))
+    (cond
+      (= kind :symbol) (f payload quoted?)
+      (and head (= (node-kind head) :keyword) (= (node-payload head) ":use"))
+        (str "("
+          (apply str (map payload (fn (kid) (map-symbols kid (fn (name _) name) quoted?))))
+          ")")
+      (includes? *container-kinds* kind)
+        (let (inner (if (and head (= (node-kind head) :symbol) (= (node-payload head) "quote"))
+                      true
+                      quoted?))
+          (str (open-delim kind)
+            (apply str (map payload (fn (kid) (map-symbols kid f inner))))
+            (close-delim kind)))
+      (string? payload) payload
+      else
+        (let (sigil (get *wrapper-sigils* kind))
+          (if (nil? sigil)
+            (error "codemod: unknown CST node kind "
+              (pr-str kind)
+              " — add it to *wrapper-sigils*")
+            (str sigil
+              (map-symbols payload
+                f
+                (cond
+                  (includes? [:unquote :splice] kind) false
+                  (= kind :quote) true
+                  (= kind :quasi) (or quoted? :quasi)
+                  else quoted?))))))))
 
 (defn rewrite-symbols-text (text f)
   "`text` with every symbol token passed through `(f name quoted?)` ([[map-symbols]]):
@@ -561,27 +557,26 @@ holds a value, not prose."
       else nil)))
 
 ;; check-allow: a CST walk recurses to the source's nesting depth, not its length.
-(check-allow :non-tail-recursion
-  (defn- map-prose (node f)
-    "The source text of `node` with each comment and docstring through `(f text)`, and
+(defn- map-prose (node f)
+  "The source text of `node` with each comment and docstring through `(f text)`, and
 everything else byte for byte."
-    (let (kind (node-kind node)
-          payload (node-payload node))
-      (cond
-        (= kind :comment) (f payload)
-        (includes? *container-kinds* kind)
-          (let (doc (docstring-index payload))
-            (str (open-delim kind)
-              (apply str
-                (map (range 0 (count payload))
-                  (fn (i)
-                    (if (= i doc)
-                      (f (node-payload (nth payload i)))
-                      (map-prose (nth payload i) f)))))
-              (close-delim kind)))
-        (string? payload) payload
-        (get *wrapper-sigils* kind) (str (get *wrapper-sigils* kind) (map-prose payload f))
-        else (node-text node)))))
+  (let (kind (node-kind node)
+        payload (node-payload node))
+    (cond
+      (= kind :comment) (f payload)
+      (includes? *container-kinds* kind)
+        (let (doc (docstring-index payload))
+          (str (open-delim kind)
+            (apply str
+              (map (range 0 (count payload))
+                (fn (i)
+                  (if (= i doc)
+                    (f (node-payload (nth payload i)))
+                    (map-prose (nth payload i) f)))))
+            (close-delim kind)))
+      (string? payload) payload
+      (get *wrapper-sigils* kind) (str (get *wrapper-sigils* kind) (map-prose payload f))
+      else (node-text node))))
 
 (defn- lossless? (text)
   ;; does the CST hold `text` as written? `parse-source` closes what an unbalanced file left
@@ -685,16 +680,15 @@ the whitespace between them is touched: a string keeps its blank lines."
     (str (first joined) (squeezed (second joined)))))
 
 ;; check-allow: a CST walk recurses to the source's nesting depth, not its length.
-(check-allow :non-tail-recursion
-  (defn- symbols-in (node)
-    "Every symbol token in `node`, quoted data included, as a vector of names."
-    (let (kind (node-kind node)
-          payload (node-payload node))
-      (cond
-        (= kind :symbol) [payload]
-        (includes? *container-kinds* kind) (into [] (mapcat payload symbols-in))
-        (string? payload) []
-        else (symbols-in payload)))))
+(defn- symbols-in (node)
+  "Every symbol token in `node`, quoted data included, as a vector of names."
+  (let (kind (node-kind node)
+        payload (node-payload node))
+    (cond
+      (= kind :symbol) [payload]
+      (includes? *container-kinds* kind) (into [] (mapcat payload symbols-in))
+      (string? payload) []
+      else (symbols-in payload))))
 
 (defn- unqualified-in (name module)
   ;; `name` without `module/` in front, or nil when it is not that module's

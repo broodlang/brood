@@ -97,7 +97,7 @@ answers `((render [x]))`."
 (defn check-categories ()
   "Every warning category the checker reports, as keywords: the names `check-allow`, a `(defmodule … (:check-allow …))` header and a project's `:check` key take (ADR-698).
 
-    (contains? (into #{} (reflect/check-categories)) :non-tail-recursion)   ;=> true"
+    (contains? (into #{} (reflect/check-categories)) :unreachable-clause)   ;=> true"
   (%check-categories))
 
 (defn file-signatures (path)

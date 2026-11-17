@@ -3426,7 +3426,7 @@ Design notes for whoever picks it up:
   replace it. A file-level or project-level blanket is exactly how a real warning gets lost,
   so the broader the scope, the louder it should be in the output — `nest check` should
   *report* what a project globally suppresses rather than silently honouring it.
-- **The category vocabulary already exists** (`:non-tail-recursion`, `:unreachable-clause`,
+- **The category vocabulary already exists** (`:unreachable-clause`,
   `:unbound`, `:type-mismatch`, …) — see `types/check/ctx.rs`. Whatever the
   new scopes are, they should take the same keywords, not a second vocabulary.
 - **Suppression is not the same as opting out of the gate.** ADR-124/125 are firm that the

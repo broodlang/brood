@@ -385,13 +385,17 @@ fn bind_def(heap: &mut Heap, name: Value, v: Value) -> Result<(), LispError> {
     r.map(|_| ())
 }
 
-/// Runaway guard for the explicit frame stack: a clean `STACK_DEPTH_EXCEEDED` once
-/// the bytecode call depth crosses this many frames, replacing the native-stack byte
-/// guard the `Node` engine uses (the driver doesn't grow the native stack per Brood
-/// call, so unbounded non-tail recursion grows `frames` + `Heap::roots` instead).
-/// Generous — the soft-memory cap (ADR-043) is the real backstop; this just turns an
-/// infinite non-tail recursion into a catchable error before it exhausts memory.
-const MAX_BC_FRAMES: usize = 1 << 20;
+/// Is the VM's call stack — `frames` pending `BcFrame`s, the operand and env roots they
+/// hold, and any native stack the nest grew — within the process's ceiling (ADR-751)? The
+/// driver asks every [`crate::stack::FRAME_CHECK_INTERVAL`] frames, so a recursion is as
+/// deep as memory allows and a runaway one fails, catchably, before it takes the machine.
+#[cold]
+fn bc_frames_within_ceiling(heap: &Heap, frames: usize) -> Result<(), LispError> {
+    let bytes = frames * std::mem::size_of::<BcFrame>()
+        + heap.roots_len() * std::mem::size_of::<Value>()
+        + heap.env_roots_len() * std::mem::size_of::<EnvRoot>();
+    crate::stack::check_frames(heap, frames, bytes)
+}
 
 /// The `entry_epoch` a FRESH frame starts at: never a real epoch, so the frame's first
 /// `Inst::SelfCall` takes the hot-reload guard's slow path and proves the arm's `dbg_name`

@@ -594,19 +594,22 @@ pub(crate) fn vm_apply(
     // `run_process_body`), so it does no loop-top preempt/kill capture — only the
     // body driver does. A `receive` suspend that surfaces here re-raises (§8.1).
     //
-    // Native-stack guard. This is the single chokepoint every *nested* activation goes
-    // through, and a nested run is the one VM shape that consumes real Rust stack per
-    // Brood level: an ordinary call pushes a heap frame inside one `vm_run_bc` loop
-    // (capped by `MAX_BC_FRAMES`), but a native callback (a `try` body, a `map`
-    // function, a top-level form run from a native) re-enters here. Nothing on that path
-    // reaches `eval`, so the tree-walker's byte guard never saw it and a recursive `try`
-    // body died on the guard page — a SIGSEGV `try`/`catch` cannot observe and no
-    // supervisor can restart (the OS process goes, not the green process). Fail here
-    // instead, with the same catchable error the tree-walker raises.
-    if !crate::process::native_stack_headroom_ok() {
-        let left = stacker::remaining_stack().unwrap_or(0);
-        return Err(crate::eval::native_stack_error(left));
-    }
+    // The single chokepoint every *nested* activation goes through, and a nested run is
+    // the one VM shape that uses real Rust stack per Brood level: an ordinary call pushes a
+    // heap frame inside one `vm_run_bc` loop, but a native callback (a `try` body, a `map`
+    // function, a top-level form run from a native) re-enters here. Near the end of the
+    // stack it continues on a heap-backed segment (ADR-751), so such a recursion is as deep
+    // as memory allows; past the call-stack ceiling it fails, catchably.
+    crate::stack::reenter(heap, |heap| vm_apply_here(heap, compiled0, args, genv0))
+}
+
+/// [`vm_apply`]'s run, on whichever stack [`crate::stack::reenter`] chose.
+fn vm_apply_here(
+    heap: &mut Heap,
+    compiled0: Arc<ArmHandle>,
+    args: &[Value],
+    genv0: EnvId,
+) -> LispResult {
     // IC cursors (ADR-175 Phase A): `vm_run_bc`'s fresh entry installs the callee's
     // block; the CALLER (whose arm continues after this nested run) needs its own
     // block back, so save/restore around the run — the single chokepoint every

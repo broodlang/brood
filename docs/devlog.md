@@ -1939,3 +1939,23 @@ a dev-only project locked nothing, and `update` dropped dev entries from a mixed
 now read both (`package-locked-deps`); guard `crates/nest/tests/dev_dependencies_lock.rs`, red
 with the helper back to production dependencies only.
 
+2026-11-17 (ADR-751). **A call stack is as deep as memory allows; the non-tail lint is gone.**
+Owner's thread 7, by design rather than by lint. The VM's 2^20 and the tree-walker's 2^19 frame
+caps became a check every 4096 frames of the frames' bytes (plus grown native stack) against
+the process's call-stack ceiling, a quarter of the memory the runtime may use or its
+`:max-heap`. The three native re-entry points (`vm_apply`, the tree-walker's `eval` and
+`apply_closure`) run through `crate::stack::reenter`, which continues on an 8 MiB heap-backed
+segment inside the last 512 KiB instead of refusing, restoring the JIT's stack-limit stamp on
+the way out. Without a memory limit the tree-walker's runaway (several KB of heap a level) hit
+the address-space cap and aborted, so a runtime with no limit now takes a soft one from its
+machine (3/4 of 3/4 of physical memory, at most half an address-space limit). Release build,
+3 000 000 levels: plain 596 ms, through `try` 405 ms, through `&optional` 483 ms on the VM, all
+three on the tree-walker; `map`/`fold` callback recursion stops cleanly at the 2 GB ceiling a
+16 GB address-space cap gives (it carries native stack per level). The byte-budget guard
+(`stack_budget`, `STACK_BASE`, `BROOD_STACK_BUDGET`) and the native headroom refusal are
+deleted, as are the `:non-tail-recursion` lint, its category and 151 wrappers (a codemod that
+removes the wrapper's open and matching close; audited that none held several forms outside
+the top level). Guards: `tail_positions.rs` (a 64 MB `:max-heap` makes a non-tail loop fail
+at the depth a tail loop passes; red with the ceiling check disabled), `tree_walker_frames.rs`,
+`jit_deep_recursion_test.blsp` (2 000 000 levels complete in a spawned process).
+

@@ -134,15 +134,14 @@ pub(crate) use links::{
     record_remote_link,
 };
 pub use scheduler::{
-    GcBlockGuard, MacroBlockGuard, NATIVE_STACK_MARGIN_BYTES, WORKER_STACK_BYTES, begin_capture,
-    capture_append, current_pid, deregister_root_ctx, deregister_root_ctx_of,
-    dirty_receive_block_count, exit, exit_count, free_drained_gen, gc_block_depth,
-    in_green_process, isolate_owner_of, live_pids, macro_block_active, migrate_count,
-    native_stack_headroom_ok, next_isolate_token, old_gen_drained, parent_of, peak_threads,
-    pending_kill_phrase, pid_value, preempt_count, report_drain_liveness, self_isolate_scope,
-    self_mailbox_seq, self_pid, set_max_parallel, set_self_isolate_scope, set_test_no_workers,
-    shutdown_runtime_parked, spawn, spawn_count, spawn_linked, spawn_monitored, spawn_root_program,
-    stack_budget, stack_overflow_check, steal_count, take_capture, test_drive_quanta, tick,
+    GcBlockGuard, MacroBlockGuard, WORKER_STACK_BYTES, begin_capture, capture_append, current_pid,
+    deregister_root_ctx, deregister_root_ctx_of, dirty_receive_block_count, exit, exit_count,
+    free_drained_gen, gc_block_depth, in_green_process, isolate_owner_of, live_pids,
+    macro_block_active, migrate_count, next_isolate_token, old_gen_drained, parent_of,
+    peak_threads, pending_kill_phrase, pid_value, preempt_count, report_drain_liveness,
+    self_isolate_scope, self_mailbox_seq, self_pid, set_max_parallel, set_self_isolate_scope,
+    set_test_no_workers, shutdown_runtime_parked, spawn, spawn_count, spawn_linked,
+    spawn_monitored, spawn_root_program, steal_count, take_capture, test_drive_quanta, tick,
     with_minting_runtime_tag, worker_threads, yield_now,
 };
 #[cfg(target_arch = "wasm32")]

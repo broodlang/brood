@@ -42,16 +42,15 @@ use super::mailbox::{
 use super::message::Message;
 use super::monitor;
 
-// Execution-safety guards (GC-block / macro-block depth + the stack-overflow byte
-// guard) live in a child module; re-exported so `scheduler::…` (hence
-// `process::…`, ADR consumers) resolves unchanged. `gc_block_set`/`macro_block_set`/
-// `stack_base_set` are scheduler-internal (only `install_ctx` resets them).
+// Execution-safety guards (GC-block / macro-block depth, the worker stack size) live in a
+// child module; re-exported so `scheduler::…` (hence `process::…`, ADR consumers) resolves
+// unchanged. `gc_block_set`/`macro_block_set` are scheduler-internal (only `install_ctx`
+// resets them).
 mod guards;
 pub use guards::{
-    GcBlockGuard, MacroBlockGuard, NATIVE_STACK_MARGIN_BYTES, WORKER_STACK_BYTES, gc_block_depth,
-    macro_block_active, native_stack_headroom_ok, stack_budget, stack_overflow_check,
+    GcBlockGuard, MacroBlockGuard, WORKER_STACK_BYTES, gc_block_depth, macro_block_active,
 };
-use guards::{gc_block_set, macro_block_set, stack_base_set};
+use guards::{gc_block_set, macro_block_set};
 
 // Process lifecycle (spawn/exit/deregister) lives in a child module; the shared
 // scheduling state stays in the root, reached from there via `use super::*`.
@@ -966,7 +965,6 @@ impl Process {
         DISPLACED.with(|d| d.borrow_mut().push(displaced));
         CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         gc_block_set(0);
-        stack_base_set(0);
         macro_block_set(0);
     }
 

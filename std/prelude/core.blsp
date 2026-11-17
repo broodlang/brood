@@ -430,9 +430,8 @@ splice it back in front of the remainder."
   ;; This is THE shape every tail-recursive rewrite lands in: walk a list building a
   ;; reversed accumulator, then splice at the stopping point. Written as
   ;; `(append (reverse acc) tail)` it costs four passes — `reverse` walks `acc`, then
-  ;; `append` folds both lists onto nil and reverses the result — and the checker's
-  ;; non-tail-recursion advice produces more of these every time it is followed. So
-  ;; the idiom gets a name and one pass. `(fold %flip-cons tail acc)` is one pass too but
+  ;; `append` folds both lists onto nil and reverses the result. So the idiom gets a name
+  ;; and one pass. `(fold %flip-cons tail acc)` is one pass too but
   ;; pays a per-element `%flip-cons` apply frame, which is why `%reverse-acc` is a
   ;; dedicated loop.
   (%reverse-acc (seq coll) tail))
@@ -785,7 +784,7 @@ and the runtime contract agree. A base type name (`int`, `map`, …) is never re
 ;; checker runs, so a `;;`-directive can't reach it; this macro expands to a
 ;; marker (`%lint-allow`) that survives macroexpansion and that `nest check`
 ;; reads. A pure runtime no-op — it just yields the wrapped body's value.
-;; Recognised categories: `:non-tail-recursion`, `:unreachable-clause`,
+;; Recognised categories: `:unreachable-clause`,
 ;; `:type-mismatch` (a `sig`-declared return/argument the body deliberately
 ;; violates — e.g. a negative test proving a `sig!` runtime contract throws),
 ;; `:unbound`, `:deprecated`, and `:discarded-catch` (a
@@ -803,7 +802,7 @@ and the runtime contract agree. A base type name (`int`, `map`, …) is never re
   f)
 (defmacro check-allow (category & body)
   "Suppress an advisory checker lint over the wrapped forms. `category` is a
-keyword: `:non-tail-recursion`, `:unreachable-clause`, `:type-mismatch`, `:unbound`
+keyword: `:unreachable-clause`, `:type-mismatch`, `:unbound`
 (globals defined at runtime — a `reflect/eval`-driven `def`, the wasm `use-native`
 binding — that the checker cannot see in source), `:deprecated`,
 `:discarded-catch`, `:cross-module-def` (a module re-binding another module's

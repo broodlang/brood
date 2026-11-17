@@ -114,24 +114,22 @@ NON-LINEAR patterns (the same name twice) work.
     (map? pat) (%match-map-vars pat)
     else nil))
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-seq-vars (pats)
-    (cond
-      (empty? pats) nil
-      (= (first pats) '&) (%match-seq-vars (rest pats))
-      (= (first pats) '&optional) (%match-optional-vars (rest pats))
-      else (append (%pattern-vars (first pats)) (%match-seq-vars (rest pats))))))
+(defn- %match-seq-vars (pats)
+  (cond
+    (empty? pats) nil
+    (= (first pats) '&) (%match-seq-vars (rest pats))
+    (= (first pats) '&optional) (%match-optional-vars (rest pats))
+    else (append (%pattern-vars (first pats)) (%match-seq-vars (rest pats)))))
 ;; The `&optional` slots of a list pattern bind their slot pattern's names — a slot is `p`
 ;; or `(p default)`, and the default is an expression, not a pattern.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-optional-vars (pats)
-    (cond
-      (empty? pats) nil
-      (= (first pats) '&) (%match-seq-vars (rest pats))
-      else
-        (append (%pattern-vars (first (%match-optional-slot (first pats))))
-          (%match-optional-vars (rest pats))))))
+(defn- %match-optional-vars (pats)
+  (cond
+    (empty? pats) nil
+    (= (first pats) '&) (%match-seq-vars (rest pats))
+    else
+      (append (%pattern-vars (first (%match-optional-slot (first pats))))
+        (%match-optional-vars (rest pats)))))
 ;; `[pattern default]` of an `&optional` slot: `p` is `[p nil]`, `(p default)` is
 ;; `[p default]`. A slot is a two-element list only in that spelling, so a list PATTERN in an
 ;; optional slot is written with its default: `((a b) nil)`.
@@ -204,19 +202,18 @@ NON-LINEAR patterns (the same name twice) work.
 
 ; literal → binds nothing
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-bytes-vars (segs)
-    (cond
-      (empty? segs) nil
-      (= (first segs) '&) (%match-bytes-vars (rest segs))
-      (pair? (first segs))
-        (let (s (first (first segs)))
-          ; (sym n) sized
-          (if (%match-wildcard? s)
-            (%match-bytes-vars (rest segs))
-            (cons s (%match-bytes-vars (rest segs)))))
-      (%match-bind-sym? (first segs)) (cons (first segs) (%match-bytes-vars (rest segs)))
-      else (%match-bytes-vars (rest segs)))))
+(defn- %match-bytes-vars (segs)
+  (cond
+    (empty? segs) nil
+    (= (first segs) '&) (%match-bytes-vars (rest segs))
+    (pair? (first segs))
+      (let (s (first (first segs)))
+        ; (sym n) sized
+        (if (%match-wildcard? s)
+          (%match-bytes-vars (rest segs))
+          (cons s (%match-bytes-vars (rest segs)))))
+    (%match-bind-sym? (first segs)) (cons (first segs) (%match-bytes-vars (rest segs)))
+    else (%match-bytes-vars (rest segs))))
 ;; typed integer segment spec: :u8/:i8/:u16[-be/-le]/…/:i64[-be/-le] → [width signed? little?]
 (defn- %match-bytes-int-spec (kw)
   (cond
@@ -356,37 +353,35 @@ NON-LINEAR patterns (the same name twice) work.
 
 ;; list pattern: split off an optional `& rest` tail, then bind element-wise.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-split (pats)
-    ;; `[required optionals rest-pat has-rest]`, the optionals as `[pattern default]` pairs
-    (cond
-      (empty? pats) [nil nil nil false]
-      (= (first pats) '&)
-        (if (= (count (rest pats)) 1)
-          [nil nil (second pats) true]
-          (error "match: '&' must be followed by exactly one tail pattern"))
-      (= (first pats) '&optional)
-        (let (sub (%match-split-optional (rest pats)))
-          (if (empty? (nth sub 0))
-            (error "match: '&optional' must be followed by at least one slot")
-            [nil (nth sub 0) (nth sub 1) (nth sub 2)]))
-      else
-        (let (sub (%match-split (rest pats)))
-          [(cons (first pats) (nth sub 0)) (nth sub 1) (nth sub 2) (nth sub 3)]))))
+(defn- %match-split (pats)
+  ;; `[required optionals rest-pat has-rest]`, the optionals as `[pattern default]` pairs
+  (cond
+    (empty? pats) [nil nil nil false]
+    (= (first pats) '&)
+      (if (= (count (rest pats)) 1)
+        [nil nil (second pats) true]
+        (error "match: '&' must be followed by exactly one tail pattern"))
+    (= (first pats) '&optional)
+      (let (sub (%match-split-optional (rest pats)))
+        (if (empty? (nth sub 0))
+          (error "match: '&optional' must be followed by at least one slot")
+          [nil (nth sub 0) (nth sub 1) (nth sub 2)]))
+    else
+      (let (sub (%match-split (rest pats)))
+        [(cons (first pats) (nth sub 0)) (nth sub 1) (nth sub 2) (nth sub 3)])))
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-split-optional (pats)
-    ;; `[optionals rest-pat has-rest]` after an `&optional` marker
-    (cond
-      (empty? pats) [nil nil false]
-      (= (first pats) '&)
-        (if (= (count (rest pats)) 1)
-          [nil (second pats) true]
-          (error "match: '&' must be followed by exactly one tail pattern"))
-      (= (first pats) '&optional) (error "match: '&optional' appears twice in one pattern")
-      else
-        (let (sub (%match-split-optional (rest pats)))
-          [(cons (%match-optional-slot (first pats)) (nth sub 0)) (nth sub 1) (nth sub 2)]))))
+(defn- %match-split-optional (pats)
+  ;; `[optionals rest-pat has-rest]` after an `&optional` marker
+  (cond
+    (empty? pats) [nil nil false]
+    (= (first pats) '&)
+      (if (= (count (rest pats)) 1)
+        [nil (second pats) true]
+        (error "match: '&' must be followed by exactly one tail pattern"))
+    (= (first pats) '&optional) (error "match: '&optional' appears twice in one pattern")
+    else
+      (let (sub (%match-split-optional (rest pats)))
+        [(cons (%match-optional-slot (first pats)) (nth sub 0)) (nth sub 1) (nth sub 2)])))
 
 (defn- %match-compile-list (pat target bound success fail)
   ;; plain `nth`, not a destructuring `let`: that lowers to the `%match` this file defines
@@ -410,82 +405,79 @@ NON-LINEAR patterns (the same name twice) work.
     (%match-or-check alts)
     (%match-compile-or-chain alts target bound success fail)))
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-compile-or-chain (alts target bound success fail)
-    (if (empty? alts)
-      fail
-      (%match-compile (first alts)
-        target
-        bound
-        success
-        (%match-compile-or-chain (rest alts) target bound success fail)))))
+(defn- %match-compile-or-chain (alts target bound success fail)
+  (if (empty? alts)
+    fail
+    (%match-compile (first alts)
+      target
+      bound
+      success
+      (%match-compile-or-chain (rest alts) target bound success fail))))
 
 ;; `(and p q …)`: match every pattern against the SAME value, left to right, so
 ;; later patterns see the names earlier ones bound (a repeated name is an equality
 ;; constraint, as everywhere else). `(and whole {:keys [a]})` is the `:as` idiom.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-compile-and (pats target bound success fail)
-    (if (empty? pats)
-      success
-      (%match-compile (first pats)
+(defn- %match-compile-and (pats target bound success fail)
+  (if (empty? pats)
+    success
+    (%match-compile (first pats)
+      target
+      bound
+      (%match-compile-and (rest pats)
         target
-        bound
-        (%match-compile-and (rest pats)
-          target
-          (append bound (%pattern-vars (first pats)))
-          success
-          fail)
-        fail))))
+        (append bound (%pattern-vars (first pats)))
+        success
+        fail)
+      fail)))
 
 ;; The walk is located at the list pattern it walks, `origin`: each level stamps its code
 ;; before handing it on, so an element's own pattern (compiled around the rest of the walk)
 ;; finds that code already located and leaves it. An error the walk raises then reports the
 ;; pattern the user wrote, not whatever user form the expander finds nearest.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-compile-seq (origin pats optionals rest-pat has-rest target bound success fail)
-    (%stamp-form-pos
-      (cond
-        (not (empty? pats))
-          (let (p (first pats)
-                hd (reflect/gensym "hd")
-                tl (reflect/gensym "tl")
-                inner (%match-compile-seq origin
-                        (rest pats)
-                        optionals
-                        rest-pat
-                        has-rest
-                        tl
-                        (append bound (%pattern-vars p))
-                        success
-                        fail)
-                head (%match-compile p hd bound inner fail))
-            `(if (/pair? ~target) (let (~hd (/first ~target) ~tl (/rest ~target)) ~head) ~fail))
-        ;; an optional element: the next one if there is one, else the slot's default —
-        ;; computed once as a value rather than by duplicating `success` per branch
-        (not (empty? optionals))
-          (let (p (nth (first optionals) 0)
-                default (nth (first optionals) 1)
-                hd (reflect/gensym "opt")
-                tl (reflect/gensym "tl")
-                inner (%match-compile-seq origin
-                        nil
-                        (rest optionals)
-                        rest-pat
-                        has-rest
-                        tl
-                        (append bound (%pattern-vars p))
-                        success
-                        fail))
-            `(let (~hd (if (/pair? ~target) (/first ~target) ~default)
-                   ~tl (if (/pair? ~target) (/rest ~target) nil))
-               ~(%match-compile p hd bound inner fail)))
-        ; bind the rest to what remains
-        has-rest (%match-compile rest-pat target bound success fail)
-        ; require the list exhausted
-        else `(if (/nil? ~target) ~success ~fail))
-      origin)))
+(defn- %match-compile-seq (origin pats optionals rest-pat has-rest target bound success fail)
+  (%stamp-form-pos
+    (cond
+      (not (empty? pats))
+        (let (p (first pats)
+              hd (reflect/gensym "hd")
+              tl (reflect/gensym "tl")
+              inner (%match-compile-seq origin
+                      (rest pats)
+                      optionals
+                      rest-pat
+                      has-rest
+                      tl
+                      (append bound (%pattern-vars p))
+                      success
+                      fail)
+              head (%match-compile p hd bound inner fail))
+          `(if (/pair? ~target) (let (~hd (/first ~target) ~tl (/rest ~target)) ~head) ~fail))
+      ;; an optional element: the next one if there is one, else the slot's default —
+      ;; computed once as a value rather than by duplicating `success` per branch
+      (not (empty? optionals))
+        (let (p (nth (first optionals) 0)
+              default (nth (first optionals) 1)
+              hd (reflect/gensym "opt")
+              tl (reflect/gensym "tl")
+              inner (%match-compile-seq origin
+                      nil
+                      (rest optionals)
+                      rest-pat
+                      has-rest
+                      tl
+                      (append bound (%pattern-vars p))
+                      success
+                      fail))
+          `(let (~hd (if (/pair? ~target) (/first ~target) ~default)
+                 ~tl (if (/pair? ~target) (/rest ~target) nil))
+             ~(%match-compile p hd bound inner fail)))
+      ; bind the rest to what remains
+      has-rest (%match-compile rest-pat target bound success fail)
+      ; require the list exhausted
+      else `(if (/nil? ~target) ~success ~fail))
+    origin))
 
 ;; vector pattern: a fixed-length tuple, matched element-wise by index.
 (defn- %match-compile-vector (pat target bound success fail)
@@ -497,20 +489,19 @@ NON-LINEAR patterns (the same name twice) work.
        ~fail)))
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-compile-velems (pats target i bound success fail)
-    (if (empty? pats)
-      success
-      (let (p (first pats)
-            el (reflect/gensym "el")
-            inner (%match-compile-velems (rest pats)
-                    target
-                    (inc i)
-                    (append bound (%pattern-vars p))
-                    success
-                    fail)
-            this (%match-compile p el bound inner fail))
-        `(let (~el (%vector-ref ~target ~i)) ~this)))))
+(defn- %match-compile-velems (pats target i bound success fail)
+  (if (empty? pats)
+    success
+    (let (p (first pats)
+          el (reflect/gensym "el")
+          inner (%match-compile-velems (rest pats)
+                  target
+                  (inc i)
+                  (append bound (%pattern-vars p))
+                  success
+                  fail)
+          this (%match-compile p el bound inner fail))
+      `(let (~el (%vector-ref ~target ~i)) ~this))))
 
 ;; associative (map) pattern: {:keys [a b] :or {a default}} — a map literal in
 ;; pattern position destructures a map. Each symbol in :keys binds to the value at
@@ -573,43 +564,41 @@ NON-LINEAR patterns (the same name twice) work.
 ;; sub-pattern against it. The key is emitted QUOTED — in pattern position a key is a
 ;; literal (`{[1 2] p}` looks up the vector `[1 2]`), never an expression to evaluate.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-compile-map-entries (entries target bound success fail)
-    (if (empty? entries)
-      success
-      (let (kv (first entries)
-            k (first kv)
-            sub (second kv)
-            v (reflect/gensym "mval"))
-        `(if (/contains? ~target (quote ~k))
-           (let (~v (/get ~target (quote ~k)))
-             ~(%match-compile sub
-                v
-                bound
-                (%match-compile-map-entries (rest entries)
-                  target
-                  (append bound (%pattern-vars sub))
-                  success
-                  fail)
-                fail))
-           ~fail)))))
+(defn- %match-compile-map-entries (entries target bound success fail)
+  (if (empty? entries)
+    success
+    (let (kv (first entries)
+          k (first kv)
+          sub (second kv)
+          v (reflect/gensym "mval"))
+      `(if (/contains? ~target (quote ~k))
+         (let (~v (/get ~target (quote ~k)))
+           ~(%match-compile sub
+              v
+              bound
+              (%match-compile-map-entries (rest entries)
+                target
+                (append bound (%pattern-vars sub))
+                success
+                fail)
+              fail))
+         ~fail))))
 
 ;; Bind each key symbol to (get target :key); when the key is absent, fall back to
 ;; its :or default (evaluated only then) if one is given, else nil.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-map-binds (keys ors target success)
-    (if (empty? keys)
-      success
-      (let (k (first keys)
-            kw (keyword (->string k))
-            ;; `(get m k default)` answers the default for an ABSENT key only — a present
-            ;; nil stays nil — which is the `:or` contract in one lookup, and the shape the
-            ;; checker reads exactly (an `(if (contains? …) …)` around it typed `40 | nil`).
-            getter (if (and ors (contains? ors k))
-                     `(/get ~target ~kw ~(get ors k))
-                     `(/get ~target ~kw)))
-        `(let (~k ~getter) ~(%match-map-binds (rest keys) ors target success))))))
+(defn- %match-map-binds (keys ors target success)
+  (if (empty? keys)
+    success
+    (let (k (first keys)
+          kw (keyword (->string k))
+          ;; `(get m k default)` answers the default for an ABSENT key only — a present
+          ;; nil stays nil — which is the `:or` contract in one lookup, and the shape the
+          ;; checker reads exactly (an `(if (contains? …) …)` around it typed `40 | nil`).
+          getter (if (and ors (contains? ors k))
+                   `(/get ~target ~kw ~(get ors k))
+                   `(/get ~target ~kw)))
+      `(let (~k ~getter) ~(%match-map-binds (rest keys) ors target success)))))
 
 ;; `(record name {map-pattern}?)` — assert the target is a `defrecord` value of nominal id
 ;; `name`, then match the optional map pattern against its fields. `record-id` returns the
@@ -780,12 +769,11 @@ and carries the name as `:name`."
 ;; Occurrences of symbol `s` in code tree `form` (pairs only — `s` is a gensym,
 ;; so quoted user data can never contain it and vectors need no descent).
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-count-sym (form s)
-    (cond
-      (= form s) 1
-      (pair? form) (+ (%match-count-sym (first form) s) (%match-count-sym (rest form) s))
-      else 0)))
+(defn- %match-count-sym (form s)
+  (cond
+    (= form s) 1
+    (pair? form) (+ (%match-count-sym (first form) s) (%match-count-sym (rest form) s))
+    else 0))
 
 ;; Replace each `(k)` call in code tree `form` with `code` (used only when the
 ;; duplication is bounded — one use, or a small `code`). Rebuilds ONLY the spine
@@ -796,18 +784,17 @@ and carries the name as `:name`."
 ;; `[spliced? form]`; `[]` patterns are avoided since `let` destructuring is
 ;; itself built on this file.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-splice-fail-in (form k code)
-    (cond
-      (and (pair? form) (= (first form) k) (nil? (rest form))) [true code]
-      (pair? form)
-        (let (head (%match-splice-fail-in (first form) k code)
-              tail (%match-splice-fail-in (rest form) k code))
-          ;; the rebuilt pair is the same form: it keeps the original's position
-          (if (or (first head) (first tail))
-            [true (%copy-form-pos (cons (second head) (second tail)) form)]
-            [false form]))
-      else [false form])))
+(defn- %match-splice-fail-in (form k code)
+  (cond
+    (and (pair? form) (= (first form) k) (nil? (rest form))) [true code]
+    (pair? form)
+      (let (head (%match-splice-fail-in (first form) k code)
+            tail (%match-splice-fail-in (rest form) k code))
+        ;; the rebuilt pair is the same form: it keeps the original's position
+        (if (or (first head) (first tail))
+          [true (%copy-form-pos (cons (second head) (second tail)) form)]
+          [false form]))
+    else [false form]))
 (defn- %match-splice-fail (form k code)
   (second (%match-splice-fail-in form k code)))
 
@@ -819,12 +806,11 @@ and carries the name as `:name`."
 ;; the patterns it names, tipping a 2-clause match into a failure thunk — a closure per run,
 ;; and a guard chain the checker could no longer read.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-size-budget (form budget)
-    (cond
-      (< budget 0) -1
-      (pair? form) (%match-size-budget (rest form) (%match-node-budget (first form) (- budget 1)))
-      else budget)))
+(defn- %match-size-budget (form budget)
+  (cond
+    (< budget 0) -1
+    (pair? form) (%match-size-budget (rest form) (%match-node-budget (first form) (- budget 1)))
+    else budget))
 
 ;; One element of a list: a quoted datum is a constant, so it costs nothing past its own cell.
 (defn- %match-node-budget (node budget)
@@ -877,15 +863,14 @@ and carries the name as `:name`."
 ;; tail position of the generated if/let, so a `match` in tail position is TCO-safe.
 ;; `nil-fail?` — see `%match-build-clause`; `match` passes false, `receive` true.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %match-build-chain (clauses target fail nil-fail?)
-    (if (empty? clauses)
-      fail
-      (let (clause (first clauses)
-            following (rest clauses)
-            rest-code (%match-build-chain following target fail nil-fail?))
-        (%match-check-reachable clause following)
-        (%match-build-clause clause target rest-code nil-fail?)))))
+(defn- %match-build-chain (clauses target fail nil-fail?)
+  (if (empty? clauses)
+    fail
+    (let (clause (first clauses)
+          following (rest clauses)
+          rest-code (%match-build-chain following target fail nil-fail?))
+      (%match-check-reachable clause following)
+      (%match-build-clause clause target rest-code nil-fail?))))
 
 (defn- %match-build (clauses target context)
   (%match-build-chain clauses

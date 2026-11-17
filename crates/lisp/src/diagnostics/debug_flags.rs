@@ -434,11 +434,6 @@ pub const FLAGS: &[DebugFlag] = &[
         "restore the peak-sized nursery reservation after a tenure — the A/B lever for that RSS fix",
     ),
     f(
-        "BROOD_STACK_BUDGET",
-        GC,
-        "`=<bytes>`: the non-tail-recursion stack guard's budget",
-    ),
-    f(
         "BROOD_TRACE_GCBLOCK",
         GC,
         "trace GC-block depth (debug builds)",

@@ -23,22 +23,14 @@ fn has(findings: &[Finding], lint: Lint, text: &str) -> bool {
         .any(|finding| finding.lint == lint && finding.message.contains(text))
 }
 
-const NON_TAIL: &str = "(defn fact (n) (if (= n 0) 1 (* n (fact (- n 1)))))";
+const UNBOUND: &str = "(defn calls () (no-such-function-here 1))";
 const MISMATCH: &str = "(defn adds () (+ 1 \"x\"))";
 
 #[test]
 fn findings_carry_their_category() {
     let findings = file_findings(&format!(
-        "(defmodule category-kinds)\n{NON_TAIL}\n{MISMATCH}\n(defn calls () (no-such-function-here 1))"
+        "(defmodule category-kinds)\n{MISMATCH}\n{UNBOUND}"
     ));
-    assert!(
-        has(
-            &findings,
-            Lint::NonTailRecursion,
-            "fact: recursive call in non-tail position"
-        ),
-        "{findings:?}"
-    );
     assert!(
         has(&findings, Lint::TypeMismatch, "argument 2 expects"),
         "{findings:?}"
@@ -56,12 +48,10 @@ fn findings_carry_their_category() {
 #[test]
 fn header_check_allow_drops_only_the_named_category() {
     let findings = file_findings(&format!(
-        "(defmodule category-allowed (:check-allow :non-tail-recursion))\n{NON_TAIL}\n{MISMATCH}"
+        "(defmodule category-allowed (:check-allow :unbound))\n{UNBOUND}\n{MISMATCH}"
     ));
     assert!(
-        !findings
-            .iter()
-            .any(|finding| finding.lint == Lint::NonTailRecursion),
+        !findings.iter().any(|finding| finding.lint == Lint::Unbound),
         "{findings:?}"
     );
     assert!(
@@ -75,17 +65,17 @@ fn header_check_allow_governs_its_own_module_region() {
     // Two modules in one file (ADR-223): the first module's clause does not reach the
     // second module's definitions.
     let findings = file_findings(
-        "(defmodule region-one (:check-allow :non-tail-recursion))\n\
-         (defn fact (n) (if (= n 0) 1 (* n (fact (- n 1)))))\n\
+        "(defmodule region-one (:check-allow :unbound))\n\
+         (defn one () (missing-in-one 1))\n\
          (defmodule region-two)\n\
-         (defn total (n) (if (= n 0) 0 (+ n (total (- n 1)))))",
+         (defn two () (missing-in-two 1))",
     );
     assert!(
-        !has(&findings, Lint::NonTailRecursion, "fact:"),
+        !has(&findings, Lint::Unbound, "missing-in-one"),
         "{findings:?}"
     );
     assert!(
-        has(&findings, Lint::NonTailRecursion, "total:"),
+        has(&findings, Lint::Unbound, "missing-in-two"),
         "{findings:?}"
     );
 }
@@ -93,7 +83,7 @@ fn header_check_allow_governs_its_own_module_region() {
 #[test]
 fn unknown_header_category_is_a_check_allow_finding() {
     let findings = file_findings(&format!(
-        "(defmodule category-typo (:check-allow :no-such-category :non-tail-recursion))\n{NON_TAIL}"
+        "(defmodule category-typo (:check-allow :no-such-category :unbound))\n{UNBOUND}"
     ));
     assert!(
         has(&findings, Lint::CheckAllow, ":no-such-category"),
@@ -101,9 +91,7 @@ fn unknown_header_category_is_a_check_allow_finding() {
     );
     // The known name beside it still applies.
     assert!(
-        !findings
-            .iter()
-            .any(|finding| finding.lint == Lint::NonTailRecursion),
+        !findings.iter().any(|finding| finding.lint == Lint::Unbound),
         "{findings:?}"
     );
 }
@@ -118,7 +106,6 @@ fn every_category_name_round_trips() {
     assert_eq!(Lint::from_name("no-such-category"), None);
     // Named by Brood code (the gate in project-check.blsp, the whole-project lints).
     for name in [
-        "non-tail-recursion",
         "gave-up",
         "deprecated",
         "beta",
@@ -136,6 +123,6 @@ fn every_category_name_round_trips() {
 fn the_runtime_defmodule_accepts_the_clause() {
     let mut interp = crate::Interp::new();
     interp
-        .eval_str("(defmodule category-runtime (:check-allow :unbound :non-tail-recursion))")
+        .eval_str("(defmodule category-runtime (:check-allow :unbound :unreachable-clause))")
         .expect("a :check-allow header clause loads");
 }

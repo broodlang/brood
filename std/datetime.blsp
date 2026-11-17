@@ -26,14 +26,13 @@ spellings of one instant."
     (if (< r 0) (- q 1) q)))
 
 ;; check-allow: deliberately non-tail — depth = the pad width — single digits.
-(check-allow :non-tail-recursion
-  (defn- dt-zero-pad (n width)
-    ;; Render n as a decimal string of at least `width` digits. Handles negative n.
-    (if (< n 0)
-      (str "-" (dt-zero-pad (- n) (- width 1)))
-      (let (s (str n)
-            pad (- width (count s)))
-        (if (> pad 0) (str (string/repeat "0" pad) s) s)))))
+(defn- dt-zero-pad (n width)
+  ;; Render n as a decimal string of at least `width` digits. Handles negative n.
+  (if (< n 0)
+    (str "-" (dt-zero-pad (- n) (- width 1)))
+    (let (s (str n)
+          pad (- width (count s)))
+      (if (> pad 0) (str (string/repeat "0" pad) s) s))))
 (sig dt-zero-pad (int int -> string))
 
 ;; ---- Gregorian <-> days-since-Unix-epoch ------------------------------------

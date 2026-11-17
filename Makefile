@@ -472,8 +472,7 @@ rr-hunt: ## Record a test binary under `rr record --chaos` until it fails, keepi
 asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly + rust-src + cargo-nextest; the system allocator so ASAN can intercept allocations instead of mimalloc's un-instrumented arena). Catches genuine OOB / use-after-free in the unsafe substrate (mmap table, JIT codegen buffers) that TSAN and the logical GC tripwires miss. Through nextest, which also skips doctests (they don't LINK under ASAN + build-std, a toolchain quirk).
 	# `--cfg brood_asan` sizes `WORKER_STACK_BYTES` to 64 MiB for this build, because ASAN's
 	# redzones roughly double every Rust frame: the instrumented prelude boot measured
-	# 16 768 736 bytes against the ordinary 16 MiB stack. Raise the stack, never
-	# BROOD_STACK_BUDGET: a budget larger than the stack disables the stale-base backstop.
+	# 16 768 736 bytes against the ordinary 16 MiB stack.
 	# No $(RUN_CAP) here or on tsan: the sanitizers reserve terabytes of shadow address space.
 	# nextest, process per test, like every other run of these binaries: under `cargo test`
 	# the integration tests shared one process and its process-wide scheduler knobs, and

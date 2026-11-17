@@ -157,28 +157,6 @@ fn a_variadic_behaviour_op_accepts_any_provider_arity() {
     );
 }
 
-// ---- non-tail recursion lint -------------------------------------------------------------
-
-#[test]
-fn a_zero_arity_first_arm_is_read_as_multi_arity() {
-    let w = recursion_warnings("(defn loop1 (() (loop1 0)) ((i) (if (< i 3) (loop1 (inc i)) i)))");
-    assert!(w.is_empty(), "both self-calls are tail calls: {w:?}");
-    let real = recursion_warnings("(defn loop2 (() (loop2 0)) ((i) (+ 1 (loop2 i))))");
-    assert_eq!(
-        real.len(),
-        1,
-        "a real non-tail call in the second arm: {real:?}"
-    );
-}
-
-#[test]
-fn a_local_binding_shadows_the_function_for_the_recursion_lint() {
-    let w = recursion_warnings("(defn step (x) (let (step (fn (y) (* y 2))) (+ 1 (step x))))");
-    assert!(w.is_empty(), "the call is to the LOCAL step: {w:?}");
-    let real = recursion_warnings("(defn step (x) (let (other 1) (+ other (step x))))");
-    assert_eq!(real.len(), 1, "{real:?}");
-}
-
 // ---- guard purity resolves the head ------------------------------------------------------
 
 #[test]

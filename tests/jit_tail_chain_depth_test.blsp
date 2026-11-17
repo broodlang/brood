@@ -27,10 +27,9 @@
 ;; The minimal repro. `tc-delegate` is a pure tail-call delegator; `tc-step` enters the
 ;; cycle from a non-tail position (the result is destructured, so the call cannot be a
 ;; tail call). Non-tail by construction, so the checker's warning is expected and correct.
-(check-allow :non-tail-recursion
-  (defn- tc-value (n) (if (= n 0) [0 n] (tc-delegate (- n 1))))
-  (defn- tc-delegate (n) (tc-step n))
-  (defn- tc-step (n) (let ([v j] (tc-value n)) [(+ v 1) j])))
+(defn- tc-value (n) (if (= n 0) [0 n] (tc-delegate (- n 1))))
+(defn- tc-delegate (n) (tc-step n))
+(defn- tc-step (n) (let ([v j] (tc-value n)) [(+ v 1) j]))
 
 (describe "KI-11: JIT tail-chain recursion stays bounded"
   :tags [:regression]
@@ -74,6 +73,5 @@
   ;; The shapes that always worked, kept so a future depth change has to keep them
   ;; working — these are the ones that stay on the small-frame native path.
   (test "plain deep non-tail self-recursion still runs deep"
-    (check-allow :non-tail-recursion
-      (defn- tc-plain (n) (if (= n 0) 0 (+ 1 (tc-plain (- n 1))))))
+    (defn- tc-plain (n) (if (= n 0) 0 (+ 1 (tc-plain (- n 1)))))
     (assert= (tc-plain 100000) 100000)))

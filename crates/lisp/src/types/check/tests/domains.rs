@@ -218,8 +218,8 @@ fn the_domain_walk_survives_a_pathologically_deep_body() {
     // walk a function's BODY: a body this deep can only arrive by construction (the
     // reader caps nesting at 256), which is exactly what a macro expansion can produce.
     // The property under test is "returns instead of crashing the host".
-    // That includes the non-tail-recursion lint's `walk`, which descends a deep body
-    // inside a `(def n (fn …))` — guarding only a pass's entry point is not enough.
+    // That includes every pass that descends a deep body inside a `(def n (fn …))` —
+    // guarding only a pass's entry point is not enough.
     let interp = crate::Interp::new();
     let mut heap =
         crate::core::heap::Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());

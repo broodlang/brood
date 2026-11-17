@@ -41,18 +41,17 @@
 (def unary-ops ["math/abs" "-" "inc" "dec"])
 
 ;; A depth-bounded tree walk: the recursion is at most `depth` deep by construction.
-(check-allow :non-tail-recursion
-  (defn expr (depth)
-    (if (or (<= depth 0) (< (draw-float) 0.35))
-      (draw-choice leaves)
-      (let (roll (draw-float) below (- depth 1))
-        (cond
-          (< roll 0.55) (str "(" (draw-choice binary-ops) " " (expr below) " " (expr below) ")")
-          (< roll 0.72)
-            (let (test (str "(" (draw-choice comparisons) " " (expr below) " " (expr below) ")"))
-              (str "(if " test " " (expr below) " " (expr below) ")"))
-          (< roll 0.85) (str "(" (draw-choice unary-ops) " " (expr below) ")")
-          else (str "(let (t " (expr below) ") (" (draw-choice binary-ops) " t " (expr below) "))"))))))
+(defn expr (depth)
+  (if (or (<= depth 0) (< (draw-float) 0.35))
+    (draw-choice leaves)
+    (let (roll (draw-float) below (- depth 1))
+      (cond
+        (< roll 0.55) (str "(" (draw-choice binary-ops) " " (expr below) " " (expr below) ")")
+        (< roll 0.72)
+          (let (test (str "(" (draw-choice comparisons) " " (expr below) " " (expr below) ")"))
+            (str "(if " test " " (expr below) " " (expr below) ")"))
+        (< roll 0.85) (str "(" (draw-choice unary-ops) " " (expr below) ")")
+        else (str "(let (t " (expr below) ") (" (draw-choice binary-ops) " t " (expr below) "))")))))
 
 (defn program (seed)
   (rng-reset seed)

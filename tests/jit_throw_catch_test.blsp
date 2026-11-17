@@ -35,8 +35,7 @@
 ;; a throw deep inside warmed NON-TAIL recursion, caught at the top — the arm gets
 ;; self-inlined, and the thrown error must unwind without reading a freed const.
 ;; deliberately non-tail (the warmed recursion is the subject) — opt out of the lint.
-(check-allow :non-tail-recursion
-  (defn deep (n) (if (= n 0) (error "bottom") (+ 1 (deep (- n 1))))))
+(defn deep (n) (if (= n 0) (error "bottom") (+ 1 (deep (- n 1)))))
 (defn hammer3 (i caught)
   (if (= i 0)
     caught
@@ -60,23 +59,20 @@
 ;; payload's identity across the native unwind, the float worker's boxing, a throw in
 ;; NON-final `do` position (the lowering must not skip it), and the depth-bail interplay
 ;; (past the 32768 cap the arm switches to the boxed path and must still catch).
-(check-allow :non-tail-recursion
-  (defn descend-throw (d i)
-    (if (= d 0) (throw (math/rem i 100)) (+ 1 (descend-throw (- d 1) i)))))
+(defn descend-throw (d i)
+  (if (= d 0) (throw (math/rem i 100)) (+ 1 (descend-throw (- d 1) i))))
 (defn hammer4 (i acc)
   (if (= i 0)
     acc
     (hammer4 (- i 1) (+ acc (try (descend-throw 50 i) (catch e e))))))
-(check-allow :non-tail-recursion
-  (defn fdescend-throw (d x)
-    (if (= d 0.0) (throw (* x 2.0)) (+ 1.0 (fdescend-throw (- d 1.0) x)))))
+(defn fdescend-throw (d x)
+  (if (= d 0.0) (throw (* x 2.0)) (+ 1.0 (fdescend-throw (- d 1.0) x))))
 (defn fhammer (i acc)
   (if (= i 0)
     acc
     (fhammer (- i 1) (+ acc (try (fdescend-throw 50.0 1.5) (catch e e))))))
-(check-allow :non-tail-recursion
-  (defn do-throw (d i)
-    (if (= d 0) (do (throw i) 999) (+ 1 (do-throw (- d 1) i)))))
+(defn do-throw (d i)
+  (if (= d 0) (do (throw i) 999) (+ 1 (do-throw (- d 1) i))))
 (defn dohammer (i acc)
   (if (= i 0)
     acc

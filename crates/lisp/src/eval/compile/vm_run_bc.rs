@@ -843,10 +843,8 @@ pub(crate) fn vm_run_bc(
     {
         record_tier0_escape(&path, top_level);
     }
-    // Keep the GC-block depth consistent for any nested native / tree-walked sub-call
-    // (their own `stack_overflow_check` reads it). The driver itself doesn't recurse
-    // per Brood call — runaway non-tail recursion is caught by `MAX_BC_FRAMES` below,
-    // not the native-stack byte guard.
+    // The driver doesn't recurse per Brood call: its frames are heap frames, measured
+    // against the call stack's ceiling as they are pushed (ADR-751).
     let _gc_block = crate::process::GcBlockGuard::enter();
     // Publish this driver's `top_level` to the `receive` gate (restored on exit, so the
     // innermost driver wins): a top-level receive captures, a native-nested one blocks.
@@ -1581,8 +1579,11 @@ pub(crate) fn vm_run_bc(
                 bases,
                 result_contract,
             }) => {
-                if frames.len() + 1 > MAX_BC_FRAMES {
-                    raise!('drive, crate::eval::bc_frame_depth_error(frames.len()));
+                if frames.len() % crate::stack::FRAME_CHECK_INTERVAL
+                    == crate::stack::FRAME_CHECK_INTERVAL - 1
+                    && let Err(error) = bc_frames_within_ceiling(heap, frames.len())
+                {
+                    raise!('drive, error);
                 }
                 // Suspend the caller (resume at the already-advanced `cur_ip`) and
                 // switch the registers to the callee. `exec_chunk` already dropped the
@@ -1630,8 +1631,11 @@ pub(crate) fn vm_run_bc(
                 bases,
                 tail,
             }) => {
-                if frames.len() + 1 > MAX_BC_FRAMES {
-                    raise!('drive, crate::eval::bc_frame_depth_error(frames.len()));
+                if frames.len() % crate::stack::FRAME_CHECK_INTERVAL
+                    == crate::stack::FRAME_CHECK_INTERVAL - 1
+                    && let Err(error) = bc_frames_within_ceiling(heap, frames.len())
+                {
+                    raise!('drive, error);
                 }
                 // A window of its own, inside any already open (ADR-493).
                 let window = crate::process::open_interrupt_window(ceiling);
@@ -1678,8 +1682,11 @@ pub(crate) fn vm_run_bc(
                 genv,
                 bases,
             }) => {
-                if frames.len() + 1 > MAX_BC_FRAMES {
-                    raise!('drive, crate::eval::bc_frame_depth_error(frames.len()));
+                if frames.len() % crate::stack::FRAME_CHECK_INTERVAL
+                    == crate::stack::FRAME_CHECK_INTERVAL - 1
+                    && let Err(error) = bc_frames_within_ceiling(heap, frames.len())
+                {
+                    raise!('drive, error);
                 }
                 let caller_arm = std::mem::replace(&mut cur_arm, arm);
                 frames.push(current_frame!(caller_arm));
@@ -1719,8 +1726,11 @@ pub(crate) fn vm_run_bc(
                 bases,
                 outcome,
             }) => {
-                if frames.len() + 1 > MAX_BC_FRAMES {
-                    raise!('drive, crate::eval::bc_frame_depth_error(frames.len()));
+                if frames.len() % crate::stack::FRAME_CHECK_INTERVAL
+                    == crate::stack::FRAME_CHECK_INTERVAL - 1
+                    && let Err(error) = bc_frames_within_ceiling(heap, frames.len())
+                {
+                    raise!('drive, error);
                 }
                 let caller_arm = std::mem::replace(&mut cur_arm, arm);
                 frames.push(current_frame!(caller_arm));

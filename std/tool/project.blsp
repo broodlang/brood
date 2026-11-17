@@ -250,9 +250,8 @@ than being fetched into `_deps/<name>/`.
 
 ;; The keys of a flat plist (every other element from the head).
 ;; check-allow: deliberately non-tail — depth = the manifest plist's key count.
-(check-allow :non-tail-recursion
-  (defn- project-plist-keys (kvs)
-    (if (empty? kvs) nil (cons (first kvs) (project-plist-keys (rest (rest kvs)))))))
+(defn- project-plist-keys (kvs)
+  (if (empty? kvs) nil (cons (first kvs) (project-plist-keys (rest (rest kvs))))))
 
 ;; Reject any reserved opt key present in `opts`, naming the offending dep.
 (defn- project-reject-reserved-opts (name opts)
@@ -457,7 +456,7 @@ since a newer checker may know names this one does not."
       (error "project: "
         ":check must be a MAP, got "
         (pr-str value)
-        " — write it as :check {:advisory [:non-tail-recursion] :allow [:list-truthiness]}")
+        " — write it as :check {:advisory [:unreachable-clause] :allow [:list-truthiness]}")
     else
       (fold (%map-pairs value)
         {}
@@ -473,7 +472,7 @@ since a newer checker may know names this one does not."
               (pr-str categories)
               " — write it as :check {"
               key
-              " [:non-tail-recursion]}"))
+              " [:unreachable-clause]}"))
           (assoc acc key (into #{} categories))))))
 
 (defn- project-parse-enhances (value)

@@ -1,6 +1,5 @@
 //! Execution-safety guards for a worker thread — the GC-block / macro-block depth
-//! counters and their RAII guards, and the non-tail-recursion stack-overflow byte
-//! guard (ADR-043/061). Split out of `scheduler.rs`: these are self-contained
+//! counters and their RAII guards, and the worker stack size (ADR-061, ADR-751). Split out of `scheduler.rs`: these are self-contained
 //! (their thread-locals are touched only by the accessors here; `install_ctx`
 //! resets them via those accessors) and independent of the reduction/worker
 //! scheduling core, which stays in the root. Reaches the parent's imports via
@@ -11,20 +10,14 @@ thread_local! {
     /// GC-block depth: how many `eval` / `macroexpand_all` frames are active on
     /// this thread. Since ADR-061 this no longer gates the GC safepoint (which now
     /// collects at any eval depth — see `MACRO_BLOCK` and the operand-stack rooting
-    /// in `eval::eval`); it survives only to feed the stack-overflow byte guard,
-    /// which establishes its base at the outermost eval (`gc_block_depth() <= 1`).
+    /// in `eval::eval`). It fed the stack-overflow byte guard, which ADR-751 removed;
+    /// nothing reads it now, and the call sites that say it blocks a collection are
+    /// owed an audit (handoff, known follow-ups).
     ///
     /// Per-process: reset to 0 at the start of each quantum (`install_ctx`), so workers
     /// multiplexing several processes don't leak each other's depths. The root
     /// thread doesn't multiplex, so its depth flows naturally.
     static GC_BLOCK: Cell<u32> = const { Cell::new(0) };
-
-    /// Stack-pointer base for the [`stack_overflow_check`] byte guard: the sp of
-    /// the *outermost* eval in this quantum. `0` = unset (established by the next
-    /// eval). Reset to 0 at the start of each quantum (`install_ctx`): a captured
-    /// process resumes on a fresh worker stack, so the base is re-established by its
-    /// first eval rather than carried across the suspend.
-    static STACK_BASE: Cell<usize> = const { Cell::new(0) };
 
     /// Compile-pass depth (ADR-061): bumped by `macroexpand_all`'s
     /// [`MacroBlockGuard`] for the duration of macro expansion. The eval safepoint
@@ -33,7 +26,7 @@ thread_local! {
     /// Rust locals. This is what lets the safepoint otherwise fire at ANY eval
     /// depth (the operand stack roots runtime transients; the compile pass opts
     /// out instead of being rooted). Reset to 0 at the start of each quantum
-    /// (`install_ctx`), exactly like `GC_BLOCK`/`STACK_BASE`.
+    /// (`install_ctx`), exactly like `GC_BLOCK`.
     static MACRO_BLOCK: Cell<u32> = const { Cell::new(0) };
 }
 
@@ -144,236 +137,21 @@ impl Drop for GcBlockGuard {
 }
 
 /// Stack size for each worker thread. A green process runs its body directly on the
-/// worker thread (ADR-100 §8.4 — no coroutine stack), and the tree-walking eval recurses
-/// one Rust frame per combination, so a debug-build evaluator running the in-language test
-/// suite (which spawns processes that load many test files) needs a deep stack.
-/// **16 MiB**: debug eval frames are heavy (no inlining + poison checks) — one
-/// nested `eval` frame is several KiB, and non-tail recursion stacks ~2 of them
-/// per level, so a few hundred levels of legitimate non-tail recursion already
-/// costs low-double-digit MiB of stack. We want the [`stack_budget`] guard to
-/// allow building structures a few hundred levels deep (the message serialiser once capped at 256; it grows its own stack now) with
-/// headroom, and still fire a clean [`STACK_DEPTH_EXCEEDED`] error well before
-/// the real guard page (with room for the error-construction frames). The pages
-/// are mmap'd lazily, so unused tail pages stay uncommitted — the higher ceiling
-/// costs ~0 until the depth actually needs it (a shallow process resides a few
-/// KiB; only deep recursion commits more, and a runaway is killed by the guard
-/// before it commits much past the budget). The `brood`/`nest` binaries re-home
-/// their root thread onto a stack of this same size (see `cli`/`nest` `main`), so
-/// the budget below is uniform and safe on both the root thread and workers.
-/// Tunable; bump if a feature lands with heavier frames.
+/// worker thread (ADR-100 §8.4 — no coroutine stack). The engines keep their call frames on
+/// the heap, so this stack carries only native code and the nested activations a native
+/// re-enters Brood through; near its end such an activation continues on a heap-backed
+/// segment (`crate::stack::reenter`, ADR-751), so this size bounds no Brood recursion. The
+/// pages are mmap'd lazily, so the tail costs nothing until it is used. The `brood`/`nest`
+/// binaries re-home their root thread onto a stack of this same size (see `cli`/`nest`
+/// `main`).
 ///
-/// **wasm32 is not a worker.** There are no OS threads there and no 16 MiB stack — the
-/// module runs on a shadow stack in linear memory, ~1 MiB by default. Both consumers of
-/// this constant are wrong at 16 MiB on that target: the budget below it can never be
-/// reached (the host traps first), and — the one that bit — the "implausibly large ⇒
-/// stale base" backstop in [`stack_overflow_check`] cannot recognise a bogus reading.
-/// That is KI-82: a stale `STACK_BASE` yielded `used = 14021552`, which is over the
-/// 12 MiB budget and under the 16 MiB backstop, so the guard raised
-/// `recursion too deep` on a program three frames deep. Sizing this to the real stack
-/// makes the backstop fire and rebase instead, which is what it exists to do.
-///
-/// **AddressSanitizer is a third size, and it has to be.** ASAN's redzones roughly double
-/// every Rust frame, so an instrumented prelude boot nearly fills a 16 MiB stack. Raising
-/// `BROOD_STACK_BUDGET` past the stack instead would disable the stale-base backstop
-/// (`the_stack_guard_thresholds_are_ordered_and_non_degenerate` forbids it), so the
-/// instrumented build gets a stack that matches the frames it builds. Set by
-/// `--cfg brood_asan` from the `asan` make target.
+/// **wasm32 is not a worker:** it runs on a shadow stack in linear memory, ~1 MiB by
+/// default. **AddressSanitizer** roughly doubles every Rust frame, so an instrumented
+/// prelude boot nearly fills 16 MiB; that build gets a stack that matches the frames it
+/// builds (`--cfg brood_asan`, from the `asan` make target).
 #[cfg(all(not(target_arch = "wasm32"), brood_asan))]
 pub const WORKER_STACK_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(all(not(target_arch = "wasm32"), not(brood_asan)))]
 pub const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(target_arch = "wasm32")]
 pub const WORKER_STACK_BYTES: usize = 1024 * 1024;
-
-/// Native-stack reserve kept free for one more *nested activation* — see
-/// [`native_stack_headroom_ok`]. Enough for the deepest single re-entry chain
-/// (`vm_apply` → `vm_run_bc` → `exec_chunk` → a native callback) plus the frames
-/// that build and unwind the error itself.
-pub const NATIVE_STACK_MARGIN_BYTES: usize = 512 * 1024;
-
-/// Is there room on the **native** (Rust) stack for another nested activation?
-///
-/// [`stack_overflow_check`] guards the *tree-walker*, whose recursion it can see:
-/// it is called from `eval` and measures bytes since that quantum's outermost
-/// `eval`. The bytecode VM's ordinary calls consume no native stack at all — they
-/// push heap frames inside one `vm_run_bc` loop, which is why 200 000-deep
-/// non-tail recursion returns cleanly and is capped by `MAX_BC_FRAMES`.
-///
-/// But some VM paths **re-enter natively**: a `try` body, a top-level form run from a
-/// native, and every native callback (`map`/`binding`/`%isolate`) run through
-/// `vm_apply` → `vm_run_bc`, adding real Rust frames
-/// per Brood level. Nothing on that path reaches `eval`, so the byte guard never
-/// fired and a recursive `try` body died on the guard page — a `SIGSEGV` that
-/// `try`/`catch` cannot observe and no supervisor can restart, because the OS
-/// process goes, not the green process. This is the VM sibling of the JIT's
-/// KI-14 `stack_headroom_ok` fix.
-///
-/// Probing the *remaining* stack, rather than counting frames or bytes-since-a-base,
-/// is the honest measure here for the same reason it was in the JIT: once a chain
-/// re-enters through a native frame, no counter this side of it reflects the true
-/// nesting, and frame weight varies far too much to convert to a count.
-///
-/// `None` (platform can't report) is treated as "fine" — the pre-existing behaviour.
-#[inline]
-pub fn native_stack_headroom_ok() -> bool {
-    match stacker::remaining_stack() {
-        Some(left) => left > NATIVE_STACK_MARGIN_BYTES,
-        None => true,
-    }
-}
-
-/// Stack-budget guard against runaway *non-tail* recursion (ADR-043). The
-/// evaluator is a native tree-walker: every nested `eval`/`macroexpand` frame
-/// (i.e. every level of non-tail recursion) consumes real Rust stack, and an
-/// unbounded one — `(defn boom (n) (+ 1 (boom (+ n 1))))` — would overflow the
-/// [`WORKER_STACK_BYTES`] worker stack as a **`SIGSEGV` the host can't
-/// `catch_unwind`**, taking down the whole REPL / `nest mcp` server. The guard
-/// turns that into a clean, catchable [`STACK_DEPTH_EXCEEDED`] error.
-///
-/// We measure **stack bytes used**, not frame *count*. Frame count (the old
-/// `GC_BLOCK`-ceiling approach) can't work: a heavy frame (`(+ 1 (boom …))`)
-/// and a light one (`{:next (f …)}`) differ several-fold in bytes, so any single
-/// frame-count ceiling is simultaneously too low for legitimate deep recursion
-/// and too high to stop a heavy runaway before the real overflow. Bytes are the
-/// thing the stack actually runs out of, so a byte budget is both safe and
-/// permissive. See [`STACK_BASE`] for how the per-quantum base is tracked.
-///
-/// Default: [`WORKER_STACK_BYTES`] minus a margin generous enough to absorb the
-/// frame we're in plus the error-construction path (`format!` + `LispError`)
-/// without itself overflowing. Override with `BROOD_STACK_BUDGET=<size>`
-/// (e.g. `6M`); `0` or malformed falls back to the default.
-#[cfg(not(target_arch = "wasm32"))]
-const STACK_BUDGET_MARGIN: usize = 4 * 1024 * 1024;
-/// A quarter of the wasm shadow stack, in the same spirit as the native quarter: enough
-/// to build and unwind the error without itself overflowing. A 4 MiB margin against a
-/// 1 MiB stack would saturate the budget to **zero** and fire the guard on every eval.
-#[cfg(target_arch = "wasm32")]
-const STACK_BUDGET_MARGIN: usize = 256 * 1024;
-
-/// The active stack budget in bytes, read once from `BROOD_STACK_BUDGET` (or
-/// derived from [`WORKER_STACK_BYTES`]). Cached so the per-`eval` check is a load
-/// + compare on the hot path.
-pub fn stack_budget() -> usize {
-    use std::sync::LazyLock;
-    static BUDGET: LazyLock<usize> = LazyLock::new(|| {
-        std::env::var("BROOD_STACK_BUDGET")
-            .ok()
-            .and_then(|s| crate::core::alloc::parse_size(&s))
-            .filter(|&n| n > 0)
-            .unwrap_or(WORKER_STACK_BYTES.saturating_sub(STACK_BUDGET_MARGIN))
-    });
-    *BUDGET
-}
-
-/// `Some(used_bytes)` when the current stack usage has crossed [`stack_budget`],
-/// else `None`. `sp` is the caller's stack-pointer probe (the address of a local
-/// in the `eval` frame); the per-quantum base ([`STACK_BASE`]) is the sp of the
-/// *outermost* eval in this quantum. Stack grows down, so `base - sp` is the
-/// bytes consumed by the nested-eval recursion since the outermost frame.
-///
-/// Self-healing: the base is recorded the first time it's seen unset (`0`) and
-/// reset to `0` at the start of each quantum (`install_ctx`), so a worker
-/// multiplexing processes never compares against another process's base. As a
-/// final backstop, an implausibly large `used` (> a whole stack — impossible
-/// within one quantum) is treated as a stale base from a missed switch and
-/// silently rebased rather than firing a false positive.
-#[inline]
-pub fn stack_overflow_check(sp: usize) -> Option<usize> {
-    // Called from `eval` *after* its `GcBlockGuard` increment, so `gc_block_depth`
-    // is this frame's depth (1 = the outermost eval in this quantum/thread).
-    STACK_BASE.with(|b| {
-        if gc_block_depth() <= 1 {
-            // Outermost eval frame — (re)establish the base *here*, every time.
-            // This is what keeps the root thread honest: the base set during
-            // prelude load would otherwise be stale by the time a user form runs.
-            // Re-stamping at every depth-1 entry fixes that, and is harmless on a
-            // worker (its first eval each quantum is depth 1 anyway).
-            b.set(sp);
-            return None;
-        }
-        let base = b.get();
-        if base == 0 || sp > base {
-            // No base yet, or we're somehow shallower than it — rebase, fail safe.
-            b.set(sp);
-            return None;
-        }
-        let used = base - sp;
-        if used > WORKER_STACK_BYTES {
-            // Larger than any single worker stack: the base must be stale (a
-            // suspend/resume path we didn't account for). Rebase rather than
-            // reject a legitimate program.
-            //
-            // Acknowledged window: this treats "used > a whole stack" as *always* a
-            // stale base, so a genuine runaway that somehow overshot a full stack
-            // between two depth-1 re-stamps would rebase here instead of raising the
-            // clean `STACK_DEPTH_EXCEEDED`. In practice it can't reach this branch:
-            // `stack_budget()` (default `WORKER_STACK_BYTES − 4 MiB`) is *below*
-            // `WORKER_STACK_BYTES`, and the tree-walker grows the stack one combination
-            // frame at a time, so a real runaway trips the `used > stack_budget()`
-            // check below — firing the clean error — well before `used` could exceed
-            // a full stack. The overshoot would need a single eval step to jump from
-            // under-budget to over-a-whole-stack, which the per-frame growth rules
-            // out. If frames ever get heavy enough to leap >4 MiB in one step, narrow
-            // this (e.g. count consecutive rebases) rather than widen the margin.
-            b.set(sp);
-            return None;
-        }
-        if used > stack_budget() {
-            Some(used)
-        } else {
-            None
-        }
-    })
-}
-
-/// Write the stack base — reset to 0 per quantum by `install_ctx` so this quantum's
-/// first eval establishes a fresh base on the worker stack (the byte-guard reference).
-#[inline]
-pub(super) fn stack_base_set(n: usize) {
-    STACK_BASE.with(|b| b.set(n));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The byte guard has two thresholds and they must stay ordered:
-    ///
-    ///   0 < stack_budget() < WORKER_STACK_BYTES
-    ///
-    /// `stack_budget()` is where a runaway is reported; `WORKER_STACK_BYTES` is where
-    /// [`stack_overflow_check`] decides a reading is too large to be real and rebases a
-    /// stale base instead of raising. Collapse either end and the guard breaks *silently*
-    /// in one direction or the other — which is KI-82, where wasm32 kept the native 16 MiB
-    /// while its shadow stack is ~1 MiB, so a bogus 13.4 MiB reading landed in the gap:
-    /// above the budget (so it raised) and below the backstop (so it was never recognised
-    /// as stale). The playground then failed its own front-page example.
-    ///
-    /// This runs on the host, so it cannot execute the wasm arm — but it pins the shape
-    /// for whatever target it is compiled for, and the wasm arm is a `cfg` of the same two
-    /// constants. It also catches the subtler half: a margin larger than the stack
-    /// saturates the budget to **zero** and fires the guard on every eval, which is what a
-    /// naive "just shrink the stack for wasm" edit produces.
-    #[test]
-    fn the_stack_guard_thresholds_are_ordered_and_non_degenerate() {
-        let budget = stack_budget();
-        assert!(
-            budget > 0,
-            "budget saturated to zero — margin exceeds the stack"
-        );
-        assert!(
-            budget < WORKER_STACK_BYTES,
-            "budget {budget} >= stack {WORKER_STACK_BYTES}: the stale-base backstop can \
-             never fire, so a bogus reading raises instead of rebasing"
-        );
-    }
-
-    /// The margin/stack relation is decidable at COMPILE time, so it is checked there —
-    /// a `const` assertion fails the build on every target it is compiled for, including
-    /// wasm32, which a `#[test]` on the host can never reach. This is the half that
-    /// saturates `stack_budget()` to zero when it is wrong.
-    const _: () = assert!(
-        STACK_BUDGET_MARGIN < WORKER_STACK_BYTES,
-        "the stack-budget margin must be smaller than the stack it is subtracted from"
-    );
-}

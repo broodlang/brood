@@ -65,10 +65,9 @@
 (def eo-t4 (table/new))
 (def eo-u4 (table/new))
 ;; check-allow: deliberately non-tail — the deopt/effect-once shape under test.
-(check-allow :non-tail-recursion
-  (defn eo-multi
-    ((v) (do (table/put eo-u4 0 (+ 1 (table/get eo-u4 0))) (+ (eo-multi v 0) (nth v 0))))
-    ((v acc) (do (table/put eo-t4 0 (+ 1 (table/get eo-t4 0))) 1.5))))
+(defn eo-multi
+  ((v) (do (table/put eo-u4 0 (+ 1 (table/get eo-u4 0))) (+ (eo-multi v 0) (nth v 0))))
+  ((v acc) (do (table/put eo-t4 0 (+ 1 (table/get eo-t4 0))) 1.5)))
 (defn eo-drive4 (i v)
   (if (= i 0) nil (do (eo-multi v) (eo-drive4 (- i 1) v))))
 
@@ -97,14 +96,13 @@
 (defn eo-leaf6 (x) (* x 2))
 (defn eo-eff6 (t) (do (table/put t 0 (+ 1 (table/get t 0))) 1))
 ;; check-allow: deliberately non-tail — the discarded overflow is the deopt trigger.
-(check-allow :non-tail-recursion
-  (defn eo-loop6 (t i acc big)
-    (if (= i 0)
-      acc
-      (do
-        (eo-eff6 t)
-        (* big big)
-        (eo-loop6 t (- i 1) (+ acc (eo-leaf6 i)) big)))))
+(defn eo-loop6 (t i acc big)
+  (if (= i 0)
+    acc
+    (do
+      (eo-eff6 t)
+      (* big big)
+      (eo-loop6 t (- i 1) (+ acc (eo-leaf6 i)) big))))
 
 ;; --- 7. the VM→native DIRECT call (compute-frontier §7.12): the DRIVER stays interpreted
 ;; (its `try` puts the chunk out of the JIT subset) and calls the effectful, always-deopting
@@ -136,14 +134,13 @@
 (defn eo-leaf8 (x) (+ x 1))
 (defn eo-eff8 (t) (do (table/put t 0 (+ 1 (table/get t 0))) 1))
 ;; check-allow: deliberately non-tail — the discarded overflow is the deopt trigger.
-(check-allow :non-tail-recursion
-  (defn eo-loop8 (t i acc x big)
-    (if (= i 0)
-      acc
-      (do
-        (eo-eff8 t)
-        (* big big)
-        (eo-loop8 t (- i 1) (+ acc (eo-leaf8 x)) x big)))))
+(defn eo-loop8 (t i acc x big)
+  (if (= i 0)
+    acc
+    (do
+      (eo-eff8 t)
+      (* big big)
+      (eo-loop8 t (- i 1) (+ acc (eo-leaf8 x)) x big))))
 (defn eo-rep8 (n f) (if (= n 0) nil (do (f) (eo-rep8 (- n 1) f))))
 (defn eo-phases8 ()
   (table/put eo-t8 0 0)

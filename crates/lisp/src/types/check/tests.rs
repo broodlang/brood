@@ -149,17 +149,6 @@ fn ty_str(src: &str) -> String {
         .unwrap_or_else(|| "<unknown>".into())
 }
 
-/// The non-tail-recursion lint (`recursion::check_recursion`) over a
-/// macroexpanded form — what `check-file`'s recursion lint runs.
-fn recursion_warnings(src: &str) -> Vec<String> {
-    let mut interp = crate::Interp::new();
-    let form = reader::read_one(&mut interp.heap, src).expect("parse");
-    let form = expanded_for_check(&mut interp.heap, form, interp.root);
-    let mut out = Vec::new();
-    recursion::check_recursion(&interp.heap, form, &mut out);
-    out.into_iter().map(|finding| finding.message).collect()
-}
-
 // ------------- Step 3: sigs sourced from NativeFn, closure inference --------------
 
 /// The eight test cases below need real user-defined closures, which means

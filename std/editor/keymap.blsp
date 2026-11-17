@@ -139,9 +139,8 @@ hand — `editor/layers/layer-dispatch` — steps through this.
       else [(try ((reflect/eval binding) state key) (catch _e state)) nil])))
 
 ;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
-(check-allow :non-tail-recursion
-  (defn keymap-where-is (keymap command)
-    "Every key SEQUENCE bound to `command` in `keymap`, as a list of key vectors
+(defn keymap-where-is (keymap command)
+  "Every key SEQUENCE bound to `command` in `keymap`, as a list of key vectors
   (`([:ctrl-x :ctrl-e] …)` — prefixes included, chords walked); `()` when nothing is
   bound to it. The inverse of `keymap-bind`, and the mechanism behind
   \"press-whatever-you-actually-have-bound\" help text: a UI names the COMMAND and
@@ -150,20 +149,19 @@ hand — `editor/layers/layer-dispatch` — steps through this.
   Pure over the keymap data — no dispatch, no eval.
 
     (editor/keymap/keymap-where-is {:a 'save :x {:q 'quit}} 'quit)   ;=> ([:x :q])"
-    ;; `map?` FIRST: a nested keymap is a prefix, never a command — so passing a
-    ;; sub-keymap as `command` finds nothing rather than matching by structural `=`.
-    (mapcat (keymap-entries keymap)
-      (fn (entry)
-        (let ([k v] entry)
-          (cond
-            (map? v) (map (keymap-where-is v command) (fn (seq) (into [k] seq)))
-            (= v command) (list [k])
-            else '()))))))
+  ;; `map?` FIRST: a nested keymap is a prefix, never a command — so passing a
+  ;; sub-keymap as `command` finds nothing rather than matching by structural `=`.
+  (mapcat (keymap-entries keymap)
+    (fn (entry)
+      (let ([k v] entry)
+        (cond
+          (map? v) (map (keymap-where-is v command) (fn (seq) (into [k] seq)))
+          (= v command) (list [k])
+          else '())))))
 
 ;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
-(check-allow :non-tail-recursion
-  (defn keymap-index (keymap)
-    "Every binding in `keymap` at once — `{command -> (key-sequence …)}`, prefixes walked,
+(defn keymap-index (keymap)
+  "Every binding in `keymap` at once — `{command -> (key-sequence …)}`, prefixes walked,
   each sequence a key vector. One walk.
 
   `keymap-where-is` answers the same question for ONE command, and walking the map per
@@ -176,30 +174,29 @@ hand — `editor/layers/layer-dispatch` — steps through this.
   been loaded appears here like any other, since a keymap names commands by symbol.
 
     (editor/keymap/keymap-index {:x {:s 'save :q 'quit}})   ;=> {save ([:x :s]), quit ([:x :q])}"
-    (fold (keymap-bindings keymap)
-      {}
-      (fn (acc pair)
-        (let ([command seq] pair)
-          (assoc acc command (cons seq (or (get acc command) '()))))))))
+  (fold (keymap-bindings keymap)
+    {}
+    (fn (acc pair)
+      (let ([command seq] pair)
+        (assoc acc command (cons seq (or (get acc command) '())))))))
 (sig keymap-index (map -> map))
 
 ;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
-(check-allow :non-tail-recursion
-  (defn keymap-bindings (keymap)
-    "Every binding in `keymap` as a flat list of `[command key-sequence]` pairs — prefixes
+(defn keymap-bindings (keymap)
+  "Every binding in `keymap` as a flat list of `[command key-sequence]` pairs — prefixes
   walked, in no particular order. The walk `keymap-index` groups; separate because the flat
   form is what a caller listing a whole keymap (a `describe-bindings`, a cheat sheet) wants,
   and because grouping with `append` per binding is what made a first cut of `keymap-index`
   nine times slower than this walk.
 
     (into #{} (editor/keymap/keymap-bindings {:a 'save :x {:q 'quit}}))   ;=> #{[save [:a]] [quit [:x :q]]}"
-    (mapcat (keymap-entries keymap)
-      (fn (entry)
-        (let ([k v] entry)
-          (cond
-            (map? v) (map (keymap-bindings v) (fn (pair) (let ([c s] pair) [c (into [k] s)])))
-            (symbol? v) (list [v [k]])
-            else '()))))))
+  (mapcat (keymap-entries keymap)
+    (fn (entry)
+      (let ([k v] entry)
+        (cond
+          (map? v) (map (keymap-bindings v) (fn (pair) (let ([c s] pair) [c (into [k] s)])))
+          (symbol? v) (list [v [k]])
+          else '())))))
 (sig keymap-bindings (map -> seqable))
 
 (defn keymap-commands (keymap)
@@ -218,9 +215,8 @@ happens to be in memory. Pure over the keymap data — no dispatch, no eval, no 
 
 (sig keymap-bind (map any any &optional (or nil string) -> map))
 ;; check-allow: deliberately non-tail — depth = the bound key-sequence length — a few keys.
-(check-allow :non-tail-recursion
-  (defn keymap-bind (keymap keys command &optional group)
-    "Bind a key sequence `keys` (a vector of one or more keys) to `command` (a symbol)
+(defn keymap-bind (keymap keys command &optional group)
+  "Bind a key sequence `keys` (a vector of one or more keys) to `command` (a symbol)
   in `keymap`, returning a new keymap — the ergonomic, data-only way to define a
   chord without baking any specific binding into this module. A one-key vector is a
   plain binding; a multi-key vector builds the intermediate prefix sub-keymaps (e.g.
@@ -235,13 +231,13 @@ happens to be in memory. Pure over the keymap data — no dispatch, no eval, no 
              (keymap-bind [:ctrl-x :ctrl-s] 'save-buffer \"files\"))
 
     (editor/keymap/keymap-bind {} [:ctrl-x :ctrl-s] 'save-buffer)   ;=> {:ctrl-x {:ctrl-s save-buffer}}"
-    (if (= (count keys) 1)
-      (let (bound (assoc keymap (first keys) command))
-        (if (nil? group) bound (info-tag bound (first keys) group)))
-      (let (k (first keys)
-            existing (get keymap k)
-            sub (if (map? existing) existing {}))
-        (assoc keymap k (keymap-bind sub (rest keys) command group))))))
+  (if (= (count keys) 1)
+    (let (bound (assoc keymap (first keys) command))
+      (if (nil? group) bound (info-tag bound (first keys) group)))
+    (let (k (first keys)
+          existing (get keymap k)
+          sub (if (map? existing) existing {}))
+      (assoc keymap k (keymap-bind sub (rest keys) command group)))))
 
 ;; ---- what a keymap says about itself: a name, and its keys in groups (ADR-745) -------
 ;; Emacs gives a prefix map a prompt string, and which-key reads the name from the map; a
@@ -303,9 +299,8 @@ keymap's keys goes through, so the info is never mistaken for a key.
 
 (sig keymap-describe (map any map -> map))
 ;; check-allow: deliberately non-tail — depth = the described key sequence's length.
-(check-allow :non-tail-recursion
-  (defn keymap-describe (keymap keys description)
-    "`keymap` with the prefix map `keys` reaches described — Emacs's prompt string for a
+(defn keymap-describe (keymap keys description)
+  "`keymap` with the prefix map `keys` reaches described — Emacs's prompt string for a
   prefix map, and which-key's name for it. `description` is a map of any of:
 
     - `:name` — the prefix's name (`\"project\"`): a which-key panel shows its key as `+project`;
@@ -318,14 +313,14 @@ keymap's keys goes through, so the info is never mistaken for a key.
   later keep the description, since [[keymap-bind]] extends a prefix map in place.
 
     (editor/keymap/keymap-name (map/get-in (editor/keymap/keymap-describe {} [:ctrl-x \"p\"] {:name \"project\"}) [:ctrl-x \"p\"]))   ;=> \"project\""
-    (if (empty? keys)
-      (info-describe keymap description)
-      (let (key (first keys)
-            existing (get keymap key)
-            sub (if (map? existing) existing {})
-            placed (assoc keymap key (keymap-describe sub (rest keys) description))
-            heading (get description :group))
-        (if (and (= (count keys) 1) (string? heading)) (info-tag placed key heading) placed)))))
+  (if (empty? keys)
+    (info-describe keymap description)
+    (let (key (first keys)
+          existing (get keymap key)
+          sub (if (map? existing) existing {})
+          placed (assoc keymap key (keymap-describe sub (rest keys) description))
+          heading (get description :group))
+      (if (and (= (count keys) 1) (string? heading)) (info-tag placed key heading) placed))))
 
 (defn keymap-name (keymap)
   "The name `keymap` was given ([[keymap-describe]]), or nil — a prefix map's which-key
@@ -391,9 +386,8 @@ Nil when no keymap binds `key`.
       top)))
 
 ;; check-allow: deliberately non-tail — depth = the keymaps' chord nesting, a few levels.
-(check-allow :non-tail-recursion
-  (defn keymap-merge-stack (keymaps)
-    "A STACK of keymaps (highest precedence first) as one keymap, every key read by
+(defn keymap-merge-stack (keymaps)
+  "A STACK of keymaps (highest precedence first) as one keymap, every key read by
 [[keymap-stack-binding]] all the way down — so each key sequence means in the merged map
 exactly what it means walked through the stack a key at a time. A mode map's `C-c C-p` over
 the global map's `C-c f` keeps both (Emacs's semantics).
@@ -405,16 +399,16 @@ the highest map that groups it gives — so a mode's `C-c` keys join the global 
     (map/get-in (editor/keymap/keymap-merge-stack [{:c {:p 'top}} {:c 'mid} {:c {:f 'low}}]) [:c :f])   ;=> low
     (editor/keymap/keymap-merge-stack [{:c nil} {:c {:f 'low}}])   ;=> {:c nil}
     (editor/keymap/keymap-name (editor/keymap/keymap-merge-stack [{:a 'top} (editor/keymap/keymap-describe {:b 'low} [] {:name \"low\"})]))   ;=> \"low\""
-    (let (stack (seq/filter keymaps map?))
-      (if (< (count stack) 2)
-        (or (first stack) {})
-        ;; the info key folds through as any key would (the top info wins), then is replaced by
-        ;; the merge of them all
-        (let (merged (fold (seq/distinct (mapcat stack keys))
-                       {}
-                       (fn (acc key) (assoc acc key (keymap-stack-binding stack key))))
-              infos (seq/keep stack (fn (keymap) (get keymap info-key))))
-          (if (empty? infos) merged (assoc merged info-key (info-merge infos))))))))
+  (let (stack (seq/filter keymaps map?))
+    (if (< (count stack) 2)
+      (or (first stack) {})
+      ;; the info key folds through as any key would (the top info wins), then is replaced by
+      ;; the merge of them all
+      (let (merged (fold (seq/distinct (mapcat stack keys))
+                     {}
+                     (fn (acc key) (assoc acc key (keymap-stack-binding stack key))))
+            infos (seq/keep stack (fn (keymap) (get keymap info-key))))
+        (if (empty? infos) merged (assoc merged info-key (info-merge infos)))))))
 
 (defn keymap-merge (low high)
   "`high` laid over `low` — [[keymap-merge-stack]] of the two: each key SEQUENCE resolves to
@@ -491,21 +485,20 @@ whole key, prefix and all; a prefix in `high` over a command in `low` is the pre
 
 ;; check-allow: deliberately non-tail — depth = the number of modifiers on one key (C-M-S-x
 ;; is three), not any input size.
-(check-allow :non-tail-recursion
-  (defn- key-name-description (name)
-    "The Emacs spelling of a key keyword's NAME — its modifier prefixes replaced one at a
+(defn- key-name-description (name)
+  "The Emacs spelling of a key keyword's NAME — its modifier prefixes replaced one at a
 time, innermost last, and a bare space as `SPC`.
 
 A prefix test per modifier rather than a chain of `string/replace` passes over every key:
 inverting a keymap labels a few hundred keys, and seven scans each was ~40 µs a key."
-    (let (hit (seq/find key-modifier-spellings (fn (p) (string/starts-with? name (first p)))))
-      (cond
-        (= name " ") "SPC"
-        (nil? hit) (if (key-angle-name? name) (str "<" name ">") name)
-        else
-          (let ([prefix spelling] hit)
-            (str spelling
-              (key-name-description (string/substring name (count prefix) (count name)))))))))
+  (let (hit (seq/find key-modifier-spellings (fn (p) (string/starts-with? name (first p)))))
+    (cond
+      (= name " ") "SPC"
+      (nil? hit) (if (key-angle-name? name) (str "<" name ">") name)
+      else
+        (let ([prefix spelling] hit)
+          (str spelling
+            (key-name-description (string/substring name (count prefix) (count name))))))))
 
 (defn single-key-description (key)
   "The Emacs spelling of one key: `:ctrl-e` → `C-e`, `:alt-g` → `M-g`, `:ctrl-meta-i` →

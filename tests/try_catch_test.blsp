@@ -361,9 +361,8 @@
       (is (> (get f :col) 0))))
 
   (test "trace is capped at 32 frames under deep non-tail recursion"
-    (check-allow :non-tail-recursion
-      (letrec (deep (fn (n) (if (= n 0) (/ 1 0) (+ 1 (deep (- n 1))))))
-        (assert= 32 (count (try (deep 100) (catch e (get e :trace))))))))
+    (letrec (deep (fn (n) (if (= n 0) (/ 1 0) (+ 1 (deep (- n 1))))))
+      (assert= 32 (count (try (deep 100) (catch e (get e :trace)))))))
 
   (test "a native-boundary callback frame appears by name"
     (let (names (try

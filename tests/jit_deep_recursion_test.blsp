@@ -127,20 +127,26 @@
 ;; value — once warm, links native→native through `jit_dispatch_call`'s closure branch. That
 ;; branch gates its stack probe on the native depth (it enters through `enter_native`, which
 ;; counts the level), where the slow path probes every call; the frame-count cap and the
-;; probe from depth 64 on must still turn a runaway into a catchable error, and a deep but
-;; bounded one must still complete, in a spawned process's smaller stack.
+;; probe from depth 64 on must still drain to the VM's heap frames, so a deep recursion
+;; completes in a spawned process's smaller stack, and a runaway one fails catchably at the
+;; process's call-stack ceiling (its `:max-heap` here, ADR-751).
 (defn- jdr-via (f n) (if (= n 0) 0 (+ 1 (f f (- n 1)))))
 (defn- jdr-via-warm (k) (if (= k 0) nil (do (jdr-via jdr-via 50) (jdr-via-warm (- k 1)))))
-(defn- jdr-via-in-spawn (depth)
+(defn- jdr-via-in-spawn (depth max-heap)
   (let (me (self))
-    (spawn (send me [:r (try [:ok (jdr-via jdr-via depth)] (catch e [:caught (get e :message)]))]))
+    (spawn (send me
+             [:r
+               (try
+                 (do (when max-heap (proc/flag :max-heap max-heap)) [:ok (jdr-via jdr-via depth)])
+                 (catch e [:caught (get e :message)]))]))
     (receive ([:r r] r) (after 850000 :TIMED-OUT))))
 
 (describe "deep recursion through a computed-head call"
-  :serial (test "completes when bounded and raises when runaway, after warming"
+  :serial (test "completes however deep, and raises at the ceiling when runaway, after warming"
     (jdr-via-warm 2000)
-    (assert= [:ok 200000] (jdr-via-in-spawn 200000))
-    (let (r (jdr-via-in-spawn 2000000))
+    (assert= [:ok 200000] (jdr-via-in-spawn 200000 nil))
+    (assert= [:ok 2000000] (jdr-via-in-spawn 2000000 nil))
+    (let (r (jdr-via-in-spawn 20000000 100000000))
       (is (vector? r))
       (assert= :caught (first r))
       (is (includes? (second r) "recursion too deep")))))

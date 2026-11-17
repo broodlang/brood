@@ -33,38 +33,37 @@
       else [:splice (draw-choice ["xs" "ys" "ws"])])))
 
 ;; Depth-bounded tree walks: the recursion is at most a few levels deep by construction.
-(check-allow :non-tail-recursion
-  ;; a list node with 0..4 children: leaves, or (rarely) nested lists
-  (defn draw-template (depth)
-    [:list
-      (map (range (draw-int 0 4))
-        (fn (_)
-          (if (and (> depth 0) (< (draw-float) 0.25))
-            (draw-template (- depth 1))
-            (draw-leaf))))])
+;; a list node with 0..4 children: leaves, or (rarely) nested lists
+(defn draw-template (depth)
+  [:list
+    (map (range (draw-int 0 4))
+      (fn (_)
+        (if (and (> depth 0) (< (draw-float) 0.25))
+          (draw-template (- depth 1))
+          (draw-leaf))))])
 
-  (defn render-quasiquoted (node)
-    (let ([kind payload] node)
-      (case kind
-        :literal payload
-        :unquote (str "~" payload)
-        :splice (str "~@" payload)
-        (str "(" (string/join (map payload render-quasiquoted) " ") ")"))))
+(defn render-quasiquoted (node)
+  (let ([kind payload] node)
+    (case kind
+      :literal payload
+      :unquote (str "~" payload)
+      :splice (str "~@" payload)
+      (str "(" (string/join (map payload render-quasiquoted) " ") ")"))))
 
-  ;; the segment a node contributes to its parent list's `append`
-  (defn render-segment (node)
-    (let ([kind payload] node)
-      (case kind
-        :splice payload
-        :list (str "(list " (render-element node) ")")
-        (str "(list " payload ")"))))
+;; the segment a node contributes to its parent list's `append`
+(defn render-segment (node)
+  (let ([kind payload] node)
+    (case kind
+      :splice payload
+      :list (str "(list " (render-element node) ")")
+      (str "(list " payload ")"))))
 
-  ;; the single value a (non-splicing) node denotes
-  (defn render-element (node)
-    (let ([kind payload] node)
-      (if (= kind :list)
-        (str "(append " (string/join (map payload render-segment) " ") ")")
-        payload))))
+;; the single value a (non-splicing) node denotes
+(defn render-element (node)
+  (let ([kind payload] node)
+    (if (= kind :list)
+      (str "(append " (string/join (map payload render-segment) " ") ")")
+      payload)))
 
 (defn program (seed)
   (rng-reset seed)

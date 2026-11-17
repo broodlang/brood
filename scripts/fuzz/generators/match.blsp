@@ -34,46 +34,45 @@
     {:kind :nil}))
 
 ;; Depth-bounded tree walks: the recursion is at most a few levels deep by construction.
-(check-allow :non-tail-recursion
-  (defn draw-value (depth)
-    (if (or (<= depth 0) (< (draw-float) 0.4))
-      (draw-leaf)
-      (let (kind (draw-choice [:vector :list])
-            child-count (draw-int 0 3))
-        {:kind kind
-         :children (map (range child-count) (fn (_) (draw-value (- depth 1))))})))
+(defn draw-value (depth)
+  (if (or (<= depth 0) (< (draw-float) 0.4))
+    (draw-leaf)
+    (let (kind (draw-choice [:vector :list])
+          child-count (draw-int 0 3))
+      {:kind kind
+       :children (map (range child-count) (fn (_) (draw-value (- depth 1))))})))
 
-  (defn render-value (node)
-    (case (:kind node)
-      :int (str (:value node))
-      :keyword (str ":" (:value node))
-      :string (str "\"" (:value node) "\"")
-      :bool (if (:value node) "true" "false")
-      :nil "nil"
-      :vector (str "[" (string/join (map (:children node) render-value) " ") "]")
-      (str "(list " (string/join (map (:children node) render-value) " ") ")")))
+(defn render-value (node)
+  (case (:kind node)
+    :int (str (:value node))
+    :keyword (str ":" (:value node))
+    :string (str "\"" (:value node) "\"")
+    :bool (if (:value node) "true" "false")
+    :nil "nil"
+    :vector (str "[" (string/join (map (:children node) render-value) " ") "]")
+    (str "(list " (string/join (map (:children node) render-value) " ") ")")))
 
-  ;; Derive a pattern from `node`; returns [pattern-text binds], appending each
-  ;; [binder-name value-node] to `binds` in pre-order.
-  (defn render-pattern (node binds)
-    (let (roll (draw-float))
-      (cond
-        ;; bind the whole sub-value
-        (< roll 0.33)
-          (let (name (str "g" (count binds)))
-            [name (conj binds [name node])])
-        (< roll 0.5) ["_" binds]
-        ;; keep structure: recurse into a container, or a literal leaf
-        (contains? #{:vector :list} (:kind node))
-          (let ([texts final-binds] (fold (:children node)
-                                      [[] binds]
-                                      (fn (state child)
-                                        (let ([texts so-far] state
-                                              [text next-binds] (render-pattern child so-far))
-                                          [(conj texts text) next-binds])))
-                inner (string/join texts " "))
-            [(if (= (:kind node) :vector) (str "[" inner "]") (str "(" inner ")")) final-binds])
-        else [(render-value node) binds]))))
+;; Derive a pattern from `node`; returns [pattern-text binds], appending each
+;; [binder-name value-node] to `binds` in pre-order.
+(defn render-pattern (node binds)
+  (let (roll (draw-float))
+    (cond
+      ;; bind the whole sub-value
+      (< roll 0.33)
+        (let (name (str "g" (count binds)))
+          [name (conj binds [name node])])
+      (< roll 0.5) ["_" binds]
+      ;; keep structure: recurse into a container, or a literal leaf
+      (contains? #{:vector :list} (:kind node))
+        (let ([texts final-binds] (fold (:children node)
+                                    [[] binds]
+                                    (fn (state child)
+                                      (let ([texts so-far] state
+                                            [text next-binds] (render-pattern child so-far))
+                                        [(conj texts text) next-binds])))
+              inner (string/join texts " "))
+          [(if (= (:kind node) :vector) (str "[" inner "]") (str "(" inner ")")) final-binds])
+      else [(render-value node) binds])))
 
 (defn literal-mutation (node)
   "A scalar literal that differs from `node`, for the clause that must not match."

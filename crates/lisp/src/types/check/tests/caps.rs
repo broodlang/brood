@@ -77,8 +77,7 @@ fn a_structurally_growing_return_widens_to_a_fixpoint_without_a_note() {
     // this reports a note.
     let warnings = file_warnings(
         "(defmodule caps-widen)
-         (check-allow :non-tail-recursion
-           (defn- nest (n) (if (= n 0) :leaf (list (nest (- n 1))))))
+         (defn- nest (n) (if (= n 0) :leaf (list (nest (- n 1)))))
          (defn use-nest () (nest 3))",
     );
     assert!(gave_up(&warnings).is_empty(), "{warnings:?}");

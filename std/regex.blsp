@@ -426,25 +426,23 @@ does and nothing could have wanted."
       else [atom i2])))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
-(check-allow :non-tail-recursion
-  (defn- regex-seq (pcs i)
-    "Parse a branch — pieces until `|`, `)`, or end; returns [pieces next]."
-    (let (c (regex-peek pcs i))
-      (if (or (nil? c) (= c "|") (= c ")"))
-        [(list) i]
-        (let ([piece i2] (regex-piece pcs i)
-              [rest i3] (regex-seq pcs i2))
-          [(cons piece rest) i3])))))
+(defn- regex-seq (pcs i)
+  "Parse a branch — pieces until `|`, `)`, or end; returns [pieces next]."
+  (let (c (regex-peek pcs i))
+    (if (or (nil? c) (= c "|") (= c ")"))
+      [(list) i]
+      (let ([piece i2] (regex-piece pcs i)
+            [rest i3] (regex-seq pcs i2))
+        [(cons piece rest) i3]))))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
-(check-allow :non-tail-recursion
-  (defn- regex-alt (pcs i)
-    "Parse an alternation — branches separated by `|`; returns [branches next]."
-    (let ([branch i2] (regex-seq pcs i))
-      (if (= (regex-peek pcs i2) "|")
-        (let ([rest i3] (regex-alt pcs (inc i2)))
-          [(cons branch rest) i3])
-        [(list branch) i2]))))
+(defn- regex-alt (pcs i)
+  "Parse an alternation — branches separated by `|`; returns [branches next]."
+  (let ([branch i2] (regex-seq pcs i))
+    (if (= (regex-peek pcs i2) "|")
+      (let ([rest i3] (regex-alt pcs (inc i2)))
+        [(cons branch rest) i3])
+      [(list branch) i2])))
 
 (defn- regex-literal-strays (pcs:vector i:int depth:int in-set:bool acc:vector -> vector)
   "`pcs` with every `)` that closes no group escaped, so the parser reads it as the
@@ -545,47 +543,44 @@ rather than handed to the engine, which refuses one. A set with no members at al
       else (str "[" (if (:neg a) "^" "") members "]"))))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
-(check-allow :non-tail-recursion
-  (defn- regex-atom-src (a)
-    "One atom in the engine's syntax."
-    (case (:t a)
-      :lit (regex-lit (:c a))
-      :any "(?s:.)"
-      :bol "\\A"
-      :eol "\\z"
-      :wordb "\\b"
-      :nwordb "\\B"
-      :class (regex-class-src (:k a))
-      :set (regex-set-src a)
-      :group
-        (str (cond (= true (:fold a)) "(?i:" (= false (:fold a)) "(?-i:" (:cap a) "(" else "(?:")
-          (regex-alt-src (:alt a))
-          ")")
-      :fold (if (:on a) "(?i)" "(?-i)")
-      :line-any "[^\\n]"
-      :line-start "(?m:^)"
-      :line-end "(?m:$)"
-      (error "regex: no translation for atom " (pr-str a)))))
+(defn- regex-atom-src (a)
+  "One atom in the engine's syntax."
+  (case (:t a)
+    :lit (regex-lit (:c a))
+    :any "(?s:.)"
+    :bol "\\A"
+    :eol "\\z"
+    :wordb "\\b"
+    :nwordb "\\B"
+    :class (regex-class-src (:k a))
+    :set (regex-set-src a)
+    :group
+      (str (cond (= true (:fold a)) "(?i:" (= false (:fold a)) "(?-i:" (:cap a) "(" else "(?:")
+        (regex-alt-src (:alt a))
+        ")")
+    :fold (if (:on a) "(?i)" "(?-i)")
+    :line-any "[^\\n]"
+    :line-start "(?m:^)"
+    :line-end "(?m:$)"
+    (error "regex: no translation for atom " (pr-str a))))
 
-(check-allow :non-tail-recursion
-  (defn- regex-piece-src (p)
-    "An atom and its quantifier, if it has one."
-    (if (nil? (:q p))
-      (regex-atom-src p)
-      (str "(?:"
-        (regex-atom-src (:a p))
-        ")"
-        (case (:q p)
-          :star "*"
-          :plus "+"
-          :count (str "{" (:lo p) "," (if (nil? (:hi p)) "" (:hi p)) "}")
-          "?")
-        (if (= false (:greedy p)) "?" "")))))
+(defn- regex-piece-src (p)
+  "An atom and its quantifier, if it has one."
+  (if (nil? (:q p))
+    (regex-atom-src p)
+    (str "(?:"
+      (regex-atom-src (:a p))
+      ")"
+      (case (:q p)
+        :star "*"
+        :plus "+"
+        :count (str "{" (:lo p) "," (if (nil? (:hi p)) "" (:hi p)) "}")
+        "?")
+      (if (= false (:greedy p)) "?" ""))))
 
-(check-allow :non-tail-recursion
-  (defn- regex-alt-src (branches)
-    "An alternation — the whole pattern, or a group's body."
-    (string/join (map branches (fn (branch) (string/join (map branch regex-piece-src) ""))) "|")))
+(defn- regex-alt-src (branches)
+  "An alternation — the whole pattern, or a group's body."
+  (string/join (map branches (fn (branch) (string/join (map branch regex-piece-src) ""))) "|"))
 
 ;; pattern -> its translation, and pattern -> that anchored to the whole string. Two tables
 ;; of strings rather than one of pairs: a table read hands back a COPY, and a `string?` guard
@@ -622,20 +617,19 @@ a literal, and the engine caches its compiled form under exactly this text."
   (and (string? pattern) (or (includes? pattern "(?<") (includes? pattern "(?P<"))))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
-(check-allow :non-tail-recursion
-  (defn- regex-alt-names (branches acc)
-    "`acc` with one entry per capturing group in `branches`, in the order of their opening
+(defn- regex-alt-names (branches acc)
+  "`acc` with one entry per capturing group in `branches`, in the order of their opening
 parens: the group's name, or nil for an unnamed one."
-    (fold branches
-      acc
-      (fn (acc branch)
-        (fold branch
-          acc
-          (fn (acc piece)
-            (let (atom (if (nil? (:q piece)) piece (:a piece)))
-              (if (= (:t atom) :group)
-                (regex-alt-names (:alt atom) (if (:cap atom) (conj acc (:name atom)) acc))
-                acc))))))))
+  (fold branches
+    acc
+    (fn (acc branch)
+      (fold branch
+        acc
+        (fn (acc piece)
+          (let (atom (if (nil? (:q piece)) piece (:a piece)))
+            (if (= (:t atom) :group)
+              (regex-alt-names (:alt atom) (if (:cap atom) (conj acc (:name atom)) acc))
+              acc)))))))
 
 (def- regex-names-cache (table/new))
 
@@ -746,27 +740,25 @@ end, and steps one character past an EMPTY match so a pattern that can match not
 ;; a count and a window's spans never include one.
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
-(check-allow :non-tail-recursion
-  (defn- regex-lines-atom (a)
-    "Atom `a` read the way a buffer search reads it: `.` short of a newline, `^`/`$` at a
+(defn- regex-lines-atom (a)
+  "Atom `a` read the way a buffer search reads it: `.` short of a newline, `^`/`$` at a
 line's ends."
-    (case (:t a)
-      :any {:t :line-any}
-      :bol {:t :line-start}
-      :eol {:t :line-end}
-      :group (assoc a :alt (regex-lines-alt (:alt a)))
-      a)))
+  (case (:t a)
+    :any {:t :line-any}
+    :bol {:t :line-start}
+    :eol {:t :line-end}
+    :group (assoc a :alt (regex-lines-alt (:alt a)))
+    a))
 
-(check-allow :non-tail-recursion
-  (defn- regex-lines-alt (branches)
-    "Every atom of an alternation read the buffer search's way ([[regex-lines-atom]])."
-    (map branches
-      (fn (branch)
-        (map branch
-          (fn (piece)
-            (if (nil? (:q piece))
-              (regex-lines-atom piece)
-              (assoc piece :a (regex-lines-atom (:a piece))))))))))
+(defn- regex-lines-alt (branches)
+  "Every atom of an alternation read the buffer search's way ([[regex-lines-atom]])."
+  (map branches
+    (fn (branch)
+      (map branch
+        (fn (piece)
+          (if (nil? (:q piece))
+            (regex-lines-atom piece)
+            (assoc piece :a (regex-lines-atom (:a piece)))))))))
 
 (def- regex-rope-cache (table/new))
 

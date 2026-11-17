@@ -69,80 +69,78 @@
 ;; ---- expressions --------------------------------------------------------------
 
 ;; The grammar productions recurse non-tail by nature; depth is bounded at 4.
-(check-allow :non-tail-recursion
-  (defn- expr (params depth)
-    ;; a pure int expression over `params`, depth-bounded and total
-    (if (or (= depth 0) (chance? 0.3))
-      (if (and (not (empty? params)) (chance? 0.6))
-        (choose params)
-        (str (if (chance? 0.4) (choose *edge-ints*) (random-int -999 999))))
-      (let (choice (random-float) below (- depth 1))
-        (cond
-          (< choice 0.45)
-            (let (operator (choose ["+" "-" "*" "math/max" "math/min" "bit/and" "bit/or" "bit/xor"]))
-              (str "(" (spaced operator (expr params below) (expr params below)) ")"))
-          ;; guarded integer division (nonzero literal divisor)
-          (< choice 0.6)
-            (let (operator (choose ["math/quot" "math/rem"]))
-              (str "(" (spaced operator (expr params below) (choose [2 3 7 97 -3 -8])) ")"))
-          (< choice 0.75)
-            (let (comparison (choose ["<" "<=" "=" ">" ">="]))
-              (str "(if ("
-                (spaced comparison (expr params below) (expr params below))
-                ") "
-                (spaced (expr params below) (expr params below))
-                ")"))
-          (< choice 0.88)
-            (let (binder (fresh-name "t"))
-              (str "(let ("
-                binder
-                " "
-                (expr params below)
-                ") "
-                (expr (conj params binder) below)
-                ")"))
-          ;; small vector build + constant-index read (MakeVector/VectorRef)
-          else
-            (let (size (random-int 2 4))
-              (str "(nth ["
-                (string/join (map (range size) (fn (_) (expr params below))) " ")
-                "] "
-                (random-int 0 (- size 1))
-                ")")))))))
+(defn- expr (params depth)
+  ;; a pure int expression over `params`, depth-bounded and total
+  (if (or (= depth 0) (chance? 0.3))
+    (if (and (not (empty? params)) (chance? 0.6))
+      (choose params)
+      (str (if (chance? 0.4) (choose *edge-ints*) (random-int -999 999))))
+    (let (choice (random-float) below (- depth 1))
+      (cond
+        (< choice 0.45)
+          (let (operator (choose ["+" "-" "*" "math/max" "math/min" "bit/and" "bit/or" "bit/xor"]))
+            (str "(" (spaced operator (expr params below) (expr params below)) ")"))
+        ;; guarded integer division (nonzero literal divisor)
+        (< choice 0.6)
+          (let (operator (choose ["math/quot" "math/rem"]))
+            (str "(" (spaced operator (expr params below) (choose [2 3 7 97 -3 -8])) ")"))
+        (< choice 0.75)
+          (let (comparison (choose ["<" "<=" "=" ">" ">="]))
+            (str "(if ("
+              (spaced comparison (expr params below) (expr params below))
+              ") "
+              (spaced (expr params below) (expr params below))
+              ")"))
+        (< choice 0.88)
+          (let (binder (fresh-name "t"))
+            (str "(let ("
+              binder
+              " "
+              (expr params below)
+              ") "
+              (expr (conj params binder) below)
+              ")"))
+        ;; small vector build + constant-index read (MakeVector/VectorRef)
+        else
+          (let (size (random-int 2 4))
+            (str "(nth ["
+              (string/join (map (range size) (fn (_) (expr params below))) " ")
+              "] "
+              (random-int 0 (- size 1))
+              ")"))))))
 
-(check-allow :non-tail-recursion
-  (defn- i64-expr (params depth)
-    ;; RESTRICTED pure-i64 expression: int arith / compares / if / let only — no vectors
-    ;; and no calls — so a fn built from it stays in the subset the SPECIALISED i64
-    ;; fast-path lowerer (`jit_lower_arm_inner`) accepts; nothing else feeds that engine.
-    (if (or (= depth 0) (chance? 0.35))
-      (if (and (not (empty? params)) (chance? 0.7))
-        (choose params)
-        (str (random-int -50 50)))
-      (let (choice (random-float) below (- depth 1))
-        (cond
-          (< choice 0.5)
-            (let (operator (choose ["+" "-" "*" "bit/and" "bit/or" "bit/xor" "math/max" "math/min"]))
-              (str "(" (spaced operator (i64-expr params below) (i64-expr params below)) ")"))
-          (< choice 0.65)
-            (let (operator (choose ["math/quot" "math/rem"]))
-              (str "(" (spaced operator (i64-expr params below) (choose [2 3 7 -3 8])) ")"))
-          (< choice 0.82)
-            (let (comparison (choose ["<" "<=" "=" ">" ">="]))
-              (str "(if ("
-                (spaced comparison (i64-expr params below) (i64-expr params below))
-                ") "
-                (spaced (i64-expr params below) (i64-expr params below))
-                ")"))
-          else
-            (let (binder (fresh-name "q"))
-              (str "(let ("
-                binder
-                " "
-                (i64-expr params below)
-                ") "
-                (i64-expr (conj params binder) below)
-                ")")))))))
+(defn- i64-expr (params depth)
+  ;; RESTRICTED pure-i64 expression: int arith / compares / if / let only — no vectors
+  ;; and no calls — so a fn built from it stays in the subset the SPECIALISED i64
+  ;; fast-path lowerer (`jit_lower_arm_inner`) accepts; nothing else feeds that engine.
+  (if (or (= depth 0) (chance? 0.35))
+    (if (and (not (empty? params)) (chance? 0.7))
+      (choose params)
+      (str (random-int -50 50)))
+    (let (choice (random-float) below (- depth 1))
+      (cond
+        (< choice 0.5)
+          (let (operator (choose ["+" "-" "*" "bit/and" "bit/or" "bit/xor" "math/max" "math/min"]))
+            (str "(" (spaced operator (i64-expr params below) (i64-expr params below)) ")"))
+        (< choice 0.65)
+          (let (operator (choose ["math/quot" "math/rem"]))
+            (str "(" (spaced operator (i64-expr params below) (choose [2 3 7 -3 8])) ")"))
+        (< choice 0.82)
+          (let (comparison (choose ["<" "<=" "=" ">" ">="]))
+            (str "(if ("
+              (spaced comparison (i64-expr params below) (i64-expr params below))
+              ") "
+              (spaced (i64-expr params below) (i64-expr params below))
+              ")"))
+        else
+          (let (binder (fresh-name "q"))
+            (str "(let ("
+              binder
+              " "
+              (i64-expr params below)
+              ") "
+              (i64-expr (conj params binder) below)
+              ")"))))))
 
 ;; ---- helpers ------------------------------------------------------------------
 ;; Each optional helper is [probability builder]; a builder returns [name arity code].
@@ -620,15 +618,14 @@
 (defn- tokenize (source) (tokenize-from (vec (string/->list source)) 0 []))
 
 ;; Parsing, rendering and the tree walks below recurse on nesting depth, which is small.
-(check-allow :non-tail-recursion
-  (defn- parse-node (tokens index)
-    ;; [node next-index]
-    (let (token (nth tokens index))
-      (if (contains? *closers* token)
-        (let (closer (get *closers* token)
-              [children next-index] (parse-children tokens (+ index 1) closer []))
-          [[token children] next-index])
-        [["a" token] (+ index 1)]))))
+(defn- parse-node (tokens index)
+  ;; [node next-index]
+  (let (token (nth tokens index))
+    (if (contains? *closers* token)
+      (let (closer (get *closers* token)
+            [children next-index] (parse-children tokens (+ index 1) closer []))
+        [[token children] next-index])
+      [["a" token] (+ index 1)])))
 
 (defn- parse-children (tokens index closer children)
   (if (= (nth tokens index) closer)
@@ -642,30 +639,27 @@
     (let ([node next-index] (parse-node tokens index))
       (parse-forms tokens next-index (conj forms node)))))
 
-(check-allow :non-tail-recursion
-  (defn- render (node)
-    (let ([kind value] node)
-      (if (= kind "a")
-        value
-        (str kind (string/join (map value render) " ") (get *closers* kind))))))
+(defn- render (node)
+  (let ([kind value] node)
+    (if (= kind "a")
+      value
+      (str kind (string/join (map value render) " ") (get *closers* kind)))))
 
 (defn- render-forms (forms) (str (string/join (map forms render) "\n") "\n"))
 
-(check-allow :non-tail-recursion
-  (defn- node-size (node)
-    (if (= (first node) "a")
-      1
-      (fold (second node) 1 (fn (total child) (+ total (node-size child)))))))
+(defn- node-size (node)
+  (if (= (first node) "a")
+    1
+    (fold (second node) 1 (fn (total child) (+ total (node-size child))))))
 
-(check-allow :non-tail-recursion
-  (defn- child-paths (node path)
-    ;; the path of every child below `node`, depth-first
-    (if (= (first node) "a")
-      []
-      (mapcat (range (count (second node)))
-        (fn (index)
-          (let (child-path (conj path index))
-            (cons child-path (child-paths (nth (second node) index) child-path))))))))
+(defn- child-paths (node path)
+  ;; the path of every child below `node`, depth-first
+  (if (= (first node) "a")
+    []
+    (mapcat (range (count (second node)))
+      (fn (index)
+        (let (child-path (conj path index))
+          (cons child-path (child-paths (nth (second node) index) child-path)))))))
 
 (defn- node-at (forms path)
   ;; nil when an earlier replacement has detached the path
@@ -675,12 +669,11 @@
       (when (and node (not (= (first node) "a")) (< index (count (second node))))
         (nth (second node) index)))))
 
-(check-allow :non-tail-recursion
-  (defn- replace-in-node (node path replacement)
-    (if (empty? path)
-      replacement
-      (let ([kind children] node index (first path))
-        [kind (assoc children index (replace-in-node (nth children index) (rest path) replacement))]))))
+(defn- replace-in-node (node path replacement)
+  (if (empty? path)
+    replacement
+    (let ([kind children] node index (first path))
+      [kind (assoc children index (replace-in-node (nth children index) (rest path) replacement))])))
 
 (defn- replace-at (forms path replacement)
   (assoc forms (first path) (replace-in-node (nth forms (first path)) (rest path) replacement)))

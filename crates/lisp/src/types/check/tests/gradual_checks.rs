@@ -642,24 +642,24 @@ fn overload_call_matching_no_arm_is_flagged() {
 
 #[test]
 fn check_allow_suppresses_targeted_lints() {
-    // A `(check-allow :non-tail-recursion …)` wrapper silences the non-tail
-    // lint for the wrapped defn — but only that category, and only inside it.
-    let non_tail = "(defn f (n) (if (< n 1) 0 (+ 1 (f (- n 1)))))";
-    let w = file_warnings(non_tail);
+    // A `(check-allow :unbound …)` wrapper silences the unbound lint for the wrapped
+    // defn — but only that category, and only inside it.
+    let unbound = "(defn f (n) (no-such-function-anywhere n))";
+    let w = file_warnings(unbound);
     assert!(
-        w.iter().any(|m| m.contains("non-tail position")),
-        "unwrapped non-tail recursion must warn: {w:?}"
+        w.iter().any(|m| m.contains("no-such-function-anywhere")),
+        "an unwrapped unbound call must warn: {w:?}"
     );
-    let w = file_warnings(&format!("(check-allow :non-tail-recursion {non_tail})"));
+    let w = file_warnings(&format!("(check-allow :unbound {unbound})"));
     assert!(
-        w.iter().all(|m| !m.contains("non-tail position")),
-        "check-allow :non-tail-recursion must suppress: {w:?}"
+        w.iter().all(|m| !m.contains("no-such-function-anywhere")),
+        "check-allow :unbound must suppress: {w:?}"
     );
     // A mismatched category does NOT suppress (no silent blanket opt-out).
-    let w = file_warnings(&format!("(check-allow :unreachable-clause {non_tail})"));
+    let w = file_warnings(&format!("(check-allow :unreachable-clause {unbound})"));
     assert!(
-        w.iter().any(|m| m.contains("non-tail position")),
-        "a mismatched category must not suppress the non-tail lint: {w:?}"
+        w.iter().any(|m| m.contains("no-such-function-anywhere")),
+        "a mismatched category must not suppress the unbound lint: {w:?}"
     );
     // Same for the redundant-`match`-clause lint.
     let dup = "(defn g (x) (match x (1 :a) (1 :b) (_ :z)))";

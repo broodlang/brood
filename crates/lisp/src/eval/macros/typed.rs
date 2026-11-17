@@ -313,7 +313,7 @@ pub(crate) const TYPED_FN: &str = "%typed-fn";
 /// The plain `(fn …)` inside a `(%typed-fn 'SIG (fn …))`, or `None` for any other form. The
 /// marker is an identity at runtime, so whatever treats a `fn`-valued form specially — the
 /// compiler's direct self-recursion for a `letrec`/`let` binder, the tree-walker's frame for
-/// it, the non-tail-recursion lint — sees through it to the lambda: wrapped, a typed `letrec`
+/// it — sees through it to the lambda: wrapped, a typed `letrec`
 /// loop lost the self-recursion path and its enclosing closure fell to the tree-walker.
 pub(crate) fn typed_fn_lambda(heap: &Heap, form: Value) -> Option<Value> {
     let items = heap.list_items(form)?;

@@ -85,7 +85,10 @@ ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character ty
    a module defining a root name, or using an import spelled like one bare, declares it with
    `(:shadow name)` or fails compilation. No warning is left.
 6. ~~**"Reduce before adding"**~~ — decided by ADR-674; both stages landed (2026-11-11).
-7. **The non-tail lint:** mutual `letrec` recursion, `try` bodies, conditional-position demands.
+7. ~~**The non-tail lint**~~ — deleted by ADR-751 (2026-11-17): a call stack is as deep as
+   memory allows, so non-tail recursion is not a hazard to lint. Follow-ups: `GcBlockGuard`
+   has no reader and several call sites believe it blocks a collection (audit); a deprecated
+   name used in its own file is reported only by `nest check`'s cached path.
 8. **View patterns** (low to medium value).
 9. **Parametric abilities** (low).
 10. ~~**Lexically shadowable operators.**~~ — done by ADR-734 (2026-11-17): a local shadows a

@@ -49,24 +49,23 @@
 (def comparisons ["<" "<=" ">" ">=" "=" "not="])
 
 ;; A depth-bounded tree walk: the recursion is at most `depth` deep by construction.
-(check-allow :non-tail-recursion
-  (defn expr (depth)
-    (if (or (<= depth 0) (< (draw-float) 0.3))
-      (draw-leaf)
-      (let (roll (draw-float) below (- depth 1))
-        (cond
-          (< roll 0.5) (str "(" (draw-choice binary-ops) " " (expr below) " " (expr below) ")")
-          ;; a comparison folded into an if, so the result stays numeric (the spot the
-          ;; float= bug lived: a comparison whose operands may be mixed)
-          (< roll 0.7)
-            (let (test (str "(" (draw-choice comparisons) " " (expr below) " " (expr below) ")"))
-              (str "(if " test " " (expr below) " " (expr below) ")"))
-          (< roll 0.82) (str "(math/abs " (expr below) ")")
-          ;; a let-binding, for slot reuse / float-slot tracking
-          (< roll 0.9)
-            (str "(let (t " (expr below) ") (" (draw-choice binary-ops) " t " (expr below) "))")
-          ;; division can yield a float or an error — both must match across engines
-          else (str "(math/quot " (expr below) " (math/max 1 (math/abs " (expr below) ")))"))))))
+(defn expr (depth)
+  (if (or (<= depth 0) (< (draw-float) 0.3))
+    (draw-leaf)
+    (let (roll (draw-float) below (- depth 1))
+      (cond
+        (< roll 0.5) (str "(" (draw-choice binary-ops) " " (expr below) " " (expr below) ")")
+        ;; a comparison folded into an if, so the result stays numeric (the spot the
+        ;; float= bug lived: a comparison whose operands may be mixed)
+        (< roll 0.7)
+          (let (test (str "(" (draw-choice comparisons) " " (expr below) " " (expr below) ")"))
+            (str "(if " test " " (expr below) " " (expr below) ")"))
+        (< roll 0.82) (str "(math/abs " (expr below) ")")
+        ;; a let-binding, for slot reuse / float-slot tracking
+        (< roll 0.9)
+          (str "(let (t " (expr below) ") (" (draw-choice binary-ops) " t " (expr below) "))")
+        ;; division can yield a float or an error — both must match across engines
+        else (str "(math/quot " (expr below) " (math/max 1 (math/abs " (expr below) ")))")))))
 
 (defn program (seed)
   (rng-reset seed)

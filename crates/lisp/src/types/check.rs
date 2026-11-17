@@ -25,8 +25,6 @@
 //! - [`protocol`] — ability / behaviour conformance: `defability` /
 //!   `defbehaviour` / `impl` / `(:implements …)` checked for missing or
 //!   wrong-arity ops.
-//! - [`recursion`] — the non-tail self-recursion lint (deep non-tail recursion
-//!   overflows the green-process stack).
 //! - [`module_loading`] / [`imports`] — what the check loads, and the file's header
 //!   imports, requires and world.
 //! - [`declarations`] — the file's `(sig …)` declarations and the type vocabulary they
@@ -141,7 +139,6 @@ mod lint;
 mod properties;
 pub use lint::{Finding, Lint};
 mod protocol;
-mod recursion;
 mod sigs;
 pub(crate) use properties::effect_of;
 pub(crate) use sigs::cover_name_of;

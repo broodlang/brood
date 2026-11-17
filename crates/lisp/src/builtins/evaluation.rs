@@ -818,8 +818,8 @@ pub(super) fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
         // another name unfolds) and TCO'd by the driver, so it never reaches this native;
         // `apply_builtin` is now only hit when a *native* HOF invokes `apply` per element,
         // which loops rather than tail-recurses — one `apply_engine` frame per call, never
-        // accumulating. (Deep non-tail recursion in the callee is bounded by the VM's
-        // `MAX_BC_FRAMES` guard, not the native stack.)
+        // accumulating. (Deep non-tail recursion in the callee lives in the VM's heap
+        // frames, bounded by the call stack's memory ceiling, ADR-751.)
         apply_engine(heap, f, &argv, env)
     })
 }

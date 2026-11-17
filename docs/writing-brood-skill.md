@@ -20,8 +20,10 @@ when the runtime crashes); `std/prelude/*.blsp` is the canonical idiomatic code.
 2. **No loops** — no `while`, `loop`/`recur`. Iterate with **tail recursion + an
    accumulator** (proper tail calls, O(1) stack) or `fold` / `reduce` / `map` /
    `seq/filter`. A local loop is a `letrec` closure called by name:
-   `(letrec (go (fn (i acc) … (go …))) (go 0 0))`. Deep *non*-tail recursion raises a
-   catchable `recursion too deep` (`E0044`). `for` exists, but it is a comprehension.
+   `(letrec (go (fn (i acc) … (go …))) (go 0 0))`. Non-tail recursion is as deep as memory
+   allows (a tail call holds no frame, a non-tail one holds its frame until it returns);
+   past the process's call-stack ceiling it raises a catchable `recursion too deep`
+   (`E0044`). `for` exists, but it is a comprehension.
 
 3. **Collection FIRST, function LAST.** `(map xs f)`, `(fold xs init f)`,
    `(reduce xs init f)`, `(seq/filter xs pred)`, `(seq/sort-by xs key-fn)` — the reverse

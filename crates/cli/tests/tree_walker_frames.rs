@@ -2,9 +2,10 @@
 //!
 //! A non-tail call on the tree-walker used to be a nested Rust `eval`, so runaway recursion was
 //! caught by the native-stack byte budget. Now every pending argument, test, binding and body
-//! form is a continuation on the machine's own stack, and the limit is a frame count. Both
-//! halves are observable from a program: a recursion deeper than the old byte budget allowed
-//! completes, and a runaway one fails with the frame-limit message, catchably.
+//! form is a continuation on the machine's own stack, bounded by the call stack's memory
+//! ceiling (ADR-751). Both halves are observable from a program: a recursion deeper than the
+//! old byte budget allowed completes, and a runaway one fails at the ceiling (the process's
+//! `:max-heap` here), catchably.
 //!
 //! Top-level forms run on the tree-walker under `BROOD_TIER=0` (a spawned process body still
 //! runs on the VM until ADR-416 stage 5), so the recursion is driven from the top level.
@@ -14,7 +15,7 @@ use std::process::Command;
 const PROGRAM: &str = r#"
 (defn deep (n) (if (= n 0) 0 (+ 1 (deep (- n 1)))))
 (io/puts (str "deep = " (deep 200000)))
-(io/puts (str "runaway = " (try (deep 100000000) (catch e (get e :message)))))
+(io/puts (str "runaway = " (try (proc/flag :max-heap 200000000) (deep 100000000) (catch e (get e :message)))))
 "#;
 
 /// A recursion that runs through an `&optional` default: each level's call is pending inside
@@ -51,7 +52,7 @@ fn run_tier0_with(name: &str, source: &str, envs: &[(&str, &str)]) -> (String, S
 }
 
 #[test]
-fn tier0_recursion_is_bounded_by_frames_not_native_stack() {
+fn tier0_recursion_is_bounded_by_memory_not_native_stack() {
     let (stdout, stderr) = run_tier0("deep", PROGRAM);
     let mut lines = stdout.lines();
     assert_eq!(
@@ -62,8 +63,8 @@ fn tier0_recursion_is_bounded_by_frames_not_native_stack() {
     );
     let runaway = lines.next().unwrap_or_default();
     assert!(
-        runaway.starts_with("runaway = recursion too deep: exceeded the tree-walker's"),
-        "runaway recursion was not stopped by the tree-walker's frame limit: {runaway:?}\n\
+        runaway.starts_with("runaway = recursion too deep: the call stack holds"),
+        "runaway recursion was not stopped at the call-stack ceiling: {runaway:?}\n\
          stderr:\n{stderr}"
     );
 }

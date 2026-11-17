@@ -30,22 +30,21 @@ oracle is upstream's own expected output in `tests/corpus/gabriel/data/deriv.inp
 
 ;; Non-tail by nature: the recursive call sits under a `cons`/`list`, which is what
 ;; makes this an allocation benchmark. The lint is correct and unwanted.
-(check-allow :non-tail-recursion
-  (defn deriv (a)
-    "The symbolic derivative of expression `a` with respect to `x`."
-    (cond
-      (not (pair? a)) (if (= a 'x) 1 0)
-      (= (first a) '+) (cons '+ (map (rest a) deriv))
-      (= (first a) '-) (cons '- (map (rest a) deriv))
-      (= (first a) '*)
-        (list '*
-          a
-          (cons '+ (map (rest a) (fn (b) (list '/ (deriv b) b)))))
-      (= (first a) '/)
-        (list '-
-          (list '/ (deriv (second a)) (third a))
-          (list '/
-            (second a)
-            (list '* (third a) (third a) (deriv (third a)))))
-      else (error "deriv: no derivation method available: " (pr-str a)))))
+(defn deriv (a)
+  "The symbolic derivative of expression `a` with respect to `x`."
+  (cond
+    (not (pair? a)) (if (= a 'x) 1 0)
+    (= (first a) '+) (cons '+ (map (rest a) deriv))
+    (= (first a) '-) (cons '- (map (rest a) deriv))
+    (= (first a) '*)
+      (list '*
+        a
+        (cons '+ (map (rest a) (fn (b) (list '/ (deriv b) b)))))
+    (= (first a) '/)
+      (list '-
+        (list '/ (deriv (second a)) (third a))
+        (list '/
+          (second a)
+          (list '* (third a) (third a) (deriv (third a)))))
+    else (error "deriv: no derivation method available: " (pr-str a))))
 (sig deriv (any -> any))
