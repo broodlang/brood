@@ -304,6 +304,11 @@
 
 ;; ---- program sections ---------------------------------------------------------
 ;; Each returns a vector of top-level lines (possibly empty).
+;;
+;; A generated `receive` never carries an `after`: a deadline makes the output depend on how
+;; fast a config runs, so a slow one (the tree-walker on a loaded runner) printed a different
+;; digest from the same correct run — a divergence that was only a clock. A message that
+;; truly never arrives is caught by the per-program :timeout-ms, as a failed run.
 
 (defn- flat-fan-out (name arity)
   (let (per (choose [500 1500 3000])
@@ -319,8 +324,7 @@
       (str "(defn fan (w) (if (= w "
         workers ") nil (do (spawn (worker w 0 " per " 0)) (fan (+ w 1)))))")
       (str "(defn fan-in (k s) (if (= k "
-        workers
-        ") s (fan-in (+ k 1) (receive ([:done v] (bit/and (+ s v) 268435455)) (after 10000 -1)))))")
+        workers ") s (fan-in (+ k 1) (receive ([:done v] (bit/and (+ s v) 268435455))))))")
       (str "(defn dig2 (k n s)\n"
         "  (if (>= k n) s\n" "    (dig2 (+ k 1) n (bit/xor s (* (- k 99999) (table/get t k 0))))))")
       "(fan 0)"
@@ -346,8 +350,7 @@
       (str "(defn node-loop (w downs sum)\n"
         "  (if (= downs " leaves ") (send me [:node (bit/and sum 268435455)])\n" "    (receive\n"
         "      ([:leaf v] (node-loop w downs (bit/and (+ sum v) 268435455)))\n"
-        "      ([:down _ _ _] (node-loop w (+ downs 1) sum))\n"
-        "      (after 15000 (send me [:node -1])))))")
+        "      ([:down _ _ _] (node-loop w (+ downs 1) sum)))))")
       (str "(defn spawn-leaves (nd w k)\n"
         "  (if (= k " leaves ") nil\n" "    (do (monitor (spawn (leaf nd w 0 " per
         " 0))) (spawn-leaves nd w (+ k 1)))))")
@@ -355,8 +358,7 @@
       (str "(defn spawn-nodes (w) (if (= w "
         nodes ") nil (do (spawn (node-worker w)) (spawn-nodes (+ w 1)))))")
       (str "(defn tree-in (k s) (if (= k "
-        nodes
-        ") s (tree-in (+ k 1) (receive ([:node v] (bit/and (+ s v) 268435455)) (after 20000 -1)))))")
+        nodes ") s (tree-in (+ k 1) (receive ([:node v] (bit/and (+ s v) 268435455))))))")
       "(spawn-nodes 0)"
       "(io/puts \"tree\" (tree-in 0 0))"]))
 
@@ -690,8 +692,11 @@
 
 (def- shrinker (table/new))
 
+;; The most wall clock one divergence may spend shrinking; the report names what it reached.
+(def- *shrink-ms* 600000)
+
 (defn- still-bad? (path candidate still-bad-fn budget)
-  (if (>= (table/get shrinker :runs) budget)
+  (if (or (>= (table/get shrinker :runs) budget) (> (os/now) (table/get shrinker :deadline)))
     false
     (do
       (table/incr shrinker :runs 1)
@@ -738,14 +743,19 @@
                                false
                                halve-int
                                attempt))
-    (if (and (or dropped zeroed halved) (< (table/get shrinker :runs) budget))
+    (if (and (or dropped zeroed halved)
+          (< (table/get shrinker :runs) budget)
+          (<= (os/now) (table/get shrinker :deadline)))
       (shrink-rounds after-halve attempt budget)
       after-halve)))
 
 (defn- shrink (path still-bad-fn budget)
   ;; greedy delta debugging: drop top-level forms, replace subtrees with 0, halve int
   ;; literals — keeping each change that preserves the failure; bounded by `budget` runs
+  ;; and by *shrink-ms* of wall clock, because one oracle run is five configs of up to
+  ;; 120 s each: a run budget alone let a slow divergence shrink for hours with no output
   (table/put shrinker :runs 0)
+  (table/put shrinker :deadline (+ (os/now) *shrink-ms*))
   (let (forms (parse-forms (tokenize (file/slurp path)) 0 [])
         attempt (fn (candidate) (still-bad? path candidate still-bad-fn budget))
         minimal (shrink-rounds forms attempt budget)
