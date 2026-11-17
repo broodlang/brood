@@ -301,3 +301,21 @@
   (test "and a reference beside such a form is still renamed"
     (assert= ["(do (m (old)) (new 1))" [[1 7 "old" "new"]]]
       (cst-rename-at-text "(do (m (old)) (old 1))" [[1 7 "old" "new"] [1 15 "old" "new"]] #{"m"}))))
+
+(describe "rename-module-text — a module renamed wherever it is named"
+  (test "qualified names in code and quoted data, and the header clauses"
+    (assert= (rename-module-text "(defmodule rows (:use pool) (:use-internals pool) (:alias pool :as p))\n(pool/run 'pool/cmd-x)"
+               "pool" "files/pool")
+      "(defmodule rows (:use files/pool) (:use-internals files/pool) (:alias files/pool :as p))\n(files/pool/run 'files/pool/cmd-x)"))
+  (test "the module's own defmodule, with its :only lists untouched"
+    (assert= (rename-module-text "(defmodule pool\n  (:use model :only [pool]))"
+               "pool" "files/pool")
+      "(defmodule files/pool\n  (:use model :only [pool]))"))
+  (test "a local or a longer name that shares the module's is left alone"
+    (assert= (rename-module-text "(let (pool 1 pooled 2) (pooled/x pool))" "pool" "files/pool")
+      "(let (pool 1 pooled 2) (pooled/x pool))")
+    (assert= (rename-module-text "(:use pooled)" "pool" "files/pool") "(:use pooled)"))
+  (test "a backticked or linked mention in prose follows; other prose does not"
+    (assert= (rename-module-text "(defn f () \"see `pool/run` and [[pool/run]]\" 1) ; the pool/run note"
+               "pool" "files/pool")
+      "(defn f () \"see `files/pool/run` and [[files/pool/run]]\" 1) ; the pool/run note")))

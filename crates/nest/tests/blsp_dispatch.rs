@@ -815,3 +815,37 @@ fn deps_lists_a_reference_into_another_context_s_detail_and_check_fails_on_it() 
     assert!(out.contains("  editing → display/rows"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn rename_module_moves_the_file_and_renames_every_reference() {
+    let dir = scratch("rename-module");
+    std::fs::create_dir_all(dir.join("src")).expect("src");
+    std::fs::write(
+        dir.join("project.blsp"),
+        "(project :name \"rm\" :version \"0.1.0\")\n",
+    )
+    .expect("project.blsp");
+    std::fs::write(
+        dir.join("src/pool.blsp"),
+        "(defmodule pool)\n(defn size () 3)\n",
+    )
+    .expect("pool");
+    std::fs::write(
+        dir.join("src/main.blsp"),
+        "(defmodule main (:use pool))\n(defn main () (let (pool 1) (+ pool (pool/size))))\n",
+    )
+    .expect("main");
+    let (code, out, err) = nest_in(&dir, &["rename-module", "pool", "files/pool"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(!dir.join("src/pool.blsp").exists());
+    let moved = std::fs::read_to_string(dir.join("src/files/pool.blsp")).expect("moved");
+    assert!(moved.starts_with("(defmodule files/pool)"), "{moved}");
+    let main = std::fs::read_to_string(dir.join("src/main.blsp")).expect("main");
+    assert_eq!(
+        main,
+        "(defmodule main (:use files/pool))\n(defn main () (let (pool 1) (+ pool (files/pool/size))))\n"
+    );
+    let (code, _, err) = nest_in(&dir, &["rename-module", "nothing", "x/nothing"]);
+    assert_eq!(code, 1, "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

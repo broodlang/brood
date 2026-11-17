@@ -1003,3 +1003,62 @@ be made (nothing is written then).
               (io/puts (str "  warning: "
                          from " and " to " now reach each other — move those helpers too")))
             0)))))
+
+;; ---- renaming a module ------------------------------------------------------------------
+;; A module renamed — `panebody` to `display/panebody`, a project cut into contexts (ADR-750) —
+;; is every reference to it renamed: the qualified names in code and in quoted data, the header
+;; clauses that name it, and the backticked mentions in prose. A local that shares the module's
+;; bare name (`region`, `pool`) is a different thing and is never touched: a bare name is renamed
+;; only as a header clause's module.
+
+(defn rename-module-text (text from to)
+  "`text` with module `from` renamed `to` ([[rename-module]]): every symbol `from/…` (code or
+quoted data), the module of a `defmodule`, `:use`, `:use-internals` or `:alias` clause, and a
+mention in prose written `` `from/…`` or `[[from/…]]`. A bare `from` anywhere else is left — it
+is a local, not the module.
+
+    (codemod/rename-module-text \"(defmodule rows (:use pool)) (pool/run 'pool/cmd) ; `pool/run`\" \"pool\" \"files/pool\")   ;=> \"(defmodule rows (:use files/pool)) (files/pool/run 'files/pool/cmd) ; `files/pool/run`\""
+  (let (prefix (str from "/")
+        symbols (rewrite-symbols-text text
+                  (fn (name _)
+                    (if (string/starts-with? name prefix)
+                      (str to "/" (string/substring name (count prefix) (count name)))
+                      name)))
+        clause (str "\\((defmodule|:use|:use-internals|:alias)(\\s+)"
+                 (regex/escape from)
+                 "([\\s)])"))
+    (-> (regex/replace symbols clause (str "($1$2" to "$3"))
+      (string/replace (str "`" prefix) (str "`" to "/"))
+      (string/replace (str "[[" prefix) (str "[[" to "/")))))
+
+(defn- module-file (files module)
+  ;; the file of `files` that declares `module`, or nil
+  (seq/find files (fn (file) (= (module-name (file/slurp file)) module))))
+
+(defn rename-module (from to)
+  "Rename module `from` to `to` across the project's .blsp files ([[rename-module-text]]) and
+move its file where the new name puts it, beside the old one's source root: `src/pool.blsp`
+renamed `files/pool` becomes `src/files/pool.blsp`. Prints each changed file; returns 0, or 1
+when no file declares `from` or the destination exists (nothing is written then).
+
+    (codemod/rename-module \"pool\" \"files/pool\")   ;~> 0"
+  (let (files (project-blsp)
+        source (module-file files from))
+    (cond
+      (nil? source) (do (io/puts "rename-module: no file declares module " from :to *err*) 1)
+      else
+        (let (depth (count (string/split from "/"))
+              root (fold (range depth) source (fn (dir _) (path/dirname dir)))
+              destination (path/join root (str to ".blsp")))
+          (if (file/exists? destination)
+            (do (io/puts "rename-module: " destination " exists already" :to *err*) 1)
+            (let (changed (seq/keep files
+                            (fn (file)
+                              (let (text (file/slurp file)
+                                    renamed (rename-module-text text from to))
+                                (when (not (= text renamed)) (file/spit file renamed) file)))))
+              (file/mkdir (path/dirname destination))
+              (file/move source destination)
+              (doseq (file changed) (io/puts "  changed: " file))
+              (io/puts "  moved: " source " → " destination)
+              0))))))
