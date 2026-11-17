@@ -20,7 +20,9 @@ relative `Location` header. A base without a scheme raises.
 bound its parameters and was checked by nothing, though typed parameters were documented for
 `fn`. Its body is now checked under `x : int`, its result held to `string`, and the lambda is
 the value `(int -> string)` wherever it is bound or passed: `(fn (x:int) (string/upper x))`
-and `(let (f (fn (x:int) …)) (f "s"))` are reported. No runtime contract guards an anonymous
+and `(let (f (fn (x:int) …)) (f "s"))` are reported. Passed to a combinator, it is held to
+what the combinator hands it, as a named callback is: `(map strings (fn (x:number) …))` and a
+two-parameter typed `fn` given to `map` are reported. No runtime contract guards an anonymous
 `fn`; it expands to `(%typed-fn 'SIG (fn …))`, an identity the compiler drops, so a typed
 `letrec` loop compiles as before.
 
