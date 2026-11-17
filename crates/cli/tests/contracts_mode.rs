@@ -363,8 +363,7 @@ fn contracted_recursion_keeps_its_depth_and_its_tail_calls() {
     std::fs::write(
         dir.path.join("depth.blsp"),
         "(sig depth (int -> int))\n\
-         (check-allow :non-tail-recursion\n\
-         \x20\x20(defn depth (n) (if (= n 0) 0 (+ 1 (depth (dec n))))))\n\
+         (defn depth (n) (if (= n 0) 0 (+ 1 (depth (dec n)))))\n\
          (sig ping (int -> any))\n\
          (sig pong (int -> any))\n\
          (defn ping (n) (if (= n 0) :done (pong (dec n))))\n\

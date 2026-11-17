@@ -347,7 +347,28 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<Finding>)
         if matches!(items.get(1), Some(&Value::Keyword(k)) if value::symbol_is(k, "generated")) {
             return;
         }
-        let mask = lint_allow_mask(items.get(1).copied());
+        // A category the checker does not know suppresses nothing, so a misspelt
+        // `(check-allow :type-mismach …)` would leave its lint on with no word why — the
+        // header's `(:check-allow …)` clause already says so; this is the form's twin.
+        let category = items.get(1).copied();
+        let known = matches!(category, Some(Value::Keyword(k))
+            if Lint::from_name(value::symbol_name_ref(k)).is_some());
+        if !known {
+            let message = match category {
+                Some(keyword @ Value::Keyword(_)) => format!(
+                    "check-allow: `{}` is not a check category",
+                    crate::syntax::printer::print(heap, keyword)
+                ),
+                _ => "check-allow: a check category keyword comes first, like `:type-mismatch`"
+                    .to_string(),
+            };
+            out.push(Finding::new(
+                Lint::CheckAllow,
+                category.map_or_else(|| heap.form_pos_only(form), |c| arg_pos(heap, c, form)),
+                message,
+            ));
+        }
+        let mask = lint_allow_mask(category);
         let inner = ctx.with_suppressed(mask);
         for &arg in &items[1..] {
             check_into(heap, arg, &inner, out);

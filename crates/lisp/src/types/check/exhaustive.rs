@@ -283,7 +283,9 @@ fn analyze_match(
         check_redundant_shapes(heap, &items[2..], out);
         walk(heap, scrutinee, ctx, namespace, out);
         for &clause in &items[2..] {
-            if let Some(clause_items) = list_items(heap, clause) {
+            // An empty clause (`nil`) is malformed: the compile pass reports it, so there is
+            // no pattern here to scope and nothing to walk.
+            if let Some(clause_items) = list_items(heap, clause).filter(|items| !items.is_empty()) {
                 let guarded = matches!(clause_items.get(1),
                     Some(&Value::Keyword(k)) if value::symbol_is(k, "when"));
                 let body_start = if guarded { 3 } else { 1 };

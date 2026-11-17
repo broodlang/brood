@@ -97,6 +97,49 @@ fn unknown_header_category_is_a_check_allow_finding() {
 }
 
 #[test]
+fn unknown_form_category_is_a_check_allow_finding() {
+    // The form's twin of the header rule: a misspelt category suppressed nothing, without
+    // a word. The lint it meant to silence still fires, and the typo is named.
+    let findings = file_findings(
+        "(defn typo (xs) (check-allow :type-mismach (string/upper 1)))\n\
+         (defn not-a-keyword () (check-allow \"type-mismatch\" (string/upper 1)))\n\
+         (defn fine () (check-allow :type-mismatch (string/upper 1)))",
+    );
+    assert!(
+        has(
+            &findings,
+            Lint::CheckAllow,
+            "`:type-mismach` is not a check category"
+        ),
+        "{findings:?}"
+    );
+    assert!(
+        has(
+            &findings,
+            Lint::CheckAllow,
+            "a check category keyword comes first"
+        ),
+        "{findings:?}"
+    );
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding.lint == Lint::TypeMismatch)
+            .count(),
+        2,
+        "the typo and the string silence nothing, the known category its form: {findings:?}"
+    );
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding.lint == Lint::CheckAllow)
+            .count(),
+        2,
+        "{findings:?}"
+    );
+}
+
+#[test]
 fn every_category_name_round_trips() {
     let mut seen = std::collections::HashSet::new();
     for &lint in Lint::ALL {

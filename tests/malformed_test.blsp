@@ -252,7 +252,21 @@
     (is (string? (expand-error '(quote a b)))))
 
   (test "threading a nil step raises type error"
-    (is (string? (expand-error '(-> 1 nil))))))
+    (is (string? (expand-error '(-> 1 nil)))))
+
+  ;; These took `first` and `second` of the binding: a missing value bound nil and a third
+  ;; element vanished, where `let` refuses both.
+  (test "an if-let-shaped binding is exactly one (name expr) list"
+    (doseq (head '(if-let when-let if-some when-some))
+      (doseq (binding '((a) (a 1 b) ()))
+        (let (message (expand-error (list head binding :then)))
+          (is (includes? (str message) (str head ": the binding is one (name expr) list"))))))
+    (is (= 1 (when-let (a 1) a))))
+
+  (test "with's bindings are name/value pairs, like let's"
+    (is (includes? (str (expand-error '(with (a) a))) "with: bindings must be name/value pairs"))
+    (is (includes? (str (expand-error '(with (a 1 b) a))) "with: bindings must be name/value pairs"))
+    (is (= 2 (with (a 1 b (inc a)) b)))))
 
 ;; ── 9. Duplicate function parameters ─────────────────────────────────────────
 

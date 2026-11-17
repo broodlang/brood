@@ -357,18 +357,33 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
 ;; truthiness, and bind the target (a symbol or destructuring pattern) to it in
 ;; the truthy branch. Testing a fresh temp (not the pattern) is what makes
 ;; destructuring targets — `(when-let ([k v] (first-entry m)) …)` — behave.
+;; The one `(name expr)` pair of an `if-let`-shaped form, or an expansion error at it: a
+;; third element was dropped without a word and a missing value bound `nil`.
+(defn- %one-binding (form binding)
+  (if (and (list? binding) (= (count binding) 2))
+    binding
+    (reflect/error-at binding
+      form
+      ": the binding is one (name expr) list, got "
+      (pr-str binding))))
 (defmacro if-let (binding then & else)
   "Bind `(name expr)`; if `expr` is truthy, evaluate `then` with `name` bound to it, else evaluate `else` (or `nil`). `name` may be a destructuring pattern.
 
     (if-let (x 1) x :none)     ;=> 1
     (if-let (x nil) x :none)   ;=> :none"
-  (let (name (first binding) expr (second binding) v (reflect/gensym "v"))
+  (let (binding (%one-binding "if-let" binding)
+        name (first binding)
+        expr (second binding)
+        v (reflect/gensym "v"))
     `(let (~v ~expr) (if ~v (let (~name ~v) ~then) ~@else))))
 (defmacro when-let (binding & body)
   "Bind `(name expr)`; when `expr` is truthy, evaluate `body` (returning the last) with `name` bound to it, else `nil`. `name` may be a destructuring pattern.
 
     (when-let (x 1) x)   ;=> 1"
-  (let (name (first binding) expr (second binding) v (reflect/gensym "v"))
+  (let (binding (%one-binding "when-let" binding)
+        name (first binding)
+        expr (second binding)
+        v (reflect/gensym "v"))
     `(let (~v ~expr) (when ~v (let (~name ~v) ~@body)))))
 
 ;; `if-some`/`when-some` — the same shapes testing for PRESENCE (`nil`) rather than truth,
@@ -379,14 +394,20 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
 
     (if-some (x false) x :absent)   ;=> false
     (if-some (x nil) x :absent)     ;=> :absent"
-  (let (name (first binding) expr (second binding) v (reflect/gensym "v"))
+  (let (binding (%one-binding "if-some" binding)
+        name (first binding)
+        expr (second binding)
+        v (reflect/gensym "v"))
     `(let (~v ~expr) (if (/nil? ~v) (do ~@else) (let (~name ~v) ~then)))))
 (defmacro when-some (binding & body)
   "Bind `(name expr)`; when `expr` is not `nil`, evaluate `body` with `name` bound to it, else `nil`. The presence-testing [[when-let]]: a `false` value runs the body.
 
     (when-some (x false) [:got x])   ;=> [:got false]
     (when-some (x nil) [:got x])     ;=> nil"
-  (let (name (first binding) expr (second binding) v (reflect/gensym "v"))
+  (let (binding (%one-binding "when-some" binding)
+        name (first binding)
+        expr (second binding)
+        v (reflect/gensym "v"))
     `(let (~v ~expr) (if (/nil? ~v) nil (let (~name ~v) ~@body)))))
 
 ;; `condp` — `cond` with the test factored out: `(condp expr pred t1 r1 t2 r2 … [default])`
@@ -477,7 +498,11 @@ Bindings are ONE flat list, exactly like `let`'s — not a list per pair. `(with
     (with (n (string/->number \"12\")) (inc n))   ;=> 13
     (with (n (string/->number \"4\") d (* n 2)) d)   ;=> 8   ; two bindings, ONE list
     (failure? (with (n (string/->number \"q\")) (inc n)))   ;=> true   ; `inc` never runs"
-  (%with-build bindings body))
+  (if (and (list? bindings) (= 0 (%rem (count bindings) 2)))
+    (%with-build bindings body)
+    (reflect/error-at bindings
+      "with: bindings must be name/value pairs, like let's, got "
+      (pr-str bindings))))
 ;; ---- local loops: just use `letrec` -----------------------------------------
 ;; Brood has no `loop`/`recur` macro. A self-contained *local* loop is a `letrec`-
 ;; bound closure you call by name:

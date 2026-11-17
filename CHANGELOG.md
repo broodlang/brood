@@ -16,6 +16,24 @@ one from its machine. The `:non-tail-recursion` checker category is deleted: rem
 `(check-allow :non-tail-recursion …)` wrappers (the form inside stays) and the category from
 any `:check` policy or `(:check-allow …)` clause. `BROOD_STACK_BUDGET` is gone.
 
+**Fixed: `if-let`, `when-let`, `if-some`, `when-some` and `with` refuse a malformed
+binding.** They took `first` and `second` of it, so `(when-let (a 1 b) …)` dropped `b`,
+`(if-let (a) …)` bound `a` to nil and `(with (a) …)` ran its body; `let` already refused all
+three. Each now fails at expansion, naming the form and the binding it got.
+
+**Fixed: `(check-allow :typo …)` is reported.** A category the checker does not know
+suppressed nothing and said nothing, so a misspelt `:type-mismach` left its lint on with no
+explanation; the header's `(:check-allow …)` clause already reported one. The form now does
+too, as does a `(check-allow)` with no category. One test used `:arity`, which never existed
+(an arity finding is a `:type-mismatch`).
+
+**Fixed: the checker no longer dies on a malformed form.** A bare `(let)` or `(letrec)`, a
+`match` with an empty clause and a top-level `(check-allow)` indexed past the end of a form,
+so the whole advisory pass ended in "checker internal error" and reported nothing else in the
+file. And a caught checker panic with stderr piped to a reader that had already exited
+(`brood --check f | grep -q …`) aborted the process with a core dump, from the crash
+reporter's own `eprintln!`; that line is now written best-effort.
+
 **Fixed: `nest fetch`, `nest update` and `nest tree` cover `:dev-dependencies`.** A project
 with only dev dependencies answered "no dependencies declared" and locked nothing, and
 `nest update` in a project with both wrote a lock without the dev ones (setup re-added them
