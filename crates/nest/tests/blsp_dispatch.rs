@@ -126,6 +126,24 @@ fn format_and_doctest_run_inside_a_scaffolded_project() {
     );
 }
 
+/// A refusal the tool raises is an answer: it read `std/tool/docs.blsp:583:59: error: doc:
+/// cannot find module 'x'`, a place in nest's own source. It now reads `nest doc: …`, and an
+/// error in the user's code keeps its location.
+#[test]
+fn a_tool_refusal_names_the_command_not_the_tool_source() {
+    let proj = scaffolded("refusals");
+    let (code, _, err) = nest_in(&proj, &["doc", "no-such-module"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.starts_with("nest doc: cannot find module 'no-such-module'"),
+        "{err}"
+    );
+    assert!(!err.contains("std/tool/"), "{err}");
+    let (code, _, err) = nest_in(&proj, &["eval", "(error \"mine\")"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("<string>:1:1: error: mine"), "{err}");
+}
+
 #[test]
 fn doctest_checks_the_examples_of_named_source_files() {
     let proj = scaffolded("doc-files");

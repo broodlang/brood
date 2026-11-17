@@ -23,6 +23,12 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: a nest refusal names the command, not nest's source.** `nest doc no-such-module`
+printed `std/tool/docs.blsp:583:59: error: doc: cannot find module …`, a place in the tool's
+own source; `nest new` and `nest eval --in` did the same. A refusal the tool raises now reads
+`nest doc: cannot find module …` (exit 1); a fault in the tool, or an error in the user's own
+code under `nest eval` or `nest run`, keeps its location.
+
 **Fixed: `brood file.blsp` reports a parse error once.** The pre-run check read the file
 first and reported it, then the run read it again and reported it a second time.
 

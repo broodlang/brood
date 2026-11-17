@@ -1282,7 +1282,28 @@ words, it is the program's.
               (do
                 (doseq (warning (seq/distinct (get options :warnings [])))
                   (eputs "nest " cmd ": warning: " warning))
-                ((get spec :run) options))))))))
+                (try
+                  ((get spec :run) options)
+                  (catch error
+                    (if (tool-refusal? error)
+                      (do (eputs (refusal-line cmd (error-message error))) 1)
+                      (throw error)))))))))))
+
+;; An `(error …)` the tool itself raised — `nest doc` naming a module that does not exist,
+;; `nest new` refusing a name — is an answer, not a fault: printed with the raise site, it
+;; read `std/tool/docs.blsp:583:59: error: doc: cannot find module 'x'`, a location in the
+;; tool's source that means nothing to whoever typed the command. Anything else — a fault in
+;; the tool, an error in the user's own code under `nest eval`/`run` (which carries the user's
+;; file, or `<string>`) — keeps its location. A prelude raise the tool called directly, like
+;; `require`'s `cannot find module` for `nest eval --in`, arrives with no file yet.
+(defn- tool-refusal? (error)
+  (and (= (:kind error) :error)
+    (or (nil? (:file error)) (string/starts-with? (:file error) "std/tool/"))))
+
+(defn- refusal-line (cmd message)
+  (if (string/starts-with? message (str cmd ": "))
+    (str "nest " message)
+    (str "nest " cmd ": " message)))
 ;; `list`, not `vector`: the router passes `(list "check" …)`, so a `vector` contract would
 ;; refuse every Brood-routed subcommand when contracts are armed (KI-113).
 (sig main ((list string) -> int))
