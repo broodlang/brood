@@ -369,8 +369,8 @@ which is meaningless for a rope, so falling through unconditionally would swap a
 
   Rooting the qualified case is the same agreement one level up (ADR-070): `defrecord` bakes
   `:__id__` by qualifying against the ROOTED current ns, so an impl written against the
-  record's own short module path (`(impl A op (r lsp-requests/LspHover) …)`) must root that
-  path too, or it registers under `:lsp-requests/lsp-hover` while every value presents
+  record's own short module path (`(impl A op (r lsp/requests/LspHover) …)`) must root that
+  path too, or it registers under `:lsp/requests/lsp-hover` while every value presents
   `:bedit/lsp-requests/lsp-hover` and dispatch finds no impl."
   (if (symbol? m)
     ;; `%str-last-index-of`, the kernel primitive, not the `string/last-index-of` wrapper
