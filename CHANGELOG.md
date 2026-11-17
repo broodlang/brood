@@ -6,6 +6,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Fixed: `(check-allow :typo …)` is reported.** A category the checker does not know
+suppressed nothing and said nothing, so a misspelt `:type-mismach` left its lint on with no
+explanation; the header's `(:check-allow …)` clause already reported one. The form now does
+too, as does a `(check-allow)` with no category. One test used `:arity`, which never existed
+(an arity finding is a `:type-mismatch`).
+
 **Fixed: the checker no longer dies on a malformed form.** A bare `(let)` or `(letrec)`, a
 `match` with an empty clause and a top-level `(check-allow)` indexed past the end of a form,
 so the whole advisory pass ended in "checker internal error" and reported nothing else in the

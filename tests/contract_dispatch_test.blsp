@@ -91,7 +91,7 @@
       (is (not (includes? (->string (get e :file)) "contract.blsp")))
       (is (not (any? (get e :trace) (fn (f) (includes? (->string (get f :file)) "contract.blsp")))))))
   (test "a wrong arity is the shim's arity error"
-    (assert-error (check-allow :arity (reflect/eval '(contract-dispatch-test/d-add 1))))))
+    (assert-error (check-allow :type-mismatch (reflect/eval '(contract-dispatch-test/d-add 1))))))
 
 ;; Return-checked contracted tail calls stay flat (KI-216, ADR-396): a pending check for an
 ;; equal result type is not stacked again, whether the frame owing it is a shim's or the
