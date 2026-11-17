@@ -65,7 +65,7 @@ impl TextHinting {
 /// then every glyph of that size is drawn through it.
 type InstanceKey = (fontdb::ID, u16, u32, Hint);
 
-/// The hinting instances in use, and the fonts known to carry colour glyphs.
+/// The hinting instances in use.
 #[derive(Default)]
 pub(super) struct HintedGlyphs {
     instances: HashMap<InstanceKey, Option<HintingInstance>>,

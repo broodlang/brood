@@ -750,8 +750,9 @@ impl<'e> Machine<'e> {
                                 // A macro's expander raised. Its body runs as frames here, so
                                 // the error has picked up a position inside the macro's
                                 // definition on the way out; the compiled tiers attach none.
-                                // ADR-618 places it at the call, unless the macro named the
-                                // sub-form with `reflect/error-at`.
+                                // ADR-618 places it at the call, unless it is pinned
+                                // (`LispErrorData::pos_pinned`: `reflect/error-at`, or a
+                                // module the expansion loaded).
                                 if matches!(kind, KontKind::Expand { .. }) && !e.pos_pinned {
                                     e.pos = None;
                                     e.file = None;

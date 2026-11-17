@@ -164,11 +164,6 @@ pub fn compile(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     // gensyms must be fresh per invocation, which a once-at-compile expansion freezes).
     let out = expand_static_quasiquotes(heap, resolved);
     heap.truncate_roots(roots_base);
-    // The warning port is Brood code that may collect: keep `out` rooted across it.
-    let out_root = heap.root(out);
-    flush_pending_warnings(heap, env);
-    let out = heap.read_root(out_root);
-    heap.truncate_roots(roots_base);
     Ok(out)
 }
 
@@ -224,19 +219,6 @@ fn refuse_undeclared_shadow(heap: &Heap, ns_name: &str, name: value::Symbol) {
         return;
     }
     crate::eval::derive::record_undeclared_shadow(name, value::intern(ns_name));
-}
-
-thread_local! {
-    static PENDING_WARNINGS: std::cell::RefCell<Vec<String>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Write the warnings the resolve pass queued, through the `*err*` port.
-fn flush_pending_warnings(heap: &mut Heap, env: EnvId) {
-    let pending = PENDING_WARNINGS.with(|q| std::mem::take(&mut *q.borrow_mut()));
-    for message in pending {
-        crate::builtins::warn_line(heap, env, &message);
-    }
 }
 
 /// Enforce module privacy (ADR-146) over a resolved form: an error for any

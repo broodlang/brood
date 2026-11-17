@@ -294,12 +294,13 @@ body starts at `body`."
 (def- regex-name-start "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
 (def- regex-name-chars (str regex-name-start "0123456789"))
 
-(defn- regex-name-run (pcs: (vector string) i:int acc:string -> (tuple string int))
-  "The name characters from `i`; returns [name next]."
-  (let (c (regex-peek pcs i))
-    (if (and (string? c) (includes? (if (= acc "") regex-name-start regex-name-chars) c))
-      (regex-name-run pcs (inc i) (str acc c))
-      [acc i])))
+(defn- regex-name-run (pcs: (vector string) i:int name:string -> (tuple string int))
+  "The name characters from `i`, after the `name` read so far; returns [name next]."
+  (let (character (regex-peek pcs i))
+    (if (and (string? character)
+          (includes? (if (= name "") regex-name-start regex-name-chars) character))
+      (regex-name-run pcs (inc i) (str name character))
+      [name i])))
 
 (defn- regex-group-name (pcs: (vector string) i:int -> (or nil (tuple string int)))
   "The name a group opening at `i` (a `(`) gives itself, as `[name body]`, or nil when it
@@ -617,19 +618,19 @@ a literal, and the engine caches its compiled form under exactly this text."
   (and (string? pattern) (or (includes? pattern "(?<") (includes? pattern "(?P<"))))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
-(defn- regex-alt-names (branches acc)
-  "`acc` with one entry per capturing group in `branches`, in the order of their opening
+(defn- regex-alt-names (branches names)
+  "`names` with one entry per capturing group in `branches`, in the order of their opening
 parens: the group's name, or nil for an unnamed one."
   (fold branches
-    acc
-    (fn (acc branch)
+    names
+    (fn (names branch)
       (fold branch
-        acc
-        (fn (acc piece)
+        names
+        (fn (names piece)
           (let (atom (if (nil? (:q piece)) piece (:a piece)))
             (if (= (:t atom) :group)
-              (regex-alt-names (:alt atom) (if (:cap atom) (conj acc (:name atom)) acc))
-              acc)))))))
+              (regex-alt-names (:alt atom) (if (:cap atom) (conj names (:name atom)) names))
+              names)))))))
 
 (def- regex-names-cache (table/new))
 
@@ -647,24 +648,26 @@ parens: the group's name, or nil for an unnamed one."
 (`(?<y>\\d{4})-\\d\\d|\\d\\d/(?<y>\\d{4})`) is the leftmost of them that took part."
   (fold (range (count names))
     {}
-    (fn (acc index)
+    (fn (named index)
       (let (name (nth names index))
         (if (nil? name)
-          acc
+          named
           (let (key (keyword name))
-            (if (nil? (get acc key)) (assoc acc key (nth groups index nil)) acc)))))))
+            (if (nil? (get named key)) (assoc named key (nth groups index nil)) named)))))))
 
-(defn- regex-with-names (pattern m)
-  "Match `m` of `pattern`, with `:named` when the pattern names a group."
-  (if (and m (regex-maybe-named? pattern))
+(defn- regex-with-names (pattern found)
+  "Match `found` of `pattern`, with `:named` when the pattern names a group."
+  (if (and found (regex-maybe-named? pattern))
     (let (names (regex-names pattern))
-      (if (any? names string?) (assoc m :named (regex-named-groups names (:groups m))) m))
-    m))
+      (if (any? names string?)
+        (assoc found :named (regex-named-groups names (:groups found)))
+        found))
+    found))
 
 (defn- regex-all-with-names (pattern matches)
   "Every match in `matches` with its `:named` ([[regex-with-names]])."
   (if (regex-maybe-named? pattern)
-    (into [] (map matches (fn (m) (regex-with-names pattern m))))
+    (into [] (map matches (fn (found) (regex-with-names pattern found))))
     matches))
 
 ;; ---- does it match? -------------------------------------------------------------
@@ -911,16 +914,16 @@ empty pattern `\"\"` is an absent prefix or suffix.
 
 ;; ---- replace / split, both written on find-all ------------------------------
 
-(defn- regex-template-group (m reference:string -> string)
+(defn- regex-template-group (found reference:string -> string)
   "The text `${reference}` stands for in a template: group `n` when it is a number (0 the
 whole match), the named group otherwise — \"\" for one that did not take part or is not
 there."
-  (let (number (when (every? (string/->list reference) (fn (ch) (includes? "0123456789" ch)))
+  (let (number (when (every? (string/->list reference) (fn (character) (includes? "0123456789" character)))
                  (string/->number reference))
         group (cond
-                (= number 0) m
-                (int? number) (nth (get m :groups) (dec number) nil)
-                else (get (get m :named) (keyword reference))))
+                (= number 0) found
+                (int? number) (nth (get found :groups) (dec number) nil)
+                else (get (get found :named) (keyword reference))))
     (if group (str (get group :text)) "")))
 
 (defn- regex-expand-loop (template:string m:any i:int acc:string -> string)
@@ -939,9 +942,7 @@ template."
             (inc close)
             (str acc (regex-template-group m (string/substring template (+ i 2) close))))
         (and (= c "$") d (includes? "0123456789" d))
-          (let (k (reflect/read-string d)
-                g (if (= k 0) m (nth (get m :groups) (dec k) nil)))
-            (regex-expand-loop template m (+ i 2) (str acc (if g (get g :text) ""))))
+          (regex-expand-loop template m (+ i 2) (str acc (regex-template-group m d)))
         else (regex-expand-loop template m (inc i) (str acc c))))))
 
 (defn- regex-replace-loop (s matches j at acc replacement)

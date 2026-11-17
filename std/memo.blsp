@@ -39,10 +39,10 @@ passed again is a hit by identity, whatever its size (ADR-670).")
   "The names a parameter list binds, in order — `&optional`/`&` markers dropped, a
 `(name default)` pair reduced to its name."
   (seq/keep params
-    (fn (p)
+    (fn (param)
       (cond
-        (list? p) (first p)
-        (and (symbol? p) (not (string/starts-with? (->string p) "&"))) p))))
+        (list? param) (first param)
+        (and (symbol? param) (not (string/starts-with? (->string param) "&"))) param))))
 
 (defn- slot-name (name)
   "The store's name for a `defmemo` of `name`: `name` qualified with the module being
@@ -125,7 +125,8 @@ only because its expansion calls it.
   "`params` when every one is a plain parameter name — `defmemo-by`'s key and input lists
 take no `&optional` or `&` markers."
   (if (and (list? params)
-        (every? params (fn (p) (and (symbol? p) (not (string/starts-with? (->string p) "&"))))))
+        (every? params
+          (fn (param) (and (symbol? param) (not (string/starts-with? (->string param) "&"))))))
     params
     (error (str "defmemo-by: " who " must be a list of plain parameter names: ") params)))
 
@@ -150,18 +151,18 @@ the caller's map of key → `[value input…]` (ADR-741).
 
     (defmemo-by rank-order-of 256 (id) (table) \"…\" (sort-rows table))"
   (let (doc? (string? (first body))
-        keys (plain-params "the key parameters" key-params)
+        key-names (plain-params "the key parameters" key-params)
         inputs (plain-params "the input parameters" input-params)
         version (symbol (str (->string name) "--memo-version"))
         slot (slot-name name)
-        key-form (if (= 1 (count keys)) (first keys) `[~@keys])
+        key-form (if (= 1 (count key-names)) (first key-names) `[~@key-names])
         indexed (map (range (count inputs)) (fn (index) [(nth inputs index) (inc index)]))
         ;; one symbol for the entry, minted here: an `entry#` inside the nested quasi-quote
         ;; below would be a DIFFERENT auto-gensym from the outer one
         entry (reflect/gensym "entry"))
     `(do
        (def ~version (/reflect/gensym "memo"))
-       (defn ~name ~(append keys inputs)
+       (defn ~name ~(append key-names inputs)
          ~@(if doc? (list (first body)) '())
          (let (key# ~key-form
                store# (or (%memo-store '~slot ~version) {})

@@ -530,7 +530,8 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 // A position from inside the expander points into the macro's definition —
                 // the tree-walker attaches one as the error leaves the body's frames; the
                 // compiled tiers attach none. Either way the error belongs at the call
-                // (ADR-618), unless the macro named a sub-form with `reflect/error-at`.
+                // (ADR-618), unless it is pinned (`LispErrorData::pos_pinned`: a macro's
+                // `reflect/error-at`, or a module the expansion loaded).
                 if !e.pos_pinned && !e.is_control() {
                     e.pos = None;
                     e.file = None;

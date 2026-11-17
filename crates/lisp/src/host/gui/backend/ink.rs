@@ -262,7 +262,7 @@ impl<'a> TextInk<'a> {
         }
     }
 
-    /// The subpixel sibling of [`TextInk::over`]: a coverage per colour channel (`cov[0]`
+    /// The subpixel sibling of `TextInk::over`: a coverage per colour channel (`cov[0]`
     /// red, `[1]` green, `[2]` blue), each corrected as a gray glyph's would be, so a gray
     /// and an LCD glyph side by side carry the same weight.
     #[cfg(test)]
@@ -283,7 +283,8 @@ impl<'a> TextInk<'a> {
 }
 
 /// One (text colour, ground pixel, lift) pair's finished blends, by coverage: for each
-/// coverage byte the three encoded channels [`TextInk::over_rgb`] would write, filled the
+/// coverage byte the three encoded channels `TextInk::over_rgb` (the test-only reference
+/// blend) would write, filled the
 /// first time that coverage is drawn over that ground. A gray rim pixel reads its three
 /// bytes; a subpixel one reads channel `k` at `cov[k]`, as `over_rgb` blends channel `k`
 /// alone. So a rim pixel is three table reads where it was a `powf` (a gray rim) or three
@@ -355,7 +356,7 @@ impl BlendTables {
 }
 
 impl TextInk<'_> {
-    /// [`TextInk::over`] through `table`, the blend table of this ink over `dst`.
+    /// `TextInk::over` through `table`, the blend table of this ink over `dst`.
     #[inline]
     pub(super) fn over_with(&self, table: &mut BlendTable, dst: u32, cov: u8) -> u32 {
         match cov {
@@ -389,7 +390,7 @@ impl TextInk<'_> {
     }
 }
 
-/// Composite `fg` over `dst` at coverage `cov` as text: [`TextInk::over`] with no lift.
+/// Composite `fg` over `dst` at coverage `cov` as text: `TextInk::over` with no lift.
 #[cfg(test)]
 pub(super) fn blend_text(dst: u32, fg: [u8; 3], cov: u8) -> u32 {
     TextInk::new(fg, None).over(dst, cov)

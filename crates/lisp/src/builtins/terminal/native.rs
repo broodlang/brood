@@ -1122,8 +1122,9 @@ pub(in crate::builtins) fn term_bg(args: &[Value], _: EnvId, heap: &mut Heap) ->
 
 /// `(term-title title)` — the terminal's window (or tab) title
 /// ([`TerminalScreen::title_bytes`]). The shell's own title is saved on the first one
-/// (`CSI 22;0t`, the title stack) and given back when the screen is left ([`farewell_bytes`], every leave path); taking the screen again (a continue
-/// after a suspend) sets this title again. Returns nil.
+/// (`CSI 22;0t`, the title stack) and given back when the screen is left
+/// ([`farewell_bytes`], every leave path); taking the screen again (a continue after a
+/// suspend) sets this title again. Returns nil.
 pub(in crate::builtins) fn term_title(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let title = expect_string(heap, "term/title", arg(args, 0))?;
     let out = {

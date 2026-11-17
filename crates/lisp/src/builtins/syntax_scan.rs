@@ -1020,14 +1020,14 @@ fn closer_after<T: ScanText>(text: &mut T, mut byte: usize, mut ch: usize) -> Op
 fn scan_bracket_partner(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let who = "reflect/scan-bracket-partner";
     let pos = expect_int(heap, who, arg(args, 1))?;
-    let v = arg(args, 0);
+    let text_value = arg(args, 0);
     let Ok(pos) = usize::try_from(pos) else {
         return Ok(Value::int(-1));
     };
-    let (form_start, _) = form_start_pair_of(heap, who, v, pos as i64)?;
-    let h: &Heap = heap;
-    let partner = if let Value::Rope(id) = v {
-        let rope = h.rope(id);
+    let (form_start, _) = form_start_pair_of(heap, who, text_value, pos as i64)?;
+    let heap: &Heap = heap;
+    let partner = if let Value::Rope(id) = text_value {
+        let rope = heap.rope(id);
         if pos >= rope.len_chars() {
             None
         } else {
@@ -1035,12 +1035,13 @@ fn scan_bracket_partner(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             bracket_partner(&mut RopeCursor::new(rope), start, pos)
         }
     } else {
-        let mut s = expect_text_string(h, who, v)?;
-        let start_byte = match v {
-            Value::Str(id) => h.str_char_to_byte(id, form_start),
-            _ => s.len(),
+        // `expect_text_string` takes only a string, so past it the value is a `Value::Str`
+        let mut text = expect_text_string(heap, who, text_value)?;
+        let Value::Str(id) = text_value else {
+            return Ok(Value::int(-1));
         };
-        bracket_partner(&mut s, (start_byte, form_start), pos)
+        let start_byte = heap.str_char_to_byte(id, form_start);
+        bracket_partner(&mut text, (start_byte, form_start), pos)
     };
     Ok(Value::int(partner.map_or(-1, |at| at as i64)))
 }

@@ -211,35 +211,39 @@
     (assert= (txt (find "hello world" "\\w+")) "hello")))
 
 (describe "regex named groups"
-  (defn- named-text (m name) (let (g (get (get m :named) name)) (when g (get g :text))))
+  (defn- named-text (found name) (let (group (get (get found :named) name)) (when group (get group :text))))
 
   (test "(?<name>...) and (?P<name>...) capture under :named by keyword"
-    (let (m (find "on 2026-11-17" "(?<year>\\d{4})-(?<month>\\d\\d)-(?P<day>\\d\\d)"))
-      (assert= (named-text m :year) "2026")
-      (assert= (named-text m :month) "11")
-      (assert= (named-text m :day) "17")
-      (assert= (get (get (get m :named) :day) :start) 11)))
+    (let (found (find "on 2026-11-17" "(?<year>\\d{4})-(?<month>\\d\\d)-(?P<day>\\d\\d)"))
+      (assert= (named-text found :year) "2026")
+      (assert= (named-text found :month) "11")
+      (assert= (named-text found :day) "17")
+      (assert= (get (get (get found :named) :day) :start) 11)))
   (test "a named group is numbered with the unnamed ones, by its opening paren"
-    (let (m (find "abc" "(a)(?<mid>b)(c)"))
-      (assert= (count (get m :groups)) 3)
-      (assert= (get (nth (get m :groups) 1) :text) "b")
-      (assert= (named-text m :mid) "b")))
+    (let (found (find "abc" "(a)(?<mid>b)(c)"))
+      (assert= (count (get found :groups)) 3)
+      (assert= (get (nth (get found :groups) 1) :text) "b")
+      (assert= (named-text found :mid) "b")))
   (test "a named group nested in another, and one under a quantifier"
-    (let (m (find "x-y-z" "(?<all>(?:(?<last>\\w)-?)+)"))
-      (assert= (named-text m :all) "x-y-z")
-      (assert= (named-text m :last) "z")))
+    (let (found (find "x-y-z" "(?<all>(?:(?<last>\\w)-?)+)"))
+      (assert= (named-text found :all) "x-y-z")
+      (assert= (named-text found :last) "z")))
   (test "a named group that did not take part is nil, and its key is there"
-    (let (m (find "b" "(?<a>a)|(?<b>b)"))
-      (is (contains? (get m :named) :a))
-      (is (nil? (named-text m :a)))
-      (assert= (named-text m :b) "b")))
+    (let (found (find "b" "(?<a>a)|(?<b>b)"))
+      (is (contains? (get found :named) :a))
+      (is (nil? (named-text found :a)))
+      (assert= (named-text found :b) "b")))
   (test "a name used twice is the leftmost group of that name that took part"
     (let (pattern "(?<y>\\d{4})-\\d\\d|\\d\\d/(?<y>\\d{4})")
       (assert= (named-text (find "2026-11" pattern) :y) "2026")
       (assert= (named-text (find "11/2025" pattern) :y) "2025")))
   (test "a pattern that names nothing gives no :named"
     (is (nil? (get (find "ab" "(a)b") :named)))
-    (is (nil? (get (find "a(?<x>" "\\(\\?<x>") :named))))
+    ;; the pattern holds `(?<` with its `(` escaped: an optional literal paren, then `<x>`, no
+    ;; group — so the name scan is reached and must find nothing
+    (let (found (find "a<x>" "\\(?<x>"))
+      (assert= (get found :text) "<x>")
+      (is (nil? (get found :named)))))
   (test "a malformed name is the characters it looks like"
     (assert= (get (find "(?<1x>a)" "\\(\\?<1x>a\\)") :text) "(?<1x>a)")
     (assert= (get (find "?<1x>a" "(?<1x>a)") :text) "?<1x>a")

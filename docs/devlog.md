@@ -1973,3 +1973,25 @@ which saturates it); and `BEDIT_REF` moves to
 bedit `8ad277e`, which dropped its `:non-tail-recursion` wrappers (the pinned bedit's strict
 ratchet counted them as unknown categories) — `smoke-bedit` green, 5491 tests.
 
+
+2026-11-17. **An error in a module that loads on first use names that module's line.** Compiling
+`(other/thing 1)` asks whether the head is a macro, which loads `other` inside the expansion
+boundary, and that boundary moves an expander's errors to the call (ADR-618): a type error on line
+5 of `other.blsp` read `caller.blsp:3:3`. A load's error is now pinned (`pos_from_at` generalised
+to `pos_pinned`), and the checker reports the calling form with the broken module's
+`file:line:col` in the message (`crates/cli/tests/load_error_position.rs`). Same family: a std
+module loaded from source in the middle of a namespace-less file credited its `defmodule` doc to
+that file — `eval_string_inner` kept a hand-written copy of `NsLoadScope` that missed the registry
+writer, which made `registry_retract_test` fail whenever std loaded from source. It uses
+`NsLoadScope` now. The macOS build's `pipe2` (the terminal's resize wake pipe) is `pipe` + `fcntl`.
+A review of the two days' work then fixed: in `vt`, a carriage return goes to the left margin
+(a pane right of column 0 never scrolled on `\r\n`) and origin mode homes to the margins'
+corner; a result check finished in place no longer skips the checks still owed under it
+(`vm_run_bc`); `reflect/bound-value`'s default is rooted across the load; the resize signal
+handler keeps `errno`; dead code (the resolve pass's warning queue, an unreachable arm, a
+discarded `expect_int` error, a one-caller alias), stale docs and short names; and a regex test
+that never reached the code it named, and contract tests that asserted only values, now assert
+what their names say.
+`std/settings` gains a `:retired` spec key: a setting that is gone tells a config that still sets
+it what replaced it, is never applied, and is left out of `specs` and the default file — bedit's
+`:welcome` is the first.

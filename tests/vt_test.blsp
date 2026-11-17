@@ -348,6 +348,13 @@
     (let (outside (vt/feed (in-margins (panes)) "\e[4;7H\n"))
       (assert= (vt/lines outside) ["a1  |w1" "a2  |w2" "a3  |w3" "a4  |w4"])
       (assert= (vt/cursor outside) [3 6])))
+  (test "a pane right of column 0 scrolls on its own \\r\\n: CR goes to the left margin"
+    (let (v (vt/feed (panes) "\e[?69h\e[1;4r\e[6;9s\e[4;6Hx\r\n"))
+      (assert= (vt/lines v) ["a1  |w2" "a2  |w3" "a3  |x4" "a4  |"])
+      (assert= (vt/cursor v) [3 5])))
+  (test "in origin mode, setting the margins homes the cursor to their corner"
+    (assert= (vt/cursor (vt/feed (panes) "\e[?69h\e[?6h\e[2;4r\e[6;9s")) [1 5])
+    (assert= (vt/cursor (vt/feed (panes) "\e[?69h\e[6;9s\e[?6h\e[2;4r")) [1 5]))
   (test "IND and RI scroll the band too, and nothing goes to history"
     (let (v (vt/feed (in-margins (panes)) "\e[4;1H\eD\e[1;1H\eM\eM"))
       (assert= (vt/lines v) ["    |w1" "    |w2" "a2  |w3" "a3  |w4"])

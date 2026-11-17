@@ -163,7 +163,9 @@ explicit motion cancels it, as on a real terminal."
     :wrap-pending false))
 
 (defn- carriage-return (vt:terminal -> terminal)
-  (assoc vt :col 0 :wrap-pending false))
+  ;; to the left margin from at or right of it, as xterm does, so a pane right of column 0
+  ;; (DECSLRM) gets its `\r\n` scrolls; from left of it, to column 0
+  (assoc vt :col (if (>= (:col vt) (:left vt)) (:left vt) 0) :wrap-pending false))
 
 ;; ---- scrolling -----------------------------------------------------------------------
 ;; Within a region `[top, bottom]` — the scroll region for a line feed, the rows under the
@@ -190,9 +192,9 @@ positive, down when negative — blanks entering where rows left; the cells outs
         left (:left vt)
         right (inc (:right vt))
         blank (into [] (seq/repeat (- right left) (erase-cell vt)))
-        moved (for (r (range top (inc bottom)) :into [])
-                (let (source (+ r n))
-                  (splice (row-at vt r)
+        moved (for (row (range top (inc bottom)) :into [])
+                (let (source (+ row n))
+                  (splice (row-at vt row)
                     left
                     right
                     (if (<= top source bottom) (seq/subvec (row-at vt source) left right) blank)))))
@@ -505,7 +507,8 @@ first, which is all a non-SGR sequence means by one."
   (let (top (dec (param params 0 1))
         bottom (dec (param params 1 (:rows vt))))
     (if (and (>= top 0) (< top bottom) (< bottom (:rows vt)))
-      (move-to (assoc vt :top top :bottom bottom) (if (mode vt :origin) top 0) 0)
+      (let (moved (assoc vt :top top :bottom bottom))
+        (if (mode moved :origin) (move-to moved top (:left moved)) (move-to moved 0 0)))
       vt)))
 
 (defn- set-column-margins (vt:terminal params:vector -> terminal)
@@ -514,7 +517,8 @@ home; a degenerate pair is ignored, as DECSTBM's is."
   (let (left (dec (param params 0 1))
         right (dec (param params 1 (:cols vt))))
     (if (and (>= left 0) (< left right) (< right (:cols vt)))
-      (move-to (assoc vt :left left :right right) (if (mode vt :origin) (:top vt) 0) 0)
+      (let (moved (assoc vt :left left :right right))
+        (if (mode moved :origin) (move-to moved (:top moved) left) (move-to moved 0 0)))
       vt)))
 
 (def- reported-modes
@@ -787,7 +791,8 @@ near the bottom), blanks enter at the bottom when it grows."
 
 (defn resize (vt:terminal cols:int rows:int -> terminal)
   "`vt` at `cols` × `rows`: rows that leave at the top of the main screen go to
-`:evicted`, the cursor is clamped, the scroll region is reset to the whole screen.
+`:evicted`, the cursor is clamped, the scroll region and the left and right margins are reset
+to the whole screen.
 
     (vt/lines (vt/resize (vt/feed (vt/make 6 2) \"abcdef\") 3 2))   ;=> [\"abc\" \"\"]"
   (let (lost (max 0 (- (count (:grid vt)) rows))

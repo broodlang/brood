@@ -289,7 +289,7 @@
         (assert= (keymap-stack-binding km-stack key) (get merged key))))))
 
 (describe "a keymap names itself and groups its keys (ADR-745)"
-  (def- km-described
+  (def- described-keymap
     (-> {}
       (keymap-bind [:ctrl-x :ctrl-f] 'a/find "files")
       (keymap-bind [:ctrl-x :ctrl-s] 'a/save "files")
@@ -299,32 +299,32 @@
       (keymap-describe [:ctrl-x] {:name "C-x" :headings ["buffers" "files"]})
       (keymap-describe [:ctrl-x "p"] {:name "project" :group "files"})))
   (test "a prefix carries its name, and binding under it keeps it"
-    (assert= "C-x" (keymap-name (get km-described :ctrl-x)))
-    (assert= "project" (keymap-name (map/get-in km-described [:ctrl-x "p"])))
-    (let (rebound (keymap-bind km-described [:ctrl-x "p" "g"] 'a/project-grep))
+    (assert= "C-x" (keymap-name (get described-keymap :ctrl-x)))
+    (assert= "project" (keymap-name (map/get-in described-keymap [:ctrl-x "p"])))
+    (let (rebound (keymap-bind described-keymap [:ctrl-x "p" "g"] 'a/project-grep))
       (assert= "project" (keymap-name (map/get-in rebound [:ctrl-x "p"])))
       (assert= 'a/project-find (map/get-in rebound [:ctrl-x "p" "f"]))))
   (test "groups come in the described order, a prefix under the group its description gives"
-    (let (groups (keymap-groups (get km-described :ctrl-x)))
+    (let (groups (keymap-groups (get described-keymap :ctrl-x)))
       (assert= ["buffers" "files" nil] (vec (map groups first)))
       (assert= #{:ctrl-f :ctrl-s "p"} (into #{} (map (second (second groups)) first)))
       (assert= [["z" 'a/repeat]] (vec (second (last groups))))))
   (test "a heading tagged but not described follows the described ones"
-    (let (more (keymap-bind km-described [:ctrl-x "o"] 'a/other "windows"))
+    (let (more (keymap-bind described-keymap [:ctrl-x "o"] 'a/other "windows"))
       (assert= ["buffers" "files" "windows" nil]
         (vec (map (keymap-groups (get more :ctrl-x)) first)))))
   (test "the info is no key: walks, indexes and dispatch never see it"
-    (let (prefix (get km-described :ctrl-x))
+    (let (prefix (get described-keymap :ctrl-x))
       (assert= 5 (count (keymap-entries prefix)))
       (assert= #{'a/find 'a/save 'a/switch 'a/repeat 'a/project-find}
-        (into #{} (keymap-commands km-described)))
-      (assert= (list [:ctrl-x "p" "f"]) (keymap-where-is km-described 'a/project-find))))
+        (into #{} (keymap-commands described-keymap)))
+      (assert= (list [:ctrl-x "p" "f"]) (keymap-where-is described-keymap 'a/project-find))))
   (test "a merged stack keeps the top name, every heading and the highest group of each key"
     (let (mode (-> {}
                  (keymap-bind [:ctrl-x "q"] 'a/mode-q "buffers")
                  (keymap-bind [:ctrl-x "z"] 'a/mode-z "mode")
                  (keymap-describe [:ctrl-x] {:name "mode C-x"}))
-          merged (get (keymap-merge-stack [mode km-described]) :ctrl-x))
+          merged (get (keymap-merge-stack [mode described-keymap]) :ctrl-x))
       (assert= "mode C-x" (keymap-name merged))
       (assert= "buffers" (keymap-key-group merged "q"))
       (assert= "mode" (keymap-key-group merged "z"))
@@ -332,7 +332,7 @@
       (assert= ["buffers" "mode" "files"] (vec (map (keymap-groups merged) first)))
       (assert= 'a/mode-z (get merged "z"))))
   (test "a stack where only a lower map is described keeps its description"
-    (let (merged (keymap-merge {:ctrl-x (get km-described :ctrl-x)} {:ctrl-x {"k" 'a/kill}}))
+    (let (merged (keymap-merge {:ctrl-x (get described-keymap :ctrl-x)} {:ctrl-x {"k" 'a/kill}}))
       (assert= "C-x" (keymap-name (get merged :ctrl-x)))
       (assert= 'a/kill (map/get-in merged [:ctrl-x "k"]))))
   (test "a plain map has no name and one ungrouped group"

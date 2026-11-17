@@ -129,7 +129,7 @@ origin is `(extent left)`."
           item [(nth tree 2) (nth tree 3) (nth tree 4)])
       (if (before? start end)
         (let ([inner-left inner-right] (split (right-of tree)
-                                         (fn (s e) (before? (+ s end) (+ e end)))))
+                                         (fn (span-start span-end) (before? (+ span-start end) (+ span-end end)))))
           [(join (left-of tree) item inner-left) inner-right])
         (let ([inner-left inner-right] (split (left-of tree) before?))
           [inner-left (join inner-right item (right-of tree))])))))

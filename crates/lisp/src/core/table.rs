@@ -1216,9 +1216,9 @@ pub fn tally(heap: &mut Heap, id: u64, key: Value, deltas: &[i64]) -> LispResult
         let map = store.hashed_or_migrate(&mut guard)?;
         let hash = heap.hash_value(key);
         let bucket = map.entry(hash).or_default();
-        let idx = find_idx(heap, bucket, key);
-        let mut totals: Vec<i64> = match idx {
-            Some(i) => match &bucket[i].1 {
+        let found = find_idx(heap, bucket, key);
+        let mut totals: Vec<i64> = match found {
+            Some(position) => match &bucket[position].1 {
                 Message::Vector(fields)
                     if fields.len() == deltas.len()
                         && fields.iter().all(|field| matches!(field, Message::Int(_))) =>
@@ -1246,8 +1246,8 @@ pub fn tally(heap: &mut Heap, id: u64, key: Value, deltas: &[i64]) -> LispResult
             })?;
         }
         let stored = Message::Vector(totals.iter().map(|n| Message::Int(*n)).collect());
-        match idx {
-            Some(i) => bucket[i].1 = stored,
+        match found {
+            Some(position) => bucket[position].1 = stored,
             None => bucket.push((to_message(heap, key)?, stored)),
         }
         totals

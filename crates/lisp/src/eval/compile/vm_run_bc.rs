@@ -1486,26 +1486,30 @@ pub(crate) fn vm_run_bc(
                 // cannot is checked where the shim's own frame would have checked it — the
                 // shim's Brood check runs in this frame's place, at its depth, so its answer
                 // (or its blamed error) is this call's, named and placed as before.
+                // A Brood check that finishes here (`Done`) goes back for the checks still owed
+                // under it; one that runs as a frame (`Tail`) comes back through this arm when
+                // it returns, and the rest are checked then.
                 let mut v = v;
-                let mut owed_by_brood = None;
-                while let Some(&handler) = heap.vm_handlers.last()
-                    && handler.kind == crate::core::heap::HandlerKind::ContractResult
-                    && handler.caller == frames.len()
-                    && heap.vm_handlers.len() > handler_floor as usize
-                {
-                    heap.vm_handlers.pop();
-                    let shim = heap.root_at(handler.base);
-                    cur_base = handler.base;
-                    if !crate::builtins::contracts::result_vouched(heap, shim, v) {
-                        owed_by_brood = Some(shim);
-                        break;
+                loop {
+                    let mut owed_by_brood = None;
+                    while let Some(&handler) = heap.vm_handlers.last()
+                        && handler.kind == crate::core::heap::HandlerKind::ContractResult
+                        && handler.caller == frames.len()
+                        && heap.vm_handlers.len() > handler_floor as usize
+                    {
+                        heap.vm_handlers.pop();
+                        let shim = heap.root_at(handler.base);
+                        cur_base = handler.base;
+                        if !crate::builtins::contracts::result_vouched(heap, shim, v) {
+                            owed_by_brood = Some(shim);
+                            break;
+                        }
                     }
-                }
-                if let Some(shim) = owed_by_brood {
+                    let Some(shim) = owed_by_brood else { break };
                     let (check, args) =
                         match crate::builtins::contracts::result_check_call(heap, shim, v) {
                             Ok(call) => call,
-                            Err(e) => raise!('drive, e),
+                            Err(error) => raise!('drive, error),
                         };
                     match dispatch(heap, check, args, true, heap.global()) {
                         Ok(Step::Tail {
@@ -1519,7 +1523,7 @@ pub(crate) fn vm_run_bc(
                             continue 'drive;
                         }
                         Ok(Step::Done(checked)) => v = checked,
-                        Err(e) => raise!('drive, e),
+                        Err(error) => raise!('drive, error),
                     }
                 }
                 // Retire the current frame, then either finish or hand `v` to the caller.

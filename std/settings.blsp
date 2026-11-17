@@ -41,6 +41,10 @@ already there, and return the stored spec. `spec` keys:
 - `:commented?` — write the key commented out in the default file (`:example` shows there
   instead of the default when given).
 - `:rank` — order in the default file; declaration order when absent.
+- `:retired` — the setting is gone, and this says what to use instead. A config that still
+  sets it is warned with this text ([[warnings]]) and its value is never applied
+  ([[value-of]] answers nil); [[specs]] and the default file leave it out. Retire a key
+  rather than undefine it, so an old config file is told what happened to it.
 
     (:default (settings/define :doc/settings :tabs {:default 4 :type '(int 1 16) :doc \"Tab width.\"}))   ;=> 4"
   (let (existing (registry/lookup id name)
@@ -60,10 +64,11 @@ True when there was one.
   (registry/remove id name))
 
 (defn specs (id:any -> list)
-  "The settings declared under `id`, as spec maps in rank order.
+  "The settings declared under `id`, as spec maps in rank order — the ones in use, a
+`:retired` one left out.
 
     (do (settings/define :doc/ordered :b {:default 2}) (settings/define :doc/ordered :a {:default 1}) (map (settings/specs :doc/ordered) :name))   ;=> (:b :a)"
-  (map (registry/ranked id) second))
+  (seq/reject (map (registry/ranked id) second) :retired))
 
 (defn spec-of (id:any name:any -> any)
   "The spec declared for `name` under `id`, or nil when there is none.
@@ -203,8 +208,9 @@ literal `or` type, else the printed type.
 (defn warnings (id:any config:map label:string -> vector)
   "Every problem with `config` against the settings declared under `id`, as readable
 strings that start with `label` (the file's name): a value its setting rejects, in rank
-order, then each key no setting declares — a typo, or a setting whose module has not loaded.
-Empty when the config is clean.
+order, then each `:retired` setting the config still sets, with what replaced it, then each key
+no setting declares — a typo, or a setting whose module has not loaded. Empty when the config
+is clean.
 
     (do (settings/define :doc/warn :cursor {:type '(or :block :bar)}) (settings/warnings :doc/warn {:cursor :blockk :curser :bar} \"init.blsp\"))   ;=> [\"init.blsp: :cursor is :blockk — want :block / :bar\" \"init.blsp: :curser is not a setting (a typo, or one whose module has not loaded)\"]"
   (let (declared (registry/entries id)
@@ -222,10 +228,17 @@ Empty when the config is clean.
                         (pr-str value)
                         " — want "
                         (want-text spec)))))))
-        unknown (sort (map (seq/filter (keys config) (fn (k) (not (contains? declared k)))) pr-str)))
-    (into bad
+        retired (fold (sort (keys config))
+                  []
+                  (fn (found key)
+                    (let (spec (get declared key))
+                      (if (and (map? spec) (:retired spec) (not (nil? (get config key))))
+                        (conj found (str label ": " (pr-str key) " is retired — " (:retired spec)))
+                        found))))
+        unknown (sort (map (seq/filter (keys config) (fn (key) (not (contains? declared key)))) pr-str)))
+    (into (into bad retired)
       (map unknown
-        (fn (k) (str label ": " k " is not a setting (a typo, or one whose module has not loaded)"))))))
+        (fn (key) (str label ": " key " is not a setting (a typo, or one whose module has not loaded)"))))))
 
 ;; ---- the file a group lives in -------------------------------------------
 ;;
@@ -262,7 +275,9 @@ not computed its directories yet can still declare). An editor then checks that 
 
 (defn- key-position (text key)
   ;; `[line col]` (1-based) of the first `key` in `text` written as a key — outside a comment,
-  ;; followed by space, a bracket or the end — or [1 1]
+  ;; followed by space, a bracket or the end — or [1 1]. A position for a warning, not a
+  ;; parse: a `;` inside a string reads as a comment, and a key spelled as a VALUE earlier
+  ;; wins, so it can point a line early
   (let (needle (pr-str key)
         lines (vec (string/split text "\n")))
     (letrec (scan (fn (row)
@@ -325,6 +340,7 @@ than the last value in force. nil for a name nothing declares.
         value (get config name))
     (cond
       (not (map? spec)) nil
+      (:retired spec) nil
       (and (not (nil? value)) (valid? spec value)) value
       else (:default spec))))
 

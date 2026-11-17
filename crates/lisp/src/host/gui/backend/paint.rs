@@ -998,14 +998,6 @@ pub(super) fn render_ops<P: Painter>(
     }
 }
 
-/// Rasterise `frame` into the renderer's retained canvas (sized `fb_w`×`fb_h`),
-/// re-rendering only the strips the diff against the previous frame marks dirty —
-/// or everything, when the canvas is fresh/resized, the diff is disabled, or
-/// `force` (the caller wants a clean full render). A dirty strip that is a translation
-/// of pixels the canvas already holds (a scroll, `strip_blits`) is copied, not drawn.
-/// Records the frame as the new previous one and returns the pixel bands `[y0, y1)`
-/// whose pixels changed — drawn or copied — for the present. `Renderer::blit_rows` counts
-/// the copied rows for the trace.
 // ---- the pixel-space ops, in software ----------------------------------------------
 
 /// The vertical centre and the half-diagonal of a `w`×`h` quad at `(x, y)` — the extent

@@ -202,8 +202,10 @@ is read and not echoed) — never the theme's colours `term/bg` gave it since.
 
 (defn- channel-light (channel)
   ;; one sRGB channel (0–255) as linear light (WCAG 2's relative luminance)
-  (let (c (/ channel 255.0))
-    (if (<= c 0.04045) (/ c 12.92) (math/exp (* 2.4 (math/ln (/ (+ c 0.055) 1.055)))))))
+  (let (fraction (/ channel 255.0))
+    (if (<= fraction 0.04045)
+      (/ fraction 12.92)
+      (math/exp (* 2.4 (math/ln (/ (+ fraction 0.055) 1.055)))))))
 
 (defn color-scheme-of (rgb)
   "Whether a background `rgb` (`[r g b]`, 0–255) is `:light` or `:dark`: light when black text
