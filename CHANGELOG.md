@@ -28,7 +28,10 @@ xs)` answered a list and `(append "" xs)` or `(reverse "")` treated `""` as an e
 while a non-empty string failed inside `rest`, `apply`, `%map-into` or `%raise`, naming a
 function the caller never called. `into`, `vec`, `reverse`, `append`, `fold`, `reduce`,
 `map` and `seq/filter` now each raise `NAME: expected a sequence, got string`, with the hint
-to walk it through `string/->list`. Found by a checker-soundness oracle: random expressions
+to walk it through `string/->list`; so do `take`, `drop`, `any?`, `every?`,
+`seq/take-while` and `sort` (`(every? "" f)` was `true`). And what is not a map is refused
+by `merge`, `keys` and `vals` — `(merge [1 2] {:a 1})` answered `[1 2 [:a 1]]` — and a map
+by `sort`, which answered `nil` for `{}`. Found by a checker-soundness oracle: random expressions
 that run must draw no type finding, and these ran where the checker said they could not.
 
 **Fixed: two formatter bugs found by formatting random readable text.** `~ @z` — unquote

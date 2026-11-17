@@ -155,6 +155,15 @@ A multi-key result prints in the map's internal order, not the order given."
 ;; [k v] vectors, in one O(n) pass. `keys`/`vals`/`contains?` (and `map/reduce-kv`) are all
 ;; Brood over it — no per-key `get`, so no O(n²).
 ;; `seq` (not `%map-pairs`) so a record that is a custom collection answers for itself.
+;; `m` when it is a map, a record or nil — else raised, naming `who`. `(merge [1 2] {:a 1})`
+;; answered `[1 2 [:a 1]]`; `(keys [])` answered nil and `(keys [1])` failed inside `first`.
+;; Untyped and its own function: the callers declare `m` a map, which the checker trusts.
+(defn- %expect-map (who m)
+  (if (if (nil? m) true (if (map? m) true (%record? m)))
+    m
+    (%raise {:kind :type
+             :code "E0030"
+             :message (str who ": expected a map, got " (type-of m) " (" (pr-str m) ")")})))
 (defn keys (m: (or nil map record) -> any)
   "The keys of map `m` (a record's are its fields, id-free). A record that stores its
 contents elsewhere answers for itself through the `Lookup` ability — a multimap gives its
@@ -166,7 +175,7 @@ Order is the map's internal (hash) order, NOT insertion order — sort if you ne
 stable one."
   ;; Unlike `get`'s, this branch is not hot: it already walks the whole map and allocates,
   ;; so the impl check sits up front rather than behind a miss.
-  (let (ks (%keys-via-lookup m))
+  (let (ks (%keys-via-lookup (%expect-map "keys" m)))
     (if (nil? ks) (map (seq m) first) ks)))
 
 (defn- %keys-via-lookup (m)
@@ -187,7 +196,7 @@ guard, as in `seq`: this file loads six before `*impls*`."
     (vals {:a 1})  ;=> (1)
 
 Order matches [[keys]] — the map's internal order, not insertion order."
-  (map (seq m) second))
+  (map (seq (%expect-map "vals" m)) second))
 (defn contains? (m k)
   "True if map `m` has key `k` (distinguishes a stored `nil`/`false` from
 absence). O(1) via the CHAMP hash path (`%map-get`), not an O(n) key scan: probe
@@ -234,7 +243,11 @@ The first map is the base, so merging into a record keeps it that record, while 
 merged INTO a plain map contributes only its fields."
   ;; Seeded with nil, not `{}`: the first non-nil map IS the accumulator — no copy, and a
   ;; record base keeps its identity (`into {}` reads a record as its fields).
-  (let (merged (reduce maps nil (fn (acc m) (cond (nil? m) acc (nil? acc) m else (into acc m)))))
+  (let (merged (reduce maps
+                 nil
+                 (fn (acc m)
+                   (let (m (%expect-map "merge" m))
+                     (cond (nil? m) acc (nil? acc) m else (into acc m))))))
     (if (nil? merged) {} merged)))
 
 (defn update (coll k f & args)
