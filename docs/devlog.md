@@ -1861,3 +1861,9 @@ ms), clipped to a range in O(log n + k), tested against the vector code on rando
 trees, data maps (wire, splice log, `buffer-property-map`) vectors; a key at the top of 10,000
 property spans 5.3 → 0.23 ms. `buffer-property-store` + `properties-in` read a range in
 O(log n + k).
+
+2026-11-17 (ADR-732). **Named regex groups.** `(?<name>…)` / `(?P<name>…)` capture as a numbered
+group does and show up under a match's `:named` by keyword; a name used twice is the leftmost
+group of that name that took part; `replace` templates read `${name}` and `${n}`. The engine is
+untouched (it sees a plain `(`), and a pattern with no `(?<` in its text pays nothing.
+Backreferences and lookaround stay out: neither has a linear engine.

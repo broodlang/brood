@@ -32,6 +32,9 @@
 ;;   \x                  any other escaped character is that character: `\.` `\*` `\\`
 ;;   |                   alternation
 ;;   (...)  (?:...)      a capturing group, and a non-capturing one
+;;   (?<name>...)        a NAMED capturing group (`(?P<name>...)` too): numbered with the
+;;                       others, and found under `:named` in a match by its keyword; a
+;;                       name is a letter or `_`, then letters, digits and `_`
 ;;   [[:alpha:]] …       a POSIX class inside a set, Emacs's (Unicode-aware) meanings:
 ;;                       alpha alnum digit xdigit upper lower space blank punct cntrl
 ;;                       graph print word ascii nonascii — `[^[:space:]]`, `[[:alpha:]_-]`
@@ -43,7 +46,7 @@
 ;; `[` mean the characters they look like, because in a hand-written pattern they
 ;; usually did. The one refusal is a repetition past *max-repeat*.
 ;;
-;; NOT supported: backreferences, lookaround, named groups.
+;; NOT supported: backreferences and lookaround — neither has a linear-time engine.
 
 (defmodule regex
   "Regular expressions: Brood's pattern language, matched by a native engine.
@@ -63,7 +66,8 @@ finished yet.
 
 The dialect: literals, `.`, `* + ?` (and their lazy `*? +? ??` forms), `{m,n}`,
 `^ $`, `[...]`/`[^...]` sets with ranges, classes and POSIX classes (`[[:alpha:]]`), `\\d \\w \\s
-\\D \\W \\S \\b \\B`, the character escapes `\\n \\t \\r \\f \\v \\xHH \\u{…}`, `|`, capturing `(...)` and non-capturing `(?:...)`, and case folding —
+\\D \\W \\S \\b \\B`, the character escapes `\\n \\t \\r \\f \\v \\xHH \\u{…}`, `|`, capturing `(...)`, named
+`(?<name>...)` and non-capturing `(?:...)`, and case folding —
 `(?i)`, `(?i:...)`, or `{:fold? true}` on any search. No backreferences or lookaround. Each
 pattern is parsed once and compiled once, then cached.")
 
@@ -287,16 +291,42 @@ body starts at `body`."
       (when (and (= (regex-peek pcs flag-at) "i") (or (= closer ")") (= closer ":")))
         [(not negated) (= closer ":") (+ flag-at 2)]))))
 
+(def- regex-name-start "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
+(def- regex-name-chars (str regex-name-start "0123456789"))
+
+(defn- regex-name-run (pcs: (vector string) i:int acc:string -> (tuple string int))
+  "The name characters from `i`; returns [name next]."
+  (let (c (regex-peek pcs i))
+    (if (and (string? c) (includes? (if (= acc "") regex-name-start regex-name-chars) c))
+      (regex-name-run pcs (inc i) (str acc c))
+      [acc i])))
+
+(defn- regex-group-name (pcs: (vector string) i:int -> (or nil (tuple string int)))
+  "The name a group opening at `i` (a `(`) gives itself, as `[name body]`, or nil when it
+names none: `(?<name>…)` and Python's `(?P<name>…)`, whose body starts at `body`. A
+malformed one (`(?<1x>`, `(?<>`, `(?<=`) names nothing and keeps the old reading."
+  (when (= (regex-peek pcs (inc i)) "?")
+    (let (open (if (= (regex-peek pcs (+ i 2)) "P") (+ i 3) (+ i 2)))
+      (when (= (regex-peek pcs open) "<")
+        (let ([name close] (regex-name-run pcs (inc open) ""))
+          (when (and (not (= name "")) (= (regex-peek pcs close) ">"))
+            [name (inc close)]))))))
+
 (defn- regex-atom (pcs i)
   "Parse one atom at `i`; returns [atom next]."
   (let (c (regex-peek pcs i)
-        flag (when (= c "(") (regex-fold-flag pcs i)))
+        flag (when (= c "(") (regex-fold-flag pcs i))
+        named (when (= c "(") (regex-group-name pcs i)))
     (cond
       ;; `(?i)` / `(?-i)`: zero-width, the engine reads it with the scope Perl gives it
       (and flag (not (second flag))) [{:t :fold :on (first flag)} (nth flag 2)]
       (and flag (second flag))
         (let ([alt nxt] (regex-alt pcs (nth flag 2)))
           [{:t :group :alt alt :cap false :fold (first flag)} (inc nxt)])
+      ;; a named group captures as a bare `(` does, and is numbered with the others
+      named
+        (let ([alt nxt] (regex-alt pcs (second named)))
+          [{:t :group :alt alt :cap true :name (first named)} (inc nxt)])
       (= c "(")
       ;; `(?:` opens a group that only groups; a bare `(` also CAPTURES, and is
       ;; numbered by the pass below rather than here (the number is the order of
@@ -582,6 +612,67 @@ a literal, and the engine caches its compiled form under exactly this text."
         (table/put regex-whole-cache pattern src)
         src))))
 
+;; ---- named groups -----------------------------------------------------------------
+;; The engine sees a named group as a plain `(`: it numbers it, and the names are kept here,
+;; read off the AST in the order of the opening parens. Only a pattern whose text could name
+;; a group pays for any of it, so `find` on every other pattern costs what it did.
+
+(defn- regex-maybe-named? (pattern -> bool)
+  "Whether `pattern`'s text could hold a named group — a cheap test before the parse."
+  (and (string? pattern) (or (includes? pattern "(?<") (includes? pattern "(?P<"))))
+
+;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
+(check-allow :non-tail-recursion
+  (defn- regex-alt-names (branches acc)
+    "`acc` with one entry per capturing group in `branches`, in the order of their opening
+parens: the group's name, or nil for an unnamed one."
+    (fold branches
+      acc
+      (fn (acc branch)
+        (fold branch
+          acc
+          (fn (acc piece)
+            (let (atom (if (nil? (:q piece)) piece (:a piece)))
+              (if (= (:t atom) :group)
+                (regex-alt-names (:alt atom) (if (:cap atom) (conj acc (:name atom)) acc))
+                acc))))))))
+
+(def- regex-names-cache (table/new))
+
+(defn- regex-names (pattern)
+  "Per capturing group of `pattern`, its name or nil ([[regex-alt-names]]). Memoised."
+  (let (hit (table/get regex-names-cache pattern))
+    (if (vector? hit)
+      hit
+      (let (names (regex-alt-names (regex-parse pattern) []))
+        (table/put regex-names-cache pattern names)
+        names))))
+
+(defn- regex-named-groups (names:vector groups -> map)
+  "The `:named` map: each name's keyword to its group. A name given to more than one group
+(`(?<y>\\d{4})-\\d\\d|\\d\\d/(?<y>\\d{4})`) is the leftmost of them that took part."
+  (fold (range (count names))
+    {}
+    (fn (acc index)
+      (let (name (nth names index))
+        (if (nil? name)
+          acc
+          (let (key (keyword name))
+            (if (nil? (get acc key)) (assoc acc key (nth groups index nil)) acc)))))))
+
+(defn- regex-with-names (pattern m)
+  "Match `m` of `pattern`, with `:named` when the pattern names a group."
+  (if (and m (regex-maybe-named? pattern))
+    (let (names (regex-names pattern))
+      (if (any? names string?) (assoc m :named (regex-named-groups names (:groups m))) m))
+    m))
+
+(defn- regex-all-with-names (pattern matches)
+  "Every match in `matches` with its `:named` ([[regex-with-names]])."
+  (if (regex-maybe-named? pattern)
+    (into [] (map matches (fn (m) (regex-with-names pattern m))))
+    matches))
+
 ;; ---- does it match? -------------------------------------------------------------
 ;; `opts` defaults to nil, the empty map, rather than `{}`: every option is read with a keyword,
 ;; which answers the same for both, and an omitted optional that defaults to nil keeps the call
@@ -617,16 +708,18 @@ start/end of the whole string, so e.g. `(match? name \"\\\\.blsp$\")` tests a su
 `{:start :end :text :groups [...]}` — half-open char offsets, the matched text, and
 one entry per `(...)` group in the pattern (each itself `{:start :end :text}`, or
 nil for a group that did not participate). Group numbering is the order of the
-opening parens; `(?:...)` groups are not numbered.
+opening parens; `(?:...)` groups are not numbered. A pattern that names a group
+(`(?<name>...)`) also gives `:named`, each name's keyword to its group.
 
     (get (regex/find \"at worker.ex:42\" \"([\\\\w.]+):(\\\\d+)\") :text)     ;=> \"worker.ex:42\"
     (get (regex/find \"at worker.ex:42\" \"([\\\\w.]+):(\\\\d+)\") :start)    ;=> 3
     (get (second (get (regex/find \"a-b\" \"(a)-(b)\") :groups)) :text)   ;=> \"b\"
     (regex/find \"abc\" \"zzz\")                                          ;=> nil
+    (map/get-in (regex/find \"v1.20\" \"(?<major>\\\\d+)\\\\.(?<minor>\\\\d+)\") [:named :minor :text])   ;=> \"20\"
 
 Leftmost-first, like Perl and unlike POSIX: of two matches starting at the same
 place, the one the pattern's own alternation and greediness prefer wins."
-  (%regex-find (regex-search-src (regex-opts-pattern pattern opts)) s 0))
+  (regex-with-names pattern (%regex-find (regex-search-src (regex-opts-pattern pattern opts)) s 0)))
 
 (defn find-all (s:string pattern:any &optional opts: (or map nil) -> (vector (map keyword any)))
   "Every non-overlapping match of `pattern` in `s`, left to right, as a vector of the
@@ -635,7 +728,8 @@ end, and steps one character past an EMPTY match so a pattern that can match not
 (`a*`) terminates instead of finding the same empty match forever.
 
     (map (regex/find-all \"a1b22c333\" \"\\\\d+\") (fn (m) (get m :text)))   ;=> (\"1\" \"22\" \"333\")"
-  (%regex-find-all (regex-search-src (regex-opts-pattern pattern opts)) s))
+  (regex-all-with-names pattern
+    (%regex-find-all (regex-search-src (regex-opts-pattern pattern opts)) s)))
 
 ;; ---- searching a rope, and a search box's pattern (ADR-540) ------------------------
 ;; An editor's buffer is a rope, and the functions above take a string: flattening the rope
@@ -707,7 +801,8 @@ the text past it (Emacs's BOUND, what a search confined to a region wants; ADR-5
     (get (regex/rope-find (text/string-> \"ab x\") \"x*\" 0 {:empty? true}) :end)   ;=> 0
     (get (regex/rope-find (text/string-> \"aaaa\") \"a+\" 0 {:bound 2}) :end)       ;=> 2
     (regex/rope-find (text/string-> \"foo bar\") \"o$\" 0 {:bound 3})               ;=> nil"
-  (%rope-regex-find r (regex-rope-src pattern opts) from (= true (:empty? opts)) (:bound opts)))
+  (regex-with-names pattern
+    (%rope-regex-find r (regex-rope-src pattern opts) from (= true (:empty? opts)) (:bound opts))))
 
 (defn rope-find-backward (r pattern before &optional opts)
   "The non-empty match of `pattern` in rope `r` that starts LAST while ending at or before
@@ -718,7 +813,8 @@ Reads backward from `before`, so the cost is the distance to the match. `opts` a
     (get (regex/rope-find-backward (text/string-> \"foo boo\") \"[fb]o+\" 7) :start)   ;=> 4
     (get (regex/rope-find-backward (text/string-> \"foo boo\") \"[fb]o+\" 4) :start)   ;=> 0
     (get (regex/rope-find-backward (text/string-> \"foo boo\") \"o+\" 7) :start)      ;=> 6"
-  (%rope-regex-rfind r (regex-rope-src pattern opts) before (= true (:empty? opts))))
+  (regex-with-names pattern
+    (%rope-regex-rfind r (regex-rope-src pattern opts) before (= true (:empty? opts)))))
 
 (defn rope-count (r pattern from limit &optional opts)
   "`[n resume]`: how many non-overlapping, non-empty matches of `pattern` in rope `r`, scanned
@@ -823,14 +919,33 @@ empty pattern `\"\"` is an absent prefix or suffix.
 
 ;; ---- replace / split, both written on find-all ------------------------------
 
+(defn- regex-template-group (m reference:string -> string)
+  "The text `${reference}` stands for in a template: group `n` when it is a number (0 the
+whole match), the named group otherwise — \"\" for one that did not take part or is not
+there."
+  (let (number (when (every? (string/->list reference) (fn (ch) (includes? "0123456789" ch)))
+                 (string/->number reference))
+        group (cond
+                (= number 0) m
+                (int? number) (nth (get m :groups) (dec number) nil)
+                else (get (get m :named) (keyword reference))))
+    (if group (str (get group :text)) "")))
+
 (defn- regex-expand-loop (template:string m:any i:int acc:string -> string)
-  "Expand `$0`..`$9` (and `$$` for a literal dollar) in a replacement template."
+  "Expand `$0`..`$9`, `${name}` / `${n}` and `$$` (a literal dollar) in a replacement
+template."
   (if (>= i (count template))
     acc
     (let (c (string/substring template i (inc i))
-          d (when (< (inc i) (count template)) (string/substring template (inc i) (+ i 2))))
+          d (when (< (inc i) (count template)) (string/substring template (inc i) (+ i 2)))
+          close (if (and (= c "$") (= d "{")) (index-of template "}" (+ i 2)) -1))
       (cond
         (and (= c "$") (= d "$")) (regex-expand-loop template m (+ i 2) (str acc "$"))
+        (> close (+ i 2))
+          (regex-expand-loop template
+            m
+            (inc close)
+            (str acc (regex-template-group m (string/substring template (+ i 2) close))))
         (and (= c "$") d (includes? "0123456789" d))
           (let (k (reflect/read-string d)
                 g (if (= k 0) m (nth (get m :groups) (dec k) nil)))
@@ -853,11 +968,12 @@ empty pattern `\"\"` is an absent prefix or suffix.
 
 (defn replace (s pattern replacement &optional opts)
   "Replace every non-overlapping match of `pattern` in `s`. `replacement` is either a
-template string, where `$0` is the whole match, `$1`..`$9` are the groups and `$$` is
-a literal dollar, or a FUNCTION of the match map — which is the one to reach for when
+template string, where `$0` is the whole match, `$1`..`$9` are the groups, `${name}` a
+named group (or `${12}` a numbered one past 9) and `$$` is a literal dollar, or a FUNCTION of the match map — which is the one to reach for when
 the new text has to be computed rather than spliced.
 
     (regex/replace \"a@b\" \"(\\\\w+)@(\\\\w+)\" \"$2@$1\")                     ;=> \"b@a\"
+    (regex/replace \"a@b\" \"(?<user>\\\\w+)@(?<host>\\\\w+)\" \"${host}:${user}\")   ;=> \"b:a\"
     (regex/replace \"a1b22\" \"\\\\d+\" (fn (m) (str \"<\" (get m :text) \">\")))   ;=> \"a<1>b<22>\"
 
 A group that did not participate expands to the empty string."
