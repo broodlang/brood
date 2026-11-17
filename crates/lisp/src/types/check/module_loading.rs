@@ -80,9 +80,9 @@ pub(super) fn feature_loaded(heap: &mut Heap, name: &str) -> bool {
 /// runtime `require-one` consults — see `setup_check_imports` for why "some `mod/*` global
 /// exists" was the wrong test). Advisory: a load error is swallowed, the checker never gates
 /// on a missing module. `require-one` is idempotent, so a spurious call costs a map lookup.
-pub(super) fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol) {
+pub(super) fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol) -> Option<crate::error::LispError> {
     if feature_loaded(heap, &value::symbol_name(mod_sym)) {
-        return;
+        return None;
     }
     let quoted = heap.list(vec![
         Value::Sym(value::intern("quote")),
@@ -90,7 +90,21 @@ pub(super) fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol) {
     ]);
     let form = heap.list(vec![Value::Sym(value::intern("require-one")), quoted]);
     let root = heap.global();
-    let _ = crate::eval::eval(heap, form, root);
+    // A module that is not there is the absent-module check's to report; one that is there and
+    // fails to load is answered, so the clause naming it can say so (`ImportScope::load_failures`).
+    match crate::eval::eval(heap, form, root) {
+        // "cannot find module" about THIS module: absent, not broken. One about a module it uses
+        // is this module failing to load, and reported
+        Err(error)
+            if !(error.message.contains("cannot find module")
+                && error
+                    .message
+                    .contains(&format!("'{}'", value::symbol_name(mod_sym)))) =>
+        {
+            Some(error)
+        }
+        _ => None,
+    }
 }
 
 /// Materialise, transitively, every module that the LOADED modules' bodies refer to by a

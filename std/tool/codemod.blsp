@@ -1003,3 +1003,129 @@ be made (nothing is written then).
               (io/puts (str "  warning: "
                          from " and " to " now reach each other — move those helpers too")))
             0)))))
+
+;; ---- renaming a module ------------------------------------------------------------------
+;; A module renamed — `panebody` to `display/panebody`, a project cut into contexts (ADR-752) —
+;; is every reference to it renamed: the qualified names in code and in quoted data, the header
+;; clauses that name it, and the backticked mentions in prose. A local that shares the module's
+;; bare name (`region`, `pool`) is a different thing and is never touched: a bare name is renamed
+;; only as a header clause's module.
+
+(defn rename-module-text (text from to &optional (nested []))
+  "`text` with module `from` renamed `to` ([[rename-module]]): every symbol `from/…` (code or
+quoted data), the module of a `defmodule`, `:use`, `:use-internals` or `:alias` clause, and a
+mention in a string or comment written `` `from/…``, `[[from/…]]`, `(from/…` or `'from/…` — a
+docstring's executed example among them. A bare `from` anywhere else is left — it
+is a local, not the module. So is a name of a module NESTED under `from` (`nested`, `lsp/servers`
+under `lsp`) or of anything in one: it belongs to that module, which this rename does not move.
+
+    (codemod/rename-module-text \"(defmodule rows (:use pool)) (pool/run 'pool/cmd) ; `pool/run`\" \"pool\" \"files/pool\")   ;=> \"(defmodule rows (:use files/pool)) (files/pool/run 'files/pool/cmd) ; `files/pool/run`\"
+    (codemod/rename-module-text \"(lsp/start (lsp/servers/up))\" \"lsp\" \"lsp/client\" [\"lsp/servers\"])   ;=> \"(lsp/client/start (lsp/servers/up))\""
+  (let (prefix (str from "/")
+        nested-name? (fn (name)
+                       (any? nested
+                         (fn (module)
+                           (or (= name module) (string/starts-with? name (str module "/"))))))
+        renamed (fn (name)
+                  (if (and (string/starts-with? name prefix)
+                        (not (nested-name? name))
+                        ;; already renamed, when `to` sits under `from` (lsp to lsp/client): a
+                        ;; name under `to` is not renamed again. Only then: renaming `ui/pane`
+                        ;; to `ui` still renames `ui/pane/draw`
+                        (not (and (string/starts-with? to prefix)
+                               (string/starts-with? name (str to "/")))))
+                    (str to "/" (string/substring name (count prefix) (count name)))
+                    name))
+        symbols (rewrite-symbols-text text (fn (name _) (renamed name)))
+        clause (str "\\((defmodule|:use|:use-internals|:alias|:load|require|require-one)(\\s+'?)"
+                 (regex/escape from)
+                 "([\\s)])")
+        ;; an `(:alias from)` with no `:as` is spelled by its last segment: when that changes,
+        ;; it keeps its old short name, so the `short/…` calls under it still resolve
+        old-short (last (string/split from "/"))
+        keep-short (fn (text)
+                     (if (= old-short (last (string/split to "/")))
+                       text
+                       (regex/replace text
+                         (str "\\(:alias(\\s+)" (regex/escape from) "\\)")
+                         (str "(:alias$1" to " :as " old-short ")")))))
+    (-> (regex/replace (keep-short symbols) clause (str "($1$2" to "$3"))
+      ;; text the symbol pass does not read — strings and comments: a name backticked or linked,
+      ;; or opening a call or quoted (`(from/x …)`, `'from/x`) as a docstring's example does,
+      ;; renamed by the same rule as a symbol. In code each is a symbol already renamed, which
+      ;; no longer starts with `from/`
+      (regex/replace "(`|\\[\\[|\\(|')([^`\\]\\s()'\"]+)"
+        (fn (found)
+          (let ([opener name] (vec (map (:groups found) :text))) (str opener (renamed name))))))))
+
+(defn- module-file (files module)
+  ;; the file of `files` that declares `module`, or nil
+  (seq/find files (fn (file) (= (module-name (file/slurp file)) module))))
+
+(defn- project-manifest-name ()
+  ;; the `:name` of the project.blsp in the current directory, or nil
+  (when (file/exists? "project.blsp")
+    (let (form (reflect/read-first (file/slurp "project.blsp")))
+      (when (and (pair? form) (= (first form) 'project))
+        (let (name (second (seq/drop-while (rest form) (fn (item) (not (= item :name))))))
+          (when (string? name) name))))))
+
+(defn rename-module (from to)
+  "Rename module `from` to `to` across the project's .blsp files ([[rename-module-text]]) and
+move its file where the new name puts it, beside the old one's source root: `src/pool.blsp`
+renamed `files/pool` becomes `src/files/pool.blsp`. Prints each changed file; returns 0, or 1
+when no file declares `from` or the destination exists (nothing is written then).
+
+    (codemod/rename-module \"pool\" \"files/pool\")   ;~> 0"
+  (let (files (project-blsp)
+        source (module-file files from)
+        ;; modules named under `from` keep their names: only `from` itself moves
+        nested (seq/filter (seq/keep files (fn (file) (module-name (file/slurp file))))
+                 (fn (module) (string/starts-with? module (str from "/"))))
+        ;; the project-rooted spelling too (`bedit/terminal`): a module's globals live under
+        ;; the project's name, and code that names them so (a registry row's late-bound
+        ;; symbols, a tool's `:use-internals`) must follow
+        project-name (project-manifest-name)
+        rename-text (fn (text)
+                      (let (plain (rename-module-text text from to nested))
+                        (if (or (nil? project-name) (string/starts-with? to (str project-name "/")))
+                          plain
+                          (rename-module-text plain
+                            (str project-name "/" from)
+                            (str project-name "/" to)
+                            (map nested (fn (module) (str project-name "/" module))))))))
+    (cond
+      (nil? source) (do (io/puts "rename-module: no file declares module " from :to *err*) 1)
+      ;; the source root is found from the path the name gives, so the two must agree
+      (not (string/ends-with? source (str "/" from ".blsp")))
+        (do
+          (io/puts "rename-module: "
+            source " declares " from " but its path does not name it" :to *err*)
+          1)
+      (module-file files to)
+        (do
+          (io/puts "rename-module: " (module-file files to) " already declares " to :to *err*)
+          1)
+      (not (lossless? (file/slurp source)))
+        (do (io/puts "rename-module: " source " does not parse; nothing renamed" :to *err*) 1)
+      else
+        (let (depth (count (string/split from "/"))
+              root (fold (range depth) source (fn (dir _) (path/dirname dir)))
+              destination (path/join root (str to ".blsp")))
+          (if (file/exists? destination)
+            (do (io/puts "rename-module: " destination " exists already" :to *err*) 1)
+            ;; a file that does not parse is left as it is and named: written back through the
+            ;; parse, it would gain what the parser closed
+            (let (readable (seq/filter files (fn (file) (lossless? (file/slurp file))))
+                  skipped (seq/reject files (fn (file) (lossless? (file/slurp file))))
+                  changed (seq/keep readable
+                            (fn (file)
+                              (let (text (file/slurp file)
+                                    renamed (rename-text text))
+                                (when (not (= text renamed)) (file/spit file renamed) file)))))
+              (file/mkdir (path/dirname destination))
+              (file/move source destination)
+              (doseq (file changed) (io/puts "  changed: " file))
+              (doseq (file skipped) (io/puts "  skipped (does not parse): " file))
+              (io/puts "  moved: " source " → " destination)
+              0))))))

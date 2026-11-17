@@ -360,10 +360,6 @@ pub fn record_undeclared_shadow(bare: Symbol, module: Symbol) {
     }
 }
 
-/// The error the current resolve pass recorded, if any: a definition head that spells a
-/// dynamic variable visible from elsewhere, then an ambiguous bare name (ADR-235). Called
-/// right after `resolve` in the macroexpand driver, so the error points at the offending
-/// form. Always clears both channels (so a caught error does not leak into the next pass).
 /// Record a bare use of `imported` (spelled `bare`, which the language ships too) in
 /// `module`, whose header has no `(:shadow bare)` (ADR-750). The first one in a pass wins.
 pub fn record_undeclared_import_shadow(bare: Symbol, imported: Symbol, module: Symbol) {
@@ -376,6 +372,12 @@ pub fn record_undeclared_import_shadow(bare: Symbol, imported: Symbol, module: S
     }
 }
 
+/// The error the current resolve pass recorded, if any: a definition head that spells a dynamic
+/// variable visible from elsewhere, a module definition of a root name its header does not
+/// declare (ADR-735), an imported name the language ships used bare without `(:shadow …)`
+/// (ADR-750), or an ambiguous bare name (ADR-235). Called right after `resolve` in the
+/// macroexpand driver, so the error points at the offending form. Always clears every channel
+/// (so a caught error does not leak into the next pass).
 pub fn take_resolve_error() -> Option<LispError> {
     let dynamic_def = PENDING_DYNAMIC_DEF.with(|pending| pending.take());
     let undeclared_shadow = PENDING_UNDECLARED_SHADOW.with(|pending| pending.take());
@@ -850,8 +852,14 @@ pub(crate) fn bound_value(
     default: Value,
     args: &[Value],
 ) -> LispResult {
-    let found = bound_lookup(heap, env, sym, args, "%lazy-bound-value", &[default])?;
-    Ok(found.unwrap_or(default))
+    // Rooted across the lookup: materialising the module can collect, and `default` is read
+    // back afterwards.
+    let base = heap.roots_len();
+    heap.push_root(default);
+    let found = bound_lookup(heap, env, sym, args, "%lazy-bound-value", &[default]);
+    let default = heap.root_at(base);
+    heap.truncate_roots(base);
+    Ok(found?.unwrap_or(default))
 }
 
 /// The value `sym` is bound to as `bound?` sees it — `Ok(None)` where `bound?` answers false,

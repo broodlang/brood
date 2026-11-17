@@ -301,3 +301,51 @@
   (test "and a reference beside such a form is still renamed"
     (assert= ["(do (m (old)) (new 1))" [[1 7 "old" "new"]]]
       (cst-rename-at-text "(do (m (old)) (old 1))" [[1 7 "old" "new"] [1 15 "old" "new"]] #{"m"}))))
+
+(describe "rename-module-text — a module renamed wherever it is named"
+  (test "qualified names in code and quoted data, and the header clauses"
+    (assert= (rename-module-text "(defmodule rows (:use pool) (:use-internals pool) (:alias pool :as p))\n(pool/run 'pool/cmd-x)"
+               "pool" "files/pool")
+      "(defmodule rows (:use files/pool) (:use-internals files/pool) (:alias files/pool :as p))\n(files/pool/run 'files/pool/cmd-x)"))
+  (test "the module's own defmodule, with its :only lists untouched"
+    (assert= (rename-module-text "(defmodule pool\n  (:use model :only [pool]))"
+               "pool" "files/pool")
+      "(defmodule files/pool\n  (:use model :only [pool]))"))
+  (test "a local or a longer name that shares the module's is left alone"
+    (assert= (rename-module-text "(let (pool 1 pooled 2) (pooled/x pool))" "pool" "files/pool")
+      "(let (pool 1 pooled 2) (pooled/x pool))")
+    (assert= (rename-module-text "(:use pooled)" "pool" "files/pool") "(:use pooled)"))
+  (test "a backticked or linked mention in prose follows; other prose does not"
+    (assert= (rename-module-text "(defn f () \"see `pool/run` and [[pool/run]]\" 1) ; the pool/run note"
+               "pool" "files/pool")
+      "(defn f () \"see `files/pool/run` and [[files/pool/run]]\" 1) ; the pool/run note")))
+
+(describe "rename-module-text — a module nested under the renamed one keeps its name"
+  (test "its qualified names, clauses and prose mentions are left; the outer module's move"
+    (assert= (rename-module-text "(defmodule lsp (:use lsp/servers))\n(lsp/start (lsp/servers/up)) ; `lsp/start`, `lsp/servers/up`"
+               "lsp"
+               "lsp/client"
+               ["lsp/servers"])
+      "(defmodule lsp/client (:use lsp/servers))\n(lsp/client/start (lsp/servers/up)) ; `lsp/client/start`, `lsp/servers/up`")))
+
+(describe "rename-module-text — a docstring's example and a quoted name in text follow"
+  (test "a call or a quote opening a name in a string or comment is renamed; bare prose is not"
+    (assert= (rename-module-text "(defn f () \"Pad.\n\n    (pool/pad 1)   ;=> 2\" 1) ; see (pool/run) and 'pool/cmd, not pool/run"
+               "pool" "files/pool")
+      "(defn f () \"Pad.\n\n    (files/pool/pad 1)   ;=> 2\" 1) ; see (files/pool/run) and 'files/pool/cmd, not pool/run")))
+
+(describe "rename-module-text — a module moved up, and one required by name"
+  (test "renaming a nested module to its parent's name renames its calls"
+    (assert= (rename-module-text "(:use ui/pane) (ui/pane/draw 1)" "ui/pane" "ui")
+      "(:use ui) (ui/draw 1)"))
+  (test "a require names the module too"
+    (assert= (rename-module-text "(require 'pool) (require-one 'pool)" "pool" "files/pool")
+      "(require 'files/pool) (require-one 'files/pool)")))
+
+(describe "rename-module-text — :load clauses and an alias's short name"
+  (test "a :load clause names the module too"
+    (assert= (rename-module-text "(defmodule u (:load pool))" "pool" "files/pool")
+      "(defmodule u (:load files/pool))"))
+  (test "an alias with no :as keeps its short name when the last segment changes"
+    (assert= (rename-module-text "(defmodule u (:alias a/basin)) (basin/d 1)" "a/basin" "a/sink")
+      "(defmodule u (:alias a/sink :as basin)) (basin/d 1)")))

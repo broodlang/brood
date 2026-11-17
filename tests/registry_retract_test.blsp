@@ -144,6 +144,23 @@
       (is (nil? (registry/lookup :regretract/loose :row)))
       (refute (includes? editor/layers/*system-layers* 'regretract-loose/layer)))))
 
+;; a namespace-less file that loads a module from SOURCE part-way through — what loading std
+;; from source does when the file is the first to reach `editor/face`
+(def- *loose-loader*
+  (fixture "regretract-loose-loader"
+    "(registry/put :regretract/loader :row 1)\n(%load-string \"(defmodule regretract-from-source \\\"its doc\\\")\")\n"))
+
+(describe "a module loaded from source inside a file without a defmodule"
+  :isolated (test "credits none of its writes, its doc among them, to the file"
+    (reflect/load *loose-loader*)
+    (let (file (path/absolute *loose-loader*))
+      (assert= (vec (map (registry/written-by #{file}) :global)) ['registry/*registries*])
+      ;; a doc credits nobody from source (the image credits the module): never the file
+      (assert= (%registry-writer '*module-docs* ["regretract-from-source"]) nil)
+      (assert= (system/module-doc 'regretract-from-source) "its doc")
+      (%with-load-journal (fn ()
+                            (doseq (write (registry/written-by #{file})) (registry/retract write)))))))
+
 (fixture "regretract-under"
   "(defmodule regretract-under)\n(registry/put :regretract/stack :k :under)\n")
 (fixture "regretract-over"

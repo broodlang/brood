@@ -150,6 +150,16 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
                           ["--text" "--defs-only"]
                           ["--text" "--in-quote"]]
              :run (fn (options) (run-rename options))}
+   "rename-module" {:about "Rename a module across the project's `.blsp` files and move its file where the new name puts it: `nest rename-module pool files/pool` rewrites every `pool/…` reference (code and quoted data), every `defmodule`/`:use`/`:use-internals`/`:alias` clause naming it and every backticked `pool/…` in prose, and moves `src/pool.blsp` to `src/files/pool.blsp`. A local named `pool` is left alone. Run it from the project root."
+                    :flags {}
+                    :positional ["from" nil]
+                    :names ["from" "to"]
+                    :arity 2
+                    :run (fn (options)
+                           (if (require-project "rename-module" nil)
+                             (codemod/rename-module (first (get options :positionals))
+                               (second (get options :positionals)))
+                             2))}
    "move" {:about "Move definitions to another module: `nest move FROM.blsp TO.blsp NAME…` takes each NAME's top-level definition (with its `sig`, the comments above it and any `check-allow` around it) out of FROM and appends it to TO (created, `:use`-ing what FROM does, when missing), then points every reference at TO — `from/NAME` in code and quoted data, a bare NAME in a file that `:use`s FROM. The moved code reaches what it left behind as `from/HELPER`; a private name reached across is made public. Says when the two modules would reach each other."
            :flags {}
            :positional ["from" nil]
@@ -165,6 +175,9 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
              :positional ["name" "dep"]
              :many true
              :run (fn (options) (run-update options))}
+   "deps" {:about "Print the project's module graph read as contexts (ADR-752): `display/panebody` is a detail of the context `display`, so a reference to it from outside `display` is listed, with the contexts that reach each other and the busiest context edges. `--check` exits 1 when anything reaches into another context's detail; `--all` lists every context edge; `--top N` the N busiest (15)."
+           :flags {"--check" :bool "--all" :bool "--top" "N"}
+           :run (fn (options) (run-deps options))}
    "tree" {:about "Print the project's resolved dependency tree (root → direct → transitive)."
            :flags {}
            :run (fn (options) (run-tree options))}
@@ -644,6 +657,16 @@ Returns the failure count."
                (= target "tree-sitter") (grammar/tree-sitter-highlights)
                else (grammar/tmlanguage)))
     0))
+
+(defn- run-deps (options)
+  (if (require-project "deps" nil)
+    (let (flags (get options :flags)
+          top (when (get flags "--top") (string/->number (get flags "--top"))))
+      (if (and (get flags "--top") (or (not (int? top)) (< top 0)))
+        (do (eputs "nest deps: --top wants a whole number, 0 or more") 2)
+        (module-graph/run (project/find-root (file/cwd))
+          {:check (get flags "--check") :all (get flags "--all") :top top})))
+    2))
 
 (defn- run-format (options)
   (if (require-project "format" nil)

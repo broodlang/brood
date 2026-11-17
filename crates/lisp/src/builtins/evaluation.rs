@@ -610,8 +610,15 @@ pub(super) fn load_module_source(args: &[Value], env: EnvId, heap: &mut Heap) ->
     result.map_err(|error| in_module(error, name))
 }
 
-/// Shared body of `reflect/eval-string` / `%load-string`. When `reset_ns`, the current
-/// namespace is reset to root for the duration and the caller's restored after.
+/// Shared body of `reflect/eval-string` / `%load-string` / `%load-module-source`. When
+/// `reset_ns` the source is a module being LOADED: it runs in a fresh file scope
+/// ([`NsLoadScope`](crate::eval::macros::NsLoadScope) — the root namespace, its own
+/// forward-reference pre-scan, no imports, no assume-own, and no namespace-less file to
+/// credit its registry writes to), and the caller's is restored after on every exit path.
+/// That scope is the one every file loader uses; a hand-kept copy of it here missed the
+/// registry writer, so a std module loaded from source in the middle of a namespace-less
+/// file credited its `defmodule`'s doc to that file. Otherwise (the REPL, inline eval) it
+/// inherits the current namespace (ADR-065).
 pub(super) fn eval_string_inner(
     heap: &mut Heap,
     env: EnvId,
@@ -620,9 +627,10 @@ pub(super) fn eval_string_inner(
 ) -> LispResult {
     let root = heap.env_root(env);
     let forms = reader::read_all(heap, src)?;
-    // When loading a module (`reset_ns`), bracket the namespace at root and
-    // pre-scan its def heads for forward references; the plain `reflect/eval-string` (REPL,
-    // inline) inherits the current namespace and does neither (ADR-065).
+    if reset_ns {
+        let mut scope = crate::eval::macros::NsLoadScope::enter(heap, &forms);
+        return run_forms(scope.heap(), root, &forms);
+    }
     // The inheriting path keeps the caller's known-name set for the call and puts it back
     // afterwards (KI-196): the resolver adds every `def` head it qualifies to that set, so a
     // `(defn map …)` evaluated here would otherwise leave bare `map` "known" for the rest
@@ -630,42 +638,26 @@ pub(super) fn eval_string_inner(
     // later `(reflect/eval-string "(defmodule other) (map …)")` would compile `other/map`.
     // A name the call defined is bound once it returns, which is the evidence the resolver
     // reads from then on, so nothing needs the addition to outlive the call.
-    let inherited_known = if reset_ns {
-        None
-    } else {
-        let known = heap.set_ns_known_names(std::collections::HashSet::new());
-        heap.set_ns_known_names(known.clone());
-        Some(known)
-    };
-    let (prev_ns, prev_known, prev_by_module, prev_imports) = if reset_ns {
-        let pn = heap.set_compile_ns(None);
-        // Region model (ADR-223): per-module pre-scan; active set starts empty and each
-        // `defmodule`'s `%in-ns` activates its region (resolution is a no-op at root, so
-        // nothing resolves before its region opens).
-        let by_module = if crate::eval::macros::file_opens_ns(heap, &forms) {
-            crate::eval::macros::scan_regions(heap, &forms)
-        } else {
-            std::collections::HashMap::new()
-        };
-        let pk = heap.set_ns_known_names(std::collections::HashSet::new());
-        let pbm = heap.set_ns_known_by_module(by_module);
-        let pi = heap.set_imports(crate::core::heap::ImportTable::default());
-        (Some(pn), Some(pk), Some(pbm), Some(pi))
-    } else {
-        (None, None, None, None)
-    };
-    // No pre-scan on the inheriting path, so a reference to a name a LATER call will
-    // define has no evidence to qualify against and would be left bare, missing the
-    // module-qualified global (KI-24) — in the REPL that is just typing `(defmodule m)`
-    // and then two mutually recursive `defn`s. Tell the resolver to fall back to the
-    // current namespace for a name bound nowhere else; a no-op at root. The module-load
-    // path sets it *off*: it has the real pre-scan, and a nested load must not inherit
-    // an outer `eval`'s assumption.
-    let prev_assume = heap.set_ns_assume_own(!reset_ns);
+    let known = heap.set_ns_known_names(std::collections::HashSet::new());
+    heap.set_ns_known_names(known.clone());
+    // No pre-scan on this path, so a reference to a name a LATER call will define has no
+    // evidence to qualify against and would be left bare, missing the module-qualified
+    // global (KI-24) — in the REPL that is just typing `(defmodule m)` and then two
+    // mutually recursive `defn`s. Tell the resolver to fall back to the current namespace
+    // for a name bound nowhere else; a no-op at root.
+    let prev_assume = heap.set_ns_assume_own(true);
+    let result = run_forms(heap, root, &forms);
+    heap.set_ns_assume_own(prev_assume);
+    heap.set_ns_known_names(known);
+    result
+}
+
+/// Compile and run `forms` in order, stopping at the first error; the last form's value.
+fn run_forms(heap: &mut Heap, root: EnvId, forms: &[Value]) -> LispResult {
     // Root the unevaluated forms across the per-form eval — a collection at any
     // depth (ADR-061) relocates the LOCAL forms this loop still holds.
     let base = heap.roots_len();
-    for &form in &forms {
+    for &form in forms {
         heap.push_root(form);
     }
     let mut result: LispResult = Ok(Value::nil());
@@ -685,22 +677,6 @@ pub(super) fn eval_string_inner(
         }
     }
     heap.truncate_roots(base);
-    heap.set_ns_assume_own(prev_assume);
-    if let Some(known) = inherited_known {
-        heap.set_ns_known_names(known);
-    }
-    if let Some(pn) = prev_ns {
-        heap.set_compile_ns(pn);
-    }
-    if let Some(pk) = prev_known {
-        heap.set_ns_known_names(pk);
-    }
-    if let Some(pbm) = prev_by_module {
-        heap.set_ns_known_by_module(pbm);
-    }
-    if let Some(pi) = prev_imports {
-        heap.set_imports(pi);
-    }
     result
 }
 

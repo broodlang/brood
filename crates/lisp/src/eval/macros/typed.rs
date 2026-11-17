@@ -243,28 +243,28 @@ pub(crate) fn plain_param_types(
     let mut names = Vec::with_capacity(list.len());
     let mut types = Vec::with_capacity(list.len());
     let mut ret = None;
-    let mut i = 0;
-    while i < list.len() {
-        let p = list[i];
-        if is_sym(p, syntax_typed::ARROW) {
-            if i + 2 != list.len() {
+    let mut index = 0;
+    while index < list.len() {
+        let param = list[index];
+        if is_sym(param, syntax_typed::ARROW) {
+            if index + 2 != list.len() {
                 return None;
             }
-            ret = declared(list[i + 1]);
+            ret = declared(list[index + 1]);
             break;
         }
-        match typed_name(p) {
+        match typed_name(param) {
             Some(TypedName::Inline(name, ty)) => {
                 names.push(value::intern(name));
                 types.push(declared(value::sym(ty)));
             }
             Some(TypedName::Next(name)) => {
                 names.push(value::intern(name));
-                types.push(declared(*list.get(i + 1)?));
-                i += 1;
+                types.push(declared(*list.get(index + 1)?));
+                index += 1;
             }
             None => {
-                let ValueRef::Sym(name) = p.unpack() else {
+                let ValueRef::Sym(name) = param.unpack() else {
                     return None;
                 };
                 if value::symbol_name_ref(name).starts_with('&') {
@@ -274,7 +274,7 @@ pub(crate) fn plain_param_types(
                 types.push(None);
             }
         }
-        i += 1;
+        index += 1;
     }
     Some((names, types, ret))
 }

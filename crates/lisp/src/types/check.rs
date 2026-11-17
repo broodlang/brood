@@ -606,6 +606,7 @@ fn check_file_passes(
 ) {
     let file_started = std::time::Instant::now();
     let (forms, expanded, import_scope, absent_ns) = expand_and_load(heap, forms, roots_base, out);
+    let import_failed_to_load = import_scope.bare_names_missing;
     let (mut ctx, visible) =
         collect_file_scope(heap, &forms, &expanded, extra_required, strict, file_ns);
     ctx.set_absent_ns(absent_ns);
@@ -682,6 +683,18 @@ fn check_file_passes(
             timing.site_reuses,
             file_started.elapsed().as_millis(),
         );
+    }
+    // A used module that failed to load leaves the names it gives unbound here: a BARE unbound
+    // name is a guess, and the load failure (reported at its clause) is the problem. A
+    // qualified one (`string/jion`) and every other finding stay: they are not about the import.
+    if import_failed_to_load {
+        out.retain(|finding| {
+            finding.lint != Lint::Unbound
+                || !finding
+                    .message
+                    .strip_prefix("unbound symbol: ")
+                    .is_some_and(|name| !name.contains('/'))
+        });
     }
 }
 

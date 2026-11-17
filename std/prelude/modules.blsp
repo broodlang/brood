@@ -531,6 +531,38 @@ feature. Put it first. e.g. (defmodule gen \"A server framework …\")."
        ~@(%defmodule-clause-forms clauses :use-internals %defmodule-internals-clause)
        ~@(%defmodule-clause-forms clauses :alias %defmodule-alias-clause))))
 
+;; `defdelegate` (ADR-753): a module's public function that is another module's, by name — a
+;; context's API over its details (`(defdelegate rows (pane) display/rows)`), without a
+;; hand-written wrapper per function. It expands to an ordinary `defn` that hands its arguments,
+;; untouched, to the target — so the target's own defaults, types, patterns and arity checks are
+;; what apply, the call stays late-bound (a redefined target is what the next call runs) and the
+;; target module loads on first use, as any qualified call's does. The written parameter list is
+;; documentation: it goes into the docstring, which points at the target rather than copying its
+;; text (copying would load the target at expansion).
+(defmacro defdelegate (name params target & options)
+  "Define `name` as a public function that calls the function of the same name in module
+`target` with the arguments it was given — `:as other` calls `target/other` instead. `params`
+is the parameter list as a reader should see it; the call forwards whatever arrives, so an
+omitted optional takes the TARGET's default and a wrong arity is the target's error. The
+docstring names the target and the written parameters, so `M-.` and the docs lead there
+(`reflect/arglist` shows `(& arguments)`). A macro cannot be delegated: it is not called.
+
+    (do (defdelegate %doc-delegated-join (parts separator) string :as join) (%doc-delegated-join [\"a\" \"b\"] \"-\"))   ;=> \"a-b\""
+  (%defn-check-name 'defdelegate name)
+  (when (not (or (empty? options)
+               (and (= (count options) 2) (= (first options) :as) (symbol? (second options)))))
+    (error "defdelegate: " name " takes `:as other` or nothing after its target, not " options))
+  (when (and (= (->string target) (->string (reflect/current-ns)))
+          (= (if (empty? options) name (second options)) name))
+    (error "defdelegate: "
+      name " would call itself: name another module, or `:as` another function"))
+  (let (callee (if (= (first options) :as) (second options) name)
+        target-name (symbol (str (->string target) "/" (->string callee)))
+        arguments (reflect/gensym "arguments"))
+    `(defn ~name (& ~arguments)
+       ~(str "Delegates to [[" (->string target-name) "]]: " (pr-str (cons name params)) ".")
+       (apply ~target-name ~arguments))))
+
 ;; First existing <filename> across the load-path dirs, or nil.
 (defn- %require-find (filename dirs)
   (cond
@@ -1693,19 +1725,22 @@ as an ordinary frame too, and a `receive` in it parks."
   (%lazy-require module)
   (apply (reflect/eval sym) args))
 
+(defn- %await-load (module)
+  ;; wait for the load of `module` another process holds, as frames that park. A load that
+  ;; fails is the reference's to report, not a question's: `bound?` never raises
+  (check-allow :discarded-catch (try (%lazy-require module) (catch _ nil))))
+
 (defn %lazy-bound? (module sym)
   "`bound?` of the qualified `sym` once the load of `module` another process holds has finished
-— the engine calls this in `bound?`'s place (`derive::bound_or_imaged`), so the wait parks. A
-load that fails leaves `sym` unbound, as `bound?` never raises."
-  ;; check-allow :discarded-catch — a broken load is the reference's to report, not `bound?`'s
-  (check-allow :discarded-catch (try (%lazy-require module) (catch _ nil)))
+— the engine calls this in `bound?`'s place (`derive::bound_or_imaged`), so the wait parks
+(ADR-738). A load that fails leaves `sym` unbound."
+  (%await-load module)
   (bound? sym))
 
 (defn %lazy-bound-value (module sym default)
   "`reflect/bound-value` of the qualified `sym` once the load of `module` another process holds
 has finished — `%lazy-bound?`'s twin for the one-lookup read (ADR-743)."
-  ;; check-allow :discarded-catch — a broken load is the reference's to report
-  (check-allow :discarded-catch (try (%lazy-require module) (catch _ nil)))
+  (%await-load module)
   (reflect/bound-value sym default))
 
 ;; ---- library names the PRELUDE itself references -----------------------------

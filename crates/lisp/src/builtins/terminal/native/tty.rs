@@ -125,8 +125,38 @@ impl TtyInput {
 static RESIZE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 extern "C" fn count_resize(_: libc::c_int) {
+    // The handler interrupts arbitrary code, and `wake`'s `write` sets `errno` when it fails
+    // (EAGAIN on a full pipe): put the interrupted code's back.
+    let saved = errno_location().map(|location| {
+        // SAFETY: the calling thread's own `errno`, a valid int for the thread's life.
+        unsafe { *location }
+    });
     RESIZE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     wake();
+    if let (Some(location), Some(value)) = (errno_location(), saved) {
+        // SAFETY: as above.
+        unsafe { *location = value };
+    }
+}
+
+/// This thread's `errno`, where the platform names it.
+fn errno_location() -> Option<*mut libc::c_int> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    // SAFETY: returns the calling thread's errno slot; async-signal-safe.
+    return Some(unsafe { libc::__errno_location() });
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly"
+    ))]
+    // SAFETY: as above.
+    return Some(unsafe { libc::__error() });
+    #[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
+    // SAFETY: as above.
+    return Some(unsafe { libc::__errno() });
+    #[allow(unreachable_code)]
+    None
 }
 
 /// A pipe whose read end a wait for input polls beside the tty, so a resize (which writes no

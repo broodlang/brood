@@ -6,7 +6,7 @@ use super::*;
 // ---- the run cache: damage tracking for the GPU target (ADR-440) -------------------
 //
 // The CPU painter retains its canvas and re-rasterises only the rows a frame changed
-// (`paint::strip_diff`). A swapchain image is not retained — every frame is drawn whole
+// (`paint::strips::grid_damage`). A swapchain image is not retained — every frame is drawn whole
 // — but drawing is the cheap half on a GPU. The expensive half is on the CPU: walking a
 // text op's graphemes, measuring each cluster and looking its glyph up in the atlas, for
 // every op of every frame. So the GPU target retains the RESULT of that walk instead: a

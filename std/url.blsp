@@ -376,12 +376,14 @@ or the length of `text` when there is none."
 root stays at the root."
   (url-dot-segments-loop path ""))
 
-(defn- url-merge-paths (base ref-path:string -> string)
+(defn- url-merge-paths (base reference-path:string -> string)
   "The reference's relative path joined to the base's directory (RFC 3986 §5.2.3)."
   (if (and (not (nil? (:authority base))) (= (:path base) ""))
-    (str "/" ref-path)
+    (str "/" reference-path)
     (let (slash (string/last-index-of (:path base) "/"))
-      (if (< slash 0) ref-path (str (string/substring (:path base) 0 (inc slash)) ref-path)))))
+      (if (< slash 0)
+        reference-path
+        (str (string/substring (:path base) 0 (inc slash)) reference-path)))))
 
 (defn- url-recompose (parts -> string)
   "The five components put back together (RFC 3986 §5.3)."
@@ -405,25 +407,31 @@ backslashes read as slashes, and nothing is percent-encoded or lowercased.
     (url/resolve \"http://a/b/c/d;p?q\" \"?y\")         ;=> \"http://a/b/c/d;p?y\"
     (url/resolve \"https://x.org/a/b\" \"/c#top\")      ;=> \"https://x.org/c#top\""
   (let (base-parts (url-components base)
-        ref (url-components reference))
+        reference-parts (url-components reference))
     (when (nil? (:scheme base-parts))
       (error "url/resolve: the base " (pr-str base) " is not absolute — it has no scheme"))
     (url-recompose (cond
-                     (not (nil? (:scheme ref)))
-                       (assoc ref :path (url-remove-dot-segments (:path ref)))
-                     (not (nil? (:authority ref)))
-                       (assoc ref
+                     (not (nil? (:scheme reference-parts)))
+                       (assoc reference-parts
+                         :path (url-remove-dot-segments (:path reference-parts)))
+                     (not (nil? (:authority reference-parts)))
+                       (assoc reference-parts
                          :scheme (:scheme base-parts)
-                         :path (url-remove-dot-segments (:path ref)))
-                     (= (:path ref) "")
+                         :path (url-remove-dot-segments (:path reference-parts)))
+                     (= (:path reference-parts) "")
                        (assoc base-parts
-                         :query (if (not (nil? (:query ref))) (:query ref) (:query base-parts))
-                         :fragment (:fragment ref))
+                         :query
+                           (if (not (nil? (:query reference-parts)))
+                             (:query reference-parts)
+                             (:query base-parts))
+                         :fragment (:fragment reference-parts))
                      else
                        (assoc base-parts
                          :path
-                           (url-remove-dot-segments (if (string/starts-with? (:path ref) "/")
-                                                      (:path ref)
-                                                      (url-merge-paths base-parts (:path ref))))
-                         :query (:query ref)
-                         :fragment (:fragment ref))))))
+                           (url-remove-dot-segments (if (string/starts-with? (:path reference-parts)
+                                                          "/")
+                                                      (:path reference-parts)
+                                                      (url-merge-paths base-parts
+                                                        (:path reference-parts))))
+                         :query (:query reference-parts)
+                         :fragment (:fragment reference-parts))))))

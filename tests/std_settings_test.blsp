@@ -176,3 +176,18 @@
     (is (empty? (file-diagnostics "/no/such/settings-file.blsp" "(config :zz 1)"))))
   (test "nest's own user config is declared, so a typo there is flagged"
     (assert= (:id (file-claim (project/user-config-path))) :project/user-config)))
+
+(define :std-settings-test/retiring
+  :kept {:default 1 :type 'int :doc "Still here."})
+(define :std-settings-test/retiring
+  :old-name {:default "x" :type 'string :retired "use :new-name — the old one did two jobs"})
+
+(describe "settings: a retired setting"
+  (test "a config that still sets it is told what replaced it"
+    (assert= ["init.blsp: :old-name is retired — use :new-name — the old one did two jobs"]
+      (warnings :std-settings-test/retiring {:old-name "y" :kept 2} "init.blsp"))
+    (assert= [] (warnings :std-settings-test/retiring {:kept 2} "init.blsp")))
+  (test "its value is never applied, and the lists of settings in use leave it out"
+    (is (nil? (value-of :std-settings-test/retiring {:old-name "y"} :old-name)))
+    (assert= [:kept] (vec (map (specs :std-settings-test/retiring) :name)))
+    (is (not (includes? (default-source :std-settings-test/retiring 'config "") "old-name")))))

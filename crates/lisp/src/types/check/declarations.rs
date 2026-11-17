@@ -221,6 +221,7 @@ pub(super) fn install_type_vocabulary(
     annot::set_ability_types(protocol::ability_type_table(heap, expanded));
     annot::set_record_ids(protocol::record_id_names(heap, expanded));
     out.append(&mut import_scope.unknown_only);
+    out.append(&mut import_scope.load_failures);
     annot::set_type_aliases(
         protocol::type_alias_table(heap, expanded, file_ns_name),
         file_ns_name.map(str::to_string),

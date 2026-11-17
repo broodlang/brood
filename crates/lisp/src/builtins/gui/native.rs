@@ -985,10 +985,9 @@ fn parse_gui_ops(
             // [:translate drow dcol inner-ops] — the inner ops moved drow rows down and dcol
             // columns right, resolved here into ops at absolute cells (ADR-728): nothing past
             // the parse knows the block was there.
-            let (Ok(drow), Ok(dcol)) = (
-                expect_int(heap, "%gui-draw", arg(&parts, 1)),
-                expect_int(heap, "%gui-draw", arg(&parts, 2)),
-            ) else {
+            // a malformed block is skipped, as every op here is: no error is built to be dropped
+            let (Some(drow), Some(dcol)) = (arg(&parts, 1).as_int(), arg(&parts, 2).as_int())
+            else {
                 continue;
             };
             let (Ok(drow), Ok(dcol)) = (i32::try_from(drow), i32::try_from(dcol)) else {

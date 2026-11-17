@@ -477,21 +477,23 @@ no tab stop.
       (let (annotation (first inline)
             index (annotation-index annotation)
             chunk (first chunks)
-            s (first chunk)
-            n (count s))
+            text (first chunk)
+            size (count text))
         (cond
           (<= index at)
             (splice-inline-step chunks
               (rest inline)
               at
               (cons (virtual-chunk annotation) acc))
-          (>= index (+ at n)) (splice-inline-step (rest chunks) inline (+ at n) (cons chunk acc))
+          (>= index (+ at size))
+            (splice-inline-step (rest chunks) inline (+ at size) (cons chunk acc))
           else
             (let (cut (- index at))
-              (splice-inline-step (cons [(string/substring s cut n) (second chunk)] (rest chunks))
+              (splice-inline-step (cons [(string/substring text cut size) (second chunk)]
+                                    (rest chunks))
                 inline
                 index
-                (cons [(string/substring s 0 cut) (second chunk)] acc)))))))
+                (cons [(string/substring text 0 cut) (second chunk)] acc)))))))
 
 (defn splice-inline (chunks inline)
   "`[substring face]` `chunks` tiling a line's text with its INLINE annotations spliced in:
