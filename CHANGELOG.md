@@ -23,6 +23,11 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: a keyword reducer fits a multi-clause callee.** `(reduce xs {} :a)` was "no clause
+accepts these arguments": `reduce`'s call is matched against its two clauses, where a keyword
+literal read only as a keyword, though `(:a acc item)` is a lookup with a default. It now
+reads as keyword-or-function there, and still rules out a clause that wants an int.
+
 **Fixed: a string where a sequence belongs is refused by the function called.** `(into ""
 xs)` answered a list and `(append "" xs)` or `(reverse "")` treated `""` as an empty list,
 while a non-empty string failed inside `rest`, `apply`, `%map-into` or `%raise`, naming a

@@ -1159,7 +1159,19 @@ fn check_overload_call(
                     .flatten()
             })
     {
-        let arg_tys: Vec<Option<Ty>> = items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+        // A keyword literal is also a function of one or two arguments (`(:k m)`,
+        // `(:k m default)`), so where an arm wants an arrow it fits: `(reduce xs {} :a)` was
+        // "no clause accepts these arguments" though `(:a acc item)` is a lookup with a
+        // default. Typed as keyword-or-function, it still rules out an arm wanting an int.
+        let callable =
+            Ty::of(crate::core::value::Tag::Fn).union(Ty::of(crate::core::value::Tag::Native));
+        let arg_tys: Vec<Option<Ty>> = items[1..]
+            .iter()
+            .map(|&a| match a {
+                Value::Keyword(_) => expr_ty(heap, a, ctx).map(|t| t.union(callable.clone())),
+                _ => expr_ty(heap, a, ctx),
+            })
+            .collect();
         if overload_arg_mismatch(&arms, &arg_tys)
             && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
         {

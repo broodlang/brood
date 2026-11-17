@@ -33,6 +33,20 @@ fn a_keyword_callback_types_as_its_accessor() {
 }
 
 #[test]
+fn a_keyword_reducer_fits_a_multi_clause_callee() {
+    // `reduce` has two clauses, so its call is matched against arms, where a keyword literal
+    // read as only a keyword: "no clause accepts these arguments", though `(:a acc item)` is
+    // a lookup with a default. Found by running random expressions and checking them.
+    let keyed = file_warnings("(defn keyed () (reduce [{:a 1}] {} :a))");
+    assert!(keyed.is_empty(), "a keyword reducer is accepted: {keyed:?}");
+    let numbered = file_warnings("(defn numbered () (reduce [1] 0 5))");
+    assert!(
+        has(&numbered, "reduce: no clause accepts these arguments"),
+        "an int where the reducer goes is still refused: {numbered:?}"
+    );
+}
+
+#[test]
 fn a_named_callback_is_held_to_the_element_it_is_handed() {
     let ws = file_warnings(
         "(sig bad ((vector string) -> any))\n\
