@@ -327,3 +327,9 @@
                "lsp/client"
                ["lsp/servers"])
       "(defmodule lsp/client (:use lsp/servers))\n(lsp/client/start (lsp/servers/up)) ; `lsp/client/start`, `lsp/servers/up`")))
+
+(describe "rename-module-text — a docstring's example and a quoted name in text follow"
+  (test "a call or a quote opening a name in a string or comment is renamed; bare prose is not"
+    (assert= (rename-module-text "(defn f () \"Pad.\n\n    (pool/pad 1)   ;=> 2\" 1) ; see (pool/run) and 'pool/cmd, not pool/run"
+               "pool" "files/pool")
+      "(defn f () \"Pad.\n\n    (files/pool/pad 1)   ;=> 2\" 1) ; see (files/pool/run) and 'files/pool/cmd, not pool/run")))

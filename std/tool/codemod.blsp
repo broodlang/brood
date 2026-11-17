@@ -1014,7 +1014,8 @@ be made (nothing is written then).
 (defn rename-module-text (text from to &optional (nested []))
   "`text` with module `from` renamed `to` ([[rename-module]]): every symbol `from/…` (code or
 quoted data), the module of a `defmodule`, `:use`, `:use-internals` or `:alias` clause, and a
-mention in prose written `` `from/…`` or `[[from/…]]`. A bare `from` anywhere else is left — it
+mention in a string or comment written `` `from/…``, `[[from/…]]`, `(from/…` or `'from/…` — a
+docstring's executed example among them. A bare `from` anywhere else is left — it
 is a local, not the module. So is a name of a module NESTED under `from` (`nested`, `lsp/servers`
 under `lsp`) or of anything in one: it belongs to that module, which this rename does not move.
 
@@ -1026,7 +1027,10 @@ under `lsp`) or of anything in one: it belongs to that module, which this rename
                          (fn (module)
                            (or (= name module) (string/starts-with? name (str module "/"))))))
         renamed (fn (name)
-                  (if (and (string/starts-with? name prefix) (not (nested-name? name)))
+                  (if (and (string/starts-with? name prefix)
+                        (not (nested-name? name))
+                        ;; already renamed (`to` may sit under `from`: lsp to lsp/client)
+                        (not (string/starts-with? name (str to "/"))))
                     (str to "/" (string/substring name (count prefix) (count name)))
                     name))
         symbols (rewrite-symbols-text text (fn (name _) (renamed name)))
@@ -1034,8 +1038,11 @@ under `lsp`) or of anything in one: it belongs to that module, which this rename
                  (regex/escape from)
                  "([\\s)])"))
     (-> (regex/replace symbols clause (str "($1$2" to "$3"))
-      ;; prose: a backticked or linked name, renamed by the same rule as a symbol
-      (regex/replace "(`|\\[\\[)([^`\\]\\s]+)"
+      ;; text the symbol pass does not read — strings and comments: a name backticked or linked,
+      ;; or opening a call or quoted (`(from/x …)`, `'from/x`) as a docstring's example does,
+      ;; renamed by the same rule as a symbol. In code each is a symbol already renamed, which
+      ;; no longer starts with `from/`
+      (regex/replace "(`|\\[\\[|\\(|')([^`\\]\\s()'\"]+)"
         (fn (found)
           (let ([opener name] (vec (map (:groups found) :text))) (str opener (renamed name))))))))
 
