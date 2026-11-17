@@ -13,6 +13,12 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: `doseq` and `fold-for` errors name `doseq` and `fold-for`, and `for` refuses
+`:let`.** An unpaired binding in either reported `for: binding … has no collection`, naming
+the check they share rather than the form written. And a keyword clause `for` does not have
+(`:let`, `:while`) bound as a literal pattern over its "collection", so it surfaced as an
+unbound name or an empty result; it now fails, naming the two clauses there are.
+
 **Fixed: `(check-allow :typo …)` is reported.** A category the checker does not know
 suppressed nothing and said nothing, so a misspelt `:type-mismach` left its lint on with no
 explanation; the header's `(:check-allow …)` clause already reported one. The form now does

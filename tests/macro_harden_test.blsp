@@ -122,7 +122,12 @@
 
   (test "a pattern with no collection raises"
     (let (msg (expand-error '(doseq (x) (io/puts x))))
-      (is (includes? msg "has no collection")))))
+      (is (includes? msg "has no collection"))
+      ;; It named `for`, the check doseq shares, not the form the user wrote.
+      (is (includes? msg "doseq: binding"))))
+
+  (test "fold-for's unpaired binding names fold-for"
+    (is (includes? (str (expand-error '(fold-for (acc 0 x [1] y) acc))) "fold-for: binding"))))
 
 ;; ── 4. for — unpaired binding or lone :when ───────────────────────────────────
 
@@ -142,6 +147,12 @@
       (is (string? msg))
       (is (includes? msg "for"))
       (is (includes? msg "x"))))
+
+  (test "a keyword other than :when and :into is not a clause"
+    ;; `:let` bound as a literal pattern over its "collection": an unbound name or nothing.
+    (doseq (clause '(:let :while))
+      (let (msg (expand-error (list 'for (list 'x [1 2] clause '(y 1)) 'x)))
+        (is (includes? (str msg) (str "for: " clause " is not a clause"))))))
 
   (test "three-element bind (missing second coll) raises"
     (let (msg (expand-error '(for (x xs y) [x y])))

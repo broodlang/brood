@@ -814,25 +814,35 @@ iterating for side effects.
 ;; Validate that binding pairs are complete — each variable has a collection, and each
 ;; :when has a guard expression. An odd-count suffix silently produces an empty result
 ;; (the missing coll becomes nil), which is almost always a mistake.
-(defn- %for-check-binds (binds)
-  (%for-check-pairs binds binds))
+;; `form` is the macro the user wrote (`for`, `fold-for`, `doseq`), which the error names.
+(defn- %for-check-binds (form binds)
+  (%for-check-pairs form binds binds))
 ;; `all` is the whole binding list, which the reader positioned: the place an error points
 ;; at, since the offending piece is usually a bare symbol, which carries no position.
-(defn- %for-check-pairs (binds all)
+(defn- %for-check-pairs (form binds all)
   (cond
     (empty? binds) nil
     (%eq (first binds) :when)
       (if (empty? (rest binds))
-        (reflect/error-at all "for: :when at end of bindings has no guard expression")
-        (%for-check-pairs (rest (rest binds)) all))
+        (reflect/error-at all form ": :when at end of bindings has no guard expression")
+        (%for-check-pairs form (rest (rest binds)) all))
     ;; `:into coll` is checked by `%for-split-into` (last clause, has a value).
-    (%eq (first binds) :into) (%for-check-pairs (rest (rest binds)) all)
+    (%eq (first binds) :into) (%for-check-pairs form (rest (rest binds)) all)
+    ;; Any other keyword here is a clause from another language (`:let`, `:while`), which
+    ;; would bind as a literal pattern over its "collection": an unbound name or nothing.
+    (keyword? (first binds))
+      (reflect/error-at all
+        form
+        ": "
+        (pr-str (first binds))
+        " is not a clause — the clauses are :when and :into; bind a name with let in the body")
     (empty? (rest binds))
       (reflect/error-at all
-        "for: binding '"
+        form
+        ": binding '"
         (pr-str (first binds))
         "' has no collection — bindings must be paired as (var coll ...)")
-    else (%for-check-pairs (rest (rest binds)) all)))
+    else (%for-check-pairs form (rest (rest binds)) all)))
 
 (defmacro for (binds & body)
   "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure. Multiple body forms are evaluated in order and the LAST one is collected (like `let`/`when`/`doseq`).
@@ -849,7 +859,7 @@ A trailing `:into coll` collects with `conj` onto `coll` instead of building a l
       (error "for: bindings must be a list, not a vector: write (for (x xs) expr)."
         " Brood is lists-for-code, vectors-for-data (unlike Clojure) — a vector"
         " *inside* a binding position is still destructuring: (for ([k v] pairs) k)."))
-    (%for-check-binds binds)
+    (%for-check-binds "for" binds)
     (let (split (%for-split-into binds)
           binds (first split)
           into (second split)
@@ -884,7 +894,7 @@ A trailing `:into coll` collects with `conj` onto `coll` instead of building a l
         "fold-for: the first pair must name the accumulator and its start, got "
         (pr-str binds)
         ". Syntax: (fold-for (acc init x xs :when p) body)"))
-    (%for-check-binds (rest (rest binds)))
+    (%for-check-binds "fold-for" (rest (rest binds)))
     (when (second (%for-split-into (rest (rest binds))))
       (error "fold-for: :into is for's clause — the accumulator IS the result here."
         " Syntax: (fold-for (acc init x xs :when p) body)"))
@@ -914,7 +924,7 @@ A trailing `:into coll` collects with `conj` onto `coll` instead of building a l
         "doseq: bindings must be a non-empty list of pattern-collection pairs, got "
         (pr-str bind)
         ". Syntax: (doseq (x xs) body...)"))
-    (%for-check-binds bind)
+    (%for-check-binds "doseq" bind)
     `(do (/fold-for (acc# nil ~@bind) ~@body nil) nil)))
 
 ;; `bench` moved to the `dev` module (`dev/bench`) with the other diagnostics.
