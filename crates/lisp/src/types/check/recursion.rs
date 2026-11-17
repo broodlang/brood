@@ -299,7 +299,8 @@ fn walk_inner(
                     return;
                 }
             }
-            analyze_body(heap, name, &items[2..], here, out);
+            // A bare `(let)` has no body (the compile pass reports it).
+            analyze_body(heap, name, items.get(2..).unwrap_or(&[]), here, out);
             return;
         }
         if value::symbol_is(head, kw::DEF) || value::symbol_is(head, kw::DEFMACRO) {

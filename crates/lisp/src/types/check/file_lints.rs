@@ -67,7 +67,8 @@ fn lint_duplicate_defs_in_inner(
     if value::symbol_is(head, "check-allow") || value::symbol_is(head, "%lint-allow") {
         let here = allowed
             || matches!(items.get(1), Some(&Value::Keyword(k)) if value::symbol_is(k, "duplicate-def"));
-        for &it in &items[2..] {
+        // A bare `(check-allow)` has no forms (and is reported where it is expanded).
+        for &it in items.get(2..).unwrap_or(&[]) {
             lint_duplicate_defs_in(heap, it, here, seen, out);
         }
         return;

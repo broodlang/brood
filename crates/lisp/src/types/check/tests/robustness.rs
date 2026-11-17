@@ -146,6 +146,212 @@ fn a_depth_capped_body_walk_is_not_memoized_as_the_callees_signature() {
     );
 }
 
+/// Malformed forms, one per line: a form missing its body, its bindings, its clauses or
+/// its type. The compile pass reports each; the checker must walk past it. A bare
+/// `(let)`, `(letrec)`, `(match v ())` and a top-level `(check-allow)` each indexed past
+/// the end of a slice, and the advisory pass died with "checker internal error".
+const MALFORMED_FORMS: &str = r#"(match v ((or) 1))
+(match v ((and) 1))
+(case v)
+(case)
+(case v ())
+(cond)
+(cond ())
+(cond (true))
+(let)
+(let ())
+(match v)
+(let (a))
+(let ([a b]) a)
+(letrec)
+(letrec (f))
+(fn)
+(fn ())
+(fn (()) 1)
+(fn ((a b)) a)
+(fn (a:) a)
+(fn (-> int) 1)
+(match)
+(fn (a:int ->) a)
+(fn (& ) 1)
+(fn (&optional) 1)
+(if)
+(if v)
+(for)
+(for ())
+(for (x) x)
+(for (x xs :when) x)
+(fold-for)
+(match v ())
+(fold-for (acc) acc)
+(when-let)
+(when-let ())
+(if-let (a))
+(try)
+(try 1 (catch))
+(try 1 (catch e))
+(receive)
+(receive ())
+(with)
+(match v (nil))
+(with ())
+(ok->)
+(-> )
+(->> v)
+(doseq)
+(doseq (x))
+(quote)
+(quasiquote)
+(unquote v)
+(def)
+(match v (_ :when))
+(sig)
+(sig f)
+(sig f ())
+(sig f (->))
+(sig f (int ->))
+(check-allow)
+(check-allow :type-mismatch)
+(map)
+(map xs)
+(fold xs)
+(match v (_ :when true))
+(apply)
+(comp)
+(defrecord)
+(%typed-fn)
+(%typed-fn 'x)
+(%typed-fn '(int -> int) 3)
+(%typed-fn 'nil (fn (a) a))
+(string/interp)
+(string/interp "{")
+(string/interp "{}")
+(match v ([a b]))
+(seq/sort-by xs)
+(assoc)
+(get)
+(nth)
+(nth xs)
+(match v ((tuple) 1))
+(match v ([& rest] rest))
+(match v ([a &] a))
+(match v (^ 1))
+(match v ('  1))
+(match v ((record) 1))
+(defn)
+(defn g)
+(defn g ())
+(defn g "doc")
+(defn- g)
+(defmacro)
+(defmacro m)
+(defmodule)
+(fn (a b) )
+(fn ((a)) a)
+(fn [a] a)
+(let [a 1] a)
+(let (1 2) 3)
+(let ("a" 2) 3)
+(letrec ((f)) 1)
+(letrec (1 2) 3)
+(match v (1))
+(match v ([1 2] ) )
+(match v ((or 1) ) )
+(case v 1)
+(cond true)
+(if 1 2 3 4)
+(do)
+(def 1 2)
+(def x)
+(fn (& a b) a)
+(fn (&optional (a)) a)
+(fn (&optional (a 1 2)) a)
+(sig 1 (int -> int))
+(defrecord r)
+(defrecord r ())
+(defrecord r (a:))
+(for (x xs y) x)
+(for (x xs :let) x)
+(for (x xs :let (y)) y)
+(fold-for (acc 0 x) acc)
+(receive (1))
+(receive (:after))
+(receive (:after 10))
+(with (a) a)
+(with (a 1) )
+(ok-> 1 ())
+(-> 1 ())
+(-> 1 (1 2))
+(cond-> 1 true)
+(as-> 1)
+(as-> 1 x)
+(comment)
+(check-allow :nope 1)
+(%lint-allow)
+(%lint-allow :x)
+(%register-sig)
+(%register-sig 'f)
+(%register-sig 'f '(int))
+(%typed-fn '(int -> int))
+(%typed-fn '(-> int) (fn () 1))
+(%typed-fn '(int int -> int) (fn (a) a))
+(%typed-fn '(int -> int) (fn (a b) a))
+(%typed-fn '(int -> int) (fn))
+(%typed-fn '(int -> int) (fn ((a) 1) ((a b) 2)))
+(map xs (fn))
+(map xs (fn ()))
+(fold xs 0 (fn))
+(fold xs 0 (fn (a)))
+(seq/filter xs (fn))
+(apply (fn))
+(comp (fn))
+(string/interp "{(}")
+(string/interp "{)}")
+(quote 1 2)
+(get-in)
+(assoc v)
+(assoc v :a)
+(nth xs 1 2 3)"#;
+
+#[test]
+fn the_checker_walks_past_every_malformed_form() {
+    // Each context puts the form where a different pass reaches it: a body, the top
+    // level (the file lints), a helper typed from its caller, a `def`, a `let`-bound
+    // lambda, a combinator's callback and a `letrec` loop's base case.
+    let contexts = [
+        "(defn f (v xs) FORM)",
+        "FORM",
+        "(defn- helper (v xs) FORM) (defn caller () (helper 1 [2]))",
+        "(def x FORM)",
+        "(defn f (v xs) (let (g (fn (a) FORM)) (g 1)))",
+        "(defn f (v xs) (map xs (fn (item) FORM)))",
+        "(defn f (v xs) (letrec (go (fn (n) (if (= n 0) FORM (go (dec n))))) (go 3)))",
+    ];
+    let internal = |src: &str| {
+        file_warnings(src)
+            .into_iter()
+            .find(|w| w.starts_with("checker internal error"))
+    };
+    for context in contexts {
+        let file: String = MALFORMED_FORMS
+            .lines()
+            .map(|form| context.replace("FORM", form) + "\n")
+            .collect();
+        if internal(&file).is_none() {
+            continue;
+        }
+        // One file aborts at its first panic; name every form that panics.
+        let culprits: Vec<String> = MALFORMED_FORMS
+            .lines()
+            .filter_map(|form| {
+                let src = context.replace("FORM", form);
+                internal(&src).map(|error| format!("{src}\n    {error}"))
+            })
+            .collect();
+        panic!("the checker died on:\n{}", culprits.join("\n"));
+    }
+}
+
 #[test]
 fn a_caller_derived_recursive_parameter_does_not_hang_the_check() {
     // `object`'s parameter is derived from its callers: `data`'s JSON-ish return, and a
