@@ -14,6 +14,12 @@ and `(let (f (fn (x:int) …)) (f "s"))` are reported. No runtime contract guard
 `fn`; it expands to `(%typed-fn 'SIG (fn …))`, an identity the compiler drops, so a typed
 `letrec` loop compiles as before.
 
+**Fixed: a helper from another module is typed by its call.** A loaded function whose
+inferred result says little — a bare `number`, or a cover like `ordered` — is re-typed under
+each call's arguments, as one in the same file already was. pong's `(defn clamp (x lo hi)
+(max lo (min hi x)))` read `ordered` from its tests whatever went in; `(clamp 1.5 0.0 2.0)`
+is now `float`. pong's strict findings drop from 38 to 32.
+
 **Fixed: types shown as written.**
 - `reflect/type-signature`, and so hover and `nest mcp`'s `lookup`, shows a polymorphic
   declaration with its type variables: `math/clamp` is `(?A ?A ?A -> ?A)`, where it read

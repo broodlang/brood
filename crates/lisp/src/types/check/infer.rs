@@ -527,10 +527,7 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                             // bounded by `(< i n)` read `ordered`, so with `datetime` in
                             // scope an int caller's `(+ acc (digits codes 0 9))` warned —
                             // the verdict moved with what happened to be loaded.
-                            if sg.ret.is_unrefined_collection()
-                                || sg.ret == Ty::NUMBER
-                                || super::sigs::cover_name_of(&sg.ret).is_some()
-                            {
+                            if result_says_little(&sg.ret) {
                                 // The body says nothing — or only "a collection" — about its
                                 // result from its own parameters (a pass-through, an
                                 // unconstrained accumulator, a recursive list builder whose
@@ -633,12 +630,16 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         return Some(sg.ret);
                     }
                     match sig_of(heap, s).map(|sig| sig.ret) {
-                        Some(t) if !t.is_unrefined_collection() => Some(t),
-                        // A loaded function whose flat return is `any` or an unrefined
-                        // collection (or that inferred nothing): re-type its body under
-                        // this call's argument types — and MEET the answer with the flat
-                        // one (`meet_flat`), since a curated `vector | map` can be sharper
-                        // than what the body says under `any` inputs.
+                        Some(t) if !result_says_little(&t) => Some(t),
+                        // A loaded function whose flat return is `any`, an unrefined
+                        // collection, a bare `number` or a registry cover (or that inferred
+                        // nothing): re-type its body under this call's argument types — the
+                        // rule a same-file inferred function gets above, so a helper reads the
+                        // same from its own module's tests as from its module. pong's
+                        // `(defn clamp (x lo hi) (max lo (min hi x)))` returned `ordered` to
+                        // every caller in another module, numbers in or not. MEET the answer
+                        // with the flat one (`meet_flat`), since a curated `vector | map` can
+                        // be sharper than what the body says under `any` inputs.
                         flat => meet_flat(
                             super::sigs::specialize_call(heap, s, &items[1..], ctx),
                             flat,
@@ -3167,6 +3168,14 @@ fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opt
         sub = sub.bind(*name, bound);
     }
     expr_ty(heap, *parts.last()?, &sub)
+}
+
+/// Does an inferred result say little enough that a call should re-type the body under its
+/// own arguments? `any` or an unrefined collection, a bare `number` (arithmetic over parameters known
+/// only as numbers, which an int call may close over int), or a registry cover (`ordered`,
+/// `numeric` — ADR-299), whose width moves with whatever the loaded modules registered.
+fn result_says_little(ret: &Ty) -> bool {
+    ret.is_unrefined_collection() || *ret == Ty::NUMBER || super::sigs::cover_name_of(ret).is_some()
 }
 
 /// The call-site answer when a body was re-typed under the call's argument types

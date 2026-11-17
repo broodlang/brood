@@ -1239,6 +1239,25 @@ fn the_unknown_keyed_value_is_read_by_overlap_under_strict() {
     assert!(!map_into_record.is_empty(), "a known map is no record");
 }
 
+/// A LOADED function whose inferred result is a registry cover (`ordered`) or a bare `number`
+/// is re-typed under each call's arguments, as a same-file one is: pong's `(defn clamp (x lo
+/// hi) (max lo (min hi x)))` read `ordered` from every other module, floats in or not, so its
+/// tests' `(abs (english …))` was flagged under `--strict`. The answer meets the flat one.
+#[test]
+fn a_loaded_function_with_a_covering_result_is_typed_by_its_call() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(defn clamp-probe (x lo hi) (math/max lo (math/min hi x)))")
+        .expect("def");
+    let call = crate::syntax::reader::read_one(&mut interp.heap, "(clamp-probe 1.5 0.0 2.0)")
+        .expect("parse");
+    let ty = crate::types::check::expr_ty_of(&interp.heap, call).expect("a type for the call");
+    assert!(
+        ty.is_subtype(&crate::types::Ty::of(crate::core::value::Tag::Float)),
+        "three floats in, a float out; got {ty}"
+    );
+}
+
 // A field guard over a value whose kind is unknown proves the field, not the kind: under
 // `(when (:sudo b) …)` an unannotated `b` is "a map or a record carrying `:sudo`"
 // (`Ty::keyed_of_open`), so it still passes on to a record parameter — a `map` shape there
