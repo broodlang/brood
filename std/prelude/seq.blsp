@@ -39,7 +39,9 @@
 
     (drop [1 2 3 4] 2)  ;=> (3 4)
     (drop [1 2] 9)      ;=> nil"
-  (if (or (<= n 0) (empty? coll)) coll (drop (rest coll) (- n 1))))
+  (%drop-loop (%expect-collection "drop" coll) n))
+(defn- %drop-loop (coll n)
+  (if (or (<= n 0) (empty? coll)) coll (%drop-loop (rest coll) (- n 1))))
 
 ;; (seq/take-while pred coll) / (seq/drop-while pred coll) split on the first failure.
 (defn seq/take-while (coll pred)
@@ -49,8 +51,9 @@ also returns a list whatever it was given.
     (seq/take-while [1 2 3 1] (fn (x) (< x 3)))   ;=> (1 2)
     (seq/take-while [5 1] (fn (x) (< x 3)))       ;=> nil
 
-Works on any collection `take` does — vectors and strings included."
-  (%take-while-acc pred coll nil))
+Works on any collection `take` does — a vector included; a string is refused, as `take`
+refuses it (walk `(string/->list s)`)."
+  (%take-while-acc pred (%expect-collection "seq/take-while" coll) nil))
 (defn- %take-while-acc (pred coll acc)
   ;; `empty?`, not `pair?` — the guard `take`/`drop` use. `pair?` is false for a VECTOR and
   ;; a STRING, so it would walk zero items of either and answer `nil`.
@@ -70,12 +73,16 @@ Works on any collection `take` does — vectors and strings included."
 
     (any? [1 3 4] math/even?)   ;=> true
     (any? [1 3] math/even?)     ;=> false"
-  (cond (empty? coll) false (pred (first coll)) true else (any? (rest coll) pred)))
+  (%any-loop (%expect-collection "any?" coll) pred))
+(defn- %any-loop (coll pred)
+  (cond (empty? coll) false (pred (first coll)) true else (%any-loop (rest coll) pred)))
 (defn every? (coll pred)
   "True if `(pred x)` holds for every item of `coll` (vacuously true if empty).
 
     (every? [2 4] math/even?)   ;=> true"
-  (cond (empty? coll) true (pred (first coll)) (every? (rest coll) pred) else false))
+  (%every-loop (%expect-collection "every?" coll) pred))
+(defn- %every-loop (coll pred)
+  (cond (empty? coll) true (pred (first coll)) (%every-loop (rest coll) pred) else false))
 
 ;; (index-of coll x [from]) -> the 0-based index of `x`, or -1. The index-returning
 ;; sibling of `includes?`, and BARE rather than `string/index-of` for the reason ADR-230
@@ -183,13 +190,24 @@ Always true for `n` <= 0.
 ;; keywords, …). Dispatch checks the first item — non-empty fast since
 ;; `(number? (first a))` is one tag-of compare. Empty coll → empty list.
 ;; Custom-comparator `(sort coll less?)` stays on the Brood-side `%merge-sort`.
+;; `sort`'s collection, checked: a walkable one (`%expect-collection`), and not a map, whose
+;; entries have no order of their own — `(sort {})` answered nil and any other map failed
+;; inside `%sort-cmp`. The sig `sort` declares already excludes a map, and the checker
+;; types this parameter from it, so the test is the primitive one it does not narrow.
+(defn- %expect-sortable (coll)
+  (if (%eq (type-of (%expect-collection "sort" coll)) :map)
+    (%raise {:kind :type
+             :code "E0030"
+             :message (str "sort: expected a list, vector or set, got map (" (pr-str coll) ")")
+             :hint "sort a map's entries with `(sort (seq m))`, or its keys with `(sort (keys m))`."})
+    coll))
 (defn sort (coll & more)
   "Sort a collection (stable). `(sort coll)` is ascending by `<` for numbers, or by structural order (lexicographic on vectors/lists, text order on strings/symbols/keywords) for anything else. `(sort coll less?)` uses a strict less-than predicate.
 
     (sort [3 1 2])              ;=> (1 2 3)
     (sort [\"b\" \"a\"])            ;=> (\"a\" \"b\")
     (sort [3 1 2] >)            ;=> (3 2 1)"
-  (%expect-collection "sort" coll)
+  (%expect-sortable coll)
   (cond
     (not (empty? more)) (%merge-sort (first more) coll)
     (empty? coll) nil
@@ -254,6 +272,10 @@ Always true for `n` <= 0.
 ;; onto the reversed accumulator, then reverse once — so we never materialise the
 ;; intermediate list-of-sublists nor spread it through `apply append`.
 
+;; Whether either of `into`'s arguments is a string. Its own function, untyped: inside
+;; `into` the parameters are declared `seqable`, which the checker reads as never a string.
+(defn- %string-in? (to from) (if (%eq (type-of to) :string) true (%eq (type-of from) :string)))
+(defn- %the-string (to from) (if (%eq (type-of to) :string) to from))
 (defn into (to:seqable from:seqable -> any)
   "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a **set**, items are added and duplicates collapse (set result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work.
 
@@ -273,6 +295,10 @@ Always true for `n` <= 0.
     ;; A plain map poured into an EMPTY map is the answer itself, as with vectors below.
     ;; A record target (ADR-542) conj's each item through `Conjable` (a custom collection
     ;; defines how); a record `from` is read through `seq`, its fields by default.
+    ;; A string on either side is not a sequence (`seqable` excludes it, so the checker
+    ;; reports such a call): at run time `(into "" xs)` answered a LIST, and anything else
+    ;; failed inside `rest`/`apply`/`%map-into`, naming none of them `into`.
+    (%string-in? to from) (%refuse-string "into" (%the-string to from))
     (%record? to) (fold (seq from) to %conj-one)
     (map? to)
       (cond

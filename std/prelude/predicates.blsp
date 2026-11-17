@@ -270,7 +270,7 @@ current element and `acc` is the current accumulator."
          ;; `%fold-source`, not `seq`: `seq` passes a string through (for `count` and
          ;; `empty?`), and walking it would then fail inside `first`, naming a function
          ;; the caller never called. `%fold-source` refuses a string with the hint.
-         (/reverse (-loop (/%fold-source coll) nil))))))
+         (/reverse (-loop (/%fold-source ~(str sym) coll) nil))))))
 
 (%defseq map
   (f)
@@ -313,13 +313,18 @@ and a set its elements, as everywhere else `seq` applies.
     (vec '(1 2 3))   ;=> [1 2 3]
     (vec {:a 1})     ;=> [[:a 1]]
     (vec nil)        ;=> []"
-  (into [] coll))
+  (if (%eq (type-of coll) :string) (%refuse-string "vec" coll) (into [] coll)))
 
 ;; Prepend every element of `lst` onto `acc` (so `acc` collects all elements in
 ;; reverse); `append` folds this over the lists, then reverses once. Argument order
 ;; is fold's (`acc` first), which is why this exists at all rather than callers
 ;; using `%reverse-onto` directly — it is that function with the arguments flipped.
 (defn- %append-onto (acc lst) (%reverse-onto lst acc))
+;; One of `append`'s arguments, reversed — or, a string, refused by `append`'s name: `""`
+;; passed as an empty list and any other string failed inside `reverse`. Above `append`:
+;; macros call `append` while the prelude is still loading.
+(defn- %append-part (part)
+  (if (%eq (type-of part) :string) (%refuse-string "append" part) (reverse part)))
 (defn append (& lists:seqable -> any)
   "Concatenate any number of lists into one, left to right.
 
@@ -344,8 +349,8 @@ front of an accumulated remainder wants; a vector last is converted."
           ;; plain list rather than a chain ending in a range
           tail (if (or (nil? last) (and (pair? last) (if (range? last) false true)))
                  last
-                 (%reverse-onto (reverse last) nil)))
-      (fold (rest rl) tail (fn (acc l) (%reverse-onto (reverse l) acc))))))
+                 (%reverse-onto (%append-part last) nil)))
+      (fold (rest rl) tail (fn (acc l) (%reverse-onto (%append-part l) acc))))))
 
 (defn- %count-acc (coll n) (if (empty? coll) n (%count-acc (rest coll) (%add n 1))))
 

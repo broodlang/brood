@@ -269,23 +269,32 @@ this by implementing the `Display` ability, which takes over this name below.
 
 (defn- %seq-passthrough (coll t) (if (%scalar-tag? t) (%not-a-collection "seq" coll t) coll))
 
+;; `who: expected a sequence, got string …`, raised, naming the public function `who` the
+;; caller called. Without the name the error printed as `%raise: …`; an empty string, which
+;; `count`/`empty?` accept, slipped through some callers as an empty sequence instead.
+(defn- %refuse-string (who coll)
+  (%raise {:kind :type
+           :code "E0030"
+           :message (str who ": expected a sequence, got string (" (pr-str coll) ")")
+           :hint "a string is not a sequence: walk its characters with `(string/->list s)`, or what a reader calls characters with `(string/->graphemes s)`."}))
+
 (defn %expect-collection (who coll)
-  "`coll`, when it is one — else raise `who: expected a collection` naming the public
-function `who` the caller called, rather than the helper deep inside it that met the scalar
-(`(sort 5)` once said `empty?: …`). Strings pass, as they do through `seq`.
+  "`coll`, when its items can be walked — else raise naming the public function `who` the
+caller called, rather than the helper deep inside it that met the value (`(sort 5)` once
+said `empty?: …`). A string is refused too: `seq` passes it through for `count` and
+`empty?`, but it has no items to walk, so `\"\"` read as empty and any other string failed
+inside `first`.
 
     (%expect-collection \"sort\" [3 1])   ;=> [3 1]"
-  (let (t (type-of coll)) (if (%scalar-tag? t) (%not-a-collection who coll t) coll)))
+  (let (t (type-of coll))
+    (if (%scalar-tag? t)
+      (%not-a-collection who coll t)
+      (if (%eq t :string) (%refuse-string who coll) coll))))
 
 ;; The list a fold walks: `seq`'s view, except a string — which `seq` passes through, for
 ;; `count` and `empty?`, but which has no elements to fold — is refused here, by name.
-(defn- %fold-source (coll)
-  (if (%eq (type-of coll) :string)
-    (%raise {:kind :type
-             :code "E0030"
-             :message (str "expected a sequence, got string (" (pr-str coll) ")")
-             :hint "a string is not a sequence: walk its characters with `(string/->list s)`, or what a reader calls characters with `(string/->graphemes s)`."})
-    (seq coll)))
+(defn- %fold-source (who coll)
+  (if (%eq (type-of coll) :string) (%refuse-string who coll) (seq coll)))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 
@@ -359,7 +368,7 @@ function `who` the caller called, rather than the helper deep inside it that met
         ;; `cond`/`second`.
         (let (parts (%seqview-parts coll))
           (fold (%vector-ref parts 0) acc ((%vector-ref parts 1) f)))
-        (%fold-loop f acc (%fold-source coll))))))
+        (%fold-loop f acc (%fold-source "fold" coll))))))
 (defn- %fold-loop (f acc coll)
   ;; ADR-315: a fold STOPS once the accumulator is a failure. Neither `with` nor `ok->`
   ;; can reach this case — the accumulator is threaded by the combinator, not by the
@@ -405,7 +414,7 @@ A string is not a sequence here — reverse its `string/->list` if you need that
       (fold coll nil %flip-cons)
       (if (if (%eq t :pair) (if (range? coll) false (if (seqview? coll) false true)) false)
         (%reverse-acc coll nil)
-        (%reverse-acc (seq coll) nil)))))
+        (%reverse-acc (%fold-source "reverse" coll) nil)))))
 
 ;; `%but-last` lives HERE, in core, and is private to the prelude — the position is
 ;; load-bearing. `receive`'s macro body calls it, and `sleep` (in process.blsp) is a
@@ -460,7 +469,7 @@ fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own co
 
 With no start, an empty collection has no value to give and raises (ADR-521): a `nil`
 there was a result nobody asked for."
-  ((coll f) (let (s (%fold-source coll))
+  ((coll f) (let (s (%fold-source "reduce" coll))
               (if (empty? s)
                 (error "reduce: an empty collection and no start value, so there is nothing to "
                   "return — give one: (reduce coll start f)")
