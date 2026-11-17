@@ -544,10 +544,18 @@ feature. Put it first. e.g. (defmodule gen \"A server framework …\")."
 `target` with the arguments it was given — `:as other` calls `target/other` instead. `params`
 is the parameter list as a reader should see it; the call forwards whatever arrives, so an
 omitted optional takes the TARGET's default and a wrong arity is the target's error. The
-docstring names the target, so `M-.` and the docs lead there.
+docstring names the target and the written parameters, so `M-.` and the docs lead there
+(`reflect/arglist` shows `(& arguments)`). A macro cannot be delegated: it is not called.
 
     (do (defdelegate %doc-delegated-join (parts separator) string :as join) (%doc-delegated-join [\"a\" \"b\"] \"-\"))   ;=> \"a-b\""
   (%defn-check-name 'defdelegate name)
+  (when (not (or (empty? options)
+               (and (= (count options) 2) (= (first options) :as) (symbol? (second options)))))
+    (error "defdelegate: " name " takes `:as other` or nothing after its target, not " options))
+  (when (and (= (->string target) (->string (reflect/current-ns)))
+          (= (if (empty? options) name (second options)) name))
+    (error "defdelegate: "
+      name " would call itself: name another module, or `:as` another function"))
   (let (callee (if (= (first options) :as) (second options) name)
         target-name (symbol (str (->string target) "/" (->string callee)))
         arguments (reflect/gensym "arguments"))

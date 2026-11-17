@@ -40,3 +40,15 @@
   (test "names its target in its docstring"
     (is (includes? (reflect/doc join) "[[string/join]]"))
     (is (includes? (reflect/doc join) "(join parts separator)"))))
+
+(describe "defdelegate refuses what cannot work"
+  (test "an option other than :as, and a delegate to itself"
+    (is (includes? (try
+                     (reflect/eval '(defdelegate dd-bad (a) string :sa join))
+                     (catch error (:message error)))
+          "takes `:as other`"))
+    ;; a module that delegates to itself, loaded as a module is: the namespace is its own then
+    (is (includes? (try
+                     (%load-string "(defmodule dd-self-module)\n(defdelegate f (a) dd-self-module)\n")
+                     (catch error (:message error)))
+          "would call itself"))))

@@ -272,6 +272,10 @@ pub(crate) struct ImportScope {
     /// one has its unbound findings dropped (`check_file_passes`): the one true problem, not a
     /// cascade of guesses.
     pub(crate) load_failures: Vec<Finding>,
+    /// A failed clause that would have brought in BARE names (`(:use m)`, `(:use m :exclude …)`):
+    /// only then are the file's bare unbound findings guesses. A failed `:only` or `:alias`
+    /// names nothing bare that is not listed, so a typo beside it is still a typo.
+    pub(crate) bare_names_missing: bool,
 }
 
 impl ImportScope {
@@ -280,6 +284,7 @@ impl ImportScope {
         self.aliases.extend(other.aliases);
         self.unknown_only.extend(other.unknown_only);
         self.load_failures.extend(other.load_failures);
+        self.bare_names_missing |= other.bare_names_missing;
     }
 }
 
@@ -293,8 +298,10 @@ fn note_load_failure(
     clause: &str,
     written: &str,
     pos: Option<Pos>,
+    brings_bare_names: bool,
 ) {
     if let Some(error) = ensure_loaded(heap, mod_sym) {
+        scope.bare_names_missing |= brings_bare_names;
         let at = match (&error.file, error.pos) {
             (Some(file), Some(error_pos)) => {
                 format!("{file}:{}:{}: ", error_pos.line, error_pos.col)
@@ -478,7 +485,15 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                 let mod_name = value::symbol_name(mod_sym);
                 scope.used.push(mod_name.clone());
                 let prefix = format!("{}/", mod_name);
-                note_load_failure(&mut scope, heap, mod_sym, ":use", &written, pos);
+                note_load_failure(
+                    &mut scope,
+                    heap,
+                    mod_sym,
+                    ":use",
+                    &written,
+                    pos,
+                    subset.is_none(),
+                );
                 match subset {
                     Some(names) => {
                         // Mirror the runtime `%refer`: a module-private name in `:only`
@@ -533,7 +548,7 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                 let mod_name = value::symbol_name(mod_sym);
                 scope.used.push(mod_name.clone());
                 let prefix = format!("{}/", mod_name);
-                note_load_failure(&mut scope, heap, mod_sym, ":use", &written, pos);
+                note_load_failure(&mut scope, heap, mod_sym, ":use", &written, pos, true);
                 let excluded: std::collections::HashSet<Symbol> = excluded.into_iter().collect();
                 for (bare, qual) in deps::obs_module_exports(heap, &prefix) {
                     if !excluded.contains(&bare) {
@@ -560,7 +575,7 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                 // The runtime clause `require-one`s the target; the checker must too, or the
                 // module's `deftype`s are not in the alias table when a `sig` says `short/name`
                 // (a CALL `short/name` infers its load lazily, ADR-227 — a type name cannot).
-                note_load_failure(&mut scope, heap, mod_sym, ":alias", &written, pos);
+                note_load_failure(&mut scope, heap, mod_sym, ":alias", &written, pos, false);
                 let key = value::intern(&format!("{}/", value::symbol_name(short)));
                 heap.add_import(key, mod_sym);
                 scope

@@ -606,7 +606,7 @@ fn check_file_passes(
 ) {
     let file_started = std::time::Instant::now();
     let (forms, expanded, import_scope, absent_ns) = expand_and_load(heap, forms, roots_base, out);
-    let import_failed_to_load = !import_scope.load_failures.is_empty();
+    let import_failed_to_load = import_scope.bare_names_missing;
     let (mut ctx, visible) =
         collect_file_scope(heap, &forms, &expanded, extra_required, strict, file_ns);
     ctx.set_absent_ns(absent_ns);

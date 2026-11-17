@@ -145,7 +145,9 @@ another context's detail, the contexts that reach each other, and the busiest co
                      (map groups (fn (group) (str "  " (string/join group " ⇄ ")))))
                    [""
                      (str "the busiest context edges (" (count busiest) " of " (count edges) "):")]
-                   (map busiest (fn ([[from to] total]) (str "  " from " → " to "  " total))))
+                   (if (empty? busiest)
+                     ["  none"]
+                     (map busiest (fn ([[from to] total]) (str "  " from " → " to "  " total)))))
       "\n")))
 
 (defn- manifest-config (root)
@@ -162,11 +164,29 @@ another context's detail, the contexts that reach each other, and the busiest co
   (manifest-config root)
   (graph (module-index/infos-of root (project/source-files root))))
 
+(defn- parses? (file)
+  ;; whether `file` reads as forms: one that does not is missing from the graph, and is said
+  (check-allow :discarded-catch
+    (try (do (reflect/read-all (file/slurp file)) true) (catch _ false))))
+
+(defn unparsed (root:string -> list)
+  "The project's source files at `root` that do not read: the graph has no module for them, so
+what they reference is missing from it.
+
+    (module-graph/unparsed \"/path/to/proj\")   ;~> () — every source file reads"
+  (manifest-config root)
+  (seq/reject (project/source-files root) parses?))
+
 (defn run (root:string options:map -> int)
-  "Print the [[report]] for the project at `root`; the exit code — 1 under `:check` when any
-reference reaches into another context's detail, else 0.
+  "Print the [[report]] for the project at `root`, and any source file that does not read
+([[unparsed]]); the exit code — 1 under `:check` when a reference reaches into another
+context's detail or a file does not read, else 0.
 
     (module-graph/run \"/path/to/proj\" {:check true})   ;~> 0 — after printing the report"
-  (let (modules (project-graph root))
+  (let (modules (project-graph root)
+        broken (unparsed root))
     (io/puts (report modules options))
-    (if (and (:check options) (not (empty? (violations modules)))) 1 0)))
+    (when (not (empty? broken))
+      (io/puts (str "\nfiles that do not read, so are not in the graph (" (count broken) "):"))
+      (doseq (file broken) (io/puts (str "  " file))))
+    (if (and (:check options) (or (not (empty? (violations modules))) (not (empty? broken)))) 1 0)))

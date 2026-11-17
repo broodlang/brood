@@ -1037,10 +1037,19 @@ under `lsp`) or of anything in one: it belongs to that module, which this rename
                     (str to "/" (string/substring name (count prefix) (count name)))
                     name))
         symbols (rewrite-symbols-text text (fn (name _) (renamed name)))
-        clause (str "\\((defmodule|:use|:use-internals|:alias|require|require-one)(\\s+'?)"
+        clause (str "\\((defmodule|:use|:use-internals|:alias|:load|require|require-one)(\\s+'?)"
                  (regex/escape from)
-                 "([\\s)])"))
-    (-> (regex/replace symbols clause (str "($1$2" to "$3"))
+                 "([\\s)])")
+        ;; an `(:alias from)` with no `:as` is spelled by its last segment: when that changes,
+        ;; it keeps its old short name, so the `short/…` calls under it still resolve
+        old-short (last (string/split from "/"))
+        keep-short (fn (text)
+                     (if (= old-short (last (string/split to "/")))
+                       text
+                       (regex/replace text
+                         (str "\\(:alias(\\s+)" (regex/escape from) "\\)")
+                         (str "(:alias$1" to " :as " old-short ")")))))
+    (-> (regex/replace (keep-short symbols) clause (str "($1$2" to "$3"))
       ;; text the symbol pass does not read — strings and comments: a name backticked or linked,
       ;; or opening a call or quoted (`(from/x …)`, `'from/x`) as a docstring's example does,
       ;; renamed by the same rule as a symbol. In code each is a symbol already renamed, which
@@ -1079,7 +1088,7 @@ when no file declares `from` or the destination exists (nothing is written then)
         project-name (project-manifest-name)
         rename-text (fn (text)
                       (let (plain (rename-module-text text from to nested))
-                        (if (nil? project-name)
+                        (if (or (nil? project-name) (string/starts-with? to (str project-name "/")))
                           plain
                           (rename-module-text plain
                             (str project-name "/" from)
@@ -1087,13 +1096,29 @@ when no file declares `from` or the destination exists (nothing is written then)
                             (map nested (fn (module) (str project-name "/" module))))))))
     (cond
       (nil? source) (do (io/puts "rename-module: no file declares module " from :to *err*) 1)
+      ;; the source root is found from the path the name gives, so the two must agree
+      (not (string/ends-with? source (str "/" from ".blsp")))
+        (do
+          (io/puts "rename-module: "
+            source " declares " from " but its path does not name it" :to *err*)
+          1)
+      (module-file files to)
+        (do
+          (io/puts "rename-module: " (module-file files to) " already declares " to :to *err*)
+          1)
+      (not (lossless? (file/slurp source)))
+        (do (io/puts "rename-module: " source " does not parse; nothing renamed" :to *err*) 1)
       else
         (let (depth (count (string/split from "/"))
               root (fold (range depth) source (fn (dir _) (path/dirname dir)))
               destination (path/join root (str to ".blsp")))
           (if (file/exists? destination)
             (do (io/puts "rename-module: " destination " exists already" :to *err*) 1)
-            (let (changed (seq/keep files
+            ;; a file that does not parse is left as it is and named: written back through the
+            ;; parse, it would gain what the parser closed
+            (let (readable (seq/filter files (fn (file) (lossless? (file/slurp file))))
+                  skipped (seq/reject files (fn (file) (lossless? (file/slurp file))))
+                  changed (seq/keep readable
                             (fn (file)
                               (let (text (file/slurp file)
                                     renamed (rename-text text))
@@ -1101,5 +1126,6 @@ when no file declares `from` or the destination exists (nothing is written then)
               (file/mkdir (path/dirname destination))
               (file/move source destination)
               (doseq (file changed) (io/puts "  changed: " file))
+              (doseq (file skipped) (io/puts "  skipped (does not parse): " file))
               (io/puts "  moved: " source " → " destination)
               0))))))

@@ -38,3 +38,10 @@
   (test "a qualified typo into a module that loads is still reported"
     (let (found (reflect/check-string-structured "(defmodule loadfail-user-5 (:use loadfail-broken))\n(defn run () (string/jion [\"a\"] \"\"))\n"))
       (is (any? found (fn (finding) (includes? (:message finding) "string/jion")))))))
+
+(describe "a broken import that names what it brings"
+  (test "a failed :only or :alias leaves a typo beside it reported"
+    (let (only (reflect/check-string-structured "(defmodule loadfail-user-6 (:use loadfail-broken :only [assist]))\n(defn run (x) (lenght x))\n")
+          aliased (reflect/check-string-structured "(defmodule loadfail-user-7 (:alias loadfail-broken :as lb))\n(defn run (x) (lenght x))\n"))
+      (is (any? only (fn (finding) (includes? (:message finding) "lenght"))))
+      (is (any? aliased (fn (finding) (includes? (:message finding) "lenght")))))))

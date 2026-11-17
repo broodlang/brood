@@ -341,3 +341,11 @@
   (test "a require names the module too"
     (assert= (rename-module-text "(require 'pool) (require-one 'pool)" "pool" "files/pool")
       "(require 'files/pool) (require-one 'files/pool)")))
+
+(describe "rename-module-text — :load clauses and an alias's short name"
+  (test "a :load clause names the module too"
+    (assert= (rename-module-text "(defmodule u (:load pool))" "pool" "files/pool")
+      "(defmodule u (:load files/pool))"))
+  (test "an alias with no :as keeps its short name when the last segment changes"
+    (assert= (rename-module-text "(defmodule u (:alias a/basin)) (basin/d 1)" "a/basin" "a/sink")
+      "(defmodule u (:alias a/sink :as basin)) (basin/d 1)")))

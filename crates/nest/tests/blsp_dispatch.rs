@@ -813,6 +813,17 @@ fn deps_lists_a_reference_into_another_context_s_detail_and_check_fails_on_it() 
         "a reach into display's detail fails --check:\n{out}\n{err}"
     );
     assert!(out.contains("  editing → display/rows"), "{out}");
+    std::fs::write(
+        dir.join("src/editing.blsp"),
+        "(defmodule editing)\n(defn run () (display/paint)\n",
+    )
+    .expect("editing unreadable");
+    let (code, out, err) = nest_in(&dir, &["deps", "--check"]);
+    assert_eq!(
+        code, 1,
+        "a file that does not read fails --check:\n{out}\n{err}"
+    );
+    assert!(out.contains("files that do not read"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
