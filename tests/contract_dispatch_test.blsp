@@ -77,7 +77,9 @@
       (is (>= n 1)))
     (assert= :callee
       (get (try (vec (map [1] (fn (x) (dispatch-lies x)))) (catch error error)) :blame))
-    (assert= :caller (get (try (apply dispatch-add ["a" 4]) (catch error error)) :blame))))
+    (assert= :caller
+      (get (try (check-allow :type-mismatch (apply dispatch-add ["a" 4])) (catch error error))
+        :blame))))
 
 (describe "what the entered path raises is the shim's error"
   (test "a bad result blames the callee, with the shim's message"
