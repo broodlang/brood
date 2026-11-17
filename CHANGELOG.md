@@ -23,6 +23,13 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: `string/->number` reads a ratio.** It is documented as the inverse of `str`, yet
+`(string/->number (str 1/2))` was a failure. Text in the reader's ratio shape (`-7/3`, a
+signed integer over a positive one) now parses, `4/2` to `2`; the checker types such a
+literal as a number. Found by a numeric-identity oracle, which also caught `math/mod`'s
+docstring contradicting itself (the code is Euclidean — never negative — and the comment
+said the sign follows the divisor).
+
 **Fixed: `brood-lsp` survives a message that is not JSON-RPC.** One well-framed but
 unparseable message ended the session (`malformed JSON-RPC message`), and the editor lost its
 language server. The frame is read to its length, so the stream is still in step: the message

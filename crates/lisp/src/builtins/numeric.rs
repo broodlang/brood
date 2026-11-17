@@ -352,7 +352,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(1, 2),
         Sig::with_optional(vec![string], vec![int], num.union(Ty::of(Tag::Failure))),
         &["s", "&optional", "radix"],
-        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else a failure value naming the input (truthy, like every failure: test it with failure? — unlike reflect/read-string). The inverse of str. With radix (2-36) the parse is integer-only in that base — how hex/octal/binary is read from DATA (in source, write the literal: 0xFF, 0b1010, 0o17); give the digits alone, no 0x/0b/0o prefix. A radix outside 2-36 raises.\n\n    (string/->number \"42\")   ;=> 42\n    (string/->number \"1F\" 16)   ;=> 31",
+        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else a ratio written num/den as the reader writes one, else a failure value naming the input (truthy, like every failure: test it with failure? — unlike reflect/read-string). The inverse of str. With radix (2-36) the parse is integer-only in that base — how hex/octal/binary is read from DATA (in source, write the literal: 0xFF, 0b1010, 0o17); give the digits alone, no 0x/0b/0o prefix. A radix outside 2-36 raises.\n\n    (string/->number \"42\")   ;=> 42\n    (string/->number \"1F\" 16)   ;=> 31\n    (string/->number (str -7/3))   ;=> -7/3",
         string_to_number);
 }
 
@@ -1392,6 +1392,9 @@ pub(crate) enum NumericText {
     /// Parses only as a float (never reached when a radix is given — a radix describes an
     /// integer notation).
     Float,
+    /// A ratio in the reader's shape, `num/den` — what `str` prints for one. It may reduce
+    /// to an int (`4/2`), so the checker reads it as a number.
+    Ratio,
     /// `string/->number` answers a `failure` for this text.
     NotANumber,
 }
@@ -1426,9 +1429,29 @@ pub(crate) fn classify_numeric_text(s: &str, radix: Option<u32>) -> NumericText 
         NumericText::Big
     } else if s.parse::<f64>().is_ok() {
         NumericText::Float
+    } else if parse_ratio_text(s).is_some() {
+        NumericText::Ratio
     } else {
         NumericText::NotANumber
     }
+}
+
+/// `num/den` as the reader reads a ratio literal: an optional `-` on the numerator, digits,
+/// `/`, and a nonzero unsigned denominator. Anything else is not a ratio here.
+fn parse_ratio_text(text: &str) -> Option<num_rational::BigRational> {
+    let (numerator, denominator) = text.split_once('/')?;
+    let digits = numerator.strip_prefix('-').unwrap_or(numerator);
+    let all_digits =
+        |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    if !all_digits(digits) || !all_digits(denominator) {
+        return None;
+    }
+    let numerator: num_bigint::BigInt = numerator.parse().ok()?;
+    let denominator: num_bigint::BigInt = denominator.parse().ok()?;
+    if denominator == num_bigint::BigInt::from(0) {
+        return None;
+    }
+    Some(num_rational::BigRational::new(numerator, denominator))
 }
 
 pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -1453,13 +1476,24 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
                     )),
                 }
             }
-            NumericText::NotANumber => heap.alloc_failure(&format!(
+            // A radix describes an integer notation, so the radix path never classifies a
+            // ratio; it reads as what it is in that base, not a number.
+            NumericText::NotANumber | NumericText::Ratio => heap.alloc_failure(&format!(
                 "string/->number: not a base-{radix} integer: {s:?}"
             )),
         });
     }
     match classify_numeric_text(&s, None) {
         NumericText::Int(i) => return Ok(Value::int(i)),
+        // A ratio — what `str` prints for one (`1/2`, `-7/3`) — in the reader's shape: a
+        // signed integer over a positive one. Without it `(string/->number (str 1/2))` was a
+        // failure, though this is documented as the inverse of `str`.
+        NumericText::Ratio => {
+            if let Some(ratio) = parse_ratio_text(&s) {
+                return Ok(heap.alloc_ratio(ratio));
+            }
+            return Ok(heap.alloc_failure(&format!("string/->number: not a number: {s:?}")));
+        }
         NumericText::NotANumber => {
             // Text this cannot interpret is a *known failure*, not an absence: it comes
             // back naming the input, so anything that looks at the value learns why.

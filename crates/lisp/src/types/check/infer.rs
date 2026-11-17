@@ -2643,6 +2643,8 @@ fn parse_number_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
                 // widening rather than guess a tag.
                 crate::builtins::NumericText::Big => Ty::NUMBER,
                 crate::builtins::NumericText::Float => Ty::of(Tag::Float),
+                // `4/2` reduces to an int, so a ratio's text is read as a number.
+                crate::builtins::NumericText::Ratio => Ty::NUMBER,
                 crate::builtins::NumericText::NotANumber => Ty::of(Tag::Failure),
             },
         )
