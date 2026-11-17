@@ -1703,6 +1703,13 @@ fn parse_optional(heap: &Heap, form: Value) -> Result<(Symbol, Value), LispError
                     .copied()
                     .ok_or_else(|| LispError::runtime("malformed &optional parameter"))?,
             )?;
+            // `(name default)` and nothing after: a third element was dropped without a word.
+            if parts.len() > 2 {
+                return Err(LispError::runtime(format!(
+                    "malformed &optional parameter {}: one name and one default",
+                    crate::syntax::printer::print(heap, form)
+                )));
+            }
             let default = parts.get(1).copied().unwrap_or(Value::nil());
             Ok((name, default))
         }
