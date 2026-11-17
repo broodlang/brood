@@ -68,6 +68,24 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-398 — a resize there and back did not repaint a terminal app, under load 🔴 open 2026-11-17
+
+`tests/term_display_test.blsp` › "SIGTSTP with no job control keeps the terminal, SIGCONT
+repaints, …": after SIGCONT the test resizes the pty to 60×14 and back to 40×10 and expects a
+whole repaint (> 280 bytes). Under the full suite once (a `make test` first try, passing on
+the retry), and 1 run in 18 with six copies of the file in parallel, the app wrote fewer than
+281 bytes in the 20 s after the bounce — it did not repaint. Alone it passes (50/50).
+
+Why it looks like the product, not the test: the check used to read through a fixed 1.5 s
+quiet window, which a slow repaint could miss; it now waits for the bytes themselves
+(`read-bytes`, 20 s of silence before giving up), and still fails at the same rate. Without
+load the app looks at the size between the two resizes (two ordinary repaints); under load
+both land between two looks, the A→B→A case `RESIZE_GENERATION` exists for
+(`builtins/terminal/native/tty.rs`, read at `keyboard.rs:752`). Reproduce:
+
+    for round in 1 2 3; do for lane in 1 2 3 4 5 6; do
+      ( ulimit -v 16000000; target/debug/nest test tests/term_display_test.blsp ) & done; wait; done
+
 ## KI-397 — an Interp's parked waiters outlived its drop past the 30 s deadline ⚠️ watching 2026-11-17
 
 **Symptom.** `interp_teardown::dropping_an_interp_reaps_permanently_parked_waiters` failed once in
@@ -123,6 +141,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
+| KI-398 | **A resize there and back did not repaint a terminal app, under load** — `term_display_test`'s SIGCONT/bounce case wrote < 281 bytes | 🔴 open 2026-11-17 — 1 in 18 under 6× load, 0 in 50 alone; the A→B→A path `RESIZE_GENERATION` covers |
 | KI-397 | **An Interp's three parked waiters outlived its drop past the 30 s deadline** — `interp_teardown` failed once under a full `make test` | ⚠️ watching 2026-11-17 — not reproducible on demand (40/40 alone, 80/80 contended); the assertion now reports the counts |
 | KI-396 | **`editor/face`'s face registry reset to `{}` when the module loaded after other modules' faces were restored** — with std loaded from source (`BROOD_NO_STDIMAGE=1`) an imaged bedit lost `:org/level-1` and `:syntax/variable` 5 runs in 6, its Org headings uncoloured | ✅ **FIXED 2026-11-16** — the registry is declared `defonce`, not `defdyn`, so the module's first load after the project image's root section restored the faces keeps them, as `editor/layers` was fixed (ADR-218). Guards: `tests/face_test.blsp` "a face another module registered outlives a re-run of editor/face", and `tests/registry_declare_test.blsp`, which checks every registry a std module declares is `defonce` |
 | KI-395 | **The JIT fast-frame's debug cross-check fired with every epoch agreeing** — `fast-link mirror … has an entry at the same epoch that does not fast-link`, aborting a debug `nest check --strict` over the corpus once in 59 runs | ⚠️ watching 2026-11-16 — not reproducible on demand; the assertion is the armed diagnostic |
