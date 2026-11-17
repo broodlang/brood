@@ -226,6 +226,56 @@ pub(crate) fn defn_param_types(heap: &Heap, form: Value) -> Option<(Symbol, Vec<
     (!out.is_empty()).then_some((name, out))
 }
 
+/// A raw parameter list of plain binders, typed or not — `(x:int y -> string)` — as each
+/// binder's name, the type form it writes (`None` where untyped, or typed `_`), and the
+/// result form after `->` (`None` when absent or `_`). `None` for a list holding a pattern,
+/// an `&` marker or a malformed `->`: the shapes a reader of unexpanded source types only
+/// when every binder is a plain name. Reads only; nothing is allocated.
+pub(crate) fn plain_param_types(
+    heap: &Heap,
+    params: Value,
+) -> Option<(Vec<Symbol>, Vec<Option<Value>>, Option<Value>)> {
+    let list = heap.list_items(params)?;
+    let declared = |ty: Value| (!is_sym(ty, UNDECLARED)).then_some(ty);
+    let mut names = Vec::with_capacity(list.len());
+    let mut types = Vec::with_capacity(list.len());
+    let mut ret = None;
+    let mut i = 0;
+    while i < list.len() {
+        let p = list[i];
+        if is_sym(p, syntax_typed::ARROW) {
+            if i + 2 != list.len() {
+                return None;
+            }
+            ret = declared(list[i + 1]);
+            break;
+        }
+        match typed_name(p) {
+            Some(TypedName::Inline(name, ty)) => {
+                names.push(value::intern(name));
+                types.push(declared(value::sym(ty)));
+            }
+            Some(TypedName::Next(name)) => {
+                names.push(value::intern(name));
+                types.push(declared(*list.get(i + 1)?));
+                i += 1;
+            }
+            None => {
+                let ValueRef::Sym(name) = p.unpack() else {
+                    return None;
+                };
+                if value::symbol_name_ref(name).starts_with('&') {
+                    return None;
+                }
+                names.push(name);
+                types.push(None);
+            }
+        }
+        i += 1;
+    }
+    Some((names, types, ret))
+}
+
 /// Is `fn_items` (`(fn …)`'s items) a multi-clause `fn` — every form after `fn`, past an
 /// optional leading docstring, a clause? The docstring is peeled as `lower_fn` peels it: a
 /// documented `(defn f "doc" ((x:int) …) ((x y) …))` reached here as `(fn "doc" clause…)`,

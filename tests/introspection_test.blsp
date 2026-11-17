@@ -241,6 +241,8 @@
 
 ;; type-signature (ADR-031; the checker signature the LSP hover + `nest mcp`
 ;; `lookup` share — a thin builtin over the checker's `signature_string`).
+(sig intro-twice (?A -> (vector ?A)))
+(defn intro-twice (x) [x x])
 (describe "type-signature"
   (test "returns the checker's arrow signature for a builtin"
     (let (sig (reflect/type-signature 'count))
@@ -251,7 +253,12 @@
   (test "an interned-but-unbound name has no signature"
     (assert= (reflect/type-signature 'no-such-global-xyz) nil))
   (test "a never-interned string name is nil, not an error"
-    (assert= (reflect/type-signature "definitely-not-a-real-global-42") nil)))
+    (assert= (reflect/type-signature "definitely-not-a-real-global-42") nil))
+  (test "a declaration with type variables keeps them, so it can be pasted back as written"
+    ;; the flat reading erased each ?A: clamp read (any any any -> any), min (& ordered -> ordered)
+    (assert= (reflect/type-signature 'math/clamp) "(?A ?A ?A -> ?A)")
+    (assert= (reflect/type-signature 'math/min) "(& ?A -> ?A)")
+    (assert= (reflect/type-signature 'introspection-test/intro-twice) "(?A -> (vector ?A))")))
 
 ;; declared-signature — the contract AS WRITTEN, for an editor to show beside a name.
 ;; `type-signature` is the checker's view (aliases expanded, or inferred when nothing was
@@ -348,6 +355,16 @@
   ;; A constructed record knows its fields in the LIVE image too: `defrecord` declares a
   ;; `?field` variable per undeclared field, and the image-side signature path resolves
   ;; it per call like a same-file declaration — so hover and this agree with `nest check`.
+  ;; A typed binder `x:int` binds `x` (ADR-420): read as a plain symbol it bound a variable
+  ;; named `x:int`, so the body's `x` was unknown and `(x:int -> int)` read as three
+  ;; parameters — `(any any any -> number)`, the type a live hint then showed.
+  (test "a lambda's typed parameters are its domain, and a declared result its result"
+    (assert= (reflect/expr-type "(fn (x) (+ x 1))") "(any -> number)")
+    (assert= (reflect/expr-type "(fn (x:int) (+ x 1))") "(int -> int)")
+    (assert= (reflect/expr-type "(fn (x:int -> string) (str x))") "(int -> string)")
+    (assert= (reflect/expr-type "(fn (x:float) x)") "(float -> float)")
+    (assert= (reflect/expr-type "(fn (xs: (list int) y) xs)") "((list int) any -> (list int))"))
+
   (test "a record constructor call carries its argument types, from the live image"
     (defrecord ispt (x y))
     (assert= (reflect/expr-type "(:x (ispt 1 2))") "1")

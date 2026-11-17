@@ -6,6 +6,16 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Fixed: types shown as written.**
+- `reflect/type-signature`, and so hover and `nest mcp`'s `lookup`, shows a polymorphic
+  declaration with its type variables: `math/clamp` is `(?A ?A ?A -> ?A)`, where it read
+  `(any any any -> any)`, and `math/min` is `(& ?A -> ?A)`, where it read
+  `(& ordered -> ordered)`. Pasted back, the old text declared a weaker function.
+- `reflect/expr-type`, and the live type hint an editor shows for an expression, reads an
+  anonymous `fn`'s typed parameters: `(fn (x:int -> string) …)` is `(int -> string)`, where
+  it read `(any any any -> string)` (each typed binder was taken as a variable named
+  `x:int`, and `->` and `string` as two more parameters).
+
 ## v0.54.0 — a window that feels native: paced to the compositor, hinted like the desktop, edits that stay O(log n)
 
 **Added: the window keeps the desktop's time and draws its text the desktop's way (ADR-726, ADR-730).**

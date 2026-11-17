@@ -3028,26 +3028,35 @@ fn is_catch_clause(heap: &Heap, form: Value) -> bool {
         .is_some_and(|h| matches!(h, Value::Sym(s) if value::symbol_is(s, kw::CATCH)))
 }
 
-/// The arrow type of a **simple** single-clause lambda literal `(fn (p…) body)`: one
-/// `any` parameter per plain-symbol param (a literal declares no domain) and the body's
-/// type as the result. `None` for anything [`lambda_ret`] declines, and when the body's
-/// type is unknown — see the caller for why an unknown result must not become `any`.
+/// A lambda literal's parameter list as the checker binds it: each binder's plain name, the
+/// type it declares (`None` where untyped), and the declared result. A typed binder `x:int`
+/// binds `x` (ADR-420): read as a plain symbol it bound a variable named `x:int`, so the
+/// body's `x` was unknown and `(x:int -> int)` read as three parameters. `None` for a list
+/// holding a pattern or an `&` marker.
+fn lambda_params(heap: &Heap, params: Value) -> Option<(Vec<Symbol>, Vec<Option<Ty>>, Option<Ty>)> {
+    let (names, types, ret) = crate::eval::macros::plain_param_types(heap, params)?;
+    let parse = |form: Option<Value>| form.and_then(|form| super::annot::parse_type(heap, form));
+    let types = types.into_iter().map(parse).collect();
+    Some((names, types, parse(ret)))
+}
+
+/// The arrow type of a **simple** single-clause lambda literal `(fn (p…) body)`: each
+/// parameter's declared type, `any` where it declares none, and the declared result — or,
+/// with none declared, the body's type under those parameters. `None` for anything
+/// [`lambda_ret`] declines, and when the body's type is unknown — see the caller for why an
+/// unknown result must not become `any`.
 fn lambda_arrow(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
     let items = list_items(heap, form)?;
     if items.len() != 3 {
         return None;
     }
-    let params = list_items(heap, items[1])?;
-    let plain = params.iter().all(|p| match p {
-        Value::Sym(s) => !value::symbol_name_ref(*s).starts_with('&'),
-        _ => false,
-    });
-    if !plain {
-        return None;
-    }
-    let inputs: Vec<Option<Ty>> = vec![None; params.len()];
-    let ret = lambda_ret(heap, form, &inputs, ctx)?;
-    Some(Ty::arrow(Sig::new(vec![Ty::ANY; params.len()], ret)))
+    let (_, declared, declared_ret) = lambda_params(heap, items[1])?;
+    let ret = match declared_ret {
+        Some(ret) => ret,
+        None => lambda_ret(heap, form, &declared, ctx)?,
+    };
+    let params = declared.into_iter().map(|t| t.unwrap_or(Ty::ANY)).collect();
+    Some(Ty::arrow(Sig::new(params, ret)))
 }
 
 /// The return type of a **simple** single-clause lambda `(fn (p…) body)` —
@@ -3072,24 +3081,23 @@ fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opt
     if parts.len() < 2 {
         return None;
     }
-    let params = list_items(heap, parts[0])?;
-    if params.len() != inputs.len() {
+    // Plain binders only: a pattern declines, and so does an `&`/`&optional`/`&rest`
+    // marker — a variadic literal's frame fill differs per call, and binding the marker
+    // itself positionally typed `(fn (& args) …)` as a 2-param fn whenever a combinator
+    // supplied two inputs — which is exactly the LOWERED pattern-clause lambda's shape, so
+    // the bogus answer also masked `clause_lambda_ret`'s recovery below it.
+    let (names, declared, _) = lambda_params(heap, parts[0])?;
+    if names.len() != inputs.len() {
         return None; // arity must match what the combinator supplies
     }
     let mut sub = ctx.clone();
-    for (param, input) in params.iter().zip(inputs) {
-        let Value::Sym(p) = param else {
-            return None; // not a plain-symbol parameter
+    for ((name, declared), input) in names.iter().zip(declared).zip(inputs) {
+        // What the combinator supplies, held to what the binder declares.
+        let bound = match (input.clone(), declared) {
+            (Some(input), Some(declared)) => Some(input.intersect(declared)),
+            (input, declared) => input.or(declared),
         };
-        // `&`/`&optional`/`&rest` are markers, not parameters: a variadic literal's
-        // frame fill differs per call, and binding the marker itself positionally
-        // typed `(fn (& args) …)` as a 2-param fn whenever a combinator supplied two
-        // inputs — which is exactly the LOWERED pattern-clause lambda's shape, so the
-        // bogus answer also masked `clause_lambda_ret`'s recovery below it.
-        if value::symbol_name_ref(*p).starts_with('&') {
-            return None;
-        }
-        sub = sub.bind(*p, input.clone());
+        sub = sub.bind(*name, bound);
     }
     expr_ty(heap, *parts.last()?, &sub)
 }

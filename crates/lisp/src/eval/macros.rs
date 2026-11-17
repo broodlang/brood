@@ -36,7 +36,7 @@ use pipeline::*;
 pub use resolve::*;
 use template_escape::*;
 use typed::*;
-pub(crate) use typed::{defn_param_types, typed_param_sig};
+pub(crate) use typed::{defn_param_types, plain_param_types, typed_param_sig};
 
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;

@@ -1468,6 +1468,21 @@ pub(super) fn declared_heap_sig_with_vars(
     annot::in_declaring_scope(sym, || annot::parse_arrow_type_with_vars(heap, type_value))
 }
 
+/// A declaration that carries type variables, as its author wrote it — `(& ?A -> ?A)`, not
+/// the flat [`Sig`] the checker keeps beside it, where every `?A` has already become `any`
+/// (or the bound a body narrowed it to). The flat reading is not the function's type:
+/// pasted back as a declaration it would say `math/clamp` returns `any` where the source
+/// says it returns what it was given. `None` for a declaration with no variable.
+pub(super) fn declared_polymorphic_text(heap: &Heap, sym: Symbol) -> Option<String> {
+    if let Some(form) = super::deps::obs_declared_sig_value(heap, sym) {
+        let polymorphic =
+            annot::in_declaring_scope(sym, || annot::parse_arrow_type_with_vars(heap, form));
+        return polymorphic.map(|_| crate::syntax::printer::print(heap, form));
+    }
+    image_heap_sig_with_vars(heap, sym)?;
+    crate::eval::derive::image_sig_text(heap, sym)
+}
+
 /// A **user-declared** signature for `sym` — the `(sig name (A -> B))` the author wrote,
 /// recorded on the heap (keyed by the module-qualified global) by `%register-sig` when
 /// the `(sig …)` form evaluated at load time. Only an arrow type-expr yields a caller
