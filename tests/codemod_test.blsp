@@ -319,3 +319,11 @@
     (assert= (rename-module-text "(defn f () \"see `pool/run` and [[pool/run]]\" 1) ; the pool/run note"
                "pool" "files/pool")
       "(defn f () \"see `files/pool/run` and [[files/pool/run]]\" 1) ; the pool/run note")))
+
+(describe "rename-module-text — a module nested under the renamed one keeps its name"
+  (test "its qualified names, clauses and prose mentions are left; the outer module's move"
+    (assert= (rename-module-text "(defmodule lsp (:use lsp/servers))\n(lsp/start (lsp/servers/up)) ; `lsp/start`, `lsp/servers/up`"
+               "lsp"
+               "lsp/client"
+               ["lsp/servers"])
+      "(defmodule lsp/client (:use lsp/servers))\n(lsp/client/start (lsp/servers/up)) ; `lsp/client/start`, `lsp/servers/up`")))

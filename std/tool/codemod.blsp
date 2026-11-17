@@ -1011,25 +1011,33 @@ be made (nothing is written then).
 ;; bare name (`region`, `pool`) is a different thing and is never touched: a bare name is renamed
 ;; only as a header clause's module.
 
-(defn rename-module-text (text from to)
+(defn rename-module-text (text from to &optional (nested []))
   "`text` with module `from` renamed `to` ([[rename-module]]): every symbol `from/…` (code or
 quoted data), the module of a `defmodule`, `:use`, `:use-internals` or `:alias` clause, and a
 mention in prose written `` `from/…`` or `[[from/…]]`. A bare `from` anywhere else is left — it
-is a local, not the module.
+is a local, not the module. So is a name of a module NESTED under `from` (`nested`, `lsp/servers`
+under `lsp`) or of anything in one: it belongs to that module, which this rename does not move.
 
-    (codemod/rename-module-text \"(defmodule rows (:use pool)) (pool/run 'pool/cmd) ; `pool/run`\" \"pool\" \"files/pool\")   ;=> \"(defmodule rows (:use files/pool)) (files/pool/run 'files/pool/cmd) ; `files/pool/run`\""
+    (codemod/rename-module-text \"(defmodule rows (:use pool)) (pool/run 'pool/cmd) ; `pool/run`\" \"pool\" \"files/pool\")   ;=> \"(defmodule rows (:use files/pool)) (files/pool/run 'files/pool/cmd) ; `files/pool/run`\"
+    (codemod/rename-module-text \"(lsp/start (lsp/servers/up))\" \"lsp\" \"lsp/client\" [\"lsp/servers\"])   ;=> \"(lsp/client/start (lsp/servers/up))\""
   (let (prefix (str from "/")
-        symbols (rewrite-symbols-text text
-                  (fn (name _)
-                    (if (string/starts-with? name prefix)
-                      (str to "/" (string/substring name (count prefix) (count name)))
-                      name)))
+        nested-name? (fn (name)
+                       (any? nested
+                         (fn (module)
+                           (or (= name module) (string/starts-with? name (str module "/"))))))
+        renamed (fn (name)
+                  (if (and (string/starts-with? name prefix) (not (nested-name? name)))
+                    (str to "/" (string/substring name (count prefix) (count name)))
+                    name))
+        symbols (rewrite-symbols-text text (fn (name _) (renamed name)))
         clause (str "\\((defmodule|:use|:use-internals|:alias)(\\s+)"
                  (regex/escape from)
                  "([\\s)])"))
     (-> (regex/replace symbols clause (str "($1$2" to "$3"))
-      (string/replace (str "`" prefix) (str "`" to "/"))
-      (string/replace (str "[[" prefix) (str "[[" to "/")))))
+      ;; prose: a backticked or linked name, renamed by the same rule as a symbol
+      (regex/replace "(`|\\[\\[)([^`\\]\\s]+)"
+        (fn (found)
+          (let ([opener name] (vec (map (:groups found) :text))) (str opener (renamed name))))))))
 
 (defn- module-file (files module)
   ;; the file of `files` that declares `module`, or nil
@@ -1043,7 +1051,10 @@ when no file declares `from` or the destination exists (nothing is written then)
 
     (codemod/rename-module \"pool\" \"files/pool\")   ;~> 0"
   (let (files (project-blsp)
-        source (module-file files from))
+        source (module-file files from)
+        ;; modules named under `from` keep their names: only `from` itself moves
+        nested (seq/filter (seq/keep files (fn (file) (module-name (file/slurp file))))
+                 (fn (module) (string/starts-with? module (str from "/")))))
     (cond
       (nil? source) (do (io/puts "rename-module: no file declares module " from :to *err*) 1)
       else
@@ -1055,7 +1066,7 @@ when no file declares `from` or the destination exists (nothing is written then)
             (let (changed (seq/keep files
                             (fn (file)
                               (let (text (file/slurp file)
-                                    renamed (rename-module-text text from to))
+                                    renamed (rename-module-text text from to nested))
                                 (when (not (= text renamed)) (file/spit file renamed) file)))))
               (file/mkdir (path/dirname destination))
               (file/move source destination)
