@@ -518,7 +518,10 @@ fn limits_for_cap(cap: usize) -> (usize, usize) {
 pub fn machine_memory() -> usize {
     use std::sync::LazyLock;
     static MEMORY: LazyLock<usize> = LazyLock::new(|| {
-        let mut least = physical_memory().unwrap_or(8 * 1024 * 1024 * 1024);
+        // 8 GB when the machine does not say; on a 32-bit target (wasm32) that is past
+        // `usize`, so it saturates to the whole address space instead of overflowing.
+        let fallback = usize::try_from(8_u64 << 30).unwrap_or(usize::MAX);
+        let mut least = physical_memory().unwrap_or(fallback);
         if let Some(limit) = address_space_limit() {
             least = least.min(limit);
         }
