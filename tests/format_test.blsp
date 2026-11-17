@@ -366,6 +366,12 @@
     (assert= (source "#{ 1   2  3 }") "#{1 2 3}\n"))
   (test "a set as a get default round-trips"
     (assert= (source "(get m k #{})") "(get m k #{})\n"))
+  ;; `@` is a symbol character: `~ @z` unquotes the symbol `@z`, `~@z` splices `z`. The
+  ;; formatter glued them, which changed what the code reads as.
+  (test "an unquote of a symbol starting with @ keeps its space"
+    (assert= (source "`(a ~ @z)") "`(a ~ @z)\n")
+    (assert= (reflect/read-all (source "`(a ~ @z)")) (reflect/read-all "`(a ~ @z)"))
+    (assert= (source "`(a ~@z)") "`(a ~@z)\n"))
   (test "empty containers stay empty"
     (assert= (source "()") "()\n")
     (assert= (source "[]") "[]\n")
@@ -386,6 +392,12 @@
                     "(defn f () 0) ;; nullary" "(def s \"hello world\")" "(def s \"a\\tb\\nc\")"
                     "(def doc \"line one\nline two\nline three\")"))
       (fold samples nil (fn (_ s) (let (once (source s) twice (source once)) (assert= once twice))))))
+  ;; Found by feeding the formatter random readable text: with a space before the comment
+  ;; the head lookup took the whitespace for the head, so the list broke; its own output,
+  ;; `(;c`, did not.
+  (test "a comment right after the open paren lays out the same with or without a space"
+    (assert= (source "( ;c\n3 (x y))") (source "(;c\n3 (x y))"))
+    (let (once (source "( ;c\n3 (x y))")) (assert= (source once) once)))
   (test "the prelude is idempotent (format(format(prelude)) == format(prelude))"
     ;; The prelude (now split across std/prelude/*.blsp) is the largest Brood program we
     ;; have; idempotency on its biggest file is a high-confidence smoke test of the walker.

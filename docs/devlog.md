@@ -1968,7 +1968,8 @@ each time. It now answers Clear from `APPROX_LIVE` below 7/8 of the ceiling, as 
 figure in the snapshot, so a heap growing by slab doublings is not judged stale (the two
 `mem_limit.rs` soft-limit tests failed until it did). `loop` is back to 1 157M against the
 base's 1 153M; `make ab-vm` read noise on every row. Also: the 8 GiB unknown-memory fallback
-overflowed `usize` on wasm32 (the playground build), now 1 GiB there; and `BEDIT_REF` moves to
+overflowed `usize` on wasm32 (the playground build; fixed upstream the same hour, 45486fcb3,
+which saturates it); and `BEDIT_REF` moves to
 bedit `8ad277e`, which dropped its `:non-tail-recursion` wrappers (the pinned bedit's strict
 ratchet counted them as unknown categories) — `smoke-bedit` green, 5491 tests.
 
