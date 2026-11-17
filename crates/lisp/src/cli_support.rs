@@ -174,8 +174,14 @@ pub fn install_crash_dump() {
         body.push_str(&format!("backtrace:\n{bt}\n"));
         if append_crash_record(&body) {
             // Point the user at the dump (the panic message itself already
-            // went to stderr via `prior`).
-            eprintln!("brood: crash report appended to {CRASH_DUMP}");
+            // went to stderr via `prior`). Not `eprintln!`: it panics when stderr is a
+            // closed pipe (`brood --check f | grep -q …`), and a panic inside the hook
+            // aborts the process — a caught checker panic became a core dump.
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "brood: crash report appended to {CRASH_DUMP}"
+            );
         }
     }));
 }

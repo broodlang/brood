@@ -6,6 +6,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Fixed: the checker no longer dies on a malformed form.** A bare `(let)` or `(letrec)`, a
+`match` with an empty clause and a top-level `(check-allow)` indexed past the end of a form,
+so the whole advisory pass ended in "checker internal error" and reported nothing else in the
+file. And a caught checker panic with stderr piped to a reader that had already exited
+(`brood --check f | grep -q …`) aborted the process with a core dump, from the crash
+reporter's own `eprintln!`; that line is now written best-effort.
+
 **Changed (breaking): a module that defines a name the language ships declares it (ADR-735).**
 `(defmodule m) (defn get …)` now fails compilation, naming the clause to add; with
 `(defmodule m (:shadow get))` it works as before — the module's `get` inside `m`, `/get` for the
