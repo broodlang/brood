@@ -343,9 +343,12 @@ pub(crate) fn debug_check_fast_link_mirror(
                 .is_none_or(|e| e != mirror_epoch)
                 || heap.vm_call_ic_entry_native_installed(site) != Some(true)
                 || heap.global_epoch() != mirror_epoch,
-            "fast-link mirror at epoch {mirror_epoch} (site {site}, head {head}) has an entry at the \
-             same epoch that does not fast-link: mirror=(code={code:#x}, nslots={nslots}) — a \
-             mirror published for an entry the authoritative rules refuse"
+            "fast-link mirror at epoch {mirror_epoch} (site {site}, head {head} `{}`) has an entry \
+             at the same epoch that does not fast-link: mirror=(code={code:#x}, nslots={nslots}) — \
+             a mirror published for an entry the authoritative rules refuse; refused because {} \
+             (KI-395)",
+            crate::core::value::symbol_name(head),
+            heap.vm_fast_link_refusal(site, head, argc as u32, mirror_epoch)
         ),
     }
 }

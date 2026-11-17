@@ -142,9 +142,17 @@ hides.
 
 **Fix.** None yet.
 
-**Diagnostic armed.** The assertion itself, in every debug build; a recurrence names the site,
-head and epochs. Next step when it fires again: the head symbol behind `head`, and which arm state
-(`BAILED`, `QUEUED`, null) the entry held.
+**Second sighting (2026-11-18).** CI's type-checker job on 235613044, the same step:
+`epoch 2427 (site 0, head 1460) … mirror=(code=0x7a8499c57000, nslots=26)`. Against the first
+(`epoch 2411, head 1445, nslots=26`) the epoch and head moved by about the same amount and the
+frame size is the same — most likely the same function, reached at the same point of the walk.
+
+**Diagnostic armed.** The assertion itself, in every debug build. Since the second sighting it
+also names the head symbol and the rule `fast_link_from_entry` refused it by
+(`Heap::vm_fast_link_refusal`: the entry not matching, the arm's code null/`BAILED`/`QUEUED`, the
+frame shape, captures, a `compile_epoch` other than the mirror's, or a pending tier entry) — the
+`compile_epoch` rule is the one the tolerated cases do not cover. Next step when it fires: read
+the rule off the message.
 
 ## Index — status per issue
 
@@ -156,7 +164,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 | KI-398 | **A resize there and back did not repaint a terminal app, under load** — `term_display_test`'s SIGCONT/bounce case wrote < 281 bytes | 🔴 open 2026-11-17 — 1 in 18 under 6× load, 0 in 50 alone; the A→B→A path `RESIZE_GENERATION` covers |
 | KI-397 | **An Interp's three parked waiters outlived its drop past the 30 s deadline** — `interp_teardown` failed once under a full `make test` | ⚠️ watching 2026-11-17 — not reproducible on demand (40/40 alone, 80/80 contended); the assertion now reports the counts |
 | KI-396 | **`editor/face`'s face registry reset to `{}` when the module loaded after other modules' faces were restored** — with std loaded from source (`BROOD_NO_STDIMAGE=1`) an imaged bedit lost `:org/level-1` and `:syntax/variable` 5 runs in 6, its Org headings uncoloured | ✅ **FIXED 2026-11-16** — the registry is declared `defonce`, not `defdyn`, so the module's first load after the project image's root section restored the faces keeps them, as `editor/layers` was fixed (ADR-218). Guards: `tests/face_test.blsp` "a face another module registered outlives a re-run of editor/face", and `tests/registry_declare_test.blsp`, which checks every registry a std module declares is `defonce` |
-| KI-395 | **The JIT fast-frame's debug cross-check fired with every epoch agreeing** — `fast-link mirror … has an entry at the same epoch that does not fast-link`, aborting a debug `nest check --strict` over the corpus once in 59 runs | ⚠️ watching 2026-11-16 — not reproducible on demand; the assertion is the armed diagnostic |
+| KI-395 | **The JIT fast-frame's debug cross-check fired with every epoch agreeing** — `fast-link mirror … has an entry at the same epoch that does not fast-link`, aborting a debug `nest check --strict` over the corpus once in 59 runs, and once on CI (2026-11-18) | ⚠️ watching 2026-11-18 — not reproducible on demand; the assertion now names the head and the rule that refused |
 | KI-394 | **`bound?` answered `false` for a name in a project module the startup image had not materialised yet** — it read the global table alone, so under a lazy install (`nest run`, `nest test FILE`) a late-bound hook kept as a symbol was skipped by `reflect/call-if-bound`: bedit's context-menu and Ctrl+wheel zoom tests failed on every warm `nest test FILE` and passed on the run after an edit | ✅ **FIXED 2026-11-14** — `bound?` roots a short project spelling and materialises the image section of the module it names when the installed project image carries one (`derive::bound_or_imaged`); a module the image does not carry is still not loaded. Guard: `startup_image::bound_answers_for_an_imaged_module_not_yet_materialised` (red on the warm run with the old `bound?`) |
 | KI-393 | **Root code in a project could not `binding` a project module's dynamic variable by its short qualifier** — `binding` resolves its names at expansion time (`%resolve-name`, ADR-722), and at root that resolution skipped the package rooting every other reference there gets, so `(binding (vcsproc/*vcs-entry-output-max-lines* 2) …)` in a docstring example, `nest eval` or the REPL raised "not a dynamic variable" while `(vcsproc/vcs-entry-tail …)` beside it worked. bedit's doctest gate went red on it | ✅ **FIXED 2026-11-13** — `%resolve-name` applies `root_qualified_ref` at root. Guard: `package_rooted_namespaces::root_code_binds_a_project_modules_dynamic_variable_by_its_short_qualifier` (red with the rooting removed, with bedit's own error) |
 | KI-392 | **`file/unlock` could leave the lock held, and `file/locked?`'s probe could refuse the next `file/lock`** — a `flock` lock belongs to the open file description, which a child mid-spawn shares from its fork until its exec; closing the file in that window left the lock in place. In a full suite run, where other tests spawn constantly, `file_lock_test` read the file still locked after `file/unlock` (CI, three jobs) | ✅ **FIXED 2026-11-13** — both release with `File::unlock` (`LOCK_UN`) instead of the drop. Guard: `file_lock_test` "an unlock is seen at once while other processes start programs", 0 of 1500 cycles, red 3/3 with either release removed (~10% of cycles failed) |

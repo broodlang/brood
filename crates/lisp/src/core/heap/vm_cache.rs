@@ -1276,6 +1276,64 @@ impl Heap {
         Some((code as *const u8, active_ns, env, callee_bases))
     }
 
+    /// Which of [`Self::fast_link_from_entry`]'s rules refuses site `site` at `epoch`, in
+    /// words — the diagnostic KI-395 asked for. That check's `None` arm fired twice (a debug
+    /// `nest check --strict` over the corpus, 2026-11-16 and on CI 2026-11-18, both with
+    /// `nslots=26`) with every epoch agreeing and native code installed, which rules out the
+    /// moves it tolerates; this names the rule that refused instead of leaving it to guess.
+    #[cfg(all(feature = "jit", debug_assertions))]
+    pub fn vm_fast_link_refusal(&self, site: u32, sym: Symbol, argc: u32, epoch: u64) -> String {
+        use std::sync::atomic::Ordering::Acquire;
+        let abs = (self.cur_ic_base.get() + site) as usize;
+        let t = self.vm_call_ics.borrow();
+        let Some(e) = t.get(abs).and_then(|entry| entry.as_ref()) else {
+            return "no call-IC entry at the site".to_string();
+        };
+        if !e.matches(sym, argc, epoch) {
+            return format!(
+                "the entry does not match: it is for `{}`/{} at epoch {}",
+                crate::core::value::symbol_name(e.sym),
+                e.argc,
+                e.epoch
+            );
+        }
+        let Some((arm, _)) = e.arm() else {
+            return "the entry names no arm".to_string();
+        };
+        let code = arm.jit_code.load(Acquire);
+        let state = if code.is_null() {
+            "null"
+        } else if code == crate::jit::BAILED {
+            "BAILED"
+        } else if code == crate::jit::QUEUED {
+            "QUEUED"
+        } else {
+            "native"
+        };
+        if state != "native" {
+            return format!("the arm's code is {state}");
+        }
+        if arm.nslots == 0 || !arm.frame_is_exactly_args(argc as usize) || arm.receive_at_head {
+            return format!(
+                "the frame does not fast-link (nslots {}, exactly-args {}, receive-at-head {})",
+                arm.nslots,
+                arm.frame_is_exactly_args(argc as usize),
+                arm.receive_at_head
+            );
+        }
+        if !arm.capture_names.is_empty() {
+            return format!("the arm captures {} name(s)", arm.capture_names.len());
+        }
+        let compiled = arm.compile_epoch.load(Acquire);
+        if compiled != epoch {
+            return format!("the arm was compiled at epoch {compiled}, not {epoch}");
+        }
+        if crate::eval::compile::needs_tier_entry(arm, code) {
+            return "the arm needs a tier entry (an upgrade to queue or swap in)".to_string();
+        }
+        "no rule refuses it now (it changed after the check read it)".to_string()
+    }
+
     /// The epoch the fat `CallIcEntry` at `site` is installed for — for the debug
     /// cross-check: an entry whose epoch moved past the mirror's is a rebind that landed
     /// between the IR's raw epoch load and the callback, not a desync.
