@@ -136,8 +136,8 @@ pub(super) fn check_conformance(
     walk::check_impl_returns(heap, expanded, ctx, out);
 }
 
-/// The lints that read a form's shape rather than its types, after the body walk: non-tail
-/// self-recursion, sealed-`match` exhaustiveness (ADR-187), effects in a `:when` guard, a
+/// The lints that read a form's shape rather than its types, after the body walk:
+/// sealed-`match` exhaustiveness (ADR-187), effects in a `:when` guard, a
 /// `catch` that discards its error, a load-time `def` of another module's global, and
 /// declared `:pure`/`:total` properties (ADR-351).
 /// The `match`, guard and `catch` lints read the UN-expanded forms — those shapes survive
@@ -149,9 +149,6 @@ pub(super) fn run_shape_lints(
     ctx: &Ctx,
     out: &mut Vec<Finding>,
 ) {
-    for &form in expanded {
-        recursion::check_recursion(heap, form, out);
-    }
     exhaustive::check_matches(heap, forms, ctx, out);
     guard_effects::check_guards(heap, forms, out);
     discarded_catch::check_discarded_catches(heap, forms, out);

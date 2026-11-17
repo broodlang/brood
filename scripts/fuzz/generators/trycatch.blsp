@@ -32,19 +32,18 @@
 (def safe-ops ["+" "-" "*"])
 
 ;; A depth-bounded tree walk: the recursion is at most `depth` deep by construction.
-(check-allow :non-tail-recursion
-  (defn expr (depth)
-    (if (or (<= depth 0) (< (draw-float) 0.4))
-      (draw-choice leaves)
-      (let (roll (draw-float) below (- depth 1))
-        (cond
-          (< roll 0.4) (str "(" (draw-choice throwing-ops) " " (expr below) " " (expr below) ")")
-          (< roll 0.7) (str "(" (draw-choice safe-ops) " " (expr below) " " (expr below) ")")
-          ;; an explicit conditional throw
-          (< roll 0.85) (str "(if (< " (expr below) " 0) (error \"neg\") " (expr below) ")")
-          ;; `nth` out of range answers nil rather than throwing, so the throw this leaf
-          ;; exists to exercise is made explicit
-          else (str "(or (nth [10 20 30] " (expr below) ") (error \"oob\"))"))))))
+(defn expr (depth)
+  (if (or (<= depth 0) (< (draw-float) 0.4))
+    (draw-choice leaves)
+    (let (roll (draw-float) below (- depth 1))
+      (cond
+        (< roll 0.4) (str "(" (draw-choice throwing-ops) " " (expr below) " " (expr below) ")")
+        (< roll 0.7) (str "(" (draw-choice safe-ops) " " (expr below) " " (expr below) ")")
+        ;; an explicit conditional throw
+        (< roll 0.85) (str "(if (< " (expr below) " 0) (error \"neg\") " (expr below) ")")
+        ;; `nth` out of range answers nil rather than throwing, so the throw this leaf
+        ;; exists to exercise is made explicit
+        else (str "(or (nth [10 20 30] " (expr below) ") (error \"oob\"))")))))
 
 ;; A nested try/catch: the inner catch answers a sentinel, then more arithmetic runs under
 ;; the outer accumulation — catch-then-continue.

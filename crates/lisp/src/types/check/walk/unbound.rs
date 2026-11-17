@@ -96,9 +96,7 @@ pub(super) fn lint_allow_mask(category: Option<Value>) -> u16 {
     let Some(Value::Keyword(k)) = category else {
         return 0;
     };
-    if value::symbol_is(k, "non-tail-recursion") {
-        crate::types::check::ctx::SUPPRESS_NON_TAIL
-    } else if value::symbol_is(k, "unreachable-clause") {
+    if value::symbol_is(k, "unreachable-clause") {
         crate::types::check::ctx::SUPPRESS_UNREACHABLE
     } else if value::symbol_is(k, "type-mismatch") {
         crate::types::check::ctx::SUPPRESS_TYPE_MISMATCH

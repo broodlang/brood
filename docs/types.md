@@ -453,27 +453,17 @@ never a false positive.
   `%dispatch` head in its body), an identity is taken only when certain, and the
   impl set unions this file's `register-impl` forms with the runtime
   `*impls*` registry so cross-file impls count. Stack-guarded for deep forms.
-- ✅ **Non-tail self-recursion lint** (`check/recursion.rs`). A `defn`, or a `fn` a
-  `letrec` binds (since 2026-11-03), whose self-call sits in a non-tail position is flagged — deep non-tail recursion
-  exhausts the small green-process stack. Since 2026-06-29 that is a **clean,
-  catchable error**, not the uncatchable segfault it once was: under the VM the
-  ~1M `MAX_BC_FRAMES` cap raises `recursion too deep: exceeded the VM's
-  1048576-frame non-tail-call limit`, and the tree-walker has the equivalent
-  byte-budget guard — so a runaway function fails its own process and the runtime
-  survives. The lint still earns its keep, because the failure is a resource limit
-  rather than a correct answer. Advisory; the fix is a tail-recursive accumulator
-  or a process-driven loop. A test that *deliberately* recurses non-tail (to
-  exercise that path) opts out with `(check-allow :non-tail-recursion …)` — see
-  the suppression directive below.
+- ~~**Non-tail self-recursion lint**~~ — deleted by ADR-751 (2026-11-17): a call stack is as
+  deep as memory allows, so a non-tail call is not a hazard to warn about; a runaway
+  recursion fails, catchably, at the process's call-stack ceiling.
 - ✅ **`(check-allow :category form…)` suppression directive.** A form-level
-  opt-out for an advisory lint the author deliberately trips — the non-tail
-  torture tests, a redundant `match` clause under test. The reader strips comments
+  opt-out for an advisory lint the author deliberately trips — a redundant `match`
+  clause under test. The reader strips comments
   before the checker runs, so a `;;`-directive can't reach it; `check-allow` (a
   prelude macro) expands to a `%lint-allow` marker that survives macroexpansion and
   that the checker reads, then thrown away at runtime (a pure no-op yielding the
-  wrapped body). Categories: `:non-tail-recursion` (skips the subtree in
-  `recursion.rs`) and `:unreachable-clause` (threads a `SUPPRESS_*` bit through the
-  `Ctx` so `check_if`'s redundancy lint declines). More categories followed;
+  wrapped body). The first category was `:unreachable-clause` (threads a `SUPPRESS_*`
+  bit through the `Ctx` so `check_if`'s redundancy lint declines). More categories followed;
   [`type-annotations.md`](type-annotations.md) lists them all. An unrecognised category
   suppresses nothing (a typo never becomes a silent blanket opt-out). This is what
   keeps `nest check` at **zero** warnings project-wide without weakening a correct

@@ -28,23 +28,22 @@
 (def operators ["+" "-" "*" "math/max" "math/min"])
 
 ;; A depth-bounded tree walk: the recursion is at most `depth` deep by construction.
-(check-allow :non-tail-recursion
-  (defn expr (depth)
-    (if (or (<= depth 0) (< (draw-float) 0.4))
-      (draw-choice ["x" "1" "2" "-1" "3" "0"])
-      (let (roll (draw-float) below (- depth 1))
-        (cond
-          (< roll 0.65) (str "(" (draw-choice operators) " " (expr below) " " (expr below) ")")
-          (< roll 0.85)
-            (let (test (str "("
-                         (draw-choice ["<" "<=" ">" "="])
-                         " "
-                         (expr below)
-                         " "
-                         (expr below)
-                         ")"))
-              (str "(if " test " " (expr below) " " (expr below) ")"))
-          else (str "(math/abs " (expr below) ")"))))))
+(defn expr (depth)
+  (if (or (<= depth 0) (< (draw-float) 0.4))
+    (draw-choice ["x" "1" "2" "-1" "3" "0"])
+    (let (roll (draw-float) below (- depth 1))
+      (cond
+        (< roll 0.65) (str "(" (draw-choice operators) " " (expr below) " " (expr below) ")")
+        (< roll 0.85)
+          (let (test (str "("
+                       (draw-choice ["<" "<=" ">" "="])
+                       " "
+                       (expr below)
+                       " "
+                       (expr below)
+                       ")"))
+            (str "(if " test " " (expr below) " " (expr below) ")"))
+        else (str "(math/abs " (expr below) ")")))))
 
 ;; `pick` cycles the argument type by phase: int (negative and positive), float, bignum
 ;; (past i64), small int.

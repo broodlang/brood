@@ -217,9 +217,9 @@ pub(super) fn stamp_stack_limit_if_outermost(heap: &mut Heap, native_depth: u32)
 }
 
 /// Cap on native-to-native recursion (see [`Heap::jit_native_depth`]). Past this many
-/// native levels, drain the rest of the subtree on the VM (heap frames, bounded by
-/// [`MAX_BC_FRAMES`]) so deep non-tail recursion keeps working instead of overflowing the
-/// native stack.
+/// native levels, drain the rest of the subtree on the VM (heap frames, bounded by the call
+/// stack's memory ceiling, ADR-751) so deep non-tail recursion keeps working instead of
+/// overflowing the native stack.
 ///
 /// This is a **frame count, not a stack measurement**, so on its own it is only ever
 /// right for one frame size: 1500 levels is a few MB of the 16 MB worker stack in a
@@ -240,24 +240,15 @@ pub(super) const JIT_HEADROOM_PROBE_FROM: u32 = 64;
 /// on an outcome-4 tail chain, the deopt re-runs), and the cost of being wrong is an
 /// unrecoverable abort while the cost of being early is a VM-drained subtree.
 ///
-/// **It must sit well ABOVE the VM's own nested-run reserve**
-/// ([`crate::process::NATIVE_STACK_MARGIN_BYTES`], `vm_apply`'s guard). This margin is what
-/// starts the drain: past it the slow call sets `jit_force_vm` and hands the rest of the
-/// subtree to `vm_apply`, whose heap frames are where deep recursion belongs. With the two
-/// margins EQUAL the drain can never start — the moment the JIT declines another native
-/// level, `vm_apply` refuses the drain on the same measurement and raises `recursion too
-/// deep`, so a recursion alternating a native arm with an interpreted one (a contract shim
-/// over a `call-mediated-boxed` original) dies at a few thousand levels.
-/// The gap between the two is the drain's working room: one `vm_apply` re-entry plus
-/// whatever bounded native callbacks the drained subtree makes per level.
+/// **It sits ABOVE the red zone where a nested activation grows the stack**
+/// ([`crate::stack::NATIVE_RED_ZONE_BYTES`], `vm_apply`'s [`crate::stack::reenter`]). This
+/// margin is what starts the drain: past it the slow call sets `jit_force_vm` and hands the
+/// rest of the subtree to `vm_apply`, whose heap frames are where deep recursion belongs.
+/// The gap is the drain's working room on this stack, so a drain begins with one
+/// `vm_apply` in place rather than with a segment grown for it.
 #[cfg(feature = "jit")]
-pub(super) const JIT_STACK_MARGIN_BYTES: usize = 1024 * 1024;
-
-#[cfg(feature = "jit")]
-const _: () = assert!(
-    JIT_STACK_MARGIN_BYTES >= 2 * crate::process::NATIVE_STACK_MARGIN_BYTES,
-    "the JIT's drain margin must leave the VM's nested-run reserve room to drain into"
-);
+/// Twice the red zone: 1 MiB, and the ASan build's larger red zone scales it with it.
+pub(super) const JIT_STACK_MARGIN_BYTES: usize = 2 * crate::stack::NATIVE_RED_ZONE_BYTES;
 
 /// Whether there is room on the native stack for another Brood→Brood native link.
 ///

@@ -225,20 +225,19 @@ Always true for `n` <= 0.
 ;; walks per level, O(n log n) wasted overall — purely to find the midpoint.
 (defn- %merge-sort (less? coll) (%merge-sort-n less? coll (count coll)))
 ;; check-allow: deliberately non-tail — depth = log2 of the length — ~60 frames for any feasible list.
-(check-allow :non-tail-recursion
-  (defn- %merge-sort-n (less? coll n)
-    (if (<= n 1)
-      coll
-      ;; `%split-at-acc`, NOT `seq/split-at`. The module function is a one-line wrapper
-      ;; over this very helper three lines above, and reaching it through the qualified
-      ;; name meant every `sort` of a non-trivial list loaded `seq` at the lookup miss and
-      ;; loaded the whole `seq` module — to call back into the prelude. `sort` is core and
-      ;; now pulls in nothing.
-      (let (h (%quot n 2)
-            parts (%split-at-acc h coll nil))
-        (%merge-runs less?
-          (%merge-sort-n less? (nth parts 0) h)
-          (%merge-sort-n less? (nth parts 1) (- n h)))))))
+(defn- %merge-sort-n (less? coll n)
+  (if (<= n 1)
+    coll
+    ;; `%split-at-acc`, NOT `seq/split-at`. The module function is a one-line wrapper
+    ;; over this very helper three lines above, and reaching it through the qualified
+    ;; name meant every `sort` of a non-trivial list loaded `seq` at the lookup miss and
+    ;; loaded the whole `seq` module — to call back into the prelude. `sort` is core and
+    ;; now pulls in nothing.
+    (let (h (%quot n 2)
+          parts (%split-at-acc h coll nil))
+      (%merge-runs less?
+        (%merge-sort-n less? (nth parts 0) h)
+        (%merge-sort-n less? (nth parts 1) (- n h))))))
 (defn- %merge-runs (less? a b) (%merge-acc less? a b nil))
 (defn- %merge-acc (less? a b acc)
   (cond
@@ -778,15 +777,14 @@ iterating for side effects.
 ;; `leaf` is the innermost form — what one iteration does to `acc`: `(cons body acc)` for
 ;; `for`, `(conj acc body)` under `:into`, the body itself for `fold-for` (ADR-377). The
 ;; walk over the bindings is the same for all three.
-(check-allow :non-tail-recursion
-  (defn- %for-fold (acc binds leaf)
-    (cond
-      (empty? binds) leaf
-      (= (first binds) :when) `(if ~(second binds) ~(%for-fold acc (rest (rest binds)) leaf) ~acc)
-      else
-        `(/fold ~(second binds)
-           ~acc
-           (fn (~acc ~(first binds)) ~(%for-fold acc (rest (rest binds)) leaf))))))
+(defn- %for-fold (acc binds leaf)
+  (cond
+    (empty? binds) leaf
+    (= (first binds) :when) `(if ~(second binds) ~(%for-fold acc (rest (rest binds)) leaf) ~acc)
+    else
+      `(/fold ~(second binds)
+         ~acc
+         (fn (~acc ~(first binds)) ~(%for-fold acc (rest (rest binds)) leaf)))))
 
 ;; `(x xs :when p :into coll)` → `[(x xs :when p) (coll)]`; without `:into`, `[binds nil]`.
 ;; The target rides in a one-element list so that `:into nil` — a list built by `conj`,
@@ -794,22 +792,21 @@ iterating for side effects.
 ;; LAST pair: it names the result, not a binding, and a guard after it would read as a
 ;; guard on nothing.
 ;; check-allow: deliberately non-tail — expansion-time recursion over the binding list.
-(check-allow :non-tail-recursion
-  (defn- %for-split-into (binds)
-    (cond
-      (empty? binds) [nil nil]
-      (%eq (first binds) :into)
-        (cond
-          (empty? (rest binds))
-            (error "for: :into has no collection. Syntax: (for (x xs :into coll) body)")
-          (empty? (rest (rest binds))) [nil (list (second binds))]
-          else
-            (error "for: :into must be the last clause of the bindings, got "
-              (pr-str binds)
-              ". Syntax: (for (x xs :when p :into coll) body)"))
-      else
-        (let (r (%for-split-into (rest (rest binds))))
-          [(cons (first binds) (cons (second binds) (first r))) (second r)]))))
+(defn- %for-split-into (binds)
+  (cond
+    (empty? binds) [nil nil]
+    (%eq (first binds) :into)
+      (cond
+        (empty? (rest binds))
+          (error "for: :into has no collection. Syntax: (for (x xs :into coll) body)")
+        (empty? (rest (rest binds))) [nil (list (second binds))]
+        else
+          (error "for: :into must be the last clause of the bindings, got "
+            (pr-str binds)
+            ". Syntax: (for (x xs :when p :into coll) body)"))
+    else
+      (let (r (%for-split-into (rest (rest binds))))
+        [(cons (first binds) (cons (second binds) (first r))) (second r)])))
 
 ;; Validate that binding pairs are complete — each variable has a collection, and each
 ;; :when has a guard expression. An odd-count suffix silently produces an empty result

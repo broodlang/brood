@@ -294,8 +294,8 @@ commits in this repo.**
    coverage — `spawn` workers that build the value, `send` it between processes (proving
    `to_message`/`from_message` and `promote`/freeze), read it from a shared global in many
    processes at once, fan in (see the `:isolated` "across processes" block in
-   `tests/maps_test.blsp`). Prefer tail-recursive loops in test bodies; deep non-tail
-   recursion raises a catchable `recursion too deep`.
+   `tests/maps_test.blsp`). Non-tail recursion is as deep as memory allows (ADR-751); a
+   runaway one raises a catchable `recursion too deep` at the process's call-stack ceiling.
 3. **Sabotage every guard you write — a guard that cannot fail is worse than none, because
    it reads as coverage.** Break the fix, watch the test go red, restore. **Assert on the
    entry point a caller reaches, not on the piece you just wrote** (a flag the fix sets, a

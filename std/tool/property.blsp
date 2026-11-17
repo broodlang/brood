@@ -40,14 +40,13 @@
 
 ;; A uniform draw in [0, bound] from `seed`: `[k next-seed]`. A bound past 32 bits takes
 ;; one draw per 32-bit limb (the modulo bias is immaterial to testing).
-(check-allow :non-tail-recursion
-  (defn- uniform (seed bound:int)
-    (let (span (+ bound 1))
-      (if (<= span two-to-32)
-        (rand/int seed span)
-        (let ([high after-high] (uniform seed (math/quot bound two-to-32))
-              [low next-seed] (rand/int after-high two-to-32))
-          [(math/mod (+ (* high two-to-32) low) span) next-seed])))))
+(defn- uniform (seed bound:int)
+  (let (span (+ bound 1))
+    (if (<= span two-to-32)
+      (rand/int seed span)
+      (let ([high after-high] (uniform seed (math/quot bound two-to-32))
+            [low next-seed] (rand/int after-high two-to-32))
+        [(math/mod (+ (* high two-to-32) low) span) next-seed]))))
 
 ;; EDGE BIAS (ADR-685 addendum). A uniform draw finds 0, the ends of a range or an empty
 ;; collection only by luck, so one random choice in `edge-odds` comes instead from the

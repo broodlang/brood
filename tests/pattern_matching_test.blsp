@@ -473,8 +473,7 @@
 (describe "fn / defn clauses"
   :serial (test "multi-clause recursion (fac)"
     ;; deliberately non-tail (`* n (recurse)`) — the point is multi-clause recursion.
-    (check-allow :non-tail-recursion
-      (defn pm-fac ((0) 1) ((n) (* n (pm-fac (- n 1))))))
+    (defn pm-fac ((0) 1) ((n) (* n (pm-fac (- n 1)))))
     (assert= (pm-fac 0) 1)
     (assert= (pm-fac 5) 120))
   (test "multi-clause with a guard"

@@ -19,24 +19,23 @@
 ;; to exercise the JIT's recursive-arm lowering and the depth cliff. `check-allow`
 ;; opts the group out of the (correct, but here intentional) non-tail lint.
 ; ÷0 at n=0, via `/`
-(check-allow :non-tail-recursion
-  (defn ut-fib (n) (if (< n 2) n (+ (ut-fib (- n 1)) (ut-fib (- n 2)))))
-  (defn ut-deep (n) (if (< n 1) 0 (+ 1 (ut-deep (- n 1)))))
-  (defn ut-fact (n) (if (< n 1) 1 (* n (ut-fact (- n 1)))))
-  (defn ut-ack (m n)
-    (if (< m 1)
-      (+ n 1)
-      (if (< n 1) (ut-ack (- m 1) 1) (ut-ack (- m 1) (ut-ack m (- n 1))))))
-  (defn ut-digsum (n) (if (< n 1) 0 (+ (math/rem n 10) (ut-digsum (math/quot n 10)))))
-  (defn ut-xor (n) (if (< n 1) 0 (bit/xor n (ut-xor (- n 1)))))
-  (defn ut-let (n) (if (< n 2) n (let (h (math/quot n 2)) (+ (ut-let (- n 1)) (ut-let (- n 2)) h))))
-  ; ÷0 at n=0
-  (defn ut-div0 (n) (if (< n 0) 0 (+ (math/rem 10 n) (ut-div0 (- n 1)))))
-  ; exact `/` stays in the worker
-  (defn ut-div (n) (if (< n 1) 1 (/ (* 2 (ut-div (- n 1))) 1)))
-  ; inexact `/` deopts to Float
-  (defn ut-div-inexact (n) (if (< n 2) n (+ (ut-div-inexact (- n 1)) (/ n 3))))
-  (defn ut-div-slash0 (n) (if (< n 0) 0 (+ (/ 10 n) (ut-div-slash0 (- n 1))))))
+(defn ut-fib (n) (if (< n 2) n (+ (ut-fib (- n 1)) (ut-fib (- n 2)))))
+(defn ut-deep (n) (if (< n 1) 0 (+ 1 (ut-deep (- n 1)))))
+(defn ut-fact (n) (if (< n 1) 1 (* n (ut-fact (- n 1)))))
+(defn ut-ack (m n)
+  (if (< m 1)
+    (+ n 1)
+    (if (< n 1) (ut-ack (- m 1) 1) (ut-ack (- m 1) (ut-ack m (- n 1))))))
+(defn ut-digsum (n) (if (< n 1) 0 (+ (math/rem n 10) (ut-digsum (math/quot n 10)))))
+(defn ut-xor (n) (if (< n 1) 0 (bit/xor n (ut-xor (- n 1)))))
+(defn ut-let (n) (if (< n 2) n (let (h (math/quot n 2)) (+ (ut-let (- n 1)) (ut-let (- n 2)) h))))
+; ÷0 at n=0
+(defn ut-div0 (n) (if (< n 0) 0 (+ (math/rem 10 n) (ut-div0 (- n 1)))))
+; exact `/` stays in the worker
+(defn ut-div (n) (if (< n 1) 1 (/ (* 2 (ut-div (- n 1))) 1)))
+; inexact `/` deopts to Float
+(defn ut-div-inexact (n) (if (< n 2) n (+ (ut-div-inexact (- n 1)) (/ n 3))))
+(defn ut-div-slash0 (n) (if (< n 0) 0 (+ (/ 10 n) (ut-div-slash0 (- n 1)))))
 (describe "unboxed-i64 register worker"
   (test "shallow-wide recursion (fib)"
     (assert= 832040 (ut-fib 30)))
@@ -96,18 +95,16 @@
     (assert-error (ut-div-slash0 5))))
 
 ;; ---- float sibling ---- (also deliberately non-tail; see the integer group)
-(check-allow :non-tail-recursion
-  (defn ut-ffib (n) (if (< n 2.0) n (+ (ut-ffib (- n 1.0)) (ut-ffib (- n 2.0)))))
-  (defn ut-fpow (b n) (if (< n 1.0) 1.0 (* b (ut-fpow b (- n 1.0)))))
-  (defn ut-fdeep (n) (if (< n 1.0) 0.0 (+ 1.0 (ut-fdeep (- n 1.0)))))
-  (defn ut-flet (n)
-    (if (< n 2.0) n (let (h (/ n 2.0)) (+ (ut-flet (- n 1.0)) (ut-flet (- n 2.0)) h)))))
+(defn ut-ffib (n) (if (< n 2.0) n (+ (ut-ffib (- n 1.0)) (ut-ffib (- n 2.0)))))
+(defn ut-fpow (b n) (if (< n 1.0) 1.0 (* b (ut-fpow b (- n 1.0)))))
+(defn ut-fdeep (n) (if (< n 1.0) 0.0 (+ 1.0 (ut-fdeep (- n 1.0)))))
+(defn ut-flet (n)
+  (if (< n 2.0) n (let (h (/ n 2.0)) (+ (ut-flet (- n 1.0)) (ut-flet (- n 2.0)) h))))
 
 ;; Recursive so it tiers to the float register worker (a flat fn would stay boxed); the
 ;; division is the last thing it does, on the worker's unboxed f64 path.
-(check-allow :non-tail-recursion
-  (defn ut-fdiv0 (x d)
-    (if (< x 1.0) (/ 1.0 d) (+ (ut-fdiv0 (- x 1.0) d) 1.0))))
+(defn ut-fdiv0 (x d)
+  (if (< x 1.0) (/ 1.0 d) (+ (ut-fdiv0 (- x 1.0) d) 1.0)))
 
 (describe "unboxed-f64 register worker"
   (test "float shallow-wide recursion"

@@ -671,9 +671,9 @@ pub(crate) fn ensure_workers() {
         LIVE_EXECUTORS.store(n, Ordering::SeqCst);
         // A process body runs directly on its worker thread (ADR-100 §8.4 — no coroutine
         // stack), and nested native / tree-walked sub-calls recurse here, so the worker
-        // stack must be at least `stack_budget`'s reference size (`WORKER_STACK_BYTES`),
-        // else a deep native recursion would overflow the default ~2 MiB thread stack
-        // *before* the guard trips a clean error. The reservation is virtual/lazy.
+        // stack is `WORKER_STACK_BYTES` rather than the default ~2 MiB: room for native code
+        // and a nest's first levels before it grows onto segments (ADR-751). The
+        // reservation is virtual/lazy.
         let mut live = 0usize;
         let mut refusal = None;
         for wid in 0..n {

@@ -333,8 +333,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<Finding>)
     // `(%lint-allow :category body…)` — the expansion of the `check-allow`
     // suppression macro. A runtime no-op (it just yields its body), but here it
     // adds `:category`'s lint to the suppressed set for the wrapped subtree, so a
-    // deliberately-lint-tripping form (a non-tail-recursive JIT torture fn, a
-    // redundant `match` clause under test) can silence exactly that lint without
+    // deliberately-lint-tripping form (a redundant `match` clause under test) can silence exactly that lint without
     // a comment (the reader strips those before the checker runs). We still walk
     // the body for every *other* lint.
     if let Value::Sym(s) = head

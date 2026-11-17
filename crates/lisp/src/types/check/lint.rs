@@ -25,7 +25,7 @@ macro_rules! lints {
             /// Every category, in a stable order (the order `%check-categories` lists).
             pub const ALL: &'static [Lint] = &[$(Lint::$variant,)*];
 
-            /// The category's keyword name, without the colon (`non-tail-recursion`).
+            /// The category's keyword name, without the colon (`unreachable-clause`).
             pub fn name(self) -> &'static str {
                 match self {
                     $(Lint::$variant => $name,)*
@@ -44,8 +44,6 @@ macro_rules! lints {
 }
 
 lints! {
-    /// A self-call in non-tail position: deep recursion overflows the green-process stack.
-    NonTailRecursion => "non-tail-recursion",
     /// A `match`/`cond` clause or `if` branch that can never run.
     UnreachableClause => "unreachable-clause",
     /// A provable type misuse: an argument, a return, a value, a callback or a call's

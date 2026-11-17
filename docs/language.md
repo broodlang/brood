@@ -1201,6 +1201,16 @@ iterate and will not overflow the stack:
     (count-down (- n 1))))
 ```
 
+**A recursion that is not a tail call is as deep as memory allows** (ADR-751). Each pending
+call holds a frame on the heap until it returns, and so does a call made through a `try`
+body, an `&optional` default or a function a builtin calls back (`map`, `fold`): when the
+native stack nears its end, the call continues on a fresh heap-backed segment. A process's
+call stack may hold up to a quarter of the memory the runtime may use, or the process's
+`:max-heap` when it set one; past that, a recursion that never stops fails with a catchable
+`recursion too deep` (`E0044`) naming what it held. So `(defn depth (tree) (if (leaf? tree)
+0 (+ 1 (depth (child tree)))))` is fine however deep the tree is, and a tail call still holds
+nothing.
+
 For purely side-effecting iteration there is one form, `doseq`. It takes `for`'s
 bindings (several pairs, `:when` guards, destructuring), collects nothing and returns
 `nil`. A counted loop iterates a `range` (ADR-674):
@@ -2260,18 +2270,18 @@ itself; `(check-allow :category form…)` records a deliberate exception where i
 
 Every finding has a **category**, printed after it (`… [type-mismatch]`) and listed by
 `(reflect/check-categories)`. Four are advisory by default — printed, never failing the
-check: `:non-tail-recursion`, `:gave-up` (a checker budget ran out), `:deprecated` and
-`:beta`; the rest gate (ADR-698). A project moves categories in `project.blsp`, and a module
+check: `:gave-up` (a checker budget ran out), `:deprecated` and `:beta`; the rest gate
+(ADR-698). A project moves categories in `project.blsp`, and a module
 silences one for its whole file in its header:
 
 ```clojure fragment
 (project :name "app" :version "0.1.0"
   :check {:advisory [:unused-binding]        ; printed, never gating
-          :gating [:non-tail-recursion]      ; fails the check
+          :gating [:deprecated]              ; fails the check
           :allow [:list-truthiness]})        ; not reported at all
 
 (defmodule app/render "Drawing."
-  (:check-allow :non-tail-recursion))        ; this file only
+  (:check-allow :unreachable-clause))        ; this file only
 ```
 
 `(sig name (params… -> ret))` declares a function's signature. It is a pure

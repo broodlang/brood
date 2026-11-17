@@ -523,7 +523,7 @@ fn the_recursive_fixpoint_keeps_the_correct_calls_silent() {
          (defn ok5 () (each (grow 4 '()) (fn (x) (if (string? x) (%string-length x) (+ x 1)))))\n\
          (defn ok6 (k) (%string-length (sum-to 10 k)))",
     );
-    // `my-map` earns the (correct) non-tail-recursion lint; only type findings matter here.
+    // Only type findings matter here.
     let ws: Vec<_> = ws.into_iter().filter(|w| w.contains("expects")).collect();
     assert!(ws.is_empty(), "{ws:?}");
 }

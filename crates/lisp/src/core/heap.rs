@@ -1290,8 +1290,8 @@ pub struct Heap {
     // shared initializers) and silence the lint only when jit is off.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_call_env: EnvRoot,
-    /// Native-to-native call recursion depth — bounds the native stack (which `MAX_BC_FRAMES`
-    /// doesn't), draining deeper recursion onto the VM instead of overflowing.
+    /// Native-to-native call recursion depth — bounds the JIT's native nest, draining deeper
+    /// recursion onto the VM's heap frames instead of overflowing.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_native_depth: u32,
     /// **Absolute stack address below which a JIT'd arm must not run** (KI-14). Every

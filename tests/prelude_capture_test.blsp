@@ -186,7 +186,7 @@
       {}))
 
   (test "the builder scan opens a check-allow wrapper"
-    (assert= (builder-offenders "(check-allow :non-tail-recursion (defn- f (t) `(if (pair? ~t) (first ~t) nil)))")
+    (assert= (builder-offenders "(check-allow :unreachable-clause (defn- f (t) `(if (pair? ~t) (first ~t) nil)))")
       {"f" (list "first" "pair?")}))
 
   ;; The scans above pass on an empty result, so prove each shape is SEEN.

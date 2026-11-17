@@ -438,12 +438,11 @@ when the caller needs indexed access. The complement of [[filterv]].
 ;; tail-recursive; the nested call recurses only as deep as the nesting (bounded), not
 ;; the length. Moved here from the prelude with `distinct-step` — same reason.
 ;; check-allow: deliberately non-tail — depth = the structure's nesting, not its element count.
-(check-allow :non-tail-recursion
-  (defn- flatten-acc (coll acc)
-    (cond
-      (empty? coll) acc
-      (list? (first coll)) (flatten-acc (rest coll) (flatten-acc (first coll) acc))
-      else (flatten-acc (rest coll) (cons (first coll) acc)))))
+(defn- flatten-acc (coll acc)
+  (cond
+    (empty? coll) acc
+    (list? (first coll)) (flatten-acc (rest coll) (flatten-acc (first coll) acc))
+    else (flatten-acc (rest coll) (cons (first coll) acc))))
 
 (defn flatten (coll)
   "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves.
@@ -520,36 +519,33 @@ or an `n` of zero or less.
 ;; container from its walked children; anything else is a leaf. `%walk-children` is the
 ;; one-level step both walkers share.
 ;; check-allow: deliberately non-tail — depth = the value's nesting, not its size.
-(check-allow :non-tail-recursion
-  (defn- %walk-children (form inner)
-    (cond
-      (vector? form) (seq/mapv form inner)
-      (map? form) (into {} (map (seq form) inner))
-      (set? form) (into #{} (map (seq form) inner))
-      ;; a rebuilt list keeps the original's source position: a macro that rewrites code
-      ;; with `postwalk`/`prewalk` still reports where its forms were written
-      (list? form) (%copy-form-pos (map form inner) form)
-      else form)))
-(check-allow :non-tail-recursion
-  (defn postwalk (form f)
-    "Rebuild `form` bottom-up: every sub-value — the leaves, then each container of already
+(defn- %walk-children (form inner)
+  (cond
+    (vector? form) (seq/mapv form inner)
+    (map? form) (into {} (map (seq form) inner))
+    (set? form) (into #{} (map (seq form) inner))
+    ;; a rebuilt list keeps the original's source position: a macro that rewrites code
+    ;; with `postwalk`/`prewalk` still reports where its forms were written
+    (list? form) (%copy-form-pos (map form inner) form)
+    else form))
+(defn postwalk (form f)
+  "Rebuild `form` bottom-up: every sub-value — the leaves, then each container of already
 walked children, then `form` itself — is replaced by `(f x)`. A map's entries pass through
 `f` as `[k v]` vectors. Depth-first, so an `f` that turns a leaf into a container does not
 see inside the container it made; [[prewalk]] is the top-down twin that does.
 
     (seq/postwalk [1 [2 3]] (fn (x) (if (int? x) (* x 10) x)))   ;=> [10 [20 30]]
     (seq/postwalk {:a 1} (fn (x) (if (vector? x) [(first x) (inc (second x))] x)))   ;=> {:a 2}"
-    (f (%walk-children form (fn (x) (postwalk x f))))))
-(check-allow :non-tail-recursion
-  (defn prewalk (form f)
-    "Rebuild `form` top-down: `form` is replaced by `(f form)` FIRST, then each child of
+  (f (%walk-children form (fn (x) (postwalk x f)))))
+(defn prewalk (form f)
+  "Rebuild `form` top-down: `form` is replaced by `(f form)` FIRST, then each child of
 the result is walked the same way. A map's entries pass through `f` as `[k v]` vectors.
 What `f` returns is what gets descended into, so a rewrite that produces a container is
 walked inside; [[postwalk]] is the bottom-up twin.
 
     (seq/prewalk [1 [2 3]] (fn (x) (if (int? x) (* x 10) x)))   ;=> [10 [20 30]]
     (seq/prewalk '(a (b)) (fn (x) (if (= x 'b) 'c x)))           ;=> (a (c))"
-    (%walk-children (f form) (fn (x) (prewalk x f)))))
+  (%walk-children (f form) (fn (x) (prewalk x f))))
 
 (defn pmap (coll:seqable f:any -> (list any))
   "`map`, with `(f x)` for every item running in its own process at once; the results come

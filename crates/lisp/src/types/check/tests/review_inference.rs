@@ -243,6 +243,7 @@ fn rule_heads_are_bound() {
         "shadow",
         "generated",
         "duplicate-def",
+        "unreachable-clause",
         "record",
         "tuple",
         "let*",

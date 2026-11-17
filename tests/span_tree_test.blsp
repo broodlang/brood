@@ -167,21 +167,20 @@ are kept as they are; only the rest are rebuilt."
 
 (defn- node-extent (tree) (if (nil? tree) 0 (nth tree 7)))
 
-(check-allow :non-tail-recursion
-  (defn- balanced? (tree)
-    ;; every node's children differ in height by at most one, and its cached measures are its
-    ;; own — a node is `[left right gap length value height count extent]`
-    (or (nil? tree)
-      (let (left (nth tree 0)
-            right (nth tree 1))
-        (and (<= (math/abs (- (node-height left) (node-height right))) 1)
-          (= (node-height tree) (inc (math/max (node-height left) (node-height right))))
-          (= (node-size tree) (+ (node-size left) 1 (node-size right)))
-          (= (node-extent tree)
-            (+ (node-extent left) (nth tree 2) (nth tree 3) (node-extent right)))
-          (> (nth tree 3) 0)
-          (balanced? left)
-          (balanced? right))))))
+(defn- balanced? (tree)
+  ;; every node's children differ in height by at most one, and its cached measures are its
+  ;; own — a node is `[left right gap length value height count extent]`
+  (or (nil? tree)
+    (let (left (nth tree 0)
+          right (nth tree 1))
+      (and (<= (math/abs (- (node-height left) (node-height right))) 1)
+        (= (node-height tree) (inc (math/max (node-height left) (node-height right))))
+        (= (node-size tree) (+ (node-size left) 1 (node-size right)))
+        (= (node-extent tree)
+          (+ (node-extent left) (nth tree 2) (nth tree 3) (node-extent right)))
+        (> (nth tree 3) 0)
+        (balanced? left)
+        (balanced? right)))))
 
 (defn- agrees? (drawn)
   ;; every step of `drawn` (`[runs edits]`) gives the vector code's spans, and a balanced tree

@@ -194,10 +194,8 @@
     (assert= "<a href=\"#\">x</a>)" (markdown/md-run "[x](javascript:alert(1))")))
 
   (test "a long run of links all render"
-    ;; 2000 links. Recursion depth here is one frame per link, so this is also the shape the
-    ;; checker's non-tail-recursion warning is about — though 2000 does NOT overflow, so the
-    ;; warning is about headroom, not an observed failure. `string-split` on N separators
-    ;; yields N+1 pieces.
+    ;; 2000 links, one frame of recursion per link. `string-split` on N separators yields
+    ;; N+1 pieces.
     (let (src (apply str (map (range 0 2000) (fn (_) "[a](u)"))))
       (assert= 2001 (count (string/split (markdown/md-run src) "<a href="))))))
 

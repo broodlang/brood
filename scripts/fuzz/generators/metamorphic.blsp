@@ -36,23 +36,22 @@
 (def operators ["+" "-" "*" "math/max" "math/min" "math/quot" "math/rem"])
 
 ;; A depth-bounded tree walk: the recursion is at most `depth` deep by construction.
-(check-allow :non-tail-recursion
-  (defn expr (depth)
-    (if (or (<= depth 0) (< (draw-float) 0.35))
-      (draw-leaf)
-      (let (roll (draw-float) below (- depth 1))
-        (cond
-          (< roll 0.6) (str "(" (draw-choice operators) " " (expr below) " " (expr below) ")")
-          (< roll 0.8)
-            (let (test (str "("
-                         (draw-choice ["<" "<=" ">" "="])
-                         " "
-                         (expr below)
-                         " "
-                         (expr below)
-                         ")"))
-              (str "(if " test " " (expr below) " " (expr below) ")"))
-          else (str "(let (t " (expr below) ") (" (draw-choice operators) " t " (expr below) "))"))))))
+(defn expr (depth)
+  (if (or (<= depth 0) (< (draw-float) 0.35))
+    (draw-leaf)
+    (let (roll (draw-float) below (- depth 1))
+      (cond
+        (< roll 0.6) (str "(" (draw-choice operators) " " (expr below) " " (expr below) ")")
+        (< roll 0.8)
+          (let (test (str "("
+                       (draw-choice ["<" "<=" ">" "="])
+                       " "
+                       (expr below)
+                       " "
+                       (expr below)
+                       ")"))
+            (str "(if " test " " (expr below) " " (expr below) ")"))
+        else (str "(let (t " (expr below) ") (" (draw-choice operators) " t " (expr below) "))")))))
 
 (defn variants (body)
   "Semantics-preserving rewrites of `body`, every one equal to it."

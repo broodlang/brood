@@ -421,10 +421,9 @@ fn a_scope_dead_on_arrival_does_not_close_an_ors_paths() {
     // widened — a strict report on `n` that mur-forge's log.blsp raised (2026-11-16).
     let src = "(defn count-of (value) (if (int? value) (+ value 1) 0))\n\
          (defn- lpb (width:int) (if (<= width 2) 1 (* 2 (lpb (math/quot width 2)))))\n\
-         (check-allow :non-tail-recursion\n\
-           (defn- path (index start end)\n\
-             (let (width (- end start))\n\
-               (if (= width 1) [] (let (half (lpb width)) (if (< index half) (conj (path index start (+ start half)) half) (conj (path (- index half) (+ start half) end) half)))))))\n\
+         (defn- path (index start end)\n\
+           (let (width (- end start))\n\
+             (if (= width 1) [] (let (half (lpb width)) (if (< index half) (conj (path index start (+ start half)) half) (conj (path (- index half) (+ start half) end) half))))))\n\
          (defn inclusion (index size) (path index 0 size))\n\
          (defn- locked (action) (action 1))\n\
          (defn proof (index size)\n\

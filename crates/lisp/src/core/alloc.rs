@@ -513,6 +513,89 @@ fn limits_for_cap(cap: usize) -> (usize, usize) {
     (hard, hard / 4 * 3)
 }
 
+/// The memory this machine gives the runtime: the physical memory, the address-space limit
+/// and the container's cap, whichever is least. Read once.
+pub fn machine_memory() -> usize {
+    use std::sync::LazyLock;
+    static MEMORY: LazyLock<usize> = LazyLock::new(|| {
+        let mut least = physical_memory().unwrap_or(8 * 1024 * 1024 * 1024);
+        if let Some(limit) = address_space_limit() {
+            least = least.min(limit);
+        }
+        if let Some(cap) = container_memory_cap() {
+            least = least.min(cap);
+        }
+        least
+    });
+    *MEMORY
+}
+
+#[cfg(target_os = "linux")]
+fn physical_memory() -> Option<usize> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib: usize = line.split_whitespace().nth(1)?.parse().ok()?;
+    kib.checked_mul(1024)
+}
+
+#[cfg(target_os = "macos")]
+fn physical_memory() -> Option<usize> {
+    let mut bytes: u64 = 0;
+    let mut size = std::mem::size_of::<u64>();
+    // SAFETY: `hw.memsize` is a u64 sysctl; `bytes` and `size` describe a buffer of exactly
+    // that size, and the name is a NUL-terminated C string.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut bytes).cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (status == 0).then(|| usize::try_from(bytes).ok()).flatten()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn physical_memory() -> Option<usize> {
+    None
+}
+
+#[cfg(unix)]
+fn address_space_limit() -> Option<usize> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes one `rlimit` through a valid pointer to a local.
+    let status = unsafe { libc::getrlimit(libc::RLIMIT_AS, &raw mut limit) };
+    if status != 0 || limit.rlim_cur == libc::RLIM_INFINITY {
+        return None;
+    }
+    usize::try_from(limit.rlim_cur).ok()
+}
+
+#[cfg(not(unix))]
+fn address_space_limit() -> Option<usize> {
+    None
+}
+
+/// The soft limit a runtime takes from its machine when nothing else sets one (ADR-751): the
+/// share of physical memory a container's cap of that size would give (three quarters of
+/// three quarters, [`limits_for_cap`]), and no more than half an address-space limit, which
+/// counts the runtime's reservations (allocator arenas, worker stacks) as well as its live
+/// bytes. Soft only: crossing it stops the process holding the most, cleanly, where the
+/// operating system's out-of-memory kill names nothing. Without it a recursion as deep as
+/// memory allows (or any runaway) met the machine's end before any limit of the runtime's.
+fn machine_soft_limit() -> Option<usize> {
+    let physical = physical_memory().map(|bytes| limits_for_cap(bytes).1);
+    let address_space = address_space_limit().map(|bytes| bytes / 2);
+    match (physical, address_space) {
+        (Some(physical), Some(address_space)) => Some(physical.min(address_space)),
+        (physical, address_space) => physical.or(address_space),
+    }
+}
+
 /// The memory cap of the container this process runs in, if it has one: the
 /// tightest `memory.max` on its cgroup's path (cgroup v2), else the tightest
 /// `memory.limit_in_bytes` (v1). `None` with no cap, no cgroup filesystem, or off
@@ -614,7 +697,8 @@ pub fn refresh_container_limits() {
         0 => None,
         hard => Some((hard, CALLER_DEFAULT_SOFT.load(Ordering::Relaxed))),
     };
-    let (hard, soft) = limits_with_cap(defaults, container_memory_cap()).unwrap_or((0, 0));
+    let (hard, soft) = limits_with_cap(defaults, container_memory_cap())
+        .unwrap_or((0, machine_soft_limit().unwrap_or(0)));
     if hard != HARD_LIMIT.load(Ordering::Relaxed) || soft != SOFT_LIMIT.load(Ordering::Relaxed) {
         set_hard_limit(hard);
         set_soft_limit(soft);
@@ -662,10 +746,12 @@ fn init_limits_inner(defaults: Option<(usize, usize)>) {
     //   2. user set `BROOD_MEM_LIMIT` but no soft → 3/4 of it
     //   3. the provided default soft (neither env var present)
     //   4. 3/4 of whatever hard we ended up with
+    //   5. the machine's share (ADR-751), when nothing above set one
     let soft = soft_env
         .or_else(|| hard_env.map(|h| h / 4 * 3))
         .or(defaults.map(|(_, s)| s))
-        .or_else(|| hard.map(|h| h / 4 * 3));
+        .or_else(|| hard.map(|h| h / 4 * 3))
+        .or_else(machine_soft_limit);
     if let Some(s) = soft {
         set_soft_limit(s);
     }

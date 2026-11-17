@@ -161,7 +161,7 @@ pub(super) fn emit_nil_locals(
 /// and a frame on another stack (a `stacker` segment, a stamp from another thread) trips it
 /// with room to spare — every arm under the ASan build deopted sixteen times and latched off
 /// native that way. The re-check re-stamps for this stack; only a real shortage deopts (the
-/// VM owns deep recursion: heap frames and the clean `MAX_BC_FRAMES` error). A `0` limit (the
+/// VM owns deep recursion: heap frames, bounded by the call stack's memory ceiling). A `0` limit (the
 /// probe could not read the stack) never trips, because the compare is unsigned.
 pub(super) fn emit_stack_guard(
     b: &mut FunctionBuilder,

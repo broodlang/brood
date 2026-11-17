@@ -18,14 +18,13 @@
 
 (defmodule jit-self-rebind-test (:use test))
 
-(check-allow :non-tail-recursion
-  ;; Non-tail self-recursion over ints — exactly the shape that tiers to the worker.
-  (defn sr-h (n) (if (< n 2) n (+ (sr-h (- n 1)) 1)))
-  (defn sr-warm (i) (if (< i 1) 0 (do (sr-h 12) (sr-warm (- i 1)))))
+;; Non-tail self-recursion over ints — exactly the shape that tiers to the worker.
+(defn sr-h (n) (if (< n 2) n (+ (sr-h (- n 1)) 1)))
+(defn sr-warm (i) (if (< i 1) 0 (do (sr-h 12) (sr-warm (- i 1)))))
 
-  ;; A second, untouched pair: rebinding one function must not disturb another's link.
-  (defn sr-keep (n) (if (< n 2) n (+ (sr-keep (- n 1)) 1)))
-  (defn sr-keep-warm (i) (if (< i 1) 0 (do (sr-keep 12) (sr-keep-warm (- i 1))))))
+;; A second, untouched pair: rebinding one function must not disturb another's link.
+(defn sr-keep (n) (if (< n 2) n (+ (sr-keep (- n 1)) 1)))
+(defn sr-keep-warm (i) (if (< i 1) 0 (do (sr-keep 12) (sr-keep-warm (- i 1)))))
 
 (def sr-alias sr-h)
 

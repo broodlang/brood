@@ -125,23 +125,22 @@ rewritten: a cache, a record beside an image, a config another tool polls.
   ;; copies or deletes what it points at, and a link to an ancestor never ends)
   (and stat (get stat :dir?) (get stat :symlink?)))
 
-(check-allow :non-tail-recursion
-  (defn copy-tree (from:string to:string -> nil)
-    "Copy the file or directory `from` to `to`: a file as `file/cp` copies it, a directory
+(defn copy-tree (from:string to:string -> nil)
+  "Copy the file or directory `from` to `to`: a file as `file/cp` copies it, a directory
 made at `to` with everything under it copied in. Throws when `from` is missing, and on a
 symlinked directory inside it — copying what it points at can loop.
 
     (file/copy-tree \"assets\" \"build/assets\")   ;~> nil; build/assets holds the whole tree"
-    (let (stat (file/stat from))
-      (cond
-        (nil? stat) (error (str "file/copy-tree: no such file: " from))
-        (symlinked-dir? stat) (error (str "file/copy-tree: a symlinked directory: " from))
-        (get stat :dir?)
-          (do
-            (file/mkdir to)
-            (doseq (name (file/ls from)) (copy-tree (path/join from name) (path/join to name)))
-            nil)
-        else (file/cp from to)))))
+  (let (stat (file/stat from))
+    (cond
+      (nil? stat) (error (str "file/copy-tree: no such file: " from))
+      (symlinked-dir? stat) (error (str "file/copy-tree: a symlinked directory: " from))
+      (get stat :dir?)
+        (do
+          (file/mkdir to)
+          (doseq (name (file/ls from)) (copy-tree (path/join from name) (path/join to name)))
+          nil)
+      else (file/cp from to))))
 
 (defn- remove-tree (path)
   ;; `path` removed for good: a directory with everything under it, a file, or a symlink

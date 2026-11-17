@@ -287,24 +287,17 @@ fn eval_tail_loop(
 ) -> LispResult {
     // GC-block guard: increments `GC_BLOCK` for the lifetime of this run. The GC safepoint
     // does not gate on this depth (ADR-061: it collects at any depth — every frame roots its
-    // transients on the operand stack); the guard feeds only the stack-overflow byte guard
-    // below, which keys its base off the outermost run (`gc_block_depth() <= 1`). `Drop`
-    // runs on every return path (including `?` and panic).
+    // transients on the operand stack), and since ADR-751 nothing reads it.
     let _gc_block = crate::process::GcBlockGuard::enter();
 
-    // Stack-budget guard (ADR-043). A run's own frames live on its heap frame stack
-    // (`machine`), so this bites only a run re-entered through native code — `eval`, or a
-    // native callback (`apply_closure` carries the same guard) — each of which is real Rust
-    // stack. An unbounded recursion through one would overflow the coroutine stack as a
-    // SIGSEGV the host can't `catch_unwind`; probing the stack pointer against the budget
-    // fails *here* with a clean, catchable error instead. (Bytes, not frame count — see
-    // `process::stack_overflow_check` for why.)
-    let stack_probe = 0u8;
-    if let Some(used) = crate::process::stack_overflow_check(&stack_probe as *const u8 as usize) {
-        return Err(stack_depth_error(used).or_form_pos(heap, expr));
-    }
-    machine::eval_trace(heap, expr);
-    machine::Machine::new(expr, env, entered).run(heap)
+    // A run's own frames live on its heap frame stack (`machine`); only a run re-entered
+    // through native code — `eval`, or a native callback (`apply_closure` does the same) —
+    // is real Rust stack, and near the end of it continues on a heap-backed segment
+    // (ADR-751), so such a recursion is as deep as memory allows.
+    crate::stack::reenter(heap, |heap| {
+        machine::eval_trace(heap, expr);
+        machine::Machine::new(expr, env, entered).run(heap)
+    })
 }
 
 /// A **keyword applied as an accessor** — `(:name person)` ≡ `(get person :name)`,
@@ -581,26 +574,21 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
     // keeps native calls shimmed through `apply`, e.g. `%receive` itself,
     // capture-eligible).
     let _tw = crate::process::TreeWalkGuard::enter();
-    // A native calling back into Brood is real Rust stack, so this entry carries the same
-    // byte-budget guard as `eval_tail_loop`.
     let _gc_block = crate::process::GcBlockGuard::enter();
-    let stack_probe = 0u8;
-    if let Some(used) = crate::process::stack_overflow_check(&stack_probe as *const u8 as usize) {
-        let name = heap.closure(cl).name;
-        return Err(close_frame(
-            stack_depth_error(used),
-            Some(TwFrame::boundary(name)),
-        ));
-    }
     // Error-trace bookkeeping: this native-boundary entry into `cl` (a `map`/`try`/
     // macro-expansion callback) is one logical frame, mirrored on the VM by a
     // `vm_apply` driver whose arm0 is `cl`. The call site is native code, so the
     // frame's entry carries the name only, and a tail call out of `cl` renames the
     // entry rather than adding one — the VM's frame-reuse behaviour exactly. The whole
     // body, `&optional` defaults included, runs on one machine (`Machine::run_closure`).
+    //
+    // A native calling back into Brood is real Rust stack: near its end the body continues
+    // on a heap-backed segment, as `eval_tail_loop` does (ADR-751).
     let mut entered: Option<TwFrame> = None;
-    heap.root_scope(|heap| machine::Machine::run_closure(heap, cl, argv, &mut entered))
-        .map_err(|e| close_frame(e, entered))
+    crate::stack::reenter(heap, |heap| {
+        heap.root_scope(|heap| machine::Machine::run_closure(heap, cl, argv, &mut entered))
+    })
+    .map_err(|e| close_frame(e, entered))
 }
 
 /// Thin-wrapper elision (perf). If the arm `cl` selects for an `argc`-argument
@@ -1170,69 +1158,6 @@ pub(crate) fn passthrough_redirect_ok(heap: &Heap, inner: Value) -> Result<bool,
     // and the body driver converts it to process death.
     crate::process::tick_nested()?;
     Ok(true)
-}
-
-// The three runaway-guard errors both engines (`eval` here and the VM's
-// `vm_apply_inner`) raise — one constructor each so their message/code/hint
-// stay byte-identical and can't drift. The caller adds engine-specific
-// trimmings (`eval` attaches `or_form_pos`; the VM truncates its root stacks).
-
-/// "recursion too deep …" — the VM's call-frame-count guard (`MAX_BC_FRAMES`) for
-/// runaway non-tail recursion. Distinct from [`stack_depth_error`], whose `used` is
-/// a byte budget: here the limit is a *frame count*, so the message must not
-/// mis-state it as bytes or cite the unrelated byte budget.
-pub(crate) fn bc_frame_depth_error(frames: usize) -> LispError {
-    LispError::runtime(format!(
-        "recursion too deep: exceeded the VM's {frames}-frame non-tail-call \
-         limit (runaway non-tail recursion?)",
-    ))
-    .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
-    .with_hint(
-        "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), \
-         or drive the iteration with a process",
-    )
-}
-
-/// "recursion too deep …" — the stack-budget guard for runaway non-tail recursion.
-pub(crate) fn stack_depth_error(used: usize) -> LispError {
-    LispError::runtime(format!(
-        "recursion too deep: used {used} bytes of stack, over the \
-         {}-byte budget (runaway non-tail recursion?)",
-        crate::process::stack_budget()
-    ))
-    .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
-    .with_hint(
-        "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), \
-         or raise the budget with BROOD_STACK_BUDGET. NOTE a self-call through \
-         `eval` is NOT a tail call however it is written — `(defn go (n) (eval \
-         (list 'go (- n 1))))` looks tail-recursive but `eval` is a native \
-         function that re-enters the evaluator on the Rust stack, so each round \
-         adds a frame. Recurse directly, or drive the loop with a process",
-    )
-}
-
-/// Native-stack exhaustion at a **nested activation** (`vm_apply`) — the VM's
-/// counterpart to [`stack_depth_error`], which guards the tree-walker.
-///
-/// Same catchable [`STACK_DEPTH_EXCEEDED`] code, different remedy in the hint:
-/// this one is not the `BROOD_STACK_BUDGET` byte budget (that guard measures
-/// bytes since the outermost `eval`, and a VM re-entry never reaches `eval`), it
-/// is real Rust stack running out. Raising the budget cannot help; restructuring
-/// the recursion can.
-pub(crate) fn native_stack_error(remaining: usize) -> LispError {
-    LispError::runtime(format!(
-        "recursion too deep: {remaining} bytes of native stack left, under the \
-         {}-byte reserve — non-tail recursion through a `try` body, an `&optional` \
-         default, or a native callback re-enters the VM on the Rust stack",
-        crate::process::NATIVE_STACK_MARGIN_BYTES
-    ))
-    .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
-    .with_hint(
-        "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), or move the \
-         recursion out of the `try` body — a plain VM call uses heap frames, not the \
-         native stack, and recurses far deeper. `eval` counts as a native callback here: \
-         a self-call made THROUGH `eval` is not a tail call however it is written",
-    )
 }
 
 /// "memory limit exceeded …" — the ADR-043 soft-memory backstop.

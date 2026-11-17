@@ -233,11 +233,10 @@ pub fn warn_nondefault_gc_env() {
         // trace — both retune/observe collection, so they belong on this list.
         "BROOD_RT_GC_FLOOR",
         "BROOD_TRACE_GCBLOCK",
-        // Not GC knobs per se, but they change run behaviour and so make a
+        // Not a GC knob per se, but it changes run behaviour and so makes a
         // benchmark non-representative: the memory cap forces extra collections
-        // as it's approached, and the stack budget bounds non-tail recursion.
+        // as it's approached.
         "BROOD_MEM_LIMIT",
-        "BROOD_STACK_BUDGET",
     ];
     let active: Vec<String> = KNOBS
         .iter()

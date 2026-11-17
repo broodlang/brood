@@ -44,60 +44,59 @@ contents are `=`, whatever order they were built in."
 
 ;; Every recursion below descends ONE path or splits on one, so its depth is the tree's
 ;; depth (O(log n)), not the collection's size.
-(check-allow :non-tail-recursion
-  (defn- split (node k)
-    "`[below found above]`: the nodes keyed below `k`, the node keyed `k` (or nil) and those above."
-    (if (nil? node)
-      [nil nil nil]
-      (let ([left key value right priority] node
-            order (compare k key))
-        (cond
-          (< order 0)
-            (let ([below found above] (split left k))
-              [below found [above key value right priority]])
-          (> order 0)
-            (let ([below found above] (split right k))
-              [[left key value below priority] found above])
-          else [left node right]))))
-  (defn- join (low high)
-    "One tree from `low` and `high`, every key of `low` below every key of `high`."
-    (cond
-      (nil? low) high
-      (nil? high) low
-      (above? (nth low 4) (nth low 1) (nth high 4) (nth high 1))
-        (let ([left key value right priority] low) [left key value (join right high) priority])
-      else (let ([left key value right priority] high) [(join low left) key value right priority])))
-  (defn- insert (node k v priority)
-    (if (or (nil? node) (above? priority k (nth node 4) (nth node 1)))
-      (let ([below _ above] (split node k)) [below k v above priority])
-      (let ([left key value right p] node
-            order (compare k key))
-        (cond
-          (< order 0) [(insert left k v priority) key value right p]
-          (> order 0) [left key value (insert right k v priority) p]
-          else [left key v right p]))))
-  (defn- delete (node k)
+(defn- split (node k)
+  "`[below found above]`: the nodes keyed below `k`, the node keyed `k` (or nil) and those above."
+  (if (nil? node)
+    [nil nil nil]
     (let ([left key value right priority] node
           order (compare k key))
       (cond
-        (< order 0) [(delete left k) key value right priority]
-        (> order 0) [left key value (delete right k) priority]
-        else (join left right))))
-  (defn- entries-onto (node entry acc)
-    "The entries of `node` in key order, consed onto `acc`."
-    (if (nil? node)
-      acc
-      (entries-onto (nth node 0) entry (cons (entry node) (entries-onto (nth node 3) entry acc)))))
-  (defn- range-onto (node from to entry acc)
-    "The entries keyed from `from` (inclusive) to `to` (exclusive) in key order, onto `acc`."
-    (if (nil? node)
-      acc
-      (let (key (nth node 1)
-            from-ok (or (nil? from) (>= (compare key from) 0))
-            to-ok (or (nil? to) (< (compare key to) 0))
-            with-right (if to-ok (range-onto (nth node 3) from to entry acc) acc)
-            with-node (if (and from-ok to-ok) (cons (entry node) with-right) with-right))
-        (if from-ok (range-onto (nth node 0) from to entry with-node) with-node)))))
+        (< order 0)
+          (let ([below found above] (split left k))
+            [below found [above key value right priority]])
+        (> order 0)
+          (let ([below found above] (split right k))
+            [[left key value below priority] found above])
+        else [left node right]))))
+(defn- join (low high)
+  "One tree from `low` and `high`, every key of `low` below every key of `high`."
+  (cond
+    (nil? low) high
+    (nil? high) low
+    (above? (nth low 4) (nth low 1) (nth high 4) (nth high 1))
+      (let ([left key value right priority] low) [left key value (join right high) priority])
+    else (let ([left key value right priority] high) [(join low left) key value right priority])))
+(defn- insert (node k v priority)
+  (if (or (nil? node) (above? priority k (nth node 4) (nth node 1)))
+    (let ([below _ above] (split node k)) [below k v above priority])
+    (let ([left key value right p] node
+          order (compare k key))
+      (cond
+        (< order 0) [(insert left k v priority) key value right p]
+        (> order 0) [left key value (insert right k v priority) p]
+        else [left key v right p]))))
+(defn- delete (node k)
+  (let ([left key value right priority] node
+        order (compare k key))
+    (cond
+      (< order 0) [(delete left k) key value right priority]
+      (> order 0) [left key value (delete right k) priority]
+      else (join left right))))
+(defn- entries-onto (node entry acc)
+  "The entries of `node` in key order, consed onto `acc`."
+  (if (nil? node)
+    acc
+    (entries-onto (nth node 0) entry (cons (entry node) (entries-onto (nth node 3) entry acc)))))
+(defn- range-onto (node from to entry acc)
+  "The entries keyed from `from` (inclusive) to `to` (exclusive) in key order, onto `acc`."
+  (if (nil? node)
+    acc
+    (let (key (nth node 1)
+          from-ok (or (nil? from) (>= (compare key from) 0))
+          to-ok (or (nil? to) (< (compare key to) 0))
+          with-right (if to-ok (range-onto (nth node 3) from to entry acc) acc)
+          with-node (if (and from-ok to-ok) (cons (entry node) with-right) with-right))
+      (if from-ok (range-onto (nth node 0) from to entry with-node) with-node))))
 
 (defn- find-node (node k)
   (if (nil? node)

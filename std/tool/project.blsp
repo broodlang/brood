@@ -250,9 +250,8 @@ than being fetched into `_deps/<name>/`.
 
 ;; The keys of a flat plist (every other element from the head).
 ;; check-allow: deliberately non-tail — depth = the manifest plist's key count.
-(check-allow :non-tail-recursion
-  (defn- project-plist-keys (kvs)
-    (if (empty? kvs) nil (cons (first kvs) (project-plist-keys (rest (rest kvs)))))))
+(defn- project-plist-keys (kvs)
+  (if (empty? kvs) nil (cons (first kvs) (project-plist-keys (rest (rest kvs))))))
 
 ;; Reject any reserved opt key present in `opts`, naming the offending dep.
 (defn- project-reject-reserved-opts (name opts)
@@ -390,7 +389,7 @@ spells, and it is a single path component — no `/`, `\\` or NUL, and not start
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
-  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:doc-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. `:doc-paths` names the markdown `nest doctest` runs the fenced examples of — files, directories (every `.md` under them) and `!`-prefixed paths to leave out; default `README.md` when there is one. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(system/brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. `:kind` is the package's kind — `:app` (an application you run) or `:library` (the default, an ordinary reusable package); optional, and the registry lists the two differently. `:check` sets which warning categories `nest check` treats as advisory, gating or silent (`:check {:advisory [:non-tail-recursion] :allow [:list-truthiness]}`, ADR-698). Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:format-paths` `:doc-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). `:format-paths` names EXTRA directories `nest format` owns beyond `:source-paths`/`:test-paths` — needed for a tree the project authors but does not build from (`std/`, `examples/`); the formatter walks a whitelist, so a fetched dependency under `_deps/` is never rewritten. `:doc-paths` names the markdown `nest doctest` runs the fenced examples of — files, directories (every `.md` under them) and `!`-prefixed paths to leave out; default `README.md` when there is one. A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(system/brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. `:kind` is the package's kind — `:app` (an application you run) or `:library` (the default, an ordinary reusable package); optional, and the registry lists the two differently. `:check` sets which warning categories `nest check` treats as advisory, gating or silent (`:check {:advisory [:unreachable-clause] :allow [:list-truthiness]}`, ADR-698). Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
   ;; quasiquote (not `(list 'apply …)`) so α qualifies `apply`
   ;; to `project/apply-config` at this macro's definition (ADR-065 §7).
   `(apply-config (quote ~opts)))
@@ -457,7 +456,7 @@ since a newer checker may know names this one does not."
       (error "project: "
         ":check must be a MAP, got "
         (pr-str value)
-        " — write it as :check {:advisory [:non-tail-recursion] :allow [:list-truthiness]}")
+        " — write it as :check {:advisory [:unreachable-clause] :allow [:list-truthiness]}")
     else
       (fold (%map-pairs value)
         {}
@@ -473,7 +472,7 @@ since a newer checker may know names this one does not."
               (pr-str categories)
               " — write it as :check {"
               key
-              " [:non-tail-recursion]}"))
+              " [:unreachable-clause]}"))
           (assoc acc key (into #{} categories))))))
 
 (defn- project-parse-enhances (value)

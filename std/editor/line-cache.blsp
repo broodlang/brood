@@ -99,31 +99,29 @@ caller starts again from when the lexer changes (a new mode) — one cache serve
   ;; and a hash of the line is as good as random and keeps the cache a pure value)
   (%hash [line :line-cache]))
 
-(check-allow :non-tail-recursion
-  (defn- lc-split (node base line)
-    "`[below rest]`: `node`'s entries (its key relative to `base`) before `line`, and from
+(defn- lc-split (node base line)
+  "`[below rest]`: `node`'s entries (its key relative to `base`) before `line`, and from
 `line` on."
-    (if (nil? node)
-      [nil nil]
-      (let (at (+ base (nth node 1)))
-        (if (< at line)
-          (let ([below rest] (lc-split (nth node 3) at line))
-            [(lc-node (nth node 0) at (nth node 2) (lc-rebase below (- at)) (nth node 4)) rest])
-          (let ([below rest] (lc-split (nth node 0) at line))
-            [below (lc-node (lc-rebase rest (- at)) at (nth node 2) (nth node 3) (nth node 4))]))))))
+  (if (nil? node)
+    [nil nil]
+    (let (at (+ base (nth node 1)))
+      (if (< at line)
+        (let ([below rest] (lc-split (nth node 3) at line))
+          [(lc-node (nth node 0) at (nth node 2) (lc-rebase below (- at)) (nth node 4)) rest])
+        (let ([below rest] (lc-split (nth node 0) at line))
+          [below (lc-node (lc-rebase rest (- at)) at (nth node 2) (nth node 3) (nth node 4))])))))
 
-(check-allow :non-tail-recursion
-  (defn- lc-join (low high)
-    "One tree of `low` and `high`, every key of `low` before every key of `high`."
-    (cond
-      (nil? low) high
-      (nil? high) low
-      (> (nth low 4) (nth high 4))
-        (let (at (nth low 1))
-          (assoc low 3 (lc-rebase (lc-join (lc-rebase (nth low 3) at) high) (- at))))
-      else
-        (let (at (nth high 1))
-          (assoc high 0 (lc-rebase (lc-join low (lc-rebase (nth high 0) at)) (- at)))))))
+(defn- lc-join (low high)
+  "One tree of `low` and `high`, every key of `low` before every key of `high`."
+  (cond
+    (nil? low) high
+    (nil? high) low
+    (> (nth low 4) (nth high 4))
+      (let (at (nth low 1))
+        (assoc low 3 (lc-rebase (lc-join (lc-rebase (nth low 3) at) high) (- at))))
+    else
+      (let (at (nth high 1))
+        (assoc high 0 (lc-rebase (lc-join low (lc-rebase (nth high 0) at)) (- at))))))
 
 (defn- lc-get (node base line)
   (if (nil? node)
@@ -163,17 +161,16 @@ caller starts again from when the lexer changes (a new mode) — one cache serve
   (let ([below rest] (lc-split tree 0 from))
     (lc-join below (lc-rebase rest delta))))
 
-(check-allow :non-tail-recursion
-  (defn- lc-entries (node base from to acc)
-    "The `[key value]` entries in `[from, to)`, in line order, before `acc`."
-    (if (nil? node)
-      acc
-      (let (at (+ base (nth node 1))
-            with-right (if (< (inc at) to) (lc-entries (nth node 3) at from to acc) acc)
-            with-node (if (and (<= from at) (< at to))
-                        (cons [at (nth node 2)] with-right)
-                        with-right))
-        (if (< from at) (lc-entries (nth node 0) at from to with-node) with-node)))))
+(defn- lc-entries (node base from to acc)
+  "The `[key value]` entries in `[from, to)`, in line order, before `acc`."
+  (if (nil? node)
+    acc
+    (let (at (+ base (nth node 1))
+          with-right (if (< (inc at) to) (lc-entries (nth node 3) at from to acc) acc)
+          with-node (if (and (<= from at) (< at to))
+                      (cons [at (nth node 2)] with-right)
+                      with-right))
+      (if (< from at) (lc-entries (nth node 0) at from to with-node) with-node))))
 
 ;; ---- an edit, and the walk that colours a window -----------------------------------
 

@@ -235,31 +235,29 @@ the reason `include-str` gives.)"
 ;; The threaded value is bound ONCE to a gensym and the binding substituted, so a
 ;; step may name `$` any number of times without re-evaluating the expression:
 ;; `(-> (expensive) (+ $ $))` calls `expensive` once.
-(check-allow :non-tail-recursion
-  (defn- %thread-slot? (form)
-    ;; expansion-time recursion over macro-body syntax — depth is source nesting.
-    (cond
-      (= form '$) true
-      ;; `'$` is the SYMBOL $, not the slot — a quoted form is data, never a hole.
-      (and (pair? form) (= (first form) 'quote)) false
-      (pair? form) (any? form %thread-slot?)
-      (vector? form) (any? form %thread-slot?)
-      (map? form) (any? (keys form) (fn (k) (or (%thread-slot? k) (%thread-slot? (get form k)))))
-      else false)))
-(check-allow :non-tail-recursion
-  (defn- %thread-fill (form g)
-    (cond
-      (= form '$) g
-      (and (pair? form) (= (first form) 'quote)) form
-      ;; the filled step is the user's step: it keeps its position, so an error in it is
-      ;; reported on its line rather than the pipe's
-      (pair? form) (%copy-form-pos (map form (fn (x) (%thread-fill x g))) form)
-      (vector? form) (seq/mapv form (fn (x) (%thread-fill x g)))
-      (map? form)
-        (fold (keys form)
-          {}
-          (fn (acc k) (assoc acc (%thread-fill k g) (%thread-fill (get form k) g))))
-      else form)))
+(defn- %thread-slot? (form)
+  ;; expansion-time recursion over macro-body syntax — depth is source nesting.
+  (cond
+    (= form '$) true
+    ;; `'$` is the SYMBOL $, not the slot — a quoted form is data, never a hole.
+    (and (pair? form) (= (first form) 'quote)) false
+    (pair? form) (any? form %thread-slot?)
+    (vector? form) (any? form %thread-slot?)
+    (map? form) (any? (keys form) (fn (k) (or (%thread-slot? k) (%thread-slot? (get form k)))))
+    else false))
+(defn- %thread-fill (form g)
+  (cond
+    (= form '$) g
+    (and (pair? form) (= (first form) 'quote)) form
+    ;; the filled step is the user's step: it keeps its position, so an error in it is
+    ;; reported on its line rather than the pipe's
+    (pair? form) (%copy-form-pos (map form (fn (x) (%thread-fill x g))) form)
+    (vector? form) (seq/mapv form (fn (x) (%thread-fill x g)))
+    (map? form)
+      (fold (keys form)
+        {}
+        (fn (acc k) (assoc acc (%thread-fill k g) (%thread-fill (get form k) g))))
+    else form))
 (defn- %thread-slot-step (acc form)
   (let (g (reflect/gensym "thread"))
     `(let (~g ~acc) ~(%thread-fill form g))))
@@ -301,14 +299,13 @@ the reason `include-str` gives.)"
 ;; to nil would discard exactly what the caller built it to read. Its sibling is `with`
 ;; below: `ok->` is for a pipeline with nothing to name, `with` for a chain of named steps.
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %ok-thread-build (place forms step)
-    (if (empty? forms)
-      place
-      `(if (/failure? ~place)
-         ~place
-         (let (~place ~(step place (first forms)))
-           ~(%ok-thread-build place (rest forms) step))))))
+(defn- %ok-thread-build (place forms step)
+  (if (empty? forms)
+    place
+    `(if (/failure? ~place)
+       ~place
+       (let (~place ~(step place (first forms)))
+         ~(%ok-thread-build place (rest forms) step)))))
 (defmacro ok-> (x & forms)
   "Thread `x` through `forms` as each one's *first* argument (like `->`), but stop as soon as a step yields a **failure**, which then falls out as the result.
 
@@ -318,12 +315,11 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
     (failure? (ok-> \"q\" string/->number inc))   ;=> true   ; `inc` never runs"
   (let (v (reflect/gensym "v")) `(let (~v ~x) ~(%ok-thread-build v forms %thread-first-step))))
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %cond-thread-build (place clauses step)
-    (if (empty? clauses)
-      place
-      `(let (~place (if ~(first clauses) ~(step place (second clauses)) ~place))
-         ~(%cond-thread-build place (rest (rest clauses)) step)))))
+(defn- %cond-thread-build (place clauses step)
+  (if (empty? clauses)
+    place
+    `(let (~place (if ~(first clauses) ~(step place (second clauses)) ~place))
+       ~(%cond-thread-build place (rest (rest clauses)) step))))
 (defmacro cond-> (x & clauses)
   "Thread `x` through the `test form` clause pairs, applying each `form` (as its *first* argument, like `->`) only when its `test` is truthy: `(cond-> {} add-a? (assoc :a 1))`.
 
@@ -422,13 +418,12 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
 ;; its test runs (ADR-507). A lone trailing form is the default; with none, no match raises,
 ;; as `case` and `match` do. ADR-379.
 ;; check-allow: deliberately non-tail — expansion-time recursion over the clause list.
-(check-allow :non-tail-recursion
-  (defn- %condp-clauses (p e clauses)
-    (cond
-      (empty? clauses) `(error "condp: no clause matched " (/pr-str ~e))
-      (empty? (rest clauses)) (first clauses)
-      else
-        `(if (~p ~e ~(first clauses)) ~(second clauses) ~(%condp-clauses p e (rest (rest clauses)))))))
+(defn- %condp-clauses (p e clauses)
+  (cond
+    (empty? clauses) `(error "condp: no clause matched " (/pr-str ~e))
+    (empty? (rest clauses)) (first clauses)
+    else
+      `(if (~p ~e ~(first clauses)) ~(second clauses) ~(%condp-clauses p e (rest (rest clauses))))))
 ;; The message for a `condp` whose second argument is not a function: it names the value
 ;; (once, when the argument is that value spelled out) and the spelling with the first two
 ;; arguments swapped.
@@ -481,19 +476,18 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
 ;; bound to a temporary, tested, and only then destructured, so a failure never reaches a
 ;; pattern that could not match it.
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %with-build (bindings body)
-    (if (empty? bindings)
-      `(do ~@body)
-      (let (target (first bindings)
-            expr (second bindings)
-            more (rest (rest bindings))
-            v (reflect/gensym "w"))
-        `(let (~v ~expr)
-           (if (/failure? ~v)
-             ~v
-             (let (~target ~v)
-               ~(%with-build more body))))))))
+(defn- %with-build (bindings body)
+  (if (empty? bindings)
+    `(do ~@body)
+    (let (target (first bindings)
+          expr (second bindings)
+          more (rest (rest bindings))
+          v (reflect/gensym "w"))
+      `(let (~v ~expr)
+         (if (/failure? ~v)
+           ~v
+           (let (~target ~v)
+             ~(%with-build more body)))))))
 (defmacro with (bindings & body)
   "Bind each `name value` pair in order, like `let` — but the first value that is a **failure** short-circuits the whole form to that failure, so the steps after it never run. The body runs only when every step produced a value, with all bindings in scope.
 
@@ -824,15 +818,13 @@ message it carries, and anything else its printed form.
 ;; Split a flat binding list (*a* va *b* vb) into its names and value forms, at
 ;; expansion time (like the threading-macro helpers above).
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %binding-names (b)
-    (cond
-      (nil? b) nil
-      (symbol? (first b)) (cons (%resolve-name (first b)) (%binding-names (rest (rest b))))
-      else (reflect/error-at b "binding: each name must be a symbol, got " (first b)))))
+(defn- %binding-names (b)
+  (cond
+    (nil? b) nil
+    (symbol? (first b)) (cons (%resolve-name (first b)) (%binding-names (rest (rest b))))
+    else (reflect/error-at b "binding: each name must be a symbol, got " (first b))))
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
-(check-allow :non-tail-recursion
-  (defn- %binding-vals (b) (if (nil? b) nil (cons (second b) (%binding-vals (rest (rest b)))))))
+(defn- %binding-vals (b) (if (nil? b) nil (cons (second b) (%binding-vals (rest (rest b))))))
 
 ;; (binding (*a* 1 *b* 2) body...) => (%binding '(m/*a* *b*) [1 2] (fn () body...))
 ;; The names go out as a quoted list and the values as a vector literal — both

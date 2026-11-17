@@ -35,10 +35,8 @@ the keybindings."
 ;; Note on recursion: the helpers below walk the layout *tree*, so they recurse on
 ;; its DEPTH — the number of nested splits — not on any list length or leaf count.
 ;; That depth is bounded by how many times a user has split the frame (a handful;
-;; each split halves a pane, so a screen tops out well before deep nesting). The
-;; non-tail-recursion checker can't see that bound and flags these; they're safe as
-;; plain tree recursion (cf. std/sexp.blsp's CST walk). Don't contort them into an
-;; explicit-stack tail loop — there's no overflow to prevent here.
+;; each split halves a pane, so a screen tops out well before deep nesting), so they
+;; are plain tree recursion (cf. std/sexp.blsp's CST walk).
 
 ;; ---- the shapes, named once (ADR-326) ---------------------------------------
 ;; What `pane-layout` hands out. A frontend keeps these as plain maps (no `defrecord`
@@ -82,28 +80,26 @@ the keybindings."
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 ;; Trusted, not verified: the tree's shape is what `f` returns at the path, which `fn` cannot say.
 (check-allow :trusted
-  (check-allow :non-tail-recursion
-    (defn- pane-update (node path f)
-      "The tree like `node` with the node at `path` replaced by `(f node-at-path)`."
-      (if (empty? path)
-        (f node)
-        (let (k (first path))
-          (assoc node k (pane-update (get node k) (rest path) f)))))))
+  (defn- pane-update (node path f)
+    "The tree like `node` with the node at `path` replaced by `(f node-at-path)`."
+    (if (empty? path)
+      (f node)
+      (let (k (first path))
+        (assoc node k (pane-update (get node k) (rest path) f))))))
 (sig pane-update (map list fn -> map))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
-(check-allow :non-tail-recursion
-  (defn- pane-paths (node prefix)
-    "All leaf paths under `node` in traversal order (a before b), each prefixed by
+(defn- pane-paths (node prefix)
+  "All leaf paths under `node` in traversal order (a before b), each prefixed by
   the forward-order `prefix`. Anything that is neither a leaf nor a split map holds no
   leaves: a missing child (`nil`) used to recurse into `nil` for ever, the prefix growing
   until the process ran out of memory, on any tree with a hole in it."
-    (cond
-      (pane-leaf? node) (list prefix)
-      (map? node)
-        (append (pane-paths (get node :a) (append prefix (list :a)))
-          (pane-paths (get node :b) (append prefix (list :b))))
-      else ())))
+  (cond
+    (pane-leaf? node) (list prefix)
+    (map? node)
+      (append (pane-paths (get node :a) (append prefix (list :a)))
+        (pane-paths (get node :b) (append prefix (list :b))))
+    else ()))
 
 (defn pane-leaf-paths (tree)
   "Every leaf's path, in left-to-right / top-to-bottom traversal order.
@@ -126,12 +122,11 @@ the keybindings."
   (seq/find (pane-leaf-paths tree) (fn (p) (get (pane-get tree p) :selected))))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
-(check-allow :non-tail-recursion
-  (defn- pane-clear (node)
-    "The tree with the `:selected` marker cleared from every leaf."
-    (if (pane-leaf? node)
-      (assoc node :selected false)
-      (assoc node :a (pane-clear (get node :a)) :b (pane-clear (get node :b))))))
+(defn- pane-clear (node)
+  "The tree with the `:selected` marker cleared from every leaf."
+  (if (pane-leaf? node)
+    (assoc node :selected false)
+    (assoc node :a (pane-clear (get node :a)) :b (pane-clear (get node :b)))))
 
 (defn pane-select-path (tree path)
   "The tree with the leaf at `path` made the sole selected pane.
@@ -173,14 +168,13 @@ behind an Emacs-style `display-buffer`).
   (get (pane-get tree path) :payload))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
-(check-allow :non-tail-recursion
-  (defn pane-map (tree f)
-    "The tree with `f` applied to *every* pane's payload (leaves only; splits and
+(defn pane-map (tree f)
+  "The tree with `f` applied to *every* pane's payload (leaves only; splits and
   selection unchanged). For an editor re-pointing pane→buffer references after the
   buffer pool changes — e.g. decrementing indices above a killed buffer."
-    (if (pane-leaf? tree)
-      (assoc tree :payload (f (get tree :payload)))
-      (assoc tree :a (pane-map (get tree :a) f) :b (pane-map (get tree :b) f)))))
+  (if (pane-leaf? tree)
+    (assoc tree :payload (f (get tree :payload)))
+    (assoc tree :a (pane-map (get tree :a) f) :b (pane-map (get tree :b) f))))
 
 (defn pane-other (tree)
   "Move selection to the next pane in traversal order, wrapping (Emacs `C-x o`).
@@ -281,37 +275,35 @@ in the same place (Emacs `rotate-frame`'s buffer half).
           (pane-update-path t path (fn (_) from)))))))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
-(check-allow :non-tail-recursion
-  (defn pane-transpose (tree)
-    "Every split turned the other way — `:row` becomes `:col` and back — so a layout of
+(defn pane-transpose (tree)
+  "Every split turned the other way — `:row` becomes `:col` and back — so a layout of
   stacked panes becomes side-by-side ones and vice versa, ratios and order kept
   (`transpose-frame`).
 
     (get (editor/pane/pane-transpose (editor/pane/pane-split (editor/pane/pane-single :a) :col :b)) :dir)   ;=> :row"
-    (if (pane-leaf? tree)
-      tree
-      (assoc tree
-        :dir (if (= (get tree :dir) :row) :col :row)
-        :a (pane-transpose (get tree :a))
-        :b (pane-transpose (get tree :b))))))
+  (if (pane-leaf? tree)
+    tree
+    (assoc tree
+      :dir (if (= (get tree :dir) :row) :col :row)
+      :a (pane-transpose (get tree :a))
+      :b (pane-transpose (get tree :b)))))
 (sig pane-transpose (map -> map))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
-(check-allow :non-tail-recursion
-  (defn pane-flip (tree &optional (dir nil))
-    "Every split's children exchanged — the layout mirrored — with `:ratio` inverted so
+(defn pane-flip (tree &optional (dir nil))
+  "Every split's children exchanged — the layout mirrored — with `:ratio` inverted so
   each pane keeps its size. `dir` restricts it to splits of that direction: `:col` mirrors
   left-right (`flop-frame`), `:row` top-bottom (`flip-frame`), nil both.
 
     (editor/pane/pane-payload-at (editor/pane/pane-flip (editor/pane/pane-split (editor/pane/pane-single :a) :col :b)) '(:a))        ;=> :b
     (editor/pane/pane-payload-at (editor/pane/pane-flip (editor/pane/pane-split (editor/pane/pane-single :a) :col :b) :row) '(:a))   ;=> :a"
-    (if (pane-leaf? tree)
-      tree
-      (let (a (pane-flip (get tree :a) dir)
-            b (pane-flip (get tree :b) dir))
-        (if (or (nil? dir) (= dir (get tree :dir)))
-          (assoc tree :a b :b a :ratio (- 1 (get tree :ratio)))
-          (assoc tree :a a :b b))))))
+  (if (pane-leaf? tree)
+    tree
+    (let (a (pane-flip (get tree :a) dir)
+          b (pane-flip (get tree :b) dir))
+      (if (or (nil? dir) (= dir (get tree :dir)))
+        (assoc tree :a b :b a :ratio (- 1 (get tree :ratio)))
+        (assoc tree :a a :b b)))))
 
 ;; ---- neighbours: which pane lies in a direction (windmove) -------------------
 
@@ -389,39 +381,38 @@ from the geometry `pane-layout` already computed.
   (math/max lo (math/min hi v)))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
-(check-allow :non-tail-recursion
-  (defn- pane-layout-go (node path rect row-seam)
-    "Lay `node` (at `path`) into `rect`, returning `{:panes (…) :dividers (…)}`. A `:row`
+(defn- pane-layout-go (node path rect row-seam)
+  "Lay `node` (at `path`) into `rect`, returning `{:panes (…) :dividers (…)}`. A `:row`
 split reserves `row-seam` rows (1 or 0) for its divider, a `:col` split always one column."
-    (if (pane-leaf? node)
-      {:panes (list {:path path
-                     :payload (get node :payload)
-                     :selected (= true (get node :selected))
-                     :rect rect})
-       :dividers ()}
-      (let ([x y w h] rect
-            col? (= (get node :dir) :col)
-            ;; the cells reserved for the divider: a column, or `row-seam` rows
-            seam (if col? 1 row-seam)
-            ;; the extent split between the two children (less the divider's seam),
-            ;; and child a's share of it, clamped so neither pane vanishes
-            ext (- (if col? w h) seam)
-            a-ext (pane-clampi (round (* ext (get node :ratio))) 1 (math/max 1 (- ext 1)))
-            arect (if col? [x y a-ext h] [x y w a-ext])
-            ;; with no seam the divider is child a's LAST row — where a terminal frontend
-            ;; draws its own separator (a mode line), and where a drag takes hold of it
-            drect (cond
-                    col? [(+ x a-ext) y 1 h]
-                    (= seam 0) [x (+ y a-ext -1) w 1]
-                    else [x (+ y a-ext) w 1])
-            brect (if col?
-                    [(+ x a-ext 1) y (- w a-ext 1) h]
-                    [x (+ y a-ext seam) w (- h a-ext seam)])
-            la (pane-layout-go (get node :a) (append path (list :a)) arect row-seam)
-            lb (pane-layout-go (get node :b) (append path (list :b)) brect row-seam))
-        {:panes (append (get la :panes) (get lb :panes))
-         :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect :seam seam}
-                     (append (get la :dividers) (get lb :dividers)))}))))
+  (if (pane-leaf? node)
+    {:panes (list {:path path
+                   :payload (get node :payload)
+                   :selected (= true (get node :selected))
+                   :rect rect})
+     :dividers ()}
+    (let ([x y w h] rect
+          col? (= (get node :dir) :col)
+          ;; the cells reserved for the divider: a column, or `row-seam` rows
+          seam (if col? 1 row-seam)
+          ;; the extent split between the two children (less the divider's seam),
+          ;; and child a's share of it, clamped so neither pane vanishes
+          ext (- (if col? w h) seam)
+          a-ext (pane-clampi (round (* ext (get node :ratio))) 1 (math/max 1 (- ext 1)))
+          arect (if col? [x y a-ext h] [x y w a-ext])
+          ;; with no seam the divider is child a's LAST row — where a terminal frontend
+          ;; draws its own separator (a mode line), and where a drag takes hold of it
+          drect (cond
+                  col? [(+ x a-ext) y 1 h]
+                  (= seam 0) [x (+ y a-ext -1) w 1]
+                  else [x (+ y a-ext) w 1])
+          brect (if col?
+                  [(+ x a-ext 1) y (- w a-ext 1) h]
+                  [x (+ y a-ext seam) w (- h a-ext seam)])
+          la (pane-layout-go (get node :a) (append path (list :a)) arect row-seam)
+          lb (pane-layout-go (get node :b) (append path (list :b)) brect row-seam))
+      {:panes (append (get la :panes) (get lb :panes))
+       :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect :seam seam}
+                   (append (get la :dividers) (get lb :dividers)))})))
 
 ;; Outside the `check-allow` wrapper, so the declaration is a top-level form the checker and
 ;; the runtime both read plainly (its placement relative to the `defn-` is free, ADR-381).
