@@ -468,7 +468,9 @@
           called (answer {:id 3 :src "(evsrv-ty-calc \"1 1 +\")"}))
       (assert= (get defined :type) "evsrv-ty-calc : (string -> number)")
       (assert= (get called :value) "0")
-      (assert= (get called :type) ": number")))
+      ;; exactly 0: the call re-types the earlier requests' bodies under its argument, and
+      ;; `(string/->number "1 1 +")` is a failure, so only the `0` branch is left
+      (assert= (get called :type) ": 0")))
 
   (test "inside a module, through the module's private definitions"
     (answer {:id 1 :src "(defmodule evsrv-ty-probe)"})
