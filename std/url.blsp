@@ -1,7 +1,8 @@
 ;; std/url.blsp — URL encoding/decoding and parsing, written entirely in Brood.
 ;;
 ;; Provides percent-encoding (RFC 3986 unreserved characters are left as-is),
-;; query-string encoding/decoding (with + for space), URL parsing/building.
+;; query-string encoding/decoding (with + for space), URL parsing/building, and resolving a
+;; reference against a base URL (RFC 3986 §5).
 
 (defmodule url
   "URL encoding/decoding and parsing, written entirely in Brood (pure; opt-in).
@@ -15,7 +16,9 @@
     ;;     :query \"q=1\" :fragment \"frag\"}
     (url/build {:scheme \"https\" :host \"example.com\" :path \"/search\"
                     :query-params {:q \"hello world\"}})
-    ;; => \"https://example.com/search?q=hello+world\"")
+    ;; => \"https://example.com/search?q=hello+world\"
+    (url/resolve \"https://example.com/a/b\" \"../c?x=1\")
+    ;; => \"https://example.com/c?x=1\"")
 
 ;; ---- percent-encoding -------------------------------------------------------
 
@@ -302,3 +305,125 @@ round-trip is lossless.
       path
       (if (nil? query) "" (str "?" query))
       (if (nil? fragment) "" (str "#" fragment)))))
+
+;; ---- resolving a reference against a base (RFC 3986 §5) ---------------------
+;;
+;; `parse` reads a URL for its host and port, and recognises a scheme only before `://`.
+;; Resolution needs the RFC's own five components instead (Appendix B): a scheme before any
+;; `/?#` (so `mailto:x` has one), and an authority told apart from its absence — `//` with
+;; nothing after it is an EMPTY authority, which §5.2.2 treats differently from none.
+
+(defn- url-first-of (text:string from:int stops:string -> int)
+  "The index of the first character at or after `from` in `text` that is one of `stops`,
+or the length of `text` when there is none."
+  (let (chars (string/->list text))
+    (letrec (scan (fn (index:int remaining)
+                    (cond
+                      (empty? remaining) (count text)
+                      (and (>= index from) (includes? stops (first remaining))) index
+                      else (scan (inc index) (rest remaining)))))
+      (scan 0 chars))))
+
+(defn- url-components (text:string -> map)
+  "`text` split as RFC 3986 Appendix B splits a reference: `{:scheme :authority :path
+:query :fragment}`, each a string or nil when absent (`:path` always a string)."
+  (let (scheme-end (url-first-of text 0 ":/?#")
+        scheme (when (and (< scheme-end (count text))
+                       (= (string/substring text scheme-end (inc scheme-end)) ":")
+                       (url-scheme? (string/substring text 0 scheme-end)))
+                 (string/substring text 0 scheme-end))
+        after-scheme (if scheme (inc scheme-end) 0)
+        authority? (string/starts-with? (string/substring text after-scheme (count text)) "//")
+        authority-end (if authority? (url-first-of text (+ after-scheme 2) "/?#") after-scheme)
+        path-end (url-first-of text authority-end "?#")
+        query-end (url-first-of text path-end "#"))
+    {:scheme scheme
+     :authority (when authority? (string/substring text (+ after-scheme 2) authority-end))
+     :path (string/substring text authority-end path-end)
+     :query (when (and (< path-end (count text))
+                    (= (string/substring text path-end (inc path-end)) "?"))
+              (string/substring text (inc path-end) query-end))
+     :fragment (when (< query-end (count text))
+                 (string/substring text (inc query-end) (count text)))}))
+
+(defn- url-drop-last-segment (output:string -> string)
+  "`output` without its last segment and the `/` before it (RFC 3986 §5.2.4 step 2C)."
+  (let (slash (string/last-index-of output "/"))
+    (if (< slash 0) "" (string/substring output 0 slash))))
+
+(defn- url-dot-segments-loop (input:string output:string -> string)
+  (cond
+    (= input "") output
+    (string/starts-with? input "../")
+      (url-dot-segments-loop (string/substring input 3 (count input)) output)
+    (string/starts-with? input "./")
+      (url-dot-segments-loop (string/substring input 2 (count input)) output)
+    (string/starts-with? input "/./")
+      (url-dot-segments-loop (string/substring input 2 (count input)) output)
+    (= input "/.") (url-dot-segments-loop "/" output)
+    (string/starts-with? input "/../")
+      (url-dot-segments-loop (string/substring input 3 (count input))
+        (url-drop-last-segment output))
+    (= input "/..") (url-dot-segments-loop "/" (url-drop-last-segment output))
+    (or (= input ".") (= input "..")) output
+    else
+      (let (segment-end (url-first-of input (if (string/starts-with? input "/") 1 0) "/"))
+        (url-dot-segments-loop (string/substring input segment-end (count input))
+          (str output (string/substring input 0 segment-end))))))
+
+(defn- url-remove-dot-segments (path:string -> string)
+  "`path` with its `.` and `..` segments interpreted away (RFC 3986 §5.2.4). A `..` at the
+root stays at the root."
+  (url-dot-segments-loop path ""))
+
+(defn- url-merge-paths (base ref-path:string -> string)
+  "The reference's relative path joined to the base's directory (RFC 3986 §5.2.3)."
+  (if (and (not (nil? (:authority base))) (= (:path base) ""))
+    (str "/" ref-path)
+    (let (slash (string/last-index-of (:path base) "/"))
+      (if (< slash 0) ref-path (str (string/substring (:path base) 0 (inc slash)) ref-path)))))
+
+(defn- url-recompose (parts -> string)
+  "The five components put back together (RFC 3986 §5.3)."
+  (str (if (:scheme parts) (str (:scheme parts) ":") "")
+    (if (not (nil? (:authority parts))) (str "//" (:authority parts)) "")
+    (:path parts)
+    (if (not (nil? (:query parts))) (str "?" (:query parts)) "")
+    (if (not (nil? (:fragment parts))) (str "#" (:fragment parts)) "")))
+
+(defn resolve (base:string reference:string -> string)
+  "The absolute URL `reference` names when it is read relative to `base` — what a browser
+does with an `href` on the page at `base`, or an HTTP client with a `Location` header (RFC
+3986 §5.2, the strict reading). `base` must be absolute (have a scheme); a `reference` that
+has one is returned with its dot segments removed. `.` and `..` segments are resolved, and a
+`..` above the root stays at the root. RFC 3986, not WHATWG: no scheme-specific defaults, no
+backslashes read as slashes, and nothing is percent-encoded or lowercased.
+
+    (url/resolve \"http://a/b/c/d;p?q\" \"g\")          ;=> \"http://a/b/c/g\"
+    (url/resolve \"http://a/b/c/d;p?q\" \"../g\")       ;=> \"http://a/b/g\"
+    (url/resolve \"http://a/b/c/d;p?q\" \"//g\")        ;=> \"http://g\"
+    (url/resolve \"http://a/b/c/d;p?q\" \"?y\")         ;=> \"http://a/b/c/d;p?y\"
+    (url/resolve \"https://x.org/a/b\" \"/c#top\")      ;=> \"https://x.org/c#top\""
+  (let (base-parts (url-components base)
+        ref (url-components reference))
+    (when (nil? (:scheme base-parts))
+      (error "url/resolve: the base " (pr-str base) " is not absolute — it has no scheme"))
+    (url-recompose (cond
+                     (not (nil? (:scheme ref)))
+                       (assoc ref :path (url-remove-dot-segments (:path ref)))
+                     (not (nil? (:authority ref)))
+                       (assoc ref
+                         :scheme (:scheme base-parts)
+                         :path (url-remove-dot-segments (:path ref)))
+                     (= (:path ref) "")
+                       (assoc base-parts
+                         :query (if (not (nil? (:query ref))) (:query ref) (:query base-parts))
+                         :fragment (:fragment ref))
+                     else
+                       (assoc base-parts
+                         :path
+                           (url-remove-dot-segments (if (string/starts-with? (:path ref) "/")
+                                                      (:path ref)
+                                                      (url-merge-paths base-parts (:path ref))))
+                         :query (:query ref)
+                         :fragment (:fragment ref))))))

@@ -16,7 +16,8 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
   - Nodes link within one `major.minor`, and the handshake can be widened later.
   - A project opts into new lints through a key in `project.blsp`.
   - Nothing is carved out as `:beta`. The release candidates are where the surface settles.
-  - The minimum time for a deprecation is deferred until closer to 1.0.
+  - The minimum time for a deprecation (decided 2026-11-17, ADR-673 addendum): at least one
+    released minor that warns, and six months from that release to the major that removes it.
 - ✅ **The last surface pass, using the freeze test** (every thread decided by 2026-11-12;
   the renames it found are F's ADR-716..719) (`archive/roadmap-for-v1.md` § The
   test): *can this be added later without breaking anyone, and without leaving the whole corpus
@@ -32,7 +33,7 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
   - **Thread 10, operators that can be shadowed locally.** This is a relaxation, so it is
     additive and can wait.
   - **Threads 1, 3, 4, 7, 8, 9 and 11** are additive (warning controls, regex groups — done, ADR-732 — URL
-    resolution, the non-tail lint, view patterns, parametric abilities, function modifiers).
+    resolution — done, ADR-733 —, the non-tail lint, view patterns, parametric abilities, function modifiers).
     They can come after 1.0, except that thread 1 is needed by B3.
 - ✅ **Re-ratify ADR-170** (2026-11-11): ADR-713 restates the table, every row checked against
   the running language. Ratios and multiple dispatch dropped (shipped), "nominal types" restated
