@@ -561,7 +561,7 @@ docstring names the target and the written parameters, so `M-.` and the docs lea
         arguments (reflect/gensym "arguments"))
     `(defn ~name (& ~arguments)
        ~(str "Delegates to [[" (->string target-name) "]]: " (pr-str (cons name params)) ".")
-       (apply ~target-name ~arguments))))
+       (/apply ~target-name ~arguments))))
 
 ;; First existing <filename> across the load-path dirs, or nil.
 (defn- %require-find (filename dirs)
