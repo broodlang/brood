@@ -659,14 +659,17 @@ Returns the failure count."
     0))
 
 (defn- run-deps (options)
-  (if (require-project "deps" nil)
-    (let (flags (get options :flags)
-          top (when (get flags "--top") (string/->number (get flags "--top"))))
-      (if (and (get flags "--top") (or (not (int? top)) (< top 0)))
-        (do (eputs "nest deps: --top wants a whole number, 0 or more") 2)
-        (module-graph/run (project/find-root (file/cwd))
-          {:check (get flags "--check") :all (get flags "--all") :top top})))
-    2))
+  ;; The root itself is the branch, not `require-project`'s yes: `find-root` answers
+  ;; nil-or-string, and `module-graph/run` takes the string.
+  (let (root (when (require-project "deps" nil) (project/find-root (file/cwd))))
+    (if (nil? root)
+      2
+      (let (flags (get options :flags)
+            top (when (get flags "--top") (string/->number (get flags "--top"))))
+        (if (and (get flags "--top") (or (not (int? top)) (< top 0)))
+          (do (eputs "nest deps: --top wants a whole number, 0 or more") 2)
+          (module-graph/run root
+            {:check (get flags "--check") :all (get flags "--all") :top top}))))))
 
 (defn- run-format (options)
   (if (require-project "format" nil)
