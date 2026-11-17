@@ -114,7 +114,7 @@ fn unknown_form_category_is_a_check_allow_finding() {
     // a word. The lint it meant to silence still fires, and the typo is named.
     let findings = file_findings(
         "(defn typo (xs) (check-allow :type-mismach (string/upper 1)))\n\
-         (defn bare () (check-allow))\n\
+         (defn not-a-keyword () (check-allow \"type-mismatch\" (string/upper 1)))\n\
          (defn fine () (check-allow :type-mismatch (string/upper 1)))",
     );
     assert!(
@@ -138,8 +138,8 @@ fn unknown_form_category_is_a_check_allow_finding() {
             .iter()
             .filter(|finding| finding.lint == Lint::TypeMismatch)
             .count(),
-        1,
-        "the typo silences nothing, the known category its form: {findings:?}"
+        2,
+        "the typo and the string silence nothing, the known category its form: {findings:?}"
     );
     assert_eq!(
         findings
