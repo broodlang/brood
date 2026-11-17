@@ -16,6 +16,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
   it read `(any any any -> string)` (each typed binder was taken as a variable named
   `x:int`, and `->` and `string` as two more parameters).
 
+**Added: named regex groups (ADR-732).** `(?<name>…)` and `(?P<name>…)` in a pattern; a match
+from `regex/find`, `find-all`, `rope-find` and `rope-find-backward` carries `:named`, each
+name's keyword to its group; `regex/replace` templates read `${name}` (and `${12}` for a group
+past 9).
+
 ## v0.54.0 — a window that feels native: paced to the compositor, hinted like the desktop, edits that stay O(log n)
 
 **Added: the window keeps the desktop's time and draws its text the desktop's way (ADR-726, ADR-730).**

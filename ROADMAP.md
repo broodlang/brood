@@ -490,8 +490,8 @@ needs a Brood-specific form to respect an ADR.
   `cap` flag decides whether `:save` states are emitted), so `match?`/`matches?` keep the
   bitset+lazy-DFA machine untouched and unslowed — measured 511 ms → 492 ms on 80k boolean
   calls. The first customer was bedit wanting Emacs' `compilation-error-regexp-alist`,
-  which a boolean-only engine cannot express at all. Remaining: backreferences, lookaround,
-  named groups. Still open for the corpora below. *Since 2026-09-23 (ADR-389) the matching
+  which a boolean-only engine cannot express at all. Named groups landed 2026-11-17
+  (ADR-732); backreferences and lookaround stay out — no linear engine has them. *Since 2026-09-23 (ADR-389) the matching
   is native (`regex-automata`, still linear); Brood keeps the parser — the pattern
   language — and the Brood engines above are deleted.*
 - ✅ **3. `iterate`** (2026-10-24, ADR-431): `(seq/iterate x f)` is a source only

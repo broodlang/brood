@@ -210,6 +210,66 @@
   (test "the match is greedy or lazy as the pattern asked"
     (assert= (txt (find "hello world" "\\w+")) "hello")))
 
+(describe "regex named groups"
+  (defn- named-text (m name) (let (g (get (get m :named) name)) (when g (get g :text))))
+
+  (test "(?<name>...) and (?P<name>...) capture under :named by keyword"
+    (let (m (find "on 2026-11-17" "(?<year>\\d{4})-(?<month>\\d\\d)-(?P<day>\\d\\d)"))
+      (assert= (named-text m :year) "2026")
+      (assert= (named-text m :month) "11")
+      (assert= (named-text m :day) "17")
+      (assert= (get (get (get m :named) :day) :start) 11)))
+  (test "a named group is numbered with the unnamed ones, by its opening paren"
+    (let (m (find "abc" "(a)(?<mid>b)(c)"))
+      (assert= (count (get m :groups)) 3)
+      (assert= (get (nth (get m :groups) 1) :text) "b")
+      (assert= (named-text m :mid) "b")))
+  (test "a named group nested in another, and one under a quantifier"
+    (let (m (find "x-y-z" "(?<all>(?:(?<last>\\w)-?)+)"))
+      (assert= (named-text m :all) "x-y-z")
+      (assert= (named-text m :last) "z")))
+  (test "a named group that did not take part is nil, and its key is there"
+    (let (m (find "b" "(?<a>a)|(?<b>b)"))
+      (is (contains? (get m :named) :a))
+      (is (nil? (named-text m :a)))
+      (assert= (named-text m :b) "b")))
+  (test "a name used twice is the leftmost group of that name that took part"
+    (let (pattern "(?<y>\\d{4})-\\d\\d|\\d\\d/(?<y>\\d{4})")
+      (assert= (named-text (find "2026-11" pattern) :y) "2026")
+      (assert= (named-text (find "11/2025" pattern) :y) "2025")))
+  (test "a pattern that names nothing gives no :named"
+    (is (nil? (get (find "ab" "(a)b") :named)))
+    (is (nil? (get (find "a(?<x>" "\\(\\?<x>") :named))))
+  (test "a malformed name is the characters it looks like"
+    (assert= (get (find "(?<1x>a)" "\\(\\?<1x>a\\)") :text) "(?<1x>a)")
+    (assert= (get (find "?<1x>a" "(?<1x>a)") :text) "?<1x>a")
+    (assert= (get (find "?<>a" "(?<>a)") :text) "?<>a"))
+  (test "case folding reaches a named group"
+    (assert= (named-text (find "ABC" "(?<b>b)" {:fold? true}) :b) "B")
+    (assert= (named-text (find "ABC" "(?i)(?<b>b)") :b) "B"))
+  (test "find-all names every match's groups"
+    (assert= (into [] (map (find-all "a1b22" "(?<n>\\d+)") (fn (m) (named-text m :n)))) ["1" "22"]))
+  (test "a rope search names its groups too"
+    (let (rope (text/string-> "ab\nkey=val"))
+      (assert= (named-text (rope-find rope "^(?<k>\\w+)=(?<v>\\w+)" 0) :v) "val")
+      (assert= (named-text (rope-find-backward rope "^(?<k>\\w+)=" 10) :k) "key")))
+  (test "replace expands ${name}, ${n} and leaves an unclosed ${ alone"
+    (assert= (replace "a@b c@d" "(?<user>\\w+)@(?<host>\\w+)" "${host}:${user}") "b:a d:c")
+    (assert= (replace "ab" "(a)(b)" "${2}${1}${0}") "baab")
+    (assert= (replace "ab" "(?<x>a)" "[${nope}]") "[]b")
+    (assert= (replace "ab" "a" "${") "${b"))
+  (test "many processes matching named groups at once, the matches sent back"
+    (let (me (self)
+          n 16
+          _ (doseq (index (range n))
+              (spawn (fn ()
+                       (send me
+                         [index (find (str "k" index "=" (* index 3)) "(?<key>\\w+)=(?<val>\\d+)")]))))
+          got (fold (range n) {} (fn (acc _) (receive ([index m] (assoc acc index m))))))
+      (doseq (index (range n))
+        (assert= (named-text (get got index) :key) (str "k" index))
+        (assert= (named-text (get got index) :val) (str (* index 3)))))))
+
 (describe "regex find-all"
   (test "every non-overlapping match, left to right"
     (assert= (into [] (map (find-all "a1b22c333" "\\d+") (fn (m) (get m :text)))) ["1" "22" "333"]))
