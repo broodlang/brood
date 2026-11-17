@@ -78,7 +78,8 @@ ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character ty
 2. **A stability policy and the road to 1.0** (`general-purpose-gaps.md`, gap 1).
 3. ~~**Regex named groups.**~~ — done by ADR-732 (2026-11-17). Lookaround and backreferences
    stay out: the engine is linear by design (ADR-389).
-4. **`std/url`: resolving against a base URL.** Still RFC 3986, not WHATWG.
+4. ~~**`std/url`: resolving against a base URL.**~~ — done by ADR-733 (2026-11-17), RFC 3986 §5
+   strict. WHATWG stays out.
 5. **A declared shadow for root functions.** Only a shadowing macro warns (ADR-423). After
    1.0: a new lint starts advisory (ADR-698), so it is additive.
 6. ~~**"Reduce before adding"**~~ — decided by ADR-674; both stages landed (2026-11-11).

@@ -6,6 +6,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Added: `url/resolve` (ADR-733).** `(url/resolve base reference)` is the absolute URL a
+relative reference names, by RFC 3986 §5 (the strict reading): what a client does with a
+relative `Location` header. A base without a scheme raises.
+
 **Fixed: an anonymous `fn`'s typed parameters are checked.** `(fn (x:int -> string) …)`
 bound its parameters and was checked by nothing, though typed parameters were documented for
 `fn`. Its body is now checked under `x : int`, its result held to `string`, and the lambda is

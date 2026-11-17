@@ -1881,3 +1881,7 @@ variable named `x:int`. No new warning across the 21 downstream projects.
 removed only at a major at least six months after the first release that warns about it, and
 after at least one released minor that carries the warning. `full.yml` and `soak.yml` dispatched
 on `583092b7b` as the release-candidate gate's first read.
+
+2026-11-17 (ADR-733). **`url/resolve`.** A reference resolved against a base by RFC 3986 §5.2,
+strict, over the RFC's own five-component split (`parse`'s map loses an empty authority and a
+scheme without `//`). Every §5.4 example is a test; a relative base raises.

@@ -33,7 +33,7 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
   - **Thread 10, operators that can be shadowed locally.** This is a relaxation, so it is
     additive and can wait.
   - **Threads 1, 3, 4, 7, 8, 9 and 11** are additive (warning controls, regex groups — done, ADR-732 — URL
-    resolution, the non-tail lint, view patterns, parametric abilities, function modifiers).
+    resolution — done, ADR-733 —, the non-tail lint, view patterns, parametric abilities, function modifiers).
     They can come after 1.0, except that thread 1 is needed by B3.
 - ✅ **Re-ratify ADR-170** (2026-11-11): ADR-713 restates the table, every row checked against
   the running language. Ratios and multiple dispatch dropped (shipped), "nominal types" restated
