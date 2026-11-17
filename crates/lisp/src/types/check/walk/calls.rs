@@ -87,7 +87,11 @@ pub(super) fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity
         // A local binding shadows the global table — its arity isn't known here.
         Value::Sym(s) if ctx.is_local(s) => None,
         Value::Sym(s) => arity_of(heap, s),
-        Value::Pair(_) => lambda_literal_arity(heap, arg),
+        // A typed `fn` is `(%typed-fn 'SIG (fn …))`: its arity is the inner `fn`'s.
+        Value::Pair(_) => match typed_fn_inner(heap, arg, ctx) {
+            Some(lambda) => lambda_literal_arity(heap, lambda),
+            None => lambda_literal_arity(heap, arg),
+        },
         // A keyword is a function of one or two arguments: `(:k m)` / `(:k m default)`.
         Value::Keyword(_) => Some(Arity::range(1, 2)),
         _ => None,
@@ -122,9 +126,30 @@ pub(super) fn callback_sig(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Sig> {
             .or_else(|| ctx.inferred_fn_sig(s))
             .or_else(|| sig_of(heap, s)),
         Value::Keyword(_) => Some(keyword_sig()),
-        Value::Pair(_) => comp_sig(heap, arg, ctx),
+        Value::Pair(_) => comp_sig(heap, arg, ctx).or_else(|| typed_fn_sig(heap, arg, ctx)),
         _ => None,
     }
+}
+
+/// The signature a typed anonymous `fn` declares — `(fn ((x number)) …)`, which expands
+/// to `(%typed-fn 'SIG (fn …))` — so a callback that names its parameter types is held to
+/// what the combinator hands it, as a named one is. An undeclared parameter is `any`, so it
+/// never trips the disjointness check. `None` when a local shadows `%typed-fn`.
+fn typed_fn_sig(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Sig> {
+    typed_fn_parts_of(heap, form, ctx).map(|(sig, _)| sig)
+}
+
+/// The inner `fn` of a typed anonymous `fn`, under the same no-shadowing rule.
+fn typed_fn_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Value> {
+    typed_fn_parts_of(heap, form, ctx).map(|(_, lambda)| lambda)
+}
+
+fn typed_fn_parts_of(heap: &Heap, form: Value, ctx: &Ctx) -> Option<(Sig, Value)> {
+    let items = list_items(heap, form)?;
+    if matches!(items.first(), Some(&Value::Sym(head)) if ctx.is_lexical_local(head)) {
+        return None;
+    }
+    crate::types::check::infer::typed_fn_parts(heap, &items)
 }
 
 /// The signature of a `(comp f … g)` form: what `g`, the first function applied, takes,

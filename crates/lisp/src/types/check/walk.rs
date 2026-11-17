@@ -1193,10 +1193,14 @@ fn walk_operands(heap: &Heap, form: Value, items: &[Value], ctx: &Ctx, out: &mut
             });
         if !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) && !collection_may_iterate_itself
         {
+            // A typed `fn` — `(%typed-fn 'SIG (fn …))` — declares its parameters, so it is
+            // held to the seed like a named one.
             let named_fits = |arg: Value, _wanted: usize| {
-                !matches!(arg, Value::Pair(_)) || list_items(heap, arg).is_some_and(|f| {
-                    matches!(f.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "comp"))
-                })
+                !matches!(arg, Value::Pair(_))
+                    || list_items(heap, arg).is_some_and(|f| {
+                        matches!(f.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "comp")
+                        || value::symbol_is(h, crate::eval::macros::TYPED_FN))
+                    })
             };
             if let Some((index, seed)) = callback_seed(heap, form, items, ctx, &named_fits) {
                 let arg = items[index];

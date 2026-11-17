@@ -55,6 +55,43 @@ fn a_named_callback_is_held_to_the_element_it_is_handed() {
 }
 
 #[test]
+fn a_typed_lambda_callback_is_held_to_the_element_it_is_handed() {
+    let ws = file_warnings(
+        "(sig bad ((vector string) -> any))\n\
+         (defn bad (xs) (map xs (fn (x:number) (inc x))))\n\
+         (sig good ((vector string) -> any))\n\
+         (defn good (xs) (map xs (fn (x:string) (%string-length x))))\n\
+         (sig folded ((vector string) -> any))\n\
+         (defn folded (xs) (fold xs 0 (fn (total:number x:number) (+ total x))))\n\
+         (sig arity ((vector string) -> any))\n\
+         (defn arity (xs) (map xs (fn (x:string other:string) [x other])))",
+    );
+    let handed = "is a callback handed string at position";
+    assert!(
+        has(
+            &ws,
+            &format!("map: argument 2 {handed} 1, but the fn takes number there")
+        ),
+        "a typed lambda over the wrong element is flagged: {ws:?}"
+    );
+    assert!(
+        has(
+            &ws,
+            &format!("fold: argument 3 {handed} 2, but the fn takes number there")
+        ),
+        "a typed fold step is held to the element at its second position: {ws:?}"
+    );
+    assert!(
+        has(
+            &ws,
+            "map: argument 2 is a callback called with 1 argument, but the fn takes 2"
+        ),
+        "a typed lambda of the wrong arity is flagged: {ws:?}"
+    );
+    assert_eq!(ws.len(), 3, "only bad, folded and arity: {ws:?}");
+}
+
+#[test]
 fn a_composed_callback_is_checked_at_both_ends_and_between_its_stages() {
     let ws = file_warnings(
         "(sig bad ((vector string) -> any))\n\
