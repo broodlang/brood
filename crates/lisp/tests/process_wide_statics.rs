@@ -88,6 +88,8 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // What the one tty shows now, cell by cell, and its colour depth (ADR-586): the next
     // frame writes only what differs from it, whichever runtime draws.
     ("builtins/terminal/native.rs", "TERMINAL_SCREEN", OneMachine),
+    // The one tty's presses read as click chains: the terminal sends each press alone.
+    ("builtins/terminal/native.rs", "TERMINAL_CLICKS", OneMachine),
     // The net reactor multiplexes every socket in the OS process on one thread.
     ("host/net.rs", "STARTING", OneMachine),
     // One audio thread owns the output device for the whole OS process.

@@ -126,11 +126,13 @@ fn lazy_load_call(
             args,
             genv,
             bases,
+            result_contract,
         } => LazyMiss::Call(ChunkExit::Call {
             arm: compiled,
             args,
             genv,
             bases,
+            result_contract,
         }),
         Step::Done(v) => LazyMiss::Value(v),
     }))
@@ -188,6 +190,7 @@ fn lazy_call(
                 args,
                 genv,
                 bases,
+                result_contract,
             },
             true,
         ) => LazyCall::Exit(ChunkExit::Tail {
@@ -195,6 +198,7 @@ fn lazy_call(
             args,
             genv,
             bases,
+            result_contract,
         }),
         (
             Step::Tail {
@@ -202,6 +206,7 @@ fn lazy_call(
                 args,
                 genv,
                 bases,
+                result_contract,
             },
             false,
         ) => {
@@ -211,6 +216,7 @@ fn lazy_call(
                 args,
                 genv,
                 bases,
+                result_contract,
             })
         }
         (Step::Done(v), true) => LazyCall::Exit(ChunkExit::Done(v)),
@@ -652,12 +658,14 @@ pub(crate) fn exec_chunk(
                             args,
                             genv,
                             bases,
+                            result_contract,
                         } => {
                             return Ok(ChunkExit::Call {
                                 arm: compiled,
                                 args,
                                 genv,
                                 bases,
+                                result_contract,
                             });
                         }
                     }
@@ -699,12 +707,14 @@ pub(crate) fn exec_chunk(
                                 args,
                                 genv,
                                 bases,
+                                result_contract,
                             } => {
                                 return Ok(ChunkExit::Call {
                                     arm: compiled,
                                     args,
                                     genv,
                                     bases,
+                                    result_contract,
                                 });
                             }
                         }
@@ -825,12 +835,14 @@ pub(crate) fn exec_chunk(
                                     args,
                                     genv,
                                     bases,
+                                    result_contract,
                                 } => {
                                     return Ok(ChunkExit::Call {
                                         arm: compiled,
                                         args,
                                         genv,
                                         bases,
+                                        result_contract,
                                     });
                                 }
                             }
@@ -879,12 +891,14 @@ pub(crate) fn exec_chunk(
                                     args,
                                     genv,
                                     bases,
+                                    result_contract,
                                 } => {
                                     return Ok(ChunkExit::Call {
                                         arm: compiled,
                                         args,
                                         genv,
                                         bases,
+                                        result_contract,
                                     });
                                 }
                             }
@@ -980,7 +994,8 @@ pub(crate) fn exec_chunk(
                         crate::perf_bump!(call_ic_miss);
                         fast = match v.unpack() {
                             ValueRef::Fn(id)
-                                if crate::eval::passthrough_arm(heap, id, argc).is_none() =>
+                                if crate::eval::passthrough_arm(heap, id, argc).is_none()
+                                    && !crate::builtins::contracts::is_entered_shim(heap, id) =>
                             {
                                 compiled_arm_for(heap, id, argc).map(|arm| {
                                     let cenv =
@@ -1238,12 +1253,14 @@ pub(crate) fn exec_chunk(
                                         args,
                                         genv,
                                         bases,
+                                        result_contract,
                                     } => {
                                         return Ok(ChunkExit::Call {
                                             arm: compiled,
                                             args,
                                             genv,
                                             bases,
+                                            result_contract,
                                         });
                                     }
                                     Step::Done(v) => {
@@ -1338,6 +1355,7 @@ pub(crate) fn exec_chunk(
                         args: argv,
                         genv: cenv,
                         bases,
+                        result_contract: None,
                     },
                     None => match dispatch(heap, callee, argv, true, cur_env) {
                         Ok(s) => s,
@@ -1400,11 +1418,13 @@ pub(crate) fn exec_chunk(
                             args,
                             genv,
                             bases,
+                            result_contract,
                         } => ChunkExit::Tail {
                             arm: compiled,
                             args,
                             genv,
                             bases,
+                            result_contract,
                         },
                         Step::Done(v) => ChunkExit::Done(v),
                     });
@@ -1417,6 +1437,7 @@ pub(crate) fn exec_chunk(
                         args,
                         genv,
                         bases,
+                        result_contract,
                     } => {
                         heap.truncate_roots(drop_base);
                         return Ok(ChunkExit::Call {
@@ -1424,6 +1445,7 @@ pub(crate) fn exec_chunk(
                             args,
                             genv,
                             bases,
+                            result_contract,
                         });
                     }
                     // Native / tree-walked callee already ran: push its value and continue.
@@ -1522,11 +1544,13 @@ pub(crate) fn exec_chunk(
                                     args,
                                     genv,
                                     bases,
+                                    result_contract,
                                 }) => ChunkExit::Tail {
                                     arm: compiled,
                                     args,
                                     genv,
                                     bases,
+                                    result_contract,
                                 },
                                 Ok(Step::Done(v)) => ChunkExit::Done(v),
                                 // A closure applied with `tail = true` is never RUN here, so

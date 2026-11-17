@@ -767,36 +767,81 @@ pub(crate) fn global_miss(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispResul
     Err(crate::eval::unbound_error(heap, sym))
 }
 
-/// The global `sym` names for `bound?` (and `reflect/call-if-bound` above it): bound now, or
-/// bound once the PROJECT IMAGE section of its module is materialised. A module the installed
-/// project image carries is part of the program as surely as one loaded from source; under a
-/// lazy install (`nest run`, `nest test FILE`) its section is only materialised on first use,
-/// and a `bound?` that read the table alone answered `false` for a name every reference would
-/// find — so a late-bound hook kept as a symbol (a menu item's command, a Ctrl+wheel handler)
-/// silently did nothing in an imaged run and worked from source. A module the image does NOT
-/// carry is still not loaded: `bound?` answers for what the program has, not for what it could
-/// load. A short project spelling (`killing/cmd-copy-region`) is rooted first, as a reference
-/// is (ADR-070).
-pub(crate) fn bound_or_imaged(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispResult {
-    if heap.env_get(env, sym).is_some() {
-        return Ok(Value::boolean(true));
+/// `bound?` of `sym` (and `reflect/call-if-bound` above it): bound now, or bound once the
+/// PROJECT IMAGE section of its module is materialised, or once the load of its module ANOTHER
+/// process holds has finished. A short project spelling (`killing/cmd-copy-region`) is rooted
+/// first, as a reference is (ADR-070).
+///
+/// - An imaged module counts: under a lazy install (`nest run`, `nest test FILE`) its section
+///   is only materialised on first use, and a `bound?` that read the table alone answered
+///   `false` for a name every reference would find — so a late-bound hook kept as a symbol (a
+///   menu item's command, a Ctrl+wheel handler) silently did nothing in an imaged run.
+/// - A module another process is loading is still publishing its globals, and the table
+///   answers `false` for a name the finished load binds (ADR-738: under a parallel test run a
+///   flake with a different set of "unbound" names each run). Waiting is a `receive`, which
+///   under this native frame cannot park and would block its OS worker, so the call is handed
+///   back to the engine (ADR-505) as the prelude's `(%lazy-bound? module 'sym)`, which waits
+///   as frames and asks again. A call that cannot take the redirect — `args` is not the slice
+///   an engine offered (a builtin calling `bound?` from Rust: `map`, `apply`) — answers from
+///   the table as it stands.
+/// - A module this process is loading answers from the table; a module neither imaged nor
+///   loading is not loaded: `bound?` answers for what the program has, not what it could load.
+pub(crate) fn bound_or_imaged(
+    heap: &mut Heap,
+    env: EnvId,
+    sym: Symbol,
+    args: &[Value],
+) -> LispResult {
+    let found = bound_lookup(heap, env, sym, args, "%lazy-bound?", &[])?;
+    Ok(Value::boolean(found.is_some()))
+}
+
+/// `reflect/bound-value` of `sym` (ADR-743): its value, found as [`bound_or_imaged`] finds it,
+/// or `default` where `bound?` would answer false — ONE lookup where `bound?` then
+/// `reflect/eval` resolved the name twice. A module another process is loading hands the call
+/// back as `(%lazy-bound-value module 'sym default)`, which waits as frames, as `bound?` does.
+pub(crate) fn bound_value(
+    heap: &mut Heap,
+    env: EnvId,
+    sym: Symbol,
+    default: Value,
+    args: &[Value],
+) -> LispResult {
+    let found = bound_lookup(heap, env, sym, args, "%lazy-bound-value", &[default])?;
+    Ok(found.unwrap_or(default))
+}
+
+/// The value `sym` is bound to as `bound?` sees it — `Ok(None)` where `bound?` answers false,
+/// `Err` a redirect to `(helper module 'sym trailing…)` when another process holds the load of
+/// its module (or a real error). The one walk behind `bound?` and `reflect/bound-value`.
+fn bound_lookup(
+    heap: &mut Heap,
+    env: EnvId,
+    sym: Symbol,
+    args: &[Value],
+    helper: &str,
+    trailing: &[Value],
+) -> Result<Option<Value>, LispError> {
+    if let Some(value) = heap.env_get(env, sym) {
+        return Ok(Some(value));
     }
     let rooted = heap.root_qualified_ref(sym).unwrap_or(sym);
-    if rooted != sym && heap.env_get(env, rooted).is_some() {
-        return Ok(Value::boolean(true));
+    if rooted != sym
+        && let Some(value) = heap.env_get(env, rooted)
+    {
+        return Ok(Some(value));
     }
     let Some(module) = module_of_resolved(rooted) else {
-        return Ok(Value::boolean(false));
+        return Ok(None);
     };
-    // A module this process is loading, or one another process is mid-load of, is answered
-    // from the table as it stands: waiting for the other load would be a `receive` under this
-    // native frame, which cannot park and would block its OS worker (see
-    // `module_to_load_off_native`).
-    if heap.compile_ns() == Some(module)
-        || module_loading_elsewhere(heap, rooted).is_some()
-        || !imaged_and_unmaterialized(heap, module)
-    {
-        return Ok(Value::boolean(false));
+    if let Some(loading) = module_loading_elsewhere(heap, rooted) {
+        return match lazy_bound_redirect(heap, helper, loading, rooted, trailing, args) {
+            Some(redirect) => Err(redirect),
+            None => Ok(None),
+        };
+    }
+    if heap.compile_ns() == Some(module) || !imaged_and_unmaterialized(heap, module) {
+        return Ok(None);
     }
     let env_base = heap.env_roots_len();
     let env_root = heap.root_env(env);
@@ -805,9 +850,31 @@ pub(crate) fn bound_or_imaged(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispR
     heap.truncate_env_roots(env_base);
     // `bound?` answers a question and never raises: a section that fails to materialise
     // leaves the name unbound, as it is (a reference to it will raise the real error).
-    Ok(Value::boolean(
-        loaded.is_ok() && heap.env_get(env, rooted).is_some(),
-    ))
+    Ok(if loaded.is_ok() {
+        heap.env_get(env, rooted)
+    } else {
+        None
+    })
+}
+
+/// The call handed back to the engine as `(helper module 'sym trailing…)` — `%lazy-bound?` for
+/// `bound?`, `%lazy-bound-value` for `reflect/bound-value`. `None` when this call was not
+/// offered a redirect, or the prelude has no such helper yet (boot).
+fn lazy_bound_redirect(
+    heap: &mut Heap,
+    helper: &str,
+    module: Symbol,
+    sym: Symbol,
+    trailing: &[Value],
+    args: &[Value],
+) -> Option<LispError> {
+    let helper = heap.env_get(heap.global(), value::intern(helper))?;
+    if !heap.redirect_offered(args) {
+        return None;
+    }
+    let mut call = vec![Value::Sym(module), Value::Sym(sym)];
+    call.extend_from_slice(trailing);
+    Some(heap.redirect(helper, &call))
 }
 
 /// Whether the installed project image carries a section for `module` that has not been

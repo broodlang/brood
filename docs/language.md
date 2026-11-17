@@ -234,6 +234,7 @@ a Rust-backed opaque handle (genuine mutable state, never a mutable `Value`):
 (table/contains? t :hits)         ;=> true
 (table/incr t :hits)              ;=> 1   ; atomic; default delta 1
 (table/incr t :hits 10)           ;=> 11
+(table/tally t :parse [1200 1])   ;=> [1200 1]  ; several counters under one key, one lock
 (count t)                         ;=> 1   ; a table is a sized collection
 (table/snapshot t)                ;=> {:hits 11}  ; an immutable map
 (table/delete t :hits)
@@ -252,7 +253,9 @@ How it behaves, and why it's safe:
 - **Keys are structural**, identical to map keys (`[1 2]`, `:k`, `"s"`, `42` all
   work).
 - **`table/incr` is atomic** — a lock-held read-modify-write, so concurrent counters
-  never lose an update. (There is deliberately no closure-based `update`: running
+  never lose an update. `table/tally` is its several-field form: each of a vector of
+  deltas added to the matching field of the vector at a key (time and calls, bytes and
+  messages), all under one lock and one key lookup (ADR-742). (There is deliberately no closure-based `update`: running
   arbitrary code under the lock can't be made safely atomic. For other atomic needs,
   serialize through a process.)
 - **`table/snapshot`** is a consistent point-in-time map — unaffected by later

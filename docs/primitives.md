@@ -72,6 +72,7 @@ arg silently becoming `nil`.
 | | `%table-has?` | 2 | true if the table has an entry for key `k` |
 | | `%table-delete` | 2 | remove key `k` if present; returns `t` |
 | | `%table-incr` | 2–3 | atomically add `delta` (default 1) to the integer at key `k` (absent → 0) and return the new value — the read-modify-write is atomic under the table lock, so concurrent increments never lose an update; errors if the existing value is not an integer |
+| | `%table-tally` | 3 | atomically add each of `deltas` (a vector of ints) to the matching field of the tally at `k` (a vector of ints as long, absent → zeros) and return the new tally — one lock and one key lookup for every field (ADR-742); errors, leaving it, on a value of another shape or a field past ±2^63 |
 | | `%table-count` | 1 | the number of entries |
 | | `%table-snapshot` | 1 | a consistent point-in-time copy of the whole table as an immutable map — atomic, O(n), unaffected by later mutation |
 | | `%table-drop` | 1 | remove the table from the registry, freeing its store; idempotent, returns true if it existed (other handles then error on use) |
@@ -220,6 +221,7 @@ arg silently becoming `nil`.
 | | `reflect/global-names` | 0 | every globally bound symbol, sorted by spelling (completion / doc generation) |
 | | `reflect/special-forms` | 0 | the special-form / core-macro names (strings) that read as keywords — the canonical list shared by the syntax highlighter (`std/editor/highlight.blsp`) and the LSP |
 | | `bound?` | 1 | whether a symbol is bound in scope → bool |
+| | `reflect/bound-value` | 1–2 | the value a symbol is bound to, found as `bound?` finds it (an imaged module counts, another process's load is waited for), or the default (nil) — one lookup where `bound?` then `reflect/eval` made two (ADR-743) |
 | | `reflect/dynamic?` | 1 | whether a symbol names a dynamic variable (declared via `defdyn`) → bool |
 | | `reflect/builtin-modules` | 0 | The names of every module baked into this binary, as a sorted list of strings — what `(require 'name)` resolves without a load-path. Backs `nest` shell completion and lets a name be validated before requiring it. |
 | | `%references-in-source` | 2 | Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded. |

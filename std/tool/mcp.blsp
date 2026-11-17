@@ -927,7 +927,7 @@ binary is seen rebuilt."
 (defn- project-catalogue ()
   "The served catalogue: the project's own `mcp-tools` when its `mcp.blsp` defines one —
 typically `(defn mcp-tools () (cons {…} (mcp/tools)))`, extending this one — else [[tools]]."
-  (if (bound? 'mcp-tools) ((reflect/eval 'mcp-tools)) (tools)))
+  (let (custom (reflect/bound-value 'mcp-tools)) (if custom (custom) (tools))))
 
 (defn main ()
   "Serve the current project over MCP on stdin/stdout until the client hangs up or sends

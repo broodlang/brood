@@ -5,10 +5,6 @@
 use super::*;
 use crate::host::gui::{KeyModifiers, OptionMeta, character_chord, named_key};
 
-/// Max gap between consecutive presses (same button, same cell) that still counts
-/// as part of one click chain — the double/triple-click window, in milliseconds.
-pub(super) const MULTI_CLICK_MS: u128 = 400;
-
 /// A key as the Brood value `term-poll`/`gui` deliver: a printable → a 1-char
 /// string, the rest → keywords. Built as a `Message` (no heap) so the GUI thread
 /// can deliver it straight to a mailbox (ADR-059). Mirrors `key_to_value`.

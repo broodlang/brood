@@ -19,11 +19,19 @@
 ;;    caller's own value hits by identity whatever its size.
 ;;  - Each `defmemo` form mints a VERSION symbol when it runs, so a redefinition (a hot
 ;;    reload) finds the stores its predecessor left stale and starts empty, in every process.
+;;  - `defmemo-by` is the other shape a hot path has (ADR-741): one answer per KEY, valid
+;;    while that key's INPUT is the value it was worked out from — a registry's order per
+;;    registry id, a buffer's table per buffer id. A recent-calls memo thrashes when more
+;;    keys than its capacity are read in turn (bedit reads ~60 registries a beat, and every
+;;    `registry/ranked` missed a 16-call `defmemo` and re-sorted), and even a hit compared
+;;    the arguments with each remembered call's. Keyed, a call is one hash of a small key and
+;;    one `=` of the input — immediate for the same cell — and a key never evicts another.
 
 (defmodule memo
   "Bounded memoisation for hot paths: `defmemo` defines a function that remembers its
 last few calls, compared by `=` — for arguments like a buffer's rope, where hashing would
-read the whole text on every call. Memoisation lives at a definition, so a cache cannot be
+read the whole text on every call; `defmemo-by` one that keeps one answer per key, valid
+while the key's input is unchanged. Memoisation lives at a definition, so a cache cannot be
 made per call (ADR-522); each process keeps its own store, uncopied, so the same value
 passed again is a hit by identity, whatever its size (ADR-670).")
 
@@ -60,9 +68,9 @@ The remember half of `defmemo`.
 
 (defn entries (name)
   "The `[key value]` entries the CALLING process keeps for the `defmemo` named `name` (its
-qualified symbol), newest first — `()` when it keeps none. What a test asserts about a
-store; each process has its own. After a redefinition the old entries show here until the
-next call replaces them; they never hit.
+qualified symbol), newest first — `()` when it keeps none; for a `defmemo-by`, its map of
+key → `[value input…]`. What a test asserts about a store; each process has its own. After
+a redefinition the old entries show here until the next call replaces them; they never hit.
 
     (memo/entries 'memo/no-such-memo)   ;=> ()"
   (or (%memo-store name nil) '()))
@@ -100,4 +108,68 @@ call fills its own store, so work spread over short-lived processes does not sha
              (second hit#)
              (let (value# (do ~@(if doc? (rest body) body)))
                (%memo-store! '~slot ~version (memo/recent-remember store# key# value# ~capacity))
+               value#)))))))
+
+(defn keyed-remember (store key entry capacity)
+  "`store` (a map) with `entry` under `key`, holding at most `capacity` keys: a NEW key
+that would exceed it starts the store over with just itself, so a long-running process's
+store stays bounded without an order to keep. The remember half of `defmemo-by`, public
+only because its expansion calls it.
+
+    (memo/keyed-remember {:a [1 :x]} :b [2 :y] 1)   ;=> {:b [2 :y]}
+    (count (memo/keyed-remember {:a [1 :x]} :a [3 :z] 1))   ;=> 1"
+  (assoc (if (and (>= (count store) capacity) (not (contains? store key))) {} store)
+    key entry))
+
+(defn- plain-params (who params)
+  "`params` when every one is a plain parameter name — `defmemo-by`'s key and input lists
+take no `&optional` or `&` markers."
+  (if (and (list? params)
+        (every? params (fn (p) (and (symbol? p) (not (string/starts-with? (->string p) "&"))))))
+    params
+    (error (str "defmemo-by: " who " must be a list of plain parameter names: ") params)))
+
+(defmacro defmemo-by (name capacity key-params input-params & body)
+  "`defn` of `(name key… input…)` that keeps ONE answer per key, valid while the key's input
+is `=` to the input it was worked out from: a call whose key has an answer and whose input
+args are `=` to that answer's returns it without running the body; otherwise the body runs
+and its value replaces the key's answer. The key (the one key arg, or a vector of several)
+is HASHED, so make it small — an id, a keyword, a symbol, a number; the inputs are compared
+with `=`, never hashed, which answers at once for the SAME cell (a rope handle, a map the
+caller kept), so an input may be as big as a buffer. At most `capacity` keys are kept; a new
+key past that starts the store over. A docstring, if the body starts with one, stays the
+function's.
+
+For one answer per thing while the thing is unchanged — a registry's sorted rows per
+registry id, a buffer's table per buffer — where more things are read in turn than a
+`defmemo` could remember: a recent-calls memo misses every call once the keys outnumber
+its capacity, and its hit compares against every remembered call. Here a key never evicts
+another, and a call is one hash lookup and one `=` per input. Like `defmemo`, the store is
+per process, held uncopied (ADR-670), and a redefinition empties it; `memo/entries` reads
+the caller's map of key → `[value input…]` (ADR-741).
+
+    (defmemo-by rank-order-of 256 (id) (table) \"…\" (sort-rows table))"
+  (let (doc? (string? (first body))
+        keys (plain-params "the key parameters" key-params)
+        inputs (plain-params "the input parameters" input-params)
+        version (symbol (str (->string name) "--memo-version"))
+        slot (slot-name name)
+        key-form (if (= 1 (count keys)) (first keys) `[~@keys])
+        indexed (map (range (count inputs)) (fn (index) [(nth inputs index) (inc index)]))
+        ;; one symbol for the entry, minted here: an `entry#` inside the nested quasi-quote
+        ;; below would be a DIFFERENT auto-gensym from the outer one
+        entry (reflect/gensym "entry"))
+    `(do
+       (def ~version (/reflect/gensym "memo"))
+       (defn ~name ~(append keys inputs)
+         ~@(if doc? (list (first body)) '())
+         (let (key# ~key-form
+               store# (or (%memo-store '~slot ~version) {})
+               ~entry (get store# key#))
+           (if (and ~entry ~@(map indexed (fn ([input index]) `(= ~input (nth ~entry ~index)))))
+             (nth ~entry 0)
+             (let (value# (do ~@(if doc? (rest body) body)))
+               (%memo-store! '~slot
+                 ~version
+                 (memo/keyed-remember store# key# [value# ~@inputs] ~capacity))
                value#)))))))

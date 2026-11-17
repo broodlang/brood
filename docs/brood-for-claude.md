@@ -1145,7 +1145,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (ADR-522), so a cache exists only at a definition (`(:use memo)`, then
   `(defmemo rows-of 8 (rope width) …)`: a `defn` that remembers its last N calls compared
   by `=` — bounded, and immediate for the same big value: each process keeps its store
-  uncopied, so the caller's own vector or map hits by identity, ADR-670) ·
+  uncopied, so the caller's own vector or map hits by identity, ADR-670); `(defmemo-by name
+  256 (id) (table) …)` keeps ONE answer per key (hashed: keep it small) while that key's input
+  is `=` to the one it was worked out from — for more keys read in turn than a recent-calls
+  memo could hold (ADR-741) ·
   `registry` for tables your modules fill as they load (`(registry/put :app/hooks :save
   'app/on-save)`, read with `registry/entries` / `registry/lookup` / `registry/ranked` — by an
   entry's `:rank`): atomic across processes and carried by the image, which a `defonce` + `def`

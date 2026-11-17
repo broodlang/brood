@@ -11,10 +11,11 @@
 ;; paint the result with the spans vocabulary it already has (ADR-384).
 ;;
 ;; The vocabulary is what interactive programs actually emit: ECMA-48 / xterm cursor
-;; motion and erase, insert/delete lines and characters, DECSTBM scroll regions, the
+;; motion and erase, insert/delete lines and characters, DECSTBM scroll regions and DECSLRM
+;; left and right margins (in DECLRMM, mode 69 — a pane scrolled in its own columns), the
 ;; alternate screen (1047/1049), DECSC/DECRC, SGR with 16 / 256 / true colour, cursor
-;; visibility and shape, bracketed paste, application cursor keys, the DSR and DA queries
-;; a program blocks on, the OSC title and OSC 8 hyperlinks. Everything else parses (so a
+;; visibility and shape, bracketed paste, application cursor keys, the DSR, DA and DECRQM
+;; queries a program blocks on, the OSC title and OSC 8 hyperlinks. Everything else parses (so a
 ;; sequence never leaks into the text) and does nothing.
 ;;
 ;; A chunk may end mid-sequence — a pipe cuts wherever it likes — so the unfinished tail
@@ -52,6 +53,8 @@ no process — the host owns the pty and the scrollback."
     :attr attr
     :top int
     :bottom int
+    :left int
+    :right int
     :modes map
     :wrap-pending bool
     :carry string
@@ -77,7 +80,8 @@ no process — the host owns the pty and the scrollback."
    :alt-screen false
    :mouse nil
    :mouse-sgr false
-   :focus-events false})
+   :focus-events false
+   :left-right-margins false})
 
 (defn make (cols:int rows:int -> terminal)
   "A fresh terminal of `cols` × `rows` cells: blank, cursor home, default attributes,
@@ -93,6 +97,8 @@ the scroll region the whole screen, every mode at its reset value.
    :attr nil
    :top 0
    :bottom (dec rows)
+   :left 0
+   :right (dec cols)
    :modes default-modes
    :wrap-pending false
    :saved nil
@@ -113,7 +119,7 @@ the scroll region the whole screen, every mode at its reset value.
   "The value of mode `k` — `:autowrap`, `:cursor-visible`, `:app-cursor`,
 `:bracketed-paste`, `:origin`, `:insert`, `:alt-screen`, `:mouse` (the reporting mode
 asked for — 1000 clicks, 1002 drags too, 1003 all motion — or nil), `:mouse-sgr`,
-`:focus-events`.
+`:focus-events`, `:left-right-margins` (DECLRMM, mode 69: `CSI l;r s` sets the margins).
 
     (vt/mode (vt/feed (vt/make 10 2) \"\\e[?2004h\") :bracketed-paste)   ;=> true
     (vt/mode (vt/make 10 2) :autowrap)   ;=> true"
@@ -161,62 +167,97 @@ explicit motion cancels it, as on a real terminal."
 
 ;; ---- scrolling -----------------------------------------------------------------------
 ;; Within a region `[top, bottom]` — the scroll region for a line feed, the rows under the
-;; cursor for an IL/DL. A row that scrolls off the top of the MAIN screen, with the region
-;; starting at row 0, is history and goes to `:evicted` for the host to keep. The alternate
-;; screen has no history, a region below row 0 is a pane inside the program, and a
-;; deleted line was never scrolled: those rows are simply gone.
+;; cursor for an IL/DL — and, in left-right margin mode (DECLRMM, mode 69), only the columns
+;; `[left, right]` between the margins (DECSLRM): the cells outside them stay where they are,
+;; and a cursor outside them scrolls nothing. A row that scrolls off the top of the MAIN
+;; screen, whole, with the region starting at row 0, is history and goes to `:evicted` for the
+;; host to keep. The alternate screen has no history, a region below row 0 or narrower than
+;; the screen is a pane inside the program, and a deleted line was never scrolled: those rows
+;; are simply gone.
+
+(defn- full-width? (vt:terminal -> bool)
+  "Whether the left and right margins are the screen's edges: scrolls move whole rows."
+  (and (= (:left vt) 0) (= (:right vt) (dec (:cols vt)))))
+
+(defn- in-columns? (vt:terminal -> bool)
+  "Whether the cursor is between the left and right margins, where a scroll takes it."
+  (<= (:left vt) (:col vt) (:right vt)))
+
+(defn- shift-band (vt:terminal top:int bottom:int n:int -> terminal)
+  "Rows `[top, bottom]` moved `n` rows between the left and right margins — up when `n` is
+positive, down when negative — blanks entering where rows left; the cells outside stay."
+  (let (grid (:grid vt)
+        left (:left vt)
+        right (inc (:right vt))
+        blank (into [] (seq/repeat (- right left) (erase-cell vt)))
+        moved (for (r (range top (inc bottom)) :into [])
+                (let (source (+ r n))
+                  (splice (nth grid r)
+                    left
+                    right
+                    (if (<= top source bottom) (seq/subvec (nth grid source) left right) blank)))))
+    (assoc vt :grid (splice grid top (inc bottom) moved))))
 
 (defn- scroll-up (vt:terminal top:int bottom:int n:int history?:any -> terminal)
   "Rows `[top, bottom]` scrolled up `n`: the top `n` leave, `n` blank rows enter at the
 bottom; with `history?` the leaving rows are kept when they are history."
-  (let (n (min n (inc (- bottom top)))
-        grid (:grid vt)
-        leaving (seq/subvec grid top (+ top n))
-        fresh (seq/repeat n (row-of (:cols vt) (erase-cell vt)))
-        region (into (seq/subvec grid (+ top n) (inc bottom)) fresh)
-        keep? (and history? (= top 0) (not (mode vt :alt-screen))))
-    (assoc vt
-      :grid (splice grid top (inc bottom) region)
-      :evicted (if keep? (into (:evicted vt) leaving) (:evicted vt)))))
+  (if (not (full-width? vt))
+    (shift-band vt top bottom n)
+    (let (n (min n (inc (- bottom top)))
+          grid (:grid vt)
+          leaving (seq/subvec grid top (+ top n))
+          fresh (seq/repeat n (row-of (:cols vt) (erase-cell vt)))
+          region (into (seq/subvec grid (+ top n) (inc bottom)) fresh)
+          keep? (and history? (= top 0) (not (mode vt :alt-screen))))
+      (assoc vt
+        :grid (splice grid top (inc bottom) region)
+        :evicted (if keep? (into (:evicted vt) leaving) (:evicted vt))))))
 
 (defn- scroll-down (vt:terminal top:int bottom:int n:int -> terminal)
   "Rows `[top, bottom]` scrolled down `n`: blanks enter at the top, the bottom `n` leave."
-  (let (n (min n (inc (- bottom top)))
-        grid (:grid vt)
-        fresh (seq/repeat n (row-of (:cols vt) (erase-cell vt)))
-        region (into (into [] fresh) (seq/subvec grid top (inc (- bottom n)))))
-    (assoc vt :grid (splice grid top (inc bottom) region))))
+  (if (not (full-width? vt))
+    (shift-band vt top bottom (- n))
+    (let (n (min n (inc (- bottom top)))
+          grid (:grid vt)
+          fresh (seq/repeat n (row-of (:cols vt) (erase-cell vt)))
+          region (into (into [] fresh) (seq/subvec grid top (inc (- bottom n)))))
+      (assoc vt :grid (splice grid top (inc bottom) region)))))
 
 (defn- linefeed (vt:terminal -> terminal)
-  "LF / IND: down a row; at the region's bottom the region scrolls instead."
+  "LF / IND: down a row; at the region's bottom the region scrolls instead — when the
+cursor is between the left and right margins, else it stays."
   (let (r (:row vt))
     (cond
-      (= r (:bottom vt)) (assoc (scroll-up vt (:top vt) r 1 true) :wrap-pending false)
+      (= r (:bottom vt))
+        (assoc (if (in-columns? vt) (scroll-up vt (:top vt) r 1 true) vt) :wrap-pending false)
       (< r (dec (:rows vt))) (assoc vt :row (inc r) :wrap-pending false)
       else (assoc vt :wrap-pending false))))
 
 (defn- reverse-index (vt:terminal -> terminal)
-  "RI: up a row; at the region's top the region scrolls down instead."
+  "RI: up a row; at the region's top the region scrolls down instead — when the cursor is
+between the left and right margins, else it stays."
   (let (r (:row vt))
     (cond
-      (= r (:top vt)) (assoc (scroll-down vt r (:bottom vt) 1) :wrap-pending false)
+      (= r (:top vt))
+        (assoc (if (in-columns? vt) (scroll-down vt r (:bottom vt) 1) vt) :wrap-pending false)
       (> r 0) (assoc vt :row (dec r) :wrap-pending false)
       else (assoc vt :wrap-pending false))))
 
 (defn- in-region? (vt:terminal -> bool)
-  (and (>= (:row vt) (:top vt)) (<= (:row vt) (:bottom vt))))
+  (and (>= (:row vt) (:top vt)) (<= (:row vt) (:bottom vt)) (in-columns? vt)))
 
 (defn- insert-lines (vt:terminal n:int -> terminal)
-  "IL: `n` blank rows at the cursor, the rows below pushed down out of the region."
+  "IL: `n` blank rows at the cursor, the rows below pushed down out of the region; the
+cursor to the left margin."
   (if (in-region? vt)
-    (assoc (scroll-down vt (:row vt) (:bottom vt) n) :col 0 :wrap-pending false)
+    (assoc (scroll-down vt (:row vt) (:bottom vt) n) :col (:left vt) :wrap-pending false)
     vt))
 
 (defn- delete-lines (vt:terminal n:int -> terminal)
   "DL: `n` rows at the cursor removed, the rows below pulled up, blanks entering at the
-region's bottom — never history."
+region's bottom — never history; the cursor to the left margin."
   (if (in-region? vt)
-    (assoc (scroll-up vt (:row vt) (:bottom vt) n false) :col 0 :wrap-pending false)
+    (assoc (scroll-up vt (:row vt) (:bottom vt) n false) :col (:left vt) :wrap-pending false)
     vt))
 
 ;; ---- printing ----------------------------------------------------------------------------
@@ -361,8 +402,9 @@ is not an SGR attribute: a reset keeps it (only OSC 8 closes it), as xterm does.
     (if (nil? s) vt (assoc (move-to vt (:row s) (:col s)) :attr (:attr s)))))
 
 (defn- whole-screen (vt:terminal -> terminal)
-  "The scroll region reset to the whole screen, no wrap pending — a screen switch."
-  (assoc vt :top 0 :bottom (dec (:rows vt)) :wrap-pending false))
+  "The scroll region and the left and right margins reset to the whole screen, no wrap
+pending — a screen switch."
+  (assoc vt :top 0 :bottom (dec (:rows vt)) :left 0 :right (dec (:cols vt)) :wrap-pending false))
 
 (defn- enter-alt-screen (vt:terminal -> terminal)
   "1047/1049: a blank screen the program owns, the main one kept aside — a second
@@ -406,6 +448,9 @@ entry while already there does nothing."
     (= n 2004) (set-mode vt :bracketed-paste on)
     (includes? [1000 1002 1003] n) (set-mode vt :mouse (if on n nil))
     (= n 1006) (set-mode vt :mouse-sgr on)
+    ;; DECLRMM: `CSI s` sets the left and right margins while it is on; either way they are
+    ;; the screen's edges again
+    (= n 69) (set-mode (assoc vt :left 0 :right (dec (:cols vt))) :left-right-margins on)
     else vt))
 
 (defn- set-ansi-mode (vt:terminal n:int on:bool -> terminal)
@@ -462,6 +507,47 @@ first, which is all a non-SGR sequence means by one."
     (if (and (>= top 0) (< top bottom) (< bottom (:rows vt)))
       (move-to (assoc vt :top top :bottom bottom) (if (mode vt :origin) top 0) 0)
       vt)))
+
+(defn- set-column-margins (vt:terminal params:vector -> terminal)
+  "DECSLRM (`CSI l;r s`, in left-right margin mode): the margins `[left, right]`, cursor
+home; a degenerate pair is ignored, as DECSTBM's is."
+  (let (left (dec (param params 0 1))
+        right (dec (param params 1 (:cols vt))))
+    (if (and (>= left 0) (< left right) (< right (:cols vt)))
+      (move-to (assoc vt :left left :right right) (if (mode vt :origin) (:top vt) 0) 0)
+      vt)))
+
+(def- reported-modes
+  ;; DECRQM: the mode each number a program may ask about is, private (`CSI ? n $ p`) and
+  ;; ANSI (`CSI n $ p`); the mouse's three are one mode, `:mouse`, holding which
+  {:private {1 :app-cursor
+             6 :origin
+             7 :autowrap
+             25 :cursor-visible
+             47 :alt-screen
+             69 :left-right-margins
+             1000 :mouse
+             1002 :mouse
+             1003 :mouse
+             1004 :focus-events
+             1006 :mouse-sgr
+             1047 :alt-screen
+             1049 :alt-screen
+             2004 :bracketed-paste}
+   :ansi {4 :insert}})
+
+(defn- mode-report (vt:terminal params:vector private?:bool -> terminal)
+  "DECRQM answered with DECRPM, `CSI ? n ; s $ y`: `s` 1 set, 2 reset, 0 a mode this
+terminal does not have — so a program learns which it can switch."
+  (let (n (or (number-at params 0) 0)
+        name (get (get reported-modes (if private? :private :ansi)) n)
+        value (when name (mode vt name))
+        setting (cond
+                  (nil? name) 0
+                  (= name :mouse) (if (= value n) 1 2)
+                  value 1
+                  else 2))
+    (reply vt (str "\e[" (if private? "?" "") n ";" setting "$y"))))
 
 (defn- cursor-up (vt:terminal n:int -> terminal)
   "CUU stops at the scroll region's top when the cursor is inside it (xterm)."
@@ -533,7 +619,9 @@ their own sequences rather than flags on `h`, `c` and `q`."
       "c" (reply vt "\e[?62;22c")
       ;; secondary DA: an xterm-like answer, the version nothing checks
       ">c" (reply vt "\e[>0;0;0c")
-      "s" (save-cursor vt)
+      "s" (if (mode vt :left-right-margins) (set-column-margins vt params) (save-cursor vt))
+      "$p" (mode-report vt params false)
+      "?$p" (mode-report vt params true)
       "u" (restore-cursor vt)
       " q" (assoc vt :cursor-style (cursor-style-of (selector params)))
       ;; window report: `CSI 18 t` asks the size in cells

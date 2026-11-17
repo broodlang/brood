@@ -321,3 +321,48 @@
   (test "a scrollback line carries no link in its faces"
     (assert= (vt/line (nth (:grid (fed 9 1 "\e]8;;u\e\\\e[1mB\e[0mx\e]8;;\e\\")) 0 []) nil)
       ["Bx" [[0 1 {:bold true}]]])))
+
+(defn- panes ()
+  "Two panes side by side, `aN` left of the bar and `wN` right of it, on every row."
+  (fed 9 4 "a1  |w1\r\na2  |w2\r\na3  |w3\r\na4  |w4"))
+
+(defn- in-margins (vt)
+  "`vt` with left and right margins round the left pane's four columns."
+  (vt/feed vt "\e[?69h\e[1;4r\e[1;4s"))
+
+(describe "vt: left and right margins (DECLRMM, DECSLRM)"
+  (test "CSI s saves the cursor outside mode 69, and sets the margins inside it"
+    (let (saved (fed 9 4 "\e[2;3H\e[s\e[H\e[u"))
+      (assert= (vt/cursor saved) [1 2]))
+    (let (v (vt/feed (panes) "\e[?69h\e[2;5H\e[1;4s"))
+      (assert (vt/mode v :left-right-margins))
+      (assert= (vt/cursor v) [0 0])))
+  (test "SU and SD move only the columns between the margins"
+    (assert= (vt/lines (vt/feed (in-margins (panes)) "\e[S"))
+      ["a2  |w1" "a3  |w2" "a4  |w3" "    |w4"])
+    (assert= (vt/lines (vt/feed (in-margins (panes)) "\e[2T"))
+      ["    |w1" "    |w2" "a1  |w3" "a2  |w4"]))
+  (test "a line feed at the bottom margin scrolls the band, and only inside its columns"
+    (assert= (vt/lines (vt/feed (in-margins (panes)) "\e[4;2H\n"))
+      ["a2  |w1" "a3  |w2" "a4  |w3" "    |w4"])
+    (let (outside (vt/feed (in-margins (panes)) "\e[4;7H\n"))
+      (assert= (vt/lines outside) ["a1  |w1" "a2  |w2" "a3  |w3" "a4  |w4"])
+      (assert= (vt/cursor outside) [3 6])))
+  (test "IND and RI scroll the band too, and nothing goes to history"
+    (let (v (vt/feed (in-margins (panes)) "\e[4;1H\eD\e[1;1H\eM\eM"))
+      (assert= (vt/lines v) ["    |w1" "    |w2" "a2  |w3" "a3  |w4"])
+      (assert= (:evicted v) [])))
+  (test "IL and DL work in the band, the cursor at its left margin"
+    (let (v (vt/feed (in-margins (panes)) "\e[2;3H\e[M"))
+      (assert= (vt/lines v) ["a1  |w1" "a3  |w2" "a4  |w3" "    |w4"])
+      (assert= (vt/cursor v) [1 0])))
+  (test "the mode's reset gives the margins back: a scroll moves whole rows again"
+    (assert= (vt/lines (vt/feed (in-margins (panes)) "\e[?69l\e[S"))
+      ["a2  |w2" "a3  |w3" "a4  |w4" ""]))
+  (test "a degenerate pair of margins is ignored"
+    (assert= (vt/lines (vt/feed (panes) "\e[?69h\e[4;2s\e[S")) ["a2  |w2" "a3  |w3" "a4  |w4" ""]))
+  (test "DECRQM says which modes the terminal has, and whether each is set"
+    (assert= (:replies (vt/feed (vt/make 9 4) "\e[?69$p\e[?7$p\e[?2026$p\e[4$p"))
+      ["\e[?69;2$y" "\e[?7;1$y" "\e[?2026;0$y" "\e[4;2$y"])
+    (assert= (:replies (vt/feed (vt/make 9 4) "\e[?69h\e[?1002h\e[?69$p\e[?1002$p\e[?1000$p"))
+      ["\e[?69;1$y" "\e[?1002;1$y" "\e[?1000;2$y"])))

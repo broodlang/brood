@@ -247,7 +247,24 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
             // `vm_apply` resolves + installs the callee's block itself (and restores
             // the caller's on exit), so the step's memoised bases aren't needed here.
             bases: _,
+            result_contract: None,
         } => vm_apply(heap, compiled, &args, genv),
+        // A contract shim's original, its result still owed a check (ADR-748): the shim
+        // rides a root across the run.
+        Step::Tail {
+            compiled,
+            args,
+            genv,
+            bases: _,
+            result_contract: Some(shim),
+        } => {
+            let slot = heap.roots_len();
+            heap.push_root(shim);
+            let value = vm_apply(heap, compiled, &args, genv);
+            let shim = heap.root_at(slot);
+            heap.truncate_roots(slot);
+            crate::builtins::contracts::finish_checked(heap, shim, value?)
+        }
     }
 }
 

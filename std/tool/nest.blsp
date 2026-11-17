@@ -1213,8 +1213,7 @@ so a matching local setup needs no flag."
                                 entry (symbol (if (or (nil? module) (includes? name "/"))
                                                 name
                                                 (str module "/" name))))
-                            (when (and (bound? entry) (fn? (reflect/eval entry)))
-                              ((reflect/eval entry))))
+                            (let (main (reflect/bound-value entry)) (when (fn? main) (main))))
                           :ok)
                         (catch e (failure (error-message e))))
               histogram (dev/profile-stop))

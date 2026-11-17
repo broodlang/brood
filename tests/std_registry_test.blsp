@@ -47,7 +47,16 @@
     (put :std-registry-test/fresh :b {:rank 2})
     (assert= (list :b) (map (ranked :std-registry-test/fresh) first))
     (put :std-registry-test/fresh :a {:rank 1})
-    (assert= (list :a :b) (map (ranked :std-registry-test/fresh) first))))
+    (assert= (list :a :b) (map (ranked :std-registry-test/fresh) first)))
+  ;; one remembered order per registry (ADR-741): reading more registries in turn than a
+  ;; recent-calls memo holds re-sorted every one; here each id keeps its own order
+  (test "many registries read in turn each keep their own order"
+    (let (ids (map (range 40) (fn (index) (keyword (str "std-registry-test/many-" index)))))
+      (fold ids nil (fn (_ id) (put id :b {:rank 2}) (put id :a {:rank 1})))
+      (fold ids nil (fn (_ id) (ranked id)))
+      (let (store (memo/entries 'registry/ranked-table))
+        (is (every? ids (fn (id) (contains? store id))))
+        (is (every? ids (fn (id) (= (list :a :b) (map (ranked id) first)))))))))
 
 ;; The reason this module exists rather than a `defonce` + `def`: two processes registering
 ;; at the same moment each read the old table, and with a plain `def` the later write drops
@@ -90,4 +99,19 @@
       (do
         (assert= 20 (reflect/call-if-bound hook nil 2))
         (reflect/eval '(defn std-registry-test/registry-test-redefined-hook (x) (* x 100)))
-        (assert= 200 (reflect/call-if-bound hook nil 2))))))
+        (assert= 200 (reflect/call-if-bound hook nil 2)))))
+  (test "a name bound to nil is still a call, which raises — the fallback is for unbound names"
+    (reflect/eval '(def std-registry-test/nil-hook nil))
+    (assert-error (reflect/call-if-bound 'std-registry-test/nil-hook :unbound 1))))
+
+(describe "reflect/bound-value — a name's value in one lookup (ADR-743)"
+  (test "a bound name answers its value"
+    (assert= 70 ((reflect/bound-value 'std-registry-test/registry-test-hook) 7)))
+  (test "an unbound name answers the default, nil when none is given"
+    (assert= :none (reflect/bound-value 'std-registry-test/no-such-name :none))
+    (assert= nil (reflect/bound-value 'std-registry-test/no-such-name)))
+  (test "a name bound to nil answers nil, not the default"
+    (reflect/eval '(def std-registry-test/bound-to-nil nil))
+    (assert= nil (reflect/bound-value 'std-registry-test/bound-to-nil :none)))
+  (test "a module nobody loaded is not loaded to answer"
+    (assert= :none (reflect/bound-value 'no-such-module-anywhere/f :none))))

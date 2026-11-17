@@ -1331,6 +1331,13 @@ pub(crate) enum Step {
         /// ADR-175 Phase A) — the driver installs it as the current bases when it
         /// enters the arm.
         bases: (u32, u32),
+        /// The contract shim whose declared RESULT this call's value must pass (ADR-748):
+        /// the dispatcher checked the shim's arguments itself and handed back its ORIGINAL to
+        /// run, so the check the shim's own frame would have made on the way out is the
+        /// caller's to arrange — the driver keeps it as a return handler (`vm_run_bc`), a
+        /// value position runs the call and checks (`contracts::finish_checked`). `None` for
+        /// every other call.
+        result_contract: Option<Value>,
     },
 }
 
@@ -1349,6 +1356,8 @@ pub(crate) enum ChunkExit {
         genv: EnvId,
         /// Callee IC block (see [`Step::Tail::bases`]).
         bases: (u32, u32),
+        /// See [`Step::Tail::result_contract`].
+        result_contract: Option<Value>,
     },
     Call {
         arm: Arc<ArmHandle>,
@@ -1356,6 +1365,8 @@ pub(crate) enum ChunkExit {
         genv: EnvId,
         /// Callee IC block (see [`Step::Tail::bases`]).
         bases: (u32, u32),
+        /// See [`Step::Tail::result_contract`].
+        result_contract: Option<Value>,
     },
     /// A non-tail call to a VM arm whose frame is its arguments (exactly `argc` required
     /// params: no optionals, no rest) — the `argc` args ALREADY sit at the top of `roots`,

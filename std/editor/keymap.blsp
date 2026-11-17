@@ -37,6 +37,11 @@ A key's Emacs spelling reads both ways: `key-description` prints `[:ctrl-x :ctrl
 `C-x C-f`, and `key-parse` reads it back, so a config file can bind a key the way help
 names it.
 
+A keymap can say what it is, as an Emacs prefix map carries a prompt string: a NAME and its
+keys in GROUPS (`keymap-describe`, and `keymap-bind`'s optional group), kept in the map itself
+so the merges carry them and a which-key panel reads them off the map it shows
+(`keymap-name`, `keymap-groups`). Walk a keymap's keys with `keymap-entries`.
+
 Used by `std/editor/lineedit.blsp` (self-insert fallback) and `std/tool/observer.blsp` (no-op
 fallback); the same pattern is how the editor's keymaps work.")
 
@@ -147,7 +152,7 @@ hand — `editor/layers/layer-dispatch` — steps through this.
     (editor/keymap/keymap-where-is {:a 'save :x {:q 'quit}} 'quit)   ;=> ([:x :q])"
     ;; `map?` FIRST: a nested keymap is a prefix, never a command — so passing a
     ;; sub-keymap as `command` finds nothing rather than matching by structural `=`.
-    (mapcat keymap
+    (mapcat (keymap-entries keymap)
       (fn (entry)
         (let ([k v] entry)
           (cond
@@ -188,7 +193,7 @@ hand — `editor/layers/layer-dispatch` — steps through this.
   nine times slower than this walk.
 
     (into #{} (editor/keymap/keymap-bindings {:a 'save :x {:q 'quit}}))   ;=> #{[save [:a]] [quit [:x :q]]}"
-    (mapcat keymap
+    (mapcat (keymap-entries keymap)
       (fn (entry)
         (let ([k v] entry)
           (cond
@@ -211,27 +216,158 @@ happens to be in memory. Pure over the keymap data — no dispatch, no eval, no 
     (sort (map (editor/keymap/keymap-commands {:a 'save :x {:q 'quit :s 'save}}) str))   ;=> (\"quit\" \"save\")"
   (seq/distinct (map (keymap-bindings keymap) first)))
 
+(sig keymap-bind (map any any &optional (or nil string) -> map))
 ;; check-allow: deliberately non-tail — depth = the bound key-sequence length — a few keys.
 (check-allow :non-tail-recursion
-  (defn keymap-bind (keymap keys command)
+  (defn keymap-bind (keymap keys command &optional group)
     "Bind a key sequence `keys` (a vector of one or more keys) to `command` (a symbol)
   in `keymap`, returning a new keymap — the ergonomic, data-only way to define a
   chord without baking any specific binding into this module. A one-key vector is a
   plain binding; a multi-key vector builds the intermediate prefix sub-keymaps (e.g.
   `[:ctrl-x :ctrl-e]`). Sibling bindings are preserved; an existing prefix sub-keymap
-  is extended in place.
+  is extended in place, its name and groups kept ([[keymap-describe]]).
+
+  `group`, a heading, shows the last key under that heading in the map that holds it
+  ([[keymap-groups]]) — said where the key is bound, so a which-key panel's groups never
+  list a key apart from its binding.
 
       (-> {} (keymap-bind [:ctrl-x :ctrl-e] 'eval-last-sexp)
-             (keymap-bind [:ctrl-x :ctrl-s] 'save-buffer))
+             (keymap-bind [:ctrl-x :ctrl-s] 'save-buffer \"files\"))
 
     (editor/keymap/keymap-bind {} [:ctrl-x :ctrl-s] 'save-buffer)   ;=> {:ctrl-x {:ctrl-s save-buffer}}"
     (if (= (count keys) 1)
-      (assoc keymap (first keys) command)
+      (let (bound (assoc keymap (first keys) command))
+        (if (nil? group) bound (info-tag bound (first keys) group)))
       (let (k (first keys)
             existing (get keymap k)
             sub (if (map? existing) existing {}))
-        (assoc keymap k (keymap-bind sub (rest keys) command))))))
+        (assoc keymap k (keymap-bind sub (rest keys) command group))))))
 
+;; ---- what a keymap says about itself: a name, and its keys in groups (ADR-745) -------
+;; Emacs gives a prefix map a prompt string, and which-key reads the name from the map; a
+;; Brood keymap is a plain map `key -> binding`, so the name and the groups live under ONE
+;; reserved key, `:keymap/info`, which no frontend delivers (a key is a 1-char string or a
+;; modifier-spelled keyword, never a qualified one). Its value is a record, not a map, so a
+;; walker that has not heard of it can never take it for a prefix. Every walk here goes
+;; through [[keymap-entries]], which leaves it out; [[keymap-bind]] tags a key with its group
+;; where the key is bound; [[keymap-describe]] names a prefix; the merges combine the infos.
+
+(def- info-key
+  ;; the reserved key a keymap keeps its info under
+  :keymap/info)
+
+;; A keymap's info: `name` (a string or nil), `headings` (the group headings, in display
+;; order) and `groups` (`{key heading}` — the group each key is shown under).
+(defrecord %keymap-info (name headings groups))
+
+(def- no-info (%keymap-info nil [] {}))
+
+(defn keymap-entries (keymap)
+  "`keymap`'s bindings as `[key binding]` pairs, in no particular order — the map's own
+pairs less its info (its name and groups, [[keymap-describe]]). What every walk over a
+keymap's keys goes through, so the info is never mistaken for a key.
+
+    (editor/keymap/keymap-entries (editor/keymap/keymap-describe {:a 'save} [] {:name \"files\"}))   ;=> ([:a save])"
+  (if (contains? keymap info-key) (seq (dissoc keymap info-key)) (seq keymap)))
+(sig keymap-entries (map -> seqable))
+
+(defn- info-of (keymap)
+  (let (info (get keymap info-key)) (if (nil? info) no-info info)))
+
+(defn- with-heading (headings heading)
+  (if (includes? headings heading) headings (conj headings heading)))
+
+(sig info-tag (map any string -> map))
+(defn- info-tag (keymap key heading)
+  ;; `keymap` with `key` shown under `heading`, the heading added to the order when new
+  (let (info (info-of keymap))
+    (assoc keymap
+      info-key
+        (%keymap-info (%keymap-info-name info)
+          (with-heading (%keymap-info-headings info) heading)
+          (assoc (%keymap-info-groups info) key heading)))))
+
+(sig info-describe (map map -> map))
+(defn- info-describe (keymap description)
+  ;; `keymap` with the `:name` and `:headings` of `description` laid over its info
+  (let (info (info-of keymap)
+        name (get description :name)
+        headings (get description :headings))
+    (if (and (nil? name) (nil? headings))
+      keymap
+      (assoc keymap
+        info-key
+          (%keymap-info (or name (%keymap-info-name info))
+            (fold (%keymap-info-headings info) (vec (or headings [])) with-heading)
+            (%keymap-info-groups info))))))
+
+(sig keymap-describe (map any map -> map))
+;; check-allow: deliberately non-tail — depth = the described key sequence's length.
+(check-allow :non-tail-recursion
+  (defn keymap-describe (keymap keys description)
+    "`keymap` with the prefix map `keys` reaches described — Emacs's prompt string for a
+  prefix map, and which-key's name for it. `description` is a map of any of:
+
+    - `:name` — the prefix's name (`\"project\"`): a which-key panel shows its key as `+project`;
+    - `:headings` — the headings of its groups, in the order they are shown (a key's group is
+      given where it is bound, [[keymap-bind]]); headings tagged but not listed follow;
+    - `:group` — the heading the prefix KEY itself is shown under in its parent map.
+
+  `[]` describes `keymap` itself (`:group` then has no parent and is ignored). A prefix not yet
+  bound is made, empty, as Emacs's `define-prefix-command` makes one; bindings added under it
+  later keep the description, since [[keymap-bind]] extends a prefix map in place.
+
+    (editor/keymap/keymap-name (map/get-in (editor/keymap/keymap-describe {} [:ctrl-x \"p\"] {:name \"project\"}) [:ctrl-x \"p\"]))   ;=> \"project\""
+    (if (empty? keys)
+      (info-describe keymap description)
+      (let (key (first keys)
+            existing (get keymap key)
+            sub (if (map? existing) existing {})
+            placed (assoc keymap key (keymap-describe sub (rest keys) description))
+            heading (get description :group))
+        (if (and (= (count keys) 1) (string? heading)) (info-tag placed key heading) placed)))))
+
+(defn keymap-name (keymap)
+  "The name `keymap` was given ([[keymap-describe]]), or nil — a prefix map's which-key
+`+name`.
+
+    (editor/keymap/keymap-name (editor/keymap/keymap-describe {} [] {:name \"help\"}))   ;=> \"help\"
+    (editor/keymap/keymap-name {:a 'save})   ;=> nil"
+  (if (map? keymap) (%keymap-info-name (info-of keymap)) nil))
+
+(defn keymap-key-group (keymap key)
+  "The heading `key` is shown under in `keymap` (given where it was bound, [[keymap-bind]]),
+or nil.
+
+    (editor/keymap/keymap-key-group (editor/keymap/keymap-bind {} [:ctrl-f] 'find \"files\") :ctrl-f)   ;=> \"files\""
+  (get (%keymap-info-groups (info-of keymap)) key))
+
+(defn keymap-groups (keymap)
+  "`keymap`'s bindings in their groups: a vector of `[heading entries]`, the headings in
+their order ([[keymap-describe]]) and each keeping only the keys `keymap` binds (a heading
+with none is left out), then `[nil entries]` for the keys no group names, when there are
+any. Entries are [[keymap-entries]] pairs, in no particular order. A keymap with no groups
+is one `[nil entries]`.
+
+    (editor/keymap/keymap-groups (editor/keymap/keymap-bind {:b 'other} [:a] 'save \"files\"))   ;=> [[\"files\" ([:a save])] [nil ([:b other])]]"
+  (let (info (info-of keymap)
+        entries (keymap-entries keymap)
+        groups (%keymap-info-groups info)
+        grouped (seq/keep (%keymap-info-headings info)
+                  (fn (heading)
+                    (let (members (seq/filter entries
+                                    (fn (entry) (= (get groups (first entry)) heading))))
+                      (if (empty? members) nil [heading members]))))
+        rest-entries (seq/reject entries (fn (entry) (contains? groups (first entry)))))
+    (if (empty? rest-entries) (vec grouped) (conj (vec grouped) [nil rest-entries]))))
+
+(defn- info-merge (infos)
+  ;; the infos of a STACK of keymaps (highest precedence first) as one: the first name, the
+  ;; headings in order of first appearance, and each key in the group the highest map that
+  ;; groups it gives
+  (%keymap-info (first (seq/keep infos %keymap-info-name))
+    (fold infos [] (fn (headings info) (fold (%keymap-info-headings info) headings with-heading)))
+    (fold (reverse infos) {} (fn (groups info) (merge groups (%keymap-info-groups info))))))
 ;; ---- a stack of keymaps, read as one -------------------------------------------------
 ;; ONE rule, for dispatch and for help alike (ADR-535): `keymap-stack-binding` is what a key
 ;; means in a stack, and `keymap-merge-stack` is that rule applied to every key, all the way
@@ -262,14 +398,23 @@ Nil when no keymap binds `key`.
 exactly what it means walked through the stack a key at a time. A mode map's `C-c C-p` over
 the global map's `C-c f` keeps both (Emacs's semantics).
 
+What the maps say about themselves ([[keymap-describe]]) merges too: the merged map has the
+highest map's name, every map's headings (the higher map's first), and each key in the group
+the highest map that groups it gives — so a mode's `C-c` keys join the global map's groups.
+
     (map/get-in (editor/keymap/keymap-merge-stack [{:c {:p 'top}} {:c 'mid} {:c {:f 'low}}]) [:c :f])   ;=> low
-    (editor/keymap/keymap-merge-stack [{:c nil} {:c {:f 'low}}])   ;=> {:c nil}"
+    (editor/keymap/keymap-merge-stack [{:c nil} {:c {:f 'low}}])   ;=> {:c nil}
+    (editor/keymap/keymap-name (editor/keymap/keymap-merge-stack [{:a 'top} (editor/keymap/keymap-describe {:b 'low} [] {:name \"low\"})]))   ;=> \"low\""
     (let (stack (seq/filter keymaps map?))
       (if (< (count stack) 2)
         (or (first stack) {})
-        (fold (seq/distinct (mapcat stack keys))
-          {}
-          (fn (acc key) (assoc acc key (keymap-stack-binding stack key))))))))
+        ;; the info key folds through as any key would (the top info wins), then is replaced by
+        ;; the merge of them all
+        (let (merged (fold (seq/distinct (mapcat stack keys))
+                       {}
+                       (fn (acc key) (assoc acc key (keymap-stack-binding stack key))))
+              infos (seq/keep stack (fn (keymap) (get keymap info-key))))
+          (if (empty? infos) merged (assoc merged info-key (info-merge infos))))))))
 
 (defn keymap-merge (low high)
   "`high` laid over `low` — [[keymap-merge-stack]] of the two: each key SEQUENCE resolves to

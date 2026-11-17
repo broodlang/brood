@@ -154,7 +154,12 @@ pub(crate) fn jit_dispatch_call(
         }
         // Resolve a closure callee's arm for this site and cache it on the call IC, from
         // which the next call publishes its fast link.
+        // A contract shim is left to `dispatch`, which enters it (ADR-748): a native caller
+        // gains nothing from running the shim's own Brood frame.
         let cache_closure_arm = |heap: &mut Heap, id| {
+            if crate::builtins::contracts::is_entered_shim(heap, id) {
+                return None;
+            }
             compiled_arm_for(heap, id, argc).map(|a| {
                 let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
                 let cb = heap.vm_arm_block(&a);
@@ -239,7 +244,9 @@ pub(crate) fn jit_dispatch_call(
                     }
                 }
             }
-        } else if let ValueRef::Fn(id) = heap.root_at(stage_base).unpack() {
+        } else if let ValueRef::Fn(id) = heap.root_at(stage_base).unpack()
+            && !crate::builtins::contracts::is_entered_shim(heap, id)
+        {
             // The computed-head resolve, memoised per closure instance: a higher-order
             // loop calls the same closure every iteration, so the hit skips the body-cache
             // lookup, the closure read and the IC-block lookup.
@@ -407,12 +414,7 @@ pub(crate) fn jit_dispatch_call(
             let callee = callee.expect("resolved whenever no arm was ready");
             match dispatch(heap, callee, argv, false, env) {
                 Ok(Step::Done(v)) => Ok(v),
-                Ok(Step::Tail {
-                    compiled,
-                    args,
-                    genv,
-                    bases: _,
-                }) => vm_apply(heap, compiled, &args, genv),
+                Ok(step @ Step::Tail { .. }) => force(heap, step),
                 // A computed head's `head` slot carries its local's name, if it is one
                 // (`emit_call`'s `slow_head`).
                 Err(e) => Err(crate::eval::name_uncallable_local(
@@ -555,11 +557,13 @@ pub(crate) fn jit_dispatch_tail(
             args,
             genv,
             bases,
+            result_contract,
         } => ChunkExit::Tail {
             arm: compiled,
             args,
             genv,
             bases,
+            result_contract,
         },
         Step::Done(v) => ChunkExit::Done(v),
     })

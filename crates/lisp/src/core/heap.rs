@@ -708,6 +708,13 @@ pub(crate) enum HandlerKind {
     /// interrupt raised for an outer window among them, passes through it. `tail`:
     /// the call was in tail position, so its answer RETURNS from the `base` frame.
     Region { window: u32, tail: bool },
+    /// A contract's RESULT check, pending on a frame (ADR-748): the dispatcher checked a
+    /// contract shim's arguments and handed the call to the shim's original, so the check
+    /// the shim's own frame would have made on the way out is kept here. `caller` is the
+    /// driver depth of the frame whose return it checks, and `base` the `roots` slot just
+    /// below that frame holding the shim (a root, so the collector keeps it current). It
+    /// catches nothing: an error unwinding past it drops it.
+    ContractResult,
 }
 
 /// One open inline `try` (ADR-400) or interrupt region (ADR-491) — see

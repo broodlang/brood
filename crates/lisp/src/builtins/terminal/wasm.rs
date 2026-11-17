@@ -40,6 +40,8 @@ wasm_unsupported_builtins!(
     term_suspend,
     term_refresh,
     term_repaint_due,
+    term_title,
+    term_reported_colors,
     term_raw_enter,
     term_raw_leave,
     term_emit,

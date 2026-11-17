@@ -150,3 +150,35 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Play a short tone of freq-hz for ms milliseconds, optionally at peak amplitude vol (0..1, default ~0.18 — pass a small vol for quiet/ambient sounds). Fire-and-forget — it never blocks the caller, and overlapping beeps mix — so a game can blip from its frame loop. Synthesised on a dedicated audio thread (needs --features audio). A graceful no-op without the feature, when there's no audio device, or when muted via BROOD_AUDIO=0 or BROOD_GUI_HEADLESS. Returns nil.",
         audio_beep);
 }
+
+/// The terminal's title (`term-title`), registered after every other primitive for the
+/// intern-order reason `syntax_scan::register` gives.
+pub(super) fn register_title(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::{Arity, Tag};
+    use crate::types::{Sig, Ty};
+    primitives.def(
+        "%term-title",
+        Arity::exact(1),
+        Sig::new(vec![Ty::of_tags(&[Tag::Str])], nil_ty),
+        &["title"],
+        "Set the terminal's window (or tab) title — OSC 2, control characters dropped. The shell's own title is saved the first time and given back when the screen is left (term-leave, a suspend, a crash), and this title set again when it is taken again (a continue). What gui-title is to a window. Returns nil.",
+        term_title,
+    );
+}
+
+/// The colours the terminal reported for itself (`term-reported-colors`, ADR-744), registered
+/// after every other primitive for the same intern-order reason.
+pub(super) fn register_reported_colors(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    primitives.def(
+        "%term-reported-colors",
+        Arity::exact(0),
+        Sig::new(vec![], map_ty),
+        &[],
+        "The terminal's own foreground and background as it reported them (OSC 10/11): {:foreground [r g b] :background [r g b]}, a key left out when the terminal did not say; {} where there is no terminal to ask. What it said when first asked — by the first term-enter, or here, in raw mode for the moment, when nothing has asked yet — not the theme's colours term-bg gave it since. ADR-744.",
+        term_reported_colors,
+    );
+}
