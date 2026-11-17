@@ -1252,11 +1252,13 @@ pub(super) fn check_let(
         // its fn-valued siblings) by late lookup when *called*, so a self- or
         // mutually-recursive `let`-bound closure works at runtime. Pre-bind those
         // names so the unbound check agrees. Only fn-valued names, and only widening
-        // scope, so an eager forward reference in a non-closure RHS still surfaces.
+        // scope, so an eager forward reference in a non-closure RHS still surfaces. A typed
+        // lambda, `(%typed-fn 'SIG (fn …))`, is the same closure.
         let mut j = 0;
         while j < binds.len() {
             if let Value::Sym(name) = binds[j]
-                && fn_form_items(heap, binds[j + 1]).is_some()
+                && (fn_form_items(heap, binds[j + 1]).is_some()
+                    || crate::eval::macros::typed_fn_lambda(heap, binds[j + 1]).is_some())
             {
                 scope = scope.bind(name, None);
             }
@@ -1473,6 +1475,13 @@ pub(in crate::types::check) fn let_rhs_ty(
             derived_let_lambda(heap, name, binds[i + 1], &visible, &scope)
                 .and_then(|(tys, ret)| derived_let_lambda_arrow(&tys, &ret))
         }
+        // A typed lambda declares its parameters, so nothing is derived; only an open result
+        // is typed, with the binder's own calls read as the loop they are.
+        Value::Sym(name) => list_items(heap, binds[i + 1])
+            .and_then(|rhs| crate::types::check::infer::typed_fn_parts(heap, &rhs))
+            .and_then(|(sig, lambda)| {
+                crate::types::check::infer::typed_lambda_arrow(heap, sig, lambda, Some(name), scope)
+            }),
         _ => None,
     };
     derived_arrow.or_else(|| expr_ty(heap, binds[i + 1], scope))

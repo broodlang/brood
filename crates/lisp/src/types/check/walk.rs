@@ -356,6 +356,18 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<Finding>)
         return;
     }
 
+    // `(%typed-fn '(T… -> R) (fn …))` — an anonymous `fn` with typed parameters (ADR-420).
+    // Its body is walked under the declared parameters and its result held to the declared
+    // one, exactly as a `defn`'s is under its registered sig.
+    if let Value::Sym(s) = head
+        && !ctx.is_lexical_local(s)
+        && let Some((sig, lambda)) = crate::types::check::infer::typed_fn_parts(heap, &items)
+        && let Some(lambda_items) = list_items(heap, lambda)
+    {
+        check_fn_seeded(heap, &lambda_items, ctx, out, Some(&sig), None, true);
+        return;
+    }
+
     match head {
         Value::Keyword(key) => {
             check_keyword_accessor(heap, form, key, &items, ctx, out);

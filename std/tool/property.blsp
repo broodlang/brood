@@ -64,7 +64,7 @@
         (uniform after-roll bound)
         (let (edges (into [0 0 0 bound bound 1 1 (- bound 1)] extra)
               [pick next-seed] (rand/int after-roll (count edges)))
-          [(math/max 0 (math/min bound (nth edges pick))) next-seed])))))
+          [(math/max 0 (math/min bound (nth edges pick 0))) next-seed])))))
 
 (def- biased (edge-sampler []))
 

@@ -5,9 +5,12 @@
 //! plain binders — nothing downstream can bind a variable literally named `w:number`. What the
 //! types declare survives as the `(%register-sig 'NAME '(T… -> R))` a named definition emits
 //! beside itself: the checker reads it as a declared signature, and the contracts enforce it
-//! when armed. An unannotated parameter or a missing `->` is the placeholder `_`, which the
-//! checker reads as "not declared" — the parameter is unconstrained and the result keeps its
-//! inferred type — so annotating one parameter never costs the inference of the rest.
+//! when armed. An anonymous `fn` has no name, so its declaration rides beside it instead —
+//! `(%typed-fn '(T… -> R) (fn PLAIN …))`, an identity the compiler drops (`typed_fn_lambda`)
+//! and the checker reads as the lambda's signature. An unannotated parameter or a missing
+//! `->` is the placeholder `_`, which the checker reads as "not declared" — the parameter is
+//! unconstrained and the result keeps its inferred type — so annotating one parameter never
+//! costs the inference of the rest.
 //!
 //! Not supported, and refused with an error rather than mis-bound: a type inside a
 //! destructuring pattern, a typed binder in `let`/`letrec`, and types on a multi-clause `fn`
@@ -302,9 +305,39 @@ fn refuse_multi_clause_types(heap: &Heap, fn_items: &[Value]) -> Result<(), Lisp
     Ok(())
 }
 
-/// `(fn PARAMS body…)` with typed parameters → the same `fn` with plain ones. An anonymous
-/// `fn` has no name to declare a signature under, so its types are checked by nothing yet;
-/// the binding is right either way. `None` when there is nothing to strip.
+/// The marker an anonymous typed `fn` expands under: `(%typed-fn '(T… -> R) (fn PLAIN …))`.
+/// At runtime the prelude's `%typed-fn` returns the function unchanged; the checker reads the
+/// quoted signature as the lambda's declaration, as it reads `%register-sig` for a `defn`.
+pub(crate) const TYPED_FN: &str = "%typed-fn";
+
+/// The plain `(fn …)` inside a `(%typed-fn 'SIG (fn …))`, or `None` for any other form. The
+/// marker is an identity at runtime, so whatever treats a `fn`-valued form specially — the
+/// compiler's direct self-recursion for a `letrec`/`let` binder, the tree-walker's frame for
+/// it, the non-tail-recursion lint — sees through it to the lambda: wrapped, a typed `letrec`
+/// loop lost the self-recursion path and its enclosing closure fell to the tree-walker.
+pub(crate) fn typed_fn_lambda(heap: &Heap, form: Value) -> Option<Value> {
+    let items = heap.list_items(form)?;
+    let [head, quoted, lambda] = items.as_slice() else {
+        return None;
+    };
+    if !is_sym(*head, TYPED_FN) {
+        return None;
+    }
+    let quote_head = heap.list_items(*quoted)?.first().copied();
+    if !quote_head.is_some_and(|h| is_sym(h, kw::QUOTE)) {
+        return None;
+    }
+    let lambda_head = heap.list_items(*lambda)?.first().copied();
+    lambda_head
+        .is_some_and(|h| is_sym(h, kw::FN))
+        .then_some(*lambda)
+}
+
+/// `(fn PARAMS body…)` with typed parameters → `(%typed-fn '(T… -> R) (fn PLAIN body…))`. An
+/// anonymous `fn` has no name to register a signature under, so the declaration rides beside
+/// it: the checker types the body under it, holds the result to it and types the value as
+/// that arrow, where a stripped list left the types checked by nothing. `None` when there is
+/// nothing to strip.
 pub(super) fn strip_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>, LispError> {
     if fn_is_multi_clause(heap, items) {
         refuse_multi_clause_types(heap, items)?;
@@ -313,12 +346,18 @@ pub(super) fn strip_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>
     let Some(&params) = items.get(1) else {
         return Ok(None);
     };
-    let Some((plain, _sig)) = strip_param_list(heap, "fn", params)? else {
+    let Some((plain, sig)) = strip_param_list(heap, "fn", params)? else {
         return Ok(None);
     };
-    let mut out = items.to_vec();
-    out[1] = plain;
-    Ok(Some(heap.list(out)))
+    let mut lambda = items.to_vec();
+    lambda[1] = plain;
+    let lambda = heap.list(lambda);
+    let quoted_sig = heap.list(vec![value::sym(kw::QUOTE), sig]);
+    Ok(Some(heap.list(vec![
+        value::sym(TYPED_FN),
+        quoted_sig,
+        lambda,
+    ])))
 }
 
 /// `(defmacro NAME PARAMS body…)` with typed parameters → plain ones. A macro's arguments

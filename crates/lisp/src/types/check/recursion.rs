@@ -92,10 +92,13 @@ fn check_recursion_inner(heap: &Heap, form: Value, out: &mut Vec<Finding>) {
         && let Some(binds) = list_items(heap, items[1])
     {
         for pair in binds.chunks(2) {
-            if let [Value::Sym(name), bound] = *pair
-                && is_fn_form(heap, bound)
-            {
-                analyze_fn(heap, name, bound, heap.form_pos_only(form), out);
+            if let [Value::Sym(name), bound] = *pair {
+                // A typed loop, `(letrec (go (fn (i:int) …)) …)`, binds `(%typed-fn 'SIG
+                // (fn …))`: its self-call is held to the same rule.
+                let bound = crate::eval::macros::typed_fn_lambda(heap, bound).unwrap_or(bound);
+                if is_fn_form(heap, bound) {
+                    analyze_fn(heap, name, bound, heap.form_pos_only(form), out);
+                }
             }
         }
     }

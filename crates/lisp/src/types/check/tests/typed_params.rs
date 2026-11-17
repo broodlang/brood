@@ -130,3 +130,50 @@ fn a_loaded_typed_function_returns_within_its_declared_parameter() {
         sig.ret
     );
 }
+
+/// An anonymous `fn` has no name to register a signature under, so its types were stripped
+/// and checked by nothing: `(fn (x:int) (string/upper x))` passed, though language.md said
+/// typed parameters work on `fn`. It now expands under `%typed-fn`, whose quoted signature the
+/// checker reads as the lambda's declaration.
+#[test]
+fn an_anonymous_fn_body_is_checked_under_its_typed_parameters() {
+    let ws = file_warnings("(defn g () (fn (x:int) (string/upper x)))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("string/upper: argument 1 expects string, got int")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn an_anonymous_fn_result_is_held_to_its_declared_result() {
+    let ws = file_warnings("(defn g () (fn (x:int -> string) (+ x 1)))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("declared return type string but the body yields int")),
+        "{ws:?}"
+    );
+}
+
+/// The lambda's value is the arrow it declares, so a call through a binding is checked.
+#[test]
+fn a_bound_anonymous_fn_is_called_against_its_typed_parameters() {
+    let ws = file_warnings("(defn g () (let (f (fn (x:int) (+ x 1))) (f \"s\")))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("argument 1 expects int, got \"s\"")),
+        "{ws:?}"
+    );
+}
+
+/// A lambda used as its types say, and one typing a parameter `_`-style by leaving it
+/// untyped, raise nothing.
+#[test]
+fn an_anonymous_fn_used_as_typed_raises_nothing() {
+    let ws = file_warnings(
+        "(defn g () (fn (x:string -> string) (string/upper x)))\n\
+         (defn h () (fn (x:int y) (+ x y)))\n\
+         (defn k () (map [1 2] (fn (x:int) (+ x 1))))",
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+}

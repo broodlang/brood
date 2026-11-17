@@ -1867,3 +1867,12 @@ group does and show up under a match's `:named` by keyword; a name used twice is
 group of that name that took part; `replace` templates read `${name}` and `${n}`. The engine is
 untouched (it sees a plain `(`), and a pattern with no `(?<` in its text pays nothing.
 Backreferences and lookaround stay out: neither has a linear engine.
+
+2026-11-17 (ADR-420 follow-up). **An anonymous `fn`'s typed parameters are checked; types
+shown as written.** A bug hunt over 0.53's checker found typed parameters on `fn` checked by
+nothing (stripped, with a code comment saying so, against language.md): a typed lambda now
+expands to `(%typed-fn 'SIG (fn …))`, which the checker reads as the lambda's declaration and
+the compiler drops, so a typed `letrec` loop keeps its direct self-recursion (wrapped, it would
+have fallen to the tree-walker). The same hunt fixed `type-signature` erasing a declaration's
+type variables (`math/clamp` read `(any any any -> any)`) and `expr-type` binding `x:int` as a
+variable named `x:int`. No new warning across the 21 downstream projects.

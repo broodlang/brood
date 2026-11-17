@@ -6,6 +6,14 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Fixed: an anonymous `fn`'s typed parameters are checked.** `(fn (x:int -> string) …)`
+bound its parameters and was checked by nothing, though typed parameters were documented for
+`fn`. Its body is now checked under `x : int`, its result held to `string`, and the lambda is
+the value `(int -> string)` wherever it is bound or passed: `(fn (x:int) (string/upper x))`
+and `(let (f (fn (x:int) …)) (f "s"))` are reported. No runtime contract guards an anonymous
+`fn`; it expands to `(%typed-fn 'SIG (fn …))`, an identity the compiler drops, so a typed
+`letrec` loop compiles as before.
+
 **Fixed: types shown as written.**
 - `reflect/type-signature`, and so hover and `nest mcp`'s `lookup`, shows a polymorphic
   declaration with its type variables: `math/clamp` is `(?A ?A ?A -> ?A)`, where it read

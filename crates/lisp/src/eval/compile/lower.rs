@@ -586,14 +586,15 @@ pub(crate) fn compile_captures(
     Some((caps, self_name))
 }
 
-/// Is `form` *directly* a `(fn …)` combination? Used by `letrec` to
-/// gate the direct self-recursion path (only a fn-valued binder can be its own
-/// recursive callee).
+/// Is `form` *directly* a `(fn …)` combination — or a typed one, `(%typed-fn 'SIG (fn …))`,
+/// which compiles to the same closure? Used by `letrec` to gate the direct self-recursion
+/// path (only a fn-valued binder can be its own recursive callee).
 pub(crate) fn is_fn_form(heap: &Heap, form: Value) -> bool {
     if let ValueRef::Pair(p) = form.unpack()
         && let ValueRef::Sym(h) = heap.pair(p).0.unpack()
     {
-        return value::symbol_is(h, kw::FN);
+        return value::symbol_is(h, kw::FN)
+            || crate::eval::macros::typed_fn_lambda(heap, form).is_some();
     }
     false
 }
@@ -1153,6 +1154,14 @@ fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -
                 // capturing a flat snapshot of the enclosing lexicals.
                 if value::symbol_is(h, kw::FN) {
                     return compile_make_closure(heap, form, scope);
+                }
+                // `(%typed-fn 'SIG (fn …))` — an anonymous `fn` with typed parameters. The
+                // marker is the identity, so it compiles to the closure itself: no call, and a
+                // `letrec` binder's `letrec_self` reaches the closure it names.
+                if scope.lookup(h).is_none()
+                    && let Some(lambda) = crate::eval::macros::typed_fn_lambda(heap, form)
+                {
+                    return compile_make_closure(heap, lambda, scope);
                 }
                 // `(%try (fn () body…) (fn (e) handler…))` — inline try/catch:
                 // run body and handler in the current frame without closure allocation.

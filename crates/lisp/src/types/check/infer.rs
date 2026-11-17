@@ -391,6 +391,11 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     if is_fn_head(s) {
                         return lambda_arrow(heap, form, ctx);
                     }
+                    if !ctx.is_lexical_local(s)
+                        && let Some((sig, lambda)) = typed_fn_parts(heap, &items)
+                    {
+                        return typed_lambda_arrow(heap, sig, lambda, None, ctx);
+                    }
                     if value::symbol_is(s, kw::QUOTE) {
                         // A quoted LIST is data whose every element is right there: type it
                         // as `list<e1 | e2 | …>` (`'()` is `nil`), the way a vector literal
@@ -3038,6 +3043,68 @@ fn lambda_params(heap: &Heap, params: Value) -> Option<(Vec<Symbol>, Vec<Option<
     let parse = |form: Option<Value>| form.and_then(|form| super::annot::parse_type(heap, form));
     let types = types.into_iter().map(parse).collect();
     Some((names, types, parse(ret)))
+}
+
+/// The two halves of `(%typed-fn '(T… -> R) (fn PLAIN body…))`, what an anonymous `fn` with
+/// typed parameters expands to (ADR-420): the signature it declares, `_` read as `any`, and
+/// the plain lambda. `None` for any other form.
+pub(super) fn typed_fn_parts(heap: &Heap, items: &[Value]) -> Option<(Sig, Value)> {
+    let [Value::Sym(head), quoted, lambda] = items else {
+        return None;
+    };
+    if !value::symbol_is(*head, crate::eval::macros::TYPED_FN) {
+        return None;
+    }
+    let quoted = list_items(heap, *quoted)?;
+    let [Value::Sym(quote), sig_form] = quoted.as_slice() else {
+        return None;
+    };
+    if !value::symbol_is(*quote, kw::QUOTE) {
+        return None;
+    }
+    let lambda_head = list_items(heap, *lambda)?.first().copied();
+    if !matches!(lambda_head, Some(Value::Sym(s)) if is_fn_head(s)) {
+        return None;
+    }
+    let sig = super::annot::parse_type(heap, *sig_form)?
+        .as_arrow()
+        .cloned()?;
+    Some((sig, *lambda))
+}
+
+/// The arrow a typed anonymous `fn` declares: its declared parameters, and its declared
+/// result — or, where the result is left open, the body's type under those parameters.
+/// `self_name` is the `let`/`letrec` binder the lambda is the value of: a self-call in the
+/// body then contributes ⊥ to the result (the least fixpoint `derived_let_lambda` takes for
+/// an untyped literal), where read under the pre-bound, unknown name a typed loop's result
+/// was unknown and every declaration resting on it merely trusted.
+pub(super) fn typed_lambda_arrow(
+    heap: &Heap,
+    sig: Sig,
+    lambda: Value,
+    self_name: Option<Symbol>,
+    ctx: &Ctx,
+) -> Option<Ty> {
+    if !sig.ret.is_any() {
+        return Some(Ty::arrow(sig));
+    }
+    let inputs: Vec<Option<Ty>> = sig
+        .params
+        .iter()
+        .map(|t| (!t.is_any()).then(|| t.clone()))
+        .collect();
+    let scope = match self_name {
+        Some(name) => {
+            let looping = Sig {
+                ret: Ty::NEVER,
+                ..sig.clone()
+            };
+            ctx.clone().bind(name, Some(Ty::arrow(looping)))
+        }
+        None => ctx.clone(),
+    };
+    let ret = lambda_ret(heap, lambda, &inputs, &scope)?;
+    Some(Ty::arrow(Sig { ret, ..sig }))
 }
 
 /// The arrow type of a **simple** single-clause lambda literal `(fn (p…) body)`: each

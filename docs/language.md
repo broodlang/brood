@@ -2286,7 +2286,11 @@ the checker **infers** from the body, so typing one parameter never costs the re
 (`pair` above declares `(int _ -> _)`). `_` may be written in a `sig` too. Typed parameters
 work on `defn`, `defn-`, `fn` and `defmacro`; a multi-clause `fn`, a destructuring pattern and
 a `let` binding refuse a type with an error — declare those with `(sig f (and …))` or on the
-enclosing function.
+enclosing function. An anonymous `fn` has no name to register a `sig` under, so its types are
+the checker's alone: `(fn (x:int -> string) …)` checks its body under `x : int`, holds its
+result to `string` and is the value `(int -> string)` wherever it is bound or passed, but no
+runtime contract guards its calls. (It expands to `(%typed-fn '(int -> string) (fn (x) …))`,
+an identity the compiler drops.) A macro's parameter types declare nothing and are dropped.
 
 The type grammar: base names — `int float number decimal ratio string symbol keyword
 bool nil pair vector list map set bytes failure record fn rope pid ref table socket

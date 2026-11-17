@@ -795,6 +795,12 @@ and the runtime contract agree. A base type name (`int`, `map`, …) is never re
 (defn %lint-allow (category value)
   "Identity on `value` — the runtime side of `check-allow` (a checker marker)."
   value)
+
+;; An anonymous `fn` with typed parameters expands to `(%typed-fn '(T… -> R) (fn …))`
+;; (ADR-420): the checker reads the quoted signature as the lambda's declaration.
+(defn %typed-fn (signature f)
+  "Identity on `f` — the runtime side of an anonymous `fn`'s typed parameters (a checker marker)."
+  f)
 (defmacro check-allow (category & body)
   "Suppress an advisory checker lint over the wrapped forms. `category` is a
 keyword: `:non-tail-recursion`, `:unreachable-clause`, `:type-mismatch`, `:unbound`
