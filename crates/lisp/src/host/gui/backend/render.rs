@@ -60,13 +60,78 @@ impl ClusterKey {
     }
 }
 
+/// A glyph-cache key: the cluster, family, bold, italic, scale, subpixel and px bits
+/// (`Renderer::cache`).
+pub(super) type GlyphKey = (ClusterKey, u32, bool, bool, u16, bool, u32);
+
+/// The glyph cache's map: probed once or twice per cluster drawn (12 000 a 1080p frame), with
+/// keys no one chooses adversarially, so an FxHash-style multiply per word rather than SipHash.
+pub(super) type GlyphMap<V> = HashMap<GlyphKey, V, std::hash::BuildHasherDefault<PaintHasher>>;
+
+/// FxHash: each word folded in with a rotate, an xor and one multiply — the painter's maps
+/// (the glyph cache, the blend tables), whose keys are its own.
+#[derive(Default, Clone, Copy)]
+pub(super) struct PaintHasher(u64);
+
+impl PaintHasher {
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+impl std::hash::Hasher for PaintHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.add(u64::from_le_bytes(word));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, value: u8) {
+        self.add(u64::from(value));
+    }
+
+    #[inline]
+    fn write_u16(&mut self, value: u16) {
+        self.add(u64::from(value));
+    }
+
+    #[inline]
+    fn write_u32(&mut self, value: u32) {
+        self.add(u64::from(value));
+    }
+
+    #[inline]
+    fn write_u64(&mut self, value: u64) {
+        self.add(value);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, value: usize) {
+        self.add(value as u64);
+    }
+}
+
 /// The raster target: a `w`×`h` framebuffer plus the half-open pixel rect
 /// `[x0, x1) × [y0, y1)` the primitives may touch. Pixels outside it are left exactly
 /// as they were — that is what lets a paint re-rasterise only the cell rows whose ops
-/// changed (`paint::strip_diff`), or only the columns of a row a change reached
+/// changed (`paint::grid_damage`), or only the columns of a row a change reached
 /// (`paint::strip_columns`), and trust the rest of the retained canvas.
 pub(super) struct Canvas<'a> {
+    /// The framebuffer's pixels from index `first` on: the whole of it, or (a band drawn on a
+    /// thread of its own, `paint::draw_rects`) the rows that band owns. Pixel `i` of the
+    /// framebuffer is `buf[i - first]`.
     pub(super) buf: &'a mut [u32],
+    pub(super) first: usize,
     pub(super) w: usize,
     pub(super) h: usize,
     pub(super) x0: usize,
@@ -98,6 +163,7 @@ impl<'a> Canvas<'a> {
     ) -> Self {
         Canvas {
             buf,
+            first: 0,
             w,
             h,
             x0: x0.min(w),
@@ -112,6 +178,7 @@ impl<'a> Canvas<'a> {
     pub(super) fn narrowed(&mut self, y0: usize, y1: usize) -> Canvas<'_> {
         Canvas {
             buf: self.buf,
+            first: self.first,
             w: self.w,
             h: self.h,
             x0: self.x0,
@@ -143,7 +210,8 @@ impl<'a> Canvas<'a> {
         let w = self.w;
         let (x0, x1) = (self.x0, self.x1.max(self.x0));
         for y in self.rows(top, h) {
-            self.buf[y * w + x0..y * w + x1].fill(color);
+            let row = y * w - self.first;
+            self.buf[row + x0..row + x1].fill(color);
         }
     }
 }
@@ -196,6 +264,12 @@ pub(crate) struct Renderer {
     text_contrast: f32,
     /// `cov -> lifted cov` for the current `text_contrast`, 256 entries; identity at 1.0.
     cov_lut: Box<[u8; 256]>,
+    /// The finished text blends by coverage, per (colour, ground, lift) pair: a rim pixel
+    /// is a table read, not a `powf` (`BlendTable`).
+    blend_tables: BlendTables,
+    /// The blend tables of the threads a large paint draws its bands on, one set per band, kept
+    /// between frames like `blend_tables` (`paint::draw_rects`).
+    pub(super) band_tables: Vec<BlendTables>,
     /// Whether runs of punctuation are shaped as one unit, so a font's programming
     /// ligatures (`->`, `!=`, `===`) form (`gui-ligatures!`, ADR-442). Off by default.
     ligatures: bool,
@@ -207,7 +281,7 @@ pub(crate) struct Renderer {
     // to clear the whole cache and re-rasterise every glyph on screen (the jank in a
     // continuous zoom), and two regions could never be drawn at two sizes in one frame —
     // which is what per-buffer zoom needs.
-    pub(super) cache: HashMap<(ClusterKey, u32, bool, bool, u16, bool, u32), CachedGlyph>,
+    pub(super) cache: GlyphMap<CachedGlyph>,
 
     /// `px bits -> CellMetrics`: shaping the reference glyph is not free and a
     /// frame with per-buffer zoom asks for the same handful of sizes on every paint. Dropped
@@ -263,8 +337,10 @@ impl Renderer {
             text_hinting: TextHinting::Auto,
             text_contrast: TEXT_CONTRAST,
             cov_lut: Box::new(contrast_lut(TEXT_CONTRAST)),
+            blend_tables: BlendTables::default(),
+            band_tables: Vec::new(),
             ligatures: false,
-            cache: HashMap::new(),
+            cache: GlyphMap::default(),
             metrics_memo: RefCell::new(HashMap::new()),
             retained: RetainedFrame::default(),
             caret_hidden: false,
@@ -431,14 +507,18 @@ impl Renderer {
     /// Take the layout a frame declares (`Op::Seam`, [`super::rows::frame_layout`]). Returns
     /// true when the GRID changed — row 0 became or stopped being a band, which moves the top
     /// margin and so the row count — so the caller re-publishes the window's size; a new seam
-    /// alone moves pixels, not cells. Either change invalidates the retained frame.
+    /// alone moves pixels, not cells. A new band invalidates the retained frame; a new seam
+    /// does not: the CPU painter diffs the frame against the rows the canvas was laid out on
+    /// (`paint::resize_damage`), so only the rows the seam moved are drawn again.
     pub(crate) fn set_layout(&mut self, layout: super::rows::Layout) -> bool {
         let grid_changed = layout.top_band != self.top_band;
         if layout.seam != self.seam || grid_changed || layout.partial != self.partial {
             self.seam = layout.seam;
             self.top_band = layout.top_band;
             self.partial = layout.partial;
-            self.invalidate();
+            if grid_changed {
+                self.invalidate();
+            }
         }
         grid_changed
     }
@@ -621,6 +701,8 @@ impl Renderer {
             1.0
         };
         *self.cov_lut = contrast_lut(self.text_contrast);
+        self.blend_tables.clear();
+        self.band_tables.clear();
         self.invalidate();
     }
 
@@ -852,6 +934,47 @@ impl Renderer {
         }
     }
 
+    /// The glyph-cache key of cluster `g` in this face at the current size and AA — `None`
+    /// for a space, which draws nothing.
+    pub(super) fn glyph_key(
+        &self,
+        g: &str,
+        family: Option<u32>,
+        bold: bool,
+        italic: bool,
+        scale: u16,
+    ) -> Option<GlyphKey> {
+        glyph_key(
+            g,
+            family.unwrap_or(self.default_family),
+            bold,
+            italic,
+            scale,
+            self.subpixel_text(),
+            self.px,
+        )
+    }
+
+    /// Build cluster `g`'s glyph into the cache if it is not there: the one step of a
+    /// glyph's drawing that writes the renderer (`paint::prepare_ops` runs it before a
+    /// frame's bands are drawn on threads, which only read the cache).
+    pub(super) fn ensure_cluster(&mut self, key: &GlyphKey, g: &str) {
+        if self.cache.contains_key(key) {
+            return;
+        }
+        let t0 = Instant::now();
+        let (_, family, bold, italic, scale, subpixel, _) = key;
+        let baked = self.build_cluster(g, *family, *bold, *italic, *scale, *subpixel);
+        PAINT_BUILD_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        PAINT_MISSES.fetch_add(1, Ordering::Relaxed);
+        self.cache.insert(key.clone(), baked);
+    }
+
+    /// What drawing a glyph reads of the renderer: its text contrast and lift curve.
+    pub(super) fn glyph_ink_parts(&self) -> (f32, &[u8; 256]) {
+        (self.text_contrast, &self.cov_lut)
+    }
+
     /// Blit grapheme cluster `g` into the framebuffer at cell-pixel `(left, top)`,
     /// alpha-compositing over the cell background. A color cluster (emoji) draws in
     /// its own colors; a monochrome one is recolored with the face `fg`. The cluster
@@ -870,66 +993,122 @@ impl Renderer {
         fg: [u8; 3],
         clip_skip: usize,
     ) {
-        if g == " " {
+        let Some(key) = self.glyph_key(g, family, bold, italic, scale) else {
             return;
-        }
-        let fid = family.unwrap_or(self.default_family);
-        let subpixel = self.subpixel_text();
-        // The common single-char cluster keys via `ClusterKey::Char` with no
-        // allocation; only a rare multi-char cluster allocates (a `Box<str>`).
-        let key = (
-            ClusterKey::of(g),
-            fid,
-            bold,
-            italic,
-            scale.max(1),
-            subpixel,
-            self.px.to_bits(),
-        );
+        };
         PAINT_CLUSTERS.fetch_add(1, Ordering::Relaxed);
-        if !self.cache.contains_key(&key) {
-            let t0 = Instant::now();
-            let baked = self.build_cluster(g, fid, bold, italic, scale, subpixel);
-            PAINT_BUILD_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            PAINT_MISSES.fetch_add(1, Ordering::Relaxed);
-            self.cache.insert(key.clone(), baked);
+        self.ensure_cluster(&key, g);
+        let ink = GlyphInk {
+            text_contrast: self.text_contrast,
+            cov_lut: &self.cov_lut,
+        };
+        composite_glyph(
+            canvas,
+            &self.cache[&key],
+            (left, top),
+            fg,
+            clip_skip,
+            ink,
+            &mut self.blend_tables,
+        );
+    }
+}
+
+/// The glyph-cache key of cluster `g` (`None` for a space, which draws nothing): the cluster,
+/// family, style, scale, AA and px a glyph is baked at.
+pub(super) fn glyph_key(
+    g: &str,
+    family: u32,
+    bold: bool,
+    italic: bool,
+    scale: u16,
+    subpixel: bool,
+    px: f32,
+) -> Option<GlyphKey> {
+    if g == " " {
+        return None;
+    }
+    // The common single-char cluster keys via `ClusterKey::Char` with no allocation; only a
+    // rare multi-char cluster allocates (a `Box<str>`).
+    Some((
+        ClusterKey::of(g),
+        family,
+        bold,
+        italic,
+        scale.max(1),
+        subpixel,
+        px.to_bits(),
+    ))
+}
+
+/// What compositing a glyph reads of the renderer: the text contrast γ and its lift curve.
+#[derive(Clone, Copy)]
+pub(super) struct GlyphInk<'a> {
+    pub(super) text_contrast: f32,
+    pub(super) cov_lut: &'a [u8; 256],
+}
+
+/// Composite the cached glyph `cg` at `(left, top)` in `fg`, its first `clip_skip` rows
+/// skipped, through the blend tables `tables`: what `Renderer::draw_cluster` and a band's
+/// painter (`paint::BandPainter`) both draw with, so a glyph is the same bytes on any thread.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn composite_glyph(
+    canvas: &mut Canvas,
+    cg: &CachedGlyph,
+    (left, top): (usize, usize),
+    fg: [u8; 3],
+    clip_skip: usize,
+    glyph_ink: GlyphInk,
+    tables: &mut BlendTables,
+) {
+    // `clip_skip` glyph rows from the top are above the clip boundary (the grid
+    // origin); they're skipped and the remaining rows land at `top` onward. The
+    // canvas rect clips the rest: pixels outside `[x0, x1) × [y0, y1)` are not touched.
+    let (fb_w, y0, y1) = (canvas.w, canvas.y0, canvas.y1);
+    let columns = canvas.cols(left, cg.width);
+    // Text blends in linear light with its weight corrected to the encoded lerp's, and
+    // lifted by `text_contrast` where it is lighter than the pixel it lands on (ADR-611,
+    // `TextInk`); a colour glyph (emoji) is plain linear-light `blend`, never lifted.
+    let lift = (glyph_ink.text_contrast != 1.0 && !cg.color).then_some(glyph_ink.cov_lut);
+    let ink = TextInk::new(fg, lift);
+    // The blend table of the ground last drawn over: along a glyph the ground is nearly
+    // always one pixel value (the band it sits on), so the map is asked again only where
+    // it changes.
+    let mut table_ground = None;
+    let mut table: Option<&mut BlendTable> = None;
+    for ry in clip_skip..cg.height {
+        let py = top + (ry - clip_skip);
+        if py >= y1 {
+            break;
         }
-        let cg = &self.cache[&key];
-        // `clip_skip` glyph rows from the top are above the clip boundary (the grid
-        // origin); they're skipped and the remaining rows land at `top` onward. The
-        // canvas rect clips the rest: pixels outside `[x0, x1) × [y0, y1)` are not touched.
-        let (fb_w, y0, y1) = (canvas.w, canvas.y0, canvas.y1);
-        let columns = canvas.cols(left, cg.width);
-        // Text blends in linear light with its weight corrected to the encoded lerp's, and
-        // lifted by `text_contrast` where it is lighter than the pixel it lands on (ADR-611,
-        // `TextInk`); a colour glyph (emoji) is plain linear-light `blend`, never lifted.
-        let lift = (self.text_contrast != 1.0 && !cg.color).then_some(&*self.cov_lut);
-        let ink = TextInk::new(fg, lift);
-        for ry in clip_skip..cg.height {
-            let py = top + (ry - clip_skip);
-            if py >= y1 {
-                break;
-            }
-            if py < y0 {
+        if py < y0 {
+            continue;
+        }
+        let row = py * fb_w - canvas.first;
+        for pxx in columns.clone() {
+            let rx = pxx - left;
+            let i = (ry * cg.width + rx) * 4;
+            let a = cg.rgba[i + 3];
+            if a == 0 {
                 continue;
             }
-            let row = py * fb_w;
-            for pxx in columns.clone() {
-                let rx = pxx - left;
-                let i = (ry * cg.width + rx) * 4;
-                let a = cg.rgba[i + 3];
-                if a == 0 {
-                    continue;
-                }
-                let dst = &mut canvas.buf[row + pxx];
-                *dst = if cg.color {
-                    blend(*dst, [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]], a)
-                } else if cg.subpixel {
-                    ink.over_rgb(*dst, [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]])
-                } else {
-                    ink.over(*dst, a)
-                };
+            let dst = &mut canvas.buf[row + pxx];
+            if cg.color {
+                *dst = blend(*dst, [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]], a);
+                continue;
             }
+            if table_ground != Some(*dst) || table.is_none() {
+                table = Some(tables.table(&ink, *dst));
+                table_ground = Some(*dst);
+            }
+            let Some(current) = table.as_deref_mut() else {
+                continue;
+            };
+            *dst = if cg.subpixel {
+                ink.over_rgb_with(current, *dst, [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]])
+            } else {
+                ink.over_with(current, *dst, a)
+            };
         }
     }
 }
@@ -1498,7 +1677,7 @@ pub(super) fn fill_cell(
         return;
     }
     for y in canvas.rows(top, h) {
-        let row = y * fb_w;
+        let row = y * fb_w - canvas.first;
         canvas.buf[row + columns.start..row + columns.end].fill(color);
     }
 }
@@ -1548,7 +1727,7 @@ pub(super) fn fill_rrect(
         .min(canvas.y1);
     for py in y0..y1 {
         let cy = py as f32 + 0.5;
-        let row = py * fb_w;
+        let row = py * fb_w - canvas.first;
         for px in x0..x1 {
             let cx = px as f32 + 0.5;
             let dx = (rx0 - cx).max(cx - rx1).max(0.0);
@@ -1650,11 +1829,12 @@ pub(super) fn cursor_cell(
     let clip = |from: usize, to: usize| from.max(clip_x0)..to.min(clip_x1);
     match style {
         CursorStyle::Block | CursorStyle::Hollow => {
+            let first = canvas.first;
             let buf = &mut *canvas.buf;
             if style == CursorStyle::Block {
                 let wash = color.unwrap_or([0xff, 0xff, 0xff]);
                 for y in draw_top..draw_bottom {
-                    let row = y * fb_w;
+                    let row = y * fb_w - first;
                     for x in clip(left, (left + w).min(fb_w)) {
                         buf[row + x] = blend(buf[row + x], wash, 128);
                     }
@@ -1668,7 +1848,7 @@ pub(super) fn cursor_cell(
             let x0 = left;
             let x1 = (left + w).min(fb_w);
             for y in draw_top..draw_bottom {
-                let row = y * fb_w;
+                let row = y * fb_w - first;
                 for x in clip(x0, (x0 + t).min(fb_w)) {
                     buf[row + x] = stroke;
                 }
@@ -1684,7 +1864,7 @@ pub(super) fn cursor_cell(
                 let y0 = ey0.max(draw_top as isize).max(0) as usize;
                 let y1 = ey1.min(draw_bottom as isize).max(0) as usize;
                 for y in y0..y1 {
-                    let row = y * fb_w;
+                    let row = y * fb_w - first;
                     for x in clip(x0, x1) {
                         buf[row + x] = stroke;
                     }
@@ -1952,6 +2132,34 @@ mod text_contrast_tests {
             hue_moved > 20,
             "only {hue_moved} blends mixed their hue apart from the encoded lerp"
         );
+    }
+
+    /// A blend table holds what the blend computes: every coverage over every ground, gray
+    /// and per channel, lifted or not, reads back the bytes `over` and `over_rgb` write.
+    #[test]
+    fn a_blend_table_answers_the_blend_byte_for_byte() {
+        let lut = contrast_lut(1.4);
+        let mut tables = BlendTables::default();
+        for (fg, lift) in [
+            ([0xe6, 0xe1, 0xcf], Some(&lut)),
+            ([0x20, 0x40, 0xa0], None),
+            ([0xff, 0x00, 0x00], Some(&lut)),
+        ] {
+            let ink = TextInk::new(fg, lift);
+            for ground in [0x00_1d_20_21u32, 0x00_ff_ff_ff, 0x00_30_80_30, 0] {
+                for cov in 0..=255u8 {
+                    let table = tables.table(&ink, ground);
+                    assert_eq!(ink.over_with(table, ground, cov), ink.over(ground, cov));
+                    let rgb_cov = [cov, cov.wrapping_mul(7), 255 - cov];
+                    let table = tables.table(&ink, ground);
+                    assert_eq!(
+                        ink.over_rgb_with(table, ground, rgb_cov),
+                        ink.over_rgb(ground, rgb_cov),
+                        "fg {fg:?} ground {ground:06x} cov {rgb_cov:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// `text_contrast` is the perceptual gamma light-on-dark text is weighted at: at γ ≈ 2.2

@@ -618,6 +618,11 @@ fn catch_in_driver(
                 heap.vm_handlers.pop();
                 crate::process::close_interrupt_window(window);
             }
+            // A contract's pending result check (ADR-748) catches nothing: the frame it
+            // would have checked is being unwound.
+            HandlerKind::ContractResult => {
+                heap.vm_handlers.pop();
+            }
         }
     };
     let depth = if let HandlerKind::Region { .. } = h.kind {
@@ -666,7 +671,7 @@ fn catch_in_driver(
             crate::process::close_interrupt_window(window);
             Some(tail)
         }
-        HandlerKind::Try => None,
+        HandlerKind::Try | HandlerKind::ContractResult => None,
     };
     let caught = e.caught_value(heap);
     heap.note_caught(e, caught);
@@ -706,7 +711,7 @@ fn truncate_handlers(heap: &mut Heap, floor: usize) {
     let outermost = heap.vm_handlers.get(floor..).and_then(|dropped| {
         dropped.iter().find_map(|handler| match handler.kind {
             HandlerKind::Region { window, .. } => Some(window),
-            HandlerKind::Try => None,
+            HandlerKind::Try | HandlerKind::ContractResult => None,
         })
     });
     if let Some(window) = outermost {
@@ -1087,6 +1092,44 @@ pub(crate) fn vm_run_bc(
         };
     }
 
+    // Run `$arm` in the CURRENT frame's place (a tail call, TCO): re-root its env, rebuild
+    // its slots in place — the `Node` trampoline's discipline. With `$owe` a contract shim
+    // (ADR-748), the new frame starts one slot higher, over the shim whose result check
+    // its `Done` owes. Shared by `Tail` and by a `Done` whose owed check runs the shim's
+    // own Brood check in the returning frame's place.
+    macro_rules! enter_in_place {
+        ($l:lifetime, $arm:expr, $args:expr, $genv:expr, $bases:expr, $owe:expr) => {{
+            let arm = $arm;
+            heap.set_ic_bases($bases);
+            heap.truncate_env_roots(cur_env_base);
+            cur_env = heap.root_env($genv);
+            heap.truncate_roots(cur_base);
+            if let Some(shim) = $owe {
+                owe_result_check(heap, shim, frames.len());
+                cur_base += 1;
+            }
+            if cur_arm_slot != usize::MAX {
+                heap.live_arm_set(cur_arm_slot, arm.clone());
+            } else if arm.has_runtime_handles {
+                cur_arm_slot = heap.live_arm_push(arm.clone());
+            }
+            if let Err(e) = push_frame(heap, &arm, &$args, cur_env) {
+                raise!($l, e);
+            }
+            cur_arm = arm;
+            cur_ip = 0;
+            cur_entry_epoch = SELF_UNCHECKED_EPOCH;
+            // The tail callee occupies a fresh frame at ip 0 — give it a tier check
+            // too (whether the tail call came from the VM or a JIT'd arm). This is what
+            // lets mutually-recursive arms reached only via tail calls run natively.
+            #[cfg(feature = "jit")]
+            {
+                try_jit = true;
+                cur_back_edges = 0; // fresh arm, fresh counter
+            }
+        }};
+    }
+
     // Return the captured continuation — `frames` under `$cur`, with this driver's entry
     // marks — as `VmOutcome::$outcome`, WITHOUT unwinding (ADR-100 §8).
     macro_rules! return_captured {
@@ -1440,6 +1483,47 @@ pub(crate) fn vm_run_bc(
         };
         match exit {
             Ok(ChunkExit::Done(v)) => {
+                // The result checks this frame owes (ADR-748), innermost first: a value the
+                // kernel vouches for passes, and its shim's slot goes with the frame. One it
+                // cannot is checked where the shim's own frame would have checked it — the
+                // shim's Brood check runs in this frame's place, at its depth, so its answer
+                // (or its blamed error) is this call's, named and placed as before.
+                let mut v = v;
+                let mut owed_by_brood = None;
+                while let Some(&handler) = heap.vm_handlers.last()
+                    && handler.kind == crate::core::heap::HandlerKind::ContractResult
+                    && handler.caller == frames.len()
+                    && heap.vm_handlers.len() > handler_floor as usize
+                {
+                    heap.vm_handlers.pop();
+                    let shim = heap.root_at(handler.base);
+                    cur_base = handler.base;
+                    if !crate::builtins::contracts::result_vouched(heap, shim, v) {
+                        owed_by_brood = Some(shim);
+                        break;
+                    }
+                }
+                if let Some(shim) = owed_by_brood {
+                    let (check, args) =
+                        match crate::builtins::contracts::result_check_call(heap, shim, v) {
+                            Ok(call) => call,
+                            Err(e) => raise!('drive, e),
+                        };
+                    match dispatch(heap, check, args, true, heap.global()) {
+                        Ok(Step::Tail {
+                            compiled,
+                            args,
+                            genv,
+                            bases,
+                            result_contract: _,
+                        }) => {
+                            enter_in_place!('drive, compiled, args, genv, bases, None::<Value>);
+                            continue 'drive;
+                        }
+                        Ok(Step::Done(checked)) => v = checked,
+                        Err(e) => raise!('drive, e),
+                    }
+                }
                 // Retire the current frame, then either finish or hand `v` to the caller.
                 heap.truncate_roots(cur_base);
                 heap.truncate_env_roots(cur_env_base);
@@ -1495,6 +1579,7 @@ pub(crate) fn vm_run_bc(
                 args,
                 genv,
                 bases,
+                result_contract,
             }) => {
                 if frames.len() + 1 > MAX_BC_FRAMES {
                     raise!('drive, crate::eval::bc_frame_depth_error(frames.len()));
@@ -1507,6 +1592,11 @@ pub(crate) fn vm_run_bc(
                 heap.set_ic_bases(bases);
                 cur_env_base = heap.env_roots_len();
                 cur_env = heap.root_env(genv);
+                // A contract shim's original (ADR-748): its frame starts one slot higher,
+                // over the shim whose result check its `Done` owes.
+                if let Some(shim) = result_contract {
+                    owe_result_check(heap, shim, frames.len());
+                }
                 cur_base = heap.roots_len();
                 cur_arm_slot = if cur_arm.has_runtime_handles {
                     heap.live_arm_push(cur_arm.clone())
@@ -1700,33 +1790,21 @@ pub(crate) fn vm_run_bc(
                 args,
                 genv,
                 bases,
+                result_contract,
             }) => {
                 crate::perf_bump!(tail_call);
-                heap.set_ic_bases(bases);
-                // Reuse the current frame for the tail callee (TCO): re-root its env,
-                // rebuild its slots in place. Same discipline as the `Node` trampoline.
-                heap.truncate_env_roots(cur_env_base);
-                cur_env = heap.root_env(genv);
-                heap.truncate_roots(cur_base);
-                if cur_arm_slot != usize::MAX {
-                    heap.live_arm_set(cur_arm_slot, arm.clone());
-                } else if arm.has_runtime_handles {
-                    cur_arm_slot = heap.live_arm_push(arm.clone());
-                }
-                if let Err(e) = push_frame(heap, &arm, &args, cur_env) {
-                    raise!('drive, e);
-                }
-                cur_arm = arm;
-                cur_ip = 0;
-                cur_entry_epoch = SELF_UNCHECKED_EPOCH;
-                // The tail callee occupies a fresh frame at ip 0 — give it a tier check
-                // too (whether the tail call came from the VM or a JIT'd arm). This is what
-                // lets mutually-recursive arms reached only via tail calls run natively.
-                #[cfg(feature = "jit")]
-                {
-                    try_jit = true;
-                    cur_back_edges = 0; // fresh arm, fresh counter
-                }
+                // A contract shim's original (ADR-748), tail-called: this frame's value is
+                // owed the shim's result check — unless the same check is already owed it,
+                // by a handler or by a shim's frame awaiting it beneath (the collapse
+                // ADR-396 makes, so contracted tail recursion stays flat).
+                let owe = result_contract.filter(|&shim| {
+                    let ret = crate::builtins::contracts::shim_result_type(heap, shim);
+                    !ret.is_some_and(|ret| {
+                        result_owed_at(heap, frames.len(), handler_floor as usize, ret)
+                            || contract_check_pending(heap, &frames, cur_base, ret)
+                    })
+                });
+                enter_in_place!('drive, arm, args, genv, bases, owe);
             }
             Ok(ChunkExit::SelfTail) => {
                 // Back-edge tiering: a hot self-tail loop handed itself back so we can
@@ -1747,7 +1825,10 @@ pub(crate) fn vm_run_bc(
                 // allocated, so the loop-top safepoint has nothing to do.
                 let top = heap.roots_len() - 1;
                 let ret = heap.root_at(top);
-                let pending = contract_check_pending(heap, &frames, cur_base, ret);
+                // A frame beneath awaiting the check, or a handler owing it this frame's
+                // value (ADR-748): either way the value is checked against `ret` anyway.
+                let pending = contract_check_pending(heap, &frames, cur_base, ret)
+                    || result_owed_at(heap, frames.len(), handler_floor as usize, ret);
                 heap.set_root_at(top, Value::boolean(pending));
                 returned_to_caller = true;
             }
@@ -1820,6 +1901,47 @@ fn contract_check_pending(heap: &Heap, frames: &[BcFrame], base: usize, ret: Val
             )
         });
     awaiting && base > 0 && heap.equal(heap.root_at(base - 1), ret)
+}
+
+/// Owe the shim `shim`'s result check to the frame about to run at driver depth `depth`
+/// (ADR-748): the shim goes in a root at the top of `roots` — the slot just below that
+/// frame's base, which the caller sets one past it — and a `ContractResult` handler names
+/// the slot and the depth, so the frame's `Done` checks its value before handing it on.
+fn owe_result_check(heap: &mut Heap, shim: Value, depth: usize) {
+    let slot = heap.roots_len();
+    heap.push_root(shim);
+    heap.vm_handlers.push(crate::core::heap::VmHandler {
+        kind: crate::core::heap::HandlerKind::ContractResult,
+        base: slot,
+        sp: slot,
+        env_len: heap.env_roots_len(),
+        arms_len: heap.live_arm_len(),
+        ip: 0,
+        bind: usize::MAX,
+        dyn_len: heap.dynamics_len(),
+        caller: depth,
+    });
+}
+
+/// Whether the value of the frame running at driver depth `depth` is already owed a check
+/// against `ret` by a `ContractResult` handler of this driver (above `floor`) — the
+/// handler-side half of the collapse [`contract_check_pending`] makes for a shim's own
+/// frame (ADR-396, ADR-748). A frame's handlers sit together at the top of the stack while
+/// it runs: anything a deeper frame pushed was gone when it returned.
+fn result_owed_at(heap: &Heap, depth: usize, floor: usize, ret: Value) -> bool {
+    heap.vm_handlers
+        .get(floor..)
+        .unwrap_or(&[])
+        .iter()
+        .rev()
+        .take_while(|handler| {
+            handler.kind == crate::core::heap::HandlerKind::ContractResult
+                && handler.caller == depth
+        })
+        .any(|handler| {
+            crate::builtins::contracts::shim_result_type(heap, heap.root_at(handler.base))
+                .is_some_and(|owed| heap.equal(owed, ret))
+        })
 }
 
 // ===================== entry =====================

@@ -140,13 +140,16 @@ pub(crate) struct TypeVerdictCache {
     hits: u64,
     asks: u64,
     vouched: u64,
+    /// Contracted calls the dispatcher entered without the shim's own frame (ADR-748).
+    entered: u64,
     misses: u64,
     clears: u64,
 }
 
 /// What `(%type-verdict-counts)` reports: memo hits and misses, verdicts held, times the
 /// table started over, and contracted calls whose arguments were put to the kernel
-/// (`asks`) and vouched for without the Brood check (`vouched`).
+/// (`asks`) and vouched for without the Brood check (`vouched`), and of those, the calls
+/// the dispatcher entered without running the shim at all (`entered`, ADR-748).
 #[derive(Default)]
 pub(crate) struct VerdictCounts {
     pub hits: u64,
@@ -155,6 +158,7 @@ pub(crate) struct VerdictCounts {
     pub clears: u64,
     pub asks: u64,
     pub vouched: u64,
+    pub entered: u64,
 }
 
 impl TypeVerdictCache {
@@ -209,60 +213,95 @@ pub(crate) fn is_base_type_name(name: Symbol) -> bool {
 /// this is that table moved to where a record's scalar fields reach it in one call. A
 /// literal keyword or bool type is the value itself. Anything else is `None`: the walk's.
 fn base_type_verdict(type_expression: Value, value: Value) -> Option<bool> {
-    let name = match type_expression {
-        Value::Sym(symbol) => crate::core::value::symbol_name_ref(symbol),
+    let symbol = match type_expression {
+        Value::Sym(symbol) => symbol,
         Value::Keyword(keyword) => return Some(matches!(value, Value::Keyword(k) if k == keyword)),
         Value::Bool(literal) => return Some(matches!(value, Value::Bool(b) if b == literal)),
         _ => return None,
     };
+    let tags = *base_type_tags().get(&symbol)?;
+    Some(tags & (1 << crate::core::value::tag(value) as u32) != 0)
+}
+
+/// Every base type name as the SET of runtime tags it admits, one bit per [`Tag`] — read
+/// once per process (ADR-748). A contract asks this per argument and per result of every
+/// call, and matching the name's spelling against thirty strings each time was a third of
+/// what a vouched-for check cost; a base name's meaning never changes (no `deftype` can
+/// rebind one), so it is decided once, here, and a check is one lookup and a bit test.
+///
+/// [`Tag`]: crate::core::value::Tag
+fn base_type_tags() -> &'static HashMap<Symbol, u32, std::hash::BuildHasherDefault<IdentityHasher>>
+{
     use crate::core::value::Tag;
-    let tag = crate::core::value::tag(value);
-    Some(match name {
-        "any" | "_" => true,
-        "never" => false,
-        "nil" => tag == Tag::Nil,
-        "int" => tag == Tag::Int,
-        "float" => tag == Tag::Float,
-        "decimal" => tag == Tag::Decimal,
-        "ratio" => tag == Tag::Ratio,
-        "number" => matches!(tag, Tag::Int | Tag::Float | Tag::Decimal | Tag::Ratio),
-        "string" => tag == Tag::Str,
-        "bool" => tag == Tag::Bool,
-        "keyword" => tag == Tag::Keyword,
-        "symbol" => tag == Tag::Sym,
-        "pair" => tag == Tag::Pair,
-        "list" => matches!(tag, Tag::Nil | Tag::Pair),
-        "vector" => tag == Tag::Vector,
-        "map" => tag == Tag::Map,
-        "set" => tag == Tag::Set,
-        "bytes" => tag == Tag::Bytes,
-        "fn" => matches!(tag, Tag::Fn | Tag::Native),
-        "seqable" => matches!(
-            tag,
-            Tag::Nil | Tag::Pair | Tag::Vector | Tag::Set | Tag::Map | Tag::Bytes
-        ),
-        "countable" => matches!(
-            tag,
-            Tag::Nil
-                | Tag::Pair
-                | Tag::Vector
-                | Tag::Set
-                | Tag::Map
-                | Tag::Bytes
-                | Tag::Str
-                | Tag::Rope
-                | Tag::Table
-        ),
-        "failure" => tag == Tag::Failure,
-        "rope" => tag == Tag::Rope,
-        "pid" => tag == Tag::Pid,
-        "ref" => tag == Tag::Ref,
-        "table" => tag == Tag::Table,
-        "socket" => tag == Tag::Socket,
-        "subprocess" => tag == Tag::Subprocess,
-        _ => return None,
+    static TABLE: std::sync::OnceLock<
+        HashMap<Symbol, u32, std::hash::BuildHasherDefault<IdentityHasher>>,
+    > = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let set = |tags: &[Tag]| tags.iter().fold(0u32, |set, &tag| set | (1 << tag as u32));
+        let names: [(&str, u32); 29] = [
+            ("any", u32::MAX),
+            ("_", u32::MAX),
+            ("never", 0),
+            ("nil", set(&[Tag::Nil])),
+            ("int", set(&[Tag::Int])),
+            ("float", set(&[Tag::Float])),
+            ("decimal", set(&[Tag::Decimal])),
+            ("ratio", set(&[Tag::Ratio])),
+            (
+                "number",
+                set(&[Tag::Int, Tag::Float, Tag::Decimal, Tag::Ratio]),
+            ),
+            ("string", set(&[Tag::Str])),
+            ("bool", set(&[Tag::Bool])),
+            ("keyword", set(&[Tag::Keyword])),
+            ("symbol", set(&[Tag::Sym])),
+            ("pair", set(&[Tag::Pair])),
+            ("list", set(&[Tag::Nil, Tag::Pair])),
+            ("vector", set(&[Tag::Vector])),
+            ("map", set(&[Tag::Map])),
+            ("set", set(&[Tag::Set])),
+            ("bytes", set(&[Tag::Bytes])),
+            ("fn", set(&[Tag::Fn, Tag::Native])),
+            (
+                "seqable",
+                set(&[
+                    Tag::Nil,
+                    Tag::Pair,
+                    Tag::Vector,
+                    Tag::Set,
+                    Tag::Map,
+                    Tag::Bytes,
+                ]),
+            ),
+            (
+                "countable",
+                set(&[
+                    Tag::Nil,
+                    Tag::Pair,
+                    Tag::Vector,
+                    Tag::Set,
+                    Tag::Map,
+                    Tag::Bytes,
+                    Tag::Str,
+                    Tag::Rope,
+                    Tag::Table,
+                ]),
+            ),
+            ("failure", set(&[Tag::Failure])),
+            ("rope", set(&[Tag::Rope])),
+            ("pid", set(&[Tag::Pid])),
+            ("ref", set(&[Tag::Ref])),
+            ("table", set(&[Tag::Table])),
+            ("socket", set(&[Tag::Socket])),
+            ("subprocess", set(&[Tag::Subprocess])),
+        ];
+        names
+            .iter()
+            .map(|&(name, tags)| (crate::core::value::intern(name), tags))
+            .collect()
     })
 }
+
 /// What `(%type-verdict t v)` found.
 pub(crate) enum KnownVerdict {
     /// Remembered: the verdict.
@@ -624,6 +663,7 @@ impl Heap {
                     clears: cache.clears,
                     asks: cache.asks,
                     vouched: cache.vouched,
+                    entered: cache.entered,
                 }
             }
             None => VerdictCounts::default(),
@@ -636,6 +676,15 @@ impl Heap {
         let mut cache = self.verdict_cache().borrow_mut();
         cache.asks += 1;
         cache.vouched += u64::from(vouched);
+    }
+
+    /// Count one contracted call the dispatcher entered itself (ADR-748): its arguments
+    /// vouched for, its original called in the shim's place.
+    pub(crate) fn note_contract_entered(&self) {
+        let mut cache = self.verdict_cache().borrow_mut();
+        cache.asks += 1;
+        cache.vouched += 1;
+        cache.entered += 1;
     }
 
     /// Drop every verdict that names a nursery object: after a minor collection (which

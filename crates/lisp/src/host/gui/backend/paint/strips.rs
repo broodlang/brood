@@ -1,7 +1,9 @@
-//! The incremental half of a paint: what changed between two frames. Per cell row, `strip_diff`
-//! says which rows' ops differ, `strip_columns` narrows a row to the columns its changed ops can
-//! paint, and `strip_blits` finds rows that only moved, so their pixels are copied rather than
-//! drawn. Pure over the ops and the row map: nothing here touches a pixel.
+//! The incremental half of a paint: what changed between two frames. Per cell row,
+//! `strip_differs` says whether its ops differ (`grid_damage` over a grid), `strip_pieces`
+//! narrows a row to the columns its changed ops can paint, and `strip_blits` finds rows (or
+//! columns of rows) that only moved, so their pixels are copied rather than drawn;
+//! `grid_plan` puts them together for any grid, the window's or a zoomed pane's
+//! (`region_plan`). Pure over the ops and the row map: nothing here touches a pixel.
 
 use super::*;
 
@@ -192,6 +194,7 @@ pub(super) fn flatten<'a>(
 /// y(k))`, so the row above a seam is one strip with its gap), and the strips past the
 /// grid whatever is left below it, a cell at a time. The unit of the frame diff: a strip
 /// is repainted whole or not at all, so the diff never has to reason about pixels.
+#[derive(Clone, Copy)]
 pub(super) struct Strips {
     rows: RowMap,
     fb_h: usize,
@@ -259,8 +262,60 @@ pub(super) struct Leaves<'a> {
     leaves: Vec<Entry<'a>>,
     bands: Vec<Option<(isize, isize)>>,
     per_strip: Vec<Vec<u32>>,
+    /// The strips `per_strip` is laid out on: what `covering` finds a band's leaves through.
+    strips: Strips,
     caret_hidden: bool,
+    /// Per leaf, the old frame's leaf it is diffed inside of rather than compared with
+    /// (`NO_TWIN` for none): a cell region at the same rect and size in both frames, whose
+    /// changed cells `region_plan` finds (`pair_regions`).
+    twins: Vec<u32>,
+    /// The twins (new leaf, old leaf) that are a zoomed pane moved or resized (`twin`), which
+    /// the window's diff leaves to the pane's own plan (`differing_leaves`).
+    moved_twins: Vec<(u32, u32)>,
+    /// Per leaf, its columns (`leaf_columns`) once worked out, on the grid `measured_on`: a
+    /// scroll asks each leaf's columns for every strip, span and delta it tries, and a text
+    /// op's are a walk of its graphemes.
+    columns: Vec<std::cell::OnceCell<Option<(isize, isize)>>>,
+    measured_on: std::cell::Cell<Option<Across>>,
+    /// The leaves an anchor of the next frame can pair with (`partners_of`), indexed once asked.
+    partners: std::cell::OnceCell<Partners<'a>>,
 }
+
+/// A frame's leaves as `blit_offsets` looks them up: each text's by its string, and the carets
+/// and one-row bands, the only other leaves an anchor pairs with.
+struct Partners<'a> {
+    texts: std::collections::HashMap<
+        &'a str,
+        Vec<u32>,
+        std::hash::BuildHasherDefault<super::super::render::PaintHasher>,
+    >,
+    marks: Vec<u32>,
+}
+
+impl<'a> Partners<'a> {
+    fn of(leaves: &[Entry<'a>]) -> Partners<'a> {
+        let mut partners = Partners {
+            texts: Default::default(),
+            marks: Vec::new(),
+        };
+        for (index, leaf) in leaves.iter().enumerate() {
+            match leaf.op {
+                Op::Text { s, .. } => partners
+                    .texts
+                    .entry(s.as_str())
+                    .or_default()
+                    .push(index as u32),
+                Op::Cursor { .. } => partners.marks.push(index as u32),
+                Op::Rect { h, .. } if *h <= 1 => partners.marks.push(index as u32),
+                _ => {}
+            }
+        }
+        partners
+    }
+}
+
+/// No twin: the leaf is compared with the old frame's as a value.
+const NO_TWIN: u32 = u32::MAX;
 
 impl<'a> Leaves<'a> {
     pub(super) fn of(ops: &'a [Op], strips: &Strips, caret_hidden: bool) -> Leaves<'a> {
@@ -276,55 +331,728 @@ impl<'a> Leaves<'a> {
                 }
             }
         }
+        let twins = vec![NO_TWIN; leaves.len()];
+        let columns = vec![std::cell::OnceCell::new(); leaves.len()];
         Leaves {
             leaves,
             bands,
             per_strip,
+            strips: *strips,
             caret_hidden,
+            twins,
+            moved_twins: Vec::new(),
+            columns,
+            measured_on: std::cell::Cell::new(None),
+            partners: std::cell::OnceCell::new(),
         }
     }
 
+    /// Leaf `i`'s pixel columns on the grid `across` (`leaf_columns`), worked out once. The
+    /// leaves of a frame are measured on one grid; asked on another, they are worked out afresh.
+    fn columns(&self, i: usize, across: Across) -> Option<(isize, isize)> {
+        let measure = || leaf_columns(self.leaves[i].op, across.ox, across.cw, across.ligatures);
+        match self.measured_on.get() {
+            None => self.measured_on.set(Some(across)),
+            Some(grid) if grid != across => return measure(),
+            Some(_) => {}
+        }
+        *self.columns[i].get_or_init(measure)
+    }
+
+    /// Leaf `i`'s op.
+    pub(super) fn op(&self, i: usize) -> &'a Op {
+        self.leaves[i].op
+    }
+
+    /// Leaf `i`'s pixel band, `None` for a leaf that paints nothing.
+    pub(super) fn band(&self, i: usize) -> Option<(isize, isize)> {
+        self.bands[i]
+    }
+
+    /// Diff leaf `i` inside the old frame's leaf `j` rather than compare the two (`same_leaf`):
+    /// a zoomed pane moved or resized between the frames, whose own grid plans its pixels
+    /// (`region_plan`).
+    pub(super) fn twin(&mut self, i: usize, j: usize) {
+        self.twins[i] = j as u32;
+        self.moved_twins.push((i as u32, j as u32));
+    }
+
+    /// Say leaf `i`'s columns on the grid `across` where `leaf_columns` cannot: a zoomed pane
+    /// whose pixels keep to its rect (`region_extent`), whose ops are on another grid. Kept
+    /// only on the grid the leaves are measured on.
+    pub(super) fn know_columns(&self, i: usize, across: Across, columns: (isize, isize)) {
+        if self.measured_on.get().is_none() {
+            self.measured_on.set(Some(across));
+        }
+        if self.measured_on.get() == Some(across) {
+            let _ = self.columns[i].set(Some(columns));
+        }
+    }
+
+    /// The leaves of this (old) frame `blit_offsets` can pair `op`, an anchor whose pixel top is
+    /// `top`, with, in frame order: for a text, the texts of the same string anywhere and every
+    /// leaf on the rows `moved_by` above it (where a line cut otherwise lies: scrolled sideways,
+    /// or down and sideways at once); for a caret or a one-row band, every caret and one-row
+    /// band. Found through an index built once a frame is asked (`Partners`), not by a walk of
+    /// every leaf per anchor: a strip where nothing moved asks for each of its leaves.
+    fn partners_of(&self, op: &Op, top: isize, moved_by: &[isize]) -> Vec<usize> {
+        let partners = self.partners.get_or_init(|| Partners::of(&self.leaves));
+        let widen = |indices: &[u32]| indices.iter().map(|&j| j as usize).collect::<Vec<_>>();
+        let mut found = match op {
+            Op::Text { s, .. } => {
+                let mut found = partners
+                    .texts
+                    .get(s.as_str())
+                    .map_or(Vec::new(), |v| widen(v));
+                for &dy in moved_by {
+                    let row = top - dy;
+                    if row >= 0 {
+                        found.extend(self.covering(row as usize, row as usize + 1));
+                    }
+                }
+                found
+            }
+            Op::Cursor { .. } | Op::Rect { .. } => widen(&partners.marks),
+            _ => Vec::new(),
+        };
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+
     /// The leaves whose band overlaps the pixel rows `[y0, y1)`, in frame order — what
-    /// a strip's `per_strip` list is, for an arbitrary band.
-    fn covering(&self, y0: usize, y1: usize) -> impl Iterator<Item = usize> + '_ {
+    /// a strip's `per_strip` list is, for an arbitrary band. Found through the strips the band
+    /// meets (a leaf meeting the band meets one of them), not by a walk of every leaf: a
+    /// scroll asks it for every strip it tries to copy.
+    fn covering(&self, y0: usize, y1: usize) -> Vec<usize> {
         let (y0, y1) = (y0 as isize, y1 as isize);
-        self.bands
+        let overlaps =
+            |&i: &usize| matches!(self.bands[i], Some((top, bottom)) if top < y1 && bottom > y0);
+        let met = self.strips.covering(y0, y1);
+        if met.len() == 1 {
+            return self.per_strip[met.start]
+                .iter()
+                .map(|&i| i as usize)
+                .filter(overlaps)
+                .collect();
+        }
+        let mut leaves: Vec<usize> = self.per_strip[met]
             .iter()
-            .enumerate()
-            .filter(move |(_, b)| matches!(b, Some((top, bottom)) if *top < y1 && *bottom > y0))
-            .map(|(i, _)| i)
+            .flatten()
+            .map(|&i| i as usize)
+            .collect();
+        leaves.sort_unstable();
+        leaves.dedup();
+        leaves.retain(overlaps);
+        leaves
     }
 }
 
-/// Which strips of the framebuffer must be re-rasterised to turn the frame `old`
-/// painted into the frame `new` would paint: those whose sequence of covering leaf
-/// ops differs — an op added, removed, changed, reordered, or shifted by a scroll
-/// region. Per strip, the ops are compared as values (`Op: PartialEq`), so an
-/// identical frame dirties nothing and a one-line edit dirties one strip. A leaf of the
-/// same memoised fragment in both frames is the same op in memory (ADR-470), so the
-/// pointer settles it before any field is compared; a blinking caret's strip is dirty
-/// when the phase flipped (ADR-469). Returns a bool per strip.
-pub(super) fn strip_diff(new: &Leaves, old: &Leaves, strips: &Strips) -> Vec<bool> {
-    (0..strips.count)
-        .map(|k| {
-            let (a, b) = (&new.per_strip[k], &old.per_strip[k]);
-            a.len() != b.len()
-                || a.iter()
-                    .zip(b)
-                    .any(|(&i, &j)| !same_leaf(new, i as usize, old, j as usize))
-        })
-        .collect()
+/// Whether strip `k` must be re-rasterised to turn the frame `old` painted into the frame
+/// `new` would paint: whether its sequence of covering leaf ops differs — an op added,
+/// removed, changed, reordered, or shifted by a scroll region. The ops are compared as values
+/// (`Op: PartialEq`), so an identical frame dirties nothing and a one-line edit dirties one
+/// strip. A leaf of the same memoised fragment in both frames is the same op in memory
+/// (ADR-470), so the pointer settles it before any field is compared; a blinking caret's strip
+/// is dirty when the phase flipped (ADR-469). `strip_damage` and `grid_damage` diff a grid by
+/// it.
+pub(super) fn strip_differs(new: &Leaves, old: &Leaves, k: usize) -> bool {
+    let (a, b) = (&new.per_strip[k], &old.per_strip[k]);
+    a.len() != b.len()
+        || a.iter()
+            .zip(b)
+            .any(|(&i, &j)| !same_leaf(new, i as usize, old, j as usize))
+}
+
+/// The damage of one strip: `None` when its leaves are the old ones, else the pixel columns
+/// the change can reach — narrowed by `strip_columns` when `narrow`, the whole row `[0, fb_w)`
+/// otherwise. THE per-strip diff: the window's grid (`grid_damage`), a zoomed pane's own grid
+/// (`region_plan`) and a resized window's kept strips (`paint::resize_damage`) all ask it.
+pub(super) fn strip_damage(
+    new: &Leaves,
+    old: &Leaves,
+    k: usize,
+    fb_w: usize,
+    across: Across,
+    narrow: bool,
+) -> Option<(usize, usize)> {
+    // only a moved zoomed pane differs: its own plan draws it (`region_plan`)
+    if !strip_differs(new, old, k) || differing_leaves(new, old, k).is_empty() {
+        return None;
+    }
+    Some(if narrow {
+        strip_columns(new, old, k, fb_w, across)
+    } else {
+        (0, fb_w)
+    })
+}
+
+/// A grid's diff, strip by strip: whether each strip is dirty, and the pixel columns it is
+/// drawn (or copied) over — the whole row for a clean one — and, once its copies are taken
+/// (`strip_blits`), the columns it draws apart from those, further right (`apart`: two panes of
+/// a split scrolled sideways opposite ways each draw the columns they brought in, at either end
+/// of the row).
+pub(super) struct GridDamage {
+    pub(super) dirty: Vec<bool>,
+    pub(super) columns: Vec<(usize, usize)>,
+    pub(super) apart: Vec<Vec<(usize, usize)>>,
+}
+
+impl GridDamage {
+    /// The rects it draws: the dirty strips over their columns, and each strip's columns apart,
+    /// all merged down the strips (`dirty_rects`).
+    pub(super) fn rects(&self, strips: &Strips) -> Vec<DamageRect> {
+        let mut rects = dirty_rects(&self.dirty, &self.columns, strips);
+        let layers = self.apart.iter().map(Vec::len).max().unwrap_or(0);
+        for layer in 0..layers {
+            let dirty: Vec<bool> = self.apart.iter().map(|spans| spans.len() > layer).collect();
+            let columns: Vec<(usize, usize)> = self
+                .apart
+                .iter()
+                .map(|spans| spans.get(layer).copied().unwrap_or((0, 0)))
+                .collect();
+            rects.extend(dirty_rects(&dirty, &columns, strips));
+        }
+        rects
+    }
+}
+
+/// Diff `new` against `old`, both laid out on `strips`, with `across` the grid's columns
+/// (`strip_damage` per strip): what the window's diff (`paint::diff_plan`) and a zoomed pane's
+/// (`region_plan`) start from.
+pub(super) fn grid_damage(
+    new: &Leaves,
+    old: &Leaves,
+    strips: &Strips,
+    fb_w: usize,
+    across: Across,
+    narrow: bool,
+) -> GridDamage {
+    let mut damage = GridDamage {
+        dirty: vec![false; strips.count],
+        columns: vec![(0, fb_w); strips.count],
+        apart: vec![Vec::new(); strips.count],
+    };
+    for k in 0..strips.count {
+        if let Some(columns) = strip_damage(new, old, k, fb_w, across, narrow) {
+            damage.dirty[k] = true;
+            damage.columns[k] = columns;
+        }
+    }
+    damage
 }
 
 /// Whether leaf `i` of `new` paints exactly what leaf `j` of `old` painted: the same op
-/// (by pointer first, ADR-470) under the same shift, and not a blinking caret whose phase
-/// flipped in between (ADR-469).
+/// (by pointer first, ADR-470) under the same shift on the same pixel rows, and not a
+/// blinking caret whose phase flipped in between (ADR-469). The band settles a window that
+/// was resized (its rows below the seam moved); within one size the same op under the same
+/// shift always has the same band. A cell region diffed inside (its twin, `pair_regions`)
+/// counts as the same here: its changed cells are damaged by `region_plan`.
 pub(super) fn same_leaf(new: &Leaves, i: usize, old: &Leaves, j: usize) -> bool {
+    if new.twins[i] == j as u32 {
+        return true;
+    }
     let (x, y) = (&new.leaves[i], &old.leaves[j]);
     x.dy == y.dy
         && x.above_seam == y.above_seam
         && !(x.caret && new.caret_hidden != old.caret_hidden)
+        && new.bands[i] == old.bands[j]
         && (std::ptr::eq(x.op, y.op) || x.op == y.op)
+}
+
+// ---- a cell region diffed as cells ------------------------------------------------
+//
+// A cell region (a zoomed pane) is one leaf of the frame: its ops are on its own grid, so
+// the window's strips cannot place them. Compared as a value, a keystroke in a zoomed pane
+// changes the region and repaints every row of it. But a region in both frames is a small
+// frame of its own, laid out on a uniform grid from its top: its ops diff the way the
+// window's do, strip by strip and column by column, on that grid. Its pixels are its ops'
+// over the ground the window's leaves before it laid, so where neither those leaves nor its
+// own changed, nothing did. A region that moved or changed size is that grid with its old
+// pixels carried to its new top-left first — the way a resized window keeps its canvas.
+
+/// A cell region of `new` and the old frame's region it is diffed inside of (`pair_regions`):
+/// in the same place, or `moved` — another rect at the same cell size.
+#[derive(Clone, Copy)]
+pub(super) struct RegionPair {
+    pub(super) new: usize,
+    pub(super) old: usize,
+    pub(super) moved: bool,
+}
+
+/// Pair each cell region of `new` with the old frame's region of the same cell size and
+/// seam group, taken in frame order, when the two differ. A pair in the same place — the same
+/// rect and shift — is marked twins here (`same_leaf` then lets the window's diff pass them);
+/// a moved one is left for the caller, which twins it only when both keep their pixels to
+/// their rects (`region_extent`), the one thing `region_plan` needs to carry them across.
+pub(super) fn pair_regions(new: &mut Leaves, old: &Leaves) -> Vec<RegionPair> {
+    let regions = |leaves: &Leaves| -> Vec<usize> {
+        (0..leaves.leaves.len())
+            .filter(|&i| matches!(leaves.leaves[i].op, Op::CellRegion { .. }))
+            .collect()
+    };
+    let (new_regions, old_regions) = (regions(new), regions(old));
+    let mut pairs = Vec::new();
+    for (&i, &j) in new_regions.iter().zip(&old_regions) {
+        let (x, y) = (&new.leaves[i], &old.leaves[j]);
+        let placed = |op: &Op| match op {
+            Op::CellRegion { x, y, w, h, .. } => Some((*x, *y, *w, *h)),
+            _ => None,
+        };
+        let size = |op: &Op| match op {
+            Op::CellRegion { px, .. } => Some(px.to_bits()),
+            _ => None,
+        };
+        if x.above_seam != y.above_seam || size(x.op) != size(y.op) || same_leaf(new, i, old, j) {
+            continue;
+        }
+        let in_place = x.dy == y.dy && new.bands[i] == old.bands[j] && placed(x.op) == placed(y.op);
+        if in_place {
+            new.twins[i] = j as u32;
+        }
+        pairs.push(RegionPair {
+            new: i,
+            old: j,
+            moved: !in_place,
+        });
+    }
+    pairs
+}
+
+/// The pixel columns of cell region `op` on the window's grid `across` — its rect's, from
+/// `across.ox + x * across.cw`, `w` window cells wide — when every pixel it paints keeps to
+/// them; `None` when one may not. `render_ops` clips a region's rows to its rect, never its
+/// columns, so this asks its ops, on its own grid (`metrics` cells from its left edge): each
+/// a cell-grid op whose columns (`leaf_columns`) lie inside the rect. A pixel-space op
+/// (pixel text, a quad, a sprite), a nested region or a group above a seam is placed by more
+/// than the region's cells, and answers `None`.
+pub(super) fn region_extent(
+    op: &Op,
+    across: Across,
+    (cell_w, cell_h): (usize, usize),
+) -> Option<(isize, isize)> {
+    let Op::CellRegion { x, w, ops, .. } = op else {
+        return None;
+    };
+    let left = across.ox as isize + *x as isize * across.cw as isize;
+    let right = left + *w as isize * across.cw as isize;
+    let mut leaves = Vec::new();
+    flatten(ops, cell_h, 0, false, &mut leaves);
+    let keeps = leaves.iter().all(|leaf| match leaf.op {
+        Op::CursorZone { .. } | Op::Sound { .. } | Op::Music { .. } | Op::Burst { .. } => true,
+        Op::Text { .. }
+        | Op::Cursor { .. }
+        | Op::Rect { .. }
+        | Op::FRect { .. }
+        | Op::Image { .. }
+        | Op::VSpans { .. }
+        | Op::Cells { .. }
+        | Op::CellsRgb { .. }
+            if !leaf.above_seam =>
+        {
+            leaf_columns(leaf.op, left.max(0) as usize, cell_w, across.ligatures)
+                .is_some_and(|(from, to)| from >= left && to <= right)
+        }
+        _ => false,
+    });
+    (keeps && left >= 0).then_some((left, right))
+}
+
+/// The window's grid across: where cell column 0 is (`ox`), the cell width, and whether
+/// punctuation runs are one unit (ligatures) — what a leaf's columns are measured on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct Across {
+    pub(super) ox: usize,
+    pub(super) cw: usize,
+    pub(super) ligatures: bool,
+}
+
+/// Whether the window's leaves over the pixels `rows` × `columns` paint them as its leaves
+/// over the pixels `offset` back painted them: what a zoomed pane's copy needs of the ground
+/// under it and anything drawn over it. `leaves_translate` over the window's leaves on
+/// `window`'s rows, the pane `twin` (new leaf, old leaf) standing for itself, its own ops
+/// checked on its own grid; both ends on the `fb_w`×`fb_h` framebuffer.
+#[allow(clippy::too_many_arguments)]
+fn window_translates(
+    new: &Leaves,
+    old: &Leaves,
+    twin: (usize, usize),
+    window: &Strips,
+    across: Across,
+    (fb_w, fb_h): (usize, usize),
+    offset: Offset,
+    (y0, y1): (usize, usize),
+    columns: (usize, usize),
+) -> bool {
+    let (src0, src1) = (y0 as isize - offset.dy, y1 as isize - offset.dy);
+    let (left, right) = (
+        columns.0 as isize - offset.dx,
+        columns.1 as isize - offset.dx,
+    );
+    if src0 < 0 || src1 > fb_h as isize || left < 0 || right > fb_w as isize {
+        return false;
+    }
+    let source_columns = (left as usize, right as usize);
+    let new_leaves = new
+        .covering(y0, y1)
+        .into_iter()
+        .filter(|&n| reaches(new, n, across, columns));
+    let old_leaves = old
+        .covering(src0 as usize, src1 as usize)
+        .into_iter()
+        .filter(|&o| reaches(old, o, across, source_columns));
+    leaves_translate(
+        new,
+        old,
+        new_leaves,
+        old_leaves,
+        offset,
+        ((y0, y1), columns),
+        &window.rows,
+        across,
+        Some(twin),
+    )
+}
+
+/// The plan of twin regions `pair` (`pair_regions`): the region's own frame planned on its
+/// grid — a uniform one from its top, `metrics` cells, its cell column 0 at its left edge,
+/// `across.ox + x * across.cw`, as `render_ops` places it. In place, its strips diff and copy
+/// as the window's do (`grid_plan`), within its band, a copy taken only where the window's own
+/// leaves over those pixels translate with it (`window_translates`); the rects are cut to its
+/// band. Moved or resized: `moved_region_plan`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn region_plan(
+    new: &Leaves,
+    old: &Leaves,
+    pair: RegionPair,
+    window: &Strips,
+    across: Across,
+    metrics: (usize, usize),
+    (fb_w, fb_h): (usize, usize),
+    switches: (bool, bool),
+) -> Plan {
+    let (i, j) = (pair.new, pair.old);
+    if pair.moved {
+        return moved_region_plan(
+            new,
+            old,
+            pair,
+            window,
+            across,
+            metrics,
+            (fb_w, fb_h),
+            switches,
+        );
+    }
+    let (
+        Op::CellRegion {
+            x, ops: new_ops, ..
+        },
+        Op::CellRegion { ops: old_ops, .. },
+    ) = (new.leaves[i].op, old.leaves[j].op)
+    else {
+        return Plan::nothing();
+    };
+    let Some((top, bottom)) = new.bands[i] else {
+        return Plan::nothing();
+    };
+    let (cell_w, cell_h) = metrics;
+    let inner_rows = RowMap::uniform(top.max(0) as usize, cell_h);
+    let inner = Strips::new(inner_rows, fb_h);
+    let new_inner = Leaves::of(new_ops, &inner, new.caret_hidden);
+    let old_inner = Leaves::of(old_ops, &inner, old.caret_hidden);
+    // the region's own grid across: its cell column 0 at its left edge, its cell width
+    let region_across = Across {
+        ox: across.ox + *x as usize * across.cw,
+        cw: cell_w,
+        ligatures: across.ligatures,
+    };
+    let (band_top, band_bottom) = (
+        top.clamp(0, fb_h as isize) as usize,
+        bottom.clamp(0, fb_h as isize) as usize,
+    );
+    let around = |offset: Offset, rows: (usize, usize), columns: (usize, usize)| {
+        window_translates(
+            new,
+            old,
+            (i, j),
+            window,
+            across,
+            (fb_w, fb_h),
+            offset,
+            rows,
+            columns,
+        )
+    };
+    let bounds = BlitBounds {
+        rows: (band_top, band_bottom),
+        columns: (0, fb_w),
+        around: Some(&around),
+    };
+    let plan = grid_plan(
+        &new_inner,
+        &old_inner,
+        &inner,
+        fb_w,
+        region_across,
+        &bounds,
+        switches,
+    );
+    let band = DamageRect {
+        x0: 0,
+        y0: band_top,
+        x1: fb_w,
+        y1: band_bottom,
+    };
+    Plan {
+        changed: cut_rects(plan.changed, band),
+        raster: cut_rects(plan.raster, band),
+        moves: plan.moves,
+    }
+}
+
+/// `rects` cut to `within`, the ones left empty dropped.
+pub(super) fn cut_rects(rects: Vec<DamageRect>, within: DamageRect) -> Vec<DamageRect> {
+    rects
+        .into_iter()
+        .filter_map(|rect| {
+            let cut = DamageRect {
+                x0: rect.x0.max(within.x0),
+                y0: rect.y0.max(within.y0),
+                x1: rect.x1.min(within.x1),
+                y1: rect.y1.min(within.y1),
+            };
+            (!cut.is_empty()).then_some(cut)
+        })
+        .collect()
+}
+
+/// The parts of `outer` outside `inner`: at most four rects — the rows above and below it, and
+/// the columns left and right of it across its rows.
+fn rect_less(outer: DamageRect, inner: DamageRect) -> Vec<DamageRect> {
+    let overlap = cut_rects(vec![inner], outer);
+    let Some(&inner) = overlap.first() else {
+        return cut_rects(vec![outer], outer);
+    };
+    let parts = [
+        DamageRect {
+            y1: inner.y0,
+            ..outer
+        },
+        DamageRect {
+            y0: inner.y1,
+            ..outer
+        },
+        DamageRect {
+            x1: inner.x0,
+            y0: inner.y0,
+            y1: inner.y1,
+            ..outer
+        },
+        DamageRect {
+            x0: inner.x1,
+            y0: inner.y0,
+            y1: inner.y1,
+            ..outer
+        },
+    ];
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
+}
+
+/// The plan of twin regions that moved, changed size, or both (`pair_regions`, each keeping
+/// its pixels to its rect: `region_extent`, whose columns the leaves carry). The old pane's
+/// pixels are anchored at the new pane's top-left, as a resized window's canvas is
+/// (`anchored_damage`): every row of its grid inside the size both have is copied there from
+/// the old pane's — a rectangle copy, offset by the pane's move — when the window's leaves over
+/// it translate too (`window_translates`) and the blit is on (`blit`), and then drawn where its
+/// ops changed (narrowed when `narrow`) and past the old width; any other row of the new pane is
+/// drawn whole. The old
+/// pane's rect outside the new one is drawn: what was under the pane shows there now.
+#[allow(clippy::too_many_arguments)]
+fn moved_region_plan(
+    new: &Leaves,
+    old: &Leaves,
+    pair: RegionPair,
+    window: &Strips,
+    across: Across,
+    (cell_w, cell_h): (usize, usize),
+    (fb_w, fb_h): (usize, usize),
+    (narrow, blit): (bool, bool),
+) -> Plan {
+    let (i, j) = (pair.new, pair.old);
+    let rect = |leaves: &Leaves, leaf: usize| -> Option<(isize, isize, isize, isize)> {
+        let (left, right) = leaves.columns(leaf, across)?;
+        let (top, bottom) = leaves.bands[leaf]?;
+        Some((left, top, right, bottom))
+    };
+    let on_screen = |(left, top, right, bottom): (isize, isize, isize, isize)| DamageRect {
+        x0: left.clamp(0, fb_w as isize) as usize,
+        y0: top.clamp(0, fb_h as isize) as usize,
+        x1: right.clamp(0, fb_w as isize) as usize,
+        y1: bottom.clamp(0, fb_h as isize) as usize,
+    };
+    let (
+        Some(new_rect),
+        Some(old_rect),
+        Op::CellRegion { ops: new_ops, .. },
+        Op::CellRegion { ops: old_ops, .. },
+    ) = (
+        rect(new, i),
+        rect(old, j),
+        new.leaves[i].op,
+        old.leaves[j].op,
+    )
+    else {
+        // not known where the pane keeps its pixels (`region_extent` twins only one that says):
+        // the rows of both drawn across the window
+        let rows = |leaves: &Leaves, leaf: usize| {
+            leaves.bands[leaf].map(|(top, bottom)| on_screen((0, top, fb_w as isize, bottom)))
+        };
+        let rects: Vec<DamageRect> = [rows(new, i), rows(old, j)].into_iter().flatten().collect();
+        return Plan {
+            changed: rects.clone(),
+            raster: rects,
+            moves: Vec::new(),
+        };
+    };
+    let (new_area, old_area) = (on_screen(new_rect), on_screen(old_rect));
+    let uncovered = rect_less(old_area, new_area);
+    let mut plan = Plan {
+        changed: cut_rects(vec![new_area], new_area),
+        raster: uncovered.clone(),
+        moves: Vec::new(),
+    };
+    plan.changed.extend(uncovered);
+    let (new_left, new_top, new_right, new_bottom) = new_rect;
+    let (old_left, old_top, old_right, old_bottom) = old_rect;
+    if new_top < 0 || old_top < 0 {
+        // a pane above the window's top is drawn from its clipped top: not a translation
+        plan.raster.extend(cut_rects(vec![new_area], new_area));
+        return plan;
+    }
+    let offset = Offset {
+        dx: new_left - old_left,
+        dy: new_top - old_top,
+    };
+    // the old pane at the new one's top-left: the width and height both have, on screen at both
+    let kept_bottom = new_top + (old_bottom - old_top);
+    let copy_width = (new_right - new_left)
+        .min(old_right - old_left)
+        .min(fb_w as isize - new_left)
+        .min(fb_w as isize - old_left)
+        .max(0) as usize;
+    let copied = (new_left as usize, new_left as usize + copy_width);
+    let inner = Strips::new(RowMap::uniform(new_top as usize, cell_h), fb_h);
+    let kept: Vec<bool> = (0..inner.count)
+        .map(|k| {
+            let (y0, y1) = inner.rows(k);
+            k > 0
+                && blit
+                && copy_width > 0
+                && y1 - y0 == cell_h
+                && y1 as isize <= kept_bottom.min(new_bottom)
+                && window_translates(
+                    new,
+                    old,
+                    (i, j),
+                    window,
+                    across,
+                    (fb_w, fb_h),
+                    offset,
+                    (y0, y1),
+                    copied,
+                )
+        })
+        .collect();
+    plan.moves = (0..inner.count)
+        .filter(|&k| kept[k])
+        .map(|k| {
+            let destination = inner.rows(k).0;
+            StripMove {
+                destination,
+                source: (destination as isize - offset.dy) as usize,
+                height: cell_h,
+                columns: copied,
+                source_left: old_left as usize,
+            }
+        })
+        .collect();
+    // the old ops laid out where the new ones are: what the copied pixels hold, diffed
+    let new_inner = Leaves::of(new_ops, &inner, new.caret_hidden);
+    let old_inner = Leaves::of(old_ops, &inner, old.caret_hidden);
+    let region_across = Across {
+        ox: new_left as usize,
+        cw: cell_w,
+        ligatures: across.ligatures,
+    };
+    plan.raster.extend(anchored_damage(
+        &new_inner,
+        &old_inner,
+        &inner,
+        &kept,
+        Anchored {
+            area: new_area,
+            kept_right: copied.1,
+        },
+        fb_w,
+        region_across,
+        narrow,
+    ));
+    plan
+}
+
+/// Where a grid's old pixels are kept, anchored at its top-left: its `area` on the framebuffer,
+/// and the column the kept pixels end at (past it, only the new size has pixels).
+pub(super) struct Anchored {
+    pub(super) area: DamageRect,
+    pub(super) kept_right: usize,
+}
+
+/// What a grid draws over old pixels kept anchored at its top-left — a resized window's canvas
+/// (`paint::resize_damage`), a moved or resized zoomed pane's rows copied to its new place
+/// (`moved_region_plan`): the frame `new` diffed against `old` as the kept pixels lay it out,
+/// both on `strips`. A strip whose pixels are kept (`kept[k]`) and whose leaves are the old ones
+/// keeps them; one that changed is drawn in its changed columns (`strip_damage`, narrowed when
+/// `narrow`); one not kept is drawn whole; and every kept strip past `kept_right` — the new
+/// right edge, drawn apart, since a change at the left and the edge at the right are two
+/// narrow rects, not one row. All cut to the grid's `area`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn anchored_damage(
+    new: &Leaves,
+    old: &Leaves,
+    strips: &Strips,
+    kept: &[bool],
+    anchored: Anchored,
+    fb_w: usize,
+    across: Across,
+    narrow: bool,
+) -> Vec<DamageRect> {
+    let area = anchored.area;
+    let mut dirty = vec![false; strips.count];
+    let mut columns = vec![(area.x0, area.x1); strips.count];
+    let mut edge = vec![false; strips.count];
+    let edge_columns = vec![(anchored.kept_right.max(area.x0), area.x1); strips.count];
+    for k in 0..strips.count {
+        let (y0, y1) = strips.rows(k);
+        if y1.min(area.y1) <= y0.max(area.y0) {
+            continue;
+        }
+        if !kept[k] {
+            dirty[k] = true;
+            continue;
+        }
+        edge[k] = area.x1 > anchored.kept_right;
+        if let Some((x0, x1)) = strip_damage(new, old, k, fb_w, across, narrow) {
+            let (x0, x1) = (x0.max(area.x0), x1.min(area.x1));
+            if x1 > x0 {
+                dirty[k] = true;
+                columns[k] = (x0, x1);
+            }
+        }
+    }
+    let mut rects = dirty_rects(&dirty, &columns, strips);
+    rects.extend(dirty_rects(&edge, &edge_columns, strips));
+    cut_rects(rects, area)
 }
 
 // ---- the column damage ----------------------------------------------------------
@@ -433,20 +1161,67 @@ pub(super) fn leaf_columns(
     }
 }
 
-/// The pixel columns `[x0, x1)` of strip `k` that can differ between `old`'s raster and
-/// `new`'s: the union of the columns of the leaves that differ — outside the strip's common
-/// prefix and suffix, and position by position when what is left is one length in both —
-/// in either frame, clamped to the `fb_w`-wide window. The whole row when any of those
-/// leaves has no known columns.
-pub(super) fn strip_columns(
+/// The pixel columns of strip `k` that can differ between `old`'s raster and `new`'s, as pieces
+/// `[x0, x1)` left to right: the columns of the differing leaves (`differing_columns`) merged
+/// where they overlap, so two leaves side by side stay two — a gutter beside its text, a word
+/// beside the next, two panes of a split. `None` when any of those leaves has no known columns:
+/// then the whole row can differ. What `strip_blits` cuts a strip at when its parts moved by
+/// different offsets.
+pub(super) fn strip_pieces(
     new: &Leaves,
     old: &Leaves,
     k: usize,
     fb_w: usize,
-    ox: usize,
-    cw: usize,
-    ligatures: bool,
-) -> (usize, usize) {
+    across: Across,
+) -> Option<Vec<(usize, usize)>> {
+    let extents = differing_columns(new, old, k, fb_w, across)?;
+    let mut pieces: Vec<(usize, usize)> = Vec::with_capacity(extents.len());
+    for (x0, x1) in extents {
+        match pieces.last_mut() {
+            Some(last) if last.1 > x0 => last.1 = last.1.max(x1),
+            _ => pieces.push((x0, x1)),
+        }
+    }
+    Some(pieces)
+}
+
+/// The pixel columns of the leaves of strip `k` that differ between `old` and `new`
+/// (`differing_leaves`), left edge first, each clamped to the `fb_w`-wide window (one wholly
+/// off it dropped). `None` when any of those leaves has no known columns.
+fn differing_columns(
+    new: &Leaves,
+    old: &Leaves,
+    k: usize,
+    fb_w: usize,
+    across: Across,
+) -> Option<Vec<(usize, usize)>> {
+    let differing = differing_leaves(new, old, k);
+    let mut extents = Vec::with_capacity(differing.len());
+    for (in_new, i) in differing {
+        let columns = if in_new {
+            new.columns(i, across)
+        } else {
+            old.columns(i, across)
+        };
+        let (from, to) = columns?;
+        let (x0, x1) = (
+            from.clamp(0, fb_w as isize) as usize,
+            to.clamp(0, fb_w as isize) as usize,
+        );
+        if x1 > x0 {
+            extents.push((x0, x1));
+        }
+    }
+    extents.sort_unstable();
+    Some(extents)
+}
+
+/// The leaves of strip `k` that differ between `old` and `new`, in either frame: outside the
+/// strip's common prefix and suffix, and position by position when what is left is one length
+/// in both. A zoomed pane that moved (`Leaves::twin`) is left out: its own plan draws its new
+/// rect and what it uncovered (`region_plan`), so a strip it alone came to or left is clean.
+/// Each leaf as `(in_new, index)`: whether it is `new`'s, and its index there.
+fn differing_leaves(new: &Leaves, old: &Leaves, k: usize) -> Vec<(bool, usize)> {
     let (a, b) = (&new.per_strip[k], &old.per_strip[k]);
     let same = |p: usize, q: usize| same_leaf(new, a[p] as usize, old, b[q] as usize);
     let shorter = a.len().min(b.len());
@@ -459,54 +1234,76 @@ pub(super) fn strip_columns(
     // line's text op and moves the caret, with the leaves between them alike): only the
     // pairs that differ count, since a pixel no differing pair reaches is painted by the
     // same ops in the same order in both frames. Otherwise the whole middle counts.
-    let mut differing: Vec<&Op> = Vec::new();
+    let mut differing: Vec<(bool, usize)> = Vec::new();
     if middle_new.len() == middle_old.len() {
         for (p, q) in middle_new.zip(middle_old) {
             if !same(p, q) {
-                differing.push(new.leaves[a[p] as usize].op);
-                differing.push(old.leaves[b[q] as usize].op);
+                differing.push((true, a[p] as usize));
+                differing.push((false, b[q] as usize));
             }
         }
     } else {
-        differing.extend(middle_new.map(|p| new.leaves[a[p] as usize].op));
-        differing.extend(middle_old.map(|q| old.leaves[b[q] as usize].op));
+        differing.extend(middle_new.map(|p| (true, a[p] as usize)));
+        differing.extend(middle_old.map(|q| (false, b[q] as usize)));
     }
-    let (mut left, mut right) = (isize::MAX, isize::MIN);
-    for op in differing {
-        let Some((from, to)) = leaf_columns(op, ox, cw, ligatures) else {
-            return (0, fb_w);
-        };
-        left = left.min(from);
-        right = right.max(to);
+    differing.retain(|&(in_new, i)| {
+        if in_new {
+            !new.moved_twins.iter().any(|&(twin, _)| twin as usize == i)
+        } else {
+            !new.moved_twins.iter().any(|&(_, twin)| twin as usize == i)
+        }
+    });
+    differing
+}
+
+/// The pixel columns `[x0, x1)` of strip `k` that can differ between `old`'s raster and
+/// `new`'s: the hull of its `strip_pieces`. The whole row when any differing leaf has no known
+/// columns, or nothing the differing leaves paint is on screen (the row whole, rather than a
+/// zero-width rect).
+pub(super) fn strip_columns(
+    new: &Leaves,
+    old: &Leaves,
+    k: usize,
+    fb_w: usize,
+    across: Across,
+) -> (usize, usize) {
+    match strip_pieces(new, old, k, fb_w, across).as_deref() {
+        Some([first, .., last]) => (first.0, last.1),
+        Some([only]) => *only,
+        _ => (0, fb_w),
     }
-    let x0 = left.clamp(0, fb_w as isize) as usize;
-    let x1 = right.clamp(0, fb_w as isize) as usize;
-    if x1 <= x0 {
-        // nothing the differing leaves paint is on screen: the row whole, rather than a
-        // zero-width rect
-        return (0, fb_w);
-    }
-    (x0, x1)
 }
 
 // ---- the scroll blit ----------------------------------------------------------
 //
 // A scroll changes every strip of a pane, so the strip diff alone re-rasterises the
 // whole pane — 6 ms of glyph blitting at 1080p, four times that on a 4K display — for
-// pixels the canvas already holds one line up or down. The blit finds them: a dirty
-// strip whose ops are the previous frame's ops at some other rows, TRANSLATED by a whole
-// number of pixels, paints exactly the pixels the retained canvas has there, so those
-// rows are copied instead of drawn. Only the strips that really changed (the line
-// scrolled in, the mode line's `L12`, the scrollbar thumb) are rasterised.
+// pixels the canvas already holds one line up or down, or a few columns aside. The blit
+// finds them: a dirty strip whose ops are the previous frame's ops elsewhere, TRANSLATED by
+// a whole number of pixels down and across (an `Offset`), paints exactly the pixels the
+// retained canvas has there, so those pixels are copied instead of drawn. Only what really
+// changed (the line scrolled in, the columns scrolled in, the mode line's `L12`, the
+// scrollbar thumb) is rasterised.
 //
-// The rule is exact, not heuristic: a strip's pixels are a function of the leaves
-// whose band overlaps it, each painted at a position; if the new strip's leaves are
-// the old band's leaves in the same order, each the same op at a position `delta`
-// pixels lower (a text line, the cursor, a one-row band), or a solid fill that covers
-// both bands entirely (the gutter wash, a divider, the frame clear — a fill has no
-// row-dependent pixels away from its corners), the strips are pixel-identical. Bands are
-// conservative (`op_band`), so a leaf that only nearly touches the strip can veto a
-// blit but never fake one.
+// The rule is exact, not heuristic: a strip's pixels in some columns are a function of the
+// leaves that reach them, each painted at a position; if the new strip's leaves over the
+// destination are the old leaves over the source in the same order, each painting there
+// what its partner painted there — the same op moved by the offset (a text line, the
+// cursor, a one-row band), a text op whose glyphs over those columns are its partner's
+// moved (a line scrolled sideways shows another slice of itself), or a solid fill that
+// covers both on any axis it did not move along (the gutter wash, a divider, the frame clear
+// — a fill has no position-dependent pixels away from its corners) — the pixels are
+// identical. Bands and columns are conservative (`op_band`, `leaf_columns`), so a leaf that
+// only nearly touches a strip can veto a blit but never fake one. One mechanism carries a
+// scroll up or down, sideways, and both, and a zoomed pane moved to another place.
+
+/// A translation of pixels, `dx` columns right and `dy` rows down: where a copy's pixels go
+/// from where the canvas holds them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct Offset {
+    pub(super) dx: isize,
+    pub(super) dy: isize,
+}
 
 /// The pixel top of a leaf that is a translatable cell-row op (text, cursor, a rect), as
 /// `op_band` places it; `None` for the others.
@@ -519,28 +1316,181 @@ pub(super) fn leaf_top(op: &Op, dy: isize, rows: &RowMap) -> Option<isize> {
     }
 }
 
-/// Whether painting `new` into the rows `[y0, y1)` produces the pixels `old` painted
-/// into `[y0 - delta, y1 - delta)`: the same op translated by `delta` pixels, or a solid
-/// fill that covers both bands with its straight part (rounded corners kept `radius`
-/// clear of the bands, and a hairline's snap slop on top).
+/// The units a text op at cell `col` draws, each with its pixel left and width on a grid at
+/// `across` — the `Text` arm of `render_ops`' walk: a raw tab to the next screen stop (its
+/// background only), a zero-width unit not at all (left out), any other `unit_cells × scale`.
+/// Only the units whose pixels meet the columns `[x0, x1)`.
+fn text_units_over(
+    s: &str,
+    col: usize,
+    scale: usize,
+    across: Across,
+    (x0, x1): (isize, isize),
+) -> Vec<(&str, isize, isize)> {
+    let mut units = Vec::new();
+    let mut cell = col;
+    for unit in text_units(s, across.ligatures) {
+        let cells = if unit == "\t" {
+            cluster_cells_at(unit, cell, TAB_WIDTH)
+        } else {
+            unit_cells(unit) * scale
+        };
+        let (left, width) = (
+            (across.ox + cell * across.cw) as isize,
+            (cells * across.cw) as isize,
+        );
+        cell += cells;
+        if width > 0 && left < x1 && left + width > x0 {
+            units.push((unit, left, width));
+        }
+        if left >= x1 {
+            break;
+        }
+    }
+    units
+}
+
+/// Whether text `new_s` at cell `new_col` paints the columns `columns` as text `old_s` at
+/// `old_col`, in the same face, painted the columns `dx` to the left: the units over each pair
+/// one to one — the same unit, as wide, `dx` further right. A unit's glyph, background and
+/// underline are its cell block's alone (`Renderer::build_cluster`), so a unit cut by the
+/// columns' edge is cut alike in both. What a pane scrolled sideways shows: another slice of
+/// the same line.
+#[allow(clippy::too_many_arguments)]
+fn text_translates(
+    (new_s, new_col): (&str, usize),
+    (old_s, old_col): (&str, usize),
+    scale: usize,
+    dx: isize,
+    (x0, x1): (usize, usize),
+    across: Across,
+) -> bool {
+    let (x0, x1) = (x0 as isize, x1 as isize);
+    let new_units = text_units_over(new_s, new_col, scale, across, (x0, x1));
+    let old_units = text_units_over(old_s, old_col, scale, across, (x0 - dx, x1 - dx));
+    new_units.len() == old_units.len()
+        && new_units.iter().zip(&old_units).all(
+            |((new_unit, new_left, new_width), (old_unit, old_left, old_width))| {
+                new_unit == old_unit && new_width == old_width && *new_left == old_left + dx
+            },
+        )
+}
+
+/// The cell shifts that would carry text `old_s` at `old_col` onto text `new_s` at `new_col`
+/// on one row: for each way the two line up — the first unit of one on a unit of the other
+/// equal to it — the shift when every unit both have from there on agrees and they share at
+/// least half the shorter. What a pane scrolled sideways draws: a line cut at another column,
+/// its units moved. Nearest first, at most `SIDEWAYS_SHIFTS`.
+fn text_shifts(
+    (new_s, new_col): (&str, usize),
+    (old_s, old_col): (&str, usize),
+    scale: usize,
+    across: Across,
+) -> Vec<isize> {
+    // the units line up only where the bytes do: one text starting inside the other and agreeing
+    // to the end of either — checked first, since most pairs asked are two unrelated lines
+    let starts_inside = |outer: &[u8], inner: &[u8]| {
+        (0..outer.len()).any(|from| {
+            let length = (outer.len() - from).min(inner.len());
+            outer[from..from + length] == inner[..length]
+        })
+    };
+    let (new_bytes, old_bytes) = (new_s.as_bytes(), old_s.as_bytes());
+    if !starts_inside(old_bytes, new_bytes) && !starts_inside(new_bytes, old_bytes) {
+        return Vec::new();
+    }
+    let everything = (isize::MIN, isize::MAX);
+    let new_units = text_units_over(new_s, new_col, scale, across, everything);
+    let old_units = text_units_over(old_s, old_col, scale, across, everything);
+    let shortest = new_units.len().min(old_units.len());
+    if shortest == 0 {
+        return Vec::new();
+    }
+    // new unit `p` on old unit `p + lag`: every pair from there agrees, and as far apart
+    let shift_at = |lag: isize| -> Option<isize> {
+        let first = (-lag).max(0) as usize;
+        let last = new_units
+            .len()
+            .min((old_units.len() as isize - lag).max(0) as usize);
+        if last <= first || (last - first) * 2 < shortest {
+            return None;
+        }
+        let shift = new_units[first].1 - old_units[(first as isize + lag) as usize].1;
+        (first..last)
+            .all(|p| {
+                let (unit, left, width) = new_units[p];
+                let (old_unit, old_left, old_width) = old_units[(p as isize + lag) as usize];
+                unit == old_unit && width == old_width && left - old_left == shift
+            })
+            .then_some(shift)
+    };
+    let lags = (0..old_units.len())
+        .filter(|&q| old_units[q].0 == new_units[0].0)
+        .map(|q| q as isize)
+        .chain(
+            (1..new_units.len())
+                .filter(|&p| new_units[p].0 == old_units[0].0)
+                .map(|p| -(p as isize)),
+        );
+    let mut shifts: Vec<isize> = lags
+        .filter_map(shift_at)
+        .filter(|&shift| shift != 0)
+        .collect();
+    shifts.sort_unstable_by_key(|shift| shift.abs());
+    shifts.dedup();
+    shifts.truncate(SIDEWAYS_SHIFTS);
+    shifts
+}
+
+/// How many sideways shifts `text_shifts` offers for one pair of texts.
+const SIDEWAYS_SHIFTS: usize = 4;
+
+/// Whether a fill whose pixel extent is `[new_from, new_to)` in the new frame and `[old_from,
+/// old_to)` in the old paints the destination `[to0, to1)` as it painted the source `delta`
+/// before it, along one axis: moved by `delta` with its extent (a band scrolled with its
+/// line), or covering both by `margin` beyond (its edges and rounded corners away from them,
+/// so the pixels between are the fill's wherever it is).
+fn fill_translates(
+    (new_from, new_to): (f32, f32),
+    (old_from, old_to): (f32, f32),
+    delta: isize,
+    (to0, to1): (isize, isize),
+    margin: f32,
+) -> bool {
+    let moved = ((new_to - new_from) - (old_to - old_from)).abs() < 1e-3
+        && (new_from - old_from - delta as f32).abs() < 1e-3;
+    let covers = |from: f32, to: f32, lo: isize, hi: isize| {
+        from + margin <= lo as f32 && to - margin >= hi as f32
+    };
+    moved
+        || (covers(new_from, new_to, to0, to1)
+            && covers(old_from, old_to, to0 - delta, to1 - delta))
+}
+
+/// Whether painting `new` over the destination — the pixel rows `[y0, y1)` and columns
+/// `[x0, x1)` — produces the pixels `old` painted over the source, `offset` back: the same op
+/// moved by the offset, a text whose units over the columns are the old one's moved
+/// (`text_translates`), or a fill that moved or covers both along each axis
+/// (`fill_translates`: rounded corners kept `radius` clear, a hairline's snap slop on top).
 pub(super) fn leaf_translates(
     new: &Entry,
     old: &Entry,
-    delta: isize,
-    (y0, y1): (isize, isize),
+    offset: Offset,
+    ((y0, y1), (x0, x1)): ((isize, isize), (usize, usize)),
     rows: &RowMap,
-    cw: usize,
+    across: Across,
 ) -> bool {
     // a leaf in a group above the seam is on other rows than one outside it (ADR-615)
     if new.above_seam != old.above_seam {
         return false;
     }
     let rows = &new.rows(rows);
-    let (src0, src1) = (y0 - delta, y1 - delta);
-    let top = |row: u16, dy: isize| rows.y(row as isize).saturating_sub(dy);
-    let covers = |top: f32, bottom: f32, margin: f32, lo: isize, hi: isize| {
-        top + margin <= lo as f32 && bottom - margin >= hi as f32
-    };
+    let (dx, dy) = (offset.dx, offset.dy);
+    let cw = across.cw as isize;
+    let top = |row: u16, shift: isize| rows.y(row as isize).saturating_sub(shift);
+    let moved_by = |new_col: u16, old_col: u16| (new_col as isize - old_col as isize) * cw == dx;
+    let left = |col: u16| (across.ox as isize + col as isize * cw) as f32;
+    let columns = (x0 as isize, x1 as isize);
     match (new.op, old.op) {
         (Op::Clear, Op::Clear) => true,
         (
@@ -557,10 +1507,24 @@ pub(super) fn leaf_translates(
                 face: of,
             },
         ) => {
-            nc == oc
-                && nf == of
-                && ns == os
-                && top(*nr, new.dy) == top(*or, old.dy).saturating_add(delta)
+            let scale = nf.scale.max(1) as usize;
+            if nf != of || top(*nr, new.dy) != top(*or, old.dy).saturating_add(dy) {
+                return false;
+            }
+            // a wavy underline's phase is the screen column's (`underline_rects`)
+            if dx != 0 && nf.underline && nf.underline_wave && dx % (4 * scale as isize) != 0 {
+                return false;
+            }
+            // the op moved whole, unless a tab in it reaches another screen stop
+            (ns == os && moved_by(*nc, *oc) && (dx == 0 || !ns.contains('\t')))
+                || text_translates(
+                    (ns, *nc as usize),
+                    (os, *oc as usize),
+                    scale,
+                    dx,
+                    (x0, x1),
+                    across,
+                )
         }
         (
             Op::Cursor {
@@ -580,12 +1544,12 @@ pub(super) fn leaf_translates(
                 under: ounder,
             },
         ) => {
-            nc == oc
+            moved_by(*nc, *oc)
                 && nst == ost
                 && ncolor == ocolor
                 && nblink == oblink
                 && nunder == ounder
-                && top(*nr, new.dy) == top(*or, old.dy).saturating_add(delta)
+                && top(*nr, new.dy) == top(*or, old.dy).saturating_add(dy)
         }
         (
             Op::Rect {
@@ -605,7 +1569,7 @@ pub(super) fn leaf_translates(
                 radius: orad,
             },
         ) => {
-            if nc != oc || nw != ow || nf != of || nrad != orad {
+            if nf != of || nrad != orad {
                 return false;
             }
             let (ntop, otop) = (top(*nr, new.dy), top(*or, old.dy));
@@ -614,27 +1578,24 @@ pub(super) fn leaf_translates(
                 rows.span(*nr as isize, *nh as isize),
                 rows.span(*or as isize, *oh as isize),
             );
-            if nheight == oheight && ntop == otop.saturating_add(delta) {
-                return true;
-            }
-            // a solid fill: the same pixels wherever it is, away from its corners
             let margin = if *nrad > 0.0 {
                 (nrad * cw as f32).ceil() + 1.0
             } else {
                 0.0
             };
-            covers(
-                ntop as f32,
-                ntop.saturating_add(nheight) as f32,
+            let width = |w: u16| w as f32 * cw as f32;
+            fill_translates(
+                (ntop as f32, ntop.saturating_add(nheight) as f32),
+                (otop as f32, otop.saturating_add(oheight) as f32),
+                dy,
+                (y0, y1),
                 margin,
-                y0,
-                y1,
-            ) && covers(
-                otop as f32,
-                otop.saturating_add(oheight) as f32,
+            ) && fill_translates(
+                (left(*nc), left(*nc) + width(*nw)),
+                (left(*oc), left(*oc) + width(*ow)),
+                dx,
+                columns,
                 margin,
-                src0,
-                src1,
             )
         }
         (
@@ -657,33 +1618,85 @@ pub(super) fn leaf_translates(
                 radius: orad,
             },
         ) => {
-            if nx != ox_ || nw != ow || nf != of || nop != oop || nrad != orad {
+            if nf != of || nop != oop || nrad != orad {
                 return false;
             }
             let ntop = rows.yf(*ny) - new.dy as f32;
             let otop = rows.yf(*oy_) - old.dy as f32;
             let (nheight, oheight) = (rows.spanf(*ny, *nh), rows.spanf(*oy_, *oh));
-            if !(ntop.is_finite() && otop.is_finite()) {
+            let (ox, cw) = (across.ox as f32, cw as f32);
+            let (nleft, oleft) = (ox + nx * cw, ox + ox_ * cw);
+            if ![ntop, otop, nheight, oheight, nleft, oleft]
+                .iter()
+                .all(|value| value.is_finite())
+            {
                 return false;
             }
-            if (nheight - oheight).abs() < 1e-3 && (ntop - otop - delta as f32).abs() < 1e-3 {
-                return true;
-            }
             // the same slop `op_band` allows a hairline's snap, plus the corners
-            let margin = nrad * cw as f32 + 5.0;
-            covers(ntop, ntop + nheight, margin, y0, y1)
-                && covers(otop, otop + oheight, margin, src0, src1)
+            let margin = nrad * cw + 5.0;
+            fill_translates(
+                (ntop, ntop + nheight),
+                (otop, otop + oheight),
+                dy,
+                (y0, y1),
+                margin,
+            ) && fill_translates(
+                (nleft, nleft + nw * cw),
+                (oleft, oleft + ow * cw),
+                dx,
+                columns,
+                margin,
+            )
         }
         // bitboards and column spans ignore the scroll shift and are never translated
         _ => false,
     }
 }
 
-/// The pixel translations that could carry an old leaf onto the first translatable
-/// leaf of the new strip `k`: for each old leaf equal to it up to its row, the
-/// difference of their tops. The candidates a strip's blit is tried at.
-pub(super) fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, rows: &RowMap) -> Vec<isize> {
-    let mut deltas = Vec::new();
+/// Whether leaf `i` of `leaves` can paint a pixel in the columns `[x0, x1)`: its columns
+/// (`leaf_columns`) meet them, or are not known.
+fn reaches(leaves: &Leaves, i: usize, across: Across, (x0, x1): (usize, usize)) -> bool {
+    leaves
+        .columns(i, across)
+        .is_none_or(|(left, right)| left < x1 as isize && right > x0 as isize)
+}
+
+/// How many of the new strip's leaves `blit_offsets` takes its candidates from.
+const ANCHORS: usize = 3;
+
+/// How many of the new strip's leaves `blit_offsets` looks at for its `ANCHORS`: a strip that
+/// moved shows them among its first few, and one where nothing did (another buffer shown) has
+/// none to find.
+const ANCHOR_LEAVES: usize = 8;
+
+/// How many of the offsets its anchors suggest `blit_offsets` answers, the likeliest first: a
+/// text repeated across the old frame suggests an offset for each copy, which one anchor alone
+/// backs.
+const ANCHOR_OFFSETS: usize = 6;
+
+/// The translations that could carry old pixels onto dirty strip `k` over the columns
+/// `window`, from its first few translatable leaves that reach them (`ANCHORS` of the first
+/// `ANCHOR_LEAVES`): for each old leaf equal to one up to its place — a text, a caret or a
+/// band, anywhere — the offset between them, and for a text cut otherwise on the same row (a
+/// line scrolled sideways) or on a row an earlier anchor moved by (scrolled down and sideways
+/// at once) each shift that lines the two up (`text_shifts`); the old leaves found through
+/// `Leaves::partners_of`. The ones more anchors agree on come first, and of those the moves
+/// straight up or down: the candidates a strip's blit is tried at, in order. With them, the
+/// column the anchors were looked for up to: the right edge of the last leaf looked at when the
+/// looking stopped short, else the window's.
+pub(super) fn blit_offsets(
+    new: &Leaves,
+    old: &Leaves,
+    k: usize,
+    rows: &RowMap,
+    across: Across,
+    window: (usize, usize),
+) -> (Vec<Offset>, usize) {
+    let cw = across.cw as isize;
+    // each offset found with how many anchors suggest it
+    let mut offsets: Vec<(Offset, usize)> = Vec::new();
+    let (mut anchors, mut looked) = (0, 0);
+    let mut reach = window.1;
     for &i in &new.per_strip[k] {
         let leaf = &new.leaves[i as usize];
         let Some(top) = leaf_top(leaf.op, leaf.dy, &leaf.rows(rows)) else {
@@ -693,11 +1706,21 @@ pub(super) fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, rows: &RowMap) -
         if matches!(leaf.op, Op::Rect { h, .. } if *h > 1) {
             continue;
         }
-        for old_leaf in &old.leaves {
+        // nor does a leaf beside the columns that changed (the other pane of a split)
+        if !reaches(new, i as usize, across, window) {
+            continue;
+        }
+        looked += 1;
+        let mut suggested: Vec<Offset> = Vec::new();
+        let mut moved_by: Vec<isize> = vec![0];
+        moved_by.extend(offsets.iter().map(|(found, _)| found.dy));
+        for j in old.partners_of(leaf.op, top, &moved_by) {
+            let old_leaf = &old.leaves[j];
             let Some(old_top) = leaf_top(old_leaf.op, old_leaf.dy, &old_leaf.rows(rows)) else {
                 continue;
             };
-            let same = match (leaf.op, old_leaf.op) {
+            let dy = top - old_top;
+            let columns = match (leaf.op, old_leaf.op) {
                 (
                     Op::Text {
                         col: a,
@@ -711,7 +1734,22 @@ pub(super) fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, rows: &RowMap) -
                         face: fb,
                         ..
                     },
-                ) => a == b && fa == fb && sa == sb,
+                ) if fa == fb => {
+                    if sa == sb {
+                        vec![(*a as isize - *b as isize) * cw]
+                    } else if dy == 0 || offsets.iter().any(|(found, _)| found.dy == dy) {
+                        // a line cut otherwise on its own row (scrolled sideways), or on a row
+                        // another anchor moved by (scrolled down and sideways at once)
+                        text_shifts(
+                            (sa, *a as usize),
+                            (sb, *b as usize),
+                            fa.scale.max(1) as usize,
+                            across,
+                        )
+                    } else {
+                        Vec::new()
+                    }
+                }
                 (
                     Op::Cursor {
                         col: a,
@@ -727,7 +1765,7 @@ pub(super) fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, rows: &RowMap) -
                         under: ub,
                         ..
                     },
-                ) => a == b && sa == sb && ca == cb && ua == ub,
+                ) if sa == sb && ca == cb && ua == ub => vec![(*a as isize - *b as isize) * cw],
                 (
                     Op::Rect {
                         col: a,
@@ -745,117 +1783,668 @@ pub(super) fn blit_deltas(new: &Leaves, old: &Leaves, k: usize, rows: &RowMap) -
                         radius: rb,
                         ..
                     },
-                ) => a == b && wa == wb && ha == hb && fa == fb && ra == rb,
-                _ => false,
+                ) if wa == wb && ha == hb && fa == fb && ra == rb => {
+                    vec![(*a as isize - *b as isize) * cw]
+                }
+                _ => Vec::new(),
             };
-            let delta = top - old_top;
-            if same && delta != 0 && !deltas.contains(&delta) {
-                deltas.push(delta);
+            for dx in columns {
+                let offset = Offset { dx, dy };
+                if offset != (Offset { dx: 0, dy: 0 }) && !suggested.contains(&offset) {
+                    suggested.push(offset);
+                }
             }
         }
-        // one anchor is enough: every other leaf still has to agree
-        if !deltas.is_empty() {
+        if !suggested.is_empty() {
+            for offset in suggested {
+                match offsets.iter_mut().find(|(found, _)| *found == offset) {
+                    Some((_, votes)) => *votes += 1,
+                    None => offsets.push((offset, 1)),
+                }
+            }
+            anchors += 1;
+        }
+        if anchors == ANCHORS || looked == ANCHOR_LEAVES {
+            reach = new
+                .columns(i as usize, across)
+                .map_or(window.1, |(_, right)| {
+                    right.clamp(window.0 as isize, window.1 as isize) as usize
+                });
             break;
         }
     }
-    deltas
+    // the ones more anchors agree on first, and of those straight up or down: a scroll's, the
+    // common move (a line of text repeated elsewhere suggests its own, which one anchor alone
+    // backs)
+    offsets.sort_by_key(|&(offset, votes)| (std::cmp::Reverse(votes), offset.dx != 0));
+    offsets.truncate(ANCHOR_OFFSETS);
+    (
+        offsets.into_iter().map(|(offset, _)| offset).collect(),
+        reach,
+    )
 }
 
-/// Whether dirty strip `k` (pixel rows `[y0, y1)`) is the old frame's band
-/// `[y0 - delta, y1 - delta)` translated: every new leaf covering the strip pairs, in
-/// order, with an old leaf covering the source band under `leaf_translates`.
-pub(super) fn strip_translates(
+/// Whether the new leaves `new_leaves`, painting the destination — pixel rows `[y0, y1)`,
+/// columns `[x0, x1)` — are the old leaves `old_leaves` painting the source `offset` back,
+/// translated: they pair one to one, in order, each under `leaf_translates` — except `twin`, a
+/// zoomed pane's leaf in both frames, whose own ops are checked on its own grid
+/// (`region_plan`), and which pairs only with itself. A caret whose blink phase flipped is not
+/// the pixels the canvas holds anywhere.
+#[allow(clippy::too_many_arguments)]
+fn leaves_translate(
     new: &Leaves,
     old: &Leaves,
-    k: usize,
-    delta: isize,
-    (y0, y1): (usize, usize),
-    fb_h: usize,
+    new_leaves: impl Iterator<Item = usize>,
+    mut old_leaves: impl Iterator<Item = usize>,
+    offset: Offset,
+    ((y0, y1), columns): ((usize, usize), (usize, usize)),
     rows: &RowMap,
-    cw: usize,
+    across: Across,
+    twin: Option<(usize, usize)>,
 ) -> bool {
-    let (src0, src1) = (y0 as isize - delta, y1 as isize - delta);
-    if src0 < 0 || src1 > fb_h as isize {
-        return false;
-    }
-    let new_leaves = &new.per_strip[k];
-    // a caret whose blink phase flipped is not the pixels the canvas holds anywhere
-    if new.caret_hidden != old.caret_hidden
-        && new_leaves.iter().any(|&i| new.leaves[i as usize].caret)
-    {
-        return false;
-    }
-    let mut old_leaves = old.covering(src0 as usize, src1 as usize);
-    for &i in new_leaves {
+    let flipped = new.caret_hidden != old.caret_hidden;
+    for i in new_leaves {
         let Some(j) = old_leaves.next() else {
             return false;
         };
-        if !leaf_translates(
-            &new.leaves[i as usize],
-            &old.leaves[j],
-            delta,
-            (y0 as isize, y1 as isize),
-            rows,
-            cw,
-        ) {
+        if flipped && new.leaves[i].caret {
+            return false;
+        }
+        let translates = match twin {
+            Some((twin_new, twin_old)) if i == twin_new || j == twin_old => {
+                i == twin_new && j == twin_old
+            }
+            _ => leaf_translates(
+                &new.leaves[i],
+                &old.leaves[j],
+                offset,
+                ((y0 as isize, y1 as isize), columns),
+                rows,
+                across,
+            ),
+        };
+        if !translates {
             return false;
         }
     }
     old_leaves.next().is_none()
 }
 
-/// For every dirty full-height cell-row strip that is a translation of pixels the
-/// canvas already holds, `(k, source_y0)`: strip `k`'s rows are copied from the old
-/// canvas rows starting at `source_y0` instead of rasterised. The translation that
-/// carried the previous strip is tried first — a scroll moves a whole pane by one
-/// delta — then the ones the strip's own anchor suggests.
+/// Whether the columns `columns` of dirty strip `k` (pixel rows `[y0, y1)`) are the old
+/// frame's pixels `offset` back translated: every new leaf covering the strip that reaches
+/// those columns pairs, in order, with an old leaf covering the source rows that reaches the
+/// source columns (`leaves_translate`). A leaf that cannot reach them paints none of their
+/// pixels, in either frame, so the other pane of a side-by-side split has no say in whether
+/// this one scrolled. The source must lie within `bounds`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn strip_translates(
+    new: &Leaves,
+    old: &Leaves,
+    k: usize,
+    offset: Offset,
+    (y0, y1): (usize, usize),
+    columns: (usize, usize),
+    bounds: &BlitBounds,
+    rows: &RowMap,
+    across: Across,
+) -> bool {
+    let (src0, src1) = (y0 as isize - offset.dy, y1 as isize - offset.dy);
+    let (left, right) = (
+        columns.0 as isize - offset.dx,
+        columns.1 as isize - offset.dx,
+    );
+    if src0 < bounds.rows.0 as isize
+        || src1 > bounds.rows.1 as isize
+        || left < bounds.columns.0 as isize
+        || right > bounds.columns.1 as isize
+    {
+        return false;
+    }
+    let source_columns = (left as usize, right as usize);
+    let new_leaves = new.per_strip[k]
+        .iter()
+        .map(|&i| i as usize)
+        .filter(|&i| reaches(new, i, across, columns));
+    let old_leaves = old
+        .covering(src0 as usize, src1 as usize)
+        .into_iter()
+        .filter(|&j| reaches(old, j, across, source_columns));
+    leaves_translate(
+        new,
+        old,
+        new_leaves,
+        old_leaves,
+        offset,
+        ((y0, y1), columns),
+        rows,
+        across,
+        None,
+    )
+}
+
+/// What `rows` × `columns` paints besides a grid's own leaves, checked by whoever placed the
+/// grid: given a move's offset, its destination rows and its destination columns, whether those
+/// paint the same pixels translated (`region_plan`'s window leaves around a zoomed pane).
+pub(super) type Around<'a> = &'a dyn Fn(Offset, (usize, usize), (usize, usize)) -> bool;
+
+/// Where a grid's strips may be copied: both ends of a move within the pixel rows `rows` and
+/// columns `columns`, and `around` (`None`: nothing) agreeing that what else paints there
+/// moved with it.
+pub(super) struct BlitBounds<'a> {
+    pub(super) rows: (usize, usize),
+    pub(super) columns: (usize, usize),
+    pub(super) around: Option<Around<'a>>,
+}
+
+impl BlitBounds<'_> {
+    /// The window's own grid: every pixel of an `fb_w`×`fb_h` framebuffer, nothing else
+    /// painting.
+    pub(super) fn whole((fb_w, fb_h): (usize, usize)) -> BlitBounds<'static> {
+        BlitBounds {
+            rows: (0, fb_h),
+            columns: (0, fb_w),
+            around: None,
+        }
+    }
+}
+
+/// The columns of `window` a move by `dx` can copy within `bounds`: the ones whose source,
+/// `dx` to the left, is in the window and the bounds too — the rest of the window is what a
+/// sideways scroll brought in, drawn.
+fn copied_columns(window: (usize, usize), dx: isize, bounds: (usize, usize)) -> (usize, usize) {
+    let shifted = |(x0, x1): (usize, usize)| (x0 as isize + dx, x1 as isize + dx);
+    let (window_from, window_to) = shifted(window);
+    let (bounds_from, bounds_to) = shifted(bounds);
+    let from = (window.0 as isize)
+        .max(window_from)
+        .max(bounds.0 as isize)
+        .max(bounds_from);
+    let to = (window.1 as isize)
+        .min(window_to)
+        .min(bounds.1 as isize)
+        .min(bounds_to);
+    if to <= from {
+        (0, 0)
+    } else {
+        (from as usize, to as usize)
+    }
+}
+
+/// The columns of `window` a move by `offset` copies onto dirty strip `k`, when it carries them:
+/// all of them, or all but the ones a sideways move brought in (`copied_columns`) — at least as
+/// many copied as brought in, or the window is more likely two things that moved apart than one
+/// that moved far — every leaf over them translating (`strip_translates`) and what else paints
+/// there agreeing (`bounds.around`).
+#[allow(clippy::too_many_arguments)]
+fn carried(
+    new: &Leaves,
+    old: &Leaves,
+    k: usize,
+    offset: Offset,
+    window: (usize, usize),
+    strips: &Strips,
+    bounds: &BlitBounds,
+    across: Across,
+) -> Option<(usize, usize)> {
+    let destination = strips.rows(k);
+    let columns = copied_columns(window, offset.dx, bounds.columns);
+    ((columns.1 - columns.0) * 2 >= window.1 - window.0
+        && columns.1 > columns.0
+        && strip_translates(
+            new,
+            old,
+            k,
+            offset,
+            destination,
+            columns,
+            bounds,
+            &strips.rows,
+            across,
+        )
+        && bounds
+            .around
+            .is_none_or(|around| around(offset, destination, columns)))
+    .then_some(columns)
+}
+
+/// No move: columns a strip's diff counts as changed whose leaves paint what they painted where
+/// they painted it — a divider or a gutter the diff could not line up beside text that changed
+/// its count of leaves. Carried by it, they are neither copied nor drawn.
+const STILL: Offset = Offset { dx: 0, dy: 0 };
+
+/// The first of `offsets` that carries the columns `columns` of strip `k` (`carried`), with the
+/// columns it copies, each one tried counted in `tries`.
+#[allow(clippy::too_many_arguments)]
+fn first_carrying(
+    offsets: &[Offset],
+    new: &Leaves,
+    old: &Leaves,
+    k: usize,
+    columns: (usize, usize),
+    strips: &Strips,
+    bounds: &BlitBounds,
+    across: Across,
+    tries: &mut usize,
+) -> Option<(Offset, (usize, usize))> {
+    offsets.iter().find_map(|&offset| {
+        *tries += 1;
+        carried(new, old, k, offset, columns, strips, bounds, across).map(|copied| (offset, copied))
+    })
+}
+
+/// The offsets a dirty strip's columns are tried at, in order: the ones that carried strips
+/// before (`recent`) — a scroll moves a whole pane by one offset, two panes by two — then the
+/// ones the strip's own anchors suggest (`blit_offsets`), which walk the old frame and so are
+/// worked out only when no offset known carries what is tried: over the strip's changed
+/// columns `window` from the columns tried on, and again for columns past the ones the anchors
+/// so far were found in (`anchored_to`) when those carried something (`anchors_paid`) — the
+/// other pane of a split, scrolled its own way, and not a strip where nothing moved. It
+/// counts the offsets it tried (`tries`), the work a strip spent looking for its copies.
+struct Candidates {
+    recent: Vec<Offset>,
+    window: (usize, usize),
+    anchored: Vec<Offset>,
+    anchored_to: Option<usize>,
+    anchors_paid: bool,
+    tries: usize,
+}
+
+impl Candidates {
+    fn new(recent: &[Offset], window: (usize, usize)) -> Candidates {
+        Candidates {
+            recent: recent.to_vec(),
+            window,
+            anchored: Vec::new(),
+            anchored_to: None,
+            anchors_paid: false,
+            tries: 0,
+        }
+    }
+
+    /// The first offset known so far — a recent one, no move at all (`STILL`), or one the
+    /// anchors found — that carries the columns `columns` of strip `k` (`carried`), with the
+    /// columns it copies.
+    #[allow(clippy::too_many_arguments)]
+    fn known(
+        &mut self,
+        new: &Leaves,
+        old: &Leaves,
+        k: usize,
+        columns: (usize, usize),
+        strips: &Strips,
+        bounds: &BlitBounds,
+        across: Across,
+    ) -> Option<(Offset, (usize, usize))> {
+        let tries = &mut self.tries;
+        first_carrying(
+            &self.recent,
+            new,
+            old,
+            k,
+            columns,
+            strips,
+            bounds,
+            across,
+            tries,
+        )
+        .or_else(|| {
+            first_carrying(
+                &[STILL],
+                new,
+                old,
+                k,
+                columns,
+                strips,
+                bounds,
+                across,
+                tries,
+            )
+        })
+        .or_else(|| {
+            let found = first_carrying(
+                &self.anchored,
+                new,
+                old,
+                k,
+                columns,
+                strips,
+                bounds,
+                across,
+                tries,
+            );
+            self.anchors_paid |= found.is_some();
+            found
+        })
+    }
+
+    /// The first candidate that carries the columns `columns` of strip `k` (`carried`), with
+    /// the columns it copies: a known one (`known`), else one the anchors from those columns
+    /// on suggest, looked for once they lie past the ones looked at.
+    #[allow(clippy::too_many_arguments)]
+    fn carrying(
+        &mut self,
+        new: &Leaves,
+        old: &Leaves,
+        k: usize,
+        columns: (usize, usize),
+        strips: &Strips,
+        bounds: &BlitBounds,
+        across: Across,
+    ) -> Option<(Offset, (usize, usize))> {
+        self.known(new, old, k, columns, strips, bounds, across)
+            .or_else(|| self.anchoring(new, old, k, columns, strips, bounds, across))
+    }
+
+    /// The first offset the anchors from the columns `columns` on suggest (`blit_offsets`) that
+    /// carries them, the anchors looked for only when those columns lie past the ones looked
+    /// at, and only offsets not known before tried.
+    #[allow(clippy::too_many_arguments)]
+    fn anchoring(
+        &mut self,
+        new: &Leaves,
+        old: &Leaves,
+        k: usize,
+        columns: (usize, usize),
+        strips: &Strips,
+        bounds: &BlitBounds,
+        across: Across,
+    ) -> Option<(Offset, (usize, usize))> {
+        if self
+            .anchored_to
+            .is_some_and(|reach| columns.0 < reach || !self.anchors_paid)
+        {
+            return None;
+        }
+        let from = self.anchored.len();
+        let (offsets, reach) = blit_offsets(
+            new,
+            old,
+            k,
+            &strips.rows,
+            across,
+            (columns.0, self.window.1),
+        );
+        self.anchored_to = Some(reach);
+        for offset in offsets {
+            if !self.recent.contains(&offset) && !self.anchored.contains(&offset) {
+                self.anchored.push(offset);
+            }
+        }
+        let found = first_carrying(
+            &self.anchored[from..],
+            new,
+            old,
+            k,
+            columns,
+            strips,
+            bounds,
+            across,
+            &mut self.tries,
+        );
+        self.anchors_paid = found.is_some();
+        found
+    }
+}
+
+/// How many offsets one strip's pieces are tried at in vain (`piece_runs`): what a piece no
+/// offset carries cost — a strip where nothing moved (another buffer shown) stops looking after
+/// these, while the tries that find a run (one for a whole-pane scroll, a few to stretch one)
+/// do not count.
+const STRIP_MISSES: usize = 24;
+
+/// Strip `k`'s `pieces` (left to right) cut into runs that are each one copy. From the leftmost
+/// piece not yet taken: all the rest when an offset known so far carries them (a whole-pane
+/// scroll, one check: `Candidates::known`), else the first candidate that carries that piece
+/// (known, then anchored: `Candidates::anchoring`), stretched over as many of the pieces after
+/// it as it carries too — to the end, to the last piece touching it, then as far as halving
+/// finds; a piece no candidate carries is left to draw, and so is every piece once the strip
+/// has tried `STRIP_MISSES` offsets in vain. Each run's offset and the columns it copies. A pane
+/// scrolled down and sideways at once is two runs — its gutter moved down, its text down and
+/// across — and two panes of a split scrolled their own ways are a run each.
+#[allow(clippy::too_many_arguments)]
+fn piece_runs(
+    new: &Leaves,
+    old: &Leaves,
+    k: usize,
+    pieces: &[(usize, usize)],
+    candidates: &mut Candidates,
+    strips: &Strips,
+    bounds: &BlitBounds,
+    across: Across,
+) -> Vec<(Offset, (usize, usize))> {
+    let mut runs = Vec::new();
+    let mut first = 0;
+    // whether the piece before `first` ended a run: only then is the rest tried whole
+    let mut after_run = true;
+    // the tries spent on pieces no offset carried
+    let mut misses = 0;
+    while first < pieces.len() && misses < STRIP_MISSES {
+        let tries_before = candidates.tries;
+        // the rest of the strip in one copy by an offset already known (a whole-pane scroll),
+        // else its first piece by a known offset, else by one its anchors suggest
+        let end = pieces.len() - 1;
+        let rest = (pieces[first].0, pieces[end].1);
+        let piece = pieces[first];
+        let whole = if after_run {
+            candidates.known(new, old, k, rest, strips, bounds, across)
+        } else {
+            None
+        };
+        // `last` is carried, `beyond` is not (or is past the pieces): the rest whole was just
+        // tried at every known offset
+        let found = match whole {
+            Some((offset, columns)) => Some((offset, columns, end, pieces.len())),
+            None => {
+                let tried = if after_run { end } else { pieces.len() };
+                match candidates.known(new, old, k, piece, strips, bounds, across) {
+                    Some((offset, columns)) => Some((offset, columns, first, tried)),
+                    None => candidates
+                        .anchoring(new, old, k, piece, strips, bounds, across)
+                        .map(|(offset, columns)| (offset, columns, first, pieces.len())),
+                }
+            }
+        };
+        let Some((offset, columns, last, beyond)) = found else {
+            misses += candidates.tries - tries_before;
+            first += 1;
+            after_run = false;
+            continue;
+        };
+        let stretched = |last: usize| {
+            carried(
+                new,
+                old,
+                k,
+                offset,
+                (pieces[first].0, pieces[last].1),
+                strips,
+                bounds,
+                across,
+            )
+        };
+        // stretched to the end, then to the last of the pieces touching this one (a pane's
+        // gutter and text), then as far as halving finds
+        let touching = (first..end)
+            .find(|&index| pieces[index].1 != pieces[index + 1].0)
+            .unwrap_or(end);
+        let mut planned = vec![touching, end];
+        let (mut last, mut copied, mut beyond) = (last, columns, beyond);
+        while last + 1 < beyond {
+            let probe = match planned.pop() {
+                Some(probe) if probe > last && probe < beyond => probe,
+                Some(_) => continue,
+                None => (last + 1 + beyond) / 2,
+            };
+            candidates.tries += 1;
+            match stretched(probe) {
+                Some(columns) => (last, copied) = (probe, columns),
+                None => beyond = probe,
+            }
+        }
+        runs.push((offset, copied));
+        first = last + 1;
+        after_run = true;
+    }
+    runs
+}
+
+/// The parts of `columns` (spans left to right) outside every one of `copied`, on the pixel rows
+/// `rows`: what a strip still draws once its copies are taken, left to right, the ones near
+/// enough merged into one (`worth_merging`), so that the two ends of a row are two narrow
+/// rects; none when the copies cover all of it.
+fn left_to_draw(
+    columns: &[(usize, usize)],
+    copied: &[(usize, usize)],
+    (y0, y1): (usize, usize),
+) -> Vec<(usize, usize)> {
+    let mut left: Vec<(usize, usize)> = columns.to_vec();
+    for &(from, to) in copied {
+        left = left
+            .into_iter()
+            .flat_map(|(x0, x1)| [(x0, x1.min(from)), (x0.max(to), x1)])
+            .filter(|(x0, x1)| x1 > x0)
+            .collect();
+    }
+    let mut groups: Vec<DamageRect> = Vec::new();
+    for (x0, x1) in left {
+        let part = DamageRect { x0, y0, x1, y1 };
+        match groups.last_mut() {
+            Some(last) if worth_merging(last, &part) => last.x1 = last.x1.max(x1),
+            _ => groups.push(part),
+        }
+    }
+    groups.iter().map(|group| (group.x0, group.x1)).collect()
+}
+
+/// How many of the offsets that carried strips `strip_blits` tries first.
+const RECENT_OFFSETS: usize = 4;
+
+/// Copy, instead of drawing, every dirty full-height cell-row strip of `damage` (on `strips`,
+/// within `bounds`) whose changed pixels are a translation of pixels the canvas already
+/// holds: answer the moves, and take what they cover out of `damage`. With narrowing on
+/// (`narrow`), a strip whose changed columns are several pieces (`strip_pieces`) is cut into
+/// runs, each its own offset (`piece_runs`): one run when a whole pane scrolled, one a pane
+/// when two scrolled their own ways, the gutter apart from the text when a pane moved down and
+/// sideways at once, none where nothing moved; any other strip is tried over its changed
+/// columns (`damage.columns`) as one window. What no move copies — a piece that is no
+/// translation, the columns a sideways scroll brought in — is left to draw, the parts far
+/// apart as rects apart (`left_to_draw`, `GridDamage::apart`). Copying only the changed
+/// columns is what lets one pane of a side-by-side split scroll by copying: the other pane's
+/// leaves stay out of the comparison, and its pixels out of the copy.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn strip_blits(
     new: &Leaves,
     old: &Leaves,
-    dirty: &[bool],
+    damage: &mut GridDamage,
     strips: &Strips,
-    fb_h: usize,
-    cw: usize,
-) -> Vec<(usize, usize)> {
-    let rows = &strips.rows;
-    let ch = rows.ch;
-    let mut blits = Vec::new();
-    let mut last_delta: Option<isize> = None;
+    fb_w: usize,
+    bounds: &BlitBounds,
+    across: Across,
+    narrow: bool,
+) -> Vec<StripMove> {
+    let ch = strips.rows.ch;
+    let mut moves = Vec::new();
+    let mut recent: Vec<Offset> = Vec::new();
     for k in 1..strips.count {
-        if !dirty[k] {
+        if !damage.dirty[k] {
             continue;
         }
         let (y0, y1) = strips.rows(k);
-        if y1 - y0 != ch {
-            // a partial strip at the bottom, or the row above a seam with its gap: its rows
-            // are its own
+        if y1 - y0 != ch || y0 < bounds.rows.0 || y1 > bounds.rows.1 {
+            // a partial strip at the bottom, the row above a seam with its gap, a row
+            // reaching out of the bounds: its rows are its own
             continue;
         }
-        let mut candidates = Vec::new();
-        if let Some(d) = last_delta {
-            candidates.push(d);
+        let window = damage.columns[k];
+        let mut candidates = Candidates::new(&recent, window);
+        // the copies taken, and the columns they were taken over (what is left is drawn): a
+        // strip of pieces side by side in runs, the first stretched over all of them when one
+        // offset carries the lot (a whole-pane scroll); any other strip over its window
+        let pieces = if narrow {
+            strip_pieces(new, old, k, fb_w, across).filter(|pieces| pieces.len() > 1)
+        } else {
+            None
+        };
+        let (runs, changed) = match pieces {
+            Some(pieces) => (
+                piece_runs(
+                    new,
+                    old,
+                    k,
+                    &pieces,
+                    &mut candidates,
+                    strips,
+                    bounds,
+                    across,
+                ),
+                pieces,
+            ),
+            None => match candidates.carrying(new, old, k, window, strips, bounds, across) {
+                Some(run) => (vec![run], vec![window]),
+                None => continue,
+            },
+        };
+        if runs.is_empty() {
+            continue;
         }
-        for d in blit_deltas(new, old, k, rows) {
-            if !candidates.contains(&d) {
-                candidates.push(d);
-            }
+        for &(offset, columns) in runs.iter().filter(|(offset, _)| *offset != STILL) {
+            moves.push(StripMove {
+                destination: y0,
+                source: (y0 as isize - offset.dy) as usize,
+                height: ch,
+                columns,
+                source_left: (columns.0 as isize - offset.dx) as usize,
+            });
+            recent.retain(|&other| other != offset);
+            recent.insert(0, offset);
+            recent.truncate(RECENT_OFFSETS);
         }
-        for delta in candidates {
-            if strip_translates(new, old, k, delta, (y0, y1), fb_h, rows, cw) {
-                blits.push((k, (y0 as isize - delta) as usize));
-                last_delta = Some(delta);
-                break;
+        let copied: Vec<(usize, usize)> = runs.iter().map(|&(_, columns)| columns).collect();
+        match left_to_draw(&changed, &copied, (y0, y1)).split_first() {
+            Some((&first, apart)) => {
+                damage.columns[k] = first;
+                damage.apart[k] = apart.to_vec();
             }
+            None => damage.dirty[k] = false,
         }
     }
-    blits
+    moves
+}
+
+/// One grid's plan: its strips diffed (`grid_damage`, narrowed to their changed columns when
+/// `narrow`), the dirty ones that are a translation copied (`strip_blits`, when `blit`), and
+/// the rest drawn. THE plan of a grid: the window's (`paint::diff_plan`) and a zoomed pane's
+/// own (`region_plan`).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn grid_plan(
+    new: &Leaves,
+    old: &Leaves,
+    strips: &Strips,
+    fb_w: usize,
+    across: Across,
+    bounds: &BlitBounds,
+    (narrow, blit): (bool, bool),
+) -> Plan {
+    let mut damage = grid_damage(new, old, strips, fb_w, across, narrow);
+    let changed = dirty_rects(&damage.dirty, &damage.columns, strips);
+    let moves = if blit {
+        strip_blits(new, old, &mut damage, strips, fb_w, bounds, across, narrow)
+    } else {
+        Vec::new()
+    };
+    let raster = damage.rects(strips);
+    Plan {
+        changed,
+        raster,
+        moves,
+    }
 }
 
 /// Merge runs of dirty strips into damage rects — one raster pass each. Strip `k` spans
 /// the pixel columns `columns[k]`; a run of adjacent dirty strips becomes one rect over
 /// the union of their columns (re-rasterising more of a row than changed is exact too,
-/// and one pass over the frame per run is what the row diff always paid).
+/// and one pass over the frame per run is what the row diff always paid) — unless the union
+/// would draw much more than the two apart (`worth_merging`).
 pub(super) fn dirty_rects(
     dirty: &[bool],
     columns: &[(usize, usize)],
@@ -871,22 +2460,48 @@ pub(super) fn dirty_rects(
         if y1 <= y0 || x1 <= x0 {
             continue;
         }
+        let strip = DamageRect { x0, y0, x1, y1 };
         match rects.last_mut() {
-            Some(last) if last.y1 == y0 => {
+            Some(last) if last.y1 == y0 && worth_merging(last, &strip) => {
                 last.y1 = y1;
                 last.x0 = last.x0.min(x0);
                 last.x1 = last.x1.max(x1);
             }
-            _ => rects.push(DamageRect { x0, y0, x1, y1 }),
+            _ => rects.push(strip),
         }
     }
     rects
+}
+
+/// How much more than its two parts a merged rect may draw, as `(numerator, denominator)`: a
+/// quarter more. Past that the two are drawn apart — a resized window's new right edge beside
+/// its new bottom rows is two narrow rects, not the window.
+const MERGE_GROWTH_MAX: (usize, usize) = (5, 4);
+
+/// Whether `above` and the strip right under it are drawn as one rect: their union draws at
+/// most [`MERGE_GROWTH_MAX`] times the pixels the two do apart.
+fn worth_merging(above: &DamageRect, below: &DamageRect) -> bool {
+    let union = DamageRect {
+        x0: above.x0.min(below.x0),
+        x1: above.x1.max(below.x1),
+        y0: above.y0,
+        y1: below.y1,
+    };
+    let (numerator, denominator) = MERGE_GROWTH_MAX;
+    union.area() * denominator <= (above.area() + below.area()) * numerator
 }
 
 #[cfg(test)]
 mod strip_diff_tests {
     use super::*;
     use crate::host::gui::{CursorStyle, Face, Op};
+
+    /// Every strip's `strip_differs`, as a bool per strip.
+    fn strip_diff(new: &Leaves, old: &Leaves, strips: &Strips) -> Vec<bool> {
+        (0..strips.count)
+            .map(|k| strip_differs(new, old, k))
+            .collect()
+    }
 
     fn text(row: u16, s: &str) -> Op {
         Op::Text {
@@ -1843,6 +3458,38 @@ mod strip_diff_tests {
         }
     }
 
+    /// A grid's damage marks only the strips whose leaves changed, each over the columns its
+    /// change reaches when narrowed and over the whole row when not; a clean strip keeps the
+    /// whole row, so a copy over it would take everything.
+    #[test]
+    fn grid_damage_marks_the_changed_strips_over_their_columns() {
+        let strips = Strips::new(RowMap::uniform(0, 10), 40);
+        let across = Across {
+            ox: 0,
+            cw: 8,
+            ligatures: false,
+        };
+        let frame = |second: &str| {
+            vec![
+                text_at(0, 2, "same", [200, 200, 200]),
+                text_at(1, 2, second, [200, 200, 200]),
+            ]
+        };
+        let (new_ops, old_ops) = (frame("abcd"), frame("abc"));
+        let (new, old) = (
+            Leaves::of(&new_ops, &strips, false),
+            Leaves::of(&old_ops, &strips, false),
+        );
+        let narrow = grid_damage(&new, &old, &strips, 200, across, true);
+        // strip 0 is the top margin, row 0 strip 1, row 1 strip 2
+        assert_eq!(narrow.dirty, vec![false, false, true, false, false]);
+        assert_eq!(narrow.columns[2], (16, 48));
+        assert_eq!(narrow.columns[1], (0, 200));
+        let whole = grid_damage(&new, &old, &strips, 200, across, false);
+        assert_eq!(whole.dirty, narrow.dirty);
+        assert_eq!(whole.columns[2], (0, 200));
+        assert_eq!(strip_damage(&new, &old, 1, 200, across, true), None);
+    }
     #[test]
     fn a_strip_whose_ops_have_no_known_columns_is_repainted_whole() {
         let strips = Strips::new(RowMap::uniform(0, 10), 40);
@@ -1851,7 +3498,12 @@ mod strip_diff_tests {
                 Leaves::of(new, &strips, false),
                 Leaves::of(old, &strips, false),
             );
-            strip_columns(&a, &b, 1, 200, 0, 8, false)
+            let across = Across {
+                ox: 0,
+                cw: 8,
+                ligatures: false,
+            };
+            strip_columns(&a, &b, 1, 200, across)
         };
         let row = |s: &str| vec![Op::Clear, text_at(0, 2, s, [200, 200, 200])];
         assert_eq!(columns(&row("abcd"), &row("abc")), (16, 48));

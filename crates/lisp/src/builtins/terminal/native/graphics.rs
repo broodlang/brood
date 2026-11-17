@@ -1,12 +1,12 @@
 //! Pictures in the terminal at PIXEL resolution (ADR-695): an `[:image …]` op drawn through
 //! the kitty graphics protocol when the terminal speaks it, in half-block cells otherwise.
 //!
-//! - **Detected once, by asking.** `term-enter` writes a kitty graphics query for a 1×1
-//!   picture and a primary device attributes request (DA1) behind it. Every terminal answers
-//!   DA1, and answers in order, so the DA1 reply marks the end of the answer: a kitty `OK`
-//!   before it means pictures. `BROOD_TERM_GRAPHICS` (`kitty` / `cells`) decides without
-//!   asking — tmux and screen answer DA1 themselves and pass no graphics through, so they
-//!   draw cells.
+//! - **Detected once, by asking.** `term-enter`'s one batched question (`probe`, ADR-740)
+//!   carries a kitty graphics query for a 1×1 picture, a primary device attributes request
+//!   (DA1) last. Every terminal answers DA1, and answers in order, so the DA1 reply marks the
+//!   end of the answers: a kitty `OK` before it means pictures.
+//!   `BROOD_TERM_GRAPHICS` (`kitty` / `cells`) decides without asking — tmux and screen
+//!   answer DA1 themselves and pass no graphics through, so they draw cells.
 //! - **Transmitted once per content, placed per frame.** A picture is resampled to the
 //!   pixels its cells cover (the cell size from the tty's `TIOCGWINSZ`), cropped to what
 //!   shows, PNG-encoded and sent under an image id; the frame then PLACES it at its cell. A
@@ -45,86 +45,17 @@ pub(super) fn forced(value: Option<&str>) -> Option<Protocol> {
     }
 }
 
-/// The question: may image 31, one RGB pixel sent directly, be stored (`a=q` stores nothing,
-/// it only checks) — then DA1, which every terminal answers, after it.
-#[cfg_attr(not(unix), allow(dead_code))]
-pub(super) const QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
-
-/// How long the answer is waited for: a local terminal answers in a millisecond, an ssh link
-/// in a round trip. One that has not answered DA1 by then draws cells; its late answer is
-/// swallowed by the decoder.
-#[cfg_attr(not(unix), allow(dead_code))]
-pub(super) const PATIENCE: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// Whether `bytes` hold the end of the answer to [`QUERY`]: a DA1 reply, `CSI ? … c`.
-#[cfg_attr(not(unix), allow(dead_code))]
-pub(super) fn answered(bytes: &[u8]) -> bool {
-    let mut rest = bytes;
-    while let Some(at) = find(rest, b"\x1b[?") {
-        let after = &rest[at + 3..];
-        let end = after
-            .iter()
-            .position(|byte| !(byte.is_ascii_digit() || *byte == b';'));
-        if let Some(end) = end
-            && after[end] == b'c'
-        {
-            return true;
-        }
-        rest = after;
-    }
-    false
-}
-
-/// The protocol an answer to [`QUERY`] says the terminal speaks: kitty when it answered the
-/// graphics query for image 31 with `OK`, cells otherwise.
-#[cfg_attr(not(unix), allow(dead_code))]
-pub(super) fn protocol_in(bytes: &[u8]) -> Protocol {
-    let mut rest = bytes;
-    while let Some(at) = find(rest, b"\x1b_G") {
-        let after = &rest[at + 3..];
-        let Some(end) = find(after, b"\x1b\\") else {
-            break;
-        };
-        let body = &after[..end];
-        let (control, message) = match body.iter().position(|byte| *byte == b';') {
-            Some(semicolon) => (&body[..semicolon], &body[semicolon + 1..]),
-            None => (body, &b""[..]),
-        };
-        if message == b"OK"
-            && control
-                .split(|byte| *byte == b',')
-                .any(|key| key == b"i=31")
-        {
-            return Protocol::Kitty;
-        }
-        rest = &after[end..];
-    }
-    Protocol::Cells
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-/// The protocol this terminal draws pictures with: [`OVERRIDE`] when it decides, else the
-/// terminal's answer to [`QUERY`]. Cells when stdout is not a terminal, or on a platform
-/// whose console Brood does not read itself.
-pub(super) fn detect() -> Protocol {
+/// The protocol this terminal draws pictures with: [`OVERRIDE`] when it decides, else what
+/// the terminal answered `term-enter`'s question (`probe`, ADR-740): `kitty_answered`, its
+/// graphics query for image 31 came back `OK`. Cells when stdout is not a terminal.
+pub(super) fn detect(kitty_answered: bool) -> Protocol {
     use std::io::IsTerminal;
     if let Some(protocol) = forced(std::env::var(OVERRIDE).ok().as_deref()) {
         return protocol;
     }
-    if !std::io::stdout().is_terminal() || std::env::var("TERM").is_ok_and(|term| term == "dumb") {
-        return Protocol::Cells;
-    }
-    #[cfg(unix)]
-    {
-        protocol_in(&super::keyboard::ask_terminal(QUERY, answered, PATIENCE))
-    }
-    #[cfg(not(unix))]
-    {
+    if kitty_answered && std::io::stdout().is_terminal() {
+        Protocol::Kitty
+    } else {
         Protocol::Cells
     }
 }
@@ -496,26 +427,6 @@ mod tests {
         assert_eq!(forced(Some("none")), Some(Protocol::Cells));
         assert_eq!(forced(Some("auto")), None);
         assert_eq!(forced(None), None);
-    }
-
-    #[test]
-    fn the_answer_says_kitty_only_when_image_31_was_ok() {
-        // kitty: the graphics answer, then DA1
-        let kitty = b"\x1b_Gi=31;OK\x1b\\\x1b[?62;22;52c";
-        assert!(answered(kitty));
-        assert_eq!(protocol_in(kitty), Protocol::Kitty);
-        // a terminal that read the query and refused it
-        let refused = b"\x1b_Gi=31;ENOTSUPPORTED:no\x1b\\\x1b[?62;4c";
-        assert_eq!(protocol_in(refused), Protocol::Cells);
-        // xterm, tmux: DA1 alone (attribute 4, sixel, is not a kitty yes)
-        let da1 = b"\x1b[?64;1;2;4;6c";
-        assert!(answered(da1));
-        assert_eq!(protocol_in(da1), Protocol::Cells);
-        // not answered yet: the graphics reply alone, or a DA1 cut short
-        assert!(!answered(b"\x1b_Gi=31;OK\x1b\\"));
-        assert!(!answered(b"\x1b[?62;2"));
-        // a key typed before the answer does not hide it
-        assert!(answered(b"x\x1b[?1;2c"));
     }
 
     #[test]

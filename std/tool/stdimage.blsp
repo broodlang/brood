@@ -115,7 +115,7 @@ attributed per inner entry when its outer key has no writer."
   (fold (%registry-names)
     {}
     (fn (acc reg)
-      (let (v (if (bound? reg) (reflect/eval reg) nil))
+      (let (v (reflect/bound-value reg))
         (cond
           (contains? %std-regs-skip reg) acc
           (list? v) (%add-member-regs acc reg)

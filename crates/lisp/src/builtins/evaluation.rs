@@ -552,12 +552,23 @@ pub(super) fn load_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
         Value::Nil => None,
         v => Some(expect_string(heap, "%load-string", v)?),
     };
-    let previous_file = name.map(|n| heap.set_current_file(Some(n)));
+    let previous_file = name.clone().map(|n| heap.set_current_file(Some(n)));
     let result = eval_string_inner(heap, env, &src, true);
     if let Some(previous) = previous_file {
         heap.set_current_file(previous);
     }
-    result
+    result.map_err(|error| in_module(error, name))
+}
+
+/// An error loading a module's source, named by the module's `name` when it names no file
+/// itself: a parse error of the source does not (the reader knows text, not files), and left
+/// so it took the name of whatever file was loading when the `require` ran — a line of
+/// `std/editor/display.blsp` reported as `src/xrefgrep.blsp:36:7` (ADR-740).
+fn in_module(error: LispError, name: Option<String>) -> LispError {
+    match name {
+        Some(name) => error.or_file(name),
+        None => error,
+    }
 }
 
 /// `(%load-module-source src file)` — load an **embedded std module**'s source with
@@ -577,7 +588,7 @@ pub(super) fn load_module_source(args: &[Value], env: EnvId, heap: &mut Heap) ->
         Value::Nil => None,
         v => Some(expect_string(heap, "%load-module-source", v)?),
     };
-    let previous_file = name.map(|n| heap.set_current_file(Some(n)));
+    let previous_file = name.clone().map(|n| heap.set_current_file(Some(n)));
     heap.enter_module_load();
     // A module's bodies are expanded WITH the optimiser's rewrites whoever triggered the
     // load — the checker holds `NoSourceRewrites` across a compile pass that loads (KI-173).
@@ -588,7 +599,7 @@ pub(super) fn load_module_source(args: &[Value], env: EnvId, heap: &mut Heap) ->
     if let Some(previous) = previous_file {
         heap.set_current_file(previous);
     }
-    result
+    result.map_err(|error| in_module(error, name))
 }
 
 /// Shared body of `reflect/eval-string` / `%load-string`. When `reset_ns`, the current
@@ -1114,4 +1125,50 @@ fn isolate_impl(args: &[Value], env: EnvId, heap: &mut Heap, replay_loads: bool)
     heap.restore_dynamic_names(dynamics);
     heap.restore_private_names(private);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Interp;
+
+    /// A module's own source that does not parse — an unescaped `"` in a std docstring —
+    /// names the MODULE's file, not the project file whose `require` was loading it: the error
+    /// said `src/xrefgrep.blsp:36:7: … dispatch character` for a line of
+    /// `std/editor/display.blsp` (ADR-740).
+    #[test]
+    fn a_parse_error_in_a_module_source_names_the_module() {
+        let directory =
+            std::env::temp_dir().join(format!("brood-module-parse-error-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let requiring = directory.join("requiring.blsp");
+        let mut interp = Interp::new();
+        for loader in ["%load-module-source", "%load-string"] {
+            // the module's docstring ends at its inner `"`, and `#q` after it is no `#` form
+            std::fs::write(
+                &requiring,
+                format!(
+                    "(def before 1)\n({loader} \"(def x \\\"a \\\"#q\\\" b\\\")\" \"std/broken.blsp\")\n"
+                ),
+            )
+            .unwrap();
+            let error = interp
+                .eval_str(&format!(
+                    "(reflect/load {:?})",
+                    requiring.display().to_string()
+                ))
+                .expect_err("the module's source does not parse");
+            assert_eq!(
+                error.file.as_deref(),
+                Some("std/broken.blsp"),
+                "{loader}: {}",
+                error.located()
+            );
+            assert!(
+                error.message.contains("dispatch character"),
+                "{}",
+                error.message
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 }

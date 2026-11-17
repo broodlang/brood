@@ -476,6 +476,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "turn every `sig` into a runtime checking shim — the static checker's runtime counterpart. The `nest run`/`nest test` default (ADR-381); `=0` opts a run out, `=all` also enforces the prelude's own sigs; a released bundle never arms",
     ),
     f(
+        "BROOD_NO_CONTRACT_DISPATCH",
+        OPTOUT,
+        "`=1`: run every armed contract through its Brood shim instead of the dispatcher checking vouched arguments and the result on return (ADR-748) — the A/B lever for compiled contracts",
+    ),
+    f(
         "BROOD_NO_CONTRACT_BOUNDARY",
         OPTOUT,
         "opt OUT of the contract MODULE BOUNDARY (ADR-383): a module's calls to its own contracted functions go through the shim too, instead of the uncontracted binding",
@@ -620,6 +625,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "BROOD_GUI_BLIT",
         HOST,
         "`=0`: rasterise every dirty strip instead of copying one that is a translation of old pixels (ADR-343) — the escape hatch if a blitted strip ever differs from a drawn one",
+    ),
+    f(
+        "BROOD_GUI_THREADS",
+        HOST,
+        "how many threads the CPU painter draws disjoint row bands on (ADR-737), above its pixel threshold; `=1` draws on the GUI thread alone — the A/B lever, and the escape hatch if a band ever differs from a single-threaded paint",
     ),
     f(
         "BROOD_GUI_COLUMNS",

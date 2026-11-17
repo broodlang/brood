@@ -167,7 +167,55 @@
       ; 1e24, beyond i64
       (table/put t :k big)
       (assert-error (table/incr t :k))
-      (assert= (table/get t :k) big))))
+      (assert= (table/get t :k) big)))
+
+  (test "an incr under a compound key bumps the key it was stored under"
+    (let (t (table/new))
+      (table/incr t [:calls "git/tick"] 1)
+      (table/incr t [:calls "git/tick"] 2)
+      (assert= (table/snapshot t) {[:calls "git/tick"] 3}))))
+
+;; ---- tally: several counters under one key (ADR-742) ----------------------------
+(describe "table: tally"
+  (test "each field adds its delta; an absent key starts at zeros"
+    (let (t (table/new))
+      (assert= (table/tally t :parse [1200 1]) [1200 1])
+      (assert= (table/tally t :parse [800 1]) [2000 2])
+      (assert= (table/tally t :parse [-500 0]) [1500 2])
+      (assert= (table/get t :parse) [1500 2])
+      (assert= (table/tally t 'git/tick [7 1 3]) [7 1 3])))
+
+  (test "an int key leaves the dense shape without losing the int counters beside it"
+    (let (t (table/new))
+      (table/incr t 3 5)
+      (assert= (table/tally t 4 [1 1]) [1 1])
+      (assert= (table/get t 3) 5)
+      (assert= (table/tally t 4 [1 1]) [2 2])))
+
+  (test "a value that is not a tally of that many integers is an error, and left as it was"
+    (let (t (table/new))
+      (table/put t :k "text")
+      (assert-error (table/tally t :k [1 1]))
+      (assert= (table/get t :k) "text")
+      (table/tally t :pair [1 2])
+      (assert-error (table/tally t :pair [1 2 3]))
+      (assert= (table/get t :pair) [1 2])
+      (table/put t :floats [1.5 2])
+      (assert-error (table/tally t :floats [1 1]))
+      (assert-error (table/tally t :fresh [1 "two"]))
+      (is (not (table/contains? t :fresh)))))
+
+  (test "a field past the ±2^63 range is an error, and the tally is left as it was"
+    (let (t (table/new) top 9223372036854775807)
+      (table/tally t :k [top 0])
+      (assert-error (table/tally t :k [1 1]))
+      (assert= (table/get t :k) [top 0])))
+
+  (test "concurrent tallies never lose an update"
+    (let (t (table/new) me (self) n 100)
+      (fold (range n) nil (fn (_ _i) (spawn (do (table/tally t :hits [1 10]) (send me :done)))))
+      (assert= (await-done n) :ok)
+      (assert= (table/get t :hits) [n (* 10 n)]))))
 
 ;; ---- snapshot ---------------------------------------------------------------
 (describe "table: snapshot"

@@ -111,3 +111,81 @@
     (reflect/eval-string "(memo/defmemo memo-test/squared 2 (n) (do (def memo-test/*calls* (inc memo-test/*calls*)) (* n n)))")
     (squared 9)
     (assert= *calls* 2)))
+
+;; ---- defmemo-by: one answer per key, while its input is unchanged (ADR-741) -------------
+
+(defmemo-by sized 64 (id) (value)
+  "The count of `value`, remembered per `id`."
+  (do (def *calls* (inc *calls*)) (count value)))
+
+(defmemo-by pair-sized 64 (kind id) (left right)
+  (do (def *calls* (inc *calls*)) [kind id (count left) (count right)]))
+
+(defmemo-by small 2 (id) (value)
+  (do (def *calls* (inc *calls*)) value))
+
+(describe "defmemo-by"
+  :isolated (test "the same key with the same input is a hit; a changed input runs again"
+    (def *calls* 0)
+    (let (rows [1 2 3])
+      (assert= (sized :a rows) 3)
+      (assert= (sized :a rows) 3)
+      (assert= *calls* 1)
+      (assert= (sized :a [1 2]) 2)
+      (assert= *calls* 2)
+      ;; the key's answer was replaced: the old input misses now
+      (assert= (sized :a rows) 3)
+      (assert= *calls* 3)))
+  :isolated (test "many keys read in turn never evict each other"
+    (def *calls* 0)
+    (let (inputs (into [] (map (range 50) (fn (index) (into [] (range index))))))
+      (fold (range 50) nil (fn (_ index) (sized index (nth inputs index))))
+      (fold (range 50) nil (fn (_ index) (sized index (nth inputs index))))
+      (assert= *calls* 50)
+      (assert= (count (memo/entries 'memo-test/sized)) 50)))
+  :isolated (test "several keys and several inputs: every one is part of the match"
+    (def *calls* 0)
+    (let (left [1] right [1 2])
+      (assert= (pair-sized :k 1 left right) [:k 1 1 2])
+      (assert= (pair-sized :k 1 left right) [:k 1 1 2])
+      (assert= *calls* 1)
+      (pair-sized :k 2 left right)
+      (pair-sized :k 1 left [9])
+      (assert= *calls* 3)
+      (is (contains? (memo/entries 'memo-test/pair-sized) [:k 1]))))
+  :isolated (test "the same big input hits by identity, though a walk could never match"
+    (def *calls* 0)
+    (let (rows (nan-rows 20000))
+      (sized :big rows)
+      (sized :big rows)
+      (assert= *calls* 1)))
+  :isolated (test "a new key past the capacity starts the store over"
+    (def *calls* 0)
+    (small :a 1)
+    (small :b 2)
+    (assert= (count (memo/entries 'memo-test/small)) 2)
+    (small :c 3)
+    (assert= (count (memo/entries 'memo-test/small)) 1)
+    ;; a key already kept is replaced in place, never a reason to start over
+    (small :c 4)
+    (assert= (count (memo/entries 'memo-test/small)) 1)
+    (assert= *calls* 4))
+  :isolated (test "each process keeps its own store"
+    (def *calls* 0)
+    (sized :here [1])
+    (let (parent (self))
+      (spawn (send parent [:child-store (count (memo/entries 'memo-test/sized))]))
+      (receive
+        ([:child-store n] (assert= n 0))
+        (after 5000 (assert= :answer :none)))))
+  :isolated (test "a redefinition starts empty"
+    (def *calls* 0)
+    (let (rows [1 2])
+      (sized :r rows)
+      (reflect/eval-string "(memo/defmemo-by memo-test/sized 64 (id) (value) (do (def memo-test/*calls* (inc memo-test/*calls*)) (count value)))")
+      (sized :r rows)
+      (assert= *calls* 2)))
+  (test "a docstring stays the function's"
+    (is (includes? (or (reflect/doc sized) "") "remembered per")))
+  (test "a key or input list with a marker is refused when the memo is defined"
+    (assert-error (reflect/eval-string "(memo/defmemo-by memo-test/bad 4 (id &optional x) (value) value)"))))

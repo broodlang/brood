@@ -1160,6 +1160,49 @@ pub fn character_chord(c: char, modifiers: KeyModifiers) -> Key {
     ))
 }
 
+/// The longest gap between two presses of one button in one cell that still counts as one
+/// click chain — the double/triple-click window, in milliseconds.
+pub const MULTI_CLICK_MS: u128 = 400;
+
+/// Presses read as click chains — ONE rule for both frontends: a press of the same button in
+/// the same cell within [`MULTI_CLICK_MS`] of the last extends the chain (a double click is
+/// 2, a triple 3), anything else starts one at 1. `B` is the frontend's button.
+#[derive(Clone, Copy, Debug)]
+pub struct ClickChain<B> {
+    last: Option<(u8, B, (u16, u16), std::time::Instant)>,
+}
+
+impl<B> ClickChain<B> {
+    /// No press yet.
+    pub const fn new() -> Self {
+        ClickChain { last: None }
+    }
+}
+
+impl<B> Default for ClickChain<B> {
+    fn default() -> Self {
+        ClickChain::new()
+    }
+}
+
+impl<B: PartialEq + Copy> ClickChain<B> {
+    /// The count of a press of `button` in `cell` at `now`, remembered for the next press.
+    pub fn press(&mut self, button: B, cell: (u16, u16), now: std::time::Instant) -> u8 {
+        let count = match self.last {
+            Some((count, last_button, last_cell, at))
+                if last_button == button
+                    && last_cell == cell
+                    && now.saturating_duration_since(at).as_millis() <= MULTI_CLICK_MS =>
+            {
+                count.saturating_add(1)
+            }
+            _ => 1,
+        };
+        self.last = Some((count, button, cell, now));
+        count
+    }
+}
+
 /// The modifiers a key name spells, frontend-neutral: each frontend reads its own event's
 /// modifier state into one of these and [`named_key`] spells it.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -1283,6 +1326,28 @@ mod under_caret_tests {
         assert_eq!(under.underline_rgb, None);
         assert_eq!(under.family, Some(2));
         assert_eq!(under.scale, 1);
+    }
+}
+
+#[cfg(test)]
+mod click_chain_tests {
+    use super::{ClickChain, MULTI_CLICK_MS};
+    use std::time::{Duration, Instant};
+
+    /// Same button, same cell, inside the window: 1, 2, 3; another cell, another button or
+    /// a pause starts again at 1.
+    #[test]
+    fn presses_chain_into_double_and_triple_clicks() {
+        let mut clicks = ClickChain::new();
+        let start = Instant::now();
+        let soon = |ms: u64| start + Duration::from_millis(ms);
+        assert_eq!(clicks.press("left", (3, 4), soon(0)), 1);
+        assert_eq!(clicks.press("left", (3, 4), soon(100)), 2);
+        assert_eq!(clicks.press("left", (3, 4), soon(200)), 3);
+        assert_eq!(clicks.press("left", (5, 4), soon(250)), 1);
+        assert_eq!(clicks.press("right", (5, 4), soon(300)), 1);
+        let late = 300 + MULTI_CLICK_MS as u64 + 1;
+        assert_eq!(clicks.press("right", (5, 4), soon(late)), 1);
     }
 }
 

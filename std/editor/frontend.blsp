@@ -76,7 +76,10 @@ Merge the result into the display map.
      ;; a kill reaches the clipboard of the machine the user sits at: the desktop's
      ;; when there is one, the TERMINAL's (OSC 52) over ssh or on a console (ADR-587)
      :clipboard-set (fn (text) (term-clipboard-set text))
-     :primary-set (fn (text) (term-clipboard-set text :primary))}
+     :primary-set (fn (text) (term-clipboard-set text :primary))
+     ;; the window options a terminal has: its title (`term/title`), as a window's
+     :configure (fn (options)
+                  (when (string? (get options :title)) (term/title (get options :title))))}
     (display-polls (fn (ms) (term-signal-input (ui-receive-tagged ms))))))
 
 (def- term-signals [:tstp :cont :term :hup])
@@ -262,6 +265,16 @@ answers nil, so the loop folds what its `:poll` returns in arrival order, as bef
     (editor/frontend/display-poll-input {})   ;=> nil"
   (let (poll-input (get display :poll-input))
     (if poll-input (poll-input) nil)))
+
+(defn display-configure (display options)
+  "Ask `display` for the window options in `options` it can still change — `:title` everywhere
+(a window's title bar, a terminal's title through OSC 2, a thin client's window), `:input` on
+a window — through its `:configure`. A display without one ignores them. Returns nil.
+
+    (editor/frontend/display-configure {} {:title \"notes\"})   ;=> nil"
+  (let (configure (get display :configure))
+    (when configure (configure options))
+    nil))
 
 (defn display-input-pending? (display)
   "Whether input is queued for `display` — without taking it: its `:input-pending?`. A window

@@ -108,6 +108,37 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         table_free);
 }
 
+/// `%table-tally` (ADR-742), registered last in `builtins::register` (a new primitive takes
+/// the next slot, after every one before it).
+pub(super) fn register_tally(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    primitives.def(
+        kw::TABLE_TALLY,
+        Arity::exact(3),
+        Sig::new(vec![table_ty, any, vec_ty], vec_ty),
+        &["t", "k", "deltas"],
+        "Atomically add each of deltas (a vector of integers) to the matching field of the tally at key k in table t — a vector of integers as long as deltas, an absent key counting as all zeros — and return the new tally. One lock and one key lookup for every field: a counter of several things at once (time and calls, bytes and messages). Errors, leaving the table as it was, when the value at k is not a tally of that many integers or a field would leave the ±2^63 range. Use table/tally.",
+        table_tally,
+    );
+}
+
+/// `(%table-tally t k deltas)` — see [`register_tally`].
+pub(super) fn table_tally(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = keyed_table(heap, "table/tally", args)?;
+    let deltas = match arg(args, 2) {
+        Value::Vector(vector) => heap
+            .vector(vector)
+            .to_vec()
+            .into_iter()
+            .map(|delta| expect_int(heap, "table/tally", delta))
+            .collect::<Result<Vec<i64>, LispError>>()?,
+        other => return Err(LispError::wrong_type(heap, "table/tally", "vector", other)),
+    };
+    crate::core::table::tally(heap, id, arg(args, 1), &deltas)
+}
+
 // ---------- in-memory shared mutable table (ADR-107) ----------
 // A `Value::Table(id)` handle; the store lives in `crate::core::table`. These builtins are
 // thin wrappers — all the storage / locking / clone-in-clone-out lives there.

@@ -223,19 +223,8 @@ on screen (roughly centred), clamped so the window never runs past the end."
 ;; absolute `text` ops (the observer paints a full frame), where lineedit emits
 ;; relative `[:print …]` ops — both over the same `highlight-chunks`.
 
-(defn- observe-chunk-ops-acc (chunks row col acc)
-  (if (empty? chunks)
-    (reverse acc)
-    (let ([s f] (first chunks))
-      (observe-chunk-ops-acc (rest chunks)
-        row
-        (+ col (count s))
-        (cons (text row col s f) acc)))))
-
-(defn- observe-chunk-ops (chunks row col)
-  "Lay `[substring face]` highlight chunks as absolute `text` ops on `row`, left to
-right from column `col`. Tail-recursive."
-  (observe-chunk-ops-acc chunks row col nil))
+;; the chunks are laid out by `editor/display/chunk-ops` — tabs at the line's stops, a wide
+;; glyph two cells — the layout every highlighted line shares
 
 (defn- observe-minibuffer
   (edit: (record &open :prompt string :text string :hscroll (or int nil) :point int)
@@ -258,7 +247,7 @@ completion already works via `lineedit/lineedit-handle`'s keymap in `observe-com
         chunks (highlight-chunks input hs vis overrides)
         cursor-col (math/min (math/max 0 (dec cols)) (+ promptw (- point hs))))
     (append [(text row 0 prompt (face :observer/minibuffer-prompt))]
-      (observe-chunk-ops chunks row promptw)
+      (chunk-ops row promptw chunks)
       [(cursor row cursor-col)])))
 
 (defn- observe-confirm-line (c)

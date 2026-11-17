@@ -18,6 +18,13 @@ use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
 
+/// Whether `name` is a `%`-name — a kernel primitive or a module's internal, bare (`%conj-one`)
+/// or qualified (`string/%orig%char-at`): never offered to a reader. The rule
+/// `reflect/internal-name?` states for Brood callers.
+pub fn is_internal_name(name: &str) -> bool {
+    name.starts_with('%') || name.contains("/%")
+}
+
 /// Every global the interpreter knows (prelude + builtins), sorted by spelling
 /// (`reflect/global-names` sorts) — the completion candidate pool.
 pub fn global_names(interp: &mut Interp) -> Vec<String> {

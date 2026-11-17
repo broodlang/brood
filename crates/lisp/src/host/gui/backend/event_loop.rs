@@ -780,21 +780,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 if let Some(b) = translate_button(button) {
                     w.held = Some(b);
                     let (col, row) = w.pointer();
-                    // Click-chain count: a fresh press in the same cell, with the same
-                    // button, within MULTI_CLICK_MS of the previous extends the chain
-                    // (double/triple-click); anything else restarts at 1.
-                    let now = Instant::now();
-                    let count = match w.last_click {
-                        Some((c, lb, lcell, lt))
-                            if lb == b
-                                && lcell == (col, row)
-                                && now.duration_since(lt).as_millis() <= MULTI_CLICK_MS =>
-                        {
-                            c.saturating_add(1)
-                        }
-                        _ => 1,
-                    };
-                    w.last_click = Some((count, b, (col, row), now));
+                    // the click-chain count (double/triple click): `ClickChain`, the rule
+                    // the terminal counts by too
+                    let count = w.clicks.press(b, (col, row), Instant::now());
                     deliver(
                         w.subscriber,
                         mouse_message(&Mouse {

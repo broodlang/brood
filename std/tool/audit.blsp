@@ -30,10 +30,6 @@ otherwise, so it does not depend on an author's choice of spelling.")
 (defn- callable? (name)
   (let (kind (type-of (reflect/eval name))) (or (= kind :fn) (= kind :native))))
 
-(defn- internal? (name)
-  (let (text (->string name))
-    (or (string/starts-with? text "%") (includes? text "/%"))))
-
 (def- builtin-module-names
   ;; The 104 modules the binary bakes in — `reflect/builtin-modules` is the registry,
   ;; so this cannot drift from what actually ships.
@@ -87,7 +83,7 @@ private, and anything defined outside `std/`.
     (> (count (audit/public-names)) 100)   ;=> true"
   (sort (seq/filterv (reflect/global-names)
           (fn (name)
-            (and (not (internal? name))
+            (and (not (reflect/internal-name? name))
               (not (reflect/private? name))
               (bound? name)
               (callable? name)

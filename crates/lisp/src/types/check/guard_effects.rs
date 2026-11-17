@@ -40,6 +40,7 @@ pub(super) const EFFECTFUL_IN_GUARD: &[&str] = &[
     kw::TABLE_INCR,
     kw::TABLE_ADD,
     kw::TABLE_SUB,
+    kw::TABLE_TALLY,
     kw::TABLE_DELETE,
     kw::TABLE_DROP,
     kw::TABLE_FREE,
