@@ -1911,3 +1911,31 @@ shrinker then re-ran five configs of up to 120 s each for up to 250 attempts. Ge
 `:timeout-ms`, and a shrink stops at ten minutes of wall clock. Before the fix, 4 lanes × 5
 rounds flagged seed 4 in 15 of 20 runs and timed out a whole round; after it, 6 lanes × 5 rounds
 agreed on all 25 seeds 30 times out of 30.
+
+2026-11-17 (ADR-750). **An import spelled like a language name, used bare, is declared.** The
+last shadow that only warned: `(:use version)` and a bare `(compare …)` called the import with a
+stderr line. Now the bare use fails compilation unless the header says `(:shadow compare)`,
+through ADR-735's clause and error channel, checked at the use like an import clash so an
+unused import costs nothing. All 147 std modules load; three test headers declare theirs; the
+downstream projects check clean apart from those still on a store release without ADR-735's
+`(:shadow fields)` (hatch, mur-forge, store-postgres, sqlite's tests). sqlite's `quote` local,
+refused since ADR-734, is `open-quote`.
+
+2026-11-17 (error location). **A loaded module's compile error is located in the module.** A
+qualified call head loads its module while the calling form expands (`require_qualified_head`),
+and the expander boundary sends every position an expansion picks up to the call (ADR-618), so
+a `let` binding `if` in `lazylib.blsp` was reported at the caller's `(lazylib/ok 1)`. A load
+error that already has a file and line is now pinned (`pos_from_at` became `pos_pinned`, which
+also covers `reflect/error-at`), and the checker's compile-error finding stays at the
+referencing form, since a finding is a place in the checked file, with the module's
+`file:line:col` in its message. Guard `crates/cli/tests/loaded_module_error_location.rs`, red
+with either half removed. A `(:use …)` load was already right: it runs outside any expansion.
+
+2026-11-17 (packages). **store 0.9.6 and store-postgres 0.10.3 published**, carrying the
+`(:shadow …)` headers ADR-735 requires; hatch, mur-forge and sqlite moved to them, and sqlite's
+`quote` local, refused since ADR-734, is `open-quote`. Moving sqlite's dev `store` found that
+`nest fetch`/`update`/`tree` read `:dependencies` alone while setup locks the dev ones too:
+a dev-only project locked nothing, and `update` dropped dev entries from a mixed lock. They
+now read both (`package-locked-deps`); guard `crates/nest/tests/dev_dependencies_lock.rs`, red
+with the helper back to production dependencies only.
+

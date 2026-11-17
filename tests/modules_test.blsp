@@ -277,18 +277,27 @@
     (%load-string (str "(defmodule clcons2 (:use clpa2) (:use clpb2 :exclude [thing]))"
                     " (defn f (x) (thing x))"))
     (assert= (clcons2/f 5) (list :a 5)))
-  ;; Shadowing a prelude name via `:use` is ALLOWED (the import wins for a bare
-  ;; reference) but warns on stderr — the warning is a compile-time advisory printed
-  ;; directly (like the reload diagnostics), not through Brood's redirectable stream,
-  ;; so this checks the behaviour; reach the prelude original as `/inc`.
-  (test "a :use import that shadows a prelude name is allowed (the import wins)"
+  ;; An import spelled like a prelude name (ADR-750): a bare use fails compilation unless the
+  ;; importer's header declares `(:shadow name)`; then the import wins and `/inc` still
+  ;; reaches the prelude's. An importer that never writes the name bare compiles as before.
+  (test "a :use import that shadows a prelude name wins only where the header declares it"
     (%load-string "(defmodule shdprov (:shadow inc)) (defn inc (x) (list :shd x))")
     (%load-string
-      (str "(defmodule shdcons (:use shdprov))"
+      (str "(defmodule shdcons (:use shdprov) (:shadow inc))"
         " (defn mine (x) (inc x))" ; imported shdprov/inc wins
         " (defn orig (x) (/inc x))")) ; /inc still reaches prelude
     (assert= (shdcons/mine 5) (list :shd 5))
-    (assert= (shdcons/orig 5) 6))
+    (assert= (shdcons/orig 5) 6)
+    (%load-string "(defmodule shdquiet (:use shdprov)) (defn mine (x) (shdprov/inc (/inc x)))")
+    (assert= (shdquiet/mine 5) (list :shd 6))
+    (let (message (try
+                    (do
+                      (%load-string "(defmodule shdbare (:use shdprov)) (defn mine (x) (inc x))")
+                      nil)
+                    (catch caught (error-message caught))))
+      (is (string? message))
+      (is (includes? message "`shdbare` uses `inc` bare"))
+      (is (includes? message "(:shadow inc)"))))
   (test "a module's defdyn is imported like any public name (ADR-722)"
     ;; Bare inside the importer, both to read and to `binding`; an importer that excludes
     ;; the name may declare its own.

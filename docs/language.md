@@ -4085,7 +4085,12 @@ compiler, `for`, `receive`, `with`) write their root names `/name`, and
 Import other namespaces' names with `(:use …)` clauses in the header. `(:use mod)`
 refers all of `mod`'s public names bare; `(:use mod :only [a b])` refers just
 those. A bare reference resolves **current namespace → imports → root**, so an
-own-namespace definition shadows an import. `:use` auto-loads the module (it never
+own-namespace definition shadows an import. **An import spelled like a name the language
+ships is held to the same header rule** (ADR-750): `(:use version)` brings in
+`version/compare`, and a bare `(compare …)` in the importer fails compilation, naming both
+meanings, until the header says `(:shadow compare)`; then the import wins and `/compare` is the
+language's. An importer that never writes the name bare needs nothing, and
+`(:use version :exclude [compare])` keeps the language's. `:use` auto-loads the module (it never
 *fetches* a package — declared deps only). There is **no `require` form** — you load
 a module by *referencing* it: a `(:use mod)` clause loads `mod` and refers its names
 bare, and otherwise **a qualified reference `mod/name` auto-infers the load**

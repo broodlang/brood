@@ -13,6 +13,22 @@ file. And a caught checker panic with stderr piped to a reader that had already 
 (`brood --check f | grep -q …`) aborted the process with a core dump, from the crash
 reporter's own `eprintln!`; that line is now written best-effort.
 
+**Fixed: `nest fetch`, `nest update` and `nest tree` cover `:dev-dependencies`.** A project
+with only dev dependencies answered "no dependencies declared" and locked nothing, and
+`nest update` in a project with both wrote a lock without the dev ones (setup re-added them
+on the next run).
+
+**Fixed: a compile error inside a module a qualified reference loads names the module's
+line.** `(lazylib/ok 1)` loading a `lazylib` that does not compile reported the error at the
+caller's `(lazylib/ok 1)`; it now reports `lazylib.blsp:6:8`, and the pre-flight check's
+finding, at the referencing form, names that line in its message.
+
+**Changed (breaking): a bare use of an import spelled like a language name declares it
+(ADR-750).** `(defmodule m (:use version))` then a bare `(compare …)` used to call
+`version/compare` with a warning on stderr; now it fails compilation, naming both meanings,
+until the header adds `(:shadow compare)`. A module that never writes the name bare is
+unaffected; `:exclude` keeps the language's. `BROOD_NO_SHADOW_WARN` is gone with the warning.
+
 **Changed (breaking): a module that defines a name the language ships declares it (ADR-735).**
 `(defmodule m) (defn get …)` now fails compilation, naming the clause to add; with
 `(defmodule m (:shadow get))` it works as before — the module's `get` inside `m`, `/get` for the

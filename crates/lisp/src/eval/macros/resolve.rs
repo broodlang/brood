@@ -190,6 +190,27 @@ pub(crate) fn shadow_declared_key(name: &str) -> value::Symbol {
 /// declares it with `(:shadow name)` (ADR-735, extending ADR-423's macro warning to every
 /// root name and making it an error): inside the module its own definition wins, so every
 /// bare use there means something else, and that must be visible where a reader looks first.
+/// A bare `name` this module imports, where the language ships a `name` too (ADR-750): the
+/// import wins only when the header says so with `(:shadow name)`; otherwise the use fails
+/// compilation, naming both. Checked where the name is USED, as an import clash is
+/// (ADR-235): a module that never writes the name bare has nothing to confuse.
+fn refuse_undeclared_import_shadow(
+    heap: &Heap,
+    ns_name: &str,
+    name: value::Symbol,
+    imported: value::Symbol,
+) {
+    let bare = value::symbol_name_ref(name);
+    if bare.starts_with('%')
+        || !heap.is_root_name(name)
+        || heap.is_private(name)
+        || heap.import_of(shadow_declared_key(bare)).is_some()
+    {
+        return;
+    }
+    crate::eval::derive::record_undeclared_import_shadow(name, imported, value::intern(ns_name));
+}
+
 fn refuse_undeclared_shadow(heap: &Heap, ns_name: &str, name: value::Symbol) {
     let bare = value::symbol_name_ref(name);
     if bare.contains('/')
@@ -855,6 +876,7 @@ pub(super) fn resolve_sym(
         crate::eval::derive::record_ambiguous(s, candidates);
         s
     } else if let Some(imported) = heap.import_of(s) {
+        refuse_undeclared_import_shadow(heap, ns_name, s, imported);
         imported
     } else if heap.ns_assume_own()
         && !is_syntax_keyword(s)

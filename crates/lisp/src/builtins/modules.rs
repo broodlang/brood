@@ -1602,15 +1602,13 @@ pub(super) fn resolve_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 ///   without qualification (resolvable then with `:only`/`:exclude`, an alias, or a
 ///   qualified call). Re-importing the *same* qualified name (a re-`:use` of the same
 ///   module) is a no-op, so idempotent reloads are fine.
-/// - **Shadow (warning).** If `bare` already names a live root/prelude/builtin global,
-///   the import shadows it — allowed (the resolver gives an import precedence over
-///   root), but warned. Reach the original with the `/name` root escape, or
-///   silence per-name with `:exclude`. `BROOD_NO_SHADOW_WARN` mutes the class.
+/// - **Shadow (lazy, ADR-750).** If `bare` names a root name the language ships, the import
+///   is recorded all the same; the resolver refuses a bare use of it unless the header
+///   declares `(:shadow bare)`. `/bare` reaches the root one, `:exclude` drops the import.
 fn refer_add(
     heap: &mut Heap,
     bare: value::Symbol,
     qualified: value::Symbol,
-    mod_name: &str,
 ) -> Result<(), LispError> {
     // A module's dynamic variable (`mod/*x*`) is imported like any other public name
     // (ADR-722); no import is skipped for being dynamic.
@@ -1628,23 +1626,8 @@ fn refer_add(
         heap.mark_import_ambiguous(bare, qualified);
         return Ok(());
     }
-    // A PRIVATE root name (a prelude `def-`) is unreachable outside its module, so an import
-    // spelled the same shadows nothing a program could have referred to.
-    if heap.env_get(value::EnvId::GLOBAL, bare).is_some()
-        && !heap.is_private(bare)
-        && std::env::var_os("BROOD_NO_SHADOW_WARN").is_none()
-    {
-        let b = value::symbol_name(bare);
-        let global = heap.global();
-        crate::builtins::warn_line(
-            heap,
-            global,
-            &format!(
-                "warning: (:use {mod_name}) refers `{b}`, which shadows the prelude/root `{b}`; \
-                 reach the original as `/{b}`, or drop it with `:exclude [{b}]`"
-            ),
-        );
-    }
+    // An import spelled like a name the language ships is not refused here: the resolver
+    // refuses a bare USE of it unless the header declares `(:shadow name)` (ADR-750).
     heap.add_import(bare, qualified);
     Ok(())
 }
@@ -1810,7 +1793,7 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                     if excluded.contains(&bare_sym) {
                         continue;
                     }
-                    refer_add(heap, bare_sym, g, &mod_name)?;
+                    refer_add(heap, bare_sym, g)?;
                     referred += 1;
                 }
             }
@@ -1871,7 +1854,7 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                         "(:use {mod_name} :only [... {bare_name} ...]): `{bare_name}` is module-private (ADR-146); grant access with (:use-internals {mod_name}) or use the public API"
                     )));
                 }
-                refer_add(heap, bare, qualified, &mod_name)?;
+                refer_add(heap, bare, qualified)?;
             }
         }
     }

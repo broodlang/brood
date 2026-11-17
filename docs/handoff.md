@@ -81,8 +81,9 @@ ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character ty
    stay out: the engine is linear by design (ADR-389).
 4. ~~**`std/url`: resolving against a base URL.**~~ — done by ADR-733 (2026-11-17), RFC 3986 §5
    strict. WHATWG stays out.
-5. **A declared shadow for root functions.** Only a shadowing macro warns (ADR-423). After
-   1.0: a new lint starts advisory (ADR-698), so it is additive.
+5. ~~**A declared shadow for root functions.**~~ — done by ADR-735 and ADR-750 (2026-11-17):
+   a module defining a root name, or using an import spelled like one bare, declares it with
+   `(:shadow name)` or fails compilation. No warning is left.
 6. ~~**"Reduce before adding"**~~ — decided by ADR-674; both stages landed (2026-11-11).
 7. **The non-tail lint:** mutual `letrec` recursion, `try` bodies, conditional-position demands.
 8. **View patterns** (low to medium value).
