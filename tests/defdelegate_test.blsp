@@ -1,4 +1,4 @@
-;; tests/defdelegate_test.blsp — `defdelegate` (ADR-751): a module's function that is another
+;; tests/defdelegate_test.blsp — `defdelegate` (ADR-753): a module's function that is another
 ;; module's, by name, forwarding every kind of parameter and staying late-bound.
 (defmodule defdelegate-test
   (:use test))
@@ -10,7 +10,10 @@
 (defn target-rebound (a b) (+ a b))
 
 (defdelegate sum (a b) defdelegate-test :as target-sum)
-(defdelegate optional (a &optional (b 10)) defdelegate-test :as target-optional)
+(defdelegate optional (a &optional b) defdelegate-test :as target-optional)
+(defdelegate typed-sum (a:int b:int -> int) defdelegate-test :as target-sum)
+(defn target-key ({:keys [p]}) p)
+(defdelegate key-of ({:keys [p]}) defdelegate-test :as target-key)
 (defdelegate rest-of (a & more) defdelegate-test :as target-rest)
 (defdelegate join (parts separator) string)
 (defdelegate rebound (a b) defdelegate-test :as target-rebound)
@@ -19,9 +22,14 @@
   (test "forwards plain arguments, to the same name or the :as one"
     (assert= 5 (sum 2 3))
     (assert= "a-b" (join ["a" "b"] "-")))
-  (test "forwards an optional argument, given or defaulted by the target's own default"
+  (test "forwards an optional argument, given or defaulted by the TARGET's default"
     (assert= [1 2] (optional 1 2))
     (assert= [1 10] (optional 1)))
+  (test "a typed parameter list and a destructuring pattern are documentation: the arguments go through"
+    (assert= 5 (typed-sum 2 3))
+    (assert= 1 (key-of {:p 1})))
+  (test "a wrong arity is the target's error"
+    (assert= :raised (try (sum 1) (catch _ :raised))))
   (test "forwards a rest argument"
     (assert= [1 '(2 3)] (rest-of 1 2 3))
     (assert= [1 nil] (rest-of 1)))
@@ -30,4 +38,5 @@
     (defn target-rebound (a b) (* a b))
     (assert= 6 (rebound 2 3)))
   (test "names its target in its docstring"
-    (is (includes? (reflect/doc join) "[[string/join]]"))))
+    (is (includes? (reflect/doc join) "[[string/join]]"))
+    (is (includes? (reflect/doc join) "(join parts separator)"))))

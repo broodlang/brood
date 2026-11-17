@@ -1005,7 +1005,7 @@ be made (nothing is written then).
             0)))))
 
 ;; ---- renaming a module ------------------------------------------------------------------
-;; A module renamed — `panebody` to `display/panebody`, a project cut into contexts (ADR-750) —
+;; A module renamed — `panebody` to `display/panebody`, a project cut into contexts (ADR-752) —
 ;; is every reference to it renamed: the qualified names in code and in quoted data, the header
 ;; clauses that name it, and the backticked mentions in prose. A local that shares the module's
 ;; bare name (`region`, `pool`) is a different thing and is never touched: a bare name is renamed
@@ -1029,12 +1029,15 @@ under `lsp`) or of anything in one: it belongs to that module, which this rename
         renamed (fn (name)
                   (if (and (string/starts-with? name prefix)
                         (not (nested-name? name))
-                        ;; already renamed (`to` may sit under `from`: lsp to lsp/client)
-                        (not (string/starts-with? name (str to "/"))))
+                        ;; already renamed, when `to` sits under `from` (lsp to lsp/client): a
+                        ;; name under `to` is not renamed again. Only then: renaming `ui/pane`
+                        ;; to `ui` still renames `ui/pane/draw`
+                        (not (and (string/starts-with? to prefix)
+                               (string/starts-with? name (str to "/")))))
                     (str to "/" (string/substring name (count prefix) (count name)))
                     name))
         symbols (rewrite-symbols-text text (fn (name _) (renamed name)))
-        clause (str "\\((defmodule|:use|:use-internals|:alias)(\\s+)"
+        clause (str "\\((defmodule|:use|:use-internals|:alias|require|require-one)(\\s+'?)"
                  (regex/escape from)
                  "([\\s)])"))
     (-> (regex/replace symbols clause (str "($1$2" to "$3"))

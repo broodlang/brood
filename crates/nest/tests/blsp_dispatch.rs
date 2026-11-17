@@ -761,7 +761,7 @@ fn attach_needs_a_spec_and_both_frontends_refuse_a_pipe_before_touching_the_scre
     );
 }
 
-// ── `nest deps` (ADR-750): the project's module graph read as contexts by name.
+// ── `nest deps` (ADR-752): the project's module graph read as contexts by name.
 
 #[test]
 fn deps_lists_a_reference_into_another_context_s_detail_and_check_fails_on_it() {

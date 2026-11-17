@@ -96,7 +96,6 @@ mod wasm;
 pub use build_info::compiled_features;
 pub(crate) use build_info::{build_id_string, stdlib_id_string};
 
-pub(crate) use io::warn_line;
 pub use io::{begin_stdout_capture, take_captured_stdout};
 pub(crate) use processes::interrupt_ceiling;
 // The checker specializes `(string/->number "1")` to the literal `1`, and may only do so by

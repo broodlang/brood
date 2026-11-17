@@ -297,6 +297,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `tool/explain.blsp` (`explain`) — Teach-the-error and intent→idiom lookup for agents and the REPL: `(error "E0030")` explains an error code (or a caught error map); `(find-pattern "loop")` returns the idiomatic Brood pattern for a task.
 - `tool/grammar.blsp` (`grammar`) — Generate editor syntax grammars from `(reflect/special-forms)` — one source of truth, no drift across editors.
 - `tool/mcp.blsp` (`mcp`) — The `nest mcp` server: the Model Context Protocol over stdio (ADR-036, docs/mcp.md) — the JSON-RPC loop, its dispatch and error mapping, and the tool catalogue it serves.
+- `tool/module-graph.blsp` (`module-graph`) — `nest deps` — a project's module dependencies, read as CONTEXTS (ADR-752).
 - `tool/module-index.blsp` (`module-index`) — The project's file → modules index (ADR-380): which `(defmodule NAME …)` forms each source file declares, cached on disk at `.brood/module-index` and keyed per file by size and mtime, so a warm start reads NO source file to learn the module graph.
 - `tool/nest.blsp` (`nest`) — The `nest` command line: argv parsing and dispatch for the subcommands implemented in Brood (ADR-322).
 - `tool/observer.blsp` (`observer`) — An interactive process observer — showing this runtime's node stats and a navigable table of live processes (id, name, status, mailbox backlog, memory, monitors), built on the display seam (M3, ADR-046) over `proc/info`.

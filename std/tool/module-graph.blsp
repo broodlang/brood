@@ -1,5 +1,5 @@
 (defmodule module-graph
-  "`nest deps` — a project's module dependencies, read as CONTEXTS (ADR-750).
+  "`nest deps` — a project's module dependencies, read as CONTEXTS (ADR-752).
 
 A context is a module and the modules named under it: `display` is the context, and
 `display/panebody` a detail of it, by the name alone — nothing declares it, as nothing declares a

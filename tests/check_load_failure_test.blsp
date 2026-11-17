@@ -25,3 +25,16 @@
   (test "a module that is simply not there is not this finding"
     (let (found (reflect/check-string-structured "(defmodule loadfail-user-2 (:use loadfail-nowhere))\n(defn run () 1)\n"))
       (is (not (any? found (fn (finding) (includes? (:message finding) "does not load"))))))))
+
+(describe "a used module that does not load, by every clause and beside other findings"
+  (test ":use … :exclude and :alias report it too, at their clause"
+    (let (excluded (reflect/check-string-structured "(defmodule loadfail-user-3 (:use loadfail-broken :exclude [assist]))\n(defn run () 1)\n")
+          aliased (reflect/check-string-structured "(defmodule loadfail-user-4 (:alias loadfail-broken :as lb))\n(defn run () 1)\n"))
+      (is (any? excluded
+            (fn (finding) (includes? (:message finding) "loadfail-broken does not load"))))
+      (is (any? aliased
+            (fn (finding) (includes? (:message finding) "loadfail-broken does not load"))))
+      (assert= (:line (first aliased)) 1)))
+  (test "a qualified typo into a module that loads is still reported"
+    (let (found (reflect/check-string-structured "(defmodule loadfail-user-5 (:use loadfail-broken))\n(defn run () (string/jion [\"a\"] \"\"))\n"))
+      (is (any? found (fn (finding) (includes? (:message finding) "string/jion")))))))

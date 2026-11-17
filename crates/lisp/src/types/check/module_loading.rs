@@ -93,7 +93,16 @@ pub(super) fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol) -> Option<crate::e
     // A module that is not there is the absent-module check's to report; one that is there and
     // fails to load is answered, so the clause naming it can say so (`ImportScope::load_failures`).
     match crate::eval::eval(heap, form, root) {
-        Err(error) if !error.message.contains("cannot find module") => Some(error),
+        // "cannot find module" about THIS module: absent, not broken. One about a module it uses
+        // is this module failing to load, and reported
+        Err(error)
+            if !(error.message.contains("cannot find module")
+                && error
+                    .message
+                    .contains(&format!("'{}'", value::symbol_name(mod_sym)))) =>
+        {
+            Some(error)
+        }
         _ => None,
     }
 }

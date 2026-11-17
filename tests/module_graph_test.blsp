@@ -1,4 +1,4 @@
-;; tests/module_graph_test.blsp — `nest deps` (std/tool/module-graph.blsp, ADR-750): a project's
+;; tests/module_graph_test.blsp — `nest deps` (std/tool/module-graph.blsp, ADR-752): a project's
 ;; module graph read as contexts by name, the references into another context's detail, and
 ;; the contexts that reach each other.
 (defmodule module-graph-test

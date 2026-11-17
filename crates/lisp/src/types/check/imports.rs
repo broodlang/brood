@@ -283,6 +283,35 @@ impl ImportScope {
     }
 }
 
+/// Load `mod_sym` for a header clause (`clause` names its kind, `written` the module as the file
+/// spells it); a module that is there and fails to load is a finding at the clause, with its own
+/// error ([`ImportScope::load_failures`]).
+fn note_load_failure(
+    scope: &mut ImportScope,
+    heap: &mut Heap,
+    mod_sym: Symbol,
+    clause: &str,
+    written: &str,
+    pos: Option<Pos>,
+) {
+    if let Some(error) = ensure_loaded(heap, mod_sym) {
+        let at = match (&error.file, error.pos) {
+            (Some(file), Some(error_pos)) => {
+                format!("{file}:{}:{}: ", error_pos.line, error_pos.col)
+            }
+            _ => String::new(),
+        };
+        scope.load_failures.push(Finding::new(
+            Lint::CompileError,
+            pos,
+            format!(
+                "({clause} {written}): {written} does not load — {at}{}",
+                error.message
+            ),
+        ));
+    }
+}
+
 pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope {
     let mut scope = ImportScope::default();
     // PASS A — parse the clauses into GC-STABLE data (`Symbol`s are Copy `u32`) with NO
@@ -291,9 +320,9 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
     enum Clause {
         // (module, Some(:only subset) | None = all public, the clause's position)
         Use(Symbol, Option<Vec<Symbol>>, Option<Pos>),
-        UseExcept(Symbol, Vec<Symbol>), // (:use mod :exclude [names]) — all public minus names
-        Alias(Symbol, Symbol),          // (short-prefix-name, module)
-        UseInternals(Symbol),           // (:use-internals mod) — ADR-146 grant
+        UseExcept(Symbol, Vec<Symbol>, Option<Pos>), // (:use mod :exclude [names]) — all public minus names
+        Alias(Symbol, Symbol, Option<Pos>),          // (short-prefix-name, module)
+        UseInternals(Symbol),                        // (:use-internals mod) — ADR-146 grant
         Shadow(Symbol), // (:shadow name …) — a declared root-name shadow, ADR-423/735
     }
     let mut clauses: Vec<Clause> = Vec::new();
@@ -348,7 +377,11 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                         let pos = heap.form_pos_only(*clause);
                         clauses.push(Clause::Use(mod_sym, Some(names), pos));
                     } else {
-                        clauses.push(Clause::UseExcept(mod_sym, names));
+                        clauses.push(Clause::UseExcept(
+                            mod_sym,
+                            names,
+                            heap.form_pos_only(*clause),
+                        ));
                     }
                 } else {
                     clauses.push(Clause::Use(mod_sym, None, heap.form_pos_only(*clause)));
@@ -385,7 +418,7 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                         heap.form_pos_only(*clause),
                     ));
                 } else {
-                    clauses.push(Clause::Use(mod_sym, None, None));
+                    clauses.push(Clause::Use(mod_sym, None, heap.form_pos_only(*clause)));
                 }
             } else if value::symbol_is(*kw_sym, "shadow") {
                 for name in citems.iter().skip(1) {
@@ -409,7 +442,7 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                         value::intern(mn.rsplit('/').next().unwrap_or(&mn))
                     }
                 };
-                clauses.push(Clause::Alias(short, mod_sym));
+                clauses.push(Clause::Alias(short, mod_sym, heap.form_pos_only(*clause)));
             }
         }
     }
@@ -445,22 +478,7 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                 let mod_name = value::symbol_name(mod_sym);
                 scope.used.push(mod_name.clone());
                 let prefix = format!("{}/", mod_name);
-                if let Some(error) = ensure_loaded(heap, mod_sym) {
-                    let at = match (&error.file, error.pos) {
-                        (Some(file), Some(error_pos)) => {
-                            format!("{file}:{}:{}: ", error_pos.line, error_pos.col)
-                        }
-                        _ => String::new(),
-                    };
-                    scope.load_failures.push(Finding::new(
-                        Lint::CompileError,
-                        pos,
-                        format!(
-                            "(:use {written}): {written} does not load — {at}{}",
-                            error.message
-                        ),
-                    ));
-                }
+                note_load_failure(&mut scope, heap, mod_sym, ":use", &written, pos);
                 match subset {
                     Some(names) => {
                         // Mirror the runtime `%refer`: a module-private name in `:only`
@@ -509,12 +527,13 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                     }
                 }
             }
-            Clause::UseExcept(mod_sym, excluded) => {
+            Clause::UseExcept(mod_sym, excluded, pos) => {
+                let written = value::symbol_name(mod_sym);
                 let mod_sym = heap.root_module_name(mod_sym); // ADR-070, as in Clause::Use
                 let mod_name = value::symbol_name(mod_sym);
                 scope.used.push(mod_name.clone());
                 let prefix = format!("{}/", mod_name);
-                ensure_loaded(heap, mod_sym);
+                note_load_failure(&mut scope, heap, mod_sym, ":use", &written, pos);
                 let excluded: std::collections::HashSet<Symbol> = excluded.into_iter().collect();
                 for (bare, qual) in deps::obs_module_exports(heap, &prefix) {
                     if !excluded.contains(&bare) {
@@ -533,14 +552,15 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                 let key = crate::eval::macros::shadow_declared_key(&value::symbol_name(name));
                 heap.add_import(key, name);
             }
-            Clause::Alias(short, mod_sym) => {
+            Clause::Alias(short, mod_sym, pos) => {
                 // Root the alias TARGET (ADR-070) so `short/name` resolves to `pkg/mod/name`;
                 // the local `short` prefix is unchanged.
+                let written = value::symbol_name(mod_sym);
                 let mod_sym = heap.root_module_name(mod_sym);
                 // The runtime clause `require-one`s the target; the checker must too, or the
                 // module's `deftype`s are not in the alias table when a `sig` says `short/name`
                 // (a CALL `short/name` infers its load lazily, ADR-227 — a type name cannot).
-                ensure_loaded(heap, mod_sym);
+                note_load_failure(&mut scope, heap, mod_sym, ":alias", &written, pos);
                 let key = value::intern(&format!("{}/", value::symbol_name(short)));
                 heap.add_import(key, mod_sym);
                 scope

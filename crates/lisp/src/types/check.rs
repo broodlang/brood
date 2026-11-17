@@ -684,10 +684,17 @@ fn check_file_passes(
             file_started.elapsed().as_millis(),
         );
     }
-    // A used module that failed to load leaves its names unbound here: those findings are
-    // guesses, and the load failure (reported at its clause) is the problem.
+    // A used module that failed to load leaves the names it gives unbound here: a BARE unbound
+    // name is a guess, and the load failure (reported at its clause) is the problem. A
+    // qualified one (`string/jion`) and every other finding stay: they are not about the import.
     if import_failed_to_load {
-        out.retain(|finding| finding.lint != Lint::Unbound);
+        out.retain(|finding| {
+            finding.lint != Lint::Unbound
+                || !finding
+                    .message
+                    .strip_prefix("unbound symbol: ")
+                    .is_some_and(|name| !name.contains('/'))
+        });
     }
 }
 

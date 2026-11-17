@@ -222,22 +222,6 @@ pub(super) fn write_err(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(Value::nil())
 }
 
-/// Write one warning line through the CURRENT `*err*` port — the dynamic one, so
-/// `with-err-str` (and any redirect) captures a kernel warning exactly as it captures a Brood
-/// `(io/puts … :to *err*)`. Falls back to real stderr when the port is unbound (early boot) or
-/// raises: a warning must never become an error of the code that triggered it.
-pub(crate) fn warn_line(heap: &mut Heap, env: EnvId, message: &str) {
-    let line = format!("{message}\n");
-    let port = heap.env_get(heap.global(), value::intern("*err*"));
-    let written = port.is_some_and(|port| {
-        let text = heap.alloc_string(&line);
-        crate::eval::apply(heap, port, &[text], env).is_ok()
-    });
-    if !written {
-        write_stderr(&line);
-    }
-}
-
 /// `(stdout-tty?)` — true when stdout is an interactive terminal, false when it's
 /// captured (a pipe, a file, `cargo test`). The test framework uses this to emit
 /// ANSI colour only when a human is watching, so captured output (what an LLM or

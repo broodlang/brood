@@ -175,7 +175,7 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
              :positional ["name" "dep"]
              :many true
              :run (fn (options) (run-update options))}
-   "deps" {:about "Print the project's module graph read as contexts (ADR-750): `display/panebody` is a detail of the context `display`, so a reference to it from outside `display` is listed, with the contexts that reach each other and the busiest context edges. `--check` exits 1 when anything reaches into another context's detail; `--all` lists every context edge; `--top N` the N busiest (15)."
+   "deps" {:about "Print the project's module graph read as contexts (ADR-752): `display/panebody` is a detail of the context `display`, so a reference to it from outside `display` is listed, with the contexts that reach each other and the busiest context edges. `--check` exits 1 when anything reaches into another context's detail; `--all` lists every context edge; `--top N` the N busiest (15)."
            :flags {"--check" :bool "--all" :bool "--top" "N"}
            :run (fn (options) (run-deps options))}
    "tree" {:about "Print the project's resolved dependency tree (root → direct → transitive)."

@@ -144,9 +144,17 @@ fn errno_location() -> Option<*mut libc::c_int> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     // SAFETY: returns the calling thread's errno slot; async-signal-safe.
     return Some(unsafe { libc::__errno_location() });
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly"
+    ))]
     // SAFETY: as above.
     return Some(unsafe { libc::__error() });
+    #[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
+    // SAFETY: as above.
+    return Some(unsafe { libc::__errno() });
     #[allow(unreachable_code)]
     None
 }
