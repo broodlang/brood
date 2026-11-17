@@ -267,6 +267,11 @@ pub(crate) struct ImportScope {
     /// runtime `%refer` cannot make (KI-211: at refer time a module may be mid-load or
     /// image-backed), reported at the `(:use …)` clause.
     pub(crate) unknown_only: Vec<Finding>,
+    /// A `(:use mod)` whose module is there but fails to load, reported at the clause with the
+    /// module's own error. Every name it would have given then reads as unbound, so a file with
+    /// one has its unbound findings dropped (`check_file_passes`): the one true problem, not a
+    /// cascade of guesses.
+    pub(crate) load_failures: Vec<Finding>,
 }
 
 impl ImportScope {
@@ -274,6 +279,7 @@ impl ImportScope {
         self.used.extend(other.used);
         self.aliases.extend(other.aliases);
         self.unknown_only.extend(other.unknown_only);
+        self.load_failures.extend(other.load_failures);
     }
 }
 
@@ -345,7 +351,7 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                         clauses.push(Clause::UseExcept(mod_sym, names));
                     }
                 } else {
-                    clauses.push(Clause::Use(mod_sym, None, None));
+                    clauses.push(Clause::Use(mod_sym, None, heap.form_pos_only(*clause)));
                 }
             } else if value::symbol_is(*kw_sym, "use-internals") {
                 let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
@@ -434,11 +440,27 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                 // must root the same way here or it scans `b/*` for exports that actually
                 // live under `pkg/b/*` and flags every imported name unbound. External /
                 // std / already-qualified names are left unchanged.
+                let written = value::symbol_name(mod_sym);
                 let mod_sym = heap.root_module_name(mod_sym);
                 let mod_name = value::symbol_name(mod_sym);
                 scope.used.push(mod_name.clone());
                 let prefix = format!("{}/", mod_name);
-                ensure_loaded(heap, mod_sym);
+                if let Some(error) = ensure_loaded(heap, mod_sym) {
+                    let at = match (&error.file, error.pos) {
+                        (Some(file), Some(error_pos)) => {
+                            format!("{file}:{}:{}: ", error_pos.line, error_pos.col)
+                        }
+                        _ => String::new(),
+                    };
+                    scope.load_failures.push(Finding::new(
+                        Lint::CompileError,
+                        pos,
+                        format!(
+                            "(:use {written}): {written} does not load — {at}{}",
+                            error.message
+                        ),
+                    ));
+                }
                 match subset {
                     Some(names) => {
                         // Mirror the runtime `%refer`: a module-private name in `:only`

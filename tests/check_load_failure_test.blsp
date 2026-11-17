@@ -1,0 +1,27 @@
+;;; A `(:use mod)` whose module is there but fails to load is the checker's finding, at the
+;;; clause, with the module's own error — not a run of `unbound symbol` for every name the
+;;; module would have given. An editor checking a buffer in a long-lived session (bedit's
+;;; sandbox, the LSP) met exactly that: one module that no longer loaded under an older
+;;; runtime, and the file using it reported every call into it as unbound.
+
+(defmodule check-load-failure-test (:use test))
+
+(purge-stale-temp "loadfail-")
+(def- *dir* (temp-dir "loadfail-"))
+(file/mkdir *dir*)
+(reflect/add-load-path *dir*)
+(file/spit (path/join *dir* "loadfail-broken.blsp")
+  "(defmodule loadfail-broken)\n(loadfail-no-such-macro x)\n(defn assist (x) x)\n")
+
+(describe "a used module that does not load"
+  (test "is reported at its clause with its own error, and no name it gives reads unbound"
+    (let (found (reflect/check-string-structured "(defmodule loadfail-user (:use loadfail-broken))\n(defn run () (assist 1))\n"))
+      (assert= (vec (map found :category)) [:compile-error])
+      (is (includes? (:message (first found))
+            "(:use loadfail-broken): loadfail-broken does not load"))
+      (is (includes? (:message (first found))
+            "loadfail-broken.blsp:2:1: unbound symbol: loadfail-no-such-macro"))
+      (assert= (:line (first found)) 1)))
+  (test "a module that is simply not there is not this finding"
+    (let (found (reflect/check-string-structured "(defmodule loadfail-user-2 (:use loadfail-nowhere))\n(defn run () 1)\n"))
+      (is (not (any? found (fn (finding) (includes? (:message finding) "does not load"))))))))

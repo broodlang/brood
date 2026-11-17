@@ -606,6 +606,7 @@ fn check_file_passes(
 ) {
     let file_started = std::time::Instant::now();
     let (forms, expanded, import_scope, absent_ns) = expand_and_load(heap, forms, roots_base, out);
+    let import_failed_to_load = !import_scope.load_failures.is_empty();
     let (mut ctx, visible) =
         collect_file_scope(heap, &forms, &expanded, extra_required, strict, file_ns);
     ctx.set_absent_ns(absent_ns);
@@ -682,6 +683,11 @@ fn check_file_passes(
             timing.site_reuses,
             file_started.elapsed().as_millis(),
         );
+    }
+    // A used module that failed to load leaves its names unbound here: those findings are
+    // guesses, and the load failure (reported at its clause) is the problem.
+    if import_failed_to_load {
+        out.retain(|finding| finding.lint != Lint::Unbound);
     }
 }
 

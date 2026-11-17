@@ -2000,3 +2000,11 @@ it what replaced it, is never applied, and is left out of `specs` and the defaul
 contexts by name (`display` and its details `display/*`): the report lists references into
 another context's detail and the contexts that reach each other; `defdelegate` writes a context's
 API over its details in one line each.
+
+2026-11-17. **A used module that does not load is the checker's finding, not a cascade of
+`unbound symbol`.** bedit's live diagnostics run in a long-lived child; under an older runtime one
+module stopped loading (it used a newer prelude macro), and every file using it reported each call
+into it as unbound, an arity from whatever had loaded, nothing about the cause. `ensure_loaded`
+discarded the load's error. A `(:use mod)` whose module is there but fails to load now reports
+`(:use mod): mod does not load — file:line:col: message` at the clause, and that file's unbound
+findings are dropped as the guesses they are (`tests/check_load_failure_test.blsp`).
