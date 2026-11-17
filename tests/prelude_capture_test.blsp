@@ -328,11 +328,14 @@
       (is (string? message))
       (is (includes? message "both an import (`capture-warn-lib/identity`) and the language"))
       (is (includes? message "(:shadow identity)"))))
+  ;; Its own library, not the test above's: each test runs in its own process, in any order
+  ;; and possibly at once, so one that reads another's module was a flake.
   (test "declared, the import wins quietly; excluded, the language's does"
+    (%load-string "(defmodule capture-warn-lib2 (:shadow identity)) (defn identity (x) [:mine x])")
     (assert= ""
-      (with-err-str (assert= (%load-string "(defmodule capture-warn-user2 (:use capture-warn-lib) (:shadow identity)) (identity 1)")
+      (with-err-str (assert= (%load-string "(defmodule capture-warn-user2 (:use capture-warn-lib2) (:shadow identity)) (identity 1)")
                       [:mine 1])))
-    (assert= (%load-string "(defmodule capture-warn-user3 (:use capture-warn-lib :exclude [identity])) (identity 1)")
+    (assert= (%load-string "(defmodule capture-warn-user3 (:use capture-warn-lib2 :exclude [identity])) (identity 1)")
       1)))
 
 (describe "macro shadowing across processes"
