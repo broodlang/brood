@@ -1876,3 +1876,8 @@ the compiler drops, so a typed `letrec` loop keeps its direct self-recursion (wr
 have fallen to the tree-walker). The same hunt fixed `type-signature` erasing a declaration's
 type variables (`math/clamp` read `(any any any -> any)`) and `expr-type` binding `x:int` as a
 variable named `x:int`. No new warning across the 21 downstream projects.
+
+2026-11-17 (ADR-673 addendum). **The deprecation window's minimum time.** A deprecated name is
+removed only at a major at least six months after the first release that warns about it, and
+after at least one released minor that carries the warning. `full.yml` and `soak.yml` dispatched
+on `583092b7b` as the release-candidate gate's first read.
