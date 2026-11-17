@@ -30,8 +30,10 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
   - ✅ **Thread 5, a declared shadow for root functions: after 1.0** (2026-11-11). The warning
     would be a new lint, and since structured severities exist (B3, ADR-698) a new lint
     starts advisory, so it is additive and nothing needs deciding before 1.0.
-  - **Thread 10, operators that can be shadowed locally.** This is a relaxation, so it is
-    additive and can wait.
+  - ✅ **Thread 10, operators that can be shadowed locally: done (ADR-734, 2026-11-17).** It was
+    not additive after all: a local named like a macro was silently ignored, so letting it win
+    later would have changed what shipped code means. A local now shadows a macro, and binding
+    one of the eight evaluator forms fails compilation.
   - **Threads 1, 3, 4, 7, 8, 9 and 11** are additive (warning controls, regex groups — done, ADR-732 — URL
     resolution — done, ADR-733 —, the non-tail lint, view patterns, parametric abilities, function modifiers).
     They can come after 1.0, except that thread 1 is needed by B3.

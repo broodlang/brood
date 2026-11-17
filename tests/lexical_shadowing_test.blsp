@@ -1,0 +1,90 @@
+;;; A local binding shadows a macro, as it shadows a function (ADR-734).
+;;;
+;;; The runtime always called a local named like a root function; the compile pass expanded
+;;; any head that named a macro, so a local `when` was silently ignored. Now every binder —
+;;; `let`, `letrec`, a `fn` parameter (`&optional` and `&` rest too), a pattern binder, a
+;;; `catch` binder, a binder a macro introduces — shadows the macro of its spelling within
+;;; its scope. A macro's own template keeps meaning the macros it names (they are pinned to
+;;; root, ADR-423), so a caller's local cannot capture them. The evaluator's own forms are
+;;; not names, and binding one fails compilation.
+
+(defmodule lexical-shadowing-test (:use test))
+
+(defn- tagged (value) [:local value])
+
+;; A user macro whose template uses `when` and `cond`: a caller's local of either name must
+;; not reach inside it.
+(defmacro pick-positive (value) `(cond (> ~value 0) (when true :positive) else :other))
+
+;; A macro whose EXPANDER asks the expander about `when`: it runs with no locals in scope,
+;; whatever the call site binds.
+(defmacro when-expands-here ()
+  `(quote ~(not (= (reflect/macroexpand-1 '(when true 7)) '(when true 7)))))
+
+(defn- shadowing-when (value)
+  (let (when tagged)
+    (when value)))
+
+(describe "a local shadows a macro of its spelling"
+  (test "a let binding"
+    (assert= (let (when tagged) (when 1)) [:local 1]))
+  (test "a fn parameter, an &optional one and the & rest one"
+    (assert= ((fn (when) (when 2)) tagged) [:local 2])
+    (assert= ((fn (&optional (cond tagged)) (cond 3))) [:local 3])
+    (assert= ((fn (& doseq) (count doseq)) 1 2 3) 3))
+  (test "each clause of a multi-arity fn binds its own parameters"
+    (let (multi (fn ((when) (when 4)) ((when extra) (when extra))))
+      (assert= (multi tagged) [:local 4])
+      (assert= (multi tagged 5) [:local 5])))
+  (test "a letrec binding, in its own value"
+    (assert= (letrec (cond (fn (n) (if (= n 0) :done (cond (dec n))))) (cond 3)) :done))
+  (test "a pattern binder"
+    (assert= (match tagged (when (when 6))) [:local 6])
+    (assert= (let ([when] [tagged]) (when 7)) [:local 7]))
+  (test "a catch binder"
+    (assert= (try (throw tagged) (catch when (when 8))) [:local 8]))
+  (test "a binder a macro introduces"
+    (assert= (into [] (for (when [tagged]) (when 9))) [[:local 9]]))
+  (test "a defn's body, compiled once"
+    (assert= (shadowing-when 10) [:local 10])))
+
+(describe "the shadow has the binding's extent and no more"
+  (test "a let value before its binder still sees the macro"
+    (assert= (let (when (when true :macro)) when) :macro))
+  (test "after the binding ends the macro is back"
+    (assert= (do (let (when tagged) (when 1)) (when true :macro)) :macro))
+  (test "a macro's template keeps meaning the macros it names"
+    (assert= (let (when tagged cond tagged) (pick-positive 5)) :positive)
+    (assert= (let (when tagged) (when-let (found 3) (inc found))) 4)
+    (assert= (let (when tagged) (if-let (found nil) found :else)) :else))
+  (test "a macro's expander runs with none of the caller's locals in scope"
+    (assert= (let (when tagged) (when-expands-here)) true)))
+
+(describe "the evaluator's own forms cannot be bound"
+  (defn- refusal (source)
+    (try (do (reflect/eval-string source) nil) (catch caught (error-message caught))))
+
+  (test "binding one fails compilation, naming it"
+    (doseq (form ["def" "do" "fn" "if" "let" "letrec" "quote" "quasiquote"])
+      (let (message (refusal (str "(let (" form " 1) 2)")))
+        (is (string? message))
+        (is (includes? message (str "`" form "` is one of the evaluator's own forms"))))))
+  (test "as a parameter, an &optional one, a letrec binding and a pattern binder"
+    (is (string? (refusal "(fn (if) 1)")))
+    (is (string? (refusal "(fn (&optional (do 1)) 1)")))
+    (is (string? (refusal "(letrec (fn 1) 2)")))
+    (is (string? (refusal "(let ([quote] [1]) 2)"))))
+  (test "a name that only looks like one is fine"
+    (assert= (let (iff 1 define 2 lets 3) (+ iff define lets)) 6)))
+
+(describe "shadowed heads across processes"
+  (test "many processes running a function whose local shadows a macro"
+    (let (me (self)
+          workers 16
+          _ (doseq (index (range workers))
+              (spawn (fn () (send me [index (shadowing-when index)]))))
+          got (fold (range workers)
+                {}
+                (fn (acc _) (receive ([index answer] (assoc acc index answer))))))
+      (doseq (index (range workers))
+        (assert= (get got index) [:local index])))))

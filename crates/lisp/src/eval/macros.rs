@@ -22,6 +22,7 @@
 mod escape_capture;
 mod hygiene;
 mod linmap;
+mod local_heads;
 mod patterns;
 mod pipeline;
 mod resolve;
@@ -31,6 +32,7 @@ mod typed;
 use escape_capture::*;
 use hygiene::*;
 use linmap::*;
+pub(crate) use local_heads::ExpansionScope;
 pub(crate) use patterns::*;
 use pipeline::*;
 pub use resolve::*;
@@ -402,6 +404,12 @@ pub fn macroexpand_1(heap: &mut Heap, form: Value, env: EnvId) -> Result<(Value,
     let ValueRef::Sym(s) = heap.pair(p).0.unpack() else {
         return Ok((form, false));
     };
+    // A head a lexical binder of the form being expanded binds is that local, called — never
+    // the macro of the same name (ADR-734). The runtime reads it from the environment; the
+    // compile pass, which expands against the root, reads the scope it is walking.
+    if local_heads::is_local(s) {
+        return Ok((form, false));
+    }
     // A qualified call head into a not-yet-loaded module may be a macro that
     // must expand at compile time (the compile-time require-for-macros rule) —
     // infer the require from the qualified name so the module loads before this lookup.
@@ -471,7 +479,12 @@ pub fn macroexpand_1(heap: &mut Heap, form: Value, env: EnvId) -> Result<(Value,
     // hot macro (`defn`, …) now compiles once and expands as bytecode/native
     // — macro expansion dominated the advisory checker (ADR-119). Same result
     // as `apply_closure`; the VM is the default engine for all other calls.
-    let expanded = crate::eval::compile::apply_engine(heap, Value::Fn(mid), &args, env)?;
+    // The expander runs with no locals in scope: it is code of its own, and anything it
+    // expands or compiles on the way is not inside the caller's bindings.
+    let expanded = {
+        let _isolated = ExpansionScope::enter();
+        crate::eval::compile::apply_engine(heap, Value::Fn(mid), &args, env)?
+    };
     Ok((expanded, true))
 }
 
@@ -546,7 +559,11 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
 /// `quote` and `quasiquote` are left opaque: their contents are data, not calls
 /// to expand. Code inside a `~unquote` still expands when the quasiquote runs.
 pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
-    let expanded = macroexpand_all_depth(heap, form, env, 0)?;
+    // Every top-level expansion starts with no locals in scope (ADR-734).
+    let expanded = {
+        let _scope = ExpansionScope::enter();
+        macroexpand_all_depth(heap, form, env, 0)?
+    };
     if SOURCE_REWRITES_OFF.with(|c| c.get()) {
         return Ok(expanded);
     }
@@ -729,7 +746,9 @@ fn macroexpand_all_depth_step_inner(
                 // An improper list: nothing to expand, but a cell of its own (`copy_form`).
                 None => return Ok(copy_form(heap, form)),
             };
-            if let Some(ValueRef::Sym(head)) = items.first().copied().map(|v| v.unpack()) {
+            if let Some(ValueRef::Sym(head)) = items.first().copied().map(|v| v.unpack())
+                && !local_heads::is_local(head)
+            {
                 // quote/quasiquote contents are data, not calls to expand. The form still
                 // gets cells of its own, as every list this walk returns does: a macro that
                 // splices one quoted argument into two `fn` bodies would otherwise hand
@@ -792,12 +811,12 @@ fn macroexpand_all_depth_step_inner(
                     }
                     // Ordinary let: expand binding *values* and the body, but not the
                     // binding *targets* — a bound name must not be expanded as a call.
-                    return expand_let(heap, original, &items, env, depth + 1);
+                    return expand_let(heap, original, &items, env, depth + 1, false);
                 } else if value::symbol_is(s, kw::LETREC) {
                     // Same shape as let: even-indexed binding entries are targets
                     // (opaque), odd-indexed are values (expand). letrec disallows
                     // pattern targets in eval, so there's no `lower_let` branch.
-                    return expand_let(heap, original, &items, env, depth + 1);
+                    return expand_let(heap, original, &items, env, depth + 1, true);
                 } else if value::symbol_is(s, kw::FN) {
                     if let Some(plain) = strip_fn(heap, &items)? {
                         return macroexpand_all_depth(heap, plain, env, depth + 1);
@@ -814,13 +833,27 @@ fn macroexpand_all_depth_step_inner(
                     if fn_is_arity_multi_clause(heap, &items) {
                         return expand_fn_clauses(heap, original, &items, env, depth + 1);
                     }
-                    return expand_tail(heap, original, &items, 2, env, depth + 1);
+                    let scope = local_heads::mark();
+                    if let Some(&params) = items.get(1) {
+                        local_heads::bind_params(heap, params)
+                            .map_err(|error| error.or_form_pos(heap, params))?;
+                    }
+                    let out = expand_tail(heap, original, &items, 2, env, depth + 1);
+                    local_heads::release(scope);
+                    return out;
                 } else if value::symbol_is(s, kw::DEFMACRO) {
                     if let Some(plain) = strip_defmacro(heap, &items)? {
                         return macroexpand_all_depth(heap, plain, env, depth + 1);
                     }
                     // (defmacro name params body...) — name/params aren't calls.
-                    return expand_tail(heap, original, &items, 3, env, depth + 1);
+                    let scope = local_heads::mark();
+                    if let Some(&params) = items.get(2) {
+                        local_heads::bind_params(heap, params)
+                            .map_err(|error| error.or_form_pos(heap, params))?;
+                    }
+                    let out = expand_tail(heap, original, &items, 3, env, depth + 1);
+                    local_heads::release(scope);
+                    return out;
                 }
             }
             // `(def NAME (fn …))`: the `fn`'s lowering names its no-match error `NAME`.
@@ -1147,9 +1180,13 @@ fn expand_fn_clauses(
         match heap.list_or_vector_items(clause) {
             Some(parts) if !parts.is_empty() => {
                 let mut co = vec![copy_form(heap, parts[0])]; // param list: opaque, copied
+                let scope = local_heads::mark();
+                local_heads::bind_params(heap, parts[0])
+                    .map_err(|error| error.or_form_pos(heap, parts[0]))?;
                 for &b in &parts[1..] {
                     co.push(macroexpand_all_depth(heap, b, env, depth)?);
                 }
+                local_heads::release(scope);
                 out.push(rebuild_list(heap, clause, co));
             }
             _ => out.push(clause),
@@ -1159,24 +1196,39 @@ fn expand_fn_clauses(
 }
 
 /// Expand an ordinary `let`: its binding *values* (odd positions of the binding
-/// list) and its body, leaving the binding *targets* (even positions) opaque.
+/// list) and its body, leaving the binding *targets* (even positions) opaque. Each target
+/// is in scope (ADR-734) from the value after it on — `let` binds in order — or, for a
+/// `letrec` (`recursive`), in every value.
 fn expand_let(
     heap: &mut Heap,
     original: Value,
     items: &[Value],
     env: EnvId,
     depth: u32,
+    recursive: bool,
 ) -> LispResult {
     let Some(bindings) = items.get(1).copied() else {
         return Ok(rebuild_list(heap, original, items.to_vec()));
     };
+    let scope = local_heads::mark();
     let new_bindings = match heap.list_or_vector_items(bindings) {
         Some(binds) => {
+            if recursive {
+                for &target in binds.iter().step_by(2) {
+                    local_heads::bind_target(target)
+                        .map_err(|error| error.or_form_pos(heap, bindings))?;
+                }
+            }
             let mut nb = Vec::with_capacity(binds.len());
             for (i, &x) in binds.iter().enumerate() {
                 // odd index = a value expression (expand); even = a target (opaque)
                 nb.push(if i % 2 == 1 {
-                    macroexpand_all_depth(heap, x, env, depth)?
+                    let value = macroexpand_all_depth(heap, x, env, depth)?;
+                    if !recursive {
+                        local_heads::bind_target(binds[i - 1])
+                            .map_err(|error| error.or_form_pos(heap, bindings))?;
+                    }
+                    value
                 } else {
                     copy_form(heap, x)
                 });
@@ -1192,6 +1244,7 @@ fn expand_let(
     for &item in &items[2..] {
         out.push(macroexpand_all_depth(heap, item, env, depth)?);
     }
+    local_heads::release(scope);
     Ok(rebuild_list(heap, original, out))
 }
 

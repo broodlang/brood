@@ -295,11 +295,14 @@ that it's there.
 enforcement path doesn't depend on `of_value` at all); the gap is purely in
 the *static* checker's precision for this one case shape.
 
-## 7. Lexically-shadowable operators ("Option C") — Lisp-1 without reserved-word cost
+## 7. Lexically-shadowable operators ("Option C") — ✅ SHIPPED 2026-11-17 (ADR-734)
 
-*Status 2026-11-06:* the module half shipped: a module's own definition wins over a root macro,
-and macro templates pin their heads to root (ADR-423, `(:shadow name)` silences the warning).
-The lexical half below is still deferred.
+*Status 2026-11-17:* both halves shipped. The module half by ADR-423; the lexical half by
+ADR-734 — the compile pass tracks the scope it walks, so a local named like a macro is called,
+and a binder spelled like one of the eight evaluator forms fails compilation. Gotcha 1 (the
+chicken-and-egg) did not bite: the expander walks from the outside in, so a macro's binders
+exist by the time its result is walked. Gotcha 2 is answered by the owner's rule that nothing
+hides: a shadowed `when` is visible in the same function. The text below is the original note.
 
 **Context.** Brood is a Lisp-1 (ADR-007), so every macro/special form occupies the
 single namespace and becomes a **reserved operator word** — you can't bind a local

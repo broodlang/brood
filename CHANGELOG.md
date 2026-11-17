@@ -6,6 +6,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed (breaking): a local binding shadows a macro (ADR-734).** `(let (when f) (when x))`
+and a parameter named `cond` called as `(cond …)` now call the local, as a local named like a
+function always did; before, the macro ran and the local was silently ignored. **Binding one of
+the eight evaluator forms** (`def do fn if let letrec quote quasiquote`) **fails compilation**,
+naming it — such a local could never have been called.
+
 **Added: `url/resolve` (ADR-733).** `(url/resolve base reference)` is the absolute URL a
 relative reference names, by RFC 3986 §5 (the strict reading): what a client does with a
 relative `Location` header. A base without a scheme raises.

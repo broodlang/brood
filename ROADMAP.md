@@ -1558,12 +1558,9 @@ ADR-436).
 `unicode-segmentation` is already a dep, wired only to display-width);
 ~~**protocols/multimethods**~~ (✅ shipped as **abilities**, ADR-168 — open generic
 functions with nominal dispatch replace hand-written `type-of` cascades);
-~~**`&key` args**~~ (refused: ADR-163, ADR-170); ⬜ **lexically-shadowable operators**
-("Option C" — resolve operator position against local scope first, so a macro
-name like `for`/`when` stops being a reserved word; decision **deferred**, kept as
-reserved words for now, full spec + gotchas + hygiene notes in
-[deferred.md #7](docs/deferred.md); ADR-423 settled the module half, the lexical half stays
-deferred); the dist
+~~**`&key` args**~~ (refused: ADR-163, ADR-170); ✅ **lexically-shadowable operators**
+(ADR-734, 2026-11-17: a local binding shadows a macro, as it shadows a function; the eight
+evaluator forms are the only names a binding cannot take; ADR-423 settled the module half); the dist
 **terminate hook** + **FQDN long names** (dist refinements below). (The
 parked-`receive` mailbox-slot leak that used to sit here was fixed
 2026-07-23 — survey housekeeping above.)

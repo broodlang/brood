@@ -1087,6 +1087,29 @@ highlighter-facing list that also names the core macros.)
 | `(letrec (f (fn ...) g (fn ...)) body...)` | Local **mutually recursive** bindings — every name is visible in every RHS (and to itself). Plain-symbol targets only; meant for fn definitions. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
 
+**The eight are the only names a binding cannot take** (ADR-734). The evaluator reads them
+before any lookup, so a local spelled `if` could never be called: `(let (if 1) …)`, a
+parameter `fn`, an `&optional (do …)` or a pattern binder `quote` fails compilation, naming
+the form. Every other name can be bound — a macro's included.
+
+### Shadowing: the nearest binding wins
+
+A local binding — `let`, `letrec`, a `fn` parameter (`&optional` and `&` rest too), a pattern
+binder, a `catch` binder, a binder a macro introduces (`for`, `doseq`) — shadows whatever the
+name meant outside it, **a macro included** (ADR-734). Inside the binding the name is the
+local; outside it, the macro or function is back:
+
+```clojure
+(let (when (fn (x) [:local x])) (when 1))   ;=> [:local 1]
+((fn (cond) (cond 2)) inc)                  ;=> 3
+(let (when (when true :macro)) when)        ;=> :macro   ; the value is outside its own binding
+```
+
+A macro's template keeps meaning the macros it names: the call heads of every template are
+pinned to the root binding when the macro is defined (ADR-423), so a caller's local `when`
+cannot reach inside a `when-let` it uses. `/name` always means the root binding, from
+anywhere.
+
 `defmacro` is **not** among them: it is a prelude macro that lowers to
 `(def name (%make-macro (fn …)))` (ADR-098) — see [Macros](#macros).
 `when`, `cond`, `and`, `or`, `case`, `match`, and `comment` read like

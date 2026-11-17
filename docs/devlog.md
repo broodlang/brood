@@ -1885,3 +1885,11 @@ on `583092b7b` as the release-candidate gate's first read.
 2026-11-17 (ADR-733). **`url/resolve`.** A reference resolved against a base by RFC 3986 §5.2,
 strict, over the RFC's own five-component split (`parse`'s map loses an empty authority and a
 scheme without `//`). Every §5.4 example is a test; a relative base raises.
+
+2026-11-17 (ADR-734). **A local shadows a macro.** The compile pass expanded every head naming a
+macro, so `(let (when f) (when x))` ran the macro and dropped the local without a word. The
+expander now keeps the lexical scope it walks (let, letrec, fn and defmacro parameters; a
+macro's binders arrive because it expands first) and leaves a locally bound head a call; an
+expander body runs with no locals. Binding `def do fn if let letrec quote quasiquote` fails
+compilation. `nest check --strict` over std, tests and examples reads identically with the
+scope on and off.

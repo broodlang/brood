@@ -86,7 +86,8 @@ ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character ty
 7. **The non-tail lint:** mutual `letrec` recursion, `try` bodies, conditional-position demands.
 8. **View patterns** (low to medium value).
 9. **Parametric abilities** (low).
-10. **Lexically shadowable operators.**
+10. ~~**Lexically shadowable operators.**~~ — done by ADR-734 (2026-11-17): a local shadows a
+    macro; binding one of the eight evaluator forms fails compilation.
 11. **Function modifiers** (wrap, failure-strict calls).
 
 ## Flake hunting
