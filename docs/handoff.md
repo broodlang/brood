@@ -86,9 +86,12 @@ ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character ty
    `(:shadow name)` or fails compilation. No warning is left.
 6. ~~**"Reduce before adding"**~~ — decided by ADR-674; both stages landed (2026-11-11).
 7. ~~**The non-tail lint**~~ — deleted by ADR-751 (2026-11-17): a call stack is as deep as
-   memory allows, so non-tail recursion is not a hazard to lint. Follow-ups: `GcBlockGuard`
-   has no reader and several call sites believe it blocks a collection (audit); a deprecated
-   name used in its own file is reported only by `nest check`'s cached path.
+   memory allows, so non-tail recursion is not a hazard to lint. `GcBlockGuard` has no reader:
+   audited 2026-11-17 — the five macro-pass sites also hold `MacroBlockGuard`, which does
+   suppress collection; the checker's `check_forms` held only it, and its compile-error branch
+   read a form from the `forms` slice after a load could collect (now the rooted copy). The
+   guard itself is dead weight, removable. Open: a deprecated name used in its own file is
+   reported only by `nest check`'s cached path.
 8. **View patterns** (low to medium value).
 9. **Parametric abilities** (low).
 10. ~~**Lexically shadowable operators.**~~ — done by ADR-734 (2026-11-17): a local shadows a

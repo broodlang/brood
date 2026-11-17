@@ -461,10 +461,9 @@ fn check_forms(
     // The header's `(:check-allow …)` clauses, read while `forms` is fresh: a module load
     // during the passes may collect and move them.
     let file_allows = lint::FileAllows::read(heap, forms);
-    // Block the copying GC for the whole check: LOCAL handles are held in Rust `Vec`s
-    // across the `eval` of `(require …)` forms, and a collection would relocate them.
-    // Inner evals then run at depth ≥ 2, so the outermost-eval safepoint never fires
-    // mid-check (ADR-054); the checker's allocations are reclaimed at the next safepoint.
+    // This guard no longer blocks a collection (ADR-061 lets the safepoint collect at any
+    // depth, and since ADR-751 nothing reads the depth): a module the check loads CAN collect,
+    // so the passes re-read their forms from the root stack after anything that may load.
     let _gc_block = crate::process::GcBlockGuard::enter();
     // Every inferred load is EAGER for the duration (ADR-335): the unbound verdict for a
     // qualified typo (`json/prase`) depends on `json` being loaded, so the checker loads
@@ -725,7 +724,10 @@ fn expand_and_load(
                 // located in ANOTHER file — inside a module this form's reference loaded —
                 // is reported at this form, naming where it is: a finding's position is a
                 // place in the file being checked.
-                let here = heap.form_pos(forms[j]);
+                // The form from the root stack, not the `forms` slice: the compile that failed
+                // may have loaded a module, and a load can collect (ADR-061).
+                let form = heap.root_at(roots_base + j);
+                let here = heap.form_pos(form);
                 let elsewhere = match (&err.file, err.pos) {
                     (Some(file), Some(pos))
                         if here.as_ref().and_then(|(_, f)| f.as_deref()) != Some(file.as_str()) =>
@@ -736,10 +738,7 @@ fn expand_and_load(
                 };
                 let (pos, location) = match elsewhere {
                     Some(location) => (here.map(|(pos, _)| pos), location),
-                    None => (
-                        err.pos.or_else(|| heap.form_pos_only(forms[j])),
-                        String::new(),
-                    ),
+                    None => (err.pos.or_else(|| heap.form_pos_only(form)), String::new()),
                 };
                 out.push(Finding::new(
                     Lint::CompileError,
