@@ -23,6 +23,13 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: `brood-lsp` survives a message that is not JSON-RPC.** One well-framed but
+unparseable message ended the session (`malformed JSON-RPC message`), and the editor lost its
+language server. The frame is read to its length, so the stream is still in step: the message
+is now skipped with a note on stderr. A broken header still ends it, since nothing after one
+can be read. Found by driving the server with hostile documents, positions and frames; every
+other request in that drive was answered.
+
 **Fixed: a nest refusal names the command, not nest's source.** `nest doc no-such-module`
 printed `std/tool/docs.blsp:583:59: error: doc: cannot find module …`, a place in the tool's
 own source; `nest new` and `nest eval --in` did the same. A refusal the tool raises now reads

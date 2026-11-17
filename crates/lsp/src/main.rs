@@ -1281,7 +1281,18 @@ fn stdio_capped() -> (Connection, CappedIoThreads) {
     let reader = std::thread::spawn(move || {
         let stdin = std::io::stdin();
         let mut stdin = stdin.lock();
-        while let Some(msg) = read_frame_capped(&mut stdin)? {
+        loop {
+            // One unparseable message must not end the session: the server died on it,
+            // and the editor lost its language server for one bad frame.
+            let msg = match read_frame_capped(&mut stdin) {
+                Ok(Some(msg)) => msg,
+                Ok(None) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                    eprintln!("brood-lsp: skipped a message: {error}");
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let is_exit = matches!(&msg, Message::Notification(n) if n.method == "exit");
             if reader_sender.send(msg).is_err() {
                 break;
@@ -1346,8 +1357,15 @@ fn read_frame_capped(input: &mut impl std::io::BufRead) -> std::io::Result<Optio
     };
     let mut body = vec![0u8; size];
     input.read_exact(&mut body)?;
-    let msg: Message = serde_json::from_slice(&body)
-        .map_err(|e| invalid(format!("malformed JSON-RPC message: {e}")))?;
+    // A body that is not JSON-RPC is `InvalidInput`, not `InvalidData`: its frame was read to
+    // its exact length, so the stream is still in step and the next frame reads — the reader
+    // skips it. A broken header (`InvalidData`) leaves the stream unreadable from here.
+    let msg: Message = serde_json::from_slice(&body).map_err(|e| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("malformed JSON-RPC message: {e}"),
+        )
+    })?;
     Ok(Some(msg))
 }
 
@@ -1371,6 +1389,25 @@ mod frame_cap_tests {
             .expect("a message");
         assert!(matches!(msg, Message::Request(r) if r.method == "shutdown"));
         assert!(read_frame_capped(&mut input).expect("clean EOF").is_none());
+    }
+
+    #[test]
+    fn a_malformed_body_is_skippable_and_the_next_frame_reads() {
+        // The server died on one unparseable message (found by driving brood-lsp with
+        // hostile input): the body is read to its exact length, so the stream is in step.
+        let mut bytes = framed("{not json at all");
+        bytes.extend(framed(r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#));
+        let mut input = Cursor::new(bytes);
+        let err = read_frame_capped(&mut input).expect_err("not JSON-RPC");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+        let msg = read_frame_capped(&mut input)
+            .expect("the next frame reads")
+            .expect("a message");
+        assert!(matches!(msg, Message::Request(r) if r.method == "shutdown"));
+        // A broken header stays fatal: the stream is unreadable after it.
+        let mut input = Cursor::new(b"Content-Length: nope\r\n\r\n{}".to_vec());
+        let err = read_frame_capped(&mut input).expect_err("refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
     }
 
     #[test]
