@@ -6,6 +6,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Fixed: a compile error inside a module a qualified reference loads names the module's
+line.** `(lazylib/ok 1)` loading a `lazylib` that does not compile reported the error at the
+caller's `(lazylib/ok 1)`; it now reports `lazylib.blsp:6:8`, and the pre-flight check's
+finding, at the referencing form, names that line in its message.
+
 **Changed (breaking): a bare use of an import spelled like a language name declares it
 (ADR-750).** `(defmodule m (:use version))` then a bare `(compare …)` used to call
 `version/compare` with a warning on stderr; now it fails compilation, naming both meanings,

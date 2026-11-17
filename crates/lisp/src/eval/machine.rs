@@ -775,7 +775,7 @@ impl<'e> Machine<'e> {
                                 // definition on the way out; the compiled tiers attach none.
                                 // ADR-618 places it at the call, unless the macro named the
                                 // sub-form with `reflect/error-at`.
-                                if matches!(kind, KontKind::Expand { .. }) && !e.pos_from_at {
+                                if matches!(kind, KontKind::Expand { .. }) && !e.pos_pinned {
                                     e.pos = None;
                                     e.file = None;
                                 }

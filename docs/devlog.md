@@ -1921,3 +1921,13 @@ downstream projects check clean apart from those still on a store release withou
 `(:shadow fields)` (hatch, mur-forge, store-postgres, sqlite's tests). sqlite's `quote` local,
 refused since ADR-734, is `open-quote`.
 
+2026-11-17 (error location). **A loaded module's compile error is located in the module.** A
+qualified call head loads its module while the calling form expands (`require_qualified_head`),
+and the expander boundary sends every position an expansion picks up to the call (ADR-618), so
+a `let` binding `if` in `lazylib.blsp` was reported at the caller's `(lazylib/ok 1)`. A load
+error that already has a file and line is now pinned (`pos_from_at` became `pos_pinned`, which
+also covers `reflect/error-at`), and the checker's compile-error finding stays at the
+referencing form, since a finding is a place in the checked file, with the module's
+`file:line:col` in its message. Guard `crates/cli/tests/loaded_module_error_location.rs`, red
+with either half removed. A `(:use …)` load was already right: it runs outside any expansion.
+

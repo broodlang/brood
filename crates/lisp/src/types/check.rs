@@ -724,11 +724,30 @@ fn expand_and_load(
             Ok(expansion) => expansion,
             Err(err) => {
                 // A macro's own `(error …)` during expansion carries no position; the
-                // form it was expanding does. Report there rather than nowhere.
+                // form it was expanding does. Report there rather than nowhere. An error
+                // located in ANOTHER file — inside a module this form's reference loaded —
+                // is reported at this form, naming where it is: a finding's position is a
+                // place in the file being checked.
+                let here = heap.form_pos(forms[j]);
+                let elsewhere = match (&err.file, err.pos) {
+                    (Some(file), Some(pos))
+                        if here.as_ref().and_then(|(_, f)| f.as_deref()) != Some(file.as_str()) =>
+                    {
+                        Some(format!("{file}:{}:{}: ", pos.line, pos.col))
+                    }
+                    _ => None,
+                };
+                let (pos, location) = match elsewhere {
+                    Some(location) => (here.map(|(pos, _)| pos), location),
+                    None => (
+                        err.pos.or_else(|| heap.form_pos_only(forms[j])),
+                        String::new(),
+                    ),
+                };
                 out.push(Finding::new(
                     Lint::CompileError,
-                    err.pos.or_else(|| heap.form_pos_only(forms[j])),
-                    format!("does not compile: {}", err.message),
+                    pos,
+                    format!("does not compile: {location}{}", err.message),
                 ));
                 // `compile` infers `(require …)` from qualified references, and that load
                 // can collect, so `form` above is stale here.

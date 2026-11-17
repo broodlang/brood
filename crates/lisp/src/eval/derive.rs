@@ -192,7 +192,14 @@ pub fn require_qualified_head(heap: &mut Heap, env: EnvId, s: Symbol) -> Result<
             return Ok(false);
         }
     }
-    ensure_required(heap, env, module)?;
+    // An error inside the loaded module is located in it already (its file and line); the
+    // expander boundary this runs under would otherwise move it to the head that asked.
+    ensure_required(heap, env, module).map_err(|mut error| {
+        if error.pos.is_some() && error.file.is_some() {
+            error.pos_pinned = true;
+        }
+        error
+    })?;
     Ok(true)
 }
 
