@@ -21,7 +21,8 @@ to 2026-11-06 moved, unedited, to the end of
   Miri, GC stress, soaks, the three suite runs. Per-push CI answers in about 12 minutes and
   leaves those out; dispatch `gh workflow run full.yml` and read it with `make green` before
   the next release.
-- **Known issues:** none open. Watching KI-395 (a debug-only JIT fast-link mirror assertion, one
+- **Known issues:** none open. Watching KI-397 (an Interp's parked waiters outlived its drop past
+  30 s, once under a full `make test`; the assertion now reports the counts) and KI-395 (a debug-only JIT fast-link mirror assertion, one
   run in 59, cause unknown; the assertion is the armed diagnostic).
 - **Waiting on the test machine (`whklat`), not runnable on the desktop:** the
   brood-benchmarks Brood column is still the 0.51.0 measurement, so that repo's daily `smoke`

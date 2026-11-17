@@ -454,9 +454,9 @@ one call site is inside `defmodule`'s template — see the note there."
 ;; module (ADR-673), read by the checker from the header source; the loader ignores it.
 (def- %defmodule-clause-heads [:use :use-internals :alias :load :implements :shadow :check-allow])
 
-;; `(:shadow name …)` declares that this module defines a root MACRO's name on purpose
-;; (ADR-423): inside the module its own definition wins, and the declaration silences the
-;; warning that change of meaning otherwise prints. The macro stays reachable as `/name`.
+;; `(:shadow name …)` declares that this module defines a name the language ships, function or
+;; macro (ADR-423, ADR-735): inside the module its own definition wins, and without the
+;; declaration the definition fails compilation. The root one stays reachable as `/name`.
 (defn- %defmodule-shadow-clause (clause)
   (map (rest clause) (fn (name) (list '%declare-shadow (list 'quote name)))))
 

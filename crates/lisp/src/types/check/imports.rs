@@ -288,7 +288,7 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
         UseExcept(Symbol, Vec<Symbol>), // (:use mod :exclude [names]) — all public minus names
         Alias(Symbol, Symbol),          // (short-prefix-name, module)
         UseInternals(Symbol),           // (:use-internals mod) — ADR-146 grant
-        Shadow(Symbol),                 // (:shadow name …) — a declared root-macro shadow, ADR-423
+        Shadow(Symbol), // (:shadow name …) — a declared root-name shadow, ADR-423/735
     }
     let mut clauses: Vec<Clause> = Vec::new();
     {

@@ -35,9 +35,15 @@ fn dropping_an_interp_reaps_permanently_parked_waiters() {
             "the spawned processes never parked"
         );
     } // Interp drops here — the teardown must reap all three.
+    // KI-397: overran the 30 s once under a full `make test`; the counts say how far the reap got.
     assert!(
         wait_until(|| brood::process::parked_process_count() <= parked_before),
-        "parked waiters survived the Interp drop (the embedded-host leak)"
+        "parked waiters survived the Interp drop (the embedded-host leak): parked {} (was {} \
+         before the Interp), exits {} (was {})",
+        brood::process::parked_process_count(),
+        parked_before,
+        brood::process::exit_count(),
+        exited_before
     );
     assert!(
         brood::process::exit_count() >= exited_before + 3,

@@ -6,6 +6,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed (breaking): a module that defines a name the language ships declares it (ADR-735).**
+`(defmodule m) (defn get …)` now fails compilation, naming the clause to add; with
+`(defmodule m (:shadow get))` it works as before — the module's `get` inside `m`, `/get` for the
+root one. This replaces ADR-423's warning, which covered only macros. 47 std definitions now
+declare theirs; a downstream module that owns `get`, `keys`, `fields` or `update` adds one line
+to its header.
+
 **Changed (breaking): a local binding shadows a macro (ADR-734).** `(let (when f) (when x))`
 and a parameter named `cond` called as `(cond …)` now call the local, as a local named like a
 function always did; before, the macro ran and the local was silently ignored. **Binding one of

@@ -4051,13 +4051,14 @@ unchanged.
 (def text/insert (fn …))         ; advice / hot reload works
 ```
 
-**A module's own definition wins over a root name — function or macro — inside that
-module** (ADR-423). `(defn when-let (x) …)` in a module makes every bare `(when-let …)` there
-call it, not expand the prelude's `when-let` macro; `/when-let` still reaches the root one.
-Because a root *macro* changing meaning is easy to miss, defining one's name prints a warning
-at load — `warning: \`m/when-let\` shadows the prelude macro \`when-let\` …` — unless the header
-declares the shadow: `(defmodule m (:shadow when-let))`. Shadowing a root *function* is silent:
-modules owning `get`, `map` or `count` is the designed style (ADR-236).
+**A module may own a root name — function or macro — and declares it in its header**
+(ADR-423, ADR-735). `(defmodule m (:shadow get when-let))` then `(defn get …)` makes every bare
+`(get …)` in `m` call the module's own, and every `(when-let …)` call its function in place of
+the prelude's macro; `/get` and `/when-let` still reach the root ones. **Without the
+declaration the definition fails compilation**, naming the header clause to add: inside the
+module a bare `get` means something other than the language's `get`, and the header is where a
+reader looks first. Modules owning `get`, `map` or `count` stays the designed style (ADR-236) —
+`std/sorted`, `std/table` and `std/stream` all do, and each says so.
 
 The same rule cannot let a module capture a *macro's* expansion. When a macro is defined,
 every call head in its quasiquote templates that names a root binding is written `/name`

@@ -72,6 +72,10 @@ thread_local! {
     /// elsewhere (ADR-722): `(bare, the variable it names, module)`. Recorded by the resolve
     /// pass, raised by [`take_resolve_error`].
     static PENDING_DYNAMIC_DEF: Cell<Option<(Symbol, Symbol, Symbol)>> = const { Cell::new(None) };
+    /// A module definition of a name the root ships, with no `(:shadow name)` in the header
+    /// (ADR-735): `(bare, module)`. Recorded by the resolve pass, raised by
+    /// [`take_resolve_error`].
+    static PENDING_UNDECLARED_SHADOW: Cell<Option<(Symbol, Symbol)>> = const { Cell::new(None) };
     /// Set by [`ensure_required`] for the load it is about to run, consumed by the loader's
     /// next `%require-record-edge!` (via [`take_skip_next_edge`]): an inferred load is not a
     /// load-time edge. One-shot, so the edges of the loaded module's OWN header clauses are
@@ -332,13 +336,45 @@ pub fn record_dynamic_def(bare: Symbol, target: Symbol, module: Symbol) {
     }
 }
 
+/// Record that `module` defines `bare`, a name the root ships, without declaring the shadow
+/// (ADR-735). Inside the module the definition would win, so every bare use there would mean
+/// something other than what a reader of the language expects — refused unless the header
+/// says so. Same channel discipline as [`record_ambiguous`].
+pub fn record_undeclared_shadow(bare: Symbol, module: Symbol) {
+    if RECORDING.with(|recording| recording.get()) {
+        PENDING_UNDECLARED_SHADOW.with(|pending| {
+            if pending.get().is_none() {
+                pending.set(Some((bare, module)));
+            }
+        });
+    }
+}
+
 /// The error the current resolve pass recorded, if any: a definition head that spells a
 /// dynamic variable visible from elsewhere, then an ambiguous bare name (ADR-235). Called
 /// right after `resolve` in the macroexpand driver, so the error points at the offending
 /// form. Always clears both channels (so a caught error does not leak into the next pass).
 pub fn take_resolve_error() -> Option<LispError> {
     let dynamic_def = PENDING_DYNAMIC_DEF.with(|pending| pending.take());
+    let undeclared_shadow = PENDING_UNDECLARED_SHADOW.with(|pending| pending.take());
     let ambiguous = take_ambiguous_error();
+    if dynamic_def.is_none()
+        && let Some((bare, module)) = undeclared_shadow
+    {
+        let bare = value::symbol_name_ref(bare);
+        let module = value::symbol_name_ref(module);
+        return Some(
+            LispError::runtime(format!(
+                "`{module}` defines `{bare}`, a name the language ships, without declaring it: \
+                 add (:shadow {bare}) to the defmodule header, or give the definition another \
+                 name"
+            ))
+            .with_hint(format!(
+                "inside `{module}` a bare `{bare}` will mean this definition, so the header says \
+                 so where a reader looks first; `/{bare}` still reaches the language's own"
+            )),
+        );
+    }
     match dynamic_def {
         Some((bare, target, module)) if bare == target => {
             let bare = value::symbol_name_ref(bare);
