@@ -1598,6 +1598,12 @@ temp, and the second rename would find it gone.
       (when (and (pair? form) (= (first form) 'project))
         (project/apply-config (rest form))))))
 
+;; Every dependency the project's lock holds: the production ones and the
+;; `:dev-dependencies` (ADR-172). Setup locks both, so a verb that re-locks from the
+;; production ones alone would drop the dev ones from the lock, and a project with only
+;; dev ones would answer "no dependencies declared" and lock nothing.
+(defn- package-locked-deps () (append project/*dependencies* project/*dev-dependencies*))
+
 ;; Locate the project root, load its manifest (so project/*dependencies* is set),
 ;; and hand the root to `body-fn`. Shared preamble for the verbs below.
 (defn- package-in-project (body-fn)
@@ -1610,10 +1616,10 @@ temp, and the second rename would find it gone.
 
     (package/fetch)   ;~> the resolved lock entries, or nil when no deps are declared"
   (package-in-project (fn (root)
-                        (if (empty? project/*dependencies*)
+                        (if (empty? (package-locked-deps))
                           (do (io/puts "package: no dependencies declared") nil)
                           (let (entries (resolve-deps root
-                                          project/*dependencies*
+                                          (package-locked-deps)
                                           (read-lockfile root)))
                             (package-guard-collisions root entries)
                             (write-lockfile root entries)
@@ -1628,11 +1634,11 @@ temp, and the second rename would find it gone.
     (package/update \"json\")   ;~> the re-resolved lock entries; prints \"package: updated json (3 locked)\""
   (package-in-project
     (fn (root)
-      (if (empty? project/*dependencies*)
+      (if (empty? (package-locked-deps))
         (do (io/puts "package: no dependencies declared") nil)
         (let (lock (package-lock-without (read-lockfile root)
                      (map names symbol))
-              entries (resolve-deps root project/*dependencies* lock))
+              entries (resolve-deps root (package-locked-deps) lock))
           ;; Reject a namespace collision before writing the lock —
           ;; same guard `fetch`/`add` run (ADR-070). Without it,
           ;; `nest update` would write a lock for a colliding dep set
@@ -1676,11 +1682,11 @@ temp, and the second rename would find it gone.
   "Print the resolved dependency tree of the current project (root → direct → transitive). Backs `nest tree`."
   (package-in-project (fn (root)
                         (io/puts (or project/*name* "(this project)"))
-                        (if (empty? project/*dependencies*)
+                        (if (empty? (package-locked-deps))
                           (io/puts "  (no dependencies)")
-                          (package-print-tree project/*dependencies*
+                          (package-print-tree (package-locked-deps)
                             (package-index-by-name (resolve-deps root
-                                                     project/*dependencies*
+                                                     (package-locked-deps)
                                                      (read-lockfile root)))
                             "  "
                             nil))

@@ -1931,3 +1931,11 @@ referencing form, since a finding is a place in the checked file, with the modul
 `file:line:col` in its message. Guard `crates/cli/tests/loaded_module_error_location.rs`, red
 with either half removed. A `(:use …)` load was already right: it runs outside any expansion.
 
+2026-11-17 (packages). **store 0.9.6 and store-postgres 0.10.3 published**, carrying the
+`(:shadow …)` headers ADR-735 requires; hatch, mur-forge and sqlite moved to them, and sqlite's
+`quote` local, refused since ADR-734, is `open-quote`. Moving sqlite's dev `store` found that
+`nest fetch`/`update`/`tree` read `:dependencies` alone while setup locks the dev ones too:
+a dev-only project locked nothing, and `update` dropped dev entries from a mixed lock. They
+now read both (`package-locked-deps`); guard `crates/nest/tests/dev_dependencies_lock.rs`, red
+with the helper back to production dependencies only.
+

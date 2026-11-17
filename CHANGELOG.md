@@ -6,6 +6,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Fixed: `nest fetch`, `nest update` and `nest tree` cover `:dev-dependencies`.** A project
+with only dev dependencies answered "no dependencies declared" and locked nothing, and
+`nest update` in a project with both wrote a lock without the dev ones (setup re-added them
+on the next run).
+
 **Fixed: a compile error inside a module a qualified reference loads names the module's
 line.** `(lazylib/ok 1)` loading a `lazylib` that does not compile reported the error at the
 caller's `(lazylib/ok 1)`; it now reports `lazylib.blsp:6:8`, and the pre-flight check's
