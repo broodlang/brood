@@ -537,7 +537,7 @@ Bindings are ONE flat list, exactly like `let`'s — not a list per pair. `(with
   ;; — `(last :k)` must still read as the error it is (`element_types` tests).
   (if (vector? xs)
     (let (n (%vector-length xs)) (if (= n 0) nil (%vector-ref xs (- n 1))))
-    (%last-walk (seq xs))))
+    (%last-walk (seq (%expect-collection "last" xs)))))
 (defn- %last-walk (xs) (if (empty? (rest xs)) (first xs) (%last-walk (rest xs))))
 
 (defn error (& parts)

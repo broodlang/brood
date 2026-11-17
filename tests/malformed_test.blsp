@@ -302,7 +302,13 @@
                           ["any?" (fn () (any? text nil?))]
                           ["every?" (fn () (every? text nil?))]
                           ["seq/take-while" (fn () (seq/take-while text nil?))]
-                          ["sort" (fn () (sort text))]]))
+                          ["sort" (fn () (sort text))]
+                          ["last" (fn () (last text))]
+                          ["seq/zip" (fn () (seq/zip text [1]))]
+                          ["seq/find" (fn () (seq/find text nil?))]
+                          ["seq/drop-while" (fn () (seq/drop-while text nil?))]
+                          ["seq/partition" (fn () (seq/partition text 1))]
+                          ["seq/distinct" (fn () (seq/distinct text))]]))
         (let ([who thunk] example
               message (try (do (thunk) nil) (catch error (error-message error))))
           (is (includes? (str message) (str who ": expected a sequence, got string")))))))

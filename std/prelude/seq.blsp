@@ -966,10 +966,12 @@ when nothing is dropped, exactly as `(drop [1 2 3] 0)` does.
     (seq/drop-while [1 2 3 1] (fn (x) (< x 3)))   ;=> (3 1)
     (seq/drop-while [5 1] (fn (x) (< x 3)))       ;=> [5 1]   ; nothing dropped, so `coll` itself
 
-Works on any collection `drop` does — vectors and strings included."
-  (if (empty? coll)
-    coll
-    (if (pred (first coll)) (seq/drop-while (rest coll) pred) coll)))
+Works on any collection `drop` does — a vector included; a string is refused, as `drop`
+refuses it (walk `(string/->list s)`)."
+  (let (coll (%expect-collection "seq/drop-while" coll))
+    (if (empty? coll)
+      coll
+      (if (pred (first coll)) (seq/drop-while (rest coll) pred) coll))))
 
 (%defseq mapcat
   (f)
@@ -984,7 +986,7 @@ indexed access or a vector literal shape (`(into [] (map coll f))`, named).
 
     (seq/mapv [1 2 3] inc)   ;=> [2 3 4]
     (map [1 2 3] inc)    ;=> (2 3 4)   ; the list-returning sibling"
-  (into [] (map coll f)))
+  (into [] (map (%expect-collection "seq/mapv" coll) f)))
 
 (defn seq/partition (coll:seqable n:number -> any)
   "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped.
@@ -997,7 +999,7 @@ empty chunks.
   ;; A size <= 0 never shrinks `coll` (`(drop coll 0)` is `coll`, and a zero-sized chunk
   ;; always "fits"), so the accumulator would grow until memory ran out.
   (if (> n 0)
-    (%partition-acc n coll nil)
+    (%partition-acc n (%expect-collection "seq/partition" coll) nil)
     (error "seq/partition: chunk size must be positive, got " n)))
 
 (defn seq/sort-by (coll key-fn)
@@ -1012,7 +1014,7 @@ string, keyword, vector, and record keys all work.
   ;; A collection of one item or none comes back as `%merge-sort` returns it — itself, and
   ;; typed as it always was (the test is on the keyed list, so `coll` is never narrowed by a
   ;; `count`); the comparator is never called for it.
-  (let (keyed (map coll (fn (item) [(key-fn item) item])))
+  (let (keyed (map (%expect-collection "seq/sort-by" coll) (fn (item) [(key-fn item) item])))
     (if (empty? (rest keyed))
       (%merge-sort < coll)
       (map (%merge-sort (fn (x y) (< (%ord-compare (%vector-ref x 0) (%vector-ref y 0)) 0)) keyed)

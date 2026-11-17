@@ -50,7 +50,11 @@ while a non-empty string failed inside `rest`, `apply`, `%map-into` or `%raise`,
 function the caller never called. `into`, `vec`, `reverse`, `append`, `fold`, `reduce`,
 `map` and `seq/filter` now each raise `NAME: expected a sequence, got string`, with the hint
 to walk it through `string/->list`; so do `take`, `drop`, `any?`, `every?`,
-`seq/take-while` and `sort` (`(every? "" f)` was `true`). And what is not a map is refused
+`seq/take-while` and `sort` (`(every? "" f)` was `true`), `last`, and the `seq/`
+walkers that answered an empty value for `""` (`partition`, `zip`, `interleave`, `flatten`,
+`find`, `dedupe`, `pmap`, `split-at`; `drop-while` handed the string back) or named an
+inner function (`distinct` said `fold`, `sort-by` `map`, `max-by` `rest`); `set/union` and
+`set/difference` refuse a base that is not a set. And what is not a map is refused
 by `merge`, `keys` and `vals` — `(merge [1 2] {:a 1})` answered `[1 2 [:a 1]]` — and a map
 by `sort`, which answered `nil` for `{}`. Found by a checker-soundness oracle: random expressions
 that run must draw no type finding, and these ran where the checker said they could not.

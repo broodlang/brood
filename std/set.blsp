@@ -30,11 +30,19 @@ set). Duplicates collapse: `(set [1 1 2]) ⇒ #{1 2}`.
 ;; module-local copy would SHADOW the polymorphic prelude ones under `(:use set)`,
 ;; breaking `(conj [1 2] 3)` for the rest of that file.
 
+;; `s` when it is a set — else raised, naming `who`. A string or vector base reached
+;; `%set-add`/`%set-remove`, and the error named that primitive. A primitive type test: the
+;; callers declare `set`, so the checker would read `set?` here as always true.
+(defn- expect-set (who s)
+  (if (%eq (type-of s) :set)
+    s
+    (error who ": expected a set, got " (type-of s) " (" (pr-str s) ")")))
+
 (defn union (a:set b:set -> set)
   "Every element in either `a` or `b`.
 
     (sort (seq (set/union (set/set [1 2]) (set/set [2 3]))))   ;=> (1 2 3)"
-  (fold b a (fn (s x) (%set-add s x))))
+  (fold b (expect-set "set/union" a) (fn (s x) (%set-add s x))))
 
 (defn intersection (a:set b:set -> set)
   "Every element in both `a` and `b`.
@@ -46,7 +54,7 @@ set). Duplicates collapse: `(set [1 1 2]) ⇒ #{1 2}`.
   "Every element of `a` that is not in `b`.
 
     (sort (seq (set/difference (set/set [1 2]) (set/set [2 3]))))   ;=> (1)"
-  (fold b a (fn (s x) (%set-remove s x))))
+  (fold b (expect-set "set/difference" a) (fn (s x) (%set-remove s x))))
 
 (defn subset? (a:set b:set -> bool)
   "True when every element of `a` is also in `b`.
