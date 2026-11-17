@@ -334,7 +334,12 @@ keyword (`:next`) is not one.
   (if (includes? text "\n") nil text))
 
 (defn- single-line-wrap (prefix child)
-  (let (s (single-line child)) (if (nil? s) nil (str prefix s))))
+  (let (s (single-line child)) (if (nil? s) nil (str (glued-prefix prefix s) s))))
+
+;; `@` is a symbol character, so `~ @z` unquotes the symbol `@z`; glued to it, `~@z` reads
+;; as a splice of `z`. The space is the meaning there, so it stays.
+(defn- glued-prefix (prefix text)
+  (if (and (= prefix "~") (string/starts-with? text "@")) "~ " prefix))
 
 (defn- single-line-seq (kids open close)
   ;; Render the structural children space-separated. Any comment, or any
@@ -384,7 +389,8 @@ keyword (`:next`) is not one.
   ;; Reader-macro wrappers don't introduce their own break: render the child at
   ;; the current column. (A long `'(foo bar)` will break inside the list, which
   ;; is what we want.)
-  (str prefix (render child (+ indent (count prefix)))))
+  (let (body (render child (+ indent (count prefix))))
+    (str (glued-prefix prefix body) body)))
 
 (defn- render-seq (n indent open close)
   ;; Try single-line; if it fits the remaining budget at this indent, take it.
@@ -572,8 +578,12 @@ if you are reintroducing hoisting, they are what you have to write back.
 ;; and the first argument (second structural form). Such a comment would be
 ;; dropped by the generic-call head-ride (which jumps from the head straight to
 ;; the first body form), so the caller breaks instead of riding when it's true.
+;; The head is found past any leading trivia (as `leading-comments` finds it): with
+;; `kids-index-of-form`, `( ;c\n3 (x y))` took the whitespace at 0 for the head and the
+;; comment for one before the first argument, so it broke, and its own output — `(;c` —
+;; did not, which made the formatter not idempotent.
 (defn- comment-before-first-arg? (kids)
-  (let (head-i (kids-index-of-form kids 0) n (count kids))
+  (let (n (count kids) head-i (first-form-index kids 0 n))
     (and (< head-i n) (comment-before-next-form? kids (inc head-i) n))))
 ;; Scanning forward from `i`, is the next non-whitespace node a comment (rather
 ;; than a structural form)? Stops at the first form (false) or first comment (true).

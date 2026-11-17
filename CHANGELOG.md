@@ -13,6 +13,13 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: two formatter bugs found by formatting random readable text.** `~ @z` — unquote
+of the symbol `@z`, since `@` is a symbol character — was printed `~@z`, which reads as a
+splice of `z`: formatting changed the code's meaning. And a list opening with a comment laid
+out differently with a space before the comment than without, so `( ;c` formatted to `(;c`
+and that formatted differently again. Each pass now reads back to the same forms and a second
+pass changes nothing, over 8,000 random inputs.
+
 **Fixed: `doseq` and `fold-for` errors name `doseq` and `fold-for`, and `for` refuses
 `:let`.** An unpaired binding in either reported `for: binding … has no collection`, naming
 the check they share rather than the form written. And a keyword clause `for` does not have
