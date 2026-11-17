@@ -6,6 +6,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed (breaking): a bare use of an import spelled like a language name declares it
+(ADR-750).** `(defmodule m (:use version))` then a bare `(compare …)` used to call
+`version/compare` with a warning on stderr; now it fails compilation, naming both meanings,
+until the header adds `(:shadow compare)`. A module that never writes the name bare is
+unaffected; `:exclude` keeps the language's. `BROOD_NO_SHADOW_WARN` is gone with the warning.
+
 **Changed (breaking): a module that defines a name the language ships declares it (ADR-735).**
 `(defmodule m) (defn get …)` now fails compilation, naming the clause to add; with
 `(defmodule m (:shadow get))` it works as before — the module's `get` inside `m`, `/get` for the

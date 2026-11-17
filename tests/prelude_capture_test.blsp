@@ -318,17 +318,22 @@
     (assert= (%load-string "(defmodule capture-warn-c (:shadow get)) (defn get (x) [:mine x]) (get 1)")
       [:mine 1])))
 
-(describe "the import shadow warning goes through *err*"
-  ;; A kernel warning, written through the dynamic `*err*` port so a test or a tool can capture
-  ;; it as it captures any Brood output.
-  (test "an import that shadows a root function warns"
-    (is
-      (includes?
-        (with-err-str
-          (%load-string
-            "(defmodule capture-warn-lib (:shadow identity)) (defn identity (x) [:mine x])
-               (defmodule capture-warn-user (:use capture-warn-lib))"))
-        "refers `identity`, which shadows the prelude/root `identity`"))))
+(describe "an import spelled like a root name (ADR-750)"
+  (defn- refusal (source)
+    (try (do (%load-string source) nil) (catch caught (error-message caught))))
+
+  (test "a bare use without the header clause fails compilation, naming both"
+    (%load-string "(defmodule capture-warn-lib (:shadow identity)) (defn identity (x) [:mine x])")
+    (let (message (refusal "(defmodule capture-warn-user (:use capture-warn-lib)) (identity 1)"))
+      (is (string? message))
+      (is (includes? message "both an import (`capture-warn-lib/identity`) and the language"))
+      (is (includes? message "(:shadow identity)"))))
+  (test "declared, the import wins quietly; excluded, the language's does"
+    (assert= ""
+      (with-err-str (assert= (%load-string "(defmodule capture-warn-user2 (:use capture-warn-lib) (:shadow identity)) (identity 1)")
+                      [:mine 1])))
+    (assert= (%load-string "(defmodule capture-warn-user3 (:use capture-warn-lib :exclude [identity])) (identity 1)")
+      1)))
 
 (describe "macro shadowing across processes"
   ;; Every worker compiles its own module defining `when`, in parallel; each must see its own

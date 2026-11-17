@@ -526,11 +526,6 @@ pub const FLAGS: &[DebugFlag] = &[
         "silence the hot-reload `def` diagnostics (arity changed / macro redefined)",
     ),
     f(
-        "BROOD_NO_SHADOW_WARN",
-        DIAG,
-        "silence the warning that a `(:use …)` import shadows a prelude/root global",
-    ),
-    f(
         "BROOD_TEST_TRACE",
         DIAG,
         "arm the test runner's --trace from the environment (one line per result as it lands) — for the nextest wrapper, whose progress dots name nothing when the run is killed at its cap (KI-120)",

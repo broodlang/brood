@@ -1911,3 +1911,13 @@ shrinker then re-ran five configs of up to 120 s each for up to 250 attempts. Ge
 `:timeout-ms`, and a shrink stops at ten minutes of wall clock. Before the fix, 4 lanes × 5
 rounds flagged seed 4 in 15 of 20 runs and timed out a whole round; after it, 6 lanes × 5 rounds
 agreed on all 25 seeds 30 times out of 30.
+
+2026-11-17 (ADR-750). **An import spelled like a language name, used bare, is declared.** The
+last shadow that only warned: `(:use version)` and a bare `(compare …)` called the import with a
+stderr line. Now the bare use fails compilation unless the header says `(:shadow compare)`,
+through ADR-735's clause and error channel, checked at the use like an import clash so an
+unused import costs nothing. All 147 std modules load; three test headers declare theirs; the
+downstream projects check clean apart from those still on a store release without ADR-735's
+`(:shadow fields)` (hatch, mur-forge, store-postgres, sqlite's tests). sqlite's `quote` local,
+refused since ADR-734, is `open-quote`.
+

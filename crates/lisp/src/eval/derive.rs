@@ -76,6 +76,9 @@ thread_local! {
     /// (ADR-735): `(bare, module)`. Recorded by the resolve pass, raised by
     /// [`take_resolve_error`].
     static PENDING_UNDECLARED_SHADOW: Cell<Option<(Symbol, Symbol)>> = const { Cell::new(None) };
+    /// A bare use of an imported name the language also ships, with no `(:shadow …)`
+    /// (ADR-750): `(bare, imported, module)`, consumed by [`take_resolve_error`].
+    static PENDING_IMPORT_SHADOW: Cell<Option<(Symbol, Symbol, Symbol)>> = const { Cell::new(None) };
     /// Set by [`ensure_required`] for the load it is about to run, consumed by the loader's
     /// next `%require-record-edge!` (via [`take_skip_next_edge`]): an inferred load is not a
     /// load-time edge. One-shot, so the edges of the loaded module's OWN header clauses are
@@ -354,9 +357,22 @@ pub fn record_undeclared_shadow(bare: Symbol, module: Symbol) {
 /// dynamic variable visible from elsewhere, then an ambiguous bare name (ADR-235). Called
 /// right after `resolve` in the macroexpand driver, so the error points at the offending
 /// form. Always clears both channels (so a caught error does not leak into the next pass).
+/// Record a bare use of `imported` (spelled `bare`, which the language ships too) in
+/// `module`, whose header has no `(:shadow bare)` (ADR-750). The first one in a pass wins.
+pub fn record_undeclared_import_shadow(bare: Symbol, imported: Symbol, module: Symbol) {
+    if RECORDING.with(|recording| recording.get()) {
+        PENDING_IMPORT_SHADOW.with(|pending| {
+            if pending.get().is_none() {
+                pending.set(Some((bare, imported, module)));
+            }
+        });
+    }
+}
+
 pub fn take_resolve_error() -> Option<LispError> {
     let dynamic_def = PENDING_DYNAMIC_DEF.with(|pending| pending.take());
     let undeclared_shadow = PENDING_UNDECLARED_SHADOW.with(|pending| pending.take());
+    let import_shadow = PENDING_IMPORT_SHADOW.with(|pending| pending.take());
     let ambiguous = take_ambiguous_error();
     if dynamic_def.is_none()
         && let Some((bare, module)) = undeclared_shadow
@@ -372,6 +388,26 @@ pub fn take_resolve_error() -> Option<LispError> {
             .with_hint(format!(
                 "inside `{module}` a bare `{bare}` will mean this definition, so the header says \
                  so where a reader looks first; `/{bare}` still reaches the language's own"
+            )),
+        );
+    }
+    if dynamic_def.is_none()
+        && ambiguous.is_none()
+        && let Some((bare, imported, module)) = import_shadow
+    {
+        let bare = value::symbol_name_ref(bare);
+        let imported = value::symbol_name_ref(imported);
+        let module = value::symbol_name_ref(module);
+        return Some(
+            LispError::runtime(format!(
+                "`{module}` uses `{bare}` bare, and both an import (`{imported}`) and the \
+                 language ship that name: add (:shadow {bare}) to the defmodule header to mean \
+                 the import, or write `{imported}` or `/{bare}`"
+            ))
+            .with_hint(format!(
+                "a bare `{bare}` that silently became the import would read as the language's \
+                 own; the header clause says which one it is where a reader looks first, and \
+                 `:exclude [{bare}]` on the `(:use …)` keeps the language's"
             )),
         );
     }
