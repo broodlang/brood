@@ -103,3 +103,29 @@ fn an_error_inside_std_is_reported_at_the_program() {
         "the std raise site stays in the trace: {stderr}"
     );
 }
+
+/// A parse error is reported ONCE. The pre-run check read the file first and reported it,
+/// then the run read it again and reported it a second time (2026-11-17). The check is left
+/// on here, unlike the parity tests above: it is half of what this guards.
+#[test]
+fn a_parse_error_is_reported_once() {
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("brood_parse_once_{}_{n}.blsp", std::process::id()));
+    std::fs::write(&path, "(def a 1)\n(def b (\n").expect("write temp program");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+    cmd.arg(&path);
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run brood");
+    let _ = std::fs::remove_file(&path);
+    let stderr = String::from_utf8_lossy_owned(out.stderr);
+    assert!(
+        !out.status.success(),
+        "a parse error fails the run: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("parse error: unclosed list").count(),
+        1,
+        "reported once: {stderr}"
+    );
+}

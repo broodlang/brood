@@ -23,6 +23,9 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: `brood file.blsp` reports a parse error once.** The pre-run check read the file
+first and reported it, then the run read it again and reported it a second time.
+
 **Fixed: an error in `reflect/eval-string`'s source is located in `<string>`.** Its forms
 took the name of whatever file was loading, so an error reported the caller's file with the
 string's line and column — `caller.blsp:1:25`, a place where nothing failed — and under

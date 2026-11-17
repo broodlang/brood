@@ -344,7 +344,11 @@ fn check_one_file(interp: &mut Interp, path: &str, src: &str, for_run: bool) -> 
                 Ok(forms) => forms,
                 Err(e) => {
                     interp.heap.set_current_file(prev);
-                    report_error(&e.clone().or_file(path.to_string()));
+                    // Before a run, the run reads the file next and reports this same
+                    // error; saying it here too printed every parse error twice.
+                    if !for_run {
+                        report_error(&e.clone().or_file(path.to_string()));
+                    }
                     return true;
                 }
             };
