@@ -1959,3 +1959,16 @@ the top level). Guards: `tail_positions.rs` (a 64 MB `:max-heap` makes a non-tai
 at the depth a tail loop passes; red with the ceiling check disabled), `tree_walker_frames.rs`,
 `jit_deep_recursion_test.blsp` (2 000 000 levels complete in a spawned process).
 
+2026-11-17 (ADR-751 follow-up). **The soft-limit probe reads the snapshot far from the
+ceiling.** With every runtime now holding a soft limit, `make ab`'s `loop` read +3.1%, and
+instruction counts named it: 1 188M against 1 152M with `BROOD_MEM_SOFT_LIMIT=0`. A native
+loop's tick (`brood_rt_tick_n`) called `soft_limit_state`, which summed every allocator shard
+each time. It now answers Clear from `APPROX_LIVE` below 7/8 of the ceiling, as the hard limit's
+`hard_verdict` does, and a large allocation (which already summed the shards) leaves its exact
+figure in the snapshot, so a heap growing by slab doublings is not judged stale (the two
+`mem_limit.rs` soft-limit tests failed until it did). `loop` is back to 1 157M against the
+base's 1 153M; `make ab-vm` read noise on every row. Also: the 8 GiB unknown-memory fallback
+overflowed `usize` on wasm32 (the playground build), now 1 GiB there; and `BEDIT_REF` moves to
+bedit `8ad277e`, which dropped its `:non-tail-recursion` wrappers (the pinned bedit's strict
+ratchet counted them as unknown categories) — `smoke-bedit` green, 5491 tests.
+

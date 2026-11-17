@@ -235,6 +235,10 @@ fn large_allocation_made(size: usize) {
         return;
     }
     let live = live_bytes();
+    // The exact figure, left for the safepoints' probe (`soft_limit_state` reads the snapshot
+    // far from the ceiling): a heap that grows by slab doublings makes few allocator calls,
+    // so the per-512-allocations refresh alone would leave it stale.
+    APPROX_LIVE.store(live, Ordering::Relaxed);
     if live > soft {
         soft_limit_attention();
     } else if live > soft - soft / 8 {
@@ -426,12 +430,16 @@ pub enum SoftLimit {
 }
 
 /// Whether the soft ceiling is crossed (with the live byte count) or approached — the
-/// safepoints' probe. Cheap when no ceiling is set: one relaxed load of a zero; otherwise
-/// it sums the shards.
+/// safepoints' probe, which a native loop reaches every few reductions. Cheap when no ceiling
+/// is set (one relaxed load of a zero) and far from it (the `APPROX_LIVE` snapshot, as
+/// [`hard_verdict`] reads it: it lags by at most [`PEAK_SAMPLE`] small allocations a thread,
+/// and a large one checks the soft limit itself, so a reading below 7/8 is Clear). Near the
+/// ceiling it sums the shards. Summing them on every probe cost a native `loop` 3% of its
+/// instructions once every runtime had a ceiling (ADR-751).
 #[inline]
 pub fn soft_limit_state() -> SoftLimit {
     let limit = SOFT_LIMIT.load(Ordering::Relaxed);
-    if limit == 0 {
+    if limit == 0 || APPROX_LIVE.load(Ordering::Relaxed) <= limit - limit / 8 {
         return SoftLimit::Clear;
     }
     let live = live_bytes();
@@ -518,7 +526,10 @@ fn limits_for_cap(cap: usize) -> (usize, usize) {
 pub fn machine_memory() -> usize {
     use std::sync::LazyLock;
     static MEMORY: LazyLock<usize> = LazyLock::new(|| {
-        let mut least = physical_memory().unwrap_or(8 * 1024 * 1024 * 1024);
+        // Unknown physical memory (wasm, an unprobed platform): 8 GiB, or 1 GiB where a
+        // `usize` cannot count 8.
+        const UNKNOWN: usize = if usize::BITS >= 64 { 8 << 30 } else { 1 << 30 };
+        let mut least = physical_memory().unwrap_or(UNKNOWN);
         if let Some(limit) = address_space_limit() {
             least = least.min(limit);
         }
