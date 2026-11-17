@@ -68,6 +68,17 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-399 — `contract_dispatch_test` fails on the tree-walker 🔴 open 2026-11-17
+
+`make test-both`'s tree-walker half (`BROOD_TIER=0`): four tests in
+`tests/contract_dispatch_test.blsp` (lines 52, 65, 75, 91) fail. Three assert `(>= n 1)` on
+`(:entered (%type-verdict-counts))`, the count of contracted calls the VM's dispatcher entered
+(ADR-748) — the tree-walker has no dispatcher, so it stays 0; the fourth expects a bad result's
+error placed outside `contract.blsp`, which the tree-walker's path does not do. The tests came
+in with 7e02f39cb and pass on the default tier, which is all per-push CI runs. Either the
+counter assertions name their tier, or the tree-walker's contract path is held to the same
+placement.
+
 ## KI-398 — a resize there and back did not repaint a terminal app, under load 🔴 open 2026-11-17
 
 `tests/term_display_test.blsp` › "SIGTSTP with no job control keeps the terminal, SIGCONT
@@ -141,6 +152,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
+| KI-399 | **`contract_dispatch_test` fails on the tree-walker** — dispatcher-entry counts stay 0 at `BROOD_TIER=0`, and one error placement differs | 🔴 open 2026-11-17 — default tier green; found by `make test-both` |
 | KI-398 | **A resize there and back did not repaint a terminal app, under load** — `term_display_test`'s SIGCONT/bounce case wrote < 281 bytes | 🔴 open 2026-11-17 — 1 in 18 under 6× load, 0 in 50 alone; the A→B→A path `RESIZE_GENERATION` covers |
 | KI-397 | **An Interp's three parked waiters outlived its drop past the 30 s deadline** — `interp_teardown` failed once under a full `make test` | ⚠️ watching 2026-11-17 — not reproducible on demand (40/40 alone, 80/80 contended); the assertion now reports the counts |
 | KI-396 | **`editor/face`'s face registry reset to `{}` when the module loaded after other modules' faces were restored** — with std loaded from source (`BROOD_NO_STDIMAGE=1`) an imaged bedit lost `:org/level-1` and `:syntax/variable` 5 runs in 6, its Org headings uncoloured | ✅ **FIXED 2026-11-16** — the registry is declared `defonce`, not `defdyn`, so the module's first load after the project image's root section restored the faces keeps them, as `editor/layers` was fixed (ADR-218). Guards: `tests/face_test.blsp` "a face another module registered outlives a re-run of editor/face", and `tests/registry_declare_test.blsp`, which checks every registry a std module declares is `defonce` |

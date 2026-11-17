@@ -145,7 +145,10 @@
   :serial (test "completes however deep, and raises at the ceiling when runaway, after warming"
     (jdr-via-warm 2000)
     (assert= [:ok 200000] (jdr-via-in-spawn 200000 nil))
-    (assert= [:ok 2000000] (jdr-via-in-spawn 2000000 nil))
+    ;; past the VM's old 1 048 576-frame cap, and within the call-stack ceiling of a runtime
+    ;; under the test runner's 2 GB soft limit on either engine (the tree-walker's frames
+    ;; are the larger)
+    (assert= [:ok 1100000] (jdr-via-in-spawn 1100000 nil))
     (let (r (jdr-via-in-spawn 20000000 100000000))
       (is (vector? r))
       (assert= :caught (first r))

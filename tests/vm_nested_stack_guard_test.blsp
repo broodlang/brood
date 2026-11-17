@@ -47,14 +47,17 @@
 
 (describe "nested-activation native stack guard"
   (test "deep recursion through the %try builtin terminates instead of aborting"
-    ;; Before the fix this never returned — the OS process died with SIGSEGV.
-    ;; Two million levels is past every engine's limit: the VM's native-stack guard trips
-    ;; long before, and the tree-walker — where `%try` is a heap frame since ADR-416 stage 3,
-    ;; so this shape never re-enters natively — stops at its frame cap.
+    ;; Before the fix this never returned — the OS process died with SIGSEGV. Now the
+    ;; recursion is as deep as memory allows (ADR-751), so the process gets a 300 MB
+    ;; `:max-heap`: past it — its call-stack ceiling on the VM, where each level grows native
+    ;; stack, or its heap limit on the tree-walker, whose levels hold more heap than frames —
+    ;; it fails catchably INSIDE the process, before memory pressure across the runtime
+    ;; would stop the whole test process.
+    (proc/flag :max-heap 300000000)
     (let (out (nsg-try 2000000))
       (is (int? out))
-      ;; The inner `catch` swallowed the depth error, so the count is the depth the
-      ;; guard allowed — bounded under the requested two million.
+      ;; The inner `catch` swallowed the error, so the count is the depth the limit
+      ;; allowed — bounded under the requested two million.
       (is (> out 0))
       (is (< out 2000000))))
 
