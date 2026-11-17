@@ -223,7 +223,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `markdown.blsp` (`markdown`) — Markdown to HTML: `->html` renders a small subset (ATX headings, fenced code, `- ` and `1.
 - `math.blsp` (`math`) — The math library — roots, powers, rounding, aggregation, and constants.
 - `mcp-server.blsp` (`mcp-server`) — A Model Context Protocol server: the JSON-RPC dispatcher behind `nest mcp`, for any program that serves tools to an agent.
-- `memo.blsp` (`memo`) — Bounded memoisation for hot paths: `defmemo` defines a function that remembers its last few calls, compared by `=` — for arguments like a buffer's rope, where hashing would read the whole text on every call.
+- `memo.blsp` (`memo`) — Bounded memoisation for hot paths: `defmemo` defines a function that remembers its last few calls, compared by `=` — for arguments like a buffer's rope, where hashing would read the whole text on every call; `defmemo-by` one that keeps one answer per key, valid while the key's input is unchanged.
 - `multimap.blsp` (`multimap`) — Multi-valued map: one key may have multiple associated values.
 - `net/dns.blsp` (`dns`) — Resolve a hostname to its A/AAAA records, over TCP.
 - `net/http.blsp` (`http`) — A minimal HTTP/1.0 server over the TCP + file libraries (ADR-062).

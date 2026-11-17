@@ -192,10 +192,10 @@ positive, down when negative — blanks entering where rows left; the cells outs
         blank (into [] (seq/repeat (- right left) (erase-cell vt)))
         moved (for (r (range top (inc bottom)) :into [])
                 (let (source (+ r n))
-                  (splice (nth grid r)
+                  (splice (row-at vt r)
                     left
                     right
-                    (if (<= top source bottom) (seq/subvec (nth grid source) left right) blank)))))
+                    (if (<= top source bottom) (seq/subvec (row-at vt source) left right) blank)))))
     (assoc vt :grid (splice grid top (inc bottom) moved))))
 
 (defn- scroll-up (vt:terminal top:int bottom:int n:int history?:any -> terminal)
