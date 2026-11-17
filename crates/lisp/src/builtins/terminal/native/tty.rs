@@ -151,8 +151,17 @@ pub(super) fn watch_resizes() {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {
         let mut ends = [0 as RawFd; 2];
-        // SAFETY: `ends` holds the two descriptors pipe2 writes.
-        if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } == 0 {
+        // `pipe` then `fcntl`, not `pipe2`: macOS has no `pipe2` (as `os.rs`'s signal pipe).
+        // SAFETY: `ends` is a live array of two; `pipe` writes the two descriptors into it.
+        if unsafe { libc::pipe(ends.as_mut_ptr()) } == 0 {
+            for fd in ends {
+                // SAFETY: `fd` is a descriptor `pipe` just returned, owned here.
+                unsafe {
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                    let flags = libc::fcntl(fd, libc::F_GETFL);
+                    libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                }
+            }
             let _ = WAKE_PIPE.set((ends[0], ends[1]));
         }
         // SAFETY: a zeroed sigaction with a handler that touches only an atomic and the pipe.
