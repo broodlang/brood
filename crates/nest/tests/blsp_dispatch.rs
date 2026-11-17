@@ -832,7 +832,7 @@ fn rename_module_moves_the_file_and_renames_every_reference() {
     .expect("pool");
     std::fs::write(
         dir.join("src/main.blsp"),
-        "(defmodule main (:use pool))\n(defn main () (let (pool 1) (+ pool (pool/size))))\n",
+        "(defmodule main (:use pool))\n(defn main () (let (pool 1) (+ pool (pool/size))))\n(def rooted 'rm/pool/size)\n",
     )
     .expect("main");
     let (code, out, err) = nest_in(&dir, &["rename-module", "pool", "files/pool"]);
@@ -843,7 +843,7 @@ fn rename_module_moves_the_file_and_renames_every_reference() {
     let main = std::fs::read_to_string(dir.join("src/main.blsp")).expect("main");
     assert_eq!(
         main,
-        "(defmodule main (:use files/pool))\n(defn main () (let (pool 1) (+ pool (files/pool/size))))\n"
+        "(defmodule main (:use files/pool))\n(defn main () (let (pool 1) (+ pool (files/pool/size))))\n(def rooted 'rm/files/pool/size)\n"
     );
     let (code, _, err) = nest_in(&dir, &["rename-module", "nothing", "x/nothing"]);
     assert_eq!(code, 1, "{err}");

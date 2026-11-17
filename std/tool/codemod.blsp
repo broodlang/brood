@@ -1053,6 +1053,14 @@ under `lsp`) or of anything in one: it belongs to that module, which this rename
   ;; the file of `files` that declares `module`, or nil
   (seq/find files (fn (file) (= (module-name (file/slurp file)) module))))
 
+(defn- project-manifest-name ()
+  ;; the `:name` of the project.blsp in the current directory, or nil
+  (when (file/exists? "project.blsp")
+    (let (form (reflect/read-first (file/slurp "project.blsp")))
+      (when (and (pair? form) (= (first form) 'project))
+        (let (name (second (seq/drop-while (rest form) (fn (item) (not (= item :name))))))
+          (when (string? name) name))))))
+
 (defn rename-module (from to)
   "Rename module `from` to `to` across the project's .blsp files ([[rename-module-text]]) and
 move its file where the new name puts it, beside the old one's source root: `src/pool.blsp`
@@ -1064,7 +1072,19 @@ when no file declares `from` or the destination exists (nothing is written then)
         source (module-file files from)
         ;; modules named under `from` keep their names: only `from` itself moves
         nested (seq/filter (seq/keep files (fn (file) (module-name (file/slurp file))))
-                 (fn (module) (string/starts-with? module (str from "/")))))
+                 (fn (module) (string/starts-with? module (str from "/"))))
+        ;; the project-rooted spelling too (`bedit/terminal`): a module's globals live under
+        ;; the project's name, and code that names them so (a registry row's late-bound
+        ;; symbols, a tool's `:use-internals`) must follow
+        project-name (project-manifest-name)
+        rename-text (fn (text)
+                      (let (plain (rename-module-text text from to nested))
+                        (if (nil? project-name)
+                          plain
+                          (rename-module-text plain
+                            (str project-name "/" from)
+                            (str project-name "/" to)
+                            (map nested (fn (module) (str project-name "/" module))))))))
     (cond
       (nil? source) (do (io/puts "rename-module: no file declares module " from :to *err*) 1)
       else
@@ -1076,7 +1096,7 @@ when no file declares `from` or the destination exists (nothing is written then)
             (let (changed (seq/keep files
                             (fn (file)
                               (let (text (file/slurp file)
-                                    renamed (rename-module-text text from to nested))
+                                    renamed (rename-text text))
                                 (when (not (= text renamed)) (file/spit file renamed) file)))))
               (file/mkdir (path/dirname destination))
               (file/move source destination)
