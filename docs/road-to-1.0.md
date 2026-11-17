@@ -17,7 +17,8 @@ the order to do it in. Legend: ⬜ not started · 🟡 partly there · ✅ done.
   - A project opts into new lints through a key in `project.blsp`.
   - Nothing is carved out as `:beta`. The release candidates are where the surface settles.
   - The minimum time for a deprecation is deferred until closer to 1.0.
-- ⬜ **The last surface pass, using the freeze test** (`archive/roadmap-for-v1.md` § The
+- ✅ **The last surface pass, using the freeze test** (every thread decided by 2026-11-12;
+  the renames it found are F's ADR-716..719) (`archive/roadmap-for-v1.md` § The
   test): *can this be added later without breaking anyone, and without leaving the whole corpus
   in a dated idiom?* Run every open thread in `handoff.md` through it:
   - ✅ **Thread 6, "reduce before adding": decided (ADR-674), both stages landed.** `doseq` is
