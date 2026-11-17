@@ -158,8 +158,8 @@
       ;; a doc credits nobody from source (the image credits the module): never the file
       (assert= (%registry-writer '*module-docs* ["regretract-from-source"]) nil)
       (assert= (system/module-doc 'regretract-from-source) "its doc")
-      (%with-load-journal
-        (fn () (doseq (write (registry/written-by #{file})) (registry/retract write)))))))
+      (%with-load-journal (fn ()
+                            (doseq (write (registry/written-by #{file})) (registry/retract write)))))))
 
 (fixture "regretract-under"
   "(defmodule regretract-under)\n(registry/put :regretract/stack :k :under)\n")

@@ -1,0 +1,172 @@
+(defmodule module-graph
+  "`nest deps` — a project's module dependencies, read as CONTEXTS (ADR-750).
+
+A context is a module and the modules named under it: `display` is the context, and
+`display/panebody` a detail of it, by the name alone — nothing declares it, as nothing declares a
+Phoenix context but the file beside its folder. The convention this report holds a project to
+is that a context is used through its own module: a reference from outside `display` to
+`display/panebody` reaches into a detail, and is listed. A module with no `/` in its name is a
+context of its own.
+
+What it reads is the module index (`module-index/infos-of`, ADR-380): each file's module, the
+modules its header requires and the modules its qualified references name — no file is loaded.
+The graph is plain data, so every question below is a pure function of it:
+
+- [[violations]] — references into another context's detail;
+- [[context-edges]] — how many references each context makes to each other one;
+- [[cycles]] — the groups of contexts that reach each other (a context graph should be a DAG);
+- [[report]] — all of it as the text `nest deps` prints.")
+
+(defn context-of (module:string -> string)
+  "The context `module` belongs to: the part of its name before the first `/`, or the whole
+name when it has none.
+
+    (module-graph/context-of \"display/panebody\")   ;=> \"display\"
+    (module-graph/context-of \"model\")   ;=> \"model\""
+  (first (string/split module "/")))
+
+(defn detail? (module:string -> bool)
+  "Whether `module` is a detail of a context — its name has a `/` — rather than a context.
+
+    (module-graph/detail? \"display/panebody\")   ;=> true
+    (module-graph/detail? \"display\")   ;=> false"
+  (includes? module "/"))
+
+(defn graph (infos:map -> map)
+  "`{module #{dependency …}}` from the module index's `infos` (`{file {:module :requires
+:refs}}`): each module's requires and qualified references that name another module of the
+same project. A std module, or a module of a package, is left out — the report is about the
+project's own shape.
+
+    (module-graph/graph {\"a.blsp\" {:module \"a\" :requires [\"b\" \"seq\"] :refs [\"b\"]} \"b.blsp\" {:module \"b\" :requires [] :refs []}})   ;=> {\"a\" #{\"b\"} \"b\" #{}}"
+  (let (entries (seq/filter (vals infos) (fn (info) (string? (:module info))))
+        own (into #{} (map entries :module)))
+    (fold entries
+      {}
+      (fn (modules info)
+        (let (module (:module info)
+              named (append (or (:requires info) []) (or (:refs info) [])))
+          (assoc modules
+            module
+              (into (or (get modules module) #{})
+                (seq/filter named
+                  (fn (dependency) (and (contains? own dependency) (not (= dependency module))))))))))))
+
+(defn references (modules:map -> list)
+  "Every `[from to]` reference of the graph `modules`, sorted.
+
+    (module-graph/references {\"a\" #{\"b\"} \"b\" #{}})   ;=> ([\"a\" \"b\"])"
+  (sort (mapcat modules (fn ([from targets]) (map targets (fn (to) [from to]))))))
+
+(defn violations (modules:map -> list)
+  "The references that reach into another context's detail: `[from to]` where `to` is a
+detail ([[detail?]]) of a context `from` is not in. Sorted.
+
+    (module-graph/violations {\"editing\" #{\"display\" \"display/panebody\"} \"display\" #{\"display/panebody\"} \"display/panebody\" #{}})   ;=> ([\"editing\" \"display/panebody\"])"
+  (seq/filter (references modules)
+    (fn ([from to]) (and (detail? to) (not (= (context-of from) (context-of to)))))))
+
+(defn context-edges (modules:map -> map)
+  "`{[from-context to-context] count}`: how many module references each context makes to each
+other one. A reference inside a context is not an edge.
+
+    (module-graph/context-edges {\"a/x\" #{\"b\" \"a\"} \"a\" #{} \"b\" #{}})   ;=> {[\"a\" \"b\"] 1}"
+  (fold (references modules)
+    {}
+    (fn (edges [from to])
+      (let (key [(context-of from) (context-of to)])
+        (if (= (first key) (second key)) edges (assoc edges key (inc (or (get edges key) 0))))))))
+
+(defn- reachable (adjacency start)
+  ;; every context reachable from `start` along `adjacency` (`{context #{context}}`), itself
+  ;; included
+  (letrec (walk (fn (seen frontier)
+                  (if (empty? frontier)
+                    seen
+                    (let (context (first frontier))
+                      (if (contains? seen context)
+                        (walk seen (rest frontier))
+                        (walk (conj seen context)
+                          (append (rest frontier) (seq (or (get adjacency context) #{})))))))))
+    (walk #{} (list start))))
+
+(defn cycles (modules:map -> list)
+  "The groups of contexts that reach each other through their references — each a sorted
+vector of two or more contexts, the groups sorted. Empty when the contexts form a DAG.
+
+    (module-graph/cycles {\"a\" #{\"b\"} \"b\" #{\"a\"} \"c\" #{\"a\"}})   ;=> ([\"a\" \"b\"])"
+  (let (adjacency (fold (keys (context-edges modules))
+                    {}
+                    (fn (adjacent [from to])
+                      (assoc adjacent from (conj (or (get adjacent from) #{}) to))))
+        contexts (sort (keys adjacency))
+        reach (into {} (map contexts (fn (context) [context (reachable adjacency context)]))))
+    (sort (seq/distinct (seq/keep contexts
+                          (fn (context)
+                            (let (group (vec (sort (seq/filter (seq (get reach context))
+                                                     (fn (other)
+                                                       (contains? (or (get reach other) #{})
+                                                         context))))))
+                              (when (> (count group) 1) group))))))))
+
+(defn report (modules:map options:map -> string)
+  "The text `nest deps` prints for the graph `modules`: a summary line, the references into
+another context's detail, the contexts that reach each other, and the busiest context edges
+(`(:top options)` of them, 15 when absent; every one with `:all`).
+
+    (string/starts-with? (module-graph/report {\"a\" #{}} {}) \"deps: 1 module\")   ;=> true"
+  (let (all-references (references modules)
+        edges (context-edges modules)
+        crossing (fold (vals edges) 0 +)
+        contexts (seq/distinct (map (keys modules) context-of))
+        reaching (violations modules)
+        groups (cycles modules)
+        shown (if (:all options) (count edges) (or (:top options) 15))
+        busiest (take (seq/sort-by (seq edges) (fn ([key total]) [(- total) key])) shown)
+        plural (fn (n word) (str n " " word (if (= n 1) "" "s"))))
+    (string/join (append [(str "deps: "
+                            (plural (count modules) "module")
+                            " in "
+                            (plural (count contexts) "context")
+                            "; "
+                            (plural (count all-references) "reference")
+                            ", "
+                            crossing
+                            " across contexts")
+                           ""
+                           (str "reaching into another context's detail (" (count reaching) "):")]
+                   (if (empty? reaching)
+                     ["  none"]
+                     (map reaching (fn ([from to]) (str "  " from " → " to))))
+                   [""
+                     (str "contexts that reach each other (" (count groups) "):")]
+                   (if (empty? groups)
+                     ["  none — the contexts form a DAG"]
+                     (map groups (fn (group) (str "  " (string/join group " ⇄ ")))))
+                   [""
+                     (str "the busiest context edges (" (count busiest) " of " (count edges) "):")]
+                   (map busiest (fn ([[from to] total]) (str "  " from " → " to "  " total))))
+      "\n")))
+
+(defn- manifest-config (root)
+  ;; the project's manifest applied, so `project/source-files` walks its own source paths
+  (let (path (path/join root "project.blsp"))
+    (when (file/exists? path)
+      (let (form (reflect/read-first (file/slurp path)))
+        (when (and (pair? form) (= (first form) 'project)) (project/apply-config (rest form)))))))
+
+(defn project-graph (root:string -> map)
+  "The [[graph]] of the project at `root`, read from its module index.
+
+    (map? (module-graph/project-graph \"/path/to/proj\"))   ;~> true"
+  (manifest-config root)
+  (graph (module-index/infos-of root (project/source-files root))))
+
+(defn run (root:string options:map -> int)
+  "Print the [[report]] for the project at `root`; the exit code — 1 under `:check` when any
+reference reaches into another context's detail, else 0.
+
+    (module-graph/run \"/path/to/proj\" {:check true})   ;~> 0 — after printing the report"
+  (let (modules (project-graph root))
+    (io/puts (report modules options))
+    (if (and (:check options) (not (empty? (violations modules)))) 1 0)))

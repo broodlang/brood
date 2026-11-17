@@ -760,3 +760,58 @@ fn attach_needs_a_spec_and_both_frontends_refuse_a_pipe_before_touching_the_scre
         "{out}"
     );
 }
+
+// ── `nest deps` (ADR-750): the project's module graph read as contexts by name.
+
+#[test]
+fn deps_lists_a_reference_into_another_context_s_detail_and_check_fails_on_it() {
+    let dir = scratch("deps");
+    let (code, _, err) = nest_in(&dir, &["deps"]);
+    assert_eq!(code, 2, "outside a project:\n{err}");
+    assert!(err.contains("nest deps: no project.blsp in"), "{err}");
+
+    std::fs::create_dir_all(dir.join("src/display")).expect("src/display");
+    std::fs::write(
+        dir.join("project.blsp"),
+        "(project :name \"deps\" :version \"0.1.0\")\n",
+    )
+    .expect("project.blsp");
+    std::fs::write(
+        dir.join("src/display.blsp"),
+        "(defmodule display (:use display/rows))\n(defn paint () (rows))\n",
+    )
+    .expect("display");
+    std::fs::write(
+        dir.join("src/display/rows.blsp"),
+        "(defmodule display/rows)\n(defn rows () [1 2])\n",
+    )
+    .expect("display/rows");
+    std::fs::write(
+        dir.join("src/editing.blsp"),
+        "(defmodule editing)\n(defn run () (display/paint))\n",
+    )
+    .expect("editing");
+
+    let (code, out, err) = nest_in(&dir, &["deps", "--check"]);
+    assert_eq!(
+        code, 0,
+        "only the context's own module is used:\n{out}\n{err}"
+    );
+    assert!(
+        out.contains("reaching into another context's detail (0):"),
+        "{out}"
+    );
+
+    std::fs::write(
+        dir.join("src/editing.blsp"),
+        "(defmodule editing)\n(defn run () (display/rows/rows))\n",
+    )
+    .expect("editing reaching in");
+    let (code, out, err) = nest_in(&dir, &["deps", "--check"]);
+    assert_eq!(
+        code, 1,
+        "a reach into display's detail fails --check:\n{out}\n{err}"
+    );
+    assert!(out.contains("  editing → display/rows"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

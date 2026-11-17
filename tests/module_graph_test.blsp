@@ -1,0 +1,45 @@
+;; tests/module_graph_test.blsp — `nest deps` (std/tool/module-graph.blsp, ADR-750): a project's
+;; module graph read as contexts by name, the references into another context's detail, and
+;; the contexts that reach each other.
+(defmodule module-graph-test
+  (:use test)
+  (:use module-graph))
+
+(def- infos
+  ;; a small project: `display` with its detail `display/panebody`, `editing` reaching past the
+  ;; display context into its detail, and `text`, which `display` uses
+  {"/p/src/display.blsp" {:module "display" :requires ["display/panebody" "text"] :refs []}
+   "/p/src/display/panebody.blsp" {:module "display/panebody" :requires ["seq"] :refs ["text"]}
+   "/p/src/editing.blsp" {:module "editing" :requires ["display"] :refs ["display/panebody"]}
+   "/p/src/text.blsp" {:module "text" :requires [] :refs ["string"]}
+   "/p/src/notes.txt" {:module nil :requires [] :refs []}})
+
+(describe "module-graph: the graph"
+  (test "a module's own modules only, never itself, never a std module"
+    (assert= (graph infos)
+      {"display" #{"display/panebody" "text"}
+       "display/panebody" #{"text"}
+       "editing" #{"display" "display/panebody"}
+       "text" #{}}))
+  (test "a context is the name before the first slash"
+    (assert= (context-of "display/panebody/rows") "display")
+    (is (detail? "display/panebody"))
+    (refute (detail? "display"))))
+
+(describe "module-graph: what the report finds"
+  (test "a reference from outside a context to its detail is a violation; one inside is not"
+    (assert= (vec (violations (graph infos))) [["editing" "display/panebody"]]))
+  (test "context edges count references between contexts, none inside one"
+    (assert= (context-edges (graph infos))
+      {["display" "text"] 2 ["editing" "display"] 2}))
+  (test "contexts that reach each other are a group; a DAG has none"
+    (is (empty? (cycles (graph infos))))
+    (assert= (vec (cycles {"a" #{"b/x"} "b/x" #{"c"} "c" #{"a"} "d" #{"a"}}))
+      [["a" "b" "c"]]))
+  (test "the report says each finding"
+    (let (text (report (graph infos) {}))
+      (is (string/starts-with? text
+            "deps: 4 modules in 3 contexts; 5 references, 4 across contexts"))
+      (is (includes? text "  editing → display/panebody"))
+      (is (includes? text "  none — the contexts form a DAG"))
+      (is (includes? text "  display → text  2")))))

@@ -99,7 +99,8 @@
   (test "a bad result's error is placed at the caller's call, not in the contract module"
     (let (error (try (dispatch-lies-caller 1) (catch error error)))
       (is (not (includes? (->string (get error :file)) "contract.blsp")))
-      (is (not (any? (get error :trace) (fn (frame) (includes? (->string (get frame :file)) "contract.blsp")))))))
+      (is (not (any? (get error :trace)
+                 (fn (frame) (includes? (->string (get frame :file)) "contract.blsp")))))))
   (test "a wrong arity is the shim's arity error"
     (assert-error (check-allow :type-mismatch (reflect/eval '(contract-dispatch-test/d-add 1))))))
 

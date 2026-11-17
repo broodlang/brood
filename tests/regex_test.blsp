@@ -211,7 +211,8 @@
     (assert= (txt (find "hello world" "\\w+")) "hello")))
 
 (describe "regex named groups"
-  (defn- named-text (found name) (let (group (get (get found :named) name)) (when group (get group :text))))
+  (defn- named-text (found name)
+    (let (group (get (get found :named) name)) (when group (get group :text))))
 
   (test "(?<name>...) and (?P<name>...) capture under :named by keyword"
     (let (found (find "on 2026-11-17" "(?<year>\\d{4})-(?<month>\\d\\d)-(?P<day>\\d\\d)"))

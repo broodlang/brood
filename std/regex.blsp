@@ -918,7 +918,8 @@ empty pattern `\"\"` is an absent prefix or suffix.
   "The text `${reference}` stands for in a template: group `n` when it is a number (0 the
 whole match), the named group otherwise — \"\" for one that did not take part or is not
 there."
-  (let (number (when (every? (string/->list reference) (fn (character) (includes? "0123456789" character)))
+  (let (number (when (every? (string/->list reference)
+                       (fn (character) (includes? "0123456789" character)))
                  (string/->number reference))
         group (cond
                 (= number 0) found

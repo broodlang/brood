@@ -235,10 +235,12 @@ is clean.
                       (if (and (map? spec) (:retired spec) (not (nil? (get config key))))
                         (conj found (str label ": " (pr-str key) " is retired — " (:retired spec)))
                         found))))
-        unknown (sort (map (seq/filter (keys config) (fn (key) (not (contains? declared key)))) pr-str)))
+        unknown (sort (map (seq/filter (keys config) (fn (key) (not (contains? declared key))))
+                        pr-str)))
     (into (into bad retired)
       (map unknown
-        (fn (key) (str label ": " key " is not a setting (a typo, or one whose module has not loaded)"))))))
+        (fn (key)
+          (str label ": " key " is not a setting (a typo, or one whose module has not loaded)"))))))
 
 ;; ---- the file a group lives in -------------------------------------------
 ;;

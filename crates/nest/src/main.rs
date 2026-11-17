@@ -245,6 +245,7 @@ const BLSP_SUBCOMMANDS: &[&str] = &[
     "fetch",
     "update",
     "tree",
+    "deps",
     "add",
     "remove",
     "publish",

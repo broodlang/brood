@@ -531,6 +531,41 @@ feature. Put it first. e.g. (defmodule gen \"A server framework …\")."
        ~@(%defmodule-clause-forms clauses :use-internals %defmodule-internals-clause)
        ~@(%defmodule-clause-forms clauses :alias %defmodule-alias-clause))))
 
+;; `defdelegate` (ADR-751): a module's public function that is another module's, by name — a
+;; context's API over its details (`(defdelegate rows (pane) display/rows)`), without a
+;; hand-written wrapper per function. It expands to an ordinary `defn` that calls the target,
+;; so the call stays late-bound (a redefined target is what the next call runs) and the target
+;; module loads on first use, as any qualified call's does. The docstring points at the target
+;; rather than copying it: copying would load the target at expansion.
+(defn- %delegate-call-args (params)
+  ;; `[plain-args rest-arg]` for a call forwarding `params`: the names in order, a
+  ;; `(name default)` optional reduced to its name, and the `& rest` name apart (nil if none)
+  (letrec (walk (fn (remaining names)
+                  (cond
+                    (empty? remaining) [names nil]
+                    (= (first remaining) '&optional) (walk (rest remaining) names)
+                    (= (first remaining) '&) [names (second remaining)]
+                    (list? (first remaining))
+                      (walk (rest remaining) (conj names (first (first remaining))))
+                    else (walk (rest remaining) (conj names (first remaining))))))
+    (walk params [])))
+
+(defmacro defdelegate (name params target & options)
+  "Define `name` as a public function that calls the function of the same name in module
+`target` with the same arguments — `:as other` calls `target/other` instead. `params` is an
+ordinary parameter list (`&optional` defaults and an `& rest` are forwarded). The docstring
+names the target, so `M-.` and the docs lead there.
+
+    (do (defdelegate %doc-delegated-join (parts separator) string :as join) (%doc-delegated-join [\"a\" \"b\"] \"-\"))   ;=> \"a-b\""
+  (%defn-check-name 'defdelegate name)
+  (let (callee (if (= (first options) :as) (second options) name)
+        target-name (symbol (str (->string target) "/" (->string callee)))
+        [plain-args rest-arg] (%delegate-call-args params)
+        call (if (nil? rest-arg)
+               `(~target-name ~@plain-args)
+               `(apply ~target-name ~@plain-args ~rest-arg)))
+    `(defn ~name ~params ~(str "Delegates to [[" (->string target-name) "]].") ~call)))
+
 ;; First existing <filename> across the load-path dirs, or nil.
 (defn- %require-find (filename dirs)
   (cond

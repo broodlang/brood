@@ -1995,3 +1995,8 @@ what their names say.
 `std/settings` gains a `:retired` spec key: a setting that is gone tells a config that still sets
 it what replaced it, is never applied, and is left out of `specs` and the default file — bedit's
 `:welcome` is the first.
+
+2026-11-17 (ADR-750, ADR-751). **`nest deps` and `defdelegate`**, for cutting a project into
+contexts by name (`display` and its details `display/*`): the report lists references into
+another context's detail and the contexts that reach each other; `defdelegate` writes a context's
+API over its details in one line each.

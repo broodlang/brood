@@ -485,10 +485,12 @@ no tab stop.
               (rest inline)
               at
               (cons (virtual-chunk annotation) acc))
-          (>= index (+ at size)) (splice-inline-step (rest chunks) inline (+ at size) (cons chunk acc))
+          (>= index (+ at size))
+            (splice-inline-step (rest chunks) inline (+ at size) (cons chunk acc))
           else
             (let (cut (- index at))
-              (splice-inline-step (cons [(string/substring text cut size) (second chunk)] (rest chunks))
+              (splice-inline-step (cons [(string/substring text cut size) (second chunk)]
+                                    (rest chunks))
                 inline
                 index
                 (cons [(string/substring text 0 cut) (second chunk)] acc)))))))
