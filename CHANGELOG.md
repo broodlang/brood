@@ -19,7 +19,15 @@ any `:check` policy or `(:check-allow …)` clause. `BROOD_STACK_BUDGET` is gone
 **Fixed: `if-let`, `when-let`, `if-some`, `when-some` and `with` refuse a malformed
 binding.** They took `first` and `second` of it, so `(when-let (a 1 b) …)` dropped `b`,
 `(if-let (a) …)` bound `a` to nil and `(with (a) …)` ran its body; `let` already refused all
-three. Each now fails at expansion, naming the form and the binding it got.
+three. Each now fails at expansion, naming the form and the binding it got. In the same
+way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
+now fail, naming what they got.
+
+**Fixed: `doseq` and `fold-for` errors name `doseq` and `fold-for`, and `for` refuses
+`:let`.** An unpaired binding in either reported `for: binding … has no collection`, naming
+the check they share rather than the form written. And a keyword clause `for` does not have
+(`:let`, `:while`) bound as a literal pattern over its "collection", so it surfaced as an
+unbound name or an empty result; it now fails, naming the two clauses there are.
 
 **Fixed: `(check-allow :typo …)` is reported.** A category the checker does not know
 suppressed nothing and said nothing, so a misspelt `:type-mismach` left its lint on with no

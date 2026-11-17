@@ -266,7 +266,16 @@
   (test "with's bindings are name/value pairs, like let's"
     (is (includes? (str (expand-error '(with (a) a))) "with: bindings must be name/value pairs"))
     (is (includes? (str (expand-error '(with (a 1 b) a))) "with: bindings must be name/value pairs"))
-    (is (= 2 (with (a 1 b (inc a)) b)))))
+    (is (= 2 (with (a 1 b (inc a)) b))))
+
+  (test "an &optional parameter is one name and one default"
+    (is (includes? (str (expand-error '((fn (&optional (a 1 2)) a))))
+          "malformed &optional parameter (a 1 2)"))
+    (is (= 1 ((fn (&optional (a 1)) a)))))
+
+  (test "a sig names a type or a property"
+    (is (includes? (str (expand-error '(sig malformed-sig-probe)))
+          "sig malformed-sig-probe: expected a type"))))
 
 ;; ── 9. Duplicate function parameters ─────────────────────────────────────────
 

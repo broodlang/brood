@@ -747,6 +747,15 @@ self-call decreases an argument, and no `match` in the body can fail).
     ;; A type-form is a list (`(int -> int)`, `(list int)`) or a name (`int`, an alias);
     ;; anything else is an error, not a declaration checked by nothing (`(sig f 5)`).
     ;; `%eq`/`if` only: this expands before `or`/`cond` exist.
+    ;; `(sig f)` names nothing to declare; it expanded to `(do nil nil)`.
+    (if (pair? spec)
+      nil
+      (%raise {:kind :error
+               :code "E0090"
+               :at name
+               :message (str "sig "
+                          name
+                          ": expected a type like (int -> int) or a property keyword after the name")}))
     (if typed
       (if (%eq (type-of type) :pair)
         nil
