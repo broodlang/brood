@@ -119,7 +119,8 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
 /// optional symbol for the next entry's kind byte.
 /// v9 adds `KIND_USES`. A v8 reader would decode its list as a value and bind the module's
 /// name to it.
-const MAGIC: &[u8] = b"brood-image-v9\n";
+/// v10 adds `KIND_META`, which a v9 reader would likewise decode as a value.
+const MAGIC: &[u8] = b"brood-image-v10\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
@@ -158,6 +159,13 @@ const KIND_DEF_SITE: u8 = 5;
 /// not loaded from source yet, and `model any -> model` once it had. Written beside the sigs,
 /// on the same rule: every module's in the root section, a named section's own.
 const KIND_USES: u8 = 6;
+/// A name's stability metadata (ADR-283): `:since`, `:deprecated` and its `:use`, `:beta`.
+/// Recorded by *evaluating* the `(meta …)` form's `%register-meta`, which materialising
+/// never does — so a module from an image lost every deprecation, and `nest check` stopped
+/// reporting a deprecated call once the project image existed (a cold check reloading each
+/// module a second time from source had hidden it). Carried like a def site, a name and no
+/// value, written after the values: a definition clears the fact, so it must land after.
+const KIND_META: u8 = 7;
 
 /// `BROOD_IMAGE_TRACE=1` — report where image time goes, split by phase. Both sides run
 /// through an intermediate `process::Message` tree before or after the byte codec, and the
@@ -434,6 +442,18 @@ fn encode_section(
             entries.push(KIND_DEF_SITE);
             put_str(&mut entries, &value::symbol_name(sym));
             put_def_site(&mut entries, &loc);
+            count += 1;
+        }
+    }
+    // Stability metadata, for every name in this section a `(meta …)` recorded it for.
+    for nv in syms {
+        let value::ValueRef::Sym(sym) = nv.unpack() else {
+            continue;
+        };
+        if let Some(meta) = heap.name_meta(sym) {
+            entries.push(KIND_META);
+            put_str(&mut entries, &value::symbol_name(sym));
+            put_meta(&mut entries, &meta);
             count += 1;
         }
     }
@@ -963,10 +983,15 @@ fn define_image_entry(
     // last, so a value entry deferred to the second pass lands AFTER the `KIND_PRIVATE`
     // entry marked it. Save and restore around the define, as `registry_update` does, so
     // the order of the two entries does not matter.
+    // The same holds for stability metadata (`KIND_META`), which `env_define` clears too.
     let was_private = heap.is_private(sym);
+    let meta = heap.name_meta(sym);
     let out = define_image_entry_inner(heap, global, kind, sym, v, reserve);
     if was_private {
         heap.mark_private(sym);
+    }
+    if let Some(meta) = meta {
+        heap.set_name_meta(sym, meta);
     }
     out
 }
@@ -1117,6 +1142,15 @@ fn load_section_entries(
                 return Ok(None);
             };
             heap.set_def_site(value::intern(&name), loc);
+            done += 1;
+            continue;
+        }
+        // …and a meta entry: the name's stability facts.
+        if kind == KIND_META {
+            let Some(meta) = get_meta(r) else {
+                return Ok(None);
+            };
+            heap.set_name_meta(value::intern(&name), meta);
             done += 1;
             continue;
         }
@@ -1406,7 +1440,8 @@ fn temp_suffix() -> String {
 /// v4 (ADR-383): the closure record carries its authoring module (the wire's v8 field).
 /// v5: the header carries the number of source positions the load re-stamps (KI-302).
 /// v6: a section may carry `KIND_USES` entries.
-const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v6\n";
+/// v7: and `KIND_META` entries.
+const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v7\n";
 
 /// The image header: magic, the build fingerprint, the gensym counter the writing boot
 /// reached, and how many source positions the load re-stamps. A reader must start its own
@@ -1461,6 +1496,11 @@ pub(crate) fn load_prelude_image_bytes(
         }
         if kind == KIND_DEF_SITE {
             heap.set_def_site(value::intern(&name), get_def_site(&mut r)?);
+            done += 1;
+            continue;
+        }
+        if kind == KIND_META {
+            heap.set_name_meta(value::intern(&name), get_meta(&mut r)?);
             done += 1;
             continue;
         }

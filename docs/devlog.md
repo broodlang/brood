@@ -2029,3 +2029,19 @@ held the screen dropped its invalidation, now said on an atomic the draw takes. 
 the short name was "not loaded" and the whole module loaded a second time — wasted work on every
 cold check, and the hot-reload notice for each `defmacro`. The pre-flight now roots each name
 with `%root-module-name`, as the header clauses do. Guard: `crates/nest/tests/check_cold_single_load.rs`.
+
+2026-11-18. **A module from an image keeps its `(meta …)` facts.** The cold-check fix above
+turned `check_warning_policy` red on CI: a deprecated call stopped being reported once the
+project image existed. Materialising a section evaluates nothing, so the `%register-meta` a
+`(meta …)` form emits never ran, and the image had no entry for what it records — privacy, the
+def site and the uses had each been given one for the same reason, stability metadata had not.
+The second, from-source load the pre-flight used to do re-ran the form and hid it. The image
+now writes a `KIND_META` entry per name (`brood-image-v10`, `brood-prelude-image-v7`), and the
+deferred second define pass keeps a name's meta as it keeps its privacy. Guard:
+`crates/nest/tests/check_warning_policy.rs` (red with the write switched off). No std module
+outside the prelude has a `(meta …)` today, so the image differential cannot see this yet.
+
+2026-11-18. **Messages printed with `io/puts` carry one space, not two.** `io/puts` joins its
+arguments with a space; the package, workspace and codemod messages were written as if it
+concatenated (`"changed: " file` printed two spaces, `"bumped to v" version` printed
+`v 0.9.7`). Guard: `blsp_dispatch`'s rename-module case reads the lines.
