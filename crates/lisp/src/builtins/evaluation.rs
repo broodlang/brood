@@ -671,7 +671,14 @@ fn run_forms(heap: &mut Heap, root: EnvId, forms: &[Value]) -> LispResult {
         {
             Ok(v) => result = Ok(v),
             Err(e) => {
-                result = Err(e);
+                // An error with no position yet is the form's: tag it here, as the file
+                // runner does, before it leaves the string. Left untagged, the caller's
+                // frame gave it the caller's position, and the boundary then named the
+                // string as its file — `<string>:1176:26`, a line of `std/tool/nest.blsp`,
+                // for `nest eval '(error "mine")'` on the tree-walker (whose top-level call
+                // tags nothing; the VM compiles the form into an arm that does).
+                let form = heap.root_at(base + i);
+                result = Err(e.or_form_pos(heap, form));
                 break;
             }
         }

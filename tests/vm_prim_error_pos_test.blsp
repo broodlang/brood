@@ -72,6 +72,12 @@
     (let (error (try (reflect/eval-string "\n\n(+ 1 :z)") (catch caught caught)))
       (is (= 3 (get error :line)))
       (is (= "<string>" (get error :file)))))
+  (test "a top-level call that raises carries the string's position, not the caller's"
+    ;; on the tree-walker the call tagged nothing and the caller's frame tagged it with its
+    ;; own line under the string's name (2026-11-18): this file's line in `<string>`
+    (let (error (try (reflect/eval-string "\n\n  (error \"mine\")") (catch caught caught)))
+      (assert= [3 3] [(get error :line) (get error :col)])
+      (is (= "<string>" (get error :file)))))
   (test "an error raised inside a std function keeps that function's file"
     (let (error (try (reflect/eval-string "(math/mod 7 0)") (catch caught caught)))
       (is (string/ends-with? (str (get error :file)) "math.blsp")))))

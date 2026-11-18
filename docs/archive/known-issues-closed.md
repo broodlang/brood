@@ -5,6 +5,32 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-401 — an error from a top-level call in `reflect/eval-string` took the caller's position, on the tree-walker ✅ fixed 2026-11-18
+
+**Symptom.** `make test-both`'s tree-walker half: `nest::blsp_dispatch
+a_tool_refusal_names_the_command_not_the_tool_source` read `<string>:1176:26: error: mine` for
+`nest eval '(error "mine")'`, where the default tier reads `<string>:1:1`. Line 1176:26 is
+`std/tool/nest.blsp`'s own `(reflect/eval-string source)`.
+
+**Cause.** `run_forms` (behind `reflect/eval-string`, `%load-string`, `%load-module-source`) did
+not tag an error with the top-level form it was evaluating. On the VM the form is compiled into an
+arm whose call positions tag it; on the tree-walker a top-level call tags nothing, so the error
+left the string positionless, the caller's frame gave it the caller's position
+(`or_form_pos` fills a position whatever file the error already names), and `eval-string` then
+named `<string>` as its file. A nested call (`(+ 1 (error …))`) was tagged by its parent and read
+right.
+
+**Why it survived.** Per-push CI runs the default tier; the test that saw it came in the same day
+(`41b5b0853`) and the tree-walker half is a test-machine gate. Present before this round
+(`f14cfde13` reads the same).
+
+**Fix.** `run_forms` tags an error with no position with the form's own position, as the file
+runner does with each top-level form's.
+
+**Guard.** `tests/vm_prim_error_pos_test.blsp` "a top-level call that raises carries the string's
+position, not the caller's" — `[3 3]` in `<string>` on both engines; at `BROOD_TIER=0` red with
+the tag removed.
+
 ## KI-400 — a module's own use of a name it deprecated was reported only by the cached check ✅ fixed 2026-11-18
 
 **Symptom.** A file that defines `old-way`, marks it `(meta old-way :deprecated …)` and calls it
