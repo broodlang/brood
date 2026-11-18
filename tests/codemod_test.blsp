@@ -349,3 +349,25 @@
   (test "an alias with no :as keeps its short name when the last segment changes"
     (assert= (rename-module-text "(defmodule u (:alias a/basin)) (basin/d 1)" "a/basin" "a/sink")
       "(defmodule u (:alias a/sink :as basin)) (basin/d 1)")))
+
+(describe "rename-global-text — a module's global, by its qualified name"
+  (test "the module's own definition and references, never a local spelled the same"
+    (assert= (rename-global-text "(defmodule a)\n(defn old (x) x)\n(defn f (old) (old 1))\n(defn g () (old 2) 'old)"
+               "a" "old" "new")
+      "(defmodule a)\n(defn new (x) x)\n(defn f (old) (old 1))\n(defn g () (new 2) 'old)"))
+  (test "another module's qualified, quoted, rooted and prose references follow"
+    (assert= (rename-global-text "(defmodule b)\n;; calls `a/old`\n(a/old 1) '(a/old) (bedit/a/old 2)"
+               "a" "old" "new" "bedit")
+      "(defmodule b)\n;; calls `a/new`\n(a/new 1) '(a/new) (bedit/a/new 2)"))
+  (test "a file that :uses the module renames its bare references and its :only list"
+    (assert= (rename-global-text "(defmodule b (:use a :only [old other]))\n(old 1)"
+               "a" "old" "new")
+      "(defmodule b (:use a :only [new other]))\n(new 1)"))
+  (test "a file with its own `old` keeps it; an :exclude list still follows"
+    (assert= (rename-global-text "(defmodule b (:use a :exclude [old]))\n(defn old () 1) (old)"
+               "a" "old" "new")
+      "(defmodule b (:use a :exclude [new]))\n(defn old () 1) (old)"))
+  (test "an alias's short name follows; a module that does not :use it keeps a bare `old`"
+    (assert= (rename-global-text "(defmodule c (:alias a :as x))\n(x/old 1) (old 2)"
+               "a" "old" "new")
+      "(defmodule c (:alias a :as x))\n(x/new 1) (old 2)")))

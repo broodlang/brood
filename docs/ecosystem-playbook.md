@@ -72,7 +72,14 @@ cd ../hatch && nest rename to-str ->string       # one rename, across this repo'
 ```
 
 `nest rename` is pure Brood (`std/tool/codemod.blsp`) — it rewrites whole identifiers
-only, so `map/get` never corrupts `multimap/get`. Run it per repo.
+only, so `map/get` never corrupts `multimap/get`. Run it per repo. A bare OLD renames by
+spelling; a qualified one renames that module's global wherever it is reached:
+
+```
+nest rename linkview/old linkview/fresh   # the definition, bare uses in linkview and in files
+                                          # that :use it (and their :only lists), every
+                                          # linkview/old — quoted, aliased, project-rooted, in prose
+```
 
 Splitting a module is `nest move FROM.blsp TO.blsp NAME…`: each definition leaves with its `sig`,
 the comments above it and any `check-allow`, lands at the end of TO (made, `:use`-ing what FROM

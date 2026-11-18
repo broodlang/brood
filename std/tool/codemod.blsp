@@ -708,16 +708,20 @@ private — `defn-`, `def-` — made public: another module reaches it now."
             (str "(" (string/substring head 0 (dec (count head))) "$1" name "$2"))
           acc)))))
 
+(defn- prose-renamed (text renames)
+  "`text` with each qualified name its comments and docstrings mention (`\\\\[from/cmd-x]`, a
+`from/NAME` in prose) through `renames` (old -> new). Whole tokens only: `shop/from/NAME` and
+`:from/NAME` are other things, and a string or a keyword in the code is data."
+  (map-prose (reflect/parse-source text)
+    (fn (prose)
+      (regex/replace prose
+        "[A-Za-z0-9_*+!?<>=%/:-]+"
+        (fn (found) (or (get renames (:text found)) (:text found)))))))
+
 (defn- prose-follows (text from to names)
-  "`text` with what its comments and docstrings say of a moved name, qualified (`\\\\[from/cmd-x]`,
-a `from/NAME` in prose), following it. Whole tokens only: `shop/from/NAME` and `:from/NAME` are
-other things, and a string or a keyword in the code is data."
-  (let (moved (fold names {} (fn (acc name) (assoc acc (str from "/" name) (str to "/" name)))))
-    (map-prose (reflect/parse-source text)
-      (fn (prose)
-        (regex/replace prose
-          "[A-Za-z0-9_*+!?<>=%/:-]+"
-          (fn (found) (or (get moved (:text found)) (:text found))))))))
+  ;; what the prose says of a moved name, qualified, follows it
+  (prose-renamed text
+    (fold names {} (fn (acc name) (assoc acc (str from "/" name) (str to "/" name))))))
 
 (defn move-text (source destination names)
   "Move the top-level definitions of `names` (strings) from the module source `source` to the
@@ -1129,3 +1133,98 @@ when no file declares `from` or the destination exists (nothing is written then)
               (doseq (file skipped) (io/puts "  skipped (does not parse): " file))
               (io/puts "  moved: " source " → " destination)
               0))))))
+
+;; ---- renaming a module's global (`nest rename mod/old mod/new`) ------------------------
+;; A bare `nest rename old new` renames by spelling, file by file, so `linkview/old` in
+;; another module kept the old name while its definition took the new one; renaming the
+;; qualified token turned it around (the callers moved, the definition did not). A global
+;; is named by its module, and that names every place that reaches it:
+;;   - the module's own file: the definition and each bare reference no local shadows;
+;;   - every file: `mod/old`, `short/old` under `(:alias mod :as short)` and the project-rooted
+;;     `proj/mod/old` — quoted data included, since a keymap or a registry binds `'mod/old`;
+;;   - a file that `:use`s the module (or its internals) and does not define its own `old`:
+;;     each bare reference no local shadows, and the name in an `:only` or `:exclude` list;
+;;   - the prose that names it qualified.
+;; A bare QUOTED `'old` is data, not a reference, and stays.
+
+(defn- use-lists-renamed (text module old new)
+  ;; `old` → `new` inside a `(:use module :only […])` or `:exclude […]` list of `text`
+  (regex/replace text
+    (str "(\\(:use(?:-internals)?\\s+"
+      (regex/escape module)
+      "\\s+:(?:only|exclude)\\s+\\[)([^\\]]*)(\\])")
+    (fn (found)
+      (let ([open listed close] (vec (map (:groups found) (fn (group) (:text group)))))
+        (str open
+          (regex/replace listed "[^\\s]+" (fn (hit) (if (= (:text hit) old) new (:text hit))))
+          close)))))
+
+(defn rename-global-text (text module old new &optional project-name)
+  "`text` with module `module`'s global `old` renamed `new` (both bare names): the definition
+and bare references when `text` is that module or `:use`s it, `module/old` (and an alias's, and
+`project-name/module/old`) everywhere, quoted data and prose included. A local spelled `old`
+is left alone.
+
+    (codemod/rename-global-text \"(defmodule a)\\n(defn old (x) x)\\n(defn f (old) (old 1))\" \"a\" \"old\" \"new\")   ;=> \"(defmodule a)\\n(defn new (x) x)\\n(defn f (old) (old 1))\"
+    (codemod/rename-global-text \"(defmodule b (:use a :only [old]))\\n(old 1) 'a/old\" \"a\" \"old\" \"new\")   ;=> \"(defmodule b (:use a :only [new]))\\n(new 1) 'a/new\""
+  (let (escaped (regex/escape module)
+        own? (= (module-name text) module)
+        uses? (regex/find text (str "\\(:use(?:-internals)?\\s+" escaped "[\\s)]"))
+        only (regex/find text
+               (str "\\(:use(?:-internals)?\\s+" escaped "\\s+:only\\s+\\[([^\\]]*)\\]"))
+        listed (when only (regex/split (string/trim (:text (first (:groups only)))) "\\s+"))
+        bare? (or own?
+                (and uses?
+                  (not (contains? (top-level-names text) old))
+                  (or (nil? listed) (includes? listed old))))
+        short (regex/find text (str "\\(:alias\\s+" escaped "\\s+:as\\s+([^\\s)]+)"))
+        qualifiers (append [module]
+                     (if short [(:text (first (:groups short)))] [])
+                     (if project-name [(str project-name "/" module)] []))
+        renames (fold qualifiers
+                  {}
+                  (fn (acc qualifier) (assoc acc (str qualifier "/" old) (str qualifier "/" new))))
+        rewritten (rewrite-references text
+                    (if bare? [old] [])
+                    (fn (name quoted?)
+                      (cond
+                        (contains? renames name) (get renames name)
+                        (and bare? (= name old) (not (= quoted? true))) new
+                        else name))))
+    (use-lists-renamed (prose-renamed rewritten renames) module old new)))
+
+(defn rename-global (qualified new)
+  "Rename the global `qualified` (`mod/old`) to `new` — `mod/new`, or the bare `new` — across the
+project's .blsp files ([[rename-global-text]]). Prints each changed file; returns 0, or 1 when
+`new` names another module (that is `nest move`) or no file declares the module.
+
+    (codemod/rename-global \"linkview/old\" \"linkview/fresh\")   ;~> 0"
+  (let (cut (string/last-index-of qualified "/")
+        module (string/substring qualified 0 cut)
+        old (string/substring qualified (inc cut))
+        new-name (if (string/starts-with? new (str module "/"))
+                   (string/substring new (inc cut))
+                   new)
+        files (project-blsp))
+    (cond
+      (includes? new-name "/")
+        (do
+          (io/puts (str "rename: "
+                     new " is in another module than " qualified "; `nest move` moves a definition")
+            :to *err*)
+          1)
+      (nil? (module-file files module))
+        (do (io/puts (str "rename: no file declares module " module) :to *err*) 1)
+      else
+        (let (project-name (project-manifest-name)
+              readable (seq/filter files (fn (file) (lossless? (file/slurp file))))
+              changed (seq/keep readable
+                        (fn (file)
+                          (let (text (file/slurp file)
+                                renamed (rename-global-text text module old new-name project-name))
+                            (when (not (= text renamed)) (file/spit file renamed) file)))))
+          (doseq (file changed) (io/puts "  changed: " file))
+          (doseq (file (seq/reject files (fn (file) (contains? (into #{} readable) file))))
+            (io/puts "  skipped (does not parse): " file))
+          (io/puts (count changed) " file(s) changed")
+          0))))

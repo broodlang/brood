@@ -16,6 +16,14 @@ one from its machine. The `:non-tail-recursion` checker category is deleted: rem
 `(check-allow :non-tail-recursion …)` wrappers (the form inside stays) and the category from
 any `:check` policy or `(:check-allow …)` clause. `BROOD_STACK_BUDGET` is gone.
 
+**Fixed: `nest rename mod/old mod/new` renames the global, not only the token.** A bare
+`nest rename old new` renamed the definition and left every `linkview/old` in other modules
+calling a name that was gone; renaming the qualified token did the opposite. A qualified OLD
+now renames that module's global: its definition and bare references in its own file (a local
+spelled the same stays), the bare references and the `:only`/`:exclude` entry in a file that
+`:use`s it, and every `mod/old` — quoted, under an `:alias`, project-rooted, and in prose. A NEW
+in another module is refused, pointing at `nest move`.
+
 **Fixed: `if-let`, `when-let`, `if-some`, `when-some` and `with` refuse a malformed
 binding.** They took `first` and `second` of it, so `(when-let (a 1 b) …)` dropped `b`,
 `(if-let (a) …)` bound `a` to nil and `(with (a) …)` ran its body; `let` already refused all
