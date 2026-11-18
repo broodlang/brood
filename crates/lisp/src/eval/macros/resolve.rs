@@ -670,7 +670,6 @@ pub fn resolve(heap: &mut Heap, form: Value) -> Value {
     // Bounded compile walk — block the safepoint so the partially-built output tree
     // and the Rust-local Vecs aren't relocated/swept mid-walk (resolve allocates a
     // parallel tree, like `macroexpand_all`; it re-enters neither eval nor expand).
-    let _gc_block = crate::process::GcBlockGuard::enter();
     let _macro_block = crate::process::MacroBlockGuard::enter();
     let ns_name = value::symbol_name_ref(ns);
     let resolved = resolve_walk(heap, form, ns_name, &[]);
@@ -1003,7 +1002,6 @@ pub(crate) fn strip_root_escapes(heap: &mut Heap, form: Value) -> Value {
     if !has_root_escape(heap, form) {
         return form;
     }
-    let _gc_block = crate::process::GcBlockGuard::enter();
     let _macro_block = crate::process::MacroBlockGuard::enter();
     rewrite_root_escapes(heap, form)
 }

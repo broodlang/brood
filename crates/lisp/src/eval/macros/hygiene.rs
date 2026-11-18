@@ -99,7 +99,6 @@ pub(super) fn hygiene_rename(heap: &mut Heap, template: Value) -> Value {
     if !template_introduces_binder(heap, template) {
         return template;
     }
-    let _gc = crate::process::GcBlockGuard::enter();
     let _macro = crate::process::MacroBlockGuard::enter();
     hyg_walk(heap, template, &[])
 }

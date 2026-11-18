@@ -461,10 +461,8 @@ fn check_forms(
     // The header's `(:check-allow …)` clauses, read while `forms` is fresh: a module load
     // during the passes may collect and move them.
     let file_allows = lint::FileAllows::read(heap, forms);
-    // This guard no longer blocks a collection (ADR-061 lets the safepoint collect at any
-    // depth, and since ADR-751 nothing reads the depth): a module the check loads CAN collect,
-    // so the passes re-read their forms from the root stack after anything that may load.
-    let _gc_block = crate::process::GcBlockGuard::enter();
+    // A module the check loads CAN collect (ADR-061 lets the safepoint collect at any
+    // depth), so the passes re-read their forms from the root stack after anything that may load.
     // Every inferred load is EAGER for the duration (ADR-335): the unbound verdict for a
     // qualified typo (`json/prase`) depends on `json` being loaded, so the checker loads
     // what the file names where a program would load it on first use.

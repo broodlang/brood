@@ -40,7 +40,6 @@ pub(super) fn rename_escape_captures(heap: &mut Heap, form: Value) -> Value {
     if escaped.is_empty() || !binds_any(heap, form, &escaped, 0) {
         return form;
     }
-    let _gc_block = crate::process::GcBlockGuard::enter();
     let _macro_block = crate::process::MacroBlockGuard::enter();
     Renamer { escaped }.code(heap, form, &mut Vec::new())
 }

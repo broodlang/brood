@@ -287,7 +287,6 @@ pub(super) fn escape_macro_definitions(heap: &mut Heap, form: Value) -> Value {
     if !mentions_make_macro(heap, form) {
         return form; // the common case: hand back the same tree, allocating nothing
     }
-    let _gc_block = crate::process::GcBlockGuard::enter();
     let _macro_block = crate::process::MacroBlockGuard::enter();
     escape_definitions_in(heap, form)
 }

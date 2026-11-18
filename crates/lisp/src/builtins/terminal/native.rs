@@ -674,6 +674,21 @@ impl TerminalScreen {
 static TERMINAL_SCREEN: std::sync::Mutex<TerminalScreen> =
     std::sync::Mutex::new(TerminalScreen::new());
 
+/// What the terminal shows was forgotten ([`invalidate_screen`]) since the last draw took the
+/// word — the one part of forgetting that needs no lock, so no invalidation is dropped
+/// because a draw held [`TERMINAL_SCREEN`] at the time.
+static SCREEN_FORGOTTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Take the screen for a draw, forgetting what it shows if anything said to since the last.
+fn screen_for_draw() -> std::sync::MutexGuard<'static, TerminalScreen> {
+    let mut state = terminal_screen();
+    if SCREEN_FORGOTTEN.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        state.shown = None;
+        state.cursor = screen::CursorState::default();
+    }
+    state
+}
+
 fn terminal_screen() -> std::sync::MutexGuard<'static, TerminalScreen> {
     TERMINAL_SCREEN
         .lock()
@@ -687,6 +702,11 @@ fn terminal_screen() -> std::sync::MutexGuard<'static, TerminalScreen> {
 /// run on the very thread whose `term-draw` holds the lock — waiting there would hang the
 /// crash. A screen it cannot take is one a draw is replacing anyway.
 pub(in crate::builtins) fn invalidate_screen() {
+    // Said first, and without the lock, so it is never lost: a draw holding the lock — the
+    // loop painting while its reader takes a resize — would otherwise keep the frame it is
+    // writing as what the terminal shows, and the next frame would be diffed against a screen
+    // the resize threw away (KI-398). The draw takes the word under the lock.
+    SCREEN_FORGOTTEN.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut state = match TERMINAL_SCREEN.try_lock() {
         Ok(state) => state,
         Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
@@ -762,7 +782,7 @@ pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) 
         Some(graphics::Protocol::Kitty) => graphics::cell_pixels(),
         _ => None,
     };
-    let mut state = terminal_screen();
+    let mut state = screen_for_draw();
     let (mut next, whole) = match &state.shown {
         Some(shown) if shown.cols == cols && shown.rows == rows => (shown.clone(), false),
         _ => (screen::Screen::new(cols, rows), true),
@@ -1090,7 +1110,10 @@ pub(in crate::builtins) fn term_refresh(_: &[Value], _: EnvId, _: &mut Heap) -> 
 /// did not change: the screen was forgotten (a resize, a continue, `term-invalidate`), so a
 /// loop that skips drawing an unchanged model must draw this time. (ADR-586)
 pub(in crate::builtins) fn term_repaint_due(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(terminal_screen().shown.is_none()))
+    Ok(Value::Bool(
+        SCREEN_FORGOTTEN.load(std::sync::atomic::Ordering::SeqCst)
+            || terminal_screen().shown.is_none(),
+    ))
 }
 
 /// `(term-bg bg fg)` — the terminal's default face: `[:clear]` fills with `bg`, and a cell whose
@@ -1867,5 +1890,32 @@ mod leave_tests {
             assert!(state.farewell().is_empty());
         }
         assert_eq!(state.modes_bytes(&probe::Answers::default()), "");
+    }
+}
+
+#[cfg(test)]
+mod invalidate_tests {
+    use super::{SCREEN_FORGOTTEN, invalidate_screen, screen, screen_for_draw, terminal_screen};
+
+    /// A resize taken while a draw holds the screen is not lost (KI-398): the forgetting
+    /// cannot wait for the lock, so it is said where no lock is needed, and the next draw
+    /// paints the screen whole.
+    #[test]
+    fn a_screen_forgotten_while_a_draw_holds_it_is_painted_whole_next() {
+        {
+            let mut state = terminal_screen();
+            state.shown = Some(screen::Screen::new(4, 2));
+        }
+        SCREEN_FORGOTTEN.store(false, std::sync::atomic::Ordering::SeqCst);
+        {
+            // the draw holds the screen; a resize arrives on another thread meanwhile
+            let held = terminal_screen();
+            std::thread::spawn(invalidate_screen).join().unwrap();
+            assert!(held.shown.is_some(), "the held screen cannot be reached");
+        }
+        assert!(
+            screen_for_draw().shown.is_none(),
+            "the next draw diffs against a screen the resize threw away"
+        );
     }
 }

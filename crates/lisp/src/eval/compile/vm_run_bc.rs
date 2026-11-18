@@ -206,8 +206,13 @@ impl ProgramState {
 /// but its body form is a RUNTIME pair, so [`cache_key`] keys it (by the body handle) and
 /// [`compiled_arm_for`] compiles it onto the VM capture path — the property that makes a
 /// `receive` anywhere inside the form park-and-capture instead of blocking the worker.
+///
+/// The thunk belongs to the module the form was written in (ADR-383) — the module being
+/// loaded, as `compile::run` and the tree-walker credit a top-level form — so every closure
+/// its compiled body builds is that module's too. Left unset, a module's functions run by the
+/// program driver were nobody's: no contract boundary of their own (KI-399).
 pub(crate) fn build_program_thunk(heap: &mut Heap, form: Value) -> Value {
-    let id = heap.alloc_closure(crate::core::value::Closure::single(
+    let mut thunk = crate::core::value::Closure::single(
         None,
         Vec::new(),
         Vec::new(),
@@ -215,7 +220,9 @@ pub(crate) fn build_program_thunk(heap: &mut Heap, form: Value) -> Value {
         vec![form],
         None,
         None, // global scope — top-level forms capture nothing
-    ));
+    );
+    thunk.module = heap.compile_ns();
+    let id = heap.alloc_closure(thunk);
     Value::func(id)
 }
 
@@ -845,7 +852,6 @@ pub(crate) fn vm_run_bc(
     }
     // The driver doesn't recurse per Brood call: its frames are heap frames, measured
     // against the call stack's ceiling as they are pushed (ADR-751).
-    let _gc_block = crate::process::GcBlockGuard::enter();
     // Publish this driver's `top_level` to the `receive` gate (restored on exit, so the
     // innermost driver wins): a top-level receive captures, a native-nested one blocks.
     let _top_guard = std::mem::DropGuard::new(

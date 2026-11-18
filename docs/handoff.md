@@ -90,8 +90,8 @@ ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character ty
    audited 2026-11-17 — the five macro-pass sites also hold `MacroBlockGuard`, which does
    suppress collection; the checker's `check_forms` held only it, and its compile-error branch
    read a form from the `forms` slice after a load could collect (now the rooted copy). The
-   guard itself is dead weight, removable. Open: a deprecated name used in its own file is
-   reported only by `nest check`'s cached path.
+   guard was removed 2026-11-18, with `BROOD_TRACE_GCBLOCK`. A deprecated name used in its
+   own file is now never reported to that file, on either path (KI-400).
 8. **View patterns** (low to medium value).
 9. **Parametric abilities** (low).
 10. ~~**Lexically shadowable operators.**~~ — done by ADR-734 (2026-11-17): a local shadows a

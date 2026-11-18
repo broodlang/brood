@@ -61,19 +61,23 @@ child exited."
       ([:proc-closed ^p _] (assoc state :closed true))
       (after ms state))))
 
-(defn- read-bytes (p state at-least ms)
-  "`read-until`, stopping once `at-least` bytes have been read since `:bytes` was reset."
-  (if (>= (:bytes state) at-least)
+(defn- read-raw-until (p state needle ms)
+  "`read-until`, stopping once the bytes read since `:raw` was reset include `needle`."
+  (if (includes? (:raw state "") needle)
     state
     (receive
-      ([:proc ^p data] (read-bytes p
+      ([:proc ^p data] (read-raw-until p
                          (assoc state
                            :vt (vt/feed (:vt state) data)
+                           :raw (str (:raw state "") data)
                            :bytes (+ (:bytes state) (count data)))
-                         at-least
+                         needle
                          ms))
       ([:proc-closed ^p _] (assoc state :closed true))
       (after ms state))))
+
+(def- whole-repaint "\e[2J")
+;; What a frame painted whole starts with — a diff never clears the screen.
 
 (defn- showing? (needle)
   (fn (vt) (includes? (screen-text vt) needle)))
@@ -170,24 +174,22 @@ child exited."
               (do
                 (is (vt/mode (:vt stopped) :alt-screen))
                 (is (includes? (screen-text (:vt stopped)) "text:startz"))
-                ;; continued (as after a stop someone else made): raw again, painted whole
+                ;; continued (as after a stop someone else made): raw again, painted whole —
+                ;; waited for by the whole repaint itself, since the screen already showed
+                ;; everything a repaint draws (KI-398: a wait on the text returned before the
+                ;; repaint, and the check below then counted it as the bounce's)
                 (os/signal p :cont)
-                (let (back (read-until p
-                             (assoc stopped :bytes 0)
-                             (fn (vt)
-                               (and (vt/mode vt :alt-screen)
-                                 (includes? (screen-text vt) "size:40x10")))
-                             20000))
+                (let (back (read-raw-until p (assoc stopped :raw "") whole-repaint 20000))
                   (do
+                    (is (includes? (:raw back) whole-repaint))
                     (is (vt/mode (:vt back) :alt-screen))
                     (is (includes? (screen-text (:vt back)) "text:startz"))
-                    ;; a resize there and back between two looks still repaints the screen
-                    ;; (waited for by its size: a fixed quiet window missed a slow repaint
-                    ;; under the full suite's load)
+                    ;; a resize there and back between two looks, after that repaint was
+                    ;; drawn, repaints the screen whole again: the terminal reflowed it
                     (os/resize-pty p 60 14)
                     (os/resize-pty p 40 10)
-                    (let (bounced (read-bytes p (assoc back :bytes 0) 281 20000))
-                      (is (> (:bytes bounced) 280)))
+                    (let (bounced (read-raw-until p (assoc back :raw "") whole-repaint 20000))
+                      (is (includes? (:raw bounced) whole-repaint)))
                     ;; SIGTERM: the app's :on-hangup runs, the terminal is restored, it exits
                     (os/signal p :term)
                     (let (ended (read-until p back (fn (_vt) false) 20000))

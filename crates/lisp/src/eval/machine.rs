@@ -334,7 +334,6 @@ pub(crate) fn run_captured(
     start: TwStart,
 ) -> Result<crate::eval::compile::VmOutcome, LispError> {
     let floors = Floors::take(heap);
-    let _gc_block = crate::process::GcBlockGuard::enter();
     let _driver = DriverGuard::enter();
     let mut entered = None;
     let mut m = Machine::new(Value::nil(), EnvId::GLOBAL, &mut entered);
@@ -366,7 +365,6 @@ pub(crate) fn resume_captured(
         redo_marks,
         floors,
     } = *s;
-    let _gc_block = crate::process::GcBlockGuard::enter();
     let _driver = DriverGuard::enter();
     let mut m = Machine {
         expr: Value::nil(),

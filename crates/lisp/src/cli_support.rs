@@ -229,10 +229,9 @@ pub fn warn_nondefault_gc_env() {
         "BROOD_GC_FLOOR",
         "BROOD_GC_TENURE",
         "BROOD_GC_MAJOR",
-        // The shared-RUNTIME-region compaction floor (ADR-091) and the GC-block
-        // trace — both retune/observe collection, so they belong on this list.
+        // The shared-RUNTIME-region compaction floor (ADR-091) retunes collection, so it
+        // belongs on this list.
         "BROOD_RT_GC_FLOOR",
-        "BROOD_TRACE_GCBLOCK",
         // Not a GC knob per se, but it changes run behaviour and so makes a
         // benchmark non-representative: the memory cap forces extra collections
         // as it's approached.

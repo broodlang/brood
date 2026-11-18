@@ -271,8 +271,8 @@ impl Interp {
     /// the root namespace; the source's own `(ns …)` sets it, restored after.
     ///
     /// GC-rooting (load-bearing): the parsed forms sit in LOCAL and each form's
-    /// eval allocates above a checkpoint. At the outermost-eval safepoint
-    /// (`GC_BLOCK == 1`) the copying collector relocates the still-unevaluated
+    /// eval allocates above a checkpoint. At an eval safepoint (ADR-061)
+    /// the copying collector relocates the still-unevaluated
     /// forms, so we root them and re-fetch each via `root_at` — the `forms` Vec's
     /// own handles go stale across a collection; positions are plain data and
     /// don't move. Between forms the discarded intermediate result is reclaimed by

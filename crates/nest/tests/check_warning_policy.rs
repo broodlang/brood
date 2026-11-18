@@ -151,3 +151,55 @@ fn the_category_and_the_project_policy_decide_what_gates_with_the_cache_on() {
 fn the_category_and_the_project_policy_decide_what_gates_with_the_cache_off() {
     scenarios(false);
 }
+
+/// A module that calls a name it deprecates itself is not told (KI-400): a deprecation is a
+/// message to its callers. The answer must not depend on the path — the cached check read the
+/// deprecation from the loaded file and warned, the fresh one never loads the file and did
+/// not. A caller in another module is still told, on both paths.
+fn own_deprecation(cached: bool) {
+    let proj = project(if cached {
+        "own-deprecation-cached"
+    } else {
+        "own-deprecation-fresh"
+    });
+    let root = &proj.path;
+    write_manifest(root, "");
+    std::fs::write(
+        root.join("src/main.blsp"),
+        "(defmodule main \"d\")\n\
+         (defn early () (old-way))\n\
+         (defn old-way () 1)\n\
+         (meta old-way :deprecated \"0.1.0\" :use 'new-way)\n\
+         (defn new-way () 2)\n\
+         (defn late () (old-way))\n\
+         (defn named () old-way)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/other.blsp"),
+        "(defmodule other \"d\")\n(defn far () (main/old-way))\n",
+    )
+    .unwrap();
+    let (output, passed) = check(root, cached);
+    assert!(passed, "an advisory deprecation does not gate:\n{output}");
+    let reported: Vec<&str> = output
+        .lines()
+        .filter(|line| line.contains("is deprecated"))
+        .collect();
+    assert_eq!(
+        reported.len(),
+        1,
+        "exactly the other module's use is reported:\n{output}"
+    );
+    assert!(reported[0].contains("other.blsp"), "{output}");
+}
+
+#[test]
+fn a_module_is_not_told_about_its_own_deprecation_with_the_cache_on() {
+    own_deprecation(true);
+}
+
+#[test]
+fn a_module_is_not_told_about_its_own_deprecation_with_the_cache_off() {
+    own_deprecation(false);
+}

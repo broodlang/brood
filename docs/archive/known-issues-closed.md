@@ -5,6 +5,105 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-400 — a module's own use of a name it deprecated was reported only by the cached check ✅ fixed 2026-11-18
+
+**Symptom.** A file that defines `old-way`, marks it `(meta old-way :deprecated …)` and calls it
+itself: `nest check` printed ``warning: `policy/main/old-way` is deprecated since 0.1.0`` with the
+check cache on and nothing with `BROOD_NO_CHECK_CACHE=1`.
+
+**Cause.** `stability_msg` reads a name's deprecation from the loaded image. The cached path
+builds the project image first, so the checked file's own `(meta …)` was loaded; the fresh path
+checks files without loading them, so it was not. The answer depended on the path.
+
+**Why it survived.** The policy test's probe called a deprecated name in another module, where
+both paths load the declaring module; ADR-751's work moved it there because the same-file probe
+disagreed, and the disagreement was left as a follow-up.
+
+**Fix.** By design, not by loading more: a deprecation is a message to a module's callers, so a
+name the checked file defines is never reported to that file (`stability_msg_in`, the rule
+`deprecated_macros` already applied to macros). A use from another module is reported on both
+paths.
+
+**Guard.** `crates/nest/tests/check_warning_policy.rs` `a_module_is_not_told_about_its_own_deprecation_with_the_cache_{on,off}`:
+one file using its own deprecated name before and after the definition and as a value, one other
+module calling it; exactly the other module's line is printed, on both paths. Both red with the
+file's own names reported again (`left: 4, right: 1`).
+
+## KI-399 — `contract_dispatch_test` failed on the tree-walker ✅ fixed 2026-11-18
+
+**Symptom.** `make test-both`'s tree-walker half (`BROOD_TIER=0`): four tests in
+`tests/contract_dispatch_test.blsp` failed. Three asserted `(>= n 1)` on `:entered`, the count
+of contracted calls the VM's dispatcher entered; the fourth found a bad result's error placed at
+`std/contract.blsp:84` (then `:30`), with a `:trace` frame naming `contract/%contract-error`.
+
+**Cause.** Three things.
+1. *Every function a module defined on the VM had no module.* `Closure::module` (ADR-383, the
+   contract boundary) was set by the tree-walker's `fn` (`top_level_module`) but not by the VM's
+   two top-level entries: `compile::run` (module loads, `reflect/eval`) compiled with a scope
+   whose `module` was unset, and the file runner's program thunk (`build_program_thunk`) was
+   built with none. The VM's own readers fall back to the closure's qualified name
+   (`compile_closure`, `reflect/fn-module`), which hid it. The startup image is written from the
+   VM, so it carried no module for any std function: an imaged `contract/%contract-check-ret`
+   came back nobody's, and the tree-walker, which tells a shim's frame by its closure's module
+   (`contract_shim_file`), treated the contract module's helpers as user code and reported
+   their positions.
+2. *A shim's own tail call replaced the call it remembered.* The shim ends in a tail call to
+   `%contract-check-ret`; the tree-walker's tail entry (`record_tw_entry`) took that call form —
+   a line of `std/contract.blsp` — as the frame's new call site, so even with the module known
+   the error moved to the shim's line rather than the user's call.
+3. *The counts are the VM's.* The tree-walker has no dispatcher, so `:entered` is 0 there by
+   design.
+
+**Why it survived.** Per-push CI runs the default tier only; the tree-walker half of
+`make test-both` is a test-machine gate. Every reader of the module field on the VM fell back to
+the qualified name, so nothing on the default tier saw it missing. A source boot
+(`BROOD_NO_STDIMAGE=1`) loads `contract` on whichever engine runs, so the bug showed only with
+the image.
+
+**Fix.** `compile::run` sets the scope's module from `top_level_module`, and the program thunk
+carries `compile_ns()`; a tail entry whose call form was read from the shim's own file keeps the
+call that entered the shim. The test's counts name their engine: at least `n` on the VM, exactly
+0 on the tree-walker (`entered?`).
+
+**Guard.** `crates/lisp/tests/closure_module.rs` reads the field itself, never a fallback: a
+module function evaluated form by form (red without the `compile::run` line), one the program
+driver defines (red without the thunk's module), and `json/encode` loaded from source (red
+with both removed, `BROOD_NO_STDIMAGE=1`). `contract_dispatch_test` passes on both engines;
+at `BROOD_TIER=0` its placement test is red with the tail-entry rule removed
+(`tests/contract_dispatch_test.blsp:109:11: test failed: … placed at the caller's call`).
+
+## KI-398 — a resize there and back did not repaint a terminal app, under load ✅ fixed 2026-11-18
+
+**Symptom.** `tests/term_display_test.blsp` › "SIGTSTP with no job control keeps the terminal,
+SIGCONT repaints, …": after SIGCONT the test resized the pty to 60×14 and back and expected
+more than 280 bytes; 1 run in 18 with six copies in parallel (and once on CI, `8619a2727`) read
+fewer.
+
+**Cause.** The test. Before SIGCONT the screen already showed `size:40x10`, so its wait for the
+SIGCONT repaint returned at once and reset the byte count before that repaint arrived. One
+whole frame is ~160 bytes, so the `> 280` held only when the SIGCONT repaint and the bounce's
+were two frames. Under load both invalidations landed before one draw, which painted the screen
+whole once — correct — and the test called it missing. Captured: the failing runs' bytes were
+one `\e[2J` frame with every line, then the 1 s `:tick`'s diff.
+
+On the way, a real hole: `invalidate_screen` takes the screen with `try_lock` (the panic path
+may run on the drawing thread) and gave up when a draw held it. The terminal's input forwarder
+runs on its own thread, so a resize it took while the loop was drawing was dropped, and the
+next frame was diffed against a screen the resize threw away.
+
+**Why it survived.** The count was a proxy for "painted whole"; it held whenever the two
+repaints happened to be separate.
+
+**Fix.** The test waits for the SIGCONT repaint by its `\e[2J` and requires the bounce to bring
+another (`read-raw-until`, `whole-repaint`). `invalidate_screen` first sets `SCREEN_FORGOTTEN`,
+an atomic the next draw takes under the lock (`screen_for_draw`), and `term/repaint-due?` reads
+it too.
+
+**Guard.** `builtins::terminal::native::invalidate_tests::a_screen_forgotten_while_a_draw_holds_it_is_painted_whole_next`
+(red with the flag's store removed: "the next draw diffs against a screen the resize threw
+away"); `term_display_test` 48/48 as six parallel copies for eight rounds, and red with a
+resize no longer invalidating.
+
 ## KI-390 — A project image dropped every dependency module the app names by its short name ✅ closed 2026-11-13
 
 **Seen** 2026-11-13, timing a one-file `nest test` on hatch (220 ms): after the image was read,

@@ -719,15 +719,13 @@ fn macroexpand_all_depth_step_inner(
     // (ADR-061) — but the compile pass opts out instead: `MacroBlockGuard` keeps
     // `MACRO_BLOCK > 0` for the expansion, and the safepoint skips collection
     // while that holds. Expansion is bounded per form, so memory grows briefly
-    // (reclaimed at the next runtime safepoint). The `GcBlockGuard` is kept too,
-    // purely for the stack-depth accounting it feeds. See `docs/memory-model.md`.
+    // (reclaimed at the next runtime safepoint). See `docs/memory-model.md`.
     if depth >= MAX_DEPTH {
         return Err(LispError::runtime(format!(
             "macro expansion nested too deeply (max {} levels)",
             MAX_DEPTH
         )));
     }
-    let _gc_block = crate::process::GcBlockGuard::enter();
     let _macro_block = crate::process::MacroBlockGuard::enter();
     let call = form;
     let form = macroexpand(heap, form, env)?;

@@ -543,6 +543,12 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     let _not_capturable = crate::process::TreeWalkGuard::enter();
     let mut scope = Scope::new();
     scope.stage_calls = true;
+    // The closures this form builds belong to the module it was written in (ADR-383) — the
+    // module being loaded, for a module's top-level form — exactly as the tree-walker credits
+    // them (`top_level_module`). Left unset, every function a module defined on this engine
+    // came back with no module: no contract boundary of its own, and the startup image, which
+    // is written from this engine, carried none for any std function (KI-399).
+    scope.module = crate::eval::top_level_module(heap, env);
     // When invoked with a *non-global* env — a `def` RHS evaluated inside a `let`,
     // e.g. `(let (me …) (def f (fn () me)))` — the form's closures must be able to
     // capture the enclosing lexicals. Seed them as `enclosing` names so a VM-compiled
@@ -584,6 +590,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 has_runtime_handles: node_has_rt_handles(&node),
                 chunk,
                 body: node,
+                module: scope.module,
                 ..CompiledArm::default()
             };
             // Runs once: nothing to tier, and no frame reserve laid out for native code.

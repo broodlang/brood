@@ -217,6 +217,14 @@ fn record_tw_entry(
     match entered {
         Some(fr) => {
             fr.name = name;
+            // A tail call the machinery itself makes — the shim's `(%contract-check-ret …)`,
+            // a form read from the contract module's own file — is not the user's call: the
+            // frame keeps the call that entered the shim (KI-399). Only a call from user code
+            // names a new one.
+            let shim_call = match (&fr.shim, &shim_call) {
+                (Some(prev), Some((_, Some(file)))) if **file == *prev.file => prev.call.clone(),
+                _ => shim_call,
+            };
             fr.shim = shim_file.map(|file| {
                 Box::new(ShimEntry {
                     file,
@@ -285,11 +293,6 @@ fn eval_tail_loop(
     env: EnvId,
     entered: &mut Option<TwFrame>,
 ) -> LispResult {
-    // GC-block guard: increments `GC_BLOCK` for the lifetime of this run. The GC safepoint
-    // does not gate on this depth (ADR-061: it collects at any depth — every frame roots its
-    // transients on the operand stack), and since ADR-751 nothing reads it.
-    let _gc_block = crate::process::GcBlockGuard::enter();
-
     // A run's own frames live on its heap frame stack (`machine`); only a run re-entered
     // through native code — `eval`, or a native callback (`apply_closure` does the same) —
     // is real Rust stack, and near the end of it continues on a heap-backed segment
@@ -574,7 +577,6 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
     // keeps native calls shimmed through `apply`, e.g. `%receive` itself,
     // capture-eligible).
     let _tw = crate::process::TreeWalkGuard::enter();
-    let _gc_block = crate::process::GcBlockGuard::enter();
     // Error-trace bookkeeping: this native-boundary entry into `cl` (a `map`/`try`/
     // macro-expansion callback) is one logical frame, mirrored on the VM by a
     // `vm_apply` driver whose arm0 is `cl`. The call site is native code, so the

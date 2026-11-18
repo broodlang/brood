@@ -57,7 +57,7 @@ fn check_value_leaf(heap: &Heap, form: Value, parent: Value, ctx: &Ctx, out: &mu
             ));
         }
         if !ctx.is_suppressed(super::ctx::SUPPRESS_DEPRECATED)
-            && let Some((lint, msg)) = stability_msg(heap, s)
+            && let Some((lint, msg)) = stability_msg_in(heap, ctx, s)
         {
             out.push(Finding::new(lint, heap.form_pos_only(parent), msg));
         }
@@ -765,7 +765,7 @@ fn check_named_call(
     // A CALLED name gets the same stability diagnostic a referenced one does — the
     // call is the commoner shape by far, and the value-slot check above never sees it.
     if !ctx.is_suppressed(super::ctx::SUPPRESS_DEPRECATED)
-        && let Some((lint, msg)) = stability_msg(heap, s)
+        && let Some((lint, msg)) = stability_msg_in(heap, ctx, s)
     {
         out.push(Finding::new(lint, heap.form_pos_only(form), msg));
     }

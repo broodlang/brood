@@ -18,10 +18,8 @@
 //!   has run others, and survive migration to another worker.
 //! - [`REDUCTIONS`] — countdown to the next preempt; [`tick`] decrements
 //!   it from inside `eval`'s loop.
-//! - [`GC_BLOCK`] — eval/macroexpand nesting depth; feeds the stack-overflow
-//!   byte guard (no longer the GC safepoint — ADR-061). [`MACRO_BLOCK`] —
-//!   compile-pass depth; the GC safepoint suppresses collection while it's
-//!   nonzero. Both reset per quantum (each quantum runs on a fresh worker
+//! - [`MACRO_BLOCK`] — compile-pass depth; the GC safepoint suppresses
+//!   collection while it's nonzero. Reset per quantum (each quantum runs on a fresh worker
 //!   stack), so workers multiplexing several processes don't leak depths.
 
 use std::cell::{Cell, RefCell};
@@ -42,15 +40,12 @@ use super::mailbox::{
 use super::message::Message;
 use super::monitor;
 
-// Execution-safety guards (GC-block / macro-block depth, the worker stack size) live in a
+// Execution-safety guards (the macro-block depth, the worker stack size) live in a
 // child module; re-exported so `scheduler::…` (hence `process::…`, ADR consumers) resolves
-// unchanged. `gc_block_set`/`macro_block_set` are scheduler-internal (only `install_ctx`
-// resets them).
+// unchanged. `macro_block_set` is scheduler-internal (only `install_ctx` resets it).
 mod guards;
-pub use guards::{
-    GcBlockGuard, MacroBlockGuard, WORKER_STACK_BYTES, gc_block_depth, macro_block_active,
-};
-use guards::{gc_block_set, macro_block_set};
+use guards::macro_block_set;
+pub use guards::{MacroBlockGuard, WORKER_STACK_BYTES, macro_block_active};
 
 // Process lifecycle (spawn/exit/deregister) lives in a child module; the shared
 // scheduling state stays in the root, reached from there via `use super::*`.
@@ -964,7 +959,6 @@ impl Process {
         let displaced = CURRENT.with(|c| c.borrow_mut().take());
         DISPLACED.with(|d| d.borrow_mut().push(displaced));
         CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
-        gc_block_set(0);
         macro_block_set(0);
     }
 

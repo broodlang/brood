@@ -18,6 +18,25 @@ pub(in crate::types::check) const UNBOUND_PREFIX: &str = "unbound symbol: ";
 /// this reads the *loaded image* rather than the file — a deprecation is almost always
 /// cross-module, and the module that declares it has been loaded by the time its callers
 /// are checked.
+///
+/// **Never for a name the file defines itself.** A deprecation is a message to the module's
+/// callers; the module still implements, and may call, what it deprecates. The checked file
+/// is not loaded on every path — the cached check reads a loaded image, a fresh one does not
+/// — so asking the image about the file's own names answered differently by path (KI-400).
+/// Both paths now give the one answer: the defining file is not told. `deprecated_macros`
+/// applies the same rule to a macro.
+pub(in crate::types::check) fn stability_msg_in(
+    heap: &Heap,
+    ctx: &Ctx,
+    sym: Symbol,
+) -> Option<(Lint, String)> {
+    if ctx.is_file_global(sym) {
+        return None;
+    }
+    stability_msg(heap, sym)
+}
+
+/// [`stability_msg_in`] with no file in view: the image's word on `sym`.
 pub(in crate::types::check) fn stability_msg(heap: &Heap, sym: Symbol) -> Option<(Lint, String)> {
     let meta = heap.name_meta(sym)?;
     let name = name_of(sym);

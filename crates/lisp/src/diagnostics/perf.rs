@@ -104,7 +104,7 @@ mod imp {
         jit_deopt_dirty,
         /// Rust-native → JIT fast path in `dispatch`: the callee was JIT-compiled and
         /// returned Done (outcome 0) via `jit_tier` without going through `vm_run_bc`.
-        /// Saves the GcBlockGuard/TopLevelGuard thread-local ops and frame-vector setup
+        /// Saves the TopLevelGuard thread-local op and frame-vector setup
         /// on each Rust-native callback call (e.g. a `reduce` lambda).
         jit_apply_fast,
         /// JIT fast-path deopt (outcome 1/2/None): fell back to vm_apply with fresh_argv.

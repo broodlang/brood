@@ -13,7 +13,7 @@ use brood::Interp;
 
 /// A tight tail-recursive loop in a spawned process that allocates a fresh cons
 /// cell per iteration. The loop is the spawned-process body, so it runs at the
-/// `gc_block_depth() == 1` safepoint where Stage B collects — the LOCAL pairs slab
+/// outermost eval's safepoint, where Stage B collects — the LOCAL pairs slab
 /// would otherwise grow linearly with `n`. We can't inspect the green process's
 /// heap from here, but completing 50 000 iterations without OOMing is the proof:
 /// the bump allocator alone would grow ~hundreds of MB at this count. Small enough
@@ -253,7 +253,7 @@ fn gc_trace_toggles_and_reports_state() {
 /// `gc_stats_counts_automatic_collections`, but run **inside a `try`** so the loop
 /// body executes at eval depth ≥ 2 (the supervised-server / `(try (loop) …)`
 /// shape). Before ADR-061 the safepoint only fired at the outermost eval
-/// (`gc_block_depth() == 1`), so a loop this deep reported **0 collections** and
+/// (eval depth 1), so a loop this deep reported **0 collections** and
 /// climbed unbounded; now the evaluator roots its transients on the operand stack
 /// and collects at any depth. Asserts the collector actually fired down there.
 /// A `def`'d range must survive promotion plus a local collection: `promote`

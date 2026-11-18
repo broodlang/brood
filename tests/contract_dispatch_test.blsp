@@ -6,11 +6,17 @@
 ;; it cannot vouch for runs the shim, whose Brood checks blame. These tests hold the
 ;; entered path to the shim's answers — the same values, the same blame, the same messages —
 ;; and `:entered` (`%type-verdict-counts`) says the path was taken, so each test that
-;; asserts it goes red under `BROOD_NO_CONTRACT_DISPATCH=1`.
+;; asserts it goes red under `BROOD_NO_CONTRACT_DISPATCH=1`. The tree-walker
+;; (`BROOD_TIER=0`) has no dispatcher: every contracted call there runs the shim, so the
+;; count it reads is 0 and the answers must be the same anyway (KI-399).
 (defmodule contract-dispatch-test
   (:use test))
 
 (defn entered () (:entered (%type-verdict-counts)))
+
+(defn entered? (n at-least)
+  "Whether `n` entries is what this engine owes: `at-least` on the VM, none on the tree-walker."
+  (if (%tree-walker?) (= n 0) (>= n at-least)))
 
 (defn entered-by (thunk)
   "How many contracted calls the dispatcher entered while `thunk` ran, and its value."
@@ -49,11 +55,11 @@
   (test "answers what the function answers, without the shim's frame"
     (let ([n value] (entered-by (fn () (dispatch-caller 41))))
       (assert= 42 value)
-      (is (>= n 1))))
+      (is (entered? n 1))))
   (test "an `any` result is not checked: the call is the original's"
     ;; a vector, which an `int` result check would refuse
     (let ([n value] (entered-by (fn () (dispatch-any 3))))
-      (is (>= n 1))
+      (is (entered? n 1))
       (assert= [3 3] value)))
   (test "a result the kernel decides by its tag passes either way"
     (assert= nil (dispatch-maybe 0))
@@ -65,16 +71,16 @@
     (assert= "a5" (dispatch-opt "a" 5)))
   (test "a result only the Brood walk can decide is walked, and passes"
     (let ([n point] (entered-by (fn () (dispatch-make 3))))
-      (is (>= n 1))
+      (is (entered? n 1))
       (assert= 3 (:x point)))
     (assert= {:n 2 :next 3} (dispatch-counts 2)))
   (test "a call through a native caller (map, apply) is checked too"
     (let ([n value] (entered-by (fn () (vec (map [1 2 3] (fn (x) (dispatch-add x 1)))))))
       (assert= [2 3 4] value)
-      (is (>= n 3)))
+      (is (entered? n 3)))
     (let ([n value] (entered-by (fn () (apply dispatch-add [3 4]))))
       (assert= 7 value)
-      (is (>= n 1)))
+      (is (entered? n 1)))
     (assert= :callee
       (get (try (vec (map [1] (fn (x) (dispatch-lies x)))) (catch error error)) :blame))
     (assert= :caller
@@ -84,7 +90,7 @@
 (describe "what the entered path raises is the shim's error"
   (test "a bad result blames the callee, with the shim's message"
     (let ([n error] (entered-by (fn () (try (dispatch-lies-caller 1) (catch error error)))))
-      (is (>= n 1))
+      (is (entered? n 1))
       (assert= :contract (get error :kind))
       (assert= :callee (get error :blame))
       (is (string/ends-with? (->string (get error :function)) "dispatch-lies"))

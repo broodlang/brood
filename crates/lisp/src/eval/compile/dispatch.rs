@@ -257,7 +257,7 @@ fn dispatch_once(
                 });
             }
             // JIT fast path: call jit_tier directly, bypassing vm_run_bc's per-call
-            // overhead (GcBlockGuard, TopLevelGuard thread-locals, BcFrame Vec alloc,
+            // overhead (TopLevelGuard thread-local, BcFrame Vec alloc,
             // loop-top safepoint checks). Gated on: JIT code installed, no runtime GC
             // handles (which need live_arm_push registration), no installed inline
             // upgrade (which needs the larger inline_nslots frame vm_run_bc sets up).

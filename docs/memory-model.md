@@ -41,8 +41,8 @@
 > `core/heap/gc.rs` (`Heap::collect` → `minor_collect` / `major_collect`, tuning in
 > `gc/tuning.rs`); `Heap::flush`, `LispError::Hibernate` and `BlobHeap` are gone, and a
 > shared blob is an `Arc<SharedBlob>` (`core/blob.rs`). `Heap::checkpoint` /
-> `reset_local_to` and the `GC_BLOCK` counter are still there, the latter feeding only the
-> stack-overflow guard.
+> `reset_local_to` are still there; the `GC_BLOCK` counter is gone (2026-11-18), its last
+> reader, the stack-overflow guard, having gone with ADR-751.
 >
 > ---
 >

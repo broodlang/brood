@@ -6,6 +6,17 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Fixed: a module's functions keep their module through the startup image (KI-399).** A
+function a module defined on the VM recorded no authoring module, so a contracted std function
+loaded from the image had no contract boundary of its own and, on the tree-walker, a contract
+error was reported at a line of `std/contract.blsp` instead of the caller's call.
+
+**Changed: a module is not told about its own deprecated names (KI-400).** `nest check` reported
+a use of a name the same file deprecates only on its cached path; now neither path does. A use
+from another module is reported as before.
+
+**Removed: `BROOD_TRACE_GCBLOCK`.** The GC-block depth it traced is gone; nothing read it.
+
 **Changed: recursion is as deep as memory allows, and the non-tail lint is gone (ADR-751).** A
 non-tail recursion used to stop at fixed caps — about a million VM frames, half that on the
 tree-walker, and far fewer through `map`/`fold` callbacks or a `try` body. Now each process's

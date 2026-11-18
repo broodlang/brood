@@ -2008,3 +2008,16 @@ into it as unbound, an arity from whatever had loaded, nothing about the cause. 
 discarded the load's error. A `(:use mod)` whose module is there but fails to load now reports
 `(:use mod): mod does not load — file:line:col: message` at the clause, and that file's unbound
 findings are dropped as the guesses they are (`tests/check_load_failure_test.blsp`).
+
+2026-11-18 (KI-398, KI-399, KI-400). **The open follow-ups closed.** KI-399: every function a
+module defined on the VM recorded no module (`Closure::module`, ADR-383) — `compile::run` and the
+file runner's program thunk never set it, and every VM reader fell back to the qualified name —
+so the startup image carried no module for any std function, and the tree-walker took the
+contract module's helpers for user code. Both entries now credit the module being loaded, as the
+tree-walker does; a shim's own tail call no longer replaces the user's call its frame remembers;
+`contract_dispatch_test`'s counts name their engine. KI-400: a module's use of a name it
+deprecated itself is never reported to it (the cached and fresh checks disagreed, since only one
+loads the file). KI-398 was the test (its SIGCONT wait matched the screen from before, so one
+correct whole repaint after both read as missing); found on the way, a resize taken while a draw
+held the screen dropped its invalidation, now said on an atomic the draw takes. `GcBlockGuard`,
+`GC_BLOCK` and `BROOD_TRACE_GCBLOCK` are removed: nothing read the depth since ADR-751.

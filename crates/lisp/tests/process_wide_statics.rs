@@ -88,6 +88,12 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // What the one tty shows now, cell by cell, and its colour depth (ADR-586): the next
     // frame writes only what differs from it, whichever runtime draws.
     ("builtins/terminal/native.rs", "TERMINAL_SCREEN", OneMachine),
+    // Its "forgotten" word, kept outside the lock so a resize during a draw is not lost.
+    (
+        "builtins/terminal/native.rs",
+        "SCREEN_FORGOTTEN",
+        OneMachine,
+    ),
     // The one tty's presses read as click chains: the terminal sends each press alone.
     ("builtins/terminal/native.rs", "TERMINAL_CLICKS", OneMachine),
     // The net reactor multiplexes every socket in the OS process on one thread.

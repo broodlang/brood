@@ -10,8 +10,8 @@ impl Heap {
     // A small explicit root stack for the few sites (today: `eval_str` /
     // `eval_source`) that hold a `Vec<Value>` of LOCAL forms across a depth-0
     // eval call. Every other place is either already reachable from
-    // `env`/`expr` at the safepoint, or sits at `GC_BLOCK > 1` where GC won't
-    // fire — see `docs/memory-model.md`. Empty on the hot path.
+    // `env`/`expr` at the safepoint, rooted on the operand stack, or inside a
+    // compile pass (`MACRO_BLOCK > 0`) where GC won't fire — see `docs/memory-model.md`. Empty on the hot path.
 
     /// Push `v` onto the explicit root stack so it survives any GC that may run
     /// between now and the matching [`Self::truncate_roots`]. Cheap: one `Vec` push.

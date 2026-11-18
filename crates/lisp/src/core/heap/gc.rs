@@ -32,8 +32,8 @@ impl Heap {
     // stays bounded by *this* process's working set.
 
     /// **Stage B — automatic copying collection at the eval safepoint** (ADR-054;
-    /// `docs/memory-review.md`). Fired by `eval::eval` when `gc_due()` *and* we are
-    /// the outermost eval (`gc_block_depth() == 1`), so the only live LOCAL handles
+    /// `docs/memory-review.md`). Fired at the eval safepoint when `gc_due()` and no
+    /// compile pass is on the stack (ADR-061), so the only live LOCAL handles
     /// are the ones reachable from the roots below — see the safepoint's
     /// rooting-completeness argument. A generational copy: a minor collection
     /// ([`minor_collect`](Self::minor_collect)) relocates every nursery object

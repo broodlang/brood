@@ -433,11 +433,6 @@ pub const FLAGS: &[DebugFlag] = &[
         GC,
         "restore the peak-sized nursery reservation after a tenure — the A/B lever for that RSS fix",
     ),
-    f(
-        "BROOD_TRACE_GCBLOCK",
-        GC,
-        "trace GC-block depth (debug builds)",
-    ),
     // ---- scheduler / messaging / distribution (added when the catalogue was completed) ----
     f(
         "BROOD_J",
@@ -837,14 +832,6 @@ pub fn derive_debug() -> bool {
 pub fn devirt_debug() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     is_set(&ON, "BROOD_DEVIRT_DBG")
-}
-
-/// `BROOD_TRACE_GCBLOCK` is set — read once. Checked on every eval entry and exit under
-/// debug assertions, where an uncached read took the environment lock on the hottest path
-/// of exactly the builds used to hunt races.
-pub fn trace_gcblock() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    is_set(&ON, "BROOD_TRACE_GCBLOCK")
 }
 
 /// The linear-map rewrites — pipeline and range-fold fusion, and the in-place table
