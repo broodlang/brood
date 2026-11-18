@@ -87,7 +87,7 @@ checkout ([[nested-checkouts]])."
     (codemod/rename [[\"old-parse\" \"parse\"] [\"mk-user\" \"user/new\"]])   ;~> 3 — files changed, each one printed"
   (let (changed (seq/filter (map (project-blsp) (fn (f) (rewrite-file pairs f)))
                   (fn (f) (not (nil? f)))))
-    (for (f changed) (io/puts "  changed: " f))
+    (for (f changed) (io/puts "  changed:" f))
     (io/puts (count changed) " file(s) changed")
     (count changed)))
 
@@ -276,7 +276,7 @@ counterpart to `rename`. Prints each changed file and returns the count.
                                       after (cst-rename-text before old new mode))
                                   (if (= before after) nil (do (file/spit f after) f)))))
                   (fn (f) (not (nil? f)))))
-    (for (f changed) (io/puts "  changed: " f))
+    (for (f changed) (io/puts "  changed:" f))
     (io/puts (count changed) " file(s) changed")
     (count changed)))
 
@@ -1101,7 +1101,7 @@ when no file declares `from` or the destination exists (nothing is written then)
                             (str project-name "/" to)
                             (map nested (fn (module) (str project-name "/" module))))))))
     (cond
-      (nil? source) (do (io/puts "rename-module: no file declares module " from :to *err*) 1)
+      (nil? source) (do (io/puts "rename-module: no file declares module" from :to *err*) 1)
       ;; the source root is found from the path the name gives, so the two must agree
       (not (string/ends-with? source (str "/" from ".blsp")))
         (do
@@ -1110,16 +1110,16 @@ when no file declares `from` or the destination exists (nothing is written then)
           1)
       (module-file files to)
         (do
-          (io/puts "rename-module: " (module-file files to) " already declares " to :to *err*)
+          (io/puts "rename-module:" (module-file files to) "already declares" to :to *err*)
           1)
       (not (lossless? (file/slurp source)))
-        (do (io/puts "rename-module: " source " does not parse; nothing renamed" :to *err*) 1)
+        (do (io/puts "rename-module:" source "does not parse; nothing renamed" :to *err*) 1)
       else
         (let (depth (count (string/split from "/"))
               root (fold (range depth) source (fn (dir _) (path/dirname dir)))
               destination (path/join root (str to ".blsp")))
           (if (file/exists? destination)
-            (do (io/puts "rename-module: " destination " exists already" :to *err*) 1)
+            (do (io/puts "rename-module:" destination "exists already" :to *err*) 1)
             ;; a file that does not parse is left as it is and named: written back through the
             ;; parse, it would gain what the parser closed
             (let (readable (seq/filter files (fn (file) (lossless? (file/slurp file))))
@@ -1131,9 +1131,9 @@ when no file declares `from` or the destination exists (nothing is written then)
                                 (when (not (= text renamed)) (file/spit file renamed) file)))))
               (file/mkdir (path/dirname destination))
               (file/move source destination)
-              (doseq (file changed) (io/puts "  changed: " file))
-              (doseq (file skipped) (io/puts "  skipped (does not parse): " file))
-              (io/puts "  moved: " source " → " destination)
+              (doseq (file changed) (io/puts "  changed:" file))
+              (doseq (file skipped) (io/puts "  skipped (does not parse):" file))
+              (io/puts "  moved:" source "→" destination)
               0))))))
 
 ;; ---- renaming a module's global (`nest rename mod/old mod/new`) ------------------------
@@ -1225,8 +1225,8 @@ project's .blsp files ([[rename-global-text]]). Prints each changed file; return
                           (let (text (file/slurp file)
                                 renamed (rename-global-text text module old new-name project-name))
                             (when (not (= text renamed)) (file/spit file renamed) file)))))
-          (doseq (file changed) (io/puts "  changed: " file))
+          (doseq (file changed) (io/puts "  changed:" file))
           (doseq (file (seq/reject files (fn (file) (contains? (into #{} readable) file))))
-            (io/puts "  skipped (does not parse): " file))
+            (io/puts "  skipped (does not parse):" file))
           (io/puts (count changed) " file(s) changed")
           0))))

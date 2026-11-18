@@ -1065,7 +1065,7 @@ for the user or nil. Never raises: every input here comes from a registry or a f
 (defn- package-verify-signature (name version checksum signature pubkey locked-pubkey)
   ;; the lock path: print the verdict's warning, return the key to pin in the lock
   (let (verdict (signature-verdict name version checksum signature pubkey locked-pubkey))
-    (when (:warning verdict) (io/puts "package: WARNING — " (:warning verdict)))
+    (when (:warning verdict) (io/puts "package: WARNING —" (:warning verdict)))
     (:pin verdict)))
 
 (defn- registry-write-meta (target base name version checksum)

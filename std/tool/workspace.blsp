@@ -43,7 +43,7 @@
   (fold (brood-repos parent) 0 (fn (failures dir) (+ failures (step dir)))))
 
 (defn- check-repo (dir)
-  (io/puts "=== " (repo-name dir) " ===")
+  (io/puts "===" (repo-name dir) "===")
   ;; `nest check` reads the project of its working directory.
   (let (result (os/cmd "nest" ["check"] {:cwd dir}))
     (io/write (get result :stdout))
@@ -55,13 +55,13 @@
     (= (dirty-count dir) 0) 0
     (not (= 0 (git-run dir (list "add" "-A")))) (failed dir "git add")
     (not (= 0 (git-run dir (list "commit" "-q" "-m" message)))) (failed dir "git commit")
-    else (do (io/puts "committed: " (repo-name dir)) 0)))
+    else (do (io/puts "committed:" (repo-name dir)) 0)))
 
 (defn- push-repo (dir)
   (cond
     (= (ahead-count dir) "0") 0
     (not (= 0 (git-run dir (list "push")))) (failed dir "git push")
-    else (do (io/puts "pushed: " (repo-name dir)) 0)))
+    else (do (io/puts "pushed:" (repo-name dir)) 0)))
 
 (defn run (action message &optional parent)
   "Dispatch for `nest ws <action> [message]` over the git repos with a `project.blsp` under

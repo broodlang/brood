@@ -869,6 +869,19 @@ fn rename_module_moves_the_file_and_renames_every_reference() {
     assert!(!dir.join("src/pool.blsp").exists());
     let moved = std::fs::read_to_string(dir.join("src/files/pool.blsp")).expect("moved");
     assert!(moved.starts_with("(defmodule files/pool)"), "{moved}");
+    // `io/puts` joins its arguments with one space: a literal written with its own trailing
+    // space printed two.
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("  changed: ") && !line.contains("  changed:  ")),
+        "{out}"
+    );
+    assert!(
+        out.lines().any(|line| line.starts_with("  moved: ")
+            && line.contains("pool.blsp → ")
+            && !line.contains("  →")),
+        "{out}"
+    );
     let main = std::fs::read_to_string(dir.join("src/main.blsp")).expect("main");
     assert_eq!(
         main,

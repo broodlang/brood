@@ -174,8 +174,8 @@ to overwrite an existing key unless `:force true`. Backs `nest key gen`.
         (str ";; Brood package signing key (ADR-212). KEEP :private SECRET — never commit or share it.\n"
           (pr-str (list 'signing-key :public public-hex :private private-hex))
           "\n"))
-      (io/puts "package: wrote signing key to " p)
-      (io/puts "package: public key (share this so others can pin it): " public-hex)
+      (io/puts "package: wrote signing key to" p)
+      (io/puts "package: public key (share this so others can pin it):" public-hex)
       public-hex)))
 
 ;; Sign the current release with the stored private key → `[signature-hex public-hex]`, or nil
@@ -414,5 +414,5 @@ Stops with an error — publishing nothing — when the bump cannot be committed
     ;; A failed commit leaves the bumped project.blsp in the tree for the user to commit
     ;; or revert; nothing is published.
     (package-git-or-error root "git commit" "commit" "-q" "-m" (str "release: v" version))
-    (io/puts "package: bumped to v" version)
+    (io/puts (str "package: bumped to v" version))
     (publish-thunk)))
