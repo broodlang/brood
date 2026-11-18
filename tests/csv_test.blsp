@@ -156,10 +156,13 @@
     (assert= "a\nfalse" (csv/encode-maps (list {"a" false}) (list "a"))))
   (test "false under a keyword key emits as false too"
     (assert= "a\nfalse" (csv/encode-maps (list {:a false}) (list "a"))))
+  ;; A row of ONE empty field is written `""`: bare, it was an empty line, which decode skips,
+  ;; so the row was lost on the way back. Still an empty field, and now it survives.
   (test "a missing key still emits an empty field"
-    (assert= "a\n" (csv/encode-maps (list {}) (list "a"))))
+    (assert= "a\n\"\"" (csv/encode-maps (list {}) (list "a")))
+    (assert= [{"a" ""}] (into [] (csv/decode-maps (csv/encode-maps (list {}) (list "a"))))))
   (test "a key present but holding nil emits an empty field"
-    (assert= "a\n" (csv/encode-maps (list {"a" nil}) (list "a"))))
+    (assert= "a\n\"\"" (csv/encode-maps (list {"a" nil}) (list "a"))))
   (test "true, zero and the empty string are unaffected"
     (assert= "a,b,c\ntrue,0," (csv/encode-maps (list {"a" true "b" 0 "c" ""}) (list "a" "b" "c")))))
 
