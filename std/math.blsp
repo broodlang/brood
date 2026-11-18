@@ -113,7 +113,7 @@ of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
   ;; caller never wrote.
   (if (and (int? a) (int? b))
     (let (r (math/rem a b)) (if (< r 0) (+ r (if (< b 0) (- b) b)) r))
-    (error "mod: expected two integers, got " a " and " b)))
+    (error "math/mod: expected two integers, got " a " and " b)))
 
 (defability Numeric
   "Float-domain questions every numeric type can answer.
@@ -249,7 +249,8 @@ value (an infinity or NaN) is an error naming `math/round`; a magnitude past 2^6
     (math/pow 2 10)        ;=> 1024
     (math/pow 2.0 0)       ;=> 1.0"
   (cond
-    (not (int? exp)) (error "pow: exponent must be an integer (use sqrt for roots), got " exp)
+    (not (int? exp))
+      (error "math/pow: exponent must be an integer (use math/sqrt for roots), got " exp)
     (< exp 0) (pow-reciprocal base exp)
     ;; The seed is the base's kind, so `(pow 2.0 0)` is `1.0` — the float arm of the
     ;; overload below promises it (ADR-116 addendum).
@@ -304,7 +305,7 @@ value (an infinity or NaN) is an error naming `math/round`; a magnitude past 2^6
     (let (f (->float (abs base))
           bits-per (if (math/infinite? f) 1024.0 (log2 f)))
       (when (> (* exp bits-per) %pow-max-bits)
-        (error "pow: " base "^" exp " would exceed " %pow-max-bits " bits")))))
+        (error "math/pow: " base "^" exp " would exceed " %pow-max-bits " bits")))))
 ;; Called only with a non-negative `exp` (a negative one never returns), so the int arm's
 ;; claim is about what it answers, not what it terminates on.
 (sig pow-acc (and (int int int -> int) (float int float -> float) (number int number -> number)))
@@ -335,7 +336,7 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
   "The square root of `n` (IEEE 754; always a float). Negative `n` raises.
 
     (math/sqrt 9)          ;=> 3.0"
-  (cond (< n 0) (error "sqrt: negative argument " n) (<= n 0) 0.0 else (%f64-sqrt n)))
+  (cond (< n 0) (error "math/sqrt: negative argument " n) (<= n 0) 0.0 else (%f64-sqrt n)))
 
 (defn clamp (x:?A lo:?A hi:?A -> ?A)
   "Constrain `x` to the closed range [`lo`, `hi`]: `lo` if `x` is below it, `hi` if above, else `x`.

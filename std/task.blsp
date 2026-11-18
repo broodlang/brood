@@ -122,7 +122,7 @@ to keep an interactive loop live.
       (receive
         ([:await--reply [:ok v]] v)
         ([:await--reply [:err m]] (error m))
-        (after timeout-ms (exit w :kill) (error "await: timed out after " timeout-ms "ms"))))))
+        (after timeout-ms (exit w :kill) (error "task/await: timed out after " timeout-ms "ms"))))))
 
 (defn- await-handle (handle timeout-ms)
   "Block for the outcome of an already-started `task`. Matches on the handle, so a
@@ -131,5 +131,5 @@ the task is cancelled, so nothing is left running behind us."
   (receive
     ([:task-done ^handle v] v)
     ([:task-error ^handle m] (error m))
-    ([:task-timeout ^handle] (error "await: the task timed out"))
-    (after timeout-ms (cancel handle) (error "await: timed out after " timeout-ms "ms"))))
+    ([:task-timeout ^handle] (error "task/await: the task timed out"))
+    (after timeout-ms (cancel handle) (error "task/await: timed out after " timeout-ms "ms"))))

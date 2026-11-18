@@ -502,7 +502,7 @@ produces is UTC.
     (or (= m 1) (= m 3) (= m 5) (= m 7) (= m 8) (= m 10) (= m 12)) 31
     (or (= m 4) (= m 6) (= m 9) (= m 11)) 30
     (= m 2) (if (leap-year? y) 29 28)
-    else (error (str "days-in-month: invalid month " m))))
+    else (error (str "datetime/days-in-month: invalid month " m))))
 
 (defn day-of-week (dt)
   "Day of week as a keyword: :monday … :sunday. Based on UTC date.

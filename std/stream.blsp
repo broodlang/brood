@@ -176,7 +176,7 @@ Call immediately after accept or connect, before any data has been read.
         s (spawn (sock-init sock me)))
     (receive
       ([:stream-socket-ready ^s] (do (sock-forward-queued sock s) s))
-      ([:stream-err msg] (error "socket->: " msg)))))
+      ([:stream-err msg] (error "stream/socket->: " msg)))))
 
 ;; A connected or accepted socket is already reading, so data can reach the caller before
 ;; the stream process owns the socket. `tcp/controlling-process` moves only what arrives
@@ -366,7 +366,7 @@ Call immediately after accept or connect, before any data has been read.
 The last vector may be shorter if the source isn't a multiple of `n`.
 
     (stream/->list (stream/chunk (stream/range 0 5) 2))   ;=> ([0 1] [2 3] [4])"
-  (when (<= n 0) (error "chunk: n must be > 0"))
+  (when (<= n 0) (error "stream/chunk: n must be > 0"))
   (spawn (chunk-outer n s)))
 
 (defn- chunk-outer (n up)
@@ -487,7 +487,7 @@ Raises on a stream error.
   (match (next s)
     (:done acc)
     ([:ok v] (%fold-loop f (f acc v) s))
-    (failed (error "fold: " (error-message failed)))))
+    (failed (error "stream/fold: " (error-message failed)))))
 
 (defn ->list (s)
   "Collect all elements of `s` into a list.
@@ -514,7 +514,7 @@ Raises on a stream error.
   (match (next s)
     (:done nil)
     ([:ok v] (do (f v) (each s f)))
-    (failed (error "each: " (error-message failed)))))
+    (failed (error "stream/each: " (error-message failed)))))
 
 (defn count (s)
   "Count the elements in `s`, consuming it.

@@ -41,7 +41,7 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
     (match (f acc (first coll))
       ([:halt v] v)
       ([:cont v] (reduce-while-loop f v (rest coll)))
-      (other (error "reduce-while: reducer must return [:cont acc] or [:halt acc], got: "
+      (other (error "seq/reduce-while: reducer must return [:cont acc] or [:halt acc], got: "
                (pr-str other))))))
 (defn reduce-while (coll init f)
   "Left-fold `coll` with `f`, but let the reducer stop early: `(f acc x)` returns `[:cont acc']` to keep going or `[:halt acc']` to stop now. Returns the last accumulator either way. Like `fold`/`reduce`, except the step decides when to quit — the early-terminating fold (≈ `Enum.reduce_while`). Tail-recursive, so it is stack-safe.
@@ -587,7 +587,7 @@ travels as a handle; a view must be realised first).
   (let (items (into [] coll)
         n (count items))
     (if (= n 0)
-      (error "sample: cannot sample from an empty collection")
+      (error "seq/sample: cannot sample from an empty collection")
       (let (s (%rand-step (%rand-seed seed)))
         [(nth items (math/rem s n)) s]))))
 

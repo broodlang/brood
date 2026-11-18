@@ -508,7 +508,7 @@ pid; `stop-serve` (or killing it) tears down every remote subscription.
 
     (telemetry/serve)   ;~> the `:telemetry-remote` agent's pid"
   (if (= (node/name) :nonode)
-    (error "serve: call (node/start name addr cookie) first")
+    (error "telemetry/serve: call (node/start name addr cookie) first")
     (let (agent (spawn (telemetry-serve-loop nil)))
       (proc/register :telemetry-remote agent)
       agent)))
