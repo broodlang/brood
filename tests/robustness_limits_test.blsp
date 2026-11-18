@@ -193,13 +193,13 @@
 (describe "string/format"
   (test "%d takes an integer; anything else is named, with its column"
     (assert= (message (fn () (string/format "%d" 1.5)))
-      "format: %d expects an integer, got 1.5 at column 1")
+      "string/format: %d expects an integer, got 1.5 at column 1")
     (assert= (message (fn () (string/format "%5d" "x")))
-      "format: %d expects an integer, got \"x\" at column 2")
+      "string/format: %d expects an integer, got \"x\" at column 2")
     (assert= (string/format "%d|%5d|%-5d|" 7 7 7) "7|    7|7    |"))
   (test "a width past a million is refused by name, not by the padding's mechanism"
     (assert= (message (fn () (string/format "%99999999999s" "x")))
-      "format: width 99999999999 too large (max 1000000)")
+      "string/format: width 99999999999 too large (max 1000000)")
     (assert= (string/format "%12s|" "x") "           x|")))
 
 (describe "errors that named a layer the caller never wrote"

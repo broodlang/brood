@@ -610,7 +610,7 @@ things in the same image is a name worth spending to fix.
       (format-digit? c) (format-width template i n args acc (= c "0") false 0)
       (= c "-") (format-width template (inc i) n args acc false true 0)
       (= c ".") (format-prec template (inc i) n args acc 0)
-      else (error (str "format: unrecognized specifier '%" c "' at column " i)))))
+      else (error (str "string/format: unrecognized specifier '%" c "' at column " i)))))
 
 (defn- format-digit? (c)
   (let (d (string/->number c)) (and (int? d) (>= d 0) (<= d 9))))
@@ -627,7 +627,7 @@ wrong), the way `%d` passes a float through."
   ;; then applies it to the specifier that ends it: `d`/`x`/`X`/`s` right-aligned (`0`
   ;; fills with zeros), `-` left-aligned, and `f`/`.Nf` for a float in a field
   (cond
-    (>= i n) (error "format: unterminated width specifier")
+    (>= i n) (error "string/format: unterminated width specifier")
     (format-digit? (string/char-at template i))
       (let (d (string/->number (string/char-at template i)))
         (format-width template (inc i) n args acc zero? left? (if (int? d) (+ (* w 10) d) w)))
@@ -642,13 +642,14 @@ wrong), the way `%d` passes a float through."
                    (= c "x") (format-hex (first args) false)
                    (= c "X") (format-hex (first args) true)
                    else
-                     (error (str "format: a width takes d, s, f, x or X, got '" c "' at column " i))))
+                     (error (str "string/format: a width takes d, s, f, x or X, got '"
+                              c "' at column " i))))
         (format-loop template (inc i) n (rest args) (str acc (format-pad body w zero? left?))))))
 
 (defn- format-width-prec (template i n args acc zero? left? w p)
   ;; `%8.2f` — a precision after a width; `i` is one past the `.`
   (cond
-    (>= i n) (error "format: unterminated %W.Nf specifier")
+    (>= i n) (error "string/format: unterminated %W.Nf specifier")
     (format-digit? (string/char-at template i))
       (let (d (string/->number (string/char-at template i)))
         (format-width-prec template (inc i) n args acc zero? left? w (if (int? d) (+ (* p 10) d) p)))
@@ -659,13 +660,16 @@ wrong), the way `%d` passes a float through."
         (rest args)
         (str acc (format-pad (math/->fixed (first args) p) w zero? left?)))
     else
-      (error (str "format: a precision takes f, got '" (string/char-at template i) "' at column " i))))
+      (error (str "string/format: a precision takes f, got '"
+               (string/char-at template i)
+               "' at column "
+               i))))
 
 ;; `%d` takes an integer, and refuses anything else rather than rendering it with `str`.
 (defn- format-int (v i)
   (if (int? v)
     (str v)
-    (error (str "format: %d expects an integer, got " (pr-str v) " at column " i))))
+    (error (str "string/format: %d expects an integer, got " (pr-str v) " at column " i))))
 
 ;; A width past this is a typo or an attack, and the padding it asks for is built
 ;; through a range, whose own refusal named a mechanism the caller never saw.
@@ -673,7 +677,7 @@ wrong), the way `%d` passes a float through."
 
 (defn- format-pad (body w zero? left?)
   (when (> w format-max-width)
-    (error "format: width " w " too large (max " format-max-width ")"))
+    (error "string/format: width " w " too large (max " format-max-width ")"))
   (cond
     left? (string/pad-right body w)
     zero? (string/pad-left body w "0")
@@ -682,7 +686,7 @@ wrong), the way `%d` passes a float through."
 (defn- format-prec (template i n args acc p)
   ;; called with `i` pointing one past the `.`, accumulating precision in `p`
   (cond
-    (>= i n) (error "format: unterminated %.Nf specifier")
+    (>= i n) (error "string/format: unterminated %.Nf specifier")
     (= (string/char-at template i) "f")
       (format-loop template
         (inc i)
@@ -693,7 +697,7 @@ wrong), the way `%d` passes a float through."
       (let (d (string/->number (string/char-at template i)))
         (format-prec template (inc i) n args acc (if (int? d) (+ (* p 10) d) p)))
     else
-      (error (str "format: expected digit or 'f' after '.' in specifier, got '"
+      (error (str "string/format: expected digit or 'f' after '.' in specifier, got '"
                (string/char-at template i)
                "' at column "
                i))))
