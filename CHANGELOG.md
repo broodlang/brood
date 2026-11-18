@@ -4,7 +4,7 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.55.0 — recursion as deep as memory allows, a project cut into contexts, a slick terminal
 
 **Fixed: a deprecated name is reported whether its module came from source or an image.** A
 module materialised from a startup image lost every `(meta …)` fact, so `nest check` reported a
@@ -15,8 +15,6 @@ call to a deprecated function only on a cold check.
 
 **Fixed: `nest publish --bump` says `bumped to v0.9.7`**, and nest's other messages lose their
 doubled spaces.
-
-## v0.55.0 — recursion as deep as memory allows, a project cut into contexts, a slick terminal
 
 **Added: a project read and cut as contexts (ADR-752, ADR-753, ADR-754).**
 - `nest deps` reads the project's module graph as contexts by name — `display` is a context,
