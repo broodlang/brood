@@ -122,6 +122,13 @@
     (let (moved (move-text move-source "(defmodule b)" ["mover"]))
       (is (includes? (:source moved) "(defn stays (n) (b/mover n))"))
       (is (includes? (:source moved) "(b/mover n)"))))
+  (test "a definer reached qualified defines: (theme/defchrome face …) moves"
+    (let (moved (move-text "(defmodule a)\n(theme/defchrome face {:fg 1})\n(defn g () face)\n"
+                  "(defmodule b)"
+                  ["face"]))
+      (is (includes? (:destination moved) "(theme/defchrome face {:fg 1})"))
+      (refute (includes? (:source moved) "defchrome"))
+      (is (includes? (:source moved) "(defn g () b/face)"))))
   (test "a check-allow wrapper moves with its definition, its own references bare"
     (let (moved (move-text move-source "(defmodule b)" ["mover" "quiet"]))
       (is (includes? (:destination moved) "(check-allow :t (defn- quiet (n) (mover n)))"))))

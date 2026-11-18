@@ -22,7 +22,8 @@ calling a name that was gone; renaming the qualified token did the opposite. A q
 now renames that module's global: its definition and bare references in its own file (a local
 spelled the same stays), the bare references and the `:only`/`:exclude` entry in a file that
 `:use`s it, and every `mod/old` — quoted, under an `:alias`, project-rooted, and in prose. A NEW
-in another module is refused, pointing at `nest move`.
+in another module is refused, pointing at `nest move`. And `nest move` takes a definition made
+by a definer reached qualified, `(theme/defchrome face …)`, as it does a bare `def…`.
 
 **Fixed: `if-let`, `when-let`, `if-some`, `when-some` and `with` refuse a malformed
 binding.** They took `first` and `second` of it, so `(when-let (a 1 b) …)` dropped `b`,

@@ -591,15 +591,17 @@ everything else byte for byte."
           head (first kids)
           named (second kids))
       (when (and head (= (node-kind head) :symbol))
-        (let (head-name (node-payload head))
+        (let (head-name (node-payload head)
+              ;; a definer reached qualified, `(theme/defchrome face …)`, defines as a bare one does
+              local-head (last (string/split head-name "/")))
           (cond
             (= head-name "check-allow") (defining-form (last kids))
             (and named (= (node-kind named) :symbol) (includes? ["sig" "sig!"] head-name))
               ["sig" (node-payload named)]
             (and named
               (= (node-kind named) :symbol)
-              (string/starts-with? head-name "def")
-              (not (= head-name "defmodule")))
+              (string/starts-with? local-head "def")
+              (not (= local-head "defmodule")))
               [head-name (node-payload named)]
             else nil))))))
 
