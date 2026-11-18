@@ -2058,3 +2058,14 @@ until it is encoded, and module sections then carry it with nothing else to writ
 (`brood-image-v11`, `brood-prelude-image-v8`). Guard: `boot::image::section_fact_tests` gives one
 name a fact of every kind and round-trips it; it also fails when a kind is added and not given
 to the name. Sabotage: a section that drops `meta` reds it and `check_warning_policy`.
+
+2026-11-18. **Two tree-walker timeouts waiting to happen, taken off the clock.** A sweep of the
+test machine (every suite, fuzz, stress and soak gate, all clean) found two cases in `make
+test-both`'s tree-walker run within 30 s of the 120 s default: `contracts_default` (87-97 s
+side by side, 26-29 s solo) and `project_image_registries`' cold case (93.5 s, 31.5 s solo). Both
+paid a stdlib image build at the tree-walker's speed (26.3 s against 10.0 s on the VM). Four
+`contracts_default` cases now build their image on the VM, since they ask how a run enforces
+contracts and the run keeps the ambient tier (8-19 s solo). The children case and the cold case
+cannot: the image their run builds is what each guards, so each has a 240 s override in
+`.config/nextest.toml` with the measurements.
+

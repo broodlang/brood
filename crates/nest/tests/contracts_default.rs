@@ -23,10 +23,10 @@ struct Run {
     ok: bool,
 }
 
-/// `nest args…` in `dir`, with `XDG_CACHE_HOME` at `cache` so the stdlib image this test
-/// builds is the one the run reads, and `BROOD_CONTRACTS` as `contracts` says (None
+/// The `nest args…` command in `dir`, with `XDG_CACHE_HOME` at `cache` so the stdlib image
+/// this test builds is the one the run reads, and `BROOD_CONTRACTS` as `contracts` says (None
 /// removes it, i.e. the default).
-fn nest(dir: &Path, cache: &Path, contracts: Option<&str>, args: &[&str]) -> Run {
+fn nest_command(dir: &Path, cache: &Path, contracts: Option<&str>, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_nest"));
     cmd.current_dir(dir)
         .args(args)
@@ -36,6 +36,11 @@ fn nest(dir: &Path, cache: &Path, contracts: Option<&str>, args: &[&str]) -> Run
         Some(v) => cmd.env("BROOD_CONTRACTS", v),
         None => cmd.env_remove("BROOD_CONTRACTS"),
     };
+    cmd
+}
+
+/// Run `cmd` to completion, its stdout and stderr together.
+fn run_to_completion(mut cmd: Command) -> Run {
     let out = cmd.output().expect("run nest");
     Run {
         out: format!(
@@ -45,6 +50,11 @@ fn nest(dir: &Path, cache: &Path, contracts: Option<&str>, args: &[&str]) -> Run
         ),
         ok: out.status.success(),
     }
+}
+
+/// `nest args…` in `dir` — see [`nest_command`].
+fn nest(dir: &Path, cache: &Path, contracts: Option<&str>, args: &[&str]) -> Run {
+    run_to_completion(nest_command(dir, cache, contracts, args))
 }
 
 /// A project whose `main` reports, for three calls, whether a contract raised: `liar/lies`
@@ -93,8 +103,17 @@ fn write_project(root: &Path) {
 
 /// Build the stdlib image into `cache` — unarmed on purpose, as `nest` itself does — and
 /// prove it is there.
+///
+/// On the VM whatever tier the job runs: what this file asks is how a RUN enforces contracts,
+/// not how the image was built (`image_matches_source` asks that), and building it is nearly
+/// all of a case's cost — 26.3 s under the tree-walker against 10.0 s on
+/// the VM (2026-11-18, solo). Inherited, five cases each paid it at the tree-walker's speed and
+/// ran 87-97 s of the 120 s budget side by side in `make test-both`. The runs that follow keep
+/// the ambient tier, so contract enforcement keeps its tree-walker coverage (KI-399).
 fn build_image(root: &Path, cache: &Path) {
-    let built = nest(root, cache, Some("0"), &["stdimage"]);
+    let mut cmd = nest_command(root, cache, Some("0"), &["stdimage"]);
+    cmd.env("BROOD_TIER", "2");
+    let built = run_to_completion(cmd);
     assert!(built.ok, "nest stdimage failed:\n{}", built.out);
 }
 

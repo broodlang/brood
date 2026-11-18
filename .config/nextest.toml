@@ -248,6 +248,28 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 filter = 'binary(contracts_mode) and test(every_baked_in_module_loads_under_contracts_from_source)'
 slow-timeout = { period = "60s", terminate-after = 4 }
 
+# `contracts_default`'s children case has its first `nest run` build the stdlib image in a
+# child, because that child is what it guards (a default-armed run once exported the flag and
+# the `stdimage` child refused to build), so it cannot take the VM-pinned `build_image` its
+# siblings use and pays the image at the job's tier. Measured 2026-11-18 on the 12-core box:
+# 33.8 s solo under `BROOD_TIER=0`, and **97.1 s inside `make test-both`'s tree-walker run**,
+# 23 s from the 120 s default — the margin this file keeps warning about. Its siblings, image
+# pinned, went from 26-29 s to 8-19 s solo under the tree-walker (87-91 s loaded before). 60 s x 4 = 240 s, ~2.5x the loaded
+# figure; a run that arms the child fails in seconds, so the budget hides no regression class.
+[[profile.default.overrides]]
+filter = 'binary(contracts_default) and test(the_default_arms_the_run_and_not_the_processes_it_starts)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# `project_image_registries`' cold case runs `nest test` twice in a fresh project with NO
+# stdlib image, so run 1 loads all of std from source and writes both images — at the job's
+# tier, because what that engine writes into the images is the question (ADR-604). Measured
+# 2026-11-18 on the 12-core box: 8.1 s solo on the VM, 31.5 s solo under `BROOD_TIER=0`, and
+# **93.5 s inside `make test-both`'s tree-walker run**, 27 s from the 120 s default. Same
+# budget as the case above, for the same reasons: a foreign record id fails run 2 in seconds.
+[[profile.default.overrides]]
+filter = 'binary(project_image_registries) and test(a_cold_first_run_without_a_stdlib_image_images_no_foreign_record_ids)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
 # `image_matches_source` (ADR-280) loads EVERY std module twice — once from source, once
 # from the freshly built image — and diffs the resulting bindings, so it is the heaviest
 # single case outside the suite wrapper by design, and the CI `differential (tree-walker)`
