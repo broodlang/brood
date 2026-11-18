@@ -115,7 +115,16 @@
     (is (failure? (encoding/base64-decode "Zg=!"))))
   (test "encode-decode roundtrip"
     (let (s "The quick brown fox jumps over the lazy dog")
-      (assert= s (encoding/base64-decode (encoding/base64-encode s))))))
+      (assert= s (encoding/base64-decode (encoding/base64-encode s)))))
+  ;; Valid Base64 of bytes that are not UTF-8 raised from inside `string/bytes->`, naming a
+  ;; primitive, though the string decoders promise a string or a failure.
+  (test "valid encoding of non-UTF-8 bytes is a failure pointing at the -bytes decoder"
+    (doseq (decoded-value [(encoding/base64-decode "/w==")
+                            (encoding/base64-url-decode "_w==")
+                            (encoding/hex-decode "ff")])
+      (is (failure? decoded-value))
+      (is (includes? (error-message decoded-value) "-bytes")))
+    (assert= [255] (into [] (decoded (encoding/base64-decode-bytes "/w=="))))))
 
 ;; ---- base64 URL-safe --------------------------------------------------------
 

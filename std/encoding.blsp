@@ -100,6 +100,20 @@ UTF-8-encodes a string.
       (encoding-hex-decode-loop s 0 n nil)
       :invalid)))
 
+;; The decoded bytes as text, or — when they are not UTF-8 — the `failure` the string
+;; decoders promise, pointing at their byte-faithful twin. They raised from deep inside
+;; `string/bytes->` instead, though each is documented to answer a string or a failure.
+(defn- decoded-text (who bs)
+  (try
+    (string/bytes-> bs)
+    (catch error
+      (failure who
+        ": the decoded bytes are not UTF-8 text ("
+        (error-message error)
+        ") — decode a binary payload with "
+        who
+        "-bytes"))))
+
 (defn hex-decode (s:string -> (or string failure))
   "Decode a hexadecimal string → original string, or a `failure` naming the input.
 
@@ -108,7 +122,7 @@ UTF-8-encodes a string.
   (let (bs (encoding-hex-decode-bytelist s))
     (if (= bs :invalid)
       (failure "encoding/hex-decode: not hexadecimal: " (pr-str s))
-      (string/bytes-> bs))))
+      (decoded-text "encoding/hex-decode" bs))))
 ;; kept for cost (KI-150)
 
 (defn hex-decode-bytes (s:string -> (or bytes failure))
@@ -167,7 +181,7 @@ UTF-8 form.
   (let (bs (encoding-b64-decode s false))
     (if (= bs :invalid)
       (failure "encoding/base64-decode: not standard Base64: " (pr-str s))
-      (string/bytes-> bs))))
+      (decoded-text "encoding/base64-decode" bs))))
 ;; kept for cost (KI-150)
 
 (defn base64-url-decode (s:string -> (or string failure))
@@ -175,7 +189,7 @@ UTF-8 form.
   (let (bs (encoding-b64-decode s true))
     (if (= bs :invalid)
       (failure "encoding/base64-url-decode: not URL-safe Base64: " (pr-str s))
-      (string/bytes-> bs))))
+      (decoded-text "encoding/base64-url-decode" bs))))
 ;; kept for cost (KI-150)
 
 (defn base64-decode-bytes (s:string -> (or bytes failure))

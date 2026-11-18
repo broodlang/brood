@@ -23,6 +23,13 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: `encoding/base64-decode`, `base64-url-decode` and `hex-decode` answer a failure
+for bytes that are not text.** Valid Base64 or hex of a binary payload raised
+`%utf8-bytes->string: invalid UTF-8` from inside them, though each promises a string or a
+failure; it is now a failure naming the decoder and pointing at its `-bytes` twin. And
+`string/bytes->`'s own error names `string/bytes->` and the `:lossy` option. Found by a
+battery of hostile texts through every std parser (22 of them), which found nothing else.
+
 **Fixed: `json/decode` names a character that starts no value.** A stray `}`, a trailing
 comma's `]`, `NaN` or a NUL each read as `json: invalid number ''` — the number parser was
 the dispatcher's last resort and had consumed nothing. They now read

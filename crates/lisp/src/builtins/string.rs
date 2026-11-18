@@ -1245,15 +1245,16 @@ pub(super) fn string_to_utf8_bytes(args: &[Value], _: EnvId, heap: &mut Heap) ->
 
 pub(super) fn utf8_bytes_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // Accepts a `bytes` value, or (leniently) a vector or list of byte ints.
-    let bytes = super::bytes::collect_bytes("utf8-bytes->string", arg(args, 0), heap)?;
+    // Named for `string/bytes->`, its one caller: the message is what the user reads, and it
+    // read `%utf8-bytes->string: …`, a primitive nobody called.
+    let bytes = super::bytes::collect_bytes("string/bytes->", arg(args, 0), heap)?;
     if args.get(1).is_some_and(|lossy| crate::eval::truthy(*lossy)) {
         return Ok(heap.alloc_string_owned(String::from_utf8_lossy_owned(bytes)));
     }
     match String::from_utf8(bytes) {
         Ok(s) => Ok(heap.alloc_string_owned(s)),
         Err(e) => Err(LispError::runtime(format!(
-            "%utf8-bytes->string: invalid UTF-8: {}",
-            e
+            "string/bytes->: invalid UTF-8: {e} (pass :lossy to read each bad sequence as U+FFFD)"
         ))),
     }
 }
