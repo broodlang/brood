@@ -1779,10 +1779,16 @@ fn receive_match_timed(
                 Some(SchedDeadline::after_millis(ms as u64))
             }
         }
-        _ => {
-            return Err(LispError::type_err(
-                "receive: timeout must be an integer (milliseconds) or nil",
-            ));
+        // A negative int lands here too, so the rule names the sign: `(after -5 …)` was told
+        // its timeout "must be an integer", which -5 is.
+        other => {
+            let got = match other {
+                Value::Int(ms) => ms.to_string(),
+                _ => "a non-integer value".to_string(),
+            };
+            return Err(LispError::type_err(format!(
+                "receive: timeout must be a non-negative whole number of milliseconds, or nil — got {got}"
+            )));
         }
     };
     // Mark this process running (the root never goes through `run_one`, so this is
