@@ -6,6 +6,20 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.55.0 — recursion as deep as memory allows, a project cut into contexts, a slick terminal
+
+**Added: a project read and cut as contexts (ADR-752, ADR-753, ADR-754).**
+- `nest deps` reads the project's module graph as contexts by name — `display` is a context,
+  `display/panebody` one of its details — and lists every reference from outside a context into
+  its details, the groups of contexts that reach each other, and the busiest context edges.
+  `--check` exits 1 on a reference into another context's detail.
+- `(defdelegate name (params) target)` defines `name` to call `target/name` with the same
+  arguments (`:as other` for `target/other`); optional and rest parameters are forwarded, and
+  the call stays late-bound.
+- `nest rename-module FROM TO` renames a module wherever it is named — qualified references in
+  code and quoted data, header clauses, `` `FROM/…` `` and `[[FROM/…]]` in prose — leaves a
+  local of the same bare name alone, and moves the file to the new name's path.
+
 **Fixed: a module's functions keep their module through the startup image (KI-399).** A
 function a module defined on the VM recorded no authoring module, so a contracted std function
 loaded from the image had no contract boundary of its own and, on the tree-walker, a contract
