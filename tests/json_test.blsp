@@ -108,7 +108,16 @@
     (assert-error (decode "\"abc"))
     ; trailing content
     (assert-error (decode "1 2"))
-    (assert-error (decode "nope"))))
+    (assert-error (decode "nope")))
+  ;; A character that starts no value read as "invalid number ''" — the number parser was the
+  ;; dispatcher's last resort, and it had consumed nothing.
+  (test "a character that starts no value is named, not called an empty number"
+    (doseq (example [["}" "json: unexpected \"}\" at index 0"]
+                      ["[1,]" "json: unexpected \"]\" at index 3"]
+                      ["NaN" "json: unexpected \"N\" at index 0"]])
+      (let ([text expected] example)
+        (is (= expected (try (decode text) (catch error (error-message error)))))))
+    (is (includes? (try (decode "--1") (catch error (error-message error))) "invalid number '--1'"))))
 (describe "encode"
   (test "scalars"
     (assert= (encode nil) "null")

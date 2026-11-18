@@ -136,7 +136,11 @@ leading zeros)."
           ;; a decode that answered it silently could not round-trip.
           (and (float? n) (math/infinite? n)) (error "json: number out of range at index " i)
           else [n end]))
-      (error "json: invalid number '" (json-slice s i end) "' at index " i))))
+      (if (= end i)
+        ;; Nothing a number is made of: the character starts no JSON value at all — a stray
+        ;; `}`, `NaN`, a NUL — which read as "invalid number ''".
+        (error "json: unexpected " (pr-str (json-slice s i (+ i 1))) " at index " i)
+        (error "json: invalid number '" (json-slice s i end) "' at index " i)))))
 
 ;; -- strings --
 (defn- hex-val (c)

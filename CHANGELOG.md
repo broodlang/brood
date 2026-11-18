@@ -23,6 +23,12 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: `json/decode` names a character that starts no value.** A stray `}`, a trailing
+comma's `]`, `NaN` or a NUL each read as `json: invalid number ''` — the number parser was
+the dispatcher's last resort and had consumed nothing. They now read
+`json: unexpected "}" at index 0`. A JSON fuzz (5,000 round trips, 37 hostile texts, 100,000
+levels of nesting) found nothing else.
+
 **Fixed: `string/->number` reads a ratio.** It is documented as the inverse of `str`, yet
 `(string/->number (str 1/2))` was a failure. Text in the reader's ratio shape (`-7/3`, a
 signed integer over a positive one) now parses, `4/2` to `2`; the checker types such a
