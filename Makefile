@@ -483,11 +483,14 @@ asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly +
 	# The `brood` and `nest` binaries first, into the same target directory: suite tests run
 	# a child beside the harness (`sibling-binary`, a doctest markdown block, a terminal app
 	# under `nest run`), and with `-p brood` alone there was none to find.
+	# RUST_MIN_STACK on the run step only: a test thread's default 2 MiB is the ASan build's
+	# whole JIT margin (2 x its 1 MiB red zone, ADR-751), so no test thread ever had room for
+	# a native link and every JIT case bailed. 16 MiB scales it as WORKER_STACK_BYTES is.
 	$(REQUIRE_NEXTEST)
 	CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
 		RUSTFLAGS="-Zsanitizer=address --cfg brood_asan --cfg brood_system_alloc" \
 		cargo +nightly build --release --target x86_64-unknown-linux-gnu -p cli -p nest
-	CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
+	RUST_MIN_STACK=16777216 CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
 		RUSTFLAGS="-Zsanitizer=address --cfg brood_asan --cfg brood_system_alloc" \
 		cargo +nightly nextest run --profile asan --no-fail-fast --target x86_64-unknown-linux-gnu \
 		-p brood --release
