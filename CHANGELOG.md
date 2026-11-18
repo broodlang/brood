@@ -23,6 +23,11 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: `csv/encode` keeps a row of one empty field.** It was written as an empty line,
+which `csv/decode` skips as no row, so `[["a"] [""]]` came back `(["a"])`. It is now written
+`""`. Found by encoding and decoding 3,000 random tables; the datetime round trip
+(epoch → ISO 8601 → parse) held at every instant tried.
+
 **Fixed: `encoding/base64-decode`, `base64-url-decode` and `hex-decode` answer a failure
 for bytes that are not text.** Valid Base64 or hex of a binary payload raised
 `%utf8-bytes->string: invalid UTF-8` from inside them, though each promises a string or a

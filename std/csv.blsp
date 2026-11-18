@@ -94,8 +94,15 @@ display form).
 Fields containing commas, quotes, or newlines are quoted; interior quotes are
 doubled. Rows are separated by `\\n`.
 
-    (csv/encode [[\"a\" \"b\"]])   ;=> \"a,b\""
-  (string/join (map rows (fn (row) (string/join (map row emit-field) ","))) "\n"))
+    (csv/encode [[\"a\" \"b\"]])   ;=> \"a,b\"
+    (csv/decode (csv/encode [[\"a\"] [\"\"]]))   ;=> ([\"a\"] [\"\"])"
+  (string/join (map rows emit-row) "\n"))
+
+;; A row of one empty field is written `""`: bare, it was an empty line, which `decode` skips
+;; as no row at all — the row was lost on the round trip.
+(defn- emit-row (row)
+  (let (line (string/join (map row emit-field) ","))
+    (if (and (= line "") (= (count row) 1)) "\"\"" line)))
 
 (defn- cell (m h)
   ;; Presence, not truthiness: a stored `false` emits `false`; a key holding nil, or
