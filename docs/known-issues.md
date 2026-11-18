@@ -97,6 +97,9 @@ both land between two looks, the A→B→A case `RESIZE_GENERATION` exists for
     for round in 1 2 3; do for lane in 1 2 3 4 5 6; do
       ( ulimit -v 16000000; target/debug/nest test tests/term_display_test.blsp ) & done; wait; done
 
+Seen again on CI (2026-11-18, `test (1/2)` on 8619a2727, `term_display_test.blsp:190` —
+`(> (:bytes bounced) 280)`), passing on nextest's retry: the CI runner's load is enough.
+
 ## KI-397 — an Interp's parked waiters outlived its drop past the 30 s deadline ⚠️ watching 2026-11-17
 
 **Symptom.** `interp_teardown::dropping_an_interp_reaps_permanently_parked_waiters` failed once in
