@@ -23,6 +23,13 @@ three. Each now fails at expansion, naming the form and the binding it got. In t
 way an `&optional` parameter `(a 1 2)` dropped its `2` and `(sig f)` declared nothing; both
 now fail, naming what they got.
 
+**Fixed: errors name the function as its caller writes it.** `string/format`'s errors began
+`format:` (the source formatter's name, which its own docstring says it avoids), and twelve
+module functions began theirs with the bare name — `stream/fold` said `fold:`, the prelude's
+different `fold`; likewise `stream/each`, `task/await`, `math/mod`/`pow`/`sqrt`,
+`seq/reduce-while`/`sample` and others. And `(receive … (after -5 …))` was told its timeout
+"must be an integer"; it now says non-negative.
+
 **Fixed: `csv/encode` keeps a row of one empty field.** It was written as an empty line,
 which `csv/decode` skips as no row, so `[["a"] [""]]` came back `(["a"])`. It is now written
 `""`. Found by encoding and decoding 3,000 random tables; the datetime round trip
