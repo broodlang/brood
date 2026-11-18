@@ -19,6 +19,36 @@ Brood itself. It runs share-nothing concurrency across every core, connects
 distributed nodes, compiles to a bytecode VM with a tier-1 native JIT, and ships an
 advisory set-theoretic type checker.
 
+## Install
+
+Prebuilt `brood`, `nest` and `brood-lsp` from the [latest release](https://github.com/broodlang/brood/releases/latest),
+checked against its SHA-256. Linux (x86_64 and aarch64, and a static x86_64 build where there
+is no glibc) and macOS (arm64 and x86_64), into `~/.local/bin`:
+
+```bash
+curl -fsSL https://brood.fly.dev/install.sh | sh
+```
+
+Windows (x86_64), in PowerShell, into `%LOCALAPPDATA%\brood\bin`:
+
+```powershell
+irm https://brood.fly.dev/install.ps1 | iex
+```
+
+Then:
+
+```bash
+brood                                    # a REPL (Ctrl-D leaves)
+nest new hello && cd hello && nest run   # a project
+nest update-brood                        # later: move to the newest release (--check only reports)
+```
+
+`BROOD_VERSION=v0.55.0` before `sh` (or `$env:BROOD_VERSION` in PowerShell) installs a given
+release, and `BROOD_INSTALL_DIR` puts it elsewhere. How well each platform is tested (ADR-715):
+Linux x86_64 runs the full suite; macOS arm64 and Windows x86_64 run the platform smoke set on
+every push; the others are built by each release and not tested beyond that. To build it
+yourself, see [Building from source](#building-from-source).
+
 **Live redefinition is the design center.** A running program can rewrite its own
 behaviour — redefine a function and every process picks it up on its next call, no
 restart.
@@ -92,28 +122,9 @@ Distribution is the same model stretched over TCP: two runtimes connect and
 `send` works location-transparently across nodes, with remote monitors and
 closure-shipping.
 
-## Install
+## Building from source
 
-Prebuilt `brood`, `nest` and `brood-lsp` from the latest GitHub release, checked against
-its SHA-256 — Linux (x86_64 and aarch64; a static x86_64 build where there is no glibc) and
-macOS (arm64 and x86_64) into `~/.local/bin`:
-
-```bash
-curl -fsSL https://brood.fly.dev/install.sh | sh
-nest update-brood           # later: move to the newest release (--check only reports)
-```
-
-Windows (x86_64), in PowerShell, into `%LOCALAPPDATA%\brood\bin`:
-
-```powershell
-irm https://brood.fly.dev/install.ps1 | iex
-```
-
-How well each is tested (ADR-715): Linux x86_64 runs the full suite; macOS arm64 and
-Windows x86_64 run the platform smoke set on every push; the others are built by each
-release and not tested beyond that.
-
-To build from source instead: it requires a Rust toolchain (via `rustup`). The build is a Cargo workspace; a
+It requires a Rust toolchain (via `rustup`). The build is a Cargo workspace; a
 **`Makefile`** wraps the common commands (`make help` lists them all), and an
 autotools-style `./configure` records build options.
 

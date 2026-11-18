@@ -180,3 +180,25 @@ jobs:
           tag_name: ${{ steps.package.outputs.tag }}
           files: dist/*
           fail_on_unmatched_files: true
+
+  # Each build uploads its own files, so the release exists once the first one lands, with an
+  # empty body: a page of 26 files that says neither which to take nor what changed. Once every
+  # build is up, the body says how to install this version and carries its CHANGELOG section.
+  notes:
+    needs: build
+    if: ${{ !inputs.dry_run }}
+    name: release notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+      - name: Install instructions and the changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          scripts/ci/release-notes.sh "$tag" > notes.md
+          gh release edit "$tag" --repo "${{ github.repository }}" --notes-file notes.md
