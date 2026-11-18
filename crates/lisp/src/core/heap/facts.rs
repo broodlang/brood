@@ -202,6 +202,46 @@ impl Heap {
         out
     }
 
+    /// Every side fact recorded about one name, in [`FactKind::ALL`] order — what a module
+    /// image section writes beside each binding it holds, and what re-defining a name while
+    /// materialising must put back. Exhaustive for the reason [`Heap::side_facts`] is: a new
+    /// kind stops this compiling, so module sections carry it by construction too. Before
+    /// this, sections wrote privacy, def sites and `meta` in hand-written blocks of their
+    /// own, and `meta` was the one left out until a deprecation went missing.
+    pub fn facts_about(&self, sym: Symbol) -> Vec<Fact> {
+        let mut out = Vec::new();
+        for kind in FactKind::ALL {
+            match kind {
+                FactKind::Private => {
+                    if self.is_private(sym) {
+                        out.push(Fact::Private(sym));
+                    }
+                }
+                FactKind::Meta => {
+                    if let Some(meta) = self.name_meta(sym) {
+                        out.push(Fact::Meta(sym, meta));
+                    }
+                }
+                FactKind::DefSite => {
+                    if let Some(loc) = self.def_site(sym) {
+                        out.push(Fact::DefSite(sym, loc));
+                    }
+                }
+                FactKind::RegistryName => {
+                    if self.is_registry_name(sym) {
+                        out.push(Fact::RegistryName(sym));
+                    }
+                }
+                FactKind::Dynamic => {
+                    if self.is_dynamic(sym) {
+                        out.push(Fact::Dynamic(sym));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Re-record one fact — the restore half of [`Heap::side_facts`], and exhaustive for
     /// the same reason. Every arm routes to the same entry point ordinary evaluation uses,
     /// so a replayed fact is indistinguishable from a recorded one.

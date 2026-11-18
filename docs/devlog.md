@@ -2045,3 +2045,16 @@ outside the prelude has a `(meta …)` today, so the image differential cannot s
 arguments with a space; the package, workspace and codemod messages were written as if it
 concatenated (`"changed: " file` printed two spaces, `"bumped to v" version` printed
 `v 0.9.7`). Guard: `blsp_dispatch`'s rename-module case reads the lines.
+
+2026-11-18. **A module image section carries every side fact by construction.** The `meta` loss
+above was the sixth bug of one shape: a fact that evaluating a definition records (privacy, def
+site, `meta`, …) was not written by a section, so a module from an image came back without it.
+The prelude image had been made complete by construction in ADR-320 (`FactKind::ALL` and
+exhaustive matches); module sections still hand-wrote one entry kind per fact. Now a section
+writes one `KIND_FACT` entry per fact `Heap::facts_about` reports, encoded by the prelude
+journal's own payload codec, and replays it with `replay_fact`; the deferred define pass puts
+back every fact a name carried, not just privacy and `meta`. A new fact kind fails to compile
+until it is encoded, and module sections then carry it with nothing else to write
+(`brood-image-v11`, `brood-prelude-image-v8`). Guard: `boot::image::section_fact_tests` gives one
+name a fact of every kind and round-trips it; it also fails when a kind is added and not given
+to the name. Sabotage: a section that drops `meta` reds it and `check_warning_policy`.

@@ -119,8 +119,9 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
 /// optional symbol for the next entry's kind byte.
 /// v9 adds `KIND_USES`. A v8 reader would decode its list as a value and bind the module's
 /// name to it.
-/// v10 adds `KIND_META`, which a v9 reader would likewise decode as a value.
-const MAGIC: &[u8] = b"brood-image-v10\n";
+/// v10 added a `meta` entry. v11 writes every side fact about a name as one `KIND_FACT`
+/// entry (privacy, def site and `meta` had an entry kind each) and renumbers `KIND_USES`.
+const MAGIC: &[u8] = b"brood-image-v11\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
@@ -129,27 +130,21 @@ const KIND_SIG: u8 = 2;
 /// A global bound to a `Value::Table` — stored as the table's *contents* (its snapshot
 /// map) and rebuilt into a fresh table on restore. See `encode_section`.
 const KIND_TABLE: u8 = 3;
-/// A **module-private** name (ADR-146). Privacy is recorded by *evaluating*
-/// `(%mark-private 'name)`, and materialising a section evaluates nothing — so without
-/// this every `defn-` in an imaged module came back PUBLIC. Silently: `(:use mod)` then
-/// refers the module's internals, `nest doc` publishes them as API, and `nest check`'s
-/// cross-module private-reference error stops firing — a gate that stops gating, the same
-/// shape as the declared sigs that a named section once dropped entirely.
+/// A **side fact** about a name in this section (`core::heap::facts`, ADR-320): its privacy,
+/// its stability `meta`, its def site, a registry mark, a `defdyn` mark — every
+/// [`Heap::facts_about`] answers, encoded as the prelude journal encodes them. A fact is
+/// recorded by *evaluating* a definition, and materialising evaluates nothing, so each one a
+/// section did not write came back missing, silently and far from the cause: privacy (every
+/// `defn-` came back public and `nest check`'s private-reference error stopped firing), the
+/// def site (go-to-definition, and the check cache's dependency fingerprint across a
+/// source ↔ image flip), and `meta` (`nest check` stopped reporting deprecated calls). Each
+/// had an entry kind of its own, added after its bug; now the exhaustive match in
+/// `facts_about` decides what a section carries, so a new kind of fact cannot be left out.
 ///
-/// Carried as its own entry rather than a flag on the value entry so it round-trips for a
-/// name whose value is not encodable (a `Table`, a closure `to_message` refuses): the
-/// privacy fact survives even when the binding itself is skipped.
-const KIND_PRIVATE: u8 = 4;
-/// Where a name was DEFINED — file, line, column — the fact `(source-location 'name)`, the
-/// LSP's go-to-definition and the incremental checker's dependency fingerprint all read
-/// (`types::check::deps::fact_of_sym`: a user global's fact is `D<file>@<mtime>`). Recorded
-/// by *evaluating* the `def`, so without this entry a materialised module had none and a
-/// global's fact depended on HOW its module arrived — defeating the ADR-119 check cache
-/// across every source ↔ image flip. Carried like privacy — a name and no value — so it
-/// round-trips for a name whose binding is not encodable. The prelude image carries the
-/// same fact through `Heap::side_facts` (ADR-320); its root section holds it twice,
-/// idempotently.
-const KIND_DEF_SITE: u8 = 5;
+/// Its own entry, a name and no value, so a fact round-trips for a name whose binding is
+/// not encodable (a `Table`, a closure `to_message` refuses). Written after the values,
+/// because defining a name clears some of its facts.
+const KIND_FACT: u8 = 4;
 /// The modules a module `(:use …)`s, in header order. Recorded by *evaluating* the header
 /// (`%refer`), which materialising never does, and read whenever a declared sig is shown as
 /// written: `(sig cmd (model any -> model))` is stored scoped as
@@ -158,14 +153,7 @@ const KIND_DEF_SITE: u8 = 5;
 /// project answered `(bedit/model/model any -> bedit/model/model)` for a module that had
 /// not loaded from source yet, and `model any -> model` once it had. Written beside the sigs,
 /// on the same rule: every module's in the root section, a named section's own.
-const KIND_USES: u8 = 6;
-/// A name's stability metadata (ADR-283): `:since`, `:deprecated` and its `:use`, `:beta`.
-/// Recorded by *evaluating* the `(meta …)` form's `%register-meta`, which materialising
-/// never does — so a module from an image lost every deprecation, and `nest check` stopped
-/// reporting a deprecated call once the project image existed (a cold check reloading each
-/// module a second time from source had hidden it). Carried like a def site, a name and no
-/// value, written after the values: a definition clears the fact, so it must land after.
-const KIND_META: u8 = 7;
+const KIND_USES: u8 = 5;
 
 /// `BROOD_IMAGE_TRACE=1` — report where image time goes, split by phase. Both sides run
 /// through an intermediate `process::Message` tree before or after the byte codec, and the
@@ -235,7 +223,7 @@ fn restore_uses(heap: &Heap, ns: &str, r: &mut Cursor<Vec<u8>>) -> Option<()> {
     Some(())
 }
 
-/// The payload of a `KIND_DEF_SITE` entry (after its name): file, line, column.
+/// A def site's payload (after its name): file, line, column.
 fn get_def_site(r: &mut Cursor<Vec<u8>>) -> Option<crate::core::heap::SourceLoc> {
     let file = get_str(r)?;
     let line = get_u32(r)?;
@@ -420,40 +408,17 @@ fn encode_section(
         }
         count += 1;
     }
-    // Privacy, for every name in this section the image records as private. Written after
-    // the values so a reader that stops early still has consistent bindings.
+    // Every side fact about every name in this section (`KIND_FACT`). Written after the
+    // values so a reader that stops early still has consistent bindings.
     for nv in syms {
         let value::ValueRef::Sym(sym) = nv.unpack() else {
             continue;
         };
-        if heap.is_private(sym) {
-            entries.push(KIND_PRIVATE);
+        for fact in heap.facts_about(sym) {
+            entries.push(KIND_FACT);
             put_str(&mut entries, &value::symbol_name(sym));
-            count += 1;
-        }
-    }
-    // Def sites, for every name in this section the runtime recorded one for — so a global
-    // materialised from the image answers `def_site` exactly as one loaded from source.
-    for nv in syms {
-        let value::ValueRef::Sym(sym) = nv.unpack() else {
-            continue;
-        };
-        if let Some(loc) = heap.def_site(sym) {
-            entries.push(KIND_DEF_SITE);
-            put_str(&mut entries, &value::symbol_name(sym));
-            put_def_site(&mut entries, &loc);
-            count += 1;
-        }
-    }
-    // Stability metadata, for every name in this section a `(meta …)` recorded it for.
-    for nv in syms {
-        let value::ValueRef::Sym(sym) = nv.unpack() else {
-            continue;
-        };
-        if let Some(meta) = heap.name_meta(sym) {
-            entries.push(KIND_META);
-            put_str(&mut entries, &value::symbol_name(sym));
-            put_meta(&mut entries, &meta);
+            entries.push(fact_tag(&fact));
+            put_fact_payload(&mut entries, &fact);
             count += 1;
         }
     }
@@ -978,20 +943,15 @@ fn define_image_entry(
     v: Value,
     reserve: bool,
 ) -> Result<(), LispError> {
-    // `env_define` clears the private mark — right for a real `def`, wrong for
-    // materialising, which is not a redefinition. A section's privacy entries are written
-    // last, so a value entry deferred to the second pass lands AFTER the `KIND_PRIVATE`
-    // entry marked it. Save and restore around the define, as `registry_update` does, so
-    // the order of the two entries does not matter.
-    // The same holds for stability metadata (`KIND_META`), which `env_define` clears too.
-    let was_private = heap.is_private(sym);
-    let meta = heap.name_meta(sym);
+    // `env_define` clears a name's privacy and `meta` — right for a real `def`, wrong for
+    // materialising, which is not a redefinition. A section's `KIND_FACT` entries are
+    // written last, so a value entry deferred to the second pass lands AFTER the facts were
+    // replayed. Put back whatever the name carried, so the order of the entries does not
+    // matter — every kind, so a fact that a future definition clears is covered too.
+    let facts = heap.facts_about(sym);
     let out = define_image_entry_inner(heap, global, kind, sym, v, reserve);
-    if was_private {
-        heap.mark_private(sym);
-    }
-    if let Some(meta) = meta {
-        heap.set_name_meta(sym, meta);
+    for fact in &facts {
+        heap.replay_fact(fact);
     }
     out
 }
@@ -1130,27 +1090,14 @@ fn load_section_entries(
         let (Some(kind), Some(name)) = (get_u8(r), get_str(r)) else {
             return Ok(None);
         };
-        // A privacy entry carries a name and no value — branch before decoding one.
-        if kind == KIND_PRIVATE {
-            heap.mark_private(value::intern(&name));
-            done += 1;
-            continue;
-        }
-        // So does a def-site entry: file, line, column.
-        if kind == KIND_DEF_SITE {
-            let Some(loc) = get_def_site(r) else {
+        // A fact entry carries a name and no value — branch before decoding one.
+        if kind == KIND_FACT {
+            let Some(fact) =
+                get_u8(r).and_then(|tag| get_fact_payload(r, tag, value::intern(&name)))
+            else {
                 return Ok(None);
             };
-            heap.set_def_site(value::intern(&name), loc);
-            done += 1;
-            continue;
-        }
-        // …and a meta entry: the name's stability facts.
-        if kind == KIND_META {
-            let Some(meta) = get_meta(r) else {
-                return Ok(None);
-            };
-            heap.set_name_meta(value::intern(&name), meta);
+            heap.replay_fact(&fact);
             done += 1;
             continue;
         }
@@ -1303,42 +1250,53 @@ const FACT_DYNAMIC: u8 = 4;
 /// guarantee — `Heap::side_facts` makes a new kind impossible to leave out of the *carry*,
 /// and this match makes it impossible to leave out of the *encoding*. Add a `Fact` variant
 /// and this stops compiling.
+/// A side fact as the prelude journal writes it: its tag, its subject, its payload.
 fn put_fact(out: &mut Vec<u8>, fact: &crate::core::heap::Fact) {
+    out.push(fact_tag(fact));
+    put_str(out, &value::symbol_name(fact.subject()));
+    put_fact_payload(out, fact);
+}
+
+/// The journal tag of `fact`'s kind. Exhaustive: a new kind needs a tag before it encodes.
+fn fact_tag(fact: &crate::core::heap::Fact) -> u8 {
     use crate::core::heap::Fact;
     match fact {
-        Fact::Private(sym) => {
-            out.push(FACT_PRIVATE);
-            put_str(out, &value::symbol_name(*sym));
-        }
-        Fact::Meta(sym, meta) => {
-            out.push(FACT_META);
-            put_str(out, &value::symbol_name(*sym));
-            put_meta(out, meta);
-        }
-        Fact::DefSite(sym, loc) => {
-            out.push(FACT_DEF_SITE);
-            put_str(out, &value::symbol_name(*sym));
-            // The file is written per entry rather than hoisted: prelude def sites all name
-            // the same materialised copy today, but nothing in the format should assume it.
-            put_def_site(out, loc);
-        }
-        Fact::RegistryName(sym) => {
-            out.push(FACT_REGISTRY_NAME);
-            put_str(out, &value::symbol_name(*sym));
-        }
-        Fact::Dynamic(sym) => {
-            out.push(FACT_DYNAMIC);
-            put_str(out, &value::symbol_name(*sym));
-        }
+        Fact::Private(_) => FACT_PRIVATE,
+        Fact::Meta(..) => FACT_META,
+        Fact::DefSite(..) => FACT_DEF_SITE,
+        Fact::RegistryName(_) => FACT_REGISTRY_NAME,
+        Fact::Dynamic(_) => FACT_DYNAMIC,
+    }
+}
+
+/// What follows a fact's subject: nothing for a mark, the facts for `meta`, the location for
+/// a def site. Shared by the prelude journal and a module section's `KIND_FACT` entries.
+fn put_fact_payload(out: &mut Vec<u8>, fact: &crate::core::heap::Fact) {
+    use crate::core::heap::Fact;
+    match fact {
+        Fact::Private(_) | Fact::RegistryName(_) | Fact::Dynamic(_) => {}
+        Fact::Meta(_, meta) => put_meta(out, meta),
+        // The file is written per entry rather than hoisted: prelude def sites all name
+        // the same materialised copy today, but nothing in the format should assume it.
+        Fact::DefSite(_, loc) => put_def_site(out, loc),
     }
 }
 
 /// Decode one side fact, or `None` for a truncated or unknown-tag file — which fails the
 /// whole load, so the source boot takes over rather than a partial fact set being installed.
 fn get_fact(r: &mut Cursor<Vec<u8>>) -> Option<crate::core::heap::Fact> {
-    use crate::core::heap::Fact;
     let tag = get_u8(r)?;
     let sym = value::intern(&get_str(r)?);
+    get_fact_payload(r, tag, sym)
+}
+
+/// The rest of a fact once its tag and subject are read.
+fn get_fact_payload(
+    r: &mut Cursor<Vec<u8>>,
+    tag: u8,
+    sym: value::Symbol,
+) -> Option<crate::core::heap::Fact> {
+    use crate::core::heap::Fact;
     Some(match tag {
         FACT_PRIVATE => Fact::Private(sym),
         FACT_META => Fact::Meta(sym, get_meta(r)?),
@@ -1440,8 +1398,9 @@ fn temp_suffix() -> String {
 /// v4 (ADR-383): the closure record carries its authoring module (the wire's v8 field).
 /// v5: the header carries the number of source positions the load re-stamps (KI-302).
 /// v6: a section may carry `KIND_USES` entries.
-/// v7: and `KIND_META` entries.
-const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v7\n";
+/// v7: and a `meta` entry.
+/// v8: a section's side facts are `KIND_FACT` entries, `KIND_USES` renumbered.
+const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v8\n";
 
 /// The image header: magic, the build fingerprint, the gensym counter the writing boot
 /// reached, and how many source positions the load re-stamps. A reader must start its own
@@ -1489,18 +1448,9 @@ pub(crate) fn load_prelude_image_bytes(
     for _ in 0..count {
         let kind = get_u8(&mut r)?;
         let name = get_str(&mut r)?;
-        if kind == KIND_PRIVATE {
-            heap.mark_private(value::intern(&name));
-            done += 1;
-            continue;
-        }
-        if kind == KIND_DEF_SITE {
-            heap.set_def_site(value::intern(&name), get_def_site(&mut r)?);
-            done += 1;
-            continue;
-        }
-        if kind == KIND_META {
-            heap.set_name_meta(value::intern(&name), get_meta(&mut r)?);
+        if kind == KIND_FACT {
+            let tag = get_u8(&mut r)?;
+            heap.replay_fact(&get_fact_payload(&mut r, tag, value::intern(&name))?);
             done += 1;
             continue;
         }
@@ -1651,5 +1601,62 @@ mod memory_image_tests {
             ))
             .expect("index the provided image");
         assert_eq!(interp.print(answer), "[false false nil]");
+    }
+}
+
+#[cfg(test)]
+mod section_fact_tests {
+    use crate::core::heap::{FactKind, NameMeta, SourceLoc};
+    use crate::core::value;
+
+    /// A module section carries every side fact about its names, whatever kinds there are:
+    /// a name holding one fact of each kind comes back from its section holding the same
+    /// ones. The name is given each kind on purpose, so a kind added to `FactKind` fails the
+    /// count below until this test sets it — and then the round trip covers it.
+    #[test]
+    fn a_section_restores_every_kind_of_fact_about_its_names() {
+        let path = format!("mem:test-facts-{}", std::process::id());
+        let mut interp = crate::Interp::new();
+        interp.eval_str("(def faceted 1)").expect("define the name");
+        let sym = value::intern("faceted");
+        let heap = &interp.heap;
+        heap.mark_private(sym);
+        heap.set_name_meta(
+            sym,
+            NameMeta {
+                deprecated: Some("0.1.0".to_string()),
+                use_instead: Some(value::intern("plain")),
+                ..NameMeta::default()
+            },
+        );
+        heap.set_def_site(
+            sym,
+            SourceLoc {
+                file: "faceted.blsp".to_string(),
+                pos: crate::error::Pos { line: 3, col: 1 },
+            },
+        );
+        heap.mark_registry_names(&[sym]);
+        heap.mark_dynamic(sym);
+        let before = format!("{:?}", heap.facts_about(sym));
+        assert_eq!(
+            heap.facts_about(sym).len(),
+            FactKind::ALL.len(),
+            "give `faceted` the new kind of fact too: {before}"
+        );
+        interp
+            .eval_str(&format!(
+                "(%image-write {path:?} [[\"\" ['faceted]]] \"fp\")"
+            ))
+            .expect("write the section");
+        interp.heap.forget_side_facts(sym);
+        assert!(interp.heap.facts_about(sym).is_empty());
+        interp
+            .eval_str(&format!(
+                "(let (section (get (%image-index {path:?} \"fp\") \"\"))
+                   (%image-load-section {path:?} (first section) (second section)))"
+            ))
+            .expect("restore the section");
+        assert_eq!(format!("{:?}", interp.heap.facts_about(sym)), before);
     }
 }

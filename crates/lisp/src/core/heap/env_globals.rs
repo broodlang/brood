@@ -1538,6 +1538,16 @@ impl Heap {
         out
     }
 
+    /// Is `sym` one of [`registry_names`](Self::registry_names), without building the list?
+    pub fn is_registry_name(&self, sym: Symbol) -> bool {
+        self.runtime
+            .registry_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&sym)
+            || self.prelude.registry_names.contains(&sym)
+    }
+
     pub fn registry_names(&self) -> Vec<Symbol> {
         let mut names: Vec<Symbol> = self
             .runtime
