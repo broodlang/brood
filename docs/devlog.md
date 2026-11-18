@@ -2021,3 +2021,11 @@ loads the file). KI-398 was the test (its SIGCONT wait matched the screen from b
 correct whole repaint after both read as missing); found on the way, a resize taken while a draw
 held the screen dropped its invalidation, now said on an atomic the draw takes. `GcBlockGuard`,
 `GC_BLOCK` and `BROOD_TRACE_GCBLOCK` are removed: nothing read the depth since ADR-751.
+
+2026-11-18. **A cold `nest check` loads each project module once.** Every package CI run of
+`store` printed `[reload] macro store/query/from redefined`: the check's pre-flight
+(`project-preload!`) required each module its files' headers name as the header spells it
+(`query`), while the project's own load had registered it rooted (`store/query`, ADR-070), so
+the short name was "not loaded" and the whole module loaded a second time — wasted work on every
+cold check, and the hot-reload notice for each `defmacro`. The pre-flight now roots each name
+with `%root-module-name`, as the header clauses do. Guard: `crates/nest/tests/check_cold_single_load.rs`.

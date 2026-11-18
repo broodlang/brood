@@ -633,8 +633,14 @@ against the fully-loaded state is also what a live image would see. Returns nil.
                    (fn (a m) (if (contains? own m) a (conj a m)))))))
     (let (t1 (os/now-ns))
       (doseq (m (sort mods))
-        ;; a module that will not load is reported by its own file's check, not here
-        (check-allow :discarded-catch (try (require-one (symbol (->string m))) (catch _ nil))))
+        ;; Rooted as the header clauses root it (`%root-module-name`, ADR-070): a closure names
+        ;; a project module as its header spells it (`query`), while the project's load
+        ;; registered it rooted (`store/query`). Required by the short name, it was not
+        ;; loaded yet, so a cold check loaded the project's modules a second time — every
+        ;; `defmacro` printing the hot-reload "macro redefined" notice.
+        ;; A module that will not load is reported by its own file's check, not here.
+        (check-allow :discarded-catch
+          (try (require-one (%root-module-name (symbol (->string m)))) (catch _ nil))))
       (project-check-trace "preload-requires" t1))
     (let (t2 (os/now-ns))
       (%check-materialise-referenced!)
