@@ -2168,3 +2168,15 @@ the LSP's `:implements` goto/hover (`module_ref` now recognises module clauses o
 live views onto `LiveModule` / `LiveComponentModule` abilities the same day. Guards:
 `abilities.rs` "a module contract …" (missing op, arity mismatch, met contract), the
 `modules_test` refusal.
+
+2026-11-19. **A module contract is checked where it is implemented, across modules.** Moving
+hatch's live views onto `LiveModule` showed the replacement for `defbehaviour` held only within
+one file: the checker compared an `impl` only with a `defability` in the same file. Fixed with
+it: an `impl` is checked against every loaded ability (`*abilities*`), per id rather than per
+`impl` form (bedit splits an LSP request kind's ops across two modules); `impl` registers
+under the ability's bare name, so a qualified `(impl web/session/SessionStore …)` dispatches;
+`system/reload-defs` re-runs a top-level `impl`; each `sig` is qualified with its own module's
+region, so two same-named records in one file keep their own types; `editor/ui`'s `Overlay`
+declares provided ops instead of a hand-written `:default` impl. Guards in ADR-761, each
+sabotage-verified. hatch's deliberately incomplete fixture view now draws the finding and
+allows it.

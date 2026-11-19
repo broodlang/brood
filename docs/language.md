@@ -536,7 +536,10 @@ implement `priority`, get the rest free:
 see [Multiple dispatch](#polymorphism-multiple-dispatch-defmulti).)
 
 To **override** a provided op for a type, add its method to that type's `impl` (the same
-form as the required ops), since each `impl` form is checked for completeness on its own.
+form as the required ops). `nest check` holds each id to the ability's required ops: an
+`impl` missing one is reported unless another `impl` — in the same file or a loaded module —
+provides it for the same id, so one kind's ops may be split across modules on purpose. An
+ability declared in another module is checked the same way as one declared in the file.
 A provided op called on an id that implements *none* of the ability runs the default body,
 which raises the ordinary `no-impl` for the required op it delegates to.
 
