@@ -129,11 +129,66 @@
       "no grammar"))
 
   (test "a reason that is not a string prints as itself"
-    (assert= (test/test-skip-reason-text (skip-unless-result "p" "" :no-grammar)) ":no-grammar")
-    (assert= (test/test-skip-reason-text (list "g" "p" nil 0 true "")) nil)))
+    (assert= (test/result-skip-reason-text (skip-unless-result "p" "" :no-grammar)) ":no-grammar")
+    (assert= (test/result-skip-reason-text (list "g" "p" nil 0 true "")) nil)))
 
 ;; The live shape: a group whose fact holds runs, exactly as if it carried no modifier.
 (describe "test: :skip-unless over a fact that holds"
   :skip-unless (fn? test/run)
   "test/run is gone"
   (test "runs" (assert= (+ 1 2) 3)))
+
+;; ---- a REASON left out, and a body that is not there --------------------------------------
+
+(describe "test: :skip-unless's REASON cannot swallow the body"
+  (test "a REASON that is not a string, with nothing after it, is refused"
+    ;; the assertion would have been read as REASON, leaving a test with no body that passes
+    (is (error-of (reflect/macroexpand '(test/test "t" :skip-unless (fact?) (assert= 1 1)))))
+    (is (error-of (reflect/macroexpand '(test/describe "g" :skip-unless (fact?) (test "a" (is 1)))))))
+  (test "a string REASON with no body after it is refused"
+    (is (error-of (reflect/macroexpand '(test/test "t" :skip-unless (fact?) "why")))))
+  (test "a REASON form followed by the body is taken"
+    (is (not (error-of (reflect/macroexpand '(test/test "t" :skip-unless (fact?) why (is true))))))
+    (is (not (error-of (reflect/macroexpand '(test/test "t" :skip (is true)))))))
+  (test "a bare :skip beside a :skip-unless has no reason, whichever comes first"
+    :isolated (test/reset-units)
+    (test "skip first" :skip :skip-unless false "unused" (is false))
+    (test "skip last" :skip-unless false "unused" :skip (is false))
+    (assert= (vec (sort (skip-unless-registered)))
+      [["skip first" true nil] ["skip last" true nil]])))
+
+;; ---- describes do not nest -----------------------------------------------------------------
+
+(defn- skip-unless-register-inner ()
+  ;; a describe a describe body reaches through a call, where expansion cannot see it
+  (describe "inner" (test "a" (is true))))
+
+(describe "test: a describe does not nest"
+  (test "one written in another's body is refused at expansion"
+    (let (problem (error-of (reflect/macroexpand '(test/describe "outer"
+                                                    (test/describe "inner" (test "a" (is 1)))))))
+      (is (includes? (error-message problem) "describes do not nest"))))
+  (test "one inside a test's body is not nested: the test runs it later, in a run of its own"
+    (is (not (error-of (reflect/macroexpand '(test/describe "outer"
+                                               (test "t" (describe "inner" (test "a" (is 1))))))))))
+  (test "one a body reaches through a call is refused as it registers, and leaves no group open"
+    :isolated (test/reset-units)
+    (let (problem (error-of (describe "outer" (test "x" (is true)) (skip-unless-register-inner))))
+      (is (includes? (error-message problem) "describes do not nest")))
+    (assert= [test/*collecting* test/*collected* test/*group-skip*] [false nil nil])
+    ;; the next describe registers as its own group, with nothing of the failed one
+    (describe "after" (test "b" (is true)))
+    (assert= (skip-unless-registered) [["b" false nil]]))
+  (test "a group whose body raised is named by the next describe once, and reset-units closes it"
+    :isolated (test/reset-units)
+    (is (error-of (describe "raises" (test "x" (is true)) (error "boom"))))
+    (assert= test/*collecting* "raises")
+    (is (includes? (error-message (error-of (describe "next" (test "y" (is true)))))
+          "describe \"raises\" was registering"))
+    ;; the refusal closed the stale group, so the describe after it registers
+    (describe "after" (test "b" (is true)))
+    (is (error-of (describe "raises again" (test "x" (is true)) (error "boom"))))
+    (test/reset-units)
+    (assert= [test/*collecting* test/*collected* test/*group-skip*] [false nil nil])
+    (test "standalone" (is true))
+    (assert= (skip-unless-registered) [["standalone" false nil]])))

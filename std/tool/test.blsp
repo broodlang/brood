@@ -95,8 +95,8 @@ docs/testing.md for the full guide."
 ; true while a describe body is being registered
 (def *collected* nil)
 ; (name thunk) pairs gathered for the current describe
-(def *group-skips* nil)
-; each open describe's skip decision, innermost first — its `:skip-unless` CONDITION is
+(def *group-skip* nil)
+; the open describe's skip decision, `[skip reason]` — its `:skip-unless` CONDITION is
 ; evaluated BEFORE the body runs (ADR-757)
 
 (defn- add-unit (mode group tests) (def test/*units* (cons (list mode group tests) test/*units*)))
@@ -108,11 +108,18 @@ docs/testing.md for the full guide."
 ;; report inflated counts. The project test runner calls this right before it
 ;; (re)loads the test files, so each run owns a clean registry regardless of how
 ;; many times the image has loaded them before.
+(defn- reset-registration ()
+  ;; no describe open: what a group leaves when it closes, and what a fresh run starts from
+  (def *collecting* false)
+  (def *collected* nil)
+  (def *group-skip* nil))
+
 (defn reset-units ()
-  "Clear the test registry (drop every registered unit). The project test runner calls this before (re)loading test files so a long-lived image — e.g. a `nest mcp` hot-reload session — doesn't accumulate duplicate registrations across runs.
+  "Clear the test registry (drop every registered unit, and close a describe a raising body left open). The project test runner calls this before (re)loading test files so a long-lived image — e.g. a `nest mcp` hot-reload session — doesn't accumulate duplicate registrations across runs.
 
     (test/reset-units)   ;~> the registry emptied"
-  (def test/*units* nil))
+  (def test/*units* nil)
+  (reset-registration))
 
 ;; --- the test run: said by the runner, and a home of its own (ADR-602) -------------
 ;; `nest test` sets `BROOD_TEST_RUN=1` before the interpreter exists, and — unless
@@ -242,22 +249,33 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
 ;; REASON (a form too, normally a string) rides as a fifth piece of state into the meta
 ;; and the skipped result, so the run says why. It replaces `(when (fact?) (describe …))`,
 ;; which registers nothing when the fact is false: the run reports fewer tests and nobody
-;; notices. Returns `(mode tags body skip reason)`.
+;; notices. A bare `:skip` wins over any `:skip-unless` beside it, and has no reason.
+;;
+;; REASON is required, and a form left out is not noticed by counting: `(test "t"
+;; :skip-unless (c?) (assert= …))` reads the assertion as REASON and registers a test with no
+;; body, which passes. So a REASON that is not a string literal must be followed by a form.
+;; Returns `(mode tags body skip reason)`.
 (defn- test-split-mods-acc (forms mode tags skip reason)
   (cond
     (empty? forms) (list mode tags forms skip reason)
     (= (first forms) :isolated) (test-split-mods-acc (rest forms) :isolated tags skip reason)
     (= (first forms) :serial) (test-split-mods-acc (rest forms) :serial tags skip reason)
-    (= (first forms) :skip) (test-split-mods-acc (rest forms) mode tags true reason)
+    (= (first forms) :skip) (test-split-mods-acc (rest forms) mode tags true nil)
     (= (first forms) :skip-unless)
-      (if (< (count forms) 3)
-        (error "describe/test: :skip-unless takes a condition and a reason — "
-          ":skip-unless (fact?) \"why\" — before the body")
-        (test-split-mods-acc (drop forms 3)
-          mode
-          tags
-          (if (= skip true) true `(or ~skip (/not ~(second forms))))
-          (third forms)))
+      (cond
+        (< (count forms) 3)
+          (error "describe/test: :skip-unless takes a condition and a reason — "
+            ":skip-unless (fact?) \"why\" — before the body")
+        (and (= (count forms) 3) (not (string? (third forms))))
+          (error "describe/test: :skip-unless's REASON is missing — "
+            (debug/pr-str-bounded (third forms))
+            " was read as the reason, leaving no body: write :skip-unless (fact?) \"why\" body…")
+        else
+          (test-split-mods-acc (drop forms 3)
+            mode
+            tags
+            (if (= skip true) true `(or ~skip (/not ~(second forms))))
+            (if (= skip true) reason (third forms))))
     (= (first forms) :tags)
       (test-split-mods-acc (rest (rest forms)) mode (second forms) skip reason)
     else (list mode tags forms skip reason)))
@@ -330,13 +348,12 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
         (fold rest nil (fn (_ t) (add-unit :parallel group (list t))))
         (add-unit mode group rest)))))
 
-;; Does a form (or anything nested within it) carry a `(test …)`/`(deftest …)`/
-;; `(describe …)`? Scans RECURSIVELY, so tests wrapped in a `let`/`do`/`when` — the
-;; common `(describe … (let (a …) (test …) …))` shape — are still seen. A nested
-;; `(describe …)` short-circuits at its head (its own tests count for the outer group).
+;; Does a form (or anything nested within it) carry a `(test …)` or `(deftest …)`? Scans
+;; RECURSIVELY, so tests wrapped in a `let`/`do`/`when` — the common
+;; `(describe … (let (a …) (test …) …))` shape — are still seen.
 (defn- form-contains-test? (form)
   (and (pair? form)
-    (or (includes? (list 'test 'deftest 'describe) (first form))
+    (or (includes? (list 'test 'deftest) (first form))
       (any? (rest form) form-contains-test?))))
 
 ;; Does a describe body carry any tests? Checked SYNTACTICALLY at expansion (the
@@ -397,47 +414,87 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
         " …)?")
     else (test-lift-prefix-mods (rest forms) (cons (first forms) acc))))
 
+;; A describe's registration, around its body. These writes are this module's globals, made
+;; for the module the describe is in. One writer at a time: the runner loads test files one by
+;; one in its own process (`run-tests-scoped`), which is also what makes the collect-then-emit
+;; protocol sound at all.
+;;
+;; `*collecting*` holds the open group's name, so a describe that starts while one is open is
+;; refused naming both. That is a nested describe — one a body reached through a call, as
+;; expansion refuses one written there — or a group whose body raised before it closed. The
+;; runner loads each file in a scope it rolls back, so the second happens only to a load
+;; outside it (a REPL's), and the refusal clears the stale group, so it says so once.
+(defn- describe-open (group skip reason)
+  (when *collecting*
+    (let (open *collecting*)
+      (reset-registration)
+      (error "describe: "
+        (pr-str group)
+        " started while describe "
+        (pr-str open)
+        " was registering — describes do not nest (or that group's body raised before it "
+        "finished)")))
+  (def *group-skip* [skip reason])
+  (def *collecting* group)
+  (def *collected* nil))
+
+(defn- describe-close (mode group tags)
+  (let (tests (reverse *collected*)
+        [skip reason] *group-skip*)
+    (reset-registration)
+    (emit-describe mode group tests tags skip reason)))
+
+;; Does a describe body hold another `(describe …)` that runs as the group registers? A test's
+;; body runs later, in its own process, so a describe inside a `(test …)` registers into a run
+;; of its own (the test framework's own tests do that) and is not looked into; nor is a quoted
+;; form, which is data.
+(defn- form-nests-describe? (form)
+  (and (pair? form)
+    (not (includes? (list 'test 'test/test 'deftest 'test/deftest 'quote 'quasiquote) (first form)))
+    (or (includes? (list 'describe 'test/describe) (first form))
+      (any? (rest form) form-nests-describe?))))
+
 (defmacro describe (group & forms)
-  "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] [:skip | :skip-unless CONDITION REASON] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on. `:skip` registers every test without running it; `:skip-unless CONDITION REASON` does so when CONDITION, evaluated once as the group registers and BEFORE its body runs, is false — the tests are still counted and listed as skipped, with REASON, where `(when CONDITION (describe …))` would register nothing (the body still runs, to register them, so keep work that must not run without CONDITION inside the tests). Inside the body, `:isolated`, `:skip`, `:skip-unless CONDITION REASON` or `:tags [kw …]` written directly before a `(test …)` form applies to that test alone (the same as writing it inside the form after its name); any other bare keyword in the body is an error. Warns (advisory) if the group contains no tests."
-  (if (keyword? group)
-    (error "describe: group name must be a string, not keyword "
-      (pr-str group)
-      " — did you mean (describe \""
-      (pr-str group)
-      "\" ...) or did you accidentally omit the group name?")
-    (let (parts (test-split-mods forms :parallel nil)
-          mode (first parts)
-          tags (second parts)
-          body (test-lift-prefix-mods (third parts) nil)
-          skip (nth parts 3)
-          reason (nth parts 4))
-      ;; These writes are this module's globals, made from the module the describe is in.
-      ;; One writer at a time: the runner loads test files one by one in its own process
-      ;; (`run-tests-scoped`), which is also what makes the collect-then-emit protocol sound
-      ;; at all. The user's body stays outside the allow, so its own writes are still linted.
+  "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] [:skip | :skip-unless CONDITION REASON] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on. `:skip` registers every test without running it; `:skip-unless CONDITION REASON` does so when CONDITION, evaluated once as the group registers and BEFORE its body runs, is false — the tests are still counted and listed as skipped, with REASON, where `(when CONDITION (describe …))` would register nothing (the body still runs, to register them, so keep work that must not run without CONDITION inside the tests). Inside the body, `:isolated`, `:skip`, `:skip-unless CONDITION REASON` or `:tags [kw …]` written directly before a `(test …)` form applies to that test alone (the same as writing it inside the form after its name); any other bare keyword in the body is an error. A describe does not nest: one in another's body is refused, at expansion when it is written there and as it registers when a function the body calls holds it. Warns (advisory) if the group contains no tests."
+  (let (parts (when (not (keyword? group)) (test-split-mods forms :parallel nil))
+        mode (first parts)
+        tags (second parts)
+        body (when parts (test-lift-prefix-mods (third parts) nil))
+        skip (nth parts 3)
+        reason (nth parts 4))
+    (cond
+      (keyword? group)
+        (error "describe: group name must be a string, not keyword "
+          (pr-str group)
+          " — did you mean (describe \""
+          (pr-str group)
+          "\" ...) or did you accidentally omit the group name?")
+      ;; Nesting is refused, not supported: a group's tags, skip and mode would each need a
+      ;; rule for what an inner group inherits, and nothing in Brood or bedit nests one. A
+      ;; describe that ran inside another used to discard the outer group's collected tests,
+      ;; report its own twice and leave the outer group's later tests outside any group.
+      (any? body form-nests-describe?)
+        (error "describe: "
+          (pr-str group)
+          " holds another describe in its body — describes do not nest; "
+          "write the inner one beside it, with a name that says both")
+      else
       ;; The skip is decided BEFORE the body runs, and once: a `:skip-unless` condition with
       ;; a side effect the body needs (`(load-test-grammar :perl)` before a body-level `def`
-      ;; that parses with it) has had it by then. It waits on a stack, so a nested describe's
-      ;; own skip cannot clobber it.
-      `(do
-         (check-allow :cross-module-def (def *group-skips* (cons [~skip ~reason] *group-skips*)))
-         (check-allow :cross-module-def (def *collecting* true) (def *collected* nil))
-         (do ~@body)
-         ; the (test ...) forms collect themselves
-         (check-allow :cross-module-def (def *collecting* false))
-         (emit-describe ~mode
-           ~group
-           (reverse *collected*)
-           ~tags
-           (first (first *group-skips*))
-           (second (first *group-skips*)))
-         (check-allow :cross-module-def (def *group-skips* (rest *group-skips*)))
-         ;; Advisory: a describe with no tests is a heading over nothing (ADR-225).
-         ~(when (not (describe-body-has-tests? body))
-            (list 'io/puts
-              (str "warning: describe " (pr-str group) " has no tests")
-              :to '*err*))
-         nil))))
+      ;; that parses with it) has had it by then. The body stays a top-level form of the
+      ;; expansion — wrapped in a `try` it would be a closure, and the checker would no longer
+      ;; see the `def`s and impls a describe body holds.
+        `(do
+           (describe-open ~group ~skip ~reason)
+           (do ~@body)
+           ; the (test ...) forms collect themselves
+           (describe-close ~mode ~group ~tags)
+           ;; Advisory: a describe with no tests is a heading over nothing (ADR-225).
+           ~(when (not (describe-body-has-tests? body))
+              (list 'io/puts
+                (str "warning: describe " (pr-str group) " has no tests")
+                :to '*err*))
+           nil))))
 
 ;; (test "name" [:isolated] body...) — register one test. Each top-level body form
 ;; becomes its own thunk; `test-run` runs them in order, each in its own `try`,
@@ -455,6 +512,9 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
         reason (nth parts 4)
         loc (fail-loc (first body))
         thunks (map body (fn (f) (list 'fn nil f))))
+    ;; a test a runtime fact gates with nothing to run would pass whenever the fact holds
+    (when (and (empty? body) (not (= skip true)) (not (= skip false)))
+      (error "test: " (pr-str name) " has :skip-unless and no body — it would pass untested"))
     ; each form -> (fn () form)
     `(register-test ~name
        (fn () (test-run (list ~@thunks) nil))
@@ -745,6 +805,18 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
     (test/result-skip-reason '(\"ruby\" \"parses\" () 0 true \"\" \"no ruby grammar\"))   ;=> \"no ruby grammar\"
     (test/result-skip-reason '(\"math\" \"adds\" () 3))   ;=> nil"
   (when (result-skipped? r) (nth r 6)))
+(defn result-skip-reason-text (r)
+  "`result-skip-reason` as text, for a report: the REASON as it is when a string, else as it
+prints — or nil when there is none. What every report and structured result says, so a reason
+reads the same in the human report, TAP, JSON and the eval server.
+
+    (test/result-skip-reason-text '(\"g\" \"p\" () 0 true \"\" :no-grammar))   ;=> \":no-grammar\"
+    (test/result-skip-reason-text '(\"math\" \"adds\" () 3))   ;=> nil"
+  (let (why (result-skip-reason r))
+    (cond
+      (nil? why) nil
+      (string? why) why
+      else (pr-str why))))
 (defn- full-name (r) (label (result-group r) (result-name r)))
 
 ;; The seed for this run, or nil. Read straight off the active filter so the
@@ -833,17 +905,8 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
       (= n 1) (test-red "  (1 failure)")
       else (test-red (str "  (" n " failures)")))))
 
-;; A skip's reason as text for a report, or nil when it has none (a bare `:skip`, a test
-;; that ran). The REASON form is normally a string; anything else prints as itself.
-(defn- test-skip-reason-text (r)
-  (let (why (result-skip-reason r))
-    (cond
-      (nil? why) nil
-      (string? why) why
-      else (pr-str why))))
-
 (defn- trace-skip-reason (r)
-  (if-let (why (test-skip-reason-text r)) (test-orange (str "  (" why ")")) ""))
+  (if-let (why (result-skip-reason-text r)) (test-orange (str "  (" why ")")) ""))
 
 ;; Every skipped test, named, after the failures and before the summary line: a count alone
 ;; says THAT tests were skipped, and a suite whose tests a missing tool skips on one machine
@@ -861,7 +924,7 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
                      " "
                      (full-name r)
                      (if (= (result-where r) "") "" (str "  " (test-dim (result-where r))))
-                     (if-let (why (test-skip-reason-text r)) (str "  — " why) ""))))))))
+                     (if-let (why (result-skip-reason-text r)) (str "  — " why) ""))))))))
 
 ;; A skipped test produces a result without ever calling its body — it still counts
 ;; and still reports, which is the difference between skipping a test and deleting it.
@@ -1726,7 +1789,7 @@ order (deterministic — the results are already collected)."
                    " - "
                    (full-name r)
                    (if (result-skipped? r)
-                     (str " # SKIP" (if-let (why (test-skip-reason-text r)) (str " " why) ""))
+                     (str " # SKIP" (if-let (why (result-skip-reason-text r)) (str " " why) ""))
                      "")))
         (when (result-failed? r)
           (fold (result-fails r)
@@ -1743,7 +1806,7 @@ renders as JSON `[]` rather than `null`."
    :name (result-name result)
    :passed (not (result-failed? result))
    :skipped (result-skipped? result)
-   :skip-reason (test-skip-reason-text result)
+   :skip-reason (result-skip-reason-text result)
    :ms (result-ms result)
    :failures (or (map (result-fails result)
                    (fn (record) {:loc (fail-loc-of record) :details (fail-lines-of record)}))
