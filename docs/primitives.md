@@ -827,9 +827,9 @@ docstring. `crates/lisp/src/` is the root of every path.
 
 | Primitive | Arity | Purpose |
 |---|---|---|
-| `%tree-sitter-chain` | 3 | The nodes containing char `offset`, outermost first, each as {:kind :start :end :named :container} WITHOUT its children. |
+| `%tree-sitter-chain` | 3 | The nodes containing char `offset`, outermost first, each as {:kind :start :end :named :container} WITHOUT its children, plus :field (the field it fills in its parent) when it has one. |
 | `%tree-sitter-errors` | 2 | Where the parse came apart: the ERROR and MISSING nodes as {:kind :start :end :missing? |
-| `%tree-sitter-kids` | 3–4 | The named children of the deepest node STRICTLY containing char `offset`, each as {:kind :start :end :named :container} without its own children — the sibling list every … |
+| `%tree-sitter-kids` | 3–4 | The named children of the deepest node STRICTLY containing char `offset`, each as {:kind :start :end :named :container} (plus :field when it fills one) without its own children — the sibling list every … |
 | `%tree-sitter-spans` | 4–5 | The fontify query: [start end reported] for the OUTERMOST nodes the face `table` colours, in source order, not descending into one that matched. |
 
 ### `builtins/wasm.rs`

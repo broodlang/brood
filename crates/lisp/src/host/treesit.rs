@@ -222,14 +222,20 @@ fn parse_cached(src: &str, lang: &str) -> Result<tree_sitter::Tree, LispError> {
     Ok(tree)
 }
 
-/// One node, WITHOUT its children — `{:kind :start :end :named :container}`.
+/// One node, WITHOUT its children — `{:kind :start :end :named :container}`, plus
+/// `:field` when `field` names the slot the node fills in its parent (`:name`, `:body`).
 ///
 /// `:container` replaces the presence of `:kids`, which is how the full projection says
 /// "this node has children"; the point of these queries is not to build them.
 #[cfg(feature = "treesit")]
-fn node_shallow<T: SpanText>(heap: &mut Heap, node: tree_sitter::Node, text: &T) -> Value {
+fn node_shallow<T: SpanText>(
+    heap: &mut Heap,
+    node: tree_sitter::Node,
+    field: Option<&str>,
+    text: &T,
+) -> Value {
     let kw = |k: &str| Value::keyword(value::intern(k));
-    heap.map_from_pairs(vec![
+    let mut pairs = vec![
         (kw("kind"), kw(node.kind())),
         (
             kw("start"),
@@ -238,7 +244,53 @@ fn node_shallow<T: SpanText>(heap: &mut Heap, node: tree_sitter::Node, text: &T)
         (kw("end"), Value::int(text.char_of(node.end_byte()) as i64)),
         (kw("named"), Value::boolean(node.is_named())),
         (kw("container"), Value::boolean(node.child_count() > 0)),
-    ])
+    ];
+    if let Some(name) = field {
+        pairs.push((kw("field"), kw(name)));
+    }
+    heap.map_from_pairs(pairs)
+}
+
+/// A node's children, each with the field it sits under in `node` (`None` for a child in
+/// no field). One cursor walk, as `Node::children` already was: the cursor knows the field
+/// of the child it stands on, where a bare `Node` would search its parent's field table.
+#[cfg(feature = "treesit")]
+fn children_with_fields<'tree>(
+    node: tree_sitter::Node<'tree>,
+) -> Vec<(tree_sitter::Node<'tree>, Option<&'tree str>)> {
+    let mut cursor = node.walk();
+    let mut out = Vec::with_capacity(node.child_count() as usize);
+    if cursor.goto_first_child() {
+        loop {
+            out.push((cursor.node(), cursor.field_name()));
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// The first child of `node` that `pred` accepts, with its field — [`children_with_fields`]
+/// stopping at the match, so the chain walk allocates nothing per level.
+#[cfg(feature = "treesit")]
+fn find_child_with_field<'tree>(
+    node: tree_sitter::Node<'tree>,
+    pred: impl Fn(&tree_sitter::Node<'tree>) -> bool,
+) -> Option<(tree_sitter::Node<'tree>, Option<&'tree str>)> {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+    loop {
+        let child = cursor.node();
+        if pred(&child) {
+            return Some((child, cursor.field_name()));
+        }
+        if !cursor.goto_next_sibling() {
+            return None;
+        }
+    }
 }
 
 /// The byte offset for a char offset — the inverse of `byte_to_char_offsets`, by binary
@@ -279,6 +331,9 @@ fn chain_in<T: SpanText>(
     let byte = text.byte_of(offset.max(0) as usize);
     let mut out: Vec<Value> = Vec::new();
     let mut node = tree.root_node();
+    // The field the current node fills in its parent: the root has none, and each step
+    // down carries the field the cursor reported for the child it took.
+    let mut field: Option<&str> = None;
     let broken = node.has_error();
     loop {
         // `:broken` on the outermost entry: does the tree contain an error anywhere?
@@ -286,7 +341,7 @@ fn chain_in<T: SpanText>(
         // chain — which only ever sees one path.
         let n = match (
             node.parent().is_none() && broken,
-            node_shallow(heap, node, text),
+            node_shallow(heap, node, field, text),
         ) {
             (true, Value::Map(id)) => heap.map_assoc(
                 id,
@@ -299,12 +354,12 @@ fn chain_in<T: SpanText>(
         // The deepest child strictly containing the byte. `named_child` is not enough:
         // an anonymous token can be the one that contains it, and the chain of KINDS is
         // what a caller counts, so the walk follows every child.
-        let mut cursor = node.walk();
-        let next = node
-            .children(&mut cursor)
-            .find(|c| c.start_byte() <= byte && byte < c.end_byte());
+        let next = find_child_with_field(node, |c| c.start_byte() <= byte && byte < c.end_byte());
         match next {
-            Some(c) => node = c,
+            Some((c, child_field)) => {
+                node = c;
+                field = child_field;
+            }
             None => break,
         }
     }
@@ -362,15 +417,10 @@ fn kids_in<T: SpanText>(
             None => break,
         }
     }
-    let mut cursor = node.walk();
-    let out: Vec<tree_sitter::Node> = if all {
-        node.children(&mut cursor).collect()
-    } else {
-        node.named_children(&mut cursor).collect()
-    };
-    let vals: Vec<Value> = out
+    let vals: Vec<Value> = children_with_fields(node)
         .into_iter()
-        .map(|c| node_shallow(heap, c, text))
+        .filter(|(c, _)| all || c.is_named())
+        .map(|(c, field)| node_shallow(heap, c, field, text))
         .collect();
     heap.alloc_vector(vals)
 }

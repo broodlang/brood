@@ -322,6 +322,42 @@
                     (= want (editor/treesit/indent-column rope :elixir bol spec tree)))))))
         (editor/treesit/free-tree tree)))
 
+    ;; A bracket whose opener is followed by a HEADER, not a first item — Ruby's `{ |x|`, a
+    ;; Kotlin lambda's `{ item ->` — opens a hanging indent although content follows it on the
+    ;; line. Without `:hanging` the body aligned one past the `{`; a call's arguments still
+    ;; align, and a hanging bracket inside an aligned call still hangs.
+    (def ts-hanging-src
+      "xs.each { |x|\n  puts x\n}\ncall(a,\n     b)\nf(1, ys.map { |y|\n  y\n})\n")
+
+    (test "a :hanging bracket indents one level, however its opening line goes on"
+      (let (spec {:width 2 :blocks #{} :dedent #{} :brackets #{:block :argument_list}}
+            hanging (assoc spec :hanging #{:block})
+            at (fn (line spec)
+                 (editor/treesit/indent-column ts-hanging-src
+                   :ruby (ts-bol ts-hanging-src line)
+                   spec)))
+        ;; aligned under ` |x|` without it
+        (assert= (at 1 spec) 9)
+        (assert= (at 1 hanging) 2)
+        ;; a call's arguments still align under the first
+        (assert= (at 4 hanging) 5)
+        ;; the innermost bracket decides: the block inside the aligned call hangs
+        (assert= (at 6 hanging) 2)))
+
+    (test "a block directly inside a :hanging bracket with a header shares its level"
+      ;; Scala's `{ item =>` keeps its body in an `indented_block`; Ruby's `{ |x|` in a
+      ;; `block_body`. Counted as a block, the body sat two levels in; a brace that ends its
+      ;; line has no header, and a block inside it still counts.
+      (let (spec {:width 2
+                  :blocks #{:block_body}
+                  :dedent #{}
+                  :brackets #{:block}
+                  :hanging #{:block}}
+            src "xs.each { |x|\n  puts x\n}\nxs.each {\n  puts x\n}\n"
+            at (fn (line) (editor/treesit/indent-column src :ruby (ts-bol src line) spec)))
+        (assert= (at 1) 2)
+        (assert= (at 4) 4)))
+
     (test "every motion over a rope agrees with the string at every offset"
       (let (rope (text/string-> ts-rope-src)
             tree (editor/treesit/open-tree rope :elixir)
@@ -1028,6 +1064,36 @@
           (editor/treesit/node-children src :elixir 2 true))
         (assert= (%tree-sitter-tree-kids tree 2 true) (%tree-sitter-kids src :elixir 2 true))
         (editor/treesit/free-tree tree)))))
+
+;; ---- a node's field: the slot it fills in its parent (ADR-759) ----------------------------
+;; A definition's name is the child in its `name` field, whatever words come before it — what a
+;; breadcrumb reads instead of guessing "the first word that is not a keyword".
+(def tsm-field-src "class A\n  def greet(x)\n    x\n  end\nend\n")
+
+(describe "nodes carry their field"
+  :skip-unless tsm-grammars?
+  "the ruby and elixir grammars are not compiled in (--features treesit-grammars)"
+  (test "node-chain: each node has the field it fills in its parent, the root none"
+    (let (chain (editor/treesit/node-chain tsm-field-src :ruby 16))
+      (assert= (map chain (fn (node) [(:kind node) (:field node)]))
+        '([:program nil] [:class nil] [:body_statement :body] [:method nil] [:identifier :name]))))
+
+  (test "node-children: a method's name, parameters and body by field; its tokens in none"
+    (let (fields (fn (kids) (map kids (fn (node) [(:kind node) (:field node)]))))
+      (assert= (fields (editor/treesit/node-children tsm-field-src :ruby 13))
+        '([:identifier :name] [:method_parameters :parameters] [:body_statement :body]))
+      (assert= (first (fields (editor/treesit/node-children tsm-field-src :ruby 13 true)))
+        [:def nil])
+      ;; a node in no field has no :field key at all, not :field nil
+      (refute (contains? (first (editor/treesit/node-children tsm-field-src :ruby 13 true)) :field))))
+
+  (test "a held tree answers the same fields as the text"
+    (let (tree (editor/treesit/open-tree tsm-field-src :ruby))
+      (assert= (editor/treesit/node-chain tsm-field-src :ruby 16 tree)
+        (editor/treesit/node-chain tsm-field-src :ruby 16))
+      (assert= (%tree-sitter-tree-kids tree 13 true)
+        (%tree-sitter-kids tsm-field-src :ruby 13 true))
+      (editor/treesit/free-tree tree))))
 
 (when (tsm-installed? :hcl)
   (describe "node-children with all?: an HCL block's braces"

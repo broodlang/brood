@@ -32,14 +32,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(3),
         Sig::new(vec![string, kw, int], vec_ty),
         &["source", "lang", "offset"],
-        "The nodes containing char `offset`, outermost first, each as {:kind :start :end :named :container} WITHOUT its children. The enclosing-context query an indenter or backward-up-list wants, answered in O(depth) instead of by projecting the whole tree and walking it. Same grammar rules and errors as %tree-sitter-parse.",
+        "The nodes containing char `offset`, outermost first, each as {:kind :start :end :named :container} WITHOUT its children, plus :field (the field it fills in its parent, `:name`, `:body`) when it sits in one. The enclosing-context query an indenter or backward-up-list wants, answered in O(depth) instead of by projecting the whole tree and walking it. Same grammar rules and errors as %tree-sitter-parse.",
         tree_sitter_chain);
     primitives.def(
         "%tree-sitter-kids",
         Arity::range(3, 4),
         Sig::with_optional(vec![string, kw, int], vec![any], vec_ty),
         &["source", "lang", "offset", "&optional", "all?"],
-        "The named children of the deepest node STRICTLY containing char `offset`, each as {:kind :start :end :named :container} without its own children — the sibling list every structural motion needs (forward-sexp is the next one starting at or after point). Strict containment is what makes a point at a node's start belong to its parent, so forward-sexp steps over the form at point rather than into it. With all? true, the ANONYMOUS children too — the parent's own tokens, in source order among the named ones, each :named false with the token's text as its :kind (`:{`, `:do`) — so a bracket matcher reads a delimiter pair in the middle of its parent (an HCL block's braces after its labels) from the list instead of scanning the text between named children. Same grammar rules and errors as %tree-sitter-parse.",
+        "The named children of the deepest node STRICTLY containing char `offset`, each as {:kind :start :end :named :container} without its own children, plus :field when it fills a field of that node (`:name`, `:body`) — the sibling list every structural motion needs (forward-sexp is the next one starting at or after point). Strict containment is what makes a point at a node's start belong to its parent, so forward-sexp steps over the form at point rather than into it. With all? true, the ANONYMOUS children too — the parent's own tokens, in source order among the named ones, each :named false with the token's text as its :kind (`:{`, `:do`) — so a bracket matcher reads a delimiter pair in the middle of its parent (an HCL block's braces after its labels) from the list instead of scanning the text between named children. Same grammar rules and errors as %tree-sitter-parse.",
         tree_sitter_kids);
     primitives.def(
         "%tree-sitter-errors",
@@ -123,7 +123,7 @@ pub(super) fn register_tree_queries(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![ref_ty, int], vec_or_nil),
         &["tree", "offset"],
-        "%tree-sitter-chain over a held tree: the nodes containing char offset of the tree's text, outermost first, each as {:kind :start :end :named :container} without its children, the outermost carrying :broken true when the tree has an error anywhere. Parses nothing — O(depth) over the tree an incremental reparse keeps. nil when the handle is gone (freed, or its owner exited): ask the text-keyed query, or open a fresh tree.",
+        "%tree-sitter-chain over a held tree: the nodes containing char offset of the tree's text, outermost first, each as {:kind :start :end :named :container} without its children (plus :field when it fills one in its parent), the outermost carrying :broken true when the tree has an error anywhere. Parses nothing — O(depth) over the tree an incremental reparse keeps. nil when the handle is gone (freed, or its owner exited): ask the text-keyed query, or open a fresh tree.",
         tree_sitter_tree_chain,
     );
     primitives.def(

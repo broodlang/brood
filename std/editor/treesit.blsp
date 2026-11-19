@@ -276,7 +276,7 @@ What a registration checks beside `face-table-problems`.
 selector's `:kind`, `:parent`, `:field` and `:after`), `:injections` (the RULES of an injection spec:
 each `:content` and `:exclude` selector, each `:lang-from` kind — the embedded languages'
 faces are their own grammars' business), `:indent` (an `indent-column` spec: its `:blocks`,
-`:brackets` and `:verbatim` kinds; `:dedent` and `:opens` are source text, not kinds) and
+`:brackets`, `:verbatim` and `:hanging` kinds; `:dedent` and `:opens` are source text, not kinds) and
 `:definitions` (its `:kinds`). What `grammar-problems` checks against the loaded grammar.
 
     (editor/treesit/language-names {:faces {{:parent :call :field :function} :syntax/function} :indent {:blocks #{:do_block}}})   ;=> {:kinds #{:call :do_block} :fields #{:function}}"
@@ -296,9 +296,10 @@ faces are their own grammars' business), `:indent` (an `indent-column` spec: its
                            (names-of-selector (get rule :exclude)
                              (names-of-selector (get rule :content) acc))))))
         from-indent (if (map? indent)
-                      (names-of-kinds (get indent :verbatim)
-                        (names-of-kinds (get indent :brackets)
-                          (names-of-kinds (get indent :blocks) from-rules)))
+                      (names-of-kinds (get indent :hanging)
+                        (names-of-kinds (get indent :verbatim)
+                          (names-of-kinds (get indent :brackets)
+                            (names-of-kinds (get indent :blocks) from-rules))))
                       from-rules))
     (if (map? definitions) (names-of-kinds (get definitions :kinds) from-indent) from-indent)))
 
@@ -759,9 +760,11 @@ ends)."
 (defn node-chain (text lang offset &optional (tree nil))
   "The nodes of `text`'s `lang` parse that contain char `offset`, OUTERMOST first (the root, then
 each node inside it down to the deepest), each `{:kind :start :end :named :container}` in char
-offsets. Read from `tree`, a held parse of exactly `text`, when one is given and alive, else from
-`text` parsed (cached by text). What a structural question about a place walks: the string or
-comment it is in, the block a fold there would cover.
+offsets, plus `:field` — the field it fills in its parent (`:name`, `:body`) — when it sits in
+one (the root never does). Read from `tree`, a held parse of exactly `text`, when one is given and
+alive, else from `text` parsed (cached by text). What a structural question about a place walks:
+the string or comment it is in, the block a fold there would cover, the name of the definition
+around it.
 
     (map (editor/treesit/node-chain \"x = [1,\\n 2]\" :ruby 5) :kind)   ;~> (:program :assignment :array …)"
   (ts-chain-at text lang offset tree))
@@ -770,7 +773,9 @@ comment it is in, the block a fold there would cover.
   "The children of the deepest node STRICTLY containing char `offset` of `text` (a string or a
 rope) parsed as `lang`, each `{:kind :start :end :named :container}` without its own
 children, in source order — the named ones, or with `all?` the parent's ANONYMOUS tokens
-too, each `:named false` with the token's text as its `:kind` (`:{`, `:do`). `tree`, the
+too, each `:named false` with the token's text as its `:kind` (`:{`, `:do`). A child that
+fills a field of the parent carries it as `:field` (`:name`, `:parameters`, `:body`), so a
+definition's name is the child with `:field :name`, whatever words precede it. `tree`, the
 held tree of exactly `text`, is read instead of parsing it; a gone handle falls back to the
 text. Strict containment makes a point at a node's start belong to its parent.
 
@@ -981,13 +986,18 @@ Ruby's are aligned this way."
         eol (ts-line-end text after))
     (and (< after eol) (not (= (string/trim (ts-slice text after eol)) "")))))
 
-(defn- ts-align-column (text bol chain brackets)
+(defn- ts-align-column (text bol chain brackets hanging)
   "The column a continuation line aligns to, or nil when it is not one.
 
 The innermost bracket enclosing the line, when that bracket opened with content after it.
 Only a real delimiter counts — `(`, `[`, `{` — because a `:brackets` entry may be a
 CONSTRUCT rather than a delimiter (Elixir's `fn … end`), and a construct has no column to
-align under."
+align under.
+
+A `hanging` bracket never aligns: what follows its opener on the line is a HEADER, not the
+first item — a Kotlin lambda's `{ item ->`, a Scala one's `{ item =>` — and its contents go one
+level in like any hanging indent. Only the innermost bracket is asked, so a hanging one inside
+an aligned call still hangs."
   (let (inner (last (seq/filter chain
                       (fn (node)
                         (and (contains? brackets (get node :kind))
@@ -996,7 +1006,9 @@ align under."
                             (ts-slice text
                               (ts-start node)
                               (inc (ts-start node)))))))))
-    (when (and inner (ts-aligns? text (get inner :start)))
+    (when (and inner
+            (not (contains? hanging (get inner :kind)))
+            (ts-aligns? text (get inner :start)))
       (inc (- (get inner :start) (ts-line-start text (get inner :start)))))))
 
 (defn- ts-next-nonblank-bol (text bol)
@@ -1041,7 +1053,8 @@ read — RET in a large file builds no whole-buffer string.
      :blocks #{:do_block :body}      ; node kinds that open one
      :dedent #{\"end\" \"else\"}         ; line-leading tokens that close one
      :dedent-levels 1                ; how many the closing token backs out of
-     :verbatim #{:heredoc_template}} ; node kinds whose inside is content, not code
+     :verbatim #{:heredoc_template} ; node kinds whose inside is content, not code
+     :hanging #{:lambda_literal}}  ; brackets that never align: what follows the opener is a header
 
 **Mechanism here, kinds there.** Which node opens a level is the one thing only the language
 knows, and it is a set of names — so a language's whole indent policy is four entries, and
@@ -1064,7 +1077,9 @@ against real source.
 triple-quoted docstring: their lines are CONTENT, and their indentation is part of the value
 — re-indenting a heredoc line to its block level rewrote the shell script inside it. A line
 is verbatim when a `:verbatim` node that began on an EARLIER line encloses it (the line that
-opens the heredoc is code, and is indented as code), and its answer is the indentation it
+opens the heredoc is code, and is indented as code) — or one that begins exactly at the line's
+start inside a node an earlier line opened (Perl's heredoc body begins at its first content
+line) — and its answer is the indentation it
 already has, so a caller that indents to the answer changes nothing. A BLANK verbatim line
 answers the previous non-blank line's indentation instead — the RET case, where the new line
 has no indentation of its own yet and the content's is the one to continue. Indentation is
@@ -1087,11 +1102,20 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
         chain (ts-chain-at text lang at tree)
         broken (get (first chain) :broken)
         verbatim (get spec :verbatim #{})
-        ;; inside content (a heredoc's body) that opened on an earlier line
+        ;; inside content (a heredoc's body) that opened on an earlier line — or that opens
+        ;; exactly at this line's start while what holds it opened earlier: Perl's heredoc body
+        ;; begins AT its first content line, so the body's first line is content too, where a
+        ;; docstring opening a statement at column 0 is still code (its statement begins here)
         inside-verbatim (and (not (empty? verbatim))
-                          (any? chain
-                            (fn (node)
-                              (and (contains? verbatim (get node :kind)) (< (get node :start) bol)))))
+                          (let (nodes (vec chain))
+                            (any? (range (count nodes))
+                              (fn (index)
+                                (let (node (nth nodes index)
+                                      start (get node :start)
+                                      parent (when (> index 0) (nth nodes (dec index))))
+                                  (and (contains? verbatim (get node :kind))
+                                    (or (< start bol)
+                                      (and (= start bol) parent (< (get parent :start) bol)))))))))
         ;; Two kinds of opener, and they differ in ONE way: whether a node that begins on
         ;; the line being indented counts for that line.
         ;;
@@ -1120,15 +1144,32 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
         ;; opens two, and charging a level for each put the contents at 8 where Python
         ;; puts them at 4 — the rule everywhere is that a line introduces at most one
         ;; level however many delimiters it opens. Blocks are exempt: a `do` block and
-        ;; the `def` around it legitimately share a line and legitimately nest.
+        ;; the `def` around it legitimately share a line and legitimately nest — except a
+        ;; block whose nearest enclosing opener is a `:hanging` bracket with a header after
+        ;; its opener: Scala's `{ item =>` holds its body in an `indented_block`, and the
+        ;; brace and that body are ONE level, as every formatter writes them. A hanging
+        ;; bracket that ends its line (a method's `= {`) has no header, and a block inside it
+        ;; (`val x =` with its value on the next line) still counts.
+        hanging (get spec :hanging #{})
+        bracket-key (fn (node) [:bracket (ts-line-start text (get node :start))])
         keys (seq/distinct
-               (map openers
-                 (fn (node)
-                   (if (contains? blocks (get node :kind))
-                     ;; keyed by identity, so every block still counts
-                     [(get node :kind) (get node :start)]
-                     ;; keyed by LINE, so co-opening brackets collapse
-                     [:bracket (ts-line-start text (get node :start))]))))
+               (second
+                 (fold openers
+                   [nil []]
+                   (fn ([previous acc] node)
+                     (let (block? (contains? blocks (get node :kind))
+                           key (cond
+                                 ;; the body of a hanging bracket shares its level
+                                 (and block?
+                                   previous
+                                   (contains? hanging (get previous :kind))
+                                   (ts-aligns? text (get previous :start)))
+                                   (bracket-key previous)
+                                 ;; keyed by identity, so every block still counts
+                                 block? [(get node :kind) (get node :start)]
+                                 ;; keyed by LINE, so co-opening brackets collapse
+                                 else (bracket-key node)))
+                       [node (conj acc key)])))))
         n (count keys)
         ;; how many of those levels a closing delimiter could be leaving
         brackets-counted (count (seq/filter keys (fn (k) (= (first k) :bracket)))))
@@ -1160,7 +1201,7 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
                     0))))))
       else
         (or (ts-comment-column text lang bol chain spec tree)
-          (ts-align-column text bol chain (get spec :brackets #{}))
+          (ts-align-column text bol chain (get spec :brackets #{}) (get spec :hanging #{}))
           (* width
             (math/max 0 (if closing (- n (ts-dedent-levels spec closing-token brackets-counted)) n)))))))
 
