@@ -2279,3 +2279,8 @@ them in place, under the promote lock, and stamps a value's positions under one 
 `--version` 0.17 → 0.135 s, its sections 102 → 75 ms. The same day in bedit: M-x keeps a command's
 symbol rather than the closure, and a plain ownership claim is just its file, which shrank the
 always-loaded section 1.76 → 1.26 MB.
+2026-11-19. **Full review of the editor toolkit and kernel, fixed.** A line breaks at LF, CR or
+CRLF everywhere (ADR-772: the rope stopped taking ropey's `unicode_lines`, a buffer search's
+`^`/`$` read CR, tree-sitter's points agree for a rope and a string), with new natives
+`text/line-text`, `text/line-end->char`, `text/char->utf16` and `text/utf16->char`. A rope range
+error names the bound that is wrong.

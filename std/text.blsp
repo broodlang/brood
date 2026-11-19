@@ -32,11 +32,46 @@ is read only where it is sliced.
     (text/line (text/string-> \"a\nb\") 1)   ;=> \"b\""
   (%rope-line r n))
 
-(defn line-count (r)
-  "The number of lines in rope r (a trailing newline ends a line; \"\" is 1 line).
+(defn line-text (rope line)
+  "The text of line `line` (0-based) of `rope` WITHOUT its line break — what a line shows.
+A line breaks at LF, CR or CRLF (ADR-771).
 
-    (text/line-count (text/string-> \"a\nb\"))   ;=> 2"
+    (text/line-text (text/string-> \"ab\\r\\ncd\") 0)   ;=> \"ab\"
+    (text/line-text (text/string-> \"ab\\ncd\") 1)   ;=> \"cd\""
+  (%rope-line-text rope line))
+
+(defn line-end->char (rope line)
+  "The character index where line `line`'s (0-based) content ends: before its line break, or
+the text's length on a last line with none. With `line->char` it bounds what `line-text`
+reads. It takes the lines `line->char` takes, `0` to `line-count`.
+
+    (text/line-end->char (text/string-> \"ab\\r\\ncd\") 0)   ;=> 2
+    (text/line-end->char (text/string-> \"ab\\ncd\") 1)   ;=> 5"
+  (%rope-line-end->char rope line))
+
+(defn line-count (r)
+  "The number of lines in rope r (a trailing newline ends a line; \"\" is 1 line). A line
+breaks at LF, CR or CRLF — never at a form feed, a vertical tab, NEL or U+2028/U+2029 — as
+LSP, tree-sitter's points and a buffer search's `^` count them (ADR-771).
+
+    (text/line-count (text/string-> \"a\nb\"))   ;=> 2
+    (text/line-count (text/string-> \"a\\u{c}b\"))   ;=> 1"
   (%rope-line-count r))
+
+(defn char->utf16 (rope idx)
+  "The UTF-16 code-unit offset of character `idx` in `rope` — what an LSP position's
+`character` counts. A character outside the Basic Multilingual Plane takes two units.
+
+    (text/char->utf16 (text/string-> \"a\\u{1F600}b\") 2)   ;=> 3"
+  (%rope-char->utf16 rope idx))
+
+(defn utf16->char (rope unit)
+  "The character index holding UTF-16 code unit `unit` of `rope` — the inverse of
+`char->utf16`; a unit inside a surrogate pair answers the character it is half of.
+
+    (text/utf16->char (text/string-> \"a\\u{1F600}b\") 3)   ;=> 2
+    (text/utf16->char (text/string-> \"a\\u{1F600}b\") 2)   ;=> 1"
+  (%rope-utf16->char rope unit))
 
 (defn char->line (r idx)
   "The 0-based line index containing character idx.

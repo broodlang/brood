@@ -46,10 +46,10 @@ cross a process boundary: `editor/buffer-server` is the process that owns one."
   (math/max lo (math/min hi x)))
 
 (defn- buffer-line-end-col (buf:any line:int -> int)
-  "The column at the end of `line` — its length excluding any trailing newline.
-Where `end-of-line` lands and the rightmost column point can hold on that line."
-  (let (lt (text/line (get buf :rope) line))
-    (if (string/ends-with? lt "\n") (dec (count lt)) (count lt))))
+  "The column at the end of `line` — its length excluding its line break. Where
+`end-of-line` lands and the rightmost column point can hold on that line."
+  (let (rope (get buf :rope))
+    (- (text/line-end->char rope line) (text/line->char rope line))))
 
 ;; ---- construction -----------------------------------------------------------
 ;;

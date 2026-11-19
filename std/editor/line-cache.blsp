@@ -175,9 +175,8 @@ caller starts again from when the lexer changes (a new mode) — one cache serve
 ;; ---- an edit, and the walk that colours a window -----------------------------------
 
 (defn- lc-line-text (rope i)
-  "Line `i` of `rope` without its newline — what a line lexer sees."
-  (let (s (text/line rope i))
-    (if (string/ends-with? s "\n") (string/substring s 0 (dec (count s))) s)))
+  "Line `i` of `rope` without its line break — what a line lexer sees."
+  (text/line-text rope i))
 
 (defn- lc-move-line (line first-line old-last new-last)
   ;; where a remembered window edge lands after an edit — only the eviction reads it, so
