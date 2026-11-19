@@ -1029,13 +1029,17 @@ Ruby's are aligned this way."
   ;; does `kinds` — a kind keyword or a set of them — name `kind`?
   (if (set? kinds) (contains? kinds kind) (= kinds kind)))
 
-(defn- ts-entry-holds? (entries node parent)
+(defn block-entry-holds? (entries node parent)
   "Does a `:blocks`/`:brackets` entry of `entries` name `node`, whose parent in the chain is
 `parent` (nil at the root)? An entry is a kind keyword, or a kind in a context (ADR-766):
 `{:kind :then :parent-not :rescue}` — the kind, only when its parent is none of `:parent-not`
 (a kind or a set) — and `{:kind :then :parent :if}`, only when its parent is one of `:parent`.
 Ruby's `rescue` body is a `then`, an `if`'s block kind, inside the `body_statement` that
-already counted the level."
+already counted the level. Public, so anything else that reads an indent spec (an editor's code
+folding) decides a block the same way.
+
+    (editor/treesit/block-entry-holds? #{:block} {:kind :block} nil)   ;=> true
+    (editor/treesit/block-entry-holds? #{{:kind :then :parent-not :rescue}} {:kind :then} {:kind :rescue})   ;=> false"
   (let (kind (get node :kind)
         parent-kind (get parent :kind))
     (or (contains? entries kind)
@@ -1052,7 +1056,7 @@ already counted the level."
   (let (nodes (vec chain))
     (vec (map (range (count nodes))
            (fn (index)
-             (ts-entry-holds? entries (nth nodes index) (when (> index 0) (nth nodes (dec index)))))))))
+             (block-entry-holds? entries (nth nodes index) (when (> index 0) (nth nodes (dec index)))))))))
 
 (defn- ts-align-column (text bol chain brackets hanging)
   "The column a continuation line aligns to, or nil when it is not one.
@@ -1499,7 +1503,7 @@ answers for Brood, and it is checked line-for-line against real source in
         ;; mistake appears on every `%{`, `{` and `fn` that begins a line.
         brackets (get spec :brackets #{})
         ;; each node of the chain asked in its place: an entry may name a kind in a context
-        ;; (`ts-entry-holds?`), and a node that opens a block is marked so, for the keys below
+        ;; (`block-entry-holds?`), and a node that opens a block is marked so, for the keys below
         chain-nodes (vec chain)
         blocked (ts-chain-holds blocks chain)
         bracketed (ts-chain-holds brackets chain)
