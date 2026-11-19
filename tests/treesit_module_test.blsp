@@ -719,99 +719,104 @@
   (let (path (str tsm-grammar-dir "libtree-sitter-" (->string lang) ".so"))
     (when (file/exists? path) (editor/treesit/declare-grammar path lang))))
 
-(when (tsm-installed? :hcl)
-  ;; Every name in HCL is an `identifier`; where it sits is the only thing telling a block's
-  ;; type from an attribute's name from a called function.
-  (def tsm-hcl-faces
-    {:string_lit :label
-     {:parent :block :kind :identifier :nth 0} :block-type
-     {:parent :attribute :kind :identifier} :attribute
-     {:parent :function_call :kind :identifier} :function
-     :identifier :name})
+;; Every name in HCL is an `identifier`; where it sits is the only thing telling a block's
+;; type from an attribute's name from a called function.
+(def tsm-hcl-faces
+  {:string_lit :label
+   {:parent :block :kind :identifier :nth 0} :block-type
+   {:parent :attribute :kind :identifier} :attribute
+   {:parent :function_call :kind :identifier} :function
+   :identifier :name})
 
-  (def tsm-hcl-src
-    "resource \"aws_instance\" \"web\" {\n  ami = lookup(var.amis, \"x\")\n  user_data = <<-EOT\n    #!/bin/bash\n\n      echo hi\n}\n  EOT\n}\nlocals {\n  a = 1\n}\n")
+(def tsm-hcl-src
+  "resource \"aws_instance\" \"web\" {\n  ami = lookup(var.amis, \"x\")\n  user_data = <<-EOT\n    #!/bin/bash\n\n      echo hi\n}\n  EOT\n}\nlocals {\n  a = 1\n}\n")
 
-  (describe "HCL: context faces"
-    (test "block type, label, attribute name, function name and variable each their own"
-      (let (spans (%tree-sitter-spans tsm-hcl-src :hcl tsm-hcl-faces false)
-            named (fn (from) (nth (seq/find spans (fn (sp) (= (first sp) from))) 2)))
-        (assert= (named 0) :block-type)
-        (assert= (named 9) :label)
-        (assert= (named 34) :attribute)
-        (assert= (named 40) :function)
-        (assert= (named 47) :name)
-        ;; `locals` is a block type too, with no label after it
-        (assert= (named (index-of tsm-hcl-src "locals")) :block-type)))
+(describe "HCL: context faces"
+  :skip-unless (tsm-installed? :hcl)
+  "no hcl grammar installed"
+  (test "block type, label, attribute name, function name and variable each their own"
+    (let (spans (%tree-sitter-spans tsm-hcl-src :hcl tsm-hcl-faces false)
+          named (fn (from) (nth (seq/find spans (fn (sp) (= (first sp) from))) 2)))
+      (assert= (named 0) :block-type)
+      (assert= (named 9) :label)
+      (assert= (named 34) :attribute)
+      (assert= (named 40) :function)
+      (assert= (named 47) :name)
+      ;; `locals` is a block type too, with no label after it
+      (assert= (named (index-of tsm-hcl-src "locals")) :block-type)))
 
-    (test "the held tree's spans equal the text's, over the whole file and a window"
-      (let (tree (editor/treesit/open-tree tsm-hcl-src :hcl)
-            whole (%tree-sitter-spans tsm-hcl-src :hcl tsm-hcl-faces false))
-        (assert= (%tree-sitter-tree-spans tree tsm-hcl-faces false 0 (count tsm-hcl-src))
-          whole)
-        ;; a window starting inside the first block still sees `ami` as an attribute
-        (assert= (%tree-sitter-tree-spans tree tsm-hcl-faces false 34 61)
-          (vec (seq/filter whole (fn (sp) (and (>= (first sp) 34) (< (first sp) 61))))))
-        (editor/treesit/free-tree tree))))
+  (test "the held tree's spans equal the text's, over the whole file and a window"
+    (let (tree (editor/treesit/open-tree tsm-hcl-src :hcl)
+          whole (%tree-sitter-spans tsm-hcl-src :hcl tsm-hcl-faces false))
+      (assert= (%tree-sitter-tree-spans tree tsm-hcl-faces false 0 (count tsm-hcl-src))
+        whole)
+      ;; a window starting inside the first block still sees `ami` as an attribute
+      (assert= (%tree-sitter-tree-spans tree tsm-hcl-faces false 34 61)
+        (vec (seq/filter whole (fn (sp) (and (>= (first sp) 34) (< (first sp) 61))))))
+      (editor/treesit/free-tree tree))))
 
-  (def tsm-hcl-indent
-    {:width 2
-     :blocks #{}
-     :brackets #{:block :object :tuple :function_call}
-     :dedent #{}
-     :opens #{"{" "[" "("}
-     :verbatim #{:heredoc_template}})
+(def tsm-hcl-indent
+  {:width 2
+   :blocks #{}
+   :brackets #{:block :object :tuple :function_call}
+   :dedent #{}
+   :opens #{"{" "[" "("}
+   :verbatim #{:heredoc_template}})
 
-  (describe "HCL: verbatim heredoc lines"
-    (test "a heredoc's lines keep their indentation; a blank one continues the content's"
-      (let (lines (string/split tsm-hcl-src "\n")
-            bol (fn (i) (fold (take lines i) 0 (fn (acc l) (+ acc (count l) 1))))
-            column (fn (spec i) (editor/treesit/indent-column tsm-hcl-src :hcl (bol i) spec)))
-        ;; resource · ami · user_data · #!/bin/bash · blank · echo · `}` · EOT · } · locals · a · }
-        (assert= (map (range 0 12) (fn (i) (column tsm-hcl-indent i)))
-          '(0 2 2 4 4 6 0 2 0 0 2 0))
-        ;; the opening line is code; without :verbatim the content is re-indented as code
-        (assert= (column (dissoc tsm-hcl-indent :verbatim) 5) 2)))
+(describe "HCL: verbatim heredoc lines"
+  :skip-unless (tsm-installed? :hcl)
+  "no hcl grammar installed"
+  (test "a heredoc's lines keep their indentation; a blank one continues the content's"
+    (let (lines (string/split tsm-hcl-src "\n")
+          bol (fn (i) (fold (take lines i) 0 (fn (acc l) (+ acc (count l) 1))))
+          column (fn (spec i) (editor/treesit/indent-column tsm-hcl-src :hcl (bol i) spec)))
+      ;; resource · ami · user_data · #!/bin/bash · blank · echo · `}` · EOT · } · locals · a · }
+      (assert= (map (range 0 12) (fn (i) (column tsm-hcl-indent i)))
+        '(0 2 2 4 4 6 0 2 0 0 2 0))
+      ;; the opening line is code; without :verbatim the content is re-indented as code
+      (assert= (column (dissoc tsm-hcl-indent :verbatim) 5) 2)))
 
-    (test "the held tree agrees"
-      (let (tree (editor/treesit/open-tree tsm-hcl-src :hcl)
-            echo-bol (index-of tsm-hcl-src "      echo"))
-        (assert= (editor/treesit/indent-column tsm-hcl-src :hcl echo-bol tsm-hcl-indent tree) 6)
-        (editor/treesit/free-tree tree)))
+  (test "the held tree agrees"
+    (let (tree (editor/treesit/open-tree tsm-hcl-src :hcl)
+          echo-bol (index-of tsm-hcl-src "      echo"))
+      (assert= (editor/treesit/indent-column tsm-hcl-src :hcl echo-bol tsm-hcl-indent tree) 6)
+      (editor/treesit/free-tree tree)))
 
-    ;; the answer is a COLUMN: a line indented with tabs keeps the column its tabs reach, at
-    ;; the ambient tab width (ADR-537) — not the count of its tab characters
-    (test "a heredoc line indented with tabs keeps its column, not its character count"
-      (let (src "x = <<EOT\n\t\techo hi\n\t\t\nEOT\n"
-            echo-bol (index-of src "\t\techo")
-            blank-bol (+ echo-bol (count "\t\techo hi\n")))
-        (assert= (editor/treesit/indent-column src :hcl echo-bol tsm-hcl-indent) 16)
-        (assert= (binding (*tab-width* 4)
-                   (editor/treesit/indent-column src :hcl echo-bol tsm-hcl-indent))
-          8)
-        ;; a blank verbatim line continues the content's column
-        (assert= (editor/treesit/indent-column src :hcl blank-bol tsm-hcl-indent) 16)))))
+  ;; the answer is a COLUMN: a line indented with tabs keeps the column its tabs reach, at
+  ;; the ambient tab width (ADR-537) — not the count of its tab characters
+  (test "a heredoc line indented with tabs keeps its column, not its character count"
+    (let (src "x = <<EOT\n\t\techo hi\n\t\t\nEOT\n"
+          echo-bol (index-of src "\t\techo")
+          blank-bol (+ echo-bol (count "\t\techo hi\n")))
+      (assert= (editor/treesit/indent-column src :hcl echo-bol tsm-hcl-indent) 16)
+      (assert= (binding (*tab-width* 4)
+                 (editor/treesit/indent-column src :hcl echo-bol tsm-hcl-indent))
+        8)
+      ;; a blank verbatim line continues the content's column
+      (assert= (editor/treesit/indent-column src :hcl blank-bol tsm-hcl-indent) 16))))
 
-(when (and (tsm-installed? :rust) (tsm-installed? :go))
-  (describe "Rust and Go: a call's function name"
-    (test "the identifier filling `function` is not the one in the arguments"
-      (let (calls {{:field :function :kind :identifier} :function :identifier :name})
-        (assert= (%tree-sitter-spans "fn main() { let x = foo(y); }\n" :rust calls false)
-          [[3 7 :name] [16 17 :name] [20 23 :function] [24 25 :name]])
-        (assert= (%tree-sitter-spans "package m\nfunc main() { x := foo(y) }\n" :go calls false)
-          [[15 19 :name] [24 25 :name] [29 32 :function] [33 34 :name]])))))
+(describe "Rust and Go: a call's function name"
+  :skip-unless (and (tsm-installed? :rust) (tsm-installed? :go))
+  "no rust or go grammar installed"
+  (test "the identifier filling `function` is not the one in the arguments"
+    (let (calls {{:field :function :kind :identifier} :function :identifier :name})
+      (assert= (%tree-sitter-spans "fn main() { let x = foo(y); }\n" :rust calls false)
+        [[3 7 :name] [16 17 :name] [20 23 :function] [24 25 :name]])
+      (assert= (%tree-sitter-spans "package m\nfunc main() { x := foo(y) }\n" :go calls false)
+        [[15 19 :name] [24 25 :name] [29 32 :function] [33 34 :name]]))))
 
-(when (tsm-installed? :rust)
-  (describe "Rust: a method call's name by its parent's place"
-    (test "`bar` in `s.bar()` is a method; `x` in `p.x` is a field read"
-      (let (src "fn main() { s.bar(); let y = p.x; }\n"
-            faces {{:kind :field_identifier :parent {:kind :field_expression :field :function}} :method
-                   :field_identifier :field}
-            tree (editor/treesit/open-tree src :rust))
-        (assert= (%tree-sitter-spans src :rust faces false) [[14 17 :method] [31 32 :field]])
-        (assert= (%tree-sitter-tree-spans tree faces false 0 (count src))
-          (%tree-sitter-spans src :rust faces false))
-        (editor/treesit/free-tree tree)))))
+(describe "Rust: a method call's name by its parent's place"
+  :skip-unless (tsm-installed? :rust)
+  "no rust grammar installed"
+  (test "`bar` in `s.bar()` is a method; `x` in `p.x` is a field read"
+    (let (src "fn main() { s.bar(); let y = p.x; }\n"
+          faces {{:kind :field_identifier :parent {:kind :field_expression :field :function}} :method
+                 :field_identifier :field}
+          tree (editor/treesit/open-tree src :rust))
+      (assert= (%tree-sitter-spans src :rust faces false) [[14 17 :method] [31 32 :field]])
+      (assert= (%tree-sitter-tree-spans tree faces false 0 (count src))
+        (%tree-sitter-spans src :rust faces false))
+      (editor/treesit/free-tree tree))))
 
 ;; ---- injections: another language's document inside this one (ADR-489) ----------------
 
@@ -1028,29 +1033,30 @@
                                                           :faces {}}))
         1))))
 
-(when (and (tsm-installed? :hcl) (tsm-installed? :python))
-  (describe "injections: an HCL heredoc as Python"
-    (test "the heredoc's identifier names the language; its pieces are one document"
-      (let (src "x = <<-PY\n  def f(): return \"${var.a}\"\nPY\n"
-            injections {:rules [{:content {:kind :template_literal :parent :heredoc_template}
-                                 :lang-from :heredoc_identifier
-                                 :aliases {"PY" :python}}]
-                        :faces {:python {:string :py-string :identifier :py-name}}}
-            host {:heredoc_template :str}
-            tree (editor/treesit/open-tree src :hcl)
-            spans (%tree-sitter-spans src :hcl host true injections))
-        ;; Python's `""` spans the `${var.a}` between its quotes; each quote is its own piece
-        (assert= spans
-          [[4 12 :str]
-            [12 15 :__keyword__]
-            [16 17 :py-name]
-            [21 27 :__keyword__]
-            [28 29 :py-string]
-            [29 37 :str]
-            [37 38 :py-string]
-            [38 41 :str]])
-        (assert= (%tree-sitter-tree-spans tree host true 0 (count src) injections) spans)
-        (editor/treesit/free-tree tree)))))
+(describe "injections: an HCL heredoc as Python"
+  :skip-unless (and (tsm-installed? :hcl) (tsm-installed? :python))
+  "no hcl or python grammar installed"
+  (test "the heredoc's identifier names the language; its pieces are one document"
+    (let (src "x = <<-PY\n  def f(): return \"${var.a}\"\nPY\n"
+          injections {:rules [{:content {:kind :template_literal :parent :heredoc_template}
+                               :lang-from :heredoc_identifier
+                               :aliases {"PY" :python}}]
+                      :faces {:python {:string :py-string :identifier :py-name}}}
+          host {:heredoc_template :str}
+          tree (editor/treesit/open-tree src :hcl)
+          spans (%tree-sitter-spans src :hcl host true injections))
+      ;; Python's `""` spans the `${var.a}` between its quotes; each quote is its own piece
+      (assert= spans
+        [[4 12 :str]
+          [12 15 :__keyword__]
+          [16 17 :py-name]
+          [21 27 :__keyword__]
+          [28 29 :py-string]
+          [29 37 :str]
+          [37 38 :py-string]
+          [38 41 :str]])
+      (assert= (%tree-sitter-tree-spans tree host true 0 (count src) injections) spans)
+      (editor/treesit/free-tree tree))))
 
 ;; ---- a node's anonymous children: the parent's own tokens --------------------------------
 
@@ -1105,19 +1111,20 @@
         (%tree-sitter-kids tsm-field-src :ruby 13 true))
       (editor/treesit/free-tree tree))))
 
-(when (tsm-installed? :hcl)
-  (describe "node-children with all?: an HCL block's braces"
-    (test "the braces after a block's labels are in the block's children"
-      ;; HCL wraps each brace in a named one-character node (`block_start`, `block_end`):
-      ;; a matcher compares a child's extent with the brace token's, as it lifts a wrapper
-      (let (src "resource \"a\" \"b\" {\n  x = 1\n}\n"
-            kids (%tree-sitter-kids src :hcl 18 true))
-        (assert= (map kids (fn (k) [(:kind k) (:start k) (:end k)]))
-          '([:identifier 0 8] [:string_lit 9 12]
-             [:string_lit 13 16]
-             [:block_start 17 18]
-             [:body 21 26]
-             [:block_end 27 28]))))))
+(describe "node-children with all?: an HCL block's braces"
+  :skip-unless (tsm-installed? :hcl)
+  "no hcl grammar installed"
+  (test "the braces after a block's labels are in the block's children"
+    ;; HCL wraps each brace in a named one-character node (`block_start`, `block_end`):
+    ;; a matcher compares a child's extent with the brace token's, as it lifts a wrapper
+    (let (src "resource \"a\" \"b\" {\n  x = 1\n}\n"
+          kids (%tree-sitter-kids src :hcl 18 true))
+      (assert= (map kids (fn (k) [(:kind k) (:start k) (:end k)]))
+        '([:identifier 0 8] [:string_lit 9 12]
+           [:string_lit 13 16]
+           [:block_start 17 18]
+           [:body 21 26]
+           [:block_end 27 28])))))
 
 ;; ADR-495: a tree handle is its owner's. Before it the handles lived in one runtime-wide LRU of
 ;; 32, so a 33rd tree opened ANYWHERE — another test running beside this one — dropped the
@@ -1677,7 +1684,7 @@
   :skip-unless (tsm-installed? :bash)
   "no bash grammar installed"
   (test "a second continued line stays with the first, and the line after the run goes back"
-    (let (spec {:width 2 :opens #{"\\"}})
+    (let (spec {:width 2 :continues #{"\\"}})
       (assert= (tsm-at-end "if x; then\n  a \\\n    b \\\n" :bash spec) 4)
       (assert= (tsm-at-end "if x; then\n  a \\\n    b\n" :bash spec) 2))))
 
@@ -1719,15 +1726,93 @@
     (assert= (language-names {:faces {{:kind :line_comment :has {:kind :doc_comment :field :doc}} :d}})
       {:kinds #{:line_comment :doc_comment} :fields #{:doc}})))
 
-;; ---- an indent spec's kind in a context (ADR-766) ------------------------------------------
+;; ---- an indent entry in the face selectors' language (ADR-766) -----------------------------
 
-(describe "indent-column: a :blocks kind in a context"
+(defn- tsm-columns (text lang spec)
+  ;; every line's column but the empty one after the final newline
+  (let (lines (string/split text "\n"))
+    (vec (map (range (dec (count lines)))
+           (fn (index)
+             (editor/treesit/indent-column text
+               lang
+               (fold (take lines index) 0 (fn (acc line) (+ acc (count line) 1)))
+               spec))))))
+
+(describe "face tables: :not, a selector the node must not satisfy"
+  :skip-unless (tsm-installed? :rust)
+  "no rust grammar installed"
+  (test "an identifier not filling a call's function field takes the face; the callee none"
+    (assert= (%tree-sitter-spans "fn main() { let x = foo(y); }\n"
+               :rust {{:kind :identifier :not {:field :function}} :name}
+               false)
+      [[3 7 :name] [16 17 :name] [24 25 :name]]))
+  (test "face-table-problems takes :not and names a misshapen one"
+    (is (empty? (face-table-problems {{:kind :identifier :not {:parent {:kind :call}}} :x})))
+    (is (not (empty? (face-table-problems {{:kind :identifier :not "call"} :x}))))
+    (is (not (empty? (face-table-problems {{:kind :identifier :not {:feild :x}} :x})))))
+  (test "language-names reads the kinds a :not names"
+    (assert= (language-names {:faces {{:kind :identifier :not {:parent :call :field :name}} :x}})
+      {:kinds #{:identifier :call} :fields #{:name}})))
+
+(describe "indent-entry-holds?: an entry asked of a node in its chain"
+  (test "a kind, and a selector reaching a parent and a grandparent"
+    (let (chain [{:kind :begin} {:kind :rescue} {:kind :then}]
+          in-method [{:kind :body_statement} {:kind :rescue} {:kind :then}]
+          entry {:kind :then :not {:parent {:kind :rescue :parent :body_statement}}})
+      (is (indent-entry-holds? #{:then} chain 2))
+      (is (indent-entry-holds? [entry] chain 2))
+      (refute (indent-entry-holds? [entry] in-method 2))
+      ;; nothing holds above the root, so a :parent at the root fails and its :not holds
+      (refute (indent-entry-holds? [{:kind :begin :parent :x}] chain 0))
+      (is (indent-entry-holds? [{:kind :begin :not {:parent :x}}] chain 0))))
+  (test "the entries are any collection: a vector or a list as well as a set"
+    (let (chain [{:kind :program} {:kind :block}])
+      (is (indent-entry-holds? [:block] chain 1))
+      (is (indent-entry-holds? '(:block) chain 1))
+      (refute (indent-entry-holds? nil chain 1))
+      (refute (indent-entry-holds? [:other] chain 1))))
+  (test ":field asks the field the node fills"
+    (is (indent-entry-holds? [{:field :body}] [{:kind :method} {:kind :block :field :body}] 1)))
+  (test "a constraint the chain cannot answer never holds"
+    (refute (indent-entry-holds? [{:kind :block :text "x"}] [{:kind :block}] 0)))
+  (test "the deprecated block-entry-holds? answers over node and parent"
+    (is (check-allow :deprecated (block-entry-holds? #{:block} {:kind :block} nil)))
+    (refute (check-allow :deprecated
+              (block-entry-holds? #{{:kind :then :not {:parent :rescue}}}
+                {:kind :then}
+                {:kind :rescue})))))
+
+(describe "indent-problems: what an indent spec may say"
+  (test "a sound spec, and none at all, have no problems"
+    (assert= (indent-problems nil) ())
+    (assert= (indent-problems {:width 2
+                               :blocks [:body {:kind :then :not {:parent :rescue}}]
+                               :verbatim #{:heredoc}
+                               :continues #{"\\"}
+                               :middles #{"else"}})
+      ()))
+  (test "the old context keys, and a constraint a chain cannot answer, are named"
+    (assert= (count (indent-problems {:blocks #{{:kind :then :parent-not :rescue}}})) 1)
+    (assert= (count (indent-problems {:blocks #{{:kind :then :parent #{:if :unless}}}})) 1)
+    (assert= (count (indent-problems {:brackets #{{:kind :block :has :x}}})) 1)
+    (assert= (count (indent-problems {:blocks #{{:kind :then :not {:after {:text "x"}}}}})) 1))
+  (test "an unknown key is named with the nearest one the spec takes"
+    (is (includes? (first (indent-problems {:blokcs #{:x}})) ":blocks")))
+  (test "a kind list that is not a collection of kinds is named"
+    (assert= (count (indent-problems {:verbatim :heredoc})) 1)
+    (assert= (count (indent-problems {:blocks :body})) 1)
+    (assert= (count (indent-problems {:hanging ["x"]})) 1)))
+
+(describe "indent-column: a :blocks entry in a context"
   :skip-unless (tsm-grammar? :ruby)
   "no ruby grammar compiled in"
   (test "a `rescue` body is a `then` inside the level its method already counted"
     (let (text "def f\n  x\nrescue E => e\n  y\nend\n"
           plain {:width 2 :blocks #{:body_statement :then} :dedent {"end" 0 "rescue" 1}}
-          scoped (assoc plain :blocks #{:body_statement {:kind :then :parent-not :rescue}})
+          scoped (assoc plain
+                   :blocks
+                     #{:body_statement
+                       {:kind :then :not {:parent {:kind :rescue :parent :body_statement}}}})
           bol (index-of text "  y"))
       (assert= (editor/treesit/indent-column text :ruby bol plain) 4)
       (assert= (editor/treesit/indent-column text :ruby bol scoped) 2)
@@ -1736,38 +1821,114 @@
                  :ruby (index-of "def f\n  if x\n    y\n  end\nend\n" "    y")
                  scoped)
         4)))
-  (test "a :parent entry counts the kind only under one of its parents"
+  (test "a `begin` opens a level, and its `rescue` body and `end` sit as a method's do"
+    (let (spec {:width 2
+                :blocks [:body_statement {:kind :then :not {:parent :rescue}}]
+                :brackets [:begin]
+                :dedent {"end" :spanned "rescue" 1}})
+      (assert= (tsm-columns "begin\n  a\nrescue\n  b\nend\n" :ruby spec) [0 2 0 2 0])
+      (assert= (tsm-columns "def f\n  begin\n    a\n  rescue\n    b\n  end\nend\n" :ruby spec)
+        [0 2 4 2 4 2 0])))
+  (test "a :spanned `else` backs out of the body_statement that spans it, not an `if`'s arm"
+    (let (spec {:width 2
+                :blocks [:body_statement
+                          {:kind :then :not {:parent :rescue}}
+                          {:kind :else :not {:parent :body_statement}}]
+                :dedent {"end" :spanned "else" :spanned "rescue" 1}})
+      (assert= (tsm-columns "def f\n  a\nrescue\n  b\nelse\n  c\nend\n" :ruby spec)
+        [0 2 0 2 0 2 0])
+      (assert= (tsm-columns "class A\n  def f\n    a\n  rescue\n    b\n  else\n    c\n  end\nend\n"
+                 :ruby spec)
+        [0 2 4 2 4 2 4 2 0])
+      (assert= (tsm-columns "def f\n  if x\n    a\n  else\n    b\n  end\nend\n" :ruby spec)
+        [0 2 4 2 4 2 0])
+      ;; with a fixed 0, the method-level `else` stays a level in
+      (assert= (nth (tsm-columns "def f\n  a\nrescue\n  b\nelse\n  c\nend\n"
+                      :ruby (assoc spec :dedent {"end" 0 "else" 0 "rescue" 1}))
+                 4)
+        2)))
+  (test "a :parent entry counts the kind only under its parent"
     (let (text "def f\n  if x\n    y\n  end\nend\n"
-          spec {:width 2
-                :blocks #{:body_statement {:kind :then :parent #{:unless}}}
-                :dedent {"end" 0}})
+          spec {:width 2 :blocks [:body_statement {:kind :then :parent :unless}] :dedent {"end" 0}})
       (assert= (editor/treesit/indent-column text :ruby (index-of text "    y") spec) 2)))
   (test "language-names reads the kinds a context entry names"
-    (assert= (language-names {:indent {:blocks #{{:kind :then :parent-not #{:rescue :ensure}}}}})
-      {:kinds #{:then :rescue :ensure} :fields #{}})))
+    (assert= (language-names {:indent {:blocks #{{:kind :then :not {:parent #{} :field :x}}}}})
+      {:kinds #{:then} :fields #{:x}})
+    (assert= (language-names {:indent {:blocks [{:kind :then :not {:parent :rescue}}]}})
+      {:kinds #{:then :rescue} :fields #{}})))
+
+;; ---- content that opens at its line's start: only the kinds named so (ADR-758) -------------
+
+(describe "indent-column: :verbatim-from-start"
+  :skip-unless (and (tsm-installed? :php) (tsm-installed? :perl))
+  "no php or perl grammar installed"
+  (test "a block comment starting a line in a function is code, indented as a one-line one is"
+    (let (spec {:width 4 :brackets #{:compound_statement} :verbatim #{:comment}})
+      ;; its second line is content, and keeps its column
+      (assert= (tsm-columns "<?php\nfunction f() {\n/* a\n b */\n$x = 1;\n}\n" :php spec)
+        [0 0 4 1 4 0])
+      (assert= (tsm-columns "<?php\nfunction f() {\n/* a */\n$x = 1;\n}\n" :php spec)
+        [0 0 4 4 0])))
+  (test "a heredoc body named in :verbatim-from-start keeps its first line where it is"
+    (let (text "sub f {\n    print <<EOT;\n  hi\n    there\nEOT\n}\n"
+          spec {:width 4 :brackets #{:block}})
+      (assert= (tsm-columns text :perl (assoc spec :verbatim-from-start #{:heredoc_content}))
+        [0 4 2 4 0 0])
+      ;; named only :verbatim, its first line is code
+      (assert= (tsm-columns text :perl (assoc spec :verbatim #{:heredoc_content})) [0 4 4 4 0 0]))))
+
+;; ---- a continuation is named, not guessed (ADR-762) -----------------------------------------
+
+(describe "indent-column on a broken parse: openers that end in no word nest"
+  :skip-unless (and (tsm-installed? :php) (tsm-installed? :scala))
+  "no php or scala grammar installed"
+  (test "PHP's `:` and Scala's `=` open a level each, nested"
+    (assert= (tsm-at-end "<?php\nif ($a):\n    if ($b):\n" :php {:width 4 :opens #{":"}}) 8)
+    (assert= (tsm-at-end "object A {\ndef f =\n  def g =\n" :scala {:width 2 :opens #{"="}}) 4))
+  (test "the same token named in :continues adds its level once"
+    (assert= (tsm-at-end "<?php\nif ($a):\n    if ($b):\n" :php {:width 4 :continues #{":"}}) 4)))
 
 ;; ---- blocks bounded by sibling tokens (ADR-767) --------------------------------------------
+
+(def tsm-heex-indent
+  {:width 2
+   :brackets #{:tag}
+   :dedent #{"</"}
+   :middles #{"else"}
+   :clauses #{"->"}
+   :pairs {"do" "ending_expression_value"}
+   :token-blocks true})
 
 (describe "indent-column: :token-blocks, a block no node encloses"
   :skip-unless (tsm-installed? :heex)
   "no heex grammar installed"
   (test "HEEx's `<%= if … do %>` … `<% else %>` … `<% end %>` directives bound a level"
-    (let (text "<main>\n  <%= if a do %>\n    <p>x</p>\n  <% else %>\n    <ul>\n      <li>y</li>\n    </ul>\n  <% end %>\n</main>\n"
-          spec {:width 2
-                :brackets #{:tag}
-                :dedent #{"</" "else"}
-                :pairs {"do" "ending_expression_value"}
-                :token-blocks true}
-          lines (string/split text "\n"))
-      (assert= (vec (map (range (dec (count lines)))
-                      (fn (index)
-                        (editor/treesit/indent-column text
-                          :heex (fold (take lines index) 0 (fn (acc line) (+ acc (count line) 1)))
-                          spec))))
-        [0 2 4 2 4 6 4 2 0])))
+    (assert= (tsm-columns "<main>\n  <%= if a do %>\n    <p>x</p>\n  <% else %>\n    <ul>\n      <li>y</li>\n    </ul>\n  <% end %>\n</main>\n"
+               :heex tsm-heex-indent)
+      [0 2 4 2 4 6 4 2 0]))
   (test "without the key, the directives' block is invisible"
     (let (text "<%= if a do %>\n  <p>x</p>\n<% end %>\n")
       (assert= (editor/treesit/indent-column text
                  :heex (index-of text "  <p>")
                  {:width 2 :brackets #{:tag} :pairs {"do" "ending_expression_value"}})
         0))))
+
+(describe "indent-column: :token-blocks with clauses, middles and delimiters"
+  :skip-unless (tsm-installed? :heex)
+  "no heex grammar installed"
+  (test "a `case`'s clauses: each clause line backs out of the clause before, `end` out of all"
+    (assert= (tsm-columns "<div>\n  <%= case x do %>\n    <% 1 -> %>\n      a\n    <% 2 -> %>\n      b\n  <% end %>\n</div>\n"
+               :heex tsm-heex-indent)
+      [0 2 4 6 4 6 2 0]))
+  (test "a :middles word is a directive's, never text's: `else entirely` in a paragraph stays"
+    (assert= (tsm-columns "<p>\n  Something\n  else entirely\n</p>\n" :heex tsm-heex-indent)
+      [0 2 2 0]))
+  (test "a closing line that starts with a brace still dedents at its keyword"
+    ;; HEEx braces an expression with `{` and `}` tokens; the `end` after them still closes
+    (assert= (tsm-columns "<%= if a do %>\n  {@x}\n{@y} <% end %>\n" :heex tsm-heex-indent) [0 2 0]))
+  (test "the limit: a `fn` the parse has no token for reads its `->` as a clause of the `do`"
+    ;; HEEx's expression is one leaf, so its `<% end %>` closes the enclosing `do` too — the
+    ;; `z` after it would be at 2 with a vocabulary that saw the `fn`
+    (assert= (tsm-columns "<%= if a do %>\n  <%= Enum.map xs, fn y -> %>\n    <p>y</p>\n  <% end %>\n  z\n<% end %>\n"
+               :heex tsm-heex-indent)
+      [0 2 4 0 0 0])))

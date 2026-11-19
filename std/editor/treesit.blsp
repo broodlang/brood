@@ -75,7 +75,7 @@ load with the list rather than at the keypress that needed it.
 ;; is a frame, not a load. Checking it here lets a registration refuse it where
 ;; `missing-services` refuses a missing service.
 
-(def- selector-constraints #{:kind :parent :field :nth :text :after :has})
+(def- selector-constraints #{:kind :parent :field :nth :text :after :has :not})
 
 ;; how many selector MAPS one key may nest through `:parent` — the kernel's bound (ADR-487,
 ;; ADR-614: four reaches the name an Elixir `def` with a guard defines)
@@ -117,13 +117,14 @@ load with the list rather than at the keypress that needed it.
 (defn- selector-shape-problem (selector depth)
   ;; what is wrong with the selector map `selector`, `depth` maps deep, or nil
   (let (parent (get selector :parent)
+        negated (get selector :not)
         after-issue (or (after-problem selector (get selector :after))
                       (has-problem selector (get selector :has))))
     (cond
       (empty? selector) "an empty selector {} would colour every node"
       (not (every? (keys selector) (fn (k) (contains? selector-constraints k))))
         (str (pr-str selector)
-          " names a constraint other than :kind :parent :field :nth :text :after :has")
+          " names a constraint other than :kind :parent :field :nth :text :after :has :not")
       ;; the kernel reads every constraint the map has, so one present with no value is refused
       (any? (keys selector) (fn (k) (nil? (get selector k))))
         (str (pr-str selector) ": a constraint with no value — leave the key out instead")
@@ -134,6 +135,11 @@ load with the list rather than at the keypress that needed it.
       (not (or (nil? (get selector :text)) (text-constraint-ok? (get selector :text))))
         (str (pr-str selector) ": :text is a string or a non-empty set of strings")
       (not (nil? after-issue)) after-issue
+      ;; `:not` (ADR-766) is any selector, asked of the node at its own place
+      (not (or (nil? negated) (keyword? negated) (map? negated)))
+        (str (pr-str selector) ": :not is a kind keyword or a selector map")
+      (and (map? negated) (selector-shape-problem negated depth))
+        (selector-shape-problem negated depth)
       (or (nil? parent) (keyword? parent)) nil
       (not (map? parent)) (str (pr-str selector) ": :parent is a kind keyword or a selector map")
       (>= depth selector-depth-max)
@@ -150,15 +156,17 @@ load with the list rather than at the keypress that needed it.
 
 (defn face-table-problems (table:any -> list)
   "What is malformed in the face table `table` — one message per bad entry, `()` when every
-key is a node kind or a context selector (`{:kind :parent :field :nth :text :after}`, ADR-486,
-ADR-487, ADR-614 — a `:parent` itself a kind or a selector map, at most four maps deep, an
-`:after` the `:kind` and `:text` of the named sibling before the node) and every
-value a face-name keyword. What a registration checks beside `missing-services`, so a
+key is a node kind or a context selector (`{:kind :parent :field :nth :text :after :has :not}`,
+ADR-486, ADR-487, ADR-614, ADR-765, ADR-766 — a `:parent` itself a kind or a selector map, at
+most four maps deep, an `:after` the `:kind` and `:text` of the named sibling before the node,
+a `:has` a child the node must have, a `:not` a kind or selector the node must not satisfy) and
+every value a face-name keyword. What a registration checks beside `missing-services`, so a
 misspelt selector fails at load rather than at the first frame drawn.
 
     (editor/treesit/face-table-problems {:string :syntax/string {:field :function} :syntax/function})   ;=> ()
     (count (editor/treesit/face-table-problems {{:feild :name} :syntax/function}))   ;=> 1
-    (editor/treesit/face-table-problems {{:kind :identifier :text #{\"def\" \"if\"} :parent {:kind :call}} :syntax/keyword})   ;=> ()"
+    (editor/treesit/face-table-problems {{:kind :identifier :text #{\"def\" \"if\"} :parent {:kind :call}} :syntax/keyword})   ;=> ()
+    (editor/treesit/face-table-problems {{:kind :identifier :not {:parent :call}} :syntax/variable})   ;=> ()"
   (seq/keep (%map-pairs table) (fn ([selector face-name]) (selector-problem selector face-name))))
 
 ;; An INJECTION spec (ADR-489) is the third thing a language hands the seam: which of its
@@ -282,36 +290,33 @@ What a registration checks beside `face-table-problems`.
             has (get selector :has)
             with-has (if (keyword? has)
                        (update with-after :kinds (fn (kinds) (conj kinds has)))
-                       (names-of-selector (when (map? has) (dissoc has :text)) with-after)))
-        (names-of-selector parent with-has))))
+                       (names-of-selector (when (map? has) (dissoc has :text)) with-after))
+            ;; what a `:not` (ADR-766) rules out is named in the grammar as much as what holds
+            with-not (names-of-selector (get selector :not) with-has))
+        (names-of-selector parent with-not))))
 
 (defn- names-of-kinds (kinds acc)
-  ;; `acc` with every keyword of `kinds` (a set or sequence, or nil) as a node kind — and of
-  ;; a kind in a context (`{:kind :then :parent-not :rescue}`, ADR-766), its kind and the
-  ;; parent kinds it names
-  (fold (or kinds [])
+  ;; `acc` with every node kind and field `kinds` (any collection, or nil) names: a kind
+  ;; keyword, or an indent entry's selector map (ADR-766) — its kind and every kind and field
+  ;; its context names
+  (fold (cond
+          (keyword? kinds) [kinds]
+          (or (set? kinds) (vector? kinds) (list? kinds)) kinds
+          else [])
     acc
-    (fn (names kind)
-      (cond
-        (keyword? kind) (update names :kinds (fn (all) (conj all kind)))
-        (map? kind)
-          (names-of-kinds (append [(get kind :kind)]
-                            (let (parents (get kind :parent))
-                              (if (set? parents) (vec parents) [parents]))
-                            (let (parents (get kind :parent-not))
-                              (if (set? parents) (vec parents) [parents])))
-            names)
-        else names))))
+    (fn (names kind) (names-of-selector kind names))))
 
 (defn language-names (language:map -> map)
   "The node kinds and field names a tree-sitter language's tables refer to, as `{:kinds
 #{…} :fields #{…}}`. `language` holds any of `:faces` (a face table: its kind keys and every
-selector's `:kind`, `:parent`, `:field` and `:after`), `:injections` (the RULES of an injection spec:
-each `:content` and `:exclude` selector, each `:lang-from` kind — the embedded languages'
-faces are their own grammars' business), `:indent` (an `indent-column` spec: its `:blocks`,
-`:brackets`, `:verbatim`, `:hanging` and `:modifiers` kinds, and its `:pairs` and `:clauses`
-tokens, which are anonymous kinds; `:dedent` and `:opens` are source text, not kinds) and
-`:definitions` (its `:kinds`). What `grammar-problems` checks against the loaded grammar.
+selector's `:kind`, `:parent`, `:field`, `:after`, `:has` and `:not`), `:injections` (the RULES
+of an injection spec: each `:content` and `:exclude` selector, each `:lang-from` kind — the
+embedded languages' faces are their own grammars' business), `:indent` (an `indent-column`
+spec: its `:blocks`, `:brackets`, `:verbatim`, `:verbatim-from-start`, `:hanging` and
+`:modifiers` entries, a selector's kinds and fields included, and its `:pairs`, `:clauses` and
+`:middles` tokens, which are anonymous kinds; `:dedent`, `:opens` and `:continues` are source
+text, not kinds) and `:definitions` (its `:kinds`). What `grammar-problems` checks against the
+loaded grammar.
 
     (editor/treesit/language-names {:faces {{:parent :call :field :function} :syntax/function} :indent {:blocks #{:do_block}}})   ;=> {:kinds #{:call :do_block} :fields #{:function}}"
   (let (faces (or (get language :faces) {})
@@ -330,15 +335,14 @@ tokens, which are anonymous kinds; `:dedent` and `:opens` are source text, not k
                            (names-of-selector (get rule :exclude)
                              (names-of-selector (get rule :content) acc))))))
         from-indent (if (map? indent)
-                      (names-of-kinds (map (into (into [] (get indent :clauses #{}))
+                      (names-of-kinds (map (append (into [] (get indent :clauses #{}))
+                                             (into [] (get indent :middles #{}))
                                              (mapcat (get indent :pairs {})
                                                (fn ([open close]) [open close])))
                                         keyword)
-                        (names-of-kinds (get indent :modifiers)
-                          (names-of-kinds (get indent :hanging)
-                            (names-of-kinds (get indent :verbatim)
-                              (names-of-kinds (get indent :brackets)
-                                (names-of-kinds (get indent :blocks) from-rules))))))
+                        (fold [:blocks :brackets :verbatim :verbatim-from-start :hanging :modifiers]
+                          from-rules
+                          (fn (acc key) (names-of-kinds (get indent key) acc))))
                       from-rules))
     (if (map? definitions) (names-of-kinds (get definitions :kinds) from-indent) from-indent)))
 
@@ -942,6 +946,17 @@ restart is never wrong where the lead-in is right, and is right everywhere the l
       (reverse (cons (get node :kind) acc))
       (ts-chain hit p (cons (get node :kind) acc)))))
 
+;; The delimiters, spelt once: each opener and the closer it wants. Every question below about
+;; a bracket — is this line closing one, does this node open with one, what does `${` want —
+;; reads these.
+(def- ts-delimiter-closers {"(" ")" "[" "]" "{" "}"})
+(def- ts-opening-delimiters (into #{} (keys ts-delimiter-closers)))
+(def- ts-closing-delimiters (into #{} (vals ts-delimiter-closers)))
+
+(defn- ts-delimiter? (token)
+  ;; is `token` (a string, or nil) a closing delimiter?
+  (contains? ts-closing-delimiters token))
+
 (defn- ts-opens-with? (line token)
   "Does `line` begin with `token` at a WORD BOUNDARY? `end)` closes a block and `endless`
 does not, and splitting on whitespace cannot tell them apart — which is how the closing
@@ -977,14 +992,11 @@ removed from the tables as redundant, and with them went the only thing that rec
 those lines as closing at all, so every `}` on its own line stopped dedenting."
   (let (t (string/trim-left line)
         first-char (when (> (count t) 0) (string/substring t 0 1)))
-    (if (and first-char (includes? ")]}" first-char))
+    (if (ts-delimiter? first-char)
       first-char
       (seq/find (ts-dedent-tokens dedent) (fn (d) (ts-opens-with? line d))))))
 
-(defn- ts-delimiter? (token)
-  (and token (= 1 (count token)) (includes? ")]}" token)))
-
-(defn- ts-dedent-levels (spec token brackets-counted)
+(defn- ts-dedent-levels (spec token brackets-counted &optional (spanned 0))
   "How many levels `token` backs out of.
 
 A closing DELIMITER decides for itself: it leaves the bracket it closes, so it backs out
@@ -995,13 +1007,18 @@ before it. One number for `}` is wrong in whichever case it was not written for,
 appear in the same file.
 
 Everything else is a keyword, and a keyword's answer IS per language — `end` is outside
-its `body_statement` while `ensure` is inside one — so it comes from the table."
+its `body_statement` while `ensure` is inside one — so it comes from the table. A table entry
+`:spanned` is the answer the chain gives, for a keyword whose answer is per PLACE: `spanned`,
+one when a counted block spans the node the token begins (Ruby's method-level `else`, a child of
+its `body_statement`) and none when it does not (an `if`'s `else`, an arm beside the `then`)."
   (if (ts-delimiter? token)
     (math/min 1 brackets-counted)
-    (let (dedent (get spec :dedent #{}))
-      (if (and (map? dedent) (not (nil? (get dedent token))))
-        (get dedent token)
-        (get spec :dedent-levels 1)))))
+    (let (dedent (get spec :dedent #{})
+          levels (when (map? dedent) (get dedent token)))
+      (cond
+        (= levels :spanned) spanned
+        (not (nil? levels)) levels
+        else (get spec :dedent-levels 1)))))
 
 (defn- ts-aligns? (text: (or string rope) open:int -> bool)
   "Does the bracket at offset `open` have CONTENT after it on its own line?
@@ -1025,40 +1042,81 @@ Ruby's are aligned this way."
         eol (ts-line-end text after))
     (and (< after eol) (not (= (string/trim (ts-slice text after eol)) "")))))
 
-(defn- ts-kinds-hold? (kinds kind)
-  ;; does `kinds` — a kind keyword or a set of them — name `kind`?
-  (if (set? kinds) (contains? kinds kind) (= kinds kind)))
+;; ---- an indent entry: a node kind, or a face selector a chain can answer (ADR-766) ----------
+;; Which node opens a level is the language's word, and sometimes the word needs a context:
+;; Ruby's `rescue` body is a `then`, the kind an `if` arm has, inside the level its method's
+;; `body_statement` already counted. The context is said in the face tables' selector language
+;; — one language for "this node, here" — restricted to what a node's CHAIN answers: its
+;; `:kind`, the `:field` it fills, a `:parent` selector asked of the node above it (so a
+;; grandparent is a `:parent` of a `:parent`), and `:not`, a selector it must not satisfy. A
+;; chain carries no siblings, children or text, so `:nth`, `:text`, `:after` and `:has` are
+;; refused by `indent-problems`, and never hold here.
+
+(def- chain-constraints #{:kind :field :parent :not})
+
+(defn- ts-selector-holds? (selector nodes index)
+  ;; does `selector` (a kind keyword, or a selector map in the chain's subset) hold of node
+  ;; `index` of `nodes` (a vector, outermost first)? Nothing holds above the root.
+  (cond
+    (< index 0) false
+    (keyword? selector) (= (get (nth nodes index) :kind) selector)
+    (not (map? selector)) false
+    else
+      (let (node (nth nodes index)
+            kind (get selector :kind)
+            field (get selector :field)
+            parent (get selector :parent)
+            negated (get selector :not))
+        (and (every? (keys selector) (fn (key) (contains? chain-constraints key)))
+          (or (nil? kind) (= kind (get node :kind)))
+          (or (nil? field) (= field (get node :field)))
+          (or (nil? parent) (ts-selector-holds? parent nodes (dec index)))
+          (or (nil? negated) (not (ts-selector-holds? negated nodes index)))))))
+
+(defn indent-entry-holds? (entries chain index)
+  "Does an entry of `entries` (any collection of `:blocks` or `:brackets` entries, or nil) name
+node `index` of `chain` (`node-chain`'s nodes, outermost first)? An entry is a kind keyword, or
+a face-table selector map (ADR-766) in the part of that language a chain answers: `:kind`,
+`:field`, `:parent` (a kind or a selector, asked of the node above) and `:not` (a kind or a
+selector the node must not satisfy). Only a NAMED node opens a level: a keyword token often
+shares its node's kind (Ruby's `else` keyword is an `else` inside the `else` node), and never
+encloses a line. Public, so anything else that reads an indent spec (an editor's code folding)
+decides a block the same way.
+
+    (editor/treesit/indent-entry-holds? #{:block} [{:kind :program} {:kind :block}] 1)   ;=> true
+    (editor/treesit/indent-entry-holds? [{:kind :then :not {:parent :rescue}}] [{:kind :rescue} {:kind :then}] 1)   ;=> false
+    (editor/treesit/indent-entry-holds? [{:kind :then :not {:parent {:kind :rescue :parent :body_statement}}}] [{:kind :begin} {:kind :rescue} {:kind :then}] 2)   ;=> true
+    (editor/treesit/indent-entry-holds? #{:else} [{:kind :else} {:kind :else :named false}] 1)   ;=> false"
+  (let (nodes (vec chain)
+        node (nth nodes index)
+        kind (get node :kind))
+    (and (not (= false (get node :named)))
+      (or (and (set? entries) (contains? entries kind))
+        (any? (or entries []) (fn (entry) (ts-selector-holds? entry nodes index)))))))
 
 (defn block-entry-holds? (entries node parent)
-  "Does a `:blocks`/`:brackets` entry of `entries` name `node`, whose parent in the chain is
-`parent` (nil at the root)? An entry is a kind keyword, or a kind in a context (ADR-766):
-`{:kind :then :parent-not :rescue}` — the kind, only when its parent is none of `:parent-not`
-(a kind or a set) — and `{:kind :then :parent :if}`, only when its parent is one of `:parent`.
-Ruby's `rescue` body is a `then`, an `if`'s block kind, inside the `body_statement` that
-already counted the level. Public, so anything else that reads an indent spec (an editor's code
-folding) decides a block the same way.
+  "**Deprecated — use `indent-entry-holds?`, which reads the whole chain.** Does an entry of
+`entries` name `node`, whose parent is `parent` (nil at the root)? Answered over the two-node
+chain `[parent node]`, so a selector that reaches past the parent cannot hold.
 
-    (editor/treesit/block-entry-holds? #{:block} {:kind :block} nil)   ;=> true
-    (editor/treesit/block-entry-holds? #{{:kind :then :parent-not :rescue}} {:kind :then} {:kind :rescue})   ;=> false"
-  (let (kind (get node :kind)
-        parent-kind (get parent :kind))
-    (or (contains? entries kind)
-      (any? entries
-        (fn (entry)
-          (and (map? entry)
-            (= (get entry :kind) kind)
-            (or (nil? (get entry :parent)) (ts-kinds-hold? (get entry :parent) parent-kind))
-            (or (nil? (get entry :parent-not))
-              (not (ts-kinds-hold? (get entry :parent-not) parent-kind)))))))))
+    (editor/treesit/block-entry-holds? #{:block} {:kind :block} nil)   ;=> true"
+  (if parent
+    (indent-entry-holds? entries [parent node] 1)
+    (indent-entry-holds? entries [node] 0)))
+
+(meta block-entry-holds? :deprecated "0.56.0" :use 'indent-entry-holds?)
+
+(defn- ts-chain-steps (chain)
+  ;; `[index node parent]` for each node of `chain` (outermost first), `parent` nil at the root:
+  ;; what every walk over a chain that asks a node in its place starts from
+  (let (nodes (vec chain))
+    (vec (map (range (count nodes))
+           (fn (index) [index (nth nodes index) (when (> index 0) (nth nodes (dec index)))])))))
 
 (defn- ts-chain-holds (entries chain)
   ;; for each node of `chain` (outermost first), whether `entries` names it in its place
   (let (nodes (vec chain))
-    (vec (map (range (count nodes))
-           (fn (index)
-             (block-entry-holds? entries
-               (nth nodes index)
-               (when (> index 0) (nth nodes (dec index)))))))))
+    (vec (map (range (count nodes)) (fn (index) (indent-entry-holds? entries nodes index))))))
 
 (defn- ts-align-column (text bol chain brackets hanging)
   "The column a continuation line aligns to, or nil when it is not one.
@@ -1072,20 +1130,79 @@ A `hanging` bracket never aligns: what follows its opener on the line is a HEADE
 first item — a Kotlin lambda's `{ item ->`, a Scala one's `{ item =>` — and its contents go one
 level in like any hanging indent. Only the innermost bracket is asked, so a hanging one inside
 an aligned call still hangs."
-  (let (nodes (vec chain)
-        bracketed (ts-chain-holds brackets chain)
-        inner (last (seq/keep (range (count nodes))
-                      (fn (index)
-                        (let (node (nth nodes index))
-                          (when (and (nth bracketed index)
-                                  (< (ts-start node) bol)
-                                  (includes? "([{"
-                                    (ts-slice text (ts-start node) (inc (ts-start node)))))
-                            node))))))
+  (let (bracketed (ts-chain-holds brackets chain)
+        inner (last (seq/keep (ts-chain-steps chain)
+                      (fn ([index node _])
+                        (when (and (nth bracketed index)
+                                (< (ts-start node) bol)
+                                (contains? ts-opening-delimiters
+                                  (ts-slice text (ts-start node) (inc (ts-start node)))))
+                          node)))))
     (when (and inner
             (not (contains? hanging (get inner :kind)))
             (ts-aligns? text (get inner :start)))
       (inc (- (get inner :start) (ts-line-start text (get inner :start)))))))
+
+;; ---- what an indent spec may say ----------------------------------------------------------
+
+(def- indent-spec-keys
+  #{:width
+    :blocks :brackets :dedent :dedent-levels :verbatim :verbatim-from-start :hanging :opens
+    :continues :pairs :clauses :middles :modifiers :token-blocks})
+
+(defn- ts-collection? (value) (or (set? value) (vector? value) (list? value)))
+
+(defn- chain-answers? (selector)
+  ;; is `selector` within the part of the selector language a chain answers?
+  (or (keyword? selector)
+    (and (map? selector)
+      (every? (keys selector) (fn (key) (contains? chain-constraints key)))
+      (every? [:parent :not]
+        (fn (key) (or (nil? (get selector key)) (chain-answers? (get selector key))))))))
+
+(defn- indent-entry-problem (key entry)
+  ;; what is wrong with one `:blocks`/`:brackets` entry, or nil
+  (cond
+    (keyword? entry) nil
+    (not (map? entry))
+      (str key " entry " (pr-str entry) " is neither a node kind nor a selector map")
+    (selector-shape-problem entry 1) (str key " entry " (selector-shape-problem entry 1))
+    (not (chain-answers? entry))
+      (str key
+        " entry "
+        (pr-str entry)
+        ": an indent entry's selector takes :kind :field :parent and :not — a node's chain "
+        "answers no :nth, :text, :after or :has")
+    else nil))
+
+(defn indent-problems (spec:any -> list)
+  "What is malformed in the `indent-column` spec `spec` — one message per problem, `()` when it
+is sound (nil, no spec, is sound): a key the spec does not take (with the nearest it does), a
+`:blocks` or `:brackets` entry that is neither a kind nor a selector a chain answers (ADR-766),
+or a kind list that is not a collection of kinds. What a registration checks beside
+`face-table-problems`, so a misspelt entry fails at load rather than as a wrong indent.
+
+    (editor/treesit/indent-problems {:width 2 :blocks #{:body {:kind :then :not {:parent :rescue}}}})   ;=> ()
+    (count (editor/treesit/indent-problems {:blocks #{{:kind :then :parent-not :rescue}}}))   ;=> 1
+    (count (editor/treesit/indent-problems {:blokcs #{:body}}))   ;=> 1"
+  (cond
+    (nil? spec) ()
+    (not (map? spec)) (list (str (pr-str spec) " is not an indent spec map"))
+    else
+      (append (map (map/shape-problems spec {:optional indent-spec-keys}) map/shape-problem->string)
+        (mapcat [:blocks :brackets]
+          (fn (key)
+            (let (entries (get spec key))
+              (cond
+                (nil? entries) ()
+                (not (ts-collection? entries))
+                  (list (str key " is a collection of kinds and selectors, not " (pr-str entries)))
+                else (seq/keep entries (fn (entry) (indent-entry-problem key entry)))))))
+        (mapcat [:verbatim :verbatim-from-start :hanging :modifiers]
+          (fn (key)
+            (let (kinds (get spec key))
+              (when (not (or (nil? kinds) (and (ts-collection? kinds) (every? kinds keyword?))))
+                (list (str key " is a collection of node kinds, not " (pr-str kinds))))))))))
 
 (defn- ts-next-nonblank-bol (text bol)
   "The start of the next NON-BLANK line after the one at `bol`, or nil at the end.
@@ -1113,37 +1230,54 @@ A comment belongs to what follows it, which is how every editor treats it and th
 answer that survives the grammars. Ruby's `body_statement` begins at its first
 STATEMENT, and a comment is not one, so the doc comment above a method sits outside the
 method's body and counting blocks puts it a level short — every documented method in the
-Ruby stdlib. Asking what the next code line does is right there and right everywhere."
+Ruby stdlib. Asking what the next code line does is right there and right everywhere. The next
+line is the first after the comment ENDS: a block comment's own second line is content, and asked
+instead it lent its indentation to the comment's first."
   (when (and (not (empty? chain))
           (contains? editor/treesit/*comment-kinds* (get (last chain) :kind)))
-    (let (next-bol (ts-next-nonblank-bol text bol))
+    (let (comment-end (ts-end (last chain))
+          last-bol (if (> comment-end bol) (ts-line-start text (dec comment-end)) bol)
+          next-bol (ts-next-nonblank-bol text last-bol))
       (when next-bol (indent-column text lang next-bol spec tree)))))
 
-(def- ts-delimiter-closers {"(" ")" "[" "]" "{" "}"})
+(defn- ts-spec-kinds (spec key)
+  ;; the spec's `key` list (any collection, or absent) as a set, for membership questions
+  (let (kinds (get spec key))
+    (cond
+      (set? kinds) kinds
+      (or (vector? kinds) (list? kinds)) (into #{} kinds)
+      else #{})))
+
+(defn- ts-verbatim-kinds (spec)
+  ;; every node kind whose inside is content: `:verbatim`, and `:verbatim-from-start` — the
+  ;; kinds whose content begins at the node's own start (Perl's heredoc body)
+  (set/union (ts-spec-kinds spec :verbatim) (ts-spec-kinds spec :verbatim-from-start)))
 
 (defn- ts-open-vocabulary (spec)
   ;; what the open-stack walk reads a token as: `:pairs` opener → closer (the delimiters are
-  ;; always pairs), the closers, the `:dedent` words that sit between an opener and its closer
-  ;; (`else`, `catch`; only for a language that names its keyword `:pairs`), the `:clauses`,
-  ;; the `:modifiers` (node kinds whose keyword opens nothing: Ruby's `x if y`), and `:texts`,
-  ;; every token text the walk asks the parse for
+  ;; always pairs), the closers, the `:middles` — words that sit between an opener and its
+  ;; closer (`else`, `catch`), named, and taken from the `:dedent` words for a language that
+  ;; names its keyword `:pairs` — the `:clauses`, the `:modifiers` (node kinds whose keyword
+  ;; opens nothing: Ruby's `x if y`), and `:texts`, every token text the walk asks the parse for
   (let (pairs (get spec :pairs {})
-        closers (into #{")" "]" "}"} (map pairs second))
-        middles (if (empty? pairs)
-                  #{}
-                  (into #{}
-                    (seq/filter (ts-dedent-tokens (get spec :dedent #{}))
-                      (fn (token)
-                        (and (not (contains? closers token)) (regex/matches? token "[A-Za-z_]+"))))))
-        clauses (get spec :clauses #{}))
+        closers (into ts-closing-delimiters (map pairs second))
+        dedent-middles (if (empty? pairs)
+                         #{}
+                         (into #{}
+                           (seq/filter (ts-dedent-tokens (get spec :dedent #{}))
+                             (fn (token)
+                               (and (not (contains? closers token))
+                                 (regex/matches? token "[A-Za-z_]+"))))))
+        middles (set/union dedent-middles (ts-spec-kinds spec :middles))
+        clauses (ts-spec-kinds spec :clauses))
     {:pairs pairs
      :closers closers
      :middles middles
      :clauses clauses
-     :modifiers (get spec :modifiers #{})
+     :modifiers (ts-spec-kinds spec :modifiers)
      :all (= true (get spec :token-blocks))
-     :texts (set/union (set/union (into #{"(" "[" "{"} (map pairs first)) closers)
-              (set/union middles (into #{} clauses)))}))
+     :texts (set/union (set/union (into ts-opening-delimiters (map pairs first)) closers)
+              (set/union middles clauses))}))
 
 (defn- ts-tokens-before (text lang before vocabulary tree)
   ;; the held tree's tokens when there is one alive, else the text's — every one before
@@ -1162,7 +1296,7 @@ Ruby stdlib. Asking what the next code line does is right there and right everyw
         (get ts-delimiter-closers (string/substring kind (dec length) length))))))
 
 (defn- ts-entry-delimiter? (entry)
-  (includes? [")" "]" "}"] (get entry :closer)))
+  (ts-delimiter? (get entry :closer)))
 
 (defn- ts-pop-to (stack closer through-delimiters?)
   ;; `stack` (innermost first) with the innermost entry wanting `closer` and all above it
@@ -1178,30 +1312,35 @@ Ruby stdlib. Asking what the next code line does is right there and right everyw
 (defn- ts-pop-clauses (stack)
   (if (and (not (empty? stack)) (get (first stack) :clause)) (ts-pop-clauses (rest stack)) stack))
 
+(defn- ts-stack-step (vocabulary stack token)
+  ;; `stack` (innermost first) after the parse's `token`
+  (let (kind (->string (get token :kind))
+        start (get token :start))
+    (cond
+      (contains? (:modifiers vocabulary) (get token :parent)) stack
+      (contains? (:clauses vocabulary) kind)
+        (cons {:kind kind :start start :header start :clause true} (ts-pop-clauses stack))
+      (ts-opener-closer vocabulary kind)
+        (cons {:kind kind :start start :header start :closer (ts-opener-closer vocabulary kind)}
+          stack)
+      (ts-delimiter? kind) (ts-pop-to stack kind true)
+      (contains? (:closers vocabulary) kind) (ts-pop-to (ts-pop-clauses stack) kind false)
+      (contains? (:middles vocabulary) kind)
+        (let (popped (ts-pop-clauses stack))
+          (if (empty? popped) popped (cons (assoc (first popped) :header start) (rest popped))))
+      else stack)))
+
+(defn- ts-stack-of (tokens vocabulary)
+  ;; the openers `tokens` (in source order) leave open, innermost first
+  (fold tokens nil (fn (stack token) (ts-stack-step vocabulary stack token))))
+
 (defn- ts-open-stack (text lang before vocabulary tree)
   "The openers still open before offset `before`, innermost first, each
 `{:kind :start :header :closer}` (`:clause true` for a `:clauses` token): what a half-typed
 buffer leaves unclosed, read off the parse's own tokens — so a bracket in a string or a comment
 is none — whatever shape error recovery gave the tree. `:header` is where the entry's latest
 header line begins: the opener, or the last middle word (`else`) inside it."
-  (fold (ts-tokens-before text lang before vocabulary tree)
-    nil
-    (fn (stack token)
-      (let (kind (->string (get token :kind))
-            start (get token :start))
-        (cond
-          (contains? (:modifiers vocabulary) (get token :parent)) stack
-          (contains? (:clauses vocabulary) kind)
-            (cons {:kind kind :start start :header start :clause true} (ts-pop-clauses stack))
-          (ts-opener-closer vocabulary kind)
-            (cons {:kind kind :start start :header start :closer (ts-opener-closer vocabulary kind)}
-              stack)
-          (includes? [")" "]" "}"] kind) (ts-pop-to stack kind true)
-          (contains? (:closers vocabulary) kind) (ts-pop-to (ts-pop-clauses stack) kind false)
-          (contains? (:middles vocabulary) kind)
-            (let (popped (ts-pop-clauses stack))
-              (if (empty? popped) popped (cons (assoc (first popped) :header start) (rest popped))))
-          else stack)))))
+  (ts-stack-of (ts-tokens-before text lang before vocabulary tree) vocabulary))
 
 (defn- ts-line-indent (text at)
   ;; the indentation of the line holding offset `at`
@@ -1243,7 +1382,7 @@ under that content. Any other line is the caller's to decide."
         (let (entry (first stack)
               header (get entry :header)
               header-bol (ts-line-start text header))
-          (when (= header-bol (ts-prev-code-bol text lang bol (get spec :verbatim #{}) tree))
+          (when (= header-bol (ts-prev-code-bol text lang bol (ts-verbatim-kinds spec) tree))
             (cond
               (and (= header (get entry :start))
                 (includes? ["(" "["] (get entry :kind))
@@ -1303,34 +1442,28 @@ under that content. Any other line is the caller's to decide."
 (defn- ts-word-token? (token) (regex/matches? token ".*[A-Za-z0-9_].*"))
 
 (defn- ts-line-opens? (opens line)
-  ;; does `line` (trimmed) end with one of `opens`: its last word, or — for a token with no
-  ;; word in it (`\`, `|>`, `:`) — its last characters, whatever they are glued to
+  ;; does `line` (trimmed) end with one of `opens` (a set): its last word, or — for a token with
+  ;; no word in it (`\`, `|>`, `:`) — its last characters, whatever they are glued to
   (or (contains? opens (or (last (string/split line " ")) ""))
     (any? opens (fn (token) (and (not (ts-word-token? token)) (string/ends-with? line token))))))
-
-(defn- ts-continues? (opens line)
-  ;; does `line` end with a CONTINUATION — an `opens` token that is neither a word nor a
-  ;; bracket (`\`, `|`, `|>`, `=`): the statement runs on below rather than opening a block
-  (any? opens
-    (fn (token)
-      (and (not (ts-word-token? token))
-        (not (includes? "([{" (string/substring token (dec (count token)) (count token))))
-        (string/ends-with? line token)))))
 
 (defn- ts-carry-column (text lang bol spec tree)
   "The column a line of a broken parse carries from the line above it, when nothing still open
 decides ([[ts-unclosed-column]]): that line's indentation, a level deeper when it ends with one of
-the spec's `:opens`. A comment line is taken as it stands — it was written at the column the code
-below it wants. A continuation (`\\`, `|>`: [[ts-continues?]]) adds its level once — the second
-continued line stays with the first — and the line after a run of them goes back to the line the
-run began on."
-  (let (verbatim (get spec :verbatim #{})
-        opens (get spec :opens #{})
+the spec's `:opens` or `:continues`. A comment line is taken as it stands — it was written at the
+column the code below it wants. A CONTINUATION — a line ending in one of `:continues` (`\\`,
+`|>`, `&&`): the statement runs on below rather than opening a block — adds its level once (the
+second continued line stays with the first), and the line after a run of them goes back to the
+line the run began on. Continuations are named rather than guessed from a token's shape: PHP's
+`:` and Scala's `=` end no word either, but they open a block, and blocks nest."
+  (let (verbatim (ts-verbatim-kinds spec)
+        continues (ts-spec-kinds spec :continues)
+        opens (set/union (ts-spec-kinds spec :opens) continues)
         width (get spec :width 2)
         previous-bol (ts-prev-code-bol text lang bol verbatim tree)
         code-above (fn (line-bol) (ts-prev-code-bol text lang line-bol verbatim tree true))
         continues? (fn (line-bol)
-                     (and line-bol (ts-continues? opens (ts-trimmed-line text line-bol)))))
+                     (and line-bol (ts-line-opens? continues (ts-trimmed-line text line-bol)))))
     (cond
       (nil? previous-bol) 0
       (ts-comment-line? text lang previous-bol tree) (ts-line-indent text previous-bol)
@@ -1348,22 +1481,44 @@ run began on."
                 (ts-line-indent text (head before-bol)))
             else indent)))))
 
+(defn- ts-keyword-depth (stack)
+  ;; how many keyword entries `stack` holds — the levels a `:token-blocks` line is in
+  (count (seq/reject stack ts-entry-delimiter?)))
+
+(defn- ts-delimiter-token? (vocabulary kind)
+  ;; is the token `kind` a delimiter — a closing one, or one ending in an opening delimiter
+  ;; (`{`, `${`) that no keyword `:pairs` entry names?
+  (or (ts-delimiter? kind)
+    (and (nil? (get (:pairs vocabulary) kind)) (not (nil? (ts-opener-closer vocabulary kind))))))
+
 (defn- ts-token-block-levels (text lang bol eol spec tree)
   "The levels the line at `bol` (ending at `eol`) is in from blocks no NODE encloses — a
 language whose `:pairs` bound blocks by sibling tokens (`:token-blocks`, ADR-767): HEEx's
 `<%= if … do %>`, `<% else %>` and `<% end %>` are three sibling directives, so the block
 between them is in no node, and counting enclosing nodes cannot see it. Every keyword entry
-open before the line is a level — less one when the line's first such token closes or
-re-opens one (its `<% end %>`, its `<% else %>`)."
+open before the line is a level, a `:clauses` entry included (the body of a `<% 1 -> %>`).
+The line's first keyword token — delimiters skipped, as a line's leading `}` closes no keyword
+block — then decides what it backs out of: a closer every level it pops (its `<% end %>` closes
+the last clause and the `do`), a clause the clause before it, a middle the clauses and one more
+(its `<% else %>` re-opens the `do`). The tokens are read once, to the line's end, as every
+token is read for a `:token-blocks` language."
   (let (vocabulary (ts-open-vocabulary spec)
-        open (count (seq/reject (ts-open-stack text lang bol vocabulary tree) ts-entry-delimiter?))
-        first-on-line (seq/find (ts-tokens-before text lang eol vocabulary tree)
-                        (fn (token) (>= (get token :start) bol)))
+        tokens (ts-tokens-before text lang eol vocabulary tree)
+        stack (ts-stack-of (seq/take-while tokens (fn (token) (< (get token :start) bol)))
+                vocabulary)
+        first-on-line (seq/find tokens
+                        (fn (token)
+                          (and (>= (get token :start) bol)
+                            (not (ts-delimiter-token? vocabulary (->string (get token :kind)))))))
         kind (when first-on-line (->string (get first-on-line :kind)))
-        leaves (and kind
-                 (not (includes? [")" "]" "}"] kind))
-                 (or (contains? (:closers vocabulary) kind) (contains? (:middles vocabulary) kind))))
-    (math/max 0 (if leaves (dec open) open))))
+        unclaused (ts-pop-clauses stack))
+    (math/max 0
+      (cond
+        (nil? kind) (ts-keyword-depth stack)
+        (contains? (:clauses vocabulary) kind) (ts-keyword-depth unclaused)
+        (contains? (:closers vocabulary) kind) (ts-keyword-depth (ts-pop-to unclaused kind false))
+        (contains? (:middles vocabulary) kind) (dec (ts-keyword-depth unclaused))
+        else (ts-keyword-depth stack)))))
 
 (defn indent-column (text lang bol spec &optional (tree nil))
   "The column the line beginning at offset `bol` should be indented to — a `:indent` service
@@ -1372,22 +1527,29 @@ editor passes its buffer's rope and held `tree`, and only the lines the indenter
 read — RET in a large file builds no whole-buffer string.
 
     {:width 2                        ; columns per level
-     :blocks #{:do_block :body}      ; node kinds that open one — or a kind in a context,
-     ;;   {:kind :then :parent-not :rescue} / {:kind :then :parent #{:if}} (ADR-766); :brackets too
-     :dedent #{\"end\" \"else\"}         ; line-leading tokens that close one
+     :blocks #{:do_block :body}      ; node kinds that open one — or a face selector a chain
+     ;;   answers: {:kind :then :not {:parent :rescue}} (ADR-766); :brackets too
+     :dedent #{\"end\" \"else\"}         ; line-leading tokens that close one — or a map of token →
+     ;;   levels, :spanned for one when a counted block spans the node it begins
      :dedent-levels 1                ; how many the closing token backs out of
      :verbatim #{:heredoc_template} ; node kinds whose inside is content, not code
+     :verbatim-from-start #{:heredoc_body} ; …whose content begins at the node's own start
      :hanging #{:lambda_literal}   ; brackets that never align: what follows the opener is a header
      ;; for a half-typed buffer, whose parse is broken (ADR-762)
-     :opens #{\"->\" \"\\\\\"}           ; a line ending in one opens a level below it
+     :opens #{\"->\" \"{\"}            ; a line ending in one opens a level below it
+     :continues #{\"\\\\\" \"|>\"}         ; a line ending in one runs on below: a level, once
      :pairs {\"do\" \"end\" \"fn\" \"end\"} ; keyword openers and their closers, beside the delimiters
      :clauses #{\"->\"}               ; tokens that open a clause the next one, or the closer, ends
+     :middles #{\"else\"}             ; tokens between an opener and its closer that re-open it
      :modifiers #{:if_modifier}    ; node kinds whose keyword opens nothing (Ruby's `x if y`)
      :token-blocks true}           ; the :pairs open levels on a clean parse too (ADR-767)
 
+`indent-problems` says what is malformed in one.
+
 **Mechanism here, kinds there.** Which node opens a level is the one thing only the language
 knows, and it is a set of names — so a language's whole indent policy is four entries, and
-this walks the tree. The nesting level is the number of enclosing `:blocks` nodes.
+this walks the tree. The nesting level is the number of enclosing `:blocks` nodes. An entry
+that needs a context names it in the face tables' selector language (`indent-entry-holds?`).
 
 **Where a line is measured from is the subtle part.** An ordinary line is measured at its
 first non-blank character, because a block node may not begin until its first statement —
@@ -1406,35 +1568,41 @@ against real source.
 triple-quoted docstring: their lines are CONTENT, and their indentation is part of the value
 — re-indenting a heredoc line to its block level rewrote the shell script inside it. A line
 is verbatim when a `:verbatim` node that began on an EARLIER line encloses it (the line that
-opens the heredoc is code, and is indented as code) — or one that begins exactly at the line's
-start inside a node an earlier line opened (Perl's heredoc body begins at its first content
-line) — and its answer is the indentation it
-already has, so a caller that indents to the answer changes nothing. A BLANK verbatim line
-answers the previous non-blank line's indentation instead — the RET case, where the new line
-has no indentation of its own yet and the content's is the one to continue. Indentation is
-counted in characters, as everywhere here.
+opens the heredoc is code, and is indented as code) — or, for a kind named in
+`:verbatim-from-start`, one that begins exactly at the line's start inside a node an earlier
+line opened and runs past the line (Perl's heredoc body begins AT its first content line). Only
+the kinds named so: a block comment or a multi-line string that merely starts a line is code
+there, and is indented. Its answer is the indentation it already has, so a caller that indents
+to the answer changes nothing. A BLANK verbatim line answers the previous non-blank line's
+indentation instead — the RET case, where the new line has no indentation of its own yet and the
+content's is the one to continue. Indentation is counted in characters, as everywhere here.
 
 **A half-typed buffer does not parse, and its tokens decide (ADR-762).** Typed a line at a
 time, a block is still unclosed when the next line is typed: the opener is a bare token in an
 ERROR node, or its closer a MISSING one, and no chain reaches it. What is still open is read off
 the parse's tokens before the line (`%tree-sitter-tokens`), matched as a stack — the delimiters
 always (`${` and `%{` open what `{` opens), a language's keyword `:pairs` and `:clauses` when it
-names them, a `:dedent` word between an opener and its closer (`else`) moving the opener's header
-to its own line. A line that closes sits at the line its opener's statement began on; the line
-right below an opener goes a level in from it (or aligns under a `(` with content after it). Any
-other line carries the code line above it, a level deeper when that line ends in one of
-`:opens`; a continuation (`\\`, `|>`) adds its level once, and the line after the run goes back.
+names them, a `:middles` word (or with keyword `:pairs` a `:dedent` word) between an opener and
+its closer (`else`) moving the opener's header to its own line. A line that closes sits at the
+line its opener's statement began on; the line right below an opener goes a level in from it (or
+aligns under a `(` with content after it). Any other line carries the code line above it, a
+level deeper when that line ends in one of `:opens` or `:continues`; a continuation adds its
+level once, and the line after the run goes back.
 
 **A block no node encloses (ADR-767).** HEEx's `<%= if … do %>`, `<% else %>` and `<% end %>` are
 three SIBLING directives, so the block between them is in no node and counting enclosing nodes
 cannot see it. With `:token-blocks`, the open stack of `:pairs` counts on a clean parse too:
-every keyword entry open before the line is a level, less one on the line whose first such
-token closes or re-opens one. A `:pairs` closer may be a NAMED leaf's kind, when that is the
-only spelling the grammar has (HEEx's `end` is an `ending_expression_value`).
+every keyword entry open before the line is a level, a clause included, and the line whose first
+keyword token closes, re-opens or starts the next clause backs out what that token pops. A
+`:pairs` closer may be a NAMED leaf's kind, when that is the only spelling the grammar has
+(HEEx's `end` is an `ending_expression_value`). The limit is the vocabulary: a block opened by
+something the parse has no token for is invisible. HEEx's expression is one leaf, so the `fn` of
+`<%= Enum.map(xs, fn x -> %>` is no token — its `->` reads as a clause of the enclosing `do`, and
+its `<% end %>` closes that `do` too.
 
-Deliberately not a full indent engine: no operator continuation rules beyond `:opens`. It
-answers the shape that block-structured languages share, which is the shape `nest format`
-answers for Brood, and it is checked line-for-line against real source in
+Deliberately not a full indent engine: no operator continuation rules beyond `:opens` and
+`:continues`. It answers the shape that block-structured languages share, which is the shape
+`nest format` answers for Brood, and it is checked line-for-line against real source in
 `tests/treesit_module_test.blsp`.
 
     (editor/treesit/indent-column \"def f do\\nx\\nend\" :elixir 9 spec)   ;~> 2 — with the :elixir grammar installed and the spec above"
@@ -1457,34 +1625,33 @@ answers for Brood, and it is checked line-for-line against real source in
                     (if (= (get (last before) :named) false) here before))
                   here))
         broken (get (first chain) :broken)
-        verbatim (get spec :verbatim #{})
-        ;; inside content (a heredoc's body) that opened on an earlier line — or that opens
-        ;; exactly at this line's start while what holds it opened earlier: Perl's heredoc body
-        ;; begins AT its first content line, so the body's first line is content too, where a
-        ;; docstring opening a statement at column 0 is still code (its statement begins here).
+        verbatim (ts-verbatim-kinds spec)
+        from-start (ts-spec-kinds spec :verbatim-from-start)
+        ;; inside content (a heredoc's body) that opened on an earlier line — or, for a kind
+        ;; named in `:verbatim-from-start`, that opens exactly at this line's start while what
+        ;; holds it opened earlier: Perl's heredoc body begins AT its first content line, so the
+        ;; body's first line is content too. Only for the kinds named so: a block comment or a
+        ;; multi-line string that begins a line inside a function (PHP's `/* a` at column 0, a
+        ;; Scala `"""` argument) is code there, and was left at column 0 as if it were content.
         ;; The at-the-start case also needs the node to run PAST this line, as a heredoc's body
-        ;; does: a one-line string that merely begins the line — a TOML array's `"one",` once
-        ;; re-indenting from scratch has stripped its indentation — is code, and was left at
-        ;; column 0 as if it were content.
+        ;; does.
         inside-verbatim (and (not (empty? verbatim))
                           ;; asked at the first character of the line — a closing line is measured at
                           ;; its start, and content (a `<style>`'s) can run up to its closing tag
                           (let (first-character (+ bol
                                                   (- (count line) (count (string/trim-left line))))
-                                nodes (vec (if (and closing (< at first-character))
-                                             (ts-chain-at text lang first-character tree)
-                                             chain)))
-                            (any? (range (count nodes))
-                              (fn (index)
-                                (let (node (nth nodes index)
-                                      start (get node :start)
-                                      parent (when (> index 0) (nth nodes (dec index))))
-                                  (and (contains? verbatim (get node :kind))
-                                    (or (< start bol)
-                                      (and (= start bol)
-                                        parent
-                                        (< (get parent :start) bol)
-                                        (> (get node :end) eol)))))))))
+                                nodes (if (and closing (< at first-character))
+                                        (ts-chain-at text lang first-character tree)
+                                        chain))
+                            (any? (ts-chain-steps nodes)
+                              (fn ([_ node parent])
+                                (let (start (get node :start))
+                                  (or (and (< start bol) (contains? verbatim (get node :kind)))
+                                    (and (= start bol)
+                                      (contains? from-start (get node :kind))
+                                      parent
+                                      (< (get parent :start) bol)
+                                      (> (get node :end) eol))))))))
         ;; Two kinds of opener, and they differ in ONE way: whether a node that begins on
         ;; the line being indented counts for that line.
         ;;
@@ -1505,17 +1672,15 @@ answers for Brood, and it is checked line-for-line against real source in
         ;; mistake appears on every `%{`, `{` and `fn` that begins a line.
         brackets (get spec :brackets #{})
         ;; each node of the chain asked in its place: an entry may name a kind in a context
-        ;; (`block-entry-holds?`), and a node that opens a block is marked so, for the keys below
-        chain-nodes (vec chain)
+        ;; (`indent-entry-holds?`), and a node that opens a block is marked so, for the keys below
         blocked (ts-chain-holds blocks chain)
         bracketed (ts-chain-holds brackets chain)
-        openers (seq/keep (range (count chain-nodes))
-                  (fn (index)
-                    (let (node (nth chain-nodes index))
-                      (cond
-                        (nth blocked index) (assoc node :block true)
-                        (and (nth bracketed index) (< (get node :start) bol)) node
-                        else nil))))
+        openers (seq/keep (ts-chain-steps chain)
+                  (fn ([index node _])
+                    (cond
+                      (nth blocked index) (assoc node :block true)
+                      (and (nth bracketed index) (< (get node :start) bol)) node
+                      else nil)))
         ;; Brackets that open on the SAME LINE count once between them. `frozenset({`
         ;; opens two, and charging a level for each put the contents at 8 where Python
         ;; puts them at 4 — the rule everywhere is that a line introduces at most one
@@ -1526,7 +1691,7 @@ answers for Brood, and it is checked line-for-line against real source in
         ;; brace and that body are ONE level, as every formatter writes them. A hanging
         ;; bracket that ends its line (a method's `= {`) has no header, and a block inside it
         ;; (`val x =` with its value on the next line) still counts.
-        hanging (get spec :hanging #{})
+        hanging (ts-spec-kinds spec :hanging)
         bracket-key (fn (node) [:bracket (ts-line-start text (get node :start))])
         keys (seq/distinct
                (second
@@ -1548,7 +1713,23 @@ answers for Brood, and it is checked line-for-line against real source in
                        [node (conj acc key)])))))
         n (count keys)
         ;; how many of those levels a closing delimiter could be leaving
-        brackets-counted (count (seq/filter keys (fn (k) (= (first k) :bracket)))))
+        brackets-counted (count (seq/filter keys (fn (k) (= (first k) :bracket))))
+        ;; a `:spanned` closer's levels, asked of the chain at the token: one when the
+        ;; outermost node it begins sits in a block counted for this line — a `:blocks`
+        ;; entry, or a `:brackets` one opened on an earlier line
+        spanned (if (and closing (= :spanned (get (get spec :dedent) closing-token)))
+                  (let (token-at (+ bol (- (count line) (count (string/trim-left line))))
+                        nodes (vec (ts-chain-at text lang token-at tree))
+                        clause (seq/find (ts-chain-steps nodes)
+                                 (fn ([_ node _]) (= (get node :start) token-at)))
+                        holder (when (and clause (> (first clause) 0)) (dec (first clause))))
+                    (if (and holder
+                          (or (indent-entry-holds? blocks nodes holder)
+                            (and (indent-entry-holds? brackets nodes holder)
+                              (< (get (nth nodes holder) :start) bol))))
+                      1
+                      0))
+                  0))
     (cond
       ;; content, not code: the line keeps its own indentation (a blank one continues the
       ;; content's) — checked before `broken`, since a heredoc stays one while code above
@@ -1568,13 +1749,15 @@ answers for Brood, and it is checked line-for-line against real source in
         (or (ts-unclosed-column text lang bol spec closing-token tree)
           (math/max 0
             (- (ts-carry-column text lang bol spec tree)
-              (if closing (* width (ts-dedent-levels spec closing-token brackets-counted)) 0))))
+              (if closing
+                (* width (ts-dedent-levels spec closing-token brackets-counted spanned))
+                0))))
       else
         (or (ts-comment-column text lang bol chain spec tree)
-          (ts-align-column text bol chain (get spec :brackets #{}) (get spec :hanging #{}))
+          (ts-align-column text bol chain brackets hanging)
           (* width
             (math/max 0
-              (+ (if closing (- n (ts-dedent-levels spec closing-token brackets-counted)) n)
+              (+ (if closing (- n (ts-dedent-levels spec closing-token brackets-counted spanned)) n)
                 (if (= true (get spec :token-blocks))
                   (ts-token-block-levels text lang bol eol spec tree)
                   0))))))))
