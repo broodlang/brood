@@ -49,17 +49,18 @@ fallback); the same pattern is how the editor's keymaps work.")
   "Dispatch `key` through `keymap` to its command — a global `(fn (state key) ->
 state)` resolved by symbol (so redefining the command, or rebinding the key,
 hot-swaps behaviour). An **unbound** key goes to `fallback` (a `(fn (state key) ->
-state)` — e.g. self-insert, or a no-op `(fn (s _) s)`). A command that throws is
-caught and leaves the state unchanged, so a bad binding can't crash the loop. The
-flat, single-key path: a binding to a nested keymap (a chord prefix) is ignored
-here — use `keymap-step` for chords. Pure apart from the symbol resolution;
-testable without a terminal.
+state)` — e.g. self-insert, or a no-op `(fn (s _) s)`). A command that throws raises
+out of here to the caller, whose loop decides what an error means (`ui-run` logs it and
+keeps the model; an editor echoes it) — a dispatcher that swallowed it left a dead key
+with nothing said. The flat, single-key path: a binding to a nested keymap (a chord
+prefix) is ignored here — use `keymap-step` for chords. Pure apart from the symbol
+resolution; testable without a terminal.
 
     (editor/keymap/keymap-dispatch {} 1 :z (fn (s k) (inc s)))   ;=> 2"
   (let (sym (get keymap key))
     (if (or (nil? sym) (map? sym))
       (fallback state key)
-      (try ((reflect/eval sym) state key) (catch _e state)))))
+      ((reflect/eval sym) state key))))
 
 (defn keymap-resolve (keymap:map pending:any key:any -> vector)
   "One keystroke through a (possibly chorded) `keymap`, resolved to its BINDING and
@@ -114,7 +115,7 @@ up in `pending` when mid-chord, else in `keymap`:
   - binds to a nested **keymap** → enter that prefix: `[state <sub-keymap>]` (state
     unchanged; we wait for the next key);
   - binds to a **command symbol** → run it and reset: `[(command state key) nil]`
-    (a throwing command leaves state unchanged, like `keymap-dispatch`);
+    (a throwing command raises to the caller, like `keymap-dispatch`);
   - **unbound at the top** (fresh, not mid-chord) → `[(fallback state key) nil]`;
   - **dead-end chord** (unbound *after* a prefix) → `[state nil]`: the key is
     dropped and the chord resets (Emacs-style \"undefined\"), so a partial chord
@@ -136,7 +137,7 @@ hand — `editor/layers/layer-dispatch` — steps through this.
         (if (nil? pending)
           [(fallback state key) nil]
           [state nil])
-      else [(try ((reflect/eval binding) state key) (catch _e state)) nil])))
+      else [((reflect/eval binding) state key) nil])))
 
 ;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
 (defn keymap-where-is (keymap command)

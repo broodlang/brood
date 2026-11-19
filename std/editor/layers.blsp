@@ -160,7 +160,7 @@ core knows nothing about buffers."
 ;;   * dormant != deactivated: leaving a context never fires :deactivate.
 ;;   * :activate/:deactivate fire for the ONE layer toggled; :on-focus/:on-blur/
 ;;     :on-close (and your own events, via `run-event`) fan across ALL active layers.
-;;   * a throwing hook is isolated (state unchanged) — a bad layer can't crash the loop.
+;;   * a throwing hook raises to the caller, whose loop decides what an error means.
 ;;   * prefixes merge across layers (Emacs's semantics, ADR-535): the first layer binding
 ;;     each key of a sequence decides, and a prefix keymap there merges with the same
 ;;     prefix in every layer below — a mode's `C-c C-p` and the global `C-c f` both work.
@@ -246,9 +246,10 @@ primitive — `activate-layer` is the hook-firing version.
 ;; ---- hooks ------------------------------------------------------------------
 
 (defn- layers-run-hook (hook ctx)
-  "Run one hook — a fn symbol resolved late and applied as `(ctx) -> ctx`. A throw
-leaves `ctx` unchanged, so a bad hook can't crash the loop."
-  (try ((reflect/eval hook) ctx) (catch _e ctx)))
+  "Run one hook — a fn symbol resolved late and applied as `(ctx) -> ctx`. A throw raises
+to the caller, whose loop decides what an error means; a hook that failed silently left a
+mode half set up with nothing said."
+  ((reflect/eval hook) ctx))
 
 (defn- layers-run-hooks (ctx hooks)
   "Thread `ctx` through a list of hooks (each `(ctx) -> ctx`)."

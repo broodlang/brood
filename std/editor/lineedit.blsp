@@ -754,9 +754,11 @@ a no-op. Passed to `keymap-dispatch` as the keymap's default."
   "Dispatch key event `key` through `editor/lineedit/*keymap*` to its command (via the
 shared `keymap-dispatch`): a global `(fn (state key) -> state)` resolved by symbol,
 so redefining the command or rebinding the key hot-swaps behaviour. An unbound key
-self-inserts (a 1-char string) or is a no-op; a command that throws is caught so a
-bad binding can't crash the read. In reverse-search mode (`:search` set) keys route
-to `lineedit-search-key` instead. Pure apart from symbol resolution; testable.
+self-inserts (a 1-char string) or is a no-op; a command that throws leaves the line as
+it was and shows its error below the input for one keystroke (where a Tab's listing
+shows), so a bad binding neither crashes the read nor goes dead with nothing said. In
+reverse-search mode (`:search` set) keys route to `lineedit-search-key` instead. Pure
+apart from symbol resolution; testable.
 
 Any pending completion listing is dropped *before* dispatch, so it survives exactly one
 keystroke: a Tab that can't make progress re-attaches it (`lineedit-apply-completion`),
@@ -767,7 +769,9 @@ a rebound key or a user's own command can't leave a stale listing on screen.
   (let (line-state (if (nil? (get state :completions)) state (assoc state :completions nil)))
     (if (not (nil? (get line-state :search)))
       (lineedit-search-key line-state key)
-      (keymap-dispatch editor/lineedit/*keymap* line-state key lineedit-fallback))))
+      (try
+        (keymap-dispatch editor/lineedit/*keymap* line-state key lineedit-fallback)
+        (catch e (assoc line-state :completions (list (str "error: " (error-message e)))))))))
 
 ;; ---- signature hint + bracket overrides (pure analysis -> render data) -------
 

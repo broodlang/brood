@@ -386,3 +386,16 @@
   (test "default mode treats the whole path as one word"
     (let (st (assoc (editor/lineedit/lineedit-init "" '()) :text path :point 17))
       (assert= (get (lineedit-backward-word st nil) :point) 0))))
+
+(defn le-boom (state key) (throw "boom"))
+
+(describe "a command that throws"
+  (test "leaves the line as it was and shows its error below the input"
+    (binding (editor/lineedit/*keymap* (assoc editor/lineedit/*keymap*
+                                         :ctrl-x 'lineedit-test/le-boom))
+      (let (typed (le-keys (le-fresh) (list "a" "b"))
+            after (editor/lineedit/lineedit-handle typed :ctrl-x))
+        (assert= (get after :text) "ab")
+        (assert= (get after :completions) (list "error: boom"))
+        ;; the next key clears it, as it clears a Tab's listing
+        (assert= (get (editor/lineedit/lineedit-handle after "c") :completions) nil)))))

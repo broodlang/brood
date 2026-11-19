@@ -59,9 +59,12 @@
     (let (km (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e))
       (assert= (keymap-step km nil "S" :ctrl-z km-fb) ["S?" nil])))
 
-  (test "a throwing command leaves state unchanged (loop can't crash)"
+  (test "a throwing command's error reaches the caller — a key never goes dead silently"
     (let (km (keymap-bind {} ["b"] 'keymap-test/km-boom))
-      (assert= (keymap-step km nil "S" "b" km-fb) ["S" nil]))))
+      (assert= (error-message (error-of (keymap-step km nil "S" "b" km-fb))) "boom")
+      (assert= (error-message (error-of (keymap-dispatch km "S" "b" km-fb))) "boom")
+      (assert= (error-message (error-of (keymap-run ['keymap-test/km-boom nil] nil "S" "b" km-fb)))
+        "boom"))))
 
 (describe "keymap-dispatch flat fast-path is unchanged"
   (test "a flat command still runs"

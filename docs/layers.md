@@ -67,8 +67,10 @@ new resolution code.
 - **Lifecycle vs. fanned events.** `:activate`/`:deactivate` fire for the *one*
   layer being toggled. `:on-focus`/`:on-blur`/`:on-close` (and any app-defined
   event) are **fanned** across *all* active layers, in precedence order.
-- **Hooks are `(state) -> state`**, late-bound, threaded, each error-isolated (a
-  throwing hook leaves state unchanged — a bad layer can't crash the loop). Side
+- **Hooks are `(state) -> state`**, late-bound, threaded. A throwing hook raises to the
+  caller, as a throwing key command does (`keymap-run`): the loop decides what an error
+  means — `ui-run` logs it, an editor echoes it — rather than a dead key or a half set-up
+  mode with nothing said. Side
   effects (incl. `spawn` for async work) ride along; async results return as
   mailbox messages handled by the `ui-run` loop.
 - **Prefixes merge across layers** (ADR-535, Emacs's semantics): the first layer binding

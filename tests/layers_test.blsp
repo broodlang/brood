@@ -72,10 +72,9 @@
   (test "deactivate of an inactive name is a no-op"
     (assert= (deactivate-layer {:log ""} 'nope) {:log ""}))
 
-  (test "a throwing hook is isolated — state unchanged, layer still on"
-    (let (ctx (activate-layer {:log "keep"} 'layers-test/layer-boom))
-      (assert= (get ctx :log) "keep")
-      (is (layer-active? ctx 'boom))))
+  (test "a throwing hook's error reaches the caller"
+    (assert= (error-message (error-of (activate-layer {:log "keep"} 'layers-test/layer-boom)))
+      "boom"))
 
   (test "replace-base-layer deactivates the old base and activates the new"
     (let (ctx (activate-layer {:log ""} 'layers-test/layer-a)
