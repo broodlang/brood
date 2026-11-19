@@ -2198,3 +2198,15 @@ doc. `:blocks` takes a kind in a context (ADR-766), so Ruby's `rescue` body coun
 `:token-blocks` counts ADR-762's keyword stack on a clean parse (ADR-767), so HEEx's
 `<% … do %>` blocks indent; a `:pairs` closer may be a named leaf's kind, and
 `%tree-sitter-tokens` takes `all?`.
+
+2026-11-19. **A release bundle launches lazily and carries its std modules (ADR-768).** Asking
+why bedit starts slowly: `bedit --version` took ~0.6 s because the bundle materialised all 272
+of its sections before `main`, and its std modules came from the user's stdlib cache — or from
+source when no toolchain of exactly that stdlib had written one, 2.5× slower again. A launch
+with an image now loads only what it reaches (the boot check and the image writer still load
+everything); the image carries the std modules the app's load used, with their registries kept
+in the root section; and the prelude preinstalls the bundle's section directory so its own boot
+code materialises too. `--version` 0.60 → 0.20 s with or without a cache. `BROOD_IMAGE_TRACE`
+reports sections in µs with facts, uses, deferred defines and a per-call total — the ms figures
+had hidden most of the cost. Guard `an_imaged_bundle_launches_lazily_and_carries_its_std_modules`,
+three halves sabotage-verified.

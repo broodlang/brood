@@ -180,9 +180,11 @@ runtime. Only the *stripped* modules above are unavailable to it.
   (the path relative to the source dir, sans `.blsp`), and a dependency's by its
   package-rooted name (`foo/parser`), so two deps may each ship a `parser`.
 - Boot policy is Brood: `brood` calls `(project-release/run-bundle argv)` in
-  `std/tool/project-release.blsp`, which applies the embedded manifest, loads every embedded
-  module (from the startup image when the archive carries one), and invokes `:main` —
-  passing the process's argv to the entry fn.
+  `std/tool/project-release.blsp`, which applies the embedded manifest, installs the startup
+  image when the archive carries one, and invokes `:main` — passing the process's argv to the
+  entry fn. With an image, a launch materialises each module on first use, the std modules
+  the app loaded included (ADR-768); without one it loads every embedded module from source.
+  The boot check (`--brood-boot-check`, `nest release`'s smoke) always loads every module.
 
 Rust supplies only mechanism (append/extract the archive, the three
 `%bundle-*` primitives); the policy lives in Brood (ADR-006).

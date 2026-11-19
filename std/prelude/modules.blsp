@@ -916,7 +916,40 @@ writing process's count while `require` reads source."
   (def- *std-impls* nil)
   (def- *std-regs* nil)
   (def- *std-image-installed* nil)
+  (%bundle-image-preinstall!)
   (when (%std-image-wanted?) (%std-image-install)))
+
+(defn- %bundle-image-stamp ()
+  "The key a release bundle's startup image is written under and read back with (ADR-484):
+the stdlib id, the contract mode and the bundle's manifest, which carries `:built-at` — so
+only the archive an image was built for can install it."
+  (str "bundle\n"
+    (system/stdlib-id)
+    (if (%contracts-armed?) " contracts" "")
+    "\n"
+    (or (%bundle-manifest) "")))
+
+(defn- %bundle-image-preinstall! ()
+  "In a release bundle, add its own startup image's section directory as a feature source
+AHEAD of the stdlib image, at boot. Returns the section count, or nil.
+
+The bundle's boot code — `project-release`, `project-image`, `project` and what they use —
+loads before `run-bundle` installs the image, so without this it came from the stdlib image
+in the user's cache when one of exactly this stdlib existed, and from SOURCE otherwise: ~90 ms
+of every launch on a machine without one (ADR-484 amended). Only the directory: the root
+section, and the registry merge around it, stay `run-bundle`'s, so an early materialise sees
+no registrations it would not have seen from the stdlib image. The stamp is the one the bundle
+writes ([[%bundle-image-stamp]]), so an image built for another release is never read;
+`BROOD_NO_BUNDLE_IMAGE` declines it as it declines the install."
+  (when (and (%bundled?)
+          (nil? (%getenv "BROOD_NO_BUNDLE_IMAGE"))
+          (%image-exists? "mem:bundle-image"))
+    ;; check-allow :discarded-catch — a best-effort probe: an unreadable image is the source boot
+    (let (idx (check-allow :discarded-catch
+                (try (%image-index "mem:bundle-image" (%bundle-image-stamp)) (catch _ nil))))
+      (when idx
+        (%add-image-source! "mem:bundle-image" (dissoc idx ""))
+        (count idx)))))
 
 (defn- %require-record-edge! (key skipped)
   ;; `reflect/current-ns` first: it is the module whose FILE is being loaded, which is the accurate

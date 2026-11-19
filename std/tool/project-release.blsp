@@ -410,12 +410,8 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; is true by construction; what is left is the contract mode an armed load bakes into each
 ;; `sig`'d function (KI-276), the stdlib it was built over, and THIS release — the manifest
 ;; carries `:built-at`, so an image can only ever be installed by the archive it was built for.
-(defn- bundle-image-stamp ()
-  (str "bundle\n"
-    (system/stdlib-id)
-    (if (%contracts-armed?) " contracts" "")
-    "\n"
-    (or (%bundle-manifest) "")))
+;; The prelude owns it (`%bundle-image-stamp`): its boot-time preinstall reads the same image.
+(defn- bundle-image-stamp () (%bundle-image-stamp))
 
 ;; The name embedded module `key` is required by — the namespace its load defines, which is
 ;; also the image section its bindings are grouped under. A uniquely named dependency module
@@ -442,11 +438,17 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 
 ;; The shared boot prefix of `run-bundle`, `check-bundle-boot` and `write-bundle-image`:
 ;; apply the embedded manifest, restore the dependency package-rooting context, install the
-;; startup image (unless `from-source?`), load every embedded module, and return the entry
+;; startup image (unless `mode` is `:source`), load the embedded modules, and return the entry
 ;; `[modname fname sections]` — `sections` the image's section count, nil when none was
 ;; installed. Factored out so the check cannot boot the bundle differently from the way the
 ;; bundle boots itself — the only property that makes a smoke test worth running.
-(defn- bundle-boot-load (&optional from-source?)
+;;
+;; `mode` is `:launch`, `:check` or `:source`. A `:launch` with an image installed loads
+;; NOTHING here: as `nest run` does (ADR-218), each module materialises from its section on
+;; first use, and the root section has already restored every module's registrations. The
+;; check and the image writer load every module, so a module that cannot load still fails
+;; the release rather than the user's launch.
+(defn- bundle-boot-load (mode)
   (let (form (reflect/read-first (or (%bundle-manifest) "")))
     (when (and (pair? form) (= (first form) 'project)) (project/apply-config (rest form))))
   ;; Rebuild the package-rooting context for the embedded DEPENDENCY modules (ADR-070
@@ -460,11 +462,17 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
   (bundle-register-project-modules)
   ;; After the rooting context, which the image's root section leaves alone
   ;; (`*package-modules-of*` is a registry exclusion), and before any module loads.
-  (let (sections (if from-source? nil (bundle-install-image)))
+  (let (sections (if (= mode :source) nil (bundle-install-image)))
     ;; Load every embedded module once. Order-independent: cross-module
     ;; `:use`/`require` resolve through the same embedded table, and require is
     ;; idempotent — so a `(:use foo)` in the first module pulls `foo` on demand.
-    (map (%bundle-module-names) (fn (key) (require-one (bundle-require-name key))))
+    ;;
+    ;; A lazy launch still loads a module the image has no section for: its file names one
+    ;; namespace and declares another, so no first use could ever find it by name.
+    (let (lazy? (and (= mode :launch) sections))
+      (doseq (key (%bundle-module-names))
+        (let (name (bundle-require-name key))
+          (when (not (and lazy? (%image-section-for name))) (require-one name)))))
     (let (entry (or project/*main-override* project/*main*))
       ;; No `%root-module-name` here (unlike `run`): a bundle's own modules are embedded
       ;; under their require-name and the rooting context is rebuilt above.
@@ -482,7 +490,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (default module `main`, fn `main`). Errors if the entry fn is missing/uncallable.
 
     (project-release/run-bundle [\"serve\" \"--port\" \"8080\"])   ;~> whatever the bundle's :main fn returns"
-  (let ([modname fname _] (bundle-boot-load))
+  (let ([modname fname _] (bundle-boot-load :launch))
     (require-one modname)
     (%crash-report-arm-default)
     (/apply (project-run/project-entry-fn "run-bundle" modname fname) args)))
@@ -506,7 +514,7 @@ the way a launch does — from the bundle's startup image when it carries one �
     (project-release/check-bundle-boot)   ;~> 0 — every embedded module loaded and :main resolved; raises otherwise"
   (when (not (%bundled?))
     (error "check-bundle-boot: this executable is not a `nest release` bundle"))
-  (let ([modname fname sections] (bundle-boot-load))
+  (let ([modname fname sections] (bundle-boot-load :check))
     (require-one modname)
     ;; An application is resolved, never started (ADR-436): this runs on the machine that
     ;; BUILT the release, where starting would bind its ports and open its files, and
@@ -536,10 +544,20 @@ imaged (a `table` global) raises, and the release ships without one.
   ;; Both baselines before a single module loads, as a project image takes them (KI-106).
   (let (before (reflect/global-names)
         before-regs (stdimage/registrations-by-module)
-        [modname _ _] (bundle-boot-load true))
+        [modname _ _] (bundle-boot-load :source))
     (require-one modname)
+    ;; The bundle carries the std modules it loaded too, those its own boot loaded before
+    ;; `before` was taken included: otherwise they come from the stdlib image in the user's
+    ;; cache, which only a toolchain of exactly this stdlib writes, and from source without
+    ;; one — a launch three times slower on any machine that never ran a matching `nest`.
     (let (carried (into #{} (map (%bundle-module-names) bundle-require-name))
-          carried? (fn (k) (contains? carried k)))
+          std-loaded? (fn (k) (and (%builtin-module? k) (contains? *features* k)))
+          carried? (fn (k) (or (contains? carried k) (std-loaded? k)))
+          before (seq/reject before
+                   (fn (name)
+                     (let (spelling (->string name)
+                           slash (%str-last-index-of spelling "/"))
+                       (and (> slash 0) (std-loaded? (string/substring spelling 0 slash)))))))
       ;; The prune runs inside the isolate, so it is rolled back once the image is written.
       (%isolate (fn ()
                   (project-image/image-prune-foreign-registrations before-regs carried?)

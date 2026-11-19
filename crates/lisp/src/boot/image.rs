@@ -1025,12 +1025,14 @@ pub(crate) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     let reserve = crate::eval::truthy(arg(args, 3));
     // From the handle `%image-index` opened for this path — never a fresh open by path, which
     // would read whatever a concurrent rebuild has since put there (KI-119/224).
+    let started = web_time::Instant::now();
     let Some(file) = image_file(heap, &path) else {
         return Ok(Value::Nil);
     };
     let Some(bytes) = read_at(&file, off, len) else {
         return Ok(Value::Nil);
     };
+    let read_us = started.elapsed().as_micros();
     let mut r = Cursor::new(bytes);
     let Some(count) = get_u32(&mut r) else {
         return Ok(Value::Nil);
@@ -1054,6 +1056,12 @@ pub(crate) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     let prior_file = heap.set_current_file(section_file.map(str::to_string));
     let loaded = load_section_entries(heap, &mut r, count, reserve);
     heap.set_current_file(prior_file);
+    if trace() {
+        eprintln!(
+            "[image-section-total] {} us (read {read_us} us, {len} bytes)",
+            started.elapsed().as_micros()
+        );
+    }
     Ok(loaded?.map_or(Value::Nil, Value::int))
 }
 
@@ -1068,6 +1076,7 @@ fn load_section_entries(
     let global = heap.global();
     let mut done: i64 = 0;
     let (mut ns_decode, mut ns_from_msg, mut ns_define) = (0u64, 0u64, 0u64);
+    let (mut ns_facts, mut ns_uses) = (0u64, 0u64);
     // **Names that already have a binding are defined LAST** (KI-72). For a module that is
     // not yet loaded, the only pre-existing binding one of its names can have is an
     // ADR-246 **autoload stub** — and a stub is the door every other process comes
@@ -1092,20 +1101,24 @@ fn load_section_entries(
         };
         // A fact entry carries a name and no value — branch before decoding one.
         if kind == KIND_FACT {
+            let fact_started = web_time::Instant::now();
             let Some(fact) =
                 get_u8(r).and_then(|tag| get_fact_payload(r, tag, value::intern(&name)))
             else {
                 return Ok(None);
             };
             heap.replay_fact(&fact);
+            ns_facts += fact_started.elapsed().as_nanos() as u64;
             done += 1;
             continue;
         }
         // …and a uses entry: the module names it `(:use …)`s.
         if kind == KIND_USES {
+            let uses_started = web_time::Instant::now();
             let Some(()) = restore_uses(heap, &name, r) else {
                 return Ok(None);
             };
+            ns_uses += uses_started.elapsed().as_nanos() as u64;
             done += 1;
             continue;
         }
@@ -1147,6 +1160,8 @@ fn load_section_entries(
     // this pass exists (KI-72). And a PROJECT image describes a later state than the heap
     // it restores into, so it may overwrite (the "basic" test in startup_image_test.blsp
     // writes 41, redefines to :clobbered, and expects 41 back).
+    let deferred_started = web_time::Instant::now();
+    let deferred_count = deferred.len();
     for (kind, sym, v) in deferred {
         if reserve {
             let existing_is_data = !matches!(
@@ -1164,13 +1179,18 @@ fn load_section_entries(
     // Everything just promoted is bound to a global, so it is all live. Tell the RUNTIME
     // collector that rather than let it find out by compacting the whole region at the next
     // safepoint and reclaiming nothing — otherwise about half of a whole-image restore.
+    let ns_deferred = deferred_started.elapsed().as_nanos() as u64;
     heap.rt_gc_rebaseline_all_live();
     if trace() {
         eprintln!(
-            "[image-section] {done} entries — decode {} ms, from_message {} ms, define {} ms",
-            ns_decode / 1_000_000,
-            ns_from_msg / 1_000_000,
-            ns_define / 1_000_000
+            "[image-section] {done} entries — decode {} us, from_message {} us, define {} us, \
+             facts {} us, uses {} us, deferred {deferred_count} in {} us",
+            ns_decode / 1_000,
+            ns_from_msg / 1_000,
+            ns_define / 1_000,
+            ns_facts / 1_000,
+            ns_uses / 1_000,
+            ns_deferred / 1_000
         );
     }
     Ok(Some(done))
