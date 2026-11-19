@@ -1239,6 +1239,35 @@ fn the_unknown_keyed_value_is_read_by_overlap_under_strict() {
     assert!(!map_into_record.is_empty(), "a known map is no record");
 }
 
+// `(get m :k)` is `(:k m)` spelled the other way round, and a parameter read either way must
+// type alike. `get`'s own sig made the `get` spelling demand `countable`, so a function that
+// hands its parameter back on one branch returned a positive `countable`, and strict reported
+// every `assoc` on its result — five apps' worth, while `(:k m)` in the same place passed.
+#[test]
+fn a_parameter_read_by_get_with_a_keyword_types_as_a_keyword_read_does() {
+    for read in [
+        "(get model :done)",
+        "(:done model)",
+        "(get model :done false)",
+    ] {
+        let src = format!(
+            "(defmodule t)\n\
+             (defn settle (model) (if {read} model (assoc model :done true)))\n\
+             (defn mark (model) (assoc (settle model) :tags 1))"
+        );
+        let strict = file_warnings_mode(&src, true);
+        assert!(strict.is_empty(), "{read}: {strict:?}");
+    }
+    // …and a receiver no keyword lookup takes is still reported, for both spellings.
+    for read in ["(get model :done)", "(:done model)"] {
+        let src = format!("(defmodule t)\n(defn f (model) {read})\n(defn g () (f \"text\"))");
+        assert!(
+            !file_warnings_mode(&src, false).is_empty(),
+            "{read} on a string"
+        );
+    }
+}
+
 /// A LOADED function whose inferred result is a registry cover (`ordered`) or a bare `number`
 /// is re-typed under each call's arguments, as a same-file one is: pong's `(defn clamp (x lo
 /// hi) (max lo (min hi x)))` read `ordered` from every other module, floats in or not, so its

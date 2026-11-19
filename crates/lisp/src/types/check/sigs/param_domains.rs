@@ -446,6 +446,21 @@ fn domain_of_inner(
                 .then(|| sig_of(heap, h))
                 .flatten()
         });
+    // `(get m :k)` is the keyword read `(:k m)` spelled the other way round, so it demands
+    // what that does of the parameter: nothing here. A wrong receiver is still reported —
+    // the walk re-checks the body at each call with the argument's type, for both spellings.
+    // `get`'s own sig says `countable`, which typed a parameter read only this way as
+    // `countable` (and the keyword receiver set would be `nil | map | set | record`), so a
+    // function returning that parameter had a positive type no `assoc` takes, and strict
+    // reported every update of its result; `(:k m)` in the same place reported nothing.
+    let callee_sig = if value::symbol_is(h, "get")
+        && !scope.shadowed.contains(&h)
+        && matches!(items.get(2), Some(Value::Keyword(_)))
+    {
+        None
+    } else {
+        callee_sig
+    };
     // Ability-op occurrence typing (ADR-190): a call to a *sealed* ability op demands
     // its first argument be a member of that ability. Only when the head IS that op
     // (`is_ability_op`): the domain is keyed by the op's bare name, and `std/tempo`
