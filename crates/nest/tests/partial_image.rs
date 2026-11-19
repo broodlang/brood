@@ -263,6 +263,50 @@ fn a_registration_the_edited_module_stops_making_is_gone() {
     assert_eq!(answer, answer_from_scratch(&dir, "regs-oracle-2"));
 }
 
+/// A closure a module's load conses onto a std LIST registry calls a function by name. The image
+/// credits the member to that load, and the partial rebuild must take it out before the module
+/// loads again: left in, it kept calling the function's OLD name after a rename, raising
+/// `unbound` until `.brood/` was deleted (bedit's `register-file-type` predicate, which a
+/// language module's load installs once per type).
+#[test]
+fn a_list_member_a_reloaded_module_wrote_is_taken_out_first() {
+    let dir = scratch("members");
+    write(
+        &dir,
+        "project.blsp",
+        "(project\n  :name pfm\n  :main main)\n",
+    );
+    let rules = |name: &str| {
+        format!(
+            "(defmodule rules)\n(def here true)\n\
+             (defn {name} (file) (string/ends-with? file \"x\"))\n\
+             (defn install (kind)\n  (when (nil? (registry/lookup :pfm/installed kind))\n    \
+             (registry/put :pfm/installed kind true)\n    \
+             (editor/layers/register-file-type (fn (file) ({name} file)) kind)))\n\
+             (defn kinds (file)\n  (map (seq/filter editor/layers/*auto-type-by-file* (fn (rule) (fn? (:match rule))))\n    (fn (rule) ((:match rule) file))))\n"
+        )
+    };
+    write(&dir, "src/rules.blsp", &rules("x-file?"));
+    write(
+        &dir,
+        "src/lang.blsp",
+        "(defmodule lang)\n(def here true)\n(rules/install :x)\n",
+    );
+    write(
+        &dir,
+        "src/main.blsp",
+        "(defmodule main)\n(defn main () lang/here (io/puts (str \"ANSWER \" (pr-str (rules/kinds \"ax\")))))\n",
+    );
+    nest_run(&dir);
+    let (_, _, before) = nest_run(&dir);
+    assert_eq!(before, "ANSWER (true)");
+
+    edit(&dir, "src/rules.blsp", &rules("ends-in-x?"));
+    let (out, _, answer) = nest_run(&dir);
+    assert!(out.contains("Rebuilt pfm"), "{out}");
+    assert_eq!(answer, "ANSWER (true)", "{out}");
+    assert_eq!(answer, answer_from_scratch(&dir, "members-oracle"));
+}
 #[test]
 fn a_headerless_or_deleted_file_rebuilds_the_image_whole() {
     let dir = scratch("whole");
