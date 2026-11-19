@@ -71,8 +71,8 @@
                          (if (= remaining 0)
                            acc
                            (receive
-                             ([:described index result] (collect (dec remaining)
-                                                          (assoc acc index result)))
+                             ([:described index result]
+                               (collect (dec remaining) (assoc acc index result)))
                              (after 5000 acc)))))
         (let (results (collect workers {}))
           (assert= (count results) workers)

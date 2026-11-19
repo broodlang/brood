@@ -149,12 +149,8 @@ backlog (`attach-display-backlog`), which paints only the newest."
     ;; The pixel-space seam: applied to the local display when it has the entry (a
     ;; window), dropped when it does not (a terminal cannot show a sprite anyway).
     ((and m
-       (or [:texture _ _ _ _] [:texture-free _] [:window _] [:sound-data _ _ _ _] [:sound-free _])) (do
-                                                                                                           (attach-display-apply display
-                                                                                                             m)
-                                                                                                           (attach-display-loop peer
-                                                                                                             session
-                                                                                                             display)))
+       (or [:texture _ _ _ _] [:texture-free _] [:window _] [:sound-data _ _ _ _] [:sound-free _]))
+      (do (attach-display-apply display m) (attach-display-loop peer session display)))
     ;; the daemon's loop is busy, or no longer (ADR-491): the window's wait cursor
     ([:busy on] (do (attach-display-busy display on) (attach-display-loop peer session display)))
     ;; the session asking whether this window is still here (`remote-claim`, ADR-519) —
@@ -162,39 +158,38 @@ backlog (`attach-display-backlog`), which paints only the newest."
     ([:ping from asked] (do (send from [:pong asked]) (attach-display-loop peer session display)))
     ;; the session's kill and yank reach this machine's clipboard (ADR-539) — before the
     ;; catch-all too
-    ([:clipboard-set text] (do
-                             (attach-clipboard-set display text)
-                             (attach-display-loop peer session display)))
-    ([:clipboard-get from asked] (do
-                                   (attach-clipboard-answer display from asked)
-                                   (attach-display-loop peer session display)))
+    ([:clipboard-set text]
+      (do (attach-clipboard-set display text) (attach-display-loop peer session display)))
+    ([:clipboard-get from asked]
+      (do (attach-clipboard-answer display from asked) (attach-display-loop peer session display)))
     ;; and its highlight this machine's PRIMARY (ADR-562)
-    ([:primary-set text] (do
-                           (attach-clipboard-set display text :primary)
-                           (attach-display-loop peer session display)))
-    ([:primary-get from asked] (do
-                                 (attach-clipboard-answer display from asked :primary)
-                                 (attach-display-loop peer session display)))
+    ([:primary-set text]
+      (do (attach-clipboard-set display text :primary) (attach-display-loop peer session display)))
+    ([:primary-get from asked]
+      (do
+        (attach-clipboard-answer display from asked :primary)
+        (attach-display-loop peer session display)))
     ;; the session's loop died and was restarted (ADR-593): the input goes to the new one
     ([:attached next] (attach-display-loop peer next display))
     ;; …told in one message by a restarted loop: switch to it and send again every key it
     ;; took none of, before any window input that follows
-    ([:reattached next supervisor taken] (do
-                                           (attach-note-session supervisor)
-                                           (attach-resend-after next taken)
-                                           (attach-display-loop peer next display)))
+    ([:reattached next supervisor taken]
+      (do
+        (attach-note-session supervisor)
+        (attach-resend-after next taken)
+        (attach-display-loop peer next display)))
     ;; the session itself, which outlives its loop: ITS end ends this client
-    ([:session supervisor] (do
-                             (attach-note-session supervisor)
-                             (attach-display-loop peer session display)))
+    ([:session supervisor]
+      (do (attach-note-session supervisor) (attach-display-loop peer session display)))
     ;; the terminal's own signals, acted on here as the local terminal display acts on them
     ;; (ADR-586): C-z / SIGTSTP suspends this client, SIGCONT repaints it — each a resize
     ;; the session re-lays out for — and SIGHUP / SIGTERM detach it, so a private session
     ;; parks rather than shipping `[:signal :hup]` to the session as a key
-    ([:signal sig] (let (input (editor/frontend/term-signal [:signal sig]))
-                     (if (nil? input)
-                       (attach-display-loop peer session display)
-                       (attach-ship-input peer session display input))))
+    ([:signal sig]
+      (let (input (editor/frontend/term-signal [:signal sig]))
+        (if (nil? input)
+          (attach-display-loop peer session display)
+          (attach-ship-input peer session display input))))
     ([:bye] nil)
     ([:nodedown ^peer] nil)
     ([:down _ who _] (when (attach-survives-down? who) (attach-display-loop peer session display)))
@@ -276,8 +271,8 @@ entry (a terminal) drops it. Returns nil."
     ([:texture tex rgba w h] (when (get display :texture) ((get display :texture) tex rgba w h)))
     ([:texture-free tex] (when (get display :texture-free) ((get display :texture-free) tex)))
     ([:window o] (when (get display :configure) ((get display :configure) o)))
-    ([:sound-data snd pcm rate channels] (when (get display :sound)
-                                           ((get display :sound) snd pcm rate channels)))
+    ([:sound-data snd pcm rate channels]
+      (when (get display :sound) ((get display :sound) snd pcm rate channels)))
     ([:sound-free snd] (when (get display :sound-free) ((get display :sound-free) snd))))
   nil)
 
@@ -321,20 +316,17 @@ Window input is not taken here: `attach-display-paint` ships it before the paint
             (attach-display-show display latest carried after)
             (attach-display-backlog peer session display f [] [])))))
     ((and m
-       (or [:texture _ _ _ _] [:texture-free _] [:window _] [:sound-data _ _ _ _] [:sound-free _])) (attach-display-backlog peer
-                                                                                                           session
-                                                                                                           display
-                                                                                                           latest
-                                                                                                           carried
-                                                                                                           (conj after
-                                                                                                             m)))
-    ([:busy on] (do
-                  (attach-display-busy display on)
-                  (attach-display-backlog peer session display latest carried after)))
+       (or [:texture _ _ _ _] [:texture-free _] [:window _] [:sound-data _ _ _ _] [:sound-free _]))
+      (attach-display-backlog peer session display latest carried (conj after m)))
+    ([:busy on]
+      (do
+        (attach-display-busy display on)
+        (attach-display-backlog peer session display latest carried after)))
     ([:bye] (attach-display-show display latest carried after))
     ([:nodedown ^peer] nil)
-    ([:down _ who _] (when (attach-survives-down? who)
-                       (attach-display-backlog peer session display latest carried after)))
+    ([:down _ who _]
+      (when (attach-survives-down? who)
+        (attach-display-backlog peer session display latest carried after)))
     (after 0 (attach-display-paint peer session display latest carried after))))
 
 (defn- attach-display-paint (peer session display latest carried after)

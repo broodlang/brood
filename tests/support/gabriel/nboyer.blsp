@@ -67,7 +67,8 @@ oracle is the rewrite count published in upstream's own source header; see
 
 (def- nboyer-lemma-data
   '((equal (compile form)
-      (reverse (codegen (optimize form) (nil)))) (equal (eqp x y) (equal (fix x) (fix y)))
+      (reverse (codegen (optimize form) (nil))))
+     (equal (eqp x y) (equal (fix x) (fix y)))
      (equal (greaterp x y)
        (lessp y x))
      (equal (lesseqp x y)

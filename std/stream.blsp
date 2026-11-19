@@ -125,11 +125,10 @@ monitor is the whole guard.
 
 (defn- list-loop (xs)
   (receive
-    ([:next r] (if (empty? xs)
-                 (do (send r :stream-done))
-                 (do
-                   (send r [:stream-val (first xs)])
-                   (list-loop (rest xs)))))
+    ([:next r]
+      (if (empty? xs)
+        (do (send r :stream-done))
+        (do (send r [:stream-val (first xs)]) (list-loop (rest xs)))))
     (:stream-close nil)))
 
 (defn fn-> (init f:fn)
@@ -142,12 +141,11 @@ first and the generator last, as `seq/iterate` takes `(x f)` (ADR-507).
 
 (defn- fn-loop (f state)
   (receive
-    ([:next r] (let (result (f state))
-                 (if (= result :done)
-                   (send r :stream-done)
-                   (do
-                     (send r [:stream-val (second result)])
-                     (fn-loop f (third result))))))
+    ([:next r]
+      (let (result (f state))
+        (if (= result :done)
+          (send r :stream-done)
+          (do (send r [:stream-val (second result)]) (fn-loop f (third result))))))
     (:stream-close nil)))
 
 (defn range (start stop)
@@ -188,9 +186,8 @@ Call immediately after accept or connect, before any data has been read.
   (receive
     ([:tcp ^sock data] (do (send s [:stream-fwd [:tcp data]]) (sock-forward-queued sock s)))
     ([:tcp-closed ^sock] (do (send s [:stream-fwd [:tcp-closed]]) (sock-forward-queued sock s)))
-    ([:tcp-error ^sock msg] (do
-                              (send s [:stream-fwd [:tcp-error msg]])
-                              (sock-forward-queued sock s)))
+    ([:tcp-error ^sock msg]
+      (do (send s [:stream-fwd [:tcp-error msg]]) (sock-forward-queued sock s)))
     (after 0 (send s :stream-flushed))))
 
 (defn- sock-init (sock parent)
@@ -212,11 +209,10 @@ Call immediately after accept or connect, before any data has been read.
   ;; buf: data that arrived before a requester; "" when empty.
   (receive
     ;; TCP data arrived
-    ([:tcp ^sock data] (if pending
-                         (do
-                           (send pending [:stream-val data])
-                           (sock-loop sock nil ""))
-                         (sock-loop sock nil (str buf data))))
+    ([:tcp ^sock data]
+      (if pending
+        (do (send pending [:stream-val data]) (sock-loop sock nil ""))
+        (sock-loop sock nil (str buf data))))
     ;; Socket closed / EOF
     ([:tcp-closed ^sock]
       (cond
@@ -231,12 +227,10 @@ Call immediately after accept or connect, before any data has been read.
     ;; left the consumer's next `[:next]` unanswered, and the stream hung.
     ([:tcp-error ^sock msg] (if pending (send pending [:stream-err msg]) (sock-error-loop msg)))
     ;; Consumer requests next chunk
-    ([:next r] (cond
-                 (not (= buf ""))
-                   (do
-                     (send r [:stream-val buf])
-                     (sock-loop sock nil ""))
-                 else (sock-loop sock r "")))
+    ([:next r]
+      (cond
+        (not (= buf "")) (do (send r [:stream-val buf]) (sock-loop sock nil ""))
+        else (sock-loop sock r "")))
     ;; Graceful cancel
     (:stream-close (tcp/close sock))))
 
@@ -249,11 +243,10 @@ Call immediately after accept or connect, before any data has been read.
 (defn- sock-eof-loop (remaining)
   ;; Closed but still have buffered bytes to deliver.
   (receive
-    ([:next r] (if (= remaining "")
-                 (send r :stream-done)
-                 (do
-                   (send r [:stream-val remaining])
-                   (sock-eof-loop ""))))
+    ([:next r]
+      (if (= remaining "")
+        (send r :stream-done)
+        (do (send r [:stream-val remaining]) (sock-eof-loop ""))))
     (:stream-close nil)))
 
 ;; ---- transformers -----------------------------------------------------------
@@ -291,9 +284,8 @@ Call immediately after accept or connect, before any data has been read.
   ;; Keep asking upstream until a matching element is found.
   (send up [:next (self)])
   (receive
-    ([:stream-val v] (if (pred v)
-                       (do (send r [:stream-val v]) (filter-outer pred up))
-                       (filter-fetch pred up r)))
+    ([:stream-val v]
+      (if (pred v) (do (send r [:stream-val v]) (filter-outer pred up)) (filter-fetch pred up r)))
     (:stream-done (send r :stream-done))
     ([:stream-err m] (send r [:stream-err m]))))
 
@@ -305,24 +297,25 @@ Call immediately after accept or connect, before any data has been read.
 
 (defn- take-loop (n up)
   (receive
-    ([:next r] (if (= n 0)
-                 (do (send r :stream-done) (close up))
-                 (do
-                   (send up [:next (self)])
-                   (receive
-                     ([:stream-val v] (send r [:stream-val v])
-                       (take-loop (- n 1) up))
-                     (:stream-done (send r :stream-done))
-                     ([:stream-err m] (send r [:stream-err m]))))))
+    ([:next r]
+      (if (= n 0)
+        (do (send r :stream-done) (close up))
+        (do
+          (send up [:next (self)])
+          (receive
+            ([:stream-val v] (send r [:stream-val v]) (take-loop (- n 1) up))
+            (:stream-done (send r :stream-done))
+            ([:stream-err m] (send r [:stream-err m]))))))
     (:stream-close (close up))))
 
 (defn- take-while-loop (pred up)
   (receive
     ([:next r] (send up [:next (self)])
       (receive
-        ([:stream-val v] (if (pred v)
-                           (do (send r [:stream-val v]) (take-while-loop pred up))
-                           (do (send r :stream-done) (close up))))
+        ([:stream-val v]
+          (if (pred v)
+            (do (send r [:stream-val v]) (take-while-loop pred up))
+            (do (send r :stream-done) (close up))))
         (:stream-done (send r :stream-done))
         ([:stream-err m] (send r [:stream-err m]))))
     (:stream-close (close up))))

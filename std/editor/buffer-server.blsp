@@ -189,19 +189,21 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
     (receive
       ;; one arm for both tagged and untagged closure edits (origin nil when untagged) —
       ;; simpler than two; there is no receive-arm budget (KI-10 no longer reproduces).
-      ([:edit f origin] (let (nb (f buf) v (inc version))
-                          (do (buffer-push subs v nb origin) (buffer-serve nb subs v rec))))
+      ([:edit f origin]
+        (let (nb (f buf) v (inc version))
+          (do (buffer-push subs v nb origin) (buffer-serve nb subs v rec))))
       ;; A read-then-decide edit in ONE round-trip: `f` returns `[new-buf value]` — the
       ;; buffer is replaced AND the extracted value (killed text, a popped mark, …) goes
       ;; back to the caller, totally ordered with every other edit (no read-modify-write
       ;; race against a concurrent splice). The kill-region shape: delete the region and
       ;; get the deleted text back, atomically. Same closure-edit caveats as `:edit`
       ;; (invisible to the transform ring; `value` must be non-rope).
-      ([:edit-reply f origin from r] (let ([nb value] (f buf) v (inc version))
-                                       (do
-                                         (send from [:reply r value])
-                                         (buffer-push subs v nb origin)
-                                         (buffer-serve nb subs v rec))))
+      ([:edit-reply f origin from r]
+        (let ([nb value] (f buf) v (inc version))
+          (do
+            (send from [:reply r value])
+            (buffer-push subs v nb origin)
+            (buffer-serve nb subs v rec))))
       ;; A structured edit: the change arrives as DATA (a positional splice), so the push
       ;; can carry the DELTA — {:splice [lo hi repl] :markers … :participants …} — instead
       ;; of each subscriber's full projection. O(change), not O(document): the seam that
@@ -210,63 +212,49 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
       ;; closure edits (:edit) and the seed keep the full projection contract. A BASED
       ;; splice is transformed first, and one with text PROPERTIES lays them on its text
       ;; (`buffer-serve-splice`).
-      ([:splice lo hi repl origin] (buffer-serve-splice buf
-                                     subs version rec lo hi repl origin nil nil))
-      ([:splice lo hi repl origin base] (buffer-serve-splice buf
-                                          subs version rec lo hi repl origin base nil))
-      ([:splice lo hi repl origin base properties] (buffer-serve-splice buf
-                                                     subs version rec lo hi repl origin base
-                                                     properties))
+      ([:splice lo hi repl origin]
+        (buffer-serve-splice buf subs version rec lo hi repl origin nil nil))
+      ([:splice lo hi repl origin base]
+        (buffer-serve-splice buf subs version rec lo hi repl origin base nil))
+      ([:splice lo hi repl origin base properties]
+        (buffer-serve-splice buf subs version rec lo hi repl origin base properties))
       ;; A cursor move as data: no text change at all — the push carries markers + names
       ;; only, so presence traffic on a large document never ships its text.
-      ([:marker-set id pos origin] (let (nb (buffer-marker-set buf id pos) v (inc version))
-                                     (do
-                                       (buffer-push-view subs
-                                         v
-                                         {:markers (buffer-markers nb)
-                                          :participants (get nb :participants {})}
-                                         origin)
-                                       (buffer-serve nb subs v rec))))
+      ([:marker-set id pos origin]
+        (let (nb (buffer-marker-set buf id pos) v (inc version))
+          (do
+            (buffer-push-view subs
+              v
+              {:markers (buffer-markers nb) :participants (get nb :participants {})}
+              origin)
+            (buffer-serve nb subs v rec))))
       ;; An appended line is a positional splice like any other: apply it at end-of-buffer,
       ;; RECORD it in the ring (a based splice computed before the append still transforms
       ;; correctly over it), and push the DELTA — so a log-backed buffer is as cheap to
       ;; subscribe to as a collaborative one (O(line), not O(document), per line).
-      ([:write s] (let (n (buffer-length buf)
-                        nb (replace-region buf n n s)
-                        v (inc version))
-                    (do
-                      (buffer-push-view subs
-                        v
-                        {:splice [n n s]
-                         :markers (buffer-markers nb)
-                         :participants (get nb :participants {})}
-                        nil)
-                      (buffer-serve nb
-                        subs
-                        v
-                        (take (cons [v n n (count s) nil] rec) 64)))))
+      ([:write s]
+        (let (n (buffer-length buf) nb (replace-region buf n n s) v (inc version))
+          (do
+            (buffer-push-view subs
+              v
+              {:splice [n n s] :markers (buffer-markers nb) :participants (get nb :participants {})}
+              nil)
+            (buffer-serve nb subs v (take (cons [v n n (count s) nil] rec) 64)))))
       ([:get f from r] (do (send from [:reply r (f buf)]) (buffer-serve buf subs version rec)))
       ;; An atomic [version view] snapshot — the RESYNC primitive: a client rebuilding
       ;; its copy after an ambiguous collision needs the text AND the version it
       ;; corresponds to in ONE reply, or edits applied between its query and the
       ;; answer replay onto the rebuilt copy (their queued pushes pass the version
       ;; check) and double themselves.
-      ([:sync proj from r] (do
-                             (send from [:reply r [version (proj buf)]])
-                             (buffer-serve buf subs version rec)))
-      ([:subscribe pid proj] (do
-                               (monitor pid)
-                               (send pid
-                                 [:buffer-updated
-                                   (self)
-                                   version
-                                   (if (nil? proj) nil (proj buf))
-                                   nil])
-                               (buffer-serve buf (cons {:pid pid :proj proj} subs) version rec)))
-      ([:unsubscribe pid] (buffer-serve buf
-                            (seq/reject subs (fn (s) (= (get s :pid) pid)))
-                            version
-                            rec))
+      ([:sync proj from r]
+        (do (send from [:reply r [version (proj buf)]]) (buffer-serve buf subs version rec)))
+      ([:subscribe pid proj]
+        (do
+          (monitor pid)
+          (send pid [:buffer-updated (self) version (if (nil? proj) nil (proj buf)) nil])
+          (buffer-serve buf (cons {:pid pid :proj proj} subs) version rec)))
+      ([:unsubscribe pid]
+        (buffer-serve buf (seq/reject subs (fn (s) (= (get s :pid) pid))) version rec))
       ([:down _ pid _]
         (let (ns (seq/reject subs (fn (s) (= (get s :pid) pid)))
               ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)
@@ -341,11 +329,11 @@ for `buffer-edit`.
     (editor/buffer-server/buffer-edit-value pid (fn (b) [b (editor/buffer/buffer-point b)]))   ;~> 0 — the point inside process `pid`"
   ((bp f) (buffer-edit-value bp nil 5000 f))
   ((bp origin f) (buffer-edit-value bp origin 5000 f))
-  ((bp origin timeout f) (let (r (buffer-edit-reply bp origin f))
-                           (receive
-                             ([:reply ^r v] v)
-                             (after timeout
-                               (error "buffer-edit-value: no reply after " timeout "ms"))))))
+  ((bp origin timeout f)
+    (let (r (buffer-edit-reply bp origin f))
+      (receive
+        ([:reply ^r v] v)
+        (after timeout (error "buffer-edit-value: no reply after " timeout "ms"))))))
 (sig buffer-edit-value (and (any fn -> any) (any any fn -> any) (any any int fn -> any)))
 
 ;; Two edits are not text splices, and transforming them as one is wrong: an overlap

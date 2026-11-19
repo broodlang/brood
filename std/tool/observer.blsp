@@ -880,15 +880,12 @@ evaluating `src` HERE (the remote eval minibuffer), and to `[:kill pid id from _
 by killing `pid` HERE and replying with the result — all sent back to the
 requester's pid (which routes over the link). Ignores anything else."
   (receive
-    ([:snapshot from _] (do
-                          (send from [:observe-reply (observe-local-snapshot)])
-                          (observe-agent-loop)))
-    ([:eval src from _] (do
-                          (send from [:eval-reply (observe-eval-string src)])
-                          (observe-agent-loop)))
-    ([:kill pid id from _] (do
-                             (send from [:kill-reply (observe-kill-msg pid id)])
-                             (observe-agent-loop)))
+    ([:snapshot from _]
+      (do (send from [:observe-reply (observe-local-snapshot)]) (observe-agent-loop)))
+    ([:eval src from _]
+      (do (send from [:eval-reply (observe-eval-string src)]) (observe-agent-loop)))
+    ([:kill pid id from _]
+      (do (send from [:kill-reply (observe-kill-msg pid id)]) (observe-agent-loop)))
     (_ (observe-agent-loop))))
 
 (defn observe-serve ()

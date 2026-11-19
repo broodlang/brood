@@ -117,11 +117,12 @@
 (let (me (self)
       big-string (string/repeat "A" 1048576))
   (let (worker (spawn (receive
-                        ([:echo s] (send me
-                                     [:reply
-                                       (count s)
-                                       (string/char-at s 0)
-                                       (string/char-at s (- (count s) 1))]))
+                        ([:echo s]
+                          (send me
+                            [:reply
+                              (count s)
+                              (string/char-at s 0)
+                              (string/char-at s (- (count s) 1))]))
                         (after 10000 :timeout))))
     (send worker [:echo big-string])
     (let (r (receive ([:reply len first-ch last-ch] [len first-ch last-ch]) (after 10000 :timeout)))

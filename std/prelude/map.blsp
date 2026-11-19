@@ -95,23 +95,21 @@ a wrong-typed one.
   ;; key skipped `%lookup-miss`, so a record collection answered the default for a key it
   ;; holds (KI-298). A `Lookup` that answers nil keeps the default. The VM and native code
   ;; run `PrimOp3::MapGet3`, which answers a plain map without the call.
-  ((coll k default) (cond
-                      (or (map? coll) (%record? coll))
-                        (let (v (%map-get coll k nil))
-                          (if (nil? v)
-                            (let (r (%lookup-miss coll k nil))
-                              (if (nil? r) (%map-get coll k default) r))
-                            v))
-                      (set? coll) (if (%set-has? coll k) k default)
-                      (nil? coll) default
-                      (string? coll)
-                        (if (int? k)
-                          (if (and (>= k 0) (< k (%string-length coll)))
-                            (string/char-at coll k)
-                            default)
-                          (%get-unanswerable coll k))
-                      (int? k) (nth coll k default)
-                      else (%get-unanswerable coll k)))
+  ((coll k default)
+    (cond
+      (or (map? coll) (%record? coll))
+        (let (v (%map-get coll k nil))
+          (if (nil? v)
+            (let (r (%lookup-miss coll k nil)) (if (nil? r) (%map-get coll k default) r))
+            v))
+      (set? coll) (if (%set-has? coll k) k default)
+      (nil? coll) default
+      (string? coll)
+        (if (int? k)
+          (if (and (>= k 0) (< k (%string-length coll))) (string/char-at coll k) default)
+          (%get-unanswerable coll k))
+      (int? k) (nth coll k default)
+      else (%get-unanswerable coll k)))
   ((coll k & default) (get coll k (first default))))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.

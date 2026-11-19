@@ -293,13 +293,14 @@ all). NONE never matches — a version constraint is about a selected version."
                 (let (state2 (nth acc 0) changed2 (nth acc 1))
                   (match (pg-ic-rel state2 ctx ic)
                     (:satisfied [:done [:conflict ic state2]])
-                    ([:almost unit-pkg] (let (term (get (get ic :terms) unit-pkg)
-                                              state3 (pg-derive state2
-                                                       ctx
-                                                       unit-pkg
-                                                       (pg-complement ctx unit-pkg term)
-                                                       ic))
-                                          [:cont [state3 (cons unit-pkg changed2)]]))
+                    ([:almost unit-pkg]
+                      (let (term (get (get ic :terms) unit-pkg)
+                            state3 (pg-derive state2
+                                     ctx
+                                     unit-pkg
+                                     (pg-complement ctx unit-pkg term)
+                                     ic))
+                        [:cont [state3 (cons unit-pkg changed2)]]))
                     (_ [:cont [state2 changed2]]))))
     [state changed]
     (get index pkg nil)))
@@ -461,14 +462,12 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
           ;; the learned incompatibility is now a unit at the backjump level; index + propagate
           ;; it and continue from the package it constrains.
           (pg-solve ctx (pg-index-add index (list learned)) state2 (keys (get learned :terms))))))
-    ([:ok state2] (match (pg-next-decision state2 ctx index)
-                    (:done [:ok (get state2 :decs)])
-                    ([:decide pkg version dep-ics discovered popped] (pg-solve ctx
-                                                                       (pg-index-add index dep-ics)
-                                                                       (pg-decide popped
-                                                                         ctx pkg version)
-                                                                       discovered))
-                    ([:no-versions pkg] [:error (pg-no-versions-msg state2 ctx index pkg)])))))
+    ([:ok state2]
+      (match (pg-next-decision state2 ctx index)
+        (:done [:ok (get state2 :decs)])
+        ([:decide pkg version dep-ics discovered popped]
+          (pg-solve ctx (pg-index-add index dep-ics) (pg-decide popped ctx pkg version) discovered))
+        ([:no-versions pkg] [:error (pg-no-versions-msg state2 ctx index pkg)])))))
 
 (defn- pg-propagate-list (state ctx index changed-list)
   (if (empty? changed-list)
@@ -583,32 +582,25 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
           (match (get ic :cause)
             ;; push the emit last so it pops after both premises' lines; visit the
             ;; left (deep) spine before the right, and only descend derived premises.
-            ([:derived a b] (pg-report-drive ctx
-                              (append (if (pg-ic-external? a) nil (list [:visit a]))
-                                (append (if (pg-ic-external? b) nil (list [:visit b]))
-                                  (cons [:emit ic] more)))
-                              acc))
+            ([:derived a b]
+              (pg-report-drive ctx
+                (append (if (pg-ic-external? a) nil (list [:visit a]))
+                  (append (if (pg-ic-external? b) nil (list [:visit b])) (cons [:emit ic] more)))
+                acc))
             ;; a bare leaf as the whole "derivation" (degenerate): emit its fact.
             (leaf (pg-report-drive ctx more (cons (pg-explain-leaf leaf) acc)))))))))
 
 ;; The one line a derived step contributes, inlining any external premise as its plain fact.
 (defn- pg-report-line (ctx ic)
   (match (get ic :cause)
-    ([:derived a b] (let (a-ext (pg-ic-external? a)
-                          b-ext (pg-ic-external? b)
-                          conseq (pg-consequence-str ctx ic))
-                      (cond
-                        (and a-ext b-ext)
-                          (str "Because "
-                            (pg-premise-str ctx a)
-                            " and "
-                            (pg-premise-str ctx b)
-                            ", "
-                            conseq
-                            ".")
-                        a-ext (str "And because " (pg-premise-str ctx a) ", " conseq ".")
-                        b-ext (str "And because " (pg-premise-str ctx b) ", " conseq ".")
-                        else (str "Thus, " conseq "."))))
+    ([:derived a b]
+      (let (a-ext (pg-ic-external? a) b-ext (pg-ic-external? b) conseq (pg-consequence-str ctx ic))
+        (cond
+          (and a-ext b-ext)
+            (str "Because " (pg-premise-str ctx a) " and " (pg-premise-str ctx b) ", " conseq ".")
+          a-ext (str "And because " (pg-premise-str ctx a) ", " conseq ".")
+          b-ext (str "And because " (pg-premise-str ctx b) ", " conseq ".")
+          else (str "Thus, " conseq "."))))
     (_ "")))
 
 (defn- pg-cause-leaves (cause acc)
@@ -629,15 +621,15 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 
 (defn- pg-explain-leaf (leaf)
   (match leaf
-    ([:root pkg constraint] (str "your project requires "
-                              (->string pkg)
-                              (resolver-constraint-suffix constraint)))
-    ([:dep pkg version dep-name dep-constraint] (str (->string pkg)
-                                                  " "
-                                                  version
-                                                  " requires "
-                                                  (->string dep-name)
-                                                  (resolver-constraint-suffix dep-constraint)))))
+    ([:root pkg constraint]
+      (str "your project requires " (->string pkg) (resolver-constraint-suffix constraint)))
+    ([:dep pkg version dep-name dep-constraint]
+      (str (->string pkg)
+        " "
+        version
+        " requires "
+        (->string dep-name)
+        (resolver-constraint-suffix dep-constraint)))))
 
 (defn- pg-leaf-packages (leaf)
   (match leaf

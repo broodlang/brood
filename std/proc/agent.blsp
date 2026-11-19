@@ -38,21 +38,20 @@ read+write primitive for compare-and-swap-style patterns."
 (defn- agent-loop (state)
   (receive
     ([:$call from r [:get f]] (send from [:reply r (agent-apply f state)]) (agent-loop state))
-    ([:$call from r [:update f]] (match (agent-apply f state)
-                                   ([:ok next] (send from [:reply r [:ok :ok]])
-                                     (agent-loop next))
-                                   (raised (send from [:reply r raised]) (agent-loop state))))
-    ([:$call from r [:get-and-update f]] (match (agent-apply (fn (current)
-                                                               (let (pair (f current))
-                                                                 (if (and (vector? pair)
-                                                                       (= (count pair) 2))
-                                                                   pair
-                                                                   (error "agent/get-and-update: f must return [result new-state], got "
-                                                                     (pr-str pair)))))
-                                                  state)
-                                           ([:ok [result next]] (send from [:reply r [:ok result]])
-                                             (agent-loop next))
-                                           (raised (send from [:reply r raised]) (agent-loop state))))
+    ([:$call from r [:update f]]
+      (match (agent-apply f state)
+        ([:ok next] (send from [:reply r [:ok :ok]]) (agent-loop next))
+        (raised (send from [:reply r raised]) (agent-loop state))))
+    ([:$call from r [:get-and-update f]]
+      (match (agent-apply (fn (current)
+                            (let (pair (f current))
+                              (if (and (vector? pair) (= (count pair) 2))
+                                pair
+                                (error "agent/get-and-update: f must return [result new-state], got "
+                                  (pr-str pair)))))
+               state)
+        ([:ok [result next]] (send from [:reply r [:ok result]]) (agent-loop next))
+        (raised (send from [:reply r raised]) (agent-loop state))))
     ([:$call from r :stop] (send from [:reply r :ok]))
     ([:$cast f] (agent-loop (f state)))
     ([:$stop] nil)

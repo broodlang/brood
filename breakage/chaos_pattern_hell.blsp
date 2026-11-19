@@ -180,16 +180,18 @@
 
 (defn parse-command (cmd)
   (match cmd
-    ([:move direction amount] (match direction
-                                (:north (str "go north " amount " steps"))
-                                (:south (str "go south " amount " steps"))
-                                (:east (str "go east " amount " steps"))
-                                (:west (str "go west " amount " steps"))
-                                (other (str "unknown direction: " (pr-str other)))))
-    ([:say who what] (match who
-                       (:player (str "player says: " what))
-                       (:npc (str "NPC says: " what))
-                       (_ (str "someone says: " what))))
+    ([:move direction amount]
+      (match direction
+        (:north (str "go north " amount " steps"))
+        (:south (str "go south " amount " steps"))
+        (:east (str "go east " amount " steps"))
+        (:west (str "go west " amount " steps"))
+        (other (str "unknown direction: " (pr-str other)))))
+    ([:say who what]
+      (match who
+        (:player (str "player says: " what))
+        (:npc (str "NPC says: " what))
+        (_ (str "someone says: " what))))
     ([:wait n] (str "waiting " n " turns"))
     (_ "unknown command")))
 

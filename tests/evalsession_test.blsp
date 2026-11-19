@@ -263,9 +263,8 @@ client whose mail can be told from the first's."
     (spawn (fn ()
              (letrec (loop (fn ()
                              (receive
-                               ([:event kind payload _gen _name] (do
-                                                                   (send me [:via tag kind payload])
-                                                                   (loop))))))
+                               ([:event kind payload _gen _name]
+                                 (do (send me [:via tag kind payload]) (loop))))))
                (loop))))))
 
 (defn- es-via (tag)

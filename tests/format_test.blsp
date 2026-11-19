@@ -134,6 +134,21 @@
       ;; Each `test result` pair on one body-indent line.
       (is (includes? out "(some-test-form x y z) (some-result-form a b)\n  (another-test-form")))))
 
+(describe "format: match clauses (ADR-770)"
+  (test "a clause body that does not fit after its pattern starts the next line"
+    (let (out (source "(match line ((str \"GET \" path) (serve-the-request-for path with-these-options and-some-more-arguments and-then-even-more-arguments here)) (_ nil))"))
+      (is (includes? out "((str \"GET \" path)\n    (serve-the-request-for path"))))
+  (test "a clause body that fits stays on the pattern's line"
+    (let (out (source "(match line ((str \"GET \" path) (serve path)) (_ nil))"))
+      (is (= out "(match line ((str \"GET \" path) (serve path)) (_ nil))\n"))))
+  (test "a clause's :when guard rides its pattern's line"
+    (let (out (source "(match line (_ :when (and (some-long-predicate-name line) (another-long-predicate-name line)) (do-something-with line and-more-arguments)))"))
+      (is (includes? out
+            "(_ :when (and (some-long-predicate-name line) (another-long-predicate-name line))\n"))))
+  (test "a call whose head is a symbol still hangs its first argument"
+    (let (out (source "(serve-the-request (let (a 1 b 2) (+ a b)) with-these-options and-some-more-arguments-here and-more)"))
+      (is (includes? out "(serve-the-request (let (a 1 b 2) (+ a b))")))))
+
 (describe "format: assoc pairs its key/value args"
   ;; `assoc` takes a collection then trailing key/value PAIRS. Broken,
   ;; the collection rides the head line and each k/v pair sits on one body line

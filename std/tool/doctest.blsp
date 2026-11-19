@@ -553,28 +553,28 @@ THIS process — `markdown-failures` gives each block a process of its own.
                                       "  — old marker: write ` ;=> ` for a case, ` ;~> ` for an illustration"))
                         else
                           (match (marked padded ";=>")
-                            ([:malformed] (continue (str here
-                                                      ": "
-                                                      (string/trim line)
-                                                      "  — malformed example: expected one form, a marker, one result")))
-                            ([:example form-text expected] (checked form-text
-                                                             (fn (form)
-                                                               (case-fault here
-                                                                 nil
-                                                                 (pr-str form)
-                                                                 (fn () (reflect/eval form))
-                                                                 expected))))
+                            ([:malformed]
+                              (continue (str here
+                                          ": "
+                                          (string/trim line)
+                                          "  — malformed example: expected one form, a marker, one result")))
+                            ([:example form-text expected]
+                              (checked form-text
+                                (fn (form)
+                                  (case-fault here
+                                    nil
+                                    (pr-str form)
+                                    (fn () (reflect/eval form))
+                                    expected))))
                             (_ (match (marked padded ";~>")
-                                 ([:malformed] (continue (str here
-                                                           ": "
-                                                           (string/trim line)
-                                                           "  — malformed example: expected one form, a marker, one result")))
-                                 ([:example form-text _] (checked form-text
-                                                           (fn (form)
-                                                             (illustration-fault here
-                                                               nil
-                                                               (pr-str form)
-                                                               form))))
+                                 ([:malformed]
+                                   (continue (str here
+                                               ": "
+                                               (string/trim line)
+                                               "  — malformed example: expected one form, a marker, one result")))
+                                 ([:example form-text _]
+                                   (checked form-text
+                                     (fn (form) (illustration-fault here nil (pr-str form) form))))
                                  (_ (walk (rest lines) (+ n 1) (append buffer [line]) faults))))))))))
     (apply vector (walk (string/split source "\n") start [] []))))
 

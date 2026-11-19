@@ -37,9 +37,10 @@
   (with (t (classify token))
     (match t
       ([:num n] (conj stack n))
-      ([:op f] (match stack
-                 ((b a & rest) (conj rest (f a b)))
-                 (_ (failure "not enough operands for " (pr-str token))))))))
+      ([:op f]
+        (match stack
+          ((b a & rest) (conj rest (f a b)))
+          (_ (failure "not enough operands for " (pr-str token))))))))
 
 (defn- result (stack)
   ;; NOTE the patterns are LIST patterns — `conj` prepends onto a list, so the stack is

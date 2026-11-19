@@ -32,8 +32,7 @@
     acc
     (receive
       ([:reply pid value] (collect what (set/disj pending pid) (conj acc value)))
-      ([:down _ pid reason] :when
-        (not (= reason :normal))
+      ([:down _ pid reason] :when (not (= reason :normal))
         (error (str what ": " pid " died before replying: " (pr-str reason))))
       (after *wait-ms*
         (error (str what

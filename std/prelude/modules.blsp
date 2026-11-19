@@ -1478,8 +1478,7 @@ of this process's never asks for this one."
   "`%require-await`'s wait: for the completion, the claimant's death, or — every
 `*require-cycle-check-ms*` — a cycle across processes, `checks` times before the backstop."
   (receive
-    ([:load-done r k failure] :when
-      (= r rref)
+    ([:load-done r k failure] :when (= r rref)
       (do
         (when mref (demonitor mref))
         ;; "Finished" includes FAILED — the error path releases waiters too, so that
@@ -1503,8 +1502,7 @@ of this process's never asks for this one."
     ;; dead pid, and `add_monitor` answers a dead target with an IMMEDIATE synthetic
     ;; `[:down … :noproc]` — so the cycle spins at 100% CPU with no delay in it, and
     ;; it poisons that module for every process, not just this one.
-    ([:down r _ _] :when
-      (= r mref)
+    ([:down r _ _] :when (= r mref)
       (do
         (%require-unwatch! key me rref nil)
         (%require-release-dead-claim! key loader)

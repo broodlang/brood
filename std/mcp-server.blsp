@@ -250,8 +250,8 @@ answers, dies, or overruns `:deadline` (epoch ms, nil for none) and is killed."
         ref (get call :ref)
         deadline (get call :deadline))
     (receive
-      ([:mcp-progress ^pid report] ((get call :emit) (progress-notification (get call :token)
-                                                       report))
+      ([:mcp-progress ^pid report]
+        ((get call :emit) (progress-notification (get call :token) report))
         (await-outcome call))
       ([:mcp-outcome ^pid outcome output] (receive ([:down ^ref _ _] nil))
         (if (= (first outcome) :ok) [:ok (second outcome) output] outcome))
@@ -444,8 +444,6 @@ killing `:pid`.
                      (send parent [:mcp-http-port (self) (tcp/local-port socket)])
                      (serve-loop socket handler))))
     (receive
-      ([:mcp-http-port ^pid port] {:pid pid
-                                   :port port
-                                   :token secret
-                                   :url (str "http://127.0.0.1:" port "/mcp")})
+      ([:mcp-http-port ^pid port]
+        {:pid pid :port port :token secret :url (str "http://127.0.0.1:" port "/mcp")})
       (after 5000 (error "mcp-server/start-http: the listener did not start")))))

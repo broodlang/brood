@@ -66,14 +66,11 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 (defn- debug-loop (state)
   (receive
     ([:trace entry from] (debug-loop (debug-record state {:kind :trace :pid from :entry entry})))
-    ([:span-enter span parent pid label] (debug-loop (debug-record state
-                                                       {:kind :span-enter
-                                                        :span span
-                                                        :parent parent
-                                                        :pid pid
-                                                        :label label})))
-    ([:span-exit span pid value] (debug-loop (debug-record state
-                                               {:kind :span-exit :span span :pid pid :value value})))
+    ([:span-enter span parent pid label]
+      (debug-loop (debug-record state
+                    {:kind :span-enter :span span :parent parent :pid pid :label label})))
+    ([:span-exit span pid value]
+      (debug-loop (debug-record state {:kind :span-exit :span span :pid pid :value value})))
     ([:break pid snapshot]
       ;; The worker is now blocked on receive awaiting [:resume] — record it as paused,
       ;; and tell whoever watches for breaks (`watch-breaks`: an editor, a DAP adapter).
@@ -86,8 +83,8 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
     ([:resume-all reply] (doseq (p (keys (get state :paused))) (send p [:resume]))
       (when reply (send reply [:resumed (count (get state :paused))]))
       (debug-loop (assoc state :paused {})))
-    ([:watch watcher] (debug-loop (assoc state
-                                    :watchers (conj (or (get state :watchers) []) watcher))))
+    ([:watch watcher]
+      (debug-loop (assoc state :watchers (conj (or (get state :watchers) []) watcher))))
     ([:query reply] (send reply [:state state])
       (debug-loop state))
     ([:stop reply] (when reply (send reply [:stopped]))

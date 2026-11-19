@@ -147,18 +147,18 @@
                (let (ls (tcp/listen "127.0.0.1" 0))
                  (send me [:port (tcp/local-port ls)])
                  (receive
-                   ([:tcp-accept ^ls c] (do
-                                          (tcp/controlling-process c (self))
-                                          (receive
-                                            ([:tcp ^c _] (do
-                                                           (tcp/send c
-                                                             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
-                                                           (tcp/send c
-                                                             "event: hello\r\ndata: world\r\n\r\n")
-                                                           (tcp/send c
-                                                             "data: {\"n\":1}\r\n\r\n")
-                                                           (tcp/close c)))
-                                            (after 5000 nil))))
+                   ([:tcp-accept ^ls c]
+                     (do
+                       (tcp/controlling-process c (self))
+                       (receive
+                         ([:tcp ^c _]
+                           (do
+                             (tcp/send c
+                               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+                             (tcp/send c "event: hello\r\ndata: world\r\n\r\n")
+                             (tcp/send c "data: {\"n\":1}\r\n\r\n")
+                             (tcp/close c)))
+                         (after 5000 nil))))
                    (after 5000 nil)))))
       (let (port (receive ([:port p] p) (after test/*wait-ms* :timeout)))
         (connect (str "http://127.0.0.1:" port "/events") me)
@@ -203,13 +203,12 @@ then close. Returns the port."
     (spawn (let (ls (tcp/listen "127.0.0.1" 0))
              (send me [:port (tcp/local-port ls)])
              (receive
-               ([:tcp-accept ^ls c] (do
-                                      (tcp/controlling-process c (self))
-                                      (receive ([:tcp ^c _] nil) (after 5000 nil))
-                                      (doseq (payload payloads)
-                                        (tcp/send c payload)
-                                        (proc/sleep 30))
-                                      (tcp/close c)))
+               ([:tcp-accept ^ls c]
+                 (do
+                   (tcp/controlling-process c (self))
+                   (receive ([:tcp ^c _] nil) (after 5000 nil))
+                   (doseq (payload payloads) (tcp/send c payload) (proc/sleep 30))
+                   (tcp/close c)))
                (after 5000 nil))))
     (receive ([:port p] p) (after test/*wait-ms* :timeout))))
 

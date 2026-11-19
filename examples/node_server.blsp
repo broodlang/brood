@@ -15,14 +15,10 @@
 
 (defn serve ()
   (receive
-    ([:hi from] (do
-                  (io/puts "[server] :hi from" from "— replying")
-                  (send from [:pong (self)])
-                  (serve)))
-    ([:ping from] (do
-                    (io/puts "[server] :ping from" from "— replying")
-                    (send from [:pong (self)])
-                    (serve)))
+    ([:hi from]
+      (do (io/puts "[server] :hi from" from "— replying") (send from [:pong (self)]) (serve)))
+    ([:ping from]
+      (do (io/puts "[server] :ping from" from "— replying") (send from [:pong (self)]) (serve)))
     (other (do (io/puts "[server] ignoring" other) (serve)))))
 
 (serve)

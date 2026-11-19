@@ -84,9 +84,8 @@ LISTENER process."
 (O(1) stack). A throwing handler is caught in `telemetry-dispatch`; an uncatchable
 handler fault kills only this process."
   (receive
-    ([:emit event measurements metadata] (do
-                                           (telemetry-run-handlers event measurements metadata)
-                                           (telemetry-listen)))
+    ([:emit event measurements metadata]
+      (do (telemetry-run-handlers event measurements metadata) (telemetry-listen)))
     ([:ping from r] (do (send from [:telemetry-pong r]) (telemetry-listen)))
     (:stop nil)))
 
@@ -329,9 +328,8 @@ Pure — the listener turns each pair into a stderr warning. Types are the check
 (defn- telemetry-runtime-loop ()
   "The watcher loop: re-emit each kernel event; stop (and disarm) on `:stop`."
   (receive
-    ([:system kind pid detail] (do
-                                 (telemetry-runtime-event kind pid detail)
-                                 (telemetry-runtime-loop)))
+    ([:system kind pid detail]
+      (do (telemetry-runtime-event kind pid detail) (telemetry-runtime-loop)))
     (:stop (do (proc/system-monitor nil) nil))))
 
 (defn watch-runtime (&optional opts)
@@ -487,13 +485,11 @@ folding the kernel snapshot builtins behind the same attach seam as `watch-runti
 that ships each emit of `event` to `subscriber`, tagged with `ref`; on `[:unsubscribe ref]`
 detach it. `subs` tracks the attached ids so a `:stop` cleans them all up."
   (receive
-    ([:subscribe event subscriber ref] (let (id [:remote ref])
-                                         (attach id
-                                           event
-                                           (fn (e m md)
-                                             (send subscriber [:remote-telemetry ref e m md])))
-                                         (send subscriber [:subscribed ref])
-                                         (telemetry-serve-loop (cons id subs))))
+    ([:subscribe event subscriber ref]
+      (let (id [:remote ref])
+        (attach id event (fn (e m md) (send subscriber [:remote-telemetry ref e m md])))
+        (send subscriber [:subscribed ref])
+        (telemetry-serve-loop (cons id subs))))
     ([:unsubscribe ref] (detach [:remote ref])
       (telemetry-serve-loop (seq/filter subs (fn (id) (not (= id [:remote ref]))))))
     (:stop (do (doseq (id subs) (detach id)) nil))

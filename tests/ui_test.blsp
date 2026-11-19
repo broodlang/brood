@@ -618,8 +618,7 @@
   (test "a message superseded while it is out for a pattern check is never delivered"
     (proc/send-latest (self) :race [:p 1])
     (assert= (receive
-               ([:p n] :when
-                 (do (when (= n 1) (proc/send-latest (self) :race [:p 2])) (number? n))
+               ([:p n] :when (do (when (= n 1) (proc/send-latest (self) :race [:p 2])) (number? n))
                  n))
       2)
     (assert= (receive (message message) (after 0 :empty)) :empty))
@@ -627,8 +626,7 @@
     (send (self) :other)
     (proc/send-latest (self) :race [:p 1])
     (assert= (receive
-               ([:p n] :when
-                 (do (when (= n 1) (proc/send-latest (self) :race [:p 2])) (number? n))
+               ([:p n] :when (do (when (= n 1) (proc/send-latest (self) :race [:p 2])) (number? n))
                  n))
       2)
     (assert= (receive (message message) (after 0 :empty)) :other)

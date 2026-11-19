@@ -461,8 +461,8 @@ request). Reply the new pid, or `:not-found`."
   ;; that hangs forever against a dead or wedged supervisor.
   (receive
     ([:EXIT pid reason] (supervisor-handle-exit state pid reason))
-    ([:$call from r :which-children] (send from
-                                       [:reply r (supervisor-summarize (get state :children))])
+    ([:$call from r :which-children]
+      (send from [:reply r (supervisor-summarize (get state :children))])
       (supervisor-loop state))
     ([:$call from r :count-children] (send from [:reply r (count (get state :children))])
       (supervisor-loop state))

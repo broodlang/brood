@@ -69,9 +69,10 @@
 (defn gui-probe (mgr ready)
   (send mgr [:attach (self) 80 24])
   (receive
-    ([:attached session] (do
-                           (send ready [:ready (self) session])
-                           (editor/attach/attach-display-loop nil session (gui-mock-display ready))))
+    ([:attached session]
+      (do
+        (send ready [:ready (self) session])
+        (editor/attach/attach-display-loop nil session (gui-mock-display ready))))
     (after test/*wait-ms* (send ready [:ready :no-attach :no-attach]))))
 
 ;; A shared-session client played in-process: attach, announce our pid, then loop —
@@ -79,19 +80,19 @@
 ;; and shipping a [:press k] from the test to the shared session as a keystroke.
 (defn shared-client-loop (session report last)
   (receive
-    ([:frame f] (let (t (frame-text f))
-                  (do
-                    (when (not (= t last)) (send report [:cframe (self) t]))
-                    (shared-client-loop session report t))))
+    ([:frame f]
+      (let (t (frame-text f))
+        (do
+          (when (not (= t last)) (send report [:cframe (self) t]))
+          (shared-client-loop session report t))))
     ([:press k] (do (send session [:key k]) (shared-client-loop session report last)))
     ([:bye] nil)))
 
 (defn shared-client (mgr report)
   (send mgr [:attach (self) 80 24])
   (receive
-    ([:attached session] (do
-                           (send report [:cready (self)])
-                           (shared-client-loop session report :none)))
+    ([:attached session]
+      (do (send report [:cready (self)]) (shared-client-loop session report :none)))
     (after test/*wait-ms* (send report [:cready :no-attach]))))
 
 ;; Receive `[:drew t]` frames until one equals `want` (skipping tick re-renders of an
@@ -549,9 +550,8 @@
   ;; the text of the first frame that starts with `prefix`, skipping those before it (the
   ;; identity's frame can come before or after a key's); :none if none does
   (receive
-    ([:frame f] (if (string/starts-with? (frame-text f) prefix)
-                  (frame-text f)
-                  (await-frame-prefix prefix)))
+    ([:frame f]
+      (if (string/starts-with? (frame-text f) prefix) (frame-text f) (await-frame-prefix prefix)))
     (after test/*wait-ms* :none)))
 
 (defn resume-client (mgr report opts)
@@ -559,12 +559,13 @@
   ;; told to die — its death is the dropped link
   (send mgr [:attach (self) 80 24 opts])
   (receive
-    ([:attached s] (do
-                     (receive ([:frame _] nil) (after test/*wait-ms* nil))
-                     (send s [:key "+"])
-                     (let (seen (await-frame-prefix "n=1"))
-                       (send report [:client s seen])
-                       (resume-client-wait report))))
+    ([:attached s]
+      (do
+        (receive ([:frame _] nil) (after test/*wait-ms* nil))
+        (send s [:key "+"])
+        (let (seen (await-frame-prefix "n=1"))
+          (send report [:client s seen])
+          (resume-client-wait report))))
     (after test/*wait-ms* (send report [:client nil :no-attach]))))
 
 (defn await-frame-text (wanted)
@@ -766,12 +767,14 @@
     ;; the PRIMARY pair (ADR-562): a highlight, and a middle click's ask
     ("h" (assoc m :sent (editor/serve/client-primary-set "highlighted")))
     ("m" (assoc m :asked (editor/serve/client-primary-ask)))
-    ([:clipboard ref text] (if (and (not (nil? ref)) (= ref (get m :asked)))
-                             (assoc m :clip (or text "nothing") :asked nil)
-                             (assoc m :ignored (inc (get m :ignored 0)))))
-    ([:primary ref text] (if (and (not (nil? ref)) (= ref (get m :asked)))
-                           (assoc m :clip (str "primary " (or text "nothing")) :asked nil)
-                           (assoc m :ignored (inc (get m :ignored 0)))))
+    ([:clipboard ref text]
+      (if (and (not (nil? ref)) (= ref (get m :asked)))
+        (assoc m :clip (or text "nothing") :asked nil)
+        (assoc m :ignored (inc (get m :ignored 0)))))
+    ([:primary ref text]
+      (if (and (not (nil? ref)) (= ref (get m :asked)))
+        (assoc m :clip (str "primary " (or text "nothing")) :asked nil)
+        (assoc m :ignored (inc (get m :ignored 0)))))
     (_ m)))
 
 (defn clip-attach (mgr)
@@ -950,13 +953,12 @@
 (defn supervised-window-client (mgr report)
   (send mgr [:attach (self) 80 24])
   (receive
-    ([:attached loop-process] (do
-                                (monitor loop-process)
-                                (send report [:ready (self)])
-                                (editor/attach/attach-display-loop nil
-                                  loop-process
-                                  (gui-mock-display report))
-                                (send report [:client-ended])))
+    ([:attached loop-process]
+      (do
+        (monitor loop-process)
+        (send report [:ready (self)])
+        (editor/attach/attach-display-loop nil loop-process (gui-mock-display report))
+        (send report [:client-ended])))
     (after test/*wait-ms* (send report [:ready :no-attach]))))
 
 ;; A served typewriter that can die: a one-letter key is appended (and the text retained),
@@ -1190,13 +1192,13 @@
 (defn observing-client-loop (report answers?)
   (receive
     ([:attached s] (do (send report [:observed-attached s]) (observing-client-loop report answers?)))
-    ([:reattached s _ _] (do
-                           (send report [:observed-reattached s])
-                           (observing-client-loop report answers?)))
-    ([:ping from asked] (do
-                          (when answers? (send from [:pong asked]))
-                          (send report [:observed-ping])
-                          (observing-client-loop report answers?)))
+    ([:reattached s _ _]
+      (do (send report [:observed-reattached s]) (observing-client-loop report answers?)))
+    ([:ping from asked]
+      (do
+        (when answers? (send from [:pong asked]))
+        (send report [:observed-ping])
+        (observing-client-loop report answers?)))
     ([:bye] (do (send report [:observed-bye]) (observing-client-loop report answers?)))
     (:deaf (observing-client-loop report false))
     (:die nil)
@@ -1215,12 +1217,13 @@
 (defn numbered-client (mgr report opts)
   (send mgr [:attach (self) 80 24 opts])
   (receive
-    ([:attached s] (do
-                     (send s [:key "+" false 1])
-                     (send s [:key "+" false 2])
-                     (send s [:key "+" false 3])
-                     (send report [:numbered-client s])
-                     (receive (:die nil))))
+    ([:attached s]
+      (do
+        (send s [:key "+" false 1])
+        (send s [:key "+" false 2])
+        (send s [:key "+" false 3])
+        (send report [:numbered-client s])
+        (receive (:die nil))))
     (after test/*wait-ms* (send report [:numbered-client nil]))))
 
 ;; The counter, whose FIRST loop dies folding a client's return — before it can take a key

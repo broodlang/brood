@@ -982,9 +982,8 @@
 ;; The push side of buffers-as-processes: subscribers get the new projection on every edit.
 (defn buf-relay-loop (bp tag report)
   (receive
-    ([:buffer-updated _bp v txt _] (do
-                                     (send report [:relayed tag v txt])
-                                     (buf-relay-loop bp tag report)))))
+    ([:buffer-updated _bp v txt _]
+      (do (send report [:relayed tag v txt]) (buf-relay-loop bp tag report)))))
 (defn buf-relay (bp tag report)
   (do (subscribe-buffer bp buffer-text) (buf-relay-loop bp tag report)))
 (defn drain-relayed (want acc)

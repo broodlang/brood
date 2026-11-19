@@ -292,10 +292,11 @@ hand-overs — or nil on timeout. A parked session waits no longer than its time
 and ends when that is up."
   (let (client (table/get state :client nil))
     (receive
-      ([:key k held? number] (do
-                               (remote-note-seq state number)
-                               (table/put state :held? held?)
-                               [(remote-note-resize state k) true]))
+      ([:key k held? number]
+        (do
+          (remote-note-seq state number)
+          (table/put state :held? held?)
+          [(remote-note-resize state k) true]))
       ([:key k held?] (do (table/put state :held? held?) [(remote-note-resize state k) true]))
       ([:key k] [(remote-note-resize state k) true])
       ([:detach] [:close true])
@@ -390,10 +391,11 @@ app monitors every hosted buffer process, whose `[:down …]` must reach its upd
 input for rehost/reshare, not tear the session down)."
   (let (client (table/get state :client nil))
     (receive
-      ([:key k held? number] (do
-                               (remote-note-seq state number)
-                               (table/put state :held? held?)
-                               (remote-note-resize state k)))
+      ([:key k held? number]
+        (do
+          (remote-note-seq state number)
+          (table/put state :held? held?)
+          (remote-note-resize state k)))
       ([:key k held?] (do (table/put state :held? held?) (remote-note-resize state k)))
       ; a client that does not say
       ([:key k] (remote-note-resize state k))
@@ -412,10 +414,10 @@ input for rehost/reshare, not tear the session down)."
 session it was handled ([[serve-handled]]), so no restarted loop is given it again. Answers
 what handling it answered: the app's input, or nil."
   (let (input (match message
-                ([:adopt token adopter cols rows] (remote-adopt state
-                                                    resume token adopter cols rows))
-                ([:claim token claimant cols rows] (remote-claim state
-                                                     resume token claimant cols rows))
+                ([:adopt token adopter cols rows]
+                  (remote-adopt state resume token adopter cols rows))
+                ([:claim token claimant cols rows]
+                  (remote-claim state resume token claimant cols rows))
                 ([:client-can from capabilities] (remote-note-capabilities state from capabilities))))
     (do (serve-handled state message) input)))
 
@@ -704,23 +706,18 @@ ends, [[serve-loop-ended]]."
   (let (loop-process (:loop session))
     (receive
       ([:editor/serve/retain value] (serve-supervise (assoc session :retained value)))
-      ([:editor/serve/session-state facts] (serve-supervise (assoc session
-                                                              :client (:client facts)
-                                                              :size
-                                                                (or (:size facts) (:size session))
-                                                              :parked-at (:parked-at facts))))
+      ([:editor/serve/session-state facts]
+        (serve-supervise (assoc session
+                           :client (:client facts)
+                           :size (or (:size facts) (:size session))
+                           :parked-at (:parked-at facts))))
       ;; a loop handled one: no restarted loop is given it again
-      ([:editor/serve/handled message] (serve-supervise (assoc session
-                                                          :pending
-                                                            (serve-pending-handled (:pending session)
-                                                              message))))
+      ([:editor/serve/handled message]
+        (serve-supervise (assoc session :pending (serve-pending-handled (:pending session) message))))
       ;; the manager's word for the loop: a parked session adopted, one asked to hand itself
       ;; over, what a client can do
-      ((and message (or [:adopt _ _ _ _] [:claim _ _ _ _] [:client-can _ _])) (do
-                                                                                (send loop-process
-                                                                                  message)
-                                                                                (serve-supervise (serve-note-forwarded session
-                                                                                                   message))))
+      ((and message (or [:adopt _ _ _ _] [:claim _ _ _ _] [:client-can _ _]))
+        (do (send loop-process message) (serve-supervise (serve-note-forwarded session message))))
       ([:EXIT ^loop-process reason] (serve-loop-ended session reason))
       (_ (serve-supervise session)))))
 
@@ -731,11 +728,10 @@ client capabilities]`), so a restarted loop knows what its client can do."
   (let (pending (conj (:pending session) message)
         kept (if (> (count pending) serve-pending-max) (into [] (rest pending)) pending))
     (match message
-      ([:client-can client capabilities] (assoc session
-                                           :pending kept
-                                           :capabilities
-                                             (assoc (:capabilities session)
-                                               client capabilities)))
+      ([:client-can client capabilities]
+        (assoc session
+          :pending kept
+          :capabilities (assoc (:capabilities session) client capabilities)))
       (_ (assoc session :pending kept)))))
 
 (defn- serve-crash-hook (on-crash retained death)
@@ -1038,19 +1034,19 @@ monitor fire and closes cleanly. Tail-recursive."
     (receive
       ([:attach client cols rows] (again (serve-attach state app client cols rows {})))
       ([:attach client cols rows given] (again (serve-attach state app client cols rows given)))
-      ([:parked session token] (again (if (= token (map/get-in state [:sessions session :token]))
-                                        (map/assoc-in state [:sessions session :parked?] true)
-                                        state)))
+      ([:parked session token]
+        (again (if (= token (map/get-in state [:sessions session :token]))
+                 (map/assoc-in state [:sessions session :parked?] true)
+                 state)))
       ([:claimed _session client] (again (serve-forget state :pending client)))
-      ([:declined session client] (again (if (= session
-                                               (map/get-in state [:pending client :asking]))
-                                           (serve-ask-next state app client)
-                                           state)))
+      ([:declined session client]
+        (again (if (= session (map/get-in state [:pending client :asking]))
+                 (serve-ask-next state app client)
+                 state)))
       ([:down _ p _] (again (serve-session-down state app p)))
-      ([:shutdown from r] (let (sessions (keys (:sessions state)))
-                            (do
-                              (doseq (s sessions) (exit s :kill))
-                              (send from [:reply r (count sessions)]))))
+      ([:shutdown from r]
+        (let (sessions (keys (:sessions state)))
+          (do (doseq (s sessions) (exit s :kill)) (send from [:reply r (count sessions)]))))
       (_ (again state)))))
 
 (defn serve-stop (&optional mgr)
@@ -1124,16 +1120,14 @@ current frame, if any); `[:remove pid]` drops one; `[:frame f]` stores + broadca
 every client; `[:size reply]` replies `[:hub-size c r]`; `[:shutdown]` tells all clients to
 close (`[:bye]`). Tail-recursive; one hub per shared session."
   (receive
-    ([:add pid] (do
-                  (when frame (send pid [:frame frame]))
-                  (shared-hub (cons pid clients) frame size)))
+    ([:add pid]
+      (do (when frame (send pid [:frame frame])) (shared-hub (cons pid clients) frame size)))
     ([:remove pid] (shared-hub (seq/reject clients (fn (p) (= p pid))) frame size))
     ([:frame f] (do (doseq (p clients) (serve-send-frame p f)) (shared-hub clients f size)))
     ;; the shared loop is busy, or no longer: every client's window shows it (ADR-491)
     ([:busy on] (do (doseq (p clients) (serve-send-busy p on)) (shared-hub clients frame size)))
-    ([:size reply] (do
-                     (send reply [:hub-size (first size) (second size)])
-                     (shared-hub clients frame size)))
+    ([:size reply]
+      (do (send reply [:hub-size (first size) (second size)]) (shared-hub clients frame size)))
     ([:shutdown] (doseq (p clients) (send p [:bye])))))
 
 (defn- shared-hub-size (hub)
@@ -1188,16 +1182,18 @@ has no per-participant state, so opts are accepted and ignored), add the client 
 and tell it the shared session pid (so it ships keys there); monitor it so its death drops
 it from the hub. Tail-recursive."
   (receive
-    ([:attach client _cols _rows] (do
-                                    (monitor client)
-                                    (send hub [:add client])
-                                    (send client [:attached session])
-                                    (serve-shared-manager session hub)))
-    ([:attach client _cols _rows _opts] (do
-                                          (monitor client)
-                                          (send hub [:add client])
-                                          (send client [:attached session])
-                                          (serve-shared-manager session hub)))
+    ([:attach client _cols _rows]
+      (do
+        (monitor client)
+        (send hub [:add client])
+        (send client [:attached session])
+        (serve-shared-manager session hub)))
+    ([:attach client _cols _rows _opts]
+      (do
+        (monitor client)
+        (send hub [:add client])
+        (send client [:attached session])
+        (serve-shared-manager session hub)))
     ([:down _ client _] (do (send hub [:remove client]) (serve-shared-manager session hub)))
     ;; serve-stop: tell every client goodbye (the hub fans [:bye]), end the session
     ([:shutdown from r] (do (send hub [:shutdown]) (exit session :kill) (send from [:reply r 1])))

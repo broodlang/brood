@@ -214,11 +214,12 @@
     (let (me (self))
       (spawn (fn () (send me [(merge {:z 1} (point 1 2)) (merge (point 1 2) {:y 9})])))
       (receive
-        ([plain updated] (do
-                           (assert= :map (type-of plain))
-                           (assert= plain {:x 1 :y 2 :z 1})
-                           (assert= (record-id updated) :record-test/point)
-                           (assert= (point-y updated) 9)))))))
+        ([plain updated]
+          (do
+            (assert= :map (type-of plain))
+            (assert= plain {:x 1 :y 2 :z 1})
+            (assert= (record-id updated) :record-test/point)
+            (assert= (point-y updated) 9)))))))
 
 ;; ---- a record name is a type (in a `sig`) -----------------------------------
 ;;

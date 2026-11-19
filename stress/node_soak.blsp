@@ -32,11 +32,12 @@
 
 (defn- relay-loop ()
   (receive
-    ([:hop hub lap route] (do
-                            (if (empty? route)
-                              (send hub [:lap lap])
-                              (send {:name :relay :node (first route)} [:hop hub lap (rest route)]))
-                            (relay-loop)))
+    ([:hop hub lap route]
+      (do
+        (if (empty? route)
+          (send hub [:lap lap])
+          (send {:name :relay :node (first route)} [:hop hub lap (rest route)]))
+        (relay-loop)))
     ([:crash] (error "node-soak: relay told to crash"))
     (_ (relay-loop))))
 

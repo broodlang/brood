@@ -265,14 +265,11 @@ transitively-closed lock file and puts each dep's source on *load-path*."
   (if (= remaining 0)
     acc
     (receive
-      ([:fetched name result] (match result
-                                ([:ok releases] (package-gather-frontier me
-                                                  (- remaining 1)
-                                                  (cons [name releases] acc)))
-                                ([:error message] (error "package: fetching "
-                                                    (->string name)
-                                                    " from the registry failed: "
-                                                    message)))))))
+      ([:fetched name result]
+        (match result
+          ([:ok releases] (package-gather-frontier me (- remaining 1) (cons [name releases] acc)))
+          ([:error message]
+            (error "package: fetching " (->string name) " from the registry failed: " message)))))))
 
 ;; The distinct dep-name symbols across a package's releases — the frontier to prefetch next.
 (defn- package-release-dep-names (releases)

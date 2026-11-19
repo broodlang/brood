@@ -497,7 +497,20 @@ keyword (`:next`) is not one.
                         (multi-arity-defn? head args) 1
                         (>= hdr-count 0) (math/min hdr-count (count args))
                         (nil? args) 0
+                        ;; a clause's guard rides with its pattern: `(pattern :when guard`
+                        (clause-guard? args) 2
                         (nil? (single-line (first args))) 0
+                        ;; a CLAUSE — a head that is a pattern, not a symbol naming what is
+                        ;; called — keeps its body on the head line only when it fits there;
+                        ;; otherwise the body starts the next line at the body indent, where a
+                        ;; call's first arg would instead hang deep under the pattern's end
+                        (and (clause-head? head)
+                          (> (+ indent
+                               2
+                               (count (or (single-line head) ""))
+                               (count (single-line (first args))))
+                            (width)))
+                          0
                         ;; A comment sitting between the head and its first
                         ;; arg must stay visible: riding the arg up would skip
                         ;; over the comment's `kids` slot (it precedes the
@@ -535,6 +548,16 @@ keyword (`:next`) is not one.
               body-text
               (if (last-nonws-comment? kids) (str "\n" (indent-of indent)) "")
               close))))))
+
+;; A list whose head is a pattern rather than a symbol is a clause — `((str "GET " path) body)`,
+;; `([:ok value] body)` — whose body is not a call's argument and reads best below its pattern.
+(defn- clause-head? (head) (not (includes? [:symbol :keyword] (node-kind head))))
+
+;; `:when guard …`: the guard of a `match`/`receive`/`fn` clause, which belongs on the pattern's line.
+(defn- clause-guard? (args)
+  (and (not (nil? (rest args)))
+    (= (node-kind (first args)) :keyword)
+    (= (node-text (first args)) ":when")))
 
 ;; The comments before the first structural form — `[;; why\n (fn () …)]` — each on its
 ;; own line right after the open bracket, the head starting on the next line at `column` —

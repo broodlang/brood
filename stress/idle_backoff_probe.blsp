@@ -20,9 +20,10 @@
   (if (= n 0)
     [first-at last-at]
     (receive
-      ([:done t] (collect (- n 1)
-                   (if (nil? first-at) t (math/min first-at t))
-                   (if (nil? last-at) t (math/max last-at t)))))))
+      ([:done t]
+        (collect (- n 1)
+          (if (nil? first-at) t (math/min first-at t))
+          (if (nil? last-at) t (math/max last-at t)))))))
 
 (let (me (self) t0 (os/now))
   (doseq (_ (range k)) (spawn (sleeper me)))

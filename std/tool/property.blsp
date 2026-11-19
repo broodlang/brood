@@ -206,29 +206,29 @@
     (property/replay (property/vector-of (property/int 0 9)) [1 4 1 2 0])   ;=> [4 2]
     (property/replay (property/vector-of (property/int 0 9) {:min 2}) [])   ;=> [0 0]"
   ((element) (vector-of element {}))
-  ((element options) (let (minimum (get options :min 0)
-                           maximum (get options :max (math/max 100 minimum))
-                           extra (math/max 0 (- (get options :average (+ minimum 5)) minimum))
-                           sampler-for (fn (size)
-                                         (let (scaled (* extra size))
-                                           (flag-sampler (/ scaled (+ scaled 1.0))))))
-                       (make (str "vector-of " (get element :label))
-                         (fn (start)
-                           (let (sampler (sampler-for (get start :size 1.0)))
-                             (letrec (go (fn (items current)
-                                           (let (n (count items))
-                                             (cond
-                                               (< n minimum)
-                                                 (let ([value after] (run element current))
-                                                   (go (conj items value) after))
-                                               (>= n maximum) [items current]
-                                               else
-                                                 (let ([more after] (draw current 1 sampler))
-                                                   (if (= more 0)
-                                                     [items after]
-                                                     (let ([value after-value] (run element after))
-                                                       (go (conj items value) after-value))))))))
-                               (go [] start))))))))
+  ((element options)
+    (let (minimum (get options :min 0)
+          maximum (get options :max (math/max 100 minimum))
+          extra (math/max 0 (- (get options :average (+ minimum 5)) minimum))
+          sampler-for (fn (size)
+                        (let (scaled (* extra size)) (flag-sampler (/ scaled (+ scaled 1.0))))))
+      (make (str "vector-of " (get element :label))
+        (fn (start)
+          (let (sampler (sampler-for (get start :size 1.0)))
+            (letrec (go (fn (items current)
+                          (let (n (count items))
+                            (cond
+                              (< n minimum)
+                                (let ([value after] (run element current))
+                                  (go (conj items value) after))
+                              (>= n maximum) [items current]
+                              else
+                                (let ([more after] (draw current 1 sampler))
+                                  (if (= more 0)
+                                    [items after]
+                                    (let ([value after-value] (run element after))
+                                      (go (conj items value) after-value))))))))
+              (go [] start))))))))
 
 (defn map-of "A generator of maps with keys from `key` and values from `value`; `options` are `vector-of`'s, bounding the number of pairs drawn (a repeated key keeps the last).
 
@@ -289,10 +289,9 @@
     (property/replay (property/string-of \"ab\") [1 1 1 0 0])   ;=> \"ba\"
     (property/replay (property/string-of \"xyz\" {:min 3}) [])   ;=> \"xxx\""
   ((alphabet) (string-of alphabet {}))
-  ((alphabet options) (let (element (if (generator? alphabet)
-                                      alphabet
-                                      (elements (string/->graphemes alphabet))))
-                        (fmap (vector-of element options) (fn (pieces) (string/join pieces ""))))))
+  ((alphabet options)
+    (let (element (if (generator? alphabet) alphabet (elements (string/->graphemes alphabet))))
+      (fmap (vector-of element options) (fn (pieces) (string/join pieces ""))))))
 
 (defn string "A generator of Unicode strings (`character`s); `options` are `vector-of`'s.
 
@@ -304,16 +303,15 @@
 
     (property/replay (property/such-that (property/int 0 9) (fn (n) (> n 2))) [1 5])   ;=> 5"
   ((generator predicate) (such-that generator predicate 100))
-  ((generator predicate tries) (make (str "such-that " (get generator :label))
-                                 (fn (start)
-                                   (letrec (attempt (fn (remaining current)
-                                                      (if (<= remaining 0)
-                                                        (invalid "such-that")
-                                                        (let ([value after] (run generator current))
-                                                          (if (predicate value)
-                                                            [value after]
-                                                            (attempt (dec remaining) after))))))
-                                     (attempt tries start))))))
+  ((generator predicate tries)
+    (make (str "such-that " (get generator :label))
+      (fn (start)
+        (letrec (attempt (fn (remaining current)
+                           (if (<= remaining 0)
+                             (invalid "such-that")
+                             (let ([value after] (run generator current))
+                               (if (predicate value) [value after] (attempt (dec remaining) after))))))
+          (attempt tries start))))))
 
 (defn from-rng (function)
   "A generator over a `seed -> [value next-seed]` function (`rand/int`, `seq/shuffle`, …): one 32-bit choice becomes the seed. It reproduces, but shrinks only by trying smaller seeds — build the value from this module's generators when a small counterexample matters.
@@ -342,13 +340,14 @@
 
     (count (property/sample (property/int 0 9) 5 42))   ;=> 5"
   ((generator n) (sample generator n 1))
-  ((generator n seed) (letrec (go (fn (values current remaining)
-                                    (if (<= remaining 0)
-                                      values
-                                      (go (conj values (generate generator current))
-                                        (next-trial-seed current)
-                                        (dec remaining)))))
-                        (go [] seed n))))
+  ((generator n seed)
+    (letrec (go (fn (values current remaining)
+                  (if (<= remaining 0)
+                    values
+                    (go (conj values (generate generator current))
+                      (next-trial-seed current)
+                      (dec remaining)))))
+      (go [] seed n))))
 
 ;; ---- running a property -----------------------------------------------------
 
@@ -523,9 +522,10 @@ A pass is `{:passed true :trials n :seed s}`. A failure is `{:passed false :valu
     (get (property/check (property/vector-of (property/int 0 100)) (fn (xs) (not (includes? xs 42))) {:trials 500}) :value)   ;=> [42]
     (get (property/check (property/int 0 100) (fn (n) (< n 1000))) :passed)   ;=> true"
   ((generator predicate) (check generator predicate {}))
-  ((generator predicate options) (when (not (generator? generator))
-                                   (error "property/check: not a generator (build one with property/int, property/vector-of, …; a seed function wraps with property/from-rng): "
-                                     generator))
+  ((generator predicate options)
+    (when (not (generator? generator))
+      (error "property/check: not a generator (build one with property/int, property/vector-of, …; a seed function wraps with property/from-rng): "
+        generator))
     (let (seed (get options :seed 1))
       (run-trials {:generator generator
                    :predicate predicate

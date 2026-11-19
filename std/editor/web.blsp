@@ -124,23 +124,24 @@ session's own messages — so a restart's resend and a new input never race over
 and an input posted after the restart goes to the new loop, numbered after the rest
 (ADR-605)."
   (receive
-    ([:editor/web/input m] (do
-                             (send session (tab-input-message id m))
-                             (stream sock id session supervisor)))
+    ([:editor/web/input m]
+      (do (send session (tab-input-message id m)) (stream sock id session supervisor)))
     ([:attached next] (stream sock id next supervisor))
     ([:session given] (do (monitor given) (tab-supervised id) (stream sock id session given)))
     ;; a restarted loop: the tab's input goes to it, every input the dead one never took
     ;; sent again first
-    ([:reattached next given taken] (do
-                                      (when (nil? supervisor) (monitor given))
-                                      (tab-supervised id)
-                                      (tab-resend-after id next taken)
-                                      (stream sock id next given)))
-    ([:down _ who _] (when (and supervisor (not (= who supervisor)))
-                       (stream sock id session supervisor)))
-    ([:frame f] (let (j (frame-json f))
-                  (when j (sse/emit sock j "frame"))
-                  (stream sock id session supervisor)))
+    ([:reattached next given taken]
+      (do
+        (when (nil? supervisor) (monitor given))
+        (tab-supervised id)
+        (tab-resend-after id next taken)
+        (stream sock id next given)))
+    ([:down _ who _]
+      (when (and supervisor (not (= who supervisor))) (stream sock id session supervisor)))
+    ([:frame f]
+      (let (j (frame-json f))
+        (when j (sse/emit sock j "frame"))
+        (stream sock id session supervisor)))
     ([:texture tex rgba w h] (sse/emit sock (texture-json tex rgba w h) "texture")
       (stream sock id session supervisor))
     ([:texture-free tex] (sse/emit sock (json/encode {:tex tex}) "texture-free")

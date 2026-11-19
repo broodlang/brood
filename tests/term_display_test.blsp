@@ -51,13 +51,14 @@ child exited."
   (if (pred (:vt state))
     state
     (receive
-      ([:proc ^p data] (read-until p
-                         (assoc state
-                           :vt (vt/feed (:vt state) data)
-                           :raw (str (:raw state "") data)
-                           :bytes (+ (:bytes state) (count data)))
-                         pred
-                         ms))
+      ([:proc ^p data]
+        (read-until p
+          (assoc state
+            :vt (vt/feed (:vt state) data)
+            :raw (str (:raw state "") data)
+            :bytes (+ (:bytes state) (count data)))
+          pred
+          ms))
       ([:proc-closed ^p _] (assoc state :closed true))
       (after ms state))))
 
@@ -66,13 +67,14 @@ child exited."
   (if (includes? (:raw state "") needle)
     state
     (receive
-      ([:proc ^p data] (read-raw-until p
-                         (assoc state
-                           :vt (vt/feed (:vt state) data)
-                           :raw (str (:raw state "") data)
-                           :bytes (+ (:bytes state) (count data)))
-                         needle
-                         ms))
+      ([:proc ^p data]
+        (read-raw-until p
+          (assoc state
+            :vt (vt/feed (:vt state) data)
+            :raw (str (:raw state "") data)
+            :bytes (+ (:bytes state) (count data)))
+          needle
+          ms))
       ([:proc-closed ^p _] (assoc state :closed true))
       (after ms state))))
 

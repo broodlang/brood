@@ -791,13 +791,12 @@ only; `tests/` files come from [[collect-tests]].
       ;; a worker that died mid-job left its module unloaded (`require-one` released its
       ;; waiters); the sequential pass after the pool loads it. One this driver killed is not a
       ;; death to report.
-      ([:down _ pid reason] (project-load-drive jobs
-                              (set/disj workers pid)
-                              stopped
-                              failed?
-                              (if (or (= reason :normal) (and failed? (= reason :killed)))
-                                deaths
-                                (conj deaths reason)))))))
+      ([:down _ pid reason]
+        (project-load-drive jobs
+          (set/disj workers pid)
+          stopped
+          failed?
+          (if (or (= reason :normal) (and failed? (= reason :killed))) deaths (conj deaths reason)))))))
 
 ;; A module the pool could not load by key, or whose load met a require cycle across two
 ;; workers that the loader did not settle itself (`%require-cycle?` in the prelude) — either

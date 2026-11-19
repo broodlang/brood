@@ -77,16 +77,15 @@ Brood."
   (if (> have http/*max-head-bytes*)
     nil
     (receive
-      ([:tcp ^sock d] (let (probe (bytes/append tail d)
-                            k (math/max 0 (- (count marker) 1))
-                            pn (count probe))
-                        (if (>= (bytes/index-of probe marker) 0)
-                          (apply bytes/append (reverse (cons d chunks)))
-                          (http-read-until sock
-                            (cons d chunks)
-                            (+ have (count d))
-                            (if (<= pn k) probe (bytes/slice probe (- pn k) pn))
-                            marker))))
+      ([:tcp ^sock d]
+        (let (probe (bytes/append tail d) k (math/max 0 (- (count marker) 1)) pn (count probe))
+          (if (>= (bytes/index-of probe marker) 0)
+            (apply bytes/append (reverse (cons d chunks)))
+            (http-read-until sock
+              (cons d chunks)
+              (+ have (count d))
+              (if (<= pn k) probe (bytes/slice probe (- pn k) pn))
+              marker))))
       ([:tcp-closed ^sock] (if (= have 0) nil (apply bytes/append (reverse chunks))))
       (after *read-timeout-ms* (if (= have 0) nil (apply bytes/append (reverse chunks)))))))
 
@@ -653,13 +652,14 @@ socket is registered *passive* (no reader until the worker calls
 ;; it closes it (a `stream-response` must not — its `:stream` fn owns it).
 (defn- http-answer (c handler raw)
   (match (try [:ok (handler (parse-request raw))] (catch problem [:raised problem]))
-    ([:ok resp] (try
-                  (send-response resp c)
-                  (catch problem
-                    (if (http-unsent? resp)
-                      (send-response (http-refusal 500 "the response could not be sent") c)
-                      (tcp/close c))
-                    (throw problem))))
+    ([:ok resp]
+      (try
+        (send-response resp c)
+        (catch problem
+          (if (http-unsent? resp)
+            (send-response (http-refusal 500 "the response could not be sent") c)
+            (tcp/close c))
+          (throw problem))))
     ([:raised problem] (send-response (http-refusal 500 "the handler raised") c)
       (throw problem))))
 
@@ -747,12 +747,11 @@ knows the body is text — the map itself always carries byte-faithful `bytes`.
 ;; server body can't OOM the client.
 (defn- http-collect (sock acc have)
   (receive
-    ([:tcp ^sock d] (let (have2 (+ have (http-chunk-size d)))
-                      (if (> have2 http/*max-response-bytes*)
-                        (do
-                          (tcp/close sock)
-                          [:error "http: response exceeded http/*max-response-bytes*"])
-                        (http-collect sock (cons d acc) have2))))
+    ([:tcp ^sock d]
+      (let (have2 (+ have (http-chunk-size d)))
+        (if (> have2 http/*max-response-bytes*)
+          (do (tcp/close sock) [:error "http: response exceeded http/*max-response-bytes*"])
+          (http-collect sock (cons d acc) have2))))
     ([:tcp-closed ^sock] [:ok (bytes/append (reverse acc))])
     ([:tcp-error ^sock msg] [:error msg])
     (after 30000 [:error "http: timed out waiting for a response"])))
@@ -1028,25 +1027,15 @@ nothing but its close.
 
 (defn- http-connection-loop (u opts sock owner-ref)
   (receive
-    ([:http-request from ref method target ropts] (let (outcome (http-attempt u
-                                                                  opts sock method target ropts)
-                                                        result (:result outcome))
-                                                    (send from
-                                                      [:http-response
-                                                        ref
-                                                        (if (failure? result)
-                                                          result
-                                                          (:response result))])
-                                                    (http-connection-loop u
-                                                      opts
-                                                      (:sock outcome)
-                                                      owner-ref)))
+    ([:http-request from ref method target ropts]
+      (let (outcome (http-attempt u opts sock method target ropts) result (:result outcome))
+        (send from [:http-response ref (if (failure? result) result (:response result))])
+        (http-connection-loop u opts (:sock outcome) owner-ref)))
     ;; idle: the server closed (or wrote out of turn) — drop the socket, open anew next time
     ([:tcp-closed ^sock] (http-connection-loop u opts nil owner-ref))
     ([:tcp ^sock _] (do (tcp/close sock) (http-connection-loop u opts nil owner-ref)))
-    ([:http-close from ref] (do
-                              (when (tcp/socket? sock) (tcp/close sock))
-                              (send from [:http-closed ref])))
+    ([:http-close from ref]
+      (do (when (tcp/socket? sock) (tcp/close sock)) (send from [:http-closed ref])))
     ([:down ^owner-ref _ _] (when (tcp/socket? sock) (tcp/close sock)))))
 
 (defn connection (url &optional (opts {}))

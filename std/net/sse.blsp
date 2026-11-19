@@ -217,12 +217,12 @@ socket a `stream-response` handler was handed. Just `(tcp/send sock (frame …))
   "Wait for the next chunk, deliver every event it completes to `subscriber`, recurse.
 Ends with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
   (receive
-    ([:tcp ^sock d] (let ([events next] (feed state d))
-                      (doseq (ev events)
-                        (send subscriber [:sse ev]))
-                      (if (> (count (first next)) *max-buffer-bytes*)
-                        (do (tcp/close sock) (send subscriber [:sse-closed :buffer-overflow]))
-                        (stream sock subscriber watch next))))
+    ([:tcp ^sock d]
+      (let ([events next] (feed state d))
+        (doseq (ev events) (send subscriber [:sse ev]))
+        (if (> (count (first next)) *max-buffer-bytes*)
+          (do (tcp/close sock) (send subscriber [:sse-closed :buffer-overflow]))
+          (stream sock subscriber watch next))))
     ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
     ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))
     ([:down ^watch _ _] (tcp/close sock))))
@@ -240,12 +240,13 @@ close, `Content-Length`, the cap or the timeout, then report it with `refused`."
     (if (or (> have *max-error-body-bytes*) (and want (>= have want)))
       (refused sock subscriber head chunks)
       (receive
-        ([:tcp ^sock d] (read-refusal sock
-                          subscriber
-                          watch
-                          head
-                          (cons d chunks)
-                          (+ have (count (string/->bytes d)))))
+        ([:tcp ^sock d]
+          (read-refusal sock
+            subscriber
+            watch
+            head
+            (cons d chunks)
+            (+ have (count (string/->bytes d)))))
         ([:tcp-closed ^sock] (refused sock subscriber head chunks))
         ([:tcp-error ^sock _] (refused sock subscriber head chunks))
         ([:down ^watch _ _] (tcp/close sock))
@@ -256,29 +257,20 @@ close, `Content-Length`, the cap or the timeout, then report it with `refused`."
 status]` and hands the leftover text to `stream`; any other status reads the body
 for the refusal."
   (receive
-    ([:tcp ^sock d] (let (text (str buf d)
-                          split (split-head text))
-                      (cond
-                        (and (nil? split) (> (count text) *max-buffer-bytes*))
-                          (do
-                            (tcp/close sock)
-                            (send subscriber [:sse-closed :buffer-overflow]))
-                        (nil? split) (read-head sock subscriber watch text)
-                        else
-                          (let ([head-text rest] split
-                                head (parse-head head-text))
-                            (if (success? (get head :status))
-                              (let ([events state] (feed ["" ""] rest))
-                                (send subscriber [:sse-open (get head :status)])
-                                (doseq (ev events)
-                                  (send subscriber [:sse ev]))
-                                (stream sock subscriber watch state))
-                              (read-refusal sock
-                                subscriber
-                                watch
-                                head
-                                (list rest)
-                                (count (string/->bytes rest))))))))
+    ([:tcp ^sock d]
+      (let (text (str buf d) split (split-head text))
+        (cond
+          (and (nil? split) (> (count text) *max-buffer-bytes*))
+            (do (tcp/close sock) (send subscriber [:sse-closed :buffer-overflow]))
+          (nil? split) (read-head sock subscriber watch text)
+          else
+            (let ([head-text rest] split head (parse-head head-text))
+              (if (success? (get head :status))
+                (let ([events state] (feed ["" ""] rest))
+                  (send subscriber [:sse-open (get head :status)])
+                  (doseq (ev events) (send subscriber [:sse ev]))
+                  (stream sock subscriber watch state))
+                (read-refusal sock subscriber watch head (list rest) (count (string/->bytes rest))))))))
     ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
     ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))
     ([:down ^watch _ _] (tcp/close sock))))

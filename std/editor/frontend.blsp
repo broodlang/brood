@@ -203,12 +203,10 @@ replies / the other kind untouched — and return the last. A `:move` never swal
       ;; one, so a window's drag was folded and rendered cell by cell (ADR-490)
       (receive
         ([:mouse ^kind button row col mods] (ui-coalesce-motion [:mouse kind button row col mods]))
-        ([:mouse ^kind button row col mods extra] (ui-coalesce-motion [:mouse
-                                                                        kind button row col mods
-                                                                        extra]))
-        ([:mouse ^kind button row col mods extra at] (ui-coalesce-motion [:mouse
-                                                                           kind button row col mods
-                                                                           extra at]))
+        ([:mouse ^kind button row col mods extra]
+          (ui-coalesce-motion [:mouse kind button row col mods extra]))
+        ([:mouse ^kind button row col mods extra at]
+          (ui-coalesce-motion [:mouse kind button row col mods extra at]))
         (after 0 msg)))
     msg))
 
@@ -318,13 +316,12 @@ not open needs."
 (defn display-texture "Upload an image as a texture through `display` — a `gui-display` (the window it owns) or the `remote-display` a served app draws to (the thin client's window, over the wire) — and return its handle, for `gui/sprite`. Either `(display-texture d image)` with the {:width :height :rgba} map `gui/image-thumb` decodes, or `(display-texture d rgba w h)` with raw bytes. The handle comes from `gui/alloc-texture`, so `gui/texture-size` knows it; a display without a `:texture` entry (the terminal) accepts and ignores the upload.
 
     (gui/texture-size (editor/frontend/display-texture {} {:width 2 :height 1 :rgba [0 0 0 0 0 0 0 0]}))   ;=> [2 1]"
-  ((display image) (display-texture display
-                     (get image :rgba)
-                     (get image :width)
-                     (get image :height)))
-  ((display rgba w h) (let (tex (gui/alloc-texture w h))
-                        (when (get display :texture) ((get display :texture) tex rgba w h))
-                        tex)))
+  ((display image)
+    (display-texture display (get image :rgba) (get image :width) (get image :height)))
+  ((display rgba w h)
+    (let (tex (gui/alloc-texture w h))
+      (when (get display :texture) ((get display :texture) tex rgba w h))
+      tex)))
 
 (defn display-sound (display pcm rate &optional channels)
   "Keep a sound through `display` — a `gui-display` or a served app's `remote-display`

@@ -18,8 +18,9 @@
   follow every byte of output, and the close must follow the exit."
   (receive
     ([:proc ^p d] (read-to-end p (cons d acc)))
-    ([:proc-exit ^p code] (let (closed (receive ([:proc-closed ^p c] c) (after 20000 :no-close)))
-                            [(string/join (reverse acc) "") code closed]))
+    ([:proc-exit ^p code]
+      (let (closed (receive ([:proc-closed ^p c] c) (after 20000 :no-close)))
+        [(string/join (reverse acc) "") code closed]))
     (after 20000 [(string/join (reverse acc) "") :timeout :timeout])))
 
 (defn- seq-output (n)

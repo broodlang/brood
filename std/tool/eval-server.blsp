@@ -614,12 +614,10 @@ process died without answering.
           ;; leave the session stuck in the last module
           (%restore-compile-context ctx)
           (assoc r :id id)))
-      ([:down ^ref ^child reason] (do
-                                    (release-holds-of child)
-                                    {:id id
-                                     :ok false
-                                     :error (str "evaluator died: " (pr-str reason))
-                                     :ms 0}))
+      ([:down ^ref ^child reason]
+        (do
+          (release-holds-of child)
+          {:id id :ok false :error (str "evaluator died: " (pr-str reason)) :ms 0}))
       (after timeout
         (do
           (exit child :kill)
@@ -891,23 +889,25 @@ anything arriving while a run is in flight waits its turn."
 
 (defn- eval-server-loop (state)
   (receive
-    ([:evsrv-line line] (let (req (evsrv-decode-request line))
-                          (eval-server-loop (if req (evsrv-drain (evsrv-handle state req)) state))))
-    ([:evsrv-test-done _id reply] (do
-                                    (when (:run state) (demonitor (get (:run state) :ref)))
-                                    (io/puts (evsrv-encode-reply reply))
-                                    (eval-server-loop (evsrv-drain (assoc state :run nil)))))
+    ([:evsrv-line line]
+      (let (req (evsrv-decode-request line))
+        (eval-server-loop (if req (evsrv-drain (evsrv-handle state req)) state))))
+    ([:evsrv-test-done _id reply]
+      (do
+        (when (:run state) (demonitor (get (:run state) :ref)))
+        (io/puts (evsrv-encode-reply reply))
+        (eval-server-loop (evsrv-drain (assoc state :run nil)))))
     ;; the runner died without answering — a crash, or the kill in `evsrv-stop-run` racing
     ;; its own demonitor. Either way the id is owed a reply, and only if it is still ours.
-    ([:down ref _child reason] (if (and (:run state) (= ref (get (:run state) :ref)))
-                                 (do
-                                   (evsrv-clear-sinks)
-                                   (io/puts (evsrv-encode-reply {:id (get (:run state) :id)
-                                                                 :ok false
-                                                                 :error (str "the test runner died: "
-                                                                          (pr-str reason))}))
-                                   (eval-server-loop (evsrv-drain (assoc state :run nil))))
-                                 (eval-server-loop state)))
+    ([:down ref _child reason]
+      (if (and (:run state) (= ref (get (:run state) :ref)))
+        (do
+          (evsrv-clear-sinks)
+          (io/puts (evsrv-encode-reply {:id (get (:run state) :id)
+                                        :ok false
+                                        :error (str "the test runner died: " (pr-str reason))}))
+          (eval-server-loop (evsrv-drain (assoc state :run nil))))
+        (eval-server-loop state)))
     ;; nil from read-line = EOF: the parent closed stdin — done
     ([:evsrv-eof] nil)))
 

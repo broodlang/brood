@@ -38,8 +38,8 @@
 (let (me (self)
       deep-list (range 1 10001))
   (let (worker (spawn (receive
-                        ([:list xs] (let (s (fold xs 0 (fn (a v) (+ a v))))
-                                      (send me [:sum s (count xs)])))
+                        ([:list xs]
+                          (let (s (fold xs 0 (fn (a v) (+ a v)))) (send me [:sum s (count xs)])))
                         (after 10000 :timeout))))
     (send worker [:list deep-list])
     (let (r (receive ([:sum s c] [s c]) (after 10000 :timeout)))

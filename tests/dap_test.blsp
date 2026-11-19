@@ -45,10 +45,9 @@
     (if (>= hit-at 0)
       [(nth queue hit-at) (assoc inbox :queue (seq/subvec queue (inc hit-at) (count queue)))]
       (receive
-        ([:tcp ^sock d] (let ([messages rest] (parse-frames (bytes/append (:buf inbox) d) nil))
-                          (await-message sock
-                            {:queue (into [] (append queue messages)) :buf rest}
-                            pred)))
+        ([:tcp ^sock d]
+          (let ([messages rest] (parse-frames (bytes/append (:buf inbox) d) nil))
+            (await-message sock {:queue (into [] (append queue messages)) :buf rest} pred)))
         (after 10000 [nil inbox])))))
 
 (defn- response-to (command)

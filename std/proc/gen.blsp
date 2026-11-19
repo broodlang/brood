@@ -270,9 +270,8 @@ and `info` can tail-recurse with it unchanged)."
         (= kind 'cast) `([:$cast ~pat] (~loop (do ~@body)))
         ; body => next state
         (= kind 'call)
-          `([:$call ~from ~rf ~pat] (let (~res (do ~@body))
-                                      (/send ~from [:reply ~rf (/nth ~res 0)])
-                                      (~loop (/nth ~res 1))))
+          `([:$call ~from ~rf ~pat]
+             (let (~res (do ~@body)) (/send ~from [:reply ~rf (/nth ~res 0)]) (~loop (/nth ~res 1))))
         ; query — like call but the body is just the reply; state is untouched.
         ; Removes the [x s] boilerplate from the common "read a field" case.
         (= kind 'query)
@@ -348,8 +347,9 @@ clause is dropped (so the mailbox can't leak)."
         ;; returns the NEW. Without a `code-change` clause the message falls through to
         ;; the catch-all and is dropped — a safe no-op.
         cc-receive (if cc-clause
-                     (list `([:$code-change] (~loop (let (~(second cc-clause) ~state-sym)
-                                                      ~@(rest (rest cc-clause))))))
+                     (list `([:$code-change]
+                              (~loop
+                                (let (~(second cc-clause) ~state-sym) ~@(rest (rest cc-clause))))))
                      nil)
         ;; Default catch-all (last): drop an unrecognised message and keep state,
         ;; so it cannot pile up unmatched in the mailbox.

@@ -73,10 +73,11 @@
 ;; before every 25th answer, so the client waiting for it parks in its native `receive`.
 (defn slow-server (n)
   (receive
-    ([:q from] (do
-                 (when (= 0 (math/mod n 25)) (proc/sleep 2))
-                 (send from [:r (+ n 1)])
-                 (slow-server (+ n 1))))
+    ([:q from]
+      (do
+        (when (= 0 (math/mod n 25)) (proc/sleep 2))
+        (send from [:r (+ n 1)])
+        (slow-server (+ n 1))))
     ([:count from] (do (send from [:count n]) (slow-server n)))
     (:stop n)))
 

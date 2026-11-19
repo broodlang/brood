@@ -60,9 +60,10 @@ are Rust."
   (let (sock (%tcp-connect host port))
     (receive
       ([:tcp-connected ^sock] sock)
-      ([:tcp-error ^sock message] (throw {:kind :runtime
-                                          :code "E0050"
-                                          :message (str "tcp-connect " host ":" port ": " message)})))))
+      ([:tcp-error ^sock message]
+        (throw {:kind :runtime
+                :code "E0050"
+                :message (str "tcp-connect " host ":" port ": " message)})))))
 
 (defn listen (host:string port:int -> socket)
   "Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as `[:tcp-accept lsock client]` messages to the calling process. Returns a socket.
