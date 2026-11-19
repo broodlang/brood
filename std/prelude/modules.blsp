@@ -1603,6 +1603,12 @@ a loader waiting on a dependency another process was mid-load of blocked its OS 
 Safe under concurrency: never returns while another process is mid-load of `mod` —
 it waits for that load to finish (a half-evaluated module is never observable).
 
+`mod` is the REGISTERED name. Inside a package a project module is registered rooted
+(`app/util`, ADR-070), so a name read from source — a header's `util`, a qualified
+reference's prefix — goes through `%root-module-name` first, as the header clauses do.
+`require-one` does not root it itself: the toolchain requires std's own `test` or `reload`
+while a project that may define a module of that name is the active package.
+
     (require-one 'json)   ;=> \"json\""
   (%require-one mod (%load-edge-skipped?) (%load-may-hand-off?)))
 

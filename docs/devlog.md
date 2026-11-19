@@ -2069,3 +2069,29 @@ contracts and the run keeps the ambient tier (8-19 s solo). The children case an
 cannot: the image their run builds is what each guards, so each has a 240 s override in
 `.config/nextest.toml` with the measurements.
 
+
+2026-11-19. **A literal whose own space doubles `io/puts`'s separator is a `:suspicious`
+finding.** `io/puts` and `io/write` join their arguments with one space, and 63 of 77
+multi-argument calls rely on it, so the API stays. But the other shape kept coming back: 18
+std messages fixed on 11-18, five more in `codemod`/`workspace` the lint found the next day,
+the node examples, `language.md`, `brood-for-claude.md` and `io/puts`'s own docstring
+(`(io/puts "count = " n)`). The checker now flags a string literal ending in exactly one space
+before another argument, or starting with one after another; two or more spaces are layout and
+an all-space literal is a separator, so neither fires. The docs, examples and the
+writing-brood skill now say the writers space-join. Guard:
+`scope_and_guards::a_literal_whose_own_space_doubles_the_writers_separator_is_flagged`, red with
+the lint off. Every package, bedit, hive and mur-forge check clean under it.
+
+2026-11-19. **`require-one` keeps taking the registered name.** The todo asked whether it should
+root its own argument, since two bugs (KI-390, the cold check's double load) were a caller that
+forgot `%root-module-name`. It should not: the toolchain requires std's `test`, `reload`,
+`doctest` and `package-publish` while the project is the active package, and rooting there
+would load a project's module of that name instead. Its docstring now says which name it takes
+and why it does not root it.
+
+2026-11-19. **The tree-walker runs on every push, on a sample.** The whole suite through
+`BROOD_TIER=0` is full.yml's (~25 minutes), so KI-399 passed per-push CI and surfaced days later
+in `make test-both`. `scripts/tree-walker-smoke.sh` runs fifteen files (the ones tree-walker-only
+failures have shown up in, plus the core forms) in the contracts job, and first checks that
+`BROOD_TIER=0` really selects the tree-walker (`%tree-walker?`), so it cannot quietly become a
+second VM run.
