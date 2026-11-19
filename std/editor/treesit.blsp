@@ -1056,7 +1056,9 @@ folding) decides a block the same way.
   (let (nodes (vec chain))
     (vec (map (range (count nodes))
            (fn (index)
-             (block-entry-holds? entries (nth nodes index) (when (> index 0) (nth nodes (dec index)))))))))
+             (block-entry-holds? entries
+               (nth nodes index)
+               (when (> index 0) (nth nodes (dec index)))))))))
 
 (defn- ts-align-column (text bol chain brackets hanging)
   "The column a continuation line aligns to, or nil when it is not one.
