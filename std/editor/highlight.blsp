@@ -26,7 +26,8 @@ as pure functions over a source string (ADR-052):
   - `(safe-restart src pos)` — a top-level form start ≤ `pos` to (re)start lexing from,
     so a viewport can be fontified without lexing the whole buffer.
   - `(highlight-chunks full base line overrides)` — `[substring face]` chunks that
-    tile a visible line (with caller `overrides`, e.g. bracket-match colours).
+    tile a visible line (with caller `overrides`, e.g. bracket-match colours);
+    `(spans->chunks spans base line overrides)` the same over spans already lexed.
   - `(face-at spans pos)` / `(ranges-face ranges pos)` / `(fontify-runs text base spans ranges)`
     — the shared span→runs tiler: look up a span's face, merge an overlay `ranges`
     channel, and coalesce `text` into `[substring face]` runs (renderers turn each
@@ -545,14 +546,19 @@ frame, including a region/isearch overlay during a drag-select), so this is a th
 at offset `base` in `full` — coloured by lexing `full`, with `overrides` (a list of
 `[pos face]` in full-coordinates, e.g. bracket-match colours) merged over the lexer.
 Adjacent chars of equal face coalesce into one chunk; feed each to a `[:print str
-face]` op. A thin shell over `fontify-runs`: each `[pos face]` override is the
-one-char range `[pos (inc pos) face]`.
+face]` op. Lexes `full` each call: a caller tiling several lines of one text lexes it
+once with `highlight-spans` and calls [[spans->chunks]] per line.
 
     (editor/highlight/highlight-chunks \"(let x)\" 0 \"(let x)\" [])   ;=> ([\"(\" nil] [\"let\" {:fg :blue, :bold true}] [\" x)\" nil])"
-  (fontify-runs line
-    base
-    (highlight-spans full)
-    (map overrides (fn ([p f]) [p (inc p) f]))))
+  (spans->chunks (highlight-spans full) base line overrides))
+
+(defn spans->chunks (spans:any base:any line:any overrides:seqable -> list)
+  "[[highlight-chunks]] over `spans` already lexed (`highlight-spans` of the whole text):
+the `[substring face]` chunks tiling `line`, which starts at offset `base`, with each
+`[pos face]` override the one-char range `[pos (inc pos) face]` merged over the lexer.
+
+    (editor/highlight/spans->chunks (editor/highlight/highlight-spans \"a\\n(let)\") 2 \"(let)\" [])   ;=> ([\"(\" nil] [\"let\" {:fg :blue, :bold true}] [\")\" nil])"
+  (fontify-runs line base spans (map overrides (fn ([p f]) [p (inc p) f]))))
 
 ;; ---- bracket matching -------------------------------------------------------
 
