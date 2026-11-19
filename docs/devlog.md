@@ -2154,3 +2154,17 @@ mean `:dependencies`?). `text/after-line->char` is the char just after a line, n
 `line-count`. Writing the suggestion showed `fuzzy/nearest` missed a transposed `:nmae`: its
 Levenshtein distance counted a swap as two edits, so `edit-distance` is optimal string
 alignment now.
+
+2026-11-19. **`defbehaviour` is gone; a module contract is an ability (ADR-761).** ADR-168 kept
+`defbehaviour` + `(:implements …)` for "a module with no dispatch value". Nothing anywhere
+claimed one (hatch's two declarations were unclaimed and its live runtime held closures), and an
+ability already enforces the contract — bodyless ops are required and the checker reports an
+`impl` missing one — once the module defines a value to implement it for. Removed:
+`std/protocol.blsp` (the prelude's last file outside `std/prelude/`), `*protocols*`,
+`%register-protocol`, `reflect/behaviour-ops`, the `:implements` header clause (now refused
+with a hint naming `defability`), the checker's behaviour pass and its `*protocols*` dep key,
+the LSP's `:implements` goto/hover (`module_ref` now recognises module clauses only, and
+`introspect::protocol_ops` is `ability_ops`, read off `*abilities*` alone). hatch moves its
+live views onto `LiveModule` / `LiveComponentModule` abilities the same day. Guards:
+`abilities.rs` "a module contract …" (missing op, arity mismatch, met contract), the
+`modules_test` refusal.

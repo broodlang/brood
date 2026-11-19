@@ -2,7 +2,7 @@
 //!
 //! While `check_file` runs under [`begin_record`], every observation of GLOBAL
 //! state — a global binding, a declared `(sig …)`, a known-namespace prefix, a
-//! module's exports, the protocol table — is recorded through the `obs_*`
+//! module's exports — is recorded through the `obs_*`
 //! wrappers here (the ONLY way the checker is allowed to read global state, so the
 //! recorded set is complete by construction). [`take_dep_keys`] turns the record
 //! into a serializable per-file "dep-keys" value; [`fingerprint`] re-observes those
@@ -20,8 +20,7 @@
 //!     is stamped with `(system/build-id)`, so a rebuild drops it),
 //!   - an unbound name → "U" (so it invalidates the day something defines it),
 //!   - a known-ns prefix → whether it is currently known,
-//!   - a `:use`d module → its current export SET,
-//!   - the protocol table → a structural hash of `*protocols*`.
+//!   - a `:use`d module → its current export SET.
 //! The def-site-mtime assumption (every mutable user global has a def-site) is
 //! verified by the differential battery, not by trust.
 
@@ -115,20 +114,14 @@ pub(super) fn obs_registry(heap: &Heap, name: &str) -> Option<Value> {
     heap.env_get(heap.global(), sym)
 }
 
-/// Record that the `*protocols*` table was consulted.
-pub(super) fn obs_protocols(heap: &Heap) {
-    heap.rec_check_dep_protocols();
-}
-
 // ── dep-keys value + fingerprint ──────────────────────────────────────────────
 
 const K_SYMS: &str = "syms";
 const K_KNS: &str = "kns";
 const K_EXP: &str = "exp";
-const K_PROTO: &str = "proto";
 
 /// Take the recorded observations and build the serializable dep-keys value
-/// `{:syms [names] :kns [prefixes] :exp [prefixes] :proto bool}` (sorted for a
+/// `{:syms [names] :kns [prefixes] :exp [prefixes]}` (sorted for a
 /// stable on-disk form). Empty record → empty lists.
 pub(super) fn take_dep_keys(heap: &mut Heap) -> Value {
     let dep = heap.take_check_dep_record().unwrap_or_default();
@@ -158,10 +151,6 @@ pub(super) fn take_dep_keys(heap: &mut Heap) -> Value {
         (Value::keyword(value::intern(K_SYMS)), syms_list),
         (Value::keyword(value::intern(K_KNS)), known_namespaces_list),
         (Value::keyword(value::intern(K_EXP)), exports_list),
-        (
-            Value::keyword(value::intern(K_PROTO)),
-            Value::Bool(dep.protocols),
-        ),
     ])
 }
 
@@ -486,15 +475,6 @@ fn exports_fact(heap: &Heap, prefix: &str) -> String {
     names.join(",")
 }
 
-/// Structural hash of the `*protocols*` table (accumulated across files, so its
-/// def-site alone can't capture a later `extend`).
-fn protocols_fact(heap: &Heap) -> String {
-    match heap.env_get(heap.global(), value::intern(reg::PROTOCOLS)) {
-        Some(v) => heap.hash_value(v).to_string(),
-        None => "none".to_string(),
-    }
-}
-
 /// A compact, deterministic stamp of the current-image facts for `dep_keys`.
 /// Two calls return the same string iff every observed global fact is unchanged.
 pub(super) fn fingerprint(heap: &Heap, dep_keys: Value) -> String {
@@ -522,14 +502,6 @@ pub(super) fn fingerprint(heap: &Heap, dep_keys: Value) -> String {
         buf.push_str(&p);
         buf.push('=');
         buf.push_str(&exports_fact(heap, &p));
-        buf.push(';');
-    }
-    if matches!(
-        heap.map_get(id, Value::keyword(value::intern(K_PROTO))),
-        Some(Value::Bool(true))
-    ) {
-        buf.push_str("p:=");
-        buf.push_str(&protocols_fact(heap));
         buf.push(';');
     }
     // Compact the (possibly large) fact string to a 64-bit FNV-1a hex stamp.

@@ -22,9 +22,8 @@
 //!   (`if`/`let`/`fn`/`def`/`defn`) plus `collect_def_names`.
 //! - [`annot`] — reads `(sig …)` declarations off the *un-expanded* tree, so a
 //!   user-declared signature seeds the checks for that name.
-//! - [`protocol`] — ability / behaviour conformance: `defability` /
-//!   `defbehaviour` / `impl` / `(:implements …)` checked for missing or
-//!   wrong-arity ops.
+//! - [`protocol`] — ability conformance: each `impl` checked against its
+//!   `defability` for missing or wrong-arity ops.
 //! - [`module_loading`] / [`imports`] — what the check loads, and the file's header
 //!   imports, requires and world.
 //! - [`declarations`] — the file's `(sig …)` declarations and the type vocabulary they

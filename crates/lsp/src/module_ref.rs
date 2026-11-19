@@ -1,52 +1,33 @@
-//! Recognize the symbol under the cursor when it names a **module or behaviour**
-//! in a `defmodule` clause — the shared primitive behind goto-definition and
-//! hover on `(:use foo)`, `(:alias foo)`, and `(:implements Bar)`.
+//! Recognize the symbol under the cursor when it names a **module** in a `defmodule`
+//! clause — the shared primitive behind goto-definition and hover on `(:use foo)` and
+//! `(:alias foo)`.
 //!
-//! These names bind nothing in the buffer (a module/behaviour isn't a value, so
-//! scope analysis resolves them `Free`), which is exactly why the generic
-//! scope-driven hover/goto paths can't see them. We instead recognize them
-//! *structurally* from the CST: the cursor is on the form right after a `:use` /
-//! `:alias` / `:implements` keyword in a clause list. (There is no `require` form
-//! in the language — a module loads only via `(:use)`/`(:alias)`/`(:implements)`
-//! or a qualified `mod/name` reference.)
+//! These names bind nothing in the buffer (a module isn't a value, so scope analysis
+//! resolves them `Free`), which is exactly why the generic scope-driven hover/goto paths
+//! can't see them. We instead recognize them *structurally* from the CST: the cursor is
+//! on the form right after a `:use` / `:alias` keyword in a clause list. (There is no
+//! `require` form in the language — a module loads only via `(:use)`/`(:alias)` or a
+//! qualified `mod/name` reference.)
 
 use brood::syntax::cst::Node;
 
-/// What the symbol under the cursor names inside a `defmodule` clause.
-pub enum ClauseRef<'s> {
-    /// A requireable module name — `(:use foo)` / `(:alias foo)`. Navigates to the
-    /// module's source file; hovers its docstring.
-    Module(&'s str),
-    /// A behaviour/protocol name — `(:implements Bar)`. Navigates to its
-    /// `(defbehaviour …)`/`(defability …)` form; hovers its declared ops.
-    Behaviour(&'s str),
-}
-
-/// Classify the symbol at byte `offset`, or `None` when it isn't the target of a
-/// clause we navigate. The target is the form *immediately after* the clause
-/// keyword (`foo` in `(:use foo …)`); a `:use … :only [a b]` import name, or the
-/// keyword itself, is not a clause target and falls through to the normal paths.
-pub fn clause_ref_at<'s>(root: &Node, src: &'s str, offset: u32) -> Option<ClauseRef<'s>> {
+/// The module the symbol at byte `offset` names as a clause target, or `None` when it
+/// isn't one. The target is the form *immediately after* the clause keyword (`foo` in
+/// `(:use foo …)`); a `:use … :only [a b]` import name, or the keyword itself, is not a
+/// clause target and falls through to the normal paths.
+pub fn clause_module_at<'s>(root: &Node, src: &'s str, offset: u32) -> Option<&'s str> {
     let node = root.symbol_at(offset)?;
-    // The innermost enclosing navigable clause list (`(:use …)` / `(:alias …)` /
-    // `(:implements …)`) containing the cursor.
+    // The innermost enclosing `(:use …)` / `(:alias …)` clause list containing the cursor.
     let mut chain = Vec::new();
     chain_to(root, offset, &mut chain);
-    let (clause, kw) = chain.iter().rev().find_map(|n| {
-        let kw = n.head_keyword(src)?;
-        matches!(kw, ":use" | ":alias" | ":implements").then_some((*n, kw))
-    })?;
+    let clause = chain
+        .iter()
+        .rev()
+        .find(|n| matches!(n.head_keyword(src), Some(":use" | ":alias")))?;
     // The target is the clause's second form; only navigate when it *is* the
     // symbol under the cursor (not a later `:only`/`:as` operand).
     let target = clause.forms().nth(1)?;
-    if !std::ptr::eq(target, node) {
-        return None;
-    }
-    match kw {
-        ":use" | ":alias" => Some(ClauseRef::Module(node.text(src))),
-        ":implements" => Some(ClauseRef::Behaviour(node.text(src))),
-        _ => None,
-    }
+    std::ptr::eq(target, node).then(|| node.text(src))
 }
 
 /// The chain of nodes from `root` down to the innermost one containing `offset`.
@@ -70,10 +51,7 @@ mod tests {
         let root = Box::leak(Box::new(cst::parse(src)));
         let src: &'static str = Box::leak(src.to_string().into_boxed_str());
         let at = src.find(needle).unwrap() as u32;
-        clause_ref_at(root, src, at).map(|r| match r {
-            ClauseRef::Module(_) => "module",
-            ClauseRef::Behaviour(_) => "behaviour",
-        })
+        clause_module_at(root, src, at).map(|_| "module")
     }
 
     #[test]
@@ -93,10 +71,11 @@ mod tests {
     }
 
     #[test]
-    fn implements_target_is_a_behaviour() {
+    fn an_implements_clause_target_is_not_navigated() {
+        // `(:implements …)` is gone (ADR-761); a stale one in a buffer is not a module.
         assert_eq!(
             kind_at("(defmodule app (:implements LiveModule))", "LiveModule"),
-            Some("behaviour")
+            None
         );
     }
 

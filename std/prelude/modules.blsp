@@ -257,8 +257,7 @@ and an unbounded silent spin is far harder to place than an error."
 ;; prefix, so inside a published package it quietly registers into a second global that
 ;; nothing reads.
 ;;
-;; The std/ callers are not namespaced: the prelude's own registries and `*protocols*` (std/protocol.blsp is CORE — loaded in the prelude with
-;; no `defmodule`, so its globals are root) are bare and root, `editor/face`'s
+;; The std/ callers are not namespaced: the prelude's own registries are bare and root, `editor/face`'s
 ;; `editor/face/*faces*` is a `defonce` written out qualified, and the rest are qualified too. So this resolution must not disturb any of them — which is why it
 ;; checks rather than assumes: an already-qualified name passes through untouched, and
 ;; between the qualified and bare forms it picks whichever is actually BOUND. Root registries
@@ -446,13 +445,10 @@ one call site is inside `defmodule`'s template — see the note there."
 ;; would let a misspelled `(:use-internal m)` or a Clojure-style `(:require m)` look like it
 ;; imported names / granted access while doing nothing — the worst failure mode for a header
 ;; that governs imports *and* privacy.
-;; `:implements` is a CHECKER annotation, not a loader one: a module claiming a protocol
-;; is verified by `crates/lisp/src/types/check/protocol.rs`, which reads the clause
-;; straight out of the header source. The loader's job is only to tolerate it — drop it
-;; from this list and every protocol-implementing module fails to load. `:check-allow` is
-;; the same kind: `(:check-allow :category …)` silences those checker categories for the
-;; module (ADR-673), read by the checker from the header source; the loader ignores it.
-(def- %defmodule-clause-heads [:use :use-internals :alias :load :implements :shadow :check-allow])
+;; `:check-allow` is a CHECKER annotation, not a loader one: `(:check-allow :category …)`
+;; silences those checker categories for the module (ADR-673), read by the checker from the
+;; header source; the loader's job is only to tolerate it.
+(def- %defmodule-clause-heads [:use :use-internals :alias :load :shadow :check-allow])
 
 ;; `(:shadow name …)` declares that this module defines a name the language ships, function or
 ;; macro (ADR-423, ADR-735): inside the module its own definition wins, and without the
@@ -465,13 +461,19 @@ one call site is inside `defmodule`'s template — see the note there."
 ;; it. The reader cannot see that: `"a doc with a "quote" in it"` is a perfectly good
 ;; string, then a symbol, then another string, so the fault only surfaces here, as clauses
 ;; that make no sense. Say so, because the alternative is unguessable.
+;; `(:implements B)` named a `defbehaviour`, both gone (ADR-761): a contract is a
+;; `defability`, and a module satisfies it with an `impl` for a value it defines.
 (defn- %defmodule-clause-hint (clause)
-  (if (or (string? clause) (symbol? clause))
-    (str " A bare "
-      (if (string? clause) "string" "symbol")
-      " in the header usually means the module docstring above it ENDED EARLY —"
-      " look for an unescaped `\"` inside it.")
-    ""))
+  (cond
+    (or (string? clause) (symbol? clause))
+      (str " A bare "
+        (if (string? clause) "string" "symbol")
+        " in the header usually means the module docstring above it ENDED EARLY —"
+        " look for an unescaped `\"` inside it.")
+    (and (pair? clause) (= (first clause) :implements))
+      (str " `(:implements …)` is gone (ADR-761): a contract is a `defability`, and a module"
+        " satisfies it with `(impl Ability its-value …)` for a value it defines.")
+    else ""))
 
 ;; `mod` is in the message because the error is raised while EXPANDING this module's
 ;; `defmodule`, and an expansion error carries no source location of its own: the reporter
@@ -487,7 +489,7 @@ one call site is inside `defmodule`'s template — see the note there."
       ": unrecognised header form "
       (pr-str clause)
       " — a `defmodule` header takes only (:use mod [:only [names]]), (:load mod …),"
-      " (:use-internals mod), (:alias mod [:as short]), (:shadow name …), (:implements Protocol)"
+      " (:use-internals mod), (:alias mod [:as short]), (:shadow name …)"
       " and (:check-allow :category …)."
       " Check the spelling;"
       " Clojure's `(:require …)` is not a Brood clause (`:use` both loads and refers)."

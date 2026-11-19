@@ -1,6 +1,7 @@
-//! Protocol conformance: model `(defprotocol …)` and check each `(defimpl …)`
-//! against it — a diagnostic per missing op, arity mismatch, or method the
-//! protocol doesn't declare.
+//! Ability conformance: model each `(defability …)` and check every `(impl …)`
+//! against it — a diagnostic per missing required op, arity mismatch, or method the
+//! ability doesn't declare. An ability is the one contract mechanism: a module
+//! contract is an ability over a value the module defines (ADR-761).
 //!
 //! Read from the **un-expanded** forms. `defability`/`impl` lower to `defn`s
 //! plus registry calls, so the ability structure only survives before macro
@@ -32,8 +33,8 @@ struct Op {
     /// A **provided** ability op — its `defability` spec carries a default body (ADR-185),
     /// so `defability` registers it as a `:default` impl. An `impl` need not supply it (the
     /// default covers it), but may override it — so it is not *required*, yet is still a
-    /// valid op name (an override isn't flagged as unknown). Always false for a protocol /
-    /// behaviour op and for an impl method (they have no default-body notion).
+    /// valid op name (an override isn't flagged as unknown). Always false for an impl
+    /// method.
     provided: bool,
 }
 
@@ -42,45 +43,14 @@ pub(super) struct Protocol {
     ops: Vec<Op>,
 }
 
-/// The known interfaces (`defprotocol` *and* `defbehaviour`), keyed by name. Starts
-/// from the runtime `*protocols*` registry — imported interfaces, populated by Pass
-/// 1's `(:use …)` evals, so a behaviour declared in another module (the common case:
-/// a framework declares it, an app implements it) is known — then the file's own
-/// declarations fill in / override.
+/// The abilities this file declares (`defability`), keyed by name — what each of its
+/// `impl`s is checked against. An `impl` of an ability declared elsewhere is checked
+/// through the loaded registries (`AbilityInfo`), not here.
 pub(super) fn collect(heap: &Heap, forms: &[Value]) -> HashMap<String, Protocol> {
-    let mut ifaces = from_registry(heap);
-    for &form in forms {
-        if let Some((name, proto)) = parse_protocol(heap, form) {
-            ifaces.insert(name, proto);
-        }
-    }
-    ifaces
-}
-
-/// Read the runtime `*protocols*` registry (a name-symbol → raw-op-specs map that
-/// `defprotocol`/`defbehaviour` populate). Empty when the registry isn't loaded.
-fn from_registry(heap: &Heap) -> HashMap<String, Protocol> {
-    let mut out = HashMap::new();
-    // Record the dependency: this file's warnings depend on the whole `*protocols*`
-    // table (it accumulates `defprotocol`/`extend` across files, so its def-site
-    // alone can't capture a later extension — the Phase-2 fingerprint hashes its
-    // full content instead).
-    super::deps::obs_protocols(heap);
-    let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern(reg::PROTOCOLS)) else {
-        return out;
-    };
-    for (key, specs) in heap.map_entries(id) {
-        let Some(name) = sym_name(key) else {
-            continue;
-        };
-        let ops = list_items(heap, specs)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|&op| parse_op(heap, op))
-            .collect();
-        out.insert(name, Protocol { ops });
-    }
-    out
+    forms
+        .iter()
+        .filter_map(|&form| parse_protocol(heap, form))
+        .collect()
 }
 
 /// Check each `(defimpl Proto key method…)` against `protos`: a diagnostic per op
@@ -168,27 +138,23 @@ pub(super) fn check_impls(
     }
 }
 
-/// `(defprotocol Name doc? (op (args) …) …)` or `(defbehaviour Name …)` → (name,
-/// model), else `None`. Protocols and behaviours share the op-spec shape; they
-/// differ only in *who* implements them (a `defimpl` vs a module's own functions).
+/// `(defability Name doc? (op (args) …) …)` → (name, model), else `None`.
 fn parse_protocol(heap: &Heap, form: Value) -> Option<(String, Protocol)> {
     let items = list_items(heap, form)?;
-    if !head_is(&items, "defbehaviour") && !head_is(&items, "defability") {
+    if !head_is(&items, "defability") {
         return None;
     }
     let pname = sym_name(*items.get(1)?)?;
-    // A `defability` op may be *provided* (a default body, ADR-185) — such an op is not
-    // required of an impl. Protocols/behaviours have no such notion. The op specs are the
-    // remaining list items; a leading docstring (a string, not a list) is skipped by
-    // `parse_op` returning `None`.
-    let is_ability = head_is(&items, "defability");
+    // An op may be *provided* (a default body, ADR-185) — such an op is not required of
+    // an impl. The op specs are the remaining list items; a leading docstring (a string,
+    // not a list) is skipped by `parse_op` returning `None`.
     let ops = items
         .get(2..)
         .unwrap_or(&[])
         .iter()
         .filter_map(|&op| {
             parse_op(heap, op).map(|mut o| {
-                o.provided = is_ability && spec_has_body(heap, op);
+                o.provided = spec_has_body(heap, op);
                 o
             })
         })
@@ -247,164 +213,6 @@ fn sym_name(v: Value) -> Option<String> {
         Value::Sym(s) | Value::Keyword(s) => Some(value::symbol_name(s)),
         _ => None,
     }
-}
-
-// ---- behaviour conformance: `(:implements Name)` on a module ----------------
-
-/// Check every module that declares `(:implements Name)` against the named interface
-/// (`defbehaviour`/`defprotocol`): the module must *define* each declared op as a
-/// function at the declared arity. Providers are read from the **expanded** tree, so
-/// functions a macro generates (a `deflive` view's `mount`/`render`/…) count.
-pub(super) fn check_behaviours(
-    heap: &Heap,
-    forms: &[Value],
-    expanded: &[Value],
-    ifaces: &HashMap<String, Protocol>,
-    out: &mut Vec<Finding>,
-) {
-    let claims = implements_claims(heap, forms);
-    if claims.is_empty() {
-        return;
-    }
-    let provided = defn_arities(heap, expanded);
-    for (bname, pos) in claims {
-        let Some(iface) = ifaces.get(&bname) else {
-            // Unknown behaviour — declared in a module this file doesn't import, or
-            // not yet defined. Stay quiet rather than false-flag.
-            continue;
-        };
-        for op in &iface.ops {
-            match provided.get(&op.name) {
-                None => out.push(Finding::new(
-                    Lint::Conformance,
-                    pos,
-                    format!(
-                        "behaviour {}: this module is missing `{}` ({} arg(s))",
-                        bname, op.name, op.arity
-                    ),
-                )),
-                // A variadic op (`(render (self & more))`) declares no single arity to pin
-                // — accept any provider, as `check_impls` does.
-                Some(&Some(arity)) if !op.variadic && arity != op.arity => out.push(Finding::new(
-                    Lint::Conformance,
-                    pos,
-                    format!(
-                        "behaviour {}: `{}` takes {} arg(s), the behaviour needs {}",
-                        bname, op.name, arity, op.arity
-                    ),
-                )),
-                _ => {}
-            }
-        }
-    }
-}
-
-/// The behaviour names a file's `(defmodule … (:implements Name) …)` header claims,
-/// each with the module form's position for the diagnostic.
-fn implements_claims(heap: &Heap, forms: &[Value]) -> Vec<(String, Option<Pos>)> {
-    let mut out = Vec::new();
-    for &form in forms {
-        let Some(items) = list_items(heap, form) else {
-            continue;
-        };
-        if !head_is(&items, "defmodule") {
-            continue;
-        }
-        let pos = heap.form_pos_only(form);
-        for &clause in items.get(2..).unwrap_or(&[]) {
-            let Some(citems) = list_items(heap, clause) else {
-                continue;
-            };
-            let is_implements = matches!(citems.first(), Some(&Value::Keyword(k)) if value::symbol_is(k, "implements"));
-            if is_implements && let Some(name) = citems.get(1).and_then(|&v| sym_name(v)) {
-                out.push((name, pos));
-            }
-        }
-    }
-    out
-}
-
-/// Every function defined in the expanded tree → its arity, as `name → arity`. The
-/// name is the *bare* last segment (`mod/render` → `render`) so it matches a
-/// behaviour's bare op names; the arity is `None` for a variadic or multi-arity fn
-/// (present, but no single arity to pin). Mirrors `walk::collect_def_names`'s
-/// recursion (a `def` can nest inside a macro's `do`).
-fn defn_arities(heap: &Heap, forms: &[Value]) -> HashMap<String, Option<usize>> {
-    let mut out = HashMap::new();
-    for &form in forms {
-        collect_arity(heap, form, &mut out);
-    }
-    out
-}
-
-fn collect_arity(heap: &Heap, form: Value, out: &mut HashMap<String, Option<usize>>) {
-    // Deep-form stack safety — the one walker in this file that was not wrapped.
-    crate::stack::maybe_grow(64 * 1024, 1024 * 1024, || {
-        collect_arity_inner(heap, form, out)
-    })
-}
-
-fn collect_arity_inner(heap: &Heap, form: Value, out: &mut HashMap<String, Option<usize>>) {
-    let Some(items) = list_items(heap, form) else {
-        return;
-    };
-    let Some(&Value::Sym(head)) = items.first() else {
-        return;
-    };
-    if value::symbol_is(head, "quote") || value::symbol_is(head, "quasiquote") {
-        return;
-    }
-    // `defn` has expanded to `(def name (fn …))` by now; `defmacro` stays itself.
-    if value::symbol_is(head, "def")
-        && let Some(&Value::Sym(name)) = items.get(1)
-    {
-        let arity = items.get(2).and_then(|&v| fn_arity(heap, v));
-        out.insert(head_name(name), arity);
-    }
-    for &item in items.get(1..).unwrap_or(&[]) {
-        collect_arity(heap, item, out);
-    }
-}
-
-/// The fixed arity of a `(fn …)` value form, or `None` for a non-`fn`, a variadic
-/// (`&` rest), or a multi-arity fn.
-fn fn_arity(heap: &Heap, v: Value) -> Option<usize> {
-    let items = list_items(heap, v)?;
-    let is_fn = matches!(items.first(), Some(&Value::Sym(s)) if is_fn_head(s));
-    if !is_fn {
-        return None;
-    }
-    // After `fn`: the param list (single-arity), skipping a docstring.
-    let rest = items.get(1..)?;
-    let rest = match rest.first() {
-        Some(Value::Str(_)) if rest.len() > 1 => &rest[1..],
-        _ => rest,
-    };
-    let params = *rest.first()?;
-    // Multi-arity: the "param list" is really a clause `((a) body…)` whose head is
-    // itself a param list/vector → can't pin one arity.
-    if let Some(pitems) = list_items(heap, params)
-        && matches!(
-            pitems.first(),
-            Some(Value::Pair(_)) | Some(Value::Vector(_))
-        )
-    {
-        return None;
-    }
-    param_count(heap, params)
-}
-
-/// The number of fixed parameters in a parameter list, or `None` if it's variadic.
-fn param_count(heap: &Heap, params: Value) -> Option<usize> {
-    let items = match params {
-        Value::Nil => return Some(0),
-        Value::Pair(_) => list_items(heap, params)?,
-        _ => return None,
-    };
-    if items.iter().any(|&p| is_rest_marker(p)) {
-        return None;
-    }
-    Some(items.len())
 }
 
 fn is_rest_marker(v: Value) -> bool {

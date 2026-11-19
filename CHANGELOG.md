@@ -6,6 +6,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Removed: `defbehaviour` and the `(:implements …)` header clause (ADR-761).** `defability` is
+the one contract mechanism: a module contract is an ability over a value the module defines,
+and its bodyless ops are required, checked at the `impl`. `reflect/behaviour-ops` and the
+`*protocols*` registry go with them; `(:implements …)` in a header is refused with a message
+naming `defability`.
+
 **Added: `nest check` flags a literal whose own space doubles `io/puts`'s separator.**
 `io/puts` and `io/write` put one space between their arguments, so `(io/puts "count = " n)`
 prints `count =  5`; the finding is `:suspicious`. Two or more spaces read as layout and pass.

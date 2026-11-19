@@ -16,7 +16,7 @@
 //! genuinely unbound) has nowhere to jump — `None`.
 
 use brood::Interp;
-use brood::syntax::cst::{Node, NodeKind};
+use brood::syntax::cst::Node;
 use brood::syntax::scope::{Resolution, ScopeTree};
 use lsp_types::{Location, Position, Range, Uri};
 
@@ -34,19 +34,12 @@ pub fn definition(
     offset: u32,
 ) -> Option<Location> {
     // A `defmodule` clause target: `(:use foo)` / `(:alias foo)` jumps to the
-    // module's file; `(:implements Bar)` jumps to the behaviour's declaration.
-    // These resolve `Free` in the CST (they bind nothing), so they're handled
+    // module's file. It resolves `Free` in the CST (it binds nothing), so it's handled
     // before the generic scope path below.
-    match module_ref::clause_ref_at(root, text, offset) {
-        Some(module_ref::ClauseRef::Module(name)) => {
-            if let Some(file) = introspect::module_file(interp, name) {
-                let top = Position::new(0, 0);
-                return crate::path_to_uri(&file).map(|u| Location::new(u, Range::new(top, top)));
-            }
-            return None;
-        }
-        Some(module_ref::ClauseRef::Behaviour(name)) => return behaviour_location(interp, name),
-        None => {}
+    if let Some(name) = module_ref::clause_module_at(root, text, offset) {
+        let file = introspect::module_file(interp, name)?;
+        let top = Position::new(0, 0);
+        return crate::path_to_uri(&file).map(|u| Location::new(u, Range::new(top, top)));
     }
     match tree.resolve_at(root, text, offset) {
         // Bound in this buffer (local or a document-level `def`): jump to the
@@ -65,41 +58,6 @@ pub fn definition(
         }
         Resolution::NotASymbol => None,
     }
-}
-
-/// Locate the `(defbehaviour Name …)` / `(defability Name …)` that declares the
-/// behaviour `name`, by scanning the project's own `.blsp` files. The interface
-/// registry (`*protocols*`) records ops but not a def site, so — unlike a global —
-/// there's no `source-location` to ask; we parse each project file's CST and look
-/// for a top-level interface form whose name matches. `None` when no project file
-/// declares it (e.g. it lives in an external package).
-fn behaviour_location(interp: &mut Interp, name: &str) -> Option<Location> {
-    behaviour_in_files(&introspect::project_files(interp), name)
-}
-
-/// Scan `files` for the `(defbehaviour name …)` / `(defability name …)` form and
-/// return a [`Location`] on its name token. Split from [`behaviour_location`] so it
-/// can be tested against an explicit file list (the live `project_files` needs a
-/// bootstrapped project). Unreadable files are skipped.
-fn behaviour_in_files(files: &[String], name: &str) -> Option<Location> {
-    for path in files {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let root = brood::syntax::cst::parse(&text);
-        for form in root.forms() {
-            let is_iface = matches!(form.head_symbol(&text), Some("defbehaviour" | "defability"));
-            let name_node = form.forms().nth(1);
-            let matches_name =
-                name_node.is_some_and(|n| n.kind == NodeKind::Symbol && n.text(&text) == name);
-            if is_iface && matches_name {
-                let index = LineIndex::new(&text);
-                let range = index.range(&text, name_node?.span);
-                return crate::path_to_uri(path).map(|u| Location::new(u, range));
-            }
-        }
-    }
-    None
 }
 
 /// Project a recorded [`introspect::SourceLoc`] (1-based line + 1-based
@@ -339,35 +297,6 @@ mod tests {
             "should jump to greeter.blsp, got {:?}",
             loc.uri
         );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn scans_project_files_for_the_defbehaviour() {
-        // The `:implements` jump scans the project's files for the
-        // `(defbehaviour Drawable …)` form and lands on its name token (line 2).
-        let dir = std::env::temp_dir().join(format!("brood_impl_def_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let iface = dir.join("shapes.blsp");
-        std::fs::write(
-            &iface,
-            "(defmodule shapes)\n(defbehaviour Drawable (draw (s)))\n",
-        )
-        .unwrap();
-
-        let files = vec![iface.display().to_string()];
-        let loc = behaviour_in_files(&files, "Drawable").expect("found the behaviour");
-        assert!(
-            loc.uri.as_str().ends_with("shapes.blsp"),
-            "should jump to shapes.blsp, got {:?}",
-            loc.uri
-        );
-        // `Drawable` is on the second line — 0-based line 1, after `(defbehaviour `.
-        assert_eq!(loc.range.start.line, 1);
-        assert_eq!(loc.range.start.character, 14);
-
-        // A name no file declares has no location.
-        assert!(behaviour_in_files(&files, "Nonexistent").is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

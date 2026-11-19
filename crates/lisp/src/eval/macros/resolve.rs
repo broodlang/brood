@@ -614,7 +614,7 @@ fn scan_def_form(heap: &Heap, form: Value, names: &mut HashSet<Symbol>) {
 /// current namespace? True for the literal `def…` special forms (handled by the caller)
 /// and, by CONVENTION, for any other head spelled `def…` — which is every definition
 /// macro in the tree: `defonce`, `defrecord`, `defmulti`, `defmethod`, `defability`,
-/// `defbehaviour`, `defevent`, and third-party ones like hatch's `defhtml`/`deflive`.
+/// `defevent`, and third-party ones like hatch's `defhtml`/`deflive`.
 ///
 /// The pre-scan reads UNEXPANDED forms, so it cannot ask a macro what it binds: at scan
 /// time the file's own `(:use …)` has not run and the macro may not even be loaded yet.

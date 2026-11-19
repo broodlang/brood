@@ -54,7 +54,7 @@ Operators — arithmetic, comparison and the reader's own punctuation. Bare by c
 - `>`
 - `>=`
 
-## dynamic (17)
+## dynamic (16)
 
 Dynamic variables (`defdyn`) — earmuffed, so they cannot be mistaken for ordinary bindings, and bare because `binding` sites read better unqualified. What remains after ADR-506 moved the subsystem dynamics into their modules (`project/*root*`, `test/*wait-ms*`) is the output ports, the printer's limits and the module system's own.
 - `*spy-sink*`
@@ -67,7 +67,6 @@ Dynamic variables (`defdyn`) — earmuffed, so they cannot be mistaken for ordin
 - `*print-length*`
 - `*print-level*`
 - `*print-string-length*`
-- `*protocols*`
 - `*reload-diagnostics*`
 - `*require-cycle-abandons*`
 - `*require-failed*`
@@ -112,7 +111,7 @@ Predicates — `x?` type and shape tests. Bare because they read as English at a
 - `table?`
 - `vector?`
 
-## core (126)
+## core (125)
 
 Core vocabulary — the language's own words: special-form companions, sequence and map operations, the process primitives, and the test/dev macros. **This is the group with a real budget.** Before adding here, ask whether the name belongs to a module instead: `string/`, `seq/`, `proc/`, `test/` all exist precisely so a name does not have to be bare.
 - `record-id`
@@ -145,7 +144,6 @@ Core vocabulary — the language's own words: special-form companions, sequence 
 - `dec`
 - `def-`
 - `defability`
-- `defbehaviour`
 - `defdelegate`
 - `defdyn`
 - `defmacro`

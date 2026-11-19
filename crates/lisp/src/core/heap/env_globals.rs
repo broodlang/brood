@@ -2168,14 +2168,6 @@ impl Heap {
             d.exports.insert(prefix.to_string());
         }
     }
-    /// Record that the `*protocols*` table was consulted.
-    pub(crate) fn rec_check_dep_protocols(&self) {
-        if let Some(cell) = self.check.get()
-            && let Some(d) = cell.borrow_mut().dep_rec.as_mut()
-        {
-            d.protocols = true;
-        }
-    }
     /// Record a global DEFINED in the file being checked (excluded from dep-keys).
     pub(crate) fn rec_check_dep_own(&self, sym: Symbol) {
         if let Some(cell) = self.check.get()

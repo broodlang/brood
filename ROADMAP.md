@@ -1020,7 +1020,8 @@ Shipped as ADRs:
   downstream. **Superseded by ADR-168:** `defprotocol`/`defimpl` dispatched only on
   `type-of`, so no two records could dispatch apart; they were retired in favour of
   the ability system (`defability`/`impl`/`defrecord`, nominal dispatch), now **core
-  in the prelude**. `defbehaviour` stays in `std/protocol.blsp`.
+  in the prelude**. `defbehaviour` stayed in `std/protocol.blsp` until ADR-761
+  (2026-11-19) folded module contracts into abilities too.
   - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first ability for
     open-extension rendering: `Display`/`->string`, with a
     zero-cost prelude `*show*` hook so the screen printers let a record define how it

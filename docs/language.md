@@ -887,39 +887,42 @@ dynamic var, so `(binding (*show* nil) …)` disables it for a scope. Default re
 printing is `#id{fields}` — that is intended (records print unlike bare maps); the
 protocol is the per-record *override*, not a change to the default.
 
-#### `defbehaviour`: the module-as-implementor contract
+#### A module contract is an ability
 
-An ability dispatches on a **value**. When the unit that implements a contract is a
-*module* — a live view the router calls by name, say — there is no value to
-dispatch on, and that is `defbehaviour`'s job. It is **core** (`std/protocol.blsp` is
-loaded in the prelude), so `defbehaviour` is available bare — no `require`, no `:use`:
+An ability is the **one** contract mechanism (ADR-761): what other languages split into
+protocols (one operation, many types) and behaviours (a set of functions a module must
+supply) is a single `defability`. When the unit implementing a contract is a *module* —
+a live view a router mounts, a storage backend — the module defines a value and implements
+the ability for it. Bodyless ops are **required**, so `nest check` reports an `impl` that
+leaves one out or gets its arity wrong; ops with a body are optional defaults.
 
 ```clojure
-;; where the contract is declared
-(defmodule views)
-(defbehaviour LiveModule
-  (mount (params))
-  (render (model))
-  (handle-event (name params model)))
+;; the contract
+(defability LiveModule
+  (mount (view params))
+  (render (view model))
+  (handle-event (view name params model))
+  (handle-tick (view ms model) model))          ; provided: optional, defaults to no change
 
-;; a module that satisfies it — the header claims it, the module defines the ops
-(defmodule counter-view (:use views) (:implements LiveModule))
-(defn mount (params) {:n 0})
-(defn render (model) (str "count: " (get model :n)))
-(defn handle-event (name params model) (assoc model :n (+ 1 (get model :n))))
+;; a view satisfies it: its value, and the impl (in practice both live in the view's module)
+(defrecord counter-view ())
+(impl LiveModule counter-view
+  (mount (_ params) {:n 0})
+  (render (_ model) (str "count: " (get model :n)))
+  (handle-event (_ name params model) (assoc model :n (+ 1 (get model :n)))))
+
+;; whoever runs the contract holds the value, and every call dispatches
+(mount (counter-view) {})        ;=> {:n 0}
 ```
 
-`defbehaviour` declares the ops and defines **no functions of its own** — a module
-satisfies the contract by defining them itself and calling them directly. A module
-claims it with `(:implements Name)` in its header, and `nest check` verifies the
-module defines each declared op at the right arity. `(reflect/behaviour-ops 'Name)` exposes
-the specs as data.
+The router holds `(counter-view)` rather than a module name, so swapping the view is
+passing a different value, and an `impl` missing `render` is a check finding where the
+contract is implemented. A framework that generates the module's code (a `deflive` macro,
+say) generates the record and the `impl` with it.
 
-> **`defprotocol` / `defimpl` were retired** (ADR-168) in favour of `ability`, which
-> subsumes them: they dispatched only on `type-of`, so no two records could ever
-> dispatch apart. `defbehaviour` stays because a module contract is genuinely a
-> different thing. Reaching for `defprotocol` now raises an unbound-symbol error
-> whose hint points at `defability`/`impl`.
+> **`defprotocol` / `defimpl` were retired** (ADR-168), and **`defbehaviour` /
+> `(:implements …)`** after them (ADR-761): an ability subsumes both. A header clause
+> `(:implements …)` is refused with a message naming `defability`.
 
 #### The abilities the standard library ships
 
@@ -4119,8 +4122,8 @@ first use; a broken or absent module errors at first use (the checker still repo
 statically). A file that needs a module loaded *before* its first call says so with
 `(:use mod)` or `(:alias mod)`, which load at the referencing file's load as they always have.
 There is **no bare-name magic**: a bare
-`sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly seven clauses — `(:use …)`,
-`(:use-internals …)`, `(:alias …)`, `(:shadow …)`, `(:implements …)`, `(:check-allow …)` (see
+`sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly six clauses — `(:use …)`,
+`(:use-internals …)`, `(:alias …)`, `(:shadow …)`, `(:check-allow …)` (see
 [Type annotations](#type-annotations)) and `(:load a b …)`, which loads modules at this file's load
 and refers nothing: the explicit eager request for code that must have a module BEFORE its first
 call reaches it (ADR-335 — the test runner declares its whole dependency closure this way, since
@@ -4330,7 +4333,6 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/proc/names.blsp` | `'names` | A process registry (ADR-445): `start` (`:unique` or `:duplicate` keys), `register`, `unregister`, `lookup`, `whereis`, `count`; a `{:via registry :key key}` address works wherever `gen` takes a pid |
 | `std/proc/groups.blsp` | `'groups` | Process groups across a cluster (ADR-446): `start` (one server per node), `join`, `leave`, `members`, `local-members` |
 | `std/proc/application.blsp` | `'application` | Applications (ADR-436): `defapp`, `start` (requirements first), `stop` (reverse), `run` (until SIGTERM/Ctrl-C or `shutdown`), `check`, `app?`, `new` |
-| `std/protocol.blsp` | `'protocol` | Behaviour contracts — the *module*-satisfies-a-contract seam: `defbehaviour` declares the ops a module must define (no value dispatch), claimed with `(:implements Name)` in a module header; `*protocols*` is the registry the checker and LSP read. Value dispatch is `ability` — `defprotocol`/`defimpl` were retired (ADR-168) |
 | `std/telemetry.blsp` | `'telemetry` | Event instrumentation; handlers run in an isolated listener process: `start`, `stop`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `sync`, the `span` macro, and the metrics and runtime watchers (`counter`, `summary`, `watch-runtime`, …) |
 
 The following modules are also opt-in and live under `std/net/` and `std/tool/`.

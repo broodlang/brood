@@ -64,15 +64,15 @@ fn every_prelude_file_is_included_in_the_concat() {
 /// judgement that something is *core* rather than a library, so it is listed here by hand:
 /// adding one has to be a decision, not a drift.
 ///
-/// `std/protocol.blsp` joined on 2026-08-21 — behaviour contracts (`defbehaviour`,
-/// `%register-protocol`, `ops`, `*protocols*`) are core, so the prelude carries them.
+/// `std/protocol.blsp` was listed from 2026-08-21 (behaviour contracts, `defbehaviour`) and
+/// is gone (ADR-761): `defability` is the one contract mechanism, so the list is empty.
 ///
 /// `std/proc/gen.blsp` was briefly listed here (`7cb796f0`, 2026-08-21) and is **not**
 /// any more: the `gen` server framework is an ordinary `embedded_module!` again, so its
 /// names live behind `gen/` instead of seizing `call`/`cast`/`stop` as bare prelude
 /// globals. Keep it out — a prelude entry is a decision that a name belongs to the
 /// language, and a framework's client API does not.
-const EXTRA_PRELUDE_FILES: &[&str] = &["std/protocol.blsp"];
+const EXTRA_PRELUDE_FILES: &[&str] = &[];
 
 /// The complement: `PRELUDE` is the split files plus [`EXTRA_PRELUDE_FILES`] and nothing
 /// more. Catches a stale `include_str!` of a file that has since been renamed away or

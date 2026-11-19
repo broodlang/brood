@@ -1,4 +1,4 @@
-//! Abilities and behaviours: impl conformance, missing impls at call sites, sealed members, typed op parameters and returns, `(:implements …)`.
+//! Abilities: impl conformance (a module contract among them, ADR-761), missing impls at call sites, sealed members, typed op parameters and returns.
 
 use super::*;
 
@@ -485,42 +485,47 @@ fn non_sealed_ability_name_is_not_a_type() {
     );
 }
 
-// ---- behaviour conformance: `(:implements …)` on a module ----
+// ---- a module contract is an ability over a value the module defines (ADR-761) ----
+// What `defbehaviour` + `(:implements …)` checked — that a module supplies every function a
+// contract requires, at the right arity — is an ability's `impl` conformance: the module
+// defines a value and implements the ability for it.
+
+const VIEW_CONTRACT: &str = "(defability View (mount (view params)) (render (view model)) \
+                             (handle-tick (view ms model) model))\n\
+                             (defmodule counter)\n(defrecord counter-view ())\n";
 
 #[test]
-fn behaviour_flags_a_missing_callback() {
-    let ws = file_warnings(
-        "(defbehaviour B (render (m)) (mount (p)))\n(defmodule foo (:implements B))\n(defn render (m) m)",
-    );
+fn a_module_contract_flags_a_missing_required_op() {
+    let ws = file_warnings(&format!(
+        "{VIEW_CONTRACT}(impl View counter-view (render (_ model) model))"
+    ));
     assert!(
         ws.iter()
-            .any(|w| w.contains("behaviour B: this module is missing `mount`")),
+            .any(|w| w.contains("ability View: impl is missing op `mount`")),
         "{ws:?}"
     );
 }
 
 #[test]
-fn behaviour_flags_an_arity_mismatch() {
-    let ws = file_warnings(
-        "(defbehaviour B (render (m)))\n(defmodule foo (:implements B))\n(defn render (m extra) m)",
-    );
+fn a_module_contract_flags_an_arity_mismatch() {
+    let ws = file_warnings(&format!(
+        "{VIEW_CONTRACT}(impl View counter-view (mount (_ params) {{}}) (render (_ model extra) model))"
+    ));
     assert!(
         ws.iter()
-            .any(|w| w.contains("`render` takes 2 arg(s), the behaviour needs 1")),
+            .any(|w| w.contains("op `render` takes 2 arg(s), this impl has 3")),
         "{ws:?}"
     );
 }
 
 #[test]
-fn behaviour_complete_module_is_clean() {
-    let ws = file_warnings(
-        "(defbehaviour B (render (m)))\n(defmodule foo (:implements B))\n(defn render (m) m)",
-    );
-    // No conformance diagnostic (the bare-interp "unbound symbol: defbehaviour"
-    // noise contains the substring "behaviour", so match the real messages).
+fn a_module_contract_met_is_clean_and_its_provided_op_optional() {
+    let ws = file_warnings(&format!(
+        "{VIEW_CONTRACT}(impl View counter-view (mount (_ params) {{}}) (render (_ model) model))"
+    ));
     assert!(
         !ws.iter()
-            .any(|w| w.contains("module is missing") || w.contains("the behaviour needs")),
+            .any(|w| w.contains("impl is missing") || w.contains("this impl has")),
         "{ws:?}"
     );
 }

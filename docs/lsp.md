@@ -9,7 +9,7 @@ one server that owns the language knowledge.
 > Status: **Tiers 0–2 live, plus a "developer ergonomics" pass** —
 > diagnostics (syntactic + semantic), completion, hover, signature help, document
 > symbols, goto-definition (in-file, cross-module, stdlib, and
-> `defmodule` `:use`/`:alias`/`:implements` clauses),
+> `defmodule` `:use`/`:alias` clauses),
 > references, document-highlight, rename, semantic tokens, **document formatting,
 > workspace symbol search, code actions, folding ranges, inlay hints,
 > document links** (clickable module names in `:use`/`:alias`)**, and
@@ -32,7 +32,7 @@ one server that owns the language knowledge.
 > (`reflect/global-names`); hover renders a local note, a document def's
 > signature+docstring (read off the CST, `defs`), a prelude/builtin name's
 > `reflect/arglist`+`reflect/doc`, or — in a `defmodule` header — a `(:use …)`/`(:alias …)`
-> module's docstring or a `(:implements …)` behaviour's ops (`module_ref`);
+> module's docstring (`module_ref`);
 > `documentSymbol` outlines top-level `def`/`defn`/`defmacro`;
 > goto-definition resolves through `scope::resolve_at`; signature help shows the
 > enclosing call's parameters with the active argument highlighted (params from
@@ -425,28 +425,15 @@ module/behaviour names there also bind nothing, so they're recognized
   `introspect::module_file` (as loading does) and jumps to `foo.blsp`; hover
   shows `(module foo)` plus the docstring its `defmodule` header declared
   (`introspect::module_doc`, read off `*module-docs*`).
-- `(:implements Bar)` → the behaviour name. The interface registry (`*protocols*`)
-  records ops but *no def-site*, so there's no `reflect/source-location` to ask; instead
-  `definition.rs` scans the project's `.blsp` files (`introspect::project_files`)
-  for the `(defbehaviour Bar …)` form and lands on its name. Hover shows
-  `(behaviour Bar)` plus its declared ops + arities
-  (`introspect::protocol_ops`). A behaviour defined only in an external package
-  (not a project file) has no goto target; hover still shows its ops if the
-  declaring package is loaded.
 
-  > Only `defbehaviour` is relevant here: `(:implements …)` is the *module*-contract
-  > seam, and an **ability** is dispatched on a value rather than claimed by a module
-  > header, so it never appears in one. (The ADR-168 migration lag this note used to
-  > track — `completion.rs` offering ops inside a `(defimpl …)` rather than an
-  > `(impl …)` — was [KI-16](known-issues.md), fixed 2026-07-27.)
+Inside an `(impl Ability …)` form, completion offers the ability's ops as method
+skeletons (`introspect::ability_ops`, read off `*abilities*`).
 
 **Document links** (`document_link.rs`) are the *passive* counterpart to goto:
 rather than waiting for the cursor, the server underlines **every** module name in
 a `(:use foo)` / `(:alias foo)` clause at once, each carrying the resolved `foo.blsp`
 URI so the editor Ctrl-click opens it. Same `introspect::module_file` resolution as the
-clause goto; a name with no file gets no underline. (`:implements` isn't
-linked — its target is found by a project scan, not a single file URI; goto still
-covers it.)
+clause goto; a name with no file gets no underline.
 
 **Navigating into the standard library.** The prelude is `include_str!`'d, so it
 has no source file at runtime — `M-.` on `map` would have nowhere to land. The

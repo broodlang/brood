@@ -4,8 +4,10 @@
 > `std/prelude/abilities.blsp` (`defability`/`impl`, value-first nominal dispatch, folded into
 > the prelude from `std/ability.blsp`), `defrecord` + a checker arm + `tests/ability_test.blsp`. It unifies value polymorphism and
 > drivers-as-values, detects cross-module impl conflicts, and dispatches records on a
-> baked `module/name` identity. `defprotocol`/`defimpl` have been **removed**;
-> `defbehaviour` stays in `std/protocol.blsp` as the module-contract seam. The
+> baked `module/name` identity. `defprotocol`/`defimpl` have been **removed**, and so has
+> `defbehaviour` (ADR-761): a module contract is an ability over a value the module
+> defines, so `defability` is the one contract mechanism. Where this note describes
+> behaviours below, it records the design as it stood, not the language now. The
 > reference documentation is [language.md §Polymorphism](language.md); the rest of this
 > note is the design record — the problem, measurements, the language survey, and the
 > space that was explored to get here.

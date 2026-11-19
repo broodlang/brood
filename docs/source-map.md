@@ -259,7 +259,6 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `proc/groups.blsp` (`groups`) — Process groups across a cluster: `join` a process to a named group, and `members` lists the group's processes on every connected node.
 - `proc/names.blsp` (`names`) — A process registry: a key that is any value, held by one process (`:unique`, the default) or by many (`:duplicate`), with a value stored beside each holder.
 - `proc/supervisor.blsp` (`supervisor`) — Process supervision written in Brood over the kernel's spawn / link / trap-exit / receive / exit (ADR-006, ADR-067).
-- `protocol.blsp` — Behaviour contracts — the module-satisfies-a-contract seam.
 - `queue.blsp` (`queue`) — Purely functional FIFO queue.
 - `rand.blsp` (`rand`) — A seeded PRNG (xorshift32).
 - `reflect.blsp` (`reflect`) — Reading Brood source as DATA: the advisory checker, the reader's lossless CST, the string- and comment-aware scanners, and where a definition lives.

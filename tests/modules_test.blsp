@@ -224,28 +224,24 @@
       (%registry-update! '*features-loading* :dissoc ["refer-race-target"] nil)
       (is (includes? (str r) "circular")))))
 
-;; `:implements` is read by the type checker (types/check/protocol.rs), which pulls the
-;; clause out of the header source; the loader only has to tolerate it. It was left out
-;; of `%defmodule-clause-heads` when unrecognised clauses became a hard error, so every
-;; module claiming a protocol failed to load — caught by a downstream app (willem) whose
-;; suite stopped loading entirely.
-(describe "defmodule: the (:implements …) checker annotation"
-  (test "a header claiming a protocol loads"
-    (%load-string "(defmodule impl-a (:implements LiveModule)) (defn mount (p) p)")
-    (assert= (impl-a/mount 7) 7))
-  (test "it composes with the loader's own clauses"
-    (%load-string "(defmodule impl-b) (defn helper () :ok)")
-    (%load-string "(defmodule impl-c (:use impl-b) (:implements LiveModule)) (defn go () (helper))")
-    (assert= (impl-c/go) :ok))
-  (test "a genuinely unrecognised clause is still a hard error"
-    ;; The tightening this restores an exception to must keep working — a misspelled
-    ;; clause that silently does nothing is the failure mode it exists to prevent.
+;; An unrecognised header clause is a hard error: a misspelled clause that silently does
+;; nothing is the failure it exists to prevent. `(:implements B)` named a `defbehaviour`; both
+;; are gone (ADR-761), and the error says what replaced them.
+(describe "defmodule: unrecognised header clauses"
+  (test "a genuinely unrecognised clause is a hard error"
     (is (= (try (%load-string "(defmodule impl-d (:require foo))") (catch _e :rejected)) :rejected)))
-  (test "the error names :implements among the accepted clauses"
+  (test "(:implements …) is refused, pointing at defability"
+    (let (message (try
+                    (%load-string "(defmodule impl-a (:implements LiveModule)) (defn mount (p) p)")
+                    (catch e (error-message e))))
+      (is (includes? message "defability"))
+      (is (includes? message "ADR-761"))))
+  (test "the error lists the clauses a header takes"
     (let (message (try
                     (%load-string "(defmodule impl-e (:nonsense x))")
                     (catch e (error-message e))))
-      (is (includes? message ":implements")))))
+      (is (includes? message ":shadow"))
+      (is (not (includes? message ":implements"))))))
 
 ;; `(:use …)` import policy (ADR-065 + ADR-235): importing two modules that
 ;; export the same name is FINE — the clash resolves lazily, reported only if that bare name

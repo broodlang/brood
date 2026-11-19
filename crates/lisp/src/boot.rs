@@ -462,9 +462,6 @@ pub const PRELUDE: &str = concat!(
     // body calls a macro defined after it is deferred to the tree-walker for good, and every
     // contract check runs through this machinery.
     include_str!("../../../std/prelude/contracts.blsp"),
-    // Behaviour contracts are CORE (defbehaviour / %register-protocol / ops / *protocols*).
-    // After modules.blsp, which defines the `swap-registry!` macro protocol uses.
-    include_str!("../../../std/protocol.blsp"),
 );
 
 /// The repo-relative paths of the files [`PRELUDE`] concatenates, in the same order —
@@ -485,7 +482,6 @@ pub const PRELUDE_PATHS: &[&str] = &[
     "std/prelude/abilities.blsp",
     "std/prelude/image-install.blsp",
     "std/prelude/contracts.blsp",
-    "std/protocol.blsp",
 ];
 
 /// Is `file` one of the prelude's own source files? Compared by trailing path
@@ -582,7 +578,7 @@ mod prelude_hygiene {
             "PRELUDE_PATHS no longer lists the files PRELUDE concatenates, in order"
         );
         assert!(is_prelude_source("/any/checkout/std/prelude/core.blsp"));
-        assert!(is_prelude_source("std/protocol.blsp"));
+        assert!(is_prelude_source("std/prelude/contracts.blsp"));
         assert!(!is_prelude_source("/project/std/prelude/core.blsp.bak"));
         assert!(!is_prelude_source("/project/src/core.blsp"));
     }

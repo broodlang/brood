@@ -6,8 +6,8 @@
 //! no link.
 //!
 //! This complements goto-definition (`definition.rs` / `module_ref.rs`): goto is
-//! cursor-driven and also covers `:implements`; document links are the
-//! editor's *passive* underlines over every linkable module name at once.
+//! cursor-driven; document links are the editor's *passive* underlines over every
+//! linkable module name at once.
 
 use brood::Interp;
 use brood::syntax::cst::{Node, NodeKind};

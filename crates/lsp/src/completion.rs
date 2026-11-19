@@ -66,19 +66,19 @@ pub fn completions(
     // Inside `(impl Ability …)`, offer the ability's ops first (so the snippet-y
     // METHOD item shadows the generic global of the same name) — you get exactly the
     // ops you must implement, each as a ready-to-fill method skeleton.
-    if let Some(proto) = enclosing_impl(cst, offset, text) {
+    if let Some(ability) = enclosing_impl(cst, offset, text) {
         // Is the method's own `(` already typed (cursor sits inside `(op…`), or are
         // we directly in the impl form? If the innermost list is the impl form
         // itself, the skeleton must supply the wrapping parens.
         let paren_open = innermost_list(cst, offset)
             .and_then(|list| list.forms().next())
             .is_some_and(|head| head.text(text) != "impl");
-        for (name, arity) in introspect::protocol_ops(interp, &proto) {
+        for (name, arity) in introspect::ability_ops(interp, &ability) {
             if seen.insert(name.clone()) {
                 let mut it = item(name.clone(), CompletionItemKind::METHOD);
                 it.detail = Some(format!(
                     "{} op ({} arg{})",
-                    proto,
+                    ability,
                     arity,
                     if arity == 1 { "" } else { "s" }
                 ));

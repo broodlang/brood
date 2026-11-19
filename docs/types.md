@@ -421,18 +421,17 @@ never a false positive.
   is now the default (`eval/macros/hygiene.rs`, ADR-066 amendment, ADR-500): a template's
   own binders are alpha-renamed at expansion, so the capture this lint looked for can't
   happen, and `check/hygiene.rs` is gone.
-- ✅ **Ability / behaviour conformance** (`check/protocol.rs`). The *macros* live in
-  the prelude (`std/prelude/abilities.blsp`, ADR-168) and `std/protocol.blsp`
-  (`defbehaviour`, ADR-158); this pass predated both by months, back when they were a
-  prototype in the `hatch` package. Beyond type misuse, the checker validates the
-  `defability` / `impl` / `defbehaviour` / `(:implements …)` family against the
-  declared interface: a diagnostic per op an impl omits, per op whose arity
-  disagrees, and per method the interface never declared (almost always a typo).
-  Behaviours additionally check that a module claiming `(:implements Name)` actually
-  *defines* each declared op at the right arity. **Sealed abilities** —
+- ✅ **Ability conformance** (`check/protocol.rs`). The *macros* live in the prelude
+  (`std/prelude/abilities.blsp`, ADR-168); this pass predated them by months, back when
+  they were a prototype in the `hatch` package. Beyond type misuse, the checker
+  validates each `impl` against its `defability`: a diagnostic per required op an impl
+  omits, per op whose arity disagrees, and per method the ability never declared
+  (almost always a typo). A module contract is checked the same way, since it is an
+  ability over a value the module defines (ADR-761; `defbehaviour` and `(:implements …)`
+  are gone). **Sealed abilities** —
   `(defability A :sealed [id …] …)` — add exhaustiveness: every declared member must
   have a *direct* impl of every op (a `:default` does not count). The interface
-  registry is seeded from the runtime `*abilities*` / `*protocols*` maps (so an
+  registry is seeded from the runtime `*abilities*` map (so an
   interface declared in an imported module is known) and read from the
   **un-expanded** tree (the shape vanishes after `defability` lowers to `defn`s +
   registry calls — the same reason `sig` and the hygiene lint read un-expanded). An

@@ -106,7 +106,7 @@ when the runtime crashes); `std/prelude/*.blsp` is the canonical idiomatic code.
   one options map with `{:keys [...]}`.
 - `(defmodule name "doc" (:use other) (:use test))` compiles the file into namespace
   `name`. `(:use mod :only [a b])` / `:exclude [a]` pick names. The header takes only
-  `:use`, `:use-internals`, `:alias`, `:load`, `:shadow`, `:implements`. From outside a
+  `:use`, `:use-internals`, `:alias`, `:load`, `:shadow`, `:check-allow`. From outside a
   module, call it qualified: `(life/step …)`.
 
 ## Muscle memory vs Brood

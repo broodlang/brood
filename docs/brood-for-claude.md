@@ -149,8 +149,8 @@ Two rules that keep Brood code uniform and unambiguous. The first is
 alternative spelling (ADR-149); the second is idiom.
 
 **1. Code uses `( )`; vectors `[ ]` are for data.** Every parameter list is a
-*list* — `defn`, `fn`, a `defmethod`, an ability op spec, an `impl` method, a
-`defbehaviour` op (ADR-512) — and so are the binding forms of `let` / `letrec` /
+*list* — `defn`, `fn`, a `defmethod`, an ability op spec, an `impl` method
+(ADR-512) — and so are the binding forms of `let` / `letrec` /
 `binding` / `for` / `doseq` / `when-let` / `if-let`. Writing the vector is a clean
 error with a hint. Vectors are reserved for data: tuple values (`[x y]`), sequence
 literals (`[1 2 3]`), tuple **patterns** that match against tuple values inside
@@ -419,12 +419,12 @@ Other things worth knowing:
 - `(satisfies? 'Shape x)` to branch instead of letting a missing op raise.
 - **Register at load time.** Top-level `impl` forms are safe; two *processes* calling
   `impl` concurrently can lose an update (it is a `def` under the hood).
-- `defbehaviour` is the *other* seam — a contract a **module** satisfies by defining
-  plain functions, claimed with `(:implements Name)` in the header. It is core (bare,
-  no `require`/`:use`). No value dispatch. Use it when the implementor is a namespace,
-  not a value.
-- **`defprotocol`/`defimpl` no longer exist** (retired, ADR-168). If you were about to
-  write one, write an ability.
+- **A module contract is an ability too** (ADR-761). When a module must supply a set of
+  functions (a live view's `mount`/`render`), declare them as a `defability`, have the
+  module define a value (`(defrecord view ())`) and `impl` the ability for it; the caller
+  holds the value. Bodyless ops are required, and `nest check` reports a missing one.
+- **`defprotocol`/`defimpl`, `defbehaviour` and `(:implements …)` no longer exist**
+  (ADR-168, ADR-761). If you were about to write one, write an ability.
 
 ### The abilities `std/` already ships (ADR-177)
 
@@ -1430,7 +1430,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (ADR-227 follow-up), for any module, so naming where something comes from loads
   it on demand (`mod/foo`). No bare-name magic, though — a bare `sqrt` with no
   `math/` prefix and no `(:use math)` stays unbound. The header understands exactly `(:use …)`,
-  `(:use-internals …)`, `(:alias …)`, `(:shadow …)`, `(:implements …)` and `(:load a b …)`
+  `(:use-internals …)`, `(:alias …)`, `(:shadow …)`, `(:check-allow …)` and `(:load a b …)`
   (load now, refer nothing — the eager request, since a plain reference loads on first
   use, ADR-335); **anything else is an error** —
   `(:require …)` and a misspelled `(:use-internal …)` are rejected rather than

@@ -86,26 +86,23 @@ fn string_contents(heap: &Heap, v: Value) -> Option<String> {
     }
 }
 
-/// The ops a protocol/behaviour `proto` declares — `(op-name, arity)` per op — read
-/// from the runtime `*protocols*` registry that `defprotocol`/`defbehaviour`
-/// populate. Empty if the registry or the named interface isn't loaded. Drives
-/// `defimpl` op-completion in the LSP. Read-only (no allocation into LOCAL).
-pub fn protocol_ops(interp: &Interp, proto: &str) -> Vec<(String, usize)> {
+/// The ops ability `ability` declares — `(op-name, arity)` per op — read from the runtime
+/// `*abilities*` registry `defability` populates. Empty if the registry or the named
+/// ability isn't loaded. Drives `impl` op-completion in the LSP. Read-only (no allocation
+/// into LOCAL).
+pub fn ability_ops(interp: &Interp, ability: &str) -> Vec<(String, usize)> {
     let heap = &interp.heap;
     let mut out = Vec::new();
-    // Search both interface registries: `*abilities*` (defability ops — for `impl`
-    // op-completion) and `*protocols*` (defbehaviour ops — for `:implements` hovers).
-    // Ability and behaviour names are distinct, so scanning both is safe.
-    for reg in [
-        crate::core::registries::ABILITIES,
-        crate::core::registries::PROTOCOLS,
-    ] {
-        let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern(reg)) else {
-            continue;
+    {
+        let Some(Value::Map(id)) = heap.env_get(
+            heap.global(),
+            value::intern(crate::core::registries::ABILITIES),
+        ) else {
+            return out;
         };
         for (key, specs) in heap.map_entries(id) {
             let Value::Sym(s) = key else { continue };
-            if value::symbol_name(s) != proto {
+            if value::symbol_name(s) != ability {
                 continue;
             }
             // Each spec is `(op-name (args…) …)`: name + the parameter list's length. A

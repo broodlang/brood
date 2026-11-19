@@ -212,7 +212,7 @@ out to already exist (`nest check` has always exited 1 on any warning).
 | 155 | `receive` clause bodies compile into the *calling* function, not into a per-message thunk |
 | 156 | The collection protocol covers every collection; a misread shape is an error, not a reading |
 | 157 | A literal `if` test picks its branch at compile time |
-| 158 | Protocols move into `std/`: the polymorphism seam ships with the language *(value dispatch superseded by ADR-168; `defbehaviour` stands)* |
+| 158 | Protocols move into `std/`: the polymorphism seam ships with the language *(value dispatch superseded by ADR-168; `defbehaviour` by ADR-761)* |
 | 159 | Grapheme-*indexed* string accessors: make the correct spelling the fast one |
 | 160 | Alternative (`or`) and conjunction (`and`) patterns; map keys are sub-patterns |
 | 161 | Transducers become public surface |

@@ -126,7 +126,6 @@ pub(super) fn check_conformance(
 ) {
     let protocols = protocol::collect(heap, forms);
     protocol::check_impls(heap, forms, &protocols, out);
-    protocol::check_behaviours(heap, forms, expanded, &protocols, out);
     protocol::check_dispatch_calls(heap, expanded, ability_info, multi_info, out);
     protocol::check_sealed(ability_info, out);
     protocol::check_requires(ability_info, out);

@@ -30,16 +30,11 @@ pub fn hover(
     let node = root.symbol_at(offset)?;
     let name = node.text(text);
 
-    // A `defmodule` clause target — the module name in `(:use …)`/`(:alias …)`, or
-    // the behaviour name in `(:implements …)` — binds nothing in the buffer, so it
-    // resolves `Free` below and renders nothing useful. Handle it first, off the
-    // module-docs / interface registries.
-    if let Some(cref) = module_ref::clause_ref_at(root, text, offset) {
-        let markdown = match cref {
-            module_ref::ClauseRef::Module(m) => render_module(interp, m),
-            module_ref::ClauseRef::Behaviour(b) => render_behaviour(interp, b),
-        };
-        return markdown.map(|value| Hover {
+    // A `defmodule` clause target — the module name in `(:use …)`/`(:alias …)` — binds
+    // nothing in the buffer, so it resolves `Free` below and renders nothing useful.
+    // Handle it first, off the module docs.
+    if let Some(module) = module_ref::clause_module_at(root, text, offset) {
+        return render_module(interp, module).map(|value| Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
                 value,
@@ -138,22 +133,6 @@ fn render_module(interp: &mut Interp, name: &str) -> Option<String> {
     if let Some(doc) = introspect::module_doc(interp, name) {
         s.push_str("\n\n");
         s.push_str(&doc);
-    }
-    Some(s)
-}
-
-/// Hover for a `(:implements Bar)` behaviour name: a `(behaviour Bar)` header plus
-/// its declared ops (name + arity), read from the interface registry. The ops are
-/// absent when the declaring package isn't loaded — then just the header shows.
-fn render_behaviour(interp: &mut Interp, name: &str) -> Option<String> {
-    let mut s = code(&format!("(behaviour {name})"));
-    let ops = introspect::protocol_ops(interp, name);
-    if !ops.is_empty() {
-        s.push_str("\n\nOps:");
-        for (op, arity) in ops {
-            let plural = if arity == 1 { "" } else { "s" };
-            s.push_str(&format!("\n- `{op}` ({arity} arg{plural})"));
-        }
     }
     Some(s)
 }
@@ -301,33 +280,5 @@ mod tests {
         assert!(md.contains("(module greeter)"), "header missing: {md:?}");
         assert!(md.contains("says hello"), "docstring missing: {md:?}");
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn hovers_an_implements_behaviour_with_its_ops() {
-        let mut interp = Interp::new();
-        // Seed the interface registry directly (the protocol package isn't loaded in
-        // a bare interp) — `*protocols*` maps a behaviour name to its op specs.
-        interp
-            .eval_str("(def *protocols* {'Drawable '((draw (s)) (area (s)))})")
-            .expect("seed protocols");
-
-        let src = "(defmodule app (:implements Drawable))";
-        let root = cst::parse(src);
-        let tree = scope::analyze(&root, src);
-        let index = LineIndex::new(src);
-        let at = src.find("Drawable").unwrap() as u32;
-        let md = hover(&mut interp, src, &root, &tree, &index, at)
-            .map(|h| match h.contents {
-                HoverContents::Markup(m) => m.value,
-                _ => panic!("expected markup"),
-            })
-            .expect("hover on the :implements behaviour name");
-        assert!(
-            md.contains("(behaviour Drawable)"),
-            "header missing: {md:?}"
-        );
-        assert!(md.contains("`draw` (1 arg)"), "op missing: {md:?}");
-        assert!(md.contains("`area` (1 arg)"), "op missing: {md:?}");
     }
 }

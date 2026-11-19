@@ -324,8 +324,6 @@ pub(crate) struct CheckDepRec {
     /// storing them would just bloat the manifest (a 1000-def file otherwise records
     /// ~1000 self-names — the 64MB-manifest bug).
     pub(crate) own: std::collections::HashSet<Symbol>,
-    /// Whether the check consulted the `*protocols*` table.
-    pub(crate) protocols: bool,
 }
 
 /// What a bare name in the `(:use …)` import table resolves to (ADR-235). One

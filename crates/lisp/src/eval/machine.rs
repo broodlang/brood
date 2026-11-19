@@ -2318,8 +2318,8 @@ fn def_bind(heap: &mut Heap, name: Symbol, val: Value, env: EnvId) -> LispResult
     // While an embedded std module is loading, its own definitions become reserved as they
     // appear — that is how `set/union` and friends join the reserved set without a static
     // name list. Same rule as the seed filter: an embedded module's FUNCTIONS become
-    // reserved, its data globals (its own registries, e.g. `protocol`'s
-    // `*protocols*`/`*impls*`) stay rebindable — they are rebound by the module's own
+    // reserved, its data globals (its own registries, e.g. `*impls*`) stay rebindable —
+    // they are rebound by the module's own
     // functions at runtime.
     if heap.in_module_load()
         && matches!(

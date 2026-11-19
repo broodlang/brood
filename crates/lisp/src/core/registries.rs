@@ -50,6 +50,3 @@ pub const METHOD_FROM: &str = "*method-from*";
 /// Multimethod dispatch algebra and declared return types.
 pub const MULTI_ALGEBRA: &str = "*multi-algebra*";
 pub const MULTI_RET: &str = "*multi-ret*";
-/// Declared protocols (`std/protocol.blsp` — a std module, not the prelude, so it may be
-/// absent; every reader treats a missing registry as empty).
-pub const PROTOCOLS: &str = "*protocols*";

@@ -114,7 +114,7 @@ checkout ([[nested-checkouts]])."
 (def- *def-heads*
   ["defn"
     "defn-" "def" "def-" "defmacro" "defdyn" "defrecord" "defability" "defmodule" "defserver"
-    "defbehaviour" "defalias"])
+    "defalias"])
 
 ;; Node shapes `parse-source` produces (all vectors):
 ;;   leaf       [:symbol "foo"] [:str "\"…\""] [:comment "; …\n"] [:whitespace " "] [:int "1"]

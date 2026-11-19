@@ -141,22 +141,6 @@ fn an_impl_op_with_a_list_parameter_form_is_read() {
     );
 }
 
-#[test]
-fn a_variadic_behaviour_op_accepts_any_provider_arity() {
-    let w = file_warnings(
-        "(defmodule bv (:implements V)) (defbehaviour V (render (self & more))) (defn render (a b c) [a b c])",
-    );
-    assert_eq!(count_containing(&w, "behaviour V"), 0, "{w:?}");
-    let fixed = file_warnings(
-        "(defmodule bv (:implements V)) (defbehaviour V (render (self))) (defn render (a b c) [a b c])",
-    );
-    assert_eq!(
-        count_containing(&fixed, "behaviour V"),
-        1,
-        "a fixed-arity op still pins the provider: {fixed:?}"
-    );
-}
-
 // ---- guard purity resolves the head ------------------------------------------------------
 
 #[test]
