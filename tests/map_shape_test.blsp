@@ -1,0 +1,72 @@
+;; Map shape checks (std/map.blsp `map/shape-problems`, ADR-760): is this map the right
+;; shape — a required key missing, a key the shape does not name (with the nearest allowed key
+;; as a "did you mean"), a value its predicate refuses, or not a map at all — answered as data,
+;; and each problem said as one sentence. Register-only — discovered and run by `nest test`.
+(defmodule map-shape-test (:use test))
+
+(def- manifest-shape {:required #{:name} :optional #{:version :dependencies :source-paths}})
+
+(describe "map/shape-problems"
+  (test "a map that fits has no problems"
+    (assert= (map/shape-problems {:name "x" :version "1"} manifest-shape) ())
+    (assert= (map/shape-problems {} {}) ()))
+  (test "an absent required key is :missing"
+    (assert= (map/shape-problems {:version "1"} manifest-shape) (list {:kind :missing :key :name})))
+  (test "a present key with a nil value is not missing"
+    (assert= (map/shape-problems {:name nil} manifest-shape) ()))
+  (test "an unknown key suggests the nearest allowed key"
+    (assert= (map/shape-problems {:name "x" :dependecies []} manifest-shape)
+      (list {:kind :unknown :key :dependecies :suggestion :dependencies})))
+  (test "an unknown key near nothing allowed has a nil suggestion"
+    (assert= (map/shape-problems {:name "x" :frobnicate 1} manifest-shape)
+      (list {:kind :unknown :key :frobnicate :suggestion nil})))
+  (test "a key already present is never suggested for a typo of it"
+    (assert= (map/shape-problems {:name "x" :nmae "y"} manifest-shape)
+      (list {:kind :unknown :key :nmae :suggestion nil})))
+  (test "a misspelt required key is both missing and unknown, the typo pointing at it"
+    (assert= (map/shape-problems {:nmae "x"} manifest-shape)
+      (list {:kind :missing :key :name} {:kind :unknown :key :nmae :suggestion :name})))
+  (test "string and symbol keys are checked and suggested like keywords"
+    (assert= (map/shape-problems {"colour" 1} {:optional #{"color" "size"}})
+      (list {:kind :unknown :key "colour" :suggestion "color"}))
+    (assert= (map/shape-problems {'widht 1} {:optional #{'width}})
+      (list {:kind :unknown :key 'widht :suggestion 'width})))
+  (test "a :check predicate that refuses a present value is :invalid; an absent key is not checked"
+    (let (shape {:optional #{:width :height} :check {:width int? :height int?}})
+      (assert= (map/shape-problems {:width "wide"} shape)
+        (list {:kind :invalid :key :width :value "wide"}))
+      (assert= (map/shape-problems {:width 3} shape) ())))
+  (test "problems come missing, then unknown, then invalid, each sorted by key"
+    (let (shape {:required #{:b :a} :optional #{:n} :check {:n int?}})
+      (assert= (map (map/shape-problems {:n "x" :zz 1 :yy 2} shape)
+                 (fn (problem) [(:kind problem) (:key problem)]))
+        (list [:missing :a] [:missing :b] [:unknown :yy] [:unknown :zz] [:invalid :n]))))
+  (test "a value that is not a map is one :not-a-map problem"
+    (assert= (map/shape-problems 42 manifest-shape) (list {:kind :not-a-map :value 42}))
+    (assert= (map/shape-problems nil manifest-shape) (list {:kind :not-a-map :value nil}))
+    (assert= (map/shape-problems [:name "x"] manifest-shape)
+      (list {:kind :not-a-map :value [:name "x"]}))))
+
+(describe "map/shape-problem->string"
+  (test "says each kind of problem as a sentence"
+    (assert= (map/shape-problem->string {:kind :missing :key :name}) "missing required key :name")
+    (assert= (map/shape-problem->string {:kind :unknown :key :nmae :suggestion :name})
+      "unknown key :nmae — did you mean :name?")
+    (assert= (map/shape-problem->string {:kind :unknown :key :zzz :suggestion nil})
+      "unknown key :zzz")
+    (assert= (map/shape-problem->string {:kind :invalid :key :width :value "wide"})
+      "key :width has an invalid value \"wide\"")
+    (assert= (map/shape-problem->string {:kind :not-a-map :value 42}) "expected a map, got 42"))
+  (test "every problem shape-problems answers renders"
+    (doseq (problem (map/shape-problems {:nmae 1 :width "w"}
+                      {:required #{:name} :optional #{:width} :check {:width int?}}))
+      (is (string? (map/shape-problem->string problem)))))
+  (test "something that is not a problem raises"
+    (assert-error (map/shape-problem->string {:kind :bogus}))))
+
+(describe "map/shape-problems across processes"
+  (test "a worker's problems arrive intact"
+    (let (me (self))
+      (spawn (send me (map/shape-problems {:nmae 1} manifest-shape)))
+      (assert= (receive (problems problems))
+        (list {:kind :missing :key :name} {:kind :unknown :key :nmae :suggestion :name})))))

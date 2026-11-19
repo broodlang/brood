@@ -18,7 +18,9 @@ the prelude and need no import; the path functions `get-in`, `assoc-in`, `update
 `dissoc-in` are here (ADR-506).
 This module adds: `reduce-kv` (fold over key and value), `merge-with` (combine on shared
 keys), `update-vals` / `update-keys` (map value/key every), `select-keys` (project a
-subset) and `zipmap` (pair keys with values). `(:use map)` for bare
+subset), `zipmap` (pair keys with values) and `shape-problems` / `shape-problem->string`
+(is this map the right shape — missing, unknown and invalid keys, with a \"did you mean\"; ADR-760).
+`(:use map)` for bare
 access, or call qualified (`map/update-vals`).")
 
 ;; merge-with: on a shared key, combine with `(f existing new)` instead of replacing.
@@ -82,3 +84,79 @@ stopping at the shorter.
 
     (map/zipmap [:a :b] [1 2])   ;=> {:a 1 :b 2}"
   (%zipmap ks vs))
+
+;; ---- shape checks: is this map the right shape? (ADR-760) -----------------------
+;; A manifest, a spec, a settings group or a plugin map is a map whose keys are a known set,
+;; and what goes wrong with one is the same few things: a required key is missing, a key is
+;; misspelt, a value is the wrong kind, or the thing is not a map at all. Each caller used to
+;; hand-roll that walk and its "did you mean"; this is the one walk, answering problems as DATA
+;; (so a caller can warn, fail, or show a diagnostic) and one sentence per problem.
+
+(defn- shape-key-text (key)
+  ;; how a key is printed — and compared, for a suggestion: `:name`, `"name"`, `name`
+  (pr-str key))
+
+(defn- shape-sorted (collection)
+  ;; keys in a stable order, whatever their kind, so problems come out the same every run
+  (seq/sort-by (vec collection) shape-key-text))
+
+(defn- shape-suggestion (key candidates)
+  ;; the nearest of `candidates` to the unknown `key` by edit distance, or nil
+  (let (by-text (into {} (map candidates (fn (candidate) [(shape-key-text candidate) candidate])))
+        nearest (fuzzy/nearest (keys by-text) (shape-key-text key)))
+    (if (empty? nearest) nil (get by-text (first nearest)))))
+
+(defn shape-problems (value shape:map -> list)
+  "What is wrong with `value` against `shape` — `{:required #{keys} :optional #{keys}
+:check {key predicate}}`, every part optional — as a list of problem maps, `()` when it fits.
+A problem is `{:kind :not-a-map :value value}` (and nothing else is checked),
+`{:kind :missing :key key}` for an absent required key, `{:kind :unknown :key key :suggestion
+nearest}` for a key the shape does not name (`:suggestion` is the nearest unused allowed key by
+edit distance, or nil), or `{:kind :invalid :key key :value value}` for a present key whose
+`:check` predicate answers false. Missing come first, then unknown, then invalid, each sorted
+by key. `map/shape-problem->string` says one as a sentence.
+
+    (map/shape-problems {:name \"x\"} {:required #{:name} :optional #{:version}})   ;=> ()
+    (map/shape-problems {:nmae \"x\"} {:required #{:name}})   ;=> ({:kind :missing :key :name} {:kind :unknown :key :nmae :suggestion :name})
+    (map/shape-problems {:width \"wide\"} {:optional #{:width} :check {:width int?}})   ;=> ({:kind :invalid :key :width :value \"wide\"})
+    (map/shape-problems 42 {:required #{:name}})   ;=> ({:kind :not-a-map :value 42})"
+  (if (not (map? value))
+    (list {:kind :not-a-map :value value})
+    (let (required (or (:required shape) #{})
+          allowed (into required (or (:optional shape) #{}))
+          checks (or (:check shape) {})
+          present (keys value)
+          missing (seq/filter (shape-sorted required) (fn (key) (not (contains? value key))))
+          unknown (seq/filter (shape-sorted present) (fn (key) (not (contains? allowed key))))
+          unused (seq/filter (vec allowed) (fn (key) (not (contains? value key))))
+          invalid (seq/filter (shape-sorted present)
+                    (fn (key)
+                      (and (contains? checks key) (not ((get checks key) (get value key)))))))
+      (append (map missing (fn (key) {:kind :missing :key key}))
+        (map unknown
+          (fn (key) {:kind :unknown :key key :suggestion (shape-suggestion key unused)}))
+        (map invalid (fn (key) {:kind :invalid :key key :value (get value key)}))))))
+
+(defn shape-problem->string (problem:map -> string)
+  "One problem from `map/shape-problems` as a sentence, with a \"did you mean\" for an unknown
+key that has a near miss.
+
+    (map/shape-problem->string {:kind :unknown :key :nmae :suggestion :name})   ;=> \"unknown key :nmae — did you mean :name?\"
+    (map/shape-problem->string {:kind :unknown :key :zzz :suggestion nil})   ;=> \"unknown key :zzz\"
+    (map/shape-problem->string {:kind :missing :key :name})   ;=> \"missing required key :name\"
+    (map/shape-problem->string {:kind :invalid :key :width :value \"wide\"})   ;=> \"key :width has an invalid value \\\"wide\\\"\"
+    (map/shape-problem->string {:kind :not-a-map :value 42})   ;=> \"expected a map, got 42\""
+  (let (key-text (shape-key-text (:key problem)))
+    (case (:kind problem)
+      :missing (str "missing required key " key-text)
+      :unknown
+        (if (nil? (:suggestion problem))
+          (str "unknown key " key-text)
+          (str "unknown key "
+            key-text
+            " — did you mean "
+            (shape-key-text (:suggestion problem))
+            "?"))
+      :invalid (str "key " key-text " has an invalid value " (pr-str (:value problem)))
+      :not-a-map (str "expected a map, got " (pr-str (:value problem)))
+      (error "map/shape-problem->string: not a shape problem: " (pr-str problem)))))

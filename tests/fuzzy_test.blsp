@@ -207,6 +207,12 @@
     (assert= (fuzzy/edit-distance "kitten" "sitting") 3))
   (test "is symmetric"
     (assert= (fuzzy/edit-distance "sitting" "kitten") (fuzzy/edit-distance "kitten" "sitting")))
+  (test "counts a swap of two adjacent characters as one edit"
+    (assert= (fuzzy/edit-distance "nmae" "name") 1)
+    (assert= (fuzzy/edit-distance "widht" "width") 1)
+    (assert= (fuzzy/edit-distance "ab" "ba") 1)
+    ;; optimal string alignment: a swapped pair is not edited again
+    (assert= (fuzzy/edit-distance "ca" "abc") 3))
   (test "counts codepoints, not bytes"
     (assert= (fuzzy/edit-distance "héllo" "hello") 1)))
 
@@ -227,6 +233,8 @@
     (assert= (fuzzy/nearest ["cat" "bat" "bat"] "cat") (list "bat")))
   (test "a candidate of a different length within the threshold qualifies"
     (assert= (fuzzy/nearest ["abcd" "ab" "abcde"] "abc") (list "ab" "abcd")))
+  (test "a swapped pair is one edit, so a short transposed name finds its match"
+    (assert= (fuzzy/nearest ["name" "none"] "nmae") (list "name")))
   (test "nothing close is an empty answer"
     (assert= (fuzzy/nearest ["reduce" "map"] "zzqqxx") ()))
   (test "answers the same in many processes at once"

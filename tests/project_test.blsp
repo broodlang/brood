@@ -1372,3 +1372,16 @@
         (file/spit added "(defmodule later \"f\")\n(defn later-answer () 7)\n")
         (assert= (project/reload-changed root) [added])
         (assert= (later/later-answer) 7)))))
+
+;; ---- an unknown manifest key: warned, with a "did you mean" (ADR-760) ----------
+(describe "project: an unknown manifest key"
+  (test "warns, names the near miss, and the manifest still applies"
+    (let (warning (with-err-str (assert= (apply-config '(:name "app" :dependecies [])) "app")))
+      (and (is (includes? warning "unknown key :dependecies — did you mean :dependencies?"))
+        (is (includes? warning "ignored")))))
+  (test "a key near nothing it could mean is named without a guess"
+    (let (warning (with-err-str (apply-config '(:name "app" :frobnicate 1))))
+      (and (is (includes? warning "unknown key :frobnicate"))
+        (is (not (includes? warning "did you mean"))))))
+  (test "a manifest of known keys says nothing"
+    (assert= (with-err-str (apply-config '(:name "app" :version "0.1.0"))) "")))

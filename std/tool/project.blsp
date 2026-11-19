@@ -527,11 +527,13 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     (def- *warned-manifest* opts)
     (let ([keys _] (fold opts
                      [[] true]
-                     (fn ([found at-key] item) [(if at-key (conj found item) found) (not at-key)])))
-      (doseq (key (seq/filter keys (fn (key) (not (contains? *manifest-keys* key)))))
-        (io/puts (str "project: warning: unknown key "
-                   (pr-str key)
-                   " in project.blsp is ignored — a typo, or a key from a newer Brood")
+                     (fn ([found at-key] item) [(if at-key (conj found item) found) (not at-key)]))
+          problems (map/shape-problems (into {} (map keys (fn (key) [key true])))
+                     {:optional *manifest-keys*}))
+      (doseq (problem problems)
+        (io/puts (str "project: warning: project.blsp: "
+                   (map/shape-problem->string problem)
+                   " — ignored: a typo, or a key from a newer Brood")
           :to *err*)))))
 
 (defn apply-config (opts)

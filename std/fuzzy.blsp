@@ -902,39 +902,57 @@ is dropped with the mailbox.
 ;; subsequence test misses, so this ranks by edit distance. Tooling that answers an unbound
 ;; name with a suggestion asks here, so every surface suggests the same names.
 
-(defn- edit-row (previous-row character other-characters row-index)
-  "One row of the Levenshtein table: the cost of turning the first `row-index + 1`
-characters of one string into each prefix of `other-characters` (a vector)."
-  (let (width (count other-characters))
+(defn- edit-row (rows character previous-character other-characters row-index)
+  "One row of the edit-distance table: the cost of turning the first `row-index + 1`
+characters of one string into each prefix of `other-characters` (a vector). `rows` is
+`[previous-row before-previous-row]` and `previous-character` the character the previous row
+was for (nil on the first): a swap of two adjacent characters costs one, read two rows back."
+  (let ([previous-row before-previous-row] rows
+        width (count other-characters))
     (letrec (go (fn (column left row)
                   (if (= column width)
                     row
-                    (let (cost (if (= character (nth other-characters column)) 0 1)
-                          cell (math/min (+ (nth previous-row (+ column 1) 0) 1)
-                                 (+ left 1)
-                                 (+ (nth previous-row column 0) cost)))
+                    (let (other (nth other-characters column)
+                          cost (if (= character other) 0 1)
+                          edited (math/min (+ (nth previous-row (+ column 1) 0) 1)
+                                   (+ left 1)
+                                   (+ (nth previous-row column 0) cost))
+                          cell (if (and (> column 0)
+                                     (not (nil? previous-character))
+                                     (= character (nth other-characters (- column 1)))
+                                     (= previous-character other))
+                                 (math/min edited (+ (nth before-previous-row (- column 1) 0) 1))
+                                 edited))
                       (go (+ column 1) cell (conj row cell))))))
       (go 0 (+ row-index 1) [(+ row-index 1)]))))
 
 (defn- characters-distance (characters other-characters)
-  "The edit distance between two codepoint lists — one immutable row per character of
-`characters`, O(n·m) time."
+  "The edit distance between two codepoint lists, an adjacent swap counting one (optimal
+string alignment) — one immutable row per character of `characters`, O(n·m) time."
   (let (others (vec other-characters)
         first-row (vec (range 0 (+ (count others) 1))))
-    (letrec (go (fn (remaining row-index row)
+    (letrec (go (fn (remaining previous-character row-index row before-row)
                   (if (empty? remaining)
                     (nth row (count others) 0)
                     (go (rest remaining)
+                      (first remaining)
                       (+ row-index 1)
-                      (edit-row row (first remaining) others row-index)))))
-      (go characters 0 first-row))))
+                      (edit-row [row before-row]
+                        (first remaining)
+                        previous-character
+                        others
+                        row-index)
+                      row))))
+      (go characters nil 0 first-row first-row))))
 
 (defn edit-distance (a:string b:string -> int)
-  "The Levenshtein distance between `a` and `b`: the fewest single-character insertions,
-deletions and substitutions turning one into the other, counted in codepoints.
+  "The edit distance between `a` and `b`: the fewest single-character insertions,
+deletions, substitutions and swaps of two adjacent characters turning one into the other,
+counted in codepoints (optimal string alignment — Levenshtein, plus the swap a typist makes).
 
     (fuzzy/edit-distance \"kitten\" \"sitting\")   ;=> 3
     (fuzzy/edit-distance \"reduc\" \"reduce\")   ;=> 1
+    (fuzzy/edit-distance \"nmae\" \"name\")   ;=> 1
     (fuzzy/edit-distance \"\" \"abc\")   ;=> 3"
   (characters-distance (string/->list a) (string/->list b)))
 
@@ -946,6 +964,7 @@ are never offered, and the threshold grows with the name, so a short unrelated c
 
     (fuzzy/nearest [\"reduce\" \"reduced\" \"map\"] \"reduc\")   ;=> (\"reduce\")
     (fuzzy/nearest [\"cot\" \"bat\" \"cat\" \"cab\" \"bat\"] \"cat\")   ;=> (\"bat\" \"cab\" \"cot\")
+    (fuzzy/nearest [\"width\" \"height\"] \"widht\")   ;=> (\"width\")
     (fuzzy/nearest [\"reduce\" \"map\"] \"zzqqxx\")   ;=> ()"
   (let (characters (string/->list name)
         length (count characters)

@@ -2143,3 +2143,14 @@ and in one copy `n` really is `:a`. A "never" verdict is now judged over every c
 to a test against an unbound symbol and never matched) and anything after a record pattern's
 field map (dropped silently). Each guard was sabotaged red. `nest check` over std/, tests/
 and examples/ stays at zero warnings, plain and strict.
+
+2026-11-19. **`map/shape-problems`, `text/after-line->char`, and a swap is one edit (ADR-760).**
+Two small capabilities bedit kept hand-rolling. `map/shape-problems` checks a map against
+`{:required :optional :check}` and answers problems as data (missing, unknown with a "did you
+mean", invalid, not-a-map); `map/shape-problem->string` says one. The project manifest's
+unknown-key warning now goes through it and suggests the near miss (`:dependecies` → did you
+mean `:dependencies`?). `text/after-line->char` is the char just after a line, newline included
+— the next line's start or the text's end — replacing bedit's seven copies of the branch on
+`line-count`. Writing the suggestion showed `fuzzy/nearest` missed a transposed `:nmae`: its
+Levenshtein distance counted a swap as two edits, so `edit-distance` is optimal string
+alignment now.

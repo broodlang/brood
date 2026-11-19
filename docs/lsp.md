@@ -82,7 +82,7 @@ one server that owns the language knowledge.
 > buffer). Case-insensitive **subsequence** matching (`fs` → `format-source`);
 > empty query lists all.
 > • **`textDocument/codeAction`** (`code_actions.rs`) — quick-fixes off the
-> diagnostics we publish. **"did you mean?"** for `unbound symbol: X` — Levenshtein
+> diagnostics we publish. **"did you mean?"** for `unbound symbol: X` — edit distance (`fuzzy/nearest`; a swap is one edit, ADR-760)
 > against locals-in-scope + special forms + globals, within a length-relative
 > threshold, top-3 nearest, edited onto the diagnostic's (already token-narrowed)
 > range; marked `isPreferred`. **Auto-import** for a *bare* `unbound symbol: foo`
@@ -499,7 +499,7 @@ additive change behind the same feature handlers.
 | **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition**, **signature help** | `reflect/arglist` / `reflect/global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** |
 | **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto** | located `check_file`; project bootstrap; `reflect/source-location` + prelude-cache | **done** |
 | **2** | **cross-file** references & rename (+prepareRename), document-highlight, semantic tokens, completion resolve | `scope::references` / `references_to_global`; `project_files`; CST token classification | **done** |
-| **2+** | formatting, workspace symbol, code actions (did-you-mean, declare signature), folding ranges, inlay hints | `introspect::format_source`; `defs::top_level` + `workspace::all_sources`; `global_names`/`names_in_scope` + Levenshtein; CST container/comment walk; `arglist_tokens` | **done** |
+| **2+** | formatting, workspace symbol, code actions (did-you-mean, declare signature), folding ranges, inlay hints | `introspect::format_source`; `defs::top_level` + `workspace::all_sources`; `global_names`/`names_in_scope` + `fuzzy/nearest`; CST container/comment walk; `arglist_tokens` | **done** |
 | **2++** | document links + `defmodule`-clause goto/hover, selection range, context-aware module completion, code actions (import via `:use`, create-defn) | `module_ref` clause classifier; `introspect::module_file`/`module_doc`/`loadable_modules`; CST node-chain | **done** |
 | **2+++** | type-directed record-field completion (`:keyword` candidates from the map argument's inferred record shape) | `check::arg_ty_at` (position-keyed checker type query); `record_key_context` CST classifier; mid-edit buffer repair (blank the key, close delimiters) | **done** |
 
