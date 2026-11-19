@@ -145,7 +145,10 @@
       (assert= (bar 0 2 "hi" {:face :ui/header :scale 2}) [:text 0 0 "h" (assoc header :scale 2)])))
   (test "an unknown face name is the default face"
     (assert= (text 0 0 "hi" :no-such-face) [:text 0 0 "hi"]))
+  ;; a sig is checked only while contracts are armed (`nest test` arms them; a bare suite run may not)
   (test "a face that is neither trips the contract"
+    :skip-unless (%contracts-armed?)
+    "contracts are not armed"
     (assert-error (text 0 0 "hi" [:fg :red]))
     (assert-error (text 0 0 "hi" "red"))
     (assert-error (rect 0 0 1 1 "red"))))
