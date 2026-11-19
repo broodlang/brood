@@ -172,8 +172,12 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
       (when (string/starts-with? e prefix)
         (let (p (path/join root e)
               modified (file/mtime p))
+          ;; Best-effort means a leftover it cannot remove is skipped, not raised: this runs at a
+          ;; test file's LOAD, so one stale fixture holding a read-only directory (a killed run of
+          ;; a permission test) failed the whole file to load, every test in it with it.
           (when (and (int? modified) (< modified cutoff))
-            (if (file/dir? p) (file/rmdir p) (file/rm p))))))))
+            (check-allow :discarded-catch
+              (try (if (file/dir? p) (file/rmdir p) (file/rm p)) (catch _ nil)))))))))
 
 ;; Full source location of a form as (file line col), or nil. Captured at
 ;; macro-expansion time (by the assertion macros), while the original read form
