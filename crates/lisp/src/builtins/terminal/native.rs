@@ -767,11 +767,13 @@ fn style_of(heap: &Heap, face: Value) -> screen::Style {
 /// `(term-draw frame)` — paint a frame: a vector of op vectors `[:clear]`,
 /// `[:text row col str]`, `[:text row col str face]`, `[:rect row col w h face]`,
 /// `[:cursor row col]` / `[:cursor row col style]`, `[:scroll-region dy ops]` and
-/// `[:above-seam ops]` (their ops drawn
-/// in place). Unknown ops are skipped (forward-compatible protocol). The frame is painted
-/// over the screen the terminal shows ([`TERMINAL_SCREEN`]) and only the cells it changed
-/// are written, in one flush (ADR-586). The cursor shows where the frame's last `[:cursor]`
-/// puts it — a `:hollow` one (an unfocused pane's) only when there is no other — and is
+/// `[:above-seam ops]` (their ops drawn in place). Unknown ops are skipped (forward-compatible
+/// protocol), and so is a malformed one — a coordinate that is not an int, text that is not a
+/// string — as the window skips it, so one bad op paints nothing rather than failing the frame
+/// in one frontend only. The frame is painted over the screen the terminal shows
+/// ([`TERMINAL_SCREEN`]) and only the cells it changed are written, in one flush (ADR-586).
+/// The cursor shows where the frame's last `[:cursor]` puts it — a `:hollow` one (an
+/// unfocused pane's) only when there is no other — and is
 /// hidden in a frame with none.
 pub(in crate::builtins) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let parsed = frame_ops(heap, arg(args, 0), "%term-draw", "vector (a frame)")?;
@@ -892,11 +894,21 @@ fn paint_ops(
         if tag == clear_t {
             target.clear(default_face);
         } else if tag == rect_t {
-            let row = expect_int(heap, "%term-draw", arg(&parts, 1))?;
-            let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
+            let Ok(row) = expect_int(heap, "%term-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(col) = expect_int(heap, "%term-draw", arg(&parts, 2)) else {
+                continue;
+            };
             // `w`/`h` clamped as they always were (MAX_EXTENT); the screen clips the rest
-            let width = clamp_extent(expect_int(heap, "%term-draw", arg(&parts, 3))?) as i64;
-            let height = clamp_extent(expect_int(heap, "%term-draw", arg(&parts, 4))?) as i64;
+            let Ok(width) = expect_int(heap, "%term-draw", arg(&parts, 3)) else {
+                continue;
+            };
+            let width = clamp_extent(width) as i64;
+            let Ok(height) = expect_int(heap, "%term-draw", arg(&parts, 4)) else {
+                continue;
+            };
+            let height = clamp_extent(height) as i64;
             let face = parts.get(5).copied().unwrap_or(Value::nil());
             target.fill(
                 row,
@@ -906,8 +918,12 @@ fn paint_ops(
                 style_of(heap, face).over(default_face),
             );
         } else if tag == cursor_t {
-            let row = expect_int(heap, "%term-draw", arg(&parts, 1))?;
-            let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
+            let Ok(row) = expect_int(heap, "%term-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(col) = expect_int(heap, "%term-draw", arg(&parts, 2)) else {
+                continue;
+            };
             if row < 0 || col < 0 || row >= target.rows as i64 || col >= target.cols as i64 {
                 continue;
             }
@@ -927,9 +943,15 @@ fn paint_ops(
                 solid = Some(at);
             }
         } else if tag == text_t {
-            let row = expect_int(heap, "%term-draw", arg(&parts, 1))?;
-            let col = expect_int(heap, "%term-draw", arg(&parts, 2))?;
-            let text = expect_string(heap, "%term-draw", arg(&parts, 3))?;
+            let Ok(row) = expect_int(heap, "%term-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(col) = expect_int(heap, "%term-draw", arg(&parts, 2)) else {
+                continue;
+            };
+            let Ok(text) = expect_string(heap, "%term-draw", arg(&parts, 3)) else {
+                continue;
+            };
             let face = parts.get(4).copied().unwrap_or(Value::nil());
             // the default face gives a missing foreground; a missing background is the
             // cell's own (`put_text`), so text over a rect keeps the rect, as in a window
@@ -1767,6 +1789,43 @@ mod image_tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encode");
         png
+    }
+
+    // A malformed op is skipped, as the window skips it: one policy for both frontends, so a
+    // bad op paints nothing in either instead of failing the frame in the terminal alone.
+    #[test]
+    fn a_malformed_op_is_skipped_and_the_rest_of_the_frame_paints() {
+        let mut heap = Heap::new();
+        let text = value::intern("text");
+        let good = heap.alloc_string("ok");
+        let mut target = screen::Screen::new(8, 2);
+        paint_ops(
+            &heap,
+            vec![
+                (
+                    text,
+                    vec![value::kw("text"), value::kw("row"), Value::int(0)],
+                ),
+                (
+                    value::intern("rect"),
+                    vec![value::kw("rect"), Value::int(0)],
+                ),
+                (
+                    value::intern("cursor"),
+                    vec![value::kw("cursor"), Value::nil(), Value::int(0)],
+                ),
+                (
+                    text,
+                    vec![value::kw("text"), Value::int(1), Value::int(0), good],
+                ),
+            ],
+            &mut target,
+            screen::Style::default(),
+            None,
+        )
+        .expect("a malformed op does not fail the frame");
+        assert_eq!(target.cell(1, 0).text, "o");
+        assert_eq!(target.cell(1, 1).text, "k");
     }
 
     // The terminal has no pixels: an `[:image …]` op is drawn in half-block cells, two

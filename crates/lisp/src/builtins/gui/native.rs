@@ -680,6 +680,32 @@ impl GuiOpTags {
     }
 }
 
+/// `text` drawn from column `col`, clipped at the window's left edge as the terminal's
+/// `put_text` clips it: the clusters left of column 0 dropped and a wide one the edge cuts
+/// drawn as a blank, so the text that is left starts at column 0 — `None` when none is. At a
+/// column of 0 or more, the text as it is. The terminal and the window agree on where a
+/// `[:text row -2 …]` lands, where clamping the column painted the whole string from 0.
+fn clip_text_left(text: String, col: i64) -> Option<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+    if col >= 0 {
+        return Some(text);
+    }
+    let mut at = col;
+    for (start, cluster) in text.grapheme_indices(true) {
+        if at >= 0 {
+            return Some(text[start..].to_string());
+        }
+        let end = at + crate::host::text_width::cluster_cells(cluster) as i64;
+        if end > 0 {
+            // a wide cluster cut by the edge: its visible cell is a blank
+            let rest = &text[start + cluster.len()..];
+            return Some(format!("{}{rest}", " ".repeat(end as usize)));
+        }
+        at = end;
+    }
+    None
+}
+
 /// Parse a sequence of already-tagged op tuples into `gui::Op`s. Called recursively
 /// for the inner ops of a `ScrollRegion`. Malformed or unknown ops are skipped.
 fn parse_gui_ops(
@@ -720,6 +746,10 @@ fn parse_gui_ops(
             let Ok(col_i) = expect_int(heap, "%gui-draw", arg(&parts, 2)) else {
                 continue;
             };
+            // off the window's top or left edge: no caret, as the terminal skips it
+            if row_i < 0 || col_i < 0 {
+                continue;
+            }
             let style = cursor_style_from(parts.get(3).copied().unwrap_or(Value::nil()));
             // `[:cursor row col style color]`: the colour a face colour takes (a
             // keyword, `[r g b]` or `"#rrggbb"`); absent, nil or unreadable is the
@@ -758,6 +788,13 @@ fn parse_gui_ops(
             let Ok(h_i) = expect_int(heap, "%gui-draw", arg(&parts, 4)) else {
                 continue;
             };
+            // the part left of or above the window is cut off, as the terminal's `fill` clips
+            // it — a clamped origin moved the whole panel down or right by what was off-screen
+            let (row_i, h_i) = (row_i.max(0), h_i.saturating_add(row_i.min(0)));
+            let (col_i, w_i) = (col_i.max(0), w_i.saturating_add(col_i.min(0)));
+            if w_i <= 0 || h_i <= 0 {
+                continue;
+            }
             let face = gui_face(heap, parts.get(5).copied().unwrap_or(Value::nil()));
             // Optional 7th element: a corner radius in cell units. Absent (every
             // existing frame) means 0.0 — a square panel, byte-for-byte the old
@@ -816,6 +853,15 @@ fn parse_gui_ops(
                 continue;
             };
             let Ok(s) = expect_string(heap, "%gui-draw", arg(&parts, 3)) else {
+                continue;
+            };
+            // a row above the window paints nothing, and a column left of it clips the
+            // text at the edge, as the terminal's `put_text` does (never clamped to 0, which
+            // painted the op over row 0 or from column 0)
+            if row_i < 0 {
+                continue;
+            }
+            let Some(s) = clip_text_left(s, col_i) else {
                 continue;
             };
             let face = gui_face(heap, parts.get(4).copied().unwrap_or(Value::nil()));
@@ -1954,6 +2000,82 @@ mod gui_music_op_tests {
         );
         assert!(
             ops == vec![Op::Music { id: 3, vol: 0.4 }, Op::Music { id: 5, vol: 0.0 }],
+            "{} ops",
+            ops.len()
+        );
+    }
+
+    // An op off the window's top or left edge lands where the terminal puts it (ADR-046's
+    // one protocol): a negative row paints nothing and a negative column clips the text at
+    // the edge — never clamped to 0, which painted `[:text -1 0 …]` over row 0. A rect is
+    // cut at the edge, and a malformed op is skipped, as the terminal now skips it too.
+    #[test]
+    fn an_op_off_the_top_or_left_edge_is_clipped_as_the_terminal_clips_it() {
+        let mut heap = Heap::new();
+        let text = value::intern("text");
+        let rect = value::intern("rect");
+        let cursor = value::intern("cursor");
+        let text_op = |heap: &mut Heap, row: i64, col: i64, s: &str| {
+            let s = heap.alloc_string(s);
+            (
+                text,
+                vec![Value::Keyword(text), Value::int(row), Value::int(col), s],
+            )
+        };
+        let parsed = vec![
+            text_op(&mut heap, -1, 0, "above"),
+            text_op(&mut heap, 2, -2, "abcd"),
+            text_op(&mut heap, 3, -1, "\u{4e2d}x"),
+            text_op(&mut heap, 4, -9, "gone"),
+            (
+                rect,
+                vec![
+                    Value::Keyword(rect),
+                    Value::int(-1),
+                    Value::int(-2),
+                    Value::int(5),
+                    Value::int(3),
+                ],
+            ),
+            (
+                cursor,
+                vec![Value::Keyword(cursor), Value::int(-1), Value::int(4)],
+            ),
+            (
+                text,
+                vec![Value::Keyword(text), Value::Keyword(text), Value::int(0)],
+            ),
+        ];
+        let ops = parse_gui_ops(
+            &heap,
+            parsed,
+            &GuiOpTags::new(),
+            &mut super::fragments::FragmentPass::empty(),
+        );
+        let face = crate::host::gui::Face::default();
+        assert!(
+            ops == vec![
+                Op::Text {
+                    row: 2,
+                    col: 0,
+                    s: "cd".to_string(),
+                    face,
+                },
+                Op::Text {
+                    row: 3,
+                    col: 0,
+                    s: " x".to_string(),
+                    face,
+                },
+                Op::Rect {
+                    row: 0,
+                    col: 0,
+                    w: 3,
+                    h: 2,
+                    face,
+                    radius: 0.0,
+                },
+            ],
             "{} ops",
             ops.len()
         );
