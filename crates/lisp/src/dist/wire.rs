@@ -1077,9 +1077,82 @@ fn put_bytes(w: &mut Vec<u8>, b: &[u8]) {
 }
 
 /// A symbol is encoded **by name** — separate runtimes have independent
-/// interners, so the id is meaningless across the wire.
+/// interners, so the id is meaningless across the wire. Inside an image section
+/// ([`SymbolTableScope`]) it is an index into the section's table instead.
 fn put_sym(w: &mut Vec<u8>, s: Symbol) {
-    put_str(w, &value::symbol_name(s));
+    let indexed = SYMBOL_TABLE.with(|table| match &mut *table.borrow_mut() {
+        Some(SymbolTable::Writing { index, order }) => {
+            let next = order.len() as u32;
+            let at = *index.entry(s).or_insert_with(|| {
+                order.push(s);
+                next
+            });
+            Some(at)
+        }
+        _ => None,
+    });
+    match indexed {
+        Some(at) => put_u32(w, at),
+        None => put_str(w, &value::symbol_name(s)),
+    }
+}
+
+/// A startup-image section's symbol table (ADR-769). Code-as-data is mostly symbols, and by
+/// name each occurrence cost a string allocation and an interner lookup to decode — 336 000
+/// of them to start bedit. A section writes each distinct symbol once, ahead of its entries,
+/// and every occurrence as a `u32` index into it.
+enum SymbolTable {
+    Writing {
+        index: std::collections::HashMap<Symbol, u32>,
+        order: Vec<Symbol>,
+    },
+    Reading(Vec<Symbol>),
+}
+
+thread_local! {
+    static SYMBOL_TABLE: std::cell::RefCell<Option<SymbolTable>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// While alive, [`encode_msg`] / [`decode_msg`] on this thread write and read symbols through
+/// one image section's table; dropping it restores what was there. Only the image codec opens
+/// one, around a single section — a node link never sees a table, and its encoding is unchanged.
+pub(crate) struct SymbolTableScope(Option<SymbolTable>);
+
+impl SymbolTableScope {
+    /// Collect the symbols a section's entries write; [`Self::finish_writing`] hands them back.
+    pub(crate) fn writing() -> Self {
+        Self::install(SymbolTable::Writing {
+            index: std::collections::HashMap::new(),
+            order: Vec::new(),
+        })
+    }
+
+    /// Read the section's entries against `symbols`, its table as written.
+    pub(crate) fn reading(symbols: Vec<Symbol>) -> Self {
+        Self::install(SymbolTable::Reading(symbols))
+    }
+
+    fn install(table: SymbolTable) -> Self {
+        SymbolTableScope(SYMBOL_TABLE.with(|slot| slot.borrow_mut().replace(table)))
+    }
+
+    /// The symbols written since [`Self::writing`], in index order.
+    pub(crate) fn finish_writing(self) -> Vec<Symbol> {
+        let table = SYMBOL_TABLE.with(|slot| slot.borrow_mut().take());
+        match table {
+            Some(SymbolTable::Writing { order, .. }) => order,
+            _ => Vec::new(),
+        }
+        // `self` drops here and puts back the table it displaced.
+    }
+}
+
+impl Drop for SymbolTableScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        SYMBOL_TABLE.with(|slot| *slot.borrow_mut() = previous);
+    }
 }
 
 /// `Option<Symbol>` as a `0`/`1` presence tag + the symbol's name when set.
@@ -1265,6 +1338,20 @@ const MAX_WIRE_SYMBOLS: usize = 1 << 20;
 static WIRE_SYMBOLS_MINTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn get_sym(r: &mut Cursor<Vec<u8>>) -> io::Result<Symbol> {
+    // In an image section, a symbol is its index into the section's table.
+    if let Some(found) = SYMBOL_TABLE.with(|table| match &*table.borrow() {
+        Some(SymbolTable::Reading(symbols)) => Some(get_u32(r).and_then(|index| {
+            symbols.get(index as usize).copied().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "symbol index outside the section's table",
+                )
+            })
+        })),
+        _ => None,
+    }) {
+        return found;
+    }
     let name = get_str(r)?;
     // Already known: no growth, no accounting — the overwhelmingly common case, and it
     // keeps a busy link off the counter entirely.

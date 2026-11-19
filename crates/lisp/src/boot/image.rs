@@ -121,7 +121,9 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
 /// name to it.
 /// v10 added a `meta` entry. v11 writes every side fact about a name as one `KIND_FACT`
 /// entry (privacy, def site and `meta` had an entry kind each) and renumbers `KIND_USES`.
-const MAGIC: &[u8] = b"brood-image-v11\n";
+/// v12 gives each section a symbol table after its entry count, and its values name a symbol
+/// by index into it (ADR-769). A v11 reader would take the table's length for an entry kind.
+const MAGIC: &[u8] = b"brood-image-v12\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
@@ -266,6 +268,8 @@ fn encode_section(
     let mut entries: Vec<u8> = Vec::new();
     let mut count: u32 = 0;
     let global = heap.global();
+    // Every symbol the entries encode goes into the section's table (ADR-769).
+    let symbol_scope = crate::dist::wire::SymbolTableScope::writing();
     for nv in syms {
         let sym = match nv.unpack() {
             value::ValueRef::Sym(s) => s,
@@ -422,9 +426,23 @@ fn encode_section(
             count += 1;
         }
     }
+    let symbols = symbol_scope.finish_writing();
     put_u32(&mut out, count);
+    put_u32(&mut out, symbols.len() as u32);
+    for symbol in symbols {
+        put_str(&mut out, &value::symbol_name(symbol));
+    }
     out.extend_from_slice(&entries);
     Ok((out, count))
+}
+
+/// A section's symbol table, as [`encode_section`] wrote it after the entry count: each
+/// distinct symbol once, interned here once, read back by index for the rest of the section.
+fn read_symbol_table(r: &mut Cursor<Vec<u8>>) -> Option<Vec<value::Symbol>> {
+    let count = get_u32(r)?;
+    (0..count)
+        .map(|_| get_str(r).map(|name| value::intern(&name)))
+        .collect()
 }
 
 /// `(%image-write path sections fingerprint)` — write a sectioned startup image.
@@ -1037,6 +1055,10 @@ pub(crate) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     let Some(count) = get_u32(&mut r) else {
         return Ok(Value::Nil);
     };
+    let Some(symbols) = read_symbol_table(&mut r) else {
+        return Ok(Value::Nil);
+    };
+    let _symbol_scope = crate::dist::wire::SymbolTableScope::reading(symbols);
     // The module whose section this is, when the caller named it (the std loader does).
     // Its forms' positions were read from that module's source, so the file must be stamped
     // WITH them: `from_message` re-stamps each rebuilt list through `set_form_pos`, which
@@ -1420,7 +1442,8 @@ fn temp_suffix() -> String {
 /// v6: a section may carry `KIND_USES` entries.
 /// v7: and a `meta` entry.
 /// v8: a section's side facts are `KIND_FACT` entries, `KIND_USES` renumbered.
-const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v8\n";
+/// v9: the section carries a symbol table, as the sectioned image's v12 does (ADR-769).
+const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v9\n";
 
 /// The image header: magic, the build fingerprint, the gensym counter the writing boot
 /// reached, and how many source positions the load re-stamps. A reader must start its own
@@ -1464,6 +1487,8 @@ pub(crate) fn load_prelude_image_bytes(
     let (gensym_floor, positions) = read_prelude_header(&mut r, fingerprint)?;
     heap.reserve_form_pos(positions as usize);
     let count = get_u32(&mut r)?;
+    let symbols = read_symbol_table(&mut r)?;
+    let _symbol_scope = crate::dist::wire::SymbolTableScope::reading(symbols);
     let mut done = 0usize;
     for _ in 0..count {
         let kind = get_u8(&mut r)?;
@@ -1621,6 +1646,74 @@ mod memory_image_tests {
             ))
             .expect("index the provided image");
         assert_eq!(interp.print(answer), "[false false nil]");
+    }
+}
+
+#[cfg(test)]
+mod symbol_table_tests {
+    /// How many times `needle` occurs in `haystack`.
+    fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+        haystack
+            .windows(needle.len())
+            .filter(|window| *window == needle)
+            .count()
+    }
+
+    /// ADR-769: a section spells each symbol once, in its table, and its values name it by
+    /// index — a symbol used a hundred times costs one string to decode, not a hundred — and
+    /// the value restores intact.
+    #[test]
+    fn a_section_spells_a_repeated_symbol_once() {
+        let path = format!("mem:test-symbols-{}", std::process::id());
+        let mut interp = crate::Interp::new();
+        let restored = interp
+            .eval_str(&format!(
+                "(do (def repeated (map (range 100) (fn (_) 'a-symbol-spelled-once)))
+                     (%image-write {path:?} [[\"\" ['repeated]]] \"fp\")
+                     (def repeated :clobbered)
+                     (let (section (get (%image-index {path:?} \"fp\") \"\"))
+                       (%image-load-section {path:?} (first section) (second section))
+                       [(count repeated) (first repeated) (nth repeated 99)]))"
+            ))
+            .expect("write and restore the section");
+        assert_eq!(
+            interp.print(restored),
+            "[100 a-symbol-spelled-once a-symbol-spelled-once]"
+        );
+        let bytes = super::memory_image(&path).expect("the image was written");
+        assert_eq!(occurrences(&bytes, b"a-symbol-spelled-once"), 1);
+    }
+
+    /// A node link has no table: its symbols are still spelled by name, which another
+    /// runtime's interner can read.
+    #[test]
+    fn the_node_codec_still_spells_a_symbol() {
+        let symbol = crate::core::value::intern("spelled-on-the-wire");
+        let message = crate::process::Message::List(
+            vec![
+                crate::process::Message::Sym(symbol),
+                crate::process::Message::Sym(symbol),
+            ],
+            None,
+        );
+        let mut bytes = Vec::new();
+        crate::dist::wire::encode_msg(&mut bytes, &message).expect("encode");
+        assert_eq!(occurrences(&bytes, b"spelled-on-the-wire"), 2);
+    }
+
+    /// An index past the section's table is a decode failure, not a read of whatever follows.
+    #[test]
+    fn an_index_outside_the_table_does_not_decode() {
+        let symbol = crate::core::value::intern("only-entry");
+        let mut bytes = Vec::new();
+        {
+            let scope = crate::dist::wire::SymbolTableScope::writing();
+            crate::dist::wire::encode_msg(&mut bytes, &crate::process::Message::Sym(symbol))
+                .expect("encode");
+            assert_eq!(scope.finish_writing(), vec![symbol]);
+        }
+        let _scope = crate::dist::wire::SymbolTableScope::reading(Vec::new());
+        assert!(crate::dist::wire::decode_msg(&mut std::io::Cursor::new(bytes)).is_err());
     }
 }
 

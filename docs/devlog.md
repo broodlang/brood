@@ -2210,3 +2210,12 @@ code materialises too. `--version` 0.60 → 0.20 s with or without a cache. `BRO
 reports sections in µs with facts, uses, deferred defines and a per-call total — the ms figures
 had hidden most of the cost. Guard `an_imaged_bundle_launches_lazily_and_carries_its_std_modules`,
 three halves sabotage-verified.
+
+2026-11-19. **An image section spells each symbol once (ADR-769).** Measuring what was left of
+bedit's launch: 336 000 symbol decodes, each a string allocation and an interner lookup, because
+images reuse the node codec, which spells symbols by name. A section now carries a symbol table
+and its values use indices; node links are unchanged. Decode 38 → 15.5 ms, images ~20% smaller
+(bedit's 14.8 → 11.9 MB), `--version` ~0.18 s. Measured and not kept: promoting a section in one
+call (the cost is the copy, not per-call overhead) and a cached `BROOD_TRACE_PROMOTE` read (no
+change). Promote (~47 ms) is now the largest piece; building straight into the RUNTIME region is
+GC-region work, left for the test machine.
