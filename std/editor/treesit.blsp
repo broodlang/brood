@@ -1105,7 +1105,11 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
         ;; inside content (a heredoc's body) that opened on an earlier line — or that opens
         ;; exactly at this line's start while what holds it opened earlier: Perl's heredoc body
         ;; begins AT its first content line, so the body's first line is content too, where a
-        ;; docstring opening a statement at column 0 is still code (its statement begins here)
+        ;; docstring opening a statement at column 0 is still code (its statement begins here).
+        ;; The at-the-start case also needs the node to run PAST this line, as a heredoc's body
+        ;; does: a one-line string that merely begins the line — a TOML array's `"one",` once
+        ;; re-indenting from scratch has stripped its indentation — is code, and was left at
+        ;; column 0 as if it were content.
         inside-verbatim (and (not (empty? verbatim))
                           (let (nodes (vec chain))
                             (any? (range (count nodes))
@@ -1115,7 +1119,10 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
                                       parent (when (> index 0) (nth nodes (dec index))))
                                   (and (contains? verbatim (get node :kind))
                                     (or (< start bol)
-                                      (and (= start bol) parent (< (get parent :start) bol)))))))))
+                                      (and (= start bol)
+                                        parent
+                                        (< (get parent :start) bol)
+                                        (> (get node :end) eol)))))))))
         ;; Two kinds of opener, and they differ in ONE way: whether a node that begins on
         ;; the line being indented counts for that line.
         ;;
