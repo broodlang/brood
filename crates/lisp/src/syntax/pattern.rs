@@ -252,8 +252,20 @@ impl Pattern {
                         _ => slots.push(item),
                     }
                 }
+                // `&` anywhere, or a literal that is not a string (it could only be the slot, and
+                // never equal text): the compiler refuses both
+                let refused = slots.iter().any(|item| match item {
+                    Value::Sym(symbol) => is_marker(*symbol),
+                    Value::Nil
+                    | Value::Bool(_)
+                    | Value::Int(_)
+                    | Value::BigInt(_)
+                    | Value::Float(_)
+                    | Value::Keyword(_) => true,
+                    _ => false,
+                });
                 match slots.as_slice() {
-                    [Value::Sym(s)] if is_marker(*s) => Pattern::Refused(pattern),
+                    _ if refused => Pattern::Refused(pattern),
                     [] => Pattern::Str { pinned, slot: None },
                     [slot] => Pattern::Str {
                         pinned,

@@ -363,9 +363,10 @@ or the length of `text` when there is none."
     ((str "/../" after) (url-dot-segments-loop (str "/" after) (url-drop-last-segment output)))
     ("/.." (url-dot-segments-loop "/" (url-drop-last-segment output)))
     ((or "." "..") output)
-    (_ (let (segment-end (url-first-of input (if (string/starts-with? input "/") 1 0) "/"))
-         (url-dot-segments-loop (string/substring input segment-end (count input))
-           (str output (string/substring input 0 segment-end)))))))
+    (_
+      (let (segment-end (url-first-of input (if (string/starts-with? input "/") 1 0) "/"))
+        (url-dot-segments-loop (string/substring input segment-end (count input))
+          (str output (string/substring input 0 segment-end)))))))
 
 (defn- url-remove-dot-segments (path:string -> string)
   "`path` with its `.` and `..` segments interpreted away (RFC 3986 §5.2.4). A `..` at the

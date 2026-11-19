@@ -145,6 +145,18 @@
     (let (out (source "(match line (_ :when (and (some-long-predicate-name line) (another-long-predicate-name line)) (do-something-with line and-more-arguments)))"))
       (is (includes? out
             "(_ :when (and (some-long-predicate-name line) (another-long-predicate-name line))\n"))))
+  (test "a comment between a clause's pattern and its :when is kept"
+    (let (out (source "(match line ([:ok value]\n  ;; only the big ones\n  :when (> value 10) (do-something-with value and-more-arguments-here-to-be-long-enough)) (_ nil))"))
+      (is (includes? out ";; only the big ones"))))
+  (test "a clause headed by a keyword or _ lays its body under the pattern too"
+    (let (out (source "(match code (:error (handle-the-error-case with-these-arguments and-some-more-arguments and-even-more-arguments here)) (_ nil))"))
+      (is (includes? out "(:error\n    (handle-the-error-case"))))
+  (test "a match's scrutinee is not a clause"
+    (let (out (source "(match (scrutinee-function (let (a 1 b 2) (+ a b)) with-a-long-argument-list and-more-arguments here) (_ nil))"))
+      (is (includes? out "(match (scrutinee-function (let (a 1 b 2) (+ a b))"))))
+  (test "a call whose first argument is :when is a call, not a clause"
+    (let (out (source "(log/info :when (some-long-predicate-name-here line and-more-args and-more) (another-call-here with args))"))
+      (is (includes? out "(log/info :when\n"))))
   (test "a call whose head is a symbol still hangs its first argument"
     (let (out (source "(serve-the-request (let (a 1 b 2) (+ a b)) with-these-options and-some-more-arguments-here and-more)"))
       (is (includes? out "(serve-the-request (let (a 1 b 2) (+ a b))")))))

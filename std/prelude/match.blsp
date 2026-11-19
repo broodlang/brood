@@ -99,6 +99,11 @@
       " ")
     ")"))
 
+;; A literal that is not a string: in a `(str …)` pattern it could only be the slot, which is
+;; matched against text, so it could never match — refused rather than compiled dead.
+(defn- %match-str-non-string-literal? (part)
+  (or (number? part) (keyword? part) (nil? part) (%eq part true) (%eq part false)))
+
 ;; An end of a `(str …)` pattern so far, with one more piece: a string literal, or a pin's
 ;; expression (`^sep` — an end whose text is known only when the match runs). Literals alone stay
 ;; one string, known at expansion; with a pin the end is the form that builds it, `(/str …)`, so a
@@ -122,6 +127,18 @@
         (if has-slot
           (%match-str-split pat (rest parts) prefix slot (%match-str-join suffix piece) true)
           (%match-str-split pat (rest parts) (%match-str-join prefix piece) nil "" false)))
+    (%match-str-non-string-literal? (first parts))
+      (reflect/error-at pat
+        "match: "
+        (pr-str (first parts))
+        " in "
+        (pr-str pat)
+        " is a literal that is not a string, so it would be the slot and never equal the text"
+        " it is matched against. Write the text, "
+        (pr-str (str (first parts)))
+        ", or pin it, ^"
+        (pr-str (first parts))
+        ".")
     (or (= (first parts) '&) (= (first parts) '&optional))
       (reflect/error-at pat
         "match: `"
@@ -158,8 +175,9 @@
 (defn- %match-str-starts? (text prefix)
   (and (/>= (/count text) (/count prefix)) (%eq (string/substring text 0 (/count prefix)) prefix)))
 (defn- %match-str-ends? (text suffix)
-  (let (n (/count text) m (/count suffix))
-    (and (/>= n m) (%eq (string/substring text (/- n m) n) suffix))))
+  (let (text-length (/count text) suffix-length (/count suffix))
+    (and (/>= text-length suffix-length)
+      (%eq (string/substring text (/- text-length suffix-length) text-length) suffix))))
 
 ;; Every alternative of an `or` must bind the SAME names — otherwise the body could
 ;; reference a name only some alternatives bind, and which one it is depends on the
@@ -747,9 +765,6 @@ NON-LINEAR patterns (the same name twice) work.
         (let (whole (%match-str-end-code prefix))
           `(let ~(nth whole 0)
              (if (and ~@(nth whole 4) (%eq ~target ~(nth whole 1))) ~success ~fail)))
-      ;; `(str s)`: any string, the whole of it the slot's
-      (and (%eq prefix "") (%eq suffix ""))
-        `(if (/string? ~target) ~(%match-compile slot target bound success fail) ~fail)
       else (%match-compile-str-ends prefix slot suffix target bound success fail))))
 
 ;; An end as the compiled code reads it: `[bindings text length empty? checks]` — a literal end
@@ -812,10 +827,14 @@ NON-LINEAR patterns (the same name twice) work.
                 (if (nth tail 3)
                   nil
                   (list `(%eq (string/substring ~target ~middle-end ~length) ~suffix-text))))
-        matched (if (%match-wildcard? slot)
-                  success
-                  `(let (~middle (string/substring ~target ~prefix-length ~middle-end))
-                     ~(%match-compile slot middle bound success fail)))
+        ;; `(str s)` — no ends — matches the slot against the string itself, still behind the
+        ;; one `and`: a `(if (string? v) slot-match fail)` would be two exits again
+        matched (cond
+                  (%match-wildcard? slot) success
+                  (and (nth head 3) (nth tail 3)) (%match-compile slot target bound success fail)
+                  else
+                    `(let (~middle (string/substring ~target ~prefix-length ~middle-end))
+                       ~(%match-compile slot middle bound success fail)))
         test `(if (and ~@tests) ~matched ~fail)
         bindings (append (or (nth head 0) nil) (or (nth tail 0) nil)))
     (if (empty? bindings) test `(let ~bindings ~test))))
@@ -1232,15 +1251,37 @@ and carries the name as `:name`."
 ;; the innermost fail is the structured no-match throw. Each chosen body lands in
 ;; tail position of the generated if/let, so a `match` in tail position is TCO-safe.
 ;; `nil-fail?` — see `%match-build-clause`; `match` passes false, `receive` true.
-;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (defn- %match-build-chain (clauses target fail nil-fail?)
+  (%match-build-chain-at clauses target fail nil-fail? (%match-mentions-str? clauses)))
+
+;; Does any clause's pattern hold a `(str …)` pattern? The dead-clause check compares clause
+;; pairs, which only a string pattern can make fail — a match without one skips it.
+;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
+(defn- %match-mentions-str? (clauses)
+  (cond
+    (empty? clauses) false
+    (%match-pattern-mentions-str? (if (pair? (first clauses)) (first (first clauses)) nil)) true
+    else (%match-mentions-str? (rest clauses))))
+;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
+(defn- %match-pattern-mentions-str? (pat)
+  (cond
+    (%match-str-pattern? pat) true
+    (%match-quoted? pat) false
+    (pair? pat)
+      (or (%match-pattern-mentions-str? (first pat)) (%match-pattern-mentions-str? (rest pat)))
+    (vector? pat) (%match-pattern-mentions-str? (%match-vec->list pat))
+    (map? pat) (%match-pattern-mentions-str? (vals pat))
+    else false))
+
+;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
+(defn- %match-build-chain-at (clauses target fail nil-fail? strings?)
   (if (empty? clauses)
     fail
     (let (clause (first clauses)
           following (rest clauses)
-          rest-code (%match-build-chain following target fail nil-fail?))
+          rest-code (%match-build-chain-at following target fail nil-fail? strings?))
       (%match-check-reachable clause following)
-      (%match-check-str-reachable clause following)
+      (when strings? (%match-check-str-reachable clause following))
       (%match-build-clause clause target rest-code nil-fail?))))
 
 (defn- %match-build (clauses target context)

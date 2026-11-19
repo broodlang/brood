@@ -24,6 +24,17 @@ use support::warnings;
 /// `(code, needle)` — `code` must produce a warning containing `needle` (so we
 /// confirm the *right* diagnostic fired, not an incidental one).
 const SHOULD_WARN: &[(&str, &str)] = &[
+    // ---- a string pattern's slot binder is a string (ADR-770): match, fn heads and let read it
+    // off the expansion, where it is a `string/substring` ----
+    (
+        r#"(defn f (req) (match req ((str "GET " path) (+ path 1)) (_ 0)))"#,
+        "+",
+    ),
+    (r#"(defn f ((str "GET " path)) (+ path 1))"#, "+"),
+    (
+        r#"(defn f (req) (let ((str "GET " path) req) (+ path 1)))"#,
+        "+",
+    ),
     // ---- base: disjoint argument, wrong arity ----
     ("(first 5)", "first"),      // int isn't a sequence
     (r#"(+ 1 "x")"#, "+"),       // string isn't a number
@@ -220,6 +231,9 @@ const SHOULD_NOT_WARN: &[&str] = &[
      (defn f (text) (match text ((str \".\" _) 1) ((str \"x\" _) 2) (_ (takes text))))",
     "(sig takes (string -> string)) (defn takes (text) text) \
      (defn f (text) (match text (nil \"\") ((str \"<\" inner \">\") inner) (_ (takes text))))",
+    // `(str slot)` — no ends — goes through the same one exit
+    "(sig takes (string -> string)) (defn takes (text) text) \
+     (defn f (text) (match text ((str (or \"a\" \"b\")) \"x\") (_ (takes text))))",
 ];
 
 #[test]

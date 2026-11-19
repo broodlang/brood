@@ -164,6 +164,9 @@
   (test "an end that is one of several literals points at an or of whole patterns"
     (assert (includes? (expansion-error '(match m ((str (or "a" "b") _) 1) (_ 2)))
               "(or (str \"a\" _) (str \"b\" _))")))
+  (test "a literal that is not a string is refused — it could only be a slot that never matches"
+    (assert (includes? (expansion-error '(match m ((str "v" 1) :one) (_ :other))) "^1"))
+    (assert (includes? (expansion-error '(match m ((str "x" :a) :a) (_ :other))) "\":a\"")))
   (test "& has no place: the slot already takes the rest"
     (assert (includes? (expansion-error '(match "GET /" ((str "GET " & path) path))) "`&`")))
   (test "a clause an earlier prefix covers is unreachable"

@@ -1346,8 +1346,7 @@
   (test "each missing kind and field is its own message, sorted, naming the grammar"
     (assert= (grammar-problems tsm-drift-info
                {:kinds #{:heredoc_body :call :alpha} :fields #{:body}})
-      '("node kind `alpha` is not in the :demo grammar"
-         "node kind `heredoc_body` is not in the :demo grammar"
+      '("node kind `alpha` is not in the :demo grammar" "node kind `heredoc_body` is not in the :demo grammar"
          "field `body` is not in the :demo grammar")))
 
   (test "no grammar at all is one problem, not a raise"

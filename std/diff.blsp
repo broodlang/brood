@@ -492,8 +492,9 @@ written for `line-hunks`: a change gutter is `(hunks-status (mapcat hunks hunk-c
                         :old (inc (:old state))
                         :removed (inc (:removed state))))
                     ((str "+" _) (assoc state :new (inc (:new state)) :added (inc (:added state))))
-                    (_ (let (flushed (flush state))
-                         (assoc flushed :old (inc (:old flushed)) :new (inc (:new flushed)))))))))
+                    (_
+                      (let (flushed (flush state))
+                        (assoc flushed :old (inc (:old flushed)) :new (inc (:new flushed)))))))))
     (:out (flush final))))
 
 ;; ---- printing a unified diff ------------------------------------------------

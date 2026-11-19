@@ -206,6 +206,11 @@ project/plugin table (`format/*headers-extra*`) first, then the built-ins.
 ;; `assoc`/`assoc!` ride one header arg (the collection) and then pair their
 ;; trailing key/value arguments, the same shape as `cond`'s test+result.
 (defdyn format/*pair-body* {'cond true 'case true 'assoc true 'assoc! true 'project true})
+
+;; True while the direct children of a `match` or `receive` are rendered — its clauses, which
+;; lay their body under the pattern when it does not fit after it (ADR-770). Each list rebinds it
+;; for its own children, so it describes the parent of the list being rendered.
+(defdyn format/*clause-list* false)
 (sig format/*pair-body* (map symbol bool))
 
 (defn pair-bindings? (head-node)
@@ -477,6 +482,8 @@ keyword (`:next`) is not one.
       else
         (let (head (first forms)
               args (rest forms)
+              ;; a clause: a child of `match`/`receive`, or an `fn` clause (its head a pattern list)
+              clause (or format/*clause-list* (pattern-head? head))
               hdr-count (head-header-count head)
               pair-bind (pair-bindings? head)
               pair-bd (pair-body? head)
@@ -497,14 +504,14 @@ keyword (`:next`) is not one.
                         (multi-arity-defn? head args) 1
                         (>= hdr-count 0) (math/min hdr-count (count args))
                         (nil? args) 0
-                        ;; a clause's guard rides with its pattern: `(pattern :when guard`
-                        (clause-guard? args) 2
+                        ;; a clause's guard rides with its pattern, `(pattern :when guard` — unless a
+                        ;; comment sits among them, which riding would skip over and drop
+                        (and clause (clause-guard? args) (not (comment-among-first-args? kids 2))) 2
                         (nil? (single-line (first args))) 0
-                        ;; a CLAUSE — a head that is a pattern, not a symbol naming what is
-                        ;; called — keeps its body on the head line only when it fits there;
+                        ;; a clause keeps its body on the head line only when it fits there;
                         ;; otherwise the body starts the next line at the body indent, where a
                         ;; call's first arg would instead hang deep under the pattern's end
-                        (and (clause-head? head)
+                        (and clause
                           (> (+ indent
                                2
                                (count (or (single-line head) ""))
@@ -520,7 +527,8 @@ keyword (`:next`) is not one.
                         else 1))
           (let (header-args (take args eff-hdr)
                 first-body-idx (kids-index-after-form kids eff-hdr)
-                header-line (render-head-line head header-args pair-bind (inc indent))
+                header-line (binding (format/*clause-list* false)
+                              (render-head-line head header-args pair-bind (inc indent)))
                 ;; Fill (pack args per line) only for a *generic call* — a head
                 ;; with no header entry (`hdr-count` -1). A known body/special
                 ;; form (`defn`/`do`/`let`/`when`…) keeps its statements one per
@@ -529,15 +537,18 @@ keyword (`:next`) is not one.
                 ;; per line (CL `:linear`), so filling `[[a][b][c]]` onto packed
                 ;; lines is wrong — break linearly. Fill stays for atom sequences
                 ;; (`(error "a: " x " b: " y …)`), the case it exists for.
-                body-text (if pair-bd
-                            (render-body-pairs kids first-body-idx body-ind)
-                            (render-body kids
-                              first-body-idx
-                              body-ind
-                              (and (< hdr-count 0)
-                                (not labelled)
-                                (not (body-has-container? kids first-body-idx)))
-                              labelled)))
+                ;; the body's lists see whether they are this form's clauses; the head line
+                ;; (a `match`'s scrutinee) does not
+                body-text (binding (format/*clause-list* (clause-list-head? head))
+                            (if pair-bd
+                              (render-body-pairs kids first-body-idx body-ind)
+                              (render-body kids
+                                first-body-idx
+                                body-ind
+                                (and (< hdr-count 0)
+                                  (not labelled)
+                                  (not (body-has-container? kids first-body-idx)))
+                                labelled))))
             ;; If the body ends in a comment, the close delimiter must drop to
             ;; its own line at the opening indent — appended directly it would
             ;; land *inside* the comment (`;; note)`), commenting out the `)`
@@ -549,9 +560,21 @@ keyword (`:next`) is not one.
               (if (last-nonws-comment? kids) (str "\n" (indent-of indent)) "")
               close))))))
 
-;; A list whose head is a pattern rather than a symbol is a clause — `((str "GET " path) body)`,
-;; `([:ok value] body)` — whose body is not a call's argument and reads best below its pattern.
-(defn- clause-head? (head) (not (includes? [:symbol :keyword] (node-kind head))))
+;; A list headed by a list, vector or map is an `fn` clause, `((x y) body)` / `([a b] body)` — a
+;; head that is a pattern, never a function called; inside a `match`/`receive` every child is a
+;; clause whatever its head (`format/*clause-list*`).
+(defn- pattern-head? (head) (includes? [:list :vector :map] (node-kind head)))
+
+;; Is the head a form whose children are clauses?
+(defn- clause-list-head? (head)
+  (and (= (node-kind head) :symbol) (includes? ["match" "receive"] (node-text head))))
+
+;; A comment before any of the first `count-of-args` arguments?
+(defn- comment-among-first-args? (kids count-of-args)
+  (let (total (count kids))
+    (any? (range 0 count-of-args)
+      (fn (form-index)
+        (comment-before-next-form? kids (kids-index-after-form kids form-index) total)))))
 
 ;; `:when guard …`: the guard of a `match`/`receive`/`fn` clause, which belongs on the pattern's line.
 (defn- clause-guard? (args)

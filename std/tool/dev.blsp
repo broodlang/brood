@@ -172,11 +172,12 @@ recorded, without re-running anything under `BROOD_JIT_BAIL_TRACE`.
       (:native nil)
       (:queued "it is hot and its compile is in flight; it runs native once that finishes")
       (:untried "it has not been called often enough to be compiled yet")
-      (:no-arm (str "never called with "
-                 argc
-                 " argument"
-                 (if (= argc 1) "" "s")
-                 ", or not a compiled function"))
+      (:no-arm
+        (str "never called with "
+          argc
+          " argument"
+          (if (= argc 1) "" "s")
+          ", or not a compiled function"))
       (:no-jit "this binary or tier ceiling (BROOD_TIER) has no native tier")
       (:bailed (str "refused: " (dev-bail-explanation (get info :reason)))))))
 

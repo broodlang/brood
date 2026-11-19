@@ -470,10 +470,11 @@
 (defn- lane-start (parent model step)
   "The loop's process, parked until `:go` so the test can queue its backlog first."
   (spawn (receive
-           (:go (ui-run (assoc model :seen [])
-                  (fn (_model _cols _rows) (do (send parent [:rendered]) []))
-                  step
-                  (lane-display))))))
+           (:go
+             (ui-run (assoc model :seen [])
+               (fn (_model _cols _rows) (do (send parent [:rendered]) []))
+               step
+               (lane-display))))))
 
 (defn- lane-await-seen ()
   (receive ([:seen seen] seen) (after 20000 :timed-out)))
@@ -745,13 +746,12 @@
   (test "a slow view is reported, at most once per quiet period"
     (let (me (self)
           loop (spawn (receive
-                        (:go (ui-run {:n 0
-                                      :slow-ms 10
-                                      :on-slow (fn (report) (send me [:slow report]))}
-                               (fn (_model _cols _rows) (do (proc/sleep 20) []))
-                               (fn (model input _cols _rows)
-                                 (if (= input :quit) (assoc model :done true) (update model :n inc)))
-                               (lane-display))))))
+                        (:go
+                          (ui-run {:n 0 :slow-ms 10 :on-slow (fn (report) (send me [:slow report]))}
+                            (fn (_model _cols _rows) (do (proc/sleep 20) []))
+                            (fn (model input _cols _rows)
+                              (if (= input :quit) (assoc model :done true) (update model :n inc)))
+                            (lane-display))))))
       (send loop [:a])
       (send loop [:b])
       (send loop :quit)
@@ -1358,13 +1358,14 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
                    (= input :tick) model
                    else (lane-record model input)))
           loop (spawn (receive
-                        (:go (ui-run {:seen []
-                                      :coalesce-input? true
-                                      :event-ceiling-ms 50
-                                      :on-slow (fn (report) (send me [:slow report]))}
-                               (fn (_model _cols _rows) [])
-                               step
-                               (dissoc (lane-display) :poll-input :poll-tagged))))))
+                        (:go
+                          (ui-run {:seen []
+                                   :coalesce-input? true
+                                   :event-ceiling-ms 50
+                                   :on-slow (fn (report) (send me [:slow report]))}
+                            (fn (_model _cols _rows) [])
+                            step
+                            (dissoc (lane-display) :poll-input :poll-tagged))))))
       (send loop "a")
       (send loop "slow")
       (send loop :quit)
@@ -1469,12 +1470,13 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
                    else (lane-record model input)))
           display (assoc (lane-display) :quit-message (fn (key) [:key key]))
           loop (spawn (receive
-                        (:go (ui-run {:seen []
-                                      :quit-busy-ms 0
-                                      :on-slow (fn (report) (send me [:slow report]))}
-                               (fn (_model _cols _rows) [])
-                               step
-                               display)))))
+                        (:go
+                          (ui-run {:seen []
+                                   :quit-busy-ms 0
+                                   :on-slow (fn (report) (send me [:slow report]))}
+                            (fn (_model _cols _rows) [])
+                            step
+                            display)))))
       (proc/send-priority loop :spin)
       (send loop :go)
       (quit-await :spinning)
@@ -1488,21 +1490,21 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
   (test "an interrupted view keeps the last frame, and the next model is drawn"
     (let (me (self)
           loop (spawn (receive
-                        (:go (ui-run {:slow false
-                                      :quit-busy-ms 0
-                                      :on-slow (fn (report) (send me [:slow report]))}
-                               (fn (model _cols _rows)
-                                 (if (:slow model)
-                                   (do (send me [:viewing true]) (quit-spin 0))
-                                   [[:clear]]))
-                               (fn (model input _cols _rows)
-                                 (cond
-                                   (= input :slow) (assoc model :slow true)
-                                   (= input :ctrl-g) (assoc model :slow false :quit-seen true)
-                                   (= input :quit) (assoc model :done true)
-                                   else model))
-                               (assoc (lane-display)
-                                 :draw (fn (frame) (send me [:drew frame]))))))))
+                        (:go
+                          (ui-run {:slow false
+                                   :quit-busy-ms 0
+                                   :on-slow (fn (report) (send me [:slow report]))}
+                            (fn (model _cols _rows)
+                              (if (:slow model)
+                                (do (send me [:viewing true]) (quit-spin 0))
+                                [[:clear]]))
+                            (fn (model input _cols _rows)
+                              (cond
+                                (= input :slow) (assoc model :slow true)
+                                (= input :ctrl-g) (assoc model :slow false :quit-seen true)
+                                (= input :quit) (assoc model :done true)
+                                else model))
+                            (assoc (lane-display) :draw (fn (frame) (send me [:drew frame]))))))))
       (send loop :go)
       (assert= (quit-await :drew) [[:clear]])
       (proc/send-priority loop :slow)
@@ -1521,24 +1523,24 @@ error a catch-all sees, so the kernel keeps raising it (sticky) until the window
     (let (me (self)
           spun (table/new)
           loop (spawn (receive
-                        (:go (ui-run {:n 0 :quit-busy-ms 0}
-                               (fn (model _cols _rows)
-                                 (cond
-                                   (and (= (:n model) 1) (not (table/get spun :once false)))
-                                     (do
-                                       (table/put spun :once true)
-                                       (send me [:viewing true])
-                                       (quit-spin 0))
-                                   (= (:n model) 2) (error "view: a model that cannot be drawn")
-                                   else [[:text 0 0 (str (:n model))]]))
-                               (fn (model input _cols _rows)
-                                 (cond
-                                   (= input :inc) (assoc model :n 1)
-                                   (= input :ctrl-g) (assoc model :n 2)
-                                   (= input :quit) (assoc model :done true)
-                                   else model))
-                               (assoc (lane-display)
-                                 :draw (fn (frame) (send me [:drew frame]))))))))
+                        (:go
+                          (ui-run {:n 0 :quit-busy-ms 0}
+                            (fn (model _cols _rows)
+                              (cond
+                                (and (= (:n model) 1) (not (table/get spun :once false)))
+                                  (do
+                                    (table/put spun :once true)
+                                    (send me [:viewing true])
+                                    (quit-spin 0))
+                                (= (:n model) 2) (error "view: a model that cannot be drawn")
+                                else [[:text 0 0 (str (:n model))]]))
+                            (fn (model input _cols _rows)
+                              (cond
+                                (= input :inc) (assoc model :n 1)
+                                (= input :ctrl-g) (assoc model :n 2)
+                                (= input :quit) (assoc model :done true)
+                                else model))
+                            (assoc (lane-display) :draw (fn (frame) (send me [:drew frame]))))))))
       (send loop :go)
       (assert= (quit-await :drew) [[:text 0 0 "0"]])
       (proc/send-priority loop :inc)

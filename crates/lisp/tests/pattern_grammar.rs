@@ -167,6 +167,8 @@ fn a_form_the_compiler_refuses_binds_nothing() {
         "(record p {} junk)",
         "(str key \"=\" value)",
         "(str \"GET \" & path)",
+        "(str \"v\" 1)",
+        "(str \"x\" :a)",
     ] {
         let pattern = read(&mut interp, source);
         let parsed = Pattern::parse(&interp.heap, pattern);

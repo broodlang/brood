@@ -205,11 +205,12 @@
     (let (me (self))
       (spawn (fn () (send me (point 11 22))))
       (receive
-        (p (do
-             (assert= (point-x p) 11)
-             (assert= (point-y p) 22)
-             (is (record? p))
-             (assert= (record-id p) :record-test/point))))))
+        (p
+          (do
+            (assert= (point-x p) 11)
+            (assert= (point-y p) 22)
+            (is (record? p))
+            (assert= (record-id p) :record-test/point))))))
   :isolated (test "a record merged into a plain map in a worker arrives as a plain map"
     (let (me (self))
       (spawn (fn () (send me [(merge {:z 1} (point 1 2)) (merge (point 1 2) {:y 9})])))

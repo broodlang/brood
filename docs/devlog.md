@@ -2282,3 +2282,20 @@ included, to the test recorded inside that form; a line outside every test form 
 rule. Guard: `test_selection_test` "a test's own (test … header line selects THAT test" (red with
 the source lookup off). The flake itself was hatch's (the workers' supervisor started after the
 listener bound, so `start` could return before it was registered; hatch a83ec68).
+
+2026-11-19. **Code review of the string-pattern work, ten findings, all fixed.** Data loss: the
+`:when` rule rode a clause's guard up over a comment and the formatter deleted it. False
+positive: `(str s)` with a refutable slot kept two exits (the special case for no ends), so the
+`(not string)` misreading came back — it now goes through the one `and`. Silent dead code:
+`(str "v" 1)` took the `1` as the slot and never matched — a non-string literal is refused, Rust
+side too. The FILE:LINE resolver read the path as typed (a suffix fell back to the old bug) and
+turned every node into a line by scanning; it reads the matched test's file and compares
+offsets. The dead-clause check ran on every match; it runs only with a string pattern present.
+The formatter judged a clause by its head's token kind, so `(:error …)` and `(_ …)` still hung
+deep; it now knows it is inside a `match`/`receive` (`format/*clause-list*`, the scrutinee
+excluded), and `:when` rides only a clause. Single-letter names renamed. One finding did not
+hold: typing a slot binder in `pattern_bindings` changes nothing — `match`, `fn` heads and `let`
+read it off the expansion, and `receive` binders are untyped for every pattern (through its
+result vector), which is wider than string patterns; the catalog pins the three that work.
+Every new guard sabotage-verified (the formatter's three, the catalog's `(str (or …))` case).
+

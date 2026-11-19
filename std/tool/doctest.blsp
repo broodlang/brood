@@ -267,10 +267,11 @@ a line still written with the retired ` → ` marker.
       (match (marked line ";=>")
         ([:malformed] (malformed))
         ([:example src expected] (check-case name-str src expected))
-        (_ (match (marked line ";~>")
-             ([:malformed] (malformed))
-             ([:example src _] (check-illustration name-str src))
-             (_ nil)))))))
+        (_
+          (match (marked line ";~>")
+            ([:malformed] (malformed))
+            ([:example src _] (check-illustration name-str src))
+            (_ nil)))))))
 
 (defn- example-or-stale? (l)
   ;; Any line `check` has something to say about: a case, an illustration, or a line still
@@ -566,16 +567,17 @@ THIS process — `markdown-failures` gives each block a process of its own.
                                     (pr-str form)
                                     (fn () (reflect/eval form))
                                     expected))))
-                            (_ (match (marked padded ";~>")
-                                 ([:malformed]
-                                   (continue (str here
-                                               ": "
-                                               (string/trim line)
-                                               "  — malformed example: expected one form, a marker, one result")))
-                                 ([:example form-text _]
-                                   (checked form-text
-                                     (fn (form) (illustration-fault here nil (pr-str form) form))))
-                                 (_ (walk (rest lines) (+ n 1) (append buffer [line]) faults))))))))))
+                            (_
+                              (match (marked padded ";~>")
+                                ([:malformed]
+                                  (continue (str here
+                                              ": "
+                                              (string/trim line)
+                                              "  — malformed example: expected one form, a marker, one result")))
+                                ([:example form-text _]
+                                  (checked form-text
+                                    (fn (form) (illustration-fault here nil (pr-str form) form))))
+                                (_ (walk (rest lines) (+ n 1) (append buffer [line]) faults))))))))))
     (apply vector (walk (string/split source "\n") start [] []))))
 
 (defn run-block (label start source)

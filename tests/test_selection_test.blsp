@@ -128,7 +128,11 @@
       (assert= (select 2) (list "g › first"))
       (assert= (select 4) (list "g › second"))
       (assert= (select 5) (list "g › second"))
-      (assert= (select 6) (list "g › second"))))
+      (assert= (select 6) (list "g › second"))
+      ;; a path typed as a suffix still finds the recorded file to read
+      (assert= (selection-labels (test-select/test-select-units units
+                                   {:lines (list ["header_test.blsp" 4])}))
+        (list "g › second"))))
   (test "a path suffix matches, so a relative path finds an absolute record"
     (assert= (selection-select {:lines (list ["demo_test.blsp" 4])}) (list "math › adds")))
   (test "an unknown file selects nothing"

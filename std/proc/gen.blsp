@@ -348,8 +348,8 @@ clause is dropped (so the mailbox can't leak)."
         ;; the catch-all and is dropped — a safe no-op.
         cc-receive (if cc-clause
                      (list `([:$code-change]
-                              (~loop
-                                (let (~(second cc-clause) ~state-sym) ~@(rest (rest cc-clause))))))
+                              (~loop (let (~(second cc-clause) ~state-sym)
+                                       ~@(rest (rest cc-clause))))))
                      nil)
         ;; Default catch-all (last): drop an unrecognised message and keep state,
         ;; so it cannot pile up unmatched in the mailbox.
@@ -395,9 +395,10 @@ clause is dropped (so the mailbox can't leak)."
       ([:next state data] (statem-enter handler st state data {}))
       ([:next state data opts] (statem-enter handler st state data opts))
       ([:stop data] (assoc st :data data :stopped true))
-      (_ (error "defstatem: a clause returned "
-           (pr-str action)
-           " (expected [:next state data], [:next state data opts], [:keep data], [:postpone] or [:stop data])")))))
+      (_
+        (error "defstatem: a clause returned "
+          (pr-str action)
+          " (expected [:next state data], [:next state data opts], [:keep data], [:postpone] or [:stop data])")))))
 
 ;; Postponed events run again, oldest first, once the state changes.
 (defn- statem-replay (handler st events)

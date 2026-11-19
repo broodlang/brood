@@ -106,28 +106,41 @@
 ;; recorded line lies inside that form. A LINE outside every test form falls back to the last
 ;; test declared at or before it. nil when neither finds one.
 (defn- test-resolve-line (units file target)
-  (let (span (test-form-span-at file target)
-        in-file (seq/filter (map (test-all-tests units) second)
-                  (fn (t) (and (not (nil? (test-line t))) (test-same-file? (test-file t) file))))
+  (let (in-file (seq/filter (map (test-all-tests units) second)
+                  (fn (test-tuple)
+                    (and (not (nil? (test-line test-tuple)))
+                      (test-same-file? (test-file test-tuple) file))))
+        ;; the file the matched tests recorded, not the path as typed: a typed path may be a
+        ;; suffix of it, or relative to somewhere else
+        span (when (not (empty? in-file)) (test-form-span-at (test-file (first in-file)) target))
         inside (when span
                  (seq/find in-file
-                   (fn (t) (and (>= (test-line t) (first span)) (<= (test-line t) (second span)))))))
+                   (fn (test-tuple)
+                     (and (>= (test-line test-tuple) (first span))
+                       (<= (test-line test-tuple) (second span)))))))
     (if inside
       (test-line inside)
       (fold in-file
         nil
-        (fn (best t)
-          (let (line (test-line t))
+        (fn (best test-tuple)
+          (let (line (test-line test-tuple))
             (if (and (<= line target) (or (nil? best) (> line best))) line best)))))))
 
-;; `[first-line last-line]` of the innermost `(test …)` form in `file` whose lines include
-;; `target`, or nil — no such form, or a file that cannot be read.
+;; `[first-line last-line]` of the innermost `(test …)` form in `file` that includes line
+;; `target`, or nil — no such form, or a file that cannot be read. Nodes are compared by
+;; character offset against the target line's range; only a matching test form's ends are
+;; turned into lines.
 (defn- test-form-span-at (file target)
   (let (text (check-allow :discarded-catch (try (file/slurp file) (catch _ nil))))
     (when (string? text)
-      (test-span-in (reflect/parse-source-positioned text) (test-line-starts text) target nil))))
+      (let (starts (test-line-starts text))
+        (when (and (>= target 1) (< target (count starts)))
+          (test-span-in (reflect/parse-source-positioned text)
+            starts
+            [(nth starts (dec target)) (nth starts target)]
+            nil))))))
 
-;; The character offset each line starts at, line 1 first.
+;; The character offset each line starts at, line 1 first, and one past the last line's end.
 (defn- test-line-starts (text)
   (vec (seq/scan (string/split text "\n") 0 (fn (start line) (+ start (count line) 1)))))
 
@@ -136,19 +149,19 @@
   (count (seq/take-while starts (fn (start) (<= start offset)))))
 
 ;; check-allow: deliberately non-tail — recursion over a parse tree; depth is source nesting.
-(defn- test-span-in (node starts target found)
-  (let (kids (get node :kids)
-        first-line (test-line-at starts (get node :start))
-        last-line (test-line-at starts (math/max 0 (dec (get node :end))))
-        covers (and (<= first-line target) (<= target last-line))
-        head (when (= (get node :kind) :list)
+(defn- test-span-in (node starts line-range found)
+  (let (covers (and (< (get node :start) (second line-range))
+                 (> (get node :end) (first line-range)))
+        kids (get node :kids)
+        head (when (and covers (= (get node :kind) :list))
                (seq/find (or kids [])
                  (fn (kid) (not (includes? [:whitespace :comment] (get kid :kind))))))
-        here (if (and covers head (= (get head :kind) :symbol) (= (get head :text) "test"))
-               [first-line last-line]
+        here (if (and head (= (get head :kind) :symbol) (= (get head :text) "test"))
+               [(test-line-at starts (get node :start))
+                 (test-line-at starts (math/max 0 (dec (get node :end))))]
                found))
     (if (and covers kids)
-      (fold kids here (fn (acc kid) (test-span-in kid starts target acc)))
+      (fold kids here (fn (acc kid) (test-span-in kid starts line-range acc)))
       here)))
 
 ;; Resolve every FILE:LINE selector, warning about any that addresses no test —

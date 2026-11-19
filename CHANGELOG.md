@@ -10,6 +10,11 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 before it. A test's recorded line is its first body form's, so its header sat above it; the
 selector now reads the file and maps a line inside a `(test …)` form to that test.
 
+**Fixed: `nest format` dropped a comment between a clause's pattern and its `:when`.** The
+formatter now decides a clause by context, so `(:error …)` and `(_ …)` clauses lay out like the
+others; run `nest format` once. **Fixed: `(str "v" 1)` compiled a clause that never matches** — a
+literal that is not a string in a string pattern is refused, naming `"1"` and `^1`.
+
 ## v0.57.0 — string patterns, and a dead string clause fails compilation
 
 **Added: string patterns, `(str "GET " path)` (ADR-770).** A pattern written like the `str` call

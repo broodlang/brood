@@ -110,9 +110,8 @@
 (defn drive-backlog (display-of messages)
   (let (me (self)
         [client watch] (spawn-monitor (receive
-                                        (:go (editor/attach/attach-display-loop nil
-                                               me
-                                               (display-of me))))))
+                                        (:go
+                                          (editor/attach/attach-display-loop nil me (display-of me))))))
     (doseq (m messages) (if (string? m) (proc/send-priority client m) (send client m)))
     (send client [:bye])
     (send client :go)
@@ -327,13 +326,14 @@
   (test "attach-display-loop ships a queued key before it paints queued frames"
     (let (me (self)
           client (spawn (receive
-                          (:go (editor/attach/attach-display-loop nil
-                                 me
-                                 {:draw (fn (f) (send me [:drew f]))
-                                  :leave (fn () nil)
-                                  :poll-input (fn ()
-                                                (let (taken (proc/take-priority))
-                                                  (if (nil? taken) nil (first taken))))})))))
+                          (:go
+                            (editor/attach/attach-display-loop nil
+                              me
+                              {:draw (fn (f) (send me [:drew f]))
+                               :leave (fn () nil)
+                               :poll-input (fn ()
+                                             (let (taken (proc/take-priority))
+                                               (if (nil? taken) nil (first taken))))})))))
       (doseq (i (range 50)) (send client [:frame [:frame-number i]]))
       (proc/send-priority client "k")
       (send client [:bye])
