@@ -79,13 +79,17 @@ arg silently becoming `nil`.
 | **Rope** (editor buffer text; immutable, char-indexed — ADR-045) | `%string->rope` | 1 | a rope holding the characters of a string — the constructor |
 | | `%rope->string` | 1 | the full text of a rope as a string (the only way a rope's content crosses a process: ropes are process-local) |
 | | `%rope-length` | 1 | character count |
-| | `%rope-line-count` | 1 | line count (a trailing newline ends a line; `""` is 1 line) |
+| | `%rope-line-count` | 1 | line count (a trailing newline ends a line; `""` is 1 line). A line breaks at LF, CR or CRLF, never at FF, VT, NEL or U+2028/U+2029 (ADR-772) |
 | | `%rope-insert` | 3 | `(rope-insert r idx s)` → a **fresh** rope with `s` inserted at char `idx` |
 | | `%rope-delete` | 3 | `(rope-delete r start end)` → a **fresh** rope with chars `[start, end)` removed |
 | | `%rope-slice` | 3 | text of chars `[start, end)` as a string |
 | | `%rope-line` | 2 | text of line `n` (0-based), including its trailing newline — the viewport primitive |
 | | `%rope-char->line` | 2 | 0-based line index containing a char index |
 | | `%rope-line->char` | 2 | char index where a 0-based line begins |
+| | `%rope-line-text` | 2 | text of line `n` (0-based) WITHOUT its line break (LF, CR or CRLF) — what a line shows (`text/line-text`) |
+| | `%rope-line-end->char` | 2 | char index where line `n`'s content ends, before its break; `n` may be the line count (`text/line-end->char`) |
+| | `%rope-char->utf16` | 2 | UTF-16 code-unit offset of a char index — an LSP position's `character` (`text/char->utf16`) |
+| | `%rope-utf16->char` | 2 | char index holding a UTF-16 code unit; a unit inside a surrogate pair answers its char (`text/utf16->char`) |
 | **Terminal** (the editor/display/input seam — ADR-046; the in-process crossterm frontend that paints the render-op protocol, `std/editor/display.blsp`) | `%term-enter` | 0 | take over the terminal: raw mode + alternate screen, cursor hidden, and the kitty keyboard protocol's repeats and releases where the terminal speaks it (inferred from the repeats where it does not) → nil. Pair with `term/leave` |
 | | `%term-leave` | 0 | restore the terminal (show cursor, leave alternate screen, disable raw mode) → nil |
 | | `%term-size` | 0 | terminal size as `[cols rows]` (character cells) |

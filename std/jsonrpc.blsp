@@ -73,9 +73,25 @@ the honest answer to a request the receiver does not implement.
     (map/get-in (first (first (jsonrpc/decode (jsonrpc/error-response 3 -32601 \"no\")))) [:error :code])   ;=> -32601"
   (frame (json/encode {:jsonrpc "2.0" :id id :error {:code code :message message}})))
 
+(def max-frame-bytes
+  ;; The largest body a frame may declare: 64 MiB. A completion reply on a large project is
+  ;; ~100 kB and a whole-document sync of a big file a few MB, so this is generous; a length
+  ;; past it is a corrupt header or a hostile peer, and waiting for that many bytes would
+  ;; buffer the stream without end. A frame declaring more is skipped like a malformed one.
+  (* 64 1024 1024))
+
+;; The longest header block (the text before the blank line) taken as one: a real one is a
+;; line or two. Past this with no blank line in sight, the front of the buffer is not a
+;; header, and the decoder resyncs rather than waiting for a blank line forever.
+(def- max-header-chars 8192)
+
+;; How many trailing characters a resync keeps when no header start is in sight: one short of
+;; `Content-Length:`, so a header split across two chunks is never cut.
+(def- header-tail-chars 14)
+
 (defn- content-length (header:string -> (or nil int))
   "The `Content-Length` value in a frame's `header` block (the text before the blank
-line), or nil when it is absent or not a number."
+line), or nil when it is absent, not a number, negative or past [[max-frame-bytes]]."
   (let (i (index-of header "Content-Length:"))
     (if (< i 0)
       nil
@@ -83,37 +99,59 @@ line), or nil when it is absent or not a number."
             eol (index-of after "\r")
             token (string/trim (if (< eol 0) after (string/substring after 0 eol)))
             n (string/->number token))
-        (if (int? n) n nil)))))
+        (if (and (int? n) (>= n 0) (<= n max-frame-bytes)) n nil)))))
+
+(defn- resync (buf from why)
+  "`buf` from the next `Content-Length:` at or after char `from` — what follows a bad frame's
+header — warning `why`. With none in sight only the last few characters stay, which may be
+the start of one."
+  (let (tail (string/substring buf from (count buf))
+        at (index-of tail "Content-Length:")
+        keep (math/min (count tail) header-tail-chars))
+    (log/warn (str "jsonrpc: " why "; skipped to the next header"))
+    (if (>= at 0)
+      (string/substring tail at (count tail))
+      (string/substring tail (- (count tail) keep) (count tail)))))
 
 (defn- decode-acc (buf acc)
   (let (separator (index-of buf "\r\n\r\n"))
-    (if (< separator 0)
-      [(reverse acc) buf] ; no complete header yet
-      (let (body-length (content-length (string/substring buf 0 separator)))
-        (if (nil? body-length)
-          [(reverse acc) buf] ; a malformed header: stop here, the caller keeps the buffer
-          (let (body-start (+ separator 4) ; the header is ASCII: char index = byte offset
-                bytes (string/->bytes buf)
-                total (count bytes))
-            (if (< (- total body-start) body-length)
-              [(reverse acc) buf] ; the body's bytes have not all arrived
-              (let (body-end (+ body-start body-length)
-                    body (string/bytes-> (bytes/slice bytes body-start body-end))
-                    remaining (string/bytes-> (bytes/slice bytes body-end total))
-                    message (try
-                              (json/decode body)
-                              (catch e
-                                (log/warn (str "jsonrpc: a frame that is not JSON was dropped: "
-                                            (error-message e)))
-                                nil)))
-                (decode-acc remaining (if (nil? message) acc (cons message acc)))))))))))
+    (cond
+      ;; no blank line in a front too long to be a header: not a header — resync past it
+      (and (< separator 0) (> (count buf) max-header-chars))
+        (decode-acc (resync buf 1 "a header with no end") acc)
+      ; no complete header yet
+      (< separator 0) [(reverse acc) buf]
+      else
+        (let (body-length (content-length (string/substring buf 0 separator)))
+          (if (nil? body-length)
+            ;; a malformed header, or a length past `max-frame-bytes`: where its body ends
+            ;; cannot be trusted, so skip to the next header rather than wedge the stream
+            (decode-acc (resync buf (+ separator 4) "a frame with a bad Content-Length") acc)
+            (let (body-start (+ separator 4) ; the header is ASCII: char index = byte offset
+                  bytes (string/->bytes buf)
+                  total (count bytes))
+              (if (< (- total body-start) body-length)
+                [(reverse acc) buf] ; the body's bytes have not all arrived
+                (let (body-end (+ body-start body-length)
+                      body (string/bytes-> (bytes/slice bytes body-start body-end))
+                      remaining (string/bytes-> (bytes/slice bytes body-end total))
+                      message (try
+                                (json/decode body)
+                                (catch e
+                                  (log/warn (str "jsonrpc: a frame that is not JSON was dropped: "
+                                              (error-message e)))
+                                  nil)))
+                  (decode-acc remaining (if (nil? message) acc (cons message acc)))))))))))
 
 (defn decode (buf:string -> (tuple list string))
   "`[messages remaining]`: every complete frame at the front of `buf`, decoded (a map per
 message), and what is left — the start of a frame whose header or body has not all arrived,
 kept for the next chunk. A frame whose body is not JSON is dropped with a warning rather
-than stalling everything behind it; a malformed HEADER stops decoding there, since where the
-next frame starts cannot be known.
+than stalling everything behind it. A malformed header — a `Content-Length` that is missing,
+not a number, or past [[max-frame-bytes]] — is skipped with a warning, and decoding resyncs
+at the next `Content-Length:`, so one bad frame never wedges the stream nor buffers it
+without end.
 
-    (second (jsonrpc/decode (str (jsonrpc/notification \"exit\" nil) \"Content-Len\")))   ;=> \"Content-Len\""
+    (second (jsonrpc/decode (str (jsonrpc/notification \"exit\" nil) \"Content-Len\")))   ;=> \"Content-Len\"
+    (:id (first (first (jsonrpc/decode (str \"Content-Length: many\\r\\n\\r\\n{}\" (jsonrpc/response 4 true))))))   ;=> 4"
   (decode-acc buf '()))

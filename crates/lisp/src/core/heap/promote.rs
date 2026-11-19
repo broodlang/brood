@@ -13,6 +13,7 @@
 //! They live here rather than with the freeze because promotion is their only user.
 
 use super::*;
+use crate::process::message::{ClosureMsg, Message};
 
 impl Heap {
     // ----- promotion: copy code from LOCAL into the shared RUNTIME region -----
@@ -478,6 +479,248 @@ impl Heap {
             .expect("promote: env slot filled exactly once");
         runtime_id
     }
+
+    // ----- building a startup-image value straight into RUNTIME (ADR-771) -----
+
+    /// Rebuild an imaged `message` **directly in the shared RUNTIME region**: what
+    /// `from_message` and then the promote a `def` runs would produce, without the LOCAL
+    /// copy in between. Materialising a section bound every value it rebuilt, so each was
+    /// built twice — once in LOCAL, once more by the promote — and the LOCAL one was
+    /// garbage the moment it was bound: a third of an imaged application's start.
+    ///
+    /// **Why this is as safe as `promote`.** Every RUNTIME slot is minted under the
+    /// `promote_lock` read guard, as `promote` mints them, so aging cannot flip the
+    /// generation between a slot and the handle naming it. The value is published by the
+    /// caller afterwards (`env_define`, whose promote passes a RUNTIME value through and
+    /// whose re-home moves one a flip left behind), with no safepoint in between: this
+    /// process cannot ack a drain while it holds the unbound value, so the generation it
+    /// was built in cannot be freed under it. That is the window `env_define` already
+    /// leaves when it stages a load's bindings. The guard is NOT held into the publish —
+    /// `promote_lock` is not reentrant against a queued writer, and the facts a define
+    /// replays take `registry_lock`, which orders before it.
+    ///
+    /// Lists, vectors, strings, byte blobs and closures are minted in place, every list
+    /// position stamped under one lock. A map, set, failure or record has its children
+    /// built here and its trie built LOCAL around them, then copied node by node (the
+    /// children pass through). The rare rest — a big number, a closure carrying module
+    /// guards or shared arms, a handle — is rebuilt LOCAL and promoted, as before.
+    pub(crate) fn build_shared(&mut self, message: &Message) -> Value {
+        let runtime = Arc::clone(&self.runtime);
+        let _promote_guard = runtime
+            .promote_lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut build = SharedBuild {
+            file: self.cold().and_then(|cold| cold.current_file_arc.clone()),
+            positions: Vec::new(),
+            forward: PromoteForward {
+                pin_tables: true,
+                ..PromoteForward::default()
+            },
+        };
+        let value = self.build_shared_in(message, &mut build);
+        runtime.set_positions(build.positions);
+        value
+    }
+
+    fn build_shared_in(&mut self, message: &Message, build: &mut SharedBuild) -> Value {
+        // Deep-nesting guard — see `WALKER_RED_ZONE`.
+        crate::stack::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+            self.build_shared_grown(message, build)
+        })
+    }
+
+    fn build_shared_grown(&mut self, message: &Message, build: &mut SharedBuild) -> Value {
+        match message {
+            Message::Nil => Value::nil(),
+            Message::Bool(flag) => Value::boolean(*flag),
+            Message::Int(number) => Value::int(*number),
+            Message::Float(number) => Value::float(*number),
+            Message::Sym(symbol) => Value::symbol(*symbol),
+            Message::Keyword(symbol) => Value::keyword(*symbol),
+            Message::Str(text) => Value::str_(self.runtime.push_str(text.clone())),
+            Message::Bytes(blob) => Value::bytes(self.runtime.push_bytes(Arc::clone(blob))),
+            // An empty list rebuilds as nil, as `from_message`'s `heap.list` does.
+            Message::List(items, _) if items.is_empty() => Value::nil(),
+            Message::List(items, position) => {
+                let heads = self.build_shared_items(items, build);
+                let (list, head) = self.push_shared_spine(heads, Value::nil());
+                if let (Some(pos), Some((index, code_gen))) = (position, head) {
+                    build.positions.push((
+                        rt_pos_key(index, code_gen),
+                        FormPos {
+                            pos: *pos,
+                            file: build.file.clone(),
+                            synthetic: false,
+                        },
+                    ));
+                }
+                list
+            }
+            Message::Dotted(items) => {
+                let mut heads = self.build_shared_items(items, build);
+                let tail = heads.pop().unwrap_or(Value::nil());
+                self.push_shared_spine(heads, tail).0
+            }
+            Message::Vector(items) => {
+                let values = self.build_shared_items(items, build);
+                Value::vector(self.runtime.push_vec(VecStore::from_vec(values)))
+            }
+            Message::Map(entries) => {
+                let pairs = self.build_shared_entries(entries, build);
+                let local = self.map_from_pairs(pairs);
+                self.promote_in(local, &mut build.forward)
+            }
+            Message::Failure(entries) => {
+                let pairs = self.build_shared_entries(entries, build);
+                let local = match self.map_from_pairs(pairs) {
+                    Value::Map(id) => Value::failure(id),
+                    other => other,
+                };
+                self.promote_in(local, &mut build.forward)
+            }
+            Message::Record(record, entries) => {
+                let pairs = self.build_shared_entries(entries, build);
+                let local = match self.map_from_pairs(pairs) {
+                    Value::Map(id) => Value::record(*record, id),
+                    other => other,
+                };
+                self.promote_in(local, &mut build.forward)
+            }
+            Message::Set(items) => {
+                let elements = self.build_shared_items(items, build);
+                let local = self.set_from_elems(elements);
+                self.promote_in(local, &mut build.forward)
+            }
+            Message::Closure(closure)
+                if closure.shared_arms.is_none()
+                    && closure
+                        .modules
+                        .iter()
+                        .all(|need| self.env_get(EnvId::GLOBAL, need.probe).is_some()) =>
+            {
+                self.build_shared_closure(closure, build)
+            }
+            _ => {
+                let local = crate::process::message::from_message(self, message);
+                self.promote_in(local, &mut build.forward)
+            }
+        }
+    }
+
+    fn build_shared_items(&mut self, items: &[Message], build: &mut SharedBuild) -> Vec<Value> {
+        let mut values = Vec::with_capacity(items.len());
+        for item in items {
+            values.push(self.build_shared_in(item, build));
+        }
+        values
+    }
+
+    fn build_shared_entries(
+        &mut self,
+        entries: &[(Message, Message)],
+        build: &mut SharedBuild,
+    ) -> Vec<(Value, Value)> {
+        let mut pairs = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            let key = self.build_shared_in(key, build);
+            let value = self.build_shared_in(value, build);
+            pairs.push((key, value));
+        }
+        pairs
+    }
+
+    /// Cons `heads` onto `tail` in the current generation, last first, and answer the list
+    /// with its head cell's slab index and generation (none for no heads).
+    fn push_shared_spine(&self, heads: Vec<Value>, tail: Value) -> (Value, Option<(usize, usize)>) {
+        // One generation read and one slab load for the spine: the caller holds the
+        // `promote_lock` read guard, so aging cannot flip it underneath us.
+        let code_gen = self.runtime.cur_gen();
+        let code = self.runtime.cur_code();
+        let mut list = tail;
+        let mut head = None;
+        for item in heads.into_iter().rev() {
+            let index = code.pairs.push((item, list));
+            list = Value::pair(PairId::runtime_gen(index, code_gen));
+            head = Some((index, code_gen));
+        }
+        (list, head)
+    }
+
+    fn build_shared_closure(&mut self, closure: &ClosureMsg, build: &mut SharedBuild) -> Value {
+        let mut arms: Vec<ClosureArm> = Vec::with_capacity(closure.arms.len());
+        for arm in &closure.arms {
+            let mut optionals = Vec::with_capacity(arm.optionals.len());
+            for (name, default) in &arm.optionals {
+                optionals.push((*name, self.build_shared_in(default, build)));
+            }
+            let body = self.build_shared_items(&arm.body, build);
+            let mut built = ClosureArm {
+                params: arm.params.clone(),
+                optionals,
+                rest: arm.rest,
+                body,
+                passthrough: None,
+            };
+            // What `alloc_closure` derives for every closure it allocates.
+            built.passthrough = self.compute_passthrough(&built);
+            arms.push(built);
+        }
+        // The captured free variables, as one frame over the global scope — the frame
+        // `from_message` builds, minted in place. A message is a tree, so nothing in it
+        // can reach back to this closure: no slot need be reserved before the build.
+        let env = if closure.captured.is_empty() {
+            None
+        } else {
+            let mut vars = Vec::with_capacity(closure.captured.len());
+            for (name, value) in &closure.captured {
+                vars.push((*name, self.build_shared_in(value, build)));
+            }
+            let code_gen = self.runtime.cur_gen();
+            let code = self.runtime.cur_code();
+            let index = code.envs.push(OnceLock::new());
+            code.envs
+                .get(index)
+                .expect("reserved env slot")
+                .set(EnvFrame {
+                    vars: vars.into_iter().collect(),
+                    parent: Some(EnvId::GLOBAL),
+                })
+                .ok()
+                .expect("build_shared: env slot filled exactly once");
+            Some(EnvId::runtime_gen(index, code_gen))
+        };
+        let code_gen = self.runtime.cur_gen();
+        let code = self.runtime.cur_code();
+        let index = code.closures.push(OnceLock::new());
+        // The RUNTIME closure count just grew — arm the eval safepoint's `rt_gc_due` probe,
+        // as `promote_closure` does.
+        self.runtime.rt_dirty.store(true, Ordering::Relaxed);
+        code.closures
+            .get(index)
+            .expect("reserved closure slot")
+            .set(Closure {
+                name: closure.name,
+                arms: arms.into(),
+                doc: closure.doc.clone(),
+                env,
+                module: closure.module,
+                // A copy across heaps is a new cell — never `=` to its source.
+                identity: crate::core::value::fresh_closure_identity(),
+            })
+            .ok()
+            .expect("build_shared: closure slot filled exactly once");
+        Value::func(ClosureId::runtime_gen(index, code_gen))
+    }
+}
+
+/// What one [`Heap::build_shared`] carries down its walk: the file its lists' positions
+/// are stamped with, the positions to install under one lock at the end, and the forwarding
+/// tables for the parts that go through `promote_in`.
+struct SharedBuild {
+    file: Option<Arc<str>>,
+    positions: Vec<(u64, FormPos)>,
+    forward: PromoteForward,
 }
 
 /// Forwarding tables for [`Heap::promote`]: LOCAL handle → the RUNTIME handle it
@@ -668,5 +911,65 @@ mod promote_sharing_tests {
             1,
             "the string is referenced twice inside the map — one copy"
         );
+    }
+}
+
+#[cfg(test)]
+mod build_shared_tests {
+    use super::*;
+    use crate::process::message::to_message_image;
+
+    /// ADR-771: an imaged value of every kind a section carries is built straight into the
+    /// RUNTIME region — no LOCAL list on the way — equal to the value it was written from,
+    /// its closure calling through its captured frame and its forms keeping their positions.
+    #[test]
+    fn an_imaged_value_is_built_in_the_runtime_region_equal_to_its_source() {
+        let mut interp = crate::Interp::new();
+        let original = interp
+            .eval_str(
+                "(def original
+                   [(list 1 \"two\" :three 'four) '(1 . 2) [1 [2 #{3}]] {:a {:b \"c\"}}
+                    123456789012345678901234567890 1.5
+                    (let (base 40) (fn (step) (+ base step)))])",
+            )
+            .expect("define the source value");
+        let original = interp
+            .heap
+            .env_get(EnvId::GLOBAL, crate::core::value::intern("original"))
+            .unwrap_or(original);
+        let message = to_message_image(&interp.heap, original).expect("image the value");
+        let local_pairs = interp.heap.local.pairs.len();
+        let built = interp.heap.build_shared(&message);
+        assert_eq!(
+            interp.heap.local.pairs.len(),
+            local_pairs,
+            "a list was built LOCAL on the way"
+        );
+        let ValueRef::Vector(vector) = built.unpack() else {
+            panic!("a vector comes back a vector");
+        };
+        assert_eq!(vector.region(), RUNTIME);
+        let items = interp.heap.vector(vector).to_vec();
+        let ValueRef::Fn(closure) = items[6].unpack() else {
+            panic!("the closure comes back a closure");
+        };
+        assert_eq!(closure.region(), RUNTIME);
+        let rebuilt = interp.heap.closure(closure).clone();
+        assert_eq!(
+            rebuilt.env.map(|env| env.region()),
+            Some(RUNTIME),
+            "its captured frame is shared too"
+        );
+        assert!(
+            interp.heap.form_pos(rebuilt.arms[0].body[0]).is_some(),
+            "a body form keeps the position it was read at"
+        );
+        interp
+            .heap
+            .env_define(EnvId::GLOBAL, crate::core::value::intern("built"), built);
+        let verdict = interp
+            .eval_str("[(= (take built 6) (take original 6)) ((nth built 6) 2)]")
+            .expect("compare and call");
+        assert_eq!(interp.print(verdict), "[true 42]");
     }
 }

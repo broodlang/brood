@@ -57,9 +57,28 @@
                                             (jsonrpc/response 2 true))))
       (assert= (map messages :id) (list 2))
       (assert= rest "")))
-  (test "a malformed header stops decoding and keeps the buffer"
-    (let (garbled "Content-Length: many\r\n\r\n{}")
-      (assert= (jsonrpc/decode garbled) [() garbled]))))
+  (test "a malformed header is skipped, and the frame after it decodes"
+    (let ([messages rest] (jsonrpc/decode (str "Content-Length: many\r\n\r\n{}"
+                                            (jsonrpc/response 2 true))))
+      (assert= (map messages :id) (list 2))
+      (assert= rest "")))
+  (test "a malformed header with no next frame yet keeps only what could start one"
+    (let ([messages rest] (jsonrpc/decode "Content-Length: -3\r\n\r\n{\"a\": 1} trailing junk"))
+      (assert= messages ())
+      (assert= rest " trailing junk")))
+  (test "a length past max-frame-bytes is not waited for: the stream resyncs"
+    (let (huge (str "Content-Length: " (inc jsonrpc/max-frame-bytes) "\r\n\r\n{\"id\": 0}")
+          [messages rest] (jsonrpc/decode (str huge (jsonrpc/response 3 true))))
+      (assert= (map messages :id) (list 3))
+      (assert= rest "")))
+  (test "a front too long to be a header is dropped rather than buffered for ever"
+    (let (junk (string/repeat "x" 10000)
+          [messages rest] (jsonrpc/decode (str junk (jsonrpc/response 5 true))))
+      (assert= (map messages :id) (list 5))
+      (assert= rest ""))
+    (let ([messages rest] (jsonrpc/decode (string/repeat "x" 10000)))
+      (assert= messages ())
+      (is (< (count rest) 20)))))
 
 ;; A real completion reply from a real project is ~100 kB, and bedit's decoder (this one,
 ;; before it moved here) reached its body with `take`/`drop` over the bytes — which go

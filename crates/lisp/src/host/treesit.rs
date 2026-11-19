@@ -565,17 +565,26 @@ impl SpanText for FlatText<'_> {
         &self.src.as_bytes()[byte.min(self.src.len())..]
     }
     fn points_of(&self, bytes: &[usize]) -> Vec<tree_sitter::Point> {
-        // one forward pass over the text, since the bytes ascend
+        // one forward pass over the text, since the bytes ascend. A line breaks where the
+        // rope's does (LF, CR, CRLF — `scanner::line_starts`, ADR-772): a CRLF's break is
+        // its `\n`, so a CR breaks only when no `\n` follows it.
         let source = self.src.as_bytes();
         let (mut row, mut line_start, mut scanned) = (0usize, 0usize, 0usize);
         bytes
             .iter()
             .map(|byte| {
                 let byte = (*byte).min(source.len());
-                for (offset, character) in source[scanned.min(byte)..byte].iter().enumerate() {
-                    if *character == b'\n' {
+                let from = scanned.min(byte);
+                for (offset, character) in source[from..byte].iter().enumerate() {
+                    let at = from + offset;
+                    let breaks = match character {
+                        b'\n' => true,
+                        b'\r' => source.get(at + 1) != Some(&b'\n'),
+                        _ => false,
+                    };
+                    if breaks {
                         row += 1;
-                        line_start = scanned + offset + 1;
+                        line_start = at + 1;
                     }
                 }
                 scanned = scanned.max(byte);
@@ -1300,9 +1309,8 @@ fn parse_rope(
 }
 
 /// The tree-sitter `Point` of `byte` in `text`: its line, and its byte column in that line.
-/// Lines are ropey's (which also breaks on `\r` alone and the Unicode separators, where
-/// tree-sitter breaks on `\n`); the parse itself is byte-addressed, so a row that differs on
-/// such text skews only a point-based query, which nothing here makes.
+/// Lines break at LF, CR and CRLF, as the rope's do and as [`FlatText`]'s `points_of` counts
+/// them (ADR-772).
 #[cfg(feature = "treesit")]
 fn point_of(text: &ropey::Rope, byte: usize) -> tree_sitter::Point {
     let byte = byte.min(text.len_bytes());
@@ -2330,5 +2338,35 @@ mod token_rule_tests {
                 punctuation: false
             }
         );
+    }
+}
+
+#[cfg(all(test, feature = "treesit"))]
+mod point_tests {
+    use super::*;
+
+    /// The points handed tree-sitter break lines where the rope does (ADR-772): LF, CR and
+    /// CRLF, never a form feed, a vertical tab, NEL or U+2028/U+2029 — and the flat-string
+    /// reader and the rope reader answer the same points for the same text.
+    #[test]
+    fn flat_and_rope_points_break_lines_alike() {
+        let source = "a\u{c}b\u{b}c\u{85}d\u{2028}e\rf\r\ng\nh";
+        let bytes: Vec<usize> = (0..=source.len())
+            .filter(|byte| source.is_char_boundary(*byte))
+            .collect();
+        let b2c = byte_to_char_offsets(source);
+        let flat = FlatText {
+            src: source,
+            b2c: &b2c,
+        }
+        .points_of(&bytes);
+        let rope = ropey::Rope::from_str(source).points_of(&bytes);
+        assert_eq!(flat, rope);
+        let row_of =
+            |needle: char| flat[bytes.binary_search(&source.find(needle).unwrap()).unwrap()].row;
+        assert_eq!(row_of('e'), 0, "FF, VT, NEL and U+2028 break no line");
+        assert_eq!(row_of('f'), 1, "a lone CR breaks");
+        assert_eq!(row_of('g'), 2, "CRLF is one break");
+        assert_eq!(row_of('h'), 3);
     }
 }

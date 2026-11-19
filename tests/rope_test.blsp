@@ -124,7 +124,15 @@
   (test "slice past the end raises" (assert-error (text/slice (text/string-> "ab") 0 99)))
   (test "line past the end raises" (assert-error (text/line (text/string-> "ab") 5)))
   (test "char->line past the end raises"
-    (assert-error (text/char->line (text/string-> "ab") 99))))
+    (assert-error (text/char->line (text/string-> "ab") 99)))
+  (test "a bad range names the bound that is wrong"
+    (let (rope (text/string-> "abc"))
+      (assert= (error-message (error-of (text/delete rope -1 2)))
+        "runtime error: %rope-delete: range start -1 out of bounds (valid 0..=3)")
+      (assert= (error-message (error-of (text/slice rope 0 9)))
+        "runtime error: %rope-slice: range end 9 out of bounds (valid 0..=3)")
+      (assert= (error-message (error-of (text/delete rope 2 1)))
+        "runtime error: %rope-delete: range end 1 is before its start 2"))))
 
 (describe "ropes across processes"
   :isolated
@@ -265,3 +273,66 @@
     (assert= (error-message (error-of (text/after-line->char (text/string-> "ab") 2)))
       "text/after-line->char: line 2 is out of bounds (valid 0..1)")
     (assert-error (text/after-line->char (text/string-> "ab") -1))))
+
+(describe "a line breaks at LF, CR or CRLF — and nowhere else (ADR-772)"
+  (test "a form feed, a vertical tab, NEL and U+2028/U+2029 break no line"
+    (doseq (separator ["\u{c}" "\u{b}" "\u{85}" "\u{2028}" "\u{2029}"])
+      (let (rope (text/string-> (str "a" separator "b")))
+        (assert= (text/line-count rope) 1)
+        (assert= (text/char->line rope 2) 0)
+        (assert= (text/line-text rope 0) (str "a" separator "b")))))
+  (test "a lone CR breaks a line, and so does LF"
+    (let (rope (text/string-> "ab\rcd\nef"))
+      (assert= (text/line-count rope) 3)
+      (assert= (text/line->char rope 1) 3)
+      (assert= (text/line->char rope 2) 6)
+      (assert= (text/char->line rope 3) 1)
+      (assert= (text/char->line rope 6) 2)))
+  (test "CRLF is ONE break"
+    (let (rope (text/string-> "ab\r\ncd"))
+      (assert= (text/line-count rope) 2)
+      (assert= (text/line->char rope 1) 4)
+      (assert= (text/char->line rope 3) 0)
+      (assert= (text/char->line rope 4) 1)))
+  (test "end-of-line in a buffer with a form feed stays on its line"
+    (let (buf (editor/buffer/end-of-line (editor/buffer/make-buffer "x\u{c}y\nz")))
+      (assert= (editor/buffer/buffer-point buf) 3)))
+  (test "a buffer search's ^ and $ agree with the rope's lines"
+    (assert= (regex/rope-find (text/string-> "x\u{c}ab") "^ab" 0) nil)
+    (assert= (get (regex/rope-find (text/string-> "x\rab") "^ab" 0) :start) 2)
+    (assert= (get (regex/rope-find (text/string-> "x\r\nab") "^ab" 0) :start) 3)
+    (assert= (get (regex/rope-find (text/string-> "xy\r\nab") "y$" 0) :start) 1)
+    (assert= (get (regex/rope-find (text/string-> "x\r\nab") "x.*" 0) :text) "x")))
+
+(describe "text/line-text and text/line-end->char"
+  (test "a line's text drops LF, CR or CRLF, and the last line has none"
+    (let (rope (text/string-> "ab\ncd\ref\r\ngh"))
+      (assert= (map (range 0 (text/line-count rope)) (fn (line) (text/line-text rope line)))
+        (list "ab" "cd" "ef" "gh"))
+      (assert= (map (range 0 (text/line-count rope)) (fn (line) (text/line-end->char rope line)))
+        (list 2 5 8 12))))
+  (test "line-end->char and line->char bound line-text"
+    (let (rope (text/string-> "one\r\ntwo\n\nlast"))
+      (doseq (line (range 0 (text/line-count rope)))
+        (assert= (text/slice rope (text/line->char rope line) (text/line-end->char rope line))
+          (text/line-text rope line)))))
+  (test "an empty last line after a trailing newline, and line-count itself"
+    (let (rope (text/string-> "ab\n"))
+      (assert= (text/line-text rope 1) "")
+      (assert= (text/line-end->char rope 1) 3)
+      (assert= (text/line-end->char rope 2) 3)))
+  (test "a line out of range raises"
+    (assert-error (text/line-text (text/string-> "ab") 1))
+    (assert-error (text/line-end->char (text/string-> "ab") 2))
+    (assert-error (text/line-end->char (text/string-> "ab") -1))))
+
+(describe "text/char->utf16 and text/utf16->char"
+  (test "an astral character takes two units, a BMP one one"
+    (let (rope (text/string-> "a\u{1F600}é b"))
+      (assert= (map (range 0 6) (fn (idx) (text/char->utf16 rope idx))) (list 0 1 3 4 5 6))
+      (assert= (map [0 1 3 4 5 6] (fn (unit) (text/utf16->char rope unit))) (list 0 1 2 3 4 5))))
+  (test "a unit inside a surrogate pair answers its character"
+    (assert= (text/utf16->char (text/string-> "a\u{1F600}b") 2) 1))
+  (test "out of range raises"
+    (assert-error (text/char->utf16 (text/string-> "ab") 3))
+    (assert-error (text/utf16->char (text/string-> "ab") 3))))

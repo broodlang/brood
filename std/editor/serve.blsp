@@ -296,9 +296,9 @@ and ends when that is up."
         (do
           (remote-note-seq state number)
           (table/put state :held? held?)
-          [(remote-note-resize state k) true]))
-      ([:key k held?] (do (table/put state :held? held?) [(remote-note-resize state k) true]))
-      ([:key k] [(remote-note-resize state k) true])
+          (remote-client-input-tagged state k)))
+      ([:key k held?] (do (table/put state :held? held?) (remote-client-input-tagged state k)))
+      ([:key k] (remote-client-input-tagged state k))
       ([:detach] [:close true])
       ((and message [:client-can _ _]) (remote-hand-over state resume message))
       ([:down _ ^client _] [(remote-client-lost state resume) true])
@@ -332,6 +332,43 @@ client used to keep the size it attached with (ADR-587)."
       (table/put state :size [(nth input 1) (nth input 2)])
       (serve-report state))
     input))
+
+;; The vector inputs a client may ship as a key: what a frontend's poll answers for the
+;; person at it. A local event (`[:timer …]`, a task's reply, a buffer push, `[:hangup …]`)
+;; is never one of these, so a client cannot pass one off as its key.
+(def- client-input-tags #{:mouse :resize :text :paste :preedit})
+
+(defn client-input? (input)
+  "Whether `input` is something a client may ship as its key: a keyword or a string (a key),
+or `[:mouse …]`, `[:resize …]`, `[:text …]`, `[:paste …]`, `[:preedit …]`, or `[:key-up k]` of
+such a key. A session takes a client's `[:key k]` only when `k` is one; anything else — an
+internal event dressed as a key, `[:key [:timer :autosave]]` — is dropped, never folded into
+the app as if the session had raised it.
+
+    (editor/serve/client-input? :ctrl-x)   ;=> true
+    (editor/serve/client-input? [:mouse {:action :press}])   ;=> true
+    (editor/serve/client-input? [:key-up \"a\"])   ;=> true
+    (editor/serve/client-input? [:timer :autosave])   ;=> false
+    (editor/serve/client-input? [:key-up [:task-done 1]])   ;=> false"
+  (cond
+    (or (keyword? input) (string? input)) true
+    (not (and (vector? input) (not (empty? input)))) false
+    (= (first input) :key-up)
+      (and (= (count input) 2)
+        (let (press (second input))
+          (and (client-input? press) (not (and (vector? press) (= (first press) :key-up))))))
+    else (contains? client-input-tags (first input))))
+
+(defn- remote-client-input (state input)
+  "`input`, a key the client shipped, when it is one ([[client-input?]]) — its resize noted
+([[remote-note-resize]]) — else nil: dropped."
+  (when (client-input? input) (remote-note-resize state input)))
+
+(defn- remote-client-input-tagged (state input)
+  "[[remote-client-input]] as `:poll-tagged` answers it: `[input true]`, or nil (dropped,
+as a timeout reads)."
+  (let (taken (remote-client-input state input))
+    (when (not (nil? taken)) [taken true])))
 
 (defn- serve-session-of (resume)
   "The session the manager knows this loop by: its supervisor (`:session` in `resume`,
@@ -395,10 +432,10 @@ input for rehost/reshare, not tear the session down)."
         (do
           (remote-note-seq state number)
           (table/put state :held? held?)
-          (remote-note-resize state k)))
-      ([:key k held?] (do (table/put state :held? held?) (remote-note-resize state k)))
+          (remote-client-input state k)))
+      ([:key k held?] (do (table/put state :held? held?) (remote-client-input state k)))
       ; a client that does not say
-      ([:key k] (remote-note-resize state k))
+      ([:key k] (remote-client-input state k))
       ([:detach] :close)
       ;; what this client can be asked beyond keys and frames ([[served-client-can?]])
       ((and message [:client-can _ _]) (remote-hand-over state resume message))
@@ -1156,15 +1193,20 @@ which is dropped (a nil ⇒ tick) rather than leaked to the app."
        :quit-message (fn (key) [:key key])}
       (display-polls (fn (ms) (serve-busy-kick-tagged state (shared-receive-tagged ms)))))))
 
+(defn- shared-client-input-tagged (input)
+  "A shared session's client key as `:poll-tagged` answers it: `[input true]` when it is one
+([[client-input?]]), else nil — dropped, as a timeout reads."
+  (when (client-input? input) [input true]))
+
 (defn- shared-receive-tagged (ms)
   "A shared session's `:poll-tagged`: the oldest message, waiting up to `ms`, as
 `[message input?]` — any client's key is input, anything else is async app input (the
 event bus) — or nil on timeout, and for a `:size` reply past its 200ms window, which is
 dropped rather than leaked to the app."
   (receive
-    ([:key k _held? _seq] [k true])
-    ([:key k _held?] [k true])
-    ([:key k] [k true])
+    ([:key k _held? _seq] (shared-client-input-tagged k))
+    ([:key k _held?] (shared-client-input-tagged k))
+    ([:key k] (shared-client-input-tagged k))
     ([:hub-size _ _] nil)
     (m [m false])
     (after ms nil)))
@@ -1173,7 +1215,11 @@ dropped rather than leaked to the app."
   "The next key any client of a shared session shipped, without waiting; nil when none
 came. Whether a key is down is per client, and one shared model has no client to ask, so
 a shared session keeps its idle timers."
-  (receive ([:key k _held? _seq] k) ([:key k _held?] k) ([:key k] k) (after 0 nil)))
+  (receive
+    ([:key k _held? _seq] (when (client-input? k) k))
+    ([:key k _held?] (when (client-input? k) k))
+    ([:key k] (when (client-input? k) k))
+    (after 0 nil)))
 
 (defn- serve-shared-manager (session hub)
   "The session manager for a SHARED session: every client attaches to the SAME running

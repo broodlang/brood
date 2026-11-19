@@ -2273,6 +2273,29 @@ once its top-level tests are stripped, with every module whose header needs one,
 dead `(:use test)` out of a module whose tests sat beside its code (ADR-225) — which could not load
 in a lean runtime either. Both halves in `tests/project_test.blsp`, each red with its half off.
 
+2026-11-19. **An imaged value is built straight into the RUNTIME region (ADR-771).** A section's
+values were rebuilt LOCAL and then copied again by the bind's promote; `Heap::build_shared` mints
+them in place, under the promote lock, and stamps a value's positions under one lock. bedit's
+`--version` 0.17 → 0.135 s, its sections 102 → 75 ms. The same day in bedit: M-x keeps a command's
+symbol rather than the closure, and a plain ownership claim is just its file, which shrank the
+always-loaded section 1.76 → 1.26 MB.
+2026-11-19. **Full review of the editor toolkit and kernel, fixed.** A line breaks at LF, CR or
+CRLF everywhere (ADR-772: the rope stopped taking ropey's `unicode_lines`, a buffer search's
+`^`/`$` read CR, tree-sitter's points agree for a rope and a string), with new natives
+`text/line-text`, `text/line-end->char`, `text/char->utf16` and `text/utf16->char`. A rope range
+error names the bound that is wrong.
+A served session takes a client's `[:key k]` only when `k` is key-shaped
+(`editor/serve/client-input?`), so a guest cannot pass an internal event off as a key.
+`jsonrpc/decode` resyncs past a bad `Content-Length` and caps a frame at 64 MiB. A key command's
+error, and a layer hook's, reach the caller instead of leaving a silent dead key (the REPL shows
+it under the input); `scope-dispatch` takes `pending` before `state` as `keymap-step` does.
+`display/text`, `rect` and `bar` resolve a face name, a sig refuses any other non-map face, and
+a frontend warns once per bad face. The window clips an op off the top or left edge as the
+terminal does, and both skip a malformed op. A second `:skip-unless` is refused; `nest test
+--help` drops `--doc`; the REPL lexes a multi-line form once per repaint. `fontify` on empty text
+was reported to answer nil where its siblings answer `()`: those are the same value (the empty
+list is nil), so nothing changed.
+
 2026-11-19. **`nest test FILE:LINE` on a test's header line ran the test before it.** Found
 chasing a hatch flake: `nest test tests/http_server_test.blsp:310`, the line of a `(test "…"`
 header, ran the previous test — a test's recorded line is its first body form's (a macro sees

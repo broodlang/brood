@@ -754,9 +754,11 @@ a no-op. Passed to `keymap-dispatch` as the keymap's default."
   "Dispatch key event `key` through `editor/lineedit/*keymap*` to its command (via the
 shared `keymap-dispatch`): a global `(fn (state key) -> state)` resolved by symbol,
 so redefining the command or rebinding the key hot-swaps behaviour. An unbound key
-self-inserts (a 1-char string) or is a no-op; a command that throws is caught so a
-bad binding can't crash the read. In reverse-search mode (`:search` set) keys route
-to `lineedit-search-key` instead. Pure apart from symbol resolution; testable.
+self-inserts (a 1-char string) or is a no-op; a command that throws leaves the line as
+it was and shows its error below the input for one keystroke (where a Tab's listing
+shows), so a bad binding neither crashes the read nor goes dead with nothing said. In
+reverse-search mode (`:search` set) keys route to `lineedit-search-key` instead. Pure
+apart from symbol resolution; testable.
 
 Any pending completion listing is dropped *before* dispatch, so it survives exactly one
 keystroke: a Tab that can't make progress re-attaches it (`lineedit-apply-completion`),
@@ -767,7 +769,9 @@ a rebound key or a user's own command can't leave a stale listing on screen.
   (let (line-state (if (nil? (get state :completions)) state (assoc state :completions nil)))
     (if (not (nil? (get line-state :search)))
       (lineedit-search-key line-state key)
-      (keymap-dispatch editor/lineedit/*keymap* line-state key lineedit-fallback))))
+      (try
+        (keymap-dispatch editor/lineedit/*keymap* line-state key lineedit-fallback)
+        (catch e (assoc line-state :completions (list (str "error: " (error-message e)))))))))
 
 ;; ---- signature hint + bracket overrides (pure analysis -> render data) -------
 
@@ -911,23 +915,24 @@ Returns `st` with `:last-row` 0 (cursor ends on row 0)."
     (assoc line-state :last-row 0)))
 
 ;; check-allow: deliberately non-tail — depth = lines of the input being edited.
-(defn- lineedit-multi-line-ops (lines i offset full overrides prompt cont)
+(defn- lineedit-multi-line-ops (lines i offset spans overrides prompt cont)
   "Render ops for the logical `lines` of a multi-line form: each line gets its prompt
-  (`prompt` for the first, `cont` after) + its highlight chunks (lexed from `full`, so
+  (`prompt` for the first, `cont` after) + its highlight chunks (from `spans`, the whole
+  text lexed ONCE — `highlight-spans` — so a long form is not re-lexed per line, and
   bracket-match overrides spanning lines apply), `[:nl]`-separated. `offset` tracks each
   line's start within the text so the lexer spans land on the right chars."
   (if (empty? lines)
     '()
     (let (line (first lines)
           pstr (if (= i 0) prompt cont)
-          chunks (highlight-chunks full offset line overrides)
+          chunks (spans->chunks spans offset line overrides)
           line-ops (cons [:print pstr] (lineedit-chunk-ops chunks))
           here (if (= i 0) line-ops (cons [:nl] line-ops)))
       (append here
         (lineedit-multi-line-ops (rest lines)
           (inc i)
           (+ offset (count line) 1)
-          full
+          spans
           overrides
           prompt
           cont)))))
@@ -954,7 +959,7 @@ tested in isolation."
         up-to-cursor (- (+ (dec nlines) (count cand-rows)) cur-row))
     (append (if (> prev-row 0) (list [:up prev-row]) '())
       (list [:cr] [:clear-below])
-      (lineedit-multi-line-ops lines 0 0 text overrides prompt cont)
+      (lineedit-multi-line-ops lines 0 0 (highlight-spans text) overrides prompt cont)
       (lineedit-completion-ops cand-rows)
       (if (> up-to-cursor 0) (list [:up up-to-cursor]) '())
       (list [:cr] [:col col]))))
@@ -988,7 +993,7 @@ lines; moves up over any leftover render block first."
     (term/emit (into []
                  (append (if (> prev-row 0) (list [:up prev-row]) '())
                    (list [:cr] [:clear-below])
-                   (lineedit-multi-line-ops lines 0 0 text '() prompt cont)
+                   (lineedit-multi-line-ops lines 0 0 (highlight-spans text) '() prompt cont)
                    (list [:nl]))))))
 
 ;; ---- the event loop (IO) ----------------------------------------------------

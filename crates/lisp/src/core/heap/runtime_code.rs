@@ -1277,6 +1277,18 @@ impl RuntimeCode {
             .insert(rt_pos_key(idx, code_gen), entry);
     }
 
+    /// [`set_position`](Self::set_position) for many forms under ONE write lock — a
+    /// builder that stamps a whole value's lists ([`Heap::build_shared`]) would otherwise
+    /// take the lock once per list.
+    pub(super) fn set_positions(&self, entries: Vec<(u64, FormPos)>) {
+        if entries.is_empty() {
+            return;
+        }
+        let mut positions = self.positions.write().unwrap_or_else(|e| e.into_inner());
+        positions.reserve(entries.len());
+        positions.extend(entries);
+    }
+
     pub(super) fn def_sites_write(&self) -> RwLockWriteGuard<'_, HashMap<Symbol, SourceLoc>> {
         self.def_sites.write().unwrap_or_else(|e| e.into_inner())
     }

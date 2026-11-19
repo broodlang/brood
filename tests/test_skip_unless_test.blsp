@@ -95,7 +95,22 @@
 
   (test ":skip-unless without its condition and reason is an expansion error"
     (is (error-of (reflect/macroexpand '(test/test "t" :skip-unless))))
-    (is (error-of (reflect/macroexpand '(test/describe "g" (test "a" (is 1)) :skip-unless true "r"))))))
+    (is (error-of (reflect/macroexpand '(test/describe "g" (test "a" (is 1)) :skip-unless true "r")))))
+  (test "a second :skip-unless is refused: the run would name the wrong reason"
+    ;; with two, `(c1?)` false and `(c2?)` true skipped the test saying "needs c2"
+    (let (problem (error-of (reflect/macroexpand '(test/test "t"
+                                                    :skip-unless (c1?)
+                                                    "needs c1"
+                                                    :skip-unless (c2?)
+                                                    "needs c2"
+                                                    (is true)))))
+      (is (includes? (error-message problem) "one :skip-unless per test")))
+    (is (error-of (reflect/macroexpand '(test/describe "g"
+                                          :skip-unless (c1?)
+                                          "needs c1"
+                                          :skip-unless (c2?)
+                                          "needs c2"
+                                          (test "a" (is 1))))))))
 
 (describe "test: a skipped test says why"
   (test "the skipped list names each test, where it is, and its reason"

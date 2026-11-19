@@ -99,6 +99,38 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         rope_line_to_char,
     );
     primitives.def(
+        "%rope-line-text",
+        Arity::exact(2),
+        Sig::new(vec![rope, int], string),
+        &["r", "n"],
+        "The text of line n (0-based) of rope r WITHOUT its line break (LF, CR or CRLF).",
+        rope_line_text,
+    );
+    primitives.def(
+        "%rope-line-end->char",
+        Arity::exact(2),
+        Sig::new(vec![rope, int], int),
+        &["r", "n"],
+        "The character index where line n's (0-based) content ends — before its line break (LF, CR or CRLF), or the rope's length on a last line with none. n may be the line count, the empty line past the end.",
+        rope_line_end_to_char,
+    );
+    primitives.def(
+        "%rope-char->utf16",
+        Arity::exact(2),
+        Sig::new(vec![rope, int], int),
+        &["r", "idx"],
+        "The UTF-16 code-unit offset of character idx in rope r (what an LSP position's character counts).",
+        rope_char_to_utf16,
+    );
+    primitives.def(
+        "%rope-utf16->char",
+        Arity::exact(2),
+        Sig::new(vec![rope, int], int),
+        &["r", "unit"],
+        "The character index holding UTF-16 code unit `unit` of rope r — the inverse of %rope-char->utf16; a unit inside a surrogate pair answers its character.",
+        rope_utf16_to_char,
+    );
+    primitives.def(
         "%rope-next-grapheme",
         Arity::exact(2),
         Sig::new(vec![rope, int], int),
@@ -131,6 +163,24 @@ pub(super) fn rope_oob(who: &str, what: &str, got: i64, max: usize) -> LispError
         who, what, got, max
     ))
     .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)
+}
+
+/// Check a character range `[start, end)` against a rope of `len` characters, naming the
+/// bound that is wrong: a start outside the rope, an end past it, or an end before the start.
+fn check_range(who: &str, start: i64, end: i64, len: usize) -> Result<(), LispError> {
+    if start < 0 || start as usize > len {
+        return Err(rope_oob(who, "range start", start, len));
+    }
+    if end < 0 || end as usize > len {
+        return Err(rope_oob(who, "range end", end, len));
+    }
+    if end < start {
+        return Err(LispError::runtime(format!(
+            "{who}: range end {end} is before its start {start}"
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
+    }
+    Ok(())
 }
 
 /// `(string->rope s)` — a rope holding the text of string `s`.
@@ -181,9 +231,7 @@ pub(super) fn rope_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let start = expect_int(heap, "%rope-delete", arg(args, 1))?;
     let end = expect_int(heap, "%rope-delete", arg(args, 2))?;
     let len = r.len_chars();
-    if start < 0 || end < start || end as usize > len {
-        return Err(rope_oob("%rope-delete", "range end", end, len));
-    }
+    check_range("%rope-delete", start, end, len)?;
     r.remove(start as usize..end as usize);
     Ok(heap.alloc_rope(r))
 }
@@ -194,9 +242,7 @@ pub(super) fn rope_slice(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     let start = expect_int(heap, "%rope-slice", arg(args, 1))?;
     let end = expect_int(heap, "%rope-slice", arg(args, 2))?;
     let len = r.len_chars();
-    if start < 0 || end < start || end as usize > len {
-        return Err(rope_oob("%rope-slice", "range end", end, len));
-    }
+    check_range("%rope-slice", start, end, len)?;
     let s = r.slice(start as usize..end as usize).to_string();
     Ok(heap.alloc_string_counted(s, (end - start) as usize))
 }
@@ -236,6 +282,77 @@ pub(super) fn rope_line_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
         return Err(rope_oob("%rope-line->char", "line", n, lines));
     }
     Ok(Value::int(r.line_to_char(n as usize) as i64))
+}
+
+/// How many characters the line break ending `line` takes: 2 for CRLF, 1 for LF or a lone
+/// CR, 0 for a last line with none. Lines break at LF, CR and CRLF (ADR-772).
+fn line_break_chars(line: ropey::RopeSlice) -> usize {
+    let length = line.len_chars();
+    match (
+        length.checked_sub(2).map(|at| line.char(at)),
+        length.checked_sub(1).map(|at| line.char(at)),
+    ) {
+        (Some('\r'), Some('\n')) => 2,
+        (_, Some('\n' | '\r')) => 1,
+        _ => 0,
+    }
+}
+
+/// `(%rope-line-text r n)` — line `n` without its line break.
+pub(super) fn rope_line_text(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope_ref(heap, "%rope-line-text", arg(args, 0))?;
+    let n = expect_int(heap, "%rope-line-text", arg(args, 1))?;
+    let lines = r.len_lines();
+    if n < 0 || n as usize >= lines {
+        return Err(rope_oob(
+            "%rope-line-text",
+            "line",
+            n,
+            lines.saturating_sub(1),
+        ));
+    }
+    let line = r.line(n as usize);
+    let chars = line.len_chars() - line_break_chars(line);
+    let text = line.slice(..chars).to_string();
+    Ok(heap.alloc_string_counted(text, chars))
+}
+
+/// `(%rope-line-end->char r n)` — where line `n`'s content ends, before its break.
+pub(super) fn rope_line_end_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope_ref(heap, "%rope-line-end->char", arg(args, 0))?;
+    let n = expect_int(heap, "%rope-line-end->char", arg(args, 1))?;
+    let lines = r.len_lines();
+    if n < 0 || n as usize > lines {
+        return Err(rope_oob("%rope-line-end->char", "line", n, lines));
+    }
+    if n as usize == lines {
+        return Ok(Value::int(r.len_chars() as i64));
+    }
+    let line = r.line(n as usize);
+    let end = r.line_to_char(n as usize) + line.len_chars() - line_break_chars(line);
+    Ok(Value::int(end as i64))
+}
+
+/// `(%rope-char->utf16 r idx)` — the UTF-16 code-unit offset of character `idx`.
+pub(super) fn rope_char_to_utf16(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope_ref(heap, "%rope-char->utf16", arg(args, 0))?;
+    let idx = expect_int(heap, "%rope-char->utf16", arg(args, 1))?;
+    let len = r.len_chars();
+    if idx < 0 || idx as usize > len {
+        return Err(rope_oob("%rope-char->utf16", "index", idx, len));
+    }
+    Ok(Value::int(r.char_to_utf16_cu(idx as usize) as i64))
+}
+
+/// `(%rope-utf16->char r unit)` — the character holding UTF-16 code unit `unit`.
+pub(super) fn rope_utf16_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope_ref(heap, "%rope-utf16->char", arg(args, 0))?;
+    let unit = expect_int(heap, "%rope-utf16->char", arg(args, 1))?;
+    let units = r.len_utf16_cu();
+    if unit < 0 || unit as usize > units {
+        return Err(rope_oob("%rope-utf16->char", "unit", unit, units));
+    }
+    Ok(Value::int(r.utf16_cu_to_char(unit as usize) as i64))
 }
 
 // ---------- grapheme clusters over a rope (ADR-422) ----------

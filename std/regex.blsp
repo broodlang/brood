@@ -560,9 +560,9 @@ rather than handed to the engine, which refuses one. A set with no members at al
         (regex-alt-src (:alt a))
         ")")
     :fold (if (:on a) "(?i)" "(?-i)")
-    :line-any "[^\\n]"
-    :line-start "(?m:^)"
-    :line-end "(?m:$)"
+    :line-any "[^\\r\\n]"
+    :line-start "(?mR:^)"
+    :line-end "(?mR:$)"
     (error "regex: no translation for atom " (pr-str a))))
 
 (defn- regex-piece-src (p)
@@ -737,8 +737,10 @@ end, and steps one character past an EMPTY match so a pattern that can match not
 ;;
 ;; They read the pattern as a BUFFER search does, Emacs's way, unless told otherwise: `^`
 ;; and `$` are a LINE's start and end, and `.` stops at a newline — so `a.*z` asks about a
-;; line, not the rest of the file (`{:lines? false}` for the string meaning). `{:fold? true}`
-;; ignores case (simple case folding, character for character). A match is never empty unless
+;; line, not the rest of the file (`{:lines? false}` for the string meaning). A line breaks
+;; where the rope's does — at LF, CR or CRLF (ADR-772) — so `$` stops before a CRLF and `^`
+;; follows a lone CR. `{:fold? true}` ignores case (simple case folding, character for
+;; character). A match is never empty unless
 ;; `{:empty? true}` asks for one (a search box that stops on one, as Emacs's isearch does);
 ;; a count and a window's spans never include one.
 

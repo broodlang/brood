@@ -606,7 +606,7 @@
   (test "bundle-collect leaves test support out, and every module that needs it"
     ;; a module that registers tests from a function is for `nest test`; a release runtime
     ;; has no `test` to load it with, so shipping it failed the release's boot check
-    (let (root (temp-dir "brood-support-"))
+    (let (root (temp-dir "brood-coloc-"))
       (file/mkdir root)
       (file/mkdir (path/join (or root "") "src"))
       (let (src (path/join (or root "") "src"))

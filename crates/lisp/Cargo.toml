@@ -285,7 +285,13 @@ subtle = "2"
 # untouched and shares unchanged structure). The one irreducible text mechanism
 # the language can't bootstrap; everything above it (points/marks/buffers) is
 # Brood. See docs/decisions.md ADR-045.
-ropey = "1.6"
+#
+# A line breaks at LF, CR or CRLF — `cr_lines`, and NOT ropey's default `unicode_lines`,
+# which also breaks at VT, FF, NEL, U+2028 and U+2029. Every other line-counter in the
+# system breaks at LF/CR/CRLF only (LSP, regex `^` in a buffer search, the points handed
+# tree-sitter, `scanner::line_starts`), so a form feed in an Emacs Lisp or C file put the rope
+# a line off from all of them (ADR-772).
+ropey = { version = "1.6", default-features = false, features = ["simd", "cr_lines"] }
 # The terminal frontend for the M3 display/input seam (ADR-046). crossterm gives
 # raw mode, the alternate screen, key events, and styled cell output across
 # platforms — the irreducible "drawing, I/O" mechanism architecture.md groups

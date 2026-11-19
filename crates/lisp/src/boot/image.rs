@@ -1150,7 +1150,13 @@ fn load_section_entries(
         };
         ns_decode += t0.elapsed().as_nanos() as u64;
         let t1 = web_time::Instant::now();
-        let v = from_message(heap, &msg);
+        // Straight into the RUNTIME region the define would promote it to (ADR-771) — but a
+        // table entry's contents are deep-cloned into a fresh store, so it is built LOCAL.
+        let v = if kind == KIND_TABLE {
+            from_message(heap, &msg)
+        } else {
+            heap.build_shared(&msg)
+        };
         ns_from_msg += t1.elapsed().as_nanos() as u64;
         let sym = value::intern(&name);
         let t2 = web_time::Instant::now();
