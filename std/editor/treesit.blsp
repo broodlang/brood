@@ -1750,41 +1750,51 @@ a first child — which is the same token either way, and does not require the t
                       (scan (inc i)))))
       (scan 0))))
 
-(defn- ts-defun? (text definitions node)
-  "Whether `node` is a definition for `beginning-of-defun`, as the language's `definitions`
-say: a node of a definition KIND (Ruby `method`, Rust `function_item`, …) or a `call`
-whose callee is a defining one (Elixir, where `def`/`defmodule`/… are calls)."
+(defn definition-node? (text definitions node)
+  "Whether the chain `node` of `text` is a definition, as `definitions` (`{:kinds #{…} :calls
+#{…}}`, [[register-definitions]]) say: a node of a definition KIND (Ruby `method`, Rust
+`function_item`, …) or a `call` whose callee is a defining one (Elixir, where
+`def`/`defmodule`/… are calls). Public, so an editor that keeps definitions per mode rather than
+per grammar asks the same question.
+
+    (editor/treesit/definition-node? \"fn f() {}\" {:kinds #{:function_item}} {:kind :function_item :start 0 :end 9})   ;=> true
+    (editor/treesit/definition-node? \"f(x)\" {:kinds #{:function_item}} {:kind :call :start 0 :end 4})   ;=> false"
   (let (k (get node :kind))
     (or (contains? (get definitions :kinds #{}) k)
       (and (= k :call) (contains? (get definitions :calls #{}) (ts-head-word text node))))))
 
-(defn- ts-defun-edge (text: (or string rope) lang:keyword point:any edge:any tree:any -> any)
+(defn- ts-defun-edge
+  (text: (or string rope) lang:keyword point:any edge:any tree:any given:any -> any)
   "The `edge` (`:start` / `:end`) of the enclosing **definition**: the deepest `def` /
 `class` / `module` / … containing `point`, falling back to the top-level form, then `point`.
-The shared body of `point-defun-start` / `point-defun-end`."
+The shared body of `point-defun-start` / `point-defun-end`; `given` is the caller's definitions, or
+nil for the ones registered for `lang`."
   (let (chain (seq/filter (ts-chain-at text lang point tree)
                 (fn (n) (and (get n :container) (< (get n :start) point) (< point (get n :end)))))
-        definitions (definitions lang)
-        defuns (seq/filter chain (fn (n) (ts-defun? text definitions n))))
+        chosen (or given (definitions lang))
+        defuns (seq/filter chain (fn (n) (definition-node? text chosen n))))
     (cond
       (not (empty? defuns)) (get (last defuns) edge)
       (not (empty? chain)) (get (first chain) edge)
       else point)))
 
-(defn point-defun-start (text lang point &optional (tree nil))
+(defn point-defun-start (text lang point &optional (tree nil) (own-definitions nil))
   "Start of the enclosing **definition** (`beginning-of-defun`): the deepest `def` / `class`
 / `module` / … containing `point` — so a `def` inside an Elixir `defmodule` or a Ruby `class`,
-not the whole enclosing module. Falls back to the top-level form, then `point`.
+not the whole enclosing module. Falls back to the top-level form, then `point`. `own-definitions`
+(`{:kinds :calls}`) overrides the ones registered for `lang`: two modes over one grammar can
+each say their own.
 
     (editor/treesit/point-defun-start src :elixir 30)   ;~> …the offset of the enclosing `def`…"
-  (ts-defun-edge text lang point :start tree))
+  (ts-defun-edge text lang point :start tree own-definitions))
 
-(defn point-defun-end (text lang point &optional (tree nil))
+(defn point-defun-end (text lang point &optional (tree nil) (own-definitions nil))
   "End of the enclosing **definition** (`end-of-defun`, C-M-e) — the close of the same node
-`point-defun-start` finds, so the pair brackets one `def` / `class` / `module`.
+`point-defun-start` finds, so the pair brackets one `def` / `class` / `module`. `own-definitions`
+overrides the registered ones, as for `point-defun-start`.
 
     (editor/treesit/point-defun-end src :elixir 30)   ;~> …the offset just past the enclosing def's `end`…"
-  (ts-defun-edge text lang point :end tree))
+  (ts-defun-edge text lang point :end tree own-definitions))
 
 ;; ---- the grammars this runtime has -------------------------------------------------
 ;; Asked of the runtime. Fetching and building one is `editor/grammar-install`.
