@@ -610,6 +610,11 @@ jobs:
           BROOD_NO_PRELUDE_IMAGE: 1
         run: ./scripts/test-contracts.sh
 
+      # The whole suite through the tree-walker is full.yml's (~25 minutes); this is the
+      # per-push sample of it, so a tree-walker-only failure (KI-399) is not a week away.
+      - name: tree-walker smoke (BROOD_TIER=0, a few files)
+        run: ./scripts/tree-walker-smoke.sh
+
   # DOWNSTREAM smoke: bedit (github.com/broodlang/bedit) against the brood under test.
   #
   # bedit is the largest program written in the language that does not live in this repo,
