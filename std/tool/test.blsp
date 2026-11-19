@@ -85,8 +85,8 @@ docs/testing.md for the full guide."
   ;; three. This list is the transitive closure a source load of this module pulls in, and
   ;; `crates/cli/tests/test_framework_closure.rs` fails when the two drift apart.
   (:load bit
-    bytes datetime dev encoding file fuzzy humanize io json map math os path proc property rand reflect
-    regex seq set stdimage string system table test-select tz url)
+    bytes datetime dev encoding file fuzzy humanize io json map math os path proc property rand
+    reflect regex seq set stdimage string system table test-select tz url)
   (:use-internals test-select))
 
 (defdyn test/*units* nil)
