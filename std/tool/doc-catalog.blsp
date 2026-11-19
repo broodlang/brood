@@ -87,6 +87,7 @@
    "dynamic variables" :meta
    "case:" :control
    "bytes patterns" :patterns
+   "string patterns" :patterns
    "spawn:" :processes
    "receive:" :processes
    "dirty-native offload" :processes

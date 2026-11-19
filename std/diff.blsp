@@ -266,11 +266,10 @@ order); the output is built from `:keep` and `:insert` ops.
         ;; `diff -u` appends a tab and a timestamp to the path
         tab (index-of p "\t")
         p (if (< tab 0) p (string/substring p 0 tab)))
-    (cond
-      (= p "/dev/null") nil
-      (or (string/starts-with? p "a/") (string/starts-with? p "b/"))
-        (string/substring p 2 (count p))
-      else p)))
+    (match p
+      ("/dev/null" nil)
+      ((or (str "a/" path) (str "b/" path)) path)
+      (_ p))))
 
 (defn- git-header-paths (line)
   "`[old new]` from a `diff --git a/x b/y` line (the split is at ` b/`, so a path with a
@@ -486,15 +485,15 @@ written for `line-hunks`: a change gutter is `(hunks-status (mapcat hunks hunk-c
                  :removed 0
                  :added 0}
                 (fn (state line)
-                  (cond
-                    (string/starts-with? line "\\") state
-                    (string/starts-with? line "-")
-                      (assoc state :old (inc (:old state)) :removed (inc (:removed state)))
-                    (string/starts-with? line "+")
-                      (assoc state :new (inc (:new state)) :added (inc (:added state)))
-                    else
-                      (let (flushed (flush state))
-                        (assoc flushed :old (inc (:old flushed)) :new (inc (:new flushed))))))))
+                  (match line
+                    ((str "\\" _) state)
+                    ((str "-" _)
+                      (assoc state
+                        :old (inc (:old state))
+                        :removed (inc (:removed state))))
+                    ((str "+" _) (assoc state :new (inc (:new state)) :added (inc (:added state))))
+                    (_ (let (flushed (flush state))
+                         (assoc flushed :old (inc (:old flushed)) :new (inc (:new flushed)))))))))
     (:out (flush final))))
 
 ;; ---- printing a unified diff ------------------------------------------------
@@ -613,18 +612,19 @@ file`. `options`: `:context`, `:from-label` (default `\"a\"`) and `:to-label` (d
     (diff/unified \"a\" \"a\\n\")   ;=> \"--- a\\n+++ b\\n@@ -1 +1 @@\\n-a\\n\\\\ No newline at end of file\\n+a\\n\"
     (diff/unified \"same\\n\" \"same\\n\")   ;=> \"\""
   ((a b) (unified a b {}))
-  ((a b options) (let (context (get options :context 3)
-                       old (text-lines a)
-                       new (text-lines b)
-                       changes (line-hunks (sentinel-text a) (sentinel-text b)))
-                   (if (empty? changes)
-                     ""
-                     (str (string/join (append [(str "--- " (get options :from-label "a"))
-                                                 (str "+++ " (get options :to-label "b"))]
-                                         (mapcat (group-changes changes context)
-                                           (fn (group) (hunk-lines old new group context))))
-                            "\n")
-                       "\n")))))
+  ((a b options)
+    (let (context (get options :context 3)
+          old (text-lines a)
+          new (text-lines b)
+          changes (line-hunks (sentinel-text a) (sentinel-text b)))
+      (if (empty? changes)
+        ""
+        (str (string/join (append [(str "--- " (get options :from-label "a"))
+                                    (str "+++ " (get options :to-label "b"))]
+                            (mapcat (group-changes changes context)
+                              (fn (group) (hunk-lines old new group context))))
+               "\n")
+          "\n")))))
 
 ;; ---- applying one -----------------------------------------------------------
 

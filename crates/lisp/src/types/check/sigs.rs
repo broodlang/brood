@@ -782,6 +782,7 @@ fn domain_of(pattern: &Pattern) -> Ty {
         Pattern::Map(_) => Ty::of(Tag::Map).union(Ty::of(Tag::Record)),
         Pattern::Record { .. } => Ty::of(Tag::Record),
         Pattern::Bytes(_) => Ty::of(Tag::Bytes),
+        Pattern::Str { .. } => Ty::of(Tag::Str),
         Pattern::Or(alternatives) => alternatives
             .iter()
             .map(domain_of)

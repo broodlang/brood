@@ -1565,6 +1565,7 @@ design and rationale see [pattern-matching.md](pattern-matching.md).
 | `[p1 p2 …]` | a vector of that exact length — the **tagged-data / tuple idiom**. `&` and `&optional` are refused in it, by name: a vector pattern is fixed-length |
 | `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the value isn't a map. `{}` matches any map. |
 | `(bytes seg…)` | a **`bytes` value**, destructured segment-by-segment — bit syntax (see below) |
+| `(str "pre" p "suf")` | a **string** by its literal ends, `p` matched against what lies between — at most one non-literal part (see below) |
 | `(or p q …)` | any alternative — first match wins; every alternative must bind the same names |
 | `(and p q …)` | every pattern, against the same value — the capture-while-destructuring (`:as`) idiom |
 | `{:k p}` | a map with key `:k` **present**, whose value matches `p` (nests to any depth) |
@@ -1623,6 +1624,60 @@ otherwise silently mean something else:
 > `or`), and a map pattern's unknown keys were ignored, so `{:a v}` degenerated to
 > "is it a map?" — matching anything, binding nothing. They were made hard errors in
 > ADR-156 and implemented in ADR-160.
+
+### String patterns
+
+`(str part…)` matches a string by its literal ends (ADR-770). It is written like the `str` call
+that builds the string: each part is a string literal, and **at most one** part is a pattern —
+the slot — matched against what lies between the literals before it and after it.
+
+```clojure
+(defn route (request)
+  (match request
+    ((str "GET " path) [:get path])      ; a prefix; the rest binds
+    ((str stem ".blsp") [:module stem])  ; a suffix
+    ((str "<" tag ">") [:tag tag])       ; both ends
+    ((str "exact") :exact)               ; no slot: the exact string
+    (_ :other)))
+
+(route "GET /index")   ;=> [:get "/index"]
+(route "core.blsp")    ;=> [:module "core"]
+(route "<b>")          ;=> [:tag "b"]
+(route "<")            ;=> :other
+```
+
+- The value must be a string long enough to hold both ends without them overlapping, so
+  `(str "a" _ "a")` does not match `"a"`. Ends are counted in characters, as `count` is.
+- The slot is any pattern: `_`, a name, `(or "a" "b")`, another `(str …)`.
+- **A pin is an end, not the slot**: `^expr` is text known when the match runs — the pinned
+  value's `str`, as the `str` call the pattern is written like would build it. So a prefix held
+  in a variable is `(str ^marker body)`, and literals beside a pin join it
+  (`(str "v" version "-" ^tag)`). A pinned value that is `nil` matches nothing (as `(str nil)`
+  it would be the end `"nil"`). A pinned end is never judged at expansion.
+- **A slot that must not be empty** takes a literal clause first or a guard:
+  `(("/" path) …) ((str directory "/") …)`, or `((str ":" name) :when (not (= name "")) …)`.
+- It works wherever patterns do — `fn` heads, refutable `let`, and `receive`, where it is safe
+  because it runs no user code: `(receive ([:line (str "ERROR " text)] (alert text)))`.
+- Adjacent literals join; `(str s)` is any string, bound whole.
+
+Three spellings fail compilation, each with a message naming the fix:
+
+- **A second non-literal part.** `(str key "=" value)` could split more than one way; use
+  `string/split`, or `regex/find` with named groups.
+- **`&`.** `(str "GET " & path)` — the slot already takes the rest.
+- **A clause an earlier string pattern makes unreachable.** A guard-free clause whose
+  `(str …)` pattern covers every string a later clause matches is a compile error, like a clause
+  after a catch-all — the order mistake a `cond` over `string/starts-with?` cannot catch:
+
+  ```clojure fragment
+  (match line
+    ((str "+" _)   :added)
+    ((str "+++" _) :header))   ; error: unreachable clause — put the longer literal first
+  ```
+
+  The comparison is structural, so it also holds inside an `fn` head or a message vector
+  (`[:line (str "E" _)]` before `[:line (str "ERROR " _)]`), and between alternatives of one
+  `(or …)`. A guarded clause covers nothing.
 
 ### Bytes patterns (bit syntax)
 

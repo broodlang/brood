@@ -100,14 +100,11 @@ debugger breaks at (`debug/break-fn`); stepping is not supported.")
     (when (string? text)
       (let (lines (into [] (string/split text "\n"))
             module (module-of lines)
-            defn-name (fn (l)
-                        (let (rest (cond
-                                     (string/starts-with? l "(defn- ")
-                                       (string/substring l 7 (count l))
-                                     (string/starts-with? l "(defn ")
-                                       (string/substring l 6 (count l))
-                                     else nil))
-                          (when rest (first (string/split rest " ")))))
+            defn-name (fn (source-line)
+                        (match source-line
+                          ((or (str "(defn- " after) (str "(defn " after))
+                            (first (string/split after " ")))
+                          (_ nil)))
             above (reverse (seq/subvec lines 0 (math/min line (count lines))))
             name (seq/find (map above defn-name) string?))
         (when name (if module (str module "/" name) name))))))
@@ -262,40 +259,40 @@ debugger breaks at (`debug/break-fn`); stepping is not supported.")
     (do (release state) (tcp/close (:sock state)) (debug/stop-debugger (:dbg state)))
     (let (sock (:sock state))
       (receive
-        ([:tcp ^sock data] (let ([messages rest] (take-messages (bytes/append (:buf state) data)
-                                                   nil))
-                             (session-loop (fold messages (assoc state :buf rest) handle))))
+        ([:tcp ^sock data]
+          (let ([messages rest] (take-messages (bytes/append (:buf state) data)
+                                  nil))
+            (session-loop (fold messages (assoc state :buf rest) handle))))
         ([:tcp-closed ^sock] (session-loop (assoc state :done true)))
-        ([:dap-loaded runner loaded] (if (= loaded :ok)
-                                       (let (broken (apply-breakpoints (all-breakpoints state)))
-                                         (send runner [:dap-go])
-                                         (session-loop (assoc state :broken broken)))
-                                       (session-loop (event (event state
-                                                              "output"
-                                                              {:category "stderr"
-                                                               :output (str (error-message loaded)
-                                                                         "\n")})
-                                                       "terminated" nil))))
-        ([:debug-break _ pid snapshot] (let ([id s1] (thread-id state pid))
-                                         (session-loop (event (assoc s1
-                                                                :paused
-                                                                  (assoc (:paused s1) pid snapshot))
-                                                         "stopped"
-                                                         {:reason "function breakpoint"
-                                                          :description (or (:label snapshot)
-                                                                         "break")
-                                                          :threadId id
-                                                          :allThreadsStopped false}))))
-        ([:dap-done _ outcome] (let (s1 (if (failure? outcome)
-                                          (event state
-                                            "output"
-                                            {:category "stderr"
-                                             :output (str (error-message outcome) "\n")})
-                                          state))
-                                 (session-loop (event (event s1
-                                                        "exited"
-                                                        {:exitCode (if (failure? outcome) 1 0)})
-                                                 "terminated" nil))))))))
+        ([:dap-loaded runner loaded]
+          (if (= loaded :ok)
+            (let (broken (apply-breakpoints (all-breakpoints state)))
+              (send runner [:dap-go])
+              (session-loop (assoc state :broken broken)))
+            (session-loop (event (event state
+                                   "output"
+                                   {:category "stderr"
+                                    :output (str (error-message loaded)
+                                              "\n")})
+                            "terminated" nil))))
+        ([:debug-break _ pid snapshot]
+          (let ([id s1] (thread-id state pid))
+            (session-loop (event (assoc s1 :paused (assoc (:paused s1) pid snapshot))
+                            "stopped"
+                            {:reason "function breakpoint"
+                             :description (or (:label snapshot)
+                                            "break")
+                             :threadId id
+                             :allThreadsStopped false}))))
+        ([:dap-done _ outcome]
+          (let (s1 (if (failure? outcome)
+                     (event state
+                       "output"
+                       {:category "stderr"
+                        :output (str (error-message outcome) "\n")})
+                     state))
+            (session-loop (event (event s1 "exited" {:exitCode (if (failure? outcome) 1 0)})
+                            "terminated" nil))))))))
 
 (defn- serve-session (sock)
   (tcp/set-binary sock true)
@@ -315,12 +312,11 @@ debugger breaks at (`debug/break-fn`); stepping is not supported.")
 
 (defn- accept-loop (listener)
   (receive
-    ([:tcp-accept ^listener client] (let (session (spawn (fn ()
-                                                           (receive
-                                                             ([:dap-session s] (serve-session s))))))
-                                      (tcp/controlling-process client session)
-                                      (send session [:dap-session client])
-                                      (accept-loop listener)))))
+    ([:tcp-accept ^listener client]
+      (let (session (spawn (fn () (receive ([:dap-session s] (serve-session s))))))
+        (tcp/controlling-process client session)
+        (send session [:dap-session client])
+        (accept-loop listener)))))
 
 (defn listen (&optional (port 0))
   "Start a DAP server on 127.0.0.1:`port` (0: one the OS picks) in a new process, each editor

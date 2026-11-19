@@ -103,12 +103,12 @@ both as element text and inside a double-quoted attribute.
 ;; One inline construct at the head of `text` (which starts with an opener), as
 ;; `[html remaining]`, or nil when the opener is just a character.
 (defn- md-construct (text)
-  (cond
-    (string/starts-with? text "`") (md-code text)
-    (string/starts-with? text "[") (md-link text)
-    (string/starts-with? text "<") (md-autolink text)
-    (string/starts-with? text "**") (md-span text "**" "strong")
-    else (md-span text "*" "em")))
+  (match text
+    ((str "`" _) (md-code text))
+    ((str "[" _) (md-link text))
+    ((str "<" _) (md-autolink text))
+    ((str "**" _) (md-span text "**" "strong"))
+    (_ (md-span text "*" "em"))))
 
 ;; A code span: everything to the closing backtick, escaped and not scanned — `**kwargs` is a
 ;; literal there, and so is a `[[…]]` someone is writing ABOUT. Handled by the scanner rather

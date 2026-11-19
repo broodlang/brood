@@ -439,7 +439,7 @@ fn collect_pattern_binders(pattern: &Node, src: &str, out: &mut Vec<Binding>) {
                 // `^x` and `'x` are their own node kinds here; written out, they bind nothing,
                 // and neither does a form the compiler refuses
                 ListForm::Quote | ListForm::Pin | ListForm::Not | ListForm::Unquote => {}
-                ListForm::Or | ListForm::And => {
+                ListForm::Or | ListForm::And | ListForm::Str => {
                     for item in forms.skip(1) {
                         collect_pattern_binders(item, src, out);
                     }

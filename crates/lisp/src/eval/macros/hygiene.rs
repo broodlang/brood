@@ -383,7 +383,8 @@ fn hyg_list_pattern(heap: &mut Heap, pattern: Value, scope: &mut HygScope, start
                 out.push(hyg_walk(heap, e, scope));
             }
         }
-        ListForm::Or | ListForm::And => {
+        // `(str …)`: its literals are literal patterns, which nothing renames
+        ListForm::Or | ListForm::And | ListForm::Str => {
             out.push(items[0]);
             for &p in &items[1..] {
                 out.push(hyg_pattern(heap, p, scope, start));

@@ -1084,7 +1084,16 @@ Shipped as ADRs:
       tests/ and ten downstream repos hold one instance of the shape it replaces, and that one
       is not a `match`, so the need has not appeared. The cost it would have had is gone:
       ADR-755 gave the Rust side one reading of the pattern grammar, so a new form no longer
-      means teaching ten readers (`docs/handoff.md` thread 8).
+      means teaching ten readers (`docs/handoff.md` thread 8). **Trigger:** a `match`,
+      `receive` or `fn` clause converting a nested value in both guard and body. **Shape if
+      it fires:** `(app f pat)` (Racket, `pcase`), refused in `receive`; no user-defined
+      pattern heads (they break ADR-755's static reading).
+    - ✅ **String patterns** ([ADR-770](docs/decisions.md), 2026-11-19) — `(str "GET " path)`,
+      `(str stem ".blsp")`, `(str "<" tag ">")`: string literals around at most one pattern,
+      matched against the middle; in `match`, `fn` heads, `let` and `receive`. A clause an
+      earlier string pattern makes unreachable fails compilation (the `"+"`-before-`"+++"`
+      order mistake a `cond` cannot catch), structurally, inside `fn` heads and message vectors
+      too. Covers the parsing case the view-pattern line waited for; regexp patterns rejected.
     - ✅ **Exhaustiveness from *inferred* scrutinees** (2026-08-28) — a `match` whose scrutinee
       is typed by inference rather than by a `sig` gets exhaustiveness: `(defn pick (b) (if b
       :ok :err))` then `(match (pick b) (:ok 1))` reports the missing `:err`, the same as when

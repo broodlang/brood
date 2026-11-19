@@ -71,6 +71,7 @@ One vocabulary, shared by every site:
 | `{:k p}` | a map with key `:k` **present**, value matches `p` |
 | `(record name {…})` | a **`defrecord` value** of nominal id `name` (bare → current ns, or `mod/name`), then the map pattern `{…}` (optional, and the last part; `{:k p}`/`:keys`/`:or` compose) against its fields. A record is its own kind (ADR-542), so this is an id assertion + a map pattern over its fields; a plain map or a different record fails |
 | `(bytes seg…)` | a **`bytes` value**, destructured segment-by-segment — bit syntax: byte/`#b"…"` literals, one-byte binders, sized `(x n)` sub-bytes (dynamic sizes), typed integers `(x :u16)`/`(x :i32-le)`/…, `& rest` — see `docs/language.md` §Bytes patterns |
+| `(str "pre" p "suf")` | a **string** by its literal ends (ADR-770): string literals around at most one pattern, matched against the middle; a clause an earlier string pattern makes unreachable fails compilation — see `docs/language.md` §String patterns |
 | `^expr` | the current value of `expr` — a pin, see below |
 | `(or p q …)` | any alternative, first match wins; every alternative binds the same names |
 | `(and p q …)` | every pattern against the same value, left to right — `(and whole {:keys [a]})` is Brood's `:as` |

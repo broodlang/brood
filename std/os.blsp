@@ -311,9 +311,9 @@ owner dying closes them all, as for any child.
 (defn- without-line-ends (line)
   ;; `line` with its trailing newlines and carriage returns dropped — and nothing else: a
   ;; trailing SPACE is part of a cmd line (`set /p secret=Secret: ` prompts with it)
-  (if (or (string/ends-with? line "\n") (string/ends-with? line "\r"))
-    (without-line-ends (string/substring line 0 (dec (count line))))
-    line))
+  (match line
+    ((or (str shorter "\n") (str shorter "\r")) (without-line-ends shorter))
+    (_ line)))
 
 (defn- windows-line (line)
   ;; What cmd.exe is handed for `line`. `cmd /c` runs ONE line — a newline cuts the rest off

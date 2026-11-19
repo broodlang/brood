@@ -352,24 +352,20 @@ or the length of `text` when there is none."
     (if (< slash 0) "" (string/substring output 0 slash))))
 
 (defn- url-dot-segments-loop (input:string output:string -> string)
-  (cond
-    (= input "") output
-    (string/starts-with? input "../")
-      (url-dot-segments-loop (string/substring input 3 (count input)) output)
-    (string/starts-with? input "./")
-      (url-dot-segments-loop (string/substring input 2 (count input)) output)
-    (string/starts-with? input "/./")
-      (url-dot-segments-loop (string/substring input 2 (count input)) output)
-    (= input "/.") (url-dot-segments-loop "/" output)
-    (string/starts-with? input "/../")
-      (url-dot-segments-loop (string/substring input 3 (count input))
-        (url-drop-last-segment output))
-    (= input "/..") (url-dot-segments-loop "/" (url-drop-last-segment output))
-    (or (= input ".") (= input "..")) output
-    else
-      (let (segment-end (url-first-of input (if (string/starts-with? input "/") 1 0) "/"))
-        (url-dot-segments-loop (string/substring input segment-end (count input))
-          (str output (string/substring input 0 segment-end))))))
+  ;; RFC 3986 §5.2.4's steps, one clause each: A drops a leading `../` or `./`, B turns a
+  ;; leading `/./` or `/.` into `/`, C does that for `/../` or `/..` and drops the output's last
+  ;; segment, D drops a lone `.` or `..`, E moves the first segment across
+  (match input
+    ("" output)
+    ((or (str "../" after) (str "./" after)) (url-dot-segments-loop after output))
+    ((str "/./" after) (url-dot-segments-loop (str "/" after) output))
+    ("/." (url-dot-segments-loop "/" output))
+    ((str "/../" after) (url-dot-segments-loop (str "/" after) (url-drop-last-segment output)))
+    ("/.." (url-dot-segments-loop "/" (url-drop-last-segment output)))
+    ((or "." "..") output)
+    (_ (let (segment-end (url-first-of input (if (string/starts-with? input "/") 1 0) "/"))
+         (url-dot-segments-loop (string/substring input segment-end (count input))
+           (str output (string/substring input 0 segment-end)))))))
 
 (defn- url-remove-dot-segments (path:string -> string)
   "`path` with its `.` and `..` segments interpreted away (RFC 3986 §5.2.4). A `..` at the

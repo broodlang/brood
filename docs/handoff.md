@@ -107,7 +107,20 @@ ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character ty
    exhaustiveness, since the checker cannot see through `f`. What made it expensive is fixed:
    the Rust side reads patterns through one module now (ADR-755), so a new form costs a
    `ListForm` variant, a corpus entry in `crates/lisp/tests/pattern_grammar.rs`, a compile
-   clause in `match.blsp`, and whatever the compiler then points at.
+   clause in `match.blsp`, and whatever the compiler then points at. A re-run of the search over
+   17 repos (128 guards) found six candidates, all `for` filters or incidental repeats.
+   **Trigger:** a real `match`, `receive` or `fn` clause that converts a *nested* value in both
+   its guard and its body — the one case `(match (f x) …)` cannot say. **If it fires, the form
+   is Racket's and `pcase`'s `(app f pat)`**: `f` evaluated with earlier binders in scope (as
+   `&optional` defaults, ADR-619), the clause failing only when `pat` fails (no `nil` or
+   `failure` special case), the checker counting it as covering nothing, and **refused in
+   `receive`**, which re-scans the mailbox and so re-runs it O(k) per scan — the BEAM keeps
+   guards to safe built-ins for the same reason. User-defined pattern heads
+   (`define-match-expander`, `defpattern`, active patterns) stay out: they make a list
+   pattern's meaning depend on a run-time registry, undoing ADR-755's one static reading.
+   **The parsing case is answered by string patterns (ADR-770, 2026-11-19)**: `(str "GET " path)`,
+   a fixed pure form that is safe in `receive` and gives a compile error for a dead clause —
+   what the Erlang and Lisp traditions use instead of a call inside a pattern.
 9. **Parametric abilities** (low).
 10. ~~**Lexically shadowable operators.**~~ — done by ADR-734 (2026-11-17): a local shadows a
     macro; binding one of the eight evaluator forms fails compilation.

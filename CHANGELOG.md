@@ -6,6 +6,19 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Added: string patterns, `(str "GET " path)` (ADR-770).** A pattern written like the `str` call
+that builds the string: literal ends, and at most one part — the slot — matched against what
+lies between them. `(str stem ".blsp")`, `(str "<" tag ">")`, `(str "exact")`; a pin is an end
+known when the match runs, `(str ^marker body)`, and a nil pin matches nothing. It works in
+`match`, `fn` heads, refutable `let` and `receive`. **A clause an earlier string pattern makes
+unreachable fails compilation** — `(str "+" _)` before `(str "+++" _)`, the ordering mistake a
+`cond` over `string/starts-with?` cannot catch — at the top of a clause, in an `fn` head, inside a
+message vector or between `(or …)` alternatives. A second slot, `&`, and `(str (or "a" "b") _)`
+are refused naming the spelling that works.
+
+**Changed: the formatter lays a clause's body under its pattern** when it does not fit after it,
+and keeps `:when guard` on the pattern's line. Run `nest format` once after upgrading.
+
 **Fixed: re-indenting leaves no one-line string at column 0.** A string that begins a line (a
 TOML array element, once indentation is stripped) was read as verbatim content, like a heredoc's
 body, and not indented. **Fixed: `test/purge-stale-temp` skips a leftover it cannot remove**

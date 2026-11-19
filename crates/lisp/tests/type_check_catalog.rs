@@ -210,6 +210,16 @@ const SHOULD_NOT_WARN: &[&str] = &[
     // inference: a covered record-variable call stays silent.
     "(defrecord usd (cents)) (defmulti scale) (defmethod scale [usd :int] (m n) m) \
      (defn f () (let (x (usd 1)) (scale x 3)))",
+    // ---- string patterns (ADR-770): a value past a refutable `(str …)` clause is still the value.
+    // The pattern once lowered with an exit for "not a string" apart from one for "a string
+    // without these ends", and the later clauses' copy under the first read the value as
+    // `(not string)` — a string argument there was reported as a mismatch.
+    "(sig takes (string -> string)) (defn takes (text) text) \
+     (defn f (text) (match text ((str stem \"-\") stem) (_ (takes text))))",
+    "(sig takes (string -> string)) (defn takes (text) text) \
+     (defn f (text) (match text ((str \".\" _) 1) ((str \"x\" _) 2) (_ (takes text))))",
+    "(sig takes (string -> string)) (defn takes (text) text) \
+     (defn f (text) (match text (nil \"\") ((str \"<\" inner \">\") inner) (_ (takes text))))",
 ];
 
 #[test]

@@ -94,6 +94,13 @@ const CORPUS: &[&str] = &[
     "(bytes a b)",
     "(bytes 0 _ len (payload len) & tail)",
     "(bytes (n :u16) (_ :u32) (m :i8-le) #b\"ab\" & _)",
+    "(str \"GET \" path)",
+    "(str stem \".blsp\")",
+    "(str \"<\" (or \"a\" \"b\") \">\")",
+    "(str \"exact\")",
+    "(str \"v\" (and all tail))",
+    "(str ^separator rest)",
+    "(str \"#\" ^expected)",
     "(unquote x)",
 ];
 
@@ -158,6 +165,8 @@ fn a_form_the_compiler_refuses_binds_nothing() {
         "[a &optional b]",
         "{:as whole}",
         "(record p {} junk)",
+        "(str key \"=\" value)",
+        "(str \"GET \" & path)",
     ] {
         let pattern = read(&mut interp, source);
         let parsed = Pattern::parse(&interp.heap, pattern);

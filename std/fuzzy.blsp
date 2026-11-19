@@ -179,18 +179,13 @@ this function rearranged (`fuzzy-dp-row`), so the library has one definition of 
 
 (defn- fuzzy-parse-term (piece)
   "One space-separated `piece` of a query as a term (`fuzzy-make-term`), or nil."
-  (let (length (count piece))
-    (cond
-      (string/starts-with? piece "!")
-        (fuzzy-make-term :exclude (string/substring piece 1 length) false false)
-      (string/starts-with? piece "=")
-        (fuzzy-make-term :literal (string/substring piece 1 length) false false)
-      else
-        (let (start? (string/starts-with? piece "^")
-              from (if start? 1 0)
-              end? (and (string/ends-with? piece "$") (> length from))
-              body (string/substring piece from (if end? (dec length) length)))
-          (fuzzy-make-term (if (or start? end?) :literal :fuzzy) body start? end?)))))
+  (/match piece
+    ((str "!" body) (fuzzy-make-term :exclude body false false))
+    ((str "=" body) (fuzzy-make-term :literal body false false))
+    ((str "^" body "$") (fuzzy-make-term :literal body true true))
+    ((str "^" body) (fuzzy-make-term :literal body true false))
+    ((str body "$") (fuzzy-make-term :literal body false true))
+    (_ (fuzzy-make-term :fuzzy piece false false))))
 
 (defn- fuzzy-pieces (query)
   "The non-empty space-separated pieces of `query`, as typed."
@@ -663,12 +658,8 @@ mailbox is left where it is."
   (if (empty? pending)
     acc
     (receive
-      ([:fuzzy-ranked ^tag index ranked] (fuzzy-gather tag
-                                           (dissoc pending index)
-                                           (append acc ranked)
-                                           score-of
-                                           k
-                                           file?))
+      ([:fuzzy-ranked ^tag index ranked]
+        (fuzzy-gather tag (dissoc pending index) (append acc ranked) score-of k file?))
       (after fuzzy/*worker-timeout-ms* (fuzzy-abandon tag pending score-of k file? acc)))))
 
 (defn- fuzzy-discard-loop (n)
@@ -844,11 +835,12 @@ when there is nothing to narrow from (a custom scorer, a query with no terms)."
 candidate set on `[:candidates …]`, exit on `[:stop]`. `previous` is what the last query
 matched (`ranker-answer`); replacing the set forgets it."
   (receive
-    ([:rank from query limit] (let ([_ to q k] (ranker-latest [:rank from query limit])
-                                    [hits next] (ranker-answer cands score-of options previous q k))
-                                (do
-                                  (send to [:fuzzy-ranked (self) q hits])
-                                  (ranker-loop cands score-of options next))))
+    ([:rank from query limit]
+      (let ([_ to q k] (ranker-latest [:rank from query limit])
+            [hits next] (ranker-answer cands score-of options previous q k))
+        (do
+          (send to [:fuzzy-ranked (self) q hits])
+          (ranker-loop cands score-of options next))))
     ([:candidates replacement] (ranker-loop replacement score-of options nil))
     ([:stop] nil)))
 

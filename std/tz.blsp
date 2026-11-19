@@ -267,8 +267,7 @@ the rule applied to every year. A failure when the rule does not parse.
 
     (string? (:name (tz/local-zone)))   ;=> true"
   (let (env (os/env "TZ")
-        name (when env
-               (if (string/starts-with? env ":") (string/substring env 1 (count env)) env)))
+        name (match env ((str ":" zone-name) zone-name) (_ env)))
     (cond
       (and name (not (failure? (zone name)))) (zone name)
       (and name (not (failure? (rule-zone name)))) (rule-zone name)

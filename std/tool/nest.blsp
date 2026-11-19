@@ -876,12 +876,10 @@ milliseconds; nil for anything else (garbage, a negative).
     (nest/duration-ms \"500ms\")  ;=> 500
     (nest/duration-ms \"soon\")   ;=> nil"
   (let (text (string/trim s)
-        [digits scale] (cond
-                         (string/ends-with? text "ms")
-                           [(string/substring text 0 (- (count text) 2)) 1]
-                         (string/ends-with? text "s")
-                           [(string/substring text 0 (- (count text) 1)) 1000]
-                         else [text 1])
+        [digits scale] (match text
+                         ((str count-text "ms") [count-text 1])
+                         ((str count-text "s") [count-text 1000])
+                         (_ [text 1]))
         amount (string/->number (string/trim digits)))
     ;; `failure?` first and alone: the checker narrows `amount` on that test, not through an `or`.
     (if (failure? amount)

@@ -205,10 +205,9 @@ suggestions\", never to an error on the user's command line."
   (fold (seq/filter (string/split (string/trim fragment) " ") (fn (s) (not (= s ""))))
     nil
     (fn (acc token)
-      (if (and (string/starts-with? token ":") (> (count token) 1))
-        (let (name (string/substring token 1 (count token)))
-          (if (complete-tag-name? name) (append acc (list name)) acc))
-        acc))))
+      (match token
+        ((str ":" name) :when (complete-tag-name? name) (append acc (list name)))
+        (_ acc)))))
 
 ;; Could `name` be a keyword's name? A tag is written `:name`, so anything holding a
 ;; quote, bracket, paren or backslash came from surrounding syntax rather than from a

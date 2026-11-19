@@ -36,6 +36,8 @@ pub enum ListForm {
     Record,
     /// `(bytes segment…)`: binary destructuring.
     Bytes,
+    /// `(str part…)`: a string by its literal ends, one part matched against the middle.
+    Str,
     /// `(not …)`: refused by the compiler (ADR-152); the test belongs in a `:when` guard.
     Not,
     /// `(unquote …)`, the old `~x` pin spelling: refused by the compiler.
@@ -46,13 +48,14 @@ pub enum ListForm {
 
 impl ListForm {
     /// Every named form with the head that names it.
-    pub const NAMED: [(&'static str, ListForm); 8] = [
+    pub const NAMED: [(&'static str, ListForm); 9] = [
         (kw::QUOTE, ListForm::Quote),
         (kw::PIN, ListForm::Pin),
         (kw::OR, ListForm::Or),
         (kw::AND, ListForm::And),
         ("record", ListForm::Record),
         ("bytes", ListForm::Bytes),
+        ("str", ListForm::Str),
         (kw::NOT, ListForm::Not),
         (kw::UNQUOTE, ListForm::Unquote),
     ];
@@ -103,6 +106,13 @@ pub enum Pattern {
     },
     /// `(bytes segment…)`
     Bytes(Vec<Segment>),
+    /// `(str part…)`: string literals and pins around at most one pattern, the slot, which is
+    /// matched against what lies between them. `pinned` holds the pins' expressions (an end whose
+    /// text is known when the match runs); a `slot` of `None` is the exact string.
+    Str {
+        pinned: Vec<Value>,
+        slot: Option<Box<Pattern>>,
+    },
     /// A form the compiler refuses with an error naming it: `(not …)`, `(unquote …)`, `&` or
     /// `&optional` in a vector, a misplaced marker, `:as` in a map, a malformed record or
     /// bytes segment. It binds nothing and admits nothing a reader may rely on.
@@ -225,6 +235,34 @@ impl Pattern {
                 Some(segments) => Pattern::Bytes(segments),
                 None => Pattern::Refused(pattern),
             },
+            ListForm::Str => {
+                let mut pinned = Vec::new();
+                let mut slots = Vec::new();
+                for &item in &items[1..] {
+                    match item {
+                        Value::Str(_) => {}
+                        Value::Pair(_) => match heap.list_items(item).as_deref() {
+                            Some([Value::Sym(head), expression])
+                                if value::symbol_is(*head, kw::PIN) =>
+                            {
+                                pinned.push(*expression)
+                            }
+                            _ => slots.push(item),
+                        },
+                        _ => slots.push(item),
+                    }
+                }
+                match slots.as_slice() {
+                    [Value::Sym(s)] if is_marker(*s) => Pattern::Refused(pattern),
+                    [] => Pattern::Str { pinned, slot: None },
+                    [slot] => Pattern::Str {
+                        pinned,
+                        slot: Some(Box::new(Self::parse(heap, *slot))),
+                    },
+                    // a second slot: the text between them could split more than one way
+                    _ => Pattern::Refused(pattern),
+                }
+            }
             ListForm::Not | ListForm::Unquote => Pattern::Refused(pattern),
             ListForm::List => match SeqPattern::parse(heap, items) {
                 Some(seq) => Pattern::List(seq),
@@ -272,6 +310,11 @@ impl Pattern {
                 }
             }
             Pattern::Bytes(segments) => out.extend(segments.iter().filter_map(Segment::binder)),
+            Pattern::Str { slot, .. } => {
+                if let Some(slot) = slot {
+                    slot.collect_binders(out);
+                }
+            }
         }
     }
 
@@ -316,6 +359,12 @@ impl Pattern {
             Pattern::Record { fields, .. } => {
                 if let Some(map) = fields {
                     map.collect_expressions(out);
+                }
+            }
+            Pattern::Str { pinned, slot } => {
+                out.extend(pinned);
+                if let Some(slot) = slot {
+                    slot.collect_expressions(out);
                 }
             }
             Pattern::Bytes(segments) => {

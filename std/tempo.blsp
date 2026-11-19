@@ -330,8 +330,7 @@ worse.
     (tempo/resolution (tempo/parse! \"2026-06-15T14\"))   ;=> :hour
     (tempo/unit (tempo/parse! \"-0044-03-15\") :year)     ;=> -44"
   (let (body (string/drop-suffix s "Z")
-        neg (string/starts-with? body "-")
-        rest-body (string/drop-prefix body "-")
+        [neg rest-body] (match body ((str "-" unsigned) [true unsigned]) (_ [false body]))
         halves (string/split rest-body "T")
         date-str (or (nth halves 0) "")
         time-str (if (> (count halves) 1) (nth halves 1) nil))

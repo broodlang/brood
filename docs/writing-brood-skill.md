@@ -78,7 +78,8 @@ when the runtime crashes); `std/prelude/*.blsp` is the canonical idiomatic code.
 
 12. **Patterns:** `(or 1 2)` matches either (same names bound); `(and whole {:keys [a]})`
    is Brood's `:as`; `{:k pat}` requires the key. `(not …)` and `:as` are errors — use a
-   `:when` guard and `and`.
+   `:when` guard and `and`. A string by its ends is `(str "GET " path)` / `(str stem ".blsp")`
+   (one non-literal part), not a `cond` over `string/starts-with?` + `string/drop-prefix`.
 
 13. **Retired names.** `fn`, not `lambda`; `first`/`rest`, not `car`/`cdr`; `append`, not
    `concat`; `count`, not `length` (a string's too: there is no `string/length`); `any?` (a pred over a coll), not `some?` — for non-nil

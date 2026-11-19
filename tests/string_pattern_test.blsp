@@ -1,0 +1,281 @@
+;; String patterns, `(str part…)` (ADR-770): string literals around at most one pattern, the
+;; slot, which is matched against what lies between them. Covers the three shapes (prefix,
+;; suffix, both ends), the exact string, nesting, every binding site (`match`, `fn` clauses,
+;; refutable `let`, `receive`), the refusals and the unreachable-clause check, a differential
+;; against a hand-written oracle, and the patterns across processes.
+;;
+;; A malformed or dead pattern fails at expansion, so those cases expand explicitly with
+;; `reflect/macroexpand` (see tests/pattern_matching_test.blsp's note).
+
+(defmodule string-pattern-test (:use test))
+
+(defn- diff-line (line)
+  (match line
+    ((or (str "+++" _) (str "---" _)) :header)
+    ((str "@@" _) :hunk)
+    ((str "+" _) :added)
+    ((str "-" _) :removed)
+    (_ nil)))
+
+(defn- route (request)
+  (match request
+    ((str "GET " path) [:get path])
+    ((str stem ".blsp") [:module stem])
+    ((str "<" tag ">") [:tag tag])
+    ((str "exact") :exact)
+    ((str whole) [:string whole])
+    (_ :not-a-string)))
+
+(defn- command ((str ":" name)) name)
+
+;; A value past a refutable `(str …)` clause is still the value. These are the runtime half;
+;; the checker half — no later clause reads the value as `(not string)` — is in
+;; crates/lisp/tests/type_check_catalog.rs, where each snippet is checked on its own (a test file's
+;; checker verdict gives up on the test macros, so it could not catch this here).
+(sig takes-string (string -> string))
+(defn- takes-string (text) text)
+(defn- trim-dash (text)
+  (match text
+    ((str stem "-") stem)
+    (_ (takes-string text))))
+(defn- trim-angle (text)
+  (match text
+    (nil "")
+    ((str "<" inner ">") inner)
+    (_ (takes-string text))))
+
+(defn- expansion-error (form) (error-of (reflect/macroexpand form)))
+
+(describe "string patterns"
+  (test "a prefix binds the rest, and _ ignores it"
+    (assert= (route "GET /index") [:get "/index"])
+    (assert= (route "GET ") [:get ""])
+    (assert= (vec (map ["+++ a" "--- b" "@@ -1" "+x" "-y" " ctx" ""] diff-line))
+      [:header :header :hunk :added :removed nil nil]))
+  (test "a suffix, and both ends"
+    (assert= (route "core.blsp") [:module "core"])
+    (assert= (route ".blsp") [:module ""])
+    (assert= (route "<b>") [:tag "b"])
+    (assert= (route "<>") [:tag ""]))
+  (test "the two ends never overlap: the string must hold both"
+    (assert= (route "<") [:string "<"])
+    (assert= (match "a" ((str "a" _ "a") :both) (_ :short)) :short)
+    (assert= (match "aa" ((str "a" mid "a") mid) (_ :short)) ""))
+  (test "no slot is the exact string, and a lone slot is any string"
+    (assert= (route "exact") :exact)
+    (assert= (route "exactly") [:string "exactly"])
+    (assert= (route "") [:string ""]))
+  (test "a value that is not a string never matches"
+    (assert= (vec (map [42 nil :GET 'GET ["GET x"] #b"GET x"] route))
+      [:not-a-string :not-a-string :not-a-string :not-a-string :not-a-string :not-a-string]))
+  (test "adjacent literals join"
+    (assert= (match "abc-d" ((str "a" "b" "c" rest) rest)) "-d"))
+  (test "ends are counted in characters, not bytes"
+    (assert= (match "é→x" ((str "é→" rest) rest)) "x")
+    (assert= (match "x👍🏽" ((str head "👍🏽") head)) "x"))
+  (test "the slot is any pattern, matched against the middle"
+    (assert= (match "abab" ((str "ab" (str "a" rest)) rest)) "b")
+    (assert= (match "<a>" ((str "<" (or "a" "b") ">") :ab) (_ :other)) :ab)
+    (assert= (match "<c>" ((str "<" (or "a" "b") ">") :ab) (_ :other)) :other)
+    (assert= (match "v1" ((str "v" (and all "1")) all) (_ :other)) "1"))
+  (test "a repeated name is an equality constraint, a pin a known value"
+    (assert= (match ["ab" "xab"] ([tail (str "x" tail)] :same) (_ :differ)) :same)
+    (assert= (match ["ab" "xcd"] ([tail (str "x" tail)] :same) (_ :differ)) :differ)
+    (let (expected "id")
+      (assert= (match "#id" ((str "#" ^expected) :hit) (_ :miss)) :hit)
+      (assert= (match "#no" ((str "#" ^expected) :hit) (_ :miss)) :miss)))
+  (test "nested in other patterns"
+    (assert= (match [:line "ERROR disk"] ([:line (str "ERROR " text)] text) (_ nil)) "disk")
+    (assert= (match {:path "a.blsp"} ({:path (str stem ".blsp")} stem) (_ nil)) "a"))
+  (test "a value past a refutable string clause is still the value (checked, see trim-dash)"
+    (assert= (trim-dash "a-") "a")
+    (assert= (trim-dash "ab") "ab")
+    (assert= (trim-angle "<x>") "x")
+    (assert= (trim-angle nil) ""))
+  (test "a guard sees the slot's binding"
+    (assert= (match "+abc" ((str "+" more) :when (> (count more) 2) :long) (_ :short)) :long)
+    (assert= (match "+a" ((str "+" more) :when (> (count more) 2) :long) (_ :short)) :short)))
+
+(defn- strip-marker (marker line)
+  (match line
+    ((str ^marker body) body)
+    (_ nil)))
+
+(describe "pinned ends: a prefix or suffix known when the match runs"
+  (test "a pinned prefix"
+    (assert= (strip-marker "// " "// note") "note")
+    (assert= (strip-marker "# " "# note") "note")
+    (assert= (strip-marker "# " "// note") nil))
+  (test "a pinned suffix, and literals beside a pin join it"
+    (let (extension ".blsp")
+      (assert= (match "core.blsp" ((str stem ^extension) stem) (_ nil)) "core")
+      (assert= (match "v1-rc" ((str "v" version "-" ^(str "r" "c")) version) (_ nil)) "1")))
+  (test "a pinned end with no slot is the exact string the str call builds"
+    (let (expected "id")
+      (assert= (match "#id" ((str "#" ^expected) :hit) (_ :miss)) :hit))
+    (let (count-value 3)
+      (assert= (match "x3" ((str "x" ^count-value) :hit) (_ :miss)) :hit)))
+  (test "a pin is an end, not the slot, so a pin and a slot together are one slot"
+    (let (separator ",")
+      (assert= (match "a,b" ((str "a" ^separator rest) rest) (_ nil)) "b")))
+  (test "the ends must still both fit"
+    (let (fence "``")
+      (assert= (match "``" ((str ^fence inner ^fence) inner) (_ :short)) :short)
+      (assert= (match "````" ((str ^fence inner ^fence) inner) (_ :short)) "")))
+  (test "a nil pin matches nothing — read as (str nil), it would be the end \"nil\""
+    ;; read from a map, so the checker cannot see the nil (it reports a literal nil pin's clause dead)
+    (let (marker (get {:other "x"} :marker))
+      (assert= (match "nil-thing" ((str ^marker rest) rest) (_ :no-match)) :no-match)
+      (assert= (match "xnil" ((str "x" ^marker) :hit) (_ :no-match)) :no-match)
+      (assert= (match "anil-b" ((str "a" ^marker rest) rest) (_ :no-match)) :no-match)
+      (assert= (strip-marker nil "nil note") nil)))
+  (test "each pinned expression is evaluated once"
+    (let (calls (table/new))
+      (match "ab"
+        ((str ^(do (table/put calls :n (inc (table/get calls :n 0))) "a") rest) rest)
+        (_ nil))
+      (assert= (table/get calls :n) 1)))
+  (test "a pinned end is never judged at expansion: its clauses all compile"
+    (let (short-prefix "+" long-prefix "+++")
+      (assert= (match "+++x" ((str ^long-prefix _) :long) ((str ^short-prefix _) :short)) :long)
+      (assert= (expansion-error '(match m ((str ^p _) 1) ((str "+++" _) 2) (_ 3))) nil))))
+
+(describe "string patterns at every binding site"
+  (test "an fn clause head"
+    (assert= (command ":quit") "quit")
+    (assert-error (command "quit")))
+  (test "a multi-clause fn"
+    (let (verb (fn (((str "GET " _)) :get) (((str "PUT " _)) :put) ((_) :other)))
+      (assert= (vec (map ["GET /" "PUT /" "HEAD /"] verb)) [:get :put :other])))
+  (test "a refutable let"
+    (assert= (let ((str "v" version) "v1.2") version) "1.2")
+    (assert-error (let ((str "v" version) "1.2") version)))
+  (test "receive"
+    (send (self) [:line "INFO up"])
+    (send (self) [:line "ERROR down"])
+    (assert= (receive ([:line (str "ERROR " text)] text)) "down")
+    (assert= (receive ([:line (str "INFO " text)] text)) "up")))
+
+(describe "string patterns refused at expansion"
+  (test "two parts that are not literals could split more than one way"
+    (let (message (expansion-error '(match "k=v" ((str key "=" value) [key value]))))
+      (assert (includes? message "at most one part"))
+      (assert (includes? message "string/split"))))
+  (test "an end that is one of several literals points at an or of whole patterns"
+    (assert (includes? (expansion-error '(match m ((str (or "a" "b") _) 1) (_ 2)))
+              "(or (str \"a\" _) (str \"b\" _))")))
+  (test "& has no place: the slot already takes the rest"
+    (assert (includes? (expansion-error '(match "GET /" ((str "GET " & path) path))) "`&`")))
+  (test "a clause an earlier prefix covers is unreachable"
+    (let (message (expansion-error '(match "x" ((str "+" _) 1) ((str "+++" _) 2) (_ 3))))
+      (assert (includes? message "unreachable clause"))
+      (assert (includes? message "(str \"+\" _)"))))
+  (test "a literal clause an earlier prefix covers is unreachable"
+    (assert (includes? (expansion-error '(match "x" ((str "+" _) 1) ("+x" 2) (_ 3)))
+              "unreachable clause")))
+  (test "a clause an earlier pair of ends covers is unreachable"
+    (assert (includes? (expansion-error '(match "x" ((str "a" _ "z") 1) ((str "ab" _ "yz") 2) (_ 3)))
+              "unreachable clause")))
+  (test "a slot that binds a name covers as _ does"
+    (assert (includes? (expansion-error '(match "x" ((str "+" rest) rest) ((str "++" _) 2) (_ 3)))
+              "unreachable clause")))
+  (test "in a message vector, position by position"
+    (assert (includes? (expansion-error '(match m
+                                           ([:line (str "E" _)] 1)
+                                           ([:line (str "ERROR " _)] 2)
+                                           (_ 3)))
+              "unreachable clause")))
+  (test "an earlier or covers through any of its alternatives"
+    (assert (includes? (expansion-error '(match m ((or (str "a" _) (str "b" _)) 1) ("bc" 2) (_ 3)))
+              "unreachable clause")))
+  (test "an alternative an earlier one in the same or covers can never match"
+    (assert (includes? (expansion-error '(match "x" ((or (str "-" _) (str "-x" _)) 1) (_ 3)))
+              "can never match")))
+  (test "the dead clause is found in an fn's clauses and a receive's too"
+    (assert-error (reflect/eval (reflect/read-string "(fn (((str \"a\" _)) 1) (((str \"ab\" _)) 2))")))
+    (assert-error (reflect/macroexpand '(receive ((str "a" _) 1) ((str "ab" _) 2))))))
+
+(describe "string patterns that are NOT refused"
+  (test "the longer literal first is the right order"
+    (assert= (match "+++" ((str "+++" _) :header) ((str "+" _) :added)) :header))
+  (test "a guarded clause covers nothing"
+    (assert= (match "+++" ((str "+" n) :when (> (count n) 5) 1) ((str "+++" _) 2) (_ 3)) 2))
+  (test "a slot that can fail covers nothing"
+    (assert= (match "+x" ((str "+" "y") 1) ((str "+" _) 2)) 2)
+    (assert= (match "+x" ((str "+" (or "y" "z")) 1) ((str "+x" _) 2)) 2))
+  (test "a short string the ends cannot both fit in is not covered"
+    (assert= (match "a" ((str "a" _ "a") 1) ("a" 2) (_ 3)) 2))
+  (test "a repeated name in the slot is an equality test, so it covers nothing"
+    (assert= (match ["b" "+c"] ([x (str "+" x)] 1) ([_ (str "+c" _)] 2) (_ 3)) 2))
+  (test "a match with no string pattern expands its dead clauses as before (the checker reports them)"
+    (assert= (expansion-error '(match m ([:ok _] 1) ([:ok 1] 2) (_ 3))) nil)))
+
+;; The oracle: what a hand-written test of the same ends answers.
+(defn- oracle (text prefix suffix)
+  (if (and (string? text)
+        (>= (count text) (+ (count prefix) (count suffix)))
+        (string/starts-with? text prefix)
+        (string/ends-with? text suffix))
+    (string/substring text (count prefix) (- (count text) (count suffix)))
+    :no))
+
+(defn- by-pattern (text)
+  [(match text ((str "ab" middle) middle) (_ :no))
+    (match text ((str middle "ba") middle) (_ :no))
+    (match text ((str "a" middle "a") middle) (_ :no))
+    (match text ((str "" middle "") middle) (_ :no))])
+
+(defn- by-oracle (text)
+  [(oracle text "ab" "") (oracle text "" "ba") (oracle text "a" "a") (oracle text "" "")])
+
+(describe "string patterns agree with a hand-written test"
+  (test "over generated strings"
+    (check-property 300
+      (property/string-of "ab")
+      (fn (text) (= (by-pattern text) (by-oracle text))))))
+
+(defn- sp-worker (parent)
+  (receive
+    ((str "ping " who) (send parent [:pong who]) (sp-worker parent))
+    ([:stop] (send parent :stopped))))
+
+(defn- sp-collect (remaining acc)
+  (if (= remaining 0)
+    (sort acc)
+    (receive ([:pong who] (sp-collect (dec remaining) (cons who acc))))))
+
+(def sp-shared-lines ["GET /a" "PUT /b" "GET /c" "x.blsp"])
+
+(defn- sp-reader (parent)
+  (send parent [:read (vec (map sp-shared-lines route))]))
+
+(defn- sp-collect-reads (remaining acc)
+  (if (= remaining 0)
+    acc
+    (receive ([:read routes] (sp-collect-reads (dec remaining) (cons routes acc))))))
+
+(describe "string patterns across processes"
+  :isolated (test "a worker's receive matches strings sent to it, and replies with the slot"
+    (let (me (self) worker (spawn (sp-worker me)))
+      (send worker "ping one")
+      (send worker "noise")
+      (send worker "ping two")
+      (assert= (sp-collect 2 nil) (list "one" "two"))
+      (send worker [:stop])
+      (assert= (receive (:stopped :stopped)) :stopped)))
+
+  (test "many workers each match their own strings, fanned in"
+    (let (me (self)
+          workers (map (range 0 16) (fn (_) (spawn (sp-worker me)))))
+      (map (seq/zip workers (range 0 16)) (fn ([worker index]) (send worker (str "ping " index))))
+      (assert= (count (sp-collect 16 nil)) 16)
+      (map workers (fn (worker) (send worker [:stop])))))
+
+  (test "many processes match a shared global at once"
+    (let (me (self))
+      (map (range 0 20) (fn (_) (spawn (sp-reader me))))
+      (let (reads (sp-collect-reads 20 nil))
+        (assert= (count reads) 20)
+        (assert (every? reads
+                  (fn (routes)
+                    (= routes [[:get "/a"] [:string "PUT /b"] [:get "/c"] [:module "x"]]))))))))

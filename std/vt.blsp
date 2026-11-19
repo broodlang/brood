@@ -974,12 +974,11 @@ offset always exists).
 
 (defn- split-modifiers (name:string -> (tuple bool bool bool string))
   "`[ctrl alt shift base]` from a key name spelled `[ctrl-meta-|ctrl-|alt-][shift-]<base>`."
-  (let (after (fn (prefix) (string/substring name (count prefix) (count name)))
-        [ctrl alt rest] (cond
-                          (string/starts-with? name "ctrl-meta-") [true true (after "ctrl-meta-")]
-                          (string/starts-with? name "ctrl-") [true false (after "ctrl-")]
-                          (string/starts-with? name "alt-") [false true (after "alt-")]
-                          else [false false name])
+  (let ([ctrl alt rest] (match name
+                          ((str "ctrl-meta-" base) [true true base])
+                          ((str "ctrl-" base) [true false base])
+                          ((str "alt-" base) [false true base])
+                          (_ [false false name]))
         shifted? (and (string/starts-with? rest "shift-") (> (count rest) 6)))
     [ctrl alt shifted? (if shifted? (string/substring rest 6 (count rest)) rest)]))
 

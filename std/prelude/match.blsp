@@ -66,6 +66,101 @@
 ;; order — deferred). Named, like `and`/`or`/`bytes`, so a plain list pattern isn't stolen.
 (defn- %match-record-pattern? (p) (and (pair? p) (= (first p) 'record)))
 
+;; `(str part…)` — a STRING pattern (ADR-770): written like the `str` call that builds the
+;; string. Each part is a string literal or a pin (`^sep`, an end whose text is the pinned value's
+;; `str`, known when the match runs), and at most ONE part is a pattern — the slot — matched
+;; against what is left between the ends before it (the prefix) and after it (the suffix):
+;; `(str "GET " path)`, `(str stem ".blsp")`, `(str "<" tag ">")`. With no slot it is the exact
+;; string. One slot is the whole rule, so a match is never ambiguous and two clauses can be
+;; compared at expansion: `(str key "=" value)` could split two ways and is refused.
+(defn- %match-str-pattern? (p) (and (pair? p) (= (first p) 'str)))
+
+;; `(or "a" "b" …)` of string literals only — what someone writing an end that is one of several
+;; literals reaches for, and what the one-slot rule must name rather than call a second slot.
+(defn- %match-literal-or? (p)
+  (and (%match-or-pattern? p) (not (empty? (rest p))) (%match-all-strings? (rest p))))
+(defn- %match-all-strings? (items)
+  (cond
+    (empty? items) true
+    (string? (first items)) (%match-all-strings? (rest items))
+    else false))
+
+;; The spelling that works for `(str … (or "a" "b") …)`: `(or (str … "a" …) (str … "b" …))`, as
+;; message TEXT — built as a string, not a form, since nothing here emits code.
+(defn- %match-str-alternatives-text (pat alternatives)
+  (/str "(or "
+    (string/join (map (rest alternatives)
+                   (fn (literal)
+                     (/str "(str "
+                       (string/join (map (rest pat)
+                                      (fn (part) (pr-str (if (%eq part alternatives) literal part))))
+                         " ")
+                       ")")))
+      " ")
+    ")"))
+
+;; An end of a `(str …)` pattern so far, with one more piece: a string literal, or a pin's
+;; expression (`^sep` — an end whose text is known only when the match runs). Literals alone stay
+;; one string, known at expansion; with a pin the end is the form that builds it, `(/str …)`, so a
+;; pinned end means what the `str` call it is written like would build.
+(defn- %match-str-join (end piece)
+  (cond
+    (and (string? end) (string? piece)) (/str end piece)
+    (string? end) (if (%eq end "") (list '/str piece) (list '/str end piece))
+    else (append end (list piece))))
+
+;; `[prefix slot-or-nil suffix has-slot?]` of a `(str …)` pattern's parts, refusing a second
+;; slot by name. Adjacent literals join: `(str "a" "b" x)` is the prefix "ab".
+(defn- %match-str-parts (pat)
+  (%match-str-split pat (rest pat) "" nil "" false))
+;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
+(defn- %match-str-split (pat parts prefix slot suffix has-slot)
+  (cond
+    (empty? parts) [prefix slot suffix has-slot]
+    (or (string? (first parts)) (%match-pin? (first parts)))
+      (let (piece (if (string? (first parts)) (first parts) (second (first parts))))
+        (if has-slot
+          (%match-str-split pat (rest parts) prefix slot (%match-str-join suffix piece) true)
+          (%match-str-split pat (rest parts) (%match-str-join prefix piece) nil "" false)))
+    (or (= (first parts) '&) (= (first parts) '&optional))
+      (reflect/error-at pat
+        "match: `"
+        (pr-str (first parts))
+        "` has no place in a (str …) pattern, got "
+        (pr-str pat)
+        " — the part that is not a string literal already takes the rest:"
+        " (str \"GET \" path), not (str \"GET \" & path).")
+    (and has-slot (or (%match-literal-or? slot) (%match-literal-or? (first parts))))
+      (let (alternatives (if (%match-literal-or? slot) slot (first parts)))
+        (reflect/error-at pat
+          "match: "
+          (pr-str alternatives)
+          " is not a literal end of "
+          (pr-str pat)
+          " — a (str …) pattern has one part that is not a literal, and an end that is one of"
+          " several literals is several whole patterns: "
+          (%match-str-alternatives-text pat alternatives)
+          "."))
+    has-slot
+      (reflect/error-at pat
+        "match: a (str …) pattern has at most one part that is not a string literal, got "
+        (pr-str slot)
+        " and "
+        (pr-str (first parts))
+        " in "
+        (pr-str pat)
+        " — the text between them could split more than one way."
+        " Match the prefix and split the rest with string/split, or use regex/find.")
+    else (%match-str-split pat (rest parts) prefix (first parts) "" true)))
+
+;; Does string `text` start with `prefix` / end with `suffix`? Expansion-time only, and the
+;; prelude's own: `string/starts-with?` lives in a module this file cannot load.
+(defn- %match-str-starts? (text prefix)
+  (and (/>= (/count text) (/count prefix)) (%eq (string/substring text 0 (/count prefix)) prefix)))
+(defn- %match-str-ends? (text suffix)
+  (let (n (/count text) m (/count suffix))
+    (and (/>= n m) (%eq (string/substring text (/- n m) n) suffix))))
+
 ;; Every alternative of an `or` must bind the SAME names — otherwise the body could
 ;; reference a name only some alternatives bind, and which one it is depends on the
 ;; input. Rust enforces the same rule for the same reason.
@@ -109,6 +204,8 @@ NON-LINEAR patterns (the same name twice) work.
     (%match-and-pattern? pat) (%match-seq-vars (rest pat))
     ;; a record pattern binds whatever its (optional) inner map pattern binds
     (%match-record-pattern? pat) (let (mp (first (rest (rest pat)))) (if mp (%pattern-vars mp) nil))
+    ;; a string pattern binds what its one non-literal part binds
+    (%match-str-pattern? pat) (%match-seq-vars (rest pat))
     (pair? pat) (%match-seq-vars pat)
     (vector? pat) (%match-seq-vars (%match-vec->list pat))
     (map? pat) (%match-map-vars pat)
@@ -171,6 +268,8 @@ NON-LINEAR patterns (the same name twice) work.
     ; (and p q …): every pattern must match the same value (capture-and-destructure)
     (%match-record-pattern? pat) (%match-compile-record pat target bound success fail)
     ; (record name {…}): a defrecord value of nominal id `name`, then a map pattern
+    (%match-str-pattern? pat) (%match-compile-str pat target bound success fail)
+    ; (str "prefix" slot "suffix"): a string by its literal ends, the slot against the middle
     (pair? pat) (%match-compile-list pat target bound success fail)
     (vector? pat) (%match-compile-vector pat target bound success fail)
     (map? pat) (%match-compile-map pat target bound success fail)
@@ -631,6 +730,96 @@ NON-LINEAR patterns (the same name twice) work.
          ~(if mappat (%match-compile mappat target bound success fail) success)
          ~fail))))
 
+;; `(str prefix slot suffix)` — a string whose literal ends are those, the slot matched against
+;; what lies between. Lowers to what a hand-written test does: a type test, a length floor (so the
+;; prefix and suffix cannot overlap), the literal ends compared with `%eq`, and one substring for
+;; the slot — skipped when the slot is `_` or there is none, and each end skipped when empty.
+(defn- %match-compile-str (pat target bound success fail)
+  (let (parts (%match-str-parts pat)
+        prefix (nth parts 0)
+        slot (nth parts 1)
+        suffix (nth parts 2)
+        has-slot (nth parts 3))
+    (cond
+      (and (not has-slot) (string? prefix)) `(if (%eq ~target ~prefix) ~success ~fail)
+      ;; no slot, and a pinned end: the exact string the pins build — none of them nil
+      (not has-slot)
+        (let (whole (%match-str-end-code prefix))
+          `(let ~(nth whole 0)
+             (if (and ~@(nth whole 4) (%eq ~target ~(nth whole 1))) ~success ~fail)))
+      ;; `(str s)`: any string, the whole of it the slot's
+      (and (%eq prefix "") (%eq suffix ""))
+        `(if (/string? ~target) ~(%match-compile slot target bound success fail) ~fail)
+      else (%match-compile-str-ends prefix slot suffix target bound success fail))))
+
+;; An end as the compiled code reads it: `[bindings text length empty? checks]` — a literal end
+;; is its own text, its length a number and `empty?` known; a pinned end binds each pinned value
+;; and the text built from them once, ahead of the test, and is measured when the match runs.
+;; `checks` are tests the match must also pass: a pinned value that is nil fails it. `(str nil)` is
+;; "nil", so a nil pin read as an end would make `(str ^prefix rest)` match "nil-thing" — a quiet
+;; wrong answer from a prefix that was never set, where "starts with nothing known" is never true.
+(defn- %match-str-end-code (end)
+  (if (string? end)
+    [nil end (/count end) (%eq end "") nil]
+    (let (pieces (%match-str-pin-pieces (rest end) nil nil nil)
+          name (reflect/gensym "end"))
+      [(append (nth pieces 0) (list name (cons '/str (nth pieces 1))))
+        name
+        `(/count ~name)
+        false
+        (nth pieces 2)])))
+
+;; `[bindings pieces checks]` for an end's pieces: each pinned expression bound to a gensym (so it
+;; is evaluated once), the pieces with those names in their place, and a not-nil check for each.
+;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
+(defn- %match-str-pin-pieces (pieces bindings names checks)
+  (cond
+    (empty? pieces) [bindings (reverse names) checks]
+    (string? (first pieces))
+      (%match-str-pin-pieces (rest pieces) bindings (cons (first pieces) names) checks)
+    else
+      (let (pinned (reflect/gensym "pinned"))
+        (%match-str-pin-pieces (rest pieces)
+          (append bindings (list pinned (first pieces)))
+          (cons pinned names)
+          (append checks (list `(/not (/nil? ~pinned))))))))
+
+(defn- %match-compile-str-ends (prefix slot suffix target bound success fail)
+  ;; ONE failure exit, after one `and`: the code the clauses after this one become is spliced
+  ;; at every exit, and the checker reads each copy under the facts of its own path — with an
+  ;; exit for "not a string" apart from one for "a string without these ends", the later
+  ;; clauses' copy under the first read the value as `(not string)` and reported a string
+  ;; argument there as a mismatch. Behind one `and`, the fall-through knows what a
+  ;; hand-written `(and (string? x) (string/starts-with? x …))` would tell it: nothing.
+  (let (middle (reflect/gensym "middle")
+        head (%match-str-end-code prefix)
+        tail (%match-str-end-code suffix)
+        prefix-text (nth head 1)
+        prefix-length (nth head 2)
+        suffix-text (nth tail 1)
+        suffix-length (nth tail 2)
+        length `(/count ~target)
+        floor (if (and (number? prefix-length) (number? suffix-length))
+                (/+ prefix-length suffix-length)
+                `(/+ ~prefix-length ~suffix-length))
+        middle-end (if (nth tail 3) length `(/- ~length ~suffix-length))
+        tests (append (nth head 4)
+                (nth tail 4)
+                (list `(/string? ~target) `(/>= ~length ~floor))
+                (if (nth head 3)
+                  nil
+                  (list `(%eq (string/substring ~target 0 ~prefix-length) ~prefix-text)))
+                (if (nth tail 3)
+                  nil
+                  (list `(%eq (string/substring ~target ~middle-end ~length) ~suffix-text))))
+        matched (if (%match-wildcard? slot)
+                  success
+                  `(let (~middle (string/substring ~target ~prefix-length ~middle-end))
+                     ~(%match-compile slot middle bound success fail)))
+        test `(if (and ~@tests) ~matched ~fail)
+        bindings (append (or (nth head 0) nil) (or (nth tail 0) nil)))
+    (if (empty? bindings) test `(let ~bindings ~test))))
+
 ;; -- clauses: (pattern [:when guard] body...) — one shape for match / fn / receive --
 (defn- %match-parse-clause (clause)
   (if (not (pair? clause))
@@ -774,6 +963,179 @@ and carries the name as `:name`."
       (reflect/error-at (first following)
         "match: unreachable clause after a catch-all (an irrefutable pattern must come last)"))))
 
+;; ---- string patterns that can never match ----------------------------------
+;; A `(str …)` pattern says exactly which strings it matches, so an earlier pattern that already
+;; matches everything a later one does is found here, at expansion, and refused like a clause
+;; after a catch-all: `(str "+" _)` before `(str "+++" _)` (or before "+++") leaves the later one
+;; dead, at the top of a clause, in an `fn` head's position or inside a message vector alike.
+;; The comparison is structural — lists and vectors position by position, an `(or …)` by its
+;; alternatives — and a clause is refused only when a string pattern is part of the proof: the
+;; check belongs to string patterns, and every match without one compiles as it did. Only a
+;; guard-free clause covers; the later clause is dead whatever its guard.
+
+;; `[prefix suffix]` of a pattern that matches every string with those ends, or nil. Only a slot
+;; that always matches (`_` or a name not repeated in the pattern) covers.
+(defn- %match-str-cover (pat twice)
+  (if (%match-str-pattern? pat)
+    (let (parts (%match-str-parts pat) slot (nth parts 1))
+      (if (and (nth parts 3)
+            (%match-always? slot twice)
+            (string? (nth parts 0))
+            (string? (nth parts 2)))
+        [(nth parts 0) (nth parts 2)]
+        nil))
+    nil))
+
+;; `[prefix suffix open?]` of a pattern that matches only strings: a string literal is the exact
+;; string (`open?` false), a `(str …)` pattern its ends. Nil for anything else.
+(defn- %match-str-shape (pat)
+  (cond
+    (string? pat) [pat "" false]
+    (%match-str-pattern? pat)
+      (let (parts (%match-str-parts pat))
+        ;; a pinned end is known only when the match runs, so nothing can be said of it here
+        (if (and (string? (nth parts 0)) (string? (nth parts 2)))
+          [(nth parts 0) (nth parts 2) (nth parts 3)]
+          nil))
+    else nil))
+
+;; Does `cover` match every string `shape` does? An open shape's strings start with its prefix
+;; and end with its suffix, so the cover's ends must be the start and end of those; an exact
+;; string must have both, without the cover's ends overlapping in it.
+(defn- %match-str-covers? (cover shape)
+  (let (prefix (first cover)
+        suffix (second cover)
+        shape-prefix (nth shape 0)
+        shape-suffix (nth shape 1))
+    (if (nth shape 2)
+      (and (%match-str-starts? shape-prefix prefix) (%match-str-ends? shape-suffix suffix))
+      (and (/>= (/count shape-prefix) (/+ (/count prefix) (/count suffix)))
+        (%match-str-starts? shape-prefix prefix)
+        (%match-str-ends? shape-prefix suffix)))))
+
+;; A pattern that matches every value: `_`, or a name bound once in the pattern it is part of
+;; (a repeated name is an equality test).
+(defn- %match-always? (pat twice)
+  (or (%match-wildcard? pat) (and (%match-bind-sym? pat) (not (%match-member? pat twice)))))
+
+;; The names `pat` binds more than once.
+(defn- %match-repeated (pat) (%match-repeated-in (%pattern-vars pat) nil nil))
+(defn- %match-repeated-in (names seen acc)
+  (cond
+    (empty? names) acc
+    (%match-member? (first names) seen)
+      (%match-repeated-in (rest names) seen (cons (first names) acc))
+    else (%match-repeated-in (rest names) (cons (first names) seen) acc)))
+
+;; A plain list pattern with no `&` or `&optional`: one element per position.
+(defn- %match-fixed-list? (pat)
+  (and (pair? pat)
+    (not (%match-quoted? pat))
+    (not (%match-pin? pat))
+    (not (%match-or-pattern? pat))
+    (not (%match-and-pattern? pat))
+    (not (%match-not-pattern? pat))
+    (not (%match-stale-pin? pat))
+    (not (%match-record-pattern? pat))
+    (not (%match-bytes-pattern? pat))
+    (not (%match-str-pattern? pat))
+    (not (%match-member? '& pat))
+    (not (%match-member? '&optional pat))))
+
+;; Does `earlier` match everything `later` does? `:no`, `:yes`, or `:str` — yes, and a string
+;; pattern's ends are part of why. Conservative: `:no` whenever it cannot tell.
+;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
+(defn- %match-subsumes (earlier later twice)
+  (cond
+    (%match-always? earlier twice) :yes
+    (%match-or-pattern? later) (%match-subsumes-all earlier (rest later) twice :yes)
+    (%match-or-pattern? earlier) (%match-subsumes-any (rest earlier) later twice)
+    (%match-str-pattern? earlier)
+      (let (cover (%match-str-cover earlier twice) shape (%match-str-shape later))
+        (if (and cover shape (%match-str-covers? cover shape)) :str :no))
+    (and (vector? earlier) (vector? later) (%eq (/count earlier) (/count later)))
+      (%match-subsumes-pairs (%match-vec->list earlier) (%match-vec->list later) twice :yes)
+    (and (%match-fixed-list? earlier)
+      (%match-fixed-list? later)
+      (%eq (/count earlier) (/count later)))
+      (%match-subsumes-pairs earlier later twice :yes)
+    (and (not (pair? earlier))
+      (not (symbol? earlier))
+      (not (vector? earlier))
+      (not (map? earlier))
+      (%eq earlier later))
+      :yes
+    else :no))
+
+;; `earlier` against every alternative of `later`.
+(defn- %match-subsumes-all (earlier alternatives twice verdict)
+  (if (empty? alternatives)
+    verdict
+    (let (one (%match-subsumes earlier (first alternatives) twice))
+      (cond
+        (%eq one :no) :no
+        else
+          (%match-subsumes-all earlier (rest alternatives) twice (if (%eq one :str) :str verdict))))))
+
+;; Some alternative of `earlier` against `later`.
+(defn- %match-subsumes-any (alternatives later twice)
+  (cond
+    (empty? alternatives) :no
+    else
+      (let (one (%match-subsumes (first alternatives) later twice))
+        (if (%eq one :no) (%match-subsumes-any (rest alternatives) later twice) one))))
+
+;; Position by position.
+(defn- %match-subsumes-pairs (earliers laters twice verdict)
+  (if (empty? earliers)
+    verdict
+    (let (one (%match-subsumes (first earliers) (first laters) twice))
+      (cond
+        (%eq one :no) :no
+        else
+          (%match-subsumes-pairs (rest earliers)
+            (rest laters)
+            twice
+            (if (%eq one :str) :str verdict))))))
+
+;; Refuse an alternative of a top-level `(or …)` that an earlier alternative of it already
+;; matches because of a string pattern.
+(defn- %match-check-str-alternatives (earlier alternatives twice)
+  (when (not (empty? alternatives))
+    (let (alternative (first alternatives))
+      (when (%eq (%match-subsumes-any earlier alternative twice) :str)
+        (reflect/error-at alternative
+          "match: "
+          (pr-str alternative)
+          " can never match — an alternative before it in the same (or …) already"
+          " matches every string it does. Put the longer literal first."))
+      (%match-check-str-alternatives (cons alternative earlier) (rest alternatives) twice))))
+
+;; Refuse a clause of `following` that this guard-free clause already matches everything of,
+;; because of a string pattern.
+(defn- %match-check-str-reachable (clause following)
+  (let (parsed (%match-parse-clause clause)
+        pat (nth parsed 0)
+        twice (%match-repeated pat))
+    (when (%match-or-pattern? pat)
+      (%match-check-str-alternatives nil (rest pat) twice))
+    (when (nil? (nth parsed 1))
+      (%match-check-str-dead pat twice following))))
+
+(defn- %match-check-str-dead (pat twice following)
+  (when (not (empty? following))
+    (let (later (first following)
+          later-pat (if (pair? later) (first later) later))
+      (when (%eq (%match-subsumes pat later-pat twice) :str)
+        (reflect/error-at later
+          "match: unreachable clause "
+          (pr-str later-pat)
+          " — the earlier clause "
+          (pr-str pat)
+          " already matches everything it does."
+          " Put the clause with the longer literal first."))
+      (%match-check-str-dead pat twice (rest following)))))
+
 ;; Occurrences of symbol `s` in code tree `form` (pairs only — `s` is a gensym,
 ;; so quoted user data can never contain it and vectors need no descent).
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
@@ -878,6 +1240,7 @@ and carries the name as `:name`."
           following (rest clauses)
           rest-code (%match-build-chain following target fail nil-fail?))
       (%match-check-reachable clause following)
+      (%match-check-str-reachable clause following)
       (%match-build-clause clause target rest-code nil-fail?))))
 
 (defn- %match-build (clauses target context)

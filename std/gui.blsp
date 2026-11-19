@@ -331,9 +331,9 @@ that is missing or fails says nothing, and so does any error. Needs no window an
 (defn- unquote-setting (value)
   ;; a gsettings string without its quotes: `'Ubuntu Sans Mono 11'` -> `Ubuntu Sans Mono 11`
   (let (text (string/trim (or value "")))
-    (if (and (>= (count text) 2) (string/starts-with? text "'") (string/ends-with? text "'"))
-      (string/substring text 1 (dec (count text)))
-      text)))
+    (match text
+      ((str "'" inner "'") inner)
+      (_ text))))
 
 (defn- font-spec (name)
   ;; `[family points]` of a desktop font name — `Ubuntu Sans Mono 11` (GNOME's, size last) or

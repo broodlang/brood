@@ -2198,3 +2198,37 @@ doc. `:blocks` takes a kind in a context (ADR-766), so Ruby's `rescue` body coun
 `:token-blocks` counts ADR-762's keyword stack on a clean parse (ADR-767), so HEEx's
 `<% … do %>` blocks indent; a `:pairs` closer may be a named leaf's kind, and
 `%tree-sitter-tokens` takes `all?`.
+
+2026-11-19. **String patterns (ADR-770).** `(str "GET " path)` matches a string by its literal
+ends — prefix, suffix, both, or the exact string — with at most one non-literal part, the slot,
+matched against the middle. It lowers to the hand-written test (type, length floor, `%eq` on the
+ends, one substring) and works in `match`, `fn` heads, refutable `let` and `receive`. The point
+is the early warning a `cond` over `string/starts-with?` cannot give: a guard-free clause whose
+string pattern covers a later clause fails compilation (`(str "+" _)` before `(str "+++" _)`),
+compared structurally so it holds inside `fn` heads, message vectors and `(or …)` alternatives,
+and reported only when a string pattern is part of the proof — every other match compiles as
+before. A second slot and `&` are refused by name. Rust side: `ListForm::Str` / `Pattern::Str`,
+read by hygiene and the CST like `or`. Measured first: 854 `starts-with?` and 286 `ends-with?`
+calls across std/, tests/ and the downstream repos, 176 followed by slicing the prefix off.
+Rejected: a regexp pattern (no dead-clause check possible, search-vs-whole trap, a hidden scan)
+and, still, the view pattern. Guards: `tests/string_pattern_test.blsp` (37, each family red under
+sabotage — the dead-clause check, the length floor and suffix test, the `:str`-only reporting),
+`pattern_grammar.rs`, `type_check_catalog.rs`.
+
+Migrated the same day: brood std/ (14 sites), bedit (42), hatch (18), mur-forge (16), hive,
+bedit-agent, mail, s3 (7). The migration found a false positive in the first lowering — a type
+test with its own failure exit left the later clauses' spliced copy reading the value as
+`(not string)` — fixed by lowering to one exit behind one `and`, guarded in
+`type_check_catalog.rs` (red with the old shape). `(str (or "a" "b") _)`, tried twice, is refused
+naming `(or (str "a" _) (str "b" _))`. A test file's checker verdict gives up on the test macros,
+so a checker guard written there was vacuous — it lives in the Rust catalog instead.
+
+Follow-ups the same day: a pinned part is an END, not the slot — `(str ^marker body)` takes a
+prefix held in a variable (the commonest site the migration could not convert); the formatter
+puts a clause's body under its pattern when it does not fit after it, and keeps `:when guard` on
+the pattern's line (tests/format_test.blsp, both red with the rules off) — the tree was
+reformatted once, collapsing every body the old layout had hung so its old breaks were not kept
+as an author's; no syntax for a non-empty slot (a literal clause first or a `:when` says it). A nil
+pinned value fails the clause (`(str nil)` is "nil", so an unset prefix matched "nil-thing"); the
+first test of it was vacuous — no input began with "nil" — and was rewritten until it went red
+with the check removed.
