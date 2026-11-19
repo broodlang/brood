@@ -2272,3 +2272,10 @@ lean toolchain. `bundle-collect` now leaves out a module that still writes `desc
 once its top-level tests are stripped, with every module whose header needs one, and takes the
 dead `(:use test)` out of a module whose tests sat beside its code (ADR-225) — which could not load
 in a lean runtime either. Both halves in `tests/project_test.blsp`, each red with its half off.
+
+2026-11-19. **An imaged value is built straight into the RUNTIME region (ADR-771).** A section's
+values were rebuilt LOCAL and then copied again by the bind's promote; `Heap::build_shared` mints
+them in place, under the promote lock, and stamps a value's positions under one lock. bedit's
+`--version` 0.17 → 0.135 s, its sections 102 → 75 ms. The same day in bedit: M-x keeps a command's
+symbol rather than the closure, and a plain ownership claim is just its file, which shrank the
+always-loaded section 1.76 → 1.26 MB.
