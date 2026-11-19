@@ -2284,3 +2284,14 @@ CRLF everywhere (ADR-772: the rope stopped taking ropey's `unicode_lines`, a buf
 `^`/`$` read CR, tree-sitter's points agree for a rope and a string), with new natives
 `text/line-text`, `text/line-end->char`, `text/char->utf16` and `text/utf16->char`. A rope range
 error names the bound that is wrong.
+A served session takes a client's `[:key k]` only when `k` is key-shaped
+(`editor/serve/client-input?`), so a guest cannot pass an internal event off as a key.
+`jsonrpc/decode` resyncs past a bad `Content-Length` and caps a frame at 64 MiB. A key command's
+error, and a layer hook's, reach the caller instead of leaving a silent dead key (the REPL shows
+it under the input); `scope-dispatch` takes `pending` before `state` as `keymap-step` does.
+`display/text`, `rect` and `bar` resolve a face name, a sig refuses any other non-map face, and
+a frontend warns once per bad face. The window clips an op off the top or left edge as the
+terminal does, and both skip a malformed op. A second `:skip-unless` is refused; `nest test
+--help` drops `--doc`; the REPL lexes a multi-line form once per repaint. `fontify` on empty text
+was reported to answer nil where its siblings answer `()`: those are the same value (the empty
+list is nil), so nothing changed.
