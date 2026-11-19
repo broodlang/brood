@@ -4,13 +4,36 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.56.0 — one contract mechanism, checked across modules
 
 **Removed: `defbehaviour` and the `(:implements …)` header clause (ADR-761).** `defability` is
 the one contract mechanism: a module contract is an ability over a value the module defines,
 and its bodyless ops are required, checked at the `impl`. `reflect/behaviour-ops` and the
 `*protocols*` registry go with them; `(:implements …)` in a header is refused with a message
 naming `defability`.
+
+**Fixed: an `impl` is checked against an ability declared in another module.** A missing
+required op or a wrong arity is reported where the contract is implemented, per dispatch id: an
+op another `impl` provides for the same id, in the file or a loaded module, is not missing.
+
+**Fixed: an `impl` that names its ability qualified dispatches.** `(impl web/session/SessionStore
+…)` registered its methods under a key dispatch never read, so every call raised "no impl".
+
+**Fixed: `system/reload-defs` re-runs a top-level `impl`,** so an edited method takes effect on
+save.
+
+**Fixed: checker false positives.** `(get m :k)` types a parameter as `(:k m)` does; a field
+guard narrows under `and`; a bare truthiness test leaves an unknown field unknown; a private
+helper is typed under each call's own arguments; two same-named records in one file keep their
+own types.
+
+**Added: `:skip-unless` on `describe`/`test`** — a test a runtime fact skips still registers,
+with its reason. **`map/shape-problems`** reports a map's missing, unknown and invalid keys with
+a "did you mean"; **`text/after-line->char`** names a line's end. `%gui-size` answers `(tuple int
+int)` and `%image-thumb` its decoded shape.
+
+**Changed: the indenter** hangs brackets, indents a heredoc's first line, and tree-sitter nodes
+carry the field they fill.
 
 **Added: `nest check` flags a literal whose own space doubles `io/puts`'s separator.**
 `io/puts` and `io/write` put one space between their arguments, so `(io/puts "count = " n)`
