@@ -43,14 +43,49 @@ pub(super) struct Protocol {
     ops: Vec<Op>,
 }
 
-/// The abilities this file declares (`defability`), keyed by name — what each of its
-/// `impl`s is checked against. An `impl` of an ability declared elsewhere is checked
-/// through the loaded registries (`AbilityInfo`), not here.
+/// The abilities an `impl` in this file may name, keyed by their bare name — what each
+/// `impl` is checked against: every ability the image has loaded (the `*abilities*`
+/// registry, filled by the file's imports in Pass 1), then the file's own `defability`
+/// forms over them. Reading the registry is what makes a MODULE CONTRACT checkable: the
+/// ability is declared in a framework's module and implemented in the app's, so a
+/// file-local read alone saw no ability at all and an `impl` missing a required op passed
+/// in silence (ADR-761).
 pub(super) fn collect(heap: &Heap, forms: &[Value]) -> HashMap<String, Protocol> {
-    forms
-        .iter()
-        .filter_map(|&form| parse_protocol(heap, form))
+    let mut abilities = loaded_abilities(heap);
+    abilities.extend(forms.iter().filter_map(|&form| parse_protocol(heap, form)));
+    abilities
+}
+
+/// Every ability in the runtime `*abilities*` registry, modelled as [`parse_protocol`]
+/// models a `defability` form. The registry keeps each op spec WITH its default body, so a
+/// provided op is told apart from a required one here as in the source.
+fn loaded_abilities(heap: &Heap) -> HashMap<String, Protocol> {
+    let Some(Value::Map(map_id)) = obs_registry(heap, reg::ABILITIES) else {
+        return HashMap::new();
+    };
+    heap.map_entries(map_id)
+        .into_iter()
+        .filter_map(|(name, specs)| {
+            let name = sym_name(name)?;
+            let ops = list_items(heap, specs)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|&spec| {
+                    parse_op(heap, spec).map(|mut op| {
+                        op.provided = spec_has_body(heap, spec);
+                        op
+                    })
+                })
+                .collect();
+            Some((name, Protocol { ops }))
+        })
         .collect()
+}
+
+/// The name an ability is registered under: its bare last segment, as `impl` registers it
+/// (`(impl web/session/SessionStore …)` is `SessionStore`'s impl).
+fn ability_key(name: &str) -> &str {
+    name.rsplit('/').next().unwrap_or(name)
 }
 
 /// Check each `(defimpl Proto key method…)` against `protos`: a diagnostic per op
@@ -60,10 +95,12 @@ pub(super) fn collect(heap: &Heap, forms: &[Value]) -> HashMap<String, Protocol>
 pub(super) fn check_impls(
     heap: &Heap,
     forms: &[Value],
+    expanded: &[Value],
     protos: &HashMap<String, Protocol>,
+    ability_info: &AbilityInfo,
     out: &mut Vec<Finding>,
 ) {
-    for &form in forms {
+    for (index, &form) in forms.iter().enumerate() {
         let Some(items) = list_items(heap, form) else {
             continue;
         };
@@ -72,9 +109,10 @@ pub(super) fn check_impls(
             continue;
         }
         let noun = "ability";
-        let Some(pname) = items.get(1).and_then(|&v| sym_name(v)) else {
+        let Some(written) = items.get(1).and_then(|&v| sym_name(v)) else {
             continue;
         };
+        let pname = ability_key(&written).to_string();
         let Some(proto) = protos.get(&pname) else {
             continue;
         };
@@ -88,12 +126,34 @@ pub(super) fn check_impls(
             .iter()
             .filter_map(|&m| parse_op(heap, m).map(|o| (o.name, (o.arity, o.variadic))))
             .collect();
+        // The dispatch id this impl registers under, as the runtime spells it — read off
+        // its own expansion (`expanded[index]` is `form`'s), where `impl` has already
+        // qualified a bare record name.
+        let mut registered = HashSet::new();
+        if let Some(&expansion) = expanded.get(index) {
+            collect_register_impls(heap, expansion, &mut registered, &mut HashSet::new());
+        }
+        let impl_id = registered
+            .into_iter()
+            .find(|(ability, _, _)| *ability == pname)
+            .map(|(_, _, id)| id);
         // Every declared *required* op must be implemented, at a compatible arity. A
         // provided op (ADR-185) is covered by its default when omitted, so its absence is
         // fine; when present it is an override and is still arity-checked below.
+        //
+        // The contract is per id, not per `impl` form: an op another `impl` already provides
+        // for the same id — in this file or a loaded module — is not missing. A project
+        // splits one kind's ops across modules on purpose (bedit's LSP requests: the
+        // connection's ops in `lsp`, the editor fold in `lsp/commands`), and a project check
+        // has loaded both before it checks either.
+        let elsewhere = |op: &str| {
+            impl_id
+                .as_deref()
+                .is_some_and(|id| ability_info.has_impl(&pname, op, id))
+        };
         for op in &proto.ops {
             match provided.get(&op.name) {
-                None if op.provided => {}
+                None if op.provided || elsewhere(&op.name) => {}
                 None => out.push(Finding::new(
                     Lint::Conformance,
                     pos,
@@ -559,6 +619,12 @@ pub(super) struct AbilityInfo {
 impl AbilityInfo {
     pub(super) fn is_empty(&self) -> bool {
         self.op_fns.is_empty()
+    }
+    /// Whether some `impl` — this file's or a loaded module's — provides `ability`'s `op`
+    /// for dispatch id `id` (a `:default` does not count, as for `:sealed`).
+    pub(super) fn has_impl(&self, ability: &str, op: &str, id: &str) -> bool {
+        self.impls
+            .contains(&(ability.to_string(), op.to_string(), id.to_string()))
     }
     /// The `(ability, op)` an op-fn global symbol denotes, if any.
     pub(super) fn op_of(&self, sym: value::Symbol) -> Option<&(String, String)> {
