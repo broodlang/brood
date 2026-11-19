@@ -136,11 +136,12 @@ dropped, so the result stays non-overlapping."
   "The spans for one `line` at offset `base`, ascending and non-overlapping: the
 tokens (structured and classified words, one scan) and the line rules, merged.
 
-    (editor/lexer/lexer-line-spans (editor/lexer/lexer-grammar {:structured [[\"#.*\" :comment]]}) \"x # y\" 10 {:comment {:fg :grey}})   ;=> ([12 15 {:fg :grey}])"
+    (editor/lexer/lexer-line-spans (editor/lexer/lexer-grammar {:structured [[\"#.*\" :comment]]}) \"x # y\" 10 {:comment {:fg :grey}})   ;=> ([12 15 {:fg :grey}])
+    (editor/lexer/lexer-line-spans (editor/lexer/lexer-grammar {:structured [[\"#.*\" :comment]]}) \"x # y\" 0 {:comment {:fg :grey}})   ;=> ([2 5 {:fg :grey}])"
   (let (tokens (lexer-tokens grammar line faces)
         rules (lexer-line-rules grammar line faces)
         merged (reverse (lexer-merge tokens rules '())))
-    (map merged (fn ([s e f]) [(+ base s) (+ base e) f]))))
+    (if (= base 0) merged (map merged (fn ([s e f]) [(+ base s) (+ base e) f])))))
 
 ;; ---- the walk ---------------------------------------------------------------------
 
