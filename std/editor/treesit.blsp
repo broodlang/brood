@@ -739,7 +739,7 @@ to test it for nil.
   "Characters `[from, to)` of `src`, a string or a rope, as a string."
   (if (rope? src) (text/slice src from to) (string/substring src from to)))
 
-(defn- ts-line-start (src at)
+(defn- ts-line-start (src at:int -> int)
   "The offset of the start of the line containing `at` (a newline belongs to the line it
 ends)."
   (if (rope? src)
@@ -1183,7 +1183,7 @@ under that content. Any other line is the caller's to decide."
                     (- (+ base width)
                       (if closing-token (* width (ts-dedent-levels spec closing-token 1)) 0)))))))))))
 
-(defn- ts-prev-nonblank-bol (text bol)
+(defn- ts-prev-nonblank-bol (text bol:int)
   ;; the start of the nearest non-blank line before the one at `bol`, or nil
   (letrec (scan (fn (at)
                   (if (<= at 0)
@@ -1267,10 +1267,10 @@ run began on."
           (cond
             (and (continues? before-bol) (continues? previous-bol)) indent
             (ts-line-opens? opens previous-line) (+ indent width)
-            (continues? before-bol)
+            (and before-bol (continues? before-bol))
               (letrec (head (fn (line-bol)
                               (let (above (code-above line-bol))
-                                (if (continues? above) (head above) line-bol))))
+                                (if (and above (continues? above)) (head above) line-bol))))
                 (ts-line-indent text (head before-bol)))
             else indent)))))
 
