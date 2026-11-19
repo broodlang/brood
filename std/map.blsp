@@ -93,28 +93,37 @@ stopping at the shorter.
 ;; (so a caller can warn, fail, or show a diagnostic) and one sentence per problem.
 
 (defn- shape-key-text (key)
-  ;; how a key is printed — and compared, for a suggestion: `:name`, `"name"`, `name`
+  ;; how a key is printed: `:name`, `"name"`, `name`
   (pr-str key))
 
 (defn- shape-sorted (collection)
   ;; keys in a stable order, whatever their kind, so problems come out the same every run
   (seq/sort-by (vec collection) shape-key-text))
 
+(defn- shape-key-name (key)
+  ;; what a suggestion compares: a keyword's or symbol's bare name, a string as it is — the
+  ;; `:` every keyword shares is no evidence two keys are alike, and counted in the text it
+  ;; lowered the distance enough that `:color` suggested `:cover`
+  (cond
+    (or (keyword? key) (symbol? key)) (->string key)
+    (string? key) key
+    else (pr-str key)))
+
 (defn- shape-suggestion (key candidates)
   ;; the nearest of `candidates` to the unknown `key` by edit distance, or nil
-  (let (by-text (into {} (map candidates (fn (candidate) [(shape-key-text candidate) candidate])))
-        nearest (fuzzy/nearest (keys by-text) (shape-key-text key)))
-    (if (empty? nearest) nil (get by-text (first nearest)))))
+  (let (by-name (into {} (map candidates (fn (candidate) [(shape-key-name candidate) candidate])))
+        nearest (fuzzy/nearest (keys by-name) (shape-key-name key)))
+    (if (empty? nearest) nil (get by-name (first nearest)))))
 
 (defn shape-problems (value shape:map -> list)
   "What is wrong with `value` against `shape` — `{:required #{keys} :optional #{keys}
-:check {key predicate}}`, every part optional — as a list of problem maps, `()` when it fits.
-A problem is `{:kind :not-a-map :value value}` (and nothing else is checked),
-`{:kind :missing :key key}` for an absent required key, `{:kind :unknown :key key :suggestion
-nearest}` for a key the shape does not name (`:suggestion` is the nearest unused allowed key by
-edit distance, or nil), or `{:kind :invalid :key key :value value}` for a present key whose
-`:check` predicate answers false. Missing come first, then unknown, then invalid, each sorted
-by key. `map/shape-problem->string` says one as a sentence.
+:check {key predicate}}`, every part optional, a key list any collection — as a list of problem
+maps, `()` when it fits. A problem is `{:kind :not-a-map :value value}` (and nothing else is
+checked), `{:kind :missing :key key}` for an absent required key, `{:kind :unknown :key key
+:suggestion nearest}` for a key the shape does not name (`:suggestion` is the nearest unused
+allowed key by edit distance between bare names, or nil), or `{:kind :invalid :key key :value
+value}` for a present key whose `:check` predicate answers false. Missing come first, then
+unknown, then invalid, each sorted by key. `map/shape-problem->string` says one as a sentence.
 
     (map/shape-problems {:name \"x\"} {:required #{:name} :optional #{:version}})   ;=> ()
     (map/shape-problems {:nmae \"x\"} {:required #{:name}})   ;=> ({:kind :missing :key :name} {:kind :unknown :key :nmae :suggestion :name})
@@ -122,8 +131,8 @@ by key. `map/shape-problem->string` says one as a sentence.
     (map/shape-problems 42 {:required #{:name}})   ;=> ({:kind :not-a-map :value 42})"
   (if (not (map? value))
     (list {:kind :not-a-map :value value})
-    (let (required (or (:required shape) #{})
-          allowed (into required (or (:optional shape) #{}))
+    (let (required (into #{} (or (:required shape) []))
+          allowed (into required (or (:optional shape) []))
           checks (or (:check shape) {})
           present (keys value)
           missing (seq/filter (shape-sorted required) (fn (key) (not (contains? value key))))

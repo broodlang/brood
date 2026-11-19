@@ -257,6 +257,11 @@
       (assert= (text/after-line->char rope 1) 3)))
   (test "an empty text's one line ends at 0"
     (assert= (text/after-line->char (text/string-> "") 0) 0))
-  (test "a line past the last, or a negative one, raises"
-    (assert-error (text/after-line->char (text/string-> "ab") 1))
+  (test "line-count itself, as line->char takes it, is the empty line at the text's end"
+    (let (rope (text/string-> "ab"))
+      (assert= (text/line->char rope 1) 2)
+      (assert= (text/after-line->char rope 1) 2)))
+  (test "a line past line-count, or a negative one, raises naming the call and the line"
+    (assert= (error-message (error-of (text/after-line->char (text/string-> "ab") 2)))
+      "text/after-line->char: line 2 is out of bounds (valid 0..1)")
     (assert-error (text/after-line->char (text/string-> "ab") -1))))
