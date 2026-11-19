@@ -80,6 +80,17 @@
       (nest/flags-of "check"))
     (assert= (list) (nest/flags-of "not-a-command")))
 
+  (test "a command's help names only the flags it takes"
+    ;; `nest test --help` advertised `--doc FILE…` long after ADR-716 moved it to `nest
+    ;; doctest`. A flag of ANOTHER command named on purpose is listed here.
+    (let (elsewhere {"attach" #{"--daemon"}})
+      (doseq (command (nest/subcommands))
+        (let (about (or (get (get nest/*commands* command) :about) "")
+              takes (into (get elsewhere command #{}) (nest/flags-of command))
+              named (map (regex/find-all about "--[a-z][a-z-]*") :text))
+          (assert= [command (seq/filter named (fn (flag) (not (contains? takes flag))))]
+            [command ()])))))
+
   (test "a fixed positional lists its values; a free-text one lists none"
     (assert= ["tmlanguage" "emacs" "tree-sitter"] (nest/positional-values "grammar"))
     (assert= (list) (nest/positional-values "check"))

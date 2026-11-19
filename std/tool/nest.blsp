@@ -68,7 +68,7 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
             ;; caller and leave the rest.
             :no-positional-with ["--fix-renames"]
             :run (fn (options) (run-check options))}
-   "test" {:about "Run the project's tests (every `tests/**/*_test.blsp`), or specific test files — `FILE`, or `FILE:LINE` for the one test at that line. `--watch` stays up and reruns on every save: the named files, or the test files a change reaches. `--doc FILE…` checks the `form ;=> result` docstring examples of those SOURCE files instead, each failure as FILE:LINE."
+   "test" {:about "Run the project's tests (every `tests/**/*_test.blsp`), or specific test files — `FILE`, or `FILE:LINE` for the one test at that line. `--watch` stays up and reruns on every save: the named files, or the test files a change reaches. A SOURCE file's `form ;=> result` docstring examples are `nest doctest`'s (ADR-716)."
            :flags {"--only" {:value "SELECTOR" :repeat true :complete "selector"}
                    "--exclude" {:value "SELECTOR" :repeat true :complete "selector"}
                    "--include" {:value "SELECTOR" :repeat true :complete "selector"}
