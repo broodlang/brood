@@ -2264,3 +2264,11 @@ as an author's; no syntax for a non-empty slot (a literal clause first or a `:wh
 pinned value fails the clause (`(str nil)` is "nil", so an unset prefix matched "nil-thing"); the
 first test of it was vacuous — no input began with "nil" — and was rewritten until it went red
 with the check removed.
+
+2026-11-19. **Test support never ships.** bedit's new `corpus` module — the harness its language
+packages test with — `(:use test)`s and registers tests from a function, and a release runtime is
+built without `test` (`dev-tools`), so `nest release` of bedit failed its boot check on every
+lean toolchain. `bundle-collect` now leaves out a module that still writes `describe`/`deftest`
+once its top-level tests are stripped, with every module whose header needs one, and takes the
+dead `(:use test)` out of a module whose tests sat beside its code (ADR-225) — which could not load
+in a lean runtime either. Both halves in `tests/project_test.blsp`, each red with its half off.
