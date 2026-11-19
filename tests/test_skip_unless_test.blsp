@@ -1,0 +1,123 @@
+;; `:skip-unless CONDITION REASON` — a skip a RUNTIME fact decides (ADR-757).
+;;
+;; A project gating tests on a fact it learns at load time (a grammar compiled in, a tool on
+;; PATH) used to write `(when (fact?) (describe …))`, which registers NOTHING when the fact is
+;; false: the run reports fewer tests and nobody notices. `:skip-unless` registers every test
+;; either way, skipped with REASON when the fact is false, and the run counts and lists them.
+;;
+;; The registration cases run `:isolated`: they reset and fill the registry, and the
+;; isolated test's private globals roll that back when it finishes.
+
+(defmodule test-skip-unless-test (:use-internals test) (:use test))
+
+(defn- skip-unless-registered ()
+  "Every registered test, run, as `[name skipped? reason]` in registration order."
+  (vec (reverse (mapcat test/*units*
+                  (fn (unit)
+                    (map (third unit)
+                      (fn (t)
+                        (let (r (test/run (second unit) t))
+                          [(test/result-name r)
+                            (test/result-skipped? r)
+                            (test/result-skip-reason r)]))))))))
+
+(defn- skip-unless-result (name where reason)
+  (list "g" name nil 0 true where reason))
+
+(describe "test: :skip-unless registers the tests it skips"
+  (test "a describe whose condition is false registers every test, skipped with the reason"
+    :isolated (test/reset-units)
+    (describe "inner"
+      :skip-unless (= 1 2)
+      "no such fact"
+      (test "a" (is false))
+      (test "b" (is false)))
+    (assert= (vec (sort (skip-unless-registered)))
+      [["a" true "no such fact"] ["b" true "no such fact"]]))
+
+  (test "a describe whose condition is true runs its tests"
+    :isolated (test/reset-units)
+    (describe "inner" :skip-unless (= 1 1) "never shown" (test "a" (is true)))
+    (assert= (skip-unless-registered) [["a" false nil]]))
+
+  (test "a test-level skip keeps its own reason inside a skipped group"
+    :isolated (test/reset-units)
+    (describe "inner"
+      :skip-unless false
+      "the group's reason"
+      (test "own" :skip-unless false "its own reason" (is false))
+      (test "group" (is false)))
+    (assert= (vec (sort (skip-unless-registered)))
+      [["group" true "the group's reason"] ["own" true "its own reason"]]))
+
+  (test "written before a test in a describe body, it applies to that test alone"
+    :isolated (test/reset-units)
+    ;; not at the head: there it would be the group's own modifier
+    (describe "inner"
+      (test "runs" (is true))
+      :skip-unless false
+      "prefix reason"
+      (test "skipped" (is false)))
+    (assert= (vec (sort (skip-unless-registered)))
+      [["runs" false nil] ["skipped" true "prefix reason"]]))
+
+  (test "a lone test outside any describe"
+    :isolated (test/reset-units)
+    (test "solo" :skip-unless nil "solo reason" (is false))
+    (assert= (skip-unless-registered) [["solo" true "solo reason"]]))
+
+  (test "the condition is evaluated as the test registers, not read as a literal"
+    :isolated (test/reset-units)
+    (let (available? (fn () false))
+      (test "gated" :skip-unless (available?) "not available" (is false)))
+    (assert= (skip-unless-registered) [["gated" true "not available"]]))
+
+  (test "a bare :skip has no reason"
+    :isolated (test/reset-units)
+    (test "plain" :skip (is false))
+    (assert= (skip-unless-registered) [["plain" true nil]]))
+
+  (test ":skip-unless without its condition and reason is an expansion error"
+    (is (error-of (reflect/macroexpand '(test/test "t" :skip-unless))))
+    (is (error-of (reflect/macroexpand '(test/describe "g" (test "a" (is 1)) :skip-unless true "r"))))))
+
+(describe "test: a skipped test says why"
+  (test "the skipped list names each test, where it is, and its reason"
+    (let (out (with-out-str (test/report-skipped (list (list "g" "ran" nil 1 false "")
+                                                   (skip-unless-result "parses"
+                                                     "tests/a_test.blsp:3" "no grammar")
+                                                   (list "g"
+                                                     "plain" nil 0 true "tests/a_test.blsp:9")))))
+      (is (includes? out "Skipped (2):"))
+      (is (includes? out "g › parses  tests/a_test.blsp:3  — no grammar"))
+      (is (includes? out "g › plain  tests/a_test.blsp:9"))
+      (refute (includes? out "ran"))))
+
+  (test "nothing skipped prints nothing"
+    (assert= (with-out-str (test/report-skipped (list (list "g" "ran" nil 1 false "")))) ""))
+
+  (test "a traced skip carries its reason"
+    :isolated (def test/*trace* true)
+    (is (includes? (with-out-str (test/trace-result (skip-unless-result "parses" "" "no grammar")))
+          "(no grammar)")))
+
+  (test "TAP puts the reason after # SKIP, as the protocol has it"
+    (is (includes? (with-out-str (test/test-fmt-tap (list (skip-unless-result "parses"
+                                                            "" "no grammar"))
+                                   0))
+          "ok 1 - g › parses # SKIP no grammar")))
+
+  (test "the structured result carries the reason"
+    (assert= (get (test/test-result->data (skip-unless-result "parses" "" "no grammar"))
+               :skip-reason)
+      "no grammar"))
+
+  (test "a reason that is not a string prints as itself"
+    (assert= (test/test-skip-reason-text (skip-unless-result "p" "" :no-grammar)) ":no-grammar")
+    (assert= (test/test-skip-reason-text (list "g" "p" nil 0 true "")) nil)))
+
+;; The live shape: a group whose fact holds runs, exactly as if it carried no modifier.
+(describe "test: :skip-unless over a fact that holds"
+  :skip-unless (fn? test/run)
+  "test/run is gone"
+  (test "runs" (assert= (+ 1 2) 3)))

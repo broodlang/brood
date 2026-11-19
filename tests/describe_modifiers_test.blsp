@@ -29,7 +29,12 @@
   (seq/filter (file/walk-files dir) (fn (file) (string/ends-with? file ".blsp"))))
 
 (defn- dm-modifier? (k)
-  (includes? [:isolated :serial :skip :tags] k))
+  (includes? [:isolated :serial :skip :skip-unless :tags] k))
+
+(defn- dm-modifier-width (k)
+  ;; How many forms a modifier takes with it: `:tags` its vector, `:skip-unless` its
+  ;; condition and reason.
+  (case k :tags 2 :skip-unless 3 1))
 
 (defn- dm-test-form? (f)
   (and (pair? f) (includes? ['test 'deftest] (first f))))
@@ -59,7 +64,7 @@
             acc))
         ;; A leading modifier. `:tags` carries its vector with it.
         (dm-scan-test-body where
-          (if (= (first forms) :tags) (rest (rest forms)) (rest forms))
+          (drop forms (dm-modifier-width (first forms)))
           false
           acc))
     else (dm-scan-test-body where (rest forms) true acc)))
@@ -74,7 +79,7 @@
       (cond
         (not in-body)
           (dm-scan-describe-body where
-            (if (= (first forms) :tags) (rest (rest forms)) (rest forms))
+            (drop forms (dm-modifier-width (first forms)))
             false
             acc)
 
@@ -87,9 +92,9 @@
                     " right after the group name, or mark the one test :isolated")
               acc))
 
-        (dm-test-form? (if (= (first forms) :tags) (third forms) (second forms)))
+        (dm-test-form? (nth forms (dm-modifier-width (first forms))))
           (dm-scan-describe-body where
-            (if (= (first forms) :tags) (rest (rest forms)) (rest forms))
+            (drop forms (dm-modifier-width (first forms)))
             true
             acc)
 
@@ -158,6 +163,8 @@
     (let (src "(describe \"g\" :serial :tags [:slow]
                   (test \"a\" :isolated (assert= 1 1))
                   :isolated (test \"b\" (assert= 1 1))
-                  :tags [:x] (test \"c\" (assert= 1 1)))"
+                  :tags [:x] (test \"c\" (assert= 1 1))
+                  :skip-unless (fact?) \"why\" (test \"d\" (assert= 1 1))
+                  (test \"e\" :skip-unless (fact?) \"why\" (assert= 1 1)))"
           found (fold (or (reflect/read-all src) nil) nil (fn (a f) (dm-walk "src" f a))))
       (assert= found nil))))

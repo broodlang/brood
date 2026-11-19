@@ -23,7 +23,7 @@
 (defmodule test-modifier-placement-test
   (:use test))
 
-(def- modifier-keywords [:isolated :skip :serial :tags])
+(def- modifier-keywords [:isolated :skip :skip-unless :serial :tags])
 (def- test-heads ['test 'deftest])
 
 (defn- modifier? (x)
@@ -47,6 +47,7 @@
   (cond
     (empty? items) items
     (= (first items) :tags) (after-modifiers (drop items 2))
+    (= (first items) :skip-unless) (after-modifiers (drop items 3))
     (modifier? (first items)) (after-modifiers (drop items 1))
     else items))
 
@@ -66,6 +67,7 @@
             legal (cond
                     (= kw :serial) false
                     (= kw :tags) (and (vector? (first tail)) (test-form? (second tail)))
+                    (= kw :skip-unless) (test-form? (nth tail 2))
                     else (test-form? (first tail))))
         (describe-body-problems tail
           (if legal acc (cons (str "(describe …) body contains " kw " with no test after it") acc))))
@@ -122,6 +124,12 @@
     (assert= '() (scan-source "(describe \"g\" :serial (test \"n\" (is 1)))"))
     (assert= '() (scan-source "(describe \"g\" :isolated (test \"n\" (is 1)))"))
     (assert= '() (scan-source "(describe \"g\" :tags [:slow] (test \"n\" (is 1)))"))
+    (assert= '() (scan-source "(describe \"g\" :skip-unless (f?) \"why\" (test \"n\" (is 1)))"))
+    (assert= '() (scan-source "(test \"n\" :skip-unless (f?) \"why\" (is 1))"))
+    (assert= '()
+      (scan-source "(describe \"g\" (test \"m\" (is 1)) :skip-unless (f?) \"why\" (test \"n\" (is 1)))"))
+    (assert= 1
+      (count (scan-source "(describe \"g\" (test \"m\" (is 1)) :skip-unless (f?) \"why\")")))
     ;; a trailing keyword VALUE is legal — macro_harden_test relies on it
     (assert= '() (scan-source "(test \"n\" (doseq (x '(1 2)) x) :ok)")))
 

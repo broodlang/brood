@@ -28,6 +28,9 @@
 ;;   (test "touches global state" :isolated ...)   ; a lone isolated test
 ;;   (test "needs a live database" :skip ...)      ; registered, never run
 ;;   (describe "postgres" :skip ...)               ; skips every test in the group
+;;   (describe "ruby" :skip-unless (ruby?) "no ruby grammar" ...)
+;;                                          ; skipped, with that reason, when
+;;                                          ;   (ruby?) is false as it registers
 ;;
 ;; Why this matters here: a runtime's processes SHARE one global table (see
 ;; docs/shared-code.md), so two parallel tests that both redefine the same global
@@ -220,40 +223,62 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
 ;; attaches tags, which `nest test --only/--exclude/--include` select on (the
 ;; ExUnit `@tag` analogue). Returns `(mode tags body)`.
 (defn- test-split-mods (forms mode tags)
-  (test-split-mods-acc forms mode tags false))
+  (test-split-mods-acc forms mode tags false nil))
 
 ;; `:skip` rides along as a fourth piece of state: a skipped test still REGISTERS
 ;; (so it is counted and reported, rather than vanishing) but its body is never
 ;; called. That is the point of a skip over deleting or commenting out the test —
 ;; it stays visible in the run.
-(defn- test-split-mods-acc (forms mode tags skip)
+;;
+;; `:skip-unless CONDITION REASON` is the skip a RUNTIME fact decides (ADR-757): the
+;; skip state becomes the form `(not CONDITION)`, evaluated when the test registers, and
+;; REASON (a form too, normally a string) rides as a fifth piece of state into the meta
+;; and the skipped result, so the run says why. It replaces `(when (fact?) (describe …))`,
+;; which registers nothing when the fact is false: the run reports fewer tests and nobody
+;; notices. Returns `(mode tags body skip reason)`.
+(defn- test-split-mods-acc (forms mode tags skip reason)
   (cond
-    (empty? forms) (list mode tags forms skip)
-    (= (first forms) :isolated) (test-split-mods-acc (rest forms) :isolated tags skip)
-    (= (first forms) :serial) (test-split-mods-acc (rest forms) :serial tags skip)
-    (= (first forms) :skip) (test-split-mods-acc (rest forms) mode tags true)
-    (= (first forms) :tags) (test-split-mods-acc (rest (rest forms)) mode (second forms) skip)
-    else (list mode tags forms skip)))
+    (empty? forms) (list mode tags forms skip reason)
+    (= (first forms) :isolated) (test-split-mods-acc (rest forms) :isolated tags skip reason)
+    (= (first forms) :serial) (test-split-mods-acc (rest forms) :serial tags skip reason)
+    (= (first forms) :skip) (test-split-mods-acc (rest forms) mode tags true reason)
+    (= (first forms) :skip-unless)
+      (if (< (count forms) 3)
+        (error "describe/test: :skip-unless takes a condition and a reason — "
+          ":skip-unless (fact?) \"why\" — before the body")
+        (test-split-mods-acc (drop forms 3)
+          mode
+          tags
+          (if (= skip true) true `(or ~skip (not ~(second forms))))
+          (third forms)))
+    (= (first forms) :tags)
+      (test-split-mods-acc (rest (rest forms)) mode (second forms) skip reason)
+    else (list mode tags forms skip reason)))
 
 ;; Per-test metadata: its tags plus where it was declared. The location comes
 ;; from the first body form's read position (captured at macro-expansion time,
 ;; like `fail-loc`), which is what makes `nest test FILE:LINE` able to pick out
 ;; one test — so a test whose body is a bare literal (no recorded position) is
 ;; still runnable, just not addressable by line.
-(defn- test-meta (tags loc skip)
-  {:tags (or tags [])
-   :file (if loc (first loc) nil)
-   :line (if loc (second loc) nil)
-   :skip (or skip false)})
+(defn- test-meta (tags loc skip reason)
+  (let (skip? (= skip true))
+    {:tags (or tags [])
+     :file (if loc (first loc) nil)
+     :line (if loc (second loc) nil)
+     :skip skip?
+     :skip-reason (when skip? reason)}))
 
 (defn- test-skip? (t) (= (get (third t) :skip) true))
 
 ;; Merge a `describe`'s group-level tags into one collected test's own tags. A
 ;; test carries the union, so `--only db` picks up a test tagged only at the
 ;; group level (ExUnit's `@moduletag`/`describe` tag inheritance).
-;; A group-level `:skip` marks every test in it; a test-level one already set its own.
-(defn- test-mark-skip (t group-skip)
-  (if (not group-skip) t (list (first t) (second t) (assoc (or (third t) {}) :skip true))))
+;; A group-level `:skip` marks every test in it; a test-level one already set its own, and
+;; keeps its own reason.
+(defn- test-mark-skip (t group-skip group-reason)
+  (if (or (not (= group-skip true)) (test-skip? t))
+    t
+    (list (first t) (second t) (assoc (or (third t) {}) :skip true :skip-reason group-reason))))
 
 (defn- test-add-tags (t group-tags)
   (if (empty? (or group-tags []))
@@ -283,8 +308,9 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
 ;; Turn a finished describe's collected tests into units according to its mode:
 ;; default spreads them across one :parallel unit each; :serial/:isolated keep
 ;; them together in a single unit.
-(defn- emit-describe (mode group tests group-tags group-skip)
-  (let (tagged (map tests (fn (t) (test-mark-skip (test-add-tags t group-tags) group-skip)))
+(defn- emit-describe (mode group tests group-tags group-skip group-reason)
+  (let (tagged (map tests
+                 (fn (t) (test-mark-skip (test-add-tags t group-tags) group-skip group-reason)))
         ;; A test marked `:isolated` on its own gets its own isolated unit even in a
         ;; parallel group — that is what the marker says, and honouring it per test avoids
         ;; serialising the other N-1 tests of the group to protect one.
@@ -345,6 +371,13 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
           (pr-str (second forms))
           " must stand directly before a "
           "(test …) form, or be the group's own modifier right after its name"))
+    (= (first forms) :skip-unless)
+      (if (test-describe-form? (nth forms 3))
+        (test-lift-prefix-mods (drop forms 4)
+          (cons (test-splice-mods (nth forms 3) (list :skip-unless (second forms) (third forms)))
+            acc))
+        (error "describe: :skip-unless CONDITION REASON must stand directly before a "
+          "(test …) form, or be the group's own modifier right after its name"))
     (= (first forms) :serial)
       (error "describe: :serial is a GROUP mode and has no per-test meaning — put it right "
         "after the group name, or mark the one test :isolated")
@@ -358,7 +391,7 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
     else (test-lift-prefix-mods (rest forms) (cons (first forms) acc))))
 
 (defmacro describe (group & forms)
-  "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on. Inside the body, `:isolated`, `:skip` or `:tags [kw …]` written directly before a `(test …)` form applies to that test alone (the same as writing it inside the form after its name); any other bare keyword in the body is an error. Warns (advisory) if the group contains no tests."
+  "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] [:skip | :skip-unless CONDITION REASON] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on. `:skip` registers every test without running it; `:skip-unless CONDITION REASON` does so when CONDITION, evaluated as the group registers, is false — the tests are still counted and listed as skipped, with REASON, where `(when CONDITION (describe …))` would register nothing (the body still runs, to register them, so keep the work that needs CONDITION inside the tests). Inside the body, `:isolated`, `:skip`, `:skip-unless CONDITION REASON` or `:tags [kw …]` written directly before a `(test …)` form applies to that test alone (the same as writing it inside the form after its name); any other bare keyword in the body is an error. Warns (advisory) if the group contains no tests."
   (if (keyword? group)
     (error "describe: group name must be a string, not keyword "
       (pr-str group)
@@ -369,7 +402,8 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
           mode (first parts)
           tags (second parts)
           body (test-lift-prefix-mods (third parts) nil)
-          skip (nth parts 3))
+          skip (nth parts 3)
+          reason (nth parts 4))
       ;; These writes are this module's globals, made from the module the describe is in.
       ;; One writer at a time: the runner loads test files one by one in its own process
       ;; (`run-tests-scoped`), which is also what makes the collect-then-emit protocol sound
@@ -379,7 +413,7 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
          (do ~@body)
          ; the (test ...) forms collect themselves
          (check-allow :cross-module-def (def *collecting* false))
-         (emit-describe ~mode ~group (reverse *collected*) ~tags ~skip)
+         (emit-describe ~mode ~group (reverse *collected*) ~tags ~skip ~reason)
          ;; Advisory: a describe with no tests is a heading over nothing (ADR-225).
          ~(when (not (describe-body-has-tests? body))
             (list 'io/puts
@@ -394,19 +428,20 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
 ;; test, so a crashing test can't hang the runner (a dead worker never sends, and
 ;; `receive` would block forever). The thunk returns the failure list (empty = pass).
 (defmacro test (name & forms)
-  "Register one test: `(test \"name\" [:isolated] [:tags [kw …]] body...)`. Each body form is checked independently, so one test can report several assertion failures. `:tags` attaches tags for `nest test --only/--exclude/--include`."
+  "Register one test: `(test \"name\" [:isolated] [:tags [kw …]] [:skip | :skip-unless CONDITION REASON] body...)`. Each body form is checked independently, so one test can report several assertion failures. `:tags` attaches tags for `nest test --only/--exclude/--include`. `:skip` registers the test without running it; `:skip-unless CONDITION REASON` does so when CONDITION, evaluated as the test registers, is false, and the run counts it and lists it as skipped with REASON."
   (let (parts (test-split-mods forms :parallel nil)
         iso (= (first parts) :isolated)
         tags (second parts)
         body (third parts)
         skip (nth parts 3)
+        reason (nth parts 4)
         loc (fail-loc (first body))
         thunks (map body (fn (f) (list 'fn nil f))))
     ; each form -> (fn () form)
     `(register-test ~name
        (fn () (test-run (list ~@thunks) nil))
        ~iso
-       (test-meta ~tags (quote ~loc) ~skip))))
+       (test-meta ~tags (quote ~loc) ~skip ~reason))))
 
 (defmacro deftest (name & body)
   "Register a single test named by the (symbol) `name`, outside any `describe` group."
@@ -684,6 +719,14 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
     (test/result-where '(\"math\" \"adds\" () 3 false \"tests/m_test.blsp:4\"))   ;=> \"tests/m_test.blsp:4\"
     (test/result-where '(\"math\" \"adds\" () 3))   ;=> \"\""
   (if (> (count r) 5) (or (nth r 5) "") ""))
+;; Why a skipped test was skipped: the REASON of a `:skip-unless`, or nil for a bare `:skip`
+;; and for any result that ran.
+(defn result-skip-reason (r)
+  "Why the skipped result `r` was skipped — the REASON its `:skip-unless` gave (the result's 7th field) — or nil for a bare `:skip` and for a test that ran.
+
+    (test/result-skip-reason '(\"ruby\" \"parses\" () 0 true \"\" \"no ruby grammar\"))   ;=> \"no ruby grammar\"
+    (test/result-skip-reason '(\"math\" \"adds\" () 3))   ;=> nil"
+  (when (result-skipped? r) (nth r 6)))
 (defn- full-name (r) (label (result-group r) (result-name r)))
 
 ;; The seed for this run, or nil. Read straight off the active filter so the
@@ -749,7 +792,8 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
                "  "
                (test-dim (trace-timing r))
                (if (= (result-where r) "") "" (str "  " (test-dim (result-where r))))
-               (trace-failure-count r))))
+               (trace-failure-count r)
+               (trace-skip-reason r))))
   r)
 
 (defn- trace-glyph (r)
@@ -771,10 +815,40 @@ failures have been reported. `brood --test` prints `message` and exits non-zero.
       (= n 1) (test-red "  (1 failure)")
       else (test-red (str "  (" n " failures)")))))
 
+;; A skip's reason as text for a report, or nil when it has none (a bare `:skip`, a test
+;; that ran). The REASON form is normally a string; anything else prints as itself.
+(defn- test-skip-reason-text (r)
+  (let (why (result-skip-reason r))
+    (cond
+      (nil? why) nil
+      (string? why) why
+      else (pr-str why))))
+
+(defn- trace-skip-reason (r)
+  (if-let (why (test-skip-reason-text r)) (test-orange (str "  (" why ")")) ""))
+
+;; Every skipped test, named, after the failures and before the summary line: a count alone
+;; says THAT tests were skipped, and a suite whose tests a missing tool skips on one machine
+;; should say which and why where the run is read (ADR-757). Quiet when nothing skipped.
+(defn- report-skipped (results)
+  (let (skipped (seq/filter results result-skipped?))
+    (when (not (empty? skipped))
+      (io/puts "")
+      (io/puts (str "Skipped (" (count skipped) "):"))
+      (fold skipped
+        nil
+        (fn (_ r)
+          (io/puts (str "  "
+                     (test-orange "○")
+                     " "
+                     (full-name r)
+                     (if (= (result-where r) "") "" (str "  " (test-dim (result-where r))))
+                     (if-let (why (test-skip-reason-text r)) (str "  — " why) ""))))))))
+
 ;; A skipped test produces a result without ever calling its body — it still counts
 ;; and still reports, which is the difference between skipping a test and deleting it.
 (defn- test-skipped-result (group t)
-  (list group (first t) nil 0 true (test-where t)))
+  (list group (first t) nil 0 true (test-where t) (get (third t) :skip-reason)))
 
 ;; "file:line" for a test, or "" when no position was recorded. The path is shown
 ;; relative to the working directory: the loader records absolute paths, and a full
@@ -1628,7 +1702,14 @@ order (deterministic — the results are already collected)."
     0
     (fn (i r)
       (let (status (if (result-failed? r) "not ok" "ok"))
-        (io/puts (str status " " (+ i 1) " - " (full-name r) (if (result-skipped? r) " # SKIP" "")))
+        (io/puts (str status
+                   " "
+                   (+ i 1)
+                   " - "
+                   (full-name r)
+                   (if (result-skipped? r)
+                     (str " # SKIP" (if-let (why (test-skip-reason-text r)) (str " " why) ""))
+                     "")))
         (when (result-failed? r)
           (fold (result-fails r)
             nil
@@ -1644,6 +1725,7 @@ renders as JSON `[]` rather than `null`."
    :name (result-name result)
    :passed (not (result-failed? result))
    :skipped (result-skipped? result)
+   :skip-reason (test-skip-reason-text result)
    :ms (result-ms result)
    :failures (or (map (result-fails result)
                    (fn (record) {:loc (fail-loc-of record) :details (fail-lines-of record)}))
@@ -1758,6 +1840,7 @@ read the un-imaged path as evidence about the imaged one."
       (io/puts "warning: no tests matched the given filters — 0 tests ran (check the selector, or a stale --failed record naming tests that no longer exist)"
         :to *err*))
     (report-failures results)
+    (report-skipped results)
     (report-slow-over results *slow-ms*)
     (when slowest (report-slow results slowest))
     (io/puts "")

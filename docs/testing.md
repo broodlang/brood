@@ -54,7 +54,7 @@ and calls `(run-tests)` for you. The language binary `brood` only ever runs a
 - **`(test "name" body…)`** — one case. The body is any Brood code plus
   assertions.
 - Both accept `:serial` / `:isolated` (execution mode), `:tags [kw …]`
-  (selection) and `:skip` before the body, in any order — see [Tags](#tags) and
+  (selection) and `:skip` or `:skip-unless CONDITION REASON` before the body, in any order — see [Tags](#tags) and
   [Skipping a test](#skipping-a-test).
 - **`(deftest name body…)`** — a single case named by a symbol, no group. Kept
   for convenience; expands to `test`.
@@ -169,6 +169,36 @@ between skipping it and deleting or commenting it out — but it counts as neith
 pass nor a failure, and the summary names them separately
 (`8 tests, 5 passed, 0 failed, 3 skipped`). `:skip` composes with the other
 modifiers (`:serial`, `:isolated`, `:tags`) in any order.
+
+When the skip depends on a fact only the running program knows — a grammar compiled in, a
+tool on `PATH`, a service reachable — use `:skip-unless CONDITION REASON`. CONDITION is
+evaluated as the test registers; when it is false the tests register skipped, with REASON:
+
+```lisp fragment
+(describe "ruby indentation" :skip-unless (grammar-installed? :ruby) "no ruby grammar"
+  (test "a def body indents" ...))
+(test "talks to postgres" :skip-unless (db-reachable?) "no database on localhost" ...)
+```
+
+Never gate tests with `(when (fact?) (describe …))`: when the fact is false it registers
+nothing, the run reports fewer tests, and nobody notices that a whole suite went missing on
+one machine. `:skip-unless` keeps them in the count. On a group it skips every test (a test's
+own `:skip-unless` keeps its own reason). Written before a `(test …)` in a describe body it
+applies to that test alone, like `:isolated`. The group's body still runs, to register its
+tests, so keep work that needs CONDITION inside the tests rather than at the top of the group.
+
+Every skipped test is listed after the failures, with where it is and its reason, so a
+skip is read where the run is read:
+
+```text
+Skipped (2):
+  ○ ruby indentation › a def body indents  tests/ruby_test.blsp:3  — no ruby grammar
+  ○ needs a live database  tests/db_test.blsp:9
+```
+
+`--trace` puts the reason after the skipped line, TAP after `# SKIP`, and `--formatter json`
+gives each result a `:skip-reason` (nil for a bare `:skip`); `test/result-skip-reason` reads it
+from a result tuple.
 
 Output is **plain text when captured** (a pipe, `cargo test`, CI, or an LLM
 reading the run) and **coloured only when stdout is an interactive terminal**
