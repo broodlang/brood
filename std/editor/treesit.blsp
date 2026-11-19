@@ -1104,8 +1104,6 @@ chain `[parent node]`, so a selector that reaches past the parent cannot hold.
     (indent-entry-holds? entries [parent node] 1)
     (indent-entry-holds? entries [node] 0)))
 
-(meta block-entry-holds? :deprecated "0.56.0" :use 'indent-entry-holds?)
-
 (defn- ts-chain-steps (chain)
   ;; `[index node parent]` for each node of `chain` (outermost first), `parent` nil at the root:
   ;; what every walk over a chain that asks a node in its place starts from

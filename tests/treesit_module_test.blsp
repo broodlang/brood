@@ -1776,11 +1776,10 @@
   (test "a constraint the chain cannot answer never holds"
     (refute (indent-entry-holds? [{:kind :block :text "x"}] [{:kind :block}] 0)))
   (test "the deprecated block-entry-holds? answers over node and parent"
-    (is (check-allow :deprecated (block-entry-holds? #{:block} {:kind :block} nil)))
-    (refute (check-allow :deprecated
-              (block-entry-holds? #{{:kind :then :not {:parent :rescue}}}
-                {:kind :then}
-                {:kind :rescue})))))
+    (is (block-entry-holds? #{:block} {:kind :block} nil))
+    (refute (block-entry-holds? #{{:kind :then :not {:parent :rescue}}}
+              {:kind :then}
+              {:kind :rescue}))))
 
 (describe "indent-problems: what an indent spec may say"
   (test "a sound spec, and none at all, have no problems"
