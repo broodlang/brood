@@ -269,6 +269,39 @@
       (assert= ((get d :poll) 500) [:note 9])
       ;; nothing waiting ⇒ nil after the timeout (ui-run treats it as :tick)
       (assert= ((get d :poll) 1) nil)))
+  (test "remote-display: a client's key that is an internal event is dropped, never folded"
+    ;; a guest holding the session pid could ship `[:key [:lsp-apply-edit …]]` and reach every
+    ;; event handler the session's own processes reach — only key-shaped input is taken
+    (let (d (remote-display (self) 80 24)
+          poll-all (fn (poll) (seq/filter [(poll) (poll) (poll)] (fn (input) (not (nil? input))))))
+      (send (self) [:key [:task-done 1] false])
+      (send (self) [:key [:key-up [:timer :autosave]]])
+      (send (self) [:key "z"])
+      (assert= (poll-all (fn () ((get d :poll) 200))) (list "z"))
+      (send (self) [:key [:lsp-apply-edit {:changes {}}] false 1])
+      (send (self) [:key [:mouse {:action :press}]])
+      (assert= (poll-all (fn () ((get d :poll-input)))) (list [:mouse {:action :press}]))))
+  (test "client-input? takes keys, the frontend's input vectors and nothing else"
+    (doseq (input ["a"
+                    :ctrl-x [:mouse {}]
+                    [:resize 80 24]
+                    [:text "é"]
+                    [:paste "x"]
+                    [:preedit "k" nil]
+                    [:key-up "a"]
+                    [:key-up :ctrl-x]])
+      (is (client-input? input)))
+    (doseq (input [nil
+                    3
+                    []
+                    [:timer :autosave]
+                    [:task-done 1]
+                    [:hangup :hup]
+                    [:key-up [:key-up "a"]]
+                    [:key-up [:timer :x]]
+                    [:key-up]
+                    {:key "a"}])
+      (refute (client-input? input))))
   (test "remote-display: a key down in the client's window holds the session's idle timers"
     ;; the client ships whether a key is down with each input, and :key-held? answers the
     ;; last one, so a served ui-run waits through a held key as a local window's does
