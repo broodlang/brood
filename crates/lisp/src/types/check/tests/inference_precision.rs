@@ -1305,3 +1305,30 @@ fn a_field_guard_on_an_unknown_value_keeps_both_keyed_kinds() {
         assert!(ws.is_empty(), "strict={strict}: {ws:?}");
     }
 }
+
+// A module-private function's parameters are DERIVED from its callers (ADR-341), so its flat
+// return is typed under the union of every call's arguments: one caller's `nil` reached
+// every other caller's result, and `(string/trim (env-or "B" "b"))` was a strict finding
+// because another site passed `(env-or "A" nil)` (zubr-relay). A call to a LEAF re-types it
+// under that call's own arguments.
+#[test]
+fn a_caller_derived_leaf_is_typed_under_each_calls_own_arguments() {
+    let src = "(defmodule t)\n\
+               (defn- env-or (name fallback)\n  \
+                 (let (value (os/env name)) (if (or (nil? value) (= value \"\")) fallback value)))\n\
+               (defn- pick (flag fallback) (if flag \"x\" fallback))\n\
+               (defn use-it () [(env-or \"A\" nil) (string/trim (env-or \"B\" \"b\"))\n                \
+                 (pick true nil) (string/trim (pick false \"b\"))])";
+    let strict = file_warnings_mode(src, true);
+    assert!(strict.is_empty(), "{strict:?}");
+    // …and the call that does pass nil still answers nil.
+    let nil_reaches = file_warnings_mode(
+        "(defmodule t)\n(defn- pick (flag fallback) (if flag \"x\" fallback))\n\
+         (defn use-it () [(pick true \"b\") (string/trim (pick false nil))])",
+        false,
+    );
+    assert!(
+        !nil_reaches.is_empty(),
+        "the nil call must still be reported"
+    );
+}

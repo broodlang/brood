@@ -527,7 +527,21 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                             // bounded by `(< i n)` read `ordered`, so with `datetime` in
                             // scope an int caller's `(+ acc (digits codes 0 9))` warned —
                             // the verdict moved with what happened to be loaded.
-                            if result_says_little(&sg.ret) {
+                            // …and a function whose parameters were DERIVED from its callers
+                            // (ADR-341): its flat return is typed under the union of every
+                            // call's arguments, so one caller's `nil` reached every other
+                            // caller's result — `(env-or "B" "b")` read `string | nil`
+                            // because another site passed `(env-or "A" nil)`. This call's
+                            // arguments lie inside that union, so its re-typed result lies
+                            // inside the flat one, and the meet below keeps it there. A
+                            // LEAF only (`is_file_leaf`): specialization has no fixpoint for
+                            // mutual recursion, so re-typing one under a single call can
+                            // under-approximate it.
+                            let derived_from_callers = ctx
+                                .derived_params(s)
+                                .is_some_and(|params| params.iter().any(Option::is_some))
+                                && super::sigs::is_file_leaf(heap, s, ctx);
+                            if result_says_little(&sg.ret) || derived_from_callers {
                                 // The body says nothing — or only "a collection" — about its
                                 // result from its own parameters (a pass-through, an
                                 // unconstrained accumulator, a recursive list builder whose

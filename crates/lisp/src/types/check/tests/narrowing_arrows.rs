@@ -512,3 +512,53 @@ fn a_declared_guard_over_a_body_that_raises_first_is_not_contradicted() {
     );
     assert!(!has(&ws, "declared (is"), "{ws:?}");
 }
+
+// A conjunct's PATH guard narrows an `and`'s then-branch as surely as a local's guard does.
+// Only the variable guards were layered, so `(and (int? (get loop :began)) (int? now))` left
+// the field a `number` in `(- now (get loop :began))` while the same guard alone narrowed it
+// (zubr's pane, under `--strict`).
+#[test]
+fn an_and_narrows_a_field_path_in_its_then_branch() {
+    for test in [
+        "(and (int? (get loop :began)) (int? now))",
+        "(and (int? now) (int? (get loop :began)))",
+        "(and (int? (:began loop)) (int? now))",
+    ] {
+        let src = format!(
+            "(defmodule t)\n\
+             (defn elapsed (now loop)\n  \
+               (if {test} (math/quot (- now (get loop :began)) 1000) nil))"
+        );
+        let ws = file_warnings_mode(&src, true);
+        assert!(ws.is_empty(), "{test}: {ws:?}");
+    }
+}
+
+// A bare truthiness test of a field the checker cannot type leaves it unknown. Narrowed to
+// "anything but nil or false" — a POSITIVE type wider than every use accepts — `error-message`
+// (`(and (map? e) (get e :message)) (get e :message)`) returned that type, so `(first report)`
+// on a `try` that caught into it was a plain finding (bedit's `about.blsp`), and so was a
+// direct `(if (get e :k) (get e :k) …)` helper's result.
+#[test]
+fn a_truthiness_test_of_an_unknown_field_leaves_it_unknown() {
+    for source in [
+        "(defmodule t)\n\
+         (defn- facts (window) [window 2 3])\n\
+         (defn show (window)\n  \
+           (let (report (try (facts window) (catch e (error-message e))))\n    \
+             (if (string? report) report (first report))))",
+        "(defmodule t)\n\
+         (defn msg (e) (if (get e :message) (get e :message) \"none\"))\n\
+         (defn show (e) (let (m (msg e)) (if (string? m) m (first m))))",
+    ] {
+        let ws = file_warnings_mode(source, false);
+        assert!(ws.is_empty(), "{source}: {ws:?}");
+    }
+    // A field the checker CAN type still loses its nil under the same test.
+    let known = file_warnings_mode(
+        "(defmodule t)\n\
+         (defn f (r: (record :n (or nil int))) (if (get r :n) (+ (get r :n) 1) 0))",
+        true,
+    );
+    assert!(known.is_empty(), "{known:?}");
+}

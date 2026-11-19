@@ -2095,3 +2095,32 @@ in `make test-both`. `scripts/tree-walker-smoke.sh` runs fifteen files (the ones
 failures have shown up in, plus the core forms) in the contracts job, and first checks that
 `BROOD_TIER=0` really selects the tree-walker (`%tree-walker?`), so it cannot quietly become a
 second VM run.
+
+2026-11-19. **Three checker false positives the demo apps' strict cleanup found, fixed.** Clearing
+325 strict warnings across eleven apps left a residue the agents could not clear without
+bending the code, and three of its causes were the checker's:
+- **`(get m :k)` typed a parameter `countable`.** `get`'s own sig set the demand, where
+  `(:k m)` sets none, so a function that hands its parameter back on one branch returned a
+  positive `countable` and every `assoc` on its result was a strict finding (zubr, zubr-relay,
+  brood-chat, swarm). A literal keyword key now demands what the keyword call does; a wrong
+  receiver is still reported, since the walk re-checks the body at each call.
+- **A field guard inside `and` narrowed nothing.** `layer_compound_facts` applied each
+  conjunct's variable guard, never its path guard, so `(and (int? (get loop :began)) (int?
+  now))` left the field a `number`. Each conjunct's path guard now narrows the then-branch.
+  That exposed a fourth: a bare truthiness test of a field the checker cannot type narrowed it
+  to "anything but nil or false", a positive type, and `error-message`'s `(and (map? e) (get e
+  :message))` clause made that its return — bedit's `(first report)` after a `try` became a
+  plain finding. Such a test now leaves an unknown subject unknown (`path_then_type`).
+- **A caller-derived parameter's union reached every caller.** A private helper's flat return
+  is typed under the union of all its callers' arguments, so `(env-or "A" nil)` made `(env-or
+  "B" "b")` read `string | nil`. A call to a LEAF (no file global in its body, so no cycle)
+  is re-typed under its own arguments; specialization has no fixpoint for mutual recursion,
+  and re-typing a recursive decoder cut its `(rec X …)` to a fixed depth — the existing rec
+  test caught that and is why the leaf rule exists.
+Two reported cases were not false positives: `(nth lines i)` after `(>= i (count lines))` is
+`nil` for a negative `i`, and `(+ unknown 1)` is a `number` by ADR-298's design. Guards, each
+sabotage-verified: `a_parameter_read_by_get_with_a_keyword_types_as_a_keyword_read_does`,
+`an_and_narrows_a_field_path_in_its_then_branch`,
+`a_truthiness_test_of_an_unknown_field_leaves_it_unknown`,
+`a_caller_derived_leaf_is_typed_under_each_calls_own_arguments`. Every package, bedit, hive,
+mur-forge and app is plain-clean under the new checker.

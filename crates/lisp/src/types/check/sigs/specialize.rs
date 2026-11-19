@@ -148,6 +148,34 @@ fn fixed_arms_of(heap: &Heap, sym: Symbol, ctx: &Ctx) -> Option<(Vec<FixedArm>, 
     Some((out, true))
 }
 
+/// Is `sym` a **leaf** of this file — a same-file function whose body names no file global,
+/// itself included? A leaf can be in no cycle, so re-typing it under one call's arguments is
+/// a single walk of a body that calls only what the image already knows. That is what makes
+/// the caller-derived call-site re-typing in `infer` safe: specialization has a fixpoint for
+/// direct self-recursion ([`specialize_recursive`]) but none for MUTUAL recursion, and
+/// re-typing a mutually recursive decoder under one call cut its `(rec X …)` result down to
+/// a nesting of fixed depth — an under-approximation the meet would then have kept.
+/// Conservative: a parameter that shadows a file global's name counts as naming it.
+pub(in crate::types::check) fn is_file_leaf(heap: &Heap, sym: Symbol, ctx: &Ctx) -> bool {
+    let forms: Vec<Value> = match ctx.clause_arms(sym) {
+        Some(clauses) => clauses.clone(),
+        None => match ctx.fn_form(sym) {
+            Some(form) => vec![form],
+            None => return false,
+        },
+    };
+    let mut work = forms;
+    while let Some(node) = work.pop() {
+        match node {
+            Value::Sym(name) if ctx.is_file_global(name) => return false,
+            Value::Pair(_) => work.extend(list_items(heap, node).unwrap_or_default()),
+            Value::Vector(id) => work.extend(heap.vector(id).iter().copied()),
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Does `form` mention `sym` anywhere — as a call head or an operand, at any depth?
 /// Conservative on purpose: a function whose body names itself is treated as recursive.
 pub(super) fn form_mentions(heap: &Heap, form: Value, sym: Symbol) -> bool {

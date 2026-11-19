@@ -730,12 +730,11 @@ fn branch_scopes_inner(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
         // this the else branch reads `¬failure`, a true statement and a wider one than the
         // `number` the expression structurally has, and the inferred return says
         // `(not failure)` where it should say `number`.
-        let guarded = super::infer::expr_ty(heap, pg.subject, ctx).unwrap_or(Ty::ANY);
-        then_ctx = then_ctx.narrow_path(
-            pg.base,
-            pg.keys.clone(),
-            guarded.clone().intersect(pg.ty.clone()),
-        );
+        let own = super::infer::expr_ty(heap, pg.subject, ctx);
+        if let Some(narrowed) = path_then_type(own.clone(), &pg.ty) {
+            then_ctx = then_ctx.narrow_path(pg.base, pg.keys.clone(), narrowed);
+        }
+        let guarded = own.unwrap_or(Ty::ANY);
         if !pg.then_only {
             else_ctx = else_ctx.narrow_path(pg.base, pg.keys, guarded.intersect(pg.ty.negate()));
         }
@@ -762,6 +761,16 @@ pub(super) fn layer_compound_facts(
 ) -> (Ctx, Ctx) {
     for guard in and_conjunct_guards(heap, test, ctx) {
         then_ctx = then_ctx.narrow(guard.sym, guard.ty);
+    }
+    // …and each conjunct's PATH guard: `(and (int? (get loop :began)) (int? now))` proves
+    // the field an int as surely as the local. Only the variable guards were layered, so a
+    // field read under an `and` kept its unnarrowed type while the same guard alone narrowed
+    // it. Seeded with the subject's own type, as the single path guard is.
+    for path in and_conjunct_path_guards(heap, test) {
+        let own = super::infer::expr_ty(heap, path.subject, ctx);
+        if let Some(narrowed) = path_then_type(own, &path.ty) {
+            then_ctx = then_ctx.narrow_path(path.base, path.keys, narrowed);
+        }
     }
     for guard in or_disjunct_guards(heap, test, ctx) {
         else_ctx = else_ctx.narrow(guard.sym, guard.else_type());
@@ -938,6 +947,43 @@ fn narrow_all(mut ctx: Ctx, facts: &[(Symbol, Ty)]) -> Ctx {
         ctx = ctx.narrow(*sym, ty.clone());
     }
     ctx
+}
+
+/// What a path guard's THEN branch narrows its subject to: the subject's own type met with
+/// the guard's. `None` — leave the path alone — for a bare truthiness test of a subject the
+/// checker cannot type. "Anything but nil or false" is a POSITIVE type wider than every use
+/// accepts, where the unknown it replaces passes by overlap: `error-message`'s clause
+/// `(and (map? e) (get e :message)) (get e :message)` made its result that type, and every
+/// caller's `(first report)` on a `try` that caught into it became a plain finding (bedit's
+/// `about.blsp`). A type predicate (`(int? (get loop :began))`) still narrows an unknown
+/// subject, and truthiness still drops `nil` from a subject the checker can type.
+fn path_then_type(own: Option<Ty>, guard: &Ty) -> Option<Ty> {
+    match own {
+        Some(own) if !own.is_any() => Some(own.intersect(guard.clone())),
+        _ if *guard == Ty::truthy() => None,
+        _ => Some(guard.clone()),
+    }
+}
+
+/// The path guard each conjunct of an `and`-expansion states — the [`PathGuard`] half of
+/// [`and_conjunct_guards`]. Left out, as there: a conjunct about one of the chain's own
+/// binders (it runs inside them), and a path over a GLOBAL, which another process can `def`
+/// between the guard and the use.
+fn and_conjunct_path_guards(heap: &Heap, test: Value) -> Vec<PathGuard> {
+    let Some((links, binders)) = chain_links(heap, test, true) else {
+        return Vec::new();
+    };
+    links
+        .into_iter()
+        .filter_map(|(op, bound_count)| {
+            let bound = &binders[..bound_count];
+            path_guard_assertion(heap, op).filter(|path| {
+                !base_is_global(heap, path.base)
+                    && !bound.contains(&path.base)
+                    && !form_mentions_any(heap, op, bound)
+            })
+        })
+        .collect()
 }
 
 /// The operands of an `and`-expansion (`is_and`) or `or`-expansion, the last one included,
