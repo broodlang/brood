@@ -10,18 +10,19 @@ option book in [`runtime-frontier.md`](runtime-frontier.md) and
 to 2026-11-06 moved, unedited, to the end of
 [`archive/perf-handoff.md`](archive/perf-handoff.md).
 
-## State (2026-11-18)
+## State (2026-11-19)
 
 - **The front is language features.** Performance, runtime and editor work wait, as ROADMAP's
   design pass set out on 2026-10-28. Not close to a 1.0 rc: never tag one without being told.
-- **Released:** v0.55.0 (2026-11-18): recursion as deep as memory allows (ADR-751), `nest deps`
-  and `defdelegate`, the terminal work.
-- **Green:** `full.yml` passed every job on `54b2322b` (run 44307696386, 2026-11-18): sanitizers,
-  Miri, GC stress, soaks, the three suite runs. The run before it (`a8f3becb`) failed only its
-  ASan job: ADR-751 made the JIT's native-link margin twice the red zone, 2 MiB under ASan, a
-  libtest thread's whole stack, so every JIT case bailed; the `asan` recipe now gives test
-  threads 16 MiB (`RUST_MIN_STACK`). Per-push CI answers in about 12 minutes and leaves those
-  out; dispatch `gh workflow run full.yml` and read it with `make green` before the next release.
+- **Released:** v0.56.0 (2026-11-19, tag on `1383f37c`): `defability` is the one contract
+  mechanism and `defbehaviour` / `(:implements …)` are gone (ADR-761); an `impl` is checked
+  against an ability from another module; checker false positives fixed. The package train
+  followed (store 0.9.8, hatch 0.32.0 — live views are ability values —, observe 0.2.7, mail
+  0.3.7, …, bedit 0.12.0), and hive and mur-forge were redeployed on it.
+- **Green:** per-push CI on `1383f37c`; `full.yml` passed every job on `94a29966` (run
+  44473989635) and was dispatched on `1383f37c` (run 44507391905). Per-push CI answers in about
+  12 minutes and leaves the sanitizers, Miri, GC stress, soaks and the three suite runs out;
+  dispatch `gh workflow run full.yml` and read it with `make green` before the next release.
 - **Swept on the test machine 2026-11-18 at `42d573b8`, all clean:** `make test-both`, the fuzz
   differential over all 13 generators, `gcstress-all`, `stress`, `test-contracts`, the
   distribution tests ×5, a 30-minute `runtime-soak`, the ASan kernel suite, and `green-all`'s
