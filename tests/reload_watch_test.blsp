@@ -81,3 +81,25 @@
       (file/spit (path/join sub "deep.blsp") "")
       (%os-cmd "/bin/ln" ["-s" d (path/join sub "up")])
       (assert= (reload/reload-collect-blsp d) (list (path/join sub "deep.blsp"))))))
+
+;; A top-level `impl` is a definition: a module contract is an ability `impl` (ADR-761), and
+;; `system/reload-defs` re-ran only `def…` forms, so an edited contract method kept running its
+;; old body after a save while a `defn` in the same file updated.
+(describe "reload-defs: a top-level impl"
+  (test "a re-saved impl body takes effect, and a top-level call still does not run"
+    (let (dir (temp-dir "brood-reload-")
+          f (path/join dir "contract.blsp"))
+      (file/mkdir dir)
+      (file/spit f
+        (str "(defability Rwt-Greeter (rwt-greet (self)))\n"
+          "(defrecord rwt-greeter ())\n"
+          "(impl Rwt-Greeter rwt-greeter (rwt-greet (_) \"before\"))\n"))
+      (reflect/load f)
+      (assert= (reflect/eval '(rwt-greet (rwt-greeter))) "before")
+      (file/spit f
+        (str "(defability Rwt-Greeter (rwt-greet (self)))\n"
+          "(defrecord rwt-greeter ())\n"
+          "(impl Rwt-Greeter rwt-greeter (rwt-greet (_) \"after\"))\n"
+          "(throw \"a top-level call must not run\")\n"))
+      (assert= (try (system/reload-defs f) :reloaded (catch e e)) :reloaded)
+      (assert= (reflect/eval '(rwt-greet (rwt-greeter))) "after"))))

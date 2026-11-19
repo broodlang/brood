@@ -83,7 +83,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
         &["path"],
-        "Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil.\n\n    (system/reload-defs \"src/app.blsp\")   ;~> nil",
+        "Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …, and `impl`) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil.\n\n    (system/reload-defs \"src/app.blsp\")   ;~> nil",
         reload_defs);
     // `apply`'s last positional arg must be a sequence (it's spliced); the
     // intermediate args can be anything. The `Sig` algebra can express
@@ -308,7 +308,13 @@ pub(super) fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
                         // bound as `web/live/deflive`, not in root) is still
                         // recognised and re-evaluated. Without this, a `(deflive …)`
                         // top-level form would be skipped and its defs never reload.
-                        nm.starts_with("def")
+                        //
+                        // A top-level `impl` is a definition too: it binds an ability's
+                        // methods for a value, and re-registering from the same namespace
+                        // is the silent hot-reload path `%register-impl` already takes. A
+                        // module contract is an `impl` (ADR-761), so skipping it left an
+                        // edited contract method running its old body after a save.
+                        (nm.starts_with("def") || nm == "impl")
                             && (nm == "def" || nm == "defmacro" || {
                                 let resolved = crate::eval::macros::resolve_reference(heap, s);
                                 matches!(heap.env_get(root, resolved), Some(Value::Macro(_)))
