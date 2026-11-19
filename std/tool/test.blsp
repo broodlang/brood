@@ -95,6 +95,9 @@ docs/testing.md for the full guide."
 ; true while a describe body is being registered
 (def *collected* nil)
 ; (name thunk) pairs gathered for the current describe
+(def *group-skips* nil)
+; each open describe's skip decision, innermost first — its `:skip-unless` CONDITION is
+; evaluated BEFORE the body runs (ADR-757)
 
 (defn- add-unit (mode group tests) (def test/*units* (cons (list mode group tests) test/*units*)))
 
@@ -395,7 +398,7 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
     else (test-lift-prefix-mods (rest forms) (cons (first forms) acc))))
 
 (defmacro describe (group & forms)
-  "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] [:skip | :skip-unless CONDITION REASON] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on. `:skip` registers every test without running it; `:skip-unless CONDITION REASON` does so when CONDITION, evaluated as the group registers, is false — the tests are still counted and listed as skipped, with REASON, where `(when CONDITION (describe …))` would register nothing (the body still runs, to register them, so keep the work that needs CONDITION inside the tests). Inside the body, `:isolated`, `:skip`, `:skip-unless CONDITION REASON` or `:tags [kw …]` written directly before a `(test …)` form applies to that test alone (the same as writing it inside the form after its name); any other bare keyword in the body is an error. Warns (advisory) if the group contains no tests."
+  "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] [:skip | :skip-unless CONDITION REASON] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on. `:skip` registers every test without running it; `:skip-unless CONDITION REASON` does so when CONDITION, evaluated once as the group registers and BEFORE its body runs, is false — the tests are still counted and listed as skipped, with REASON, where `(when CONDITION (describe …))` would register nothing (the body still runs, to register them, so keep work that must not run without CONDITION inside the tests). Inside the body, `:isolated`, `:skip`, `:skip-unless CONDITION REASON` or `:tags [kw …]` written directly before a `(test …)` form applies to that test alone (the same as writing it inside the form after its name); any other bare keyword in the body is an error. Warns (advisory) if the group contains no tests."
   (if (keyword? group)
     (error "describe: group name must be a string, not keyword "
       (pr-str group)
@@ -412,12 +415,23 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
       ;; One writer at a time: the runner loads test files one by one in its own process
       ;; (`run-tests-scoped`), which is also what makes the collect-then-emit protocol sound
       ;; at all. The user's body stays outside the allow, so its own writes are still linted.
+      ;; The skip is decided BEFORE the body runs, and once: a `:skip-unless` condition with
+      ;; a side effect the body needs (`(load-test-grammar :perl)` before a body-level `def`
+      ;; that parses with it) has had it by then. It waits on a stack, so a nested describe's
+      ;; own skip cannot clobber it.
       `(do
+         (check-allow :cross-module-def (def *group-skips* (cons [~skip ~reason] *group-skips*)))
          (check-allow :cross-module-def (def *collecting* true) (def *collected* nil))
          (do ~@body)
          ; the (test ...) forms collect themselves
          (check-allow :cross-module-def (def *collecting* false))
-         (emit-describe ~mode ~group (reverse *collected*) ~tags ~skip ~reason)
+         (emit-describe ~mode
+           ~group
+           (reverse *collected*)
+           ~tags
+           (first (first *group-skips*))
+           (second (first *group-skips*)))
+         (check-allow :cross-module-def (def *group-skips* (rest *group-skips*)))
          ;; Advisory: a describe with no tests is a heading over nothing (ADR-225).
          ~(when (not (describe-body-has-tests? body))
             (list 'io/puts

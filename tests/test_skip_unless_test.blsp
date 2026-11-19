@@ -21,6 +21,10 @@
                             (test/result-skipped? r)
                             (test/result-skip-reason r)]))))))))
 
+;; what ran, in order, as a describe registered: its condition and its body (an :isolated test
+;; writes it, and its private globals roll the writes back)
+(def- skip-unless-order [])
+
 (defn- skip-unless-result (name where reason)
   (list "g" name nil 0 true where reason))
 
@@ -71,6 +75,18 @@
     (let (available? (fn () false))
       (test "gated" :skip-unless (available?) "not available" (is false)))
     (assert= (skip-unless-registered) [["gated" true "not available"]]))
+
+  (test "a describe's condition is evaluated once, before its body runs"
+    :isolated (test/reset-units)
+    ;; the condition's side effect (a grammar it loads) must be visible to the body's own
+    ;; forms, which run as the group registers; it was evaluated after them
+    (describe "inner"
+      :skip-unless (do (def skip-unless-order (conj skip-unless-order :condition)) true)
+      "never shown"
+      (def skip-unless-order (conj skip-unless-order :body))
+      (test "a" (is true)))
+    (assert= skip-unless-order [:condition :body])
+    (assert= (skip-unless-registered) [["a" false nil]]))
 
   (test "a bare :skip has no reason"
     :isolated (test/reset-units)

@@ -172,7 +172,8 @@ modifiers (`:serial`, `:isolated`, `:tags`) in any order.
 
 When the skip depends on a fact only the running program knows — a grammar compiled in, a
 tool on `PATH`, a service reachable — use `:skip-unless CONDITION REASON`. CONDITION is
-evaluated as the test registers; when it is false the tests register skipped, with REASON:
+evaluated once as the test or group registers, before a group's body runs; when it is false
+the tests register skipped, with REASON:
 
 ```lisp fragment
 (describe "ruby indentation" :skip-unless (grammar-installed? :ruby) "no ruby grammar"
@@ -185,7 +186,8 @@ nothing, the run reports fewer tests, and nobody notices that a whole suite went
 one machine. `:skip-unless` keeps them in the count. On a group it skips every test (a test's
 own `:skip-unless` keeps its own reason). Written before a `(test …)` in a describe body it
 applies to that test alone, like `:isolated`. The group's body still runs, to register its
-tests, so keep work that needs CONDITION inside the tests rather than at the top of the group.
+tests. CONDITION has run by then, so a grammar it loads is there for a body-level `def`, but a
+skipped group's body runs too: keep work that must not run without CONDITION inside the tests.
 
 Every skipped test is listed after the failures, with where it is and its reason, so a
 skip is read where the run is read:
