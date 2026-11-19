@@ -249,7 +249,7 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
         (test-split-mods-acc (drop forms 3)
           mode
           tags
-          (if (= skip true) true `(or ~skip (not ~(second forms))))
+          (if (= skip true) true `(or ~skip (/not ~(second forms))))
           (third forms)))
     (= (first forms) :tags)
       (test-split-mods-acc (rest (rest forms)) mode (second forms) skip reason)
