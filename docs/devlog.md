@@ -2265,6 +2265,14 @@ pinned value fails the clause (`(str nil)` is "nil", so an unset prefix matched 
 first test of it was vacuous — no input began with "nil" — and was rewritten until it went red
 with the check removed.
 
+2026-11-19. **Test support never ships.** bedit's new `corpus` module — the harness its language
+packages test with — `(:use test)`s and registers tests from a function, and a release runtime is
+built without `test` (`dev-tools`), so `nest release` of bedit failed its boot check on every
+lean toolchain. `bundle-collect` now leaves out a module that still writes `describe`/`deftest`
+once its top-level tests are stripped, with every module whose header needs one, and takes the
+dead `(:use test)` out of a module whose tests sat beside its code (ADR-225) — which could not load
+in a lean runtime either. Both halves in `tests/project_test.blsp`, each red with its half off.
+
 2026-11-19. **`nest test FILE:LINE` on a test's header line ran the test before it.** Found
 chasing a hatch flake: `nest test tests/http_server_test.blsp:310`, the line of a `(test "…"`
 header, ran the previous test — a test's recorded line is its first body form's (a macro sees

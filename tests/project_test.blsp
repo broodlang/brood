@@ -600,7 +600,30 @@
             "(defn shipped () 1)\n" "(describe \"lib\" (test \"t\" (assert= 1 (shipped))))\n"))
         (let (bundle (project-release/bundle-collect root))
           (is (any? bundle (fn (s) (and (string? s) (includes? s "defn shipped")))))
-          (is (not (any? bundle (fn (s) (and (string? s) (includes? s "describe"))))))))))
+          (is (not (any? bundle (fn (s) (and (string? s) (includes? s "describe"))))))
+          ;; …and the header's now-dead `(:use test)`, which a release runtime could not load
+          (is (not (any? bundle (fn (s) (and (string? s) (includes? s "(:use test)"))))))))))
+  (test "bundle-collect leaves test support out, and every module that needs it"
+    ;; a module that registers tests from a function is for `nest test`; a release runtime
+    ;; has no `test` to load it with, so shipping it failed the release's boot check
+    (let (root (temp-dir "brood-support-"))
+      (file/mkdir root)
+      (file/mkdir (path/join (or root "") "src"))
+      (let (src (path/join (or root "") "src"))
+        (file/spit (path/join (or root "") "project.blsp")
+          "(project :name \"support\" :source-paths [\"src\"] :main app)\n")
+        (file/spit (path/join src "app.blsp") "(defmodule app)\n(defn main () 1)\n")
+        (file/spit (path/join src "harness.blsp")
+          (str "(defmodule harness (:use test))\n"
+            "(defn define-checks () (describe \"checks\" (test \"one\" (is true))))\n"))
+        (file/spit (path/join src "pack.blsp") "(defmodule pack (:use harness))\n(defn run () 1)\n")
+        (let (bundle (project-release/bundle-collect root)
+              keys (map (seq/filter (rest bundle) (fn (s) (includes? ["app" "harness" "pack"] s)))
+                     ->string))
+          (assert= (vec (sort keys)) ["app"])
+          (assert= (vec (project/plist-get (rest (reflect/read-first (first bundle)))
+                          :project-modules))
+            ["app"])))))
   (test "bundle-collect bakes the project's own module names into the manifest"
     ;; ADR-606: what `reflect/project-modules` answers in the released program — the
     ;; `(defmodule …)` names, as `setup` registers them from disk, not the file stems

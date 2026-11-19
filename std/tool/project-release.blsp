@@ -235,7 +235,10 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
                                         (or (bundle-dep-root path dep-dirs) root)))
                                 acc)
                               acc))))
-            pairs (append project-pairs dep-pairs)
+            collected (append project-pairs dep-pairs)
+            test-support (bundle-test-support collected)
+            pairs (map (seq/reject collected (fn (pair) (includes? test-support (first pair))))
+                    (fn (pair) (list (first pair) (drop-test-use (second pair)))))
             ;; The FULL set of dependency packages rooted in this bundle (transitive included):
             ;; the distinct leading segment of every DEP-rooted key (`store/repo` -> `store`).
             ;; `dep-pairs` is exactly the dependency modules — the root project's own `web/…`
@@ -255,9 +258,61 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
             dep-packages
             ;; the project's own modules by their `(defmodule …)` names, as `setup` registers
             ;; them from disk: what `reflect/project-modules` answers in the bundle (ADR-606)
-            (seq/distinct (map (/apply append (map src-dirs package/module-files))
-                            (fn (module-file) (->string (first module-file))))))
+            (seq/reject (seq/distinct (map (/apply append (map src-dirs package/module-files))
+                                        (fn (module-file) (->string (first module-file)))))
+              (fn (module) (includes? test-support module))))
           (fold pairs nil (fn (acc p) (cons (first p) (cons (second p) acc)))))))))
+
+;; ---- test support never ships -----------------------------------------------------
+;; A release runtime is built without `test` (`dev-tools`), so a shipped module that still
+;; `(:use test)`s cannot load in it. Two kinds of module do:
+;;
+;; - one whose tests sit beside its code (ADR-225). `strip-test-forms` has already taken the
+;;   tests out, which leaves the clause dead; `drop-test-use` takes it out too.
+;; - TEST SUPPORT: a module that still writes `describe`/`deftest` once its top-level tests
+;;   are gone, because registering tests is its job (bedit's `corpus`, the harness its
+;;   language packages test with). It is for `nest test`, as the stripped forms are, and is
+;;   left out of the bundle — with every module whose header needs one.
+
+;; Whether `source`, with its top-level tests stripped, still writes a test anywhere.
+(defn- registers-tests? (source)
+  (let (forms (check-allow :discarded-catch (try (reflect/read-all source) (catch _ nil))))
+    (any? (seq/flatten forms) (fn (atom) (includes? ['describe 'deftest] atom)))))
+
+;; The bundle keys of the test-support modules among `pairs` (`(key source)` each).
+(defn- bundle-test-support (pairs)
+  (let (needs (map pairs (fn (pair) [(first pair) (map (%header-requires (second pair)) ->string)])))
+    (bundle-test-support-from needs
+      (vec (map (seq/filter needs
+                  (fn (need)
+                    (and (includes? (second need) "test")
+                      (registers-tests? (second (seq/find pairs
+                                                  (fn (pair) (= (first pair) (first need)))))))))
+             first)))))
+
+(defn- bundle-test-support-from (needs found)
+  (let (more (fold needs
+               found
+               (fn (acc need)
+                 (if (and (not (includes? acc (first need)))
+                       (any? (second need) (fn (module) (includes? acc module))))
+                   (conj acc (first need))
+                   acc))))
+    (if (= more found) found (bundle-test-support-from needs more))))
+
+;; `source` without its header's `(:use test …)` clause — unchanged when it has none.
+(defn- drop-test-use (source)
+  (let (header (first (sexp/top-level-forms source))
+        clause (and header
+                 (= (get header :kind) :list)
+                 (seq/find (rest (sexp/forms-of header))
+                   (fn (node)
+                     (and (= (get node :kind) :list)
+                       (= (vec (map (take (sexp/forms-of node) 2)
+                                 (fn (part)
+                                   (string/substring source (get part :start) (get part :end)))))
+                         [":use" "test"]))))))
+    (if clause (string-splice-spans source [[(get clause :start) (get clause :end) ""]]) source)))
 
 ;; A bundle whose entry module was never collected is a 22 MB binary that cannot boot,
 ;; and nothing before the user's first run says so: `nest release` reported success, and
