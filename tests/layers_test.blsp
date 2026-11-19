@@ -223,7 +223,7 @@
     (let (buffer (push-layer {} 'layers-test/layer-a)
           ; binds x→cmd-x
           model {:log "M"}
-          r (scope-dispatch (list buffer) model nil "x" no-fb))
+          r (scope-dispatch (list buffer) nil model "x" no-fb))
       ;; cmd-x runs on the model (not the buffer the keymap came from)
       (assert= (get (first r) :log) "MX")
       (assert= (second r) nil)))

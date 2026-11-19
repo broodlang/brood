@@ -105,7 +105,7 @@ core knows nothing about buffers."
 ;; focused buffer shadowing the window/app. Layers stays focus-agnostic: YOU pass
 ;; the scope contexts, highest precedence first.
 ;;
-;;   (scope-dispatch (list focused-buffer model) model pending key fallback)
+;;   (scope-dispatch (list focused-buffer model) pending model key fallback)
 ;;       ; keymap merged from buffer + model layers; command runs on `model`
 ;;
 ;; Switching focus is *dormancy*, not teardown (no activate/deactivate). Fire the
@@ -124,7 +124,7 @@ core knows nothing about buffers."
 ;;
 ;;   (defn update (model input cols rows)
 ;;     (let (buf (current-buffer model)                       ; app's own accessor
-;;           r   (scope-dispatch (list buf model) model (get model :pending) input
+;;           r   (scope-dispatch (list buf model) (get model :pending) model input
 ;;                               (fn (m _) m)))               ; fallback: ignore
 ;;       (assoc (first r) :pending (second r))))
 ;;
@@ -647,13 +647,14 @@ of it to a command (or to nil): a mode's `C-c C-p` leaves the global `C-c f` in 
                    :layer (:name layer)
                    :shadowed-by (if (or (nil? winner) (= winner i)) nil (:name (nth layers winner)))})))))))))
 
-(defn scope-dispatch (ctxs state pending key fallback)
+(defn scope-dispatch (ctxs pending state key fallback)
   "Dispatch `key` through the merged keymap of `ctxs` (precedence by order), running
 the resolved command on `state` — typically the app model, which may itself be one
 of `ctxs` so its window-level layers compose with the focused buffer's. Returns
-`[state' pending']`. The multi-scope counterpart to `layer-dispatch`.
+`[state' pending']`. The multi-scope counterpart to `layer-dispatch`; `pending` comes before
+`state`, as in `keymap-step` and `keymap-run`.
 
-    (first (editor/layers/scope-dispatch [{} {}] 0 nil :z (fn (s k) (inc s))))   ;=> 1"
+    (first (editor/layers/scope-dispatch [{} {}] nil 0 :z (fn (s k) (inc s))))   ;=> 1"
   (keymap-run (scope-resolve ctxs pending key) pending state key fallback))
 
 (defn switch-focus (from to)
