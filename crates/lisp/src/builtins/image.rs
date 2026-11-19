@@ -9,6 +9,17 @@ use crate::error::{LispError, LispResult};
 use super::args::{arg, expect_int, expect_string};
 use super::bytes::{bytes_to_value, collect_bytes};
 
+/// The `{:width int :height int :rgba bytes}` buffer `%image-thumb` decodes into — a closed
+/// shape, so a caller's `(:width thumb)` reads an `int` with nothing to declare.
+fn decoded_image() -> crate::types::Ty {
+    use super::signature_types::{bytes_ty, int};
+    let fields = [("width", int), ("height", int), ("rgba", bytes_ty)]
+        .into_iter()
+        .map(|(name, ty)| (crate::core::value::intern(name), (ty, true)))
+        .collect();
+    crate::types::Ty::record_shape(fields, crate::types::Ty::of(crate::core::value::Tag::Nil))
+}
+
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.
 pub(super) fn register(primitives: &mut super::Primitives) {
     use super::signature_types::*;
@@ -17,7 +28,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%image-thumb",
         Arity::exact(3),
-        Sig::new(vec![any, int, int], map_ty.union(nil_ty)),
+        Sig::new(vec![any, int, int], decoded_image().union(nil_ty)),
         &["bytes", "max-w", "max-h"],
         "Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). nil when the bytes aren't a decodable image or the dims are non-positive. Per-call decode limits bound a decompression bomb. The one image primitive; rendering (half-block cells, a GUI texture) is Brood policy over the decoded buffer.",
         image_thumb);

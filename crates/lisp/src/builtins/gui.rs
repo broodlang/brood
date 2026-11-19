@@ -131,14 +131,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%gui-size",
         Arity::exact(1),
-        Sig::new(vec![int], vec_ty),
+        Sig::new(vec![int], Ty::tuple_of(vec![int, int])),
         &["id"],
         "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size.",
         gui_size);
     primitives.def(
         "%gui-size-px",
         Arity::exact(1),
-        Sig::new(vec![int], vec_ty),
+        Sig::new(vec![int], Ty::tuple_of(vec![int, int])),
         &["id"],
         "Window id's inner size as [w h] in PHYSICAL pixels (tracks resize / HiDPI) — the frame a pixel-space app (`:sprite` / `:quad` ops, `{:input :pixels}`) lays itself out in, where gui-size is the cell grid.",
         gui_size_px);

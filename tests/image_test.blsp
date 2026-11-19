@@ -21,7 +21,7 @@
       (is (bytes? (get t :rgba)))
       (assert= (count (get t :rgba)) 16)
       ; the first pixel is the fixture colour (10,20,30), fully opaque
-      (let (px (get t :rgba))
+      (let ({:rgba px} t)
         (assert= [(bytes/at px 0) (bytes/at px 1) (bytes/at px 2) (bytes/at px 3)]
           [10 20 30 255]))))
 
