@@ -444,3 +444,18 @@ through edits, as an editor's does."
       (assert= 8 (buffer-point (sexp/up-forward b nil)))
       (assert= 5 (buffer-point (sexp/forward b nil)))
       (assert= 3 (buffer-point (sexp/up b nil))))))
+
+;; A reader-macro wrapper holds one form; the list it wraps encloses what is inside, so a
+;; quasiquoted body indents from its own paren (ADR-763).
+(describe "enclosing descends through reader-macro wrappers"
+  (test "the list a backquote wraps encloses a point inside it"
+    (assert= (get (enclosing (tree "(defmacro m () `(let (x) y))") 18) :start) 16))
+  (test "so do a quote's, an unquote's and a splice's"
+    (assert= (get (enclosing (tree "(a '(b c))") 6) :start) 4)
+    (assert= (get (enclosing (tree "`(a ~(b c))") 7) :start) 5)
+    (assert= (get (enclosing (tree "`(a ~@(b c))") 8) :start) 6))
+  (test "a point on the wrapper itself, outside its list, belongs to what holds the wrapper"
+    (assert= (get (enclosing (tree "(a `(b c))") 4) :start) 0))
+  (test "wrapper-kind? names the wrappers"
+    (is (wrapper-kind? :quasi))
+    (is (not (wrapper-kind? :list)))))

@@ -2189,3 +2189,12 @@ them as a stack: delimiters always, a language's keyword `:pairs`, `:clauses` (E
 `:modifiers` (Ruby's `x if y`) when its spec names them. Continuations add one level, the line
 after a run goes back. Fontify drops the zero-width spans of MISSING nodes where they are made.
 The corpus's typing gaps are 55 lines now, most of them `case` labels no electric word names.
+
+2026-11-19. **Five capabilities bedit's corpus found missing.** `sexp/enclosing` descends through
+reader-macro wrappers (ADR-763), so Common Lisp's backquoted macro body indents from its paren.
+A Lisp dialect passes its docstring places, `:docs` (ADR-764): elisp's `defun` after its arglist,
+`defvar` third. A face selector's `:has` asks for a child (ADR-765), so Rust's `///` paints as a
+doc. `:blocks` takes a kind in a context (ADR-766), so Ruby's `rescue` body counts no extra level.
+`:token-blocks` counts ADR-762's keyword stack on a clean parse (ADR-767), so HEEx's
+`<% … do %>` blocks indent; a `:pairs` closer may be a named leaf's kind, and
+`%tree-sitter-tokens` takes `all?`.

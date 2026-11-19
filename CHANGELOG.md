@@ -20,6 +20,14 @@ keyword `:pairs`, `:clauses` and `:modifiers` when its indent spec names them. A
 adds its level once. **Fixed: `%tree-sitter-spans` reports no empty span** for a node the parser
 inserted while recovering.
 
+**Five capabilities a language mode was missing.** `sexp/enclosing` descends through a quote,
+quasiquote or unquote, so a backquoted body indents from its own paren (ADR-763).
+`highlight-spans` and `lisp-line-lexer` take a dialect's docstring places, `:docs` (ADR-764). A
+face selector's `:has` asks for a child, so Rust's `///` can be a doc (ADR-765). An indent
+spec's `:blocks` and `:brackets` take a kind in a context, `{:kind :then :parent-not :rescue}`
+(ADR-766). `:token-blocks` counts keyword `:pairs` on a clean parse, for blocks bounded by sibling
+directives like HEEx's `<% … do %>` … `<% end %>` (ADR-767).
+
 ## v0.56.0 — one contract mechanism, checked across modules
 
 **Removed: `defbehaviour` and the `(:implements …)` header clause (ADR-761).** `defability` is

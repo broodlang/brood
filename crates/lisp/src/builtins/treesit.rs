@@ -53,7 +53,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(4, 5),
         Sig::with_optional(vec![string, kw, list_ty.union(vec_ty).union(map_ty), any], vec![any], vec_ty),
         &["source", "lang", "table", "keywords?", "&optional", "injections"],
-        "The fontify query: [start end reported] for the OUTERMOST nodes the face `table` colours, in source order, not descending into one that matched. `table` is a list/vector of kind keywords (each reported as itself), or a map from SELECTOR to what a span reports: a selector is a kind keyword, or a context map {:kind :parent :field :nth :text :after} — the node's kind, its parent (a kind, or a selector map the parent must satisfy in turn, at most 4 maps deep), the field it fills in the parent (tree-sitter's field name), its index among the parent's named children, its exact source text (a string or a set of strings) and a {:kind :text} map the named sibling right before it must satisfy (ADR-614) — whose given constraints must all hold. When several match, the most specific wins: the node's own constraints first (:after over :text over :field over :parent over :nth over :kind), then each ancestor selector's, then the narrower :text set, so any context entry beats the plain kind (ADR-486, ADR-487). With keywords? true, an anonymous token beginning with a letter is also reported, as kind :__keyword__ — the cross-language keyword rule, which no grammar names; keywords? may instead be a set of the rules wanted, #{:keywords :punctuation}, where :punctuation reports an anonymous token made only of brackets, commas and semicolons as :__punctuation__ (ADR-614). Which kinds get which face stays with the caller; what this avoids is projecting every node into a map to read its kind and discard the rest, which is what a windowed fontify did on every keystroke. INJECTIONS (ADR-489): an optional {:rules [rule …] :faces {lang table}} naming the nodes whose text is another language's document — a rule is {:content selector :lang :bash} or {:content selector :lang-from kind :aliases {word lang}} (the language read from the first word of the content's sibling, or child, of that kind) — whose spans, from that language's :faces table, replace the host's over the content; a parent's matching children are ONE document (included ranges, joined by the line breaks between them), a rule's optional :exclude selector cuts the content's descendants it selects out of the document so they keep the host's colours (ADR-496), and a document whose language has no table or no grammar keeps the host's colours.",
+        "The fontify query: [start end reported] for the OUTERMOST nodes the face `table` colours, in source order, not descending into one that matched. `table` is a list/vector of kind keywords (each reported as itself), or a map from SELECTOR to what a span reports: a selector is a kind keyword, or a context map {:kind :parent :field :nth :text :after :has} — the node's kind, its parent (a kind, or a selector map the parent must satisfy in turn, at most 4 maps deep), the field it fills in the parent (tree-sitter's field name), its index among the parent's named children, its exact source text (a string or a set of strings) a {:kind :text} map the named sibling right before it must satisfy (ADR-614) and a child it must have, a kind or a {:kind :field :text} map (:has, ADR-765) — whose given constraints must all hold. When several match, the most specific wins: the node's own constraints first (:has over :after over :text over :field over :parent over :nth over :kind), then each ancestor selector's, then the narrower :text set, so any context entry beats the plain kind (ADR-486, ADR-487). With keywords? true, an anonymous token beginning with a letter is also reported, as kind :__keyword__ — the cross-language keyword rule, which no grammar names; keywords? may instead be a set of the rules wanted, #{:keywords :punctuation}, where :punctuation reports an anonymous token made only of brackets, commas and semicolons as :__punctuation__ (ADR-614). Which kinds get which face stays with the caller; what this avoids is projecting every node into a map to read its kind and discard the rest, which is what a windowed fontify did on every keystroke. INJECTIONS (ADR-489): an optional {:rules [rule …] :faces {lang table}} naming the nodes whose text is another language's document — a rule is {:content selector :lang :bash} or {:content selector :lang-from kind :aliases {word lang}} (the language read from the first word of the content's sibling, or child, of that kind) — whose spans, from that language's :faces table, replace the host's over the content; a parent's matching children are ONE document (included ranges, joined by the line breaks between them), a rule's optional :exclude selector cuts the content's descendants it selects out of the document so they keep the host's colours (ADR-496), and a document whose language has no table or no grammar keeps the host's colours.",
         tree_sitter_spans);
     // Tree HANDLES (ADR-443): a whole document's parse tree, held across edits and
     // reparsed incrementally, queried over a range — what an editor's view keeps per
@@ -398,9 +398,35 @@ fn ts_selector(
                 }
                 selector.after = Some(Box::new(after));
             }
+            "has" => {
+                // a child the node must have: a kind, or a {:kind :field :text} map — the field
+                // it fills in the node, not where the node sits (ADR-765)
+                let has = match v {
+                    Value::Keyword(kind) => Selector::of_kind(value::symbol_name(kind)),
+                    Value::Map(has_map) => ts_selector(heap, who, has_map, depth)?,
+                    other => {
+                        return Err(LispError::wrong_type(
+                            heap,
+                            who,
+                            "a kind keyword or a {:kind :field :text} selector map for selector :has",
+                            other,
+                        ));
+                    }
+                };
+                if has.parent.is_some()
+                    || has.nth.is_some()
+                    || has.after.is_some()
+                    || has.has.is_some()
+                {
+                    return Err(LispError::runtime(format!(
+                        "{who}: a selector's :has names the child's :kind, :field and :text only"
+                    )));
+                }
+                selector.has = Some(Box::new(has));
+            }
             other => {
                 return Err(LispError::runtime(format!(
-                    "{who}: a face-table selector takes :kind :parent :field :nth :text :after, not :{other}"
+                    "{who}: a face-table selector takes :kind :parent :field :nth :text :after :has, not :{other}"
                 )));
             }
         }
@@ -1019,18 +1045,18 @@ pub(super) fn register_open_tokens(primitives: &mut super::Primitives) {
     use crate::types::Sig;
     primitives.def(
         "%tree-sitter-tokens",
-        Arity::exact(4),
-        Sig::new(vec![string, kw, int, any], vec_ty),
-        &["source", "lang", "offset", "texts"],
-        "The anonymous tokens of source's lang parse that start before char offset and that texts (a set or sequence of strings) names, in source order, each {:kind \"text\" :start :end :parent}, :parent the kind of the node holding it; a token whose text ENDS in an opening delimiter texts names counts too (`${` and `%{` for \"{\"). A token tree-sitter inserted while recovering (MISSING, zero-width) is none, and a construct that parsed cleanly and ends before offset is skipped whole — it closes what it opens. What a half-typed buffer still has OPEN, matched as a stack by the caller: error recovery leaves an unclosed `{` or `do` as a bare token in an ERROR node, where no chain reaches it. Same grammar rules and errors as %tree-sitter-parse.",
+        Arity::range(4, 5),
+        Sig::with_optional(vec![string, kw, int, any], vec![any], vec_ty),
+        &["source", "lang", "offset", "texts", "&optional", "all?"],
+        "The anonymous tokens of source's lang parse that start before char offset and that texts (a set or sequence of strings) names, in source order, each {:kind \"text\" :start :end :parent}, :parent the kind of the node holding it; a token whose text ENDS in an opening delimiter texts names counts too (`${` and `%{` for \"{\"). A token tree-sitter inserted while recovering (MISSING, zero-width) is none, and a construct that parsed cleanly and ends before offset is skipped whole — it closes what it opens — unless all? is true, for blocks bounded by SIBLING tokens (HEEx's `<% … do %>` … `<% end %>`, ADR-767), when every token before offset counts. What a half-typed buffer still has OPEN, matched as a stack by the caller: error recovery leaves an unclosed `{` or `do` as a bare token in an ERROR node, where no chain reaches it. Same grammar rules and errors as %tree-sitter-parse.",
         tree_sitter_tokens,
     );
     primitives.def(
         "%tree-sitter-tree-tokens",
-        Arity::exact(3),
-        Sig::new(vec![ref_ty, int, any], vec_or_nil),
-        &["tree", "offset", "texts"],
-        "%tree-sitter-tokens over a held tree: the anonymous tokens before char offset of its text that texts names, in source order. Parses nothing. nil when the handle is gone.",
+        Arity::range(3, 4),
+        Sig::with_optional(vec![ref_ty, int, any], vec![any], vec_or_nil),
+        &["tree", "offset", "texts", "&optional", "all?"],
+        "%tree-sitter-tokens over a held tree: the anonymous tokens before char offset of its text that texts names, in source order (every one with all?). Parses nothing. nil when the handle is gone.",
         tree_sitter_tree_tokens,
     );
 }
@@ -1055,7 +1081,8 @@ pub(super) fn tree_sitter_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     let lang = ts_lang(heap, who, arg(args, 1))?;
     let offset = expect_int(heap, who, arg(args, 2))?;
     let texts = ts_texts(heap, who, arg(args, 3))?;
-    crate::host::treesit::tokens_before(heap, &src, &lang, offset, &texts)
+    let all = !matches!(arg(args, 4), Value::Nil | Value::Bool(false));
+    crate::host::treesit::tokens_before(heap, &src, &lang, offset, &texts, all)
 }
 
 /// `(%tree-sitter-tree-tokens tree offset texts)` — `crate::host::treesit::tree_tokens_before`.
@@ -1064,5 +1091,6 @@ pub(super) fn tree_sitter_tree_tokens(args: &[Value], _: EnvId, heap: &mut Heap)
     let handle = ts_handle(heap, who, arg(args, 0))?;
     let offset = expect_int(heap, who, arg(args, 1))?;
     let texts = ts_texts(heap, who, arg(args, 2))?;
-    crate::host::treesit::tree_tokens_before(heap, handle, offset, &texts)
+    let all = !matches!(arg(args, 3), Value::Nil | Value::Bool(false));
+    crate::host::treesit::tree_tokens_before(heap, handle, offset, &texts, all)
 }

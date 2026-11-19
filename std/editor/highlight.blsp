@@ -202,20 +202,24 @@ the stream is one LINE and the list may go on below it."
           (= kind :comment) (hl-more-forms? (rest toks) open-end?)
           else (not (= kind :close))))))
 
-(defn- hl-doc? (stack toks open-end?)
-  "True when the string token starting here is a DOCSTRING rather than a string value:
-the enclosing form is a doc-carrying `def…` head (`(reflect/doc-forms)`), the string sits right
-after the name — or after the parameter list — and, for the heads that build a function,
-more body follows it (a function whose body is a lone string returns that string, which
-is why `\"hello mylife\"` in `(defn greeting () \"Doc.\" \"hello mylife\")` stays a
-string). `toks` is the stream AFTER the string."
+(defn- hl-doc? (stack toks pass)
+  "True when the string token starting here is a DOCSTRING rather than a string value, by
+the pass's `:docs` table (head → place, Brood's `(reflect/doc-forms)` by default). A head's
+place is `:fn` — the string right after the name or after the parameter list, with more body
+after it (a function whose body is a lone string returns that string, which is why
+`\"hello mylife\"` in `(defn greeting () \"Doc.\" \"hello mylife\")` stays a string) — or
+`:head`, the same places with nothing needed after, or an integer N: the string is the form's
+Nth element after its head, whatever follows (elisp's `(defvar name value \"doc\")` is 3,
+ADR-764). `toks` is the stream AFTER the string."
   (and (not (empty? stack))
     (let ([open n head params?] (first stack)
-          kind (get hl-doc-forms head))
+          place (get (:docs pass) head))
       (and (= open "(")
-        (not (nil? kind))
-        (or (= n 2) (and (= n 3) params?))
-        (or (= kind :head) (hl-more-forms? toks open-end?))))))
+        (not (nil? place))
+        (if (int? place)
+          (= n place)
+          (and (or (= n 2) (and (= n 3) params?))
+            (or (= place :head) (hl-more-forms? toks (:open-end? pass)))))))))
 
 ;; ---- the lexer walk ---------------------------------------------------------
 
@@ -269,7 +273,7 @@ editor on its next re-lex."
     (string/starts-with? head "def")
     (let (specials (:specials pass))
       (or (= true (get specials head))
-        (doc-form? head)
+        (not (nil? (get (:docs pass) head)))
         (and (string/ends-with? head "-")
           (= true (get specials (string/substring head 0 (dec (count head))))))))))
 
@@ -327,14 +331,14 @@ REVERSE and the stack the stream ended with."
                     else nil))
             (hl-walk more (hl-name stack text) (if (nil? f) acc (cons [s e f] acc)) pass))
         (= kind :string)
-          (let (f (if (hl-doc? stack more (:open-end? pass)) (get faces :doc) (get faces :string)))
+          (let (f (if (hl-doc? stack more pass) (get faces :doc) (get faces :string)))
             (hl-walk more (hl-advance stack false) (cons [s e f] acc) pass))
         else
           (let (f (get faces kind))
             ; :number / :keyword
             (hl-walk more (hl-advance stack false) (if (nil? f) acc (cons [s e f] acc)) pass))))))
 
-(defn highlight-spans (src &optional (specials hl-special-set))
+(defn highlight-spans (src &optional (specials hl-special-set) (docs hl-doc-forms))
   "Lexically tokenize Lisp `src` into a list of `[start end face]` colour spans
 (character offsets, end-exclusive) for the tokens that carry a colour — comments,
 strings (a `def…` form's docstring apart from a string value), numbers, keywords, and
@@ -349,14 +353,19 @@ stream (O(tokens)), so it stays fast enough for per-frame fontification.
 `{\"defun\" true …}` — and defaults to Brood's. Everything else this does is true of any
 s-expression language: parens, `;` comments, `\"` strings, numbers. Passing another
 dialect's set is therefore the whole of teaching it to colour, which is what an elisp or
-Scheme mode needs and all it needs.
+Scheme mode needs — with `docs`, the dialect's docstring places (head → `:fn`, `:head` or an
+argument index: the form's Nth element after its head; Brood's `(reflect/doc-forms)` by default),
+since elisp puts `defvar`'s doc third, after its value (ADR-764).
 
     (editor/highlight/highlight-spans \"x ; hi\")    ;=> ([2 6 {:fg :dark-grey}])
     (editor/highlight/highlight-spans \"(let x)\")   ;=> ([1 4 {:fg :blue, :bold true}])"
   (let ([spans _] (hl-walk (reflect/scan-tokens src)
                     '()
                     '()
-                    {:faces (hl-faces) :specials specials :open-end? false}))
+                    {:faces (hl-faces)
+                     :specials specials
+                     :docs (or docs hl-doc-forms)
+                     :open-end? false}))
     (reverse spans)))
 (sig highlight-spans (string -> any))
 
@@ -451,7 +460,8 @@ gives it, because each line starts in the state the line above ended in — the 
 and, inside a multi-line string, that string's face. For `line-cache-update`, where a
 windowed `highlight-spans` would need a `safe-restart` lead-in and the lead-in can begin
 inside a docstring. `specials` is the head-symbol set, as for `highlight-spans` (nil for
-Brood's). `options` takes `:rainbow` — true colours each bracket by its depth in the
+Brood's). `options` takes `:docs`, the docstring places as for `highlight-spans`, and `:rainbow`
+— true colours each bracket by its depth in the
 `:syntax/delimiter-1` … `-9` faces (Emacs's rainbow-delimiters), exact across lines because
 the depth is the stack the lines carry. The faces are resolved when the lexer is built.
 
@@ -463,6 +473,7 @@ whole-source lex calls a lone last body string a value.
     (first ((:lex (editor/highlight/lisp-line-lexer)) \"doc.\\\" 1)\" [nil {:fg :grey :italic true}]))   ;=> ([0 5 {:fg :grey, :italic true}] [6 7 {:fg :yellow}])"
   (let (pass {:faces (hl-faces)
               :specials (or specials hl-special-set)
+              :docs (or (:docs options) hl-doc-forms)
               :open-end? true
               :rainbow (when (:rainbow options)
                          (vec (map (range 1 10)

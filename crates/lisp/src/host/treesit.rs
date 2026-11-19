@@ -683,6 +683,9 @@ pub struct Selector {
     pub nth: Option<usize>,
     pub text: Option<TextMatch>,
     pub after: Option<Box<Selector>>,
+    /// A child the node must have (ADR-765): its kind, the field it fills in the node, its
+    /// text — what tells Rust's `///` (a `line_comment` holding a `doc_comment`) from a `//`.
+    pub has: Option<Box<Selector>>,
 }
 
 #[cfg_attr(not(feature = "treesit"), allow(dead_code))]
@@ -703,6 +706,7 @@ impl Selector {
             && self.nth.is_none()
             && self.text.is_none()
             && self.after.is_none()
+            && self.has.is_none()
     }
 
     /// How many selector levels deep it reaches: 1 for a map with no parent selector.
@@ -710,7 +714,7 @@ impl Selector {
         1 + self.parent.as_ref().map_or(0, |parent| parent.depth())
     }
 
-    /// The selector's own constraints as distinct powers of two — after 32, text 16, field
+    /// The selector's own constraints as distinct powers of two — has 64, after 32, text 16, field
     /// 8, parent 4, nth 2, kind 1 — so two different constraint sets at one level never tie.
     fn level_weight(&self) -> u8 {
         u8::from(self.kind.is_some())
@@ -719,6 +723,7 @@ impl Selector {
             | (u8::from(self.field.is_some()) << 3)
             | (u8::from(self.text.is_some()) << 4)
             | (u8::from(self.after.is_some()) << 5)
+            | (u8::from(self.has.is_some()) << 6)
     }
 
     /// The level weights from the node outward: the node's own constraints, then its parent
@@ -739,6 +744,7 @@ impl Selector {
     fn breadth(&self) -> usize {
         self.text.as_ref().map_or(0, |text| text.texts.len())
             + self.after.as_ref().map_or(0, |after| after.breadth())
+            + self.has.as_ref().map_or(0, |has| has.breadth())
             + self.parent.as_ref().map_or(0, |parent| parent.breadth())
     }
 
@@ -777,6 +783,35 @@ impl Selector {
                             .is_none_or(|wanted| wanted.holds(previous, text))
                 }
             }
+            && self
+                .has
+                .as_deref()
+                .is_none_or(|has| has.held_by_a_child_of(node, text))
+    }
+
+    /// Does one of `node`'s children — named or not — satisfy this `:has` selector: its kind,
+    /// the field it fills in `node`, its text? Read last, as it walks the children.
+    #[cfg(feature = "treesit")]
+    fn held_by_a_child_of<T: SpanText>(&self, node: tree_sitter::Node, text: &T) -> bool {
+        let mut cursor = node.walk();
+        if !cursor.goto_first_child() {
+            return false;
+        }
+        loop {
+            let child = cursor.node();
+            if self.kind.as_deref().is_none_or(|kind| kind == child.kind())
+                && (self.field.is_none() || self.field.as_deref() == cursor.field_name())
+                && self
+                    .text
+                    .as_ref()
+                    .is_none_or(|wanted| wanted.holds(child, text))
+            {
+                return true;
+            }
+            if !cursor.goto_next_sibling() {
+                return false;
+            }
+        }
     }
 }
 
@@ -1689,6 +1724,7 @@ fn tokens_into<'tree>(
     node: tree_sitter::Node<'tree>,
     byte: usize,
     texts: &std::collections::HashSet<String>,
+    all: bool,
     out: &mut Vec<(tree_sitter::Node<'tree>, tree_sitter::Node<'tree>)>,
 ) {
     let mut cursor = node.walk();
@@ -1710,13 +1746,18 @@ fn tokens_into<'tree>(
             // and so is one made of tokens alone, which may be one HALF of a pair: HCL wraps a
             // block's `{` in a `block_start` and its `}` in a `block_end`
             let tokens_only = child.named_child_count() == 0;
-            if child.end_byte() > byte || child.has_error() || last || tokens_only {
-                tokens_into(child, byte, texts, out);
+            if all || child.end_byte() > byte || child.has_error() || last || tokens_only {
+                tokens_into(child, byte, texts, all, out);
             }
-        } else if !child.is_named()
-            && !child.is_missing()
+        } else if !child.is_missing()
             && child.start_byte() < child.end_byte()
-            && token_counts(child.kind(), texts)
+            // an anonymous token by its text — or a NAMED leaf by its kind, when that is the
+            // only spelling a grammar has: HEEx's `<% end %>` is an `ending_expression_value`
+            && (if child.is_named() {
+                texts.contains(child.kind())
+            } else {
+                token_counts(child.kind(), texts)
+            })
         {
             out.push((child, node));
         }
@@ -1734,10 +1775,11 @@ fn tokens_in<T: SpanText>(
     text: &T,
     offset: i64,
     texts: &std::collections::HashSet<String>,
+    all: bool,
 ) -> Value {
     let byte = text.byte_of(offset.max(0) as usize);
     let mut found = Vec::new();
-    tokens_into(tree.root_node(), byte, texts, &mut found);
+    tokens_into(tree.root_node(), byte, texts, all, &mut found);
     let kw = |k: &str| Value::keyword(value::intern(k));
     let entries: Vec<Value> = found
         .into_iter()
@@ -1769,7 +1811,9 @@ fn tokens_in<T: SpanText>(
 /// say it, matched as a stack in Brood (`editor/treesit`'s open stack), and walking them is a
 /// walk of the tree, which `%tree-sitter-parse` could only do by projecting every node. Only
 /// the path to `offset` and the subtrees with errors are walked: a clean construct that ends
-/// before `offset` is balanced and skipped.
+/// before `offset` is balanced and skipped — unless `all`, for a language whose blocks are
+/// bounded by SIBLING tokens (HEEx's `<% … do %>` … `<% end %>`, ADR-767), where every token
+/// before `offset` counts.
 #[cfg(feature = "treesit")]
 pub fn tokens_before(
     heap: &mut Heap,
@@ -1777,6 +1821,7 @@ pub fn tokens_before(
     lang: &str,
     offset: i64,
     texts: &std::collections::HashSet<String>,
+    all: bool,
 ) -> LispResult {
     let tree = parse_cached(src, lang)?;
     let b2c = byte_to_char_offsets(src);
@@ -1786,6 +1831,7 @@ pub fn tokens_before(
         &FlatText { src, b2c: &b2c },
         offset,
         texts,
+        all,
     ))
 }
 
@@ -1797,11 +1843,19 @@ pub fn tree_tokens_before(
     handle: u64,
     offset: i64,
     texts: &std::collections::HashSet<String>,
+    all: bool,
 ) -> LispResult {
     let Some(entry) = tree_entry(handle) else {
         return Ok(Value::Nil);
     };
-    Ok(tokens_in(heap, &entry.tree, &entry.text, offset, texts))
+    Ok(tokens_in(
+        heap,
+        &entry.tree,
+        &entry.text,
+        offset,
+        texts,
+        all,
+    ))
 }
 
 /// `(%tree-sitter-tree-alive? tree)` — is the handle still held: not freed, its owner alive?

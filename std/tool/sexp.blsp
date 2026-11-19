@@ -62,18 +62,33 @@ interpreted and the bottleneck in structural navigation.)
 
 ;; ---- structure queries ------------------------------------------------------
 
+(defn wrapper-kind? (kind)
+  "Kinds of the reader-macro wrappers — a quote, a quasiquote, an unquote, a splice, a pin —
+which hold the one form they prefix.
+
+    (sexp/wrapper-kind? :quasi)   ;=> true
+    (sexp/wrapper-kind? :list)    ;=> false"
+  (includes? [:quote :quasi :unquote :splice :pin] kind))
+
 (defn enclosing (anode:map point:number -> map)
   "The deepest container node strictly containing `point` (descending into
-list/vector/map children); the root if none. Reader-macro wrappers are navigated
-as a unit — descending through them is a deferred refinement.
+list/vector/map children); the root if none. A reader-macro wrapper ([[wrapper-kind?]]) is
+no container but is descended THROUGH: the list a backquote wraps encloses what is inside
+it, so a quasiquoted body indents from its own paren rather than from the form around the
+backquote (ADR-763).
 
-    (get (sexp/enclosing (sexp/tree \"(a (b c))\") 5) :start)   ;=> 3"
+    (get (sexp/enclosing (sexp/tree \"(a (b c))\") 5) :start)   ;=> 3
+    (get (sexp/enclosing (sexp/tree \"(a `(b c))\") 6) :start)   ;=> 4"
   (let (hit (seq/find (or (get anode :kids) (list))
-              (fn (k)
-                (and (container-kind? (get k :kind))
-                  (< (get k :start) point)
-                  (< point (get k :end))))))
-    (if (nil? hit) anode (enclosing hit point))))
+              (fn (kid)
+                (and (< (get kid :start) point)
+                  (< point (get kid :end))
+                  (or (container-kind? (get kid :kind)) (wrapper-kind? (get kid :kind)))))))
+    (cond
+      (nil? hit) anode
+      (container-kind? (get hit :kind)) (enclosing hit point)
+      ;; a wrapper: the container inside it that holds `point`, else what holds the wrapper
+      else (let (inner (enclosing hit point)) (if (= inner hit) anode inner)))))
 
 ;; A tree node — a positioned CST node `{:kind :start :end …}` with half-open character
 ;; offsets; its `:kids` are nodes too. Stated once here, so the offset accessors and the

@@ -190,6 +190,7 @@ pub fn tokens_before(
     _lang: &str,
     _offset: i64,
     _texts: &std::collections::HashSet<String>,
+    _all: bool,
 ) -> LispResult {
     Err(without_treesit("%tree-sitter-tokens"))
 }
@@ -199,6 +200,7 @@ pub fn tree_tokens_before(
     _handle: u64,
     _offset: i64,
     _texts: &std::collections::HashSet<String>,
+    _all: bool,
 ) -> LispResult {
     Err(without_treesit("%tree-sitter-tree-tokens"))
 }

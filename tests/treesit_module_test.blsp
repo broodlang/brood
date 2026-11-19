@@ -1678,3 +1678,86 @@
     (assert= (tsm-at-end "<html>\n  <body>\n"
                :html {:width 2 :brackets #{:element} :dedent #{"</"}})
       4)))
+
+;; ---- a face selector by a child (ADR-765) ---------------------------------------------------
+;; A coloured node is painted whole, so what tells two nodes of one kind apart must be asked of
+;; the node itself: Rust's `///` and `//` are both a `line_comment`, the first holding a
+;; `doc_comment`.
+
+(describe "face tables: :has, a child the node must have"
+  :skip-unless (tsm-installed? :rust)
+  "no rust grammar installed"
+  (test "a `line_comment` holding a `doc_comment` takes the doc face, a plain one its own"
+    (let (text "/// Doc.\n// note\nfn f() {}\n"
+          table {:line_comment :comment {:kind :line_comment :has :doc_comment} :doc}
+          spans (%tree-sitter-spans text :rust table false))
+      (assert= (vec (map spans (fn (span) [(first span) (nth span 2)]))) [[0 :doc] [9 :comment]])))
+  (test "a :has map asks the child's kind and text"
+    (let (text "/// Doc.\n//! Inner.\n"
+          table {:line_comment :comment
+                 {:kind :line_comment :has {:kind :inner_doc_comment_marker :text "!"}} :inner}
+          spans (%tree-sitter-spans text :rust table false))
+      (assert= (vec (map spans (fn (span) (nth span 2)))) [:comment :inner]))))
+
+(describe "face-table-problems and language-names know :has"
+  (test "a well-formed :has passes, a misshapen one is named"
+    (is (empty? (face-table-problems {{:kind :line_comment :has :doc_comment} :doc})))
+    (is (empty? (face-table-problems {{:kind :line_comment :has {:kind :x :field :y :text "z"}} :doc})))
+    (is (not (empty? (face-table-problems {{:kind :line_comment :has {:parent :x}} :doc}))))
+    (is (not (empty? (face-table-problems {{:kind :line_comment :has "x"} :doc})))))
+  (test "the child's kind and field are names the grammar must have"
+    (assert= (language-names {:faces {{:kind :line_comment :has {:kind :doc_comment :field :doc}} :d}})
+      {:kinds #{:line_comment :doc_comment} :fields #{:doc}})))
+
+;; ---- an indent spec's kind in a context (ADR-766) ------------------------------------------
+
+(describe "indent-column: a :blocks kind in a context"
+  :skip-unless (tsm-grammar? :ruby)
+  "no ruby grammar compiled in"
+  (test "a `rescue` body is a `then` inside the level its method already counted"
+    (let (text "def f\n  x\nrescue E => e\n  y\nend\n"
+          plain {:width 2 :blocks #{:body_statement :then} :dedent {"end" 0 "rescue" 1}}
+          scoped (assoc plain :blocks #{:body_statement {:kind :then :parent-not :rescue}})
+          bol (index-of text "  y"))
+      (assert= (editor/treesit/indent-column text :ruby bol plain) 4)
+      (assert= (editor/treesit/indent-column text :ruby bol scoped) 2)
+      ;; and an `if`'s `then` still counts
+      (assert= (editor/treesit/indent-column "def f\n  if x\n    y\n  end\nend\n"
+                 :ruby (index-of "def f\n  if x\n    y\n  end\nend\n" "    y")
+                 scoped)
+        4)))
+  (test "a :parent entry counts the kind only under one of its parents"
+    (let (text "def f\n  if x\n    y\n  end\nend\n"
+          spec {:width 2
+                :blocks #{:body_statement {:kind :then :parent #{:unless}}}
+                :dedent {"end" 0}})
+      (assert= (editor/treesit/indent-column text :ruby (index-of text "    y") spec) 2)))
+  (test "language-names reads the kinds a context entry names"
+    (assert= (language-names {:indent {:blocks #{{:kind :then :parent-not #{:rescue :ensure}}}}})
+      {:kinds #{:then :rescue :ensure} :fields #{}})))
+
+;; ---- blocks bounded by sibling tokens (ADR-767) --------------------------------------------
+
+(describe "indent-column: :token-blocks, a block no node encloses"
+  :skip-unless (tsm-installed? :heex)
+  "no heex grammar installed"
+  (test "HEEx's `<%= if … do %>` … `<% else %>` … `<% end %>` directives bound a level"
+    (let (text "<main>\n  <%= if a do %>\n    <p>x</p>\n  <% else %>\n    <ul>\n      <li>y</li>\n    </ul>\n  <% end %>\n</main>\n"
+          spec {:width 2
+                :brackets #{:tag}
+                :dedent #{"</" "else"}
+                :pairs {"do" "ending_expression_value"}
+                :token-blocks true}
+          lines (string/split text "\n"))
+      (assert= (vec (map (range (dec (count lines)))
+                      (fn (index)
+                        (editor/treesit/indent-column text
+                          :heex (fold (take lines index) 0 (fn (acc line) (+ acc (count line) 1)))
+                          spec))))
+        [0 2 4 2 4 6 4 2 0])))
+  (test "without the key, the directives' block is invisible"
+    (let (text "<%= if a do %>\n  <p>x</p>\n<% end %>\n")
+      (assert= (editor/treesit/indent-column text
+                 :heex (index-of text "  <p>")
+                 {:width 2 :brackets #{:tag} :pairs {"do" "ending_expression_value"}})
+        0))))

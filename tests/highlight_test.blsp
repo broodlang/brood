@@ -96,6 +96,22 @@
         [6 7 hl-face-definition]
         [12 15 hl-face-function]
         [16 19 hl-face-string])))
+  ;; a dialect names its own docstring places (ADR-764): elisp's `defun` documents after its
+  ;; arglist, its `defvar` third, after its value
+  (test "a dialect's :docs table: after the arglist, or the Nth element after the head"
+    (let (docs {"defun" :fn "defvar" 3}
+          specials {"defun" true "defvar" true})
+      (is (includes? (vec (highlight-spans "(defun f (x) \"Doc.\" x)" specials docs))
+            [13 19 hl-face-doc]))
+      (is (includes? (vec (highlight-spans "(defvar v nil \"Doc.\")" specials docs))
+            [14 20 hl-face-doc]))
+      ;; and Brood's own heads are no docstring place for that dialect
+      (is (includes? (vec (highlight-spans "(defn f () \"s\" 1)" specials docs))
+            [11 14 hl-face-string]))))
+  (test "the line lexer reads the same table"
+    (let (lexer (lisp-line-lexer {"defvar" true} {:docs {"defvar" 3}})
+          [spans _] ((:lex lexer) "(defvar v nil \"Doc.\")" (:initial lexer)))
+      (is (includes? (vec spans) [14 20 hl-face-doc]))))
   (test "doc-form? mirrors the kernel's (reflect/doc-forms)"
     (is (doc-form? "defn"))
     (is (doc-form? "defmodule"))
