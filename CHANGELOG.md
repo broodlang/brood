@@ -4,6 +4,13 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Fixed: re-indenting leaves no one-line string at column 0.** A string that begins a line (a
+TOML array element, once indentation is stripped) was read as verbatim content, like a heredoc's
+body, and not indented. **Fixed: `test/purge-stale-temp` skips a leftover it cannot remove**
+instead of failing the test file's load.
+
 ## v0.56.0 — one contract mechanism, checked across modules
 
 **Removed: `defbehaviour` and the `(:implements …)` header clause (ADR-761).** `defability` is
