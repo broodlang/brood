@@ -170,6 +170,18 @@ resolution; `%impl-for` is what picks the winner."
                         (if variadic (str fixed "+") fixed)
                         "\n")))))))
 
+; The name an ability is REGISTERED under: `defability` keys `*abilities*` and every op's impls
+; by the bare symbol it was given, so an `impl` that names it qualified — `(impl
+; web/session/SessionStore …)`, the spelling a caller in another module naturally writes —
+; registered its methods under a key dispatch never reads, and every call raised "no impl".
+; Cut at the last `/`, as `%impl-id-owner` does. `str`, not `->string`: this runs while the
+; prelude's own `impl`s expand, before `Display` (which takes `->string` over) has an impl
+; for a symbol.
+(defn- %ability-name (aname)
+  (let (nm (str aname)
+        cut (%str-last-index-of nm "/"))
+    (if (< cut 0) aname (symbol (string/substring nm (inc cut) (count nm))))))
+
 (defn %register-impl (aname op key f from)
   "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the registering
   namespace `from`. Resolution is by PRECEDENCE, not load order (ADR-172 §3): the impl with
@@ -758,7 +770,8 @@ error is a `:blame :callee` contract error, like a function's own result mismatc
   ; never by a wrapper around each method body here, which would make every impl a real
   ; activation and stop `(impl Port :native (write (p s) (%port-write p s)))` being elided
   ; to its primitive (KI-182).
-  (let (id-kw (%ability-id-kw key))
+  (let (id-kw (%ability-id-kw key)
+        aname (%ability-name aname))
     (cons 'do
       (map methods
         (fn (m)
@@ -784,7 +797,8 @@ error is a `:blame :callee` contract error, like a function's own result mismatc
 
   Returns the number of impls actually removed, so a caller can tell a retraction from a
   no-op. A `key` that never had an impl is a quiet zero."
-  (let (id-kw (%ability-id-kw key))
+  (let (id-kw (%ability-id-kw key)
+        aname (%ability-name aname))
     (list '%unimpl-do
       (list 'quote aname)
       id-kw

@@ -166,6 +166,26 @@
     ;; before the fix this registered under :circle and never matched :ability-test/circle
     (assert= (kilo (circle 9)) 15)))
 
+;; ---- an impl may name its ability qualified ----
+;; An ability is registered under its bare name, and `impl` registered under whatever it was
+;; given: `(impl web/session/SessionStore …)` — the spelling a module implementing another
+;; module's contract writes — filed its methods under a key dispatch never reads, and every
+;; call raised "no impl" (hatch, ADR-761).
+(defability Labelled (label-of (self) :-> string))
+(defrecord badge ((text string)))
+(impl ability-test/Labelled badge (label-of (b) (get b :text)))
+
+(describe "impl ability qualification"
+  (test "an impl naming its ability qualified registers under the ability"
+    (assert= (label-of (badge "hi")) "hi")
+    (is (satisfies? 'Labelled (badge "x"))))
+  (test "the impl is seen from another process"
+    (let (me (self))
+      (spawn (send me [:label (label-of (badge "far"))]))
+      (receive
+        ([:label text] (assert= text "far"))
+        (after 5000 (is false))))))
+
 ;; ---- late / open extension: an impl added after the fact, for a built-in ----
 (describe "open extension"
   :serial (test "a new impl can be added for any kind after the ability is declared"
