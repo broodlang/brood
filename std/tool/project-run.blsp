@@ -610,7 +610,8 @@ source paths, no such module under them, or no `:main` naming it.
 ;; which is where a stale dependency dies. This asks "does it boot?": load every module
 ;; the way the shipped artifact does (top-level forms evaluate at load), resolve the
 ;; entry point, and run NOTHING. Every module, not the entry's require-closure: a
-;; bundle loads every embedded module, so a closure-only check would miss a dead one.
+;; bundle's launch reaches any embedded module on first use (ADR-768), so a closure-only
+;; check would miss a dead one.
 
 (defn check-boot ()
   "Load the project the way a shipped bundle does — every source module, then resolve the

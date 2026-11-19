@@ -255,6 +255,16 @@
           (editor/treesit/register-definitions :ruby declared)
           (assert= moved 0))))
 
+    ;; Two modes over one grammar can each say their own: a caller's definitions override the
+    ;; ones registered for the grammar, and leave them as they were.
+    (test "a caller's own definitions decide beginning- and end-of-defun, the grammar's unchanged"
+      (let (src "class A\n  def f\n    1\n  end\nend\n"
+            inside (index-of src "1"))
+        (assert= (editor/treesit/point-defun-start src :ruby inside nil {:kinds #{:class}}) 0)
+        (assert= (editor/treesit/point-defun-end src :ruby inside nil {:kinds #{:class}})
+          (dec (count src)))
+        (assert= (editor/treesit/point-defun-start src :ruby inside) (index-of src "def f"))))
+
     (test "a language that declared nothing falls back to the top-level form"
       (assert= (editor/treesit/definitions :no-such-language) {}))
     (test "point-up rises to the enclosing node's start"

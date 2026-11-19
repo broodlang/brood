@@ -547,3 +547,100 @@ fn a_bundle_answers_its_own_project_modules() {
     );
     let _ = std::fs::remove_dir_all(app.parent().unwrap());
 }
+
+/// An app whose load registers into a std module's registry, `:use`s a std module (`json`) its
+/// boot does not, and ships a module nothing reaches.
+const LAZY_APP: &[(&str, &str)] = &[
+    (
+        "main",
+        "(defmodule main (:use lib))\n\
+         (defn main () (io/puts (str \"entry:\" (registry/lookup :app/things :k) \" \" (json/encode [1]))))",
+    ),
+    (
+        "lib",
+        "(defmodule lib (:use json))\n(registry/put :app/things :k \"registered\")\n(defn greet () 1)",
+    ),
+    ("unreached", "(defmodule unreached)\n(defn idle () 1)"),
+];
+
+/// Run `app` with `BROOD_IMAGE_TRACE` and its stdlib image cache at `cache`, asserting it
+/// exits 0; answer `(stdout, stderr)`.
+fn run_traced(
+    app: &std::path::Path,
+    cwd: &std::path::Path,
+    cache: &std::path::Path,
+) -> (String, String) {
+    let mut cmd = Command::new(app);
+    cmd.current_dir(cwd)
+        .env("BROOD_IMAGE_TRACE", "1")
+        .env("XDG_CACHE_HOME", cache);
+    support::dies_with_parent(&mut cmd);
+    let out = run_bundle(&mut cmd);
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (
+        String::from_utf8_lossy_owned(out.stdout),
+        String::from_utf8_lossy_owned(out.stderr),
+    )
+}
+
+/// A launch materialises only what it reaches (ADR-484 amended): `unreached` stays in the image
+/// while its registration — like every module's — arrives with the root section. The std
+/// modules the app loaded come from the BUNDLE's image, with or without a stdlib image in the
+/// user's cache: with none, `json` was compiled from source on every launch.
+#[test]
+fn an_imaged_bundle_launches_lazily_and_carries_its_std_modules() {
+    let (app, cwd) = write_app("lazy", IMAGED_MANIFEST, LAZY_APP);
+    embed_image(&app, &cwd, IMAGED_MANIFEST, IMAGED_MANIFEST, LAZY_APP);
+    let empty_cache = app.with_file_name("empty-cache");
+    std::fs::create_dir_all(empty_cache.join("brood")).unwrap();
+    let (out, trace) = run_traced(&app, &cwd, &empty_cache);
+    assert!(out.contains("entry:registered [1]"), "{out}\n{trace}");
+    assert!(
+        trace.contains("[image] lib\n"),
+        "lib came from the image: {trace}"
+    );
+    assert!(
+        !trace.contains("[image] unreached"),
+        "a module nothing reaches was materialised: {trace}"
+    );
+    assert!(
+        trace.contains("[image] json\n"),
+        "json came from source, not the bundle's image: {trace}"
+    );
+    // …and so does the boot's own code, which loads before `run-bundle` installs the image.
+    assert!(
+        trace.contains("[image] project-release\n"),
+        "the bundle's boot code came from source: {trace}"
+    );
+
+    // With a stdlib image in the cache the bundle's own sections still serve its modules and
+    // its registrations survive — a std module taken from the cache would carry its pristine
+    // registry instead of the app's.
+    let cache = app.with_file_name("std-cache");
+    std::fs::create_dir_all(cache.join("brood")).unwrap();
+    let script = app.with_file_name("build-stdimage.blsp");
+    std::fs::write(
+        &script,
+        "(require-one 'stdimage)\n(io/puts (stdimage/build))\n",
+    )
+    .unwrap();
+    let built = Command::new(env!("CARGO_BIN_EXE_brood"))
+        .arg(&script)
+        .env("XDG_CACHE_HOME", &cache)
+        .output()
+        .expect("build the stdlib image");
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let (out, trace) = run_traced(&app, &cwd, &cache);
+    assert!(out.contains("entry:registered [1]"), "{out}\n{trace}");
+    assert!(!trace.contains("[image] unreached"), "{trace}");
+    let _ = std::fs::remove_dir_all(app.parent().unwrap());
+}

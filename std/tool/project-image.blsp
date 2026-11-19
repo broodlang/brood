@@ -163,13 +163,18 @@ come from `*module-files*`).
 ;; MUST stay in root even though the load created it. Excluding it — as a bare `seen` test
 ;; did — dropped it from the image entirely: a deferred module's buffer type vanished on an
 ;; imaged start (register-type-layers runs at that module's load, which materialising skips).
+;;
+;; A std module's registry stays in root even when the image carries the module (a release
+;; bundle carries the std modules it loaded): that module may materialise from the stdlib
+;; image or load from source before this image is installed, and its section here would
+;; then never be read — `registry/*registries*`, every app's registrations, lost.
 (defn- project-image-registry-names (seen carried?)
   (seq/reject (%registry-names)
     (fn (n)
       (or (includes? *registry-exclusions* n)
         (and (not (contains? seen n))
           (let (mod (project-image-section-of n))
-            (and mod (carried? mod))))))))
+            (and mod (carried? mod) (not (%builtin-module? mod)))))))))
 
 ;; The module a global belongs to: its name minus the last segment, which IS the feature
 ;; name `require` uses (a global `myproj/shapes/area` comes from feature `myproj/shapes`).
@@ -227,13 +232,16 @@ come from `*module-files*`).
 ;; class this is guarding against.
 (defn- image-sections (before carried?)
   (let (seen (project-image-seen before)
-        fresh (project-image-fresh-names seen)
+        registries (project-image-registry-names seen carried?)
+        ;; A registry rides root ALONE: in its module's section as well it would be written
+        ;; twice and, on materialise, overwrite the value the root install merged.
+        in-root (into #{} registries)
+        fresh (seq/reject (project-image-fresh-names seen) (fn (n) (contains? in-root n)))
         grouped (fold fresh
                   {}
                   (fn (m n)
                     (let (k (or (project-image-section-of n) ""))
                       (assoc m k (cons n (or (get m k) nil))))))
-        registries (project-image-registry-names seen carried?)
         _ (%set-project-image-credits! (image-credits registries carried?))
         root (append registries (get grouped "") ['*project-image-credits*]))
     (cons ["" root]
@@ -241,13 +249,12 @@ come from `*module-files*`).
         (seq/reject (keys grouped)
           (fn (k)
             ;; A non-root section is materialised from the image only for a module the
-            ;; image carries (`carried?`: the project's own and its dependencies). A
-            ;; std/embedded module (regex, editor/ui, …) always loads from its baked-in
-            ;; source, so its section would never be read back — writing it is dead
-            ;; weight, and it is exactly where a runtime-only value like
-            ;; `regex/regex-states-cache` (a mutable cache table) makes the whole image
-            ;; write fail. Skip it. (Its bare globals still ride the always-materialised
-            ;; root section; a builtin there images by name.)
+            ;; image carries (`carried?`: the project's own and its dependencies, and for a
+            ;; release bundle the std modules it loaded). A project image's std module
+            ;; (regex, editor/ui, …) loads from the stdlib image or its baked-in source, so
+            ;; its section would never be read back — writing it is dead weight. Skip it.
+            ;; (Its bare globals still ride the always-materialised root section; a builtin
+            ;; there images by name.)
             (or (= k "") (not (carried? k)))))
         (fn (k) [k (get grouped k)])))))
 

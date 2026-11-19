@@ -2199,6 +2199,27 @@ doc. `:blocks` takes a kind in a context (ADR-766), so Ruby's `rescue` body coun
 `<% … do %>` blocks indent; a `:pairs` closer may be a named leaf's kind, and
 `%tree-sitter-tokens` takes `all?`.
 
+2026-11-19. **A release bundle launches lazily and carries its std modules (ADR-768).** Asking
+why bedit starts slowly: `bedit --version` took ~0.6 s because the bundle materialised all 272
+of its sections before `main`, and its std modules came from the user's stdlib cache — or from
+source when no toolchain of exactly that stdlib had written one, 2.5× slower again. A launch
+with an image now loads only what it reaches (the boot check and the image writer still load
+everything); the image carries the std modules the app's load used, with their registries kept
+in the root section; and the prelude preinstalls the bundle's section directory so its own boot
+code materialises too. `--version` 0.60 → 0.20 s with or without a cache. `BROOD_IMAGE_TRACE`
+reports sections in µs with facts, uses, deferred defines and a per-call total — the ms figures
+had hidden most of the cost. Guard `an_imaged_bundle_launches_lazily_and_carries_its_std_modules`,
+three halves sabotage-verified.
+
+2026-11-19. **An image section spells each symbol once (ADR-769).** Measuring what was left of
+bedit's launch: 336 000 symbol decodes, each a string allocation and an interner lookup, because
+images reuse the node codec, which spells symbols by name. A section now carries a symbol table
+and its values use indices; node links are unchanged. Decode 38 → 15.5 ms, images ~20% smaller
+(bedit's 14.8 → 11.9 MB), `--version` ~0.18 s. Measured and not kept: promoting a section in one
+call (the cost is the copy, not per-call overhead) and a cached `BROOD_TRACE_PROMOTE` read (no
+change). Promote (~47 ms) is now the largest piece; building straight into the RUNTIME region is
+GC-region work, left for the test machine.
+
 2026-11-19. **String patterns (ADR-770).** `(str "GET " path)` matches a string by its literal
 ends — prefix, suffix, both, or the exact string — with at most one non-literal part, the slot,
 matched against the middle. It lowers to the hand-written test (type, length floor, `%eq` on the

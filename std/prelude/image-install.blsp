@@ -27,6 +27,7 @@
 ;; in a coverage readout and `nest test --cover-lines` would silently report nothing for the
 ;; standard library. ONE predicate for both boot paths, so an imaged boot cannot install what
 ;; a source boot would have declined.
+(%bundle-image-preinstall!)
 (when (%std-image-wanted?)
   (if (%getenv "BROOD_IMAGE_TRACE")
     (let (t0 (%now-ns) n (%std-image-install) t1 (%now-ns))
