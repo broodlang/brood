@@ -249,7 +249,9 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
 ;; REASON (a form too, normally a string) rides as a fifth piece of state into the meta
 ;; and the skipped result, so the run says why. It replaces `(when (fact?) (describe …))`,
 ;; which registers nothing when the fact is false: the run reports fewer tests and nobody
-;; notices. A bare `:skip` wins over any `:skip-unless` beside it, and has no reason.
+;; notices. A bare `:skip` wins over any `:skip-unless` beside it, and has no reason. A header
+;; takes one `:skip-unless`: with two, the run would name the last reason whichever condition
+;; was false.
 ;;
 ;; REASON is required, and a form left out is not noticed by counting: `(test "t"
 ;; :skip-unless (c?) (assert= …))` reads the assertion as REASON and registers a test with no
@@ -270,6 +272,11 @@ real home (`nest test --real-home`, `BROOD_TEST_HOME=keep`) or this is no test r
           (error "describe/test: :skip-unless's REASON is missing — "
             (debug/pr-str-bounded (third forms))
             " was read as the reason, leaving no body: write :skip-unless (fact?) \"why\" body…")
+        ;; a second one would leave the run naming the LAST reason whichever condition was
+        ;; false; joining them is the author's to say
+        (not (nil? reason))
+          (error "describe/test: one :skip-unless per test — join the conditions with `and` "
+            "and write one reason that names both")
         else
           (test-split-mods-acc (drop forms 3)
             mode
