@@ -281,11 +281,29 @@ pub(super) fn register_declarations(
     file_ns_name: Option<&str>,
     visible: &HashSet<String>,
 ) -> std::sync::Arc<protocol::AbilityInfo> {
+    // The module each top-level form sits in (ADR-223: a file may open more than one
+    // `defmodule`, and each governs the forms up to the next). A declaration is qualified
+    // with ITS module, not the file's first: two modules in one file that each
+    // `(defrecord live-view ())` declare two constructor sigs named `live-view`, and
+    // qualifying both with the first module filed the second's over the first's, so the
+    // first constructor read the other module's record as its declared result.
+    // `expanded[j]` is `forms[j]`'s expansion, so one walk serves both.
+    let mut current = file_ns_name.map(str::to_string);
+    let mut form_namespaces: Vec<Option<String>> = Vec::with_capacity(forms.len());
+    for &form in forms {
+        if let Some(module) = crate::eval::macros::defmodule_form_name(heap, form) {
+            current = Some(value::symbol_name(heap.root_module_name(module)));
+        }
+        form_namespaces.push(current.clone());
+    }
     // Building a `(sig name type)` form needs `&mut heap`, so collect first and
     // register after — GC is blocked for the whole check, so the handles stay live.
-    let mut macro_sig_forms: Vec<Value> = Vec::new();
-    for &form in expanded {
-        collect_register_sig_forms(heap, form, &mut macro_sig_forms);
+    let mut macro_sig_forms: Vec<(Value, Option<String>)> = Vec::new();
+    for (index, &form) in expanded.iter().enumerate() {
+        let mut collected = Vec::new();
+        collect_register_sig_forms(heap, form, &mut collected);
+        let namespace = form_namespaces.get(index).cloned().flatten();
+        macro_sig_forms.extend(collected.into_iter().map(|sig| (sig, namespace.clone())));
     }
     // THIS file's records' declared field types, BEFORE any other sig is parsed: a
     // `(sig f (pt -> …))` resolves the record NAME to a shape carrying them
@@ -295,11 +313,11 @@ pub(super) fn register_declarations(
     // result is a record shape.
     {
         let mut field_types = HashMap::new();
-        for &form in &macro_sig_forms {
-            let Some((name, sig)) = annot::parse_sig_decl(heap, form) else {
+        for (form, namespace) in &macro_sig_forms {
+            let Some((name, sig)) = annot::parse_sig_decl(heap, *form) else {
                 continue;
             };
-            let id = value::symbol_name(qualify_decl_name(ctx, file_ns_name, name));
+            let id = value::symbol_name(qualify_decl_name(ctx, namespace.as_deref(), name));
             if let Some(fields) = sig.ret.record_fields() {
                 field_types.entry(id).or_insert_with(|| fields.clone());
             }
@@ -320,8 +338,11 @@ pub(super) fn register_declarations(
     // On the ctx from here too: the demand walk asks `is_ability_op` to tell an op
     // function from a same-file function spelling its name (ADR-350).
     ctx.set_ability(ability_info.clone());
-    for &form in forms.iter().chain(&macro_sig_forms) {
-        register_declared_sig(heap, ctx, file_ns_name, form);
+    for (&form, namespace) in forms.iter().zip(&form_namespaces) {
+        register_declared_sig(heap, ctx, namespace.as_deref(), form);
+    }
+    for (form, namespace) in &macro_sig_forms {
+        register_declared_sig(heap, ctx, namespace.as_deref(), *form);
     }
     ability_info
 }

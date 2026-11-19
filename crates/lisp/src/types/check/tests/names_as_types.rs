@@ -502,3 +502,21 @@ fn a_bare_type_name_means_its_own_modules_type_before_any_other_modules() {
         "only `bad` passes a value that is not `web`'s conn — {ws:?}"
     );
 }
+
+// Two modules in one file (ADR-223) that each define a record of the same name: each
+// constructor's declared result is ITS module's record. Every declaration in a file was
+// qualified with the first module, so the second `(sig live-view …)` was filed over the
+// first, and the first constructor read the other module's record as its declared result —
+// a type-mismatch on correct code (hatch's markup test, five views in one file).
+#[test]
+fn same_named_records_in_two_modules_of_one_file_keep_their_own_types() {
+    let ws = file_warnings_mode(
+        "(defmodule views/both)\n(defrecord live-view ())\n(defn make () (live-view))\n\
+         (defmodule views/both-second)\n(defrecord live-view ())\n(defn make () (live-view))\n",
+        true,
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("declared return type")),
+        "{ws:?}"
+    );
+}
