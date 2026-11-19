@@ -135,3 +135,17 @@
       [:scroll-region 0.5 [[:cell-region 0 0 4 4 18 []]]])
     (assert= (cell-region 0 0 4 4 18 [(scroll-region 0.5 [])])
       [:cell-region 0 0 4 4 18 [[:scroll-region 0.5 []]]])))
+
+(describe "a face is a map, a face name, or nil"
+  (test "text, rect and bar resolve a face NAME through the face registry"
+    (let (header (editor/face/face :ui/header))
+      (assert= (text 0 0 "hi" :ui/header) [:text 0 0 "hi" header])
+      (assert= (rect 0 0 2 1 :ui/header) [:rect 0 0 2 1 header])
+      (assert= (bar 0 2 "hi" {:face :ui/header}) [:text 0 0 "hi" header])
+      (assert= (bar 0 2 "hi" {:face :ui/header :scale 2}) [:text 0 0 "h" (assoc header :scale 2)])))
+  (test "an unknown face name is the default face"
+    (assert= (text 0 0 "hi" :no-such-face) [:text 0 0 "hi"]))
+  (test "a face that is neither trips the contract"
+    (assert-error (text 0 0 "hi" [:fg :red]))
+    (assert-error (text 0 0 "hi" "red"))
+    (assert-error (rect 0 0 1 1 "red"))))

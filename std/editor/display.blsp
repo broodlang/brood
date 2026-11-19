@@ -63,14 +63,28 @@ columns are 0-based character cells.")
     (editor/display/clear)   ;=> [:clear]"
   [:clear])
 
+(defn- face-of (face)
+  "`face` as an op carries it: a face NAME (a keyword) resolved through `editor/face/face`
+— nil for an unknown one, the default face — and anything else as it is."
+  (if (keyword? face) (editor/face/face face) face))
+
 (defn text (row col s &optional (face nil))
   "A render op drawing string `s` at (`row`, `col`) (0-based cells), optionally
-styled by `face` (a map like `{:fg :red :bold true}`).
+styled by `face`: a map like `{:fg :red :bold true}`, or a face NAME (`:ui/header`)
+resolved through `editor/face/face` now, as `bar`'s docstring writes it. Any other face —
+a vector, a string — trips the contract under `nest test`; a frontend paints it in the
+default face and warns once.
 
-    (editor/display/text 0 0 \"hi\")   ;=> [:text 0 0 \"hi\"]"
-  (if (nil? face)
-    [:text row col s]
-    [:text row col s face]))
+    (editor/display/text 0 0 \"hi\")   ;=> [:text 0 0 \"hi\"]
+    (editor/display/text 0 0 \"hi\" {:bold true})   ;=> [:text 0 0 \"hi\" {:bold true}]
+    (editor/display/text 0 0 \"hi\" :no-such-face)   ;=> [:text 0 0 \"hi\"]"
+  ;; `face-of` inline: `text` is the hottest op constructor, and a call per op costs more
+  ;; than the `keyword?` test it would wrap
+  (let (resolved (if (keyword? face) (editor/face/face face) face))
+    (if (nil? resolved)
+      [:text row col s]
+      [:text row col s resolved])))
+(sig text (any any any &optional (or nil map keyword) -> vector))
 
 (defn cursor (row col &optional (style nil) (color nil) (blink nil) (under nil) (face nil))
   "A render op placing the text cursor at (`row`, `col`). With `style` — `:bar`
@@ -138,7 +152,8 @@ with `face`'s `:bg` colour — a solid panel. The general fill primitive `bar`
 gutter background. The GUI paints the rectangle directly (no glyphs); the terminal
 space-fills each row in the face so the `:bg` shows. Other face attributes (`:fg`,
 `:bold`) are irrelevant — there are no glyphs — but a `:bg` (or `:reverse`) is what
-makes it visible; a face with no background paints nothing.
+makes it visible; a face with no background paints nothing. `face` may be a face NAME
+(`:ui/selection`), resolved through `editor/face/face` as `text` resolves one.
 
 `radius` (cell units, default 0.0) rounds the corners **in the GUI**; the terminal
 ignores it and space-fills as always, which is the same frontend asymmetry
@@ -150,9 +165,11 @@ existing frames are byte-identical.
 
     (editor/display/rect 1 2 3 4 {:bg :blue})   ;=> [:rect 1 2 3 4 {:bg :blue}]
     (editor/display/rect 1 2 3 4 nil 0.5)       ;=> [:rect 1 2 3 4 nil 0.5]"
-  (if (= radius 0.0)
-    [:rect row col w h face]
-    [:rect row col w h face radius]))
+  (let (resolved (face-of face))
+    (if (= radius 0.0)
+      [:rect row col w h resolved]
+      [:rect row col w h resolved radius])))
+(sig rect (any any any any (or nil map keyword) &optional any -> vector))
 
 (defn image (row col w h source &optional (opts nil))
   "A render op painting a raster picture into the `w`×`h` block of cells whose top-left
@@ -269,7 +286,8 @@ terminal frontend skips it (like `vspans`).
 shape `std/observer` draws by hand. Returns one `text` op.
 
 `opts` (all optional):
-  `:face`  — the style map: `{:reverse true}`, a named `(face :ui/header)`, or
+  `:face`  — the style map: `{:reverse true}`, a named `(face :ui/header)` or the name
+             itself (`:ui/header`), or
              `{:bg :blue :fg :white :bold true}`.
   `:align` — `:left` (default), `:center`, or `:right`: where `s` sits on the bar.
   `:scale` — GUI per-op font scale (ADR-079, an integer >= 1, default 1): the bar is
@@ -280,7 +298,8 @@ shape `std/observer` draws by hand. Returns one `text` op.
     (bar (dec rows) cols msg {:face {:bg :blue :fg :white} :align :center})
 
     (editor/display/bar 0 6 \"ab\")                   ;=> [:text 0 0 \"ab    \"]
-    (editor/display/bar 0 6 \"ab\" {:align :right})   ;=> [:text 0 0 \"    ab\"]"
+    (editor/display/bar 0 6 \"ab\" {:align :right})   ;=> [:text 0 0 \"    ab\"]
+    (editor/display/bar 0 2 \"ab\" {:face :ui/header})   ;=> [:text 0 0 \"ab\" {:bold true :reverse true}]"
   (let (scale (math/max 1 (get opts :scale 1))
         cells (math/max 1 (math/quot width scale)))
     (text row
@@ -289,9 +308,10 @@ shape `std/observer` draws by hand. Returns one `text` op.
       (bar-face (get opts :face) scale))))
 
 (defn- bar-face (face scale)
-  "`face` with `:scale` added when `scale` > 1 (a magnified bar); the face unchanged
-(possibly `nil`) at scale 1."
-  (if (> scale 1) (assoc (or face {}) :scale scale) face))
+  "`face` (a map, or a face name resolved through `editor/face/face`) with `:scale` added when
+`scale` > 1 (a magnified bar); the face unchanged (possibly `nil`) at scale 1."
+  (let (resolved (face-of face))
+    (if (> scale 1) (assoc (or resolved {}) :scale scale) resolved)))
 
 (defn- bar-fit (s cells align)
   "`s` fitted to exactly `cells` characters — padded with spaces (positioned per
@@ -450,7 +470,7 @@ glyph that does not fit leaves its cells blank. A chunk `[text face :virtual]`
 ([[splice-inline]]) is painted but moves
 no tab stop.
 
-    (editor/display/chunk-ops 0 2 [[\"a\\tb\" :x] [\"日\" nil]])   ;=> ([:text 0 2 \"a       b\" :x] [:text 0 11 \"日\"])
+    (editor/display/chunk-ops 0 2 [[\"a\\tb\" {:bold true}] [\"日\" nil]])   ;=> ([:text 0 2 \"a       b\" {:bold true}] [:text 0 11 \"日\"])
     (editor/display/chunk-ops 0 0 [[\"abcdef\" nil]] 0 3)   ;=> ([:text 0 0 \"abc\"])
     (editor/display/chunk-ops 0 0 [[\"ab日\" nil] [\"c\" :x]] 0 3)   ;=> ([:text 0 0 \"ab\"])"
   (chunk-ops-step row x col limit chunks '()))
@@ -549,7 +569,7 @@ widest line plus one cell of padding each side; `face` fills the surface, `fg` s
 text, and `opts` forwards `:border`/`:radius` to `card-surface`. GUI rounds the card; the
 terminal draws a flat panel.
 
-    (editor/display/tooltip 5 10 [\"hi\"] :popup :fg 80 24)   ;=> ([:rect 4 10 4 1 :popup] [:text 4 10 \" hi \" :fg])"
+    (editor/display/tooltip 5 10 [\"hi\"] {:bg :blue} {:fg :white} 80 24)   ;=> ([:rect 4 10 4 1 {:bg :blue}] [:text 4 10 \" hi \" {:fg :white}])"
   (let (n (count lines)
         w (+ 2 (fold lines 0 (fn (m s) (math/max m (count s)))))
         [mr mc] (card-rect (- anchor-row n) anchor-col w n cols rows))

@@ -25,9 +25,17 @@ pub(super) struct UnderlineSpec {
 }
 
 /// Read a face map (`{:fg :red :bg :blue :bold true :reverse true}`); `None` for a non-map
-/// face, which is the frontend's default style.
+/// face, which is the frontend's default style. `nil` is the default face; any other non-map
+/// (a vector, a string, a keyword `editor/display` did not resolve) is a caller's mistake, and
+/// is said once per distinct value on stderr ([`warn_bad_face`]) — the op still paints, in
+/// the default style, so one bad face never blanks a frame.
 pub(super) fn read_face(heap: &Heap, face: Value) -> Option<FaceFields> {
-    let Value::Map(id) = face else { return None };
+    let Value::Map(id) = face else {
+        if !matches!(face, Value::Nil) {
+            warn_bad_face(heap, face);
+        }
+        return None;
+    };
     let k = &*FACE_KEYS;
     let flag = |key| heap.map_get(id, key).is_some_and(face_truthy);
     let underline = heap
@@ -58,6 +66,41 @@ pub(super) fn read_face(heap: &Heap, face: Value) -> Option<FaceFields> {
         reverse: flag(k.reverse),
         underline,
     })
+}
+
+/// Say on stderr, once per distinct printed value, that `face` is not a face map. A frame is
+/// painted many times a second, so a bad face in it would otherwise print on every frame;
+/// past `MAX_WARNED_FACES` distinct values it warns without recording, rather than grow.
+/// Whether it warned.
+fn warn_bad_face(heap: &Heap, face: Value) -> bool {
+    const MAX_WARNED_FACES: usize = 256;
+    const MAX_SHOWN_CHARS: usize = 120;
+    static WARNED_FACES: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+        std::sync::Mutex::new(None);
+    let mut printed = crate::syntax::printer::print(heap, face);
+    if let Some((cut, _)) = printed.char_indices().nth(MAX_SHOWN_CHARS) {
+        printed.truncate(cut);
+        printed.push('…');
+    }
+    let first = match WARNED_FACES.lock() {
+        Ok(mut guard) => {
+            let warned = guard.get_or_insert_with(Default::default);
+            if warned.len() >= MAX_WARNED_FACES && !warned.contains(&printed) {
+                true
+            } else {
+                warned.insert(printed.clone())
+            }
+        }
+        // A poisoned lock must not silence the diagnostic this exists to print.
+        Err(_) => true,
+    };
+    if first {
+        eprintln!(
+            "display: a face must be a map (or nil), not {printed} — painted in the default \
+             face (warns once per value)"
+        );
+    }
+    first
 }
 
 /// Parse a frame value (the op-vector `term-draw`/`term-emit`/`gui-draw` all
@@ -358,5 +401,29 @@ mod color_value_tests {
         assert_eq!(face_rgb(&heap, s), Some([0x28, 0x2c, 0x34]));
         // anything else is the default face
         assert_eq!(face_rgb(&heap, Value::int(7)), None);
+    }
+}
+
+#[cfg(test)]
+mod bad_face_tests {
+    use super::{read_face, warn_bad_face};
+    use crate::core::heap::Heap;
+    use crate::core::value::{self, Value};
+
+    /// A face that is not a map paints in the default face (no fields read) and is said
+    /// ONCE per distinct value, not on every frame; nil is the default face and says nothing.
+    #[test]
+    fn a_bad_face_is_the_default_and_warns_once_per_value() {
+        let mut heap = Heap::new();
+        let vector = heap.alloc_vector(vec![value::kw("fg"), value::kw("bad-face-test-a")]);
+        assert!(read_face(&heap, vector).is_none());
+        assert!(
+            !warn_bad_face(&heap, vector),
+            "the read above already warned"
+        );
+        let other = heap.alloc_string("bad-face-test-b");
+        assert!(warn_bad_face(&heap, other));
+        assert!(!warn_bad_face(&heap, other));
+        assert!(read_face(&heap, Value::nil()).is_none());
     }
 }

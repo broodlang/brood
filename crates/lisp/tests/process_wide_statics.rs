@@ -214,6 +214,7 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("process/scheduler/pool.rs", "QUANTUM_LEDGER", Diagnostic),
     ("eval/compile/closure.rs", "SEEN", Diagnostic),
     ("dist/routing.rs", "SEEN", Diagnostic),
+    ("builtins/display.rs", "WARNED_FACES", Diagnostic),
 ];
 
 fn source_root() -> PathBuf {
