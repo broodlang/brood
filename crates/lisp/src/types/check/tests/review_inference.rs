@@ -253,6 +253,8 @@ fn rule_heads_are_bound() {
         "%pin",
         // `receive`'s timeout clause word, matched by the unused-binder lint to skip it
         "after",
+        // the writers' trailing `:to port`, which the doubled-space lint leaves out
+        "to",
         "%contract-check-args",
         "%contract-check-rest",
     ];
