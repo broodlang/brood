@@ -1216,7 +1216,7 @@ bindings (several pairs, `:when` guards, destructuring), collects nothing and re
 `nil`. A counted loop iterates a `range` (ADR-674):
 
 ```clojure
-(doseq (i (range 3)) (io/write i " "))    ; prints "0 1 2 "
+(doseq (i (range 3)) (io/write (str i " ")))  ; prints "0 1 2 "
 (doseq (x (list :a :b))                   ; runs the body for each element
   (io/puts (->string x)))                 ; prints "a" then "b"
 ```
@@ -2661,7 +2661,7 @@ does not get to own. `(def call …)` is yours again.)
   (call  :value          [n n])            ; synchronous; body = [reply next-state]
   (query :double         (* n 2))          ; synchronous read-only; body = the reply, state unchanged
   (info  [:down _ p r]   (do (log p r) n)) ; a non-envelope message (monitor/link/timer/raw send)
-  (terminate reason (io/puts "down: " reason)))  ; runs on (stop); body for cleanup
+  (terminate reason (io/puts "down:" reason)))  ; runs on (stop); body for cleanup
 
 (def c (start counter 0))
 (cast c :inc)              ; fire-and-forget

@@ -4,6 +4,12 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Added: `nest check` flags a literal whose own space doubles `io/puts`'s separator.**
+`io/puts` and `io/write` put one space between their arguments, so `(io/puts "count = " n)`
+prints `count =  5`; the finding is `:suspicious`. Two or more spaces read as layout and pass.
+
 ## v0.55.0 — recursion as deep as memory allows, a project cut into contexts, a slick terminal
 
 **Fixed: a deprecated name is reported whether its module came from source or an image.** A

@@ -742,7 +742,7 @@ and registers the new pid. The name is auto-reaped on death.
     (receive
       ([:down ^ref _ :normal] :ok)
       ([:down ^ref _ reason]
-        (io/puts "child died: " (pr-str reason) " — restarting")
+        (io/puts "child died:" (pr-str reason) "— restarting")
         (supervise worker-fn)))))
 ```
 
@@ -784,7 +784,7 @@ a node link (ADR-073). The whole model in one example:
 ;; --- on node "bob" -----------------------------------------------------------
 (node/start "bob")
 (proc/register :inbox (self))
-(receive ([:hi from] (io/puts "hi from " from)))       ; => hi from :alice@host
+(receive ([:hi from] (io/puts "hi from" from)))        ; => hi from :alice@host
 ```
 
 The three pieces and how they relate:
@@ -1063,7 +1063,7 @@ To run a one-off entry point without editing the manifest's `:main`, pass
 (try
   (work)
   (catch e
-    (io/puts "failed: " e)))
+    (io/puts "failed:" e)))
 
 (try (work)                              ; `finally` runs on success, on a raise,
   (catch e (cleanup-failed e))           ;   and on a raise inside `catch` (ADR-306);

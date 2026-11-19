@@ -57,7 +57,8 @@ when the runtime crashes); `std/prelude/*.blsp` is the canonical idiomatic code.
    `(map m (fn ([k v]) …))`.
 
 9. **Many familiar names live in a module and are unbound bare.** Output: `io/puts`,
-   `io/write`, `io/inspect` (no `print`). `math/…`: `min max quot rem mod floor abs sqrt
+   `io/write`, `io/inspect` (no `print`); they join their arguments with one space, so
+   `(io/puts "count =" n)`, never `"count = "`. `math/…`: `min max quot rem mod floor abs sqrt
    even? odd?`. `seq/…`: `zip subvec frequencies group-by find distinct filter reject
    sort-by partition take-while repeatedly`. `map/…`: `get-in assoc-in update-in`.
    `proc/sleep`, `os/now`; `reflect/…`: `gensym macroexpand doc apropos`; `debug/spy`;

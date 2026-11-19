@@ -77,7 +77,7 @@
           (doseq (dir (brood-repos parent))
             (let (dirty (dirty-count dir) ahead (ahead-count dir))
               (when (or (> dirty 0) (not (= ahead "0")))
-                (io/puts (repo-name dir) "  uncommitted=" dirty " unpushed=" ahead))))
+                (io/puts (repo-name dir) (str " uncommitted=" dirty) (str "unpushed=" ahead)))))
           0)
       (= action "check") (fan-out parent check-repo)
       (= action "commit")

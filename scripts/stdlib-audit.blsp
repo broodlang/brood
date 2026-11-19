@@ -69,7 +69,7 @@ parenthesised call on its own line — the shapes the stdlib actually uses."
 
 (defn- report (label xs)
   (io/puts "")
-  (io/puts "== " label " (" (count xs) ")")
+  (io/puts "==" label (str "(" (count xs) ")"))
   (doseq (chunk (seq/partition (sort xs) 6))
     (io/puts "   " (reduce chunk "" (fn (a b) (if (= a "") b (str a "  " b)))))))
 
@@ -87,13 +87,13 @@ parenthesised call on its own line — the shapes the stdlib actually uses."
                      (let (d (check-allow :discarded-catch
                                (try (reflect/doc (reflect/eval (string/->symbol n))) (catch _ nil))))
                        (and d (not (example? d)))))))
-  (io/puts "stdlib audit — "
-    (count names)
-    " public names ("
-    (count bare)
-    " bare, "
-    (count qualified)
-    " namespaced)")
+  (io/puts (str "stdlib audit — "
+             (count names)
+             " public names ("
+             (count bare)
+             " bare, "
+             (count qualified)
+             " namespaced)"))
   (report "STUTTER — local part repeats its module" stutter)
   (io/puts "")
   (io/puts "== DOCS")
@@ -104,9 +104,9 @@ parenthesised call on its own line — the shapes the stdlib actually uses."
   ;; fixes them. Every public `defn`/`defmacro` in the library is documented.
   ;;
   ;; The actionable number is therefore the example count below, not this one.
-  (io/puts "   no docstring at all : "
+  (io/puts "   no docstring at all :"
     (count no-doc)
     "  (def/defdyn/defrecord/ability ops — no docstring slot exists)")
-  (io/puts "   docstring, no example: " (count no-example))
-  (io/puts "   documented + example : " (- (count names) (count no-doc) (count no-example)))
+  (io/puts "   docstring, no example:" (count no-example))
+  (io/puts "   documented + example :" (- (count names) (count no-doc) (count no-example)))
   (report "BARE core names — each must earn staying unnamespaced" bare))

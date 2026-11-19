@@ -170,15 +170,19 @@ it does not."
 named by a trailing `:to <port>`. Returns nil.
 
     (io/write \"working\")   ;~> nil, after writing `working` to *out*
-    (io/write \"progress: \" n :to *err*)   ;~> nil, after writing to stderr"
+    (io/write \"progress:\" n :to *err*)   ;~> nil, after writing `progress: 3` to stderr"
   (send-text xs "" render-display))
 
 (defn puts (& xs)
   "Write the display forms of `xs` followed by a newline, to `*out*` — or to the port named
 by a trailing `:to <port>`. Returns nil. The everyday output function.
 
+The values are joined with ONE space, so a literal needs none of its own: `(io/puts
+\"count =\" 3)` prints `count = 3`. To join without spaces, build the line with `str`.
+
     (io/puts \"hello\")   ;~> nil, after printing the line `hello`
-    (io/puts \"count = \" n)
+    (io/puts \"count =\" n)
+    (io/puts (str \"built in \" ms \"ms\"))
     (io/puts \"boom\" :to *err*)
     (io/puts \"entry\" :to (io/file-port \"log.txt\"))"
   (send-text xs "\n" render-display))

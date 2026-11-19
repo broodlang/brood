@@ -24,7 +24,7 @@
 
 ;; Vectors are a data type with O(1) indexing (code is lists, data can be vectors).
 (def v [10 20 30])
-(io/puts "v[1] =" (nth v 1) " count =" (count v))
+(io/puts "v[1] =" (nth v 1) "count =" (count v))
 
 ;; Macros — define your own control form.
 (defmacro unless2 (c & body) `(if ~c nil (do ~@body)))

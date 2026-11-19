@@ -368,6 +368,52 @@ pub(super) fn is_output_sink(s: Symbol) -> bool {
     crate::types::check::known_ops::is_one_of(s, crate::types::check::known_ops::OUTPUT_SINKS)
 }
 
+/// The writers that put ONE space between their arguments (`io/puts`, `io/write`).
+pub(super) fn is_space_joining_sink(s: Symbol) -> bool {
+    crate::types::check::known_ops::is_one_of(
+        s,
+        crate::types::check::known_ops::SPACE_JOINING_SINKS,
+    )
+}
+
+/// The **doubled-space** lint: a string literal passed to a space-joining writer that
+/// already ends in a space before another argument, or starts with one after another.
+/// `(io/puts "count = " n)` prints `count =  5` — the writer adds the separator, so the
+/// literal's own space makes two. Eighteen call sites across std/ were written that way
+/// (fixed 26cd555f8), and the docs taught it. A trailing `:to port` is not a value to
+/// print, so the pair is left out first.
+///
+/// Only a SINGLE space is the slip. Two or more is layout (`"evens:  "` padded to line up
+/// under `"squares:"`, `"   "` indenting a line), and an all-space literal is a separator
+/// on purpose — the checker would rather miss than misfire.
+pub(super) fn doubled_space_literals(heap: &Heap, arguments: &[Value]) -> Vec<String> {
+    let printed = match arguments {
+        [values @ .., Value::Keyword(keyword), _] if value::symbol_is(*keyword, "to") => values,
+        _ => arguments,
+    };
+    let mut messages = Vec::new();
+    for (index, argument) in printed.iter().enumerate() {
+        let Value::Str(id) = argument else { continue };
+        let text = heap.string(*id);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let doubled_after =
+            index + 1 < printed.len() && text.len() - text.trim_end_matches(' ').len() == 1;
+        let doubled_before = index > 0 && text.len() - text.trim_start_matches(' ').len() == 1;
+        if doubled_after || doubled_before {
+            let side = if doubled_after { "ends" } else { "starts" };
+            messages.push(format!(
+                "{:?} {side} with a space, and the writer already puts one space between \
+                 its arguments — this prints two. Drop the literal's space, or build the \
+                 line with (str …)",
+                text
+            ));
+        }
+    }
+    messages
+}
+
 /// The arity a signature describes: `&` rest → unbounded, `&optional` → a range, else an
 /// exact count. Shared by the declared-sig path, the arrow-parameter path and the
 /// sig-vs-definition arity check (`check_sig_declarations`), which have to agree — they

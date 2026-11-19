@@ -45,6 +45,10 @@ pub(super) const RETURN_INT_CLOSED: &[&str] = &["+", "-", "*", "math/abs"];
 /// to one stringifies the *function* (`#<fn …>`) instead of calling it.
 pub(super) const OUTPUT_SINKS: &[&str] = &["io/puts", "io/write", "str", "string/format"];
 
+/// The writers that join their arguments with one space — the doubled-space lint's heads.
+/// `str` concatenates and `io/inspect` quotes its strings, so neither belongs here.
+pub(super) const SPACE_JOINING_SINKS: &[&str] = &["io/puts", "io/write"];
+
 /// The unary primitives a guard may narrow **through** — a call to one of these is a
 /// `PathKey::Call` step, so `(if (failure? (string/->number s)) d (string/->number s))`
 /// types the second occurrence as `number`, not `number | failure`.

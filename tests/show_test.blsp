@@ -38,8 +38,8 @@
     (is (includes? (with-out-str (io/puts (plain 7))) "#show-test/plain{")))
   (test "built-ins render identically with the hook installed and disabled"
     ;; the hook only touches records, so every built-in arg is byte-for-byte the same
-    (assert= (with-out-str (io/puts 42 " " [1 2] " " {:k 1}))
-      (with-out-str (binding (*show* nil) (io/puts 42 " " [1 2] " " {:k 1}))))))
+    (assert= (with-out-str (io/puts 42 "text" [1 2] {:k 1}))
+      (with-out-str (binding (*show* nil) (io/puts 42 "text" [1 2] {:k 1}))))))
 
 (describe "*show* is an ordinary dynamic var"
   (test "(binding (*show* nil) …) disables the protocol for a scope"

@@ -870,6 +870,13 @@ fn check_named_call(
             }
         }
     }
+    if is_space_joining_sink(s) && !ctx.is_local(s) {
+        out.extend(
+            doubled_space_literals(heap, &items[1..])
+                .into_iter()
+                .map(|message| Finding::new(Lint::Suspicious, heap.form_pos_only(form), message)),
+        );
+    }
 
     // **Match-exhaustiveness lint** (ADR-118). `match` compiles a no-catch-
     // all form's failure to `(%raise (%match-error 'context target

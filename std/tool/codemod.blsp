@@ -88,7 +88,7 @@ checkout ([[nested-checkouts]])."
   (let (changed (seq/filter (map (project-blsp) (fn (f) (rewrite-file pairs f)))
                   (fn (f) (not (nil? f)))))
     (for (f changed) (io/puts "  changed:" f))
-    (io/puts (count changed) " file(s) changed")
+    (io/puts (count changed) "file(s) changed")
     (count changed)))
 
 ;; ---- CST-backed rename (context-aware) ---------------------------------------
@@ -277,7 +277,7 @@ counterpart to `rename`. Prints each changed file and returns the count.
                                   (if (= before after) nil (do (file/spit f after) f)))))
                   (fn (f) (not (nil? f)))))
     (for (f changed) (io/puts "  changed:" f))
-    (io/puts (count changed) " file(s) changed")
+    (io/puts (count changed) "file(s) changed")
     (count changed)))
 
 ;; ---- renaming the references the checker found (`nest check --fix-renames`) --------------
@@ -1105,8 +1105,8 @@ when no file declares `from` or the destination exists (nothing is written then)
       ;; the source root is found from the path the name gives, so the two must agree
       (not (string/ends-with? source (str "/" from ".blsp")))
         (do
-          (io/puts "rename-module: "
-            source " declares " from " but its path does not name it" :to *err*)
+          (io/puts "rename-module:"
+            source "declares" from "but its path does not name it" :to *err*)
           1)
       (module-file files to)
         (do
@@ -1228,5 +1228,5 @@ project's .blsp files ([[rename-global-text]]). Prints each changed file; return
           (doseq (file changed) (io/puts "  changed:" file))
           (doseq (file (seq/reject files (fn (file) (contains? (into #{} readable) file))))
             (io/puts "  skipped (does not parse):" file))
-          (io/puts (count changed) " file(s) changed")
+          (io/puts (count changed) "file(s) changed")
           0))))

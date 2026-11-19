@@ -610,6 +610,40 @@ fn function_as_value_lint_is_quiet_on_the_correct_and_legitimate_shapes() {
 }
 
 #[test]
+fn a_literal_whose_own_space_doubles_the_writers_separator_is_flagged() {
+    // `io/puts` and `io/write` put one space between their arguments, so a literal's own
+    // trailing (or leading) space prints two: eighteen std call sites and the docs were
+    // written that way (26cd555f8).
+    let doubled = |source: &str| {
+        warnings(source)
+            .into_iter()
+            .filter(|message| message.contains("already puts one space"))
+            .collect::<Vec<_>>()
+    };
+    for source in [
+        "(io/puts \"count = \" 3)",
+        "(io/puts 3 \" items\")",
+        "(io/write \"progress: \" 3 :to *err*)",
+    ] {
+        assert_eq!(doubled(source).len(), 1, "{source} should be flagged once");
+    }
+    // Quiet: the right spelling, a lone literal, the `:to` pair, layout padding of two or
+    // more spaces, an all-space separator, a concatenating `str`, and `io/inspect` (which
+    // quotes its strings).
+    for source in [
+        "(io/puts \"count =\" 3)",
+        "(io/puts \"alone \")",
+        "(io/puts \"alone \" :to *err*)",
+        "(io/puts \"evens:  \" 3)",
+        "(io/puts \"   \" 3)",
+        "(io/puts (str \"count = \" 3))",
+        "(io/inspect \"count = \" 3)",
+    ] {
+        assert!(doubled(source).is_empty(), "{source} should be quiet");
+    }
+}
+
+#[test]
 fn unbound_is_silent_for_in_scope_names() {
     // fn params don't look unbound when used as call heads or
     // referenced in the body.
