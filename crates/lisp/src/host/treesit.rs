@@ -1019,7 +1019,12 @@ fn spans_into<T: SpanText>(
                 node.end_byte().min(to).max(node.start_byte().max(from)),
             ),
         };
-        out.push((start, end, reported));
+        // A zero-width span colours nothing, and one is what a node tree-sitter INSERTED while
+        // recovering looks like (a MISSING `}` or `end`, which is a keyword by its kind): no
+        // caller wants it, and every one of them had to tolerate it.
+        if start < end {
+            out.push((start, end, reported));
+        }
         return; // coloured whole: do not descend
     }
     let mut cursor = node.walk();
@@ -1660,6 +1665,143 @@ pub fn tree_kids(heap: &mut Heap, handle: u64, offset: i64, all: bool) -> LispRe
         return Ok(Value::Nil);
     };
     Ok(kids_in(heap, &entry.tree, &entry.text, offset, all))
+}
+
+/// Does an anonymous token of `kind` count for a [`tokens_before`] query naming `texts`? Its
+/// text is one of them, or it ENDS in an opening delimiter one of them names: `${`, `%{`, `#{`
+/// and `\{` open what `{` opens, and listing every language's spelling of it was the
+/// alternative.
+#[cfg(feature = "treesit")]
+fn token_counts(kind: &str, texts: &std::collections::HashSet<String>) -> bool {
+    texts.contains(kind)
+        || kind.chars().last().is_some_and(|last| {
+            matches!(last, '(' | '[' | '{') && texts.contains(&last.to_string())
+        })
+}
+
+/// The walk under [`tokens_before`]: the real anonymous tokens of `node` starting before
+/// `byte`, in source order. A child that ENDS by `byte` and parsed cleanly is skipped whole,
+/// unless it is the last one before `byte` — a complete construct closes everything it opens,
+/// so its tokens could only cancel out —
+/// which keeps the walk to the path down to `byte` and the broken parts beside it.
+#[cfg(feature = "treesit")]
+fn tokens_into<'tree>(
+    node: tree_sitter::Node<'tree>,
+    byte: usize,
+    texts: &std::collections::HashSet<String>,
+    out: &mut Vec<(tree_sitter::Node<'tree>, tree_sitter::Node<'tree>)>,
+) {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return;
+    }
+    loop {
+        let child = cursor.node();
+        if child.start_byte() >= byte {
+            break; // source order: nothing after this starts before `byte`
+        }
+        if child.child_count() > 0 {
+            // the LAST construct before `byte` is walked even when it is clean: it closes
+            // what it opens, but a word between an opener and its closer that it holds
+            // (an `elseif_clause`'s `elseif`, its `if` left open outside it) still counts
+            let last = child
+                .next_sibling()
+                .is_none_or(|next| next.start_byte() >= byte);
+            // and so is one made of tokens alone, which may be one HALF of a pair: HCL wraps a
+            // block's `{` in a `block_start` and its `}` in a `block_end`
+            let tokens_only = child.named_child_count() == 0;
+            if child.end_byte() > byte || child.has_error() || last || tokens_only {
+                tokens_into(child, byte, texts, out);
+            }
+        } else if !child.is_named()
+            && !child.is_missing()
+            && child.start_byte() < child.end_byte()
+            && token_counts(child.kind(), texts)
+        {
+            out.push((child, node));
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+}
+
+/// [`tokens_before`] over any text the tree was parsed from.
+#[cfg(feature = "treesit")]
+fn tokens_in<T: SpanText>(
+    heap: &mut Heap,
+    tree: &tree_sitter::Tree,
+    text: &T,
+    offset: i64,
+    texts: &std::collections::HashSet<String>,
+) -> Value {
+    let byte = text.byte_of(offset.max(0) as usize);
+    let mut found = Vec::new();
+    tokens_into(tree.root_node(), byte, texts, &mut found);
+    let kw = |k: &str| Value::keyword(value::intern(k));
+    let entries: Vec<Value> = found
+        .into_iter()
+        .map(|(node, parent)| {
+            let kind = heap.alloc_string(node.kind());
+            heap.map_from_pairs(vec![
+                (kw("kind"), kind),
+                (
+                    kw("start"),
+                    Value::int(text.char_of(node.start_byte()) as i64),
+                ),
+                (kw("end"), Value::int(text.char_of(node.end_byte()) as i64)),
+                (kw("parent"), kw(parent.kind())),
+            ])
+        })
+        .collect();
+    heap.alloc_vector(entries)
+}
+
+/// `(%tree-sitter-tokens source lang offset texts)` — the anonymous tokens before char
+/// `offset` that `texts` names, in source order, each `{:kind "text" :start :end :parent}` (the
+/// kind of the node holding it); a token
+/// tree-sitter inserted while recovering (MISSING, zero-width) is none.
+///
+/// **Why the kernel has to answer this.** A half-typed buffer does not parse, and what is
+/// still OPEN in it — the `{` no `}` has closed yet, the `do` waiting for its `end` — is the
+/// one thing an indenter needs there. Error recovery hides it: the opener is a bare token
+/// inside an ERROR node, or the closer a MISSING one, and no chain reaches it. The tokens do
+/// say it, matched as a stack in Brood (`editor/treesit`'s open stack), and walking them is a
+/// walk of the tree, which `%tree-sitter-parse` could only do by projecting every node. Only
+/// the path to `offset` and the subtrees with errors are walked: a clean construct that ends
+/// before `offset` is balanced and skipped.
+#[cfg(feature = "treesit")]
+pub fn tokens_before(
+    heap: &mut Heap,
+    src: &str,
+    lang: &str,
+    offset: i64,
+    texts: &std::collections::HashSet<String>,
+) -> LispResult {
+    let tree = parse_cached(src, lang)?;
+    let b2c = byte_to_char_offsets(src);
+    Ok(tokens_in(
+        heap,
+        &tree,
+        &FlatText { src, b2c: &b2c },
+        offset,
+        texts,
+    ))
+}
+
+/// `(%tree-sitter-tree-tokens tree offset texts)` — [`tokens_before`] over a held tree. `Nil`
+/// for a gone handle.
+#[cfg(feature = "treesit")]
+pub fn tree_tokens_before(
+    heap: &mut Heap,
+    handle: u64,
+    offset: i64,
+    texts: &std::collections::HashSet<String>,
+) -> LispResult {
+    let Some(entry) = tree_entry(handle) else {
+        return Ok(Value::Nil);
+    };
+    Ok(tokens_in(heap, &entry.tree, &entry.text, offset, texts))
 }
 
 /// `(%tree-sitter-tree-alive? tree)` — is the handle still held: not freed, its owner alive?

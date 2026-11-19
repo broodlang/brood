@@ -183,3 +183,22 @@ pub fn kids(
 pub fn errors(heap: &mut crate::core::heap::Heap, src: &str, lang: &str) -> LispResult {
     parse(heap, src, lang)
 }
+
+pub fn tokens_before(
+    _heap: &mut crate::core::heap::Heap,
+    _src: &str,
+    _lang: &str,
+    _offset: i64,
+    _texts: &std::collections::HashSet<String>,
+) -> LispResult {
+    Err(without_treesit("%tree-sitter-tokens"))
+}
+
+pub fn tree_tokens_before(
+    _heap: &mut crate::core::heap::Heap,
+    _handle: u64,
+    _offset: i64,
+    _texts: &std::collections::HashSet<String>,
+) -> LispResult {
+    Err(without_treesit("%tree-sitter-tree-tokens"))
+}

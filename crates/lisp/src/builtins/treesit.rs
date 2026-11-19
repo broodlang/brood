@@ -1008,3 +1008,61 @@ pub(super) fn tree_sitter_forget_grammar_verdict(
     let path = expect_string(heap, "%tree-sitter-forget-grammar-verdict", arg(args, 0))?;
     crate::host::treesit::forget_grammar_verdict(&path)
 }
+
+// ---- what a half-typed buffer leaves open ------------------------------------------------
+
+/// The token query an indenter asks of a broken parse — registered LAST from
+/// `builtins::register`, for the intern-table order reason `register_tree_queries` gives.
+pub(super) fn register_open_tokens(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    primitives.def(
+        "%tree-sitter-tokens",
+        Arity::exact(4),
+        Sig::new(vec![string, kw, int, any], vec_ty),
+        &["source", "lang", "offset", "texts"],
+        "The anonymous tokens of source's lang parse that start before char offset and that texts (a set or sequence of strings) names, in source order, each {:kind \"text\" :start :end :parent}, :parent the kind of the node holding it; a token whose text ENDS in an opening delimiter texts names counts too (`${` and `%{` for \"{\"). A token tree-sitter inserted while recovering (MISSING, zero-width) is none, and a construct that parsed cleanly and ends before offset is skipped whole — it closes what it opens. What a half-typed buffer still has OPEN, matched as a stack by the caller: error recovery leaves an unclosed `{` or `do` as a bare token in an ERROR node, where no chain reaches it. Same grammar rules and errors as %tree-sitter-parse.",
+        tree_sitter_tokens,
+    );
+    primitives.def(
+        "%tree-sitter-tree-tokens",
+        Arity::exact(3),
+        Sig::new(vec![ref_ty, int, any], vec_or_nil),
+        &["tree", "offset", "texts"],
+        "%tree-sitter-tokens over a held tree: the anonymous tokens before char offset of its text that texts names, in source order. Parses nothing. nil when the handle is gone.",
+        tree_sitter_tree_tokens,
+    );
+}
+
+/// The `texts` of a token query: a set or sequence of strings.
+fn ts_texts(
+    heap: &Heap,
+    who: &'static str,
+    v: Value,
+) -> Result<std::collections::HashSet<String>, LispError> {
+    let mut texts = std::collections::HashSet::new();
+    for item in heap.seq_items(v)? {
+        texts.insert(expect_string_ref(heap, who, item)?.to_string());
+    }
+    Ok(texts)
+}
+
+/// `(%tree-sitter-tokens source lang offset texts)` — `crate::host::treesit::tokens_before`.
+pub(super) fn tree_sitter_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "%tree-sitter-tokens";
+    let src = expect_string(heap, who, arg(args, 0))?;
+    let lang = ts_lang(heap, who, arg(args, 1))?;
+    let offset = expect_int(heap, who, arg(args, 2))?;
+    let texts = ts_texts(heap, who, arg(args, 3))?;
+    crate::host::treesit::tokens_before(heap, &src, &lang, offset, &texts)
+}
+
+/// `(%tree-sitter-tree-tokens tree offset texts)` — `crate::host::treesit::tree_tokens_before`.
+pub(super) fn tree_sitter_tree_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "%tree-sitter-tree-tokens";
+    let handle = ts_handle(heap, who, arg(args, 0))?;
+    let offset = expect_int(heap, who, arg(args, 1))?;
+    let texts = ts_texts(heap, who, arg(args, 2))?;
+    crate::host::treesit::tree_tokens_before(heap, handle, offset, &texts)
+}

@@ -2180,3 +2180,12 @@ region, so two same-named records in one file keep their own types; `editor/ui`'
 declares provided ops instead of a hand-written `:default` impl. Guards in ADR-761, each
 sabotage-verified. hatch's deliberately incomplete fixture view now draws the finding and
 allows it.
+
+2026-11-19. **The tree-sitter indenter reads a half-typed buffer (ADR-762).** bedit's corpus
+types every sample a line at a time, and 163 lines landed wrong on the broken parse: an unclosed
+`{` a level short, a `}` a level deep, keyword blocks by luck. The kernel now answers the tokens
+before a point (`%tree-sitter-tokens`, skipping clean constructs), and `editor/treesit` matches
+them as a stack: delimiters always, a language's keyword `:pairs`, `:clauses` (Elixir's `->`) and
+`:modifiers` (Ruby's `x if y`) when its spec names them. Continuations add one level, the line
+after a run goes back. Fontify drops the zero-width spans of MISSING nodes where they are made.
+The corpus's typing gaps are 55 lines now, most of them `case` labels no electric word names.

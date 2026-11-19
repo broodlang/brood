@@ -243,6 +243,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     tooling::register_bound_value(&mut primitives);
     // And again: the colours the terminal reported for itself (ADR-744).
     terminal::register_reported_colors(&mut primitives);
+    // And again: the tokens a half-typed buffer leaves open, for its indenter.
+    treesit::register_open_tokens(&mut primitives);
 }
 
 #[cfg(test)]

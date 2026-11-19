@@ -830,7 +830,9 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `%tree-sitter-chain` | 3 | The nodes containing char `offset`, outermost first, each as {:kind :start :end :named :container} WITHOUT its children, plus :field (the field it fills in its parent) when it has one. |
 | `%tree-sitter-errors` | 2 | Where the parse came apart: the ERROR and MISSING nodes as {:kind :start :end :missing? |
 | `%tree-sitter-kids` | 3–4 | The named children of the deepest node STRICTLY containing char `offset`, each as {:kind :start :end :named :container} (plus :field when it fills one) without its own children — the sibling list every … |
-| `%tree-sitter-spans` | 4–5 | The fontify query: [start end reported] for the OUTERMOST nodes the face `table` colours, in source order, not descending into one that matched. |
+| `%tree-sitter-spans` | 4–5 | The fontify query: [start end reported] for the OUTERMOST nodes the face `table` colours, in source order, not descending into one that matched. A span would be empty only for a node the parser inserted while recovering (a MISSING `}`), and none is reported. |
+| `%tree-sitter-tokens` | 4 | `(source lang offset texts)` → the anonymous tokens before char `offset` that `texts` (strings) names, in source order, each `{:kind "text" :start :end :parent}`; a token ENDING in an opening delimiter `texts` names counts as it (`${` for `"{"`). MISSING tokens are none, and a clean construct ending before `offset` is skipped whole (unless it is the last one, or made of tokens alone). What a half-typed buffer still has open, for its indenter (`editor/treesit`'s open stack). ADR-762 |
+| `%tree-sitter-tree-tokens` | 3 | `(tree offset texts)` → `%tree-sitter-tokens` over a held tree. Parses nothing. nil for a gone handle. ADR-762 |
 
 ### `builtins/wasm.rs`
 

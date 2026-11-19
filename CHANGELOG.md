@@ -11,6 +11,15 @@ TOML array element, once indentation is stripped) was read as verbatim content, 
 body, and not indented. **Fixed: `test/purge-stale-temp` skips a leftover it cannot remove**
 instead of failing the test file's load.
 
+**The tree-sitter indenter reads a half-typed buffer (ADR-762).** Typed a line at a time, a
+block is still unclosed and the parse broken; RET after an unclosed `{`, `(` or `[` landed a level
+short, a closing `}` stayed a level deep and keyword blocks indented by luck. What is still open
+is now read off the parse's tokens (new primitives `%tree-sitter-tokens` and
+`%tree-sitter-tree-tokens`) and matched as a stack: the delimiters always, and a language's
+keyword `:pairs`, `:clauses` and `:modifiers` when its indent spec names them. A `\` continuation
+adds its level once. **Fixed: `%tree-sitter-spans` reports no empty span** for a node the parser
+inserted while recovering.
+
 ## v0.56.0 — one contract mechanism, checked across modules
 
 **Removed: `defbehaviour` and the `(:implements …)` header clause (ADR-761).** `defability` is

@@ -1310,6 +1310,12 @@
                                                 :after {:kind :alias :text "def"}}} :d}})
       {:kinds #{:identifier :arguments :alias} :fields #{}}))
 
+  (test "an indent spec's :pairs and :clauses are tokens of the grammar, its :modifiers kinds"
+    (assert= (language-names {:indent {:pairs {"do" "end"}
+                                       :clauses #{"->"}
+                                       :modifiers #{:if_modifier}}})
+      {:kinds #{:do :end :-> :if_modifier} :fields #{}}))
+
   (test "an empty language refers to nothing"
     (assert= (language-names {}) {:kinds #{} :fields #{}})))
 
@@ -1549,3 +1555,126 @@
         (is (any? chain (fn (node) (and (= (:start node) 17) (= (:end node) 40)))))
         (assert= (map (node-chain text :elixir 17 tree) :kind) (map chain :kind))
         (free-tree tree)))))
+
+;; ---- a half-typed buffer: what is still open (ADR-762) ----------------------------------
+;; Typed a line at a time, a buffer's blocks are still unclosed when the next line is typed, and
+;; the parse is broken: the opener is a bare token in an ERROR node, or its closer a MISSING one.
+;; The indenter reads what is open off the parse's tokens (`%tree-sitter-tokens`), matched as a
+;; stack: the delimiters always, a language's keyword `:pairs` and `:clauses` when it names them.
+
+(defn- tsm-at-end (text lang spec)
+  ;; the column RET at the end of `text` lands on
+  (editor/treesit/indent-column text lang (count text) spec))
+
+(defn- tsm-last-line (text lang spec)
+  ;; the column `text`'s last line is indented to
+  (editor/treesit/indent-column text
+    lang
+    (inc (string/last-index-of text "\n" (dec (count text))))
+    spec))
+
+(def tsm-c-indent
+  {:width 4
+   :brackets #{:compound_statement
+               :field_declaration_list :initializer_list :argument_list :parameter_list}
+   :dedent #{"case" "default"}})
+
+(describe "indent-column on a broken parse: an unclosed delimiter"
+  :skip-unless (tsm-installed? :c)
+  "no c grammar installed"
+  (test "the line below an unclosed `{` goes a level in from the opener's line"
+    (assert= (tsm-at-end "struct point {\n" :c tsm-c-indent) 4)
+    (assert= (tsm-at-end "int f() {\n    int v[] = {\n" :c tsm-c-indent) 8))
+
+  (test "a closing `}` sits at the line its opener's statement begins on"
+    (assert= (tsm-last-line "int f() {\n    while (x) {\n        y();\n}" :c tsm-c-indent) 4))
+
+  (test "a bracket in a comment or a string opens nothing"
+    (assert= (tsm-at-end "int f() { // {\n" :c tsm-c-indent) 4)
+    (assert= (tsm-at-end "int f() {\n    s = \"{\";\n" :c tsm-c-indent) 4))
+
+  (test "an opener on a continued line is measured from where its statement begins"
+    (assert= (tsm-at-end "void run(int n,\n         int t) {\n" :c tsm-c-indent) 4))
+
+  (test "below a `(` with content after it, the next line aligns under that content"
+    (assert= (tsm-at-end "int f() {\n    g(a,\n" :c tsm-c-indent) 6))
+
+  (test "a :dedent word right below the opener backs out of the level it gave"
+    (assert= (tsm-last-line "int f() {\n    switch (x) {\n    case" :c tsm-c-indent) 4))
+
+  (test "the tokens: the real ones, a held tree answering as the text"
+    (let (text "int f() {\n    s = \"{\";\n    g(1);\n"
+          tokens (%tree-sitter-tokens text :c (count text) #{"{" "}" "(" ")"})
+          tree (open-tree text :c))
+      ;; the string's `{` is none, and a clean construct before the offset is skipped whole
+      (assert= (vec (map (seq/filter tokens (fn (token) (= (:kind token) "{"))) :start)) [8])
+      (assert= (%tree-sitter-tree-tokens tree (count text) #{"{" "}" "(" ")"}) tokens)
+      (free-tree tree)))
+
+  (test "no span is empty: a node the parser inserted while recovering colours nothing"
+    (let (text "int f() {\n    if (x) {\n")
+      (is (every? (%tree-sitter-spans text :c {} #{:keywords :punctuation})
+            (fn (span) (< (first span) (second span))))))))
+
+(def tsm-lua-indent
+  {:width 2
+   :dedent {"end" 0 "else" 0 "elseif" 0 "until" 0}
+   :pairs {"function" "end" "if" "end" "do" "end" "repeat" "until"}})
+
+(describe "indent-column on a broken parse: keyword :pairs"
+  :skip-unless (tsm-installed? :lua)
+  "no lua grammar installed"
+  (test "below an unclosed keyword block, a level in"
+    (assert= (tsm-at-end "function f()\n  if x then\n" :lua tsm-lua-indent) 4))
+
+  (test "a middle word re-opens its block: the line below it goes a level in from it"
+    (assert= (tsm-at-end "function f()\n  if x then\n    a()\n  elseif y then\n"
+               :lua tsm-lua-indent)
+      4)
+    (assert= (tsm-last-line "function f()\n  if x then\n    a()\nelse" :lua tsm-lua-indent) 2))
+
+  (test "a closer sits at its opener's line"
+    (assert= (tsm-last-line "function f()\n  if x then\n    a()\nend" :lua tsm-lua-indent) 2)
+    (assert= (tsm-last-line "function f()\n  repeat\n    a()\nuntil" :lua tsm-lua-indent) 2))
+
+  (test "a keyword closer never closes past an open delimiter"
+    ;; the `end` closes the `function` inside the table, and the table stays open
+    (assert= (tsm-at-end "t = {\n  f = function() end,\n" :lua tsm-lua-indent) 2)))
+
+(describe "indent-column on a broken parse: :clauses"
+  :skip-unless (tsm-installed? :elixir)
+  "no elixir grammar installed"
+  (test "below a clause's `->`, a level in; its block's `end` closes the clause too"
+    (let (spec {:width 2 :dedent #{"end" "else"} :pairs {"do" "end"} :clauses #{"->"}})
+      (assert= (tsm-at-end "def f(x) do\n  case x do\n    1 ->\n" :elixir spec) 6)
+      (assert= (tsm-last-line "def f(x) do\n  case x do\n    1 ->\n      :one\nend" :elixir spec) 2))))
+
+(describe "indent-column on a broken parse: :modifiers"
+  :skip-unless (tsm-grammar? :ruby)
+  "no ruby grammar compiled in"
+  (test "a trailing `if` opens nothing"
+    (let (spec {:width 2
+                :blocks #{:body_statement :then :else :block_body}
+                :dedent {"end" 0 "else" 0}
+                :pairs {"def" "end" "do" "end" "if" "end"}
+                :modifiers #{:if_modifier}})
+      (assert= (tsm-at-end "def f(xs)\n  xs.each do |x|\n    next if x\n" :ruby spec) 4)
+      (assert= (tsm-at-end "def f(xs)\n  xs.each do |x|\n    next if x\n"
+                 :ruby (dissoc spec :modifiers))
+        6))))
+
+(describe "indent-column on a broken parse: a continuation"
+  :skip-unless (tsm-installed? :bash)
+  "no bash grammar installed"
+  (test "a second continued line stays with the first, and the line after the run goes back"
+    (let (spec {:width 2 :opens #{"\\"}})
+      (assert= (tsm-at-end "if x; then\n  a \\\n    b \\\n" :bash spec) 4)
+      (assert= (tsm-at-end "if x; then\n  a \\\n    b\n" :bash spec) 2))))
+
+(describe "indent-column at the end of the text"
+  :skip-unless (tsm-installed? :html)
+  "no html grammar installed"
+  (test "an element the grammar closes at the end of input still encloses the line below it"
+    (assert= (tsm-at-end "<html>\n  <body>\n"
+               :html {:width 2 :brackets #{:element} :dedent #{"</"}})
+      4)))
