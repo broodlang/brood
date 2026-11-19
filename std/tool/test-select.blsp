@@ -99,21 +99,57 @@
   (fold units nil (fn (acc unit) (append acc (map (third unit) (fn (t) (list (second unit) t)))))))
 
 ;; Resolve one FILE:LINE selector to the exact declared line of the test it
-;; addresses: the LAST test in that file declared at or before LINE. So pointing
-;; anywhere inside a test's body (not just at its header) selects that test —
-;; what `nest test path:line` runs. nil when the file has no test at/before it.
+;; addresses. A test's recorded line is its FIRST BODY FORM's (a macro sees its arguments'
+;; positions, not its own), so the line of its `(test "…"` header lies above it — and the
+;; "last test declared at or before LINE" rule picked the test BEFORE it for that line. So the
+;; file is read: a LINE inside a `(test …)` form, header included, addresses the test whose
+;; recorded line lies inside that form. A LINE outside every test form falls back to the last
+;; test declared at or before it. nil when neither finds one.
 (defn- test-resolve-line (units file target)
-  (fold (test-all-tests units)
-    nil
-    (fn (best pair)
-      (let (t (second pair)
-            line (test-line t))
-        (if (and (not (nil? line))
-              (test-same-file? (test-file t) file)
-              (<= line target)
-              (or (nil? best) (> line best)))
-          line
-          best)))))
+  (let (span (test-form-span-at file target)
+        in-file (seq/filter (map (test-all-tests units) second)
+                  (fn (t) (and (not (nil? (test-line t))) (test-same-file? (test-file t) file))))
+        inside (when span
+                 (seq/find in-file
+                   (fn (t) (and (>= (test-line t) (first span)) (<= (test-line t) (second span)))))))
+    (if inside
+      (test-line inside)
+      (fold in-file
+        nil
+        (fn (best t)
+          (let (line (test-line t))
+            (if (and (<= line target) (or (nil? best) (> line best))) line best)))))))
+
+;; `[first-line last-line]` of the innermost `(test …)` form in `file` whose lines include
+;; `target`, or nil — no such form, or a file that cannot be read.
+(defn- test-form-span-at (file target)
+  (let (text (check-allow :discarded-catch (try (file/slurp file) (catch _ nil))))
+    (when (string? text)
+      (test-span-in (reflect/parse-source-positioned text) (test-line-starts text) target nil))))
+
+;; The character offset each line starts at, line 1 first.
+(defn- test-line-starts (text)
+  (vec (seq/scan (string/split text "\n") 0 (fn (start line) (+ start (count line) 1)))))
+
+;; The 1-based line of character offset `offset`.
+(defn- test-line-at (starts offset)
+  (count (seq/take-while starts (fn (start) (<= start offset)))))
+
+;; check-allow: deliberately non-tail — recursion over a parse tree; depth is source nesting.
+(defn- test-span-in (node starts target found)
+  (let (kids (get node :kids)
+        first-line (test-line-at starts (get node :start))
+        last-line (test-line-at starts (math/max 0 (dec (get node :end))))
+        covers (and (<= first-line target) (<= target last-line))
+        head (when (= (get node :kind) :list)
+               (seq/find (or kids [])
+                 (fn (kid) (not (includes? [:whitespace :comment] (get kid :kind))))))
+        here (if (and covers head (= (get head :kind) :symbol) (= (get head :text) "test"))
+               [first-line last-line]
+               found))
+    (if (and covers kids)
+      (fold kids here (fn (acc kid) (test-span-in kid starts target acc)))
+      here)))
 
 ;; Resolve every FILE:LINE selector, warning about any that addresses no test —
 ;; a typo'd path or a line above the file's first test would otherwise just run

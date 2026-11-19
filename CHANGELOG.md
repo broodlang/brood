@@ -4,6 +4,12 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Fixed: `nest test FILE:LINE` on a test's `(test "…"` header line runs that test,** not the one
+before it. A test's recorded line is its first body form's, so its header sat above it; the
+selector now reads the file and maps a line inside a `(test …)` form to that test.
+
 ## v0.57.0 — string patterns, and a dead string clause fails compilation
 
 **Added: string patterns, `(str "GET " path)` (ADR-770).** A pattern written like the `str` call

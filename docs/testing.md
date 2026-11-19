@@ -422,7 +422,7 @@ value unless the key is the built-in `test`/`describe` pseudo-selector below).
 | `--only SELECTOR` | run **only** matching tests. Repeatable; several `--only`s **union** |
 | `--exclude SELECTOR` | drop matching tests |
 | `--include SELECTOR` | re-admit what `--exclude` dropped (`--include` wins) |
-| `FILE:LINE` | the test covering that line — point anywhere inside its body |
+| `FILE:LINE` | the test covering that line — its `(test "…"` header or anywhere inside its body |
 | `--failed` | only the tests that failed on the previous run here |
 | `--partitions N --shard K` | one stable shard of the suite, for CI fan-out |
 | `--seed N` | randomise order; the seed is echoed so a failure replays |

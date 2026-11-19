@@ -2264,3 +2264,13 @@ as an author's; no syntax for a non-empty slot (a literal clause first or a `:wh
 pinned value fails the clause (`(str nil)` is "nil", so an unset prefix matched "nil-thing"); the
 first test of it was vacuous — no input began with "nil" — and was rewritten until it went red
 with the check removed.
+
+2026-11-19. **`nest test FILE:LINE` on a test's header line ran the test before it.** Found
+chasing a hatch flake: `nest test tests/http_server_test.blsp:310`, the line of a `(test "…"`
+header, ran the previous test — a test's recorded line is its first body form's (a macro sees
+its arguments' positions, not its own), and the resolver took the last test declared at or
+before the line. It now reads the file and maps a line inside a `(test …)` form, header
+included, to the test recorded inside that form; a line outside every test form keeps the old
+rule. Guard: `test_selection_test` "a test's own (test … header line selects THAT test" (red with
+the source lookup off). The flake itself was hatch's (the workers' supervisor started after the
+listener bound, so `start` could return before it was registered; hatch a83ec68).

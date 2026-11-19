@@ -106,6 +106,29 @@
     (let (warning (with-err-str (assert= (selection-select {:lines (list ["tests/demo_test.blsp" 1])})
                                   nil)))
       (is (includes? warning "no test found at"))))
+  (test "a test's own (test \"…\" header line selects THAT test, not the one before it"
+    ;; A test's recorded line is its first body form's, so its header sits above it, and
+    ;; "the last test declared at or before LINE" picked the previous test for the header —
+    ;; `nest test file:LINE` ran the wrong test. The resolver now reads the file: a line inside a
+    ;; `(test …)` form, header included, addresses that test.
+    (let (path (path/join (or (test/scratch-dir) (error "test: no scratch directory"))
+                 "header_test.blsp")
+          _ (file/spit path
+              (string/join ["(describe \"g\""
+                             "  (test \"first\"" "    (one))" "  (test \"second\""
+                             "    ;; a comment between the header and the body" "    (two)))"]
+                "\n"))
+          units (list (selection-unit :parallel
+                        "g"
+                        (list (selection-test "first" [] path 3)
+                          (selection-test "second" [] path 6))))
+          select (fn (line)
+                   (selection-labels (test-select/test-select-units units
+                                       {:lines (list [path line])}))))
+      (assert= (select 2) (list "g › first"))
+      (assert= (select 4) (list "g › second"))
+      (assert= (select 5) (list "g › second"))
+      (assert= (select 6) (list "g › second"))))
   (test "a path suffix matches, so a relative path finds an absolute record"
     (assert= (selection-select {:lines (list ["demo_test.blsp" 4])}) (list "math › adds")))
   (test "an unknown file selects nothing"
