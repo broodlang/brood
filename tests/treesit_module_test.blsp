@@ -1842,6 +1842,9 @@
         [0 2 4 2 4 2 4 2 0])
       (assert= (tsm-columns "def f\n  if x\n    a\n  else\n    b\n  end\nend\n" :ruby spec)
         [0 2 4 2 4 2 0])
+      ;; re-indented from scratch, each closer's token at its line's start: the `else` arm it
+      ;; begins does not enclose its own line
+      (assert= (tsm-columns "def f\nif x\na\nelse\nb\nend\nend\n" :ruby spec) [0 2 4 2 4 2 0])
       ;; with a fixed 0, the method-level `else` stays a level in
       (assert= (nth (tsm-columns "def f\n  a\nrescue\n  b\nelse\n  c\nend\n"
                       :ruby (assoc spec :dedent {"end" 0 "else" 0 "rescue" 1}))
@@ -1932,3 +1935,11 @@
     (assert= (tsm-columns "<%= if a do %>\n  <%= Enum.map xs, fn y -> %>\n    <p>y</p>\n  <% end %>\n  z\n<% end %>\n"
                :heex tsm-heex-indent)
       [0 2 4 0 0 0])))
+
+(describe "indent-column on a broken parse: :token-blocks closers and clauses"
+  :skip-unless (tsm-installed? :heex)
+  "no heex grammar installed"
+  (test "a line's first keyword closes wherever on the line it sits, and a clause sits at the last"
+    (let (above "<main>\n  <%= case @status do %>\n    <% :ok -> %>\n      <p>\n        x\n      </p>\n")
+      (assert= (tsm-last-line (str above "<% _ -> %>") :heex tsm-heex-indent) 4)
+      (assert= (tsm-last-line (str above "<% end %>") :heex tsm-heex-indent) 2))))

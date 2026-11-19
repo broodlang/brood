@@ -1342,6 +1342,21 @@ is none — whatever shape error recovery gave the tree. `:header` is where the 
 header line begins: the opener, or the last middle word (`else`) inside it."
   (ts-stack-of (ts-tokens-before text lang before vocabulary tree) vocabulary))
 
+(defn- ts-delimiter-token? (vocabulary kind)
+  ;; is the token `kind` a delimiter — a closing one, or one ending in an opening delimiter
+  ;; (`{`, `${`) that no keyword `:pairs` entry names?
+  (or (ts-delimiter? kind)
+    (and (nil? (get (:pairs vocabulary) kind)) (not (nil? (ts-opener-closer vocabulary kind))))))
+
+(defn- ts-first-keyword (tokens bol vocabulary)
+  ;; the kind of the first keyword token of `tokens` at or after `bol` — delimiters skipped, as
+  ;; a line's leading `{@x}` closes no keyword block — or nil
+  (let (token (seq/find tokens
+                (fn (token)
+                  (and (>= (get token :start) bol)
+                    (not (ts-delimiter-token? vocabulary (->string (get token :kind))))))))
+    (when token (->string (get token :kind)))))
+
 (defn- ts-line-indent (text at)
   ;; the indentation of the line holding offset `at`
   (let (line-bol (ts-line-start text at))
@@ -1366,19 +1381,34 @@ header line begins: the opener, or the last middle word (`else`) inside it."
 says nothing ([[ts-open-stack]]). A line that closes (a delimiter, or with keyword `:pairs` a
 closer or middle word) sits at the line its opener's statement begins on. A line right below an
 entry's header goes one level in from it — or, below a `(`/`[` with content after it, aligns
-under that content. Any other line is the caller's to decide."
+under that content. Any other line is the caller's to decide. For a `:token-blocks` language
+the line's first keyword token is its closer wherever on the line it sits (`<% end %>`), and a
+line whose first keyword starts the next clause sits at the clause before it."
   (let (vocabulary (ts-open-vocabulary spec)
         stack (ts-open-stack text lang bol vocabulary tree)
         width (get spec :width 2)
-        closes (and closing-token
-                 (or (ts-delimiter? closing-token)
-                   (contains? (:closers vocabulary) closing-token)
-                   (contains? (:middles vocabulary) closing-token))))
-    (when (not (empty? stack))
-      (if closes
+        line-keyword (when (:all vocabulary)
+                       (ts-first-keyword (ts-tokens-before text
+                                           lang
+                                           (ts-line-end text bol)
+                                           vocabulary
+                                           tree)
+                         bol vocabulary))
+        leaves? (fn (token)
+                  (and token
+                    (or (contains? (:closers vocabulary) token)
+                      (contains? (:middles vocabulary) token))))
+        closes (or (and closing-token (or (ts-delimiter? closing-token) (leaves? closing-token)))
+                 (leaves? line-keyword)))
+    (cond
+      (empty? stack) nil
+      closes
         (let (target (first (ts-pop-clauses stack)))
           (when target
             (ts-line-indent text (ts-anchor-bol text lang (get target :start) vocabulary tree))))
+      (and line-keyword (contains? (:clauses vocabulary) line-keyword) (get (first stack) :clause))
+        (ts-line-indent text (get (first stack) :start))
+      else
         (let (entry (first stack)
               header (get entry :header)
               header-bol (ts-line-start text header))
@@ -1394,7 +1424,7 @@ under that content. Any other line is the caller's to decide."
                              (ts-line-indent text header)))
                   (math/max 0
                     (- (+ base width)
-                      (if closing-token (* width (ts-dedent-levels spec closing-token 1)) 0)))))))))))
+                      (if closing-token (* width (ts-dedent-levels spec closing-token 1)) 0))))))))))
 
 (defn- ts-prev-nonblank-bol (text bol:int)
   ;; the start of the nearest non-blank line before the one at `bol`, or nil
@@ -1485,12 +1515,6 @@ line the run began on. Continuations are named rather than guessed from a token'
   ;; how many keyword entries `stack` holds — the levels a `:token-blocks` line is in
   (count (seq/reject stack ts-entry-delimiter?)))
 
-(defn- ts-delimiter-token? (vocabulary kind)
-  ;; is the token `kind` a delimiter — a closing one, or one ending in an opening delimiter
-  ;; (`{`, `${`) that no keyword `:pairs` entry names?
-  (or (ts-delimiter? kind)
-    (and (nil? (get (:pairs vocabulary) kind)) (not (nil? (ts-opener-closer vocabulary kind))))))
-
 (defn- ts-token-block-levels (text lang bol eol spec tree)
   "The levels the line at `bol` (ending at `eol`) is in from blocks no NODE encloses — a
 language whose `:pairs` bound blocks by sibling tokens (`:token-blocks`, ADR-767): HEEx's
@@ -1506,11 +1530,7 @@ token is read for a `:token-blocks` language."
         tokens (ts-tokens-before text lang eol vocabulary tree)
         stack (ts-stack-of (seq/take-while tokens (fn (token) (< (get token :start) bol)))
                 vocabulary)
-        first-on-line (seq/find tokens
-                        (fn (token)
-                          (and (>= (get token :start) bol)
-                            (not (ts-delimiter-token? vocabulary (->string (get token :kind)))))))
-        kind (when first-on-line (->string (get first-on-line :kind)))
+        kind (ts-first-keyword tokens bol vocabulary)
         unclaused (ts-pop-clauses stack))
     (math/max 0
       (cond
@@ -1556,7 +1576,9 @@ first non-blank character, because a block node may not begin until its first st
 Ruby's `body_statement` starts at the `def` it contains, so measuring at the line START puts
 you outside the very block you are in. A CLOSING line is measured at the line start instead,
 because a closer sits outside what it closes; measuring `end` at the `end` would put it
-inside the block again in some grammars and not others.
+inside the block again in some grammars and not others. It counts only the nodes that began
+before its token: re-indented from scratch the token sits at the line start, and the node it
+begins (an `if`'s `else` arm) does not enclose its own line.
 
 `:dedent-levels` is what remains of that difference, and it is per-language because the
 grammars genuinely differ: Elixir's `do_block` spans its own `end`, so a closer measured at
@@ -1672,10 +1694,20 @@ Deliberately not a full indent engine: no operator continuation rules beyond `:o
         ;; mistake appears on every `%{`, `{` and `fn` that begins a line.
         brackets (get spec :brackets #{})
         ;; each node of the chain asked in its place: an entry may name a kind in a context
-        ;; (`indent-entry-holds?`), and a node that opens a block is marked so, for the keys below
-        blocked (ts-chain-holds blocks chain)
-        bracketed (ts-chain-holds brackets chain)
-        openers (seq/keep (ts-chain-steps chain)
+        ;; (`indent-entry-holds?`), and a node that opens a block is marked so, for the keys below.
+        ;; A closing line counts only what began BEFORE its token: measured at the line start, a
+        ;; line re-indented from scratch has its token there, and the node the token begins (an
+        ;; `if`'s `else` arm) would count as enclosing the very line it starts on — a level deep
+        ;; from scratch where the line as written, its token past the line start, held.
+        token-at (+ bol (- (count line) (count (string/trim-left line))))
+        counted-chain (if closing
+                        (vec (seq/keep (ts-chain-steps chain)
+                               (fn ([index node _])
+                                 (when (or (= index 0) (< (get node :start) token-at)) node))))
+                        chain)
+        blocked (ts-chain-holds blocks counted-chain)
+        bracketed (ts-chain-holds brackets counted-chain)
+        openers (seq/keep (ts-chain-steps counted-chain)
                   (fn ([index node _])
                     (cond
                       (nth blocked index) (assoc node :block true)
@@ -1718,8 +1750,7 @@ Deliberately not a full indent engine: no operator continuation rules beyond `:o
         ;; outermost node it begins sits in a block counted for this line — a `:blocks`
         ;; entry, or a `:brackets` one opened on an earlier line
         spanned (if (and closing (= :spanned (get (get spec :dedent) closing-token)))
-                  (let (token-at (+ bol (- (count line) (count (string/trim-left line))))
-                        nodes (vec (ts-chain-at text lang token-at tree))
+                  (let (nodes (vec (ts-chain-at text lang token-at tree))
                         clause (seq/find (ts-chain-steps nodes)
                                  (fn ([_ node _]) (= (get node :start) token-at)))
                         holder (when (and clause (> (first clause) 0)) (dec (first clause))))
