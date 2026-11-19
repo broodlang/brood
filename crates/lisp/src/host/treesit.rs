@@ -686,6 +686,9 @@ pub struct Selector {
     /// A child the node must have (ADR-765): its kind, the field it fills in the node, its
     /// text — what tells Rust's `///` (a `line_comment` holding a `doc_comment`) from a `//`.
     pub has: Option<Box<Selector>>,
+    /// A selector the node must NOT satisfy, asked at the same place (ADR-766): a Ruby `then`
+    /// that is not a `rescue`'s, `{:kind :then :not {:parent :rescue}}`.
+    pub not: Option<Box<Selector>>,
 }
 
 #[cfg_attr(not(feature = "treesit"), allow(dead_code))]
@@ -707,6 +710,7 @@ impl Selector {
             && self.text.is_none()
             && self.after.is_none()
             && self.has.is_none()
+            && self.not.is_none()
     }
 
     /// How many selector levels deep it reaches: 1 for a map with no parent selector.
@@ -714,8 +718,9 @@ impl Selector {
         1 + self.parent.as_ref().map_or(0, |parent| parent.depth())
     }
 
-    /// The selector's own constraints as distinct powers of two — has 64, after 32, text 16, field
-    /// 8, parent 4, nth 2, kind 1 — so two different constraint sets at one level never tie.
+    /// The selector's own constraints as distinct powers of two — not 128, has 64, after 32, text
+    /// 16, field 8, parent 4, nth 2, kind 1 — so two different constraint sets at one level
+    /// never tie.
     fn level_weight(&self) -> u8 {
         u8::from(self.kind.is_some())
             | (u8::from(self.nth.is_some()) << 1)
@@ -724,6 +729,7 @@ impl Selector {
             | (u8::from(self.text.is_some()) << 4)
             | (u8::from(self.after.is_some()) << 5)
             | (u8::from(self.has.is_some()) << 6)
+            | (u8::from(self.not.is_some()) << 7)
     }
 
     /// The level weights from the node outward: the node's own constraints, then its parent
@@ -787,6 +793,10 @@ impl Selector {
                 .has
                 .as_deref()
                 .is_none_or(|has| has.held_by_a_child_of(node, text))
+            && self
+                .not
+                .as_deref()
+                .is_none_or(|not| !not.holds(node, context, text))
     }
 
     /// Does one of `node`'s children — named or not — satisfy this `:has` selector: its kind,

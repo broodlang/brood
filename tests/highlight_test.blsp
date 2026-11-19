@@ -112,6 +112,21 @@
     (let (lexer (lisp-line-lexer {"defvar" true} {:docs {"defvar" 3}})
           [spans _] ((:lex lexer) "(defvar v nil \"Doc.\")" (:initial lexer)))
       (is (includes? (vec spans) [14 20 hl-face-doc]))))
+  ;; a frame past its third form used to drop its head, so a place above 3 never matched
+  (test "an integer place past 3: elisp's define-derived-mode documents its fourth"
+    (let (docs {"define-derived-mode" 4}
+          specials {"define-derived-mode" true}
+          src "(define-derived-mode foo-mode text-mode \"Foo\" \"Doc.\")"
+          lexer (lisp-line-lexer specials {:docs docs})
+          [line-spans _] ((:lex lexer) src (:initial lexer)))
+      (is (includes? (vec (highlight-spans src specials docs)) [46 52 hl-face-doc]))
+      (is (includes? (vec (highlight-spans src specials docs)) [40 45 hl-face-string]))
+      (is (includes? (vec line-spans) [46 52 hl-face-doc]))
+      ;; and across lines, the frame carried in the line state keeps its head
+      (let ([_ state] ((:lex lexer) "(define-derived-mode foo-mode text-mode" (:initial lexer))
+            [_ state] ((:lex lexer) "  \"Foo\"" state)
+            [spans _] ((:lex lexer) "  \"Doc.\")" state))
+        (is (includes? (vec spans) [2 8 hl-face-doc])))))
   (test "doc-form? mirrors the kernel's (reflect/doc-forms)"
     (is (doc-form? "defn"))
     (is (doc-form? "defmodule"))

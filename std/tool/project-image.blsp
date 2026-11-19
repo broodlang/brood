@@ -656,12 +656,43 @@ the record the next partial rebuild reads.
       (%registry-update! r :assoc ["%declare"] nil)
       (%registry-update! r :dissoc ["%declare"] nil))))
 
+;; Module -> `[registry member]` for every member of a list registry whose writer is that
+;; module's load. Read off the journal directly rather than `stdimage/registrations-by-module`,
+;; which lists a member only when the journal knows the op that added it — and a member the
+;; image install credited (`image-credit-writes!`) carries its writer and no op. The prelude's
+;; load-state lists are runtime state, not registrations.
+(defn- project-list-members-by-module ()
+  (fold (%registry-names)
+    {}
+    (fn (acc registry)
+      (if (or (contains? #{'*features* '*features-loading*} registry)
+            (not (list? (reflect/bound-value registry))))
+        acc
+        (fold (%registry-members registry)
+          acc
+          (fn (grouped row)
+            (let (writer (get row 1))
+              (if (symbol? writer)
+                (%map-assoc grouped
+                  (->string writer)
+                  (cons [registry (get row 0)] (%map-get grouped (->string writer) nil)))
+                grouped))))))))
+
 ;; Take module `m`'s registrations out of the live registries before it loads again: the
-;; non-impl ones its previous load recorded (`owners`), its ability impls (`*impl-from*` names
-;; their declaring module, and the image carries it), its require edges and its doc.
-(defn- project-forget-module! (m owners impls)
+;; non-impl ones its previous load recorded (`owners`), the list members the image credited to
+;; it (`members`, [[project-list-members-by-module]]), its ability impls (`*impl-from*`
+;; names their declaring module, and the image carries it), its require edges and its doc.
+;;
+;; A list member is not in the record — a member is a value, and a closure prints `#<fn>` — but
+;; the install credited each to the load that wrote it (`image-credit-writes!`), so the live
+;; journal names them. Left in place, a closure member kept calling what its module's previous
+;; load defined: rename a function a `register-file-type` predicate calls, and every file typed
+;; after the rebuild raised `unbound` on the old name until the image was deleted.
+(defn- project-forget-module! (m owners impls members)
   (doseq (r (or (get owners m) nil))
     (%registry-update! (get r 0) :dissoc (get r 1) nil))
+  (doseq (registration (or (get members m) nil))
+    (%registry-update! (get registration 0) :remove [] (get registration 1) nil))
   (doseq (r (or (get impls m) nil))
     ;; `[ability op key f from]`, `%register-impl`'s argument list
     (let (aname (get r 0)
@@ -705,10 +736,11 @@ the record the next partial rebuild reads.
                   (fn (sections)
                     (let (invalid (project-reverse-closure (append edited pinned)
                                     (project-dependents root own))
-                          impls (stdimage/%std-impls-by-module))
+                          impls (stdimage/%std-impls-by-module)
+                          members (project-list-members-by-module))
                       (project-redeclare-registries! (get rec :registries))
                       (doseq (m invalid)
-                        (project-forget-module! m (or (get rec :owners) {}) impls))
+                        (project-forget-module! m (or (get rec :owners) {}) impls members))
                       (let (kept (fold invalid sections (fn (secs m) (dissoc secs m))))
                         (table/put chosen :invalid invalid)
                         (table/put chosen :kept kept)

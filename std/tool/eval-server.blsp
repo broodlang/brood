@@ -689,7 +689,7 @@ process is freshly spawned per request by [[answer]], so its mailbox holds nothi
    :name (test/result-name r)
    :passed (not (test/result-failed? r))
    :skipped (test/result-skipped? r)
-   :skip-reason (test/result-skip-reason r)
+   :skip-reason (test/result-skip-reason-text r)
    :ms (test/result-ms r)
    :where (test/result-where r)
    :failures (or (map (test/result-fails r) (fn (f) {:loc (first f) :details (second f)})) [])})

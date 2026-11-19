@@ -162,28 +162,35 @@ ending the text included, whose escaped character is not there (`\"a\\` at a lin
   "Open a frame for the bracket `open`."
   (cons [open 0 nil false] stack))
 
-;; Past its third form nothing reads a frame's count, head or parameter flag (head position
-;; is form 0, a docstring form 2 or 3), so a frame that far in is stored as ONE value
+;; Past the last form anything reads a frame's count, head or parameter flag (head position
+;; is form 0, a docstring form 2 or 3 — or, for a dialect's integer `:docs` place, form N:
+;; elisp's `define-derived-mode` documents its fourth), a frame is stored as ONE value
 ;; (`hl-frame`). The line lexer compares the states its lines start in to stop re-lexing after
 ;; an edit; with the count kept, adding a form anywhere in a long body changed the state of
-;; every line after it until the body closed.
-(defn- hl-frame (open n head params?)
-  (if (> n 3) [open 4 nil false] [open n head params?]))
+;; every line after it until the body closed. `limit` is that last form, the pass's
+;; `:frame-limit` ([[hl-frame-limit]]).
+(defn- hl-frame (open n head params? limit)
+  (if (> n limit) [open (inc limit) nil false] [open n head params?]))
 
-(defn- hl-advance (stack params?)
+(defn- hl-frame-limit (docs)
+  ;; the last form a frame must count to: 3, or the largest integer place in `docs`
+  (fold (vals (or docs {})) 3 (fn (limit place) (if (int? place) (math/max limit place) limit))))
+
+(defn- hl-advance (stack params? limit)
   "Advance the innermost frame past one started form; `params?` marks that form as a
 bracketed list sitting in parameter position (index 2)."
   (if (empty? stack)
     stack
     (let ([open n head p] (first stack))
-      (cons (hl-frame open (inc n) head (or p (and params? (= n 2)))) (rest stack)))))
+      (cons (hl-frame open (inc n) head (or p (and params? (= n 2))) limit) (rest stack)))))
 
-(defn- hl-name (stack text)
+(defn- hl-name (stack text limit)
   "Advance past a symbol, recording it as the list's head when it is the first form."
   (if (empty? stack)
     stack
     (let ([open n head p] (first stack))
-      (cons (hl-frame open (inc n) (if (and (= n 0) (= open "(")) text head) p) (rest stack)))))
+      (cons (hl-frame open (inc n) (if (and (= n 0) (= open "(")) text head) p limit)
+        (rest stack)))))
 
 (defn- hl-head? (stack)
   "True when the form starting here is in HEAD position — the first form of a `(` list."
@@ -293,7 +300,7 @@ form `stack` (head position, and enough shape to tell a docstring from a string)
 `:symbol` needs position — head + special form → keyword face, head → call face, the name
 place of a `def…` head → definition face, else uncoloured — and `:string` needs it too (doc
 vs. value). `pass` is what the walk does not
-change: `:faces` (the resolved `hl-faces`), `:specials`, and `:open-end?` (the stream is one
+change: `:faces` (the resolved `hl-faces`), `:specials`, `:docs`, `:frame-limit`, and `:open-end?` (the stream is one
 line of a longer source, see `hl-more-forms?`). Returns `[spans stack]`, the spans in
 REVERSE and the stack the stream ended with."
   (if (empty? toks)
@@ -308,7 +315,7 @@ REVERSE and the stack the stream ended with."
         ;; `(define (f x) …)`) is marked, so its head reads as the name.
         (= kind :open)
           (hl-walk more
-            (let (pushed (hl-push (hl-advance stack true) text))
+            (let (pushed (hl-push (hl-advance stack true (:frame-limit pass)) text))
               (if (and (= text "(") (hl-name-place? stack pass))
                 (cons ["(" 0 :definition false] (rest pushed))
                 pushed))
@@ -329,14 +336,20 @@ REVERSE and the stack the stream ended with."
                     head? (get faces :function)
                     (hl-name-place? stack pass) (get faces :definition)
                     else nil))
-            (hl-walk more (hl-name stack text) (if (nil? f) acc (cons [s e f] acc)) pass))
+            (hl-walk more
+              (hl-name stack text (:frame-limit pass))
+              (if (nil? f) acc (cons [s e f] acc))
+              pass))
         (= kind :string)
           (let (f (if (hl-doc? stack more pass) (get faces :doc) (get faces :string)))
-            (hl-walk more (hl-advance stack false) (cons [s e f] acc) pass))
+            (hl-walk more (hl-advance stack false (:frame-limit pass)) (cons [s e f] acc) pass))
         else
           (let (f (get faces kind))
             ; :number / :keyword
-            (hl-walk more (hl-advance stack false) (if (nil? f) acc (cons [s e f] acc)) pass))))))
+            (hl-walk more
+              (hl-advance stack false (:frame-limit pass))
+              (if (nil? f) acc (cons [s e f] acc))
+              pass))))))
 
 (defn highlight-spans (src &optional (specials hl-special-set) (docs hl-doc-forms))
   "Lexically tokenize Lisp `src` into a list of `[start end face]` colour spans
@@ -365,6 +378,7 @@ since elisp puts `defvar`'s doc third, after its value (ADR-764).
                     {:faces (hl-faces)
                      :specials specials
                      :docs (or docs hl-doc-forms)
+                     :frame-limit (hl-frame-limit (or docs hl-doc-forms))
                      :open-end? false}))
     (reverse spans)))
 (sig highlight-spans (string -> any))
@@ -474,6 +488,7 @@ whole-source lex calls a lone last body string a value.
   (let (pass {:faces (hl-faces)
               :specials (or specials hl-special-set)
               :docs (or (:docs options) hl-doc-forms)
+              :frame-limit (hl-frame-limit (or (:docs options) hl-doc-forms))
               :open-end? true
               :rainbow (when (:rainbow options)
                          (vec (map (range 1 10)

@@ -251,14 +251,17 @@ fn ts_kinds(heap: &Heap, who: &'static str, v: Value) -> Result<Vec<String>, Lis
 /// {:kind :field_identifier
 ///  :parent {:kind :field_expression :field :function}}   ; a method call's name
 /// {:kind :arguments :after {:text "def"}}     ; what follows a `def` head: a grammar's definition form
+/// {:kind :then :not {:parent :rescue}}        ; a `then` that is not a `rescue`'s
 /// ```
 ///
 /// `:kind` and `:field` are keywords, `:nth` a non-negative int, `:text` a string or a
 /// non-empty set of strings, `:after` a map of `:kind` and `:text` alone that the named sibling
-/// right before the node must satisfy (ADR-614), and `:parent` a kind keyword or a selector
-/// map the parent must satisfy, nested at most [`MAX_SELECTOR_DEPTH`](crate::host::treesit::MAX_SELECTOR_DEPTH)
-/// maps deep. At least one constraint is given, and nothing else is accepted, so a misspelt
-/// constraint fails at the call rather than quietly matching everything.
+/// right before the node must satisfy (ADR-614), `:has` a child it must have (ADR-765), `:not`
+/// a kind keyword or a selector map it must NOT satisfy at its place (ADR-766), and `:parent`
+/// a kind keyword or a selector map the parent must satisfy, nested at most
+/// [`MAX_SELECTOR_DEPTH`](crate::host::treesit::MAX_SELECTOR_DEPTH) maps deep. At least one
+/// constraint is given, and nothing else is accepted, so a misspelt constraint fails at the
+/// call rather than quietly matching everything.
 fn ts_table(
     heap: &Heap,
     who: &'static str,
@@ -391,6 +394,8 @@ fn ts_selector(
                     || after.field.is_some()
                     || after.nth.is_some()
                     || after.after.is_some()
+                    || after.has.is_some()
+                    || after.not.is_some()
                 {
                     return Err(LispError::runtime(format!(
                         "{who}: a selector's :after names the sibling's :kind and :text only"
@@ -417,6 +422,7 @@ fn ts_selector(
                     || has.nth.is_some()
                     || has.after.is_some()
                     || has.has.is_some()
+                    || has.not.is_some()
                 {
                     return Err(LispError::runtime(format!(
                         "{who}: a selector's :has names the child's :kind, :field and :text only"
@@ -424,9 +430,26 @@ fn ts_selector(
                 }
                 selector.has = Some(Box::new(has));
             }
+            "not" => {
+                // a selector the node must not satisfy, asked at the node's own place (ADR-766):
+                // any selector, so it reaches as far up as a `:parent` chain may
+                let not = match v {
+                    Value::Keyword(kind) => Selector::of_kind(value::symbol_name(kind)),
+                    Value::Map(not_map) => ts_selector(heap, who, not_map, depth)?,
+                    other => {
+                        return Err(LispError::wrong_type(
+                            heap,
+                            who,
+                            "a kind keyword or a selector map for selector :not",
+                            other,
+                        ));
+                    }
+                };
+                selector.not = Some(Box::new(not));
+            }
             other => {
                 return Err(LispError::runtime(format!(
-                    "{who}: a face-table selector takes :kind :parent :field :nth :text :after :has, not :{other}"
+                    "{who}: a face-table selector takes :kind :parent :field :nth :text :after :has :not, not :{other}"
                 )));
             }
         }
@@ -1048,7 +1071,7 @@ pub(super) fn register_open_tokens(primitives: &mut super::Primitives) {
         Arity::range(4, 5),
         Sig::with_optional(vec![string, kw, int, any], vec![any], vec_ty),
         &["source", "lang", "offset", "texts", "&optional", "all?"],
-        "The anonymous tokens of source's lang parse that start before char offset and that texts (a set or sequence of strings) names, in source order, each {:kind \"text\" :start :end :parent}, :parent the kind of the node holding it; a token whose text ENDS in an opening delimiter texts names counts too (`${` and `%{` for \"{\"). A token tree-sitter inserted while recovering (MISSING, zero-width) is none, and a construct that parsed cleanly and ends before offset is skipped whole — it closes what it opens — unless all? is true, for blocks bounded by SIBLING tokens (HEEx's `<% … do %>` … `<% end %>`, ADR-767), when every token before offset counts. What a half-typed buffer still has OPEN, matched as a stack by the caller: error recovery leaves an unclosed `{` or `do` as a bare token in an ERROR node, where no chain reaches it. Same grammar rules and errors as %tree-sitter-parse.",
+        "The tokens of source's lang parse that start before char offset and that texts (a set or sequence of strings) names, in source order, each {:kind \"text\" :start :end :parent}, :parent the kind of the node holding it: an anonymous token by its text, or a NAMED leaf by its kind when that is the only spelling the grammar has (HEEx's `<% end %>` is an `ending_expression_value`, reported with that kind). A token whose text ENDS in an opening delimiter texts names counts too (`${` and `%{` for \"{\"). A token tree-sitter inserted while recovering (MISSING, zero-width) is none, and a construct that parsed cleanly and ends before offset is skipped whole — it closes what it opens — unless all? is true, for blocks bounded by SIBLING tokens (HEEx's `<% … do %>` … `<% end %>`, ADR-767), when every token before offset counts. What a half-typed buffer still has OPEN, matched as a stack by the caller: error recovery leaves an unclosed `{` or `do` as a bare token in an ERROR node, where no chain reaches it. Same grammar rules and errors as %tree-sitter-parse.",
         tree_sitter_tokens,
     );
     primitives.def(
@@ -1056,7 +1079,7 @@ pub(super) fn register_open_tokens(primitives: &mut super::Primitives) {
         Arity::range(3, 4),
         Sig::with_optional(vec![ref_ty, int, any], vec![any], vec_or_nil),
         &["tree", "offset", "texts", "&optional", "all?"],
-        "%tree-sitter-tokens over a held tree: the anonymous tokens before char offset of its text that texts names, in source order (every one with all?). Parses nothing. nil when the handle is gone.",
+        "%tree-sitter-tokens over a held tree: the tokens (anonymous by text, named leaves by kind) before char offset of its text that texts names, in source order (every one with all?). Parses nothing. nil when the handle is gone.",
         tree_sitter_tree_tokens,
     );
 }

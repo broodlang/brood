@@ -2220,6 +2220,17 @@ call (the cost is the copy, not per-call overhead) and a cached `BROOD_TRACE_PRO
 change). Promote (~47 ms) is now the largest piece; building straight into the RUNTIME region is
 GC-region work, left for the test machine.
 
+2026-11-19. **A review of the day's indenter, test and std work.** The indent entries speak the
+face selectors' language (ADR-766 amended): `:parent` a selector, a new `:not` in both (the
+kernel's `Selector` too), `indent-entry-holds?` over the chain (the old name a deprecated
+alias), `indent-problems` for a registration, and a `:spanned` dedent for Ruby's method-level
+`else` and `begin`'s `end`. `:verbatim-from-start` names the kinds whose content begins at the
+node (ADR-758 amended), `:continues` the continuation tokens (ADR-762 amended), and
+`:token-blocks` backs out what a line's first keyword pops, clauses included, with `:middles`
+named (ADR-767 amended; the HEEx `fn` limit documented). `:skip-unless`'s REASON cannot swallow
+the body, and a describe does not nest (ADR-757 amended). `map/shape-problems` takes any key
+collection and suggests by bare name; `text/after-line->char` takes `line-count`.
+
 2026-11-19. **String patterns (ADR-770).** `(str "GET " path)` matches a string by its literal
 ends — prefix, suffix, both, or the exact string — with at most one non-literal part, the slot,
 matched against the middle. It lowers to the hand-written test (type, length floor, `%eq` on the

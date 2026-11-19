@@ -189,6 +189,17 @@ applies to that test alone, like `:isolated`. The group's body still runs, to re
 tests. CONDITION has run by then, so a grammar it loads is there for a body-level `def`, but a
 skipped group's body runs too: keep work that must not run without CONDITION inside the tests.
 
+REASON is required. A REASON that is not a string literal must have the body after it, so a
+left-out reason is refused at expansion rather than taking the first assertion as the reason
+and registering a test with no body, which passes. A `:skip-unless` test with no body is
+refused too. A bare `:skip` beside a `:skip-unless` skips unconditionally and has no reason.
+The reason reads the same everywhere: the human report, `--trace`, TAP, `--formatter json`
+and the eval server all print it as text (`test/result-skip-reason-text`).
+
+A describe does not nest: one written in another's body is refused at expansion, and one a
+body reaches through a function call is refused as it registers. A describe inside a
+`(test …)` body is not nested, since the test runs it later, in a run of its own.
+
 Every skipped test is listed after the failures, with where it is and its reason, so a
 skip is read where the run is read:
 

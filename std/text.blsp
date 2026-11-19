@@ -54,16 +54,23 @@ is read only where it is sliced.
   "The character index just AFTER line `line` (0-based), its newline included: where line
 `line + 1` begins, or the text's length on the last line. With `line->char` it bounds a
 line as the half-open range `[(line->char rope line), (after-line->char rope line))` that
-`text/line` reads and `text/delete` takes. A line past the last raises, as `line->char` does.
+`text/line` reads and `text/delete` takes. It takes the lines `line->char` takes, `0` to
+`line-count`: `line-count` itself is the empty line past the end, whose range is
+`[length, length)`. A line outside them raises.
 
     (text/after-line->char (text/string-> \"ab\\ncd\\nef\") 0)   ;=> 3
     (text/after-line->char (text/string-> \"ab\\ncd\\nef\") 2)   ;=> 8
-    (text/after-line->char (text/string-> \"ab\\n\") 1)   ;=> 3"
-  (when (< line 0)
-    (error "text/after-line->char: line " line " is negative"))
-  ;; the rope answers its length for the line one past its last, so the next line's start IS
-  ;; the end on the last line — no branch on line-count
-  (%rope-line->char rope (inc line)))
+    (text/after-line->char (text/string-> \"ab\\n\") 1)   ;=> 3
+    (text/after-line->char (text/string-> \"ab\\n\") 2)   ;=> 3"
+  (let (lines (%rope-line-count rope))
+    (cond
+      (or (< line 0) (> line lines))
+        (error "text/after-line->char: line " line " is out of bounds (valid 0.." lines ")")
+      ;; the empty line past the end ends where it begins, at the text's length
+      (= line lines) (%rope-line->char rope line)
+      ;; the rope answers its length for the line one past its last, so the next line's start
+      ;; IS the end on the last line
+      else (%rope-line->char rope (inc line)))))
 
 (defn ->string (r)
   "The full text of rope r as a string.

@@ -41,6 +41,16 @@
       (assert= (map (map/shape-problems {:n "x" :zz 1 :yy 2} shape)
                  (fn (problem) [(:kind problem) (:key problem)]))
         (list [:missing :a] [:missing :b] [:unknown :yy] [:unknown :zz] [:invalid :n]))))
+  (test "a shape's key lists may be any collection, a vector or a list as a set"
+    (assert= (map/shape-problems {:b 1} {:required [:a] :optional '(:b)})
+      (list {:kind :missing :key :a}))
+    (assert= (map/shape-problems {:a 1 :b 2} {:required [:a] :optional [:b]}) ()))
+  (test "a suggestion compares bare names, so a keyword's `:` lends it no likeness"
+    ;; `color` and `cover` are two edits apart in five letters: no suggestion, as fuzzy/nearest
+    ;; says of the bare words, where the `:` both texts share made it one
+    (assert= (fuzzy/nearest ["cover"] "color") ())
+    (assert= (get (first (map/shape-problems {:color 1} {:optional #{:cover}})) :suggestion) nil)
+    (assert= (get (first (map/shape-problems {:nmae 1} {:optional #{:name}})) :suggestion) :name))
   (test "a value that is not a map is one :not-a-map problem"
     (assert= (map/shape-problems 42 manifest-shape) (list {:kind :not-a-map :value 42}))
     (assert= (map/shape-problems nil manifest-shape) (list {:kind :not-a-map :value nil}))
