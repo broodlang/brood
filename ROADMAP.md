@@ -1079,7 +1079,11 @@ Shipped as ADRs:
       duck-type; `?A` sig vars + `(list T)` cover most). Defer hardest.
     - ⬜ *low-med* — **Custom match extractors / view patterns** (F# active patterns, Scala
       `unapply`). Match on computed meaning, not just shape. `:when` guards + record patterns
-      cover the common case; wait for a parsing-heavy need.
+      cover the common case; wait for a parsing-heavy need. *Re-measured 2026-11-19:* std/,
+      tests/ and ten downstream repos hold one instance of the shape it replaces, and that one
+      is not a `match`, so the need has not appeared. The cost it would have had is gone:
+      ADR-755 gave the Rust side one reading of the pattern grammar, so a new form no longer
+      means teaching ten readers (`docs/handoff.md` thread 8).
     - ✅ **Exhaustiveness from *inferred* scrutinees** (2026-08-28) — a `match` whose scrutinee
       is typed by inference rather than by a `sig` gets exhaustiveness: `(defn pick (b) (if b
       :ok :err))` then `(match (pick b) (:ok 1))` reports the missing `:err`, the same as when

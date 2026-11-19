@@ -3,6 +3,7 @@
 //! `do` body, a list's items. Pure readers — nothing here warns.
 
 use super::*;
+use crate::syntax::pattern::Pattern;
 
 /// `symbol_name(s)` is a `String` allocation; we only need the spelling on
 /// the rare *error* paths (unbound / arity / type-disjoint). Wrap as a
@@ -474,7 +475,8 @@ pub(in crate::types::check) fn pattern_bindings(
     pat: Value,
     rhs_ty: Option<&Ty>,
 ) -> Vec<(Symbol, Option<Ty>)> {
-    let names = pattern_syms(heap, pat);
+    let parsed = Pattern::parse(heap, pat);
+    let names = parsed.binders();
     // A `never` right-hand side — a call that always throws, or a return still at the
     // joint fixpoint's ⊥ seed — has no positions to read: every binder is `never`, which
     // contributes nothing to a derived parameter. Bound UNKNOWN instead, `(inc i2)` would
@@ -482,80 +484,52 @@ pub(in crate::types::check) fn pattern_bindings(
     if rhs_ty.is_some_and(Ty::is_never) {
         return names.into_iter().map(|s| (s, Some(Ty::NEVER))).collect();
     }
-    let Some(items) = bindings(heap, pat) else {
-        return names.into_iter().map(|s| (s, None)).collect();
+    let unknown = || names.iter().map(|&s| (s, None)).collect();
+    // Only a flat sequence of names is typed by position; `&optional` slots are not.
+    let (items, rest): (&[Pattern], Option<&Pattern>) = match &parsed {
+        Pattern::Vector(items) => (items, None),
+        Pattern::List(seq) if seq.optional.is_empty() => (&seq.required, seq.rest.as_deref()),
+        _ => return unknown(),
     };
-    let flat = items.iter().all(|it| matches!(it, Value::Sym(_)));
+    let is_name = |item: &Pattern| matches!(item, Pattern::Bind(_) | Pattern::Wildcard);
+    if !items.iter().all(is_name) || !rest.is_none_or(is_name) {
+        return unknown();
+    }
     let elem = rhs_ty.and_then(|t| t.elem_ty());
     // A positional shape — a vector tuple or a list shape — types each binder by its
     // position, and a `& rest` binder by the positions that remain.
     let tuple = rhs_ty.and_then(|t| t.positional_elems());
-    if !flat || (elem.is_none() && tuple.is_none()) {
-        return names.into_iter().map(|s| (s, None)).collect();
+    if elem.is_none() && tuple.is_none() {
+        return unknown();
     }
     let mut out = Vec::new();
-    let mut rest_next = false;
-    let mut position = 0usize;
-    for it in items {
-        let Value::Sym(s) = it else { continue };
-        let nm = name_of(s);
-        if nm == "&" {
-            rest_next = true;
-            continue;
-        }
-        if rest_next {
-            let rest_ty = match &tuple {
-                Some(elems) => Some(match elems.get(position..) {
-                    Some(tail) if !tail.is_empty() => Ty::list_shape_of(tail.to_vec()),
-                    _ => Ty::of(crate::types::Tag::Nil),
-                }),
-                None => elem.clone().map(Ty::list_of),
+    for (position, item) in items.iter().enumerate() {
+        if let Pattern::Bind(s) = item {
+            let ty = match &tuple {
+                Some(elems) => elems.get(position).cloned(),
+                None => elem.clone(),
             };
-            out.push((s, rest_ty));
-            rest_next = false;
-            continue;
+            out.push((*s, ty));
         }
-        let ty = match &tuple {
-            Some(elems) => elems.get(position).cloned(),
-            None => elem.clone(),
+    }
+    if let Some(Pattern::Bind(s)) = rest {
+        let rest_ty = match &tuple {
+            Some(elems) => Some(match elems.get(items.len()..) {
+                Some(tail) if !tail.is_empty() => Ty::list_shape_of(tail.to_vec()),
+                _ => Ty::of(crate::types::Tag::Nil),
+            }),
+            None => elem.map(Ty::list_of),
         };
-        position += 1;
-        if nm != "_" {
-            out.push((s, ty));
-        }
+        out.push((*s, rest_ty));
     }
     out
 }
 
-/// The binder symbols of a destructuring pattern (`(a b)`, `[a b & rest]`,
-/// nested `((a b) c)`) — every `Value::Sym` leaf except the `&` rest marker and
-/// the `_` wildcard, which bind nothing. Literals (ints/keywords/strings) are
-/// match constraints, not binders, so they're skipped. Used to put a pattern-let's
-/// names in scope for the unbound-symbol check (a precise per-position type isn't
-/// available, so each is bound to `None`).
+/// The binder symbols of a destructuring pattern ([`Pattern::binders`]), used to put a
+/// pattern-let's names in scope for the unbound-symbol check where no per-position type is
+/// available.
 pub(super) fn pattern_syms(heap: &Heap, pat: Value) -> Vec<Symbol> {
-    let mut out = Vec::new();
-    collect_pattern_syms(heap, pat, &mut out);
-    out
-}
-
-pub(super) fn collect_pattern_syms(heap: &Heap, pat: Value, out: &mut Vec<Symbol>) {
-    match pat {
-        Value::Sym(s) => {
-            let nm = name_of(s);
-            if nm != "&" && nm != "_" {
-                out.push(s);
-            }
-        }
-        Value::Pair(_) | Value::Vector(_) => {
-            if let Some(items) = bindings(heap, pat) {
-                for it in items {
-                    collect_pattern_syms(heap, it, out);
-                }
-            }
-        }
-        _ => {}
-    }
+    Pattern::parse(heap, pat).binders()
 }
 
 /// The PATH each binder of a flat vector pattern names, when the right-hand side is itself

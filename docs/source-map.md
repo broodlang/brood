@@ -147,6 +147,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `syntax.rs` — Surface syntax: the reader (text → `Value`) and the printer (`Value` → text).
   - `syntax/atom.rs` — Shared lexical rules for the two parsers in this layer: the evaluation [`reader`](super::reader) (text → `Value`) and the tooling [`cst`](super::cst) (text → lossless span tree).
   - `syntax/cst.rs` — A lossless, span-carrying concrete syntax tree (CST) for **tooling** — the language server, and later a formatter.
+  - `syntax/pattern.rs` — The pattern grammar, read once: what every part of a pattern is, for each Rust pass that interprets one — the checker, the hygiene pass and the scope analysis over the CST.
   - `syntax/printer.rs` — Renders a [`Value`] to text.
   - `syntax/reader.rs` — The reader: turns source text into [`Value`]s.
   - `syntax/scanner.rs` — Shared low-level scanner for the two structural parsers in this layer: the evaluation [`reader`](super::reader) (text → `Value`) and the tooling [`cst`](super::cst) (text → lossless span tree).

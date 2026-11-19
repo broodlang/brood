@@ -198,7 +198,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; Without a trailing `& rest`, the bytes must be consumed exactly (count match).
 
 (defn- %match-bytes-pattern? (pat)
-  (and (pair? pat) (= (first pat) (quote bytes))))
+  (and (pair? pat) (= (first pat) 'bytes)))
 
 ; literal → binds nothing
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
@@ -484,6 +484,9 @@ NON-LINEAR patterns (the same name twice) work.
   (let (elems (%match-vec->list pat) n (count elems))
     (when (%match-member? '& elems)
       (error "match: '&' (rest) is not allowed in a vector pattern — vectors are fixed-length"))
+    (when (%match-member? '&optional elems)
+      (error "match: '&optional' is not allowed in a vector pattern — vectors are fixed-length;"
+        " a list pattern takes optional elements: (a &optional b)"))
     `(if (and (/vector? ~target) (%eq (%vector-length ~target) ~n))
        ~(%match-compile-velems elems target 0 bound success fail)
        ~fail)))
@@ -612,6 +615,11 @@ NON-LINEAR patterns (the same name twice) work.
       (error (str "match: (record name …) needs a record NAME symbol, got "
                (pr-str name)
                " — e.g. (record circle {:r r}) or (record geometry/circle {:r r}).")))
+    (when (not (empty? (rest (rest (rest pat)))))
+      (error (str "match: (record "
+               (pr-str name)
+               " …) takes one field pattern at most, got "
+               (pr-str pat))))
     (when (and mappat (not (map? mappat)))
       (error (str "match: (record "
                (pr-str name)

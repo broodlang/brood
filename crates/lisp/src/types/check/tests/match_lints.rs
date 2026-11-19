@@ -363,3 +363,37 @@ fn redundant_clause_lint_leaves_a_clause_after_a_guarded_twin_alone() {
         "an unguarded duplicate is dead: {w:?}"
     );
 }
+
+// ---- a verdict about every run is judged over every copy (`walk::every_copy`) ----
+// The match compiler splices a short fall-through into each failure point of a clause, so
+// a later clause sits in the expansion once where the first clause's head did not match
+// and once where it matched but more arguments followed — there `n` is `:a`. Judged from
+// that copy alone, a guard the other copy needs read as "can never be true".
+
+#[test]
+fn a_guard_one_copy_of_its_clause_needs_is_not_dead() {
+    let ws = file_warnings("(defn kx ((:a) 1) ((n) :when (int? n) n))");
+    assert!(
+        !ws.iter().any(|w| w.contains("can never be true")),
+        "{ws:?}"
+    );
+    let ws = file_warnings("(defn vx (v) (match v ([a 1] a) ((n) :when (int? n) n) (_ 0)))");
+    assert!(
+        !ws.iter().any(|w| w.contains("can never be true")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_guard_dead_in_every_copy_is_still_reported() {
+    // Every copy of the second clause has a keyword in hand.
+    let ws = file_warnings(
+        "(sig kk ((list keyword) -> any))\n\
+         (defn kk (ks) (match ks ((:a) 1) ((n) :when (int? n) n) (_ 0)))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("int?: this can never be true")),
+        "{ws:?}"
+    );
+}

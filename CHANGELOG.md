@@ -10,6 +10,16 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 `io/puts` and `io/write` put one space between their arguments, so `(io/puts "count = " n)`
 prints `count =  5`; the finding is `:suspicious`. Two or more spaces read as layout and pass.
 
+**Fixed: four false checker findings on pattern clauses (KI-402, KI-403).** A clause-style
+`defn` no longer reports "no clause accepts" for a record passed to a map pattern, `nil` passed to
+`(& r)`, or bytes passed to a `(bytes …)` pattern. `((:a) 1) ((n) :when (int? n) n)` no longer
+reports its guard as "can never be true". In the editor, an `&optional` default and a bytes
+segment's size are references, not binders, for goto and rename.
+
+**Changed: two malformed patterns are compile errors (KI-404).** `&optional` in a vector pattern
+(`[a &optional b]`, which never matched) and anything after a record pattern's field map
+(`(record p {:a a} extra)`, which was ignored) are refused by name.
+
 ## v0.55.0 — recursion as deep as memory allows, a project cut into contexts, a slick terminal
 
 **Fixed: a deprecated name is reported whether its module came from source or an image.** A

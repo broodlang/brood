@@ -40,6 +40,7 @@ use std::sync::LazyLock;
 use crate::core::heap::{Heap, SymbolMap};
 use crate::core::keywords as kw;
 use crate::core::value::{self, Arity, Symbol, Tag, Value};
+use crate::syntax::pattern::Pattern;
 use crate::types::{Sig, Ty};
 
 // The checker modules the children name as `super::walk` and so on.
@@ -757,28 +758,35 @@ pub(super) fn clause_arm(heap: &Heap, clause: Value) -> Option<ClauseArm> {
 
 /// What one clause-head PATTERN admits — the runtime test the `match` lowering emits for
 /// it (`std/prelude/match.blsp`), read as a type: a binder or `_` admits anything; a
-/// literal, its own type; a non-empty list pattern tests `pair?` (so never nil); the
-/// empty list pattern tests `nil?`; a vector pattern tests `vector?`. An over-approximation
-/// wherever it is not exact (an element pattern inside a list is not read), which is the
-/// sound direction for a domain: a call outside it genuinely fails to match.
+/// literal, its own type; a list pattern that requires an element tests `pair?` (one that
+/// requires none matches any value, `nil` and non-lists included); a vector pattern tests
+/// `vector?`, a map pattern `%map-like?` (a map or a record), a record pattern a record, a
+/// `bytes` pattern `bytes?`; `or` is the union of its alternatives and `and` their meet.
+/// An over-approximation wherever it is not exact (an element pattern inside a list is not
+/// read), which is the sound direction for a domain: a call outside it genuinely fails to
+/// match.
 pub(super) fn pattern_domain(heap: &Heap, pat: Value) -> Ty {
-    match pat {
-        Value::Sym(_) => Ty::ANY,
-        Value::Nil => Ty::of(Tag::Nil),
-        Value::Pair(_) => match list_items(heap, pat) {
-            // `(quote x)` / `(record …)` / `(or …)` heads carry match-language forms whose
-            // domains are not read here — anything, soundly.
-            Some(items)
-                if matches!(items.first(), Some(Value::Sym(s))
-                    if matches!(value::symbol_name_ref(*s), "quote" | "record" | "or" | "and" | "not" | "%pin" | "unquote")) =>
-            {
-                Ty::ANY
-            }
-            Some(_) => Ty::of(Tag::Pair),
-            None => Ty::ANY,
-        },
-        Value::Vector(_) => Ty::of(Tag::Vector),
-        other => Ty::of_value(other),
+    domain_of(&Pattern::parse(heap, pat))
+}
+
+fn domain_of(pattern: &Pattern) -> Ty {
+    match pattern {
+        Pattern::Wildcard | Pattern::Bind(_) => Ty::ANY,
+        Pattern::Literal(literal) => Ty::of_value(*literal),
+        // A quoted datum and a pin compare by equality with a value not read here, and a
+        // refused form never compiles: anything, soundly.
+        Pattern::Quoted(_) | Pattern::Pin(_) | Pattern::Refused(_) => Ty::ANY,
+        Pattern::List(seq) if seq.required.is_empty() => Ty::ANY,
+        Pattern::List(_) => Ty::of(Tag::Pair),
+        Pattern::Vector(_) => Ty::of(Tag::Vector),
+        Pattern::Map(_) => Ty::of(Tag::Map).union(Ty::of(Tag::Record)),
+        Pattern::Record { .. } => Ty::of(Tag::Record),
+        Pattern::Bytes(_) => Ty::of(Tag::Bytes),
+        Pattern::Or(alternatives) => alternatives
+            .iter()
+            .map(domain_of)
+            .fold(Ty::NEVER, Ty::union),
+        Pattern::And(patterns) => patterns.iter().map(domain_of).fold(Ty::ANY, Ty::intersect),
     }
 }
 

@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 use crate::core::heap::Heap;
 use crate::core::value::{self, Value};
 use crate::error::Pos;
+use crate::syntax::pattern::Pattern;
 use crate::types::Ty;
 use crate::types::check::{Finding, Lint};
 
@@ -328,7 +329,11 @@ fn check_redundant_shapes(heap: &Heap, clauses: &[Value], out: &mut Vec<Finding>
         };
         let guarded = matches!(clause_items.get(1),
             Some(&Value::Keyword(marker)) if value::symbol_is(marker, "when"));
-        let exact = exact_pattern_ty(heap, pattern, &mut std::collections::HashSet::new());
+        let exact = exact_pattern_ty(
+            heap,
+            &Pattern::parse(heap, pattern),
+            &mut std::collections::HashSet::new(),
+        );
         if exact.as_ref().is_some_and(Ty::is_any) && !guarded {
             return; // a catch-all: the compiler rejects whatever follows it
         }
@@ -383,66 +388,50 @@ fn covered_by(ty: &Ty, earlier: &[Ty]) -> bool {
 /// sets — so it makes the pattern inexact, as does every other form.
 fn exact_pattern_ty(
     heap: &Heap,
-    pattern: Value,
+    pattern: &Pattern,
     seen: &mut std::collections::HashSet<value::Symbol>,
 ) -> Option<Ty> {
     match pattern {
-        Value::Sym(name) if value::symbol_is(name, "_") => Some(Ty::ANY),
-        Value::Sym(name) if value::symbol_is(name, "&") || value::symbol_is(name, "&optional") => {
-            None
-        }
-        Value::Sym(binder) => seen.insert(binder).then_some(Ty::ANY),
-        Value::Keyword(_) | Value::Int(_) | Value::Bool(_) | Value::Nil => {
-            Some(Ty::of_value(pattern))
-        }
-        Value::Str(id) => Some(Ty::str_lit(heap.string(id))),
-        Value::Vector(id) => {
-            let elems = heap.vector(id).to_vec();
-            if elems.is_empty() {
-                return None;
-            }
-            let tys = elems
-                .into_iter()
-                .map(|elem| exact_pattern_ty(heap, elem, seen))
+        Pattern::Wildcard => Some(Ty::ANY),
+        Pattern::Bind(binder) => seen.insert(*binder).then_some(Ty::ANY),
+        Pattern::Literal(
+            literal @ (Value::Keyword(_) | Value::Int(_) | Value::Bool(_) | Value::Nil),
+        ) => Some(Ty::of_value(*literal)),
+        Pattern::Literal(Value::Str(id)) => Some(Ty::str_lit(heap.string(*id))),
+        Pattern::Vector(items) if !items.is_empty() => {
+            let tys = items
+                .iter()
+                .map(|item| exact_pattern_ty(heap, item, seen))
                 .collect::<Option<Vec<Ty>>>()?;
             Some(Ty::tuple_of(tys))
         }
-        Value::Pair(_) => {
-            let items = list_items(heap, pattern)?;
-            if let Some(&Value::Sym(head)) = items.first() {
-                let name = value::symbol_name_ref(head);
-                if name == "or" {
-                    // Alternatives that bind nothing — literals and wildcards — union exactly,
-                    // while the union stays below the lattice's widening cap: past it, two
-                    // alternatives merge position-wise (`[:d 4] ∪ [:e 5]` → `[(:d|:e) (4|5)]`),
-                    // which admits values the pattern does not match.
-                    let mut alts = Vec::new();
-                    for &alt in &items[1..] {
-                        let mut alt_seen = std::collections::HashSet::new();
-                        let ty = exact_pattern_ty(heap, alt, &mut alt_seen)?;
-                        if !alt_seen.is_empty() {
-                            return None;
-                        }
-                        alts.push(ty);
-                    }
-                    let terms: usize = alts.iter().map(|alt| alt.terms_vec().len()).sum();
-                    if terms > MAX_EXACT_UNION {
-                        return None;
-                    }
-                    return alts.into_iter().reduce(Ty::union);
-                }
-                if matches!(
-                    name,
-                    "quote" | "%pin" | "record" | "and" | "not" | "unquote" | "bytes"
-                ) {
-                    return None;
-                }
-            }
-            let tys = items
-                .into_iter()
+        Pattern::List(seq) if seq.optional.is_empty() && seq.rest.is_none() => {
+            let tys = seq
+                .required
+                .iter()
                 .map(|item| exact_pattern_ty(heap, item, seen))
                 .collect::<Option<Vec<Ty>>>()?;
             Some(Ty::list_shape_of(tys))
+        }
+        Pattern::Or(alternatives) => {
+            // Alternatives that bind nothing — literals and wildcards — union exactly,
+            // while the union stays below the lattice's widening cap: past it, two
+            // alternatives merge position-wise (`[:d 4] ∪ [:e 5]` → `[(:d|:e) (4|5)]`),
+            // which admits values the pattern does not match.
+            let mut alts = Vec::new();
+            for alt in alternatives {
+                let mut alt_seen = std::collections::HashSet::new();
+                let ty = exact_pattern_ty(heap, alt, &mut alt_seen)?;
+                if !alt_seen.is_empty() {
+                    return None;
+                }
+                alts.push(ty);
+            }
+            let terms: usize = alts.iter().map(|alt| alt.terms_vec().len()).sum();
+            if terms > MAX_EXACT_UNION {
+                return None;
+            }
+            alts.into_iter().reduce(Ty::union)
         }
         _ => None,
     }
@@ -516,13 +505,8 @@ fn is_catch_all(pat: Value) -> bool {
 /// The record id of a record pattern `(record NAME …)` — its `NAME`, ignoring the (optional)
 /// field pattern. `None` for a non-record pattern.
 fn record_pattern_id(heap: &Heap, pat: Value) -> Option<String> {
-    let items = list_items(heap, pat)?;
-    match items.first() {
-        Some(&Value::Sym(h)) if value::symbol_is(h, "record") => {}
-        _ => return None,
-    }
-    match items.get(1) {
-        Some(&Value::Sym(name)) => Some(value::symbol_name(name)),
+    match Pattern::parse(heap, pat) {
+        Pattern::Record { name, .. } => Some(value::symbol_name(name)),
         _ => None,
     }
 }

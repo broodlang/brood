@@ -339,6 +339,12 @@
   (test ":when with no guard" (assert-error (reflect/macroexpand '(match 1 (x :when)))))
   (test "& is not allowed in a vector pattern"
     (assert-error (reflect/macroexpand '(match [1 2] ([a & b] :x)))))
+  ;; It used to compile to a test against the unbound symbol `&optional`, so the clause
+  ;; silently never matched.
+  (test "&optional is not allowed in a vector pattern, and the error says what is"
+    (let (msg (error-of (reflect/macroexpand '(match [1 2] ([a &optional b] :x)))))
+      (is (includes? msg "not allowed in a vector pattern"))
+      (is (includes? msg "(a &optional b)"))))
   (test "a clause that isn't a (pattern body...) list"
     (assert-error (reflect/macroexpand '(match 1 5))))
   (test "& rest still works (sanity: a valid & does not error)"
@@ -556,6 +562,10 @@
     (assert= (match (pm-rect 3 4) ((record pm-rect {:w w :h h}) (* w h))) 12))
   (test ":keys shorthand composes inside a record pattern"
     (assert= (match (pm-pt 1 2) ((record pm-pt {:keys [x y]}) [x y])) [1 2]))
+  ;; It used to drop everything after the field pattern without a word.
+  (test "a record pattern takes one field pattern at most"
+    (let (msg (error-of (reflect/macroexpand '(match 1 ((record pm-circle {:r r} junk) r)))))
+      (is (includes? msg "takes one field pattern at most"))))
   (test "an id-only record pattern (no field map) matches any instance"
     (assert= (match (pm-circle 9) ((record pm-circle) :yes)) :yes))
   (test "a non-matching record id falls through to the next clause"

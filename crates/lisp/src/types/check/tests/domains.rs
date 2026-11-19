@@ -646,3 +646,61 @@ fn a_cross_module_caller_is_checked_against_the_loaded_domain() {
         "{ws:?}"
     );
 }
+
+// ---- a clause head's domain is what its pattern admits (`syntax::pattern`) ----
+// Each of these was a false "no clause accepts" on a call that runs: the domain reader had
+// its own switch over pattern heads, which did not know `bytes`, read a map pattern as
+// `map` though `%map-like?` takes a record, and read every list pattern as `pair`.
+
+#[test]
+fn a_map_pattern_clause_admits_a_record() {
+    let ws = file_warnings(
+        "(defrecord pt (x y))\n(defn get-x (({:keys [x]}) x) ((n) :when (int? n) n))\n\
+         (defn g () (get-x (pt 1 2)))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("no clause accepts")),
+        "{ws:?}"
+    );
+    let ws = file_warnings(
+        "(defn get-x (({:keys [x]}) x) ((n) :when (int? n) n))\n(defn g () (get-x \"s\"))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("get-x: no clause accepts")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_bytes_pattern_clause_admits_bytes() {
+    let ws = file_warnings(
+        "(defn fb (((bytes b & _r)) b) ((n) :when (int? n) n))\n(defn g () (fb #b\"\\x01\\x02\"))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("no clause accepts")),
+        "{ws:?}"
+    );
+    let ws = file_warnings(
+        "(defn fb (((bytes b & _r)) b) ((n) :when (int? n) n))\n(defn g () (fb \"s\"))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("fb: no clause accepts")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_list_pattern_requiring_no_element_admits_nil() {
+    // `(& r)` binds whatever it is handed, the empty list included.
+    let ws = file_warnings("(defn tl (((& r)) r) ((n) :when (int? n) n))\n(defn g () (tl nil))");
+    assert!(
+        !ws.iter().any(|w| w.contains("no clause accepts")),
+        "{ws:?}"
+    );
+    // One required element is a `pair?` test, so `nil` matches no clause.
+    let ws = file_warnings("(defn tl (((a & r)) r) ((n) :when (int? n) n))\n(defn g () (tl nil))");
+    assert!(
+        ws.iter().any(|w| w.contains("tl: no clause accepts")),
+        "{ws:?}"
+    );
+}

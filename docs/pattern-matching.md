@@ -66,10 +66,10 @@ One vocabulary, shared by every site:
 | `'sym` | the literal symbol `sym` (bare symbols bind, so quote to match) |
 | `(p1 p2 …)` | a list of exactly that length, element-wise |
 | `(p1 & rest)` | head(s) + tail bound — reuses the `&` rest marker |
-| `[p1 p2 …]` | a vector of exactly that length — the *tuple* |
+| `[p1 p2 …]` | a vector of exactly that length — the *tuple*; `&` and `&optional` are refused in it |
 | `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the target isn't a map |
 | `{:k p}` | a map with key `:k` **present**, value matches `p` |
-| `(record name {…})` | a **`defrecord` value** of nominal id `name` (bare → current ns, or `mod/name`), then the map pattern `{…}` (optional; `{:k p}`/`:keys`/`:or` compose) against its fields. A record is its own kind (ADR-542), so this is an id assertion + a map pattern over its fields; a plain map or a different record fails |
+| `(record name {…})` | a **`defrecord` value** of nominal id `name` (bare → current ns, or `mod/name`), then the map pattern `{…}` (optional, and the last part; `{:k p}`/`:keys`/`:or` compose) against its fields. A record is its own kind (ADR-542), so this is an id assertion + a map pattern over its fields; a plain map or a different record fails |
 | `(bytes seg…)` | a **`bytes` value**, destructured segment-by-segment — bit syntax: byte/`#b"…"` literals, one-byte binders, sized `(x n)` sub-bytes (dynamic sizes), typed integers `(x :u16)`/`(x :i32-le)`/…, `& rest` — see `docs/language.md` §Bytes patterns |
 | `^expr` | the current value of `expr` — a pin, see below |
 | `(or p q …)` | any alternative, first match wins; every alternative binds the same names |
@@ -354,6 +354,25 @@ The raised value is an error map (ADR-501): `{:kind :match :message … :context
     definition named `first` does not capture the generated code.
 
 - **`match` needs no core change** — it's a plain macro.
+
+- **The Rust side reads patterns through one module.** The checker, the hygiene pass and
+  the language server's scope analysis do not compile patterns, but they need to know
+  which parts bind, which are expressions and which are literals. They read them through
+  `crates/lisp/src/syntax/pattern.rs`: `ListForm` names what a list pattern's head makes
+  it, and every reader matches it with no catch-all arm, so a new form fails to compile at
+  each reader until it is handled; `Pattern` is the parsed tree the checker's analyses
+  walk. `crates/lisp/tests/pattern_grammar.rs` holds the two languages together: the
+  heads the compiler's shape predicates test for must be exactly `ListForm::NAMED`, and
+  Rust's binders must equal `%pattern-vars` over a corpus that covers every form. **A new
+  pattern form starts in `match.blsp`, then gets a `ListForm` variant, a corpus entry, and
+  whatever the compiler then points at.**
+
+- **A short fall-through is copied into every failure point.** `%match-build-clause` splices
+  the remaining clauses into each place the current clause can fail when that code is
+  small, so one source clause can appear several times in the expansion, each copy under
+  a different scope. The checker judges a verdict about every run of a form ("this can
+  never be true") over all of its copies (`types/check/walk/every_copy.rs`); a finding on
+  one path, such as an argument of the wrong type, is reported from the copy that has it.
 
 - **Good errors come from the macro itself.** Because the matcher is Brood code
   that holds the literal patterns as data, it can both emit the compile-time checks

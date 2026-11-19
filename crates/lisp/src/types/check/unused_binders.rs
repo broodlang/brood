@@ -4,6 +4,7 @@
 //! arms, `catch`, `as->`), which expansion would otherwise hide behind synthetic lets.
 
 use super::*;
+use crate::syntax::pattern::Pattern;
 
 /// **Unused pattern-binder lint**, run on the UN-EXPANDED tree.
 ///
@@ -349,95 +350,11 @@ fn collect_clause_binders(heap: &Heap, plist: Value, out: &mut Vec<Symbol>) {
     }
 }
 
-/// The names a pattern binds, by the one pattern grammar (`docs/language.md` § Pattern
-/// matching; the CST twin is `syntax::scope`'s `collect_pattern_binders`). A bare symbol
-/// binds; a literal, a quoted symbol `'s` and a pin `^x` (`(%pin x)`) do not — a pin
-/// COMPARES against an outer binding, so flagging it would false-positive on every pinned
-/// `receive` clause (`[:down ^ref _ reason]`). `and`/`or`/`bytes` are operators over
-/// sub-patterns, `(record name {…})` names a type, and a map pattern's `:or` holds
-/// default values, not patterns.
+/// The names a pattern binds ([`Pattern::binders`]). A bare symbol binds; a literal, a
+/// quoted symbol `'s` and a pin `^x` do not — a pin COMPARES against an outer binding, so
+/// flagging it would false-positive on every pinned `receive` clause (`[:down ^ref _ reason]`).
 fn collect_pattern_binders(heap: &Heap, pattern: Value, out: &mut Vec<Symbol>) {
-    match pattern {
-        Value::Sym(s) => {
-            // `_` is collected like any binder; the `_`-prefix exemption silences it
-            if !(value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_OPTIONAL)) {
-                out.push(s);
-            }
-        }
-        Value::Vector(id) => {
-            collect_sequence_binders(heap, heap.vector(id), out);
-        }
-        Value::Pair(_) => {
-            let items = list_items(heap, pattern).unwrap_or_default();
-            let skip = match items.first() {
-                Some(&Value::Sym(h)) if value::symbol_is(h, kw::QUOTE) => return,
-                Some(&Value::Sym(h)) if value::symbol_is(h, "%pin") => return,
-                Some(&Value::Sym(h))
-                    if value::symbol_is(h, "or")
-                        || value::symbol_is(h, "and")
-                        || value::symbol_is(h, "bytes") =>
-                {
-                    1
-                }
-                Some(&Value::Sym(h)) if value::symbol_is(h, "record") => 2,
-                _ => return collect_sequence_binders(heap, &items, out),
-            };
-            for &item in items.iter().skip(skip) {
-                collect_pattern_binders(heap, item, out);
-            }
-        }
-        Value::Map(id) => {
-            for &(key, entry) in heap.map_entries(id).iter() {
-                if !matches!(key, Value::Keyword(k) if value::symbol_is(k, "or")) {
-                    collect_pattern_binders(heap, entry, out);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// The binders of a list or vector pattern's elements. After `&optional` a slot is
-/// `(pattern default)` (or a bare name), and the default is an expression, not a pattern:
-/// `(_a &optional (b (do (io/write "d") 0)))` binds `b` and nothing named `do`.
-fn collect_sequence_binders(heap: &Heap, items: &[Value], out: &mut Vec<Symbol>) {
-    let mut optional = false;
-    for &item in items {
-        match item {
-            Value::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) => optional = true,
-            Value::Sym(s) if value::symbol_is(s, kw::AMP) => optional = false,
-            _ => match list_items(heap, item).as_deref() {
-                Some(&[slot, _default]) if optional => collect_pattern_binders(heap, slot, out),
-                _ => collect_pattern_binders(heap, item, out),
-            },
-        }
-    }
-}
-
-/// How many times `sym` occurs in `pattern`. A name written twice in one pattern is an
-/// equality constraint (`[x x]`), and a `bytes` segment's size may name an earlier
-/// segment's binder — either way the pattern itself reads it.
-fn occurrences_in(heap: &Heap, pattern: Value, sym: Symbol) -> usize {
-    match pattern {
-        Value::Sym(s) if s == sym => 1,
-        Value::Vector(id) => heap
-            .vector(id)
-            .to_vec()
-            .into_iter()
-            .map(|item| occurrences_in(heap, item, sym))
-            .sum(),
-        Value::Pair(_) => list_items(heap, pattern)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|item| occurrences_in(heap, item, sym))
-            .sum(),
-        Value::Map(id) => heap
-            .map_entries(id)
-            .iter()
-            .map(|&(key, entry)| occurrences_in(heap, key, sym) + occurrences_in(heap, entry, sym))
-            .sum(),
-        _ => 0,
-    }
+    out.extend(Pattern::parse(heap, pattern).binders());
 }
 
 /// **Unused binders at every other binding form**, on the un-expanded tree. Each of these
@@ -563,15 +480,24 @@ fn report_unused_binders(
     else {
         return;
     };
-    let mut binders = Vec::new();
-    collect_pattern_binders(heap, pattern, &mut binders);
-    for binder in binders {
+    let parsed = Pattern::parse(heap, pattern);
+    let binders = parsed.binders();
+    // The pattern reads a name itself when it repeats it (`[x x]` is an equality test) or
+    // when one of its own expressions does (`(bytes len (payload len))`, a default).
+    let expressions = parsed.expressions();
+    let read_by_pattern = |binder: Symbol| {
+        binders.iter().filter(|&&other| other == binder).count() > 1
+            || expressions
+                .iter()
+                .any(|&expression| walk::sym_appears_in(heap, expression, binder))
+    };
+    for &binder in &binders {
         let spelling = value::symbol_name_ref(binder);
         if spelling.starts_with('_')
             || walk::is_gensym_sym(binder)
             || sigs::is_globally_bound(heap, binder)
             || sigs::has_curated_sig(binder)
-            || occurrences_in(heap, pattern, binder) > 1
+            || read_by_pattern(binder)
         {
             continue;
         }

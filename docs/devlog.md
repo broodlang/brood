@@ -2124,3 +2124,22 @@ sabotage-verified: `a_parameter_read_by_get_with_a_keyword_types_as_a_keyword_re
 `a_truthiness_test_of_an_unknown_field_leaves_it_unknown`,
 `a_caller_derived_leaf_is_typed_under_each_calls_own_arguments`. Every package, bedit, hive,
 mur-forge and app is plain-clean under the new checker.
+
+2026-11-19. **The pattern grammar has one Rust reading, and four false positives went with
+the old ones (ADR-755, ADR-756; KI-402..404).** Started from the open-threads audit: view
+patterns (thread 8) would have had to be taught to about ten separate readers of pattern
+syntax, and those readers had already drifted. `syntax/pattern.rs` is now the one Rust reading: `ListForm` for
+the readers that rebuild or walk the CST, matched with no catch-all, and `Pattern` for the
+checker. `crates/lisp/tests/pattern_grammar.rs` checks that `match.blsp`'s heads equal
+`ListForm::NAMED` and that Rust's binders equal `%pattern-vars` over a corpus covering every
+form. The drift was real: a clause-style `defn` reported "no clause accepts" for a record
+passed to a map pattern, for `nil` passed to `(& r)`, and for bytes passed to a `(bytes …)`
+pattern, all calls that run. The scope analysis bound an `&optional` default and a segment's
+size, and the binding reader took `&optional` for a binder. A fourth false positive was not
+the readers' fault: `(defn kx ((:a) 1) ((n) :when (int? n) n))` reported `int?: this can never
+be true — n is :a`. The match compiler copies a short fall-through into each failure point,
+and in one copy `n` really is `:a`. A "never" verdict is now judged over every copy
+(`walk/every_copy.rs`). The compiler also refuses `&optional` in a vector pattern (it compiled
+to a test against an unbound symbol and never matched) and anything after a record pattern's
+field map (dropped silently). Each guard was sabotaged red. `nest check` over std/, tests/
+and examples/ stays at zero warnings, plain and strict.

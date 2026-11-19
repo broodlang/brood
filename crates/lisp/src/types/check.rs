@@ -196,7 +196,7 @@ use same_file_inference::*;
 use signature_capture::*;
 use top_level::*;
 use unused_binders::*;
-use walk::{check_into, collect_all_syms, collect_def_names, list_items};
+use walk::{collect_all_syms, collect_def_names, list_items};
 
 /// The **type signature** of the callable `sym` resolves to — declared, curated, or
 /// inferred (all of `sigs::sig_of`'s sources) — rendered as its arrow string, e.g.
@@ -242,7 +242,7 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
     // tables (`fn_form`, `clause_arms`) — `signature_string` already does this.
     sigs::clear_sig_memo();
     let mut out = Vec::new();
-    check_into(heap, form, &Ctx::default(), &mut out);
+    walk::check_top_level(heap, form, &Ctx::default(), &mut out);
     out.into_iter().map(Finding::into_pair).collect()
 }
 
@@ -664,7 +664,7 @@ fn check_file_passes(
         let mut guarded = HashSet::new();
         collect_bound_guards(heap, form, &mut guarded);
         ctx.set_bound_guarded(guarded);
-        check_into(heap, form, &ctx, out);
+        walk::check_top_level(heap, form, &ctx, out);
     }
     ctx.set_bound_guarded(HashSet::new());
     run_shape_lints(heap, &forms, &expanded, &ctx, out);

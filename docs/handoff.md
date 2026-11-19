@@ -98,11 +98,25 @@ ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character ty
    read a form from the `forms` slice after a load could collect (now the rooted copy). The
    guard was removed 2026-11-18, with `BROOD_TRACE_GCBLOCK`. A deprecated name used in its
    own file is now never reported to that file, on either path (KI-400).
-8. **View patterns** (low to medium value).
+8. **View patterns** (low to medium value). **Re-assessed 2026-11-19: still deferred, now for
+   a measured reason.** No code needs one. A search of std/, tests/ and ten downstream repos
+   for the shape a view pattern replaces (a `:when` guard computes `(f x)` and the body
+   computes it again) found one hit, a `for` filter in bedit, not a `match`. `(match (f x) …)`,
+   a `:when` guard and `with` already say it. A view pattern also hides the value from
+   exhaustiveness, since the checker cannot see through `f`. What made it expensive is fixed:
+   the Rust side reads patterns through one module now (ADR-755), so a new form costs a
+   `ListForm` variant, a corpus entry in `crates/lisp/tests/pattern_grammar.rs`, a compile
+   clause in `match.blsp`, and whatever the compiler then points at.
 9. **Parametric abilities** (low).
 10. ~~**Lexically shadowable operators.**~~ — done by ADR-734 (2026-11-17): a local shadows a
     macro; binding one of the eight evaluator forms fails compilation.
-11. **Function modifiers** (wrap, failure-strict calls).
+11. **Function modifiers** (wrap, failure-strict calls). **Re-assessed 2026-11-19: still
+    deferred.** `docs/deferred.md` §11 names the triggers. One was spent by ADR-316; neither
+    other one has fired: no complaint about `number | failure` in hovers (the owner wants
+    `failure` to stay in the return type), and no new wrapper. `debug/trace-fn` is arguably a
+    third ad-hoc wrapper beside contracts and coverage, but the three work at different levels
+    (binding time in the kernel, redefinition with a registry, source instrumentation), so a
+    shared `wrap` layer would add a concept without removing much code.
 
 ## Flake hunting
 

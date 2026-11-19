@@ -1555,13 +1555,13 @@ design and rationale see [pattern-matching.md](pattern-matching.md).
 | `^expr` | the current value of `expr` (a *pin*) |
 | `(p1 p2 …)` | a list of that exact length, element-wise |
 | `(p1 & rest)` | head(s) + the tail bound to `rest` |
-| `[p1 p2 …]` | a vector of that exact length — the **tagged-data / tuple idiom** |
+| `[p1 p2 …]` | a vector of that exact length — the **tagged-data / tuple idiom**. `&` and `&optional` are refused in it, by name: a vector pattern is fixed-length |
 | `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the value isn't a map. `{}` matches any map. |
 | `(bytes seg…)` | a **`bytes` value**, destructured segment-by-segment — bit syntax (see below) |
 | `(or p q …)` | any alternative — first match wins; every alternative must bind the same names |
 | `(and p q …)` | every pattern, against the same value — the capture-while-destructuring (`:as`) idiom |
 | `{:k p}` | a map with key `:k` **present**, whose value matches `p` (nests to any depth) |
-| `(record name {…})` | a **`defrecord` value** whose nominal id is `name` (bare → current ns, or `mod/name`), then the map pattern `{…}` against its fields (`{:k p}`/`:keys`/`:or` all compose); the `{…}` is optional (id-only). A plain map or non-record fails |
+| `(record name {…})` | a **`defrecord` value** whose nominal id is `name` (bare → current ns, or `mod/name`), then the map pattern `{…}` against its fields (`{:k p}`/`:keys`/`:or` all compose); the `{…}` is optional (id-only), and anything after it is refused. A plain map or non-record fails |
 
 Patterns nest to any depth. **The one trap:** a bare symbol *binds* (and
 shadows) — it does **not** test against a same-named value. Match a known value

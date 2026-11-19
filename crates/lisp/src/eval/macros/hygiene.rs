@@ -2,6 +2,7 @@
 //! binders are alpha-renamed before the template is built.
 
 use super::*;
+use crate::syntax::pattern::ListForm;
 
 // ============================================================================
 // Automatic binding hygiene (ADR-066 amendment — "Option A"; ADR-500)
@@ -370,40 +371,38 @@ fn hyg_list_pattern(heap: &mut Heap, pattern: Value, scope: &mut HygScope, start
         Some(i) => i,
         None => return pattern,
     };
-    let head = match items.first().map(|v| v.unpack()) {
-        Some(ValueRef::Sym(h)) => Some(h),
-        _ => None,
-    };
     let mut out = Vec::with_capacity(items.len());
-    match head {
-        Some(h) if value::symbol_is(h, kw::QUOTE) => return pattern, // the literal symbol
-        Some(h) if value::symbol_is(h, kw::PIN) => {
+    match ListForm::of_list(&items) {
+        ListForm::Quote => return pattern, // the literal datum
+        // Refused by the pattern compiler, which names the form: nothing binds.
+        ListForm::Not | ListForm::Unquote => return pattern,
+        ListForm::Pin => {
             // `^expr` — matched against the CURRENT value of `expr`: a reference.
             out.push(items[0]);
             for &e in &items[1..] {
                 out.push(hyg_walk(heap, e, scope));
             }
         }
-        Some(h) if value::symbol_is(h, kw::OR) || value::symbol_is(h, kw::AND) => {
+        ListForm::Or | ListForm::And => {
             out.push(items[0]);
             for &p in &items[1..] {
                 out.push(hyg_pattern(heap, p, scope, start));
             }
         }
-        Some(h) if value::symbol_name_ref(h) == "record" => {
+        ListForm::Record => {
             // `(record name {…})` — the name is a record id, then a map pattern.
             out.extend(items.iter().take(2).copied());
             for &p in items.get(2..).unwrap_or(&[]) {
                 out.push(hyg_pattern(heap, p, scope, start));
             }
         }
-        Some(h) if value::symbol_name_ref(h) == "bytes" => {
+        ListForm::Bytes => {
             out.push(items[0]);
             for &segment in &items[1..] {
                 out.push(hyg_bytes_segment(heap, segment, scope, start));
             }
         }
-        _ => {
+        ListForm::List => {
             // A list pattern: every element, the first included, is a pattern — except after
             // `&optional`, where a `(pattern default)` slot's default is an expression that
             // reads the names bound before it (ADR-619).

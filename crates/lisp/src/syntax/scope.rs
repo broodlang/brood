@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use crate::core::keywords as kw;
 use crate::error::Span;
 use crate::syntax::cst::{Node, NodeKind};
+use crate::syntax::pattern::ListForm;
 
 /// Whether a binding is global (a top-level `def`-family name) or a lexical
 /// local (a parameter or `let` binding).
@@ -434,24 +435,27 @@ fn collect_pattern_binders(pattern: &Node, src: &str, out: &mut Vec<Binding>) {
         }
         NodeKind::List => {
             let forms = pattern.forms();
-            match pattern.head_symbol(src) {
-                Some("quote") => {}
-                Some("or" | "and" | "bytes") => {
+            match ListForm::of_head(pattern.head_symbol(src)) {
+                // `^x` and `'x` are their own node kinds here; written out, they bind nothing,
+                // and neither does a form the compiler refuses
+                ListForm::Quote | ListForm::Pin | ListForm::Not | ListForm::Unquote => {}
+                ListForm::Or | ListForm::And => {
                     for item in forms.skip(1) {
                         collect_pattern_binders(item, src, out);
                     }
                 }
                 // `(record name {…})`: the name is a type's, the map is the pattern
-                Some("record") => {
+                ListForm::Record => {
                     for item in forms.skip(2) {
                         collect_pattern_binders(item, src, out);
                     }
                 }
-                _ => {
-                    for item in forms {
-                        collect_pattern_binders(item, src, out);
+                ListForm::Bytes => {
+                    for segment in forms.skip(1) {
+                        collect_segment_binder(segment, src, out);
                     }
                 }
+                ListForm::List => collect_sequence_binders(forms, src, out),
             }
         }
         NodeKind::Map => {
@@ -463,6 +467,44 @@ fn collect_pattern_binders(pattern: &Node, src: &str, out: &mut Vec<Binding>) {
                 {
                     collect_pattern_binders(value, src, out);
                 }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A list pattern's elements: each is a pattern, except that after `&optional` a
+/// `(pattern default)` slot binds its pattern and its default is an expression.
+fn collect_sequence_binders<'t>(
+    forms: impl Iterator<Item = &'t Node>,
+    src: &str,
+    out: &mut Vec<Binding>,
+) {
+    let mut optional = false;
+    for item in forms {
+        match item.kind {
+            NodeKind::Symbol if item.text(src) == kw::AMP_OPTIONAL => optional = true,
+            NodeKind::Symbol if item.text(src) == kw::AMP => optional = false,
+            NodeKind::List if optional && item.forms().count() == 2 => {
+                if let Some(slot) = item.forms().next() {
+                    collect_pattern_binders(slot, src, out);
+                }
+            }
+            _ => collect_pattern_binders(item, src, out),
+        }
+    }
+}
+
+/// One `bytes` segment: `x` binds a byte, `(x n)` and `(x :u16)` bind `x` (a symbol `n` is
+/// an earlier binder, read), `& rest` binds the rest; a literal binds nothing.
+fn collect_segment_binder(segment: &Node, src: &str, out: &mut Vec<Binding>) {
+    match segment.kind {
+        NodeKind::Symbol => collect_pattern_binders(segment, src, out),
+        NodeKind::List => {
+            if let Some(binder) = segment.forms().next()
+                && binder.kind == NodeKind::Symbol
+            {
+                collect_pattern_binders(binder, src, out);
             }
         }
         _ => {}
@@ -758,6 +800,9 @@ mod tests {
             "(if-let ({:keys [f]} m) (f) 2)",
             "(doseq (f xs) (f))",
             "(for (a xs f ys) (f))",
+            "(match x ((a &optional (f 1)) (f)))",
+            "(match x ((bytes (f 2) & r) (f)))",
+            "(match x ((bytes a & f) (f)))",
         ] {
             assert!(resolves_local_at_last(src, "f"), "{src}");
         }
@@ -777,6 +822,9 @@ mod tests {
             "(defn g ({:keys [a] :or {a f}}) (f))",
             "(match x ((record f {:x a}) (f)))",
             "(receive (after 10 (f)))",
+            // an `&optional` slot's default and a segment's size are read, not bound
+            "(match x ((a &optional (b f)) (f)))",
+            "(match x ((bytes (b f) & r) (f)))",
         ] {
             assert!(!resolves_local_at_last(src, "f"), "{src}");
         }

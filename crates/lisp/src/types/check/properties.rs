@@ -455,29 +455,10 @@ fn fn_bodies(heap: &Heap, fn_form: Value) -> Vec<Value> {
     items.get(body_start..).map_or_default(<[Value]>::to_vec)
 }
 
-/// Every symbol a binding pattern binds (a bare name, or the names inside a
-/// destructuring vector/list/map).
+/// Every name a binding pattern binds ([`Pattern::binders`]). A parameter list reads as the
+/// list pattern it is.
 pub(super) fn collect_pattern_names(heap: &Heap, pat: Value, out: &mut HashSet<Symbol>) {
-    let mut work = vec![pat];
-    while let Some(v) = work.pop() {
-        match v {
-            Value::Sym(s) => {
-                out.insert(s);
-            }
-            Value::Pair(_) => {
-                if let Some(items) = list_items(heap, v) {
-                    work.extend(items);
-                }
-            }
-            Value::Vector(id) => work.extend(heap.vector(id).iter().copied()),
-            Value::Map(id) => {
-                for (_, val) in heap.map_entries(id) {
-                    work.push(val);
-                }
-            }
-            _ => {}
-        }
-    }
+    out.extend(crate::syntax::pattern::Pattern::parse(heap, pat).binders());
 }
 
 /// A `(ui-memo key deps thunk)` call whose thunk performs an effect is reported: the memo

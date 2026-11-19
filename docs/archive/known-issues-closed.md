@@ -5,6 +5,98 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-404 — the pattern compiler accepted `&optional` in a vector pattern and junk after a record's field map ✅ fixed 2026-11-19
+
+**Symptom.** `(match [1 2] ([a &optional b] [a b]))` raised `match: no clause matches [1 2] —
+tried [a &optional b]`, with a checker warning that `&optional` "is a special form, not a value".
+`(match v ((record pt {:a a} junk) a))` compiled and ignored `junk`.
+
+**Cause.** `%match-compile-vector` refused `&` by name but not `&optional`, so `&optional` fell to
+the literal case and compiled to `(%eq el &optional)`, a test against an unbound symbol, and the
+clause never matched. `%match-compile-record` read `(first (rest (rest pat)))` and never looked
+past it.
+
+**Why it survived.** Neither shape appears in std/, tests/ or the downstream repos, and no test
+wrote either one. ADR-152's rule (refuse a shape rather than reinterpret it) had been applied to
+`&`, `(not …)` and `:as` one at a time.
+
+**Fix.** Both are refused at expansion with a message naming the form. The vector message says
+what does take optional elements, a list pattern `(a &optional b)` (ADR-755).
+
+**Guard.** `tests/pattern_matching_test.blsp` "&optional is not allowed in a vector pattern, and
+the error says what is" and "a record pattern takes one field pattern at most": with both checks
+disabled, `151 tests, 149 passed, 2 failed`, naming the two. `crates/lisp/tests/pattern_grammar.rs`
+`a_form_the_compiler_refuses_binds_nothing` also asserts the compiler refuses each.
+
+## KI-403 — a guard a clause needs was reported "can never be true" from one copy of the clause ✅ fixed 2026-11-19
+
+**Symptom.** `(defn kx ((:a) 1) ((n) :when (int? n) n))` under `brood --check`: `warning: int?:
+this can never be true — n is :a, which is never int`. `(kx 7)` returns 7. The same for a vector
+first clause: `n is vector`, and `n is map | record` after a map pattern.
+
+**Cause.** `%match-build-clause` splices a short fall-through into each point where a clause can
+fail. The second clause therefore sits in the expansion twice. One copy is where the first
+clause's head was not `:a`. The other is where the head was `:a` but more arguments followed
+(`(if (%eq hd :a) (if (nil? tl) 1 <copy>) <copy>)`), and in that copy the path narrowing makes
+`n` exactly `:a`. The never-true lint judged each copy alone and reported from the second.
+
+**Why it survived.** The lint is gated by `nest check` at zero warnings over std/ and tests/,
+which only proves no instance of the shape is there: a clause-style `defn` or a `match` whose
+first clause is a list or vector pattern holding a literal, with a later clause guarding its
+binder. The `match` tests that exercise the lint use a bare scrutinee binder (`(n :when …)`),
+which reads the whole value and is not narrowed by the earlier test.
+
+**Fix.** A verdict about every run of a form is judged over every copy of it (ADR-756,
+`types/check/walk/every_copy.rs`): each judged call records its visit and its verdict, and when
+the top-level walk ends a verdict some visit did not reach is withdrawn. A copy whose argument
+is `never` records nothing. The copies are rebuilt by the expander, so the key is the form's
+position and text. Keying on heap identity was tried first and failed this guard.
+
+**Guard.** `types::check::tests::match_lints::a_guard_one_copy_of_its_clause_needs_is_not_dead`,
+red without the ledger (`["int?: this can never be true — n is :a, which is never int"]`), and
+`a_guard_dead_in_every_copy_is_still_reported`, which keeps the lint from being withdrawn
+wholesale.
+
+## KI-402 — the Rust readers of pattern syntax drifted from the compiler: false "no clause accepts", wrong binders ✅ fixed 2026-11-19
+
+**Symptom.** Under `brood --check`, each on a call that runs:
+
+- `(defn get-x (({:keys [x]}) x) ((n) :when (int? n) n))` with `(get-x (pt 1 2))`, a record:
+  `get-x: no clause accepts these arguments — the clauses take (map), (int)`.
+- `(defn tail-of (((& r)) r) ((n) :when (int? n) n))` with `(tail-of nil)`: `the clauses take
+  (pair), (int)`.
+- `(defn first-byte (((bytes b & _r)) b) ((n) :when (int? n) n))` with a bytes value: `the
+  clauses take (pair), (int)`.
+
+In the language server's scope analysis, the `x` in an `&optional` slot `(b x)` and the `len` in a
+segment `(payload len)` resolved to themselves as binders. The checker's binding reader took
+`&optional` in a list pattern for a binder and typed the next name from the wrong position.
+
+**Cause.** About ten Rust passes each read pattern syntax with their own switch over the heads.
+`sigs::pattern_domain` listed `quote record or and not %pin unquote` but not `bytes`, so a
+`(bytes …)` head fell to "a non-empty list tests `pair?`". A map pattern was typed `map`, but the
+compiler tests `%map-like?`, which admits a record (ADR-542). A list pattern that requires no
+element matches anything, `nil` included. The CST reader had no case for `&optional` or for
+`bytes` segments, and `pattern_bindings` counted every symbol in a flat list as a position.
+
+**Why it survived.** Each reader was tested against the heads it knew. Nothing compared the
+readers with each other or with `match.blsp`, and std/ and tests/ hold no clause-style `defn` with
+a map, bytes or rest-only first clause called with the value that exposes it.
+
+**Fix.** `syntax/pattern.rs` is the one Rust reading (ADR-755). The readers that rebuild a pattern
+or walk the CST match `ListForm` with no catch-all, and the checker's readers walk the parsed
+`Pattern`. `crates/lisp/tests/pattern_grammar.rs` requires `match.blsp`'s heads to equal
+`ListForm::NAMED`, and Rust's binders to equal `%pattern-vars` over a corpus covering every form.
+
+**Guard.** `types::check::tests::domains::{a_map_pattern_clause_admits_a_record,
+a_bytes_pattern_clause_admits_bytes, a_list_pattern_requiring_no_element_admits_nil}`, each
+asserting both sides of the boundary. With the old domains restored, all three were red. In
+`syntax::scope::tests`, `a_pattern_binds_only_where_it_binds` went red on
+`(match x ((a &optional (b f)) (f)))` and, sabotaged alone, on `(match x ((bytes (b f) & r)
+(f)))`. In `pattern_grammar.rs`, an `or` that bound every alternative's names was red at
+`the binders of (or [:a x] [:b x])` (`"x x"` against `"x"`). A renamed head was red in the head
+test and the corpus test.
+
 ## KI-401 — an error from a top-level call in `reflect/eval-string` took the caller's position, on the tree-walker ✅ fixed 2026-11-18
 
 **Symptom.** `make test-both`'s tree-walker half: `nest::blsp_dispatch

@@ -8,6 +8,7 @@
 
 pub mod atom;
 pub mod cst;
+pub mod pattern;
 pub mod printer;
 pub mod reader;
 pub mod scanner;

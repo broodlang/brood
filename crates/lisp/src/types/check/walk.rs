@@ -26,12 +26,14 @@ use std::sync::LazyLock;
 
 mod binders;
 mod calls;
+mod every_copy;
 mod impls;
 mod shape;
 mod unbound;
 
 pub(in crate::types::check) use binders::*;
 pub(in crate::types::check) use calls::*;
+pub(in crate::types::check) use every_copy::check_top_level;
 pub(in crate::types::check) use impls::*;
 pub(in crate::types::check) use shape::*;
 pub(in crate::types::check) use unbound::*;
@@ -990,14 +992,20 @@ fn check_named_call(
     // call is the TEST of a branch the dead-clause lint proves dead, the finding is the
     // dead clause instead: `drop_unwanted_dead_clause` drops this warning and reports
     // the clause once, naming the symbol the author tested, under `:unreachable-clause`.
+    // "Never" is a claim about every run of the call, so it is judged over every copy the
+    // expansion made of it (`every_copy`), not from one.
     if !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
-        && let Some(message) = never_true_predicate(heap, items, ctx)
+        && let Some((predicate, argument, tested)) = judged_predicate_call(heap, items, ctx)
     {
-        out.push(Finding::new(
-            Lint::TypeMismatch,
-            arg_pos(heap, items[1], form),
-            message,
-        ));
+        match never_true_verdict(heap, predicate, argument, &tested, ctx) {
+            PredicateVerdict::Unreachable => {}
+            PredicateVerdict::Possible => every_copy::report(heap, form, None, out),
+            PredicateVerdict::Never(message) => {
+                let finding =
+                    Finding::new(Lint::TypeMismatch, arg_pos(heap, argument, form), message);
+                every_copy::report(heap, form, Some(finding), out);
+            }
+        }
     }
 
     if let Some(sig) = sig {
@@ -1310,6 +1318,27 @@ fn walk_operands(heap: &Heap, form: Value, items: &[Value], ctx: &Ctx, out: &mut
 /// `check_if`'s dead-clause lint ([`drop_unwanted_dead_clause`]) so that one dead
 /// clause is reported once.
 fn never_true_predicate(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<String> {
+    let (predicate, argument, tested) = judged_predicate_call(heap, items, ctx)?;
+    match never_true_verdict(heap, predicate, argument, &tested, ctx) {
+        PredicateVerdict::Never(message) => Some(message),
+        PredicateVerdict::Unreachable | PredicateVerdict::Possible => None,
+    }
+}
+
+/// What the never-true lint concludes of one judged call in one scope.
+enum PredicateVerdict {
+    /// The scope cannot run: the argument is `never`. It says nothing about the call.
+    Unreachable,
+    /// A true answer is possible, or nothing proves it impossible.
+    Possible,
+    /// The argument is nothing the predicate admits.
+    Never(String),
+}
+
+/// The call the never-true lint judges — `(pred x)` with `pred` a type predicate whose true
+/// answer states a type, applied to a name the author wrote or a computed expression — as
+/// `(pred, x, the type a true answer asserts)`. `None` for every other call.
+fn judged_predicate_call(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<(Symbol, Value, Ty)> {
     let Some(&Value::Sym(predicate)) = items.first() else {
         return None;
     };
@@ -1328,14 +1357,28 @@ fn never_true_predicate(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Strin
     if !facts.stated || tested.is_any() {
         return None; // a truthy result proves nothing, so nothing makes it impossible
     }
+    Some((predicate, argument, tested))
+}
+
+/// The verdict on a judged call: never true when `argument` can be nothing `tested` admits.
+fn never_true_verdict(
+    heap: &Heap,
+    predicate: Symbol,
+    argument: Value,
+    tested: &Ty,
+    ctx: &Ctx,
+) -> PredicateVerdict {
     let bound = gradual_of(heap, argument, ctx).bound;
+    if bound.is_never() {
+        return PredicateVerdict::Unreachable;
+    }
     // A parameter bound to what its in-file callers pass (the caller-derived parameter pass) is not judged here:
     // the guard may be there for callers that do not exist yet.
     let derived = matches!(argument, Value::Sym(a) if ctx.is_derived_local(a));
-    if derived || bound.is_never() || bound == Ty::ANY || !bound.is_disjoint(&tested) {
-        return None;
+    if derived || bound == Ty::ANY || !bound.is_disjoint(tested) {
+        return PredicateVerdict::Possible;
     }
-    Some(format!(
+    PredicateVerdict::Never(format!(
         "{}: this can never be true — {} is {}, which is never {}",
         name_of(predicate),
         elide(&crate::syntax::printer::print(heap, argument), 60),
