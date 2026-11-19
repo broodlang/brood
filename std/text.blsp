@@ -34,7 +34,7 @@ is read only where it is sliced.
 
 (defn line-text (rope line)
   "The text of line `line` (0-based) of `rope` WITHOUT its line break — what a line shows.
-A line breaks at LF, CR or CRLF (ADR-771).
+A line breaks at LF, CR or CRLF (ADR-772).
 
     (text/line-text (text/string-> \"ab\\r\\ncd\") 0)   ;=> \"ab\"
     (text/line-text (text/string-> \"ab\\ncd\") 1)   ;=> \"cd\""
@@ -52,7 +52,7 @@ reads. It takes the lines `line->char` takes, `0` to `line-count`.
 (defn line-count (r)
   "The number of lines in rope r (a trailing newline ends a line; \"\" is 1 line). A line
 breaks at LF, CR or CRLF — never at a form feed, a vertical tab, NEL or U+2028/U+2029 — as
-LSP, tree-sitter's points and a buffer search's `^` count them (ADR-771).
+LSP, tree-sitter's points and a buffer search's `^` count them (ADR-772).
 
     (text/line-count (text/string-> \"a\nb\"))   ;=> 2
     (text/line-count (text/string-> \"a\\u{c}b\"))   ;=> 1"

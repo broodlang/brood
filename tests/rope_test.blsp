@@ -274,7 +274,7 @@
       "text/after-line->char: line 2 is out of bounds (valid 0..1)")
     (assert-error (text/after-line->char (text/string-> "ab") -1))))
 
-(describe "a line breaks at LF, CR or CRLF — and nowhere else (ADR-771)"
+(describe "a line breaks at LF, CR or CRLF — and nowhere else (ADR-772)"
   (test "a form feed, a vertical tab, NEL and U+2028/U+2029 break no line"
     (doseq (separator ["\u{c}" "\u{b}" "\u{85}" "\u{2028}" "\u{2029}"])
       (let (rope (text/string-> (str "a" separator "b")))
