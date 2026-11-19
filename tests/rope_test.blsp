@@ -124,7 +124,15 @@
   (test "slice past the end raises" (assert-error (text/slice (text/string-> "ab") 0 99)))
   (test "line past the end raises" (assert-error (text/line (text/string-> "ab") 5)))
   (test "char->line past the end raises"
-    (assert-error (text/char->line (text/string-> "ab") 99))))
+    (assert-error (text/char->line (text/string-> "ab") 99)))
+  (test "a bad range names the bound that is wrong"
+    (let (rope (text/string-> "abc"))
+      (assert= (error-message (error-of (text/delete rope -1 2)))
+        "runtime error: %rope-delete: range start -1 out of bounds (valid 0..=3)")
+      (assert= (error-message (error-of (text/slice rope 0 9)))
+        "runtime error: %rope-slice: range end 9 out of bounds (valid 0..=3)")
+      (assert= (error-message (error-of (text/delete rope 2 1)))
+        "runtime error: %rope-delete: range end 1 is before its start 2"))))
 
 (describe "ropes across processes"
   :isolated

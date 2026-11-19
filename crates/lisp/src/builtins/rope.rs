@@ -133,6 +133,24 @@ pub(super) fn rope_oob(who: &str, what: &str, got: i64, max: usize) -> LispError
     .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)
 }
 
+/// Check a character range `[start, end)` against a rope of `len` characters, naming the
+/// bound that is wrong: a start outside the rope, an end past it, or an end before the start.
+fn check_range(who: &str, start: i64, end: i64, len: usize) -> Result<(), LispError> {
+    if start < 0 || start as usize > len {
+        return Err(rope_oob(who, "range start", start, len));
+    }
+    if end < 0 || end as usize > len {
+        return Err(rope_oob(who, "range end", end, len));
+    }
+    if end < start {
+        return Err(LispError::runtime(format!(
+            "{who}: range end {end} is before its start {start}"
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
+    }
+    Ok(())
+}
+
 /// `(string->rope s)` — a rope holding the text of string `s`.
 pub(super) fn string_to_rope(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let rope = ropey::Rope::from_str(expect_string_ref(heap, "%string->rope", arg(args, 0))?);
@@ -181,9 +199,7 @@ pub(super) fn rope_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let start = expect_int(heap, "%rope-delete", arg(args, 1))?;
     let end = expect_int(heap, "%rope-delete", arg(args, 2))?;
     let len = r.len_chars();
-    if start < 0 || end < start || end as usize > len {
-        return Err(rope_oob("%rope-delete", "range end", end, len));
-    }
+    check_range("%rope-delete", start, end, len)?;
     r.remove(start as usize..end as usize);
     Ok(heap.alloc_rope(r))
 }
@@ -194,9 +210,7 @@ pub(super) fn rope_slice(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     let start = expect_int(heap, "%rope-slice", arg(args, 1))?;
     let end = expect_int(heap, "%rope-slice", arg(args, 2))?;
     let len = r.len_chars();
-    if start < 0 || end < start || end as usize > len {
-        return Err(rope_oob("%rope-slice", "range end", end, len));
-    }
+    check_range("%rope-slice", start, end, len)?;
     let s = r.slice(start as usize..end as usize).to_string();
     Ok(heap.alloc_string_counted(s, (end - start) as usize))
 }
