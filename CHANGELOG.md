@@ -4,7 +4,7 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.57.0 — string patterns, and a dead string clause fails compilation
 
 **Added: string patterns, `(str "GET " path)` (ADR-770).** A pattern written like the `str` call
 that builds the string: literal ends, and at most one part — the slot — matched against what
