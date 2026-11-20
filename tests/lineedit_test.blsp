@@ -372,22 +372,27 @@
       (assert= (receive (r r)) "abc"))))
 
 ; jumps the whole path
-(describe "lineedit path mode (M-b/M-f by folder)"
-  ;; "/home/wilhelm/src" — 17 chars; "/" is a word boundary only in :path mode.
+(describe "lineedit word motion (M-b/M-f under the word syntax, ADR-774)"
+  ;; "/home/wilhelm/src" — 17 chars; `/` is not a word character, so a path moves by folder.
   (def path "/home/wilhelm/src")
   ; start of "src"
   (test "M-b moves back one path component"
-    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :word-mode :path :text path :point 17))
+    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :text path :point 17))
       (assert= (get (lineedit-backward-word st nil) :point) 14)))
   ; end of "/home"
   (test "M-f moves forward one path component"
-    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :word-mode :path :text path :point 0))
+    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :text path :point 0))
       (assert= (get (lineedit-forward-word st nil) :point) 5)))
-  (test "default mode treats the whole path as one word"
-    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :text path :point 17))
-      (assert= (get (lineedit-backward-word st nil) :point) 0))))
-
-(defn le-boom (state key) (throw "boom"))
+  (test "by default a hyphenated name is two words, as in Emacs's lisp modes"
+    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :text "(foo-bar 1)" :point 0))
+      (assert= (get (lineedit-forward-word st nil) :point) 4)
+      (assert= (get (lineedit-kill-word-forward st nil) :text) "-bar 1)")))
+  (test "the :word-syntax option adds word characters"
+    (let (st (assoc (editor/lineedit/lineedit-init "" '() {:word-syntax {:word-chars "-"}})
+               :text "(foo-bar 1)"
+               :point 8))
+      (assert= (get (lineedit-backward-word st nil) :point) 1)
+      (assert= (get (lineedit-kill-word-backward st nil) :text) "( 1)"))))
 
 (describe "a command that throws"
   (test "leaves the line as it was and shows its error below the input"

@@ -802,6 +802,7 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `%rope-find` | 4 | The character index of the first occurrence of needle in rope r at or after from, or -1. |
 | `%rope-rfind` | 4 | The character index of the LAST occurrence of needle in rope r starting strictly before `before`, or -1. |
 | `%rope-skip` | 5 | Where a run of characters reaches from `at` in rope r: with inside? |
+| `%skip-word` | 5 | Where a run of word (or non-word) characters reaches from `at` in a rope or a string — a letter, a number, a combining mark or one of word-chars (ADR-774). |
 
 ### `builtins/tooling.rs`
 

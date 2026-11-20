@@ -29,6 +29,8 @@ pub(crate) const num: Ty = Ty::NUMBER;
 pub(crate) const float: Ty = Ty::of(Tag::Float);
 pub(crate) const string: Ty = Ty::of(Tag::Str);
 pub(crate) const rope: Ty = Ty::of(Tag::Rope);
+/// A rope or a string: the text a word scan reads (`%skip-word`).
+pub(crate) const rope_or_string: Ty = Ty::of_tags(&[Tag::Rope, Tag::Str]);
 pub(crate) const socket_ty: Ty = Ty::of(Tag::Socket);
 pub(crate) const subprocess_ty: Ty = Ty::of(Tag::Subprocess);
 pub(crate) const table_ty: Ty = Ty::of(Tag::Table);
