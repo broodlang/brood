@@ -490,7 +490,11 @@ asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly +
 	CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
 		RUSTFLAGS="-Zsanitizer=address --cfg brood_asan --cfg brood_system_alloc" \
 		cargo +nightly build --release --target x86_64-unknown-linux-gnu -p cli -p nest
-	RUST_MIN_STACK=16777216 CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
+	# BROOD_TEST_TRACE: the in-language suite prints a line per test with its time. It runs
+	# close to its cap here, its end-of-run report never prints when the cap kills it, and the
+	# per-test lines are in the output nextest shows on a timeout (and on a pass: the asan
+	# profile's success-output), so a run out of time still names the tests that took it.
+	BROOD_TEST_TRACE=1 RUST_MIN_STACK=16777216 CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
 		RUSTFLAGS="-Zsanitizer=address --cfg brood_asan --cfg brood_system_alloc" \
 		cargo +nightly nextest run --profile asan --no-fail-fast --target x86_64-unknown-linux-gnu \
 		-p brood --release
