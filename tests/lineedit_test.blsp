@@ -398,6 +398,8 @@
       (assert= (get (lineedit-backward-word st nil) :point) 1)
       (assert= (get (lineedit-kill-word-backward st nil) :text) "( 1)"))))
 
+(defn le-boom (state key) (throw "boom"))
+
 (describe "a command that throws"
   (test "leaves the line as it was and shows its error below the input"
     (binding (editor/lineedit/*keymap* (assoc editor/lineedit/*keymap*

@@ -390,4 +390,5 @@
           caller (self)
           workers (map (range 0 4)
                     (fn (_) (spawn (fn () (send caller [:at (text/forward-word rope 1000 nil)]))))))
-      (assert= (map workers (fn (_) (receive ([:at at] at)))) [expected expected expected expected]))))
+      (assert= (vec (map workers (fn (_) (receive ([:at at] at)))))
+        [expected expected expected expected]))))
