@@ -878,6 +878,14 @@ pub(crate) fn shim_parts(heap: &Heap, id: value::ClosureId) -> Option<ShimParts>
     })
 }
 
+/// Whether the closure `id` is the contract module's — the one-compare filter a call site
+/// asks before anything costlier, so an uncontracted call (a thin wrapper's, say, which
+/// also caches no arm) pays a closure read and nothing else (ADR-773).
+#[inline]
+pub(crate) fn authored_by_contracts(heap: &Heap, id: value::ClosureId) -> bool {
+    heap.closure(id).module == Some(shim_names().contract_module)
+}
+
 /// Whether `id` is a shim the dispatcher enters — the call sites that cache a callee's
 /// compiled arm leave such a closure to `dispatch` instead, as they leave a thin wrapper.
 pub(crate) fn is_entered_shim(heap: &Heap, id: value::ClosureId) -> bool {

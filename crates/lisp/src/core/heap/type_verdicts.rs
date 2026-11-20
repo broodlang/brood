@@ -573,7 +573,7 @@ impl Heap {
     /// record's id.
     fn sealed_members(&self, symbol: Symbol) -> Option<Vec<Symbol>> {
         let sealed = match self.env_get(
-            self.global(),
+            EnvId::GLOBAL,
             crate::core::value::intern(crate::core::registries::SEALED),
         ) {
             Some(Value::Map(id)) => id,
@@ -616,7 +616,7 @@ impl Heap {
             id_name == name || id_name.ends_with(&format!("/{name}"))
         } else {
             match self.env_get(
-                self.global(),
+                EnvId::GLOBAL,
                 crate::core::value::intern(crate::core::registries::RECORD_IDS),
             ) {
                 Some(Value::Map(records)) => matches!(
@@ -640,7 +640,7 @@ impl Heap {
             return has;
         }
         let has = match self.env_get(
-            self.global(),
+            EnvId::GLOBAL,
             crate::core::value::intern(crate::core::registries::IMPLS),
         ) {
             // `*impls*` is keyed by `[ability op]`; a map lookup compares the vector by value.
@@ -984,7 +984,7 @@ impl Heap {
         }
         let name = crate::core::value::symbol_name_ref(type_name);
         let records = match self.env_get(
-            self.global(),
+            EnvId::GLOBAL,
             crate::core::value::intern(crate::core::registries::RECORD_IDS),
         ) {
             Some(Value::Map(id)) => self.map_entries(id),

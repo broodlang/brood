@@ -43,8 +43,11 @@ short_calls=20000
 long_calls=120000
 
 base_sha="$(git -C "$root" rev-parse --short "$base_ref")" || die "no such ref: $base_ref"
-worktree="$root/target/contract-cost/$base_sha"
-if [ ! -d "$worktree" ]; then
+# Outside `target/`: CI caches `target/`, and a restored copy of a worktree is no worktree.
+worktree="${TMPDIR:-/tmp}/contract-cost/$base_sha"
+if ! git -C "$worktree" rev-parse --git-dir >/dev/null 2>&1; then
+  rm -rf "$worktree"
+  git -C "$root" worktree prune
   git -C "$root" worktree add --detach "$worktree" "$base_sha" >/dev/null
 fi
 [ -f "$root/config.mk" ] && cp "$root/config.mk" "$worktree/config.mk"
@@ -106,9 +109,9 @@ if [ -n "$annotate" ]; then
         "$binary" "$program" >/dev/null 2>&1 ) || true
     echo
     echo "== $side, row $annotate, $long_calls calls: inclusive"
-    callgrind_annotate --inclusive=yes "$out" 2>/dev/null | sed -n '1,70p' | cut -c1-180
+    { callgrind_annotate --inclusive=yes "$out" 2>/dev/null || true; } | sed -n '1,70p' | cut -c1-220
     echo
     echo "== $side, row $annotate: self"
-    callgrind_annotate "$out" 2>/dev/null | sed -n '1,50p' | cut -c1-180
+    { callgrind_annotate "$out" 2>/dev/null || true; } | sed -n '1,50p' | cut -c1-220
   done
 fi

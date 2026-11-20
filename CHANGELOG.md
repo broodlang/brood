@@ -10,6 +10,18 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 already in range (edits keep them so), not a fresh copy each call, so a memo keyed on it hits.
 It still clamps a position past the end.
 
+**Faster: an armed contract costs a bedit key ~0.5 ms, down from ~2.3 ms (ADR-773).** A call
+site caches a contracted function's original behind its shim, so a call whose arguments the
+kernel vouches for skips the dispatcher, and native code links to the original the same way;
+the result is still checked, with the same errors and blame. The kernel now reads the whole
+type grammar but `rec` — a `defrecord` name, a sealed ability, `tuple`, `map`, `set`,
+`seqable`, `len`, `(int lo hi)`, `and`/`not`, and a value's parts all the way down — so a
+record-typed argument no longer runs the Brood `type-matches?` walk (~90 000 instructions a
+call before). bedit's key at 213×49: ~5.6–7.0 ms → ~4.0–4.2 ms armed, ~3.4–3.8 ms unarmed.
+**Added: `BROOD_CONTRACT_WALK_TRACE=1`** names each declared type a contracted call could not
+have decided natively, and `scripts/contract-cost.sh` (Diagnose `what=contract-cost`) counts
+instructions per armed call per declared shape.
+
 **Fixed: `nest test FILE:LINE` on a test's `(test "…"` header line runs that test,** not the one
 before it. A test's recorded line is its first body form's, so its header sat above it; the
 selector now reads the file and maps a line inside a `(test …)` form to that test.

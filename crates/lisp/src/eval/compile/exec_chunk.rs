@@ -1149,6 +1149,7 @@ pub(crate) fn exec_chunk(
                     && let Some(sym) = head
                     && *site != NO_SITE
                     && let ValueRef::Fn(shim_id) = callee.unpack()
+                    && crate::builtins::contracts::authored_by_contracts(heap, shim_id)
                     && heap.is_global(cur_env)
                     && let Some(original) = heap.vm_call_ic_contracted(
                         *site,
