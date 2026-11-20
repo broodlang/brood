@@ -276,10 +276,22 @@ jobs:
   # (`--skip jit_`) matches none of them (they are named `..._under_jit`), which would be a
   # no-op that reads exactly like a working exclusion. A slow nightly job is honest; a
   # filter that silently skips nothing is the failure mode this whole section exists for.
+  #
+  # Two jobs, which between them run every test: the in-language suite (`binary(suite)`, one
+  # nextest case that is the whole suite) and everything else. On one runner the suite took
+  # 5002 s beside the rest on the 2026-11-03 image; on the 2026-11-11 image every test ran
+  # 15-25% slower, the job passed its 150 minutes, and twice the runner was lost (starved) at
+  # 85 minutes, the last green commit included (KI-405). Apart, each has a runner to itself.
   asan:
-    name: AddressSanitizer (kernel tests)
+    name: AddressSanitizer (${{ matrix.part.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: ${{ matrix.part.minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        part:
+          - { name: kernel tests, filter: "not binary(suite)", minutes: 150 }
+          - { name: in-language suite, filter: "binary(suite)", minutes: 210 }
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -303,7 +315,7 @@ jobs:
           echo "ASAN_SYMBOLIZER_PATH=$symbolizer" >> "$GITHUB_ENV"
 
       - name: make asan
-        run: make asan
+        run: make asan ASAN_FILTER='${{ matrix.part.filter }}'
 
   # ThreadSanitizer, the loom model check and the Shuttle model check. All three are fast; they
   # are here rather than in CI only because TSan needs a nightly toolchain.

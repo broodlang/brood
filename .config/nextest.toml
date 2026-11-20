@@ -432,10 +432,12 @@ slow-timeout = { period = "120s", terminate-after = 10 }
 
 [[profile.asan.overrides]]
 filter = 'binary(suite)'
-slow-timeout = { period = "120s", terminate-after = 45 }
+# 7200 s: 5002 s on a pass on the 2026-11-03 runner image, past 5400 s on the 2026-11-11 one,
+# where every test ran 15-25% slower, the last green commit's too (KI-405). It has a job of its
+# own in full.yml now, so this cap is the job's: 210 minutes covers the build and one try.
+slow-timeout = { period = "120s", terminate-after = 60 }
 # Shown on a pass too: `make asan` traces the suite (BROOD_TEST_TRACE, a line per test with its
-# time), and a green
-# run's times are the baseline a later timeout is read against.
+# time), and a green run's times are the baseline a later timeout is read against.
 success-output = "final"
 
 # `image_matches_source` loads every std module twice, so it grows with `std/`, and it took 1111 s
