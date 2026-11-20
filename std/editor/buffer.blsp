@@ -2057,9 +2057,15 @@ omitted (nil) keeps what it was (left gravity for a new marker).
 
 (defn buffer-markers (buf)
   "The marker map `{id -> pos}` (positions clamped to the current length), or `{}` if none.
+The stored map itself when every position is already in range — which edits keep true — so a
+cache keyed on it hits.
 
     (editor/buffer/buffer-markers (editor/buffer/buffer-marker-set (editor/buffer/make-buffer \"abc\") :m 2))   ;=> {:m 2}"
-  (update-vals (or (get buf :markers) {}) (fn (pos) (buffer-clamp 0 (buffer-length buf) pos))))
+  (let (markers (or (get buf :markers) {})
+        length (buffer-length buf))
+    (if (every? (vals markers) (fn (pos) (<= 0 pos length)))
+      markers
+      (update-vals markers (fn (pos) (buffer-clamp 0 length pos))))))
 
 ;; ---- annotations: derived data stamped with the text it describes -------------
 ;; A tool that computes something ABOUT a buffer — per-line test verdicts, a diff

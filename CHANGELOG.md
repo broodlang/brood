@@ -6,6 +6,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed: `editor/buffer/buffer-markers` answers the stored marker map** when every position is
+already in range (edits keep them so), not a fresh copy each call, so a memo keyed on it hits.
+It still clamps a position past the end.
+
 **Fixed: `nest test FILE:LINE` on a test's `(test "…"` header line runs that test,** not the one
 before it. A test's recorded line is its first body form's, so its header sat above it; the
 selector now reads the file and maps a line inside a `(test …)` form to that test.
