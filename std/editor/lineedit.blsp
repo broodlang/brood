@@ -78,16 +78,31 @@ submitting). `:word-syntax` is the word syntax M-f, M-b, M-d and C-w move by
 ;; ---- words ------------------------------------------------------------------
 ;; A word is what the state's `:word-syntax` says (`text/word-char?`, ADR-774) — the same
 ;; notion an editor buffer's M-f uses. nil, the default, is letters and digits only: in a
-;; line of Brood `foo-bar` is two words, as it is in Emacs's lisp modes, and a path's `/`
-;; and `.` separate its components.
+;; line of Brood `foo-bar` is two words, as it is in Emacs's lisp modes. In `:path` mode (a
+;; file prompt) a word is a whole path COMPONENT instead, everything between two `/`, so C-w
+;; takes `foo.txt` back to the folder at once, as Emacs's vertico-directory-delete-word does.
+
+(defn- lineedit-path-mode? (state) (= (get state :word-mode) :path))
 
 (defn- lineedit-word-end (state -> int)
-  "Where the next word forward from point ends (M-f, M-d)."
-  (text/forward-word (get state :text) (get state :point) (get state :word-syntax)))
+  "Where the next word forward from point ends (M-f, M-d): the next path component's end in
+`:path` mode."
+  (let (text (get state :text)
+        point (get state :point))
+    (if (lineedit-path-mode? state)
+      (let (rope (text/string-> text))
+        (text/skip-forward rope (text/skip-forward rope point "/" true) "/" false))
+      (text/forward-word text point (get state :word-syntax)))))
 
 (defn- lineedit-word-start (state -> int)
-  "Where the previous word backward from point starts (M-b, C-w)."
-  (text/backward-word (get state :text) (get state :point) (get state :word-syntax)))
+  "Where the previous word backward from point starts (M-b, C-w): the previous path
+component's start in `:path` mode."
+  (let (text (get state :text)
+        point (get state :point))
+    (if (lineedit-path-mode? state)
+      (let (rope (text/string-> text))
+        (text/skip-backward rope (text/skip-backward rope point "/" true) "/" false))
+      (text/backward-word text point (get state :word-syntax)))))
 
 ;; ---- multi-line geometry (pure) ---------------------------------------------
 ;; `:text` may hold newlines (a multi-line form). Point is a flat offset; these map
@@ -466,12 +481,14 @@ globals by default; a project can rebind it to complete its own vocabulary)."
     (get (editor/lineedit/lineedit-backward-char (editor/lineedit/lineedit-insert (editor/lineedit/lineedit-init \"\" []) \"foo bar\") nil) :point)   ;=> 6"
   (lineedit-move state (string/prev-grapheme (get state :text) (get state :point))))
 (defn lineedit-forward-word (state _)
-  "Move point to the end of the next word (M-f), under the state's `:word-syntax`.
+  "Move point to the end of the next word (M-f), under the state's `:word-syntax`; by path
+component in `:path` mode.
 
     (get (editor/lineedit/lineedit-forward-word (editor/lineedit/lineedit-beginning-of-line (editor/lineedit/lineedit-insert (editor/lineedit/lineedit-init \"\" []) \"foo bar\") nil) nil) :point)   ;=> 3"
   (lineedit-move state (lineedit-word-end state)))
 (defn lineedit-backward-word (state _)
-  "Move point to the start of the previous word (M-b), under the state's `:word-syntax`.
+  "Move point to the start of the previous word (M-b), under the state's `:word-syntax`;
+by path component in `:path` mode.
 
     (get (editor/lineedit/lineedit-backward-word (editor/lineedit/lineedit-insert (editor/lineedit/lineedit-init \"\" []) \"foo bar\") nil) :point)   ;=> 4"
   (lineedit-move state (lineedit-word-start state)))
@@ -491,10 +508,7 @@ vertico-directory has it: a directory is one step back, and `~` alone names noth
     (get (editor/lineedit/lineedit-delete-backward (assoc (editor/lineedit/lineedit-insert (editor/lineedit/lineedit-init \"\" []) \"~/\") :word-mode :path) nil) :text)   ;=> \"\""
   (let (text (get state :text)
         p (get state :point))
-    (if (and (= (get state :word-mode) :path)
-          (> p 0)
-          (= p (count text))
-          (string/ends-with? text "/"))
+    (if (and (lineedit-path-mode? state) (> p 0) (= p (count text)) (string/ends-with? text "/"))
       (let (start (lineedit-component-start text p))
         (assoc state :text (string/substring text 0 start) :point start :hist-idx -1))
       (lineedit-del-back state))))

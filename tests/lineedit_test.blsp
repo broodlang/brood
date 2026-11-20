@@ -373,16 +373,20 @@
 
 ; jumps the whole path
 (describe "lineedit word motion (M-b/M-f under the word syntax, ADR-774)"
-  ;; "/home/wilhelm/src" — 17 chars; `/` is not a word character, so a path moves by folder.
-  (def path "/home/wilhelm/src")
-  ; start of "src"
-  (test "M-b moves back one path component"
-    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :text path :point 17))
+  ;; "/home/wilhelm/src.d" — 19 chars. In :path mode a word is a whole component.
+  (def path "/home/wilhelm/src.d")
+  (test "in :path mode M-b moves back one whole path component"
+    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :word-mode :path :text path :point 19))
       (assert= (get (lineedit-backward-word st nil) :point) 14)))
-  ; end of "/home"
-  (test "M-f moves forward one path component"
-    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :text path :point 0))
+  (test "in :path mode M-f moves forward one path component"
+    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :word-mode :path :text path :point 0))
       (assert= (get (lineedit-forward-word st nil) :point) 5)))
+  (test "in :path mode C-w kills a file name with its dot back to the folder"
+    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :word-mode :path :text path :point 19))
+      (assert= (get (lineedit-kill-word-backward st nil) :text) "/home/wilhelm/")))
+  (test "by default `.` separates words, so M-b stops inside a file name"
+    (let (st (assoc (editor/lineedit/lineedit-init "" '()) :text path :point 19))
+      (assert= (get (lineedit-backward-word st nil) :point) 18)))
   (test "by default a hyphenated name is two words, as in Emacs's lisp modes"
     (let (st (assoc (editor/lineedit/lineedit-init "" '()) :text "(foo-bar 1)" :point 0))
       (assert= (get (lineedit-forward-word st nil) :point) 4)

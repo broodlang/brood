@@ -13,7 +13,7 @@ them declares it: `(forward-word buf {:word-chars "'"})`. Both take the syntax a
 argument (nil adds nothing). New: `text/word-char?`, `text/forward-word`, `text/backward-word`,
 `text/word-bounds` over a rope or a string, on the native `%skip-word`. The REPL's line editor
 moves by the same notion (`lineedit-init`'s `:word-syntax` option), so `foo-bar` is two words
-there too and a path moves by component in every mode.
+there too; `:word-mode :path` still moves and kills by whole path component.
 
 **Changed: `editor/buffer/buffer-markers` answers the stored marker map** when every position is
 already in range (edits keep them so), not a fresh copy each call, so a memo keyed on it hits.
