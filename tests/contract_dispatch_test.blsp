@@ -134,3 +134,88 @@
     (let (error (try (dispatch-narrow 1) (catch error error)))
       (assert= :callee (get error :blame))
       (is (string/ends-with? (->string (get error :function)) "dispatch-narrow")))))
+
+;; The call site caches the shim's original (ADR-773): a call IC holds the ORIGINAL's arm
+;; behind the shim, so a vouched call skips `dispatch`, and native code links to the original
+;; the same way. What the cache must never do is outlive what it was filled under: an
+;; argument it cannot vouch for still runs the shim, and a result still gets its check.
+(defn dispatch-site-double (x) (* 2 x))
+(sig! dispatch-site-double (int -> int))
+
+(check-allow :type-mismatch
+  (defn dispatch-site-maybe-lie (x) (if (< x 0) "negative" x)))
+(sig! dispatch-site-maybe-lie (int -> int))
+
+(defn dispatch-site-loop (n acc)
+  (if (= n 0) acc (dispatch-site-loop (- n 1) (+ acc (dispatch-site-double n)))))
+
+;; called with a string below, on purpose
+(check-allow :type-mismatch
+  (defn dispatch-site-call (x) (dispatch-site-double x)))
+(defn dispatch-site-lie-call (x) (dispatch-site-maybe-lie x))
+
+(defn dispatch-site-lie-loop (n acc)
+  ;; non-tail, so a native caller makes the call and checks the value it returns
+  (if (= n 0) acc (dispatch-site-lie-loop (- n 1) (+ acc (dispatch-site-maybe-lie (- 1000 n))))))
+
+(describe "a call site that caches a contracted callee"
+  (test "a hot loop's calls are entered and answer as the function does"
+    (let ([n value] (entered-by (fn () (dispatch-site-loop 5000 0))))
+      (assert= 25005000 value)
+      (is (entered? n 5000))))
+  (test "a bad argument at a warm site still runs the shim, which blames the caller"
+    (doseq (_ (range 200)) (dispatch-site-call 1))
+    (let (error (check-allow :type-mismatch (try (dispatch-site-call "x") (catch error error))))
+      (assert= :caller (get error :blame))
+      (assert= 1 (get error :argument))))
+  (test "a bad result at a warm site is still checked, and blames the callee"
+    (doseq (_ (range 200)) (dispatch-site-lie-call 1))
+    (let (error (try (dispatch-site-lie-call -1) (catch error error)))
+      (assert= :callee (get error :blame))
+      (is (string/ends-with? (->string (get error :function)) "dispatch-site-maybe-lie"))))
+  (test "a native caller's linked call still checks the result it gets back"
+    (assert= 499500 (dispatch-site-lie-loop 1000 0))
+    (let (error (try (dispatch-site-lie-loop 1001 0) (catch error error)))
+      (assert= :callee (get error :blame)))))
+
+;; A `defrecord` name, a record shape over a record instance, and the compound forms an
+;; editor declares are decided by the kernel (ADR-773), so a call over them is entered —
+;; and a value that does not inhabit them still runs the shim, which blames.
+(defrecord dispatch-buffer (name lines))
+(defrecord dispatch-other (name))
+(defn dispatch-buffer-name (buffer) (:name buffer))
+(sig! dispatch-buffer-name (dispatch-buffer -> any))
+(defn dispatch-tuple-sum (pair) (+ (first pair) (second pair)))
+(sig! dispatch-tuple-sum ((tuple int int) -> int))
+(defn dispatch-map-size (table) (count table))
+(sig! dispatch-map-size ((map keyword int) -> int))
+(defn dispatch-rows (n) (map (range n) (fn (i) [i (str i)])))
+(sig! dispatch-rows (int -> (list (tuple int string))))
+
+(describe "record names and compound forms are decided without the walk"
+  (test "a defrecord-typed argument is entered"
+    (let ([n value] (entered-by (fn () (dispatch-buffer-name (dispatch-buffer "a" [])))))
+      (is (entered? n 1))
+      (assert= "a" value)))
+  (test "another record, or a map, under a record name is the caller's error"
+    (assert= :caller
+      (get (check-allow :type-mismatch
+             (try (dispatch-buffer-name (dispatch-other "a")) (catch error error)))
+        :blame))
+    (assert= :caller
+      (get (check-allow :type-mismatch (try (dispatch-buffer-name {:name "a"}) (catch error error)))
+        :blame)))
+  (test "a tuple, a map and a fresh list of tuples are entered and checked"
+    (let ([n value] (entered-by (fn () (dispatch-tuple-sum [1 2]))))
+      (is (entered? n 1))
+      (assert= 3 value))
+    (let ([n value] (entered-by (fn () (dispatch-map-size {:a 1 :b 2}))))
+      (is (entered? n 1))
+      (assert= 2 value))
+    (assert= [0 "0"] (first (dispatch-rows 3)))
+    (assert= :caller
+      (get (check-allow :type-mismatch (try (dispatch-tuple-sum [1 "2"]) (catch error error)))
+        :blame))
+    (assert= :caller
+      (get (check-allow :type-mismatch (try (dispatch-map-size {:a "1"}) (catch error error)))
+        :blame))))

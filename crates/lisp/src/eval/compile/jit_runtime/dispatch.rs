@@ -119,6 +119,9 @@ pub(crate) fn jit_dispatch_call(
     // The callee's arm when the resolve below found one it could not link (not native yet,
     // an optional or rest parameter, over the cap): the slow path runs it as it is.
     let mut vm_arm: Option<(Arc<ArmHandle>, EnvId)> = None;
+    // The contract shim whose result the call still owes a check, once the resolve below
+    // entered one (ADR-773).
+    let mut contract: Option<Value> = None;
     // ---- Native-to-native call linking ----
     // Link straight to the callee's installed, epoch-current native code — set up its frame
     // at `stage_base` and call its entry — skipping `dispatch → vm_apply → vm_run_bc →
@@ -158,6 +161,21 @@ pub(crate) fn jit_dispatch_call(
         // gains nothing from running the shim's own Brood frame.
         let cache_closure_arm = |heap: &mut Heap, id| {
             if crate::builtins::contracts::is_entered_shim(heap, id) {
+                // Cache the original's arm behind the shim (ADR-773): the next call reads
+                // it back through `contracted_arm` below, vouching first. This one runs
+                // through `dispatch`.
+                if let Some(original) =
+                    crate::builtins::contracts::shim_call_site_arm(heap, Value::func(id), argc)
+                {
+                    heap.vm_call_ic_install_contracted(
+                        site,
+                        head,
+                        argc as u32,
+                        epoch,
+                        Value::func(id),
+                        original,
+                    );
+                }
                 return None;
             }
             compiled_arm_for(heap, id, argc).map(|a| {
@@ -173,6 +191,29 @@ pub(crate) fn jit_dispatch_call(
                 );
                 (a, env, cb)
             })
+        };
+        // A contract shim whose original's arm the call IC holds, and whose arguments the
+        // kernel vouches for (ADR-748's entry, made here without `dispatch`, ADR-773): the
+        // original is linked or run in the shim's place, and `contract` holds the shim when
+        // its declared result is still owed a check — made on the value the call returns,
+        // as `dispatch` makes it for a call run to completion (`finish_checked`). A call
+        // the kernel cannot vouch for takes the slow path, where `dispatch` runs the shim.
+        let contracted_arm = |heap: &Heap, shim: Value, contract: &mut Option<Value>| {
+            let ValueRef::Fn(shim_id) = shim.unpack() else {
+                return None;
+            };
+            let original = heap.vm_call_ic_contracted(site, head, argc as u32, epoch, shim)?;
+            match crate::builtins::contracts::enter_shim(
+                heap,
+                shim_id,
+                heap.roots_slice(stage_base, stage_base + argc),
+            )? {
+                crate::builtins::contracts::ShimEntry::Forward { check_result, .. } => {
+                    *contract = check_result.then_some(shim);
+                    Some(original)
+                }
+                crate::builtins::contracts::ShimEntry::Run => None,
+            }
         };
         let resolved: Option<(Arc<ArmHandle>, EnvId, (u32, u32))> = if elided {
             match heap.vm_call_ic_probe(site, head, argc as u32, epoch) {
@@ -202,6 +243,19 @@ pub(crate) fn jit_dispatch_call(
                     // entry kept hitting, so the miss branch that fills the arm never ran
                     // (`(defn add (a x) (+ a x))` from a native loop, ~2 100 instructions a
                     // call against ~30 once linked and inlined).
+                    ValueRef::Fn(id) if crate::builtins::contracts::is_entered_shim(heap, id) => {
+                        match contracted_arm(heap, v, &mut contract) {
+                            Some(original) => Some(original),
+                            // Not vouched for (the shim runs), or not yet cached: fill it.
+                            None if heap
+                                .vm_call_ic_contracted(site, head, argc as u32, epoch, v)
+                                .is_some() =>
+                            {
+                                None
+                            }
+                            None => cache_closure_arm(heap, id),
+                        }
+                    }
                     ValueRef::Fn(id) => cache_closure_arm(heap, id),
                     _ => None,
                 },
@@ -281,6 +335,10 @@ pub(crate) fn jit_dispatch_call(
                 // Tier work only an entry does goes the slow way below, through the driver.
                 && !needs_tier_entry(&arm, code)
             {
+                // A preempt that unwinds rebuilds the callee as a bytecode frame, which would
+                // return past the result check a contract still owes (ADR-773): such a call
+                // preempts as a nested one does.
+                let unwind = unwind && contract.is_none();
                 // Build the callee frame at `stage_base`. For an elided head the args are
                 // already in place (`[stage_base, stage_base+argc)`); for a computed head the
                 // dead callee slot sits below them, so shift the args down one (forward-safe:
@@ -320,7 +378,7 @@ pub(crate) fn jit_dispatch_call(
                 if exit.outcome == outcome::DONE {
                     crate::perf_bump!(jit_link_done);
                     heap.truncate_roots(stage_base);
-                    return Some(ret);
+                    return checked_result(heap, contract, ret);
                 }
                 let frame = NestedFrame {
                     stage_base,
@@ -334,7 +392,7 @@ pub(crate) fn jit_dispatch_call(
                 return match finish_nested(heap, exit.outcome, ret, &frame, false, |_| {
                     Some((arm, env, true))
                 }) {
-                    Nested::Done(v) => Some(v),
+                    Nested::Done(v) => checked_result(heap, contract, v),
                     Nested::Raised | Nested::Unresolved => None,
                 };
             }
@@ -409,7 +467,10 @@ pub(crate) fn jit_dispatch_call(
         _ => None,
     });
     let result = match direct_arm {
-        Some((arm, cenv)) => vm_apply(heap, arm, &argv, cenv),
+        Some((arm, cenv)) => vm_apply(heap, arm, &argv, cenv).and_then(|value| match contract {
+            Some(shim) => crate::builtins::contracts::finish_checked(heap, shim, value),
+            None => Ok(value),
+        }),
         None => {
             let callee = callee.expect("resolved whenever no arm was ready");
             match dispatch(heap, callee, argv, false, env) {
@@ -567,4 +628,22 @@ pub(crate) fn jit_dispatch_tail(
         },
         Step::Done(v) => ChunkExit::Done(v),
     })
+}
+
+/// A linked call's value with the contract's result check applied, when one is owed
+/// (ADR-773): `value` itself, the value `%contract-check-ret` answers, or `None` with its
+/// blamed error parked for the native caller — what `dispatch` does for a call it runs to
+/// completion (`contracts::finish_checked`).
+#[cfg(feature = "jit")]
+fn checked_result(heap: &mut Heap, contract: Option<Value>, value: Value) -> Option<Value> {
+    let Some(shim) = contract else {
+        return Some(value);
+    };
+    match crate::builtins::contracts::finish_checked(heap, shim, value) {
+        Ok(checked) => Some(checked),
+        Err(error) => {
+            heap.jit_pending_error = Some(error);
+            None
+        }
+    }
 }

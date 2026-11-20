@@ -130,7 +130,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![any, any], bool_ty.union(nil_ty)),
         &["type", "value"],
-        "Whether `value` inhabits `type` when the kernel can say without the Brood walk — by the value's tag (a base name, a literal), by the type's form (`?A`, an arrow, an `or` of decided parts), one level into a record or vector over decided parts, or by a verdict remembered under the IDENTITY of both (an unchanged sub-value of an immutable value is the same object) — else nil. Backs `type-matches?` and every contract shim (ADR-480).",
+        "Whether `value` inhabits `type` when the kernel can say without the Brood walk — by the value's tag (a base name, a literal), by the type's form read natively — an alias, a `defrecord` name, a sealed ability, and every compound form but `rec`, descending into the value (ADR-773) — or by a verdict remembered under the IDENTITY of both (an unchanged sub-value of an immutable value is the same object) — else nil. Backs `type-matches?` and every contract shim (ADR-480).",
         type_verdict_prim,
     );
     primitives.def(
@@ -935,6 +935,42 @@ pub(crate) fn enter_shim(
         original: parts.original,
         check_result: !matches!(parts.ret, Value::Sym(symbol) if symbol == any),
     })
+}
+
+/// The arm a call site may cache for the shim `shim` called with `argc` arguments — its
+/// ORIGINAL's, with the env the original closed over (ADR-773) — so a vouched call goes
+/// straight to it without `dispatch` looking it up per call. `None` where the dispatcher's
+/// own path differs from "call the original's arm": a shim it does not enter, an arity the
+/// template refuses (its arity error is the shim's), an original that is a thin wrapper
+/// (the dispatcher redirects it, ADR-069) or itself a shim, or one with no compiled arm for
+/// `argc`. A shim's captured frame never changes, so nothing here can go stale but the
+/// binding, which the entry's epoch already guards.
+pub(crate) fn shim_call_site_arm(
+    heap: &Heap,
+    shim: Value,
+    argc: usize,
+) -> Option<(std::sync::Arc<crate::eval::compile::ArmHandle>, EnvId)> {
+    let ValueRef::Fn(id) = shim.unpack() else {
+        return None;
+    };
+    let parts = shim_parts(heap, id)?;
+    let accepts = heap
+        .closure(id)
+        .arms
+        .iter()
+        .any(|arm| arm.min_arity() <= argc && arm.max_arity().is_none_or(|max| argc <= max));
+    let ValueRef::Fn(original) = parts.original.unpack() else {
+        return None;
+    };
+    if !accepts
+        || crate::eval::passthrough_arm(heap, original, argc).is_some()
+        || is_entered_shim(heap, original)
+    {
+        return None;
+    }
+    let arm = crate::eval::compile::compiled_arm_for(heap, original, argc)?;
+    let env = heap.closure(original).env.unwrap_or_else(|| heap.global());
+    Some((arm, env))
 }
 
 /// The declared result type of the shim `shim`, if it is one.
