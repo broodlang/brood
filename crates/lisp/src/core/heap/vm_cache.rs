@@ -1037,6 +1037,34 @@ impl Heap {
         }
     }
 
+    /// [`Self::vm_call_ic_probe`], with a third part: the ORIGINAL's arm when the entry is a
+    /// contract shim's (ADR-773) — in the same borrow, so the bytecode call site learns it
+    /// at no cost beyond the probe it already makes. The second part stays `None` for a shim.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn vm_call_ic_probe_shim(
+        &self,
+        site: u32,
+        sym: Symbol,
+        argc: u32,
+        epoch: u64,
+    ) -> Option<(
+        Value,
+        Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))>,
+        Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))>,
+    )> {
+        let t = self.vm_call_ics.borrow();
+        let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
+        if !e.matches(sym, argc, epoch) {
+            return None;
+        }
+        Some((
+            e.callee(),
+            e.arm().map(|(arm, env)| (arm.clone(), env, e.callee_bases)),
+            e.contracted_arm()
+                .map(|(arm, env)| (arm.clone(), env, e.callee_bases)),
+        ))
+    }
+
     /// The ORIGINAL's arm a current entry at `site` caches for the contract shim `shim`
     /// (ADR-773) — `None` for any other entry, or one cached for another callee. The caller
     /// still owes the vouching: the arm may run only once the shim's arguments are vouched

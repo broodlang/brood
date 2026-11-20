@@ -175,6 +175,8 @@ pub(crate) fn jit_dispatch_call(
                         Value::func(id),
                         original,
                     );
+                } else {
+                    heap.vm_call_ic_install(site, head, argc as u32, epoch, Value::func(id), None);
                 }
                 return None;
             }
@@ -243,18 +245,14 @@ pub(crate) fn jit_dispatch_call(
                     // entry kept hitting, so the miss branch that fills the arm never ran
                     // (`(defn add (a x) (+ a x))` from a native loop, ~2 100 instructions a
                     // call against ~30 once linked and inlined).
-                    ValueRef::Fn(id) if crate::builtins::contracts::is_entered_shim(heap, id) => {
-                        match contracted_arm(heap, v, &mut contract) {
-                            Some(original) => Some(original),
-                            // Not vouched for (the shim runs), or not yet cached: fill it.
-                            None if heap
-                                .vm_call_ic_contracted(site, head, argc as u32, epoch, v)
-                                .is_some() =>
-                            {
-                                None
-                            }
-                            None => cache_closure_arm(heap, id),
-                        }
+                    // A shim: its original's arm when the entry holds one and the arguments
+                    // are vouched for; otherwise the slow path, where `dispatch` enters or
+                    // runs the shim. An arm-less entry for a shim is one the resolve could not
+                    // cache an original for (a thin wrapper's, say), so it is not asked again.
+                    ValueRef::Fn(id)
+                        if crate::builtins::contracts::authored_by_contracts(heap, id) =>
+                    {
+                        contracted_arm(heap, v, &mut contract)
                     }
                     ValueRef::Fn(id) => cache_closure_arm(heap, id),
                     _ => None,
