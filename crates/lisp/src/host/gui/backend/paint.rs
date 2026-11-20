@@ -798,7 +798,7 @@ pub(super) fn render_ops<P: Painter>(
             // pointer-move in the window event handler (ADR-080).
             Op::CursorZone { .. } => {}
             // A sound is played by the window, not painted.
-            Op::Sound { .. } | Op::Music { .. } => {}
+            Op::Sound { .. } | Op::Music { .. } | Op::Ambience { .. } => {}
             // The frame's effects are passes `raster_frame` runs around these ops.
             Op::Ambient { .. }
             | Op::Light { .. }

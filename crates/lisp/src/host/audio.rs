@@ -54,14 +54,37 @@ impl SoundData {
     }
 }
 
-/// Play `sound` once at peak amplitude `vol` (0..1). Fire-and-forget like `beep`;
-/// overlapping plays mix. No-op without `--features audio`.
+/// Play `sound` once at peak amplitude `vol` (0..1), placed by `pan` from the left
+/// speaker (-1) to the right (1) — 0 plays it as it was uploaded. Fire-and-forget like
+/// `beep`; overlapping plays mix. No-op without `--features audio`.
 #[cfg(not(feature = "audio"))]
-pub fn play(_sound: &SoundData, _vol: f32) {}
+pub fn play(_sound: &SoundData, _vol: f32, _pan: f32) {}
 
 #[cfg(feature = "audio")]
-pub fn play(sound: &SoundData, vol: f32) {
-    backend::play(sound, vol);
+pub fn play(sound: &SoundData, vol: f32, pan: f32) {
+    backend::play(sound, vol, pan);
+}
+
+/// Start the audio thread and open the output device now, rather than on the first
+/// sound — opening a device takes tens of milliseconds, which the first sound of a game
+/// would otherwise start late by. A window calls it when a sound is uploaded for it.
+/// No-op when muted, already started, or without `--features audio`.
+pub fn warm() {
+    #[cfg(feature = "audio")]
+    backend::warm();
+}
+
+/// The gains `[left right]` a sound at peak amplitude `vol` placed at `pan` plays with:
+/// a balance — the centre plays both channels at `vol`, and moving towards one side
+/// fades the other out, so a sound never plays louder than `vol` anywhere. A
+/// non-finite `pan` is the centre; past ±1 it is held at the side.
+pub fn pan_gains(vol: f32, pan: f32) -> [f32; 2] {
+    let pan = if pan.is_finite() {
+        pan.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    [vol * (1.0 - pan).min(1.0), vol * (1.0 + pan).min(1.0)]
 }
 
 /// A playing track — what a `[:music …]` op keeps going. It loops until this handle is
@@ -141,9 +164,95 @@ mod backend {
     const VOLUME: f32 = 0.18;
 
     enum Cmd {
-        Beep { freq: f32, ms: u64, vol: f32 },
-        Play { sound: super::SoundData, vol: f32 },
+        Beep {
+            freq: f32,
+            ms: u64,
+            vol: f32,
+        },
+        Play(OneShotSource),
         Loop(LoopSource),
+        /// Nothing to play: the thread is started, and the device opened, ahead of the
+        /// first sound (`warm`).
+        Warm,
+    }
+
+    /// A sound played once, straight from its shared samples (no copy per play), each
+    /// channel scaled by its gain. A panned mono sound plays as stereo — its one channel
+    /// on both, at the two gains; an unpanned one keeps its own channel count.
+    pub struct OneShotSource {
+        samples: Arc<[f32]>,
+        position: usize,
+        /// The channels of the sound's samples (1 or 2).
+        source_channels: usize,
+        /// The channels this source hands the mixer: 2 for a panned mono sound.
+        channels: std::num::NonZeroU16,
+        rate: std::num::NonZeroU32,
+        gains: [f32; 2],
+        /// Which output channel of the current frame comes next.
+        channel: usize,
+    }
+
+    impl OneShotSource {
+        /// `sound` at peak amplitude `vol` placed at `pan` (`pan_gains`); `None` when it
+        /// has no samples, rate or channels to play.
+        pub fn new(sound: &super::SoundData, vol: f32, pan: f32) -> Option<OneShotSource> {
+            let rate = std::num::NonZeroU32::new(sound.rate)?;
+            let source_channels = sound.channels as usize;
+            if sound.samples.is_empty() || !(1..=2).contains(&source_channels) {
+                return None;
+            }
+            let panned = pan.is_finite() && pan != 0.0;
+            let output_channels = if panned { 2 } else { source_channels as u16 };
+            Some(OneShotSource {
+                samples: sound.samples.clone(),
+                position: 0,
+                source_channels,
+                channels: std::num::NonZeroU16::new(output_channels)?,
+                rate,
+                gains: if panned {
+                    super::pan_gains(vol, pan)
+                } else {
+                    [vol, vol]
+                },
+                channel: 0,
+            })
+        }
+    }
+
+    impl Iterator for OneShotSource {
+        type Item = f32;
+
+        fn next(&mut self) -> Option<f32> {
+            let output_channels = self.channels.get() as usize;
+            // The sample of this output channel: a mono sound's one sample serves both.
+            let index = self.position + self.channel.min(self.source_channels - 1);
+            let sample = *self.samples.get(index)?;
+            let gain = self.gains[self.channel.min(1)];
+            self.channel += 1;
+            if self.channel == output_channels {
+                self.channel = 0;
+                self.position += self.source_channels;
+            }
+            Some(sample * gain)
+        }
+    }
+
+    impl Source for OneShotSource {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+
+        fn channels(&self) -> std::num::NonZeroU16 {
+            self.channels
+        }
+
+        fn sample_rate(&self) -> std::num::NonZeroU32 {
+            self.rate
+        }
+
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
     }
 
     /// How long a track takes to fade to a new volume, or out when it stops.
@@ -293,6 +402,33 @@ mod backend {
     /// limit), and caching that refusal would mute the process for good. The next sound
     /// tries again, as the timer and the network reactor do. `STARTING` keeps two first
     /// callers from starting two threads.
+    /// How much audio the device buffers, in milliseconds: what a sound waits behind
+    /// before it is heard. rodio asks for 50 ms by default, three frames of a 60 Hz game
+    /// late; 20 ms is still far from an underrun on a desktop's mixer thread.
+    const BUFFER_MS: u32 = 20;
+
+    /// The default output device, opened with a `BUFFER_MS` buffer — or, should the
+    /// device refuse that, however rodio opens it by default (its own buffer, another
+    /// configuration, another device).
+    fn open_sink() -> Result<rodio::MixerDeviceSink, rodio::DeviceSinkError> {
+        use rodio::cpal::traits::{DeviceTrait, HostTrait};
+        let low_latency = rodio::cpal::default_host()
+            .default_output_device()
+            .and_then(|device| {
+                let rate = device.default_output_config().ok()?.sample_rate();
+                let frames = (rate * BUFFER_MS / 1000).next_power_of_two();
+                DeviceSinkBuilder::from_device(device)
+                    .ok()?
+                    .with_buffer_size(rodio::cpal::BufferSize::Fixed(frames))
+                    .open_stream()
+                    .ok()
+            });
+        match low_latency {
+            Some(sink) => Ok(sink),
+            None => DeviceSinkBuilder::open_default_sink(),
+        }
+    }
+
     fn sender() -> Option<&'static Sender<Cmd>> {
         static SENDER: OnceLock<Sender<Cmd>> = OnceLock::new();
         static STARTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -311,7 +447,7 @@ mod backend {
             .name("brood-audio".into())
             .spawn(move || {
                 // Own the device for the thread's life (the sink must stay alive).
-                let stream = match DeviceSinkBuilder::open_default_sink() {
+                let stream = match open_sink() {
                     Ok(s) => s,
                     Err(_) => return,
                 };
@@ -325,22 +461,9 @@ mod backend {
                                 .amplify(vol);
                             mixer.add(tone);
                         }
-                        Cmd::Play { sound, vol } => {
-                            let (Some(channels), Some(rate)) = (
-                                std::num::NonZeroU16::new(sound.channels),
-                                std::num::NonZeroU32::new(sound.rate),
-                            ) else {
-                                continue;
-                            };
-                            let buffer = rodio::buffer::SamplesBuffer::new(
-                                channels,
-                                rate,
-                                sound.samples.to_vec(),
-                            )
-                            .amplify(vol);
-                            mixer.add(buffer);
-                        }
+                        Cmd::Play(source) => mixer.add(source),
                         Cmd::Loop(source) => mixer.add(source),
+                        Cmd::Warm => {}
                     }
                 }
             });
@@ -373,27 +496,23 @@ mod backend {
         }
     }
 
-    /// A decoded sound to the mixer, once. The samples are shared, so this is a
-    /// reference count, not a copy, per play; a non-finite or non-positive `vol` takes
-    /// the default; an empty sound is nothing to play.
-    pub fn play(sound: &super::SoundData, vol: f32) {
-        let vol = if vol.is_finite() && vol > 0.0 {
-            vol.min(1.0)
-        } else {
-            VOLUME
-        };
-        if sound.samples.is_empty() {
+    /// A decoded sound to the mixer, once, at `vol` placed at `pan`. The samples are
+    /// shared, so this is a reference count, not a copy, per play; a non-finite or
+    /// non-positive `vol` takes the default; an empty sound is nothing to play.
+    pub fn play(sound: &super::SoundData, vol: f32, pan: f32) {
+        let vol = clamp_volume(vol);
+        let Some(source) = OneShotSource::new(sound, vol, pan) else {
             return;
-        }
+        };
         if let Some(tx) = sender() {
-            let _ = tx.send(Cmd::Play {
-                sound: super::SoundData {
-                    rate: sound.rate,
-                    channels: sound.channels,
-                    samples: sound.samples.clone(),
-                },
-                vol,
-            });
+            let _ = tx.send(Cmd::Play(source));
+        }
+    }
+
+    /// Start the audio thread (it opens the device) without playing anything.
+    pub fn warm() {
+        if let Some(tx) = sender() {
+            let _ = tx.send(Cmd::Warm);
         }
     }
 
@@ -429,6 +548,47 @@ mod backend {
             assert!(tail.windows(2).all(|w| w[1] <= w[0]), "a fade, not a cut");
         }
 
+        fn ramp(channels: u16, len: usize) -> super::super::SoundData {
+            super::super::SoundData {
+                rate: 1000,
+                channels,
+                samples: (1..=len)
+                    .map(|index| index as f32)
+                    .collect::<Vec<_>>()
+                    .into(),
+            }
+        }
+
+        #[test]
+        fn an_unpanned_one_shot_plays_its_samples_once_at_its_volume() {
+            let source = OneShotSource::new(&ramp(1, 3), 0.5, 0.0).unwrap();
+            assert_eq!(
+                source.channels().get(),
+                1,
+                "a centred mono sound stays mono"
+            );
+            assert_eq!(source.collect::<Vec<_>>(), vec![0.5, 1.0, 1.5]);
+            let stereo = OneShotSource::new(&ramp(2, 4), 1.0, 0.0).unwrap();
+            assert_eq!(stereo.channels().get(), 2);
+            assert_eq!(stereo.collect::<Vec<_>>(), vec![1.0, 2.0, 3.0, 4.0]);
+        }
+
+        #[test]
+        fn a_panned_mono_one_shot_plays_as_stereo_with_the_far_side_faded() {
+            let source = OneShotSource::new(&ramp(1, 2), 1.0, 0.5).unwrap();
+            assert_eq!(source.channels().get(), 2, "panned, a mono sound is stereo");
+            // right of centre: the right channel at full, the left at half
+            assert_eq!(source.collect::<Vec<_>>(), vec![0.5, 1.0, 1.0, 2.0]);
+            let hard_left = OneShotSource::new(&ramp(2, 2), 1.0, -1.0).unwrap();
+            assert_eq!(hard_left.collect::<Vec<_>>(), vec![1.0, 0.0]);
+        }
+
+        #[test]
+        fn nothing_to_play_is_no_source() {
+            assert!(OneShotSource::new(&ramp(1, 0), 1.0, 0.0).is_none());
+            assert!(OneShotSource::new(&constant(0, 1, 4), 1.0, 0.0).is_none());
+        }
+
         #[test]
         fn a_stereo_track_ends_on_a_frame_boundary() {
             let (control, source) = looping(&constant(1000, 2, 4), 1.0);
@@ -442,5 +602,19 @@ mod backend {
                 "{played} samples is a whole number of frames"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pan_tests {
+    use super::pan_gains;
+
+    #[test]
+    fn the_centre_plays_both_sides_and_a_side_fades_the_other_out() {
+        assert_eq!(pan_gains(0.8, 0.0), [0.8, 0.8]);
+        assert_eq!(pan_gains(1.0, 0.25), [0.75, 1.0]);
+        assert_eq!(pan_gains(1.0, -1.0), [1.0, 0.0]);
+        assert_eq!(pan_gains(1.0, 7.0), [0.0, 1.0], "past a side is held there");
+        assert_eq!(pan_gains(0.5, f32::NAN), [0.5, 0.5], "no pan is the centre");
     }
 }

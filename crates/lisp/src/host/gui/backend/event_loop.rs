@@ -128,6 +128,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             UserEvent::Sound { id, snd, data } => {
                 if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
                     win.sounds.insert(snd, data);
+                    // A window with sounds will play one: open the device now, so the
+                    // first is not late by the opening.
+                    crate::host::audio::warm();
                 }
             }
             UserEvent::SoundFree { id, snd } => {
@@ -165,15 +168,13 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     w.drawn = true;
                     // Sounds are ops of the frame: each `[:sound …]` plays once, here, as
                     // the frame arrives — not on repaints, and (by the equality above) not
-                    // for a frame that repeats the last one verbatim.
-                    for op in &ops {
-                        if let Op::Sound { id: snd, vol } = op
-                            && let Some(data) = w.sounds.get(snd)
-                        {
-                            crate::host::audio::play(data, *vol);
-                        }
+                    // for a frame that repeats the last one verbatim. A keyed sound the
+                    // last frame carried too is still playing (ADR-777).
+                    for (snd, vol, pan) in sounds_to_play(&w.sounds, &w.frame, &ops) {
+                        crate::host::audio::play(&w.sounds[&snd], vol, pan);
                     }
                     reconcile_music(w, &ops);
+                    reconcile_ambience(w, &ops);
                     w.renderer.emitters.frame_arrived(&ops);
                     // The rows this frame lays out (ADR-610): its seam, and whether row 0 is
                     // a band. A change of band moves the top margin, so the grid holds

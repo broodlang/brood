@@ -162,6 +162,7 @@ pub(super) fn build_window(
         pixel_input: spec.pixel_input,
         sounds: HashMap::new(),
         music: None,
+        ambience: HashMap::new(),
         frame: Vec::new(),
         bleed: bleed::Bleed::default(),
         mods: ModifiersState::empty(),

@@ -651,6 +651,7 @@ struct GuiOpTags {
     text_px_t: value::Symbol,
     sound_t: value::Symbol,
     music_t: value::Symbol,
+    ambience_t: value::Symbol,
     ambient_t: value::Symbol,
     light_t: value::Symbol,
     overlay_t: value::Symbol,
@@ -686,6 +687,7 @@ impl GuiOpTags {
             text_px_t: value::intern("text-px"),
             sound_t: value::intern("sound"),
             music_t: value::intern("music"),
+            ambience_t: value::intern("ambience"),
             ambient_t: value::intern("ambient"),
             light_t: value::intern("light"),
             overlay_t: value::intern("overlay"),
@@ -1158,8 +1160,34 @@ fn parse_gui_ops(
                 align,
             });
         } else if tag == tags.sound_t {
-            // `[:sound id]` / `[:sound id vol]` — a handle that is not a non-negative int
-            // is not a sound; an absent or non-number volume is the default (0).
+            // `[:sound id]` / `[:sound id vol]` / `[:sound id vol pan]` /
+            // `[:sound id vol pan key]` — a handle that is not a non-negative int is not a
+            // sound; an absent or non-number volume is the default (0), an absent pan the
+            // centre, and a key that is not an int no key (the sound plays every frame
+            // that carries it, as before keys).
+            let Value::Int(snd) = arg(&parts, 1) else {
+                continue;
+            };
+            let Ok(id) = u32::try_from(snd) else {
+                continue;
+            };
+            let number_at = |index: usize| match parts.get(index).copied() {
+                Some(v @ (Value::Int(_) | Value::Float(_))) => num(v),
+                _ => 0.0,
+            };
+            let key = match parts.get(4).copied() {
+                Some(Value::Int(key)) => Some(key),
+                _ => None,
+            };
+            ops.push(crate::host::gui::Op::Sound {
+                id,
+                vol: number_at(2),
+                pan: number_at(3),
+                key,
+            });
+        } else if tag == tags.music_t || tag == tags.ambience_t {
+            // `[:music id]` / `[:music id vol]`, and `[:ambience …]` the same — read
+            // exactly as `[:sound …]` is.
             let Value::Int(snd) = arg(&parts, 1) else {
                 continue;
             };
@@ -1170,20 +1198,11 @@ fn parse_gui_ops(
                 Some(v @ (Value::Int(_) | Value::Float(_))) => num(v),
                 _ => 0.0,
             };
-            ops.push(crate::host::gui::Op::Sound { id, vol });
-        } else if tag == tags.music_t {
-            // `[:music id]` / `[:music id vol]` — read exactly as `[:sound …]` is.
-            let Value::Int(snd) = arg(&parts, 1) else {
-                continue;
-            };
-            let Ok(id) = u32::try_from(snd) else {
-                continue;
-            };
-            let vol = match parts.get(2).copied() {
-                Some(v @ (Value::Int(_) | Value::Float(_))) => num(v),
-                _ => 0.0,
-            };
-            ops.push(crate::host::gui::Op::Music { id, vol });
+            ops.push(if tag == tags.music_t {
+                crate::host::gui::Op::Music { id, vol }
+            } else {
+                crate::host::gui::Op::Ambience { id, vol }
+            });
         } else if tag == tags.ambient_t {
             // `[:ambient color]` — a colour lighting cannot read is no lighting.
             let Some(color) = face_rgb(heap, arg(&parts, 1)) else {
@@ -2023,6 +2042,92 @@ mod gui_music_op_tests {
             "{} ops",
             ops.len()
         );
+    }
+
+    // `[:ambience snd vol]` reads as `[:music …]` does, into its own op.
+    #[test]
+    fn an_ambience_op_reads_its_handle_and_volume() {
+        let heap = Heap::new();
+        let ambience = value::intern("ambience");
+        let parsed = vec![
+            (
+                ambience,
+                vec![Value::Keyword(ambience), Value::int(2), Value::Float(0.25)],
+            ),
+            (ambience, vec![Value::Keyword(ambience), Value::int(-2)]),
+        ];
+        let ops = parse_gui_ops(
+            &heap,
+            parsed,
+            &GuiOpTags::new(),
+            &mut super::fragments::FragmentPass::empty(),
+        );
+        assert!(
+            ops == vec![Op::Ambience { id: 2, vol: 0.25 }],
+            "{} ops",
+            ops.len()
+        );
+    }
+
+    // `[:sound snd vol pan key]`: the pan and the key are optional — the centre and no key
+    // when absent, and a key that is not an int is no key.
+    #[test]
+    fn a_sound_op_reads_its_pan_and_key() {
+        let heap = Heap::new();
+        let sound = value::intern("sound");
+        let parsed = vec![
+            (
+                sound,
+                vec![
+                    Value::Keyword(sound),
+                    Value::int(1),
+                    Value::Float(0.5),
+                    Value::Float(-0.75),
+                    Value::int(42),
+                ],
+            ),
+            (
+                sound,
+                vec![Value::Keyword(sound), Value::int(1), Value::Float(0.5)],
+            ),
+            (
+                sound,
+                vec![
+                    Value::Keyword(sound),
+                    Value::int(1),
+                    Value::int(1),
+                    Value::int(1),
+                    Value::Float(4.2),
+                ],
+            ),
+        ];
+        let ops = parse_gui_ops(
+            &heap,
+            parsed,
+            &GuiOpTags::new(),
+            &mut super::fragments::FragmentPass::empty(),
+        );
+        let expected = vec![
+            Op::Sound {
+                id: 1,
+                vol: 0.5,
+                pan: -0.75,
+                key: Some(42),
+            },
+            Op::Sound {
+                id: 1,
+                vol: 0.5,
+                pan: 0.0,
+                key: None,
+            },
+            Op::Sound {
+                id: 1,
+                vol: 1.0,
+                pan: 1.0,
+                key: None,
+            },
+        ];
+        assert!(ops == expected, "{} ops", ops.len());
     }
 
     // An op off the window's top or left edge lands where the terminal puts it (ADR-046's

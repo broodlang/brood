@@ -2392,3 +2392,15 @@ build, so the second binary used on a checkout (installed beside dev, a profilin
 used evicted (a read touches its slot). Guard `image_slots` drives four builds from one copy of
 the binary whose mtime it resets before each run; red with one image path, and with either
 touch removed (the oldest-written slot goes instead of the least recently used).
+
+2026-11-20 (ADR-777). **Sound for games: pan, keyed one-shots, layered ambience.** dino's sound
+needed a boar heard from the right, a forest of four loops at once that fog muffles by
+crossfade, and footfalls that sound once though a present-paced loop draws a step on two or
+three frames. `[:sound snd vol pan]` places a one-shot (a balance: never louder than `vol`);
+`[:sound snd vol pan key]` plays only when the frame before (or an earlier op of the frame) did
+not carry the same handle and key; `[:ambience snd vol]` keeps any number of loops going, keyed
+by handle, fading like `:music`. One-shots now play from the shared samples instead of a copy a
+play, the device is opened when a window gets its first sound (not on the first play), and it
+asks for a 20 ms buffer instead of rodio's 50. app.js mirrors the three. Guards: `pan_tests`,
+the one-shot source tests, `sound_tests` (keyed edge), the op parser tests. Not run here: the
+full suites (desktop rule).
