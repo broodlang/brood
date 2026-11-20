@@ -23,12 +23,17 @@ name: Diagnose
 #
 #     gh workflow run diagnose.yml -R broodlang/brood -f what=ab -f base=<ref>
 #     (then `gh run watch` on the run it starts)
+#
+# `contract-cost` runs `scripts/contract-cost.sh`: callgrind's instructions per armed
+# contracted call, per declared-type shape, `base` against this commit — deterministic, so it
+# shows a change of a few percent on the contract call path that `ab` (whose rows declare
+# no `sig`) cannot see at all. `-f rows="--annotate int"` adds the attributed profile.
 
 on:
   workflow_dispatch:
     inputs:
       what:
-        description: "ki307 (the gc-contention repro), ab (benchmark rows, base vs this commit) ki308 (the regex-split stall), or repeat (one Rust test, many times)"
+        description: "ki307 (the gc-contention repro), ab (benchmark rows, base vs this commit), contract-cost (instructions per armed contracted call, base vs this commit), ki308 (the regex-split stall), or repeat (one Rust test, many times)"
         default: ki307
       base:
         description: "for ab: the baseline ref"
@@ -43,7 +48,7 @@ on:
         description: "for repeat: how many runs"
         default: "200"
       rows:
-        description: "for ab: the benchmark rows (empty: the default set)"
+        description: "for ab: the benchmark rows (empty: the default set); for contract-cost: the script's arguments"
         default: ""
 
 concurrency:
@@ -260,3 +265,26 @@ jobs:
             echo "== round $round"
             ( ulimit -v 16000000; timeout 300 target/release/brood "$REPRO" ) 2>&1 | grep -v "native %receive took 5[0-9]ms"
           done
+
+  contract-cost:
+    name: instructions per armed contracted call, base vs this commit
+    if: inputs.what == 'contract-cost'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install valgrind
+        run: sudo apt-get update -q && sudo apt-get install -y -q valgrind
+      # `rows` here is the script's arguments: `--tier default`, `--annotate <row>`, row names.
+      - name: Count, bytecode tier and the default tier
+        run: |
+          base=$(git rev-parse "${{ inputs.base }}")
+          echo "base $base, this commit $(git rev-parse HEAD)"
+          scripts/contract-cost.sh --base "$base" ${{ inputs.rows }}
+          scripts/contract-cost.sh --base "$base" --tier default int char-at record shape

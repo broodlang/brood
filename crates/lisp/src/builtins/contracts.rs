@@ -922,6 +922,11 @@ pub(crate) fn enter_shim(
         None => call_args.is_empty(),
     };
     if !vouched {
+        if walk_trace_enabled()
+            && let Some(spec) = parts.spec
+        {
+            trace_unvouched_arguments(heap, parts.name, spec, call_args);
+        }
         return Some(ShimEntry::Run);
     }
     heap.note_contract_entered();
@@ -977,7 +982,64 @@ pub(crate) fn result_check_call(
     let check = heap
         .env_get(EnvId::GLOBAL, shim_names().check_ret)
         .ok_or_else(|| LispError::runtime("contract/%contract-check-ret is not bound"))?;
+    if walk_trace_enabled() {
+        trace_walk(heap, parts.name, "result", parts.ret, value);
+    }
     Ok((check, smallvec::smallvec![parts.name, parts.ret, value]))
+}
+
+/// `BROOD_CONTRACT_WALK_TRACE=1`: name, on stderr, every declared type the dispatcher
+/// could not vouch for — an argument that sends the call to its shim's Brood check, or a
+/// result that goes to `%contract-check-ret` — with the kind of value it met. What an
+/// armed program's remaining contract cost is made of, by shape.
+fn walk_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    crate::diagnostics::debug_flags::is_set(&ON, "BROOD_CONTRACT_WALK_TRACE")
+}
+
+/// One `[contract-walk]` line: the function, which position, the declared type, the value's
+/// kind (and a record's id).
+fn trace_walk(heap: &Heap, name: Value, position: &str, type_expression: Value, value: Value) {
+    let kind = match value {
+        Value::Record { id, .. } => format!("record {}", value::symbol_name_ref(id)),
+        other => value::tag(other).name().to_string(),
+    };
+    eprintln!(
+        "[contract-walk] {} {position} {} <- {kind}",
+        crate::syntax::printer::print(heap, name),
+        crate::syntax::printer::print(heap, type_expression),
+    );
+}
+
+/// [`trace_walk`] for each argument [`args_vouched`] would not vouch for, paired as it pairs.
+fn trace_unvouched_arguments(heap: &Heap, name: Value, spec: Value, call_args: &[Value]) {
+    use crate::core::heap::KnownVerdict;
+    let ValueRef::Vector(spec_id) = spec.unpack() else {
+        return;
+    };
+    let declared: Vec<Value> = heap.vector(spec_id).to_vec();
+    let at = |index: usize| declared.get(index).copied().unwrap_or(Value::nil());
+    let mut types = heap.list_to_vec(at(0)).unwrap_or_default();
+    types.extend(heap.list_to_vec(at(1)).unwrap_or_default());
+    for (index, &value) in call_args.iter().enumerate() {
+        let type_expression = match types.get(index) {
+            Some(&type_expression) => type_expression,
+            None if !matches!(at(2), Value::Nil) => at(2),
+            None => break,
+        };
+        if !matches!(
+            heap.type_verdict(type_expression, value),
+            KnownVerdict::Known(true)
+        ) {
+            trace_walk(
+                heap,
+                name,
+                &format!("argument {}", index + 1),
+                type_expression,
+                value,
+            );
+        }
+    }
 }
 
 /// `value`, checked against `shim`'s declared result as the template checks it: vouched
