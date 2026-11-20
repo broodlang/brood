@@ -940,9 +940,9 @@ pub(crate) fn exec_chunk(
                 // parameters): a hit it could not take would leave `fast` empty and send the
                 // call through `dispatch` instead of straight to the arm.
                 let mut self_tail = false;
-                // A contract shim's ORIGINAL arm, when the call IC holds one for this callee
-                // (ADR-773) — run only behind the vouching below.
-                let mut shim_original: Option<(Arc<ArmHandle>, EnvId, (u32, u32))> = None;
+                // Set when `fast` holds a contract shim's ORIGINAL arm, from a call IC entry
+                // for the shim (ADR-773): it may run only once the vouching below says so.
+                let mut fast_is_original = false;
                 let self_tail_probe = *tail && arm.noptional == 0 && arm.rest_slot.is_none();
                 // KI-19: a *staged* head was resolved before the args (it sits below them),
                 // so the callee is that value — not a fresh resolution, which would observe
@@ -990,7 +990,7 @@ pub(crate) fn exec_chunk(
                             if same {
                                 crate::perf_bump!(call_ic_hit);
                                 fast = payload;
-                                shim_original = original;
+                                fast_is_original = original;
                             }
                         }
                     }
@@ -1032,7 +1032,7 @@ pub(crate) fn exec_chunk(
                         {
                             crate::perf_bump!(call_ic_hit);
                             fast = payload;
-                            shim_original = original;
+                            fast_is_original = original;
                             (v, drop_base)
                         } else {
                             crate::perf_bump!(call_ic_miss);
@@ -1149,20 +1149,22 @@ pub(crate) fn exec_chunk(
                 // shim. With a result owed, the call takes the frame path, whose return
                 // handler checks it exactly as `dispatch`'s `Step::Tail` would have.
                 let mut owed: Option<Value> = None;
-                if let Some(original) = shim_original.take()
-                    && let ValueRef::Fn(shim_id) = callee.unpack()
-                {
+                if fast_is_original {
                     let top = heap.roots_len();
-                    if let Some(crate::builtins::contracts::ShimEntry::Forward {
-                        check_result,
-                        ..
-                    }) = crate::builtins::contracts::enter_shim(
-                        heap,
-                        shim_id,
-                        heap.roots_slice(top - argc, top),
-                    ) {
-                        fast = Some(original);
-                        owed = check_result.then_some(callee);
+                    let entry = match callee.unpack() {
+                        ValueRef::Fn(shim_id) => crate::builtins::contracts::enter_shim(
+                            heap,
+                            shim_id,
+                            heap.roots_slice(top - argc, top),
+                        ),
+                        _ => None,
+                    };
+                    match entry {
+                        Some(crate::builtins::contracts::ShimEntry::Forward {
+                            check_result,
+                            ..
+                        }) => owed = check_result.then_some(callee),
+                        _ => fast = None,
                     }
                 }
                 // In-place non-tail call (`ChunkExit::CallInPlace`): a VM callee whose frame

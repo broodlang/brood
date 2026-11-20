@@ -1037,9 +1037,11 @@ impl Heap {
         }
     }
 
-    /// [`Self::vm_call_ic_probe`], with a third part: the ORIGINAL's arm when the entry is a
-    /// contract shim's (ADR-773) — in the same borrow, so the bytecode call site learns it
-    /// at no cost beyond the probe it already makes. The second part stays `None` for a shim.
+    /// [`Self::vm_call_ic_probe`] for the bytecode call site, which can vouch for a contract
+    /// shim's call (ADR-773): for a shim's entry the arm is its ORIGINAL's and the flag is
+    /// set, and the caller may run that arm only once it has vouched for the arguments.
+    /// One borrow, and no larger an answer than the plain probe's.
+    #[inline]
     #[allow(clippy::type_complexity)]
     pub(crate) fn vm_call_ic_probe_shim(
         &self,
@@ -1050,7 +1052,7 @@ impl Heap {
     ) -> Option<(
         Value,
         Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))>,
-        Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))>,
+        bool,
     )> {
         let t = self.vm_call_ics.borrow();
         let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
@@ -1059,9 +1061,9 @@ impl Heap {
         }
         Some((
             e.callee(),
-            e.arm().map(|(arm, env)| (arm.clone(), env, e.callee_bases)),
-            e.contracted_arm()
+            e.held_arm()
                 .map(|(arm, env)| (arm.clone(), env, e.callee_bases)),
+            e.kind == CalleeKind::Shim,
         ))
     }
 
