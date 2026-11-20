@@ -143,6 +143,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Window id's inner size as [w h] in PHYSICAL pixels (tracks resize / HiDPI) — the frame a pixel-space app (`:sprite` / `:quad` ops, `{:input :pixels}`) lays itself out in, where gui-size is the cell grid.",
         gui_size_px);
     primitives.def(
+        "%gui-refresh-hz",
+        Arity::exact(1),
+        Sig::new(vec![int], float.union(nil_ty)),
+        &["id"],
+        "The refresh rate of the monitor window id is on, in hertz (59.951, 144.0) as the platform reports it, or nil when it does not say and headless — what a game pacing itself by `[:presented t-ns]` snaps its frame times to.",
+        gui_refresh_hz);
+    primitives.def(
         "%gui-latency",
         Arity::exact(1),
         Sig::new(vec![int], vec_ty),

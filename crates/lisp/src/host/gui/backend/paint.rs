@@ -1638,12 +1638,16 @@ fn resize_damage(
     )
 }
 
+/// Paint `frame` into the window through softbuffer, re-rasterising only what changed, and
+/// present it. True when the frame reached the compositor — false when the surface could
+/// not be resized, no buffer could be had, or the present failed — which is what a window
+/// asked for present events reports (`present_event`).
 pub(super) fn paint(
     surface: &mut softbuffer::Surface<Rc<winit::window::Window>, Rc<winit::window::Window>>,
     window: &winit::window::Window,
     r: &mut Renderer,
     frame: &[Op],
-) {
+) -> bool {
     // Paint-breakdown timing (BROOD_STALL_MS): reset the per-paint counters; the
     // tail of this fn prints clusters/misses/build-time when the paint is slow.
     let paint_t0 = paint_stall_ms().map(|ms| {
@@ -1659,7 +1663,7 @@ pub(super) fn paint(
         .resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap())
         .is_err()
     {
-        return;
+        return false;
     }
     let (fb_w, fb_h) = (w as usize, h as usize);
     // Coordinate contract: `r.cell_w`/`cell_h` are PHYSICAL (post-scale) pixels;
@@ -1681,7 +1685,7 @@ pub(super) fn paint(
             // The rows just rasterised never reached the window; forget the retained
             // frame so the next paint rasterises and presents everything.
             r.invalidate();
-            return;
+            return false;
         }
     };
     let full = DamageRect::whole(fb_w, fb_h);
@@ -1740,12 +1744,12 @@ pub(super) fn paint(
     // presented, never before a paint that might return early with nothing committed.
     window.pre_present_notify();
     let whole = rects.len() == 1 && rects[0] == full;
-    if rects.is_empty() {
+    let presented = if rects.is_empty() {
         // Nothing changed and the buffer is current — an expose with no new frame.
         // A zero-area damage is invalid, so re-present as is.
-        let _ = buf.present();
+        buf.present()
     } else if whole {
-        let _ = buf.present();
+        buf.present()
     } else {
         let sb: Vec<softbuffer::Rect> = rects
             .iter()
@@ -1756,8 +1760,9 @@ pub(super) fn paint(
                 height: NonZeroU32::new((d.y1 - d.y0) as u32).unwrap(),
             })
             .collect();
-        let _ = buf.present_with_damage(&sb);
+        buf.present_with_damage(&sb)
     }
+    .is_ok();
     // Slow-paint breakdown: when this paint took >= BROOD_STALL_MS, attribute the
     // time across phases. `present` dominating = the softbuffer→window blit (a
     // platform/software-render cost); `body` dominating with build~0 = the raster
@@ -1797,6 +1802,7 @@ pub(super) fn paint(
             );
         }
     }
+    presented
 }
 
 #[cfg(test)]

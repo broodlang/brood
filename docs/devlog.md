@@ -2322,3 +2322,19 @@ read it off the expansion, and `receive` binders are untyped for every pattern (
 result vector), which is wider than string patterns; the catalog pins the three that work.
 Every new guard sabotage-verified (the formatter's three, the catalog's `(str (or …))` case).
 
+
+2026-11-20 (ADR-773). **A window can tell its app each time a frame is presented.** b2d's loop
+stepped on a timer and drew fire-and-forget into a FIFO window, so a 60 Hz timer beat against
+the panel: frames shown twice or dropped, visible as jitter in dino. `gui/open {:present-events
+true}` now delivers `[:presented t-ns]` (on `os/now-ns`'s clock, kept monotonic) after every
+present that reached the compositor, GPU target and CPU painter alike; headless and a skipped
+frame send nothing, and it is off by default. `gui/refresh-hz` (and a `gui-display`'s
+`:refresh-hz`) answers the monitor's rate. Found while measuring: the window drops a frame
+identical to the one on screen, so a present-paced loop with nothing new to draw (a 60-step game
+between steps on a 144 Hz panel) got no present back and stalled on its timer — presents fell
+from 144 to ~23 a second; such a window now presents the identical frame again. Also measured: a
+loop that draws on each present under FIFO on GNOME got its presents 1, 2 or 3 refreshes apart
+(a trivial probe at 144 Hz: 147 of 299 one refresh apart), under MAILBOX one a refresh (998 of
+999) — b2d's present-paced loop opens with the window's default. Guards: `present_tests`,
+`window_spec_tests` (sabotaged: both red with the opt-in check removed),
+`tests/gui_present_events_test.blsp`. Not run here: the full suites (desktop rule).

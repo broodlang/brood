@@ -1,0 +1,37 @@
+;; tests/gui_present_events_test.blsp — a window that asks hears of each present (ADR-773).
+;;
+;; `{:present-events true}` has a window send `[:presented t-ns]` after every frame it
+;; presents; the message's shape and the opt-in default are the Rust tests'
+;; (`present_tests`, `window_spec_tests`), since only a real window presents. What runs
+;; here is the headless half: a headless window (`BROOD_GUI_HEADLESS=1`) presents nothing,
+;; so it sends nothing even when asked, and it has no monitor, so `gui/refresh-hz` and a
+;; `gui-display`'s `:refresh-hz` answer nil. In a child runtime of its own, so the
+;; headless switch is that runtime's alone.
+(defmodule gui-present-events-test
+  (:use test)
+  (:use suite-helpers))
+
+(purge-stale-temp "present-events-")
+
+(def- app-source
+  (str "(if (not (gui/available?))\n"
+    "  (io/puts \"no-gui\")\n"
+    "  (let (display (editor/frontend/gui-display {:present-events true :input :pixels}))\n"
+    "    ((get display :draw) [[:clear] [:quad 0 0 10 10 [255 0 0]]])\n"
+    "    (io/puts (str \"refresh \" ((get display :refresh-hz)) \" \"\n"
+    "      (gui/refresh-hz (get display :window))))\n"
+    "    (io/puts (str \"heard \" (receive ([:presented t] t) (after 300 \"nothing\"))))))\n"))
+
+(describe "present events (ADR-773)"
+  (test "a headless window asked for present events sends none, and knows no refresh rate"
+    (let (nest (sibling-binary "nest"))
+      (when nest
+        (let (dir (temp-dir "present-events-")
+              script (path/join dir "app.blsp"))
+          (file/mkdir dir)
+          (file/spit script app-source)
+          (let (result (os/cmd nest ["run" script] {:env {"BROOD_GUI_HEADLESS" "1"} :dir dir})
+                out (str (os/cmd-out result) (get result :stderr "")))
+            (when (not (includes? out "no-gui"))
+              (is (includes? out "refresh nil nil"))
+              (is (includes? out "heard nothing")))))))))

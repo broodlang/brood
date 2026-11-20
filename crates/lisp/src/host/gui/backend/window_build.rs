@@ -150,7 +150,8 @@ pub(super) fn build_window(
     renderer.set_text_contrast(defaults.text_contrast);
     renderer.set_ligatures(defaults.ligatures);
     let inner = window.inner_size();
-    let period = frame_period(&window);
+    let millihertz = refresh_millihertz(&window);
+    let period = period_of(millihertz);
     Ok(Win {
         window,
         backend,
@@ -196,6 +197,8 @@ pub(super) fn build_window(
         particles_next: None,
         frame_period: period,
         frame_period_at: Instant::now(),
+        refresh_millihertz: Arc::new(AtomicU32::new(millihertz.unwrap_or(0))),
+        present_events: spec.present_events,
         published_size: None,
         scroll_last_tick: Instant::now(),
         scroll_pending: false,

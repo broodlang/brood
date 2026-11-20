@@ -77,6 +77,15 @@ pub(in crate::builtins) fn gui_window_id(
 /// observer parks in `(receive)` rather than pinning a worker in a blocking poll.
 /// Starts the GUI thread on the first call; each call is an independent window.
 pub(in crate::builtins) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let spec = window_spec(args, heap)?;
+    let id =
+        crate::host::gui::open(crate::process::self_pid(), spec).map_err(LispError::runtime)?;
+    Ok(Value::int(id as i64))
+}
+
+/// The `WindowSpec` `gui-open`'s arguments ask for: its title, size and opts map, read and
+/// checked here, before any window exists.
+fn window_spec(args: &[Value], heap: &Heap) -> Result<crate::host::gui::WindowSpec, LispError> {
     let title = match arg(args, 0) {
         Value::Nil => None,
         v => Some(expect_string(heap, "%gui-open", v)?),
@@ -175,7 +184,12 @@ pub(in crate::builtins) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -
             Some("none") => crate::host::gui::OptionMeta::None,
             _ => crate::host::gui::OptionMeta::Left,
         };
-    let spec = crate::host::gui::WindowSpec {
+    //   :present-events true — `[:presented t-ns]` after each successful present, the
+    //     clock a game paces its frames by; off unless asked.
+    let present_events = opts
+        .and_then(|id| heap.map_get(id, value::kw("present-events")))
+        .is_some_and(crate::eval::truthy);
+    Ok(crate::host::gui::WindowSpec {
         title,
         size,
         decorations,
@@ -186,10 +200,8 @@ pub(in crate::builtins) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -
         ime,
         wheel,
         option_meta,
-    };
-    let id =
-        crate::host::gui::open(crate::process::self_pid(), spec).map_err(LispError::runtime)?;
-    Ok(Value::int(id as i64))
+        present_events,
+    })
 }
 
 /// `(%gui-size-px id)` — window `id`'s inner size as `[w h]` in PHYSICAL pixels.
@@ -197,6 +209,14 @@ pub(in crate::builtins) fn gui_size_px(args: &[Value], _: EnvId, heap: &mut Heap
     let id = gui_window_id(heap, "%gui-size-px", arg(args, 0))?;
     let (w, h) = crate::host::gui::size_px(id).map_err(LispError::runtime)?;
     Ok(heap.alloc_vector2(Value::int(w as i64), Value::int(h as i64)))
+}
+
+/// `(%gui-refresh-hz id)` — the refresh rate of window `id`'s monitor in hertz, or nil
+/// when the platform does not say (and headless).
+pub(in crate::builtins) fn gui_refresh_hz(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-refresh-hz", arg(args, 0))?;
+    let hertz = crate::host::gui::refresh_hz(id).map_err(LispError::runtime)?;
+    Ok(hertz.map_or(Value::Nil, Value::float))
 }
 
 /// `(%gui-settle id)` — window `id`'s app finished a turn with nothing new to draw (ADR-444).
@@ -2133,4 +2153,40 @@ pub(in crate::builtins) fn gui_text_hinting(
     let mode = text_hinting_of(heap, "gui/text-hinting", arg(args, 0))?;
     crate::host::gui::text_hinting(mode).map_err(LispError::runtime)?;
     Ok(Value::nil())
+}
+
+#[cfg(test)]
+mod window_spec_tests {
+    use super::window_spec;
+    use crate::core::heap::Heap;
+    use crate::core::value::{self, Value};
+
+    /// `gui-open`'s args with `opts` as the opts map (nil title and size).
+    fn spec_with(heap: &mut Heap, opts: Vec<(Value, Value)>) -> crate::host::gui::WindowSpec {
+        let map = heap.map_from_pairs(opts);
+        window_spec(&[Value::Nil, Value::Nil, Value::Nil, map], heap).expect("a valid spec")
+    }
+
+    // Present events are opt-in (ADR-773): a window opened with no opts, or opts that do not
+    // name `:present-events`, or name it false or nil, sends no `[:presented t-ns]`; only
+    // `{:present-events true}` turns them on.
+    #[test]
+    fn present_events_are_off_unless_asked() {
+        let mut heap = Heap::new();
+        assert!(!window_spec(&[], &heap).unwrap().present_events);
+        let unrelated = spec_with(&mut heap, vec![(value::kw("input"), value::kw("pixels"))]);
+        assert!(!unrelated.present_events);
+        let off = spec_with(
+            &mut heap,
+            vec![(value::kw("present-events"), Value::boolean(false))],
+        );
+        assert!(!off.present_events);
+        let nil = spec_with(&mut heap, vec![(value::kw("present-events"), Value::Nil)]);
+        assert!(!nil.present_events);
+        let on = spec_with(
+            &mut heap,
+            vec![(value::kw("present-events"), Value::boolean(true))],
+        );
+        assert!(on.present_events);
+    }
 }

@@ -264,6 +264,13 @@ pub struct WindowSpec {
     pub wheel: WheelMode,
     /// Which Option key is Meta on macOS (the `{:option-meta …}` open option, ADR-541).
     pub option_meta: OptionMeta,
+    /// True when the window tells its app each time a frame reaches the compositor (the
+    /// `{:present-events true}` open option): after every successful present — the GPU
+    /// target's and the CPU painter's alike — the subscriber gets `[:presented t-ns]`, `t-ns`
+    /// the moment the present returned on `os/now-ns`'s clock, kept monotonic (`present_ns`).
+    /// Off by default, so an app that does not ask sees no new message. What a game paces
+    /// its simulation by to draw exactly one frame a refresh.
+    pub present_events: bool,
 }
 
 /// Who repeats a held key in a GUI window (ADR-441).
@@ -340,6 +347,7 @@ impl Default for WindowSpec {
             ime: true,
             wheel: WheelMode::Lines,
             option_meta: OptionMeta::Left,
+            present_events: false,
         }
     }
 }
@@ -1510,9 +1518,9 @@ pub use disabled::{
     TextAa, TextHinting, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg,
     focus, font, font_info, fullscreen, grab, headless, held_key, host_main_thread, icon,
     input_mode, inset, key_repeat, key_repeats, latency, latency_histograms, ligatures,
-    line_height, lose_display, maximize, minimize, next_texture_id, open, register_family,
-    register_installed_family, render_frame, settle, size, size_px, sound, sound_free, text_aa,
-    text_contrast, text_hinting, texture, texture_free, title, window_ids,
+    line_height, lose_display, maximize, minimize, next_texture_id, open, refresh_hz,
+    register_family, register_installed_family, render_frame, settle, size, size_px, sound,
+    sound_free, text_aa, text_contrast, text_hinting, texture, texture_free, title, window_ids,
 };
 
 #[cfg(feature = "gui")]
@@ -1520,7 +1528,7 @@ pub use backend::{
     TextAa, TextHinting, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg,
     focus, font, font_info, fullscreen, grab, headless, held_key, host_main_thread, icon,
     input_mode, inset, key_repeat, key_repeats, latency, latency_histograms, ligatures,
-    line_height, lose_display, maximize, minimize, next_texture_id, open, register_family,
-    register_installed_family, render_frame, settle, size, size_px, sound, sound_free, text_aa,
-    text_contrast, text_hinting, texture, texture_free, title, window_ids,
+    line_height, lose_display, maximize, minimize, next_texture_id, open, refresh_hz,
+    register_family, register_installed_family, render_frame, settle, size, size_px, sound,
+    sound_free, text_aa, text_contrast, text_hinting, texture, texture_free, title, window_ids,
 };

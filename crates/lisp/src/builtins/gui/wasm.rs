@@ -37,6 +37,7 @@ wasm_unsupported_builtins!(
     gui_maximize,
     gui_size,
     gui_size_px,
+    gui_refresh_hz,
     gui_latency,
     gui_latency_histogram,
     gui_key_repeat,
