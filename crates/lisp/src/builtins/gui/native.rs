@@ -2167,7 +2167,7 @@ mod window_spec_tests {
         window_spec(&[Value::Nil, Value::Nil, Value::Nil, map], heap).expect("a valid spec")
     }
 
-    // Present events are opt-in (ADR-773): a window opened with no opts, or opts that do not
+    // Present events are opt-in (ADR-775): a window opened with no opts, or opts that do not
     // name `:present-events`, or name it false or nil, sends no `[:presented t-ns]`; only
     // `{:present-events true}` turns them on.
     #[test]

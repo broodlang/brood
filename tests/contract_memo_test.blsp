@@ -96,3 +96,58 @@
     (reflect/eval '(sig! memo-take-buffer (memo-buffer -> int)))
     (assert= 1 ((reflect/eval 'memo-take-buffer) {:name "a" :lines []}))
     (assert-error ((reflect/eval 'memo-take-buffer) {:name 3 :lines []}))))
+
+;; The rest of the grammar the kernel decides (ADR-773): each answer is `%type-match`'s, and
+;; `%type-verdict` answering at all (not nil) is what says the walk was not needed.
+(defrecord memo-rec (a b))
+(defrecord memo-rec-other (a))
+(deftype memo-rec-shape (record &open :__id__ :contract-memo-test/memo-rec :a int))
+
+(defn decided (t v) (%type-verdict t v))
+
+(describe "the kernel decides record names and compound forms as the walk does"
+  (test "a defrecord name admits its records and nothing else"
+    (assert= true (decided 'memo-rec (memo-rec 1 2)))
+    (assert= false (decided 'memo-rec (memo-rec-other 1)))
+    (assert= false (decided 'memo-rec {:a 1 :b 2}))
+    (assert= false (decided 'memo-rec 5))
+    ;; a name nothing defines accepts anything, as the walk's unknown-type default does
+    (assert= true (decided 'memo-no-such-type 5)))
+  (test "a record shape over a record instance, its nil field read as nil"
+    (assert= true (decided 'memo-rec-shape (memo-rec 1 nil)))
+    (assert= false (decided 'memo-rec-shape (memo-rec "1" nil)))
+    (assert= false (decided 'memo-rec-shape (memo-rec-other 1))))
+  (test "a tuple, a map, a set and seqable"
+    (assert= true (decided '(tuple int string) [1 "a"]))
+    (assert= false (decided '(tuple int string) [1 2]))
+    (assert= false (decided '(tuple int string) [1 "a" 3]))
+    (assert= true (decided '(map keyword int) {:a 1}))
+    (assert= false (decided '(map keyword int) {:a "1"}))
+    (assert= false (decided '(map keyword int) (memo-rec 1 2)))
+    (assert= true (decided '(set int) #{1 2}))
+    (assert= false (decided '(set int) #{1 "2"}))
+    (assert= true (decided '(seqable int) [1 2]))
+    (assert= true (decided '(seqable int) '(1 2)))
+    (assert= false (decided '(seqable int) {:a 1})))
+  (test "a positional list, an interval, and, not and is"
+    (assert= true (decided '(list int string) '(1 "a")))
+    (assert= false (decided '(list int string) '(1 "a" 2)))
+    (assert= true (decided '(int 0 9) 5))
+    (assert= false (decided '(int 0 9) 10))
+    (assert= true (decided '(int 0 _) 10))
+    (assert= true (decided '(and int (int 0 9)) 3))
+    (assert= false (decided '(not int) 3))
+    (assert= true (decided '(not string) 3))
+    (assert= true (decided '(is int) false))
+    (assert= true (decided '(len (vector int) 1 _) [1]))
+    (assert= false (decided '(len (vector int) 1 _) []))
+    (assert= false (decided '(len (vector int) 1 _) ["a"])))
+  (test "a nested value is decided all the way down, and remembered"
+    (let (rows (list [1 "a" nil []] [2 "b" 3 [:x]]))
+      (assert= true (decided '(list (tuple int string (or nil int) vector)) rows))
+      (assert= false (decided '(list (tuple int string (or nil int) vector)) (list [1 "a" "c" []])))))
+  (test "what stays with the walk answers nil here and is still right through type-matches?"
+    (assert= nil (decided '(len string 0 3) "ab"))
+    (assert (type-matches? '(len string 0 3) "ab"))
+    ;; a record with a Lookup impl: its missing field may answer through `get`
+    (assert= nil (decided 'memo-wants-extra (memo-defaulted 1)))))

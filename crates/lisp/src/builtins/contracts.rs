@@ -130,7 +130,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![any, any], bool_ty.union(nil_ty)),
         &["type", "value"],
-        "Whether `value` inhabits `type` when the kernel can say without the Brood walk — by the value's tag (a base name, a literal), by the type's form (`?A`, an arrow, an `or` of decided parts), one level into a record or vector over decided parts, or by a verdict remembered under the IDENTITY of both (an unchanged sub-value of an immutable value is the same object) — else nil. Backs `type-matches?` and every contract shim (ADR-480).",
+        "Whether `value` inhabits `type` when the kernel can say without the Brood walk — by the value's tag (a base name, a literal), by the type's form read natively — an alias, a `defrecord` name, a sealed ability, and every compound form but `rec`, descending into the value (ADR-773) — or by a verdict remembered under the IDENTITY of both (an unchanged sub-value of an immutable value is the same object) — else nil. Backs `type-matches?` and every contract shim (ADR-480).",
         type_verdict_prim,
     );
     primitives.def(
@@ -878,6 +878,14 @@ pub(crate) fn shim_parts(heap: &Heap, id: value::ClosureId) -> Option<ShimParts>
     })
 }
 
+/// Whether the closure `id` is the contract module's — the one-compare filter a call site
+/// asks before anything costlier, so an uncontracted call (a thin wrapper's, say, which
+/// also caches no arm) pays a closure read and nothing else (ADR-773).
+#[inline]
+pub(crate) fn authored_by_contracts(heap: &Heap, id: value::ClosureId) -> bool {
+    heap.closure(id).module == Some(shim_names().contract_module)
+}
+
 /// Whether `id` is a shim the dispatcher enters — the call sites that cache a callee's
 /// compiled arm leave such a closure to `dispatch` instead, as they leave a thin wrapper.
 pub(crate) fn is_entered_shim(heap: &Heap, id: value::ClosureId) -> bool {
@@ -922,6 +930,11 @@ pub(crate) fn enter_shim(
         None => call_args.is_empty(),
     };
     if !vouched {
+        if walk_trace_enabled()
+            && let Some(spec) = parts.spec
+        {
+            trace_unvouched_arguments(heap, parts.name, spec, call_args);
+        }
         return Some(ShimEntry::Run);
     }
     heap.note_contract_entered();
@@ -930,6 +943,42 @@ pub(crate) fn enter_shim(
         original: parts.original,
         check_result: !matches!(parts.ret, Value::Sym(symbol) if symbol == any),
     })
+}
+
+/// The arm a call site may cache for the shim `shim` called with `argc` arguments — its
+/// ORIGINAL's, with the env the original closed over (ADR-773) — so a vouched call goes
+/// straight to it without `dispatch` looking it up per call. `None` where the dispatcher's
+/// own path differs from "call the original's arm": a shim it does not enter, an arity the
+/// template refuses (its arity error is the shim's), an original that is a thin wrapper
+/// (the dispatcher redirects it, ADR-069) or itself a shim, or one with no compiled arm for
+/// `argc`. A shim's captured frame never changes, so nothing here can go stale but the
+/// binding, which the entry's epoch already guards.
+pub(crate) fn shim_call_site_arm(
+    heap: &Heap,
+    shim: Value,
+    argc: usize,
+) -> Option<(std::sync::Arc<crate::eval::compile::ArmHandle>, EnvId)> {
+    let ValueRef::Fn(id) = shim.unpack() else {
+        return None;
+    };
+    let parts = shim_parts(heap, id)?;
+    let accepts = heap
+        .closure(id)
+        .arms
+        .iter()
+        .any(|arm| arm.min_arity() <= argc && arm.max_arity().is_none_or(|max| argc <= max));
+    let ValueRef::Fn(original) = parts.original.unpack() else {
+        return None;
+    };
+    if !accepts
+        || crate::eval::passthrough_arm(heap, original, argc).is_some()
+        || is_entered_shim(heap, original)
+    {
+        return None;
+    }
+    let arm = crate::eval::compile::compiled_arm_for(heap, original, argc)?;
+    let env = heap.closure(original).env.unwrap_or_else(|| heap.global());
+    Some((arm, env))
 }
 
 /// The declared result type of the shim `shim`, if it is one.
@@ -977,7 +1026,64 @@ pub(crate) fn result_check_call(
     let check = heap
         .env_get(EnvId::GLOBAL, shim_names().check_ret)
         .ok_or_else(|| LispError::runtime("contract/%contract-check-ret is not bound"))?;
+    if walk_trace_enabled() {
+        trace_walk(heap, parts.name, "result", parts.ret, value);
+    }
     Ok((check, smallvec::smallvec![parts.name, parts.ret, value]))
+}
+
+/// `BROOD_CONTRACT_WALK_TRACE=1`: name, on stderr, every declared type the dispatcher
+/// could not vouch for — an argument that sends the call to its shim's Brood check, or a
+/// result that goes to `%contract-check-ret` — with the kind of value it met. What an
+/// armed program's remaining contract cost is made of, by shape.
+fn walk_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    crate::diagnostics::debug_flags::is_set(&ON, "BROOD_CONTRACT_WALK_TRACE")
+}
+
+/// One `[contract-walk]` line: the function, which position, the declared type, the value's
+/// kind (and a record's id).
+fn trace_walk(heap: &Heap, name: Value, position: &str, type_expression: Value, value: Value) {
+    let kind = match value {
+        Value::Record { id, .. } => format!("record {}", value::symbol_name_ref(id)),
+        other => value::tag(other).name().to_string(),
+    };
+    eprintln!(
+        "[contract-walk] {} {position} {} <- {kind}",
+        crate::syntax::printer::print(heap, name),
+        crate::syntax::printer::print(heap, type_expression),
+    );
+}
+
+/// [`trace_walk`] for each argument [`args_vouched`] would not vouch for, paired as it pairs.
+fn trace_unvouched_arguments(heap: &Heap, name: Value, spec: Value, call_args: &[Value]) {
+    use crate::core::heap::KnownVerdict;
+    let ValueRef::Vector(spec_id) = spec.unpack() else {
+        return;
+    };
+    let declared: Vec<Value> = heap.vector(spec_id).to_vec();
+    let at = |index: usize| declared.get(index).copied().unwrap_or(Value::nil());
+    let mut types = heap.list_to_vec(at(0)).unwrap_or_default();
+    types.extend(heap.list_to_vec(at(1)).unwrap_or_default());
+    for (index, &value) in call_args.iter().enumerate() {
+        let type_expression = match types.get(index) {
+            Some(&type_expression) => type_expression,
+            None if !matches!(at(2), Value::Nil) => at(2),
+            None => break,
+        };
+        if !matches!(
+            heap.type_verdict(type_expression, value),
+            KnownVerdict::Known(true)
+        ) {
+            trace_walk(
+                heap,
+                name,
+                &format!("argument {}", index + 1),
+                type_expression,
+                value,
+            );
+        }
+    }
 }
 
 /// `value`, checked against `shim`'s declared result as the template checks it: vouched

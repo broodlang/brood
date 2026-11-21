@@ -81,7 +81,9 @@ The vocabulary you'll use most:
   `buffer-char-after`/`-before` · `buffer-region`
 - **Move point:** `goto-char` · `forward-char`/`backward-char` ·
   `beginning-of-line`/`end-of-line` · `forward-line`/`backward-line`
-  (column-preserving) · `beginning-of-buffer`/`end-of-buffer`
+  (column-preserving) · `beginning-of-buffer`/`end-of-buffer` · `forward-word`/`backward-word`
+  (under a word syntax: `(forward-word buf {:word-chars "'"})` — letters and digits plus
+  those; nil adds nothing, ADR-774)
 - **Edit:** `insert` · `delete-char` · `delete-backward-char` · `delete-region` ·
   `set-mark`/`clear-mark`
 - **Read-only:** `read-only?` · `set-read-only` — a buffer marked read-only refuses

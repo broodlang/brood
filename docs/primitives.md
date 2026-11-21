@@ -373,7 +373,7 @@ literal — no constructor call.
 |  | `%gui-lose-display` | 1 | Act as if the display went away: every open window's app is sent `[:hangup :display-lost]` once, then draws are no-ops and a new window fails. The GUI thread does this itself when its event loop ends (compositor or X server gone); exposed so the path runs headless. ADR-631. |
 |  | `%gui-size` | 1 | Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size. |
 |  | `%gui-size-px` | 1 | Window id's inner size as [w h] in PHYSICAL pixels — the frame a pixel-space app (`:sprite` / `:quad` ops, `{:input :pixels}`) lays itself out in, where gui-size is the cell grid. |
-|  | `%gui-refresh-hz` | 1 | The refresh rate of the monitor window id is on, in hertz, or nil when the platform does not say (and headless) — what a game paced by `[:presented t-ns]` (ADR-773) snaps its frame times to. |
+|  | `%gui-refresh-hz` | 1 | The refresh rate of the monitor window id is on, in hertz, or nil when the platform does not say (and headless) — what a game paced by `[:presented t-ns]` (ADR-775) snaps its frame times to. |
 |  | `%gui-latency` | 1 | Window id's recent input-to-present samples (at most 64, oldest first), each a map of milliseconds (and `:input`, `:key` or `:pointer`, ADR-612): `:total` (input received on the GUI thread to the present of the next frame drawn) and `:paint`, plus `:encode :upload :acquire :submit :present` on the GPU target. Empty headless. ADR-440. |
 |  | `%gui-latency-histogram` | 1 | Window id's input-to-present times since it opened as a distribution, keys apart from the pointer: `{:key h :pointer h}`, each `h` `{:count n :max-us n :buckets {upper-us n}}` (log-linear buckets, exact below 16 µs, then 16 per power of two). Wrapped as `gui/latency-histogram`; `gui/latency-percentiles`, `gui/latency-merge` and `gui/latency-since` are Brood over the data. Empty headless. ADR-612. |
 |  | `%gui-key-repeat?` | 1 | Whether the last key press window id's app took from its mailbox was an OS auto-repeat (marked as each press leaves the mailbox, so exact for the press being folded). False for a window not open and headless. Wrapped as `gui/key-repeat?`. ADR-612. |
@@ -484,7 +484,7 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `%contracts-armed?` | 0 | — |
 | `%contracts-sweep!` | 1 | — |
 | `%type-names-record?` | 1 | Whether some registered record id is named `name` as a `sig` spells a record type — bare (the record's name) or qualified (the id's trailing path). |
-| `%type-verdict` | 2 | Whether `value` inhabits `type` when the kernel can say without the Brood walk — by the value's tag (a base name, a literal), by the type's form (`?A`, an arrow, an `or` of … |
+| `%type-verdict` | 2 | Whether `value` inhabits `type` when the kernel can say without the Brood walk — by the value's tag (a base name, a literal), by the type's form read natively — an alias, a `defrecord` name, a sealed … |
 | `%type-verdict!` | 3 | Remember `verdict` for `(type value)` — when the pair is worth remembering — and return it. |
 | `%type-verdict-counts` | 0 | This process's verdict memo as `{:hits :misses :entries :clears}` — what a test reads to tell a remembered verdict from a walked one (ADR-480). |
 
@@ -803,6 +803,7 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `%rope-find` | 4 | The character index of the first occurrence of needle in rope r at or after from, or -1. |
 | `%rope-rfind` | 4 | The character index of the LAST occurrence of needle in rope r starting strictly before `before`, or -1. |
 | `%rope-skip` | 5 | Where a run of characters reaches from `at` in rope r: with inside? |
+| `%skip-word` | 5 | Where a run of word (or non-word) characters reaches from `at` in a rope or a string — a letter, a number, a combining mark or one of word-chars (ADR-774). |
 
 ### `builtins/tooling.rs`
 

@@ -1,4 +1,4 @@
-;; tests/gui_present_events_test.blsp — a window that asks hears of each present (ADR-773).
+;; tests/gui_present_events_test.blsp — a window that asks hears of each present (ADR-775).
 ;;
 ;; `{:present-events true}` has a window send `[:presented t-ns]` after every frame it
 ;; presents; the message's shape and the opt-in default are the Rust tests'
@@ -22,7 +22,7 @@
     "      (gui/refresh-hz (get display :window))))\n"
     "    (io/puts (str \"heard \" (receive ([:presented t] t) (after 300 \"nothing\"))))))\n"))
 
-(describe "present events (ADR-773)"
+(describe "present events (ADR-775)"
   (test "a headless window asked for present events sends none, and knows no refresh rate"
     (let (nest (sibling-binary "nest"))
       (when nest

@@ -1,4 +1,4 @@
-//! Tests of a window's present events (`{:present-events true}`, ADR-773): the
+//! Tests of a window's present events (`{:present-events true}`, ADR-775): the
 //! `[:presented t-ns]` a successful present sends, only when asked, on `os/now-ns`'s clock.
 
 use super::*;

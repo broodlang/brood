@@ -940,6 +940,9 @@ pub(crate) fn exec_chunk(
                 // parameters): a hit it could not take would leave `fast` empty and send the
                 // call through `dispatch` instead of straight to the arm.
                 let mut self_tail = false;
+                // Set when `fast` holds a contract shim's ORIGINAL arm, from a call IC entry
+                // for the shim (ADR-773): it may run only once the vouching below says so.
+                let mut fast_is_original = false;
                 let self_tail_probe = *tail && arm.noptional == 0 && arm.rest_slot.is_none();
                 // KI-19: a *staged* head was resolved before the args (it sits below them),
                 // so the callee is that value — not a fresh resolution, which would observe
@@ -974,8 +977,8 @@ pub(crate) fn exec_chunk(
                         {
                             crate::perf_bump!(call_ic_hit);
                             self_tail = true;
-                        } else if let Some((cached, payload)) =
-                            heap.vm_call_ic_probe(*site, *sym, argc as u32, epoch)
+                        } else if let Some((cached, payload, original)) =
+                            heap.vm_call_ic_probe_shim(*site, *sym, argc as u32, epoch)
                         {
                             // Identity, not equality: the IC's cached arm is only valid
                             // for the very closure it was resolved from. A non-closure
@@ -987,6 +990,7 @@ pub(crate) fn exec_chunk(
                             if same {
                                 crate::perf_bump!(call_ic_hit);
                                 fast = payload;
+                                fast_is_original = original;
                             }
                         }
                     }
@@ -1023,11 +1027,12 @@ pub(crate) fn exec_chunk(
                             crate::perf_bump!(call_ic_hit);
                             self_tail = true;
                             (v, drop_base)
-                        } else if let Some((v, payload)) =
-                            heap.vm_call_ic_probe(*site, *sym, argc as u32, epoch)
+                        } else if let Some((v, payload, original)) =
+                            heap.vm_call_ic_probe_shim(*site, *sym, argc as u32, epoch)
                         {
                             crate::perf_bump!(call_ic_hit);
                             fast = payload;
+                            fast_is_original = original;
                             (v, drop_base)
                         } else {
                             crate::perf_bump!(call_ic_miss);
@@ -1072,7 +1077,33 @@ pub(crate) fn exec_chunk(
                             fast = arm
                                 .as_ref()
                                 .map(|(a, cenv)| (a.clone(), *cenv, heap.vm_arm_block(a)));
-                            heap.vm_call_ic_install(*site, *sym, argc as u32, epoch, v, arm);
+                            match arm {
+                                None => match crate::builtins::contracts::shim_call_site_arm(
+                                    heap, v, argc,
+                                ) {
+                                    // A contract shim caches its original's arm, read back
+                                    // below behind the vouching (ADR-773).
+                                    Some(original) => heap.vm_call_ic_install_contracted(
+                                        *site,
+                                        *sym,
+                                        argc as u32,
+                                        epoch,
+                                        v,
+                                        original,
+                                    ),
+                                    None => heap.vm_call_ic_install(
+                                        *site,
+                                        *sym,
+                                        argc as u32,
+                                        epoch,
+                                        v,
+                                        None,
+                                    ),
+                                },
+                                arm => {
+                                    heap.vm_call_ic_install(*site, *sym, argc as u32, epoch, v, arm)
+                                }
+                            }
                             (v, drop_base)
                         }
                     } else {
@@ -1110,6 +1141,32 @@ pub(crate) fn exec_chunk(
                 } else {
                     (heap.root_at(n - argc - 1), n - argc - 1)
                 };
+                // A contract shim whose original's arm the call IC holds (ADR-773): the
+                // dispatcher's entry (ADR-748) made here, without `dispatch` — every argument
+                // vouched for, the original's arm runs in the shim's place, and the declared
+                // result is owed its check (`owed`) unless it is `any`. A call the kernel
+                // cannot vouch for leaves `fast` empty and goes to `dispatch`, which runs the
+                // shim. With a result owed, the call takes the frame path, whose return
+                // handler checks it exactly as `dispatch`'s `Step::Tail` would have.
+                let mut owed: Option<Value> = None;
+                if fast_is_original {
+                    let top = heap.roots_len();
+                    let entry = match callee.unpack() {
+                        ValueRef::Fn(shim_id) => crate::builtins::contracts::enter_shim(
+                            heap,
+                            shim_id,
+                            heap.roots_slice(top - argc, top),
+                        ),
+                        _ => None,
+                    };
+                    match entry {
+                        Some(crate::builtins::contracts::ShimEntry::Forward {
+                            check_result,
+                            ..
+                        }) => owed = check_result.then_some(callee),
+                        _ => fast = None,
+                    }
+                }
                 // In-place non-tail call (`ChunkExit::CallInPlace`): a VM callee whose frame
                 // is exactly its arguments takes them where they lie. Not for a callee with
                 // native code installed — the VM→native direct call below owns that — and a
@@ -1120,6 +1177,7 @@ pub(crate) fn exec_chunk(
                 // path (which must decline it) and the direct call below read one answer.
                 #[cfg(feature = "jit")]
                 let direct_native = !*tail
+                    && owed.is_none()
                     && fast
                         .as_ref()
                         .is_some_and(|(farm, _, _)| vm_direct_eligible(heap, farm, argc));
@@ -1127,6 +1185,7 @@ pub(crate) fn exec_chunk(
                 let direct_native = false;
                 if !*tail
                     && !direct_native
+                    && owed.is_none()
                     && let Some((ref farm, _, _)) = fast
                     && farm.frame_is_args_then_nil(argc)
                 {
@@ -1307,8 +1366,9 @@ pub(crate) fn exec_chunk(
                 // nothing between the operand reads and the frame writes allocates.
                 if *tail {
                     let is_self = self_tail
-                        || matches!(fast, Some((ref compiled, cenv, _))
-                            if std::ptr::eq(Arc::as_ptr(compiled.arc()), arm) && cur_env == cenv);
+                        || owed.is_none()
+                            && matches!(fast, Some((ref compiled, cenv, _))
+                                if std::ptr::eq(Arc::as_ptr(compiled.arc()), arm) && cur_env == cenv);
                     {
                         if is_self
                             && arm.noptional == 0
@@ -1355,7 +1415,7 @@ pub(crate) fn exec_chunk(
                         args: argv,
                         genv: cenv,
                         bases,
-                        result_contract: None,
+                        result_contract: owed,
                     },
                     None => match dispatch(heap, callee, argv, true, cur_env) {
                         Ok(s) => s,

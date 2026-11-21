@@ -2323,7 +2323,7 @@ result vector), which is wider than string patterns; the catalog pins the three 
 Every new guard sabotage-verified (the formatter's three, the catalog's `(str (or …))` case).
 
 
-2026-11-20 (ADR-773). **A window can tell its app each time a frame is presented.** b2d's loop
+2026-11-20 (ADR-775). **A window can tell its app each time a frame is presented.** b2d's loop
 stepped on a timer and drew fire-and-forget into a FIFO window, so a 60 Hz timer beat against
 the panel: frames shown twice or dropped, visible as jitter in dino. `gui/open {:present-events
 true}` now delivers `[:presented t-ns]` (on `os/now-ns`'s clock, kept monotonic) after every

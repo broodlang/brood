@@ -175,3 +175,56 @@ in the run — from `chars` with `inside?`, not from it without. The mirror of
 
     (text/skip-backward (text/string-> \"ab cd\") 5 \" \" false)   ;=> 3"
   (%rope-skip r at false chars inside?))
+
+;; ---- word syntax (ADR-774) --------------------------------------------------
+;; A word is a run of word characters, as in Emacs's syntax tables: a letter or a number in
+;; any script (and a combining mark, so a decomposed `é` stays in its word), plus the extra
+;; characters a WORD SYNTAX declares — `{:word-chars "'"}` makes "don't" one word. Every
+;; other character separates words. A syntax of nil, or one without `:word-chars`, adds
+;; nothing: `foo_bar` and `foo-bar` are two words each. The scans read a rope or a string
+;; and, on a rope, only the characters they cross (`%skip-word`).
+
+(defn- word-chars (syntax -> string)
+  "The extra word characters `syntax` declares, or the empty string."
+  (let (chars (get syntax :word-chars)) (if (string? chars) chars "")))
+
+(defn word-char? (character syntax -> bool)
+  "Is `character` (a one-character string) a word constituent under `syntax`: a letter, a
+number, a combining mark, or one of the syntax's `:word-chars`?
+
+    (text/word-char? \"é\" nil)   ;=> true
+    (text/word-char? \"_\" nil)   ;=> false
+    (text/word-char? \"'\" {:word-chars \"'\"})   ;=> true"
+  (= (%skip-word character 0 true (word-chars syntax) true) 1))
+
+(defn forward-word (text at:int syntax -> int)
+  "Where the next word forward from `at` ends in `text` (a rope or a string): past any
+non-word characters, then past the word — Emacs's `forward-word` (M-f) under `syntax`.
+
+    (text/forward-word \"  foo_bar\" 0 nil)   ;=> 5
+    (text/forward-word \"don't stop\" 0 {:word-chars \"'\"})   ;=> 5"
+  (let (chars (word-chars syntax)
+        start (%skip-word text at true chars false))
+    (%skip-word text start true chars true)))
+
+(defn backward-word (text at:int syntax -> int)
+  "Where the previous word backward from `at` starts in `text`: back past any non-word
+characters, then back past the word — Emacs's `backward-word` (M-b) under `syntax`.
+
+    (text/backward-word \"foo.bar  \" 9 nil)   ;=> 4"
+  (let (chars (word-chars syntax)
+        end (%skip-word text at false chars false))
+    (%skip-word text end false chars true)))
+
+(defn word-bounds (text at:int syntax)
+  "`[start end]` of the word at `at` in `text` under `syntax` — the word holding the
+character at `at`, else the word ending at `at` — or nil when neither is a word character.
+What a word-at-point asks (a double-click, `thing-at-point 'word`).
+
+    (text/word-bounds \"foo.bar\" 5 nil)   ;=> [4 7]
+    (text/word-bounds \"foo bar\" 3 nil)   ;=> [0 3]
+    (text/word-bounds \"a - b\" 2 nil)   ;=> nil"
+  (let (chars (word-chars syntax)
+        start (%skip-word text at false chars true)
+        end (%skip-word text at true chars true))
+    (when (< start end) [start end])))

@@ -148,7 +148,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     // repaint at all. The op vocabulary is plain data, so equality is exact.
                     // A window still hidden paints it anyway: it is the app's first frame,
                     // and the window waits for one to show itself. A window that reports its
-                    // presents presents it again, unchanged (ADR-773): an app paced by
+                    // presents presents it again, unchanged (ADR-775): an app paced by
                     // `[:presented]` that drew a frame owes nothing new — a 60-step game on
                     // a 144 Hz panel, between steps — and, with no present to answer it, would
                     // wait out its own timer with the clock stopped.

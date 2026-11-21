@@ -874,6 +874,12 @@ impl Heap {
         self.roots[i]
     }
 
+    /// The operand-stack slots `start..end`, read in place — a call's arguments where they
+    /// lie, for a check that must not copy them (a contract's vouching, ADR-773).
+    pub(crate) fn roots_slice(&self, start: usize, end: usize) -> &[Value] {
+        &self.roots[start..end]
+    }
+
     /// Overwrite the operand-stack slot at `i` (the VM uses this to write a
     /// computed `let` binding into its frame slot — ADR-076 Stage 2). The slot is
     /// already a tracked root, so the value is relocated by every collection like any

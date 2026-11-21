@@ -122,6 +122,11 @@ enum CalleeKind {
     Fn,
     Native,
     Keyword,
+    /// A contract shim the dispatcher enters (ADR-748): the entry's arm is its ORIGINAL's, for
+    /// a call whose arguments the kernel vouches for (ADR-773). Read only through
+    /// [`CallIcEntry::contracted_arm`]; to every other reader the entry is arm-less, as a
+    /// shim's always was, so nothing links or runs the original without the vouching.
+    Shim,
 }
 
 /// One call-site inline-cache entry — see the [`Heap::vm_call_ics`] field doc.
@@ -196,13 +201,32 @@ impl CallIcEntry {
 
     fn callee(&self) -> Value {
         match self.kind {
-            CalleeKind::Fn => Value::Fn(crate::core::value::ClosureId(self.callee_bits)),
+            CalleeKind::Fn | CalleeKind::Shim => {
+                Value::Fn(crate::core::value::ClosureId(self.callee_bits))
+            }
             CalleeKind::Native => Value::Native(crate::core::value::NativeId(self.callee_bits)),
             CalleeKind::Keyword => Value::Keyword(self.callee_bits as Symbol),
         }
     }
 
+    /// The callee's own arm — never a shim's original's (see [`CalleeKind::Shim`]).
     fn arm(&self) -> Option<(&Arc<crate::eval::compile::ArmHandle>, EnvId)> {
+        if self.kind == CalleeKind::Shim {
+            return None;
+        }
+        self.held_arm()
+    }
+
+    /// A shim entry's original's arm.
+    fn contracted_arm(&self) -> Option<(&Arc<crate::eval::compile::ArmHandle>, EnvId)> {
+        if self.kind != CalleeKind::Shim {
+            return None;
+        }
+        self.held_arm()
+    }
+
+    /// Whichever arm the entry holds, for the install's own bookkeeping.
+    fn held_arm(&self) -> Option<(&Arc<crate::eval::compile::ArmHandle>, EnvId)> {
         self.arm.as_ref().map(|arm| (arm, self.env))
     }
 
@@ -1013,6 +1037,58 @@ impl Heap {
         }
     }
 
+    /// [`Self::vm_call_ic_probe`] for the bytecode call site, which can vouch for a contract
+    /// shim's call (ADR-773): for a shim's entry the arm is its ORIGINAL's and the flag is
+    /// set, and the caller may run that arm only once it has vouched for the arguments.
+    /// One borrow, and no larger an answer than the plain probe's.
+    #[inline]
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn vm_call_ic_probe_shim(
+        &self,
+        site: u32,
+        sym: Symbol,
+        argc: u32,
+        epoch: u64,
+    ) -> Option<(
+        Value,
+        Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))>,
+        bool,
+    )> {
+        let t = self.vm_call_ics.borrow();
+        let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
+        if !e.matches(sym, argc, epoch) {
+            return None;
+        }
+        Some((
+            e.callee(),
+            e.held_arm()
+                .map(|(arm, env)| (arm.clone(), env, e.callee_bases)),
+            e.kind == CalleeKind::Shim,
+        ))
+    }
+
+    /// The ORIGINAL's arm a current entry at `site` caches for the contract shim `shim`
+    /// (ADR-773) — `None` for any other entry, or one cached for another callee. The caller
+    /// still owes the vouching: the arm may run only once the shim's arguments are vouched
+    /// for, and its result is checked unless the declared result is `any`.
+    pub(crate) fn vm_call_ic_contracted(
+        &self,
+        site: u32,
+        sym: Symbol,
+        argc: u32,
+        epoch: u64,
+        shim: Value,
+    ) -> Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))> {
+        let t = self.vm_call_ics.borrow();
+        let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
+        let same = matches!((e.callee(), shim), (Value::Fn(a), Value::Fn(b)) if a == b);
+        if !(same && e.matches(sym, argc, epoch)) {
+            return None;
+        }
+        e.contracted_arm()
+            .map(|(arm, env)| (arm.clone(), env, e.callee_bases))
+    }
+
     /// Fast-link probe for the JIT's native-to-native call path — like
     /// [`Self::vm_call_ic_probe`] but does the *entire* fast-link validation (sym/argc/
     /// epoch match, native code installed + epoch-current, simple arm: `nslots > 0` and a
@@ -1509,6 +1585,28 @@ impl Heap {
         }
     }
 
+    /// Cache that call site `site` resolved global `sym` to the contract shim `shim`, with
+    /// its ORIGINAL's arm `original` for `argc` arguments (ADR-773) — read back only by
+    /// [`Self::vm_call_ic_contracted`]. Every other reader sees the arm-less entry a shim
+    /// had before, so no path runs or links the original without vouching for the call.
+    pub(crate) fn vm_call_ic_install_contracted(
+        &self,
+        site: u32,
+        sym: Symbol,
+        argc: u32,
+        epoch: u64,
+        shim: Value,
+        original: (Arc<crate::eval::compile::ArmHandle>, EnvId),
+    ) {
+        if self.is_dynamic(sym) || !matches!(shim, Value::Fn(_)) {
+            return;
+        }
+        if let Some(mut entry) = CallIcEntry::new(sym, argc, epoch, shim, Some(original)) {
+            entry.kind = CalleeKind::Shim;
+            self.vm_call_ic_put(site, entry);
+        }
+    }
+
     /// Install (or overwrite) call-site `site`'s inline cache entry. An
     /// out-of-range site (a live arm compiled before the last
     /// [`Self::runtime_collect`] table clear) is ignored. Refuses to cache a
@@ -1522,7 +1620,7 @@ impl Heap {
         if is_movable(entry.callee()) {
             return;
         }
-        if let Some((_, env)) = entry.arm()
+        if let Some((_, env)) = entry.held_arm()
             && env != EnvId::GLOBAL
             && env.region() == LOCAL
         {
@@ -1530,7 +1628,7 @@ impl Heap {
         }
         // Resolve the callee arm's IC block BEFORE borrowing the table below —
         // `vm_arm_block` may grow `vm_call_ics` (a nested mutable borrow otherwise).
-        entry.callee_bases = match entry.arm() {
+        entry.callee_bases = match entry.held_arm() {
             Some((arm, _)) => self.vm_arm_block(arm),
             None => (0, 0),
         };

@@ -60,6 +60,17 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Where a run of characters reaches from `at` in rope r: with inside? the run of characters IN set, else of characters NOT in it. Forward (forward? true) it answers the first index at or after `at` whose character ends the run; backward, the smallest index at or before `at` such that every character between it and `at` is in the run. Reads only the run, not the rope: a word motion over a large buffer costs the word. `at` is clamped to the rope.\n\n    (%rope-skip (text/string-> \"  ab cd\") 0 true \" \" true)   ;=> 2",
         rope_skip,
     );
+    primitives.def(
+        "%skip-word",
+        Arity::exact(5),
+        Sig::new(
+            vec![rope_or_string, int, any, string, any],
+            int,
+        ),
+        &["text", "at", "forward?", "word-chars", "inside?"],
+        "Where a run of word characters (inside? true) or of non-word characters (inside? false) reaches from `at` in text, a rope or a string. A word character is a Unicode letter, a number, a combining mark, or one of word-chars — the word syntax of ADR-774. Forward (forward? true) it answers the first index at or after `at` whose character ends the run; backward, the smallest index at or before `at` such that every character between it and `at` is in the run. On a rope it reads only the run, not the text. `at` is clamped to the text.\n\n    (%skip-word \"foo_bar baz\" 0 true \"\" true)   ;=> 3",
+        skip_word,
+    );
 }
 
 /// Simple case folding for one character: its lowercase when that is exactly one
@@ -251,44 +262,61 @@ fn rope_rfind(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     ))
 }
 
-/// How far a run of characters in (or out of) `set` reaches from `at`: forward, the first
-/// index ≥ `at` whose character does not continue the run; backward, the smallest index ≤
-/// `at` such that every character between it and `at` does. Reads only the run itself
-/// (`chars_at` walks the rope's leaves, and `prev` steps back through them), so a word
-/// motion costs the word, not the document.
+/// How many characters of `chars` continue a run (`continues`) before the first that does
+/// not. Polls per character: a run can be the whole document, a file of spaces (ADR-491).
+fn run_length(
+    chars: impl Iterator<Item = char>,
+    continues: impl Fn(char) -> bool,
+) -> Result<usize, LispError> {
+    let mut poll = InterruptPoll::new();
+    let mut length = 0;
+    for character in chars {
+        poll.tick()?;
+        if !continues(character) {
+            break;
+        }
+        length += 1;
+    }
+    Ok(length)
+}
+
+/// How far a run of characters that `continues` reaches from `at` in a rope: forward, the
+/// first index ≥ `at` whose character does not continue the run; backward, the smallest
+/// index ≤ `at` such that every character between it and `at` does. Reads only the run
+/// itself (`chars_at` walks the rope's leaves, and `prev` steps back through them), so a
+/// word motion costs the word, not the document.
 fn skip_run(
     rope: &ropey::Rope,
     at: usize,
     forward: bool,
-    set: &[char],
-    inside: bool,
+    continues: impl Fn(char) -> bool,
 ) -> Result<usize, LispError> {
-    let n = rope.len_chars();
-    let at = at.min(n);
-    let continues = |c: char| set.contains(&c) == inside;
-    // a run can be the whole document (a file of spaces): poll per character (ADR-491)
-    let mut poll = InterruptPoll::new();
+    let at = at.min(rope.len_chars());
+    let mut chars = rope.chars_at(at);
     if forward {
-        let mut index = at;
-        for c in rope.chars_at(at) {
-            poll.tick()?;
-            if !continues(c) {
-                break;
-            }
-            index += 1;
-        }
-        Ok(index)
+        Ok(at + run_length(chars, continues)?)
     } else {
-        let mut index = at;
-        let mut chars = rope.chars_at(at);
-        while let Some(c) = chars.prev() {
-            poll.tick()?;
-            if !continues(c) {
-                break;
-            }
-            index -= 1;
-        }
-        Ok(index)
+        Ok(at - run_length(std::iter::from_fn(|| chars.prev()), continues)?)
+    }
+}
+
+/// [`skip_run`] over a string, for the short texts (a prompt's line, one character) that
+/// are not ropes.
+fn skip_run_in_string(
+    text: &str,
+    at: usize,
+    forward: bool,
+    continues: impl Fn(char) -> bool,
+) -> Result<usize, LispError> {
+    let at_byte = text
+        .char_indices()
+        .nth(at)
+        .map_or(text.len(), |(byte, _)| byte);
+    let at = text[..at_byte].chars().count();
+    if forward {
+        Ok(at + run_length(text[at_byte..].chars(), continues)?)
+    } else {
+        Ok(at - run_length(text[..at_byte].chars().rev(), continues)?)
     }
 }
 
@@ -302,7 +330,34 @@ fn rope_skip(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         .collect();
     let at = expect_int(heap, who, arg(args, 1))?.max(0) as usize;
     let rope = expect_rope_ref(heap, who, arg(args, 0))?;
-    Ok(Value::Int(skip_run(rope, at, forward, &set, inside)? as i64))
+    let continues = |character: char| set.contains(&character) == inside;
+    Ok(Value::Int(skip_run(rope, at, forward, continues)? as i64))
+}
+
+/// Is `character` a word constituent under a word syntax whose extra word characters are
+/// `word_chars` (ADR-774)? Emacs's `w` class: a letter or a number in any script, plus a
+/// combining mark so a decomposed `é` stays inside its word, plus what the mode adds.
+fn is_word_char(character: char, word_chars: &[char]) -> bool {
+    character.is_alphanumeric()
+        || unicode_normalization::char::is_combining_mark(character)
+        || word_chars.contains(&character)
+}
+
+/// `(%skip-word text at forward? word-chars inside?)`
+fn skip_word(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "%skip-word";
+    let forward = truthy(arg(args, 2));
+    let inside = truthy(arg(args, 4));
+    let word_chars: Vec<char> = expect_string_ref(heap, who, arg(args, 3))?
+        .chars()
+        .collect();
+    let at = expect_int(heap, who, arg(args, 1))?.max(0) as usize;
+    let continues = |character: char| is_word_char(character, &word_chars) == inside;
+    let index = match arg(args, 0) {
+        Value::Str(id) => skip_run_in_string(heap.string(id), at, forward, continues)?,
+        text => skip_run(expect_rope_ref(heap, who, text)?, at, forward, continues)?,
+    };
+    Ok(Value::Int(index as i64))
 }
 
 #[cfg(test)]
@@ -415,5 +470,68 @@ mod find_tests {
                 }
             }
         }
+    }
+
+    /// A word scan over a rope of many leaves answers what the same scan over the flat
+    /// string answers, at every offset, in both directions, for both runs, and for a word
+    /// syntax with and without extra word characters (ADR-774).
+    #[test]
+    fn word_scan_over_a_rope_agrees_with_the_string_scan() {
+        let unit = "don't foo_bar ταχύ e\u{301}te x2 (a-b) 50% ";
+        let text: String = unit.repeat(400);
+        let rope = ropey::Rope::from_str(&text);
+        assert!(
+            rope.chunks().count() > 4,
+            "the text must span several leaves"
+        );
+        for word_chars in [vec![], vec!['\'', '%']] {
+            for inside in [false, true] {
+                let continues = |character: char| is_word_char(character, &word_chars) == inside;
+                for at in (0..=rope.len_chars()).step_by(7) {
+                    for forward in [false, true] {
+                        assert_eq!(
+                            skip_run(&rope, at, forward, continues).unwrap(),
+                            skip_run_in_string(&text, at, forward, continues).unwrap(),
+                            "at {at} forward {forward} inside {inside} extras {word_chars:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Letters and digits of any script and combining marks are word characters; `_`, `-`,
+    /// `'` and `.` are not, unless the word syntax adds them.
+    #[test]
+    fn a_word_is_letters_digits_and_the_declared_extras() {
+        for character in ['a', 'Z', '7', 'é', 'λ', '中', '\u{301}'] {
+            assert!(is_word_char(character, &[]), "{character:?}");
+        }
+        for character in ['_', '-', '\'', '.', ' ', '(', '/'] {
+            assert!(!is_word_char(character, &[]), "{character:?}");
+        }
+        assert!(is_word_char('\'', &['\'']));
+        assert_eq!(
+            skip_run_in_string("foo_bar", 0, true, |character| is_word_char(character, &[]))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            skip_run_in_string("don't x", 0, true, |character| is_word_char(
+                character,
+                &['\'']
+            ))
+            .unwrap(),
+            5
+        );
+        assert_eq!(
+            skip_run_in_string("ab", 9, true, |character| is_word_char(character, &[])).unwrap(),
+            2
+        );
+        assert_eq!(
+            skip_run_in_string("ab cd", 5, false, |character| is_word_char(character, &[]))
+                .unwrap(),
+            3
+        );
     }
 }
