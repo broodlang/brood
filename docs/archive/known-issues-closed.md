@@ -83,6 +83,40 @@ and `terminate` call the machine's clauses through its global name.
 **Guard.** `gen_test` "a running server adopts a redefinition, and code-change runs the NEW
 migration" (red against the previous `gen.blsp`); `statem_test` "a running machine adopts a
 redefinition".
+## KI-405 — full.yml's AddressSanitizer job no longer fit its runner ✅ fixed 2026-11-20
+
+**Symptom.** `AddressSanitizer (kernel tests)` red four runs in a row, no memory error in any:
+twice `The hosted runner lost communication with the server` at 85 minutes, with no log
+(runs 44601155754 on `c41ca2f6c`, 44691308011 on `4740f6e5c`); twice `exceeded the maximum
+execution time of 2h30m0s`, the first with `brood_suite_passes` killed at `TRY 1 TMT
+[5400.058s]` (44623644866 on `c48f4bfbd`). The last green run (44507391905, `1383f37cf`) passed
+it in 5002 s.
+
+**Cause.** The runner, not a commit. Every ASan test ran 15-25% slower between the green run
+and the red ones — `types` 219 → 274 s, `tail_positions` 420 → 512 s, `image_matches_source`
+1842 → 2100 s — on the same nightly (`65ce8611f 2026-11-18`), the runner image having moved from
+20261103 to 20261111. `v0.56.0`, the green commit, ran out of time on the new image too (run
+44702475115). The suite ran beside every other test on one runner at 93% of its cap, so the
+slowdown took it over; the lost runners read as starvation at the same point of the run.
+
+**Why it survived.** Nothing measures the margin: the ASan job is weekly, its suite's per-test
+times were never printed (the runner's report comes at the end, which a killed run never
+reaches, and nextest hides a passing test's output), and a lost runner leaves no log at all.
+
+**Fix.** `make asan` takes `ASAN_FILTER`, and full.yml runs it as two jobs that between them
+run every test: the in-language suite (`binary(suite)`) on a runner of its own, its cap 7200 s
+and its job 210 minutes, and everything else in 150. Nothing is filtered out. `4740f6e5c` makes
+the ASan target trace the suite (`BROOD_TEST_TRACE`) and show its output on a pass, so the next
+slow run names its tests and a green one is the baseline.
+
+**Guard.** None can be in a test: this is the runner's budget. Closed on a green full.yml with
+both jobs.
+
+**Closed (2026-11-20).** full.yml run 44740297280 on `113a88d16`, green. `AddressSanitizer
+(in-language suite)`: `brood_suite_passes` in 3128 s of its 7200 s cap (8716 tests, 8666
+passed, 50 skipped), the job 154 of its 210 minutes. `AddressSanitizer (kernel tests)`: 1925
+tests in 1684 s, the job 43 of its 150 minutes. On a runner of its own the suite takes 63% of the
+5002 s it took sharing one, so most of the old margin went to the neighbours, not the image.
 
 ## KI-404 — the pattern compiler accepted `&optional` in a vector pattern and junk after a record's field map ✅ fixed 2026-11-19
 

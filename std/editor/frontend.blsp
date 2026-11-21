@@ -349,7 +349,9 @@ runtime built with `--features gui` (`./configure --with-gui && make install`), 
 
 `opts` is passed through to `gui/open`, so a frontend can ask for a window that
 suits it: `:title` names it, `:width`/`:height` size it (logical pixels), `:input :pixels`
-and `:vsync true` are the game options (ADR-374), `:key-repeat :os` hands a held key's repeat
+and `:vsync true` are the game options (ADR-374), `:present-events true` has the window send
+`[:presented t-ns]` after each frame it presents, the clock a game paces itself by (ADR-775;
+the map's `:refresh-hz` answers the monitor's rate, or nil), `:key-repeat :os` hands a held key's repeat
 to the OS (the user's delay and rate; at most one undelivered, taken back at the
 release), `:ime false` turns the input method off and `:wheel :glide` makes a wheel notch
 glide instead of scrolling its three lines at once (ADR-441), `:option-meta` picks which macOS
@@ -376,6 +378,9 @@ their input. Both are deferred trade-offs (ADR-059), fine for the observer.
       {:enter (fn () nil)
        :leave (fn () (gui/close id))
        :size (fn () (gui/size id))
+       ;; the monitor's refresh in hertz, or nil: what a game paced by `[:presented t-ns]`
+       ;; snaps its frame times to (ADR-775)
+       :refresh-hz (fn () (gui/refresh-hz id))
        :draw (fn (f) (gui/draw id f))
        ;; the window takes `ui-memo` markers: a fragment the loop reused is not parsed
        ;; again, and is the same allocation as last frame's to its diff (ADR-470)

@@ -6,20 +6,57 @@ write every module's bindings to one sectioned image, and materialise them on th
 run instead of re-evaluating source. `load-sources-cached` is the entry `project/setup`
 takes; everything else is the mechanism behind it.")
 
-(def- *file* ".brood/image.bin")
+;; A project keeps one image per SLOT — a build and contract mode, the half of the key no
+;; partial rebuild can work around — under `.brood/image-<slot>.*`. With one file, two
+;; toolchains used in one checkout (an installed `nest` and one built from a working tree, a
+;; profiling build, a release beside a debug binary) each threw the other's image away, and
+;; every switch paid a whole rebuild: seconds on bedit. A slot read is touched, so the
+;; `*slots-kept*` most recently USED survive a run of fresh dev builds.
+(def- *slots-kept* 3)
 
-;; The files the modules in the image spliced in with `include-str`, one absolute path per
-;; line, written beside the image. Part of the staleness key (KI-275): the image holds what
-;; a module built from that text, and a `.blsp`-only key served the old text after an edit.
-;; Read before anything loads — which is why it is a file, not something the image carries.
-(def- *includes-file* ".brood/image.includes")
+;; The three files of a slot, by suffix:
+;; - `.bin` the sectioned image;
+;; - `.includes` the files the modules in the image spliced in with `include-str`, one
+;;   absolute path per line. Part of the staleness key (KI-275): the image holds what a
+;;   module built from that text, and a `.blsp`-only key served the old text after an edit.
+;;   Read before anything loads — which is why it is a file, not something the image carries;
+;; - `.modules` what the partial rebuild needs to know about the image beside it (ADR-419),
+;;   one readable map: the fingerprint the image was stamped with (to open it after the tree
+;;   moved on), its global key (the build, the contract mode, the dependency and included
+;;   files), each source file's stamp, the registrations each project module's load wrote,
+;;   and the modules whose load evaluated source text. Read only when the full fingerprint
+;;   misses.
+(def- *slot-suffixes* [".bin" ".includes" ".modules"])
 
-;; What the partial rebuild needs to know about the image beside it (ADR-419), one readable
-;; map: the fingerprint the image was stamped with (to open it after the tree moved on), its
-;; global key (the build, the contract mode, the dependency and included files), each source
-;; file's stamp, the registrations each project module's load wrote, and the modules whose
-;; load evaluated source text. Read only when the full fingerprint misses.
-(def- *modules-file* ".brood/image.modules")
+;; This run's slot. The build id is already a file name (`0.57.0+<sha>+<binary stamp>`).
+(defn- image-slot ()
+  (str (system/build-id) (if (%contracts-armed?) "-contracts" "")))
+
+(defn- slot-file (root suffix)
+  (path/join root ".brood" (str "image-" (image-slot) suffix)))
+
+;; Keep the `*slots-kept*` most recently used slots of `root` and delete the rest. Best-effort:
+;; a file another run holds open, or a read-only checkout, keeps what it cannot delete.
+(defn- prune-image-slots (root)
+  (let (dir (path/join root ".brood")
+        images (seq/keep (file/ls dir)
+                 (fn (name) (match name ((str "image-" _ ".bin") (path/join dir name)) (_ nil)))))
+    (doseq (image (least-recent images *slots-kept*))
+      (doseq (suffix *slot-suffixes*)
+        ;; check-allow :discarded-catch — a best-effort cache delete: a kept file costs disk only
+        (check-allow :discarded-catch
+          (try (file/rm (str (string/drop-suffix image ".bin") suffix)) (catch _ nil)))))))
+
+(defn least-recent (paths:seqable keep:int -> any)
+  "All but the `keep` most recently modified of `paths` — what a cache that keeps a few slots evicts; a missing file counts as oldest.
+
+    (project-image/least-recent nil 3)   ;=> nil"
+  (drop (seq/sort-by paths (fn (path) (- (or (file/mtime path) 0)))) keep))
+
+;; Mark this run's slot used, so pruning keeps it.
+(defn- touch-image-slot (root)
+  ;; check-allow :discarded-catch — a best-effort cache stamp: a read-only checkout keeps its age
+  (check-allow :discarded-catch (try (file/set-mtime (image-path root) (os/now)) (catch _ nil))))
 
 ;; A registry global is one that LOADING mutates rather than creates — `*impls*`,
 ;; `*methods*`, `*module-docs*`, … They already exist after the prelude, so the "names that
@@ -57,10 +94,10 @@ takes; everything else is the mechanism behind it.")
     '*project-modules*])
 
 (defn image-path (root)
-  "Where `root`'s startup image lives.
+  "Where `root`'s startup image for this build and contract mode lives.
 
-    (project-image/image-path \"/app\")   ;=> \"/app/.brood/image.bin\""
-  (path/join root *file*))
+    (project-image/image-path \"/app\")   ;~> \"/app/.brood/image-0.57.0+…+….bin\""
+  (slot-file root ".bin"))
 
 ;; The staleness key: every source file's path + size + mtime, plus the running
 ;; binary's build id. Any edit, add or delete changes it, as does a new `brood`.
@@ -127,7 +164,7 @@ come from `*module-files*`).
 ;; The included files the last image write recorded for this project, or none.
 (defn- project-included-files ()
   (let (root (when (bound? 'project/*root*) project/*root*)
-        listing (when root (path/join root *includes-file*)))
+        listing (when root (slot-file root ".includes")))
     (if (and listing (file/exists? listing))
       (seq/reject (string/split (file/slurp listing) "\n") empty?)
       (list))))
@@ -416,11 +453,11 @@ in the image now on disk: those are copied byte for byte rather than re-encoded,
 the rebuild did not touch need not be materialised to be written again. Beside the image goes
 the record the next partial rebuild reads.
 
-    (project-image/write-image \"/path/to/proj\" before (stdimage/registrations-by-module))   ;~> 5310 — entries written to /path/to/proj/.brood/image.bin"
+    (project-image/write-image \"/path/to/proj\" before (stdimage/registrations-by-module))   ;~> 5310 — entries written to /path/to/proj/.brood/image-<slot>.bin"
   (let (dir (path/dirname (image-path root)))
     (when (not (file/dir? dir)) (file/mkdir dir))
     ;; Before the fingerprint below, which reads this list back.
-    (file/spit (path/join root *includes-file*)
+    (file/spit (slot-file root ".includes")
       (string/join (%included-files) "\n"))
     (let (fp (project-image-fingerprint root)
           previous (if reloaded (read-modules-record root) nil)
@@ -428,6 +465,7 @@ the record the next partial rebuild reads.
                         (image-prune-foreign-registrations before-regs)
                         (%image-write (image-path root) (project-partial-sections before kept) fp))))
       (write-modules-record! root fp reloaded previous)
+      (prune-image-slots root)
       n)))
 
 ;; The registrations each project or dependency module's load wrote, as `module -> [[registry
@@ -471,7 +509,7 @@ the record the next partial rebuild reads.
                               (fn (m)
                                 (and (not (contains? reloaded m)) (contains? *module-files* m))))))))))
 
-(defn- modules-record-path (root) (path/join root *modules-file*))
+(defn- modules-record-path (root) (slot-file root ".modules"))
 
 ;; Best-effort, like the image: a record that cannot be written costs the next edit a full
 ;; rebuild, never a wrong answer.
@@ -542,7 +580,9 @@ the record the next partial rebuild reads.
         (%registry-cas! r after (project-registry-merge-values after before))))))
 
 (defn- project-install-image (root fp &optional choose)
-  (image-install (image-path root) fp choose))
+  (let (sections (image-install (image-path root) fp choose))
+    (when sections (touch-image-slot root))
+    sections))
 
 ;; Install the image at `path` (a file, or a `mem:` path a host provided) when its stamp is
 ;; `fp` — the project's, or a release bundle's (ADR-484), which have no root on disk.

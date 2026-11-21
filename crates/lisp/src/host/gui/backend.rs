@@ -24,6 +24,8 @@ mod keyboard;
 mod main_thread;
 mod offscreen;
 mod paint;
+#[cfg(test)]
+mod present_tests;
 mod primitives;
 mod render;
 mod rows;
@@ -69,8 +71,9 @@ pub use primitives::{
     bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font, font_info,
     fullscreen, grab, held_key, icon, input_mode, inset, key_repeat, key_repeats, latency,
     latency_histograms, ligatures, line_height, maximize, minimize, next_texture_id, open,
-    register_family, register_installed_family, render_frame, settle, size, size_px, sound,
-    sound_free, text_aa, text_contrast, text_hinting, texture, texture_free, title, window_ids,
+    refresh_hz, register_family, register_installed_family, render_frame, settle, size, size_px,
+    sound, sound_free, text_aa, text_contrast, text_hinting, texture, texture_free, title,
+    window_ids,
 };
 
 use super::{
@@ -395,6 +398,7 @@ struct OpenReply {
     keys: Arc<Mutex<KeyReport>>,
     key_repeat: Arc<AtomicBool>,
     latency: Arc<Mutex<LatencyLog>>,
+    refresh_millihertz: Arc<AtomicU32>,
 }
 
 /// What the Brood side keeps per open window (keyed by the id `open` returns) —
@@ -419,6 +423,9 @@ struct WinHandle {
     /// `gui-latency` (ADR-440), and the session's distribution per kind of input, for
     /// `gui-latency-histogram` (ADR-612).
     latency: Arc<Mutex<LatencyLog>>,
+    /// The monitor's refresh in millihertz, 0 when unknown (`Win::refresh_millihertz`),
+    /// for `gui-refresh-hz`.
+    refresh_millihertz: Arc<AtomicU32>,
 }
 
 /// The one GUI thread's event-loop proxy, started lazily on the first `open`.
@@ -558,13 +565,19 @@ struct Win {
     /// When to repaint next for the particles in flight (`[:emitter …]`): they move between
     /// frames, so the window repaints on its own, once a refresh of its monitor, while any live.
     particles_next: Option<Instant>,
-    /// How long one refresh of the monitor the window is on lasts (`frame_period`): the step
+    /// How long one refresh of the monitor the window is on lasts (`period_of`): the step
     /// of everything the window animates by itself — a kinetic coast, particles — so each
     /// refresh shows exactly one step, on a 60 Hz panel and a 144 Hz one alike. Re-read by a
     /// paint at most once every `FRAME_PERIOD_REREAD` (`frame_period_at`).
     frame_period: Duration,
     /// When `frame_period` was last read.
     frame_period_at: Instant,
+    /// The monitor's refresh as the platform reports it, in millihertz (0: it does not
+    /// say), re-read with `frame_period` and shared with `gui-refresh-hz`.
+    refresh_millihertz: Arc<AtomicU32>,
+    /// Whether each successful present is told to the subscriber as `[:presented t-ns]`
+    /// (`WindowSpec::present_events`).
+    present_events: bool,
     /// The size the app was last told to lay out in (`publish_size`): cells, or pixels for a
     /// pixel-input window. None until the first `[:resize]` has gone.
     published_size: Option<(u32, u32)>,
@@ -723,6 +736,7 @@ impl GuiApp {
                     keys: win.keyboard.report(),
                     key_repeat: win.keyboard.received_repeat(),
                     latency: win.latency.clone(),
+                    refresh_millihertz: win.refresh_millihertz.clone(),
                 }));
                 self.ids.insert(id, wid);
                 self.wins.insert(wid, win);
@@ -899,25 +913,58 @@ fn resize_of(pixel_input: bool, (width, height): (u32, u32)) -> Message {
     }
 }
 
-/// One refresh of the monitor `window` is on — what everything the window animates by
-/// itself steps by ([`period_of`]).
-pub(super) fn frame_period(window: &Window) -> Duration {
-    period_of(
-        window
-            .current_monitor()
-            .and_then(|monitor| monitor.refresh_rate_millihertz()),
-    )
+/// The refresh of the monitor `window` is on, in millihertz, as the platform reports it —
+/// `None` when it cannot say (no monitor yet, a backend that reports no rate). Unclamped:
+/// what `gui-refresh-hz` answers; [`period_of`] turns it into the step of everything the
+/// window animates by itself.
+pub(super) fn refresh_millihertz(window: &Window) -> Option<u32> {
+    window
+        .current_monitor()
+        .and_then(|monitor| monitor.refresh_rate_millihertz())
+}
+
+/// `instant` on `os/now-ns`'s clock (nanoseconds since the Unix epoch), kept monotonic:
+/// the wall clock is read once, at the first call, and every later reading is that plus
+/// the monotonic time since — so two presents a refresh apart are a refresh apart even
+/// across an NTP step, and a reading still compares with `os/now-ns` (to within the
+/// wall clock's drift since the first present).
+pub(super) fn present_ns(instant: Instant) -> i64 {
+    static ANCHOR: OnceLock<(Instant, i64)> = OnceLock::new();
+    let (anchor_instant, anchor_ns) = *ANCHOR.get_or_init(|| {
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos() as i64)
+            .unwrap_or(0);
+        (Instant::now(), wall)
+    });
+    match instant.checked_duration_since(anchor_instant) {
+        Some(after) => anchor_ns + after.as_nanos() as i64,
+        None => anchor_ns - anchor_instant.duration_since(instant).as_nanos() as i64,
+    }
+}
+
+/// What a window tells its app about one paint (`WindowSpec::present_events`):
+/// `[:presented t-ns]` when the window asked for present events and the paint reached the
+/// compositor (`presented_at`, the moment the present returned), nothing otherwise — not
+/// for a window that did not ask, and not for a paint that presented nothing (a GPU frame
+/// skipped for want of a swapchain image, a CPU buffer that could not be had).
+pub(super) fn present_event(asked: bool, presented_at: Option<Instant>) -> Option<Message> {
+    let at = presented_at.filter(|_| asked)?;
+    Some(Message::Vector(vec![
+        Message::Keyword(value::intern("presented")),
+        Message::Int(present_ns(at)),
+    ]))
 }
 
 /// One refresh at `millihertz`: 60 Hz's when the platform cannot say (no monitor yet, a
 /// backend that reports no rate), and a rate outside 30..=360 Hz clamped into it, so a bogus
 /// report can neither stall the window's animation nor flood it.
-fn period_of(millihertz: Option<u32>) -> Duration {
+pub(super) fn period_of(millihertz: Option<u32>) -> Duration {
     let rate = millihertz.unwrap_or(60_000).clamp(30_000, 360_000);
     Duration::from_nanos(1_000_000_000_000 / u64::from(rate))
 }
 
-/// How often a window re-reads its monitor's refresh ([`frame_period`]): a move between
+/// How often a window re-reads its monitor's refresh ([`refresh_millihertz`]): a move between
 /// panels at one scale sends no event, and on some platforms the read is a driver query, too
 /// dear for every paint.
 const FRAME_PERIOD_REREAD: Duration = Duration::from_secs(1);

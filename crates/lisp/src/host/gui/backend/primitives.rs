@@ -87,6 +87,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
                 keys: Arc::default(),
                 key_repeat: Arc::default(),
                 latency: Arc::default(),
+                refresh_millihertz: Arc::default(),
             },
         );
         deliver_undelivered_degradations(subscriber);
@@ -111,6 +112,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
         keys,
         key_repeat,
         latency,
+        refresh_millihertz,
     } = reply_rx
         .recv()
         .map_err(|_| "gui thread did not reply".to_string())??;
@@ -123,6 +125,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
             keys,
             key_repeat,
             latency,
+            refresh_millihertz,
         },
     );
     deliver_undelivered_degradations(subscriber);
@@ -289,6 +292,17 @@ pub fn latency_histograms(id: u64) -> Result<(LatencyHistogram, LatencyHistogram
     let h = w.get(&id).ok_or("gui window not open")?;
     let log = lock(&h.latency);
     Ok((log.keys.clone(), log.pointer.clone()))
+}
+
+/// `(gui-refresh-hz id)` — the refresh rate of the monitor window `id` is on, in hertz
+/// (`59.951`, `144.0`), as the platform reports it; `None` when it does not say, and
+/// headless, where there is no monitor. Re-read at most once a second while the window
+/// paints, so a window dragged to another monitor follows it.
+pub fn refresh_hz(id: u64) -> Result<Option<f64>, String> {
+    let w = lock(windows());
+    let h = w.get(&id).ok_or("gui window not open")?;
+    let millihertz = h.refresh_millihertz.load(Ordering::Relaxed);
+    Ok((millihertz > 0).then(|| f64::from(millihertz) / 1000.0))
 }
 
 /// `(gui-key-repeat? id)` — whether the last key press window `id`'s app took from its

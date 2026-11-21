@@ -147,8 +147,15 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     // changed nothing, a model turn whose view is unchanged — costs no
                     // repaint at all. The op vocabulary is plain data, so equality is exact.
                     // A window still hidden paints it anyway: it is the app's first frame,
-                    // and the window waits for one to show itself.
+                    // and the window waits for one to show itself. A window that reports its
+                    // presents presents it again, unchanged (ADR-775): an app paced by
+                    // `[:presented]` that drew a frame owes nothing new — a 60-step game on
+                    // a 144 Hz panel, between steps — and, with no present to answer it, would
+                    // wait out its own timer with the clock stopped.
                     if ops == w.frame && w.shown {
+                        if w.present_events {
+                            w.window.request_redraw();
+                        }
                         return;
                     }
                     // Two frames before one paint keep the EARLIER input's stamp: the
@@ -972,20 +979,32 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 // 60 Hz panel to a 144 Hz one at the same scale gets no event that says so, and
                 // its coast and particles step by it.
                 if paint_start.duration_since(w.frame_period_at) >= FRAME_PERIOD_REREAD {
-                    w.frame_period = frame_period(&w.window);
+                    let millihertz = refresh_millihertz(&w.window);
+                    w.frame_period = period_of(millihertz);
+                    w.refresh_millihertz
+                        .store(millihertz.unwrap_or(0), Ordering::Relaxed);
                     w.frame_period_at = paint_start;
                 }
-                let painted: Option<Option<[u64; 5]>> = match &mut w.backend {
-                    Backend::Cpu { surface, .. } => {
-                        paint(surface, &w.window, &mut w.renderer, frame);
-                        Some(None)
-                    }
-                    #[cfg(feature = "gui-gpu")]
-                    Backend::Gpu(gpu) => gpu
-                        .paint(frame, &mut w.renderer)
-                        .map(|times| Some(times.phases())),
-                };
+                // `reached_compositor`: whether a frame went out, what `[:presented t-ns]` reports.
+                let (painted, reached_compositor): (Option<Option<[u64; 5]>>, bool) =
+                    match &mut w.backend {
+                        Backend::Cpu { surface, .. } => {
+                            let presented = paint(surface, &w.window, &mut w.renderer, frame);
+                            (Some(None), presented)
+                        }
+                        #[cfg(feature = "gui-gpu")]
+                        Backend::Gpu(gpu) => {
+                            let times = gpu.paint(frame, &mut w.renderer);
+                            (times.map(|times| Some(times.phases())), times.is_some())
+                        }
+                    };
                 let presented = Instant::now();
+                // The app that asked hears of every present, the clock it paces its frames by.
+                if let Some(message) =
+                    present_event(w.present_events, reached_compositor.then_some(presented))
+                {
+                    deliver(w.subscriber, message);
+                }
                 // The app has drawn: the window may appear. Shown even when the GPU skipped
                 // this frame — a surface reports itself occluded while its window is hidden
                 // (Metal does), so waiting for a presented frame would wait out

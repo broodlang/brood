@@ -110,7 +110,17 @@ fn answer(out: &Output) -> String {
 fn build(dir: &Path, sequential: bool) -> (String, String, usize) {
     let _ = std::fs::remove_dir_all(dir.join(".brood"));
     let cold = answer(&nest(dir, &["run", "--no-check"], sequential));
-    let record = std::fs::read_to_string(dir.join(".brood/image.modules")).expect("the record");
+    // The cold run wrote one slot (`.brood/image-<build>.modules`) into a fresh `.brood`.
+    let record_path = std::fs::read_dir(dir.join(".brood"))
+        .expect("the image directory")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "modules")
+        })
+        .expect("the record");
+    let record = std::fs::read_to_string(record_path).expect("the record");
     let mut warm = Command::new(env!("CARGO_BIN_EXE_nest"));
     warm.args(["run", "--no-check"])
         .current_dir(dir)

@@ -2364,3 +2364,31 @@ of the same name share the declared-sig store, so the later erased the earlier
 (`editor/treesit`'s `parse-state` type); an alias is stored under its own key now, so a type
 and a function may share a name, as bedit's `liveeval` also does. The record contract checks DECLARED field types only — a record carries what
 `assoc` added. Every guard sabotage-verified.
+2026-11-20 (ADR-775). **A window can tell its app each time a frame is presented.** b2d's loop
+stepped on a timer and drew fire-and-forget into a FIFO window, so a 60 Hz timer beat against
+the panel: frames shown twice or dropped, visible as jitter in dino. `gui/open {:present-events
+true}` now delivers `[:presented t-ns]` (on `os/now-ns`'s clock, kept monotonic) after every
+present that reached the compositor, GPU target and CPU painter alike; headless and a skipped
+frame send nothing, and it is off by default. `gui/refresh-hz` (and a `gui-display`'s
+`:refresh-hz`) answers the monitor's rate. Found while measuring: the window drops a frame
+identical to the one on screen, so a present-paced loop with nothing new to draw (a 60-step game
+between steps on a 144 Hz panel) got no present back and stalled on its timer — presents fell
+from 144 to ~23 a second; such a window now presents the identical frame again. Also measured: a
+loop that draws on each present under FIFO on GNOME got its presents 1, 2 or 3 refreshes apart
+(a trivial probe at 144 Hz: 147 of 299 one refresh apart), under MAILBOX one a refresh (998 of
+999) — b2d's present-paced loop opens with the window's default. Guards: `present_tests`,
+`window_spec_tests` (sabotaged: both red with the opt-in check removed),
+`tests/gui_present_events_test.blsp`. Not run here: the full suites (desktop rule).
+
+2026-11-20. **A project's image and check verdicts are kept per build (ADR-776).** Asking
+whether startup needs compiled code cached: measured on the test machine, it does not. On
+bedit's warm start (0.27 s) the VM compiler is ~1% of the samples, about 3 ms; Cranelift runs
+on its own `brood-jit` thread, and `BROOD_TIER=1` starts in the same time. A cold load (3.5 s)
+spends ~2.4% of its loader samples compiling and ~3.5% expanding macros. What the measuring
+did find: the project image and the check manifests were one file each, stamped with the
+build, so the second binary used on a checkout (installed beside dev, a profiling build,
+`BROOD_TIER=1`) threw the first one's away, and the next switch back cost bedit a 4 s
+`nest run` with 26 s of CPU. Both are now kept per build, three slots each, the least recently
+used evicted (a read touches its slot). Guard `image_slots` drives four builds from one copy of
+the binary whose mtime it resets before each run; red with one image path, and with either
+touch removed (the oldest-written slot goes instead of the least recently used).
