@@ -258,6 +258,31 @@ fn deep_handle_spill_under_jit() {
     );
 }
 
+#[test]
+fn call_spills_never_land_on_a_join_carried_operand() {
+    // dino's tiger sprite, reported as "an absent `&optional` gets a stale value once hot".
+    // The tail call's staged head and its first argument cross the `(or sheet …)` join, so
+    // they are carried in the block-argument spill window; the non-tail `(nearest alpha)`
+    // then spills the two map/vector reads below it. Those reads were not counted as handle
+    // producers, so the call-result half of the reserve held one slot, and the second spill
+    // went on into the window — over the staged head — and the native tail call called the
+    // tint's 208. Now the reads are counted, and a call spill that would reach the window
+    // bails the arm instead.
+    is(
+        "(defn nearest (value) (+ value 1))
+         (defn draw (image left options) [image left options])
+         (defn sprite (art pose alpha &optional sheet)
+           (draw (or sheet (get art :tiger)) (get pose :left)
+                 [(nth (get pose :tint) 0) (nearest alpha)]))
+         (defn run (k last)
+           (if (< k 1)
+             last
+             (run (- k 1) (first (sprite {:tiger :sheet} {:left 1.0 :tint [208 200]} 0.5)))))
+         (run 20000 nil)",
+        ":sheet",
+    );
+}
+
 // NOTE: the self-inliner is always on, so an ordinary `cargo test --features jit --test jit`
 // exercises it. The `inlined_*` tests below assert the engine-independent result.
 #[test]

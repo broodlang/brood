@@ -458,6 +458,12 @@ fn jit_lower_arm_inner(
     let spill_base = frame_top_for_spills - reserve;
     let (blockarg_spill_base, blockarg_spill_len) =
         crate::eval::compile::jit_plan::blockarg_spill_window(code, reserve, frame_top_for_spills);
+    // The call-result half is what lies BELOW the block-argument window. A call spill past
+    // it lands on a slot the window gives an operand-stack position: a value carried across
+    // a join (a staged call head, say) is overwritten by a handle spilled at a later call,
+    // and the tail call then calls that handle — dino's `cannot call non-function: 208`,
+    // reported as an `&optional` bug because `(or sheet …)` is the join that put it there.
+    let call_spill_capacity = reserve - blockarg_spill_len;
     let mut spill_next = 0usize;
     // Return-via-roots writes/reads the result at `roots[base]` (slot 0), and the VM hooks
     // read it back the same way — both require slot 0 to exist. A 0-slot arm (a 0-arg,
@@ -918,7 +924,7 @@ fn jit_lower_arm_inner(
                         },
                         head_gsite,
                         spill_base,
-                        reserve,
+                        call_spill_capacity,
                         epoch_ptr,
                         tailcall,
                         unwindable.then_some(j),

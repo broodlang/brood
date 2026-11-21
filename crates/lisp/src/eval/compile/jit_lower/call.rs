@@ -70,7 +70,9 @@ pub(super) fn emit_call(
     // (`CompiledArm::tail_head_gsite`); unused otherwise.
     head_gsite: u32,
     spill_base: usize,
-    reserve: usize,
+    // How many call-result spill slots lie at `spill_base`: the reserve less the
+    // block-argument window above them, which a call spill must never reach.
+    call_spill_capacity: usize,
     epoch_ptr: Option<Value>,
     tailcall: Block,
     // This call's ip, when the activation may be rebuilt mid-call: a non-tail call's error
@@ -115,7 +117,7 @@ pub(super) fn emit_call(
         .or_bail("operand-stack-underflow")?;
     for d in 0..below {
         if matches!(stack[d], Op::Handle(..)) {
-            if *spill_next >= reserve {
+            if *spill_next >= call_spill_capacity {
                 return super::bail("call-spill-exhausted");
             }
             let slot = spill_base + *spill_next;
