@@ -610,8 +610,7 @@ impl Heap {
     }
 
     /// Does the constructor of record `symbol` declare a field type other than `any`, `_` or a
-    /// type variable — the
-    /// `(record :__id__ … :field T …)` after its signature's `->`?
+    /// type variable — in the `(record :__id__ … :field T …)` after its signature's `->`?
     fn record_declares_field_types(&self, symbol: Symbol) -> bool {
         let Some(sig) =
             crate::builtins::modules::sig_type_of(self, self.declared_sig_value(symbol))
