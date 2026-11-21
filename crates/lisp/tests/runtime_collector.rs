@@ -835,7 +835,10 @@ fn drained_within_budget(heap: &Heap) -> bool {
     let budget = Duration::from_secs(5);
     let deadline = Instant::now() + budget;
     loop {
-        if process::old_gen_drained(heap) {
+        // Freed already counts: the report that completes a drain frees it at once
+        // (`free_if_last_to_ack`, KI-407), ending the drain — and a free requires every live
+        // process, the parked one included, to have acked, which is what is asked here.
+        if !heap.drain_active() || process::old_gen_drained(heap) {
             return true;
         }
         if Instant::now() >= deadline {

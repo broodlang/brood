@@ -1472,7 +1472,10 @@ pub(super) fn register_type(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
         Value::symbol(value::intern(TYPE_ALIAS_MARKER)),
         type_value,
     ]);
-    heap.set_declared_sig(qualified, wrapped);
+    // Under the alias's OWN key: a type and a function may share a name (`parse-state` the
+    // type, `parse-state` the function that returns one), as type and value positions are
+    // separate. Under the bare name the later registration erased the earlier.
+    heap.set_declared_sig(type_alias_key(qualified), wrapped);
     // Declarations of this module that named it before it existed mean it now.
     super::type_scope::type_name_arrived(heap, qualified)?;
     Ok(Value::symbol(qualified))
@@ -1480,6 +1483,31 @@ pub(super) fn register_type(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 
 /// The head that marks a declared-sig entry as a type ALIAS rather than a signature.
 pub const TYPE_ALIAS_MARKER: &str = "%type";
+
+/// The key a `deftype` alias is stored under in the declared-sig store: its qualified name
+/// behind [`TYPE_ALIAS_KEY_PREFIX`], apart from any function signature of the same name.
+/// Idempotent, so a key read back from the store maps to itself.
+pub fn type_alias_key(name: Symbol) -> Symbol {
+    let text = value::symbol_name_ref(name);
+    if text.starts_with(TYPE_ALIAS_KEY_PREFIX) {
+        name
+    } else {
+        value::intern(&format!("{TYPE_ALIAS_KEY_PREFIX}{text}"))
+    }
+}
+
+/// The alias's own name for a store key — [`type_alias_key`] undone; any other key as is.
+pub fn type_alias_name(key: Symbol) -> Symbol {
+    match value::symbol_name_ref(key).strip_prefix(TYPE_ALIAS_KEY_PREFIX) {
+        Some(name) => value::intern(name),
+        None => key,
+    }
+}
+
+/// What sets an alias's store key apart from a signature's: a type and a function were
+/// both keyed by the bare qualified name, so `editor/treesit`'s `parse-state` type was lost
+/// to its `parse-state` function and every contract naming the type had nothing to check.
+pub const TYPE_ALIAS_KEY_PREFIX: &str = "%type:";
 
 /// `(%side-facts)` — every side fact this runtime has recorded, one string per fact,
 /// sorted: `"<kind> <name> <payload>"`.

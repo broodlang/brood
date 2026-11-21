@@ -63,9 +63,11 @@
           "sig q: unknown type `strng`"))
     (refute (warns-about? "(sig q (strng -> int)) (defn q (x) 1) (defn p () (q 42))"
               "q: argument 1"))
-    ;; A capitalised unknown name stays silent — that is an ability used as a type,
-    ;; whose module a single-file check may not have loaded (ADR-181/186).
-    (assert= (checker-messages "(sig w (Shape -> int)) (defn w (x) 1) (defn p () (w 42))") nil)))
+    ;; A capitalised unknown name is reported too: the checker reads every ability the
+    ;; image holds, so one that resolves to nothing is a misspelling (`x:Strng`), not an
+    ;; ability from an unloaded module.
+    (is (warns-about? "(sig w (Shape -> int)) (defn w (x) 1) (defn p () (w 42))"
+          "sig w: unknown type `Shape`"))))
 
 (describe "sig: placement is free in every mode"
   ;; `sig` is a pure declaration (ADR-381): enforcement is decided when the BINDING comes

@@ -744,6 +744,11 @@ fn declared_names_of(heap: &Heap, owner: Option<&str>) -> Vec<Symbol> {
         .map(|(name, _)| name)
         .filter(|name| {
             let text = value::symbol_name(*name);
+            // A `deftype` alias rides the same store under its own key; it has no binding to
+            // offer a contract.
+            if text.starts_with(super::modules::TYPE_ALIAS_KEY_PREFIX) {
+                return false;
+            }
             match &prefix {
                 Some(p) => text
                     .strip_prefix(p.as_str())

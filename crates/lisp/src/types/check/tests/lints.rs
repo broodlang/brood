@@ -752,3 +752,27 @@ fn a_data_shaped_line_about_to_be_evaluated_is_still_checked() {
         "{ws:?}"
     );
 }
+
+#[test]
+fn an_or_whose_first_value_is_a_number_never_falls_back() {
+    // `(or (index-of xs 3) 0)`: index-of answers -1 for "not found", a number is never
+    // falsy, so the default is dead and the -1 flows on — the bedit bug ADR-373 cites. The
+    // `if` lint cannot see it (`or` tests its binding); this half reports the numeric case.
+    let w = file_warnings("(defn g (xs) (or (index-of xs 3) 0))");
+    assert!(
+        w.iter().any(|m| m.contains("this `or` never falls back")),
+        "{w:?}"
+    );
+    // A defensive fallback over a value that may be absent, or over a bare symbol, is not
+    // the trap: both stay silent.
+    // So is a read of a field the checker knows is present (it types as the field's number:
+    // the fallback is defensive), and a macro's own `or` with no literal default.
+    let quiet = file_warnings(
+        "(defn h (m) (or (get m :k) 0)) (defn k (s) (or s \"\")) \
+         (defn r () (or (get {:n 1} :n) 0)) (defn a () (assert (+ 1 2)))",
+    );
+    assert!(
+        quiet.iter().all(|m| !m.contains("never falls back")),
+        "{quiet:?}"
+    );
+}

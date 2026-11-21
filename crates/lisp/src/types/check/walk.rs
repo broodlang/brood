@@ -212,12 +212,13 @@ fn check_arg_against_param(
         && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
     {
         let msg = format!(
-            "{}: argument {} expects {}, got {} ({})",
+            "{}: argument {} expects {}, got {} ({}){}",
             callee,
             i + 1,
             crate::types::check::annot::display_ty(param),
             crate::types::check::annot::display_ty(&g.bound),
             crate::syntax::printer::print(heap, arg),
+            inclusion_reason(&g, param, "the argument's"),
         );
         // Anchor at the offending ARGUMENT when it's a positioned sub-form (a nested
         // call), else the call form.
@@ -228,6 +229,36 @@ fn check_arg_against_param(
         ));
     }
     true
+}
+
+/// Why an argument that OVERLAPS its parameter was still reported — the half of the gradual
+/// relation a reader cannot see from the two types alone (docs/types.md § "Which reading a
+/// value gets"). A disjoint argument needs no reason: none of its values fit. An overlapping
+/// one was read by inclusion, either because its type is precise (a literal, a declared
+/// parameter, integer-closed arithmetic) or because `--strict` reads every positively-known
+/// type that way; the suffix says which, and names the values that would not fit.
+pub(crate) fn inclusion_reason(arg: &GradualTy, param: &Ty, whose: &str) -> String {
+    if arg.bound.is_disjoint(param) {
+        return String::new();
+    }
+    let reading = if arg.dynamic {
+        "under --strict every value of a known type must fit"
+    } else {
+        "is precise, so every value must fit"
+    };
+    let reading = if arg.dynamic {
+        reading.to_string()
+    } else {
+        format!("{whose} type {reading}")
+    };
+    let leftover = arg.bound.clone().difference(param.clone());
+    if leftover.is_never() {
+        return format!(" — {reading}");
+    }
+    format!(
+        " — {reading}, and {} would not",
+        crate::types::check::annot::display_ty(&leftover)
+    )
 }
 
 /// **A computed callee** — `((cur 1) "x")`, `((get handlers :k) msg)`: a head that is itself
@@ -547,7 +578,7 @@ fn check_dispatch_hooks(
                         param_ty,
                         gradual.bound,
                         crate::syntax::printer::print(heap, arg),
-                    ),
+                    ) + &inclusion_reason(&gradual, param_ty, "the argument's"),
                 ));
             }
         }

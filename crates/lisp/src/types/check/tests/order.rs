@@ -60,3 +60,30 @@ fn a_files_own_requires_do_widen_its_operator_domain() {
         "a file that reaches `datetime` compares its records too: {with}"
     );
 }
+
+#[test]
+fn a_call_chain_reports_whichever_order_it_is_defined_in() {
+    // The same-file return fixpoint walked functions in definition order, settling one
+    // level of a call chain per round, so a 41-function chain written caller-first ran out
+    // of rounds and went silent while the same chain written callee-first reported.
+    let defs: Vec<String> = (0..40)
+        .map(|i| format!("(defn h-{i} (x) (h-{} x))", i + 1))
+        .chain(std::iter::once("(defn h-40 (x) \"s\")".to_string()))
+        .collect();
+    let caller = "(defn use-it (x) (+ 1 (h-0 x)))";
+    let forward = format!("{}\n{caller}", defs.join("\n"));
+    let reversed: Vec<String> = defs.iter().rev().cloned().collect();
+    let backward = format!("{}\n{caller}", reversed.join("\n"));
+    for (label, src) in [("caller-first", &forward), ("callee-first", &backward)] {
+        let ws = super::file_warnings(src);
+        assert!(
+            ws.iter()
+                .any(|w| w.contains("+: argument 2 expects number")),
+            "{label}: {ws:?}"
+        );
+        assert!(
+            !ws.iter().any(|w| w.contains("still moving")),
+            "{label}: the returns settle: {ws:?}"
+        );
+    }
+}

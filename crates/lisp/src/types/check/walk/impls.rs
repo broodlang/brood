@@ -166,8 +166,10 @@ pub(super) fn check_one_method_return(
             Lint::TypeMismatch,
             heap.form_pos_only(ret_form),
             format!(
-                "multimethod {mname}{key_str}: declared return type {} but the method yields {}",
-                ret, g.bound
+                "multimethod {mname}{key_str}: declared return type {} but the method yields {}{}",
+                ret,
+                g.bound,
+                crate::types::check::walk::inclusion_reason(&g, &ret, "the method's"),
             ),
         ));
     }
@@ -270,8 +272,10 @@ pub(super) fn check_one_impl_return(
             Lint::TypeMismatch,
             heap.form_pos_only(ret_form),
             format!(
-                "ability {ability}/{op}{id_str}: declared return type {} but the impl yields {}",
-                ret, g.bound
+                "ability {ability}/{op}{id_str}: declared return type {} but the impl yields {}{}",
+                ret,
+                g.bound,
+                crate::types::check::walk::inclusion_reason(&g, ret, "the impl's"),
             ),
         ));
     }

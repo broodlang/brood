@@ -945,6 +945,12 @@ fn handle_notification(
                 && let Some(root) = path.parent()
             {
                 bootstrapped.remove(root);
+            } else {
+                // Any other save: the image this server checks against loaded the project
+                // once, so a module saved since would otherwise be checked by its OLD
+                // types in every file that uses it — the editor and `nest check`
+                // disagreeing about the same tree. Reload what moved on disk.
+                refresh_project(interp, bootstrapped, &uri);
             }
             // Re-publish diagnostics against the (possibly re-bootstrapped)
             // image so the user sees the effect of their save right away.
@@ -1024,6 +1030,29 @@ fn bootstrap_project(interp: &mut Interp, bootstrapped: &mut HashSet<PathBuf>, u
     // (each top-level form's `eval_str` is checkpointed), and re-running on
     // every publish would re-load every source on every keystroke.
     bootstrapped.insert(root);
+}
+
+/// Bring a bootstrapped project's image up to date with the files on disk
+/// (`project/reload-changed`: a `stat` per source file, and a reload of each one whose mtime
+/// moved since the image loaded it). A no-op outside a bootstrapped project. What the
+/// reloaded files print goes to stderr — stdout is this server's protocol channel.
+fn refresh_project(interp: &mut Interp, bootstrapped: &HashSet<PathBuf>, uri: &Uri) {
+    let Some(path) = uri_to_path(uri) else {
+        return;
+    };
+    let Some(root) = bootstrapped.iter().find(|root| path.starts_with(root)) else {
+        return;
+    };
+    let code = format!(
+        "(binding (*out* *err*) {})",
+        brood::introspect::call_form("project/reload-changed", &[&root.display().to_string()])
+    );
+    if let Err(error) = interp.eval_str(&code) {
+        eprintln!(
+            "brood-lsp: refreshing {} after a save failed: {error}",
+            root.display()
+        );
+    }
 }
 
 /// Parse the document and publish two tiers of diagnostics:

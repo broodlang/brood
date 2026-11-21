@@ -1033,7 +1033,10 @@ pub(super) fn type_alias_table(
     let mut out = std::collections::HashMap::new();
     for (sym, form) in heap.declared_sigs_everywhere() {
         if let Some(inner) = unwrap_type_alias(heap, form) {
-            out.insert(value::symbol_name(sym), inner);
+            out.insert(
+                value::symbol_name(crate::builtins::modules::type_alias_name(sym)),
+                inner,
+            );
         }
     }
     for &form in expanded {

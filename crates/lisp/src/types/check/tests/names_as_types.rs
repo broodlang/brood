@@ -5,13 +5,8 @@ use super::*;
 #[test]
 fn a_qualified_ability_name_is_read_like_its_bare_spelling() {
     // `shapes/Shape` and `Shape` name the same ability — the registry is keyed by the bare
-    // CamelCase name (ADR-255). In a PROJECT check both resolve and neither warns; this is
-    // the loose single-file case, where neither can resolve because the defining module was
-    // never loaded, and the checker falls back to "capitalised means an ability I can't see".
-    // That fallback read the whole spelling, so `shapes/Shape` — starting with a lowercase
-    // `s` — reported `unknown type` while the bare form was accepted silently. Naming the
-    // module the ability comes from is not a mistake, and must not be the thing that
-    // manufactures a diagnostic.
+    // CamelCase name (ADR-255) — so the two spellings get ONE verdict. Here no such ability
+    // exists, so both are reported; once it is declared, neither is.
     let ws = file_warnings(
         "\
          (defmodule loose)\n\
@@ -21,11 +16,24 @@ fn a_qualified_ability_name_is_read_like_its_bare_spelling() {
          (defn b (s) 1.0)",
     );
     assert!(
-        !ws.iter().any(|w| w.contains("unknown type")),
-        "neither spelling of an unloaded ability may warn — {ws:?}"
+        ws.iter().any(|w| w.contains("unknown type `Shape`"))
+            && ws.iter().any(|w| w.contains("unknown type `shapes/Shape`")),
+        "both spellings of an undefined ability are reported — {ws:?}"
     );
-    // The silence is still keyed on capitalisation, not on merely containing a slash: a
-    // qualified LOWERCASE name is an ordinary unknown type and must still be reported.
+    let ws = file_warnings(
+        "\
+         (defmodule shapes)\n\
+         (defability Shape (area (self) :-> float))\n\
+         (sig a (Shape -> float))\n\
+         (defn a (s) 1.0)\n\
+         (sig b (shapes/Shape -> float))\n\
+         (defn b (s) 1.0)",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("unknown type")),
+        "neither spelling of a declared ability is reported — {ws:?}"
+    );
+    // A qualified LOWERCASE name is an ordinary unknown type.
     let ws = file_warnings(
         "\
          (defmodule loose)\n\

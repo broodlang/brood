@@ -857,3 +857,46 @@
 
 (defn c-add-one (n) (+ n 1))
 (sig! c-add-one (int -> int))
+
+(describe "contracts agree with the checker"
+  ;; A keyword is callable (ADR-165) and the checker admits it where a function is wanted;
+  ;; the contract refused it, so `sig!` raised on `(map people :name)`-shaped calls.
+  (test "a keyword passes an arrow type"
+    (assert (type-matches? '(map -> any) :name))
+    (assert (not (type-matches? '(map -> any) 5))))
+  ;; A record type was checked by its id alone, so a value forged by `assoc` passed a
+  ;; contract the checker refuses statically.
+  (test "a record type holds its declared field types"
+    (reflect/eval '(defrecord contract-probe-id (n:int)))
+    (assert (type-matches? 'contract-probe-id (reflect/eval '(contract-probe-id 7))))
+    (assert (not (type-matches? 'contract-probe-id
+                   (assoc (reflect/eval '(contract-probe-id 7)) :n "oops"))))))
+
+(describe "a contract over a misspelled type"
+  ;; An unknown type name used to accept anything, so a typo in a `sig!` enforced nothing.
+  (test "an unknown type name raises, naming it"
+    (assert (includes? (error-message (error-of (type-matches? 'strng 5))) "unknown type `strng`")))
+  (test "an open ability still admits any value"
+    (reflect/eval '(defability ContractProbeOpen (contract-probe-op (self))))
+    (assert (type-matches? 'ContractProbeOpen 5)))
+  (test "numeric, ordered and record are known names"
+    (assert (type-matches? 'numeric 5))
+    (assert (type-matches? 'ordered 1.5))
+    (assert (not (type-matches? 'record 5)))))
+
+(describe "a type and a function may share a name"
+  ;; Both lived in the declared-sig store under the qualified name, so the later silently
+  ;; erased the earlier: `editor/treesit`'s `parse-state` type was lost to its function, and
+  ;; every contract naming the type had nothing left to check. An alias has its own key now.
+  (test "a function returning the type of its own name keeps both"
+    (reflect/eval '(deftype shared-name (or :ok :err)))
+    (reflect/eval '(defn shared-name (x:int -> shared-name) (if (> x 0) :ok :err)))
+    (assert (type-matches? 'shared-name :ok))
+    (assert (not (type-matches? 'shared-name 5)))
+    (assert= :ok (reflect/eval '(shared-name 1))))
+  (test "in either order"
+    (reflect/eval '(defn shared-later (x:int -> int) x))
+    (reflect/eval '(deftype shared-later (vector int)))
+    (assert (type-matches? 'shared-later [1 2]))
+    (assert (not (type-matches? 'shared-later ["a"])))
+    (assert= 3 (reflect/eval '(shared-later 3)))))

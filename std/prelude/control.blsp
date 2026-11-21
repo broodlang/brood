@@ -456,8 +456,13 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
   ;; non-function` from inside the first clause. A keyword is callable, so it stays allowed.
   (when (and (%cond-constant? pred) (not (keyword? pred)))
     (error (%condp-swap-message expr pred (pr-str pred))))
-  (let (e (reflect/gensym "e") p (reflect/gensym "p"))
-    `(let (~e ~expr ~p ~pred)
+  ;; A predicate NAMED by a symbol is called by that name in each test, so `(= e "a")` is a
+  ;; call of `=` the checker narrows through, as it does a `case`; binding it to a temporary
+  ;; first hid which function it was. A computed predicate is still evaluated once.
+  (let (e (reflect/gensym "e")
+        p (if (symbol? pred) pred (reflect/gensym "p"))
+        bind-p (if (symbol? pred) () (list p pred)))
+    `(let (~e ~expr ~@bind-p)
        (%condp-check ~p '~expr '~pred)
        ~(%condp-clauses p e clauses))))
 

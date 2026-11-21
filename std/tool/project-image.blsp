@@ -827,8 +827,10 @@ program's and the LSP's protocol channel stays clean.
                   (cond
                     (nil? n) nil
                     ;; Everything, because this entry point is for the tools that need the
-                    ;; whole project. `nest run` uses `setup-lazy-image` instead.
-                    else (do (materialize-all) n)))
+                    ;; whole project. `nest run` uses `setup-lazy-image` instead. The image
+                    ;; holds exactly the files its fingerprint was taken over, so a long-lived
+                    ;; image (the LSP, `nest mcp`) can ask `project/reload-changed` later.
+                    else (do (materialize-all) (project/note-image-current files) n)))
               else nil)
         t-d (os/now-ns)
         _ (when (os/env "BROOD_IMAGE_TRACE")
@@ -855,7 +857,11 @@ program's and the LSP's protocol channel stays clean.
                         (project-partial-load root files (includes? opts :lazy))
                         nil))
           (if partial
-            (project-report-partial root name partial before before-regs started)
+            ;; a partial rebuild leaves the image current for every file: the edited ones
+            ;; reloaded from source, the rest restored as their fingerprint took them
+            (let (result (project-report-partial root name partial before before-regs started))
+              (project/note-image-current files)
+              result)
             (project-build-whole root opts files name started before before-regs))))))
 
 ;; The partial rebuild's tail: write the image again and say what was reloaded.

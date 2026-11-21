@@ -2317,9 +2317,11 @@ supplies the render/write split behind the writers (`%render`, `%write-out`,
 
 ## Type annotations
 
-Types in Brood are **optional and advisory** — you never have to write one, and a
-program with no annotations checks and runs exactly as before (see
-[types.md](types.md) for the set-theoretic model). Two opt-in declaration forms
+Types in Brood are **optional** — you never have to write one, and a program with no
+annotations checks and runs exactly as before (see [types.md](types.md) for the
+set-theoretic model). The checker is **advisory in the live image** and **a gate in a batch
+check**; [types.md § "Which reading a value gets"](types.md#which-reading-a-value-gets)
+says when a call is reported and how to see why. Two opt-in declaration forms
 let you inform — and optionally *enforce* — the type system. Both are macros, not
 special forms.
 

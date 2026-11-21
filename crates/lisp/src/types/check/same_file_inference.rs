@@ -195,7 +195,7 @@ fn def_counts(heap: &Heap, expanded: &[Value]) -> HashMap<Symbol, usize> {
 /// defined once, undeclared, and not a macro, dynamic variable or gensym.
 fn inference_candidates(heap: &Heap, expanded: &[Value], ctx: &Ctx) -> Vec<(Symbol, Value)> {
     let def_count = def_counts(heap, expanded);
-    top_level_defs(heap, expanded)
+    let found: Vec<(Symbol, Value)> = top_level_defs(heap, expanded)
         .into_iter()
         .filter_map(|form| {
             let (name, rhs) = def_name_and_value(heap, form)?;
@@ -206,7 +206,75 @@ fn inference_candidates(heap: &Heap, expanded: &[Value], ctx: &Ctx) -> Vec<(Symb
                 && (ctx.declared_sig(name).is_none() || ctx.is_open_ret(name)))
             .then_some((name, rhs))
         })
-        .collect()
+        .collect();
+    callees_first(heap, found)
+}
+
+/// `candidates` ordered so each function comes after the same-file functions it calls
+/// (a depth-first post-order of the call graph; a cycle keeps its definition order). The
+/// return fixpoint walks this list once per round, and a callee typed earlier in the same
+/// round is what its caller reads — so callee-first, a chain of any length settles in one
+/// round. In definition order it settled one level per round, and the order the file
+/// happened to define a chain in decided whether it settled inside the round cap: the same
+/// 41-function chain reported its finding written one way and went silent written the other.
+fn callees_first(heap: &Heap, candidates: Vec<(Symbol, Value)>) -> Vec<(Symbol, Value)> {
+    let index: HashMap<Symbol, usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, &(name, _))| (name, i))
+        .collect();
+    // The same-file candidates each body mentions, in the order it mentions them.
+    let calls: Vec<Vec<usize>> = candidates
+        .iter()
+        .map(|&(_, rhs)| {
+            let mut seen = Vec::new();
+            let mut stack = vec![rhs];
+            while let Some(form) = stack.pop() {
+                match form {
+                    Value::Sym(sym) => {
+                        if let Some(&callee) = index.get(&sym)
+                            && !seen.contains(&callee)
+                        {
+                            seen.push(callee);
+                        }
+                    }
+                    Value::Pair(_) | Value::Vector(_) => {
+                        if let Some(items) = heap.list_or_vector_items(form) {
+                            stack.extend(items.into_iter().rev());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            seen
+        })
+        .collect();
+    // Iterative post-order: a node is emitted once every callee below it has been.
+    let mut placed = vec![false; candidates.len()];
+    let mut on_path = vec![false; candidates.len()];
+    let mut order = Vec::with_capacity(candidates.len());
+    for root in 0..candidates.len() {
+        if placed[root] {
+            continue;
+        }
+        let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+        on_path[root] = true;
+        while let Some(&mut (node, ref mut next)) = stack.last_mut() {
+            if let Some(&callee) = calls[node].get(*next) {
+                *next += 1;
+                if !placed[callee] && !on_path[callee] {
+                    on_path[callee] = true;
+                    stack.push((callee, 0));
+                }
+            } else {
+                stack.pop();
+                on_path[node] = false;
+                placed[node] = true;
+                order.push(node);
+            }
+        }
+    }
+    order.into_iter().map(|i| candidates[i]).collect()
 }
 
 /// **Same-file function inference.** The file being checked isn't loaded, so `sig_of`'s

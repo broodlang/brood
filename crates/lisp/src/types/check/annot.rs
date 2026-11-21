@@ -959,21 +959,16 @@ pub(super) const TYPE_HEADS: [&str; 13] = [
 /// gate that cannot fail. This finds the *innermost* offending
 /// sub-expression and says what is wrong with it.
 ///
-/// **The one deliberate silence:** an unknown symbol whose name starts with an
-/// uppercase letter is taken to be an ability used as a type (ADR-181/186) whose
-/// defining module this particular check didn't load — abilities resolve by bare
-/// name through `ABILITY_TYPES`, which under a single-file `brood --check` only
-/// carries what the file itself declares. Ability names are capitalised (they are
-/// named like records) and no base type is, so the split is exact for
-/// well-named code and false-positive-free for the rest.
+/// A capitalised name is read as an ability used as a type (ADR-181/186). Abilities resolve
+/// by bare name through `ABILITY_TYPES`, which holds the file's own declarations AND every
+/// ability in the image's registry (`protocol::ability_type_table`) — and a check loads what
+/// the file requires first. So a capitalised name that resolves to nothing is a misspelling
+/// (`x:Strng`), and is reported like a lowercase one. It used to be the one deliberate
+/// silence, on the theory that the ability's module might not be loaded; that left every
+/// capitalised typo unreported, even under `--strict`.
 ///
-/// The test reads the symbol's **last `/` segment**, not the whole spelling, because
-/// `shapes/Shape` and `Shape` name the same ability — the registry is keyed by the bare
-/// CamelCase name (ADR-255) and [`ability_type`] resolves through `rsplit('/')` for exactly
-/// that reason. Testing the whole spelling gave one ability two verdicts: in a project check
-/// both forms resolve and neither warns, but in a loose single-file check the bare form fell
-/// into this silence while the qualified form reported `unknown type` — a diagnostic that
-/// appeared only when the module the ability actually comes from was named.
+/// The name is read by its **last `/` segment**: `shapes/Shape` and `Shape` name the same
+/// ability, because the registry is keyed by the bare CamelCase name (ADR-255).
 pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
     if parse_type(heap, form).is_some() {
         return None;
@@ -983,7 +978,9 @@ pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
             let name = value::symbol_name(s);
             let bare = name.rsplit('/').next().unwrap_or(&name);
             if bare.starts_with(|c: char| c.is_uppercase()) {
-                return None; // an ability from a module this check didn't load
+                return Some(format!(
+                    "unknown type `{name}` — no loaded ability, record or deftype has that name"
+                ));
             }
             Some(format!("unknown type `{name}`"))
         }

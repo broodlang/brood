@@ -190,7 +190,7 @@ impl Interp {
     /// report — caret, hint, call trace.
     pub fn run_program(&mut self, src: &str, file: Option<String>) -> Result<(), LispError> {
         let exit = process::spawn_root_program(&self.heap, src, file, None, false)?;
-        exit.wait()
+        exit.wait_with_heap(&mut self.heap)
     }
 
     /// [`run_program`](Self::run_program) with `preamble` evaluated first, inside the
@@ -204,7 +204,7 @@ impl Interp {
         file: Option<String>,
     ) -> Result<(), LispError> {
         let exit = process::spawn_root_program(&self.heap, src, file, Some(preamble), false)?;
-        exit.wait()
+        exit.wait_with_heap(&mut self.heap)
     }
 
     /// Run a top-level program as a green process and return its **printed** result (wasm).
@@ -218,7 +218,7 @@ impl Interp {
     /// while the playground's actual entry point went unchecked.
     pub fn run_program_repr(&mut self, src: &str) -> Result<String, LispError> {
         let exit = process::spawn_root_program(&self.heap, src, None, None, true)?;
-        exit.wait()?;
+        exit.wait_with_heap(&mut self.heap)?;
         Ok(exit.take_result().unwrap_or_default())
     }
 

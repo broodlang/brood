@@ -21,6 +21,9 @@ pub(in crate::types::check) struct ArgTyQuery {
     col: u32,
     arg_index: usize,
     result: Option<Ty>,
+    /// The same argument as the gradual relation reads it at a call (`gradual_of`): its
+    /// bound, and whether it is precise (checked by inclusion) or dynamic (by overlap).
+    gradual: Option<GradualTy>,
 }
 
 /// Arm the [`ArgTyQuery`] for the next [`check_into`] walk on this thread.
@@ -31,6 +34,7 @@ pub(in crate::types::check) fn arm_arg_ty_query(line: u32, col: u32, arg_index: 
             col,
             arg_index,
             result: None,
+            gradual: None,
         })
     });
 }
@@ -40,6 +44,13 @@ pub(in crate::types::check) fn take_arg_ty_query() -> Option<Ty> {
     ARG_TY_QUERY
         .with(|q| q.borrow_mut().take())
         .and_then(|q| q.result)
+}
+
+/// Disarm the query and return the gradual reading it captured.
+pub(in crate::types::check) fn take_arg_gradual_query() -> Option<GradualTy> {
+    ARG_TY_QUERY
+        .with(|q| q.borrow_mut().take())
+        .and_then(|q| q.gradual)
 }
 
 /// The capture hook — called on every list form the walk visits. When the armed
@@ -62,6 +73,9 @@ pub(super) fn capture_arg_ty(heap: &Heap, form: Value, items: &[Value], ctx: &Ct
         }
         if let Some(&arg) = items.get(query.arg_index) {
             query.result = expr_ty(heap, arg, ctx);
+            if query.result.is_some() {
+                query.gradual = Some(gradual_of(heap, arg, ctx));
+            }
         }
     });
 }

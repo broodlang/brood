@@ -141,12 +141,6 @@ pub(in crate::core::heap) fn rt_gc_floor() -> usize {
     })
 }
 
-/// How often a process runs the multigen drain free-attempt (the O·live-process
-/// `report_parked_liveness` registry scan) at its RUNTIME safepoint while a drain is
-/// armed: once every `RT_DRAIN_SCAN_STRIDE` safepoints, not every frame. See the
-/// `rt_drain_tick` field for why (the pinned-generation scan storm).
-pub(in crate::core::heap) const RT_DRAIN_SCAN_STRIDE: u32 = 64;
-
 /// How often a process runs its **per-safepoint drain self-report** while a generation drain
 /// is armed: once every `DRAIN_REPORT_STRIDE` safepoints, not every frame. During a `spawn`
 /// fan-out the drain lingers (workers pin it until they exit), so every worker reaches the

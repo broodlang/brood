@@ -492,7 +492,7 @@ pub(crate) fn alias_expansion(heap: &Heap, sym: value::Symbol) -> Option<Value> 
 /// the declared-sig store wrapped as `(%type T)` so no reader can mistake it for a
 /// signature (ADR-327); this unwraps that marker and nothing else.
 pub(crate) fn alias_form_at(heap: &Heap, key: value::Symbol) -> Option<Value> {
-    let form = heap.declared_sig_value(key)?;
+    let form = heap.declared_sig_value(crate::builtins::modules::type_alias_key(key))?;
     let items = heap.list_to_vec(form).ok()?;
     match items.as_slice() {
         [Value::Sym(head), inner]
@@ -522,6 +522,7 @@ pub(super) fn type_aliases(_args: &[Value], _env: EnvId, heap: &mut Heap) -> Lis
         if !value::symbol_is(*head, crate::builtins::modules::TYPE_ALIAS_MARKER) {
             continue;
         }
+        let sym = crate::builtins::modules::type_alias_name(sym);
         let inner = super::type_scope::unscope_form(heap, sym, *inner);
         let name = heap.alloc_string(&value::symbol_name(sym));
         out.push(heap.alloc_vector2(name, inner));

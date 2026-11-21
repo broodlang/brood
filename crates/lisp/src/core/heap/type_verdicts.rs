@@ -388,9 +388,13 @@ impl Heap {
                 let items = self.list_to_vec(type_expression).ok()?;
                 let is_symbol = |item: &Value, name: &str| matches!(item, Value::Sym(symbol) if crate::core::value::symbol_name_ref(*symbol) == name);
                 if items.iter().any(|item| is_symbol(item, "->")) {
+                    // A keyword is callable — it reads its key out of a map (ADR-165) — so
+                    // it passes an arrow type, as `%type-match` and the checker both say.
                     return Some(matches!(
                         crate::core::value::tag(value),
-                        crate::core::value::Tag::Fn | crate::core::value::Tag::Native
+                        crate::core::value::Tag::Fn
+                            | crate::core::value::Tag::Native
+                            | crate::core::value::Tag::Keyword
                     ));
                 }
                 if !is_symbol(&head, "or") {

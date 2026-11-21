@@ -432,6 +432,29 @@ pub(super) fn refuse_typed_let(heap: &Heap, who: &str, items: &[Value]) -> Resul
     Ok(())
 }
 
+/// `(def x:int 3)` — a typed NAME on a `def`. Typed parameters (ADR-420) belong to
+/// function parameter lists; on a `def` the colon spelling silently bound a global literally
+/// named `x:int`, leaving `x` unbound. Refuse it, naming the two spellings that work.
+pub(super) fn refuse_typed_def_name(heap: &Heap, items: &[Value]) -> Result<(), LispError> {
+    let Some(&name @ Value::Sym(sym)) = items.get(1) else {
+        return Ok(());
+    };
+    let text = value::symbol_name_ref(sym);
+    let Some(typed) = crate::syntax::typed::split(text) else {
+        return Ok(());
+    };
+    let plain = typed.name();
+    let declare = match typed {
+        crate::syntax::typed::TypedName::Inline(_, ty) => format!("(sig {plain} {ty})"),
+        crate::syntax::typed::TypedName::Next(_) => format!("(sig {plain} TYPE)"),
+    };
+    Err(LispError::runtime(format!(
+        "def: `{}` is a typed name, which only a function parameter can carry — write \
+         (def {plain} …) and declare its type with {declare}",
+        crate::syntax::printer::print(heap, name)
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

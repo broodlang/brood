@@ -151,3 +151,15 @@
       (assert= (seq/repeat 8 :locked)
         (map (range 0 8) (fn (_) (receive ([:saw state] state) (after test/*wait-ms* :timeout)))))
       (stop pid))))
+
+(describe "a running machine adopts a redefinition"
+  :isolated
+  ;; The handler was a closure built when the machine started, so a reload never reached
+  ;; a running machine. It now calls the machine's clauses through its global name.
+  (test "the next event runs the new definition"
+    (reflect/eval-string "(gen/defstatem reloading-machine (d) (:idle (call :version (gen/reply reply :v1) [:keep d])))")
+    (let (m (gen/start (reflect/eval-string "reloading-machine") nil))
+      (assert= :v1 (gen/call m :version))
+      (reflect/eval-string "(gen/defstatem reloading-machine (d) (:idle (call :version (gen/reply reply :v2) [:keep d])))")
+      (assert= :v2 (gen/call m :version))
+      (gen/stop m))))

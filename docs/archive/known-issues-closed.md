@@ -5,6 +5,85 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-408 — a `deftype` and a function of the same name erased each other ✅ fixed 2026-11-20
+
+**Symptom.** With contracts armed, `(editor/treesit/parse-tag :ok)` raised `contract: unknown
+type \`parse-state\``; `(%type-alias 'editor/treesit/parse-state)` answered nil although the
+module declares `(deftype parse-state …)`.
+
+**Cause.** An alias is stored in the declared-sig store wrapped `(%type T)`, keyed by its
+qualified name — the same key a function's signature takes. `editor/treesit` declares both a
+`parse-state` type and a `parse-state` function, so the function's typed parameters
+overwrote the alias.
+
+**Why it survived.** A runtime contract accepted any type name it could not resolve, so the
+lost alias checked nothing and said nothing; the checker reads aliases from the source of the
+file it checks, so `nest check` never saw the store. Surfaced the moment an unknown contract
+type started raising (the same day).
+
+**Fix.** An alias is keyed `%type:<name>` (`type_alias_key`), so a type and a function may
+share a name — bedit's `liveeval` declares the same pair. Every reader goes through the key:
+`alias_form_at`, `%type-aliases`, the checker's alias table, `rescope`, the image's section
+filter, the contract sweep (which skips alias keys). The image format went to v13: a v12
+image's aliases decode under the bare name and would all read as unknown types, and the
+stdlib image's id (version, sha, source hash) does not change for a Rust-side change.
+
+**Guard.** `contract_test` "a type and a function may share a name" (both orders), and
+`doc_examples_test` (`parse-tag`'s example raised).
+
+## KI-407 — superseded code was never reclaimed in a multi-process runtime ✅ fixed 2026-11-20
+
+**Symptom.** A runtime with a reloader and one parked peer, redefining one function 120 000
+times: `(dev/gc-stats)` showed `:runtime-aged 1`, `:runtime-draining true` for the rest of the
+run, and `:runtime-closures` climbing to 116 281.
+
+**Cause.** Three, each enough on its own to hold the first drain open (and a new drain waits
+for the previous free, so nothing was reclaimed after it). A root thread waiting on its
+top-level program (every `brood FILE` run, ADR-135) held a root context in the live set — one
+minted before the program started, by the check-cache replay's `require` — that reached no
+safepoint and was no parked green process the coordinator inspects, so it never acknowledged.
+The free was attempted once per 64 collector entries (`RT_DRAIN_SCAN_STRIDE`), and the entries
+come only at doublings of the code region, so it was never attempted. And with the free run only
+from the collector, a drain that completed just after an attempt waited for another doubling.
+
+**Why it survived.** `live-editing.md` still said the multi-process case "keeps every version",
+so nothing asserted otherwise: no test ran redefinitions under several processes and read the
+closure count. The stride's comment claimed the free was tried at each doubling; the threshold
+back-off it relied on was added after the stride and compounded with it.
+
+**Fix.** The root's wait (`ProgramExit::wait_with_heap`) wakes every 50 ms during a drain and
+reports, and rehomes, for its own heap (`report_root_wait_liveness`); the free is attempted at
+every collector entry; the report that completes a drain frees it (`free_if_last_to_ack`).
+Not fixed: a process whose running code reaches the draining generation holds it until that code
+returns (`rehome_drain_pins` cannot rewrite a live arm) — `live-editing.md` Stage 5.
+
+**Guard.** `crates/lisp/tests/runtime_drain_completes.rs` — 36 000 redefinitions under a
+reloader and a parked peer must leave under 20 000 closures. Red with the root report and the
+completing free made no-ops (32 000 closures).
+
+## KI-406 — a running `defserver` never ran redefined clauses, and `code-change` ran the old migration ✅ fixed 2026-11-20
+
+**Symptom.** A server started on v1, its `defserver` re-evaluated as v2 with a `code-change`
+clause, then `(gen/code-change pid)`: `(call pid :version)` answered `:v1` and the state was
+unmigrated, while a freshly started server answered `:v2`.
+
+**Cause.** `defserver` expanded to a local `letrec` loop holding the clause bodies, so a running
+server never looked its definition up again; the `[:$code-change]` clause sat inside that old
+loop. `defstatem` built its handler as a closure at start, with the same effect.
+
+**Why it survived.** `gen_test`'s code-change cases defined the migration clause before the
+server started and never reloaded, so the old loop already had it.
+
+**Fix.** The loop is a clause of the server's own function, `(NAME :$serve state)`, reached by
+a tail call through the global name, so the next message runs the current definition; every
+server forwards `[:$code-change]` to `(NAME :$code-change state)`, so the migration that runs is
+the current definition's even when the message lands in the old receive. `defstatem`'s handler
+and `terminate` call the machine's clauses through its global name.
+
+**Guard.** `gen_test` "a running server adopts a redefinition, and code-change runs the NEW
+migration" (red against the previous `gen.blsp`); `statem_test` "a running machine adopts a
+redefinition".
+
 ## KI-404 — the pattern compiler accepted `&optional` in a vector pattern and junk after a record's field map ✅ fixed 2026-11-19
 
 **Symptom.** `(match [1 2] ([a &optional b] [a b]))` raised `match: no clause matches [1 2] —

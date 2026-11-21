@@ -136,6 +136,37 @@ impl ProgramExit {
         self.slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// [`wait`](Self::wait) for a root thread that holds a heap: it wakes every 50 ms to
+    /// answer an open RUNTIME drain on its own behalf
+    /// ([`report_root_wait_liveness`](crate::process::report_root_wait_liveness)), since a
+    /// root blocked here otherwise pins every drain until the program ends.
+    pub fn wait_with_heap(&self, heap: &mut crate::core::heap::Heap) -> Result<(), LispError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = heap;
+            self.wait()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if let Some(outcome) = g.clone() {
+                    return outcome;
+                }
+                g = self
+                    .cv
+                    .wait_timeout(g, std::time::Duration::from_millis(50))
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+                if g.is_none() {
+                    drop(g);
+                    crate::process::report_root_wait_liveness(heap);
+                    g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+                }
+            }
+        }
+    }
+
     pub fn wait(&self) -> Result<(), LispError> {
         #[cfg(target_arch = "wasm32")]
         {

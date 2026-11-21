@@ -258,7 +258,8 @@ optional map:
 
 (defn- gen-clause (c loop from rf res state-sym)
   "Compile one defserver message clause `c` into a receive clause. `loop` is the
-loop fn (so a clause tail-recurses with the next state); `from`/`rf`/`res` are the
+head of the recursion — `(NAME :$serve)`, so a clause tail-recurses with the next state
+through the server's GLOBAL name and a redefinition reaches the running server; `from`/`rf`/`res` are the
 gensyms a `call`/`query` clause uses for the sender pid, reply ref, and the
 [reply state] tuple; `state-sym` is the closed-over state parameter (so `query`
 and `info` can tail-recurse with it unchanged)."
@@ -267,16 +268,18 @@ and `info` can tail-recurse with it unchanged)."
   (let (kind (first c) pat (second c) body (rest (rest c)))
     (%copy-form-pos
       (cond
-        (= kind 'cast) `([:$cast ~pat] (~loop (do ~@body)))
+        (= kind 'cast) `([:$cast ~pat] (~@loop (do ~@body)))
         ; body => next state
         (= kind 'call)
           `([:$call ~from ~rf ~pat]
-             (let (~res (do ~@body)) (/send ~from [:reply ~rf (/nth ~res 0)]) (~loop (/nth ~res 1))))
+             (let (~res (do ~@body))
+               (/send ~from [:reply ~rf (/nth ~res 0)])
+               (~@loop (/nth ~res 1))))
         ; query — like call but the body is just the reply; state is untouched.
         ; Removes the [x s] boilerplate from the common "read a field" case.
         (= kind 'query)
           `([:$call ~from ~rf ~pat] (/send ~from [:reply ~rf (do ~@body)])
-             (~loop ~state-sym))
+             (~@loop ~state-sym))
         ; defer — a CALL the server will answer later. The body returns the next state
         ; (like a cast) and binds `reply`, an opaque token, so the answer can be sent from
         ; anywhere once it exists: a worker process, a later message, a timer. Without this
@@ -284,10 +287,10 @@ and `info` can tail-recurse with it unchanged)."
         ; work off without blocking its own loop — the one gap that limited what could be
         ; built rather than merely what was convenient. `~'reply` injects the literal symbol
         ; (the `%defseq` escape hatch) so the body can name it.
-        (= kind 'defer) `([:$call ~from ~rf ~pat] (let (~'reply [~from ~rf]) (~loop (do ~@body))))
+        (= kind 'defer) `([:$call ~from ~rf ~pat] (let (~'reply [~from ~rf]) (~@loop (do ~@body))))
         ; info — a raw message (no envelope): a monitor [:down …], a link [:EXIT …],
         ; a timer tick, a plain send. Body => next state, like a cast.
-        (= kind 'info) `(~pat (~loop (do ~@body)))
+        (= kind 'info) `(~pat (~@loop (do ~@body)))
         else
           (error "defserver: a message clause must start with `cast`, `call`, `query`, `defer`, or `info`, got "
             (pr-str kind)))
@@ -330,7 +333,14 @@ clause is dropped (so the mailbox can't leak)."
         from (reflect/gensym "from")
         rf (reflect/gensym "ref")
         res (reflect/gensym "res")
-        loop (reflect/gensym "loop")
+        ;; The loop is a clause of the server's own function, `(NAME :$serve state)`, and
+        ;; every clause recurs through that GLOBAL name. A local `letrec` loop (what this
+        ;; was) never sees a redefinition: a running server kept its old clauses forever, and
+        ;; `code-change` ran the OLD migration clause, so after a reload nothing new ran at
+        ;; all. A tail call through a global re-resolves (the self-call epoch check), so the
+        ;; server adopts redefined clauses on its next message — gen_server's
+        ;; `Module:handle_call`, without a module system.
+        loop (list name :$serve)
         junk (reflect/gensym "msg")
         compile (fn (c) (gen-clause c loop from rf res state-sym))
         env-receive (map env-clauses compile)
@@ -340,31 +350,34 @@ clause is dropped (so the mailbox can't leak)."
                       `([:$stop] (let (~(second term-clause) :normal) ~@(rest (rest term-clause)))
                          nil)
                       `([:$stop] nil))
-        ;; `[:$code-change]` (from `(code-change pid)`): the loop migrates its own
-        ;; state before continuing, so a long-lived server picks up a state-shape
-        ;; change after a hot reload (ADR-013 late binding swaps the *code*; this is
-        ;; the hand-off that reshapes the *state*). The clause binds the OLD state and
-        ;; returns the NEW. Without a `code-change` clause the message falls through to
-        ;; the catch-all and is dropped — a safe no-op.
-        cc-receive (if cc-clause
-                     (list `([:$code-change]
-                              (~loop (let (~(second cc-clause) ~state-sym)
-                                       ~@(rest (rest cc-clause))))))
-                     nil)
+        ;; Every server answers `[:$code-change]` the same way, whatever its clauses: by
+        ;; calling `(NAME :$code-change state)` through the GLOBAL name. A reload lands while
+        ;; the server waits in its OLD receive, so the message is matched by the old code —
+        ;; but the migration it calls is the CURRENT definition's, which is the one that
+        ;; knows the new state shape. A server with no `code-change` clause migrates nothing.
+        cc-receive (list `([:$code-change] (~name :$code-change ~state-sym)))
+        cc-entry-clause (if cc-clause
+                          `((:$code-change ~state-sym)
+                             (~@loop (let (~(second cc-clause) ~state-sym)
+                                       ~@(rest (rest cc-clause)))))
+                          `((:$code-change ~state-sym) (~@loop ~state-sym)))
         ;; Default catch-all (last): drop an unrecognised message and keep state,
         ;; so it cannot pile up unmatched in the mailbox.
-        catch-all `(~junk (~loop ~state-sym))
+        catch-all `(~junk (~@loop ~state-sym))
         loop-body `(receive ~@env-receive ~stop-clause ~@cc-receive ~@info-receive ~catch-all)
         ;; `init` runs once: its body sees the state param and returns the initial
         ;; state. Without it the loop just starts from the passed-in state.
         init-expr (if init-clause `(do ~@(rest init-clause)) state-sym)
-        ;; A local `loop` keeps init outside the per-message recursion; the clause
-        ;; bodies tail-recurse via `loop`, so the receive loop stays O(1) stack.
-        entry `(letrec (~loop (fn (~state-sym) ~loop-body)) (~loop ~init-expr)))
+        ;; The serve clause keeps init outside the per-message recursion; the clause
+        ;; bodies tail-call it, so the receive loop stays O(1) stack.
+        serve-clause `((:$serve ~state-sym) ~loop-body)
+        entry-clause `((~state-sym) (~@loop ~init-expr)))
     ;; Guard typos: every message clause must be cast/call/query/info.
     (if (not (= (+ (count env-clauses) (count info-clauses)) (count msg-clauses)))
       (error "defserver: every clause must be cast/call/query/defer/info/init/terminate/code-change"))
-    (if doc `(defn ~name ~params ~doc ~entry) `(defn ~name ~params ~entry))))
+    (if doc
+      `(defn ~name ~doc ~entry-clause ~serve-clause ~cc-entry-clause)
+      `(defn ~name ~entry-clause ~serve-clause ~cc-entry-clause))))
 
 ;; ---- defstatem ---------------------------------------------------------------
 ;; A state machine (ADR-437): the server's state is a NAME plus data, and what a message
@@ -506,19 +519,32 @@ with `gen/start`; drive it with `gen/cast`, `gen/call` and `gen/stop`.
                                   (map (rest block) (fn (c) (statem-clause (first block) c)))))
                         (if any-block (map (rest any-block) (fn (c) (statem-clause '_ c))) ())
                         (list `(~'_ :unhandled)))
+        reason-sym (reflect/gensym "reason")
+        ;; The handler and `terminate` are clauses of the machine's own function, and the
+        ;; closures the loop holds call them through its GLOBAL name — so a redefinition
+        ;; reaches a running machine on its next event, as it does a `defserver`. Built
+        ;; inline at start (what this was), the loop kept the definition it started with.
+        handle-clause `((:$handle ~state-sym ~event-sym ~data-sym)
+                         (match [~state-sym ~event-sym] ~@match-clauses))
+        terminate-clause (if term-clause
+                           `((:$terminate ~(second term-clause) ~data-sym)
+                              ~@(rest (rest term-clause)))
+                           `((:$terminate ~reason-sym ~data-sym) nil))
         handler `(fn (~state-sym ~event-sym ~data-sym)
-                   (match [~state-sym ~event-sym] ~@match-clauses))
+                   (~name :$handle ~state-sym ~event-sym ~data-sym))
         terminate (if term-clause
-                    `(fn (~(second term-clause) ~data-sym) ~@(rest (rest term-clause)))
+                    `(fn (~reason-sym ~data-sym) (~name :$terminate ~reason-sym ~data-sym))
                     nil)
         initial (if init-clause
                   `(do ~@(rest init-clause))
                   `[~(first (first state-blocks)) ~data-sym])
-        entry `(gen/run-statem ~handler ~terminate ~initial))
+        entry-clause `((~data-sym) (gen/run-statem ~handler ~terminate ~initial)))
     (when (not (symbol? data-sym))
       (error "defstatem " name ": the parameter list must start with the data parameter"))
     (when (empty? state-blocks) (error "defstatem " name ": no states"))
     (when (not (= known (count clauses)))
       (error "defstatem "
         name ": every clause must be a state block (:name …), init, terminate or any"))
-    (if doc `(defn ~name ~params ~doc ~entry) `(defn ~name ~params ~entry))))
+    (if doc
+      `(defn ~name ~doc ~entry-clause ~handle-clause ~terminate-clause)
+      `(defn ~name ~entry-clause ~handle-clause ~terminate-clause))))

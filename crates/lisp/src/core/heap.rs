@@ -1097,20 +1097,6 @@ pub struct Heap {
     /// in the same process overwrites it and simply recompiles at its next lookup instead.
     /// Read at every frame entry — a hot per-process cell, not the arm's cold flag.
     stale_arm_uid: Cell<u64>,
-    /// **RUNTIME collector — Stage 4 (drain free-attempt throttle, ADR-091).** A
-    /// per-process tick rate-limiting how often this process runs the multigen drain
-    /// **free-attempt** ([`crate::process::free_drained_gen`] → the O·live-process
-    /// `report_parked_liveness` whole-registry scan) at its safepoint. While a drain is
-    /// armed the threshold is held low so every safepoint re-enters the collector; when
-    /// the drain can't yet complete — a long-lived process still runs old-generation
-    /// code, so the generation stays pinned — that means the O(live-process) registry
-    /// scan runs on *every* safepoint of *every* worker purely to re-discover "still not
-    /// drained". Throttling the free-attempt to 1/[`RT_DRAIN_SCAN_STRIDE`]
-    /// cuts that ~stride-fold; the free is still attempted regularly (no lost wakeup) as
-    /// long as any process reaches a safepoint, and every process's O(1) drain
-    /// self-report still runs every frame so acks stay current. A plain `Cell` (the
-    /// `Heap` is single-threaded), so the throttle adds no atomic or cross-core traffic.
-    rt_drain_tick: Cell<u32>,
     /// **RUNTIME collector — Stage 3c (local clean-ack cache, ADR-091).** The drain
     /// epoch this process last reported *clean* for (0 = none). While a drain stays
     /// armed — which it does for the whole run whenever a long-lived process pins the
@@ -1588,8 +1574,8 @@ mod gc;
 // sibling children resolve them unqualified, as they did when they were defined here.
 use self::gc::{
     DRAIN_REPORT_STRIDE, P1_LARGE_SEED, P1_REVALIDATE_STRIDE, P2_REVALIDATE_STRIDE,
-    RT_DRAIN_SCAN_STRIDE, WALKER_RED_ZONE, WALKER_STACK_CHUNK, budget_units, gc_floor, major_floor,
-    nursery_byte_floor, rt_gc_floor,
+    WALKER_RED_ZONE, WALKER_STACK_CHUNK, budget_units, gc_floor, major_floor, nursery_byte_floor,
+    rt_gc_floor,
 };
 mod gc_runtime;
 mod local_string;
@@ -2022,7 +2008,6 @@ impl Heap {
             seen_free_epoch: Cell::new(0),
             seen_stale_gen: Cell::new(0),
             stale_arm_uid: Cell::new(0),
-            rt_drain_tick: Cell::new(0),
             acked_drain_epoch: Cell::new(0),
             acked_drain_pid: Cell::new(0),
             drain_report_tick: Cell::new(0),

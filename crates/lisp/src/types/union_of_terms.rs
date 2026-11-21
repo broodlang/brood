@@ -134,6 +134,7 @@ impl Ty {
         // nothing from it — and raising the cap instead (eight) took the match compiler's
         // own file from 0.6 s to past five minutes, since the relations quantify over
         // subsets of the alternatives.
+        let mut blind = false;
         while merged.len() > MAX_TY_TERMS {
             let pair = (0..merged.len())
                 .flat_map(|i| ((i + 1)..merged.len()).map(move |j| (i, j)))
@@ -144,10 +145,16 @@ impl Ty {
                         && b.fields.is_none()
                         && !tagged_apart(a, b)
                 });
+            // A BLIND merge — no same-shape pair was left, so two alternatives a check could
+            // tell apart become one. That is the widening that can drop a finding.
             let (i, j) = pair.unwrap_or((merged.len() - 2, merged.len() - 1));
+            blind |= pair.is_none() && tagged_apart(&merged[i], &merged[j]);
             let second = merged.remove(j);
             let first = merged.remove(i);
             merged.push(first.union_term(second));
+        }
+        if blind {
+            UNION_WIDENINGS.with(|count| count.set(count.get() + 1));
         }
         // The head of a union doubles as its container, and a container flagged `mu` is a
         // binder over the WHOLE union. A closed recursive alternative must therefore not
@@ -792,4 +799,23 @@ impl Ty {
         }
         false
     }
+}
+
+thread_local! {
+    /// How many unions had more than [`MAX_TY_TERMS`] alternatives and were widened BLINDLY —
+    /// two alternatives a check could tell apart merged into one — since the last
+    /// [`reset_union_widenings`]. Widening is sound but loses precision, and a lost
+    /// alternative can drop a finding (a fifth tagged arm made a mismatch go silent), so the
+    /// checker reports it per file the way it reports its other caps.
+    static UNION_WIDENINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Unions widened past the term cap since the last reset (see [`UNION_WIDENINGS`]).
+pub fn union_widenings() -> u64 {
+    UNION_WIDENINGS.with(std::cell::Cell::get)
+}
+
+/// Zero the widening count — the checker does this per file.
+pub fn reset_union_widenings() {
+    UNION_WIDENINGS.with(|count| count.set(0));
 }

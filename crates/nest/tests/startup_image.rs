@@ -766,3 +766,50 @@ fn bound_answers_for_an_imaged_module_not_yet_materialised() {
     assert!(warm.contains("1 tests, 1 passed"), "warm:\n{warm}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A long-lived tooling image (the LSP, `nest mcp`) started from the startup image must
+/// know it holds the current files, or `project/reload-changed` — what keeps such an image
+/// in step with the disk — reads every source as never loaded and reloads the whole project
+/// the first time it runs. The image-hit path used to record nothing.
+#[test]
+fn a_tooling_image_started_from_the_image_knows_it_is_current() {
+    let dir = scratch("tooling-current");
+    write(&dir, "project.blsp", "(project\n  :name demo)\n");
+    write(
+        &dir,
+        "src/lib.blsp",
+        "(defmodule lib)\n\
+         (io/puts \"SOURCE-LOAD: lib\")\n\
+         (defn twice (x) (* 2 x))\n",
+    );
+    let probe = |dir: &Path| -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_nest"))
+            .args([
+                "eval",
+                "(project/setup-tooling-image (file/cwd)) \
+                 (io/puts \"RELOADED:\" (count (project/reload-changed (file/cwd))))",
+            ])
+            .current_dir(dir)
+            .output()
+            .expect("spawn nest");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "nest eval failed:\n{combined}");
+        combined
+    };
+    // The first start builds the image; the second is served from it.
+    let _ = probe(&dir);
+    let warm = probe(&dir);
+    assert!(
+        warm.contains("RELOADED: 0"),
+        "an unchanged project reloaded files right after an imaged start:\n{warm}"
+    );
+    assert!(
+        !warm.contains("SOURCE-LOAD: lib"),
+        "the second start was not served from the image, so this case proves nothing:\n{warm}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

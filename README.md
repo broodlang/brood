@@ -16,8 +16,8 @@
 **Brood** is a dynamic **Lisp implemented in Rust** with a deliberately small core:
 a handful of special forms, with the standard library, REPL and toolchain written in
 Brood itself. It runs share-nothing concurrency across every core, connects
-distributed nodes, compiles to a bytecode VM with a tier-1 native JIT, and ships an
-advisory set-theoretic type checker.
+distributed nodes, compiles to a bytecode VM with a tier-1 native JIT, and ships a
+set-theoretic type checker: advisory in the live image, a gate in CI.
 
 ## Install
 

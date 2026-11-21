@@ -49,10 +49,11 @@
       (assert (type-matches? 'memo-shape lines))
       (reflect/eval '(deftype memo-shape (vector int)))
       (assert (not (type-matches? 'memo-shape lines)))))
-  (test "a defrecord turns an unknown name from accepting into a record check"
+  (test "a defrecord turns an unknown name from an error into a record check"
     (let (plain {:a 1})
-      ;; a name nothing defines accepts anything
-      (assert (type-matches? 'memo-late-record plain))
+      ;; a name nothing defines is a misspelled declaration: it raises, and no verdict is
+      ;; remembered for it
+      (assert-error "unknown type `memo-late-record`" (type-matches? 'memo-late-record plain))
       (reflect/eval '(defrecord memo-late-record (a)))
       (assert (not (type-matches? 'memo-late-record plain)))))
   (test "a collection between checks keeps every verdict right"

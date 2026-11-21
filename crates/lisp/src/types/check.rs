@@ -321,6 +321,41 @@ pub fn arg_ty_at(
     walk::take_arg_ty_query()
 }
 
+/// [`arg_ty_at`]'s question answered the way a call's argument check reads it: the
+/// argument's type AND whether it is **precise** (a literal, a declared parameter,
+/// integer-closed arithmetic — checked against a parameter by inclusion, so a merely
+/// wider value is reported) or **dynamic** (a call result, a redefinable global — checked
+/// by overlap, so only a value that cannot fit is reported). docs/types.md § "Which
+/// reading a value gets"; the LSP's hover shows it.
+pub fn arg_gradual_at(
+    heap: &mut Heap,
+    forms: &[Value],
+    line: u32,
+    col: u32,
+    arg_index: usize,
+) -> Option<crate::types::GradualTy> {
+    walk::arm_arg_ty_query(line, col, arg_index);
+    let _ = check_file(heap, forms);
+    walk::take_arg_gradual_query()
+}
+
+/// How a call reads an argument of this gradual type, in words — the hover's line and the
+/// vocabulary of docs/types.md § "Which reading a value gets". `strict` is the mode the
+/// check runs in (`nest check --strict` reads a positively-known dynamic type by inclusion
+/// too).
+pub fn describe_reading(arg: &crate::types::GradualTy, strict: bool) -> String {
+    let ty = annot::display_ty(&arg.bound);
+    if !arg.dynamic {
+        format!("`{ty}` — precise: a parameter must accept every value of it")
+    } else if arg.bound.is_any() {
+        "unknown — dynamic: never reported".to_string()
+    } else if strict {
+        format!("`{ty}` — dynamic, read by inclusion under --strict")
+    } else {
+        format!("`{ty}` — dynamic: reported only if no value of it fits the parameter")
+    }
+}
+
 /// The checker's static type for a **closed expression** — the entry point a test or
 /// tool needs to ask "what does the checker think this value is?" without running a
 /// whole file check. For a literal the answer is exact, which is what makes it usable

@@ -272,7 +272,7 @@
   (test "code-change on a server without the clause is a safe no-op"
     (let (p (start plain 7))
       (code-change p)
-      (assert= (call p :value) 7) ; dropped by the catch-all; state unchanged
+      (assert= (call p :value) 7) ; no migration clause: state unchanged
       (stop p)))
 
   ;; Cross-process: build the pre-migration state in one process, ship the server's
@@ -284,4 +284,18 @@
       (let (c (receive (p p)))
         (code-change c)
         (assert= (call c :value) {:count 3 :ver 2})
-        (stop c)))))
+        (stop c))))
+
+  ;; A REAL reload: the server runs v1, the definition is replaced by v2 while it runs.
+  ;; The loop used to be a local `letrec`, so a running server never saw v2's clauses, and
+  ;; `code-change` ran v1's migration (here: none) — after a reload nothing new ran at all.
+  (test "a running server adopts a redefinition, and code-change runs the NEW migration"
+    ;; defined through `reflect/eval-string` (a root global), as a reload re-evaluates source
+    (reflect/eval-string "(gen/defserver reloading (n) (query :value n) (query :version :v1))")
+    (let (c (start (reflect/eval-string "reloading") 5))
+      (assert= :v1 (call c :version))
+      (reflect/eval-string "(gen/defserver reloading (n) (query :value n) (query :version :v2) (code-change old {:count old}))")
+      (code-change c)
+      (assert= :v2 (call c :version))
+      (assert= {:count 5} (call c :value))
+      (stop c))))

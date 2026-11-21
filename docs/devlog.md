@@ -2322,3 +2322,45 @@ read it off the expansion, and `receive` binders are untyped for every pattern (
 result vector), which is wider than string patterns; the catalog pins the three that work.
 Every new guard sabotage-verified (the formatter's three, the catalog's `(str (or …))` case).
 
+
+2026-11-20. **The checker says why it reported, keeps the editor current, and a gate pins
+precision through every prelude macro.** From a design review of the type system. (1) A call
+reported by *inclusion* — a precise argument (literal, declared parameter) merely wider than
+its parameter, or any known type under `--strict` — now says so and names what would not fit:
+`… got number (x) — the argument's type is precise, so every value must fit, and float |
+decimal | ratio would not`; the same suffix on declared-return, multimethod and impl returns.
+LSP hover on an argument shows its type and reading (`arg_gradual_at`, `describe_reading`);
+docs/types.md § "Which reading a value gets" is the user-facing rule. (2) The LSP loaded a
+project once and never again, so a module saved later was still checked by its OLD types in
+every caller — now a save runs `project/reload-changed` (output to stderr). That exposed a
+second fault: a start served from the startup image recorded no loaded mtimes, so the first
+`reload-changed` in any tooling image (`nest mcp` too) reloaded the whole project;
+`project/note-image-current` records them on the image-hit and partial paths. (3)
+`precision_gate.rs`: every prelude macro has a case proving a type flows through its
+expansion, or a recorded reason none applies; a new macro must be classified. It found
+`condp` never narrowed (the predicate was bound to a temporary — now called by name when it
+is a symbol) and records three gaps it asserts still silent, so fixing one flips it:
+`receive` clause bindings, and the results of `with-out-str`/`with-err-str`. (4) The docs
+say plainly the checker is advisory in the image and a gate in CI. Every guard
+sabotage-verified (hover reading flipped, LSP refresh removed, image-hit mtimes removed).
+
+2026-11-20. **Nine bugs the design review's research found, fixed.** (1) KI-406: a running
+`defserver`/`defstatem` now runs redefined clauses — the loop is a clause of the server's own
+function reached through its global name — and `code-change` runs the CURRENT definition's
+migration. (2) KI-407: superseded code is reclaimed in a multi-process runtime — the waiting
+root thread reports for itself, the free is tried at every collector entry (the 1-in-64
+stride compounded with the doubling back-off into never) and by the report that completes a
+drain. (3) `seq` of any empty collection is nil (`(seq [])` was `[]`, truthy; std/tool/audit
+printed empty groups). (4) `(def x:int 3)` is refused naming `(sig x int)`; `defrecord` reads
+`n:int` as a typed field. (5) A misspelled type name is reported even capitalised (`x:Strng`),
+and an unknown name in a runtime contract raises instead of admitting anything; `numeric`,
+`ordered` and `record` got contract branches. (6) A union widened blindly past four
+alternatives prints a `gave-up` note. (7) Contracts agree with the checker: a keyword passes an
+arrow type, and a record type holds its declared field types. (8) The same-file return
+fixpoint walks callees first, so a call chain's finding no longer depends on definition order.
+(9) `(or (index-of …) 0)` is reported: an `or` whose first value is a numeric call (not a map
+read) with a literal default never falls back. (10) Found by (5): a `deftype` and a function
+of the same name share the declared-sig store, so the later erased the earlier
+(`editor/treesit`'s `parse-state` type); an alias is stored under its own key now, so a type
+and a function may share a name, as bedit's `liveeval` also does. The record contract checks DECLARED field types only — a record carries what
+`assoc` added. Every guard sabotage-verified.

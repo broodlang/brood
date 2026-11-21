@@ -123,7 +123,11 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
 /// entry (privacy, def site and `meta` had an entry kind each) and renumbers `KIND_USES`.
 /// v12 gives each section a symbol table after its entry count, and its values name a symbol
 /// by index into it (ADR-769). A v11 reader would take the table's length for an entry kind.
-const MAGIC: &[u8] = b"brood-image-v12\n";
+/// v13 keys a `deftype` alias's entry `%type:<name>`, apart from a function's signature of
+/// the same name (KI-408). The entries decode alike, so a v12 image would restore its aliases
+/// under the bare name, where nothing looks for them any more: every alias in it would read as
+/// an unknown type. The bump makes such an image stale instead.
+const MAGIC: &[u8] = b"brood-image-v13\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
@@ -351,8 +355,9 @@ fn encode_section(
     // declared — a module restored from the image came back with its sigs but with every
     // `pane` in them an unknown type.
     // The module a declared name belongs to: everything before its last `/`.
+    // An alias's key carries its marker prefix (`%type:mod/name`); its module is its name's.
     let module_of = |sym: value::Symbol| {
-        value::symbol_name(sym)
+        value::symbol_name(crate::builtins::modules::type_alias_name(sym))
             .rsplit_once('/')
             .map(|(module, _)| module.to_string())
     };

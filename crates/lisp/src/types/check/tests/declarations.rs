@@ -94,26 +94,43 @@ fn a_sig_for_a_name_that_is_never_defined_is_reported() {
 }
 
 #[test]
-fn a_capitalised_unknown_type_name_stays_silent_inside_an_arrow_too() {
-    // The first cut reported `(Shape -> int)` as a *malformed arrow*: every part read
-    // as fine (the capitalised name being deliberately silent), so the walk fell
-    // through to the structural message and named the wrong thing. A part that does
-    // not parse now decides the whole expression — including when its verdict is
-    // silence.
-    let ws = file_warnings("(sig w (Shape -> int))\n(defn w (x) 1)\n(defn p () (w 42))");
-    assert!(!ws.iter().any(|m| m.contains("sig w:")), "{ws:?}");
-    let ws = file_warnings("(sig w ((vector Shape) -> int))\n(defn w (x) 1)");
-    assert!(!ws.iter().any(|m| m.contains("sig w:")), "{ws:?}");
-    let ws = file_warnings("(sig w ((record :s Shape) -> int))\n(defn w (x) 1)");
-    assert!(!ws.iter().any(|m| m.contains("sig w:")), "{ws:?}");
+fn a_capitalised_unknown_type_name_is_reported_inside_an_arrow_too() {
+    // A part that does not parse decides the whole expression: `(Shape -> int)` names the
+    // unknown part, not a malformed arrow.
+    for src in [
+        "(sig w (Shape -> int))\n(defn w (x) 1)",
+        "(sig w ((vector Shape) -> int))\n(defn w (x) 1)",
+        "(sig w ((record :s Shape) -> int))\n(defn w (x) 1)",
+    ] {
+        let ws = file_warnings(src);
+        assert!(
+            ws.iter().any(|m| m.contains("unknown type `Shape`")),
+            "{src}: {ws:?}"
+        );
+        assert!(!ws.iter().any(|m| m.contains("malformed")), "{src}: {ws:?}");
+    }
 }
 
 #[test]
-fn a_capitalised_unknown_type_name_stays_silent() {
-    // An ability used as a type resolves by bare name (ADR-181/186), and a
-    // single-file check only knows the abilities the file itself declares — so an
-    // unknown *capitalised* name is assumed to be one, and never reported.
-    let ws = file_warnings("(sig f (Shape -> int))\n(defn f (s) 0)");
+fn a_capitalised_unknown_type_name_is_reported() {
+    // It used to be the one deliberate silence (an ability from a module the check had not
+    // loaded), which left every capitalised typo unreported: `x:Strng` passed even under
+    // `--strict`. The checker reads every ability in the image, so a name that resolves to
+    // nothing is a misspelling, capitalised or not.
+    let ws = file_warnings("(sig f (Strng -> int))\n(defn f (s) 0)");
+    assert!(
+        ws.iter().any(|w| w.contains("unknown type `Strng`")),
+        "{ws:?}"
+    );
+    let ws = file_warnings("(defn g (x:Strng) x)");
+    assert!(
+        ws.iter().any(|w| w.contains("unknown type `Strng`")),
+        "{ws:?}"
+    );
+    // A declared ability is a type, and is not reported.
+    let ws = file_warnings(
+        "(defability Shape (area (self) :-> float))\n(sig f (Shape -> float))\n(defn f (s) (area s))",
+    );
     assert!(!ws.iter().any(|w| w.contains("unknown type")), "{ws:?}");
 }
 
