@@ -483,7 +483,7 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `%contracts-armed?` | 0 | — |
 | `%contracts-sweep!` | 1 | — |
 | `%type-names-record?` | 1 | Whether some registered record id is named `name` as a `sig` spells a record type — bare (the record's name) or qualified (the id's trailing path). |
-| `%type-verdict` | 2 | Whether `value` inhabits `type` when the kernel can say without the Brood walk — by the value's tag (a base name, a literal), by the type's form (`?A`, an arrow, an `or` of … |
+| `%type-verdict` | 2 | Whether `value` inhabits `type` when the kernel can say without the Brood walk — by the value's tag (a base name, a literal), by the type's form read natively — an alias, a `defrecord` name, a sealed … |
 | `%type-verdict!` | 3 | Remember `verdict` for `(type value)` — when the pair is worth remembering — and return it. |
 | `%type-verdict-counts` | 0 | This process's verdict memo as `{:hits :misses :entries :clears}` — what a test reads to tell a remembered verdict from a walked one (ADR-480). |
 
@@ -802,6 +802,7 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `%rope-find` | 4 | The character index of the first occurrence of needle in rope r at or after from, or -1. |
 | `%rope-rfind` | 4 | The character index of the LAST occurrence of needle in rope r starting strictly before `before`, or -1. |
 | `%rope-skip` | 5 | Where a run of characters reaches from `at` in rope r: with inside? |
+| `%skip-word` | 5 | Where a run of word (or non-word) characters reaches from `at` in a rope or a string — a letter, a number, a combining mark or one of word-chars (ADR-774). |
 
 ### `builtins/tooling.rs`
 

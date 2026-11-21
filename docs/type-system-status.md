@@ -22,7 +22,10 @@ below:
 
 - **Contracts are binding-time policy, on by default under `nest run`/`nest test`** (ADR-381),
   with caller/callee blame, a module boundary (ADR-383) and remembered verdicts (ADR-480). So
-  "contract blame and contracts-by-default" in the deferred lists below are done.
+  "contract blame and contracts-by-default" in the deferred lists below are done. An armed
+  call skips its shim when the kernel vouches for the arguments (ADR-748), which it now does
+  for the whole grammar but `rec`, record names included, from a call site that caches the
+  original (ADR-773).
 - **Typed parameters** (ADR-420): `(defn area (w:number h:number -> number) …)` registers the
   `sig`. `_` is an open position, and an open result stays inferred.
 - **A record is its own value kind** (ADR-542, step 3 in the checker). A shape carrying an

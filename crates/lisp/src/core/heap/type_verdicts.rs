@@ -36,12 +36,16 @@
 //! Per heap, so per process: a verdict about a LOCAL object means nothing to another
 //! heap, and no lock is ever taken.
 //!
-//! **What is decided here, not remembered.** Beside the table, [`Heap::type_verdict`]
-//! answers what it can state exactly from a value's tag and a type's form — a base name, a
-//! literal, `?A`, an arrow, an `or` of decided parts — and, on a miss, a record or uniform
-//! vector or list one level deep over decided parts. Everything else (`len`, `rec`, `map`,
-//! `set`, `seqable`, sealed abilities, record names, a record instance's absent field) is
-//! left to `%type-match`, the Brood walk, which stays the one full reading of the grammar.
+//! **What is decided here, not remembered.** Beside the table, [`Heap::decide`] reads the
+//! type grammar natively (ADR-773): base names and literals by the value's tag, `?A`, an
+//! alias by its expansion, a `defrecord` name or a sealed ability nominally, and every
+//! compound form but `rec` — an arrow, `or`/`and`/`not`, `is`, `(int lo hi)`, `len`,
+//! `list`, `vector`, `set`, `seqable`, `map`, `record` and `tuple` — descending into the value as
+//! the walk does and remembering each compound part it decides. A form is read by its head
+//! symbol's interned id, with no list built, and what a NAME stands for is remembered per
+//! name under the stamp. Left to `%type-match`, the Brood walk and the one full reading of
+//! the grammar: `rec`, an int or string literal type, a string's `len`, a record instance's
+//! absent field when its record implements `Lookup`, and anything nested past `DECIDE_DEPTH`.
 
 use super::*;
 use crate::core::value::{AGE_OLD, REGION_SHIFT};
@@ -52,9 +56,10 @@ use crate::core::value::{AGE_OLD, REGION_SHIFT};
 /// table without end.
 pub(crate) const VERDICT_CAPACITY: usize = 1 << 16;
 
-/// How deep `or` alternatives and alias expansions are followed when deciding a form
-/// without the walk. Real types nest a few levels; a cycle is cut here and left to the walk.
-const FORM_DEPTH: u32 = 16;
+/// How deep [`Heap::decide`] follows a type into a value — alias expansions, `or`/`and`/`not`
+/// alternatives and descents into elements and fields together. Real types and values nest a
+/// few levels; a cyclic alias, or a value deeper than this, is cut here and left to the walk.
+const DECIDE_DEPTH: u32 = 24;
 
 /// What a verdict was reached under. A verdict is reused only while every part is equal.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -137,6 +142,13 @@ pub(crate) struct TypeVerdictCache {
     /// `%nominal-type-matches?` made per checked value, through `->string` on every id. It
     /// depends on the name and the registry alone, and the registry moving moves the stamp.
     names_record: HashMap<Symbol, bool, std::hash::BuildHasherDefault<IdentityHasher>>,
+    /// Per type NAME that is not a base name: what it names ([`NameKind`]) — an alias, a
+    /// type variable, a sealed ability, or a nominal name (ADR-773).
+    name_kinds: HashMap<Symbol, NameKind, std::hash::BuildHasherDefault<IdentityHasher>>,
+    /// Per `(record id, type name)`: `%record-id-named?`'s answer.
+    ids_named: HashMap<(Symbol, Symbol), bool, std::hash::BuildHasherDefault<IdentityHasher>>,
+    /// Per record id: whether it implements `Lookup` (`get` may answer a missing field).
+    lookups: HashMap<Symbol, bool, std::hash::BuildHasherDefault<IdentityHasher>>,
     hits: u64,
     asks: u64,
     vouched: u64,
@@ -168,7 +180,110 @@ impl TypeVerdictCache {
             self.clears += 1;
         }
         self.names_record.clear();
+        self.name_kinds.clear();
+        self.ids_named.clear();
+        self.lookups.clear();
     }
+}
+
+/// What a type name that is not a base name stands for, as `%type-match` reads it — decided
+/// once per name under the verdict stamp, since every part of the answer (the alias store,
+/// `*sealed*`, `*record-ids*`, the namespace a bare name resolves in) moves the stamp.
+#[derive(Clone)]
+enum NameKind {
+    /// A `deftype` alias: the verdict is its expansion's.
+    Alias,
+    /// A type variable (`?A`): a static-only constraint, accepted.
+    Variable,
+    /// A sealed ability: the closed set of its members' record ids.
+    Sealed(Vec<Symbol>),
+    /// A `defrecord` name: a value that is not one such record fails. `typed_fields`: its
+    /// constructor declares field types, which the id alone does not prove — a record built
+    /// with `assoc` can carry a wrong one — so a matching record is left to the walk, which
+    /// checks them (`%record-declared-fields-match?`).
+    Nominal { typed_fields: bool },
+    /// An open ability: any value may gain an impl, so any value is admitted.
+    OpenAbility,
+    /// A name nothing defines: a misspelled declaration. Left to the walk, which raises
+    /// naming it — accepting it made a typo in a `sig!` enforce nothing.
+    Unknown,
+}
+
+/// The head symbols [`Heap::decide`] reads a form by, interned once.
+struct FormHeads {
+    arrow: Symbol,
+    or: Symbol,
+    and: Symbol,
+    not: Symbol,
+    is: Symbol,
+    int: Symbol,
+    len: Symbol,
+    open_end: Symbol,
+    list: Symbol,
+    vector: Symbol,
+    tuple: Symbol,
+    set: Symbol,
+    seqable: Symbol,
+    map: Symbol,
+    record: Symbol,
+    open: Symbol,
+    optional: Symbol,
+    lookup: Symbol,
+    lookup_get: Symbol,
+}
+
+fn form_heads() -> &'static FormHeads {
+    use crate::core::value::intern;
+    static HEADS: std::sync::OnceLock<FormHeads> = std::sync::OnceLock::new();
+    HEADS.get_or_init(|| FormHeads {
+        arrow: intern("->"),
+        or: intern("or"),
+        and: intern("and"),
+        not: intern("not"),
+        is: intern("is"),
+        int: intern("int"),
+        len: intern("len"),
+        open_end: intern("_"),
+        list: intern("list"),
+        vector: intern("vector"),
+        tuple: intern("tuple"),
+        set: intern("set"),
+        seqable: intern("seqable"),
+        map: intern("map"),
+        record: intern("record"),
+        open: intern("&open"),
+        optional: intern("optional"),
+        lookup: intern("Lookup"),
+        lookup_get: intern("lookup-get"),
+    })
+}
+
+/// Part verdicts folded the way `and` folds them: one failure decides, else any undecided
+/// part leaves the whole undecided.
+fn all_of(parts: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+    let mut undecided = false;
+    for part in parts {
+        match part {
+            Some(false) => return Some(false),
+            Some(true) => {}
+            None => undecided = true,
+        }
+    }
+    if undecided { None } else { Some(true) }
+}
+
+/// A positional shape — `(tuple A B)`, `(list A B …)` — against `elements`: exact arity,
+/// then each position against its own type.
+fn positional(heap: &Heap, types: &[Value], elements: &[Value], depth: u32) -> Option<bool> {
+    if types.len() != elements.len() {
+        return Some(false);
+    }
+    all_of(
+        types
+            .iter()
+            .zip(elements)
+            .map(|(&type_expression, &element)| heap.decide(type_expression, element, depth)),
+    )
 }
 
 /// A hasher for keys that are already well-distributed integers — the odd-multiply mix
@@ -238,7 +353,7 @@ fn base_type_tags() -> &'static HashMap<Symbol, u32, std::hash::BuildHasherDefau
     > = std::sync::OnceLock::new();
     TABLE.get_or_init(|| {
         let set = |tags: &[Tag]| tags.iter().fold(0u32, |set, &tag| set | (1 << tag as u32));
-        let names: [(&str, u32); 29] = [
+        let names: [(&str, u32); 32] = [
             ("any", u32::MAX),
             ("_", u32::MAX),
             ("never", 0),
@@ -287,6 +402,17 @@ fn base_type_tags() -> &'static HashMap<Symbol, u32, std::hash::BuildHasherDefau
                     Tag::Table,
                 ]),
             ),
+            // `numeric` and `ordered`: a number, or a record (which may have a method for the
+            // operator) — the contract's reading; `record` is the tag.
+            (
+                "numeric",
+                set(&[Tag::Int, Tag::Float, Tag::Decimal, Tag::Ratio, Tag::Record]),
+            ),
+            (
+                "ordered",
+                set(&[Tag::Int, Tag::Float, Tag::Decimal, Tag::Ratio, Tag::Record]),
+            ),
+            ("record", set(&[Tag::Record])),
             ("failure", set(&[Tag::Failure])),
             ("rope", set(&[Tag::Rope])),
             ("pid", set(&[Tag::Pid])),
@@ -328,92 +454,6 @@ impl Heap {
         self.type_verdicts.get_or_init(Box::default)
     }
 
-    /// The remembered verdict on whether `value` inhabits `type_expression`, if one is
-    /// still valid — see the module docs for what invalidates one. A miss on a record or a
-    /// uniform sequence is then tried ONE level deep, here: when every field or element is
-    /// decided by its type's tag or by a remembered verdict — a new model whose buffers are
-    /// the same objects as last time — the whole is decided without the Brood walk, and
-    /// remembered. Anything undecided leaves it to the walk.
-    pub(crate) fn type_verdict(&self, type_expression: Value, value: Value) -> KnownVerdict {
-        if let Some(verdict) = self.form_verdict(type_expression, value, 0) {
-            return KnownVerdict::Known(verdict);
-        }
-        let keys = (type_identity(type_expression), value_identity(value));
-        if let (Some(type_key), Some(value_key)) = keys {
-            let mut cache = self.synced_verdict_cache();
-            if let Some(verdict) = cache.verdicts.get(&(type_key, value_key)).copied() {
-                cache.hits += 1;
-                return KnownVerdict::Known(verdict);
-            }
-            cache.misses += 1;
-        }
-        let keep = keys.0.is_some() && keys.1.is_some();
-        match self.one_level_verdict(type_expression, value) {
-            Some(verdict) => {
-                if keep {
-                    self.record_type_verdict(type_expression, value, verdict);
-                }
-                KnownVerdict::Known(verdict)
-            }
-            None if keep => KnownVerdict::Unknown,
-            None => KnownVerdict::Unkept,
-        }
-    }
-
-    /// What the type expression's FORM decides with no memo and no walk: a base name or a
-    /// literal (by the value's tag), a type variable (`?A`, a static-only constraint the
-    /// walk accepts), an arrow type (the walk's `fn?`), and an `or` whose alternatives are
-    /// each decided. Mirrors the order `%type-match` asks in: an arrow before the head, a
-    /// type variable only once no alias claims the name.
-    fn form_verdict(&self, type_expression: Value, value: Value, depth: u32) -> Option<bool> {
-        // An alias cycle through `or` (`(deftype a (or b))` `(deftype b (or a))`) the walk
-        // stops with its `seen` path; here a bound leaves it undecided, for the walk.
-        if depth > FORM_DEPTH {
-            return None;
-        }
-        if matches!(type_expression, Value::Nil) {
-            return Some(matches!(value, Value::Nil));
-        }
-        if let Some(verdict) = base_type_verdict(type_expression, value) {
-            return Some(verdict);
-        }
-        match type_expression {
-            Value::Sym(symbol) => {
-                let type_variable = crate::core::value::symbol_name_ref(symbol).starts_with('?');
-                (type_variable && crate::builtins::alias_expansion(self, symbol).is_none())
-                    .then_some(true)
-            }
-            Value::Pair(id) => {
-                let (head, _) = self.pair(id);
-                let items = self.list_to_vec(type_expression).ok()?;
-                let is_symbol = |item: &Value, name: &str| matches!(item, Value::Sym(symbol) if crate::core::value::symbol_name_ref(*symbol) == name);
-                if items.iter().any(|item| is_symbol(item, "->")) {
-                    // A keyword is callable — it reads its key out of a map (ADR-165) — so
-                    // it passes an arrow type, as `%type-match` and the checker both say.
-                    return Some(matches!(
-                        crate::core::value::tag(value),
-                        crate::core::value::Tag::Fn
-                            | crate::core::value::Tag::Native
-                            | crate::core::value::Tag::Keyword
-                    ));
-                }
-                if !is_symbol(&head, "or") {
-                    return None;
-                }
-                let mut undecided = false;
-                for &alternative in &items[1..] {
-                    match self.decided_verdict(alternative, value, depth + 1) {
-                        Some(true) => return Some(true),
-                        Some(false) => {}
-                        None => undecided = true,
-                    }
-                }
-                if undecided { None } else { Some(false) }
-            }
-            _ => None,
-        }
-    }
-
     /// The table, cleared first if its stamp has moved.
     fn synced_verdict_cache(&self) -> std::cell::RefMut<'_, TypeVerdictCache> {
         let stamp = self.verdict_stamp();
@@ -425,183 +465,588 @@ impl Heap {
         cache
     }
 
-    /// A part's verdict when it is already decided: by its form ([`form_verdict`]), by a
-    /// remembered verdict, or — for an alias over a base name (`(deftype line int)`) — by
-    /// the tag under the alias. `None` is undecided, never "fails".
-    ///
-    /// [`form_verdict`]: Self::form_verdict
-    fn decided_verdict(&self, type_expression: Value, value: Value, depth: u32) -> Option<bool> {
-        if let Some(verdict) = self.form_verdict(type_expression, value, depth) {
-            return Some(verdict);
+    /// Whether `value` inhabits `type_expression`, when the kernel can say without the
+    /// Brood walk — see [`Self::decide`] — else whether the pair is worth remembering once
+    /// the walk has answered it.
+    pub(crate) fn type_verdict(&self, type_expression: Value, value: Value) -> KnownVerdict {
+        if let Some(verdict) = self.decide(type_expression, value, 0) {
+            return KnownVerdict::Known(verdict);
         }
-        if let (Some(type_key), Some(value_key)) =
-            (type_identity(type_expression), value_identity(value))
-        {
-            let mut cache = self.synced_verdict_cache();
-            if let Some(verdict) = cache.verdicts.get(&(type_key, value_key)).copied() {
-                cache.hits += 1;
-                return Some(verdict);
-            }
-        }
-        match type_expression {
-            // An alias stands for its expansion: decided when the expansion's form is.
-            Value::Sym(symbol) => self.form_verdict(
-                crate::builtins::alias_expansion(self, symbol)?,
-                value,
-                depth + 1,
-            ),
-            _ => None,
+        match (type_identity(type_expression), value_identity(value)) {
+            (Some(_), Some(_)) => KnownVerdict::Unknown,
+            _ => KnownVerdict::Unkept,
         }
     }
 
-    /// `type_expression` against `value` one level deep — the cases `%type-match` handles
-    /// that a contracted editor meets per call: a record (closed or `&open`, `(optional T)`
-    /// fields), or a uniform vector or list, each behind an alias or not. Every part
-    /// must be [`decided`](Self::decided_verdict); one that is not makes the whole `None`,
-    /// unless another part already fails it. Mirrors `%type-match` and must stay in step
-    /// with it: the record's `get` is the map's own entry (a record INSTANCE, whose `get` may
-    /// go through `Lookup`, is left to the walk), and a closed record admits only its keys.
-    fn one_level_verdict(&self, type_expression: Value, value: Value) -> Option<bool> {
-        let form = match type_expression {
-            Value::Sym(symbol) => crate::builtins::alias_expansion(self, symbol)?,
-            form => form,
-        };
-        // An expansion is a new form: an arrow, an `or` or a name may decide it outright —
-        // and an arrow is decided THERE, before any head below could claim it.
-        if let Some(verdict) = self.form_verdict(form, value, 0) {
+    /// `type_expression` against `value`, decided natively (ADR-773) — or `None`, which
+    /// leaves the question to `%type-match`, the Brood walk and the one full reading of the
+    /// grammar. Mirrors `%type-match` case for case and must stay in step with it:
+    ///
+    /// - a base name or a literal keyword/bool by the value's tag, `nil` by identity;
+    /// - a remembered verdict for a compound value (the memo, by identity);
+    /// - a symbol by what it names ([`Self::symbol_verdict`]): an alias by its expansion, a
+    ///   type variable accepts, a `defrecord` name or a sealed ability nominally;
+    /// - a form by its head symbol, compared as an interned id — an arrow, `or`, `and`,
+    ///   `not`, `is`, `(int lo hi)`, `len`, `list` (uniform or positional), `vector`, `set`,
+    ///   `seqable`, `map`, `record` and `tuple` — descending into the value's parts the way
+    ///   the walk does, so a whole model is decided natively, each newly decided compound
+    ///   part remembered on the way.
+    ///
+    /// Left to the walk: `rec`, an int or string literal type, a string's `len`, an unknown head, a lazy
+    /// range or seq-view where a list is asked for, a record instance's absent field when its
+    /// record implements `Lookup`, and anything past [`DECIDE_DEPTH`] (a cyclic alias among
+    /// them — the walk's `seen` answers that).
+    pub(crate) fn decide(&self, type_expression: Value, value: Value, depth: u32) -> Option<bool> {
+        if depth > DECIDE_DEPTH {
+            return None;
+        }
+        if matches!(type_expression, Value::Nil) {
+            return Some(matches!(value, Value::Nil));
+        }
+        if let Some(verdict) = base_type_verdict(type_expression, value) {
             return Some(verdict);
         }
-        if let Value::Sym(_) = form {
-            return self.decided_verdict(form, value, 0);
+        let keys = match (type_identity(type_expression), value_identity(value)) {
+            (Some(type_key), Some(value_key)) => {
+                let mut cache = self.synced_verdict_cache();
+                if let Some(verdict) = cache.verdicts.get(&(type_key, value_key)).copied() {
+                    cache.hits += 1;
+                    return Some(verdict);
+                }
+                cache.misses += 1;
+                true
+            }
+            _ => false,
+        };
+        let verdict = match type_expression {
+            Value::Sym(symbol) => self.symbol_verdict(symbol, value, depth),
+            Value::Pair(_) => self.form_verdict(type_expression, value, depth),
+            _ => None,
+        }?;
+        if keys {
+            self.record_type_verdict(type_expression, value, verdict);
         }
-        let items = self.list_to_vec(form).ok()?;
-        let symbol_named = |item: &Value, name: &str| matches!(item, Value::Sym(symbol) if crate::core::value::symbol_name_ref(*symbol) == name);
-        let head = items.first()?;
-        // Fold part verdicts the way `and` does: one failure decides, else any undecided
-        // part leaves the whole undecided.
-        let all_of = |parts: &mut dyn Iterator<Item = Option<bool>>| {
+        Some(verdict)
+    }
+
+    /// A type NAME that is not a base name: what `%type-match` makes of a symbol once the
+    /// base names are past — an alias stands for its expansion; otherwise
+    /// `%nominal-type-matches?`: a type variable (`?A`) accepts, a sealed ability admits its
+    /// member identities, a `defrecord` name admits a record of that id, a name some record
+    /// carries refuses anything else, and a name nothing defines accepts. What a name IS is
+    /// remembered per name under the verdict stamp ([`NameKind`]), so a record-typed
+    /// argument costs a lookup and an id comparison, not the walk's string work.
+    fn symbol_verdict(&self, symbol: Symbol, value: Value, depth: u32) -> Option<bool> {
+        match self.name_kind(symbol) {
+            NameKind::Alias => {
+                let expansion = crate::builtins::alias_expansion(self, symbol)?;
+                self.decide(expansion, value, depth + 1)
+            }
+            NameKind::Variable => Some(true),
+            // A sealed ability over a value that is no record: its `type-of` identity is the
+            // walk's to compare.
+            NameKind::Sealed(members) => match value {
+                Value::Record { id, .. } => Some(members.contains(&id)),
+                _ => None,
+            },
+            NameKind::Nominal { typed_fields } => {
+                if let Value::Record { id, .. } = value
+                    && self.record_id_named(id, symbol)
+                {
+                    return if typed_fields { None } else { Some(true) };
+                }
+                Some(false)
+            }
+            NameKind::OpenAbility => Some(true),
+            NameKind::Unknown => None,
+        }
+    }
+
+    /// What the type name `symbol` names, remembered under the verdict stamp.
+    fn name_kind(&self, symbol: Symbol) -> NameKind {
+        if let Some(kind) = self.synced_verdict_cache().name_kinds.get(&symbol) {
+            return kind.clone();
+        }
+        // `%type-alias` answers nil for no alias, so an alias OF nil reads as no alias there.
+        let kind = if crate::builtins::alias_expansion(self, symbol)
+            .is_some_and(|expansion| !matches!(expansion, Value::Nil))
+        {
+            NameKind::Alias
+        } else if crate::core::value::symbol_name_ref(symbol).starts_with('?') {
+            NameKind::Variable
+        } else if let Some(members) = self.sealed_members(symbol) {
+            NameKind::Sealed(members)
+        } else if self.type_names_record(symbol) {
+            NameKind::Nominal {
+                typed_fields: self.record_declares_field_types(symbol),
+            }
+        } else if self.names_open_ability(symbol) {
+            NameKind::OpenAbility
+        } else {
+            NameKind::Unknown
+        };
+        self.synced_verdict_cache()
+            .name_kinds
+            .insert(symbol, kind.clone());
+        kind
+    }
+
+    /// Is `symbol` (as written, or by its last segment) a registered ability?
+    fn names_open_ability(&self, symbol: Symbol) -> bool {
+        let Some(Value::Map(abilities)) = self.env_get(
+            EnvId::GLOBAL,
+            crate::core::value::intern(crate::core::registries::ABILITIES),
+        ) else {
+            return false;
+        };
+        let name = crate::core::value::symbol_name_ref(symbol);
+        let leaf = name
+            .rfind('/')
+            .map(|slash| crate::core::value::intern(&name[slash + 1..]))
+            .unwrap_or(symbol);
+        [symbol, leaf]
+            .into_iter()
+            .any(|key| self.map_get(abilities, Value::Sym(key)).is_some())
+    }
+
+    /// Does the constructor of record `symbol` declare a field type other than `any`, `_` or a
+    /// type variable — the
+    /// `(record :__id__ … :field T …)` after its signature's `->`?
+    fn record_declares_field_types(&self, symbol: Symbol) -> bool {
+        let Some(sig) =
+            crate::builtins::modules::sig_type_of(self, self.declared_sig_value(symbol))
+        else {
+            return false;
+        };
+        let Ok(items) = self.list_to_vec(sig) else {
+            return false;
+        };
+        let arrow = crate::core::value::intern("->");
+        let Some(shape) = items
+            .iter()
+            .position(|item| matches!(item, Value::Sym(s) if *s == arrow))
+            .and_then(|at| items.get(at + 1).copied())
+        else {
+            return false;
+        };
+        let Ok(parts) = self.list_to_vec(shape) else {
+            return false;
+        };
+        let any = crate::core::value::intern("any");
+        let open = crate::core::value::intern("_");
+        // `record`, then key/type pairs; `:__id__`'s value is the id keyword, not a type.
+        parts
+            .get(1..)
+            .unwrap_or(&[])
+            .chunks(2)
+            .any(|pair| match pair {
+                [Value::Keyword(key), _]
+                    if crate::core::value::symbol_name_ref(*key) == "__id__" =>
+                {
+                    false
+                }
+                // An untyped field is declared `?field`, a type variable, which checks nothing.
+                [_, Value::Sym(ty)] => {
+                    *ty != any
+                        && *ty != open
+                        && !crate::core::value::symbol_name_ref(*ty).starts_with('?')
+                }
+                [_, _] => true,
+                _ => false,
+            })
+    }
+
+    /// The sealed member ids of the ability `symbol` names, looked up as written and by its
+    /// last segment — `%nominal-type-matches?`'s `(or (%sealed-members t) (%sealed-members
+    /// leaf))`. A member that is not a keyword id is kept out; one would never equal a
+    /// record's id.
+    fn sealed_members(&self, symbol: Symbol) -> Option<Vec<Symbol>> {
+        let sealed = match self.env_get(
+            EnvId::GLOBAL,
+            crate::core::value::intern(crate::core::registries::SEALED),
+        ) {
+            Some(Value::Map(id)) => id,
+            _ => return None,
+        };
+        let name = crate::core::value::symbol_name_ref(symbol);
+        let leaf = name
+            .rfind('/')
+            .map(|slash| crate::core::value::intern(&name[slash + 1..]))
+            .unwrap_or(symbol);
+        let members = [symbol, leaf].into_iter().find_map(|key| {
+            self.map_get(sealed, Value::Sym(key))
+                .filter(|m| !matches!(m, Value::Nil))
+        })?;
+        let items = match members {
+            Value::Vector(id) => self.vector(id).to_vec(),
+            list => self.list_to_vec(list).ok()?,
+        };
+        Some(
+            items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Value::Keyword(id) => Some(id),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// `%record-id-named?`: does the record id `id` name the type `type_name` as a `sig`
+    /// spells it — bare (the record's registered NAME) or qualified (the id's trailing
+    /// path, or the whole of it). Remembered per pair under the verdict stamp.
+    fn record_id_named(&self, id: Symbol, type_name: Symbol) -> bool {
+        if let Some(&named) = self.synced_verdict_cache().ids_named.get(&(id, type_name)) {
+            return named;
+        }
+        let name = crate::core::value::symbol_name_ref(type_name);
+        let named = if name.contains('/') {
+            let id_name = crate::core::value::symbol_name_ref(id);
+            id_name == name || id_name.ends_with(&format!("/{name}"))
+        } else {
+            match self.env_get(
+                EnvId::GLOBAL,
+                crate::core::value::intern(crate::core::registries::RECORD_IDS),
+            ) {
+                Some(Value::Map(records)) => matches!(
+                    self.map_get(records, Value::Keyword(id)),
+                    Some(Value::Sym(registered)) if registered == type_name
+                ),
+                _ => false,
+            }
+        };
+        self.synced_verdict_cache()
+            .ids_named
+            .insert((id, type_name), named);
+        named
+    }
+
+    /// Whether the record id `id` implements `Lookup` — so a field its map lacks may still
+    /// answer through `lookup-get` (`get`'s `%lookup-miss`), which only the walk can call.
+    /// Remembered per id under the verdict stamp (an `impl` rebinds `*impls*`).
+    fn record_has_lookup(&self, id: Symbol) -> bool {
+        if let Some(&has) = self.synced_verdict_cache().lookups.get(&id) {
+            return has;
+        }
+        let has = match self.env_get(
+            EnvId::GLOBAL,
+            crate::core::value::intern(crate::core::registries::IMPLS),
+        ) {
+            // `*impls*` is keyed by `[ability op]`; a map lookup compares the vector by value.
+            Some(Value::Map(impls)) => self.map_get_by_op_key(impls, id),
+            // Unbound (`%lookup-miss`'s `bound?` guard): no record answers through it.
+            Some(_) => false,
+            None => false,
+        };
+        self.synced_verdict_cache().lookups.insert(id, has);
+        has
+    }
+
+    /// `*impls*[[Lookup lookup-get]]` holds an entry for `id`. The key vector is found by
+    /// scanning the (few) keys rather than allocating one to look it up, since this runs
+    /// from a `&self` reader.
+    fn map_get_by_op_key(&self, impls: MapId, id: Symbol) -> bool {
+        let names = form_heads();
+        let methods = self.map_entries(impls).into_iter().find_map(|(key, methods)| {
+            let Value::Vector(key_id) = key else {
+                return None;
+            };
+            matches!(
+                self.vector(key_id),
+                [Value::Sym(ability), Value::Sym(op)] if *ability == names.lookup && *op == names.lookup_get
+            )
+            .then_some(methods)
+        });
+        match methods {
+            Some(Value::Map(methods)) => self
+                .map_get(methods, Value::Keyword(id))
+                .is_some_and(|method| !matches!(method, Value::Nil)),
+            _ => false,
+        }
+    }
+
+    /// A compound type form against `value`, read by its head symbol's interned id — no list
+    /// is built and no spelling compared. An arrow anywhere in the form is checked first, as
+    /// `%type-match` checks it before the head (KI-113).
+    fn form_verdict(&self, form: Value, value: Value, depth: u32) -> Option<bool> {
+        let names = form_heads();
+        let Value::Pair(form_id) = form else {
+            return None;
+        };
+        let (head, parts) = self.pair(form_id);
+        if self.list_any(
+            form,
+            |item| matches!(item, Value::Sym(symbol) if symbol == names.arrow),
+        ) {
+            // A keyword is callable — it reads its key out of a map (ADR-165) — so it passes
+            // an arrow type, as `%type-match` and the checker both say.
+            return Some(matches!(
+                crate::core::value::tag(value),
+                crate::core::value::Tag::Fn
+                    | crate::core::value::Tag::Native
+                    | crate::core::value::Tag::Keyword
+            ));
+        }
+        let Value::Sym(head) = head else {
+            return None;
+        };
+        let next = depth + 1;
+        if head == names.or {
             let mut undecided = false;
-            for part in parts {
-                match part {
-                    Some(false) => return Some(false),
-                    Some(true) => {}
+            for alternative in self.type_items(parts) {
+                match self.decide(alternative, value, next) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
                     None => undecided = true,
                 }
             }
-            if undecided { None } else { Some(true) }
-        };
-        if symbol_named(head, "record") {
-            // A map, or a record's fields (ADR-542). A record INSTANCE answers `get` on a
-            // missing (or nil) key through its `Lookup` impl (`%lookup-miss`), which only
-            // the walk can call; a field it holds is its field map's own entry either way.
-            let (map_id, instance_id) = match value {
-                Value::Map(map_id) => (map_id, None),
-                Value::Record { id, fields } => (fields, Some(id)),
+            return if undecided { None } else { Some(false) };
+        }
+        if head == names.and {
+            return all_of(
+                self.type_items(parts)
+                    .map(|part| self.decide(part, value, next)),
+            );
+        }
+        if head == names.not {
+            let mut undecided = false;
+            for part in self.type_items(parts) {
+                match self.decide(part, value, next) {
+                    Some(true) => return Some(false),
+                    Some(false) => {}
+                    None => undecided = true,
+                }
+            }
+            return if undecided { None } else { Some(true) };
+        }
+        if head == names.is {
+            return Some(matches!(value, Value::Bool(_)));
+        }
+        let first = self.nth_item(parts, 0);
+        if head == names.int {
+            let number = match value {
+                Value::Int(number) => number,
+                // A big integer is an `int?` outside every i64 bound; the walk compares it.
+                Value::BigInt(_) => return None,
                 _ => return Some(false),
             };
-            let instance = instance_id.is_some();
-            let open = items.get(1).is_some_and(|item| symbol_named(item, "&open"));
-            // `key type` pairs; a dangling odd key is ignored, as the walk ignores it.
-            let (all_fields, _) = items[if open { 2 } else { 1 }..].as_chunks::<2>();
-            // The `:__id__` pseudo-field a `defrecord` constructor's result type carries
-            // names the record type: such a shape admits only a record of that id, and the
-            // pseudo-field is no field of it. A shape without one admits a map or a record,
-            // as `type-matches?` does (an accessor's `&open` shape takes any carrier).
-            let id_key = Value::Keyword(*crate::core::value::RECORD_ID_SYMBOL);
-            let is_id = |field: &[Value; 2]| matches!((field[0], id_key), (Value::Keyword(a), Value::Keyword(b)) if a == b);
-            if let Some(field) = all_fields.iter().find(|field| is_id(field)) {
-                let wanted = match field[1] {
-                    Value::Keyword(wanted) => wanted,
-                    _ => return None,
-                };
-                if instance_id != Some(wanted) {
-                    return Some(false);
-                }
-            }
-            let fields: Vec<[Value; 2]> = all_fields
-                .iter()
-                .filter(|field| !is_id(field))
-                .copied()
-                .collect();
-            let fields = fields.as_slice();
-            // Keyword field names only: the closed check below compares names by identity,
-            // as `%record-declares?` does with `%eq`, which is exact only for interned keys.
-            if fields
-                .iter()
-                .any(|field| !matches!(field[0], Value::Keyword(_)))
-            {
-                return None;
-            }
-            let field_verdicts = fields.iter().map(|field| {
-                let field_value = self.map_get(map_id, field[0]).unwrap_or(Value::Nil);
-                if instance && matches!(field_value, Value::Nil) {
-                    return None;
-                }
-                let field_type = field[1];
-                if let Value::Pair(id) = field_type {
-                    let (wrapper, tail) = self.pair(id);
-                    if symbol_named(&wrapper, "optional") {
-                        if matches!(field_value, Value::Nil) {
-                            return Some(true);
-                        }
-                        let Value::Pair(tail_id) = tail else {
-                            return None;
-                        };
-                        return self.decided_verdict(self.pair(tail_id).0, field_value, 0);
-                    }
-                }
-                self.decided_verdict(field_type, field_value, 0)
-            });
-            let fields_pass = all_of(&mut field_verdicts.collect::<Vec<_>>().into_iter());
-            if fields_pass != Some(true) || open {
-                return fields_pass;
-            }
-            let declared = |key: Value| {
-                let Value::Keyword(key) = key else {
-                    return false;
-                };
-                fields
-                    .iter()
-                    .any(|field| matches!(field[0], Value::Keyword(name) if name == key))
+            let bound = |end: Value, admits: fn(i64, i64) -> bool| match end {
+                Value::Sym(symbol) if symbol == names.open_end => Some(true),
+                Value::Int(limit) => Some(admits(limit, number)),
+                _ => None,
             };
             return Some(
-                self.map_entries(map_id)
-                    .into_iter()
-                    .all(|(key, _)| declared(key)),
+                bound(first, |low, n| low <= n)?
+                    && bound(self.nth_item(parts, 1), |high, n| n <= high)?,
             );
         }
-        if symbol_named(head, "vector") {
-            let Value::Vector(vector_id) = value else {
+        if head == names.len {
+            // `(len T lo hi)`: a countable `T` whose count lies in the interval — `nil`
+            // counts 0. A string's or bytes' count is the walk's (`count` of a string is its
+            // characters); a non-countable value never fits.
+            let count = match value {
+                Value::Nil => 0,
+                Value::Pair(_) => self.list_to_vec(value).ok()?.len(),
+                Value::Vector(vector_id) => self.vector(vector_id).len(),
+                Value::Map(map_id) | Value::Set(map_id) => self.map_size(map_id),
+                Value::Str(_) | Value::Bytes(_) | Value::Range(_) | Value::SeqView(_) => {
+                    return None;
+                }
+                _ => return Some(false),
+            };
+            let count = i64::try_from(count).ok()?;
+            let bound = |end: Value, admits: fn(i64, i64) -> bool| match end {
+                Value::Sym(symbol) if symbol == names.open_end => Some(true),
+                Value::Int(limit) => Some(admits(limit, count)),
+                _ => None,
+            };
+            if !(bound(self.nth_item(parts, 1), |low, n| low <= n)?
+                && bound(self.nth_item(parts, 2), |high, n| n <= high)?)
+            {
                 return Some(false);
-            };
-            let Some(&element_type) = items.get(1) else {
-                return Some(true);
-            };
-            let elements: Vec<Value> = self.vector(vector_id).to_vec();
-            return all_of(
-                &mut elements
-                    .into_iter()
-                    .map(|element| self.decided_verdict(element_type, element, 0)),
-            );
+            }
+            return self.decide(first, value, next);
         }
-        if symbol_named(head, "list") && items.len() <= 2 {
-            match value {
-                Value::Nil | Value::Pair(_) => {}
+        if head == names.list {
+            let elements = match value {
+                Value::Nil | Value::Pair(_) => self.list_to_vec(value).ok()?,
                 // A lazy range or seq-view is a list to `list?`; realising one is the walk's.
                 Value::Range(_) | Value::SeqView(_) => return None,
                 _ => return Some(false),
-            }
-            let Some(&element_type) = items.get(1) else {
-                return Some(true);
             };
-            let elements = self.list_to_vec(value).ok()?;
+            let types: Vec<Value> = self.type_items(parts).collect();
+            // No element type, or a nil one, admits any list: the walk asks `(nil? elem)` first.
+            return match types.len() {
+                _ if matches!(types.first(), None | Some(Value::Nil)) => Some(true),
+                1 => all_of(
+                    elements
+                        .into_iter()
+                        .map(|element| self.decide(types[0], element, next)),
+                ),
+                _ => positional(self, &types, &elements, next),
+            };
+        }
+        if head == names.vector {
+            let Value::Vector(vector_id) = value else {
+                return Some(false);
+            };
+            if matches!(first, Value::Nil) {
+                return Some(true);
+            }
+            let elements: Vec<Value> = self.vector(vector_id).to_vec();
             return all_of(
-                &mut elements
+                elements
                     .into_iter()
-                    .map(|element| self.decided_verdict(element_type, element, 0)),
+                    .map(|element| self.decide(first, element, next)),
             );
         }
+        if head == names.tuple {
+            let Value::Vector(vector_id) = value else {
+                return Some(false);
+            };
+            let types: Vec<Value> = self.type_items(parts).collect();
+            let elements: Vec<Value> = self.vector(vector_id).to_vec();
+            return positional(self, &types, &elements, next);
+        }
+        if head == names.set || head == names.seqable {
+            let elements = match value {
+                Value::Set(set_id) => self.set_elems(set_id),
+                Value::Vector(vector_id) if head == names.seqable => {
+                    self.vector(vector_id).to_vec()
+                }
+                Value::Nil | Value::Pair(_) if head == names.seqable => {
+                    self.list_to_vec(value).ok()?
+                }
+                Value::Range(_) | Value::SeqView(_) if head == names.seqable => return None,
+                _ => return Some(false),
+            };
+            if matches!(first, Value::Nil) {
+                return Some(true);
+            }
+            return all_of(
+                elements
+                    .into_iter()
+                    .map(|element| self.decide(first, element, next)),
+            );
+        }
+        if head == names.map {
+            // A record is its own kind (ADR-542): `(map K V)` never admits one.
+            let Value::Map(map_id) = value else {
+                return Some(false);
+            };
+            let value_type = self.nth_item(parts, 1);
+            if matches!((first, value_type), (Value::Nil, Value::Nil)) {
+                return Some(true);
+            }
+            // A missing half is the `nil` type, as the walk reads `(first (rest …))` of it.
+            return all_of(
+                self.map_entries(map_id)
+                    .into_iter()
+                    .flat_map(|(key, entry)| {
+                        [
+                            self.decide(first, key, next),
+                            self.decide(value_type, entry, next),
+                        ]
+                    }),
+            );
+        }
+        if head == names.record {
+            return self.record_verdict(parts, value, next);
+        }
         None
+    }
+
+    /// `(record [&open] k1 T1 k2 T2 …)` against `value` — `%type-match`'s record arm. A field
+    /// typed `(optional T)` may be absent or nil; a closed record admits only its keys; a
+    /// shape carrying the `:__id__` pseudo-field (a `defrecord` constructor's result, ADR-542)
+    /// admits only a record of that id. A record INSTANCE's field is read as `get` reads it:
+    /// its field map's entry, and on a miss (or nil) its `Lookup` — decided here only when its
+    /// record implements none, so the miss is nil.
+    fn record_verdict(&self, parts: Value, value: Value, depth: u32) -> Option<bool> {
+        let names = form_heads();
+        let (map_id, instance) = match value {
+            Value::Map(map_id) => (map_id, None),
+            Value::Record { id, fields } => (fields, Some(id)),
+            _ => return Some(false),
+        };
+        let open = matches!(self.nth_item(parts, 0), Value::Sym(symbol) if symbol == names.open);
+        let items: Vec<Value> = self.type_items(parts).skip(usize::from(open)).collect();
+        // `key type` pairs; a dangling odd key is ignored, as the walk ignores it.
+        let (all_fields, _) = items.as_chunks::<2>();
+        let id_key = *crate::core::value::RECORD_ID_SYMBOL;
+        let is_id = |field: &[Value; 2]| matches!(field[0], Value::Keyword(key) if key == id_key);
+        if let Some(field) = all_fields.iter().find(|field| is_id(field)) {
+            let Value::Keyword(wanted) = field[1] else {
+                return None;
+            };
+            if instance != Some(wanted) {
+                return Some(false);
+            }
+        }
+        let fields: Vec<[Value; 2]> = all_fields
+            .iter()
+            .filter(|field| !is_id(field))
+            .copied()
+            .collect();
+        // Keyword field names only: the closed check compares names by identity, as
+        // `%record-declares?` does with `%eq`, which is exact only for interned keys.
+        if fields
+            .iter()
+            .any(|field| !matches!(field[0], Value::Keyword(_)))
+        {
+            return None;
+        }
+        let misses_are_nil = instance.is_none_or(|id| !self.record_has_lookup(id));
+        let field_verdicts = fields.iter().map(|field| {
+            let field_value = self.map_get(map_id, field[0]).unwrap_or(Value::Nil);
+            if !misses_are_nil && matches!(field_value, Value::Nil) {
+                return None;
+            }
+            let field_type = field[1];
+            if let Value::Pair(id) = field_type {
+                let (wrapper, tail) = self.pair(id);
+                if matches!(wrapper, Value::Sym(symbol) if symbol == names.optional) {
+                    if matches!(field_value, Value::Nil) {
+                        return Some(true);
+                    }
+                    return self.decide(self.nth_item(tail, 0), field_value, depth);
+                }
+            }
+            self.decide(field_type, field_value, depth)
+        });
+        let fields_pass = all_of(field_verdicts.collect::<Vec<_>>().into_iter());
+        if fields_pass != Some(true) || open {
+            return fields_pass;
+        }
+        let declared = |key: Value| matches!(key, Value::Keyword(key) if fields.iter().any(|field| matches!(field[0], Value::Keyword(name) if name == key)));
+        Some(
+            self.map_entries(map_id)
+                .into_iter()
+                .all(|(key, _)| declared(key)),
+        )
+    }
+
+    /// The items of the proper list `list`, in order — stops at its end or at an improper tail.
+    fn type_items(&self, list: Value) -> impl Iterator<Item = Value> + '_ {
+        let mut rest = list;
+        std::iter::from_fn(move || match rest {
+            Value::Pair(id) => {
+                let (item, tail) = self.pair(id);
+                rest = tail;
+                Some(item)
+            }
+            _ => None,
+        })
+    }
+
+    /// The `index`th item of the list `list`, or nil past its end.
+    fn nth_item(&self, list: Value, index: usize) -> Value {
+        self.type_items(list).nth(index).unwrap_or(Value::Nil)
+    }
+
+    /// Whether any item of the list `list` satisfies `test`.
+    fn list_any(&self, list: Value, test: impl Fn(Value) -> bool) -> bool {
+        self.type_items(list).any(test)
     }
 
     /// Remember `verdict` for `(type_expression, value)` under the current stamp. A pair not
@@ -632,7 +1077,7 @@ impl Heap {
         }
         let name = crate::core::value::symbol_name_ref(type_name);
         let records = match self.env_get(
-            self.global(),
+            EnvId::GLOBAL,
             crate::core::value::intern(crate::core::registries::RECORD_IDS),
         ) {
             Some(Value::Map(id)) => self.map_entries(id),

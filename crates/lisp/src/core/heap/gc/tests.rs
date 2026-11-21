@@ -925,6 +925,9 @@ fn major_keeps_nursery_form_positions() {
 /// lets those bits name a different object must forget what they named. `reset_local_to`
 /// truncates the nursery and mints the SAME slot at the SAME epoch for the next allocation:
 /// a verdict kept across it would answer for an object it never saw.
+///
+/// The type is a name nothing defines, which the kernel decides as accepting (ADR-773), so
+/// these tests remember `false` about it: a `false` answer is the memo's, a `true` one fresh.
 #[test]
 fn reset_local_to_forgets_verdicts_about_reclaimed_slots() {
     use crate::core::heap::KnownVerdict;
@@ -932,10 +935,10 @@ fn reset_local_to_forgets_verdicts_about_reclaimed_slots() {
     let type_expression = Value::Sym(crate::core::value::intern("verdict-test-type"));
     let checkpoint = h.checkpoint();
     let first = h.alloc_vector(vec![Value::int(1)]);
-    h.record_type_verdict(type_expression, first, true);
+    h.record_type_verdict(type_expression, first, false);
     assert!(matches!(
         h.type_verdict(type_expression, first),
-        KnownVerdict::Known(true)
+        KnownVerdict::Known(false)
     ));
     h.reset_local_to(checkpoint);
     let reused = h.alloc_vector(vec![Value::nil()]);
@@ -947,7 +950,7 @@ fn reset_local_to_forgets_verdicts_about_reclaimed_slots() {
     assert!(
         matches!(
             h.type_verdict(type_expression, reused),
-            KnownVerdict::Unknown
+            KnownVerdict::Known(true)
         ),
         "a verdict about the reclaimed vector answered for the one now in its slot",
     );
@@ -967,7 +970,7 @@ fn collections_forget_exactly_the_verdicts_whose_objects_move() {
     h.minor_collect(true, &mut roots, &mut []);
     let tenured = roots[0];
     let young = h.alloc_vector(vec![Value::int(2)]);
-    h.record_type_verdict(type_expression, tenured, true);
+    h.record_type_verdict(type_expression, tenured, false);
     h.record_type_verdict(type_expression, young, false);
     assert_eq!(h.type_verdict_counts().entries, 2);
 
@@ -981,11 +984,11 @@ fn collections_forget_exactly_the_verdicts_whose_objects_move() {
     );
     assert!(matches!(
         h.type_verdict(type_expression, tenured),
-        KnownVerdict::Known(true)
+        KnownVerdict::Known(false)
     ));
     assert!(matches!(
         h.type_verdict(type_expression, young),
-        KnownVerdict::Unknown
+        KnownVerdict::Known(true)
     ));
 
     let mut roots = vec![tenured, young];
@@ -1007,19 +1010,20 @@ fn a_declaration_or_a_rebinding_starts_the_verdicts_over() {
     let mut h = Heap::new();
     let type_expression = Value::Sym(crate::core::value::intern("verdict-test-type"));
     let value = h.alloc_vector(vec![Value::int(1)]);
-    h.record_type_verdict(type_expression, value, true);
+    // remembered `false` about a name the kernel decides as accepting (see above)
+    h.record_type_verdict(type_expression, value, false);
     h.runtime
         .declared_sigs_version
         .fetch_add(1, Ordering::AcqRel);
     assert!(matches!(
         h.type_verdict(type_expression, value),
-        KnownVerdict::Unknown
+        KnownVerdict::Known(true)
     ));
-    h.record_type_verdict(type_expression, value, true);
+    h.record_type_verdict(type_expression, value, false);
     h.runtime.version.fetch_add(1, Ordering::Relaxed);
     assert!(matches!(
         h.type_verdict(type_expression, value),
-        KnownVerdict::Unknown
+        KnownVerdict::Known(true)
     ));
 }
 

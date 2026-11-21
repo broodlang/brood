@@ -471,6 +471,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "`=1`: run every armed contract through its Brood shim instead of the dispatcher checking vouched arguments and the result on return (ADR-748) — the A/B lever for compiled contracts",
     ),
     f(
+        "BROOD_CONTRACT_WALK_TRACE",
+        DIAG,
+        "`=1`: print `[contract-walk] <fn> <position> <type> <- <kind>` on stderr for every declared argument or result type the dispatcher could not vouch for, so the call fell to the Brood `type-matches?` walk — the shapes an armed program's contract cost is made of",
+    ),
+    f(
         "BROOD_NO_CONTRACT_BOUNDARY",
         OPTOUT,
         "opt OUT of the contract MODULE BOUNDARY (ADR-383): a module's calls to its own contracted functions go through the shim too, instead of the uncontracted binding",

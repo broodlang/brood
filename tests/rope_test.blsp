@@ -336,3 +336,59 @@
   (test "out of range raises"
     (assert-error (text/char->utf16 (text/string-> "ab") 3))
     (assert-error (text/utf16->char (text/string-> "ab") 3))))
+
+;; ---- word syntax (%skip-word, ADR-774) ---------------------------------------
+;; A word is letters and digits of any script plus the extra characters a word syntax
+;; declares. The scans take a rope or a string and agree on both.
+
+(describe "text word syntax"
+  (test "letters, digits and combining marks are word characters; punctuation is not"
+    (is (text/word-char? "a" nil))
+    (is (text/word-char? "9" nil))
+    (is (text/word-char? "λ" nil))
+    (is (text/word-char? "\u{301}" nil))
+    (refute (text/word-char? "_" nil))
+    (refute (text/word-char? "-" nil))
+    (refute (text/word-char? "'" nil))
+    (refute (text/word-char? "" nil)))
+  (test "a syntax's :word-chars are word characters too"
+    (is (text/word-char? "'" {:word-chars "'"}))
+    (is (text/word-char? "_" {:word-chars "_-"}))
+    (refute (text/word-char? "." {:word-chars "_-"})))
+  (test "forward-word skips the gap, then the word"
+    (assert= (text/forward-word "foo_bar baz" 0 nil) 3)
+    (assert= (text/forward-word "foo_bar baz" 3 nil) 7)
+    (assert= (text/forward-word "foo_bar baz" 0 {:word-chars "_"}) 7)
+    (assert= (text/forward-word "ab" 2 nil) 2))
+  (test "backward-word skips the gap, then the word"
+    (assert= (text/backward-word "x.y = don't" 11 nil) 10)
+    (assert= (text/backward-word "x.y = don't" 11 {:word-chars "'"}) 6)
+    (assert= (text/backward-word "ab" 0 nil) 0))
+  (test "a rope and the same string answer alike"
+    (let (line "  (foo-bar \"é don't\") 42.5 "
+          rope (text/string-> line)
+          syntax {:word-chars "'"})
+      (assert= (map (range 0 (count line)) (fn (at) (text/forward-word rope at syntax)))
+        (map (range 0 (count line)) (fn (at) (text/forward-word line at syntax))))
+      (assert= (map (range 0 (count line)) (fn (at) (text/backward-word rope at syntax)))
+        (map (range 0 (count line)) (fn (at) (text/backward-word line at syntax))))))
+  (test "word-bounds is the word at or just before an index"
+    (assert= (text/word-bounds "foo.bar" 5 nil) [4 7])
+    (assert= (text/word-bounds "foo.bar" 4 nil) [4 7])
+    (assert= (text/word-bounds "foo.bar" 3 nil) [0 3])
+    (assert= (text/word-bounds (text/string-> "a - b") 2 nil) nil)
+    (assert= (text/word-bounds "don't" 1 {:word-chars "'"}) [0 5]))
+  (test "indices are characters, and an index past the end is clamped"
+    (assert= (text/forward-word "ééé x" 0 nil) 3)
+    (assert= (text/forward-word "ab" 99 nil) 2)
+    (assert= (text/backward-word "ab cd" 99 nil) 3)))
+
+(describe "text word scans across processes"
+  :isolated (test "workers scanning one shared rope agree with the caller"
+    (let (rope (text/string-> (string/join (map (range 0 200) (fn (_) "foo_bar don't ")) ""))
+          expected (text/forward-word rope 1000 nil)
+          caller (self)
+          workers (map (range 0 4)
+                    (fn (_) (spawn (fn () (send caller [:at (text/forward-word rope 1000 nil)]))))))
+      (assert= (vec (map workers (fn (_) (receive ([:at at] at)))))
+        [expected expected expected expected]))))

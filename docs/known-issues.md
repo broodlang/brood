@@ -68,6 +68,35 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-405 — full.yml's AddressSanitizer job no longer fit its runner, open 2026-11-20
+
+**Symptom.** `AddressSanitizer (kernel tests)` red four runs in a row, no memory error in any:
+twice `The hosted runner lost communication with the server` at 85 minutes, with no log
+(runs 44601155754 on `c41ca2f6c`, 44691308011 on `4740f6e5c`); twice `exceeded the maximum
+execution time of 2h30m0s`, the first with `brood_suite_passes` killed at `TRY 1 TMT
+[5400.058s]` (44623644866 on `c48f4bfbd`). The last green run (44507391905, `1383f37cf`) passed
+it in 5002 s.
+
+**Cause.** The runner, not a commit. Every ASan test ran 15-25% slower between the green run
+and the red ones — `types` 219 → 274 s, `tail_positions` 420 → 512 s, `image_matches_source`
+1842 → 2100 s — on the same nightly (`65ce8611f 2026-11-18`), the runner image having moved from
+20261103 to 20261111. `v0.56.0`, the green commit, ran out of time on the new image too (run
+44702475115). The suite ran beside every other test on one runner at 93% of its cap, so the
+slowdown took it over; the lost runners read as starvation at the same point of the run.
+
+**Why it survived.** Nothing measures the margin: the ASan job is weekly, its suite's per-test
+times were never printed (the runner's report comes at the end, which a killed run never
+reaches, and nextest hides a passing test's output), and a lost runner leaves no log at all.
+
+**Fix.** `make asan` takes `ASAN_FILTER`, and full.yml runs it as two jobs that between them
+run every test: the in-language suite (`binary(suite)`) on a runner of its own, its cap 7200 s
+and its job 210 minutes, and everything else in 150. Nothing is filtered out. `4740f6e5c` makes
+the ASan target trace the suite (`BROOD_TEST_TRACE`) and show its output on a pass, so the next
+slow run names its tests and a green one is the baseline.
+
+**Guard.** None can be in a test: this is the runner's budget. Closed when a full.yml run is green
+with both jobs, their times recorded here.
+
 ## KI-397 — an Interp's parked waiters outlived its drop past the 30 s deadline ⚠️ watching 2026-11-17
 
 **Symptom.** `interp_teardown::dropping_an_interp_reaps_permanently_parked_waiters` failed once in
@@ -134,6 +163,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 | KI-408 | **A `deftype` and a function of the same name erased each other** — `editor/treesit`'s `parse-state` type was lost to its function | ✅ **FIXED 2026-11-20** — an alias has its own store key (`%type:<name>`); image format v13. Guard: `contract_test` "a type and a function may share a name" |
 | KI-407 | **Superseded code was never reclaimed in a multi-process runtime** — 120 000 redefinitions kept 116 000 closures; the first drain never completed | ✅ **FIXED 2026-11-20** — a waiting root thread reports for itself, the free is tried at every collector entry and by the report that completes a drain. Guard: `runtime_drain_completes` (red with the fixes off). Still open: running code pins a drain until it returns |
 | KI-406 | **A running `defserver` never ran redefined clauses, and `code-change` ran the old migration** — the loop was a local `letrec` | ✅ **FIXED 2026-11-20** — the loop and the migration go through the server's global name; `defstatem` likewise. Guards: `gen_test`/`statem_test` reload cases (red against the old `gen.blsp`) |
+| KI-405 | **`full.yml`'s AddressSanitizer job no longer fit its runner** — on the 2026-11-11 runner image every ASan test ran 15-25% slower (the in-language suite past its 5400 s cap, from 5002 s on a pass), the job passed 150 minutes, and twice the runner was lost ("lost communication", starved) at 85 minutes; v0.56.0, green on the old image, did the same on the new one (run 44702475115), so no commit caused it. No memory error | **OPEN 2026-11-20 — fix landed, awaiting a green full.yml**: the job is two (`ASAN_FILTER`): the in-language suite on a runner of its own with a 7200 s cap and 210 minutes, everything else on another; nothing removed. The ASan target traces the suite (`BROOD_TEST_TRACE`), so the next slow run names its slow tests |
 | KI-404 | **The pattern compiler accepted `&optional` in a vector pattern and junk after a record's field map** — the first never matched, the second was dropped | ✅ **FIXED 2026-11-19** — both refused by name (ADR-755). Guards: `pattern_matching_test` "&optional is not allowed in a vector pattern…" and "a record pattern takes one field pattern at most" (red with the checks off) |
 | KI-403 | **A guard a clause needs was reported "can never be true" from one copy of the clause** — `(defn kx ((:a) 1) ((n) :when (int? n) n))`: `n is :a` | ✅ **FIXED 2026-11-19** — a "never" verdict is judged over every copy the match compiler splices (ADR-756). Guards: `match_lints::a_guard_one_copy_of_its_clause_needs_is_not_dead`, `…dead_in_every_copy_is_still_reported` |
 | KI-402 | **The Rust readers of pattern syntax drifted from the compiler** — false "no clause accepts" for a record to a map pattern, `nil` to `(& r)`, bytes to `(bytes …)`; wrong binders in the scope analysis | ✅ **FIXED 2026-11-19** — one Rust reading, `syntax/pattern.rs` (ADR-755), held to `match.blsp` by `crates/lisp/tests/pattern_grammar.rs`. Guards: `domains::a_map_pattern_clause_admits_a_record` and siblings, `scope::tests::a_pattern_binds_only_where_it_binds` |

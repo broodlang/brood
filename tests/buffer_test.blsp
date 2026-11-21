@@ -124,33 +124,52 @@
   (test "forward-word moves to the end of the next word"
     (let (b (make-buffer "foo bar  baz"))
       ; end of "foo"
-      (assert= (buffer-point (forward-word b)) 3)
+      (assert= (buffer-point (forward-word b nil)) 3)
       ; end of "bar"
-      (assert= (buffer-point (forward-word (forward-word b))) 7)
-      (assert= (buffer-point (forward-word (goto-char b 12))) 12)))
+      (assert= (buffer-point (forward-word (forward-word b nil) nil)) 7)
+      (assert= (buffer-point (forward-word (goto-char b 12) nil)) 12)))
   ; at start, stays
   (test "backward-word moves to the start of the previous word"
     (let (b (goto-char (make-buffer "foo bar  baz") 12))
       ; end of "baz"
       ; start of "baz"
-      (assert= (buffer-point (backward-word b)) 9)
+      (assert= (buffer-point (backward-word b nil)) 9)
       ; start of "bar"
-      (assert= (buffer-point (backward-word (backward-word b))) 4)
-      (assert= (buffer-point (backward-word (goto-char b 0))) 0)))
-  (test "a qualified name is two words: `/` is a delimiter for M-f/M-b and M-d/M-DEL"
+      (assert= (buffer-point (backward-word (backward-word b nil) nil)) 4)
+      (assert= (buffer-point (backward-word (goto-char b 0) nil)) 0)))
+  (test "a qualified name is two words: `/` is not a word character"
     (let (b (make-buffer "(math/floor x)"))
       ; end of "math"
-      (assert= (buffer-point (forward-word b)) 5)
+      (assert= (buffer-point (forward-word b nil)) 5)
       ; end of "floor"
-      (assert= (buffer-point (forward-word (forward-word b))) 11)
+      (assert= (buffer-point (forward-word (forward-word b nil) nil)) 11)
       ; from after "floor": back to its start, then to the start of "math"
-      (assert= (buffer-point (backward-word (goto-char b 11))) 6)
-      (assert= (buffer-point (backward-word (backward-word (goto-char b 11)))) 1)))
+      (assert= (buffer-point (backward-word (goto-char b 11) nil)) 6)
+      (assert= (buffer-point (backward-word (backward-word (goto-char b 11) nil) nil)) 1)))
+  (test "a word is letters and digits: `_`, `-`, `.` and `'` separate words (ADR-774)"
+    (let (b (make-buffer "foo_bar baz-qux x.y don't"))
+      (assert= (buffer-point (forward-word b nil)) 3)
+      (assert= (buffer-point (forward-word (goto-char b 3) nil)) 7)
+      (assert= (buffer-point (forward-word (goto-char b 7) nil)) 11)
+      (assert= (buffer-point (forward-word (goto-char b 16) nil)) 17)
+      (assert= (buffer-point (forward-word (goto-char b 17) nil)) 19)
+      (assert= (buffer-point (forward-word (goto-char b 19) nil)) 23)
+      (assert= (buffer-point (backward-word (end-of-buffer b) nil)) 24)))
+  (test "the word syntax's :word-chars join words"
+    (let (b (make-buffer "foo_bar don't"))
+      (assert= (buffer-point (forward-word b {:word-chars "_"})) 7)
+      (assert= (buffer-point (backward-word (end-of-buffer b) {:word-chars "'"})) 8)))
+  (test "letters and digits of any script are word characters"
+    (let (b (make-buffer "ταχύ2 中文 e\u{301}t\u{e9}"))
+      (assert= (buffer-point (forward-word b nil)) 5)
+      (assert= (buffer-point (forward-word (goto-char b 5) nil)) 8)
+      ;; a combining accent stays inside its word
+      (assert= (buffer-point (forward-word (goto-char b 8) nil)) 13)))
   (test "word motion crosses lines and delimiters"
     (let (b (make-buffer "(foo\n bar)"))
       ; skips '(', ends "foo"
-      (assert= (buffer-point (forward-word b)) 4)
-      (assert= (buffer-point (forward-word (forward-word b))) 9))))
+      (assert= (buffer-point (forward-word b nil)) 4)
+      (assert= (buffer-point (forward-word (forward-word b nil) nil)) 9))))
 (describe "back-to-indentation (M-m)"
   (test "point lands on the line's first non-whitespace character"
     (let (b (make-buffer "  hi\nthere"))
@@ -203,7 +222,7 @@
     (let (b (set-read-only (make-buffer "hello world") true))
       ;; make-buffer built the text before the flag; navigation never checks it
       (assert= (buffer-text b) "hello world")
-      (assert= (buffer-point (forward-word b)) 5)
+      (assert= (buffer-point (forward-word b nil)) 5)
       (assert= (buffer-point (end-of-buffer b)) 11)))
   (test "clearing read-only restores editing"
     (let (b (set-read-only (make-buffer "ab") true))
@@ -948,6 +967,10 @@
     (let (b (buffer-marker-set (make-buffer "abcdef") :m 5))
       (assert= (buffer-markers b) {:m 5})
       (is (nil? (buffer-marker (buffer-marker-delete b :m) :m)))))
+  (test "buffer-markers answers the stored map when it is in range, and clamps one that is not"
+    (let (b (buffer-marker-set (buffer-marker-set (make-buffer "abcdef") :m 5) :n 0))
+      (assert= (buffer-markers b) (get b :markers))
+      (assert= (buffer-markers (assoc b :markers {:m 9 :n 2})) {:m 6 :n 2})))
   ; whole buffer gone
   (test "a marker read is clamped to the current length after a shrinking edit"
     (let (b (buffer-marker-set (make-buffer "abcdef") :m 5))

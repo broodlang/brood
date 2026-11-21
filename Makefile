@@ -469,6 +469,9 @@ RR ?= rr
 rr-hunt: ## Record a test binary under `rr record --chaos` until it fails, keeping that recording: make rr-hunt RR_TEST="target/debug/deps/brood-HASH case_name" RR_RUNS=50 [RR=/path/to/rr, 5.10+ on glibc 2.42+]
 	@RR="$(RR)" scripts/rr-hunt.sh $(RR_RUNS) $(RR_TEST)
 
+# Which tests `make asan` runs (a nextest filterset). full.yml runs it as two jobs, the
+# in-language suite (`binary(suite)`) apart from the rest, each with a runner to itself.
+ASAN_FILTER ?= all()
 asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly + rust-src + cargo-nextest; the system allocator so ASAN can intercept allocations instead of mimalloc's un-instrumented arena). Catches genuine OOB / use-after-free in the unsafe substrate (mmap table, JIT codegen buffers) that TSAN and the logical GC tripwires miss. Through nextest, which also skips doctests (they don't LINK under ASAN + build-std, a toolchain quirk).
 	# `--cfg brood_asan` sizes `WORKER_STACK_BYTES` to 64 MiB for this build, because ASAN's
 	# redzones roughly double every Rust frame: the instrumented prelude boot measured
@@ -490,10 +493,14 @@ asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly +
 	CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
 		RUSTFLAGS="-Zsanitizer=address --cfg brood_asan --cfg brood_system_alloc" \
 		cargo +nightly build --release --target x86_64-unknown-linux-gnu -p cli -p nest
-	RUST_MIN_STACK=16777216 CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
+	# BROOD_TEST_TRACE: the in-language suite prints a line per test with its time. It runs
+	# close to its cap here, its end-of-run report never prints when the cap kills it, and the
+	# per-test lines are in the output nextest shows on a timeout (and on a pass: the asan
+	# profile's success-output), so a run out of time still names the tests that took it.
+	BROOD_TEST_TRACE=1 RUST_MIN_STACK=16777216 CARGO_UNSTABLE_BUILD_STD=std CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
 		RUSTFLAGS="-Zsanitizer=address --cfg brood_asan --cfg brood_system_alloc" \
 		cargo +nightly nextest run --profile asan --no-fail-fast --target x86_64-unknown-linux-gnu \
-		-p brood --release
+		-p brood --release -E '$(ASAN_FILTER)'
 
 repl: ## Start the REPL
 	$(CLI)

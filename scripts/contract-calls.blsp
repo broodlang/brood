@@ -1,0 +1,71 @@
+;; scripts/contract-calls.blsp — one contracted call shape, `N` times in a loop: what
+;; `scripts/contract-cost.sh` counts the instructions of, armed and unarmed (ADR-748, ADR-773).
+;;
+;;     ROW=char-at N=100000 BROOD_CONTRACTS=1 brood scripts/contract-calls.blsp
+;;
+;; Each row is its own loop over its own call site, so a site sees one callee. The declared
+;; types are what an armed editor's calls declare: a base name, a `defrecord` name, a
+;; `deftype` record shape (an unchanged value and a fresh one each call), an `or` with nil, a
+;; uniform vector, a map, a tuple, and an `any` result. Root names, so every call is checked
+;; (a root name has no module boundary, ADR-383); `char-at` crosses std's `string` boundary.
+(defrecord cc-point (x y))
+(deftype cc-shape (record :x int :y int))
+
+(sig cc-add (int int -> int))
+(defn cc-add (a b) (+ a b))
+(sig cc-record (cc-point -> int))
+(defn cc-record (point) (:x point))
+(sig cc-shape-x (cc-shape -> int))
+(defn cc-shape-x (shape) (:x shape))
+(sig cc-maybe ((or nil int) -> int))
+(defn cc-maybe (value) (if (nil? value) 0 value))
+(sig cc-vector ((vector int) -> int))
+(defn cc-vector (items) (count items))
+(sig cc-map ((map keyword int) -> int))
+(defn cc-map (table) (count table))
+(sig cc-tuple ((tuple int string) -> int))
+(defn cc-tuple (pair) (first pair))
+(sig cc-any (int -> any))
+(defn cc-any (value) value)
+
+(def cc-the-point (cc-point 1 2))
+(def cc-the-shape {:x 1 :y 2})
+(def cc-the-vector [1 2 3 4 5 6 7 8])
+(def cc-the-map {:a 1 :b 2 :c 3})
+(def cc-the-tuple [1 "one"])
+
+(defn cc-loop-char-at (n acc)
+  (if (= n 0) acc (cc-loop-char-at (- n 1) (+ acc (count (string/char-at "hello" 1))))))
+(defn cc-loop-int (n acc) (if (= n 0) acc (cc-loop-int (- n 1) (cc-add acc 1))))
+(defn cc-loop-record (n acc)
+  (if (= n 0) acc (cc-loop-record (- n 1) (+ acc (cc-record cc-the-point)))))
+(defn cc-loop-shape (n acc)
+  (if (= n 0) acc (cc-loop-shape (- n 1) (+ acc (cc-shape-x cc-the-shape)))))
+(defn cc-loop-fresh-shape (n acc)
+  (if (= n 0) acc (cc-loop-fresh-shape (- n 1) (+ acc (cc-shape-x {:x n :y 2})))))
+(defn cc-loop-maybe (n acc) (if (= n 0) acc (cc-loop-maybe (- n 1) (+ acc (cc-maybe n)))))
+(defn cc-loop-vector (n acc)
+  (if (= n 0) acc (cc-loop-vector (- n 1) (+ acc (cc-vector cc-the-vector)))))
+(defn cc-loop-map (n acc) (if (= n 0) acc (cc-loop-map (- n 1) (+ acc (cc-map cc-the-map)))))
+(defn cc-loop-tuple (n acc)
+  (if (= n 0) acc (cc-loop-tuple (- n 1) (+ acc (cc-tuple cc-the-tuple)))))
+(defn cc-loop-any (n acc) (if (= n 0) acc (cc-loop-any (- n 1) (+ acc (cc-any 1)))))
+
+(def cc-loops
+  {"char-at" cc-loop-char-at
+   "int" cc-loop-int
+   "record" cc-loop-record
+   "shape" cc-loop-shape
+   "fresh-shape" cc-loop-fresh-shape
+   "maybe" cc-loop-maybe
+   "vector" cc-loop-vector
+   "map" cc-loop-map
+   "tuple" cc-loop-tuple
+   "any" cc-loop-any})
+
+(let (row (or (os/env "ROW") "int")
+      n (string/->number (or (os/env "N") "1000"))
+      run (get cc-loops row))
+  (if (nil? run)
+    (throw (str "contract-calls: no row " row ", rows: " (keys cc-loops)))
+    (io/puts (str row " " (run n 0)))))

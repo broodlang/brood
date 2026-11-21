@@ -299,39 +299,29 @@ the target line is long enough. Clamps to the buffer's line range.
   (goto-char buf (buffer-length buf)))
 
 ;; ---- word motion (M-f / M-b) ------------------------------------------------
-;; A word is a run of non-delimiter, non-whitespace chars (same notion as the
-;; line editor's M-f/M-b). Forward skips any non-word chars then the word;
-;; backward is the mirror. Both scan the ROPE from point (`text/skip-forward`), reading
-;; only the characters they cross.
-
-(def- *word-delimiters*
-  ;; what is NOT part of a word: whitespace and the delimiters. `/` is one — a qualified
-  ;; name `math/floor` is two words, so M-d / M-DEL and M-f / M-b take the namespace and
-  ;; the name separately.
-  " /\t\n()[]{}\";,")
+;; A word is what a WORD SYNTAX says it is (`text/word-char?`, ADR-774): letters and digits
+;; plus the extra characters the buffer's mode declares, as an Emacs syntax table's word
+;; class. The caller passes the syntax — the buffer does not know its mode. Both motions scan
+;; the ROPE from point, reading only the characters they cross.
 
 (def- *horizontal-space*
   ;; horizontal only: a newline is a line boundary, never whitespace to squeeze
   " \t")
 
-(defn forward-word (buf)
-  "Point moved to the end of the next word forward (skip non-word chars, then the word).
-Scans the rope from point and reads only what it crosses: it used to flatten the whole
-buffer to a string on every M-f, which on a large file was the cost of the keystroke.
+(defn forward-word (buf syntax)
+  "Point moved to the end of the next word forward under word syntax `syntax` (skip
+non-word chars, then the word). Scans the rope from point and reads only what it crosses.
 
-    (editor/buffer/buffer-point (editor/buffer/forward-word (editor/buffer/make-buffer \"  hello world\")))   ;=> 7"
-  (let (rope (get buf :rope)
-        i (text/skip-forward rope (get buf :point) *word-delimiters* true))
-    (goto-char buf (text/skip-forward rope i *word-delimiters* false))))
+    (editor/buffer/buffer-point (editor/buffer/forward-word (editor/buffer/make-buffer \"  hello_world\") nil))   ;=> 7
+    (editor/buffer/buffer-point (editor/buffer/forward-word (editor/buffer/make-buffer \"don't\") {:word-chars \"'\"}))   ;=> 5"
+  (goto-char buf (text/forward-word (get buf :rope) (get buf :point) syntax)))
 
-(defn backward-word (buf)
-  "Point moved to the start of the previous word backward (skip non-word chars, then the
-word). Like `forward-word`, reads only the characters it crosses.
+(defn backward-word (buf syntax)
+  "Point moved to the start of the previous word backward under word syntax `syntax` (skip
+non-word chars, then the word). Like `forward-word`, reads only the characters it crosses.
 
-    (editor/buffer/buffer-point (editor/buffer/backward-word (editor/buffer/end-of-buffer (editor/buffer/make-buffer \"hello world\"))))   ;=> 6"
-  (let (rope (get buf :rope)
-        i (text/skip-backward rope (get buf :point) *word-delimiters* true))
-    (goto-char buf (text/skip-backward rope i *word-delimiters* false))))
+    (editor/buffer/buffer-point (editor/buffer/backward-word (editor/buffer/end-of-buffer (editor/buffer/make-buffer \"hello.world\")) nil))   ;=> 6"
+  (goto-char buf (text/backward-word (get buf :rope) (get buf :point) syntax)))
 
 ;; ---- indentation motion (M-m) -----------------------------------------------
 ;; `beginning-of-line` with the indent skipped — the same rope scan the word motions use.
@@ -2057,9 +2047,15 @@ omitted (nil) keeps what it was (left gravity for a new marker).
 
 (defn buffer-markers (buf)
   "The marker map `{id -> pos}` (positions clamped to the current length), or `{}` if none.
+The stored map itself when every position is already in range — which edits keep true — so a
+cache keyed on it hits.
 
     (editor/buffer/buffer-markers (editor/buffer/buffer-marker-set (editor/buffer/make-buffer \"abc\") :m 2))   ;=> {:m 2}"
-  (update-vals (or (get buf :markers) {}) (fn (pos) (buffer-clamp 0 (buffer-length buf) pos))))
+  (let (markers (or (get buf :markers) {})
+        length (buffer-length buf))
+    (if (every? (vals markers) (fn (pos) (<= 0 pos length)))
+      markers
+      (update-vals markers (fn (pos) (buffer-clamp 0 length pos))))))
 
 ;; ---- annotations: derived data stamped with the text it describes -------------
 ;; A tool that computes something ABOUT a buffer — per-line test verdicts, a diff
