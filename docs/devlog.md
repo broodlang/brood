@@ -2404,3 +2404,14 @@ play, the device is opened when a window gets its first sound (not on the first 
 asks for a 20 ms buffer instead of rodio's 50. app.js mirrors the three. Guards: `pan_tests`,
 the one-shot source tests, `sound_tests` (keyed edge), the op parser tests. Not run here: the
 full suites (desktop rule).
+
+2026-11-21 (ADR-777). **What dino's hot paths found.** The "stale `&optional` once hot" bug was a
+call spill landing in the block-argument window: `emit_call` bounded call-result spills by the
+whole reserve, so a spill past its half overwrote a value a join had carried (dino's staged tail
+call head, then called as `208`); bounded now, with map/vector reads counted as handle producers
+and capped by the entries actually below a non-tail call. A widened join of a float and an
+untyped slot keeps the float guess, so b2d-physics `warm-start!` no longer latches off native.
+`(- a b c)`/`(/ a b c)` fold like `+`/`*`. `math/round`/`ceil` test finiteness with `(< (- x x)
+1.0)` instead of two ability dispatches (2.1 µs → 0.5 µs a call). The kernel decides a record
+name against a record value (contracted record parameter 9.5 → 2.0 µs, union 13.6 → 2.2 µs).
+dino render ~5% faster. Not run here: the full suites, A/B rows, gcstress, fuzz (desktop rule).
