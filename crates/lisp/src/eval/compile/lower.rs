@@ -1341,12 +1341,25 @@ fn compile_node_inner(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -
                 // (e.g. bintree's `(+ 1 (check …) (check …))`). Left-fold matches the
                 // prelude's own `fold`; each `Prim2(Add/Mul)` deopts on i64 overflow exactly
                 // as `%add`/`%mul` promote to BigInt, so results stay identical. Restricted
-                // to the associative reducers with the in-order map `[0,1]` — never a
-                // comparison (`<`/`=` chain pairwise, not fold) or a swapped wrapper.
+                // to the reducers with the in-order map `[0,1]` — never a comparison (`<`/`=`
+                // chain pairwise, not fold) or a swapped wrapper.
+                //
+                // `-` and `/` fold the same way: their variadic arms are `(fold xs x %sub)` and
+                // `(fold xs x %div)`, a LEFT fold, so `(- a b c)` is `(%sub (%sub a b) c)`, and a
+                // step that deopts dispatches the real wrapper with its two operands, whose
+                // 2-arg arm gives the same answer. Not being associative, they are folded only
+                // when the head is the PRELUDE operator itself, whose variadic arm is known —
+                // a 3-arg `-` was a call to that arm, building a rest list, and latched hot
+                // physics code off the JIT.
                 if items.len() > 3
                     && scope.lookup(h).is_none()
                     && let Some((op, [0, 1])) = resolve_prim(heap, h)
-                    && matches!(op, PrimOp::Add | PrimOp::Mul)
+                    && (matches!(op, PrimOp::Add | PrimOp::Mul)
+                        || (matches!(op, PrimOp::Sub | PrimOp::Div)
+                            && matches!(
+                                heap.env_get(heap.global(), h).map(|v| v.unpack()),
+                                Some(ValueRef::Fn(id)) if id.region() == crate::core::value::PRELUDE
+                            )))
                 {
                     let mut acc = compile_node(heap, items[1], scope, false)?;
                     for &arg in &items[2..] {

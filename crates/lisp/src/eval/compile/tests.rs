@@ -3133,3 +3133,64 @@ fn a_float_join_over_an_untyped_slot_does_not_latch_the_arm_off_native() {
         "`magnitude` deopted on its float join until it latched off the native tier"
     );
 }
+
+/// `(- a b c)` and `(/ a b c)` left-fold into nested two-argument primitives, as `+` and `*`
+/// always have: a three-argument `-` was a call to the prelude's variadic arm, building a
+/// rest list per call, and it latched b2d's `prepare-joint` off the native tier. The fold is
+/// the prelude's own (`(fold xs x %sub)`), so the answers are unchanged; and a user function
+/// whose two-argument arm merely looks like `-` is not folded, since its other arms are its
+/// own business.
+#[test]
+fn three_argument_subtraction_and_division_fold_into_primitives() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str(
+            "(do
+               (defn minus3 (a b c) (- a b c))
+               (defn over3 (a b c) (/ a b c))
+               (defn like-minus ((a b) (%sub a b)) ((a b c) (* a b c)))
+               (defn user3 (a b c) (like-minus a b c)))",
+        )
+        .expect("define");
+    let calls_in = |interp: &mut crate::Interp, name: &str| {
+        let id = match interp.eval_str(name).expect("read the function").unpack() {
+            ValueRef::Fn(id) => id,
+            _ => panic!("`{name}` should be a closure"),
+        };
+        let arm = compiled_arm_for(&interp.heap, id, 3).expect("the arm compiles");
+        let chunk = arm.chunk.as_ref().expect("the arm has a chunk");
+        chunk
+            .code
+            .iter()
+            .filter(|inst| matches!(inst, Inst::Call { .. }))
+            .count()
+    };
+    assert_eq!(
+        calls_in(&mut interp, "minus3"),
+        0,
+        "`(- a b c)` should fold, not call `-`"
+    );
+    assert_eq!(
+        calls_in(&mut interp, "over3"),
+        0,
+        "`(/ a b c)` should fold, not call `/`"
+    );
+    assert_eq!(
+        calls_in(&mut interp, "user3"),
+        1,
+        "a look-alike user function must stay a call"
+    );
+    let print = |interp: &mut crate::Interp, source: &str| {
+        let value = interp.eval_str(source).expect("evaluate");
+        interp.print(value)
+    };
+    assert_eq!(print(&mut interp, "(minus3 10 3 2)"), "5");
+    assert_eq!(print(&mut interp, "(minus3 10.5 0.25 2)"), "8.25");
+    assert_eq!(print(&mut interp, "(over3 60 2 3)"), "10");
+    assert_eq!(print(&mut interp, "(over3 1 2 3)"), "1/6");
+    assert_eq!(
+        print(&mut interp, "(minus3 9223372036854775807 -1 0)"),
+        "9223372036854775808"
+    );
+    assert_eq!(print(&mut interp, "(user3 2 3 4)"), "24");
+}
