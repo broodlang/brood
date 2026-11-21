@@ -926,8 +926,9 @@ fn major_keeps_nursery_form_positions() {
 /// truncates the nursery and mints the SAME slot at the SAME epoch for the next allocation:
 /// a verdict kept across it would answer for an object it never saw.
 ///
-/// The type is a name nothing defines, which the kernel decides as accepting (ADR-773), so
-/// these tests remember `false` about it: a `false` answer is the memo's, a `true` one fresh.
+/// The type is a name nothing defines, which the kernel leaves undecided (the walk raises
+/// naming it), so these tests remember `false` about it: a `false` answer is the memo's, and
+/// `Unknown` means the memo forgot it.
 #[test]
 fn reset_local_to_forgets_verdicts_about_reclaimed_slots() {
     use crate::core::heap::KnownVerdict;
@@ -950,7 +951,7 @@ fn reset_local_to_forgets_verdicts_about_reclaimed_slots() {
     assert!(
         matches!(
             h.type_verdict(type_expression, reused),
-            KnownVerdict::Known(true)
+            KnownVerdict::Unknown
         ),
         "a verdict about the reclaimed vector answered for the one now in its slot",
     );
@@ -988,7 +989,7 @@ fn collections_forget_exactly_the_verdicts_whose_objects_move() {
     ));
     assert!(matches!(
         h.type_verdict(type_expression, young),
-        KnownVerdict::Known(true)
+        KnownVerdict::Unknown
     ));
 
     let mut roots = vec![tenured, young];
@@ -1010,20 +1011,21 @@ fn a_declaration_or_a_rebinding_starts_the_verdicts_over() {
     let mut h = Heap::new();
     let type_expression = Value::Sym(crate::core::value::intern("verdict-test-type"));
     let value = h.alloc_vector(vec![Value::int(1)]);
-    // remembered `false` about a name the kernel decides as accepting (see above)
+    // remembered `false` about a name nothing defines — which the kernel leaves to the walk
+    // (it raises naming the name), so a forgotten verdict reads as Unknown
     h.record_type_verdict(type_expression, value, false);
     h.runtime
         .declared_sigs_version
         .fetch_add(1, Ordering::AcqRel);
     assert!(matches!(
         h.type_verdict(type_expression, value),
-        KnownVerdict::Known(true)
+        KnownVerdict::Unknown
     ));
     h.record_type_verdict(type_expression, value, false);
     h.runtime.version.fetch_add(1, Ordering::Relaxed);
     assert!(matches!(
         h.type_verdict(type_expression, value),
-        KnownVerdict::Known(true)
+        KnownVerdict::Unknown
     ));
 }
 
