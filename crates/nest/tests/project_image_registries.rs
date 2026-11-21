@@ -94,6 +94,17 @@ fn scaffold_writers(dir: &Path) {
     .unwrap();
 }
 
+/// Whether `dir` holds a project image: one slot per build and contract mode,
+/// `.brood/image-<slot>.bin`.
+fn has_project_image(dir: &Path) -> bool {
+    std::fs::read_dir(dir.join(".brood")).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with("image-") && name.ends_with(".bin")
+        })
+    })
+}
+
 fn nest_test(dir: &Path) -> (bool, String) {
     nest_test_with_cache(dir, None)
 }
@@ -126,7 +137,7 @@ fn a_second_nest_test_boots_from_the_image_with_consistent_registries() {
         "run 1 (source load, writes the image) failed:\n{text1}"
     );
     assert!(
-        dir.join(".brood").join("image.bin").exists(),
+        has_project_image(&dir),
         "run 1 must have written the project image\n{text1}"
     );
     let (ok2, text2) = nest_test(&dir);
@@ -156,7 +167,7 @@ fn an_imaged_boot_credits_each_registry_entry_to_the_module_that_wrote_it() {
         "run 1 (source load, writes the image) failed:\n{text1}"
     );
     assert!(
-        dir.join(".brood").join("image.bin").exists(),
+        has_project_image(&dir),
         "run 1 must have written the project image\n{text1}"
     );
     let (ok2, text2) = nest_test(&dir);

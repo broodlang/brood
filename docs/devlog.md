@@ -2338,3 +2338,16 @@ loop that draws on each present under FIFO on GNOME got its presents 1, 2 or 3 r
 999) — b2d's present-paced loop opens with the window's default. Guards: `present_tests`,
 `window_spec_tests` (sabotaged: both red with the opt-in check removed),
 `tests/gui_present_events_test.blsp`. Not run here: the full suites (desktop rule).
+
+2026-11-20. **A project's image and check verdicts are kept per build (ADR-776).** Asking
+whether startup needs compiled code cached: measured on the test machine, it does not. On
+bedit's warm start (0.27 s) the VM compiler is ~1% of the samples, about 3 ms; Cranelift runs
+on its own `brood-jit` thread, and `BROOD_TIER=1` starts in the same time. A cold load (3.5 s)
+spends ~2.4% of its loader samples compiling and ~3.5% expanding macros. What the measuring
+did find: the project image and the check manifests were one file each, stamped with the
+build, so the second binary used on a checkout (installed beside dev, a profiling build,
+`BROOD_TIER=1`) threw the first one's away, and the next switch back cost bedit a 4 s
+`nest run` with 26 s of CPU. Both are now kept per build, three slots each, the least recently
+used evicted (a read touches its slot). Guard `image_slots` drives four builds from one copy of
+the binary whose mtime it resets before each run; red with one image path, and with either
+touch removed (the oldest-written slot goes instead of the least recently used).

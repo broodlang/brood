@@ -1055,8 +1055,40 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
 ;; `name` selects which on-disk manifest under the project's cache dir — Phase 1's
 ;; parse extracts (`"extracts"`) and Phase 2's check results (`"checks"`) are
 ;; separate files keyed by the same paths.
+;;
+;; Each manifest is kept per STAMP, as `<name>-<slot>.blsp`, the slot a digest of
+;; `project-cache-stamp`. With one file per name, two binaries used on one project (an
+;; installed `nest` and a dev build) or a walk flag set for one run (`BROOD_TIER=1`) each
+;; dropped the other's verdicts, and `nest run`'s pre-flight re-checked the entry's whole
+;; closure on every switch: 4 s, 26 s of CPU, on bedit. A manifest read is touched, so the
+;; `*manifest-slots-kept*` most recently used of a name survive.
+(def- *manifest-slots-kept* 3)
+
 (defn- project-cache-file (root name)
-  (let (dir (project-cache-dir root)) (when dir (path/join dir (str name ".blsp")))))
+  (let (dir (project-cache-dir root))
+    (when dir
+      (path/join dir
+        (str name "-" (string/substring (hash/sha256 (project-cache-stamp)) 0 16) ".blsp")))))
+
+;; A manifest this run is reading from: mark it used.
+(defn- project-cache-touch (file)
+  ;; check-allow :discarded-catch — a best-effort cache stamp: an unwritable cache keeps its age
+  (check-allow :discarded-catch (try (file/set-mtime file (os/now)) (catch _ nil))))
+
+;; After writing manifest `name`, delete all but its most recently used slots. A slot is
+;; exactly 16 hex digits, so `checks` never claims `checks-run`'s or `checks-strict`'s files.
+(defn- project-cache-prune-slots (root name)
+  (let (dir (project-cache-dir root)
+        prefix (str name "-")
+        slot? (fn (entry)
+                (match entry
+                  ((str ^prefix tail) (and (= (count tail) 21) (not (includes? tail "-"))))
+                  (_ false))))
+    (when dir
+      (let (slots (map (seq/filter (file/ls dir) slot?) (fn (entry) (path/join dir entry))))
+        (doseq (stale (project-image/least-recent slots *manifest-slots-kept*))
+          ;; check-allow :discarded-catch — a best-effort cache delete: a kept file costs disk only
+          (check-allow :discarded-catch (try (file/rm stale) (catch _ nil))))))))
 
 ;; The cached `{path -> entry}` map for manifest `name`, or `{}` if the cache is off
 ;; / missing / stamp-mismatched / unreadable (any failure falls back to a cold
@@ -1069,7 +1101,7 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
         (try
           (let (data (reflect/read-string (file/slurp f)))
             (if (= (%map-get data :stamp nil) (project-cache-stamp))
-              (%map-get data :entries {})
+              (do (project-cache-touch f) (%map-get data :entries {}))
               {}))
           (catch _e {}))
         {}))))
@@ -1084,7 +1116,8 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
         (check-allow :discarded-catch
           (try
             (file/spit f (pr-str {:stamp (project-cache-stamp) :entries entries}))
-            (catch _e nil)))))))
+            (catch _e nil)))
+        (project-cache-prune-slots root name)))))
 
 ;; Parse `files` in parallel (`:scan-entries`), returning a list of
 ;; `[path [mtime counts privs def-names]]`. A dead worker's chunk is re-scanned in
@@ -1286,7 +1319,9 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
   (check-allow :discarded-catch
     (try
       (let (f (project-cache-file root (project-check-manifest "verdict")))
-        (if (and f (file/exists? f)) (reflect/read-string (file/slurp f)) nil))
+        (if (and f (file/exists? f))
+          (do (project-cache-touch f) (reflect/read-string (file/slurp f)))
+          nil))
       (catch _ nil))))
 
 (defn- project-verdict-write! (root key lines gating)
@@ -1295,7 +1330,8 @@ check-result cache and the `--failed`/`--stale` records live in; created on dema
       (when f
         ;; check-allow :discarded-catch — a best-effort cache write: the next run recomputes
         (check-allow :discarded-catch
-          (try (file/spit f (pr-str {:key key :lines (vec lines) :gating gating})) (catch _ nil)))))))
+          (try (file/spit f (pr-str {:key key :lines (vec lines) :gating gating})) (catch _ nil)))
+        (project-cache-prune-slots root (project-check-manifest "verdict"))))))
 
 ;; `check` / `check-files` behind one door: replay the recorded verdict when the project,
 ;; the binary, the mode and the asked-about files are all as they were; otherwise run the
