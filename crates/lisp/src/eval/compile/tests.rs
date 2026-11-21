@@ -3063,3 +3063,73 @@ fn an_optional_arm_takes_a_fast_frame_only_when_nothing_omitted_needs_a_default(
         (false, false)
     );
 }
+
+/// A join of a float and the untyped slot it came from — `(if (< pn 0.0) (- 0.0 pn) pn)`
+/// with `pn` read out of a vector — widens into a block-argument slot. That slot was left
+/// untyped, so the `+` after the join took the integer path and deopted on every call; the
+/// float-context re-lowering did not help (it guesses float only for an `Op::Handle`), and
+/// after sixteen deopts the arm latched off the native tier for good. b2d-physics
+/// `warm-start!` ran interpreted that way on every physics step. The widened slot now
+/// keeps the float guess when some edge is a float and none can never be one.
+#[cfg(feature = "jit")]
+#[test]
+fn a_float_join_over_an_untyped_slot_does_not_latch_the_arm_off_native() {
+    use std::sync::atomic::Ordering::Acquire;
+    if crate::eval::compile::tier_ceiling() != crate::eval::compile::Tier::Native {
+        return;
+    }
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str(
+            "(defn fetch (state index)
+               (if (< index 0) (error \"fetch: negative index \" index) (nth state index)))
+             (defn magnitude (point nx state)
+               (let (pn (nth point 7)
+                     pt (nth point 8))
+                 (when (> (+ (if (< pn 0.0) (- 0.0 pn) pn) pt) 0.0)
+                   (let (jx (* nx pn)
+                         a (fetch state 0)
+                         b (fetch state 1))
+                     (+ (* jx (nth a 0)) (* jx (nth b 0)))))))
+             (defn warm (k total)
+               (if (< k 1)
+                 total
+                 (warm (- k 1)
+                   (+ total (magnitude [1.0 2.0 3.0 4.0 0.5 0.5 0.1 0.3 0.2] 0.5 [[1.0] [2.0]])))))",
+        )
+        .expect("define");
+    let id = match interp
+        .eval_str("magnitude")
+        .expect("read magnitude")
+        .unpack()
+    {
+        ValueRef::Fn(id) => id,
+        _ => panic!("`magnitude` should be a closure"),
+    };
+    let arm = compiled_arm_for(&interp.heap, id, 3).expect("magnitude/3 compiles");
+    let arm = arm.arc().clone();
+    let settled = || {
+        let code = arm.jit_code.load(Acquire);
+        !code.is_null() && code != crate::jit::QUEUED
+    };
+    // Each round runs the arm well past the sixteen deopts that latch it, once natively
+    // installed: the first lowering, its float-context re-lowering, and after.
+    for _ in 0..3 {
+        wait_for_tier(
+            settled,
+            || arm.jit_code.load(Acquire) == crate::jit::QUEUED,
+            || {
+                interp.eval_str("(warm 200 0.0)").expect("warm");
+            },
+            || "`magnitude` should have settled to native code".to_string(),
+        );
+        interp
+            .eval_str("(warm 3000 0.0)")
+            .expect("warm past the latch");
+    }
+    assert_ne!(
+        arm.jit_code.load(Acquire),
+        crate::jit::BAILED,
+        "`magnitude` deopted on its float join until it latched off the native tier"
+    );
+}
