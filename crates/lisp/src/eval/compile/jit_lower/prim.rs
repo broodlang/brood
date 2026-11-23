@@ -8,10 +8,11 @@
 use super::Op;
 use super::OrBail;
 use super::emit::{
-    DeoptReason, Frame, Funcs, as_f64_guarded, as_f64_pair, as_int, call_handle, cmp_dispatch,
-    deopt_code, emit_arith, emit_float_arith, eq_dispatch, handle_from_out_slot, inline_vec_ref,
-    load_slot_int, op_is_float, op_maybe_float, read_out_slot, read_words, slot_untyped,
-    table_prim, vector_ref,
+    DeoptReason, Frame, Funcs, NumberKind, as_f64_guarded, as_f64_pair, as_int, call_handle,
+    cmp_dispatch, deopt_code, dispatch_instead_of_guess, emit_arith, emit_dispatched,
+    emit_float_arith, eq_dispatch, handle_from_out_slot, inline_vec_ref, load_slot_int,
+    number_kind, op_is_float, op_maybe_float, read_out_slot, read_words, slot_untyped, table_prim,
+    vector_ref,
 };
 use crate::core::value::jit_layout::{
     PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_KEYWORD, TAG_PAIR, TAG_RANGE, TAG_SEQVIEW,
@@ -1034,6 +1035,10 @@ pub(super) fn emit_prim2(
         let wa = read_words(b, aa_op, frame);
         let wb = read_words(b, bb_op, frame);
         stack.push(Op::Int(eq_dispatch(b, wa, wb, frame, funcs)));
+    } else if dispatch_instead_of_guess(b, *op, aa_op, bb_op, frame) {
+        // The arm's arithmetic proved polymorphic (`jit_arith_dispatch`): whichever path
+        // below would take this on a guess, dispatch by tag instead.
+        stack.push(emit_dispatched(b, *op, aa_op, bb_op, map, frame)?);
     } else if matches!(op, PrimOp::Lt | PrimOp::Le)
         && !op_is_float(aa_op, frame)
         && !op_is_float(bb_op, frame)
@@ -1071,6 +1076,17 @@ pub(super) fn emit_prim2(
         let x = pick(aa, bb, map[0]);
         let y = pick(aa, bb, map[1]);
         stack.push(emit_float_arith(b, *op, x, y, deopt)?);
+    } else if has_float_slot
+        && matches!(op, PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div)
+        && ((matches!(aa_op, Op::Handle(..)) && number_kind(b, bb_op, frame) == NumberKind::Int)
+            || (matches!(bb_op, Op::Handle(..)) && number_kind(b, aa_op, frame) == NumberKind::Int))
+    {
+        // A float-context arm, a type-erased operand beside one that can never be a
+        // float (`(* (count cards) (hash key 1 seed))`): the float path above refused it
+        // and the integer path below would deopt whenever the erased side is a float —
+        // which a float-context arm has already seen it be. Neither guess is right, so
+        // make none: dispatch by tag at runtime (`arith_dispatch`).
+        stack.push(emit_dispatched(b, *op, aa_op, bb_op, map, frame)?);
     } else {
         // Arithmetic/comparison: materialise to int, apply `map`.
         let aa = as_int(b, aa_op, frame);
@@ -1186,6 +1202,16 @@ pub(super) fn emit_prim2_slot_slot(
         let wa = read_words(b, Op::Slot(slot_a), frame);
         let wb = read_words(b, Op::Slot(slot_b), frame);
         stack.push(Op::Int(cmp_dispatch(b, *op, wa, wb, map, frame)?));
+    } else if dispatch_instead_of_guess(b, *op, Op::Slot(slot_a), Op::Slot(slot_b), frame) {
+        // Polymorphic arithmetic (`jit_arith_dispatch`): by tag, not by guess.
+        stack.push(emit_dispatched(
+            b,
+            *op,
+            Op::Slot(slot_a),
+            Op::Slot(slot_b),
+            map,
+            frame,
+        )?);
     } else if op_is_float(Op::Slot(slot_a), frame)
         || op_is_float(Op::Slot(slot_b), frame)
         || (frame.float_context
@@ -1283,6 +1309,22 @@ pub(super) fn emit_prim2_slot_int(
             funcs,
         );
         stack.push(h);
+    } else if frame.arith_dispatch
+        && dispatch_instead_of_guess(b, *op, Op::Slot(slot_a), Op::Slot(slot_a), frame)
+    {
+        // Polymorphic arithmetic (`jit_arith_dispatch`) against a literal — `(< n 0)` and
+        // `(- n)` (`(%sub 0 n)`) in a `magnitude` called with ints and floats: by tag, so
+        // neither kind deopts. (The slot stands in for both operands in the test: the
+        // literal is certainly an int, which never changes the answer.)
+        let literal = Op::Int(b.ins().iconst(types::I64, int_b));
+        stack.push(emit_dispatched(
+            b,
+            *op,
+            Op::Slot(slot_a),
+            literal,
+            map,
+            frame,
+        )?);
     } else if op_is_float(Op::Slot(slot_a), frame) {
         // `(op floatslot int-literal)` — Brood coerces the int to f64 (`(+ 1.5 1)` =
         // 2.5). Promote the literal and do float arith.

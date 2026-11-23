@@ -5,6 +5,51 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-410 — arithmetic on a number that is an int one time and a float the next deopted for good ✅ fixed 2026-11-23
+
+**Symptom.** `BROOD_JIT_BAIL_TRACE=1` over the dino game: `[jit-deopt] arm=b2d-scenery/block-walk
+… op=Prim2 reason=handle-int-guard(tag=4)` 3 799 times in 302 headless frames, after the arm's
+`[jit-relower] … reason=float-through-erased-reads`; `dino-forest/hanging-lianas` the same, 114
+times. Separately, `math/abs` called with one int among float callers latched
+`deopt-thrash-latched … last-deopt=slot-float-guard` and ran interpreted for every caller (b2d
+had worked around it in Brood).
+
+**Cause.** Two holes in the JIT's static typing of arithmetic. (1) `(* (count cards) (hash key 1
+seed))` in a float-context arm: the float path refuses an operand that can never be a float
+(`op_maybe_float`), so the multiply took the integer path, whose `as_int` guard deopts on the
+float hash every time. ADR-378's float-context re-tier was the only feedback for that guard, and
+it had already fired. (2) A slot that is really both kinds: each static guess deopts on the
+other, and nothing re-tiered on "an int where a float was guessed" (reasons 24/25/46). A
+self-tail loop is never deopt-watched, so in it either hole deopted once per activation forever.
+A watched arm latched BAILED instead. (3) Found while fixing them, and a miscompile: a
+self-tail call writes a register-carried param from a boxed arg (a `Handle`, a let-bound slot)
+by copying its payload into the register with no tag check, so a float reaching an int-carried
+slot was read as its bit pattern — `(walk-carry 0 0 [1.5 2.5 3.5])`, whose `(< acc 100)` the JIT
+answered `false`. The dispatch below made it reachable from arithmetic too: its first version
+summed `walk` to 3.7e20.
+
+**Why it survived.** Both shapes give correct answers on the VM, so every correctness test passed.
+The bail trace showed them, but only to someone reading it over a real program. ADR-378's test
+covers erased reads beside other erased reads, never beside a `count`. The thrash latch, the one
+deopt gate there was, skips self-tail loops on purpose (their deopts usually follow productive
+iterations).
+
+**Fix.** ADR-780: such arithmetic dispatches by tag at runtime (`arith_dispatch`). Case (1) does
+so structurally. Case (2) does so after four of those deopts (`jit_arith_dispatch`, a re-tier
+like the float context's). Case (3): the back edge tag-checks every boxed arg for a carried
+slot before it stores anything (`self-call-carry-tag`, payload the slot); sixteen of those box
+the slot, as entry-tag deopts do. The structural case (1) has no separate guard: with it removed
+the feedback still settles the arm, four deopts later.
+
+**Guard.** `crates/cli/tests/polymorphic_arithmetic.rs`: the JIT's output equals the VM's, `walk`
+(case 1) and `magnitude` (case 2) each settle within twelve deopts without latching, and
+`magnitude` names the `polymorphic-arithmetic` re-tier. Sabotage, both seen red:
+the back-edge check skipped, the JIT printed `false` and 5.47e20 where the VM printed `true` and
+189419.9; both dispatch paths turned off, `walk` deopted 139 times. Not run here: the suites
+(desktop rule).
+
+---
+
 ## KI-409 — a `def` over a draining tail freed the list under the global ✅ fixed 2026-11-23
 
 **Symptom.** `make gcstress` (debug build, `BROOD_GC_STRESS` + `BROOD_GC_VERIFY`) failed

@@ -225,6 +225,11 @@ pub(super) struct Frame<'a> {
     /// feedback that found it computing on floats read out of vectors. Licenses the
     /// optimistic float path for arithmetic on operands nothing else types.
     pub float_context: bool,
+    /// The arm's deopt feedback found its arithmetic polymorphic (`jit_arith_dispatch`):
+    /// arithmetic that would rest on a type GUESS — a float-guessed slot, a type-erased
+    /// operand in a float-context arm — dispatches by tag at runtime instead
+    /// (`arith_dispatch`/`cmp_dispatch`), so neither kind of number deopts.
+    pub arith_dispatch: bool,
     /// Base frame slot of the **block-argument spill** region (KI-49). An operand that must
     /// cross a block boundary but is not a profiled `Int` is stored at
     /// `blockarg_spill_base + <its operand-stack index>` and carried as `ParamRepr::Slot`.
@@ -1685,6 +1690,211 @@ pub(super) fn eq_dispatch(
     b.ins().jump(done, &[BlockArg::Value(keq)]);
     b.switch_to_block(done);
     b.block_params(done)[0]
+}
+
+/// What the lowering knows for certain about an operand's numeric type.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum NumberKind {
+    /// Certainly an `Int`: an unboxed `i64`, an int-carried slot, a slot an int store
+    /// cached in this block.
+    Int,
+    /// Certainly a `Float`: an unboxed `f64`, a float-carried slot, a cached float store.
+    Float,
+    /// Only the runtime knows — a `Handle`, a frame slot whose flags are a guess.
+    Unknown,
+    /// Not a number the arithmetic paths read (a bool, a hoisted vector or table).
+    Other,
+}
+
+pub(super) fn number_kind(b: &FunctionBuilder, op: Op, f: Frame) -> NumberKind {
+    match op {
+        Op::Int(value) if b.func.dfg.value_type(value) == types::I64 => NumberKind::Int,
+        Op::Float(_) => NumberKind::Float,
+        Op::Handle(..) => NumberKind::Unknown,
+        Op::Slot(slot) => {
+            if f.slot_bool.borrow().get(slot).copied().unwrap_or(false) {
+                return NumberKind::Other;
+            }
+            match f.carry_vars.get(slot).copied().flatten() {
+                Some((_, true)) => return NumberKind::Float,
+                Some((_, false)) => return NumberKind::Int,
+                None => {}
+            }
+            if f.slot_f64_cache
+                .borrow()
+                .get(slot)
+                .copied()
+                .flatten()
+                .is_some()
+            {
+                NumberKind::Float
+            } else if f
+                .slot_i64_cache
+                .borrow()
+                .get(slot)
+                .copied()
+                .flatten()
+                .is_some()
+            {
+                NumberKind::Int
+            } else {
+                NumberKind::Unknown
+            }
+        }
+        _ => NumberKind::Other,
+    }
+}
+
+/// Should this binary op dispatch by tag instead of guessing? Only in an arm whose deopt
+/// feedback found its arithmetic polymorphic (`Frame::arith_dispatch`), only for `+ - * /
+/// < <=`, and only when the static type would be a guess: some operand is `Unknown` and
+/// none is certainly a `Float` (then promotion is the VM's rule and the float path is no
+/// guess) nor anything but a number.
+pub(super) fn dispatch_instead_of_guess(
+    b: &FunctionBuilder,
+    op: PrimOp,
+    first: Op,
+    second: Op,
+    f: Frame,
+) -> bool {
+    if !f.arith_dispatch
+        || !matches!(
+            op,
+            PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Lt | PrimOp::Le
+        )
+    {
+        return false;
+    }
+    let kinds = [number_kind(b, first, f), number_kind(b, second, f)];
+    kinds.contains(&NumberKind::Unknown)
+        && !kinds.contains(&NumberKind::Float)
+        && !kinds.contains(&NumberKind::Other)
+}
+
+/// An operand as the three words of a whole `Value`, for the dispatchers: a register-
+/// carried slot's value lives in its variable, not the frame, so a certain int goes through
+/// `as_int` and is boxed here; everything else is `read_words`.
+fn dispatch_words(b: &mut FunctionBuilder, op: Op, f: Frame) -> [cranelift_codegen::ir::Value; 3] {
+    if number_kind(b, op, f) == NumberKind::Int {
+        let value = as_int(b, op, f);
+        let tag = b.ins().iconst(types::I64, TAG_INT as i64);
+        let zero = b.ins().iconst(types::I64, 0);
+        [tag, value, zero]
+    } else {
+        read_words(b, op, f)
+    }
+}
+
+/// Lower a binary op `dispatch_instead_of_guess` (or a caller's own reasoning) chose to
+/// dispatch: a comparison through `cmp_dispatch` (a bool), arithmetic through
+/// `arith_dispatch` (a boxed number).
+pub(super) fn emit_dispatched(
+    b: &mut FunctionBuilder,
+    op: PrimOp,
+    first: Op,
+    second: Op,
+    map: [u8; 2],
+    f: Frame,
+) -> Option<Op> {
+    let first_words = dispatch_words(b, first, f);
+    let second_words = dispatch_words(b, second, f);
+    if matches!(op, PrimOp::Lt | PrimOp::Le) {
+        Some(Op::Int(cmp_dispatch(
+            b,
+            op,
+            first_words,
+            second_words,
+            map,
+            f,
+        )?))
+    } else {
+        arith_dispatch(b, op, first_words, second_words, map, f)
+    }
+}
+
+/// `+ - * /` dispatched at RUNTIME by tag, for an operand whose type no guess can settle:
+/// both `Int` compute as ints (overflow, a zero divisor and an inexact quotient deopt as on
+/// the integer path), anything else reads both as floats — an `Int` beside a `Float`
+/// promoted, the VM's own rule — and a non-number deopts. The answer is boxed (an
+/// `Op::Handle` of words in registers, no allocation), since its type is the runtime's.
+///
+/// For the case neither static path can lower: an operand that can never be a float (an
+/// unboxed `Int`, a `count`) beside a type-erased one in a float-context arm —
+/// `(* (count cards) (hash key 1 seed))`. The integer path deopts every time the erased
+/// operand is a float, the float path every time no operand is (`as_f64_pair` refuses the
+/// never-float side), so a self-tail loop of that shape — which is never deopt-watched —
+/// fell out of native code on every activation for good. `map` orders the operands as for
+/// `emit_arith`.
+pub(super) fn arith_dispatch(
+    b: &mut FunctionBuilder,
+    op: PrimOp,
+    first: [cranelift_codegen::ir::Value; 3],
+    second: [cranelift_codegen::ir::Value; 3],
+    map: [u8; 2],
+    f: Frame,
+) -> Option<Op> {
+    let first_tag = b.ins().band_imm_s(first[0], 0xff);
+    let second_tag = b.ins().band_imm_s(second[0], 0xff);
+    let done = b.create_block();
+    b.append_block_param(done, types::I64);
+    b.append_block_param(done, types::I64);
+    let first_int = b.ins().icmp_imm_s(IntCC::Equal, first_tag, TAG_INT as i64);
+    let second_int = b.ins().icmp_imm_s(IntCC::Equal, second_tag, TAG_INT as i64);
+    let both_int = b.ins().band(first_int, second_int);
+    let int_block = b.create_block();
+    let float_block = b.create_block();
+    b.ins().brif(both_int, int_block, &[], float_block, &[]);
+    b.switch_to_block(int_block);
+    let (left, right) = if map[0] == 0 {
+        (first[1], second[1])
+    } else {
+        (second[1], first[1])
+    };
+    let int_result = emit_arith(b, op, left, right, f.deopt)?;
+    let int_tag = b.ins().iconst(types::I64, TAG_INT as i64);
+    b.ins().jump(
+        done,
+        &[BlockArg::Value(int_tag), BlockArg::Value(int_result)],
+    );
+    b.switch_to_block(float_block);
+    let first_float = float_or_promoted_int(
+        b,
+        first_tag,
+        first[1],
+        f,
+        DeoptReason::ArithDispatchFirstOperand,
+        true,
+    );
+    let second_float = float_or_promoted_int(
+        b,
+        second_tag,
+        second[1],
+        f,
+        DeoptReason::ArithDispatchSecondOperand,
+        true,
+    );
+    let (left, right) = if map[0] == 0 {
+        (first_float, second_float)
+    } else {
+        (second_float, first_float)
+    };
+    let float_result = match emit_float_arith(b, op, left, right, f.deopt)? {
+        Op::Float(value) => value,
+        _ => return super::bail("arith-dispatch-not-arithmetic"),
+    };
+    let float_bits = b
+        .ins()
+        .bitcast(types::I64, MemFlagsData::new(), float_result);
+    let float_tag = b.ins().iconst(types::I64, TAG_FLOAT as i64);
+    b.ins().jump(
+        done,
+        &[BlockArg::Value(float_tag), BlockArg::Value(float_bits)],
+    );
+    b.switch_to_block(done);
+    let tag = b.block_params(done)[0];
+    let payload = b.block_params(done)[1];
+    let zero = b.ins().iconst(types::I64, 0);
+    Some(Op::Handle(tag, payload, zero))
 }
 
 /// `<` / `<=` on two operands nothing types (`Handle`s, or slots with no profile and no

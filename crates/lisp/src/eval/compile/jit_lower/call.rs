@@ -8,11 +8,11 @@
 use super::Op;
 use super::OrBail;
 use super::emit::{
-    DeoptReason, Frame, Funcs, TICK_BATCH, box_scalar, deopt_code, handle_from_out_slot,
-    read_out_slot, read_words, store_int, store_op,
+    DeoptReason, Frame, Funcs, TICK_BATCH, box_scalar, deopt_code, deopt_code_with_constant,
+    handle_from_out_slot, read_out_slot, read_words, store_int, store_op,
 };
 use crate::core::value::Symbol;
-use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT};
+use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT};
 use cranelift_codegen::ir::BlockArg;
 use cranelift_codegen::ir::{
     Block, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Value, condcodes::IntCC, types,
@@ -704,6 +704,61 @@ pub(super) fn emit_self_call(
     ops.reverse(); // ops[i] = the i-th positional arg → frame slot i
     if !stack.is_empty() {
         return super::bail("staged-args-leftover-operand-stack");
+    }
+    // A register-carried param is read from its variable with no tag check, so an arg for
+    // it must be of the carried type, checked here — before any store, so a deopt leaves
+    // the frame as the last checkpoint saw it. An unboxed `Int`/`Float` of the carried
+    // kind passes free; a boxed arg (a `Handle`, another slot) is tag-checked; an unboxed
+    // value of the other kind, or a bool, always deopts. Without this the back edge took
+    // the payload as-is: a float reaching an int-carried slot through a let-bound `nth`
+    // was read as its bit pattern (KI-410), and `arith_dispatch`'s boxed answer could
+    // carry one there on every iteration.
+    for (slot, &op) in ops.iter().enumerate() {
+        let Some((_, carried_float)) = carry_vars.get(slot).copied().flatten() else {
+            continue;
+        };
+        let expected_tag = if carried_float { TAG_FLOAT } else { TAG_INT };
+        let observed_tag = match op {
+            Op::Int(value) if !carried_float && b.func.dfg.value_type(value) == types::I64 => {
+                continue;
+            }
+            Op::Float(_) if carried_float => continue,
+            Op::Slot(source)
+                if carry_vars
+                    .get(source)
+                    .copied()
+                    .flatten()
+                    .map(|(_, float)| float)
+                    == Some(carried_float) =>
+            {
+                continue;
+            }
+            Op::Handle(w0, ..) => Some(b.ins().band_imm_s(w0, 0xff)),
+            Op::Slot(source) => {
+                let roots_base = b.use_var(rb_var);
+                let index = b.ins().iadd_imm_s(base, source as i64);
+                let offset = b.ins().imul_imm_s(index, STRIDE);
+                let address = b.ins().iadd(roots_base, offset);
+                let tag = b.ins().load(types::I8, MemFlagsData::trusted(), address, 0);
+                Some(b.ins().uextend(types::I64, tag))
+            }
+            _ => None,
+        };
+        let deopt_reason = deopt_code_with_constant(b, DeoptReason::SelfCallCarryTag, slot as i64);
+        match observed_tag {
+            Some(tag) => {
+                let matches = b.ins().icmp_imm_s(IntCC::Equal, tag, expected_tag as i64);
+                let cont = b.create_block();
+                b.ins()
+                    .brif(matches, cont, &[], deopt, &[BlockArg::Value(deopt_reason)]);
+                b.switch_to_block(cont);
+            }
+            None => {
+                b.ins().jump(deopt, &[BlockArg::Value(deopt_reason)]);
+                let dead = b.create_block();
+                b.switch_to_block(dead);
+            }
+        }
     }
     // Each arg becomes a list of (byte-offset, word) stores. An `Int` is boxed (tag at 0,
     // payload at PAYLOAD_OFFSET — the third word is left alone, irrelevant to an Int). A

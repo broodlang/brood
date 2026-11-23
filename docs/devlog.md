@@ -2453,3 +2453,18 @@ why KI-407's fix exposed it, and why `d8a10b9cb` (the completing free taken out)
 step green without closing the hole. With the fix and the completing free put back, the five
 files passed 3 cold-and-warm rounds in CI. Guard in `runtime_collector`, sabotage-checked.
 Not run here: the suites and gcstress (desktop rule); proved in CI.
+
+2026-11-23. **Arithmetic no guess can type stays native (ADR-780, KI-410).** b2d's
+`block-walk` deopted ~12 times a frame and dino's `hanging-lianas` on most frames, both
+`handle-int-guard(tag=4)` at `(* (count xs) (hash …))`: in a float-context arm the float path
+refuses the never-float `count` and the integer path deopts on the float, and a self-tail loop
+is never deopt-watched, so the deopt repeated on every activation. Such an op now dispatches by
+tag at runtime (`arith_dispatch`, boxed answer in registers). The general case — `math/abs`
+called with an int among float callers latched BAILED for every caller — gets deopt feedback:
+four int-where-float-guessed deopts re-tier the arm with guessed arithmetic dispatched
+(`[jit-relower] … reason=polymorphic-arithmetic`). Fixing it found a miscompile underneath: a
+self-tail call copied a boxed arg into an int-carried param's register unchecked, so a float there
+was read as its bits; the back edge now tag-checks it. Headless dino, 302 frames at distance
+2 000 000: all deopts 4 767 → 619, `block-walk` 3 799 → 0, `hanging-lianas` 114 → 4. Guard
+`cli::polymorphic_arithmetic`. Not run here: the suites, `make ab`/`ab-vm`, gcstress, fuzz
+(desktop rule); CI runs the suites.
