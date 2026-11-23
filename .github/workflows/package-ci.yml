@@ -230,10 +230,21 @@ jobs:
           PGUSER: postgres
           PGPASSWORD: postgres
           PGDATABASE: postgres
+        shell: bash
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           if [ "${{ inputs.test-partitions }}" -gt 1 ]; then
-            nest test --partitions "${{ inputs.test-partitions }}" --shard "${{ matrix.shard }}"
+            nest test --partitions "${{ inputs.test-partitions }}" --shard "${{ matrix.shard }}" 2>&1 | tee nest-test.log
           else
-            nest test
+            nest test 2>&1 | tee nest-test.log
           fi
+
+      # What failed, at its file and line with its assertion, on the run page and in
+      # `gh run view` (brood's scripts/ci-failure-summary.sh, at the brood ref under test).
+      - name: Annotate the failing tests (on failure)
+        if: failure() && inputs.run-tests
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/broodlang/brood/${{ inputs.brood-ref }}/scripts/ci-failure-summary.sh" -o "$RUNNER_TEMP/ci-failure-summary.sh" \
+            && bash "$RUNNER_TEMP/ci-failure-summary.sh" nest-test.log "nest test" \
+            || echo "::warning::could not annotate the failures; see the nest test step"
