@@ -127,7 +127,8 @@ struct TexInst {
     @location(2) tint: vec4<f32>,   // straight rgba, 0..1
     @location(3) mode: u32,         // 0 = colour, 1 = coverage mask recoloured with tint,
                                     // 2 = a mask whose coverage takes the contrast lift,
-                                    // 3 / 4 = the same per colour channel (LCD, `fs_tex_lcd`)
+                                    // 3 / 4 = the same per colour channel (LCD, `fs_tex_lcd`),
+                                    // 5 = colour premultiplied (a smooth texture, ADR-783)
     @location(4) rot: f32,          // radians about the centre
     @location(5) clip: vec4<f32>,   // x0, y0, x1, y1 in pixels
     @location(6) ground: f32,       // a glyph's ground's linear luminance (`text_alpha`)
@@ -176,7 +177,21 @@ fn fs_tex(in: TexOut) -> @location(0) vec4<f32> {
     if (in.mode == 2u || in.mode == 4u) {
         return vec4<f32>(in.tint.rgb, pow(t.a, viewport.text.x) * in.tint.a);
     }
+    if (in.mode == 5u) {
+        return straight(t) * in.tint;
+    }
     return t * in.tint;
+}
+
+// A smooth texture's texel (ADR-783): kept premultiplied, so the linear sampler has mixed
+// colour weighted by coverage — a transparent neighbour fades an edge without darkening it.
+// Back to straight alpha for the pipeline's blend, which multiplies by alpha again: the
+// premultiplied blend `src + dst·(1 − a)`, in the same pipeline as every other sprite.
+fn straight(texel: vec4<f32>) -> vec4<f32> {
+    if (texel.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(min(texel.rgb / texel.a, vec3<f32>(1.0)), texel.a);
 }
 
 // Subpixel (LCD) text on an adapter WITHOUT dual-source blending: the same quads drawn three
@@ -259,8 +274,8 @@ fn fs_tex_linear(in: TexOut) -> @location(0) vec4<f32> {
         discard;
     }
     let t = textureSample(tex, samp, in.uv);
-    if (in.mode == 0u) {
-        let c = t * in.tint;
+    if (in.mode == 0u || in.mode == 5u) {
+        let c = select(t, straight(t), in.mode == 5u) * in.tint;
         return vec4<f32>(srgb_to_linear(c.rgb), c.a);
     }
     // a grey mask, or an LCD one drawn grey (its alpha is its greatest channel)

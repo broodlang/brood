@@ -317,8 +317,9 @@ pub(in crate::builtins) fn gui_key_repeats(
     ]))
 }
 
-/// `(%gui-texture id tex rgba w h)` — upload `rgba` (`w*h*4` bytes, row-major straight
-/// alpha, a bytes value or a vector of ints) as texture `tex` of window `id`. The handle
+/// `(%gui-texture id tex rgba w h filter)` — upload `rgba` (`w*h*4` bytes, row-major
+/// straight alpha, a bytes value or a vector of ints) as texture `tex` of window `id`,
+/// sampled per `filter` (`:nearest` or `:smooth`, ADR-783). The handle
 /// is the CALLER's (Brood allocates it — `gui/texture` — so a sprite sheet's size can be
 /// remembered beside it without a round trip here), which is why this takes it rather
 /// than returns it. The dimensions are validated against the byte count before any
@@ -330,6 +331,7 @@ pub(in crate::builtins) fn gui_texture(args: &[Value], _: EnvId, heap: &mut Heap
     let rgba = collect_bytes("%gui-texture", arg(args, 2), heap)?;
     let w_i = expect_int(heap, "%gui-texture", arg(args, 3))?;
     let h_i = expect_int(heap, "%gui-texture", arg(args, 4))?;
+    let filter = texture_filter(heap, arg(args, 5))?;
     let Ok(tex) = u32::try_from(tex_i) else {
         return Err(LispError::runtime(format!(
             "%gui-texture: texture handle must be a non-negative int, got {tex_i}"
@@ -356,8 +358,28 @@ pub(in crate::builtins) fn gui_texture(args: &[Value], _: EnvId, heap: &mut Heap
             )));
         }
     };
-    crate::host::gui::texture(id, tex, rgba, w, h).map_err(LispError::runtime)?;
+    crate::host::gui::texture(id, tex, rgba, w, h, filter).map_err(LispError::runtime)?;
     Ok(Value::nil())
+}
+
+/// A texture's sampling filter from its keyword: `:nearest` or `:smooth` (ADR-783). Anything
+/// else is a clean error naming both, never a silent nearest.
+fn texture_filter(heap: &Heap, given: Value) -> Result<crate::host::gui::TextureFilter, LispError> {
+    use crate::host::gui::TextureFilter;
+    match given {
+        Value::Keyword(name) if value::symbol_name_ref(name) == "nearest" => {
+            Ok(TextureFilter::Nearest)
+        }
+        Value::Keyword(name) if value::symbol_name_ref(name) == "smooth" => {
+            Ok(TextureFilter::Smooth)
+        }
+        other => Err(LispError::wrong_type(
+            heap,
+            "%gui-texture",
+            "a filter, :nearest or :smooth",
+            other,
+        )),
+    }
 }
 
 /// `(%gui-sound id snd rate channels pcm)` — keep `pcm` (interleaved PCM16 little-endian

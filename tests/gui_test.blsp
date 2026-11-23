@@ -107,7 +107,47 @@
     (let (msg (try
                 (gui/texture 999999 {:width 1 :height 1 :rgba [1 2 3]})
                 :no-error (catch e (error-message e))))
+      (is (includes? msg "bytes of rgba"))))
+
+  ;; ADR-783: the options map's :filter is checked in Brood, before a handle is allocated
+  ;; or anything reaches the backend
+  (test "an unknown :filter is refused by name, in both forms"
+    (let (refusal (fn (thunk) (try (thunk) :no-error (catch e (error-message e)))))
+      (is (includes? (refusal (fn () (gui/texture 999999 [1 2 3 4] 1 1 {:filter :linear})))
+            ":nearest or :smooth"))
+      (is (includes? (refusal (fn ()
+                                (gui/texture 999999
+                                  {:width 1 :height 1 :rgba [1 2 3 4]}
+                                  {:filter :blur})))
+            ":nearest or :smooth"))))
+
+  (test "{:filter :smooth} passes validation and reaches the backend, in both forms"
+    (let (refusal (fn (thunk) (try (thunk) :no-error (catch e (error-message e))))
+          passed? (fn (msg) (or (= msg :no-error) (not (includes? msg ":nearest or :smooth")))))
+      (is (passed? (refusal (fn () (gui/texture 999999 [1 2 3 4] 1 1 {:filter :smooth})))))
+      (is (passed? (refusal (fn ()
+                              (gui/texture 999999
+                                {:width 1 :height 1 :rgba [1 2 3 4]}
+                                {:filter :smooth})))))))
+
+  (test "the size check still holds with options"
+    (let (msg (try
+                (gui/texture 999999 [1 2 3] 1 1 {:filter :smooth})
+                :no-error (catch e (error-message e))))
       (is (includes? msg "bytes of rgba")))))
+
+(describe "gui/texture-filter — the options map's :filter (ADR-783)"
+  (test "no :filter is :nearest — pixel art stays the default"
+    (assert= (gui/texture-filter {}) :nearest)
+    (assert= (gui/texture-filter {:filter :nearest}) :nearest))
+
+  (test ":smooth is :smooth"
+    (assert= (gui/texture-filter {:filter :smooth}) :smooth))
+
+  (test "anything else is an error naming the two, never a silent nearest"
+    (assert-error (gui/texture-filter {:filter :linear}))
+    (assert-error (gui/texture-filter {:filter "smooth"}))
+    (assert-error (gui/texture-filter {:filter true}))))
 
 (describe "gui/open — the pixel-input and vsync options"
   ;; Parsed before any window exists, like :app-id above: on a build without the gui

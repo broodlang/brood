@@ -962,7 +962,9 @@ code paints to a terminal or a GUI window unchanged.
   build): `[:quad x y w h color rot]` and `[:sprite tex x y w h uv tint
   rot]`, physical pixels from the window's corner. Build them with `gui/line` and
   `gui/sprite` over a `gui/texture` handle; open the window with `{:input :pixels}` so
-  mouse messages carry pixels. The engine above them is the `b2d` package (ADR-374).
+  mouse messages carry pixels. A texture samples nearest by default (pixel art stays
+  crisp); upload a painted or photographic one with `{:filter :smooth}` so it stays clean
+  drawn scaled or turned (ADR-783). The engine above them is the `b2d` package (ADR-374).
 - **A picture** (a page, a photo) = `(editor/display/image row col w h source opts)`: PNG / JPEG
   bytes in a cell block, painted at full pixel resolution by both window painters and in
   half-block cells by a terminal (pixels through the kitty graphics protocol where the terminal

@@ -80,8 +80,8 @@ pub use primitives::{
 
 use super::{
     CursorShape, InputKind, Key, KeyRepeat, Keystroke, LatencyHistogram, LatencyLog, LatencySample,
-    Mouse, MouseAction, MouseButton, Op, OptionMeta, PAINT_PHASES, RepeatCounts, WheelMode,
-    WindowSpec,
+    Mouse, MouseAction, MouseButton, Op, OptionMeta, PAINT_PHASES, RepeatCounts, TextureFilter,
+    WheelMode, WindowSpec,
 };
 
 use crate::core::sync::lock;
@@ -253,15 +253,16 @@ enum UserEvent {
     },
     /// Upload a texture for window `id`'s `:sprite` ops: `rgba` is `w*h*4` bytes,
     /// row-major straight alpha, and `tex` the handle the Brood side already returned
-    /// for it (allocated there from a counter, so `gui-texture` needs no round trip).
-    /// The GPU target keeps it on the device; the CPU target has no sprite arm and
-    /// drops it. Behind `gui-texture`.
+    /// for it (allocated there from a counter, so `gui-texture` needs no round trip),
+    /// sampled per `filter` (ADR-783). The GPU target keeps it on the device, the CPU
+    /// target in the renderer (`paint::paint_sprite`). Behind `gui-texture`.
     Texture {
         id: u64,
         tex: u32,
         rgba: Vec<u8>,
         w: u32,
         h: u32,
+        filter: TextureFilter,
     },
     /// Release texture `tex` of window `id` (a later `:sprite` naming it draws nothing).
     /// Behind `gui-texture-free`.

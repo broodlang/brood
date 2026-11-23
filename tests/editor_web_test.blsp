@@ -19,9 +19,13 @@
 
 (describe "texture-json"
   (test "bytes and int vectors both encode as base64 pixels"
-    (let (expected {:tex 3 :w 1 :h 1 :rgba "AQIDBA=="})
-      (assert= (json/decode (texture-json 3 (bytes 1 2 3 4) 1 1)) expected)
-      (assert= (json/decode (texture-json 3 [1 2 3 4] 1 1)) expected))))
+    (let (expected {:tex 3 :w 1 :h 1 :filter "nearest" :rgba "AQIDBA=="})
+      (assert= (json/decode (texture-json 3 (bytes 1 2 3 4) 1 1 :nearest)) expected)
+      (assert= (json/decode (texture-json 3 [1 2 3 4] 1 1 :nearest)) expected)))
+
+  ;; the painter turns image smoothing on for a smooth texture's sprites (ADR-783)
+  (test "the filter rides along as a string the painter reads"
+    (assert= (get (json/decode (texture-json 3 [1 2 3 4] 1 1 :smooth)) :filter) "smooth")))
 
 (describe "parse-input: read, never evaluated, only a window's shapes"
   (test "a key, a keyword and a mouse vector are accepted as data"

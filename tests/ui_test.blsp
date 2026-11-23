@@ -1186,17 +1186,36 @@
 (describe "editor/ui — display-texture (the pixel-space seam through a display map)"
   (test "the handle comes from gui/alloc-texture and the upload goes through the display"
     (let (log (table/new)
-          display {:texture (fn (tex rgba w h) (table/put log :upload [tex rgba w h]))}
+          display {:texture (fn (tex rgba w h filter) (table/put log :upload [tex rgba w h filter]))}
           tex (display-texture display [9 9 9 9] 1 1))
       (assert= (gui/texture-size tex) [1 1])
-      (assert= (table/get log :upload) [tex [9 9 9 9] 1 1])))
+      ;; no options: nearest, the pixel-art default (ADR-783)
+      (assert= (table/get log :upload) [tex [9 9 9 9] 1 1 :nearest])))
 
   (test "the image-map form unpacks width, height and rgba"
     (let (log (table/new)
-          display {:texture (fn (_tex _rgba w h) (table/put log :upload [w h]))}
+          display {:texture (fn (_tex _rgba w h filter) (table/put log :upload [w h filter]))}
           tex (display-texture display {:width 2 :height 1 :rgba [0 0 0 0 0 0 0 0]}))
       (assert= (gui/texture-size tex) [2 1])
-      (assert= (table/get log :upload) [2 1])))
+      (assert= (table/get log :upload) [2 1 :nearest])))
+
+  (test "{:filter :smooth} reaches the display's :texture, in both forms (ADR-783)"
+    (let (log (table/new)
+          display {:texture (fn (tex _rgba _w _h filter) (table/put log tex filter))}
+          from-bytes (display-texture display [9 9 9 9] 1 1 {:filter :smooth})
+          from-image (display-texture display
+                       {:width 1 :height 1 :rgba [9 9 9 9]}
+                       {:filter :smooth})
+          plain (display-texture display [9 9 9 9] 1 1 {}))
+      (assert= (table/get log from-bytes) :smooth)
+      (assert= (table/get log from-image) :smooth)
+      (assert= (table/get log plain) :nearest)))
+
+  (test "an unknown filter is refused before the display is called"
+    (let (log (table/new)
+          display {:texture (fn (tex _rgba _w _h _filter) (table/put log :called tex))})
+      (assert-error (display-texture display [9 9 9 9] 1 1 {:filter :linear}))
+      (assert= (table/get log :called) nil)))
 
   (test "a display without :texture (the terminal) still hands back a sized handle"
     (let (tex (display-texture {} [1 2 3 4] 1 1))

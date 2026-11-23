@@ -174,6 +174,47 @@ fn lcd_glyphs_batch_apart_from_grey_ones_on_the_same_atlas_page() {
 }
 
 #[test]
+fn a_smooth_texture_is_kept_premultiplied_and_drawn_in_its_own_mode() {
+    // premultiplied at upload: colour scaled by alpha (rounded), alpha kept; an opaque texel
+    // is untouched and a transparent one loses its colour, which is what keeps the linear
+    // sampler from mixing a transparent pixel's black into an edge (ADR-783)
+    assert_eq!(
+        premultiplied(&[255, 255, 255, 255, 200, 100, 50, 128, 255, 0, 0, 0]),
+        vec![255, 255, 255, 255, 100, 50, 25, 128, 0, 0, 0, 0]
+    );
+    // nearest sprites keep the straight colour mode; smooth ones the premultiplied one,
+    // which the shader turns back to straight alpha before the blend
+    assert_eq!(sprite_mode(TextureFilter::Nearest), 0);
+    assert_eq!(sprite_mode(TextureFilter::Smooth), 5);
+    // mode 5 is colour, not subpixel text: it batches with the texture's other sprites
+    // and draws through the plain textured pipeline
+    let mut fb = FrameBuilder::new(FW, FH);
+    for x in [0.0, 10.0] {
+        fb.textured(
+            TexKey::User(1),
+            x,
+            0.0,
+            8.0,
+            8.0,
+            [0.0, 0.0, 1.0, 1.0],
+            [255; 4],
+            sprite_mode(TextureFilter::Smooth),
+            0.1,
+            0.0,
+        );
+    }
+    let shape: Vec<(u32, bool)> = fb
+        .batches
+        .iter()
+        .map(|batch| match batch {
+            Batch::Tex { count, lcd, .. } => (*count, *lcd),
+            _ => unreachable!("only sprites in this frame"),
+        })
+        .collect();
+    assert_eq!(shape, vec![(2, false)]);
+}
+
+#[test]
 fn consecutive_quads_of_one_kind_form_one_batch_and_a_kind_change_starts_another() {
     let mut fb = FrameBuilder::new(FW, FH);
     fb.solid(0.0, 0.0, 10.0, 10.0, [255, 0, 0, 255], 0.0, Edge::Plain);

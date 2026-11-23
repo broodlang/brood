@@ -486,10 +486,18 @@ pub fn icon(id: u64, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// `(gui-texture id tex rgba w h)` — upload `rgba` (`w*h*4` bytes) as texture `tex` of
-/// window `id`, for its `:sprite` ops. The handle was allocated by the caller
-/// (`next_texture_id`), so this is fire-and-forget like `icon`: no reply to wait for.
-pub fn texture(id: u64, tex: u32, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), String> {
+/// `(gui-texture id tex rgba w h filter)` — upload `rgba` (`w*h*4` bytes) as texture `tex`
+/// of window `id`, for its `:sprite` ops, sampled per `filter` (ADR-783). The handle was
+/// allocated by the caller (`next_texture_id`), so this is fire-and-forget like `icon`: no
+/// reply to wait for.
+pub fn texture(
+    id: u64,
+    tex: u32,
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+    filter: TextureFilter,
+) -> Result<(), String> {
     if headless() {
         return headless_send(|| offscreen::Request::Texture {
             id,
@@ -497,6 +505,7 @@ pub fn texture(id: u64, tex: u32, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), S
             rgba,
             w,
             h,
+            filter,
         });
     }
     if let Ok(g) = gui() {
@@ -506,6 +515,7 @@ pub fn texture(id: u64, tex: u32, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), S
             rgba,
             w,
             h,
+            filter,
         });
     }
     Ok(())

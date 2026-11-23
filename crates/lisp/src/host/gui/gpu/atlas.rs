@@ -50,7 +50,8 @@ impl GpuWindow {
         let mut page_index = self.atlas.len().saturating_sub(1);
         loop {
             if page_index >= self.atlas.len() {
-                let (texture, bind_group) = self.create_texture(ATLAS_SIZE, ATLAS_SIZE);
+                let (texture, bind_group) =
+                    self.create_texture(ATLAS_SIZE, ATLAS_SIZE, TextureFilter::Nearest);
                 self.atlas.push(AtlasPage {
                     texture,
                     bind_group,

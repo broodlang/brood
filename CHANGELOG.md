@@ -4,6 +4,16 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Added: smooth textures (ADR-783).** `(gui/texture id image {:filter :smooth})` — and the same
+options map on the `rgba w h` form and on `editor/frontend/display-texture` — makes a texture's
+sprites filter bilinearly, so a painted or photographic sprite drawn scaled or turned keeps
+clean edges; edges fade by coverage, never fringing dark. `:nearest` stays the default, for
+pixel art. Both window painters and the browser page honour it. **Breaking:** a display map's
+`:texture` entry is now called `(f tex rgba w h filter)`, the attach protocol's `[:texture …]`
+message carries the filter, and `%gui-texture` takes it as a sixth argument.
+
 ## v0.58.0 — file/watch, faster contracts, words by syntax
 
 **Added: `file/watch` and `file/unwatch` (ADR-782).** A process watches a file or a directory and

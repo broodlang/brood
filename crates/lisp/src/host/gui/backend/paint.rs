@@ -1170,9 +1170,72 @@ fn paint_quad(canvas: &mut Canvas, x: f32, y: f32, w: f32, h: f32, color: [u8; 4
     }
 }
 
+/// The texel of `texture` under the texture-space point `(texture_u, texture_v)`: the one
+/// it falls in, clamped to the edge — what the GPU's nearest sampler returns. Straight RGBA.
+fn sample_nearest(texture: &CpuTexture, texture_u: f32, texture_v: f32) -> [u8; 4] {
+    let (width, height) = (texture.w as f32, texture.h as f32);
+    let column = ((texture_u * width).floor().clamp(0.0, width - 1.0)) as usize;
+    let row = ((texture_v * height).floor().clamp(0.0, height - 1.0)) as usize;
+    let index = (row * texture.w as usize + column) * 4;
+    [
+        texture.rgba[index],
+        texture.rgba[index + 1],
+        texture.rgba[index + 2],
+        texture.rgba[index + 3],
+    ]
+}
+
+/// `texture` under the texture-space point `(texture_u, texture_v)`, filtered bilinearly
+/// (ADR-783): the four texels whose centres surround the point, weighted by distance, the
+/// edge clamped — the
+/// GPU's linear sampler with `ClampToEdge`. The mix is by COVERAGE: each texel's colour
+/// counts by its weight times its alpha (premultiplied, as the GPU keeps a smooth texture),
+/// so a transparent texel next to an opaque one fades the edge out without pulling its
+/// colour (black, typically) into it. Straight RGBA again, for the blend.
+fn sample_bilinear(texture: &CpuTexture, texture_u: f32, texture_v: f32) -> [u8; 4] {
+    let (width, height) = (texture.w as f32, texture.h as f32);
+    // texel centres sit at half-integers: shift so the point is measured from them
+    let along_x = texture_u * width - 0.5;
+    let along_y = texture_v * height - 0.5;
+    let left = along_x.floor();
+    let top = along_y.floor();
+    let weight_x = along_x - left;
+    let weight_y = along_y - top;
+    let clamp_column = |column: f32| column.clamp(0.0, width - 1.0) as usize;
+    let clamp_row = |row: f32| row.clamp(0.0, height - 1.0) as usize;
+    let (column_0, column_1) = (clamp_column(left), clamp_column(left + 1.0));
+    let (row_0, row_1) = (clamp_row(top), clamp_row(top + 1.0));
+    let mut colour = [0.0f32; 3];
+    let mut alpha = 0.0f32;
+    for (column, row, weight) in [
+        (column_0, row_0, (1.0 - weight_x) * (1.0 - weight_y)),
+        (column_1, row_0, weight_x * (1.0 - weight_y)),
+        (column_0, row_1, (1.0 - weight_x) * weight_y),
+        (column_1, row_1, weight_x * weight_y),
+    ] {
+        let index = (row * texture.w as usize + column) * 4;
+        let coverage = weight * texture.rgba[index + 3] as f32;
+        for (channel, sum) in colour.iter_mut().enumerate() {
+            *sum += coverage * texture.rgba[index + channel] as f32;
+        }
+        alpha += coverage;
+    }
+    if alpha <= 0.0 {
+        return [0, 0, 0, 0];
+    }
+    let straight = |sum: f32| (sum / alpha).round().clamp(0.0, 255.0) as u8;
+    [
+        straight(colour[0]),
+        straight(colour[1]),
+        straight(colour[2]),
+        alpha.round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
 /// A `[:sprite …]`: the texture's `uv` rect (`[u0 v0 du dv]`, a negative extent mirrors)
-/// sampled nearest-neighbour across the quad, multiplied by `tint`, blended by the
-/// texel's alpha times the tint's.
+/// sampled across the quad — nearest-neighbour, or bilinearly for a texture uploaded
+/// `{:filter :smooth}` (ADR-783) — multiplied by `tint`, blended by the sample's alpha
+/// times the tint's.
 #[allow(clippy::too_many_arguments)]
 fn paint_sprite(
     canvas: &mut Canvas,
@@ -1189,15 +1252,15 @@ fn paint_sprite(
         return;
     }
     let fb_w = canvas.w;
-    let (tw, th) = (t.w as f32, t.h as f32);
+    let sample = match t.filter {
+        TextureFilter::Nearest => sample_nearest,
+        TextureFilter::Smooth => sample_bilinear,
+    };
     let mut hits: Vec<(usize, u32)> = Vec::new();
     each_quad_pixel(canvas, x, y, w, h, rot, |px, py, u, v| {
         let tu = uv[0] + u * uv[2];
         let tv = uv[1] + v * uv[3];
-        let sx = ((tu * tw).floor().clamp(0.0, tw - 1.0)) as usize;
-        let sy = ((tv * th).floor().clamp(0.0, th - 1.0)) as usize;
-        let i = (sy * t.w as usize + sx) * 4;
-        let texel = [t.rgba[i], t.rgba[i + 1], t.rgba[i + 2], t.rgba[i + 3]];
+        let texel = sample(t, tu, tv);
         let mul = |c: u8, k: u8| ((c as u32 * k as u32 + 127) / 255) as u8;
         let rgb = [
             mul(texel[0], tint[0]),
@@ -2431,6 +2494,7 @@ mod cell_region_tests {
                     255, 0, 0, 255, 0, 0, 0, 0, //
                     0, 0, 0, 0, 0, 0, 255, 255,
                 ],
+                filter: TextureFilter::Nearest,
             },
         );
         let ops = vec![
@@ -2537,6 +2601,99 @@ mod cell_region_tests {
         assert_eq!(at(10, 26), pack([0, 0, 255]));
         assert_eq!(at(10, 21), 0);
         assert_eq!(at(5, 26), 0);
+    }
+
+    /// One row of `width` pixels of texture 1 (`rgba`, `texture_width`×1) drawn as a sprite
+    /// `width`×1 at the origin over `ground`, through the CPU painter's op walk.
+    fn paint_strip(
+        rgba: Vec<u8>,
+        texture_width: u32,
+        filter: TextureFilter,
+        width: usize,
+        ground: u32,
+    ) -> Vec<u32> {
+        let mut renderer = Renderer::new(1.0, default_families(), 14.0);
+        let (cell_width, cell_height) = (renderer.cell_w.max(1), renderer.cell_h.max(1));
+        renderer.textures.insert(
+            1,
+            CpuTexture {
+                w: texture_width,
+                h: 1,
+                rgba,
+                filter,
+            },
+        );
+        let mut pixels = vec![ground; width];
+        let mut canvas = Canvas::full(&mut pixels, width, 1);
+        let sprite = Op::Sprite {
+            tex: 1,
+            x: 0.0,
+            y: 0.0,
+            w: width as f32,
+            h: 1.0,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            tint: [255, 255, 255, 255],
+            rot: 0.0,
+        };
+        render_ops(
+            &[sprite],
+            &mut canvas,
+            &mut renderer,
+            0,
+            &RowMap::uniform(0, cell_height),
+            cell_width,
+            0,
+            0,
+        );
+        pixels
+    }
+
+    #[test]
+    fn a_smooth_texture_scaled_up_shows_the_colours_between_its_texels() {
+        // A 2×1 texture, red then blue, drawn 8 pixels wide (4×). The pixel centres fall at
+        // texel-space x = (i + 0.5) / 4 - 0.5, so pixels 0..1 clamp to red, 6..7 to blue, and
+        // 2..5 sit between the two texel centres.
+        let rgba = vec![255, 0, 0, 255, 0, 0, 255, 255];
+        let red = pack([255, 0, 0]);
+        let blue = pack([0, 0, 255]);
+        let smooth = paint_strip(rgba.clone(), 2, TextureFilter::Smooth, 8, 0);
+        assert_eq!(smooth[0], red);
+        assert_eq!(smooth[1], red);
+        assert_eq!(smooth[6], blue);
+        assert_eq!(smooth[7], blue);
+        // 7/8 red at pixel 2 down to 1/8 at pixel 5, the blue rising as the red falls
+        let expected = [(223, 32), (159, 96), (96, 159), (32, 223)];
+        for (pixel, (red_part, blue_part)) in (2..6).zip(expected) {
+            assert_eq!(
+                smooth[pixel],
+                pack([red_part, 0, blue_part]),
+                "pixel {pixel}"
+            );
+        }
+        // nearest, the default: only the two texel colours, half the strip each
+        let nearest = paint_strip(rgba, 2, TextureFilter::Nearest, 8, 0);
+        assert_eq!(nearest, [vec![red; 4], vec![blue; 4]].concat());
+    }
+
+    #[test]
+    fn a_smooth_edge_fades_out_without_darkening() {
+        // Opaque white beside a transparent BLACK texel, drawn 8 wide over a white ground.
+        // Mixed by coverage (premultiplied), the edge is white at falling alpha over white:
+        // white everywhere. Mixed straight, the edge would pick up the transparent texel's
+        // black and draw a grey fringe — the dark halo a bilinear sprite gets.
+        let rgba = vec![255, 255, 255, 255, 0, 0, 0, 0];
+        let white = pack([255, 255, 255]);
+        let strip = paint_strip(rgba.clone(), 2, TextureFilter::Smooth, 8, white);
+        assert_eq!(strip, vec![white; 8]);
+        // over black, the same edge is a ramp of greys: the alpha does fall off
+        let over_black = paint_strip(rgba, 2, TextureFilter::Smooth, 8, 0);
+        assert_eq!(over_black[0], white);
+        assert_eq!(over_black[7], 0);
+        let grey = (over_black[3] >> 16) & 0xff;
+        assert!(
+            (100..160).contains(&grey),
+            "a half-covered pixel, got {grey}"
+        );
     }
 
     #[test]

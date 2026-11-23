@@ -70,25 +70,35 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     win.window.set_window_icon(Some(ic));
                 }
             }
-            // A sprite texture lives on the GPU target; the CPU target has no sprite
-            // arm, so for it the upload is a no-op (the `:sprite` op is skipped there too).
+            // A sprite texture lives with whichever target paints the window: on the device
+            // for the GPU one, in the renderer for the CPU one. Either samples it per its
+            // filter (ADR-783).
             UserEvent::Texture {
                 id,
                 tex,
                 rgba,
-                w: tw,
-                h: th,
+                w: texture_width,
+                h: texture_height,
+                filter,
             } => {
                 if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
                     match &mut win.backend {
                         // The CPU painter samples it from memory (`paint::paint_sprite`).
                         Backend::Cpu { .. } => {
-                            win.renderer
-                                .textures
-                                .insert(tex, render::CpuTexture { w: tw, h: th, rgba });
+                            win.renderer.textures.insert(
+                                tex,
+                                render::CpuTexture {
+                                    w: texture_width,
+                                    h: texture_height,
+                                    rgba,
+                                    filter,
+                                },
+                            );
                         }
                         #[cfg(feature = "gui-gpu")]
-                        Backend::Gpu(gpu) => gpu.upload_texture(tex, &rgba, tw, th),
+                        Backend::Gpu(gpu) => {
+                            gpu.upload_texture(tex, &rgba, texture_width, texture_height, filter)
+                        }
                     }
                 }
             }

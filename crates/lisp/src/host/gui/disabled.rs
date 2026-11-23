@@ -55,7 +55,14 @@ pub fn size(_id: u64) -> Result<(u16, u16), String> {
 pub fn size_px(_id: u64) -> Result<(u32, u32), String> {
     Err(NOT_COMPILED.into())
 }
-pub fn texture(_id: u64, _tex: u32, _rgba: Vec<u8>, _w: u32, _h: u32) -> Result<(), String> {
+pub fn texture(
+    _id: u64,
+    _tex: u32,
+    _rgba: Vec<u8>,
+    _w: u32,
+    _h: u32,
+    _filter: super::TextureFilter,
+) -> Result<(), String> {
     Err(NOT_COMPILED.into())
 }
 pub fn texture_free(_id: u64, _tex: u32) -> Result<(), String> {

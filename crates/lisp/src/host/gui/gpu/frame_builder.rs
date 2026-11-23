@@ -220,7 +220,8 @@ impl FrameBuilder {
 
     /// A textured quad sampling `uv` (`[u0 v0 du dv]`, texture space) of `key`; `mode`
     /// is the shader's: 0 a colour texel, 1 a coverage mask tinted, 2 a mask lifted, 3 / 4
-    /// the same per colour channel (`glyph_mode`). `ground` is the linear luminance of what a
+    /// the same per colour channel (`glyph_mode`), 5 a premultiplied colour texel (a smooth
+    /// texture's sprite, `sprite_mode`). `ground` is the linear luminance of what a
     /// glyph is drawn over, which its blend is corrected by (ADR-611); 0 for a sprite.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn textured(
@@ -262,7 +263,7 @@ impl FrameBuilder {
             ground.to_bits(),
         ]);
         let merge = self.can_merge();
-        let lcd = mode >= 3;
+        let lcd = mode == 3 || mode == 4;
         match self.batches.last_mut() {
             Some(Batch::Tex {
                 key: k,

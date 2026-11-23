@@ -534,8 +534,20 @@ impl GpuWindow {
                     tint,
                     rot,
                 } => {
-                    if self.textures.contains_key(tex) {
-                        fb.textured(TexKey::User(*tex), *x, *y, *w, *h, *uv, *tint, 0, *rot, 0.0);
+                    if let Some(texture) = self.textures.get(tex) {
+                        let mode = sprite_mode(texture.filter);
+                        fb.textured(
+                            TexKey::User(*tex),
+                            *x,
+                            *y,
+                            *w,
+                            *h,
+                            *uv,
+                            *tint,
+                            mode,
+                            *rot,
+                            0.0,
+                        );
                     }
                 }
                 Op::Quad {

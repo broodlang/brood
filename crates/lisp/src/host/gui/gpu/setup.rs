@@ -262,6 +262,21 @@ impl GpuWindow {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
+        // Linear, for a texture uploaded `{:filter :smooth}` (ADR-783): a painted sprite
+        // drawn scaled or turned mixes the four texels around each sample instead of
+        // stair-stepping. Its texels are premultiplied at upload (`upload_texture`) so the
+        // mix weighs colour by coverage; no mipmaps, so it is for sprites drawn near their
+        // own size, not shrunk far below it.
+        let smooth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("smooth"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
 
         let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
         let primitive = wgpu::PrimitiveState {
@@ -456,6 +471,7 @@ impl GpuWindow {
             tex_layout,
             tex_instances,
             sampler,
+            smooth_sampler,
             atlas: Vec::new(),
             glyphs: HashMap::new(),
             textures: HashMap::new(),

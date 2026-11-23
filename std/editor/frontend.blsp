@@ -313,14 +313,18 @@ not open needs."
   (when (get o :title) (gui/title id (get o :title)))
   nil)
 
-(defn display-texture "Upload an image as a texture through `display` — a `gui-display` (the window it owns) or the `remote-display` a served app draws to (the thin client's window, over the wire) — and return its handle, for `gui/sprite`. Either `(display-texture d image)` with the {:width :height :rgba} map `gui/image-thumb` decodes, or `(display-texture d rgba w h)` with raw bytes. The handle comes from `gui/alloc-texture`, so `gui/texture-size` knows it; a display without a `:texture` entry (the terminal) accepts and ignores the upload.
+(defn display-texture "Upload an image as a texture through `display` — a `gui-display` (the window it owns) or the `remote-display` a served app draws to (the thin client's window, over the wire) — and return its handle, for `gui/sprite`. Either `(display-texture d image)` with the {:width :height :rgba} map `gui/image-thumb` decodes, or `(display-texture d rgba w h)` with raw bytes; a trailing options map takes `gui/texture`'s `:filter` — `(display-texture d image {:filter :smooth})` for a painted sprite drawn scaled or turned, `:nearest` (the default) for pixel art (ADR-783). The display's `:texture` entry is called `(f tex rgba w h filter)`, the filter a keyword, so it crosses the wire and reaches a browser tab with the pixels. The handle comes from `gui/alloc-texture`, so `gui/texture-size` knows it; a display without a `:texture` entry (the terminal) accepts and ignores the upload.
 
-    (gui/texture-size (editor/frontend/display-texture {} {:width 2 :height 1 :rgba [0 0 0 0 0 0 0 0]}))   ;=> [2 1]"
-  ((display image)
-    (display-texture display (get image :rgba) (get image :width) (get image :height)))
-  ((display rgba w h)
-    (let (tex (gui/alloc-texture w h))
-      (when (get display :texture) ((get display :texture) tex rgba w h))
+    (gui/texture-size (editor/frontend/display-texture {} {:width 2 :height 1 :rgba [0 0 0 0 0 0 0 0]}))   ;=> [2 1]
+    (gui/texture-size (editor/frontend/display-texture {} [0 0 0 0] 1 1 {:filter :smooth}))   ;=> [1 1]"
+  ((display image) (display-texture display image {}))
+  ((display image opts)
+    (display-texture display (get image :rgba) (get image :width) (get image :height) opts))
+  ((display rgba w h) (display-texture display rgba w h {}))
+  ((display rgba w h opts)
+    (let (filter (gui/texture-filter opts)
+          tex (gui/alloc-texture w h))
+      (when (get display :texture) ((get display :texture) tex rgba w h filter))
       tex)))
 
 (defn display-sound (display pcm rate &optional channels)
@@ -398,7 +402,7 @@ their input. Both are deferred trade-offs (ADR-059), fine for the observer.
        ;; input unit / title the app wants — the three things that also cross the wire
        ;; in `editor/serve/remote-display`, so an app written against a display runs
        ;; unchanged in its own window or in a thin client's.
-       :texture (fn (tex rgba w h) (%gui-texture id tex rgba w h))
+       :texture (fn (tex rgba w h filter) (%gui-texture id tex rgba w h filter))
        :texture-free (fn (tex) (%gui-texture-free id tex))
        :sound (fn (snd pcm rate channels) (%gui-sound id snd rate channels pcm))
        :sound-free (fn (snd) (%gui-sound-free id snd))

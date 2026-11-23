@@ -98,7 +98,7 @@ use crate::host::gui::backend::{
     luminance, paint_stall_ms, snap_hairline, text_px_width, text_units, unit_cells,
 };
 use crate::host::gui::effects::{EmitterStep, FrameEffects};
-use crate::host::gui::{Align, CursorStyle, Face, MAX_PARTICLES, Op};
+use crate::host::gui::{Align, CursorStyle, Face, MAX_PARTICLES, Op, TextureFilter};
 // A raw tab advances to the next SCREEN stop of the fixed `TAB_WIDTH`, as the CPU painter's
 // does (`backend.rs`): the painter cannot read a program's `*tab-width*` (ADR-537), so a
 // program that wants its own width expands tabs before it paints (`string/expand-tabs`).
@@ -117,6 +117,31 @@ enum TexKey {
 /// A texture the app uploaded, bound for the textured pipeline.
 struct GpuTexture {
     bind_group: wgpu::BindGroup,
+    /// How its sprites sample it (ADR-783): a smooth texture is bound with the linear
+    /// sampler and its texels are premultiplied, so its quads draw in `sprite_mode`'s mode.
+    filter: TextureFilter,
+}
+
+/// The textured shader's mode for a sprite of a texture filtered `filter`: 0, a straight
+/// colour texel, for a nearest one; 5, a premultiplied texel the shader turns back to
+/// straight alpha after the filter has mixed it, for a smooth one (ADR-783).
+fn sprite_mode(filter: TextureFilter) -> u32 {
+    match filter {
+        TextureFilter::Nearest => 0,
+        TextureFilter::Smooth => 5,
+    }
+}
+
+/// `rgba` (straight-alpha RGBA bytes) with each colour channel multiplied by its alpha,
+/// rounded — what a smooth texture keeps on the device, so the linear sampler mixes colour
+/// weighted by coverage and a transparent texel's colour cannot fringe an edge (ADR-783).
+fn premultiplied(rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len());
+    for [red, green, blue, alpha] in rgba.as_chunks::<4>().0 {
+        let scale = |channel: &u8| ((*channel as u32 * *alpha as u32 + 127) / 255) as u8;
+        out.extend_from_slice(&[scale(red), scale(green), scale(blue), *alpha]);
+    }
+    out
 }
 
 /// The textures `[:image …]` ops drew (ADR-686): each picture uploaded once per size it is
@@ -201,6 +226,8 @@ pub struct GpuWindow {
     tex_layout: wgpu::BindGroupLayout,
     tex_instances: InstanceBuffer,
     sampler: wgpu::Sampler,
+    /// The linear sampler a texture uploaded `{:filter :smooth}` is bound with (ADR-783).
+    smooth_sampler: wgpu::Sampler,
     atlas: Vec<AtlasPage>,
     /// Cluster+face+px key → its atlas slot; `None` for a cluster that rasterised to
     /// nothing (or was too big for a page), remembered so it is not retried each frame.
@@ -357,8 +384,18 @@ impl GpuWindow {
     }
 
     /// An empty `w`×`h` RGBA8 texture on the device, with the bind group the textured
-    /// pipeline samples it through.
-    fn create_texture(&self, w: u32, h: u32) -> (wgpu::Texture, wgpu::BindGroup) {
+    /// pipeline samples it through — by the nearest sampler, or the linear one for a
+    /// smooth `filter`.
+    fn create_texture(
+        &self,
+        w: u32,
+        h: u32,
+        filter: TextureFilter,
+    ) -> (wgpu::Texture, wgpu::BindGroup) {
+        let sampler = match filter {
+            TextureFilter::Nearest => &self.sampler,
+            TextureFilter::Smooth => &self.smooth_sampler,
+        };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -384,7 +421,7 @@ impl GpuWindow {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         });
@@ -414,16 +451,20 @@ impl GpuWindow {
         );
     }
 
-    /// `gui-texture`: keep `rgba` (`w*h*4` bytes) on the device as texture `tex`. A
-    /// re-upload under a live handle replaces it; a size that does not match the bytes
-    /// is dropped (the Brood side validates, this is the backstop).
-    pub fn upload_texture(&mut self, tex: u32, rgba: &[u8], w: u32, h: u32) {
+    /// `gui-texture`: keep `rgba` (`w*h*4` straight-alpha bytes) on the device as texture
+    /// `tex`, sampled per `filter` — a smooth texture premultiplied, for the linear sampler
+    /// (ADR-783). A re-upload under a live handle replaces it, filter and all; a size that
+    /// does not match the bytes is dropped (the Brood side validates, this is the backstop).
+    pub fn upload_texture(&mut self, tex: u32, rgba: &[u8], w: u32, h: u32, filter: TextureFilter) {
         if w == 0 || h == 0 || rgba.len() as u64 != w as u64 * h as u64 * 4 {
             return;
         }
-        let (texture, bind_group) = self.create_texture(w, h);
-        self.write_rgba(&texture, 0, 0, rgba, w, h);
-        self.textures.insert(tex, GpuTexture { bind_group });
+        let (texture, bind_group) = self.create_texture(w, h, filter);
+        match filter {
+            TextureFilter::Nearest => self.write_rgba(&texture, 0, 0, rgba, w, h),
+            TextureFilter::Smooth => self.write_rgba(&texture, 0, 0, &premultiplied(rgba), w, h),
+        }
+        self.textures.insert(tex, GpuTexture { bind_group, filter });
         self.texture_generation += 1;
     }
 
@@ -462,12 +503,19 @@ impl GpuWindow {
             *used = self.pictures.clock;
             return Some(*id);
         }
-        let (texture, bind_group) = self.create_texture(width, height);
+        // resampled to exactly the drawn pixels already, so nearest maps texel to pixel
+        let (texture, bind_group) = self.create_texture(width, height, TextureFilter::Nearest);
         self.write_rgba(&texture, 0, 0, scaled.as_raw(), width, height);
         let pictures = &mut self.pictures;
         let id = pictures.next_id;
         pictures.next_id = pictures.next_id.wrapping_add(1);
-        pictures.textures.insert(id, GpuTexture { bind_group });
+        pictures.textures.insert(
+            id,
+            GpuTexture {
+                bind_group,
+                filter: TextureFilter::Nearest,
+            },
+        );
         pictures.by_size.insert(key, (id, pictures.clock));
         pictures.bytes += width as usize * height as usize * 4;
         while pictures.bytes > PICTURE_TEXTURE_BUDGET && pictures.by_size.len() > 1 {

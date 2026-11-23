@@ -1515,6 +1515,20 @@ pub struct Mouse {
     pub partial: bool,
 }
 
+/// How a texture's `[:sprite …]` ops sample it, chosen when it is uploaded (`gui/texture`
+/// with `{:filter …}`, ADR-783) and kept with it. `Nearest`, the default, maps each pixel to
+/// one texel, so pixel art scaled up stays crisp; `Smooth` mixes the four texels around the
+/// sample point (bilinear), so a painted or photographic sprite drawn scaled or turned has
+/// clean edges instead of stair steps. Both painters honour it: the GPU binds a linear
+/// sampler to the texture and keeps its texels premultiplied, the CPU painter interpolates
+/// by coverage the same way (`paint::paint_sprite`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TextureFilter {
+    #[default]
+    Nearest,
+    Smooth,
+}
+
 #[cfg(not(feature = "gui"))]
 const NOT_COMPILED: &str = "gui backend not compiled in — this `brood` was built without it. \
      From the brood repo: `./configure --with-gui && make install` (note that ./configure starts \

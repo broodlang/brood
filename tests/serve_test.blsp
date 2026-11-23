@@ -317,9 +317,10 @@
     ;; message the thin client's loop applies to its own display — so a served game's
     ;; sprite sheet lands in the client's window and the window is told to report pixels.
     (let (d (remote-display (self) 80 24))
-      ((get d :texture) 7 [1 2 3 4] 1 1)
-      (assert= (receive ([:texture tex rgba w h] [tex rgba w h]) (after 5000 :none))
-        [7 [1 2 3 4] 1 1])
+      ((get d :texture) 7 [1 2 3 4] 1 1 :smooth)
+      ;; the filter crosses with the pixels (ADR-783): the client's window samples as asked
+      (assert= (receive ([:texture tex rgba w h filter] [tex rgba w h filter]) (after 5000 :none))
+        [7 [1 2 3 4] 1 1 :smooth])
       ((get d :texture-free) 7)
       (assert= (receive ([:texture-free tex] tex) (after 5000 :none)) 7)
       ((get d :configure) {:input :pixels :title "game"})
@@ -336,20 +337,20 @@
     ;; the loop, as the app quitting does.
     (let (log (table/new)
           display {:draw (fn (f) (table/put log :frame f))
-                   :texture (fn (tex _rgba w h) (table/put log :texture [tex w h]))
+                   :texture (fn (tex _rgba w h filter) (table/put log :texture [tex w h filter]))
                    :configure (fn (o) (table/put log :window o))
                    :leave (fn () nil)}
           bare {:draw (fn (_f) nil) :leave (fn () nil)})
-      (send (self) [:texture 3 [0 0 0 0] 1 1])
+      (send (self) [:texture 3 [0 0 0 0] 1 1 :smooth])
       (send (self) [:window {:input :pixels}])
       (send (self) [:frame [:clear]])
       (send (self) [:bye])
       (editor/attach/attach-display-loop nil (self) display)
-      (assert= (table/get log :texture) [3 1 1])
+      (assert= (table/get log :texture) [3 1 1 :smooth])
       (assert= (table/get log :window) {:input :pixels})
       (assert= (table/get log :frame) [:clear])
       ;; the bare display: the same messages, nothing to apply them to, no error
-      (send (self) [:texture 3 [0 0 0 0] 1 1])
+      (send (self) [:texture 3 [0 0 0 0] 1 1 :nearest])
       (send (self) [:texture-free 3])
       (send (self) [:window {:input :pixels}])
       (send (self) [:bye])
@@ -378,10 +379,10 @@
   (test "attach-display-loop paints only the newest of a backlog, every texture uploaded"
     (let (seen (drive-backlog (fn (me)
                                 {:draw (fn (f) (send me [:drew f]))
-                                 :texture (fn (tex _rgba _w _h) (send me [:uploaded tex]))
+                                 :texture (fn (tex _rgba _w _h _filter) (send me [:uploaded tex]))
                                  :leave (fn () nil)})
                  (mapcat (range 20)
-                   (fn (i) [[:texture i [0 0 0 0] 1 1] [:frame [[:sprite i 0 0 1 1]]]]))))
+                   (fn (i) [[:texture i [0 0 0 0] 1 1 :nearest] [:frame [[:sprite i 0 0 1 1]]]]))))
       (assert= (vec (seq/filter seen (fn (e) (= (first e) :drew))))
         [[:drew [[:sprite 19 0 0 1 1]]]])
       (assert= (vec (map (seq/filter seen (fn (e) (= (first e) :uploaded))) second))
@@ -446,11 +447,11 @@
       ((get display :draw) [[:text 0 0 "1"]])
       ((get display :draw) [[:sound 1]])
       ((get display :draw) [[:text 0 0 "2"]])
-      ((get display :texture) 3 [0 0 0 0] 1 1)
+      ((get display :texture) 3 [0 0 0 0] 1 1 :nearest)
       ((get display :draw) [[:text 0 0 "3"]])
       (send sink :go)
       (assert= (receive ([:got seen] seen) (after test/*wait-ms* :none))
-        [[:frame [[:sound 1]]] [:texture 3 [0 0 0 0] 1 1] [:frame [[:text 0 0 "3"]]]])))
+        [[:frame [[:sound 1]]] [:texture 3 [0 0 0 0] 1 1 :nearest] [:frame [[:text 0 0 "3"]]]])))
 
   (test "an async (non-key) mailbox message reaches a served app's update — the event bus"
     ;; The editor pattern: a spawned task / buffer process sends `[:tag …]` straight to the
@@ -738,8 +739,8 @@
       (monitor old)
       ((get display :configure) {:title "game"})
       ((get display :configure) {:input :pixels})
-      ((get display :texture) 1 :rgba-one 2 2)
-      ((get display :texture) 2 :rgba-two 2 2)
+      ((get display :texture) 1 :rgba-one 2 2 :nearest)
+      ((get display :texture) 2 :rgba-two 2 2 :smooth)
       ((get display :texture-free) 1)
       ((get display :sound) 7 :pcm 44100 1)
       (draw [[:clear] [:sound 7 1.0] [:text 0 0 "board"]])
@@ -752,8 +753,9 @@
       (assert= ((get display :size)) [100 30])
       (assert= (receive ([:attached _] :attached) (after 0 :none)) :attached)
       (assert= (receive ([:window o] o) (after 0 :none)) {:title "game" :input :pixels})
-      (assert= (receive ([:texture id _ _ _] id) (after 0 :none)) 2) ; 1 was freed
-      (assert= (receive ([:texture id _ _ _] id) (after 0 :none)) :none)
+      ;; 1 was freed; 2 comes back with the filter it was uploaded with (ADR-783)
+      (assert= (receive ([:texture id _ _ _ filter] [id filter]) (after 0 :none)) [2 :smooth])
+      (assert= (receive ([:texture id _ _ _ _] id) (after 0 :none)) :none)
       (assert= (receive ([:sound-data id _ _ _] id) (after 0 :none)) 7)
       (assert= (receive ([:frame f] f) (after 0 :none)) [[:clear] [:text 0 0 "board"]]))))
 

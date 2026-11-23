@@ -15,7 +15,7 @@
 use super::fonts::default_families;
 use super::render::{Renderer, TextAa};
 use crate::host::gui::gpu::{GpuWindow, hardware_adapters};
-use crate::host::gui::{CursorBlink, CursorStyle, Face, FragmentOps, Op};
+use crate::host::gui::{CursorBlink, CursorStyle, Face, FragmentOps, Op, TextureFilter};
 use std::sync::Arc;
 
 const WIDTH: u32 = 800;
@@ -479,7 +479,8 @@ impl Target {
                         }
                     })
                     .collect();
-                self.gpu.upload_texture(*texture, &rgba, side, side);
+                self.gpu
+                    .upload_texture(*texture, &rgba, side, side, TextureFilter::Nearest);
             }
             Change::FreeTexture(texture) => self.gpu.free_texture(*texture),
             Change::Resize(width, height) => self.gpu.resize(*width, *height),

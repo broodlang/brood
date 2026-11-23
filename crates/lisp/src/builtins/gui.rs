@@ -186,10 +186,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         gui_settle);
     primitives.def(
         "%gui-texture",
-        Arity::exact(5),
-        Sig::new(vec![int, int, Ty::of_tags(&[Tag::Bytes, Tag::Vector]), int, int], nil_ty),
-        &["id", "tex", "rgba", "w", "h"],
-        "Upload rgba — w*h*4 bytes (a bytes value or a vector of 0-255 ints), row-major, straight alpha — as texture tex of window id, for its [:sprite …] ops. The handle tex is the caller's (gui/texture allocates it), so a sheet's size can be kept beside it; re-uploading under a live handle replaces the texture. Errors when the byte count is not w*h*4 or tex is negative; a silent no-op headless or on the CPU render target, which has no sprite arm. Returns nil.",
+        Arity::exact(6),
+        Sig::new(
+            vec![int, int, Ty::of_tags(&[Tag::Bytes, Tag::Vector]), int, int, kw],
+            nil_ty,
+        ),
+        &["id", "tex", "rgba", "w", "h", "filter"],
+        "Upload rgba — w*h*4 bytes (a bytes value or a vector of 0-255 ints), row-major, straight alpha — as texture tex of window id, for its [:sprite …] ops, sampled per filter: :nearest (each pixel one texel; pixel art stays crisp) or :smooth (bilinear; a painted sprite drawn scaled or turned keeps clean edges, ADR-783). The handle tex is the caller's (gui/texture allocates it), so a sheet's size can be kept beside it; re-uploading under a live handle replaces the texture and its filter. Errors when the byte count is not w*h*4, tex is negative or filter is neither keyword. Returns nil.",
         gui_texture);
     primitives.def(
         "%gui-texture-free",

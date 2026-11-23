@@ -2489,3 +2489,15 @@ kind, and unwatch withdraws a queued one. New dependency `notify` 9 (native only
 `tests/file_watch_test.blsp` (12 tests, three guards sabotaged red: the retirement hook, the
 withdrawal, the coalescing). Linux only here; macOS and Windows are CI's. Not run here: the
 suites (desktop rule).
+
+2026-11-23. **A texture can be smooth (ADR-783).** b2d's painted figure — limbs drawn as
+sprites scaled ~1.1× and turned every frame — showed stair steps and shimmer along every arm
+and garment edge, because every painter sampled sprites nearest. `gui/texture` and
+`editor/frontend/display-texture` now take `{:filter :smooth}` (`:nearest` stays the default,
+anything else is an error): the GPU binds the texture to a second, linear sampler and keeps its
+texels premultiplied, drawing them in a new shader mode that un-premultiplies after the filter,
+so edges fade by coverage instead of picking up the transparent pixels' black; the CPU painter
+interpolates the same way (`sample_bilinear`); the browser page turns on image smoothing per
+texture. **Breaking:** a display map's `:texture` entry takes a fifth argument, the filter, and
+the wire's `[:texture …]` message and `%gui-texture` carry it (b2d's displays need the
+parameter). Not run here: the suites (desktop rule); see the ADR for the tests.

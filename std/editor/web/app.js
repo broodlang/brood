@@ -13,7 +13,7 @@ const status = document.getElementById("status");
 
 let tabId = null;
 let lastFrame = [];
-const textures = new Map(); // handle -> { bitmap, w, h }
+const textures = new Map(); // handle -> { bitmap, w, h, smooth }
 let pixelInput = false;      // the app asked for pixels (else cells) in mouse messages
 const sounds = new Map();   // handle -> AudioBuffer
 let audio = null;           // the AudioContext, created on the first user gesture
@@ -490,7 +490,11 @@ function paintOps(ops, ox, oy, cw, ch, dy) {
         ctx.rotate(rot || 0);
         ctx.scale(du < 0 ? -1 : 1, dv < 0 ? -1 : 1);
         ctx.globalAlpha = tint && tint.length === 4 ? tint[3] / 255 : 1;
-        ctx.imageSmoothingEnabled = false;
+        // Per texture (ADR-783): nearest keeps pixel art crisp; a texture uploaded
+        // {:filter :smooth} filters bilinearly, as the window's painters do. The canvas
+        // keeps images premultiplied, so its smoothing fringes no edge.
+        ctx.imageSmoothingEnabled = t.smooth;
+        if (t.smooth) ctx.imageSmoothingQuality = "low";
         ctx.drawImage(t.bitmap, sx, sy, sw, sh, -w / 2, -h / 2, w, h);
         ctx.restore();
         break;
@@ -679,7 +683,7 @@ events.addEventListener("texture", async (e) => {
   const t = JSON.parse(e.data);
   const data = new ImageData(decodeBase64(t.rgba), t.w, t.h);
   const bitmap = await createImageBitmap(data);
-  textures.set(t.tex, { bitmap, w: t.w, h: t.h });
+  textures.set(t.tex, { bitmap, w: t.w, h: t.h, smooth: t.filter === "smooth" });
   paintFrame(lastFrame);
 });
 events.addEventListener("texture-free", (e) => {

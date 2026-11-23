@@ -307,11 +307,13 @@ pub(crate) struct Renderer {
     pub(super) cpu_particles: crate::host::gui::effects::CpuParticles,
 }
 
-/// A texture as the CPU painter samples it: `w`×`h` straight-alpha RGBA bytes.
+/// A texture as the CPU painter samples it: `w`×`h` straight-alpha RGBA bytes, and how a
+/// sprite samples them (ADR-783).
 pub(super) struct CpuTexture {
     pub(super) w: u32,
     pub(super) h: u32,
     pub(super) rgba: Vec<u8>,
+    pub(super) filter: TextureFilter,
 }
 
 impl Renderer {

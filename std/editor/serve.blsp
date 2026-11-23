@@ -157,8 +157,8 @@ alive past its time to live.
          ;; go to the client as a message its loop applies to its own display — so a game
          ;; written against a display map serves to a thin client's window unchanged. A
          ;; resuming session remembers what is live, for a client that adopts it.
-         :texture (fn (tex rgba w h)
-                    (serve-seam state resume :textures tex [:texture tex rgba w h]))
+         :texture (fn (tex rgba w h filter)
+                    (serve-seam state resume :textures tex [:texture tex rgba w h filter]))
          :texture-free (fn (tex) (serve-seam state resume :textures tex [:texture-free tex]))
          :sound (fn (snd pcm rate channels)
                   (serve-seam state resume :sounds snd [:sound-data snd pcm rate channels]))

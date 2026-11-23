@@ -35,7 +35,7 @@ use super::{
 };
 use crate::core::sync::lock;
 use crate::core::value;
-use crate::host::gui::{FontChoice, FontInfo, FrameImage, Op, RenderSpec};
+use crate::host::gui::{FontChoice, FontInfo, FrameImage, Op, RenderSpec, TextureFilter};
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -86,6 +86,7 @@ pub(super) enum Request {
         rgba: Vec<u8>,
         w: u32,
         h: u32,
+        filter: TextureFilter,
     },
     TextureFree {
         id: u64,
@@ -311,12 +312,13 @@ impl Painter {
                 rgba,
                 w,
                 h,
+                filter,
             } => {
                 if let Some(window) = self.windows.get_mut(&id) {
                     window
                         .renderer
                         .textures
-                        .insert(tex, CpuTexture { w, h, rgba });
+                        .insert(tex, CpuTexture { w, h, rgba, filter });
                 }
             }
             Request::TextureFree { id, tex } => {

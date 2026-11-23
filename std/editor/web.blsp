@@ -13,7 +13,7 @@ that program posts the events this bridge streams (`%tab-post`), with the encode
 
 Routes: `GET /` and `GET /app.js` the page; `GET
 /events` a server-sent event stream — `hello` with the tab's id, then `frame` (the op
-vector as JSON), `texture` (`{tex w h rgba}`, the pixels base64) and `window` (the
+vector as JSON), `texture` (`{tex w h filter rgba}`, the pixels base64) and `window` (the
 options the app asked for); `POST /input/<id>` one input message as a Brood form
 (`[:mouse :press :left 20 10 [] 1]`, the shapes a window sends — read, never
 evaluated). Listens on 127.0.0.1 only.
@@ -54,12 +54,15 @@ op holds raw bytes) — the tab keeps its last frame rather than the stream dyin
   ;; The error IS the answer: a frame the encoder refuses is skipped, not fatal.
   (check-allow :discarded-catch (try (json/encode frame) (catch _e nil))))
 
-(defn texture-json (tex rgba w h)
-  "A texture upload as JSON: the handle, the size, and the pixels as base64.
+(defn texture-json (tex rgba w h filter)
+  "A texture upload as JSON: the handle, the size, the sampling filter (`\"nearest\"` or
+`\"smooth\"`, which the painter turns into the canvas's image smoothing for the texture's
+sprites, ADR-783) and the pixels as base64.
 
-    (get (json/decode (editor/web/texture-json 3 (bytes 1 2 3 4) 1 1)) :rgba)   ;=> \"AQIDBA==\""
+    (get (json/decode (editor/web/texture-json 3 (bytes 1 2 3 4) 1 1 :nearest)) :rgba)   ;=> \"AQIDBA==\"
+    (get (json/decode (editor/web/texture-json 3 (bytes 1 2 3 4) 1 1 :smooth)) :filter)   ;=> \"smooth\""
   (let (pixels (if (bytes? rgba) rgba (fold rgba #b"" (fn (acc b) (bytes/append acc (bytes b))))))
-    (json/encode {:tex tex :w w :h h :rgba (encoding/base64-encode-bytes pixels)})))
+    (json/encode {:tex tex :w w :h h :filter filter :rgba (encoding/base64-encode-bytes pixels)})))
 
 (defn sound-json (snd pcm rate channels)
   "A sound upload as JSON: the handle, the rate and channel count, the PCM16 bytes as
@@ -142,7 +145,7 @@ and an input posted after the restart goes to the new loop, numbered after the r
       (let (j (frame-json f))
         (when j (sse/emit sock j "frame"))
         (stream sock id session supervisor)))
-    ([:texture tex rgba w h] (sse/emit sock (texture-json tex rgba w h) "texture")
+    ([:texture tex rgba w h filter] (sse/emit sock (texture-json tex rgba w h filter) "texture")
       (stream sock id session supervisor))
     ([:texture-free tex] (sse/emit sock (json/encode {:tex tex}) "texture-free")
       (stream sock id session supervisor))
