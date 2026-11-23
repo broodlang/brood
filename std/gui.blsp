@@ -764,7 +764,6 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
   (table/delete *textures* tex)
   (%gui-texture-free id tex))
 
-
 ;; --- 3D: meshes and scenes (ADR-786) ----------------------------------------------------------
 ;;
 ;; A third pixel-space op draws in 3D: `[:scene x y w h spec]`, meshes rendered into the

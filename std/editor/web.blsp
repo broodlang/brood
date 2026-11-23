@@ -64,7 +64,8 @@ holds a vector of ops has its scenes taken out of it as well."
   (seq/mapv (seq/filterv ops (fn (op) (not (and (vector? op) (= (first op) :scene)))))
     (fn (op)
       (if (vector? op)
-        (seq/mapv op (fn (part) (if (and (vector? part) (vector? (first part))) (without-scenes part) part)))
+        (seq/mapv op
+          (fn (part) (if (and (vector? part) (vector? (first part))) (without-scenes part) part)))
         op))))
 
 (defn texture-json (tex rgba w h filter)

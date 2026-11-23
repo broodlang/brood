@@ -149,7 +149,12 @@ backlog (`attach-display-backlog`), which paints only the newest."
     ;; The pixel-space seam: applied to the local display when it has the entry (a
     ;; window), dropped when it does not (a terminal cannot show a sprite anyway).
     ((and m
-       (or [:texture _ _ _ _ _] [:texture-free _] [:mesh _ _] [:mesh-free _] [:window _] [:sound-data _ _ _ _]
+       (or [:texture _ _ _ _ _]
+         [:texture-free _]
+         [:mesh _ _]
+         [:mesh-free _]
+         [:window _]
+         [:sound-data _ _ _ _]
          [:sound-free _]))
       (do (attach-display-apply display m) (attach-display-loop peer session display)))
     ;; the daemon's loop is busy, or no longer (ADR-491): the window's wait cursor
@@ -320,7 +325,12 @@ Window input is not taken here: `attach-display-paint` ships it before the paint
             (attach-display-show display latest carried after)
             (attach-display-backlog peer session display f [] [])))))
     ((and m
-       (or [:texture _ _ _ _ _] [:texture-free _] [:mesh _ _] [:mesh-free _] [:window _] [:sound-data _ _ _ _]
+       (or [:texture _ _ _ _ _]
+         [:texture-free _]
+         [:mesh _ _]
+         [:mesh-free _]
+         [:window _]
+         [:sound-data _ _ _ _]
          [:sound-free _]))
       (attach-display-backlog peer session display latest carried (conj after m)))
     ([:busy on]
