@@ -18,7 +18,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(brood_asan)', 'cfg(brood_s
 undocumented_unsafe_blocks = "warn"
 
 [workspace.package]
-version = "0.58.0"
+version = "0.59.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 authors = ["Wilhelm Kirschbaum"]
