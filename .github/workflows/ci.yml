@@ -36,7 +36,7 @@ env:
   # `gh api repos/broodlang/bedit/commits/main -q .sha`), paste it here, and run
   # `make smoke-bedit` against that checkout first — bump it whenever bedit adopts a
   # brood change (a rename wave, a new std name) that its previous commit predates.
-  BEDIT_REF: 103163e4d7e8d188714360519323563e6a18b56e
+  BEDIT_REF: d540d04e9712b6e25e6848d6d84f1ececc48b696
 
 jobs:
   # Is the version in Cargo.toml actually released? Not a gate — a NOTICE, because the
