@@ -68,6 +68,10 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("core/table.rs", "FREE_SLOTS", ProcessUniqueKeys),
     ("host/net.rs", "REGISTRY", ProcessUniqueKeys),
     ("host/subprocess.rs", "REGISTRY", ProcessUniqueKeys),
+    // File watches (ADR-782): one OS watcher per OS process — one inotify instance, one
+    // thread — and the handles routed through it, keyed by ref ids unique across the process.
+    ("host/file_watch.rs", "WATCHER", OneMachine),
+    ("host/file_watch.rs", "ROUTES", ProcessUniqueKeys),
     ("host/wasm.rs", "REGISTRY", ProcessUniqueKeys),
     // Compiled components keyed by the BLAKE3 of their source bytes: the bytes decide the code,
     // and each load still gets a store and instance of its own.

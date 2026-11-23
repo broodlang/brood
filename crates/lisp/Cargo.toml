@@ -424,6 +424,9 @@ mimalloc = { version = "0.1", default-features = false }
 # stub needs none).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 mio = { version = "1", features = ["net", "os-poll"] }
+# File change notification for `file/watch` (ADR-782): inotify on Linux, FSEvents on macOS,
+# ReadDirectoryChangesW on Windows behind one API. Native only, like the reactor above.
+notify = "9"
 crossterm = "0.29"
 # TLS stack (crate::net only) — see the comment where these were declared. The
 # aws-lc-rs crypto provider is a C build with no wasm target.

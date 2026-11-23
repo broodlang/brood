@@ -3068,6 +3068,49 @@ dies, so a forgotten interval can't tick forever.
 (timer/cancel t)
 ```
 
+### Watching a file (`file/watch`)
+
+`(file/watch path)` subscribes the calling process to changes of a file or a directory
+(ADR-782). It answers a watch handle (a ref), or a failure when the directory is missing
+or the operating system refuses a watch. Each change then arrives as a message:
+
+```clojure fragment
+[:file-watch handle path kind]   ; kind is :created, :modified or :removed
+```
+
+`path` is spelled as it was given to `file/watch`. A watched directory reports its entries,
+each message naming the entry, and does not report its subdirectories' contents. A file
+is watched through its directory, so:
+
+- a file that does not exist yet can be watched, and its creation is the first message;
+- the watch survives the file being deleted and recreated, or replaced by a rename (how
+  editors save, how logs rotate), with `:removed` and then `:created`.
+
+Bursts coalesce. While a message for a path and kind sits unreceived in the mailbox,
+further changes of that kind send nothing. The next change after you receive it sends a
+fresh one. A message therefore means "this changed since you last heard", so re-read the
+file instead of counting messages. A follower of a growing log keeps its offset and reads
+what was appended with `file/slurp-bytes-from`:
+
+```clojure fragment
+(defn follow (path offset)
+  (receive
+    ([:file-watch _ ^path _]
+     (let (added (file/slurp-bytes-from path offset))
+       (handle-lines added)
+       (follow path (+ offset (count added)))))))
+
+(file/watch "session.jsonl")
+(follow "session.jsonl" 0)
+```
+
+`(file/unwatch handle)` ends a watch and answers true, or false when it had already ended.
+A message already queued for it is withdrawn, so no `receive` after `file/unwatch` sees one.
+Any process holding the handle may end it. A watch also ends when the process that made
+it exits. One operating-system watcher (inotify, FSEvents, `ReadDirectoryChangesW`) serves
+every handle in the program, so a watch costs no thread or file descriptor of its own. The
+browser build has no watcher, and `file/watch` answers a failure there.
+
 ### Blocking natives (`proc/offload`)
 
 A long or blocking native — a git clone, a key derivation, big file IO — would

@@ -2476,3 +2476,16 @@ watcher) re-read and re-decoded the whole file, several megabytes, twice a secon
 for a missing file, empty bytes at or past the end, a raise for a negative offset or limit.
 Bytes, not a string, because an offset can split a character. Offloadable like
 `file/slurp-bytes`. Tests: `tests/slurp_bytes_test.blsp`.
+
+2026-11-23. **`file/watch`: a file's changes arrive as messages (ADR-782).** The follow-up
+ADR-781 named: `(file/watch path)` answers a ref and the caller receives
+`[:file-watch handle path kind]` (`:created` `:modified` `:removed`); `(file/unwatch handle)`
+ends it; the owner's exit ends it too (the scheduler's retirement, beside sockets and child
+processes). A file is watched through its directory, so a missing file is watchable and
+delete-and-recreate or save-by-rename keeps the watch. One `notify` watcher serves the OS
+process (Linux allows 128 inotify instances per user), with handles counted per directory.
+Bursts coalesce on the mailbox's delivery credit, one waiting message per handle, path and
+kind, and unwatch withdraws a queued one. New dependency `notify` 9 (native only). Guard
+`tests/file_watch_test.blsp` (12 tests, three guards sabotaged red: the retirement hook, the
+withdrawal, the coalescing). Linux only here; macOS and Windows are CI's. Not run here: the
+suites (desktop rule).

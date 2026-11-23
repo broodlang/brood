@@ -7,6 +7,8 @@
 pub mod audio; // optional audio output backend (feature "audio", pulled in by "gui")
 pub mod clipboard; // OS clipboard via `arboard` (feature "clipboard", pulled in by "gui"); no-ops without it
 pub(crate) mod dial; // dialling a TCP peer by name with the resolve and the connect both bounded (KI-97)
+#[cfg(not(target_arch = "wasm32"))]
+pub mod file_watch; // file change notification as process messages (ADR-782); wasm has none
 pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
 #[cfg(not(target_arch = "wasm32"))]
 pub mod net; // thin non-blocking TCP socket mechanism (ADR-062); policy lives in bundled std/net/* (ADR-097)
