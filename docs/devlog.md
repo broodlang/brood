@@ -2453,3 +2453,13 @@ why KI-407's fix exposed it, and why `d8a10b9cb` (the completing free taken out)
 step green without closing the hole. With the fix and the completing free put back, the five
 files passed 3 cold-and-warm rounds in CI. Guard in `runtime_collector`, sabotage-checked.
 Not run here: the suites and gcstress (desktop rule); proved in CI.
+
+2026-11-23. **The tree-walker job's 120 s timeout was KI-409, and the test now says so.**
+`full.yml` on `258dc646` timed out `rehome_keeps_positions` (3 s on the run before). Rebuilt at
+that commit, its fixture hung on 6 of 6 loaded loops within four runs: a loader process died
+on `runtime map node` or `runtime string handle` (KI-409's freed generation), and main, which
+spawned the loaders unlinked, waited forever for their `:done`. HEAD ran the fixture 1 800
+times under the same load, and 1 500 more linked, with no failure; `full.yml` on `ff2e433c`
+passed every job. The loaders are now `spawn-link`ed and the test asserts the exit status, so
+a crashed loader reds the test in about a second with the panic printed. Checked against the
+old binary: red 3 of 10 under load, each naming the panic.
