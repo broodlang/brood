@@ -16,6 +16,12 @@ ignore = [
     # ttf-parser is unmaintained. It arrives through cosmic-text → fontdb (the `gui` feature)
     # and is not ours to replace; drop this when cosmic-text moves off it.
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser: transitive via cosmic-text; no maintained drop-in" },
+    # url's `Url::origin()` overflows the stack on nested `blob:` URLs, and no fixed release
+    # exists yet (2.5.9 is the newest). url arrives only through wasmtime-wasi, which calls
+    # `url::Host::parse` (sockets/ip_name_lookup.rs) and never `Url::origin()`; Brood itself
+    # does not depend on url, and a WASI guest is never granted the network. Drop this when
+    # url ships a fix.
+    { id = "RUSTSEC-2026-0592", reason = "url: Url::origin unreachable (wasmtime-wasi only calls Host::parse); no fixed release yet" },
 ]
 
 [licenses]
