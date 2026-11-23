@@ -29,11 +29,16 @@ enough to miss it. KI-407's fix (`b0d11feac`) made the free run at every collect
 at the report that completes a drain, so a drain now completes at once, inside the window, on
 a cold boot under GC stress. It went red on the first CI run after the merge (45133378793);
 the next main run was cancelled, so the red was first read as the 2026-11-23 perf commits'.
+`d8a10b9cb` then took the completing free out, which closes the window in these five files but
+not the hole: the collector's own free trusts the same acks.
 
 **Fix.** Promotion re-homes every older-generation value it meets inside what it copies: a
 value (`promote_in_grown`'s fallback), a captured env frame (`promote_env`) and a shared CHAMP
 sub-trie (`promote_map_node`), through the drain's forwarding map so `=` still sees one copy.
-`make gcstress` now prints a failing file's exit status and its first panic.
+`make gcstress` now prints a failing file's exit status and its first panic. With the fix the
+completing free is safe again: the five files passed 3 rounds out of 3, cold boot included,
+with it put back (a temporary CI branch, run 45152093418); whether to restore it for KI-407's
+burst case is left open.
 
 **Guard.** `runtime_collector::a_def_of_a_fresh_cell_over_an_old_gen_tail_is_rehomed_off_the_freed_generation`
 — red (`runtime pair handle`) with `_ => v` put back as the fallback. And `make gcstress` in CI.

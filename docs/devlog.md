@@ -2443,10 +2443,13 @@ breakage job had failed its GC-stress step on five process files since the merge
 `b0d11feac`, before the day's perf commits (a baseline run on `b95ab6a28` failed the same
 way). The step printed only `FAILED`; it now prints the exit status and the first panic:
 `runtime string handle` at the test runner's `spawn`. A temporary drain trace on CI showed the
-root acking clean and the drain freeing the generation while the test file loaded; the free
-reaching the root only through `(def test/*units* (cons unit test/*units*))`, whose fresh cell
-kept an old-generation tail that the top-level re-home could not see. Promotion now re-homes
+root acking clean and the drain freeing the generation while the test file loaded; the
+generation was still reachable, but only through
+`(def test/*units* (cons unit test/*units*))`, whose fresh cell kept an old-generation tail
+that the top-level re-home could not see. Promotion now re-homes
 every older-generation value, env frame and sub-trie it meets. With the free disabled
 (`free_if_last_to_ack` removed, or `BROOD_RT_GC_FLOOR` huge) the five files passed, which is
-why KI-407's fix exposed it. Guard in `runtime_collector`, sabotage-checked. Not run here: the
-suites and gcstress (desktop rule); proved in CI.
+why KI-407's fix exposed it, and why `d8a10b9cb` (the completing free taken out) turned the
+step green without closing the hole. With the fix and the completing free put back, the five
+files passed 3 cold-and-warm rounds in CI. Guard in `runtime_collector`, sabotage-checked.
+Not run here: the suites and gcstress (desktop rule); proved in CI.
