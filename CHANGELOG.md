@@ -4,7 +4,7 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.59.0 — shadow like other languages, named fn, smooth textures, 3D meshes
 
 **Added: signed-distance scenes evaluated natively (ADR-787).** The `sdf` module takes a model of
 shapes and joins LOWERED to flat records (`sdf/record`, `sdf/material`, `sdf/field`), checks it
