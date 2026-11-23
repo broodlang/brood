@@ -6,7 +6,8 @@
 #
 #   scripts/ci-failure-summary.sh LOG LABEL
 #
-# Reads two shapes: the in-language runner's
+# Reads three shapes: a file that did not load (`file:line:col: error: …`), the in-language
+# runner's
 #     tests/x_test.blsp:36: test failed: group › name
 #         assert: …   actual: …   expect: …
 # and a Rust test's
@@ -69,6 +70,19 @@ while IFS= read -r number; do
   found=$((found + 1))
 done < <(grep -nE "thread '[^']*' (\([0-9]+\) )?panicked at [^ ]+:[0-9]+:[0-9]+:$" "$clean" \
   | grep -v "brood-suite\|_suite_passes" | cut -d: -f1 | head -30)
+
+# A file that did not load or compile (a header error, a module that does not compile): its
+# `file:line:col: error: message` line, which stops a run before any test reports.
+while IFS= read -r header; do
+  location="${header%%: error: *}"
+  message="${header#*: error: }"
+  file="${location%%:*}"
+  rest="${location#*:}"
+  line="${rest%%:*}"
+  echo "::error file=$file,line=$line,title=$label: error::$(printf '%s\n' "$message" | escape)"
+  echo "- \`$file:$line\` $message" >> "$summary"
+  found=$((found + 1))
+done < <(grep -oE '[^ ]+\.blsp:[0-9]+:[0-9]+: error: .*' "$clean" | sort -u | head -30)
 
 if [ "$found" -eq 0 ]; then
   echo "::error::$label failed, but no failing test was found in the log: see the step's output"

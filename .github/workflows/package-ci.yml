@@ -144,9 +144,18 @@ jobs:
           [ -f project.blsp ] && nest fetch || echo "no project.blsp — nothing to fetch"
 
       - name: nest check
+        shell: bash
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          nest check
+          nest check 2>&1 | tee nest-check.log
+
+      - name: Annotate what did not load (on failure)
+        if: failure()
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/broodlang/brood/${{ inputs.brood-ref }}/scripts/ci-failure-summary.sh" -o "$RUNNER_TEMP/ci-failure-summary.sh" \
+            && bash "$RUNNER_TEMP/ci-failure-summary.sh" nest-check.log "nest check" \
+            || echo "::warning::could not annotate the failures; see the nest check step"
 
       - name: nest format --check
         run: |
