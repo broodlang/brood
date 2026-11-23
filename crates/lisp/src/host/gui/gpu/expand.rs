@@ -560,6 +560,25 @@ impl GpuWindow {
                 } => {
                     fb.solid(*x, *y, *w, *h, *color, *rot, Edge::Plain);
                 }
+                // A 3D scene: rendered into its own target before the passes, its picture drawn
+                // here as a premultiplied sprite at its pixel size (ADR-786).
+                Op::Scene(scene) => {
+                    let index = fb.scenes.len() as u32;
+                    let (width, height) = scene.pixel_size();
+                    fb.scenes.push(scene.clone());
+                    fb.textured(
+                        TexKey::Scene(index),
+                        scene.x,
+                        scene.y,
+                        width as f32,
+                        height as f32,
+                        [0.0, 0.0, 1.0, 1.0],
+                        [255; 4],
+                        sprite_mode(TextureFilter::Smooth),
+                        0.0,
+                        0.0,
+                    );
+                }
                 // Pixel-space text: the `Text` walk from a pixel top-left (after the
                 // alignment's shift by the run's shaped width), untouched by grid or scroll.
                 Op::TextPx {

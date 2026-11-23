@@ -327,6 +327,14 @@ not open needs."
       (when (get display :texture) ((get display :texture) tex rgba w h filter))
       tex)))
 
+(defn display-mesh (display spec)
+  "Upload a mesh through `display` — a `gui-display` or the `remote-display` a served app draws to — and return its handle, for the draws of a `[:scene …]` op (ADR-786). The spec is `gui/mesh`'s (little-endian attribute bytes). The display's `:mesh` entry is called `(f handle spec)`, so the mesh crosses the wire to a thin client's window; a display without one (the terminal, the browser tab) accepts and ignores the upload.
+
+    (< 0 (editor/frontend/display-mesh {} {}))   ;=> true"
+  (let (handle (gui/alloc-mesh))
+    (when (get display :mesh) ((get display :mesh) handle spec))
+    handle))
+
 (defn display-sound (display pcm rate &optional channels)
   "Keep a sound through `display` — a `gui-display` or a served app's `remote-display`
 (the thin client's window, over the wire) — and return its handle, for a `[:sound snd vol pan key]`,
@@ -404,6 +412,9 @@ their input. Both are deferred trade-offs (ADR-059), fine for the observer.
        ;; unchanged in its own window or in a thin client's.
        :texture (fn (tex rgba w h filter) (%gui-texture id tex rgba w h filter))
        :texture-free (fn (tex) (%gui-texture-free id tex))
+       ;; a mesh for `[:scene …]` ops (ADR-786), crossing the wire as a texture does
+       :mesh (fn (handle spec) (%gui-mesh id handle spec))
+       :mesh-free (fn (handle) (%gui-mesh-free id handle))
        :sound (fn (snd pcm rate channels) (%gui-sound id snd rate channels pcm))
        :sound-free (fn (snd) (%gui-sound-free id snd))
        :configure (fn (o) (display-configure-window id o))

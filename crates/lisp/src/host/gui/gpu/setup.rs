@@ -479,6 +479,7 @@ impl GpuWindow {
             viewport_layout,
             effects: None,
             particles: None,
+            scenes: None,
             runs: RunCache::default(),
             fragments: FragmentCache::default(),
             texture_generation: 0,

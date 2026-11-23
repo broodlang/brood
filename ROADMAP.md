@@ -3100,6 +3100,11 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
   the tab since 2026-10-18 (ADR-414, its std modules imaged); Windows compiles in CI
   (`windows-check`). ✅ Windows shown to RUN: `windows-smoke` runs a program and the platform
   smoke set, a CI gate since 2026-11-04 (paths ADR-592, program lookup ADR-607).
+- ✅ **3D meshes in a frame** (ADR-786, 2026-11-23) — `gui/mesh` uploads a skinned, morphable
+  mesh (glTF-style attribute bytes); `[:scene x y w h spec]` draws meshes with a camera,
+  directional lights, joint palettes and a fixed skin/standard/cutout/blend material model,
+  composited in op order. GPU (depth, 4× MSAA, vertex skinning) and CPU painter (software
+  rasteriser). ⬜ The browser tab draws no scenes yet; ⬜ mipmaps.
 - ✅ **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
   deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped

@@ -48,11 +48,24 @@ evaluated). Listens on 127.0.0.1 only.
 
 (defn frame-json (frame)
   "A frame as JSON for the painter, or nil for one the encoder cannot carry (a bitboard
-op holds raw bytes) — the tab keeps its last frame rather than the stream dying.
+op holds raw bytes) — the tab keeps its last frame rather than the stream dying. Its
+`[:scene …]` ops are left out: the tab's Canvas2D painter draws no 3D yet (ADR-786), and a
+scene's joint palettes are the bulk of a frame that carries one.
 
-    (editor/web/frame-json [[:clear] [:text 0 0 \"hi\"]])   ;=> \"[[\\\"clear\\\"],[\\\"text\\\",0,0,\\\"hi\\\"]]\""
+    (editor/web/frame-json [[:clear] [:text 0 0 \"hi\"]])   ;=> \"[[\\\"clear\\\"],[\\\"text\\\",0,0,\\\"hi\\\"]]\"
+    (editor/web/frame-json [[:clear] [:scene 0 0 10 10 {}]])   ;=> \"[[\\\"clear\\\"]]\"
+    (editor/web/frame-json [[:scroll-region 0 [[:scene 0 0 1 1 {}] [:clear]]]])   ;=> \"[[\\\"scroll-region\\\",0,[[\\\"clear\\\"]]]]\""
   ;; The error IS the answer: a frame the encoder refuses is skipped, not fatal.
-  (check-allow :discarded-catch (try (json/encode frame) (catch _e nil))))
+  (check-allow :discarded-catch (try (json/encode (without-scenes frame)) (catch _e nil))))
+
+(defn- without-scenes (ops)
+  "`ops` with every `[:scene …]` op left out, inside regions and fragments too: whatever op
+holds a vector of ops has its scenes taken out of it as well."
+  (seq/mapv (seq/filterv ops (fn (op) (not (and (vector? op) (= (first op) :scene)))))
+    (fn (op)
+      (if (vector? op)
+        (seq/mapv op (fn (part) (if (and (vector? part) (vector? (first part))) (without-scenes part) part)))
+        op))))
 
 (defn texture-json (tex rgba w h filter)
   "A texture upload as JSON: the handle, the size, the sampling filter (`\"nearest\"` or

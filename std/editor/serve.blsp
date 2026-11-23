@@ -160,6 +160,8 @@ alive past its time to live.
          :texture (fn (tex rgba w h filter)
                     (serve-seam state resume :textures tex [:texture tex rgba w h filter]))
          :texture-free (fn (tex) (serve-seam state resume :textures tex [:texture-free tex]))
+         :mesh (fn (handle spec) (serve-seam state resume :meshes handle [:mesh handle spec]))
+         :mesh-free (fn (handle) (serve-seam state resume :meshes handle [:mesh-free handle]))
          :sound (fn (snd pcm rate channels)
                   (serve-seam state resume :sounds snd [:sound-data snd pcm rate channels]))
          :sound-free (fn (snd) (serve-seam state resume :sounds snd [:sound-free snd]))
@@ -200,12 +202,12 @@ session is parked, with nobody to send to."
 
 (defn- serve-seam (state resume kind id message)
   "Send a texture or sound `message` about `id` to the client — and, for a resuming session,
-keep what is LIVE under `kind` (`:textures` / `:sounds`): the data message while it lives,
+keep what is LIVE under `kind` (`:textures` / `:sounds` / `:meshes`): the data message while it lives,
 nothing once freed, so an adopting client is given exactly what the old one held."
   (do
     (when resume
       (let (live (table/get state kind {})
-            freed? (contains? #{:texture-free :sound-free} (first message)))
+            freed? (contains? #{:texture-free :sound-free :mesh-free} (first message)))
         (table/put state kind (if freed? (dissoc live id) (assoc live id message)))))
     (serve-to state (fn (to) (send to message)))))
 
@@ -549,7 +551,7 @@ without the manager's token."
 
 (defn- serve-replay (state client)
   "Give a `client` that took this session over the window as it stands: the window options
-asked for so far, the textures and sound data still live, then the last frame — without
+asked for so far, the textures, meshes and sound data still live, then the last frame — without
 its sounds and bursts, which played when it was first drawn. A new grid redraws anyway;
 the same grid would draw nothing until the model changed (ADR-444)."
   (let (options (table/get state :window nil)
@@ -557,6 +559,7 @@ the same grid would draw nothing until the model changed (ADR-444)."
     (do
       (when options (send client [:window options]))
       (doseq (message (vals (table/get state :textures {}))) (send client message))
+      (doseq (message (vals (table/get state :meshes {}))) (send client message))
       (doseq (message (vals (table/get state :sounds {}))) (send client message))
       (when frame (send client [:frame (serve-without-one-shots frame)])))))
 

@@ -836,6 +836,23 @@ pub(super) fn render_ops<P: Painter>(
                     paint_sprite(canvas, t, *x, *y, *w, *h, *uv, *tint, *rot);
                 }
             }
+            // A 3D scene, rasterised before the walk (`Renderer::prepare_scenes`), drawn as its
+            // picture over its rect (ADR-786).
+            Op::Scene(scene) => {
+                if let Some(t) = r.scene_picture(scene) {
+                    paint_sprite(
+                        canvas,
+                        t,
+                        scene.x,
+                        scene.y,
+                        t.w as f32,
+                        t.h as f32,
+                        [0.0, 0.0, 1.0, 1.0],
+                        [255; 4],
+                        0.0,
+                    );
+                }
+            }
             // Pixel-space text: the `Text` walk with the run's top-left given in
             // pixels (after the alignment's shift by the run's shaped width) rather
             // than derived from a cell; unaffected by grid origin and scroll.
@@ -1393,6 +1410,8 @@ pub(super) fn raster_frame(
     fb_h: usize,
     force: bool,
 ) -> Vec<DamageRect> {
+    // the frame's 3D scenes rasterised first, so the walk draws each as a picture (ADR-786)
+    r.prepare_scenes(frame);
     let cw = r.cell_w.max(1);
     let (ox, _) = r.grid_origin(fb_w, fb_h);
     let rows = r.rows(fb_w, fb_h);

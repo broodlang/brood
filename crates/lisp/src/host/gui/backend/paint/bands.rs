@@ -32,6 +32,8 @@ pub(in crate::host::gui::backend) trait Painter {
     fn scale(&self) -> f64;
     fn caret_hidden(&self) -> bool;
     fn texture(&self, handle: u32) -> Option<&CpuTexture>;
+    /// The picture the frame's 3D `scene` was rasterised to (ADR-786).
+    fn scene_picture(&self, scene: &crate::host::gui::mesh::Scene) -> Option<&CpuTexture>;
     #[allow(clippy::too_many_arguments)]
     fn draw_cluster(
         &mut self,
@@ -94,6 +96,10 @@ impl Painter for Renderer {
         self.textures.get(&handle)
     }
 
+    fn scene_picture(&self, scene: &crate::host::gui::mesh::Scene) -> Option<&CpuTexture> {
+        Renderer::scene_picture(self, scene)
+    }
+
     fn draw_cluster(
         &mut self,
         canvas: &mut Canvas,
@@ -136,6 +142,8 @@ impl Painter for Renderer {
 pub(in crate::host::gui::backend) struct BandPainter<'a> {
     cache: &'a GlyphMap<CachedGlyph>,
     textures: &'a HashMap<u32, CpuTexture>,
+    /// The frame's 3D scenes as the GUI thread rasterised them (`Renderer::prepare_scenes`).
+    scenes: &'a [(std::sync::Arc<crate::host::gui::mesh::Scene>, CpuTexture)],
     regions: &'a [(u32, CellMetrics)],
     ink: GlyphInk<'a>,
     tables: &'a mut BlendTables,
@@ -197,6 +205,13 @@ impl Painter for BandPainter<'_> {
 
     fn texture(&self, handle: u32) -> Option<&CpuTexture> {
         self.textures.get(&handle)
+    }
+
+    fn scene_picture(&self, scene: &crate::host::gui::mesh::Scene) -> Option<&CpuTexture> {
+        self.scenes
+            .iter()
+            .find(|(seen, _)| std::ptr::eq(&**seen, scene))
+            .map(|(_, picture)| picture)
     }
 
     fn draw_cluster(
@@ -453,6 +468,7 @@ fn draw_threaded(
     let cov_lut: [u8; 256] = *cov_lut;
     let cov_lut = &cov_lut;
     let (cache, textures, tables) = (&r.cache, &r.textures, &mut r.band_tables);
+    let scenes = &r.scene_pictures[..];
     let regions = &regions;
     // the bands' rows, each a disjoint slice of the framebuffer
     let mut slices = Vec::with_capacity(cuts.len());
@@ -474,6 +490,7 @@ fn draw_threaded(
                     let mut painter = BandPainter {
                         cache,
                         textures,
+                        scenes,
                         regions,
                         ink: GlyphInk {
                             text_contrast,

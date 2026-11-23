@@ -100,6 +100,10 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             gpu.upload_texture(tex, &rgba, texture_width, texture_height, filter)
                         }
                     }
+                    // a scene drawing with it is rasterised again (ADR-786)
+                    if win.renderer.forget_scene_pictures() {
+                        win.window.request_redraw();
+                    }
                 }
             }
             UserEvent::TextureFree { id, tex } => {
@@ -111,6 +115,35 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                         #[cfg(feature = "gui-gpu")]
                         Backend::Gpu(gpu) => gpu.free_texture(tex),
                     }
+                    if win.renderer.forget_scene_pictures() {
+                        win.window.request_redraw();
+                    }
+                }
+            }
+            // A mesh lives in the renderer for both targets (the CPU painter rasterises from it,
+            // `gui/capture` too) and, on the GPU target, on the device as well (ADR-786).
+            UserEvent::Mesh { id, handle, mesh } => {
+                if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                    #[cfg(feature = "gui-gpu")]
+                    if let Backend::Gpu(gpu) = &mut win.backend {
+                        gpu.upload_mesh(handle, &mesh);
+                    }
+                    win.renderer.meshes.insert(handle, mesh);
+                    // the frame on screen may draw it: paint it again, the CPU painter's scenes
+                    // rasterised anew
+                    win.renderer.forget_scene_pictures();
+                    win.window.request_redraw();
+                }
+            }
+            UserEvent::MeshFree { id, handle } => {
+                if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                    #[cfg(feature = "gui-gpu")]
+                    if let Backend::Gpu(gpu) = &mut win.backend {
+                        gpu.free_mesh(handle);
+                    }
+                    win.renderer.meshes.remove(handle);
+                    win.renderer.forget_scene_pictures();
+                    win.window.request_redraw();
                 }
             }
             // A window's picture resampled off this thread (ADR-695): every window takes what

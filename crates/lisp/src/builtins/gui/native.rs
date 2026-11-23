@@ -680,6 +680,7 @@ struct GuiOpTags {
     bloom_t: value::Symbol,
     crt_t: value::Symbol,
     emitter_t: value::Symbol,
+    scene_t: value::Symbol,
     burst_t: value::Symbol,
     seam_t: value::Symbol,
     above_seam_t: value::Symbol,
@@ -716,6 +717,7 @@ impl GuiOpTags {
             bloom_t: value::intern("bloom"),
             crt_t: value::intern("crt"),
             emitter_t: value::intern("emitter"),
+            scene_t: value::intern("scene"),
             burst_t: value::intern("burst"),
             seam_t: value::intern("seam"),
             above_seam_t: value::intern("above-seam"),
@@ -1309,6 +1311,22 @@ fn parse_gui_ops(
                 y: num(arg(&parts, 3)),
                 spec,
             });
+        } else if tag == tags.scene_t {
+            // `[:scene x y w h spec]` — meshes in 3D over a pixel rect (ADR-786); a spec without
+            // a 16-number `:camera` is not a scene.
+            if let Some(scene) = scene_spec(
+                heap,
+                [
+                    num(arg(&parts, 1)),
+                    num(arg(&parts, 2)),
+                    num(arg(&parts, 3)),
+                    num(arg(&parts, 4)),
+                ],
+                arg(&parts, 5),
+                &num,
+            ) {
+                ops.push(crate::host::gui::Op::Scene(std::sync::Arc::new(scene)));
+            }
         } else if tag == tags.burst_t {
             // `[:burst id count]`.
             let (Value::Int(id), Value::Int(count)) = (arg(&parts, 1), arg(&parts, 2)) else {
@@ -1454,6 +1472,313 @@ fn emitter_spec(
         spec.max = max.clamp(1, MAX_PARTICLES as i64) as u32;
     }
     spec
+}
+
+/// A `[:scene x y w h spec]` op's spec read into a `mesh::Scene` (ADR-786): `:camera` (16
+/// numbers, a column-major view-projection with clip depth 0 … 1 — required), `:eye [x y z]`,
+/// `:lights [{:direction [x y z] :color [r g b]} …]`, `:sky` / `:ground [r g b]` (the
+/// ambient from above and below), `:exposure`, `:background [r g b a]` (0 … 1, transparent by
+/// default), `:palettes` (joint matrices, 16 numbers each: a vector of numbers or f32 bytes per
+/// skeleton) and `:draws [{:mesh h :model [16] :palette i :morphs [[target weight] …]
+/// :material {…}} …]`. Colours and light are linear. A key of the wrong shape keeps its
+/// default; a draw without a mesh handle is dropped.
+fn scene_spec(
+    heap: &Heap,
+    rect: [f32; 4],
+    spec: Value,
+    num: &dyn Fn(Value) -> f32,
+) -> Option<crate::host::gui::mesh::Scene> {
+    use crate::host::gui::mesh::{Draw, Light, MAX_LIGHTS, MAX_MORPHS, Material, Scene, Surface};
+    let Value::Map(map) = spec else {
+        return None;
+    };
+    let is_number = |candidate: Value| {
+        matches!(
+            candidate,
+            Value::Int(_) | Value::Float(_) | Value::Ratio(_) | Value::Decimal(_)
+        )
+    };
+    let finite = |number: f32| if number.is_finite() { number } else { 0.0 };
+    let numbers = |given: Option<Value>, count: usize| -> Option<Vec<f32>> {
+        match given {
+            Some(Value::Vector(id))
+                if heap.vector(id).len() == count
+                    && heap.vector(id).iter().all(|item| is_number(*item)) =>
+            {
+                Some(
+                    heap.vector(id)
+                        .iter()
+                        .map(|item| finite(num(*item)))
+                        .collect(),
+                )
+            }
+            _ => None,
+        }
+    };
+    let three = |given: Option<Value>, default: [f32; 3]| {
+        numbers(given, 3).map_or(default, |values| [values[0], values[1], values[2]])
+    };
+    let matrix = |given: Option<Value>| {
+        numbers(given, 16).map(|values| {
+            let mut out = [0.0f32; 16];
+            out.copy_from_slice(&values);
+            out
+        })
+    };
+    let get = |within, key: &str| heap.map_get(within, value::kw(key));
+    let view_proj = matrix(get(map, "camera"))?;
+    let lights = match get(map, "lights") {
+        Some(Value::Vector(id)) => heap
+            .vector(id)
+            .iter()
+            .filter_map(|light| match light {
+                Value::Map(light_map) => Some(Light {
+                    direction: three(get(*light_map, "direction"), [0.0, -1.0, 0.0]),
+                    color: three(get(*light_map, "color"), [1.0, 1.0, 1.0]),
+                }),
+                _ => None,
+            })
+            .take(MAX_LIGHTS)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let palettes = match get(map, "palettes") {
+        Some(Value::Vector(id)) => heap
+            .vector(id)
+            .iter()
+            .map(|palette| {
+                let values: Vec<f32> = match palette {
+                    Value::Vector(numbers_id) => heap
+                        .vector(*numbers_id)
+                        .iter()
+                        .map(|item| num(*item))
+                        .collect(),
+                    Value::Bytes(bytes_id) => heap
+                        .bytes(*bytes_id)
+                        .as_bytes()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|word| f32::from_le_bytes(*word))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                // whole joints only, every number finite
+                let whole = values.len() / 16 * 16;
+                let values: Vec<f32> = values[..whole]
+                    .iter()
+                    .map(|number| finite(*number))
+                    .collect();
+                std::sync::Arc::from(values)
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let material_of = |given: Option<Value>| -> Material {
+        let mut material = Material::default();
+        let Some(Value::Map(material_map)) = given else {
+            return material;
+        };
+        let number = |key: &str| match get(material_map, key) {
+            Some(item) if is_number(item) => Some(num(item)).filter(|value| value.is_finite()),
+            _ => None,
+        };
+        let handle = |key: &str| match get(material_map, key) {
+            Some(Value::Int(handle)) => u32::try_from(handle).ok(),
+            _ => None,
+        };
+        if let Some(Value::Keyword(surface)) = get(material_map, "surface") {
+            material.surface = match value::symbol_name_ref(surface) {
+                "skin" => Surface::Skin,
+                "cutout" => Surface::Cutout,
+                "blend" => Surface::Blend,
+                _ => Surface::Standard,
+            };
+        }
+        material.base = handle("base");
+        material.normal = handle("normal");
+        if let Some(color) = numbers(get(material_map, "color"), 4) {
+            material.color = [color[0], color[1], color[2], color[3]];
+        } else if let Some(color) = numbers(get(material_map, "color"), 3) {
+            material.color = [color[0], color[1], color[2], 1.0];
+        }
+        if let Some(roughness) = number("roughness") {
+            material.roughness = roughness.clamp(0.0, 1.0);
+        }
+        if let Some(specular) = number("specular") {
+            material.specular = specular.clamp(0.0, 16.0);
+        }
+        if let Some(wrap) = number("wrap") {
+            material.wrap = wrap.clamp(0.0, 1.0);
+        }
+        material.scatter = three(get(material_map, "scatter"), material.scatter);
+        if let Some(rim) = number("rim") {
+            material.rim = rim.clamp(0.0, 16.0);
+        }
+        if let Some(cutoff) = number("cutoff") {
+            material.cutoff = cutoff.clamp(0.0, 1.0);
+        }
+        material.double_sided =
+            matches!(get(material_map, "double-sided"), Some(Value::Bool(true)));
+        material
+    };
+    let draws = match get(map, "draws") {
+        Some(Value::Vector(id)) => heap
+            .vector(id)
+            .iter()
+            .filter_map(|draw| {
+                let Value::Map(draw_map) = draw else {
+                    return None;
+                };
+                let Some(Value::Int(mesh)) = get(*draw_map, "mesh") else {
+                    return None;
+                };
+                let mesh = u32::try_from(mesh).ok()?;
+                let palette = match get(*draw_map, "palette") {
+                    Some(Value::Int(index)) => usize::try_from(index).ok(),
+                    _ => None,
+                };
+                let mut morphs: Vec<(u32, f32)> = match get(*draw_map, "morphs") {
+                    Some(Value::Vector(morphs_id)) => heap
+                        .vector(morphs_id)
+                        .iter()
+                        .filter_map(|pair| match pair {
+                            Value::Vector(pair_id) if heap.vector(*pair_id).len() == 2 => {
+                                let items = heap.vector(*pair_id);
+                                match items[0] {
+                                    Value::Int(target) => u32::try_from(target)
+                                        .ok()
+                                        .map(|target| (target, num(items[1]))),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        })
+                        .filter(|(_, weight)| weight.is_finite() && *weight != 0.0)
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                morphs.sort_by(|left, right| right.1.abs().total_cmp(&left.1.abs()));
+                morphs.truncate(MAX_MORPHS);
+                Some(Draw {
+                    mesh,
+                    model: matrix(get(*draw_map, "model")).unwrap_or([
+                        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                        1.0,
+                    ]),
+                    palette,
+                    morphs,
+                    material: material_of(get(*draw_map, "material")),
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let exposure = match get(map, "exposure") {
+        Some(item) if is_number(item) && num(item).is_finite() => num(item).max(0.0),
+        _ => 1.0,
+    };
+    let background = numbers(get(map, "background"), 4)
+        .map_or([0.0; 4], |color| [color[0], color[1], color[2], color[3]]);
+    Some(Scene {
+        x: rect[0],
+        y: rect[1],
+        w: rect[2],
+        h: rect[3],
+        view_proj,
+        eye: three(get(map, "eye"), [0.0, 0.0, 0.0]),
+        lights,
+        sky: three(get(map, "sky"), [0.3, 0.32, 0.36]),
+        ground: three(get(map, "ground"), [0.1, 0.08, 0.06]),
+        exposure,
+        background,
+        palettes,
+        draws,
+    })
+}
+
+/// A byte-valued key of a `%gui-mesh` spec: its bytes, or none when the key is absent or nil.
+fn mesh_bytes(
+    heap: &mut Heap,
+    map: crate::core::value::MapId,
+    key: &str,
+) -> Result<Vec<u8>, LispError> {
+    match heap.map_get(map, value::kw(key)) {
+        None | Some(Value::Nil) => Ok(Vec::new()),
+        Some(given) => collect_bytes("%gui-mesh", given, heap),
+    }
+}
+
+/// `(%gui-mesh id handle spec)` — keep the mesh `spec` describes under `handle` for window
+/// `id`'s `[:scene …]` ops (ADR-786). Its attributes are little-endian bytes as a glTF buffer
+/// holds them: `:positions` (3 f32 a vertex, required), `:normals` (3 f32), `:uvs` (2 f32),
+/// `:tangents` (4 f32), `:joints` (4 a vertex, `:joint-type :u8` or `:u16`), `:weights`
+/// (4 f32), `:indices` (`:index-type :u16` or `:u32`) and `:morphs`, a vector of
+/// `{:positions bytes :normals bytes}`. Validated here, so a mesh that lies about its counts
+/// is a clean error, never a draw that reads past its data. The handle is the caller's
+/// (`gui/mesh` allocates it). Returns nil.
+pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-mesh", arg(args, 0))?;
+    let requested = expect_int(heap, "%gui-mesh", arg(args, 1))?;
+    let Ok(handle) = u32::try_from(requested) else {
+        return Err(LispError::runtime(format!(
+            "%gui-mesh: mesh handle must be a non-negative int, got {requested}"
+        )));
+    };
+    let Value::Map(map) = arg(args, 2) else {
+        return Err(LispError::wrong_type(
+            heap,
+            "%gui-mesh",
+            "a mesh spec map",
+            arg(args, 2),
+        ));
+    };
+    let keyword_is = |heap: &Heap, key: &str, wanted: &str| matches!(heap.map_get(map, value::kw(key)), Some(Value::Keyword(found)) if value::symbol_name_ref(found) == wanted);
+    let joints_wide = keyword_is(heap, "joint-type", "u16");
+    let indices_wide = keyword_is(heap, "index-type", "u32");
+    let mut parts = crate::host::gui::mesh::MeshParts {
+        positions: mesh_bytes(heap, map, "positions")?,
+        normals: mesh_bytes(heap, map, "normals")?,
+        uvs: mesh_bytes(heap, map, "uvs")?,
+        tangents: mesh_bytes(heap, map, "tangents")?,
+        joints: mesh_bytes(heap, map, "joints")?,
+        joints_wide,
+        weights: mesh_bytes(heap, map, "weights")?,
+        indices: mesh_bytes(heap, map, "indices")?,
+        indices_wide,
+        morphs: Vec::new(),
+    };
+    if let Some(Value::Vector(morphs)) = heap.map_get(map, value::kw("morphs")) {
+        let targets = heap.vector(morphs).to_vec();
+        for target in targets {
+            let Value::Map(target) = target else {
+                return Err(LispError::wrong_type(
+                    heap,
+                    "%gui-mesh",
+                    "a morph target map",
+                    target,
+                ));
+            };
+            let positions = mesh_bytes(heap, target, "positions")?;
+            let normals = mesh_bytes(heap, target, "normals")?;
+            parts.morphs.push((positions, normals));
+        }
+    }
+    let mesh = crate::host::gui::mesh::Mesh::from_parts(parts)
+        .map_err(|why| LispError::runtime(format!("%gui-mesh: {why}")))?;
+    crate::host::gui::mesh(id, handle, std::sync::Arc::new(mesh)).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
+/// `(%gui-mesh-free id handle)` — forget mesh `handle` of window `id`.
+pub(in crate::builtins) fn gui_mesh_free(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "%gui-mesh-free", arg(args, 0))?;
+    let requested = expect_int(heap, "%gui-mesh-free", arg(args, 1))?;
+    let Ok(handle) = u32::try_from(requested) else {
+        return Ok(Value::nil());
+    };
+    crate::host::gui::mesh_free(id, handle).map_err(LispError::runtime)?;
+    Ok(Value::nil())
 }
 
 pub(in crate::builtins) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

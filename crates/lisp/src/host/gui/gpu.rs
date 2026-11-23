@@ -47,7 +47,8 @@
 //! instance buffers and their diff), `frame_builder` (the frame's quads and batches),
 //! `atlas` (the glyph atlas), `run_cache` and `fragment_cache` (the reuse), `text_runs`
 //! (shaping a text run), `expand` (the op walk), `passes` (the render passes), `effects`
-//! (lights, post-processing and particles) and `frame_dump` (the readback).
+//! (lights, post-processing and particles), `scenes` (the 3D meshes and the `[:scene …]`
+//! op, ADR-786) and `frame_dump` (the readback).
 
 mod atlas;
 mod effects;
@@ -59,6 +60,7 @@ mod instances;
 mod passes;
 mod pipelines;
 mod run_cache;
+mod scenes;
 mod setup;
 mod shaders;
 mod text_runs;
@@ -81,6 +83,7 @@ use instances::*;
 use passes::*;
 use pipelines::*;
 use run_cache::*;
+use scenes::*;
 #[cfg(test)]
 use setup::*;
 use shaders::*;
@@ -112,11 +115,15 @@ enum TexKey {
     User(u32),
     /// A picture an `[:image …]` op drew, at one size (`PictureTextures`, ADR-686).
     Picture(u32),
+    /// The picture the frame's `n`th `[:scene …]` op rendered (ADR-786).
+    Scene(u32),
 }
 
 /// A texture the app uploaded, bound for the textured pipeline.
 struct GpuTexture {
     bind_group: wgpu::BindGroup,
+    /// The texture itself, for a mesh material to sample (ADR-786).
+    view: wgpu::TextureView,
     /// How its sprites sample it (ADR-783): a smooth texture is bound with the linear
     /// sampler and its texels are premultiplied, so its quads draw in `sprite_mode`'s mode.
     filter: TextureFilter,
@@ -240,6 +247,9 @@ pub struct GpuWindow {
     effects: Option<EffectsGpu>,
     /// The particle systems, made the first time a frame carries an emitter.
     particles: Option<ParticlesGpu>,
+    /// The 3D meshes and the targets `[:scene …]` ops render into, made the first time a
+    /// mesh is uploaded or a frame carries a scene (ADR-786).
+    scenes: Option<MeshGpu>,
     /// Every text run the last frame drew, as quads — what a frame that repeats a run
     /// reuses instead of re-shaping it (`RunCache`, ADR-440).
     runs: RunCache,
@@ -464,7 +474,15 @@ impl GpuWindow {
             TextureFilter::Nearest => self.write_rgba(&texture, 0, 0, rgba, w, h),
             TextureFilter::Smooth => self.write_rgba(&texture, 0, 0, &premultiplied(rgba), w, h),
         }
-        self.textures.insert(tex, GpuTexture { bind_group, filter });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.textures.insert(
+            tex,
+            GpuTexture {
+                bind_group,
+                view,
+                filter,
+            },
+        );
         self.texture_generation += 1;
     }
 
@@ -506,6 +524,7 @@ impl GpuWindow {
         // resampled to exactly the drawn pixels already, so nearest maps texel to pixel
         let (texture, bind_group) = self.create_texture(width, height, TextureFilter::Nearest);
         self.write_rgba(&texture, 0, 0, scaled.as_raw(), width, height);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let pictures = &mut self.pictures;
         let id = pictures.next_id;
         pictures.next_id = pictures.next_id.wrapping_add(1);
@@ -513,6 +532,7 @@ impl GpuWindow {
             id,
             GpuTexture {
                 bind_group,
+                view,
                 filter: TextureFilter::Nearest,
             },
         );
@@ -534,6 +554,21 @@ impl GpuWindow {
         }
         self.texture_generation += 1;
         Some(id)
+    }
+
+    /// `gui-mesh`: keep `mesh` on the device under `handle` (ADR-786).
+    pub fn upload_mesh(&mut self, handle: u32, mesh: &crate::host::gui::mesh::Mesh) {
+        let (device, queue) = (&self.device, &self.queue);
+        self.scenes
+            .get_or_insert_with(|| MeshGpu::new(device, queue))
+            .upload(device, queue, handle, mesh);
+    }
+
+    /// `gui-mesh-free`: drop mesh `handle` (a later draw naming it draws nothing).
+    pub fn free_mesh(&mut self, handle: u32) {
+        if let Some(scenes) = &mut self.scenes {
+            scenes.meshes.remove(&handle);
+        }
     }
 
     /// `gui-texture-free`: drop texture `tex` (a later `:sprite` naming it draws nothing).
@@ -649,6 +684,25 @@ impl GpuWindow {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame"),
             });
+        // the frame's 3D scenes, each into its own target, before the passes that draw their
+        // pictures (ADR-786)
+        if !fb.scenes.is_empty() {
+            let (device, queue) = (&self.device, &self.queue);
+            self.scenes
+                .get_or_insert_with(|| MeshGpu::new(device, queue))
+                .render(
+                    device,
+                    queue,
+                    &mut encoder,
+                    &fb.scenes,
+                    &self.textures,
+                    &self.tex_layout,
+                    &self.smooth_sampler,
+                );
+        } else if let Some(scenes) = &mut self.scenes {
+            // no scene this frame: their targets go back
+            scenes.targets.clear();
+        }
         if let Some(particles) = &self.particles {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("particle step"),

@@ -202,6 +202,20 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Release texture tex of window id; a later [:sprite …] naming it draws nothing. Idempotent. Returns nil.",
         gui_texture_free);
     primitives.def(
+        "%gui-mesh",
+        Arity::exact(3),
+        Sig::new(vec![int, int, Ty::of_tags(&[Tag::Map])], nil_ty),
+        &["id", "handle", "spec"],
+        "Keep the mesh spec describes under handle for window id, for its [:scene …] ops (ADR-786). The spec is a map of little-endian bytes as a glTF buffer holds them: :positions (3 f32 a vertex, required), :normals (3 f32), :uvs (2 f32), :tangents (4 f32), :joints (4 a vertex, :joint-type :u8 or :u16), :weights (4 f32), :indices (:index-type :u16 or :u32) and :morphs, a vector of {:positions bytes :normals bytes}. Errors when a byte count is not whole entries for every vertex or an index names no vertex. The handle is the caller's (gui/mesh allocates it); re-uploading under a live handle replaces the mesh. Returns nil.",
+        gui_mesh);
+    primitives.def(
+        "%gui-mesh-free",
+        Arity::exact(2),
+        Sig::new(vec![int, int], nil_ty),
+        &["id", "handle"],
+        "Forget mesh handle of window id; a later draw naming it in a [:scene …] draws nothing. Idempotent. Returns nil.",
+        gui_mesh_free);
+    primitives.def(
         "%gui-input!",
         Arity::exact(2),
         Sig::new(vec![int, kw], nil_ty),

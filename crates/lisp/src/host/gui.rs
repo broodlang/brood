@@ -1021,6 +1021,15 @@ pub enum Op {
     AboveSeam {
         ops: Vec<Op>,
     },
+    /// Meshes drawn in 3D into a pixel rect of the frame (`[:scene x y w h spec]`, ADR-786): a
+    /// camera, directional lights over a sky/ground ambient, the skeletons' joint palettes and
+    /// the draws — each a mesh `gui-mesh` uploaded, its model matrix, morph weights and a
+    /// material of the fixed shading model (`mesh::Scene`). Composited where the op stands as
+    /// a premultiplied picture, so the 2D ops before it are behind it and those after in front.
+    /// Rendered on the GPU target with a depth buffer and 4× multisampling; rasterised in
+    /// software by the CPU painter (`mesh::rasterize`). The terminal and the browser tab skip
+    /// it. Frame-global: a memoised fragment never carries one.
+    Scene(std::sync::Arc<mesh::Scene>),
 }
 
 /// `value + delta` as a grid coordinate, or `None` when that lands before the grid's first
@@ -1544,6 +1553,11 @@ pub(crate) mod backend;
 #[cfg(feature = "gui")]
 pub(crate) mod effects; // lighting, post-processing and particles, shared by both painters
 
+// 3D meshes and the `[:scene …]` op (ADR-786): the data and the CPU rasteriser, built always
+// because `Op` carries a scene whether or not a painter is compiled in
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub mod mesh;
+
 #[cfg(feature = "gui-gpu")]
 pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 
@@ -1552,9 +1566,10 @@ pub use disabled::{
     TextAa, TextHinting, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg,
     focus, font, font_info, fullscreen, grab, headless, held_key, host_main_thread, icon,
     input_mode, inset, key_repeat, key_repeats, latency, latency_histograms, ligatures,
-    line_height, lose_display, maximize, minimize, next_texture_id, open, refresh_hz,
-    register_family, register_installed_family, render_frame, settle, size, size_px, sound,
-    sound_free, text_aa, text_contrast, text_hinting, texture, texture_free, title, window_ids,
+    line_height, lose_display, maximize, mesh, mesh_free, minimize, next_texture_id, open,
+    refresh_hz, register_family, register_installed_family, render_frame, settle, size, size_px,
+    sound, sound_free, text_aa, text_contrast, text_hinting, texture, texture_free, title,
+    window_ids,
 };
 
 #[cfg(feature = "gui")]
@@ -1562,7 +1577,8 @@ pub use backend::{
     TextAa, TextHinting, bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg,
     focus, font, font_info, fullscreen, grab, headless, held_key, host_main_thread, icon,
     input_mode, inset, key_repeat, key_repeats, latency, latency_histograms, ligatures,
-    line_height, lose_display, maximize, minimize, next_texture_id, open, refresh_hz,
-    register_family, register_installed_family, render_frame, settle, size, size_px, sound,
-    sound_free, text_aa, text_contrast, text_hinting, texture, texture_free, title, window_ids,
+    line_height, lose_display, maximize, mesh, mesh_free, minimize, next_texture_id, open,
+    refresh_hz, register_family, register_installed_family, render_frame, settle, size, size_px,
+    sound, sound_free, text_aa, text_contrast, text_hinting, texture, texture_free, title,
+    window_ids,
 };

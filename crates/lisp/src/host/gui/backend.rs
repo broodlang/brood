@@ -72,10 +72,10 @@ pub use main_thread::host_main_thread;
 pub use primitives::{
     bg, busy, capture, cell_size, close, drag_move, drag_resize, draw, fg, focus, font, font_info,
     fullscreen, grab, held_key, icon, input_mode, inset, key_repeat, key_repeats, latency,
-    latency_histograms, ligatures, line_height, maximize, minimize, next_texture_id, open,
-    refresh_hz, register_family, register_installed_family, render_frame, settle, size, size_px,
-    sound, sound_free, text_aa, text_contrast, text_hinting, texture, texture_free, title,
-    window_ids,
+    latency_histograms, ligatures, line_height, maximize, mesh, mesh_free, minimize,
+    next_texture_id, open, refresh_hz, register_family, register_installed_family, render_frame,
+    settle, size, size_px, sound, sound_free, text_aa, text_contrast, text_hinting, texture,
+    texture_free, title, window_ids,
 };
 
 use super::{
@@ -267,6 +267,16 @@ enum UserEvent {
     /// Release texture `tex` of window `id` (a later `:sprite` naming it draws nothing).
     /// Behind `gui-texture-free`.
     TextureFree { id: u64, tex: u32 },
+    /// Keep mesh `handle` for window `id`'s `[:scene …]` ops (ADR-786): validated already, shared
+    /// with the renderer (the CPU painter rasterises from it, and `gui/capture` too) and, on
+    /// the GPU target, uploaded to the device. Behind `gui-mesh`.
+    Mesh {
+        id: u64,
+        handle: u32,
+        mesh: std::sync::Arc<crate::host::gui::mesh::Mesh>,
+    },
+    /// Forget mesh `handle` of window `id` (a later draw naming it draws nothing).
+    MeshFree { id: u64, handle: u32 },
     /// A window's picture-resample worker finished one (ADR-695): every window takes what
     /// landed for it and repaints. Sent from the worker thread.
     PicturesLanded,

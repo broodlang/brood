@@ -631,3 +631,192 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
     return vec4<f32>(in.color.rgb, a);
 }
 "#;
+
+/// The mesh shader (ADR-786): morph, skin and transform a vertex; shade a fragment with the
+/// fixed model `host::gui::mesh` writes for the CPU painter (`shade`, `tone`) — keep the two
+/// in step. Writes premultiplied, sRGB-encoded colour, the space the scene's picture is
+/// composited in.
+pub(super) const MESH_SRC: &str = r#"
+struct Light { direction: vec4<f32>, color: vec4<f32> };
+struct SceneU {
+    view_proj: mat4x4<f32>,
+    eye: vec4<f32>,
+    lights: array<Light, 4>,
+    sky: vec4<f32>,
+    ground: vec4<f32>,
+    params: vec4<f32>,          // exposure, light count
+};
+struct DrawU {
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+    scatter: vec4<f32>,         // rgb, wrap
+    material: vec4<f32>,        // roughness, specular, rim, cutoff
+    flags: vec4<u32>,           // surface, texture bits, palette offset, skinned
+    morph_info: vec4<u32>,      // morph count, vertex count, palette joint count
+    morph_index: array<vec4<u32>, 2>,
+    morph_weight: array<vec4<f32>, 2>,
+};
+@group(0) @binding(0) var<uniform> scene: SceneU;
+@group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
+@group(1) @binding(0) var<uniform> draw: DrawU;
+@group(2) @binding(0) var<storage, read> morphs: array<vec4<f32>>;
+@group(3) @binding(0) var base_texture: texture_2d<f32>;
+@group(3) @binding(1) var normal_texture: texture_2d<f32>;
+@group(3) @binding(2) var texture_sampler: sampler;
+
+struct VertexIn {
+    @builtin(vertex_index) index: u32,
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) tangent: vec4<f32>,
+    @location(4) joints: vec4<u32>,
+    @location(5) weights: vec4<f32>,
+};
+struct VertexOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) tangent: vec4<f32>,
+};
+
+@vertex
+fn vs_mesh(input: VertexIn) -> VertexOut {
+    var position = input.position;
+    var normal = input.normal;
+    for (var slot = 0u; slot < draw.morph_info.x; slot = slot + 1u) {
+        let target_index = draw.morph_index[slot / 4u][slot % 4u];
+        let weight = draw.morph_weight[slot / 4u][slot % 4u];
+        let at = (target_index * draw.morph_info.y + input.index) * 2u;
+        position = position + weight * morphs[at].xyz;
+        normal = normal + weight * morphs[at + 1u].xyz;
+    }
+    var matrix = draw.model;
+    if (draw.flags.w == 1u) {
+        // as `skin_matrix` skins: a joint past the palette's end is skipped, and a vertex no
+        // joint of the palette moves stays rigid
+        let start = draw.flags.z;
+        let joint_count = draw.morph_info.z;
+        var skin = mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+        var moved = false;
+        for (var slot = 0u; slot < 4u; slot = slot + 1u) {
+            let joint = input.joints[slot];
+            let weight = input.weights[slot];
+            if (weight > 0.0 && joint < joint_count) {
+                skin = skin + palette[start + joint] * weight;
+                moved = true;
+            }
+        }
+        if (moved) {
+            matrix = draw.model * skin;
+        }
+    }
+    let world = matrix * vec4<f32>(position, 1.0);
+    var out: VertexOut;
+    out.clip = scene.view_proj * world;
+    out.world = world.xyz;
+    out.normal = (matrix * vec4<f32>(normal, 0.0)).xyz;
+    out.uv = input.uv;
+    out.tangent = vec4<f32>((matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz, input.tangent.w);
+    return out;
+}
+
+// `vector` made unit length, or +z when it has none: the CPU's `normalize`, never NaN
+fn safe_normalize(vector: vec3<f32>) -> vec3<f32> {
+    let length_squared = dot(vector, vector);
+    if (length_squared > 1e-24) {
+        return vector * inverseSqrt(length_squared);
+    }
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
+    return select(pow((color + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), color / 12.92, color <= vec3<f32>(0.04045));
+}
+
+fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
+    let clamped = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
+    return select(1.055 * pow(clamped, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055), clamped * 12.92, clamped <= vec3<f32>(0.0031308));
+}
+
+fn straight(texel: vec4<f32>, premultiplied: bool) -> vec4<f32> {
+    if (premultiplied && texel.a > 1e-6) {
+        return vec4<f32>(texel.rgb / texel.a, texel.a);
+    }
+    return texel;
+}
+
+fn shininess(roughness: f32) -> f32 {
+    let clamped = clamp(roughness, 0.04, 1.0);
+    return clamp(2.0 / (clamped * clamped * clamped * clamped) - 2.0, 1.0, 4096.0);
+}
+
+fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
+    let up = normal.y * 0.5 + 0.5;
+    var out = base * mix(scene.ground.rgb, scene.sky.rgb, up);
+    let exponent = shininess(draw.material.x);
+    let normalisation = (exponent + 8.0) / (8.0 * 3.14159265);
+    let count = u32(scene.params.y);
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        let light = scene.lights[slot];
+        let to_light = safe_normalize(-light.direction.xyz);
+        let facing = dot(normal, to_light);
+        let lambert = max(facing, 0.0);
+        let half_vector = safe_normalize(to_light + view);
+        let specular = draw.material.y * normalisation * pow(max(dot(normal, half_vector), 0.0), exponent) * lambert;
+        var diffuse = vec3<f32>(lambert);
+        if (draw.flags.x == 0u) {
+            let wrap = draw.scatter.w;
+            let wrapped = clamp((facing + wrap) / (1.0 + wrap), 0.0, 1.0);
+            diffuse = vec3<f32>(lambert) + draw.scatter.rgb * (wrapped - lambert);
+        }
+        out = out + light.color.rgb * (base * diffuse + vec3<f32>(specular));
+    }
+    let rim = draw.material.z * pow(1.0 - max(dot(normal, view), 0.0), 3.0);
+    return out + rim * scene.sky.rgb;
+}
+
+fn tone(color: vec3<f32>, exposure: f32) -> vec3<f32> {
+    let exposed = max(color * exposure, vec3<f32>(0.0));
+    let mapped = (exposed * (2.51 * exposed + vec3<f32>(0.03))) / (exposed * (2.43 * exposed + vec3<f32>(0.59)) + vec3<f32>(0.14));
+    return linear_to_srgb(mapped);
+}
+
+@fragment
+fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // both textures sampled before any branch (uniform control flow); a missing one is a
+    // white or flat-normal pixel bound in its place
+    let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
+    let normal_texel = straight(textureSample(normal_texture, texture_sampler, fragment.uv), (draw.flags.y & 8u) != 0u);
+    let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
+    var alpha = texel.a * draw.color.a;
+    if (draw.flags.x == 2u) {
+        if (alpha < draw.material.w) {
+            discard;
+        }
+        alpha = 1.0;
+    } else if (draw.flags.x == 3u) {
+        if (alpha <= 0.002) {
+            discard;
+        }
+    } else {
+        alpha = 1.0;
+    }
+    let base = srgb_to_linear(texel.rgb) * draw.color.rgb;
+    var normal = safe_normalize(fragment.normal);
+    if (!front) {
+        normal = -normal;
+    }
+    if ((draw.flags.y & 4u) != 0u) {
+        let tangent = safe_normalize(fragment.tangent.xyz);
+        let bitangent = cross(normal, tangent);
+        let sign = select(1.0, -1.0, fragment.tangent.w < 0.0);
+        let local = normal_texel.rgb * 2.0 - vec3<f32>(1.0);
+        normal = safe_normalize(tangent * local.x + sign * bitangent * local.y + normal * local.z);
+    }
+    let view = safe_normalize(scene.eye.xyz - fragment.world);
+    let lit = tone(shade(base, normal, view), scene.params.x);
+    return vec4<f32>(lit * alpha, alpha);
+}
+"#;

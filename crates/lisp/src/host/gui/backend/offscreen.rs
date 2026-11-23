@@ -92,6 +92,15 @@ pub(super) enum Request {
         id: u64,
         tex: u32,
     },
+    Mesh {
+        id: u64,
+        handle: u32,
+        mesh: Arc<crate::host::gui::mesh::Mesh>,
+    },
+    MeshFree {
+        id: u64,
+        handle: u32,
+    },
     Metrics {
         id: u64,
         px: Option<f32>,
@@ -319,11 +328,25 @@ impl Painter {
                         .renderer
                         .textures
                         .insert(tex, CpuTexture { w, h, rgba, filter });
+                    window.renderer.forget_scene_pictures();
                 }
             }
             Request::TextureFree { id, tex } => {
                 if let Some(window) = self.windows.get_mut(&id) {
                     window.renderer.textures.remove(&tex);
+                    window.renderer.forget_scene_pictures();
+                }
+            }
+            Request::Mesh { id, handle, mesh } => {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.renderer.meshes.insert(handle, mesh);
+                    window.renderer.forget_scene_pictures();
+                }
+            }
+            Request::MeshFree { id, handle } => {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.renderer.meshes.remove(handle);
+                    window.renderer.forget_scene_pictures();
                 }
             }
             Request::Metrics { id, px, reply } => {

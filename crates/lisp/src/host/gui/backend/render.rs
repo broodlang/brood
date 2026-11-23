@@ -305,6 +305,11 @@ pub(crate) struct Renderer {
     /// target paints, and the CPU painter's own copy of their particles.
     pub(crate) emitters: crate::host::gui::effects::EmitterBook,
     pub(super) cpu_particles: crate::host::gui::effects::CpuParticles,
+    /// The meshes `gui-mesh` uploaded (ADR-786), for both targets.
+    pub(crate) meshes: crate::host::gui::mesh::MeshBook,
+    /// The last frame's `[:scene …]` ops rasterised by the CPU painter, each with its picture;
+    /// a scene equal to one here is not rasterised again.
+    pub(super) scene_pictures: Vec<(std::sync::Arc<crate::host::gui::mesh::Scene>, CpuTexture)>,
 }
 
 /// A texture as the CPU painter samples it: `w`×`h` straight-alpha RGBA bytes, and how a
@@ -317,6 +322,88 @@ pub(super) struct CpuTexture {
 }
 
 impl Renderer {
+    /// Rasterise the `[:scene …]` ops `frame` carries, wherever they stand (ADR-786), keeping
+    /// the picture of a scene equal to one the last frame drew: the CPU painter's walk then
+    /// draws each as a sprite ([`Renderer::scene_picture`]).
+    pub(super) fn prepare_scenes(&mut self, frame: &[Op]) {
+        // every scene the walk can meet, inside regions too, as the GPU's expand meets them
+        fn collect<'f>(
+            ops: &'f [Op],
+            into: &mut Vec<&'f std::sync::Arc<crate::host::gui::mesh::Scene>>,
+        ) {
+            for op in ops {
+                match op {
+                    Op::Scene(scene) => into.push(scene),
+                    Op::ScrollRegion { ops, .. }
+                    | Op::CellRegion { ops, .. }
+                    | Op::AboveSeam { ops } => collect(ops, into),
+                    Op::Fragment(fragment) => collect(&fragment.0, into),
+                    _ => {}
+                }
+            }
+        }
+        let mut scenes = Vec::new();
+        collect(frame, &mut scenes);
+        if scenes.is_empty() {
+            self.scene_pictures.clear();
+            return;
+        }
+        let mut old = std::mem::take(&mut self.scene_pictures);
+        for scene in scenes {
+            if let Some(at) = old.iter().position(|(seen, _)| seen == scene) {
+                // kept under this frame's own allocation, which the walk looks it up by
+                let (_, picture) = old.swap_remove(at);
+                self.scene_pictures.push((scene.clone(), picture));
+                continue;
+            }
+            let meshes = &self.meshes;
+            let textures = &self.textures;
+            let (w, h, rgba) =
+                crate::host::gui::mesh::rasterize(scene, &|handle| meshes.get(handle), &|handle| {
+                    textures
+                        .get(&handle)
+                        .map(|t| crate::host::gui::mesh::TextureRef {
+                            w: t.w,
+                            h: t.h,
+                            rgba: &t.rgba,
+                        })
+                });
+            self.scene_pictures.push((
+                scene.clone(),
+                CpuTexture {
+                    w,
+                    h,
+                    rgba,
+                    filter: TextureFilter::Nearest,
+                },
+            ));
+        }
+    }
+
+    /// Forget the scene pictures after a mesh or a texture changed under a handle (ADR-786): a
+    /// scene's spec names its meshes and textures by handle only, so an unchanged spec over a
+    /// replaced mesh must be rasterised again, and the unchanged frame repainted. True when
+    /// there was a picture to forget (the window then asks for a paint).
+    pub(super) fn forget_scene_pictures(&mut self) -> bool {
+        if self.scene_pictures.is_empty() {
+            return false;
+        }
+        self.scene_pictures.clear();
+        self.invalidate();
+        true
+    }
+
+    /// The picture `prepare_scenes` made for `scene`.
+    pub(super) fn scene_picture(
+        &self,
+        scene: &crate::host::gui::mesh::Scene,
+    ) -> Option<&CpuTexture> {
+        self.scene_pictures
+            .iter()
+            .find(|(seen, _)| std::ptr::eq(&**seen, scene))
+            .map(|(_, picture)| picture)
+    }
+
     pub(super) fn new(scale: f64, families: Families, base_px: f32) -> Self {
         let mut r = Renderer {
             families,
@@ -350,6 +437,8 @@ impl Renderer {
             pictures: crate::host::picture::ScaledPictures::new(),
             emitters: Default::default(),
             cpu_particles: Default::default(),
+            meshes: Default::default(),
+            scene_pictures: Vec::new(),
         };
         r.recompute();
         r

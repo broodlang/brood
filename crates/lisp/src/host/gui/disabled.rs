@@ -182,3 +182,13 @@ pub fn window_ids() -> Vec<u64> {
     Vec::new()
 }
 pub fn lose_display(_why: &str) {}
+pub fn mesh(
+    _id: u64,
+    _handle: u32,
+    _mesh: std::sync::Arc<super::mesh::Mesh>,
+) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}
+pub fn mesh_free(_id: u64, _handle: u32) -> Result<(), String> {
+    Err(NOT_COMPILED.into())
+}

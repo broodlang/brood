@@ -219,7 +219,7 @@ pub(super) fn forget(window: u64) {
 }
 
 /// Whether `op` (or anything inside it) is an op the window reads from the WHOLE frame
-/// rather than paints in place — a sound, the music, an effect, an emitter, the seam. A fragment
+/// rather than paints in place — a sound, the music, an effect, an emitter, the seam, a 3D scene. A fragment
 /// holding one is spliced instead of shared, so those scanners never look inside a
 /// fragment.
 fn frame_global(op: &Op) -> bool {
@@ -234,7 +234,9 @@ fn frame_global(op: &Op) -> bool {
         | Op::Crt { .. }
         | Op::Emitter { .. }
         | Op::Burst { .. }
-        | Op::Seam { .. } => true,
+        | Op::Seam { .. }
+        // a scene is rendered from the top level of the frame before it is drawn (ADR-786)
+        | Op::Scene(_) => true,
         Op::ScrollRegion { ops, .. } | Op::CellRegion { ops, .. } | Op::AboveSeam { ops } => {
             ops.iter().any(frame_global)
         }

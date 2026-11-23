@@ -535,6 +535,33 @@ pub fn texture_free(id: u64, tex: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// `(gui-mesh id handle mesh)` — keep `mesh` under `handle` for window `id`'s `[:scene …]` ops
+/// (ADR-786). Fire-and-forget like `texture`: the handle is the caller's.
+pub fn mesh(
+    id: u64,
+    handle: u32,
+    mesh: std::sync::Arc<crate::host::gui::mesh::Mesh>,
+) -> Result<(), String> {
+    if headless() {
+        return headless_send(|| offscreen::Request::Mesh { id, handle, mesh });
+    }
+    if let Ok(g) = gui() {
+        let _ = lock(g).send_event(UserEvent::Mesh { id, handle, mesh });
+    }
+    Ok(())
+}
+
+/// `(gui-mesh-free id handle)` — forget mesh `handle` of window `id`.
+pub fn mesh_free(id: u64, handle: u32) -> Result<(), String> {
+    if headless() {
+        return headless_send(|| offscreen::Request::MeshFree { id, handle });
+    }
+    if let Ok(g) = gui() {
+        let _ = lock(g).send_event(UserEvent::MeshFree { id, handle });
+    }
+    Ok(())
+}
+
 /// `(gui-sound id snd rate channels pcm)` — keep a PCM16 sound under handle `snd` for
 /// window `id`'s `[:sound …]` ops. Fire-and-forget like `texture`.
 pub fn sound(id: u64, snd: u32, rate: u32, channels: u16, pcm: Vec<u8>) -> Result<(), String> {

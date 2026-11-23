@@ -2501,3 +2501,24 @@ interpolates the same way (`sample_bilinear`); the browser page turns on image s
 texture. **Breaking:** a display map's `:texture` entry takes a fifth argument, the filter, and
 the wire's `[:texture …]` message and `%gui-texture` carry it (b2d's displays need the
 parameter). Not run here: the suites (desktop rule); see the ADR for the tests.
+
+2026-11-23. **3D meshes and the `[:scene …]` op (ADR-786).** A b2d game's figure, made in
+Blender and baked to jointed sprites, hit the limits of 2D: joints that crack, a figure that
+only faces the camera, light baked in, hair that cannot move. The runtime now draws 3D, as
+mechanism: `gui/mesh` (`%gui-mesh`, a display's `:mesh`, the wire's `[:mesh handle spec]`,
+replayed by a resuming session) uploads a mesh once as the little-endian attribute bytes a glTF
+buffer holds — positions, normals, uvs, tangents, joints and weights, indices, morph targets —
+validated by `mesh::Mesh::from_parts`. A `[:scene x y w h spec]` op draws meshes into a pixel
+rect: a view-projection matrix, up to four directional lights over a sky/ground ambient, the
+skeletons' joint palettes, and per draw a model matrix, morph weights and a material of a fixed
+model (`:skin` with wrapped, scatter-tinted diffuse; `:standard`; `:cutout`; `:blend` for hair;
+base and normal maps, Blinn-Phong specular, a fresnel rim, ACES tone mapping). It composites
+where it stands as a premultiplied picture, so 2D and 3D mix in one frame without a mode. The
+GPU target renders each scene into a 4× multisampled colour and depth target before the frame's
+passes and draws the resolved picture through the sprite path (`TexKey::Scene`); vertices are
+skinned and morphed in the vertex shader (`MESH_SRC`). The CPU painter rasterises the same
+scene in software (`mesh::rasterize`, 2×2 supersampled) before its walk, so a headless capture
+draws it too. glTF loading, skeletons, cameras and animation stay Brood (b2d). The browser tab
+does not draw scenes yet (`editor/web/frame-json` leaves them out); recorded in the ADR. Run
+here: the new unit tests (`host::gui::mesh`, `the_mesh_shader_validates`) only; the suites are
+CI's (desktop rule).

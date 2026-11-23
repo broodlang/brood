@@ -98,6 +98,12 @@ fn the_text_shaders_validate_the_lcd_one_only_with_dual_source_blending() {
 }
 
 #[test]
+fn the_mesh_shader_validates() {
+    // ADR-786: the WGSL twin of `host::gui::mesh`'s shading model, checked without a device
+    validate_wgsl(MESH_SRC, wgpu::naga::valid::Capabilities::default());
+}
+
+#[test]
 fn a_glyph_mode_says_colour_grey_or_lcd_and_whether_it_is_lifted() {
     assert_eq!(glyph_mode(false, false, true), 0); // an emoji draws in its own colours
     assert_eq!(glyph_mode(false, true, true), 0);

@@ -56,6 +56,9 @@ pub(super) struct FrameBuilder {
     /// The batch the top-level `Overlay` starts at: no batch merges across it, so the scene
     /// and the unlit layer draw as separate runs.
     pub(super) overlay_at: Option<usize>,
+    /// The frame's `[:scene …]` ops in order: the `n`th one's picture is `TexKey::Scene(n)`
+    /// (ADR-786), rendered before the passes.
+    pub(super) scenes: Vec<std::sync::Arc<crate::host::gui::mesh::Scene>>,
     /// How many regions deep the walk is (an `Overlay` counts only at the top).
     pub(super) nested: u32,
 }
@@ -70,6 +73,7 @@ impl FrameBuilder {
             fh,
             clip: [0.0, 0.0, fw, fh],
             overlay_at: None,
+            scenes: Vec::new(),
             nested: 0,
         }
     }

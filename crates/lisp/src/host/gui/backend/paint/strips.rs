@@ -55,6 +55,16 @@ pub(super) fn op_band(op: &Op, dy: isize, rows: &RowMap) -> Option<(isize, isize
                 .clamp(isize::MIN as f32, isize::MAX as f32) as isize;
             Some((top, bottom.max(top)))
         }
+        // A 3D scene covers its own rect (ADR-786).
+        Op::Scene(scene) => {
+            let (top, bottom) = (scene.y.floor(), (scene.y + scene.h).ceil());
+            if !top.is_finite() || !bottom.is_finite() {
+                return Some((isize::MIN, isize::MAX));
+            }
+            let top = top.clamp(isize::MIN as f32, isize::MAX as f32) as isize;
+            let bottom = bottom.clamp(isize::MIN as f32, isize::MAX as f32) as isize;
+            Some((top, bottom.max(top)))
+        }
         // Pixel text sits where it says, whatever the grid or scroll: its band is its own.
         Op::TextPx { y, face, .. } => {
             let top = y.round() as isize;
@@ -1150,6 +1160,7 @@ pub(super) fn leaf_columns(
             let (_, half) = quad_extent(*y, *w, *h);
             pixels(x + w / 2.0 - half, x + w / 2.0 + half)
         }
+        Op::Scene(scene) => pixels(scene.x, scene.x + scene.w),
         Op::TextPx {
             x, s, face, align, ..
         } => {

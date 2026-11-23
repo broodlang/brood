@@ -116,6 +116,11 @@ impl GpuWindow {
                             TexKey::Picture(id) => {
                                 self.pictures.textures.get(id).map(|t| &t.bind_group)
                             }
+                            TexKey::Scene(index) => self
+                                .scenes
+                                .as_ref()
+                                .and_then(|scenes| scenes.targets.get(*index as usize))
+                                .map(|target| &target.composite),
                         };
                         let Some(bind_group) = bind_group else {
                             continue;
