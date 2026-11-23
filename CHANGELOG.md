@@ -4,7 +4,7 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## v0.59.0 — shadow like other languages, named fn, smooth textures, 3D meshes
+## Unreleased
 
 **Added: signed-distance scenes evaluated natively (ADR-787).** The `sdf` module takes a model of
 shapes and joins LOWERED to flat records (`sdf/record`, `sdf/material`, `sdf/field`), checks it
@@ -26,6 +26,8 @@ skinned, morphed meshes, filtered 3×3 with a slope-scaled and normal-offset rec
 `:cast-shadow false` casts nothing. Both window painters draw them alike. **Breaking:** a
 malformed light (an unknown key, a wrong shape, a `:range` on a directional light) or more than
 8 lights is now an error raised by `gui/draw`, where it used to be ignored.
+
+## v0.59.0 — shadow like other languages, named fn, smooth textures, 3D meshes
 
 **Added: smooth textures (ADR-783).** `(gui/texture id image {:filter :smooth})` — and the same
 options map on the `rgba w h` form and on `editor/frontend/display-texture` — makes a texture's
