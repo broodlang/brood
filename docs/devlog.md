@@ -2499,3 +2499,13 @@ times under the same load, and 1 500 more linked, with no failure; `full.yml` on
 passed every job. The loaders are now `spawn-link`ed and the test asserts the exit status, so
 a crashed loader reds the test in about a second with the panic printed. Checked against the
 old binary: red 3 of 10 under load, each naming the panic.
+
+2026-11-23. **A parameter named like a macro no longer makes a file opaque to the checker.** The
+caller-derived parameter pass walked an `fn` form's items after the head as code, its
+parameter list included, so `(fn (match) …)` read as a call of the `match` macro: one such lambda
+made the file opaque, every derivation in it declined, and `--strict` then blamed an unrelated
+helper whose `(inc index)` read `number` (bedit's `org/link-at` beside `org/item-sibling-by`).
+The walk now visits each arm's body and its parameters' default expressions, never the list
+itself (`caller_derived.rs` `fn_arm_parts` / `param_defaults`); two `caps.rs` tests pin both
+halves, the first red with the parameter list walked again. `editor/treesit/block-entry-holds?`,
+ADR-766's one-release deprecated alias, is removed and ledgered as a call shape.

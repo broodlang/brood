@@ -4,6 +4,15 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Removed: `editor/treesit/block-entry-holds?`** (deprecated in v0.57, ADR-766). Ask
+`indent-entry-holds?` with the chain: `(indent-entry-holds? entries [parent node] 1)`.
+
+**Fixed: a lambda parameter named like a macro (`(fn (match) …)`) no longer makes the checker give
+up on the whole file.** The caller-derived pass read the parameter list as a macro call, declined
+every derivation in the file, and `--strict` then reported a widened type in an unrelated function.
+
 ## v0.58.0 — file/watch, faster contracts, words by syntax
 
 **Added: `file/watch` and `file/unwatch` (ADR-782).** A process watches a file or a directory and
