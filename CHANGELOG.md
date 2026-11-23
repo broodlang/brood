@@ -6,6 +6,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Dependencies: wasmtime 51 and cranelift 0.138**, plus every semver-compatible update. The
+wasmtime release fixes eight advisories, among them a guest aborting the host through a stale GC
+heap pointer (GHSA-43j2-gcp4-m22g) and unbounded memory growth from empty WASI writes
+(GHSA-5m8g-xhq4-4h93). regex 1.13.2 fixes wrong match offsets for alternations whose branches
+start with the same repetition. num-bigint stays at 0.4, since bigdecimal and num-rational are
+built on it, and skrifa stays at swash's version.
+
 **Changed: a word is letters and digits plus what a word syntax adds (ADR-774).** As in Emacs,
 `editor/buffer/forward-word` and `backward-word` now stop at `_`, `-`, `.`, `'` and every other
 character that is not a Unicode letter, number or combining mark, unless the word syntax passed to
