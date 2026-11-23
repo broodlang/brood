@@ -1034,6 +1034,24 @@ pub(super) fn period_of(millihertz: Option<u32>) -> Duration {
 /// dear for every paint.
 const FRAME_PERIOD_REREAD: Duration = Duration::from_secs(1);
 
+/// How often a window re-reads its monitor's refresh while it does not know it yet: a
+/// Wayland window learns its monitor only once the compositor maps it (`wl_surface.enter`),
+/// after its first frames, and an app pacing itself by `[:presented t-ns]` (b2d) cannot snap
+/// its frame times to the refresh until it knows it. Measured on GNOME: a full second of
+/// timer-paced, jittering frames at every start while it waited out `FRAME_PERIOD_REREAD`.
+const FRAME_PERIOD_PROBE: Duration = Duration::from_millis(50);
+
+/// Whether a paint `since` the last read of the refresh reads it again: once a second, or
+/// every `FRAME_PERIOD_PROBE` while the platform has not said (`known` false).
+pub(super) fn refresh_reread_due(since: Duration, known: bool) -> bool {
+    let period = if known {
+        FRAME_PERIOD_REREAD
+    } else {
+        FRAME_PERIOD_PROBE
+    };
+    since >= period
+}
+
 /// Recompute `(cols, rows)` from the window's physical size and the cell
 /// metrics, and publish it for `gui-size`.
 fn update_cells(window: &winit::window::Window, r: &Renderer, size: &Arc<Mutex<(u16, u16)>>) {

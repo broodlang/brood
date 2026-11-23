@@ -978,8 +978,12 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 let frame = w.bleed.frame(&w.frame, margins);
                 // The monitor's refresh, re-read once a second at most: a window dragged from a
                 // 60 Hz panel to a 144 Hz one at the same scale gets no event that says so, and
-                // its coast and particles step by it.
-                if paint_start.duration_since(w.frame_period_at) >= FRAME_PERIOD_REREAD {
+                // its coast and particles step by it. Until the platform says (a Wayland window
+                // before the compositor maps it), it is asked again every few paints.
+                if refresh_reread_due(
+                    paint_start.duration_since(w.frame_period_at),
+                    w.refresh_millihertz.load(Ordering::Relaxed) > 0,
+                ) {
                     let millihertz = refresh_millihertz(&w.window);
                     w.frame_period = period_of(millihertz);
                     w.refresh_millihertz
