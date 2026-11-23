@@ -363,8 +363,13 @@
                                    (path/join root "kept")))
               "brood-runtime-v9.9.9-riscv64-test"))))))
 
+;; The lint as every caller reaches it: each file's defs read through the module index
+;; (rootless, so nothing is written), then the duplicate-def warnings over them.
+(defn- duplicate-def-warnings (files)
+  (project-check/project-duplicate-def-warnings (module-index/defs-of nil files)))
+
 (describe "project: namespace-aware duplicate global detection (ADR-065)"
-  (test "project-check/project-file-def-names resolves names to ns/name (a /root escape stays root; defmodule skipped)"
+  (test "module-index/defs-of resolves names to ns/name (a /root escape stays root; defmodule skipped)"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
       (let (f (path/join dir "a.blsp"))
@@ -373,7 +378,7 @@
             "(defdyn /*r* 0)\n(defn helper (y) y)\n"))
         ;; Under `(defmodule a)` every binding resolves to `a/…`, a `defdyn` included
         ;; (ADR-722); only the `/*r*` root escape stays root (mirrors `qualify_name`).
-        (assert= (sort (project-check/project-file-def-names f))
+        (assert= (sort (get (module-index/defs-of nil [f]) f))
           (sort ["*r*" "a/*d*" "a/helper" "a/k" "a/m" "a/main"])))))
   (test "the same short name in two DIFFERENT namespaces is not a collision"
     (let (dir (temp-dir "brood-dup-"))
@@ -382,14 +387,14 @@
         (file/spit fa "(defmodule alpha)\n(defn main () 1)\n")
         (file/spit fb "(defmodule beta)\n(defn main () 2)\n")
         ;; alpha/main vs beta/main — distinct keys, no warning.
-        (assert= (project-check/project-duplicate-def-warnings-seq [fa fb]) nil))))
+        (assert= (duplicate-def-warnings [fa fb]) nil))))
   (test "the same name in the SAME namespace IS flagged (qualified)"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
       (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defmodule shared)\n(defn main () 1)\n(defn only-a () 1)\n")
         (file/spit fb "(defmodule shared)\n(defn main () 2)\n(defn only-b () 2)\n")
-        (let (warns (project-check/project-duplicate-def-warnings-seq [fa fb]))
+        (let (warns (duplicate-def-warnings [fa fb]))
           (assert= (count warns) 1)
           (is (includes? (first warns) "shared/main"))
           (refute (includes? (first warns) "only-a"))))))
@@ -399,7 +404,7 @@
       (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defmodule alpha)\n(defdyn *cfg* 1)\n(defdyn /*root-cfg* 1)\n")
         (file/spit fb "(defmodule beta)\n(defdyn *cfg* 2)\n(defdyn /*root-cfg* 2)\n")
-        (let (warns (project-check/project-duplicate-def-warnings-seq [fa fb]))
+        (let (warns (duplicate-def-warnings [fa fb]))
           (assert= (count warns) 1)
           (is (includes? (first warns) "*root-cfg*"))
           (refute (includes? (first warns) "alpha/*cfg*"))))))
@@ -409,7 +414,7 @@
       (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defn main () 1)\n(defn only-a () 1)\n")
         (file/spit fb "(defn main () 2)\n(defn only-b () 2)\n")
-        (let (warns (project-check/project-duplicate-def-warnings-seq [fa fb]))
+        (let (warns (duplicate-def-warnings [fa fb]))
           (assert= (count warns) 1)
           (is (includes? (first warns) "main"))
           (refute (includes? (first warns) "only-a"))))))
@@ -419,11 +424,12 @@
       (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defmodule alpha)\n(defn alpha-fn () 1)\n")
         (file/spit fb "(defmodule beta)\n(defn beta-fn () 2)\n")
-        (assert= (project-check/project-duplicate-def-warnings-seq [fa fb]) nil))))
-  ;; The cached, extract-based path (ADR-119) must agree with the sequential one.
-  ;; Build extracts by hand (dummy mtime 0) so this needs no disk cache, and compare
-  ;; both the duplicate-defs and unused-private derivations against the -seq/-agg forms.
-  (test "extract-based passes agree with the from-scratch passes"
+        (assert= (duplicate-def-warnings [fa fb]) nil))))
+  ;; The two whole-project lints read a file's defs from two primitives: duplicate-defs
+  ;; from the module index (`%module-direct-requires`), unused-private from the per-file
+  ;; extract (`scan-source-extract`). They must name the same globals. Extracts are built
+  ;; by hand (dummy mtime 0) so this needs no disk cache.
+  (test "the module index and the scan extract read the same defs"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
       (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
@@ -435,11 +441,10 @@
                          {}
                          (fn (m p)
                            (let ([c pr dn] (project-check/project-scan-file-entry p))
-                             (%map-assoc m p [0 c pr dn]))))
-              source-set (fold files {} (fn (m p) (%map-assoc m p true))))
-          ;; duplicate-defs: extract path == sequential path
-          (assert= (sort (project-check/project-duplicate-def-warnings extracts source-set))
-            (sort (project-check/project-duplicate-def-warnings-seq files)))
+                             (%map-assoc m p [0 c pr dn])))))
+          (doseq (file files)
+            (assert= (vec (nth (get extracts file) 3)) (get (module-index/defs-of nil files) file)))
+          (assert= (count (duplicate-def-warnings files)) 1)
           ;; unused-private: shared-dead is unreferenced (warn), shared-helper is used
           (let (warns (project-check/project-unused-private-warnings extracts))
             (assert= (count warns) 1)

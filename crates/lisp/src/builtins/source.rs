@@ -141,6 +141,41 @@ fn scan_sym_name(v: Value) -> Option<&'static str> {
     }
 }
 
+/// One top-level definition a file makes, as the whole-project lints read it.
+pub(super) struct TopLevelDefinition {
+    /// The global key it binds (`scan_qualify` against the file's first `defmodule`).
+    pub qualified: String,
+    /// The name as written.
+    pub bare: &'static str,
+    /// A `defn-`/`def-` head: module-private (ADR-146). The name itself is clean, so
+    /// privacy is read from the def form, not the name.
+    pub private: bool,
+}
+
+/// Every top-level `def`-family form in `forms`, in source order. The one reading of
+/// "what does this file define" — the duplicate-def lint reads it from the module index
+/// (`%module-direct-requires`'s `:defs`) and the unused-private lint from
+/// `%scan-source-extract`, and the two must agree on every name.
+pub(super) fn top_level_definitions(heap: &Heap, forms: &[Value]) -> Vec<TopLevelDefinition> {
+    // First `(defmodule NAME …)`'s NAME is the file's namespace.
+    let namespace: Option<&str> = forms.iter().find_map(|&form| {
+        let (head, name) = scan_head2(heap, form)?;
+        (scan_sym_name(head)? == "defmodule").then(|| scan_sym_name(name))?
+    });
+    forms
+        .iter()
+        .filter_map(|&form| {
+            let (head, name) = scan_head2(heap, form)?;
+            let (head, name) = (scan_sym_name(head)?, scan_sym_name(name)?);
+            SCAN_DEF_HEADS.contains(&head).then(|| TopLevelDefinition {
+                qualified: scan_qualify(namespace, name),
+                bare: name,
+                private: head == "defn-" || head == "def-",
+            })
+        })
+        .collect()
+}
+
 /// The head and second element of a list form (nil if it isn't a ≥2-element list).
 fn scan_head2(heap: &Heap, f: Value) -> Option<(Value, Value)> {
     if let Value::Pair(id) = f {
@@ -204,29 +239,18 @@ fn scan_count_syms(heap: &Heap, v: Value, counts: &mut std::collections::HashMap
 pub(super) fn scan_source_extract(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let src = expect_string(heap, "reflect/scan-source-extract", arg(args, 0))?;
     let forms = reader::read_all(heap, &src).unwrap_or_default();
-    // First `(defmodule NAME …)`'s NAME is the file's namespace.
-    let ns: Option<String> = forms.iter().find_map(|&f| {
-        let (h, n) = scan_head2(heap, f)?;
-        (scan_sym_name(h)? == "defmodule").then(|| scan_sym_name(n).map(str::to_string))?
-    });
     let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut def_names: Vec<Value> = Vec::new();
-    let mut privs: Vec<Value> = Vec::new();
     for &f in &forms {
         scan_count_syms(heap, f, &mut counts);
-        if let Some((h, n)) = scan_head2(heap, f)
-            && let (Some(head), Some(name)) = (scan_sym_name(h), scan_sym_name(n))
-            && SCAN_DEF_HEADS.contains(&head)
-        {
-            let qual = scan_qualify(ns.as_deref(), name);
-            let qv = heap.alloc_string(&qual);
-            def_names.push(qv);
-            // A `defn-`/`def-` head marks a module-private (ADR-146); the name
-            // itself is clean, so privacy is read from the def form, not the name.
-            if head == "defn-" || head == "def-" {
-                let bv = heap.alloc_string(name);
-                privs.push(heap.alloc_vector2(bv, qv));
-            }
+    }
+    let mut def_names: Vec<Value> = Vec::new();
+    let mut privs: Vec<Value> = Vec::new();
+    for definition in top_level_definitions(heap, &forms) {
+        let qv = heap.alloc_string(&definition.qualified);
+        def_names.push(qv);
+        if definition.private {
+            let bv = heap.alloc_string(definition.bare);
+            privs.push(heap.alloc_vector2(bv, qv));
         }
     }
     let count_pairs: Vec<(Value, Value)> = counts

@@ -123,8 +123,23 @@
       (assert= ["alpha" "string"] (get (get (infos-of root (list a b)) b) :requires))
       (assert= {:files 2 :hits 2 :parsed 0} (last-scan))
       (let (text (file/slurp (idx-file root)))
-        (is (includes? text "(brood-module-index 4)"))
+        (is (includes? text "(brood-module-index 5)"))
         (is (includes? text "\"beta\" [\"alpha\" \"string\"]")))))
+
+  :isolated (test "an entry carries the globals the file defines, so the duplicate-def lint reads no source"
+    (let (root (fixture-root!)
+          b (path/join root "src" "b.blsp"))
+      (file/spit b "(defmodule beta)\n(defn g () 1)\n(def- k 2)\n(defdyn /*root* 0)\n(g)\n")
+      (assert= ["beta/g" "beta/k" "*root*"] (get (defs-of root (list b)) b))
+      (assert= {:files 1 :hits 0 :parsed 1} (last-scan))
+      ;; served from the index once the memo is dropped: the warm path parses nothing
+      (%isolate (fn () (module-index/defs-of root (list b))))
+      (assert= ["beta/g" "beta/k" "*root*"] (get (defs-of root (list b)) b))
+      (assert= {:files 1 :hits 1 :parsed 0} (last-scan))
+      ;; a changed file is re-read — its size moves, so no mtime granularity is involved
+      (file/spit b "(defmodule beta)\n(defn g () 1)\n(defn h () 2)\n")
+      (assert= ["beta/g" "beta/h"] (get (defs-of root (list b)) b))
+      (assert= {:files 1 :hits 0 :parsed 1} (last-scan))))
 
   :isolated (test "mentions are lexical: a call, a keyword, a string and quoted data all count"
     (let (root (fixture-root!)
