@@ -147,7 +147,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "file/slurp-bytes-from",
         Arity::range(2, 3),
         Sig::with_optional(vec![string, int], vec![int.union(nil_ty)], bytes_ty.union(nil_ty)),
-        &["path", "offset", "limit"],
+        &["path", "offset", "&optional", "limit"],
         "Read the file at path from byte offset to its end — or at most limit bytes — as a bytes value; nil when the file is missing. An offset at or past the end reads empty bytes. The read a follower of a growing file wants (a log, a JSON-lines journal another program appends to): remember where the last read ended and read only what came after, never the whole file again. Decode with string/bytes->, after the last newline the caller kept back, so a half-written line or character waits for the next read (ADR-781).\n\n    (file/slurp-bytes-from \"app.log\" 1024)   ;~> the bytes written after the first 1024",
         watched!("file/slurp-bytes-from", slurp_bytes_from, 1));
     // Change notification (ADR-782): the OS tells a process its file changed, so a
