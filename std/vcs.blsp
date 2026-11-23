@@ -47,6 +47,21 @@ with \"Unable to create '.git/index.lock': File exists\"."
               (catch _ nil))))
     (if (and r (= (get r :exit) 0)) (get r :stdout) nil)))
 
+(defdyn vcs/*untrusted* false)
+;; True while a question is asked of a checkout not trusted to run programs: a repository's own
+;; config can name programs the VCS runs on a plain read (git's `core.fsmonitor` on every
+;; `ls-files` and `status`), and a checkout that came as an archive brings that config with
+;; it. Bound by a caller that knows (an editor's per-project trust); the backend reads it.
+
+(def- *untrusted-git* ["-c" "core.fsmonitor=false"])
+
+(defn- git (args: (or list vector) root:string -> (or string nil))
+  "git's stdout for `args` in `root`, as [[run]] answers it — with the repository's
+`core.fsmonitor` switched off under [[vcs/*untrusted*]]. A trusted checkout keeps it: a
+builtin fsmonitor is what makes `status` fast in a large repository. No question here asks
+git for a diff's text, so an external diff or a textconv driver never runs either way."
+  (run "git" (if vcs/*untrusted* (append *untrusted-git* args) args) root))
+
 (defn- fields (out:string -> (list string))
   "The NUL-separated fields of a `-z` git listing — without `-z` git writes a non-ASCII name
 quoted, which no file is called."
@@ -61,8 +76,8 @@ work tree. `-z` because without it git writes a non-ASCII name quoted, which no 
 called. nil when git cannot answer.
 
     (vcs/git-files \"/\")   ;=> nil"
-  (let (listed (run "git" ["ls-files" "-z" "--cached" "--others" "--exclude-standard"] root)
-        gone (run "git" ["ls-files" "-z" "--deleted"] root))
+  (let (listed (git ["ls-files" "-z" "--cached" "--others" "--exclude-standard"] root)
+        gone (git ["ls-files" "-z" "--deleted"] root))
     (if (nil? listed)
       nil
       (let (deleted (set/set (if gone (fields gone) [])))
@@ -91,17 +106,18 @@ not this work; against `origin/main` with no upstream), the index, the work tree
 root-relative, sorted. nil when git cannot answer.
 
     (vcs/git-changed \"/\")   ;=> nil"
-  (let (upstream (or (run "git"
-                       ["rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{upstream}"]
-                       root)
+  (let (upstream (or (git ["rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{upstream}"] root)
                    "origin/main")
-        committed (run "git"
-                    ["diff" "--name-only" "-z" (str (string/trim upstream) "...HEAD")]
+        committed (git ["diff"
+                         "--no-ext-diff"
+                         "--name-only"
+                         "-z"
+                         (str (string/trim upstream) "...HEAD")]
                     root)
         ;; the index, the work tree and the untracked files in ONE `status`, not `git diff
         ;; HEAD` + `--cached` + `ls-files --others`: the porcelain `git diff` writes the
         ;; index it refreshes even under GIT_OPTIONAL_LOCKS=0, and `status` does not
-        working (run "git" ["status" "--porcelain" "-z" "--untracked-files=all"] root))
+        working (git ["status" "--porcelain" "-z" "--untracked-files=all"] root))
     (if (and (nil? committed) (nil? working))
       nil
       (sort (seq/distinct (into (if committed (vec (fields committed)) []) (status-paths working)))))))
@@ -113,18 +129,18 @@ nil for a file HEAD does not have (a new one) or outside a checkout.
     (vcs/git-base-text \"/\" \"/no-such-file\")   ;=> nil"
   ;; `HEAD:./name` from the file's own directory: git reads `./` against the cwd, so a file in
   ;; a subdirectory needs no root-relative spelling worked out here
-  (run "git" ["show" (str "HEAD:./" (path/basename path))] (path/dirname path)))
+  (git ["show" (str "HEAD:./" (path/basename path))] (path/dirname path)))
 
 (defn git-id (root:string -> (or map nil))
   "What the git checkout at `root` is at: `{:id <short sha> :dirty? <work tree differs>}`, or
 nil before the first commit or outside a checkout.
 
     (vcs/git-id \"/\")   ;=> nil"
-  (let (sha (run "git" ["rev-parse" "--short=12" "HEAD"] root))
+  (let (sha (git ["rev-parse" "--short=12" "HEAD"] root))
     (if (nil? sha)
       nil
       {:id (string/trim sha)
-       :dirty? (not (empty? (string/trim (or (run "git" ["status" "--porcelain"] root) ""))))})))
+       :dirty? (not (empty? (string/trim (or (git ["status" "--porcelain"] root) ""))))})))
 
 ;; --- the backends ----------------------------------------------------------------------------
 ;; git ranks 20, leaving room before it: a VCS that can take over a git clone in place

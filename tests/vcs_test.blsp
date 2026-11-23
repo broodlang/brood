@@ -122,7 +122,24 @@
           (assert= (index-sum) before)
           ;; and the fixture can see a write: a git that may take the lock does write it
           (git dir "status" "--porcelain")
-          (refute (= (index-sum) before)))))))
+          (refute (= (index-sum) before))))))
+  (test "an untrusted checkout's own fsmonitor never runs; a trusted one's does"
+    ;; a repository's `.git/config` can name a program git runs on `ls-files` and `status`
+    ;; (`core.fsmonitor`) — an archive brings that file along, a clone does not
+    (let (dir (git-repository "brood-vcs-git-fsmonitor-"))
+      (when dir
+        (let (marker (path/join dir "ran")
+              hook (path/join dir "fsmonitor.sh"))
+          (file/spit hook (str "#!/bin/sh\necho ran >> '" marker "'\nexit 1\n"))
+          (file/chmod hook 493)
+          (git dir "config" "core.fsmonitor" hook)
+          (binding (vcs/*untrusted* true)
+            (assert= (files dir) (list "a.txt" "fsmonitor.sh" "sub/b.txt"))
+            (changed dir)
+            (is (:dirty? (id dir))))
+          (refute (file/exists? marker))
+          (files dir)
+          (is (file/exists? marker)))))))
 
 (defn fake-files (root) (list (str "listed-under-" (path/basename root))))
 (defn fake-base-text (root path) (str "before:" (path/basename path)))
