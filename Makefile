@@ -255,8 +255,13 @@ gcstress: ## Run the concurrency/mailbox tests with GC_STRESS+GC_VERIFY armed â€
 		else \
 			status=$$?; echo "FAILED (exit $$status)"; fail=1; \
 			grep -E "test failed|use-after-GC|tests," /tmp/gcstress.$$t.log | head -5 | sed 's/^/      /'; \
-			echo "      --- last 30 lines of /tmp/gcstress.$$t.log ---"; \
-			tail -n 30 /tmp/gcstress.$$t.log | cut -c1-400 | sed 's/^/      | /'; \
+			if grep -q "panicked at" /tmp/gcstress.$$t.log; then \
+				echo "      --- the first panic in /tmp/gcstress.$$t.log ---"; \
+				grep -m1 -A60 "panicked at" /tmp/gcstress.$$t.log | cut -c1-400 | sed 's/^/      | /'; \
+			else \
+				echo "      --- last 30 lines of /tmp/gcstress.$$t.log ---"; \
+				tail -n 30 /tmp/gcstress.$$t.log | cut -c1-400 | sed 's/^/      | /'; \
+			fi; \
 		fi; \
 	done; \
 	if [ $$fail -ne 0 ]; then echo ">>> gcstress: FAILURES above"; exit 1; fi; \
