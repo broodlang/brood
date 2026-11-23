@@ -57,7 +57,12 @@ normal; `:grid` the field's index.
     (when (nil? op) (error "sdf/record: no op " (get part :op)))
     (when (> (count params) 11) (error "sdf/record: more than 11 shape parameters: " params))
     (into []
-      (append [kind op (or (get part :size) 1) (get part :blend) (get part :amount) (get part :shell)]
+      (append [kind
+                op
+                (or (get part :size) 1)
+                (get part :blend)
+                (get part :amount)
+                (get part :shell)]
         (padded (or (get part :bound) []) 4)
         [(get part :material) (get part :region)]
         (padded params 11)
