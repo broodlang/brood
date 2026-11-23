@@ -1,0 +1,38 @@
+;; A named fn (ADR-785): `(fn name (params) body…)` calls itself by `name`, as
+;; `(letrec (name (fn (params) body…)) name)` does.
+(defmodule named-fn-test (:use test))
+
+(describe "a named fn"
+  (test "calls itself by its name"
+    (assert= ((fn fact (n) (if (= n 0) 1 (* n (fact (dec n))))) 10) 3628800))
+  (test "a self-call in tail position runs in constant stack"
+    (assert= ((fn down (n) (if (= n 0) :done (down (dec n)))) 1000000) :done))
+  (test "is a value like any fn: handed to map, closing over what is around it"
+    (let (step 3)
+      (assert= (vec (map [1 2 3] (fn up (n) (if (> n 6) n (up (+ n step))))))
+        [7 8 9])))
+  (test "its name is bound inside it only"
+    (let (outer (fn me (n) (if (= n 0) :inner (me (dec n)))))
+      (assert= (outer 3) :inner)
+      (is (not (bound? 'me)))))
+  (test "the name shadows an outer binding of that name inside the body"
+    (let (again :outer
+          f (fn again (n) (if (= n 0) :mine (again (dec n)))))
+      (assert= (f 2) :mine)
+      (assert= again :outer)))
+  (test "a multi-clause fn may be named"
+    (let (sum (fn total
+                ((xs) (total xs 0))
+                ((xs acc) (if (empty? xs) acc (total (rest xs) (+ acc (first xs)))))))
+      (assert= (sum [1 2 3 4]) 10)))
+  (test "a symbol where the parameter list goes still names, never binds the arguments"
+    (assert= ((fn args () :no-params)) :no-params)))
+
+(describe "named fns across processes"
+  :isolated (test "workers each build with their own named fn and send the result back"
+    (let (me (self)
+          n 4)
+      (doseq (i (range n))
+        (spawn (fn () (send me [i ((fn tri (k) (if (= k 0) 0 (+ k (tri (dec k))))) (* 10 i))]))))
+      (let (got (fold (range n) {} (fn (acc _) (receive ([i v] (assoc acc i v))))))
+        (assert= (vec (map (range n) (fn (i) (get got i)))) [0 55 210 465])))))

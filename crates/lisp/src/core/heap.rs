@@ -348,7 +348,7 @@ pub enum ImportEntry {
 /// swaps the table (`Heap::set_imports`) carries them along unchanged.
 ///
 /// Both are supersets: `may_alias` is set by any key spelled with a trailing `/`, which every
-/// alias key has (a `(:shadow /)` key, `/shadow//`, sets it too — the cost of that is only
+/// alias key has (a named-import key for `/`, `/named//`, sets it too — the cost of that is only
 /// the lookup it would have skipped), and `may_grant` by any key spelled `/internals/…`.
 /// Entries are never removed from a table, so neither flag has to clear; a fresh table
 /// starts with both false.

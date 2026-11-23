@@ -19,8 +19,7 @@ host port data]`, so a server is a `receive` loop.
     (let (a (udp/open \"127.0.0.1\" 0) b (udp/open \"127.0.0.1\" 0))
       (udp/send a \"127.0.0.1\" (udp/local-port b) \"ping\")
       (:data (udp/recv b 1000)))
-    ;=> #b\"ping\""
-  (:shadow send))
+    ;=> #b\"ping\"")
 
 (defn open (host:string port:int -> socket)
   "A UDP socket bound to `host`:`port` — `\"0.0.0.0\"` (or `\"::\"`) for every interface,

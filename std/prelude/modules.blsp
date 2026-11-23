@@ -448,13 +448,7 @@ one call site is inside `defmodule`'s template — see the note there."
 ;; `:check-allow` is a CHECKER annotation, not a loader one: `(:check-allow :category …)`
 ;; silences those checker categories for the module (ADR-673), read by the checker from the
 ;; header source; the loader's job is only to tolerate it.
-(def- %defmodule-clause-heads [:use :use-internals :alias :load :shadow :check-allow])
-
-;; `(:shadow name …)` declares that this module defines a name the language ships, function or
-;; macro (ADR-423, ADR-735): inside the module its own definition wins, and without the
-;; declaration the definition fails compilation. The root one stays reachable as `/name`.
-(defn- %defmodule-shadow-clause (clause)
-  (map (rest clause) (fn (name) (list '%declare-shadow (list 'quote name)))))
+(def- %defmodule-clause-heads [:use :use-internals :alias :load :check-allow])
 
 ;; A header clause that is a bare string or symbol is almost never a typo'd clause — it is
 ;; the tail of a DOCSTRING that ended early, because someone wrote an unescaped `"` inside
@@ -470,6 +464,10 @@ one call site is inside `defmodule`'s template — see the note there."
         (if (string? clause) "string" "symbol")
         " in the header usually means the module docstring above it ENDED EARLY —"
         " look for an unescaped `\"` inside it.")
+    (and (pair? clause) (= (first clause) :shadow))
+      (str " `(:shadow …)` is gone (ADR-784): a module's own definition shadows the language's"
+        " name with no declaration, and `/name` still reaches the language's; an import spelled"
+        " like a language name is declared by naming it in `:only`.")
     (and (pair? clause) (= (first clause) :implements))
       (str " `(:implements …)` is gone (ADR-761): a contract is a `defability`, and a module"
         " satisfies it with `(impl Ability its-value …)` for a value it defines.")
@@ -489,7 +487,7 @@ one call site is inside `defmodule`'s template — see the note there."
       ": unrecognised header form "
       (pr-str clause)
       " — a `defmodule` header takes only (:use mod [:only [names]]), (:load mod …),"
-      " (:use-internals mod), (:alias mod [:as short]), (:shadow name …)"
+      " (:use-internals mod), (:alias mod [:as short])"
       " and (:check-allow :category …)."
       " Check the spelling;"
       " Clojure's `(:require …)` is not a Brood clause (`:use` both loads and refers)."
@@ -527,7 +525,6 @@ feature. Put it first. e.g. (defmodule gen \"A server framework …\")."
        (%record-module-doc! root-key# ~doc)
        (%defmodule-provide root-key#)
        (%in-ns '~mod)
-       ~@(%defmodule-clause-forms clauses :shadow %defmodule-shadow-clause)
        ~@(%defmodule-clause-forms clauses :load %defmodule-load-clause)
        ~@(%defmodule-clause-forms clauses :use %defmodule-use-clause)
        ~@(%defmodule-clause-forms clauses :use-internals %defmodule-internals-clause)

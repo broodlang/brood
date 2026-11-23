@@ -32,8 +32,7 @@ it dies, and every entry goes when the registry does.
 
 A `{:via registry :key key}` address works wherever `gen` takes a pid, including
 `gen/start`'s `:name`."
-  (:use gen :only [defserver])
-  (:shadow count))
+  (:use gen :only [defserver]))
 
 (def- *start-options* #{:keys :link})
 

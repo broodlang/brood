@@ -19,8 +19,8 @@ when the runtime crashes); `std/prelude/*.blsp` is the canonical idiomatic code.
 
 2. **No loops** — no `while`, `loop`/`recur`. Iterate with **tail recursion + an
    accumulator** (proper tail calls, O(1) stack) or `fold` / `reduce` / `map` /
-   `seq/filter`. A local loop is a `letrec` closure called by name:
-   `(letrec (go (fn (i acc) … (go …))) (go 0 0))`. Non-tail recursion is as deep as memory
+   `seq/filter`. A local loop is a named `fn`, called by its name (ADR-785):
+   `((fn go (i acc) … (go …)) 0 0)`, or a `letrec` closure. Non-tail recursion is as deep as memory
    allows (a tail call holds no frame, a non-tail one holds its frame until it returns);
    past the process's call-stack ceiling it raises a catchable `recursion too deep`
    (`E0044`). `for` exists, but it is a comprehension.
@@ -86,8 +86,11 @@ when the runtime crashes); `std/prelude/*.blsp` is the canonical idiomatic code.
    write `(not (nil? x))`; `mapcat`, not `flat-map`; `(not (= a b))`, not `not=`
    (deprecated). Unsure? `(bound? 'name)`.
 
-14. **Never `def` a name Brood ships** (prelude, builtins, std modules are reserved). Use
-   another name, a local `let` shadow, or your own `(defmodule …)`.
+14. **Shadowing a name Brood ships is fine in a module.** In your `(defmodule …)`, `(defn drop …)`,
+   `(defn update …)` or `(defn when …)` just works, no declaration (ADR-784): bare uses in that
+   module mean yours, `/drop` the language's. Do not rename to dodge a core name. Only an
+   IMPORT spelled like one must be named to be used bare: `(:use version :only [compare])`.
+   Redefining the language's own binding (a top-level `def` outside any module) is an error.
 
 15. **A `sig` is a runtime contract under `nest run` / `nest test`.** A wrong argument
    raises `{:kind :contract :blame :caller …}`; a wrong result blames the callee. A sig
@@ -115,7 +118,7 @@ when the runtime crashes); `std/prelude/*.blsp` is the canonical idiomatic code.
 | You reach for | Brood has |
 | --- | --- |
 | `concat` | `append` — variadic over lists and vectors, returns a list |
-| `loop`/`recur` | a `letrec` local loop, a private tail-recursive helper, or `fold`/`reduce` |
+| `loop`/`recur` | a named `fn` or `letrec` local loop, a private tail-recursive helper, or `fold`/`reduce` |
 | `(map f xs)` | `(map xs f)` — collection first (trap 3) |
 | interpolation / printf | `(string/interp "a={a} b={(+ a 1)}")`; `(string/format "%-8s|%6.2f" s x)` |
 | `print` / `println` | `(io/puts x)`, `(io/write x)`, `(io/inspect x)`; stderr `(io/puts x :to *err*)` |

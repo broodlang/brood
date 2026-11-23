@@ -15,8 +15,7 @@ UTC instant it denotes, and rendering is UTC.
 
 **Ordering** is the `compare-to` multimethod, so `<`, `<=`, `>`, `>=`, `sort` and `compare`
 work on these values directly — same type only, since a date and a datetime are not two
-spellings of one instant."
-  (:shadow second))
+spellings of one instant.")
 
 ;; ---- internal helpers -------------------------------------------------------
 

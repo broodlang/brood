@@ -8,6 +8,11 @@
 //! processes `require-one` twenty modules concurrently under `BROOD_GC_STRESS`, which turns
 //! the region over constantly; every module's inner error must report its own line. Without
 //! the fix this failed three runs in three; with aging disabled it never failed.
+//!
+//! The loaders are `spawn-link`ed: a loader that crashes takes the main process with it, so
+//! the run exits at once with the crash on stderr. Unlinked, a crashed loader left main
+//! waiting for a `:done` that never came, and the test hung to nextest's 120 s cap with
+//! nothing printed (KI-409's freed generation, seen that way in the tree-walker job).
 
 use std::process::Command;
 
@@ -35,7 +40,7 @@ fn concurrent_loads_under_runtime_aging_keep_inner_positions() {
         "(reflect/add-load-path {dir:?})\n\
          (let (me (self))\n\
            (doseq (w (range 4))\n\
-             (spawn (do (doseq (i (range 20)) (when (= w (math/rem i 4)) (require-one (symbol (str \"pm\" i)))))\n\
+             (spawn-link (do (doseq (i (range 20)) (when (= w (math/rem i 4)) (require-one (symbol (str \"pm\" i)))))\n\
                         (send me :done))))\n\
            (doseq (_ (range 4)) (receive (:done nil))))\n\
          (def bad (seq/filter (range 20)\n\
@@ -53,8 +58,9 @@ fn concurrent_loads_under_runtime_aging_keep_inner_positions() {
             .expect("run brood");
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            stdout.contains("BAD nil"),
-            "run {run}: modules whose inner error lost its line:\n{stdout}\n{}",
+            out.status.success() && stdout.contains("BAD nil"),
+            "run {run} ({}): modules whose inner error lost its line, or a loader crashed:\n{stdout}\n{}",
+            out.status,
             String::from_utf8_lossy(&out.stderr)
         );
     }

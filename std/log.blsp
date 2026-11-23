@@ -48,8 +48,7 @@ and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
   (:use gen)
   ;; `:exclude [inspect]` — `io/inspect` WRITES, while the root `inspect` is the `Inspect`
   ;; ability op that RETURNS a string. Referring the writer bare here would shadow the op.
-  (:use io :exclude [inspect])
-  (:shadow error))
+  (:use io :exclude [inspect]))
 ;; ---- levels -----------------------------------------------------------------
 (def- log-ranks {:debug 0 :info 1 :warn 2 :error 3})
 (def- log-labels {:debug "DEBUG" :info "INFO" :warn "WARN" :error "ERROR"})

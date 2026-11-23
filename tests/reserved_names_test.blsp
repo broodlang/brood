@@ -122,7 +122,7 @@
   (test "a module-scoped defn is a DIFFERENT name, so it is allowed"
     ;; `(defn get …)` inside module `m` defines `m/get` — this is why the blast
     ;; radius of the rule is tiny: the namespace system already did the work.
-    (assert= :allowed (rn-try "(defmodule rn-mod (:shadow get)) (defn get (m k) :mine)"))
+    (assert= :allowed (rn-try "(defmodule rn-mod) (defn get (m k) :mine)"))
     (assert= :mine (reflect/eval-string "(rn-mod/get {} :k)"))
     ;; and the root `get` is untouched by that
     (assert= 1 (get {:a 1} :a))))

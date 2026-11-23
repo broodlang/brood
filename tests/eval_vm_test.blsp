@@ -134,10 +134,10 @@
 ;; defined its own `map` made `(map …)` unbound in the next module evaluated.
 (describe "an eval'd definition does not leak its bare name into other modules (KI-196)"
   (test "a later module's bare map is still the prelude's"
-    (reflect/eval-string "(defmodule evm-leak-a (:shadow map)) (defn map (xs f) :mine)")
+    (reflect/eval-string "(defmodule evm-leak-a) (defn map (xs f) :mine)")
     (assert= (list 2 3) (reflect/eval-string "(defmodule evm-leak-b) (map [1 2] inc)")))
 
   (test "and the same through reflect/eval, form by form"
-    (reflect/eval-string "(defmodule evm-leak-c (:shadow first))")
+    (reflect/eval-string "(defmodule evm-leak-c)")
     (reflect/eval '(defn first (xs) :mine))
     (assert= 1 (reflect/eval-string "(defmodule evm-leak-d) (first [1 2])"))))

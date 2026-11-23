@@ -240,13 +240,19 @@
     (let (message (try
                     (%load-string "(defmodule impl-e (:nonsense x))")
                     (catch e (error-message e))))
-      (is (includes? message ":shadow"))
-      (is (not (includes? message ":implements"))))))
+      (is (includes? message ":check-allow"))
+      (is (not (includes? message ":shadow")))
+      (is (not (includes? message ":implements")))))
+  (test "a (:shadow …) clause is refused, saying a definition shadows without one (ADR-784)"
+    (let (message (try
+                    (%load-string "(defmodule shadow-gone (:shadow get))")
+                    (catch e (error-message e))))
+      (is (includes? message "ADR-784")))))
 
 ;; `(:use …)` import policy (ADR-065 + ADR-235): importing two modules that
 ;; export the same name is FINE — the clash resolves lazily, reported only if that bare name
 ;; is actually used (then resolvable with `:only`/`:exclude`, an alias, or a qualified call).
-;; An import that shadows a prelude/root name is allowed but WARNS. Providers are set up with
+;; An import spelled like a prelude/root name must be named in `:only` to be used bare (ADR-784). Providers are set up with
 ;; `%load-string` (which `provide`s them, so a later `(:use …)` finds them).
 (describe "modules: (:use …) import clashes and shadows"
   :isolated (test "importing two modules that share a name is fine until the name is used bare"
@@ -273,13 +279,13 @@
     (%load-string (str "(defmodule clcons2 (:use clpa2) (:use clpb2 :exclude [thing]))"
                     " (defn f (x) (thing x))"))
     (assert= (clcons2/f 5) (list :a 5)))
-  ;; An import spelled like a prelude name (ADR-750): a bare use fails compilation unless the
-  ;; importer's header declares `(:shadow name)`; then the import wins and `/inc` still
-  ;; reaches the prelude's. An importer that never writes the name bare compiles as before.
-  (test "a :use import that shadows a prelude name wins only where the header declares it"
-    (%load-string "(defmodule shdprov (:shadow inc)) (defn inc (x) (list :shd x))")
+  ;; An import spelled like a prelude name (ADR-750, ADR-784): a bare use fails compilation unless
+  ;; the importer names it in `:only`; then the import wins and `/inc` still reaches the
+  ;; prelude's. An importer that never writes the name bare compiles as before.
+  (test "a :use import that shadows a prelude name wins only where :only names it"
+    (%load-string "(defmodule shdprov) (defn inc (x) (list :shd x))")
     (%load-string
-      (str "(defmodule shdcons (:use shdprov) (:shadow inc))"
+      (str "(defmodule shdcons (:use shdprov :only [inc]))"
         " (defn mine (x) (inc x))" ; imported shdprov/inc wins
         " (defn orig (x) (/inc x))")) ; /inc still reaches prelude
     (assert= (shdcons/mine 5) (list :shd 5))
@@ -293,7 +299,7 @@
                     (catch caught (error-message caught))))
       (is (string? message))
       (is (includes? message "`shdbare` uses `inc` bare"))
-      (is (includes? message "(:shadow inc)"))))
+      (is (includes? message ":only [inc]"))))
   (test "a module's defdyn is imported like any public name (ADR-722)"
     ;; Bare inside the importer, both to read and to `binding`; an importer that excludes
     ;; the name may declare its own.

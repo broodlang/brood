@@ -17,8 +17,7 @@
   "Teach-the-error and intent→idiom lookup for agents and the REPL:
 `(error \"E0030\")` explains an error code (or a caught error map);
 `(find-pattern \"loop\")` returns the idiomatic Brood pattern for a task. Backs
-the `nest mcp` tools of the same names."
-  (:shadow error))
+the `nest mcp` tools of the same names.")
 
 ;; ---- error explanations (keyed by the stable E-codes in crates/lisp/error.rs)
 

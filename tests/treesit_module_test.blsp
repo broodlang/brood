@@ -1774,12 +1774,7 @@
   (test ":field asks the field the node fills"
     (is (indent-entry-holds? [{:field :body}] [{:kind :method} {:kind :block :field :body}] 1)))
   (test "a constraint the chain cannot answer never holds"
-    (refute (indent-entry-holds? [{:kind :block :text "x"}] [{:kind :block}] 0)))
-  (test "the deprecated block-entry-holds? answers over node and parent"
-    (is (block-entry-holds? #{:block} {:kind :block} nil))
-    (refute (block-entry-holds? #{{:kind :then :not {:parent :rescue}}}
-              {:kind :then}
-              {:kind :rescue}))))
+    (refute (indent-entry-holds? [{:kind :block :text "x"}] [{:kind :block}] 0))))
 
 (describe "indent-problems: what an indent spec may say"
   (test "a sound spec, and none at all, have no problems"

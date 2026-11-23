@@ -472,6 +472,50 @@ fn collect_private_sites(
 }
 
 /// One top-level form's walk — see [`collect_private_sites`].
+/// Each arm of fn form `items` as its parameter list and its body forms: one arm for
+/// `(fn (params) body…)`, one per clause for the multi-clause `(fn ((a) …) ((a b) …))`. A
+/// clause that is not a list comes back as a body with no parameters, so it is still walked.
+fn fn_arm_parts(heap: &Heap, items: &[Value]) -> Vec<(Value, Vec<Value>)> {
+    if crate::eval::macros::fn_is_arity_multi_clause(heap, items) {
+        let clauses = match items.get(1..) {
+            Some([Value::Str(_), rest @ ..]) if !rest.is_empty() => rest,
+            Some(rest) => rest,
+            None => &[],
+        };
+        clauses
+            .iter()
+            .map(|&clause| match list_items(heap, clause) {
+                Some(parts) if !parts.is_empty() => (parts[0], parts[1..].to_vec()),
+                _ => (Value::Nil, vec![clause]),
+            })
+            .collect()
+    } else {
+        match items.get(1) {
+            Some(&params) => vec![(
+                params,
+                items.get(2..).map_or_else(Vec::new, <[Value]>::to_vec),
+            )],
+            None => Vec::new(),
+        }
+    }
+}
+
+/// The default expressions of parameter list `params`: what follows the name in each
+/// `(name default)` entry (`&optional (x (f))`). A plain name or a vector pattern has none.
+fn param_defaults(heap: &Heap, params: Value) -> Vec<Value> {
+    list_items(heap, params)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Value::Pair(_) => {
+                list_items(heap, entry).map(|parts| parts.into_iter().skip(1).collect::<Vec<_>>())
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
 fn collect_form_sites(
     heap: &Heap,
     form: Value,
@@ -764,8 +808,16 @@ fn collect_form_sites(
                     inner = inner.with_derived_count_aliases(name, &params);
                     self.within = Some(name);
                 }
-                for &it in &items[1..] {
-                    self.walk(it, &inner, None);
+                // The BODIES, never a parameter list as a form: `(fn (match) …)` walked as
+                // code is a call of the `match` macro, which made the whole file opaque. A
+                // parameter's default (`&optional (x (f))`) is code, so it is walked.
+                for (params_form, body) in fn_arm_parts(self.heap, &items) {
+                    for default in param_defaults(self.heap, params_form) {
+                        self.walk(default, &inner, None);
+                    }
+                    for it in body {
+                        self.walk(it, &inner, None);
+                    }
                 }
                 self.within = outer_within;
                 return;

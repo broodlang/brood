@@ -68,7 +68,7 @@
 
 (describe "a module's shadow of a prelude name, removed"
   :isolated (test "code compiled from then on reaches the prelude name"
-    (reflect/eval-string "(defmodule undef-shadow (:shadow map)) (defn map (xs f) :shadowed) (defn use-map () (map [1 2] inc))")
+    (reflect/eval-string "(defmodule undef-shadow) (defn map (xs f) :shadowed) (defn use-map () (map [1 2] inc))")
     (assert= :shadowed ((hot "undef-shadow" "use-map")))
     (reflect/undef 'undef-shadow/map)
     ;; A bare `map` evaluated in the module now falls through to root…
@@ -78,7 +78,7 @@
     (assert= (list 2 3) ((hot "undef-shadow" "use-map"))))
 
   (test "a caller compiled while the shadow was bound raises, never calls it"
-    (reflect/eval-string "(defmodule undef-stale (:shadow map)) (defn map (xs f) :shadowed) (defn use-map () (map [1 2] inc))")
+    (reflect/eval-string "(defmodule undef-stale) (defn map (xs f) :shadowed) (defn use-map () (map [1 2] inc))")
     (assert= :shadowed ((hot "undef-stale" "use-map")))
     (reflect/undef 'undef-stale/map)
     (let (message (error-message-of (fn () ((hot "undef-stale" "use-map")))))

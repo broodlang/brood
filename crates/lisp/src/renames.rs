@@ -992,6 +992,13 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     ("test/*test-slow-ms*", "test/*slow-ms*", "ADR-718"),
     ("test/*test-formatter*", "test/*formatter*", "ADR-718"),
     ("repl/*repl-commands*", "repl/*commands*", "ADR-718"),
+    // ADR-766 kept the node-and-parent question one release as a deprecated alias; the
+    // chain-level question takes the chain and the node's index in it, so a call shape.
+    (
+        "editor/treesit/block-entry-holds?",
+        "editor/treesit/indent-entry-holds? entries [parent node] 1",
+        "ADR-766",
+    ),
     (
         "http/*http-read-timeout-ms*",
         "http/*read-timeout-ms*",

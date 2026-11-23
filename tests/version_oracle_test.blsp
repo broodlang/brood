@@ -17,7 +17,7 @@
   (:use test)
   (:use suite-helpers)
   (:use version)
-  (:shadow compare satisfies?))
+  (:use version :only [compare satisfies?]))
 
 (defn pick (s lo hi) (+ lo (math/rem s (+ 1 (- hi lo))))) ; s → int in [lo, hi]
 ;; --- the independent reference (int tuples only, no strings) -------------------------

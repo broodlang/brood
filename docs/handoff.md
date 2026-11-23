@@ -28,13 +28,13 @@ to 2026-11-06 moved, unedited, to the end of
   distribution tests ×5, a 30-minute `runtime-soak`, the ASan kernel suite, and `green-all`'s
   gates (`smoke-bedit` needs a `--features brood/treesit-grammars` nest at `BEDIT_REF`;
   `wasm-test` needs `wasm-bindgen-cli` at the crate's pin).
+- **2026-11-23:** `full.yml` passed every job on `ff2e433c` (run 45157276947), the first full run
+  with KI-409's fix; on whklat `make gcstress` 3/3 and the fuzz differential over all 13
+  generators (200 each, `stale=0`) were clean. The tree-walker job's timeout on `258dc646` was
+  KI-409 too (devlog). The brood-benchmarks Brood column is current (0.57.0, smoke green).
 - **Known issues:** none open. Watching KI-397 (an Interp's parked waiters outlived its drop past
   30 s, once under a full `make test`; the assertion now reports the counts) and KI-395 (a debug-only JIT fast-link mirror assertion, one
   run in 59, cause unknown; the assertion is the armed diagnostic).
-- **Waiting on the test machine (`whklat`), not runnable on the desktop:** the
-  brood-benchmarks Brood column is still the 0.51.0 measurement, so that repo's daily `smoke`
-  is red on its Staleness step. The step-by-step refresh is in brood-benchmarks' `CLAUDE.md`,
-  "Refreshing the Brood column".
 - **bedit** is pinned by `BEDIT_REF` in `.github/workflows/ci.yml`, which moves often. Smoke with a
   grammar-enabled `nest`, or its mode tests fail on "no grammar", which is not a regression.
 - **Before pushing:** `make prepush`, and `git merge --ff-only origin/main` first if it moved.
@@ -88,7 +88,7 @@ ADR-170's refusals (`lazy-seq`, `&key`, `loop`/`recur`, metadata, a character ty
    stay out: the engine is linear by design (ADR-389).
 4. ~~**`std/url`: resolving against a base URL.**~~ — done by ADR-733 (2026-11-17), RFC 3986 §5
    strict. WHATWG stays out.
-5. ~~**A declared shadow for root functions.**~~ — done by ADR-735 and ADR-750 (2026-11-17):
+5. ~~**A declared shadow for root functions.**~~ — done by ADR-735 and ADR-750 (2026-11-17), then simplified by ADR-784 (2026-11-23: a definition shadows undeclared, an import is named in `:only`):
    a module defining a root name, or using an import spelled like one bare, declares it with
    `(:shadow name)` or fails compilation. No warning is left.
 6. ~~**"Reduce before adding"**~~ — decided by ADR-674; both stages landed (2026-11-11).

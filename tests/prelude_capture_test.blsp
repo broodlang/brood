@@ -205,7 +205,7 @@
   (test "a module defining `get` does not capture defrecord's accessor"
     (assert=
       (%load-string
-        "(defmodule capture-probe-get (:shadow get))
+        "(defmodule capture-probe-get)
                 (defn get (bag k) :CAPTURED)
                 (defrecord pt (x y))
                 (pt-x (pt 7 8))")
@@ -214,7 +214,7 @@
   (test "a module defining `reverse` does not capture `for`"
     (assert=
       (%load-string
-        "(defmodule capture-probe-reverse (:shadow reverse))
+        "(defmodule capture-probe-reverse)
                 (defn reverse (c) :CAPTURED)
                 (for (x [1 2 3]) x)")
       (list 1 2 3)))
@@ -225,7 +225,7 @@
   (test "a module defining `nil?`/`nth` does not capture `receive`"
     (assert=
       (%load-string
-        "(defmodule capture-probe-receive (:shadow nil? nth))
+        "(defmodule capture-probe-receive)
                 (defn nil? (x) :CAPTURED)
                 (defn nth (c i) :CAPTURED)
                 (let (p (spawn (fn () (receive (m m)))))
@@ -241,7 +241,7 @@
   (test "a module defining `sig` does not capture defrecord's signatures"
     (assert=
       (%load-string
-        "(defmodule capture-probe-sig (:shadow sig))
+        "(defmodule capture-probe-sig)
          (defn sig (a b) :CAPTURED)
          (defrecord pt ((x int) (y int)))
          (pt-x (pt 3 4))")
@@ -262,7 +262,7 @@
   (test "a module defining `bound?` does not capture `defonce`"
     (assert=
       (%load-string
-        "(defmodule capture-probe-bound (:shadow bound?))
+        "(defmodule capture-probe-bound)
                 (defn bound? (s) :CAPTURED)
                 (defonce zz 5)
                 zz")
@@ -274,7 +274,7 @@
   (test "a module defining its own `when` macro does not capture `when-let` or `cond`"
     (assert=
       (%load-string
-        "(defmodule capture-probe-when (:shadow when and))
+        "(defmodule capture-probe-when)
          (defmacro when (c & body) :CAPTURED)
          (defmacro and (& xs) :CAPTURED)
          [(when-let (x 5) x) (if-let (y 1) y 0) (cond (= 1 1) :ok else :no)]")
@@ -283,7 +283,7 @@
   (test "a module's own function wins a bare call over a root macro; /name reaches the macro"
     (assert=
       (%load-string
-        "(defmodule capture-probe-doto (:shadow doto))
+        "(defmodule capture-probe-doto)
          (defn- doto (x) [:mine x])
          [(doto 1) (/doto 3)]")
       ;; the macro returns its expression's value; the module's function would give [:mine 3]
@@ -296,44 +296,35 @@
       (%load-string
         "(defmodule capture-probe-lib)
          (defmacro head-of (xs) `(first ~xs))
-         (defmodule capture-probe-user (:shadow first))
+         (defmodule capture-probe-user)
          (defn first (xs) :CAPTURED)
          (capture-probe-lib/head-of [7 8])")
       7)))
 
-(describe "a module defining a root name declares it (ADR-735)"
-  (test "undeclared, a root macro's or function's name fails compilation, naming the clause"
-    (doseq (name ["doto" "get"])
-      (let (message (try
-                      (do
-                        (%load-string (str "(defmodule capture-undeclared-"
-                                        name ") (defn " name " (x) x)"))
-                        nil)
-                      (catch caught (error-message caught))))
-        (is (string? message))
-        (is (includes? message (str "(:shadow " name ")"))))))
-  (test "declared, it compiles quietly and the module's definition wins"
+(describe "a module defining a root name shadows it (ADR-784)"
+  (test "a root macro's or function's name, defined in a module, compiles with no declaration"
     (assert= ""
-      (with-err-str (%load-string "(defmodule capture-warn-b (:shadow doto)) (defn doto (x) x)")))
-    (assert= (%load-string "(defmodule capture-warn-c (:shadow get)) (defn get (x) [:mine x]) (get 1)")
-      [:mine 1])))
+      (with-err-str (%load-string "(defmodule capture-own-a) (defn doto (x) x)"))))
+  (test "the module's definition wins inside it, and /name still reaches the language's"
+    (assert= (%load-string "(defmodule capture-own-b) (defn get (x) [:mine x]) [(get 1) (/get {:a 1} :a)]")
+      [[:mine 1] 1])))
 
 (describe "an import spelled like a root name (ADR-750)"
   (defn- refusal (source)
     (try (do (%load-string source) nil) (catch caught (error-message caught))))
 
-  (test "a bare use without the header clause fails compilation, naming both"
-    (%load-string "(defmodule capture-warn-lib (:shadow identity)) (defn identity (x) [:mine x])")
+  (test "a bare use of an import not named in :only fails compilation, naming both"
+    (%load-string "(defmodule capture-warn-lib) (defn identity (x) [:mine x])")
     (let (message (refusal "(defmodule capture-warn-user (:use capture-warn-lib)) (identity 1)"))
       (is (string? message))
       (is (includes? message "both an import (`capture-warn-lib/identity`) and the language"))
-      (is (includes? message "(:shadow identity)"))))
+      (is (includes? message ":only [identity]"))))
   ;; Its own library, not the test above's: each test runs in its own process, in any order
   ;; and possibly at once, so one that reads another's module was a flake.
-  (test "declared, the import wins quietly; excluded, the language's does"
-    (%load-string "(defmodule capture-warn-lib2 (:shadow identity)) (defn identity (x) [:mine x])")
+  (test "named in :only, the import wins quietly; excluded, the language's does"
+    (%load-string "(defmodule capture-warn-lib2) (defn identity (x) [:mine x])")
     (assert= ""
-      (with-err-str (assert= (%load-string "(defmodule capture-warn-user2 (:use capture-warn-lib2) (:shadow identity)) (identity 1)")
+      (with-err-str (assert= (%load-string "(defmodule capture-warn-user2 (:use capture-warn-lib2 :only [identity])) (identity 1)")
                       [:mine 1])))
     (assert= (%load-string "(defmodule capture-warn-user3 (:use capture-warn-lib2 :exclude [identity])) (identity 1)")
       1)))
@@ -352,7 +343,7 @@
                 (%load-string
                   (str "(defmodule capture-probe-par"
                     i
-                    " (:shadow when))
+                    ")
                               (defmacro when (c & body) [:own "
                     i
                     "])

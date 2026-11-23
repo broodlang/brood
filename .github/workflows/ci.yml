@@ -422,6 +422,13 @@ jobs:
       - name: Test (nextest)
         run: scripts/nextest-no-flakes.sh --no-fail-fast --features brood/treesit-grammars --partition count:${{ matrix.partition }}/2
 
+      # What failed, at its file and line, on the run page and in `gh run view` — not only in
+      # a log of thousands of lines.
+      - name: Annotate the failing tests (on failure)
+        if: failure()
+        shell: bash
+        run: scripts/ci-failure-summary.sh nextest.log "test (${{ matrix.partition }}/2)"
+
       # The `gui`/`gui-gpu` renderer tests do not run above: the nextest step builds
       # the DEFAULT surface plus grammars, and `gui` is opt-in, so every
       # `#[cfg(test)]` case under `src/host/gui.rs` / `src/host/gui/gpu.rs` was compiled by the
@@ -608,7 +615,13 @@ jobs:
         env:
           BROOD_NO_STDIMAGE: 1
           BROOD_NO_PRELUDE_IMAGE: 1
-        run: ./scripts/test-contracts.sh
+        shell: bash
+        run: ./scripts/test-contracts.sh 2>&1 | tee contracts.log
+
+      - name: Annotate the failing tests (on failure)
+        if: failure()
+        shell: bash
+        run: scripts/ci-failure-summary.sh contracts.log "suite with contracts armed"
 
       # The whole suite through the tree-walker is full.yml's (~25 minutes); this is the
       # per-push sample of it, so a tree-walker-only failure (KI-399) is not a week away.

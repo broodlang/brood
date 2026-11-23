@@ -15,8 +15,7 @@
     ;; => ([:keep 1] [:delete 2] [:keep 3] [:keep 4] [:insert 5])
 
     (diff/summary ops)
-    ;; => {:keeps 2 :deletes 1 :inserts 1}"
-  (:shadow seq))
+    ;; => {:keeps 2 :deletes 1 :inserts 1}")
 
 ;; ---- LCS table --------------------------------------------------------------
 ;;

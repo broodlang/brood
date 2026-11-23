@@ -24,8 +24,7 @@
 A multimap is a **record** wrapping a key→list map, so it is its own type rather than a
 map that happens to hold lists: `multimap?` is a real predicate, it is never `=` to a
 look-alike map, and it prints as `#<multimap …>` (`->map` is the plain-map view,
-`inspect` the full contents)."
-  (:shadow empty? assoc get contains? dissoc))
+`inspect` the full contents).")
 
 ;; The field is typed so `multimap/get` verifies its declared result rather than trusting it.
 (defrecord multimap ((entries (map any (list any)))))

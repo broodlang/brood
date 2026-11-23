@@ -1094,16 +1094,6 @@ decides a block the same way.
       (or (and (set? entries) (contains? entries kind))
         (any? (or entries []) (fn (entry) (ts-selector-holds? entry nodes index)))))))
 
-(defn block-entry-holds? (entries node parent)
-  "**Deprecated — use `indent-entry-holds?`, which reads the whole chain.** Does an entry of
-`entries` name `node`, whose parent is `parent` (nil at the root)? Answered over the two-node
-chain `[parent node]`, so a selector that reaches past the parent cannot hold.
-
-    (editor/treesit/block-entry-holds? #{:block} {:kind :block} nil)   ;=> true"
-  (if parent
-    (indent-entry-holds? entries [parent node] 1)
-    (indent-entry-holds? entries [node] 0)))
-
 (defn- ts-chain-steps (chain)
   ;; `[index node parent]` for each node of `chain` (outermost first), `parent` nil at the root:
   ;; what every walk over a chain that asks a node in its place starts from

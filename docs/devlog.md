@@ -2502,6 +2502,37 @@ texture. **Breaking:** a display map's `:texture` entry takes a fifth argument, 
 the wire's `[:texture …]` message and `%gui-texture` carry it (b2d's displays need the
 parameter). Not run here: the suites (desktop rule); see the ADR for the tests.
 
+2026-11-23. **The tree-walker job's 120 s timeout was KI-409, and the test now says so.**
+`full.yml` on `258dc646` timed out `rehome_keeps_positions` (3 s on the run before). Rebuilt at
+that commit, its fixture hung on 6 of 6 loaded loops within four runs: a loader process died
+on `runtime map node` or `runtime string handle` (KI-409's freed generation), and main, which
+spawned the loaders unlinked, waited forever for their `:done`. HEAD ran the fixture 1 800
+times under the same load, and 1 500 more linked, with no failure; `full.yml` on `ff2e433c`
+passed every job. The loaders are now `spawn-link`ed and the test asserts the exit status, so
+a crashed loader reds the test in about a second with the panic printed. Checked against the
+old binary: red 3 of 10 under load, each naming the panic.
+
+2026-11-23. **A parameter named like a macro no longer makes a file opaque to the checker.** The
+caller-derived parameter pass walked an `fn` form's items after the head as code, its
+parameter list included, so `(fn (match) …)` read as a call of the `match` macro: one such lambda
+made the file opaque, every derivation in it declined, and `--strict` then blamed an unrelated
+helper whose `(inc index)` read `number` (bedit's `org/link-at` beside `org/item-sibling-by`).
+The walk now visits each arm's body and its parameters' default expressions, never the list
+itself (`caller_derived.rs` `fn_arm_parts` / `param_defaults`); two `caps.rs` tests pin both
+halves, the first red with the parameter list walked again. `editor/treesit/block-entry-holds?`,
+ADR-766's one-release deprecated alias, is removed and ledgered as a call shape.
+
+2026-11-23. **Shadowing like other languages, and a named fn (ADR-784, ADR-785).** A module's own
+definition of `drop`, `update` or `when` now shadows the language's with no header clause;
+`(:shadow …)` is deleted outright (greenfield: no compatibility shim), from std's 21 modules and
+the tests, and refused with a hint where a header still writes it. The import half of the old
+rule stays, since an import is not in sight: a bare use of an imported language name compiles
+once `:only` names it. `(fn name (params) body…)` rewrites to `letrec` in `macroexpand_all`, so
+no engine learns a new form. Guards: `root_name_shadow.rs` (renamed from
+`macro_shadow_warning.rs`), `import_shadow.rs`, `prelude_capture_test`, `modules_test`,
+`named_fn_test`. The writing-brood skill's trap 14 had told agents never to define a shipped name,
+which is why they renamed defensively; it now says the opposite.
+
 2026-11-23. **3D meshes and the `[:scene …]` op (ADR-786).** A b2d game's figure, made in
 Blender and baked to jointed sprites, hit the limits of 2D: joints that crack, a figure that
 only faces the camera, light baked in, hair that cannot move. The runtime now draws 3D, as

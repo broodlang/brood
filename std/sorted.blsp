@@ -25,8 +25,7 @@ Both are collections: `seq`, `map`, `fold`, `for`, `count`, `into` and `conj` wo
 key order, and bare `get` reads them. What a hash map cannot do is the reason to use one:
 `min`/`max`, `floor`/`ceiling` (the nearest key at or below/above a key) and `range` (every
 entry between two keys), each without a full scan. Two sorted collections with the same
-contents are `=`, whatever order they were built in."
-  (:shadow assoc dissoc get contains? range))
+contents are `=`, whatever order they were built in.")
 
 (defrecord sorted-map (%tree %size))
 (defrecord sorted-set (%tree %size))

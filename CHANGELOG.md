@@ -14,6 +14,32 @@ pixel art. Both window painters and the browser page honour it. **Breaking:** a 
 `:texture` entry is now called `(f tex rgba w h filter)`, the attach protocol's `[:texture …]`
 message carries the filter, and `%gui-texture` takes it as a sixth argument.
 
+**Added: 3D meshes in a frame (ADR-786).** `(gui/mesh id spec)` uploads a skinned, morphable mesh
+as the little-endian attribute bytes a glTF buffer holds (positions, normals, uvs, tangents,
+joints and weights, indices, morph targets), and a `[:scene x y w h spec]` op draws meshes into a
+pixel rect with a camera, directional lights, joint palettes and a fixed skin, standard, cutout or
+blend material, composited in op order with the 2D ops around it. Both window painters draw it
+(the GPU with depth and 4× multisampling, the CPU painter in software); the browser tab does not
+yet. A display map's `:mesh` entry and the wire's `[:mesh …]` / `[:mesh-free …]` messages carry
+meshes to a served app's window.
+
+**Changed: a module's own definition shadows a name the language ships, with no declaration
+(ADR-784).** `(defn drop …)` in a module just works: bare `drop` there is yours, `/drop` the
+language's. The `(:shadow …)` header clause is gone (a header that writes one is refused, saying
+why). An imported name the language also ships is used bare once it is named:
+`(:use version :only [compare])`.
+
+**Added: named `fn` (ADR-785).** `(fn name (params) body…)` calls itself by `name`:
+`((fn fact (n) (if (= n 0) 1 (* n (fact (dec n))))) 5)` is 120. A local loop no longer needs
+`letrec`.
+
+**Removed: `editor/treesit/block-entry-holds?`** (deprecated in v0.57, ADR-766). Ask
+`indent-entry-holds?` with the chain: `(indent-entry-holds? entries [parent node] 1)`.
+
+**Fixed: a lambda parameter named like a macro (`(fn (match) …)`) no longer makes the checker give
+up on the whole file.** The caller-derived pass read the parameter list as a macro call, declined
+every derivation in the file, and `--strict` then reported a widened type in an unrelated function.
+
 ## v0.58.0 — file/watch, faster contracts, words by syntax
 
 **Added: `file/watch` and `file/unwatch` (ADR-782).** A process watches a file or a directory and

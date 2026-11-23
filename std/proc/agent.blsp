@@ -15,8 +15,7 @@
 
 State is always passed through a function so callers never access the raw value
 directly, keeping access patterns explicit. `get-and-update` is the atomic
-read+write primitive for compare-and-swap-style patterns."
-  (:shadow get update))
+read+write primitive for compare-and-swap-style patterns.")
 
 ;; ---- receive loop -----------------------------------------------------------
 ;;

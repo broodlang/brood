@@ -591,7 +591,6 @@ docstring. `crates/lisp/src/` is the root of every path.
 | `%bundle-module-names` | 0 | — |
 | `%bundled?` | 0 | — |
 | `%compile-context` | 0 | — |
-| `%declare-shadow` | 1 | — |
 | `%eager-loads!` | 1 | Pin the inferred-load policy (ADR-335): with `on?` truthy every qualified reference loads its module when the referencing file loads (the eager policy); otherwise a function … |
 | `%forget-absent-modules!` | 0 | Forget which modules a require has already failed to FIND. |
 | `%grant-internals` | 1 | — |

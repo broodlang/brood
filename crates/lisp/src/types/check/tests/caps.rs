@@ -42,6 +42,35 @@ fn a_same_file_macro_reports_the_opaque_derivation_once() {
 }
 
 #[test]
+fn a_parameter_named_like_a_macro_is_not_an_unexpanded_macro_call() {
+    // The parameter list is not code: `(fn (match) …)` walked as a form was a call of the
+    // `match` macro, and one such lambda anywhere made every derivation in the file decline
+    // (an unrelated helper's `(inc index)` then read `number`, and `--strict` blamed it).
+    // The multi-clause form's parameter lists are skipped the same way.
+    let warnings = file_warnings(
+        "(defmodule caps-param-named-macro)
+         (defn- step (i) (inc i))
+         (defn use-step () (step 1))
+         (defn found (xs column)
+           (seq/find xs (fn (match) (< (:start match) column))))
+         (defn arms (x) ((fn ((cond) cond) ((cond when) when)) x))",
+    );
+    assert!(gave_up(&warnings).is_empty(), "no decline: {warnings:?}");
+}
+
+#[test]
+fn a_macro_call_in_a_parameter_default_still_declines() {
+    // A default is code: an unexpanded macro there is walked, and still declines.
+    let warnings = file_warnings(
+        "(defmodule caps-default-macro)
+         (defmacro my-or (a b) `(let ((v ~a)) (if v v ~b)))
+         (defn- pick (x) x)
+         (defn use-pick (&optional (y (my-or nil 1))) (pick y))",
+    );
+    assert_eq!(gave_up(&warnings).len(), 1, "one decline: {warnings:?}");
+}
+
+#[test]
 fn a_form_past_the_depth_cap_is_reported_not_silently_unknown() {
     let mut interp = crate::Interp::new();
     let x = Value::Sym(crate::core::value::intern("x"));
