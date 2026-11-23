@@ -1,5 +1,5 @@
 //! 3D meshes and the scenes that draw them (ADR-786): the MECHANISM a 3D game needs and
-//! nothing more. A mesh is uploaded once (`gui-mesh`): positions, normals, texture
+//! nothing more. A mesh is uploaded once (`gui-mesh`): positions, normals,
 //! coordinates, optional tangents, the joints and weights that skin it to a skeleton, the
 //! triangles, and morph targets. A `[:scene …]` op draws meshes into a pixel rect of the
 //! frame: a camera (one view-projection matrix), a few directional lights over a sky/ground
@@ -19,8 +19,33 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The most directional lights a scene lights with; more are ignored.
-pub const MAX_LIGHTS: usize = 4;
+/// The most lights a scene lights with (a spec naming more is refused).
+pub const MAX_LIGHTS: usize = 8;
+/// The most lights of a scene that cast shadows (ADR-788).
+pub const MAX_SHADOWS: usize = 4;
+/// The most shadow maps a scene renders: one a directional or spot light, six (a cube's
+/// faces) a point light.
+pub const MAX_SHADOW_VIEWS: usize = MAX_SHADOWS * 6;
+/// The smallest and largest side of a shadow map, in texels, and the side a light without
+/// `:resolution` gets.
+pub const MIN_SHADOW_SIDE: u32 = 16;
+pub const MAX_SHADOW_SIDE: u32 = 4096;
+pub const DEFAULT_SHADOW_SIDE: u32 = 1024;
+/// The most texels a scene's shadow maps may hold together: the GPU target keeps them as one
+/// array of layers as big as the largest, so `views × side²` — 128 MiB of 32-bit depth.
+pub const MAX_SHADOW_TEXELS: u64 = 1 << 25;
+/// How far, in shadow-map texels, a receiver is moved toward the light (times one plus the
+/// slope of its surface to the light) and along its normal before it is compared, by default.
+pub const DEFAULT_SHADOW_BIAS: f32 = 1.0;
+pub const DEFAULT_SHADOW_NORMAL_BIAS: f32 = 1.5;
+/// A spot or point light's shadow near plane, in metres, by default: nearer casters are clipped.
+pub const DEFAULT_SHADOW_NEAR: f32 = 0.05;
+/// The distance under which a point or spot light's inverse-square falloff stops growing (a
+/// surface touching the bulb is not infinitely bright).
+pub const NEAR_LIGHT: f32 = 0.01;
+/// The texels each cube face of a point light's shadow reaches past its 90°, so the filter of
+/// a receiver on a face's edge stays on that face.
+const CUBE_MARGIN: f32 = 3.0;
 /// The most morph targets one draw blends (the heaviest, when it names more).
 pub const MAX_MORPHS: usize = 8;
 /// The largest side of a scene's picture, in pixels.
@@ -57,6 +82,111 @@ pub struct Mesh {
     pub weights: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
     pub morphs: Vec<Morph>,
+    /// Where its vertices can be, for fitting a shadow map to a scene without posing them.
+    pub bounds: MeshBounds,
+}
+
+/// An axis-aligned box: its least and greatest corner.
+pub type Bounds = [[f32; 3]; 2];
+
+/// Where a mesh's vertices can be once a draw has morphed and skinned them, kept per joint so
+/// a posed bound stays tight (ADR-788): a skinned vertex is a weighted mean of its joints'
+/// matrices applied to it, so it lies in the box around every joint's matrix applied to the
+/// box of the vertices that joint moves. Both painters fit a shadow map from these alone, so
+/// they fit it alike.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MeshBounds {
+    /// The box of the vertices no joint moves (every vertex of a rigid mesh).
+    pub rigid: Option<Bounds>,
+    /// Each joint some vertex is weighted to, with the box of those vertices.
+    pub joints: Vec<(u16, Bounds)>,
+    /// Each morph target's box of position offsets.
+    pub morphs: Vec<Bounds>,
+}
+
+fn extend(bounds: Option<Bounds>, point: [f32; 3]) -> Option<Bounds> {
+    Some(match bounds {
+        None => [point, point],
+        Some([low, high]) => [
+            [
+                low[0].min(point[0]),
+                low[1].min(point[1]),
+                low[2].min(point[2]),
+            ],
+            [
+                high[0].max(point[0]),
+                high[1].max(point[1]),
+                high[2].max(point[2]),
+            ],
+        ],
+    })
+}
+
+/// The box around both, either of which may be none.
+pub fn union(left: Option<Bounds>, right: Option<Bounds>) -> Option<Bounds> {
+    match (left, right) {
+        (Some(box_left), Some(box_right)) => {
+            extend(extend(Some(box_left), box_right[0]), box_right[1])
+        }
+        (one, None) | (None, one) => one,
+    }
+}
+
+fn corners(bounds: Bounds) -> [[f32; 3]; 8] {
+    let [low, high] = bounds;
+    let mut out = [[0.0f32; 3]; 8];
+    for (index, corner) in out.iter_mut().enumerate() {
+        *corner = [
+            if index & 1 == 0 { low[0] } else { high[0] },
+            if index & 2 == 0 { low[1] } else { high[1] },
+            if index & 4 == 0 { low[2] } else { high[2] },
+        ];
+    }
+    out
+}
+
+impl MeshBounds {
+    fn of(
+        positions: &[[f32; 3]],
+        joints: &[[u16; 4]],
+        weights: &[[f32; 4]],
+        morphs: &[Morph],
+    ) -> MeshBounds {
+        let mut rigid = None;
+        let mut by_joint: HashMap<u16, Bounds> = HashMap::new();
+        for (index, position) in positions.iter().enumerate() {
+            let mut moved = false;
+            if !joints.is_empty() {
+                for (joint, weight) in joints[index].iter().zip(weights[index]) {
+                    if weight > 0.0 {
+                        moved = true;
+                        let grown = extend(by_joint.get(joint).copied(), *position);
+                        by_joint.insert(*joint, grown.expect("extended"));
+                    }
+                }
+            }
+            if !moved {
+                rigid = extend(rigid, *position);
+            }
+        }
+        let mut joints: Vec<(u16, Bounds)> = by_joint.into_iter().collect();
+        joints.sort_by_key(|(joint, _)| *joint);
+        let morphs = morphs
+            .iter()
+            .map(|morph| {
+                morph
+                    .positions
+                    .iter()
+                    .fold(None, |bounds, offset| extend(bounds, *offset))
+                    .unwrap_or([[0.0; 3]; 2])
+            })
+            .collect();
+        MeshBounds {
+            rigid,
+            joints,
+            morphs,
+        }
+    }
 }
 
 /// A mesh's attributes as raw little-endian bytes, the way a glTF buffer holds them, before
@@ -227,6 +357,7 @@ impl Mesh {
             };
             morphs.push(Morph { positions, normals });
         }
+        let bounds = MeshBounds::of(&positions, &joints, &weights, &morphs);
         Ok(Mesh {
             positions,
             normals,
@@ -236,6 +367,7 @@ impl Mesh {
             weights,
             indices,
             morphs,
+            bounds,
         })
     }
 }
@@ -279,6 +411,9 @@ pub struct Material {
     pub cutoff: f32,
     /// Draw back faces too (their normals turned to face the viewer).
     pub double_sided: bool,
+    /// Whether it casts a shadow from the scene's shadowed lights (ADR-788). A `:cutout` or
+    /// `:blend` surface casts only where its alpha reaches `cutoff`.
+    pub cast_shadow: bool,
 }
 
 impl Default for Material {
@@ -295,16 +430,117 @@ impl Default for Material {
             rim: 0.0,
             cutoff: 0.5,
             double_sided: false,
+            cast_shadow: true,
         }
     }
 }
 
-/// A directional light: the direction its light TRAVELS (from the light into the scene) and
-/// its linear colour, intensity included.
+/// What kind of light a [`Light`] is (ADR-788).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightKind {
+    /// From infinitely far, the same everywhere: the sun, the sky through a window.
+    Directional,
+    /// From a point, every way, falling off with the square of the distance: a bare bulb.
+    Point,
+    /// A point light held to a cone: a lamp with a shade, a torch.
+    Spot,
+}
+
+/// A light's shadow map, as its `:shadow` asked for it (ADR-788).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shadow {
+    /// The map's side in texels (each cube face's, for a point light).
+    pub resolution: u32,
+    /// How far, in texels, a receiver is moved toward the light (times one plus its slope to
+    /// the light) before it is compared: against acne.
+    pub bias: f32,
+    /// How far, in texels, a receiver is moved along its normal before it is compared: against
+    /// acne at grazing light, without the shadow leaving its caster.
+    pub normal_bias: f32,
+    /// A directional light's map covers a sphere of this radius about `center` (metres); none
+    /// fits it to the scene's bounds every frame.
+    pub extent: Option<f32>,
+    pub center: Option<[f32; 3]>,
+    /// A spot or point light's near plane (metres).
+    pub near: f32,
+}
+
+impl Default for Shadow {
+    fn default() -> Self {
+        Shadow {
+            resolution: DEFAULT_SHADOW_SIDE,
+            bias: DEFAULT_SHADOW_BIAS,
+            normal_bias: DEFAULT_SHADOW_NORMAL_BIAS,
+            extent: None,
+            center: None,
+            near: DEFAULT_SHADOW_NEAR,
+        }
+    }
+}
+
+/// A light (ADR-786, ADR-788). `direction` is the way its light TRAVELS (from the light into
+/// the scene) for a directional or spot light; `position` is where a point or spot light is;
+/// `color` is linear, intensity included — for a point or spot light the light arriving 1 m
+/// away, falling off with the inverse square of the distance, windowed to nothing at `range`
+/// when it is above 0. A spot's `cone` is its inner and outer half-angle (radians): full
+/// inside the inner, nothing past the outer, a smoothstep between.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Light {
+    pub kind: LightKind,
     pub direction: [f32; 3],
+    pub position: [f32; 3],
     pub color: [f32; 3],
+    pub range: f32,
+    pub cone: [f32; 2],
+    pub shadow: Option<Shadow>,
+}
+
+impl Light {
+    pub fn directional(direction: [f32; 3], color: [f32; 3]) -> Light {
+        Light {
+            kind: LightKind::Directional,
+            direction,
+            position: [0.0; 3],
+            color,
+            range: 0.0,
+            cone: [0.0; 2],
+            shadow: None,
+        }
+    }
+
+    pub fn point(position: [f32; 3], color: [f32; 3], range: f32) -> Light {
+        Light {
+            kind: LightKind::Point,
+            position,
+            range,
+            ..Light::directional([0.0, -1.0, 0.0], color)
+        }
+    }
+
+    pub fn spot(
+        position: [f32; 3],
+        direction: [f32; 3],
+        color: [f32; 3],
+        range: f32,
+        cone: [f32; 2],
+    ) -> Light {
+        Light {
+            kind: LightKind::Spot,
+            position,
+            range,
+            cone,
+            ..Light::directional(direction, color)
+        }
+    }
+
+    /// How many shadow maps it renders: none unshadowed, six (a cube) for a point light.
+    pub fn shadow_views(&self) -> usize {
+        match (&self.shadow, self.kind) {
+            (None, _) => 0,
+            (Some(_), LightKind::Point) => 6,
+            (Some(_), _) => 1,
+        }
+    }
 }
 
 /// One mesh drawn in a scene.
@@ -430,15 +666,74 @@ pub fn shininess(roughness: f32) -> f32 {
     (2.0 / (clamped * clamped * clamped * clamped) - 2.0).clamp(1.0, 4096.0)
 }
 
+/// How much of a point or spot light's `:color` (the light 1 m away) arrives `distance` metres
+/// away: the inverse square, held below a centimetre, times the window that takes it smoothly
+/// to nothing at `range` — `clamp(1 − (d/r)⁴)²`, Frostbite's and UE4's — when `range` is above
+/// 0. The shader's `distance_falloff` is the same.
+pub fn distance_falloff(distance: f32, range: f32) -> f32 {
+    let inverse_square = 1.0 / (distance * distance).max(NEAR_LIGHT * NEAR_LIGHT);
+    if range > 0.0 {
+        let ratio = distance / range;
+        let window = (1.0 - ratio * ratio * ratio * ratio).clamp(0.0, 1.0);
+        inverse_square * window * window
+    } else {
+        inverse_square
+    }
+}
+
+/// How much of a spot light leaves it at an angle whose cosine is `cos_angle` from its axis:
+/// all inside the inner half-angle, none past the outer, a smoothstep between (`cone` is
+/// `[inner outer]` in radians). The shader's `cone_falloff` is the same.
+pub fn cone_falloff(cos_angle: f32, cone: [f32; 2]) -> f32 {
+    let (cos_inner, cos_outer) = (cone[0].cos(), cone[1].cos());
+    let amount = ((cos_angle - cos_outer) / (cos_inner - cos_outer).max(1e-4)).clamp(0.0, 1.0);
+    amount * amount * (3.0 - 2.0 * amount)
+}
+
+fn subtract(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+
+/// The unit direction from `world` toward `light`, and how much of the light's colour arrives
+/// there (before any shadow): all of a directional light's; a point light's by
+/// [`distance_falloff`]; a spot's by that and [`cone_falloff`].
+pub fn light_arrival(light: &Light, world: [f32; 3]) -> ([f32; 3], f32) {
+    match light.kind {
+        LightKind::Directional => (
+            normalize([
+                -light.direction[0],
+                -light.direction[1],
+                -light.direction[2],
+            ]),
+            1.0,
+        ),
+        LightKind::Point | LightKind::Spot => {
+            let toward = subtract(light.position, world);
+            let distance = dot(toward, toward).sqrt();
+            let to_light = normalize(toward);
+            let mut amount = distance_falloff(distance, light.range);
+            if light.kind == LightKind::Spot {
+                let axis = normalize(light.direction);
+                let cos_angle = -dot(to_light, axis);
+                amount *= cone_falloff(cos_angle, light.cone);
+            }
+            (to_light, amount)
+        }
+    }
+}
+
 /// The light leaving a surface point toward the eye, linear and before exposure: `base` its
 /// linear colour, `normal` its unit normal facing the viewer's side, `view` the unit
-/// direction from it to the eye.
+/// direction from it to the eye, `world` where it is, and `visibility` how much of each
+/// light (by index) its shadow lets through — 1 for a light it holds no entry for.
 pub fn shade(
     scene: &Scene,
     material: &Material,
     base: [f32; 3],
     normal: [f32; 3],
     view: [f32; 3],
+    world: [f32; 3],
+    visibility: &[f32],
 ) -> [f32; 3] {
     let up = normal[1] * 0.5 + 0.5;
     let mut out = [0.0f32; 3];
@@ -448,12 +743,9 @@ pub fn shade(
     }
     let exponent = shininess(material.roughness);
     let normalisation = (exponent + 8.0) / (8.0 * std::f32::consts::PI);
-    for light in scene.lights.iter().take(MAX_LIGHTS) {
-        let to_light = normalize([
-            -light.direction[0],
-            -light.direction[1],
-            -light.direction[2],
-        ]);
+    for (index, light) in scene.lights.iter().take(MAX_LIGHTS).enumerate() {
+        let (to_light, arriving) = light_arrival(light, world);
+        let arriving = arriving * visibility.get(index).copied().unwrap_or(1.0);
         let facing = dot(normal, to_light);
         let lambert = facing.max(0.0);
         let half = normalize([
@@ -470,7 +762,7 @@ pub fn shade(
             } else {
                 lambert
             };
-            out[channel] += light.color[channel] * (base[channel] * diffuse + specular);
+            out[channel] += light.color[channel] * arriving * (base[channel] * diffuse + specular);
         }
     }
     let rim = material.rim * (1.0 - dot(normal, view).max(0.0)).powi(3);
@@ -489,6 +781,421 @@ pub fn tone(color: [f32; 3], exposure: f32) -> [f32; 3] {
         linear_to_srgb(mapped)
     };
     [map(color[0]), map(color[1]), map(color[2])]
+}
+
+// --- shadow maps (ADR-788): planned here for both painters --------------------------------------
+
+/// One shadow map a scene renders: the scene as a light sees it, depth only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShadowView {
+    /// Column-major, clip depth 0 (near) … 1 (far), as a camera's.
+    pub view_proj: [f32; 16],
+    /// Its side in texels.
+    pub resolution: u32,
+    /// The world size of one texel: 1 m in front of a perspective view (a spot's, a cube
+    /// face's), anywhere in an orthographic one (a directional light's). Times a receiver's
+    /// clip w (1 when orthographic) it is the texel's size there.
+    pub texel: f32,
+}
+
+/// The shadow maps a scene renders this frame, and which belong to which light.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShadowPlan {
+    pub views: Vec<ShadowView>,
+    /// Per light, by index: its first view and how many it has — none for a light without a
+    /// shadow (or one there is nothing to fit to).
+    pub lights: [(u32, u32); MAX_LIGHTS],
+    /// The side of the layers the GPU target keeps the views in: the largest view's.
+    pub layer_side: u32,
+}
+
+/// Where `draw`'s vertices can be in the world this frame — morphed, skinned and moved — from
+/// its mesh's `bounds` alone: what both painters fit a shadow map to.
+pub fn draw_bounds(scene: &Scene, draw: &Draw, bounds: &MeshBounds) -> Option<Bounds> {
+    // what the morphs can add to a position, before skinning
+    let mut grow = [[0.0f32; 3]; 2];
+    for &(target, weight) in draw.morphs.iter().take(MAX_MORPHS) {
+        if let Some(offsets) = bounds.morphs.get(target as usize) {
+            for axis in 0..3 {
+                let (low, high) = (weight * offsets[0][axis], weight * offsets[1][axis]);
+                grow[0][axis] += low.min(high);
+                grow[1][axis] += low.max(high);
+            }
+        }
+    }
+    let grown = |[low, high]: Bounds| -> Bounds {
+        [
+            [
+                low[0] + grow[0][0],
+                low[1] + grow[0][1],
+                low[2] + grow[0][2],
+            ],
+            [
+                high[0] + grow[1][0],
+                high[1] + grow[1][1],
+                high[2] + grow[1][2],
+            ],
+        ]
+    };
+    let palette = scene.palette_of(draw);
+    let mut out = None;
+    let mut add = |part: Bounds, matrix: &[f32; 16]| {
+        for corner in corners(grown(part)) {
+            let moved = transform(matrix, corner, 1.0);
+            out = extend(out, [moved[0], moved[1], moved[2]]);
+        }
+    };
+    if let Some(rigid) = bounds.rigid {
+        add(rigid, &draw.model);
+    }
+    for &(joint, part) in &bounds.joints {
+        let start = joint as usize * 16;
+        match palette {
+            Some(palette) if start + 16 <= palette.len() => {
+                let mut joint_matrix = [0.0f32; 16];
+                joint_matrix.copy_from_slice(&palette[start..start + 16]);
+                add(part, &multiply(&draw.model, &joint_matrix));
+            }
+            // a joint the palette does not hold leaves its vertices where the model puts them
+            _ => add(part, &draw.model),
+        }
+    }
+    out
+}
+
+/// A right and an up direction square to `forward` (a unit vector): world up projected, or
+/// world +z when `forward` is nearly vertical.
+fn basis(forward: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let hint = if forward[1].abs() > 0.99 {
+        [0.0, 0.0, 1.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let right = normalize(cross(forward, hint));
+    (right, cross(right, forward))
+}
+
+/// A column-major matrix from its four rows.
+fn from_rows(rows: [[f32; 4]; 4]) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    for (row, values) in rows.iter().enumerate() {
+        for (column, value) in values.iter().enumerate() {
+            out[column * 4 + row] = *value;
+        }
+    }
+    out
+}
+
+/// A perspective view from `eye` along `forward` with a square field `tan_half` wide either
+/// side of its axis, depth 0 at `near` … 1 at `far`.
+fn perspective_view(
+    eye: [f32; 3],
+    forward: [f32; 3],
+    tan_half: f32,
+    near: f32,
+    far: f32,
+) -> [f32; 16] {
+    let (right, up) = basis(forward);
+    let scale = far / (far - near);
+    let offset = far * near / (far - near);
+    from_rows([
+        [
+            right[0] / tan_half,
+            right[1] / tan_half,
+            right[2] / tan_half,
+            -dot(eye, right) / tan_half,
+        ],
+        [
+            up[0] / tan_half,
+            up[1] / tan_half,
+            up[2] / tan_half,
+            -dot(eye, up) / tan_half,
+        ],
+        [
+            forward[0] * scale,
+            forward[1] * scale,
+            forward[2] * scale,
+            -dot(eye, forward) * scale - offset,
+        ],
+        [forward[0], forward[1], forward[2], -dot(eye, forward)],
+    ])
+}
+
+/// The axes a point light's six shadow views look along, in the order [`cube_face`] numbers
+/// them.
+const CUBE_FACES: [[f32; 3]; 6] = [
+    [1.0, 0.0, 0.0],
+    [-1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, -1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 0.0, -1.0],
+];
+
+/// Which of a point light's six views sees a point `offset` from the light: the one along its
+/// largest axis. The shader's `cube_face` is the same.
+pub fn cube_face(offset: [f32; 3]) -> usize {
+    let (across, up, deep) = (offset[0].abs(), offset[1].abs(), offset[2].abs());
+    if across >= up && across >= deep {
+        if offset[0] >= 0.0 { 0 } else { 1 }
+    } else if up >= deep {
+        if offset[1] >= 0.0 { 2 } else { 3 }
+    } else if offset[2] >= 0.0 {
+        4
+    } else {
+        5
+    }
+}
+
+/// The farthest a point of `world` is from `eye`, for a light with no `:range` to reach to.
+fn farthest(eye: [f32; 3], world: Option<Bounds>) -> Option<f32> {
+    let bounds = world?;
+    corners(bounds)
+        .iter()
+        .map(|corner| {
+            let offset = subtract(*corner, eye);
+            dot(offset, offset).sqrt()
+        })
+        .reduce(f32::max)
+}
+
+/// The shadow views of `light`, whose shadow is `shadow`, over a scene whose things lie in
+/// `world`: none when there is nothing to fit them to.
+fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<ShadowView> {
+    let side = shadow.resolution.clamp(MIN_SHADOW_SIDE, MAX_SHADOW_SIDE);
+    let far_of = || {
+        let far = if light.range > 0.0 {
+            Some(light.range)
+        } else {
+            farthest(light.position, world).map(|far| far * 1.01)
+        }?;
+        let near = shadow.near.min(far * 0.5).max(1e-4);
+        Some((near, far.max(near * 2.0)))
+    };
+    match light.kind {
+        LightKind::Directional => {
+            let forward = normalize(light.direction);
+            let (right, up) = basis(forward);
+            let middle = |[low, high]: Bounds| [0, 1, 2].map(|axis| (low[axis] + high[axis]) * 0.5);
+            let (center, radius) = match (shadow.extent, world) {
+                (Some(extent), _) => (
+                    shadow.center.or(world.map(middle)).unwrap_or([0.0; 3]),
+                    extent,
+                ),
+                (None, Some(bounds)) => {
+                    let diagonal = subtract(bounds[1], bounds[0]);
+                    let half = (dot(diagonal, diagonal).sqrt() * 0.5).max(0.01);
+                    // a quarter-octave step, so a fit following a moving figure changes its
+                    // scale seldom rather than every frame
+                    (middle(bounds), 2f32.powf((half.log2() * 4.0).ceil() / 4.0))
+                }
+                (None, None) => return Vec::new(),
+            };
+            let texel = 2.0 * radius / side as f32;
+            // the centre on the texel grid: a fit that moves slides whole texels, so the edges
+            // of the shadows it casts do not crawl
+            let across = (dot(center, right) / texel).round() * texel;
+            let down = (dot(center, up) / texel).round() * texel;
+            let depth_center = dot(center, forward);
+            // depth through the sphere, and back toward the light past everything in the
+            // scene, which may cast into it
+            let (mut near, mut far) = (-radius, radius);
+            if let Some(bounds) = world {
+                for corner in corners(bounds) {
+                    let depth = dot(corner, forward) - depth_center;
+                    near = near.min(depth);
+                    far = far.max(depth);
+                }
+            }
+            let pad = (far - near) * 0.01 + 0.01;
+            let (near, far) = (near - pad, far + pad);
+            let depth_scale = 1.0 / (far - near);
+            let view_proj = from_rows([
+                [
+                    right[0] / radius,
+                    right[1] / radius,
+                    right[2] / radius,
+                    -across / radius,
+                ],
+                [
+                    up[0] / radius,
+                    up[1] / radius,
+                    up[2] / radius,
+                    -down / radius,
+                ],
+                [
+                    forward[0] * depth_scale,
+                    forward[1] * depth_scale,
+                    forward[2] * depth_scale,
+                    -(depth_center + near) * depth_scale,
+                ],
+                [0.0, 0.0, 0.0, 1.0],
+            ]);
+            vec![ShadowView {
+                view_proj,
+                resolution: side,
+                texel,
+            }]
+        }
+        LightKind::Spot => {
+            let Some((near, far)) = far_of() else {
+                return Vec::new();
+            };
+            let tan_half = light.cone[1].tan().clamp(1e-3, 1e3);
+            vec![ShadowView {
+                view_proj: perspective_view(
+                    light.position,
+                    normalize(light.direction),
+                    tan_half,
+                    near,
+                    far,
+                ),
+                resolution: side,
+                texel: 2.0 * tan_half / side as f32,
+            }]
+        }
+        LightKind::Point => {
+            let Some((near, far)) = far_of() else {
+                return Vec::new();
+            };
+            // a little wider than a quarter turn, so a receiver's filter on a face's edge
+            // reads that face's own texels
+            let tan_half = side as f32 / (side as f32 - 2.0 * CUBE_MARGIN);
+            CUBE_FACES
+                .iter()
+                .map(|forward| ShadowView {
+                    view_proj: perspective_view(light.position, *forward, tan_half, near, far),
+                    resolution: side,
+                    texel: 2.0 * tan_half / side as f32,
+                })
+                .collect()
+        }
+    }
+}
+
+/// The shadow maps `scene` renders this frame, its things lying in `world` (the union of its
+/// draws' [`draw_bounds`]): the first [`MAX_SHADOWS`] shadowed lights' views, within
+/// [`MAX_SHADOW_TEXELS`] (the spec parser refuses a scene asking for more).
+pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
+    let mut plan = ShadowPlan {
+        views: Vec::new(),
+        lights: [(0, 0); MAX_LIGHTS],
+        layer_side: 0,
+    };
+    let mut shadowed = 0;
+    for (index, light) in scene.lights.iter().enumerate().take(MAX_LIGHTS) {
+        let Some(shadow) = &light.shadow else {
+            continue;
+        };
+        if shadowed == MAX_SHADOWS {
+            break;
+        }
+        let views = light_views(light, shadow, world);
+        if views.is_empty() {
+            continue;
+        }
+        let layer_side = plan.layer_side.max(views[0].resolution);
+        let layers = (plan.views.len() + views.len()) as u64;
+        if layers * u64::from(layer_side) * u64::from(layer_side) > MAX_SHADOW_TEXELS {
+            continue;
+        }
+        shadowed += 1;
+        plan.lights[index] = (plan.views.len() as u32, views.len() as u32);
+        plan.layer_side = layer_side;
+        plan.views.extend(views);
+    }
+    plan
+}
+
+/// How much of a light a receiver at `point` gets past the depth map of `view` (`depth_map`,
+/// its `resolution`² texels, row 0 the top): a 3×3 percentage-closer filter of bilinear taps,
+/// read as the weights of a 4×4 block of plain comparisons — 1 lit … 0 in shadow. A point
+/// outside the map, or past its depth, is lit. Texel reads off the map's left or top edge read
+/// the edge; off its right or bottom edge they read the GPU target's layer of `layer_side`
+/// texels, cleared to the far plane where the view did not reach. The shader's
+/// `shadow_sample` is the same, a comparison gather per 2×2 of the block.
+pub fn sample_shadow(
+    view: &ShadowView,
+    layer_side: u32,
+    depth_map: &[f32],
+    point: [f32; 3],
+) -> f32 {
+    let clip = transform(&view.view_proj, point, 1.0);
+    if clip[3] <= 1e-6 || !clip[3].is_finite() {
+        return 1.0;
+    }
+    let depth = clip[2] / clip[3];
+    let across_unit = clip[0] / clip[3] * 0.5 + 0.5;
+    let down_unit = 0.5 - clip[1] / clip[3] * 0.5;
+    let unit = 0.0..=1.0;
+    if !unit.contains(&depth) || !unit.contains(&across_unit) || !unit.contains(&down_unit) {
+        return 1.0;
+    }
+    let side = view.resolution as i64;
+    let last = i64::from(layer_side.max(1)) - 1;
+    let across = across_unit * view.resolution as f32 - 0.5;
+    let down = down_unit * view.resolution as f32 - 0.5;
+    let (column, row) = (across.floor(), down.floor());
+    let (fraction_x, fraction_y) = (across - column, down - row);
+    let weights_x = [1.0 - fraction_x, 1.0, 1.0, fraction_x];
+    let weights_y = [1.0 - fraction_y, 1.0, 1.0, fraction_y];
+    let (column, row) = (column as i64 - 1, row as i64 - 1);
+    let mut lit = 0.0;
+    for (step_y, weight_y) in weights_y.iter().enumerate() {
+        let read_row = (row + step_y as i64).clamp(0, last);
+        for (step_x, weight_x) in weights_x.iter().enumerate() {
+            let read_column = (column + step_x as i64).clamp(0, last);
+            let stored = if read_column >= side || read_row >= side {
+                1.0
+            } else {
+                depth_map[(read_row * side + read_column) as usize]
+            };
+            if depth <= stored {
+                lit += weight_x * weight_y;
+            }
+        }
+    }
+    lit / 9.0
+}
+
+/// How much of light `index` reaches `world`, whose surface's unit normal is `normal`, past
+/// its shadow — 1 for a light without one. The receiver is moved toward the light by the
+/// shadow's `bias` texels (times one plus the tangent of the light's angle to the surface,
+/// held at 4) and along its normal by `normal_bias` texels, both measured where it stands, so
+/// a lit surface does not shadow itself (acne) at any angle and a shadow starts where its
+/// caster touches the ground. The shader's `shadow_visibility` is the same.
+pub fn shadow_visibility(
+    scene: &Scene,
+    plan: &ShadowPlan,
+    maps: &[Vec<f32>],
+    index: usize,
+    world: [f32; 3],
+    normal: [f32; 3],
+) -> f32 {
+    let (first, count) = plan.lights.get(index).copied().unwrap_or((0, 0));
+    let (Some(light), true) = (scene.lights.get(index), count > 0) else {
+        return 1.0;
+    };
+    let Some(shadow) = &light.shadow else {
+        return 1.0;
+    };
+    let face = if count == 6 {
+        cube_face(subtract(world, light.position))
+    } else {
+        0
+    };
+    let at = first as usize + face;
+    let (Some(view), Some(depth_map)) = (plan.views.get(at), maps.get(at)) else {
+        return 1.0;
+    };
+    let texel = view.texel * transform(&view.view_proj, world, 1.0)[3].max(0.0);
+    let (to_light, _) = light_arrival(light, world);
+    let facing = dot(normal, to_light).abs().clamp(1e-3, 1.0);
+    let slope = ((1.0 - facing * facing).max(0.0).sqrt() / facing).min(4.0);
+    let toward = shadow.bias * texel * (1.0 + slope);
+    let along = shadow.normal_bias * texel;
+    let biased = [0, 1, 2].map(|axis| world[axis] + normal[axis] * along + to_light[axis] * toward);
+    sample_shadow(view, plan.layer_side, depth_map, biased)
 }
 
 // --- the CPU painter's rasteriser ---------------------------------------------------------------
@@ -670,12 +1377,22 @@ struct DrawContext<'a> {
     material: &'a Material,
     base_texture: Option<TextureRef<'a>>,
     normal_texture: Option<TextureRef<'a>>,
+    shadows: &'a ShadowPlan,
+    shadow_maps: &'a [Vec<f32>],
 }
 
-/// Rasterise one triangle (already clipped in front of the camera) into `canvas`.
-fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVertex; 3]) {
-    let material = context.material;
-    let (width, height) = (canvas.width as f32, canvas.height as f32);
+/// The pixels of a `width`×`height` picture whose centres `corners` (already clipped in front
+/// of the view) cover, each handed to `pixel` with its column, row, screen-space barycentric
+/// weights and depth (0 … 1; a pixel past either end of the depth range is left out). A
+/// triangle facing away (clockwise in normalised device coordinates) is skipped unless
+/// `keep_back`; `pixel` is told which way it faces.
+fn scan_triangle(
+    width: usize,
+    height: usize,
+    corners: [&ClipVertex; 3],
+    keep_back: bool,
+    mut pixel: impl FnMut(usize, usize, [f32; 3], f32, bool),
+) {
     let to_device = |vertex: &ClipVertex| {
         let inverse_w = 1.0 / vertex.clip[3];
         [
@@ -694,16 +1411,16 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
     let area = (device[1][0] - device[0][0]) * (device[2][1] - device[0][1])
         - (device[2][0] - device[0][0]) * (device[1][1] - device[0][1]);
     let front = area > 0.0;
-    if area == 0.0 || !area.is_finite() || (!front && !material.double_sided) {
+    if area == 0.0 || !area.is_finite() || (!front && !keep_back) {
         return;
     }
     // screen space in f64: a triangle clipped just in front of the camera reaches hundreds of
     // thousands of pixels off the picture, where f32 edge functions cancel to noise
-    let (width, height) = (f64::from(width), f64::from(height));
+    let (width_f, height_f) = (width as f64, height as f64);
     let to_screen = |point: [f32; 3]| {
         [
-            (f64::from(point[0]) * 0.5 + 0.5) * width,
-            (0.5 - f64::from(point[1]) * 0.5) * height,
+            (f64::from(point[0]) * 0.5 + 0.5) * width_f,
+            (0.5 - f64::from(point[1]) * 0.5) * height_f,
             f64::from(point[2]),
         ]
     };
@@ -712,30 +1429,23 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
         to_screen(device[1]),
         to_screen(device[2]),
     ];
-    let min_x = screen
-        .iter()
-        .map(|point| point[0])
-        .fold(f64::INFINITY, f64::min)
-        .floor()
-        .max(0.0) as usize;
-    let max_x = screen
-        .iter()
-        .map(|point| point[0])
-        .fold(f64::NEG_INFINITY, f64::max)
-        .ceil()
-        .min(width) as usize;
-    let min_y = screen
-        .iter()
-        .map(|point| point[1])
-        .fold(f64::INFINITY, f64::min)
-        .floor()
-        .max(0.0) as usize;
-    let max_y = screen
-        .iter()
-        .map(|point| point[1])
-        .fold(f64::NEG_INFINITY, f64::max)
-        .ceil()
-        .min(height) as usize;
+    let span = |axis: usize, limit: f64| {
+        let low = screen
+            .iter()
+            .map(|point| point[axis])
+            .fold(f64::INFINITY, f64::min)
+            .floor()
+            .max(0.0) as usize;
+        let high = screen
+            .iter()
+            .map(|point| point[axis])
+            .fold(f64::NEG_INFINITY, f64::max)
+            .ceil()
+            .min(limit) as usize;
+        (low, high)
+    };
+    let (min_x, max_x) = span(0, width_f);
+    let (min_y, max_y) = span(1, height_f);
     if min_x >= max_x || min_y >= max_y {
         return;
     }
@@ -746,18 +1456,6 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
     if total.abs() < 1e-12 {
         return;
     }
-    let inverse_w = [
-        1.0 / corners[0].clip[3],
-        1.0 / corners[1].clip[3],
-        1.0 / corners[2].clip[3],
-    ];
-    let sign = if corners[0].tangent[3] < 0.0 {
-        -1.0
-    } else {
-        1.0
-    };
-    let blend = material.surface == Surface::Blend;
-    let scene = context.scene;
     for row in min_y..max_y {
         for column in min_x..max_x {
             let (x, y) = (column as f64 + 0.5, row as f64 + 0.5);
@@ -769,41 +1467,75 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
             }
             let depth =
                 (first * screen[0][2] + second * screen[1][2] + third * screen[2][2]) as f32;
-            let (first, second, third) = (first as f32, second as f32, third as f32);
-            let slot = row * canvas.width + column;
-            if !(0.0..=1.0).contains(&depth) || depth >= canvas.depth[slot] {
+            if !(0.0..=1.0).contains(&depth) {
                 continue;
             }
-            // perspective-correct weights for the attributes
-            let weights = [
-                first * inverse_w[0],
-                second * inverse_w[1],
-                third * inverse_w[2],
-            ];
-            let sum = weights[0] + weights[1] + weights[2];
-            let weights = [weights[0] / sum, weights[1] / sum, weights[2] / sum];
+            pixel(
+                column,
+                row,
+                [first as f32, second as f32, third as f32],
+                depth,
+                front,
+            );
+        }
+    }
+}
+
+/// Screen-space barycentric weights made perspective-correct for the attributes of
+/// `corners`.
+fn perspective_weights(corners: [&ClipVertex; 3], screen: [f32; 3]) -> [f32; 3] {
+    let weights = [
+        screen[0] / corners[0].clip[3],
+        screen[1] / corners[1].clip[3],
+        screen[2] / corners[2].clip[3],
+    ];
+    let sum = weights[0] + weights[1] + weights[2];
+    [weights[0] / sum, weights[1] / sum, weights[2] / sum]
+}
+
+fn blend_uv(corners: [&ClipVertex; 3], weights: [f32; 3]) -> [f32; 2] {
+    [
+        corners[0].uv[0] * weights[0]
+            + corners[1].uv[0] * weights[1]
+            + corners[2].uv[0] * weights[2],
+        corners[0].uv[1] * weights[0]
+            + corners[1].uv[1] * weights[1]
+            + corners[2].uv[1] * weights[2],
+    ]
+}
+
+/// Rasterise one triangle (already clipped in front of the camera) into `canvas`.
+fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVertex; 3]) {
+    let material = context.material;
+    let sign = if corners[0].tangent[3] < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    let blend = material.surface == Surface::Blend;
+    let scene = context.scene;
+    let lights = scene.lights.len().min(MAX_LIGHTS);
+    let (width, height) = (canvas.width, canvas.height);
+    scan_triangle(
+        width,
+        height,
+        corners,
+        material.double_sided,
+        |column, row, screen, depth, front| {
+            let slot = row * canvas.width + column;
+            if depth >= canvas.depth[slot] {
+                return;
+            }
+            let weights = perspective_weights(corners, screen);
             let blend3 = |pick: fn(&ClipVertex) -> [f32; 3]| {
                 let values = [pick(corners[0]), pick(corners[1]), pick(corners[2])];
-                [
-                    values[0][0] * weights[0]
-                        + values[1][0] * weights[1]
-                        + values[2][0] * weights[2],
-                    values[0][1] * weights[0]
-                        + values[1][1] * weights[1]
-                        + values[2][1] * weights[2],
-                    values[0][2] * weights[0]
-                        + values[1][2] * weights[1]
-                        + values[2][2] * weights[2],
-                ]
+                [0, 1, 2].map(|axis| {
+                    values[0][axis] * weights[0]
+                        + values[1][axis] * weights[1]
+                        + values[2][axis] * weights[2]
+                })
             };
-            let uv = [
-                corners[0].uv[0] * weights[0]
-                    + corners[1].uv[0] * weights[1]
-                    + corners[2].uv[0] * weights[2],
-                corners[0].uv[1] * weights[0]
-                    + corners[1].uv[1] * weights[1]
-                    + corners[2].uv[1] * weights[2],
-            ];
+            let uv = blend_uv(corners, weights);
             let texel = context
                 .base_texture
                 .as_ref()
@@ -812,13 +1544,13 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
             match material.surface {
                 Surface::Cutout => {
                     if alpha < material.cutoff {
-                        continue;
+                        return;
                     }
                     alpha = 1.0;
                 }
                 Surface::Blend => {
                     if alpha <= 0.002 {
-                        continue;
+                        return;
                     }
                 }
                 Surface::Skin | Surface::Standard => alpha = 1.0,
@@ -833,6 +1565,9 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
             if !front {
                 normal = [-normal[0], -normal[1], -normal[2]];
             }
+            // the shadow lookups move the receiver along the surface's own normal, not the
+            // normal map's
+            let surface_normal = normal;
             if let Some(map) = context.normal_texture.as_ref() {
                 let tangent = normalize(blend3(|vertex| {
                     [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]]
@@ -850,9 +1585,25 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     tangent[2] * local[0] + sign * bitangent[2] * local[1] + normal[2] * local[2],
                 ]);
             }
+            let mut visibility = [1.0f32; MAX_LIGHTS];
+            for (index, seen) in visibility.iter_mut().enumerate().take(lights) {
+                if context.shadows.lights[index].1 > 0 {
+                    *seen = shadow_visibility(
+                        scene,
+                        context.shadows,
+                        context.shadow_maps,
+                        index,
+                        world,
+                        surface_normal,
+                    );
+                }
+            }
             let eye = scene.eye;
             let view = normalize([eye[0] - world[0], eye[1] - world[1], eye[2] - world[2]]);
-            let lit = tone(shade(scene, material, base, normal, view), scene.exposure);
+            let lit = tone(
+                shade(scene, material, base, normal, view, world, &visibility),
+                scene.exposure,
+            );
             let under = canvas.color[slot];
             canvas.color[slot] = [
                 lit[0] * alpha + under[0] * (1.0 - alpha),
@@ -863,8 +1614,8 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
             if !blend {
                 canvas.depth[slot] = depth;
             }
-        }
-    }
+        },
+    );
 }
 
 /// The vertices of `mesh` drawn by `draw`: morphed, skinned, moved by the model matrix and seen
@@ -917,6 +1668,91 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
         .collect()
 }
 
+/// A draw posed for this frame: its mesh and its vertices, as the camera sees them.
+struct Posed<'a> {
+    draw: &'a Draw,
+    mesh: Arc<Mesh>,
+    vertices: Vec<ClipVertex>,
+}
+
+/// The convex polygons `mesh`'s triangles leave in front of the view their `vertices` are seen
+/// through, each as a fan of triangles handed to `triangle`.
+fn each_clipped_triangle(
+    mesh: &Mesh,
+    vertices: &[ClipVertex],
+    mut triangle: impl FnMut([&ClipVertex; 3]),
+) {
+    for indices in mesh.indices.as_chunks::<3>().0 {
+        let corners = [
+            vertices[indices[0] as usize],
+            vertices[indices[1] as usize],
+            vertices[indices[2] as usize],
+        ];
+        let polygon = clip_near(corners);
+        // a convex polygon, as a fan from its first vertex
+        for fan in 1..polygon.len().saturating_sub(1) {
+            triangle([&polygon[0], &polygon[fan], &polygon[fan + 1]]);
+        }
+    }
+}
+
+/// The depth map of shadow `view`: every draw of `posed` that casts a shadow, rasterised as
+/// the light sees it, both faces, a `:cutout` or `:blend` surface only where its alpha reaches
+/// its `cutoff` — `resolution`² depths, row 0 the top, 1 where nothing is.
+fn render_shadow_map<'t>(
+    view: &ShadowView,
+    posed: &[Posed],
+    textures: &dyn Fn(u32) -> Option<TextureRef<'t>>,
+) -> Vec<f32> {
+    let side = view.resolution as usize;
+    let mut depth_map = vec![1.0f32; side * side];
+    for item in posed {
+        let material = &item.draw.material;
+        if !material.cast_shadow {
+            continue;
+        }
+        let alpha_tested = matches!(material.surface, Surface::Cutout | Surface::Blend);
+        let base_texture = if alpha_tested {
+            material.base.and_then(textures)
+        } else {
+            None
+        };
+        if alpha_tested && base_texture.is_none() && material.color[3] < material.cutoff {
+            continue;
+        }
+        let seen: Vec<ClipVertex> = item
+            .vertices
+            .iter()
+            .map(|vertex| ClipVertex {
+                clip: transform(&view.view_proj, vertex.world, 1.0),
+                ..*vertex
+            })
+            .collect();
+        each_clipped_triangle(&item.mesh, &seen, |corners| {
+            scan_triangle(
+                side,
+                side,
+                corners,
+                true,
+                |column, row, screen, depth, _| {
+                    let slot = row * side + column;
+                    if depth >= depth_map[slot] {
+                        return;
+                    }
+                    if let Some(texture) = base_texture.as_ref() {
+                        let uv = blend_uv(corners, perspective_weights(corners, screen));
+                        if sample(texture, uv[0], uv[1])[3] * material.color[3] < material.cutoff {
+                            return;
+                        }
+                    }
+                    depth_map[slot] = depth;
+                },
+            );
+        });
+    }
+    depth_map
+}
+
 /// How many times finer than the picture the CPU painter rasterises a scene of at most
 /// `pixels` pixels and averages down: the anti-aliasing the GPU's 4× multisampling gives, for
 /// a scene small enough that four samples a pixel stay cheap; one sample for a bigger one, so
@@ -928,6 +1764,7 @@ fn supersample_for(pixels: usize) -> usize {
 /// `scene` rasterised in software: its picture, `w`×`h` straight-alpha RGBA bytes (sRGB),
 /// what the CPU painter draws where the op stands. `meshes` and `textures` look up handles;
 /// a draw naming a mesh that is not there draws nothing, a missing texture samples white.
+/// The scene's shadow maps are rasterised first, from the same posed vertices (ADR-788).
 pub fn rasterize<'t>(
     scene: &Scene,
     meshes: &dyn Fn(u32) -> Option<Arc<Mesh>>,
@@ -952,38 +1789,44 @@ pub fn rasterize<'t>(
         color: vec![clear; width * height],
         depth: vec![1.0f32; width * height],
     };
-    for draw in scene.draw_order() {
-        let Some(mesh) = meshes(draw.mesh) else {
-            continue;
-        };
-        let vertices = pose_vertices(scene, &mesh, draw);
-        let material = &draw.material;
+    let posed: Vec<Posed> = scene
+        .draw_order()
+        .filter_map(|draw| {
+            let mesh = meshes(draw.mesh)?;
+            let vertices = pose_vertices(scene, &mesh, draw);
+            Some(Posed {
+                draw,
+                mesh,
+                vertices,
+            })
+        })
+        .collect();
+    let world = posed.iter().fold(None, |bounds, item| {
+        union(bounds, draw_bounds(scene, item.draw, &item.mesh.bounds))
+    });
+    let shadows = shadow_plan(scene, world);
+    let shadow_maps: Vec<Vec<f32>> = shadows
+        .views
+        .iter()
+        .map(|view| render_shadow_map(view, &posed, textures))
+        .collect();
+    for item in &posed {
+        let material = &item.draw.material;
         let context = DrawContext {
             scene,
             material,
             base_texture: material.base.and_then(textures),
-            normal_texture: if mesh.tangents.is_some() {
+            normal_texture: if item.mesh.tangents.is_some() {
                 material.normal.and_then(textures)
             } else {
                 None
             },
+            shadows: &shadows,
+            shadow_maps: &shadow_maps,
         };
-        for triangle in mesh.indices.as_chunks::<3>().0 {
-            let corners = [
-                vertices[triangle[0] as usize],
-                vertices[triangle[1] as usize],
-                vertices[triangle[2] as usize],
-            ];
-            let polygon = clip_near(corners);
-            // a convex polygon, as a fan from its first vertex
-            for fan in 1..polygon.len().saturating_sub(1) {
-                fill_triangle(
-                    &mut canvas,
-                    &context,
-                    [&polygon[0], &polygon[fan], &polygon[fan + 1]],
-                );
-            }
-        }
+        each_clipped_triangle(&item.mesh, &item.vertices, |corners| {
+            fill_triangle(&mut canvas, &context, corners)
+        });
     }
     // averaged down to the picture's pixels, premultiplied, then straight alpha
     let mut rgba = vec![0u8; out_width as usize * out_height as usize * 4];
@@ -1073,10 +1916,7 @@ mod tests {
             h: 16.0,
             view_proj: identity(),
             eye: [0.0, 0.0, -10.0],
-            lights: vec![Light {
-                direction: [0.0, 0.0, -1.0],
-                color: [1.0, 1.0, 1.0],
-            }],
+            lights: vec![Light::directional([0.0, 0.0, -1.0], [1.0, 1.0, 1.0])],
             sky: [0.1, 0.1, 0.1],
             ground: [0.1, 0.1, 0.1],
             exposure: 1.0,
@@ -1255,8 +2095,18 @@ mod tests {
             [1.0; 3],
             normal,
             [0.0, 0.0, -1.0],
+            [0.0; 3],
+            &[],
         );
-        let wrapped = shade(&scene, &skin, [1.0; 3], normal, [0.0, 0.0, -1.0]);
+        let wrapped = shade(
+            &scene,
+            &skin,
+            [1.0; 3],
+            normal,
+            [0.0, 0.0, -1.0],
+            [0.0; 3],
+            &[],
+        );
         assert!(wrapped[0] > plain[0] + 0.2, "red wraps round");
         assert!(
             wrapped[0] - plain[0] > wrapped[2] - plain[2],
@@ -1275,7 +2125,427 @@ mod tests {
             [1.0; 3],
             [0.0, 0.0, 1.0],
             [0.0, 0.0, 1.0],
+            [0.0; 3],
+            &[],
         );
         assert!(lit.iter().all(|channel| channel.is_finite()));
+    }
+
+    // --- lights and shadows (ADR-788) -----------------------------------------------------------
+
+    /// A light of colour 1 on a white surface facing it, through `shade` with nothing else
+    /// lighting it: what arrives.
+    fn arriving(light: Light, world: [f32; 3], normal: [f32; 3]) -> f32 {
+        let mut lit = scene(draw());
+        lit.lights = vec![light];
+        lit.sky = [0.0; 3];
+        lit.ground = [0.0; 3];
+        let material = Material {
+            specular: 0.0,
+            ..Material::default()
+        };
+        shade(&lit, &material, [1.0; 3], normal, normal, world, &[])[0]
+    }
+
+    #[test]
+    fn a_point_light_falls_off_with_the_square_of_the_distance_and_ends_at_its_range() {
+        let up = [0.0, 1.0, 0.0];
+        let unbounded = Light::point([0.0, 0.0, 0.0], [1.0; 3], 0.0);
+        // `:color` is the light 1 m away; at half a metre four times it, at 2 m a quarter
+        let at = |distance: f32| arriving(unbounded.clone(), [0.0, -distance, 0.0], up);
+        assert!((at(1.0) - 1.0).abs() < 1e-5, "1 m: {}", at(1.0));
+        assert!((at(0.5) - 4.0).abs() < 1e-4, "0.5 m: {}", at(0.5));
+        assert!((at(2.0) - 0.25).abs() < 1e-5, "2 m: {}", at(2.0));
+        // a range windows it: nearly the inverse square close in, nothing at or past the range
+        let ranged = Light::point([0.0, 0.0, 0.0], [1.0; 3], 4.0);
+        let near = arriving(ranged.clone(), [0.0, -0.5, 0.0], up);
+        assert!(
+            (near - 4.0).abs() < 0.01,
+            "close in, the window is ~1: {near}"
+        );
+        let toward_the_end = arriving(ranged.clone(), [0.0, -3.9, 0.0], up);
+        assert!(toward_the_end > 0.0 && toward_the_end < 0.25 / 3.9 / 3.9);
+        assert_eq!(arriving(ranged.clone(), [0.0, -4.0, 0.0], up), 0.0);
+        assert_eq!(arriving(ranged, [0.0, -9.0, 0.0], up), 0.0);
+        // a surface on the bulb is bright, not infinite
+        assert!(at(0.0).is_finite());
+    }
+
+    #[test]
+    fn a_spot_lights_its_inner_cone_fully_and_nothing_past_its_outer() {
+        // pointing straight down from 1 m up; inner 0.3 rad, outer 0.5 rad
+        let spot = Light::spot([0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [1.0; 3], 0.0, [0.3, 0.5]);
+        let point = Light::point([0.0, 1.0, 0.0], [1.0; 3], 0.0);
+        let at_angle = |light: &Light, angle: f32| {
+            // a point on the unit sphere about the light, its surface facing the light
+            let offset = [angle.sin(), -angle.cos(), 0.0];
+            let world = [offset[0], 1.0 + offset[1], 0.0];
+            arriving(light.clone(), world, [-offset[0], -offset[1], 0.0])
+        };
+        for inside in [0.0, 0.2, 0.299] {
+            let full = at_angle(&point, inside);
+            assert!(
+                (at_angle(&spot, inside) - full).abs() < 1e-4,
+                "inside the inner cone ({inside}) a spot is its point light"
+            );
+        }
+        let between = at_angle(&spot, 0.4);
+        assert!(
+            between > 0.05 && between < 0.95,
+            "between the cones: {between}"
+        );
+        assert!(
+            at_angle(&spot, 0.35) > at_angle(&spot, 0.45),
+            "falling outward"
+        );
+        for outside in [0.5, 0.6, 1.5, 3.0] {
+            assert_eq!(
+                at_angle(&spot, outside),
+                0.0,
+                "past the outer cone ({outside})"
+            );
+        }
+    }
+
+    /// A quad of `corners` (counter-clockwise seen from where its normal points), its UVs
+    /// running 0 … 1 from the first corner.
+    fn quad(corners: [[f32; 3]; 4]) -> Mesh {
+        let normal = normalize(cross(
+            subtract(corners[1], corners[0]),
+            subtract(corners[2], corners[0]),
+        ));
+        let positions: Vec<f32> = corners.iter().flatten().copied().collect();
+        let normals: Vec<f32> = (0..4).flat_map(|_| normal).collect();
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&positions),
+            normals: bytes_of(&normals),
+            uvs: bytes_of(&[0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]),
+            indices: [0u16, 1, 2, 0, 2, 3]
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            ..MeshParts::default()
+        })
+        .expect("a quad")
+    }
+
+    /// An 8 m floor at y = 0 and a 1 m square card held 1 m above its middle (mesh 2), seen
+    /// straight down by an orthographic camera onto a 128-pixel picture (16 px a metre: world x
+    /// is column `64 + 16x`, world z row `64 + 16z`), lit by `light` alone.
+    fn floor_and_card(light: Light) -> (Scene, HashMap<u32, Arc<Mesh>>) {
+        let floor = quad([
+            [-4.0, 0.0, 4.0],
+            [4.0, 0.0, 4.0],
+            [4.0, 0.0, -4.0],
+            [-4.0, 0.0, -4.0],
+        ]);
+        let card = quad([
+            [-0.5, 1.0, 0.5],
+            [0.5, 1.0, 0.5],
+            [0.5, 1.0, -0.5],
+            [-0.5, 1.0, -0.5],
+        ]);
+        let solid = Material {
+            double_sided: true,
+            specular: 0.0,
+            ..Material::default()
+        };
+        let mut seen = scene(Draw {
+            material: solid.clone(),
+            ..draw()
+        });
+        seen.draws.push(Draw {
+            mesh: 2,
+            material: solid,
+            ..draw()
+        });
+        seen.w = 128.0;
+        seen.h = 128.0;
+        // x → clip x / 4, z → clip −y / 4 (z grows down the picture), height → depth
+        seen.view_proj = from_rows([
+            [0.25, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -0.25, 0.0],
+            [0.0, -1.0 / 6.0, 0.0, 0.5],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        seen.eye = [0.0, 10.0, 0.0];
+        seen.lights = vec![light];
+        seen.sky = [0.05; 3];
+        seen.ground = [0.05; 3];
+        let meshes = HashMap::from([(1, Arc::new(floor)), (2, Arc::new(card))]);
+        (seen, meshes)
+    }
+
+    fn paint(scene: &Scene, meshes: &HashMap<u32, Arc<Mesh>>) -> Vec<u8> {
+        rasterize(scene, &|handle| meshes.get(&handle).cloned(), &|_| None).2
+    }
+
+    fn red_at(rgba: &[u8], world_x: f32, world_z: f32) -> u8 {
+        let column = (64.0 + 16.0 * world_x) as usize;
+        let row = (64.0 + 16.0 * world_z) as usize;
+        rgba[(row * 128 + column) * 4]
+    }
+
+    fn shadowed(mut light: Light) -> Light {
+        light.shadow = Some(Shadow::default());
+        light
+    }
+
+    /// The light 45° from straight down, travelling toward −x: the card's shadow falls 1 m
+    /// toward −x of it, on x −1.5 … −0.5.
+    fn slanted() -> Light {
+        Light::directional([-1.0, -1.0, 0.0], [1.0; 3])
+    }
+
+    #[test]
+    fn a_card_shadows_the_floor_under_a_directional_light() {
+        let (mut lit, meshes) = floor_and_card(shadowed(slanted()));
+        let with_shadow = paint(&lit, &meshes);
+        lit.lights[0].shadow = None;
+        let without = paint(&lit, &meshes);
+        let (dark, bright) = (red_at(&with_shadow, -1.0, 0.0), red_at(&without, -1.0, 0.0));
+        assert!(
+            u16::from(dark) + 60 < u16::from(bright),
+            "the floor in the card's shadow is dark: {dark} against {bright} unshadowed"
+        );
+        assert_eq!(
+            red_at(&with_shadow, 2.0, 2.0),
+            red_at(&without, 2.0, 2.0),
+            "the floor away from it is lit"
+        );
+    }
+
+    /// Every floor pixel of `with_shadow` and `without` outside the card and its shadow (and a
+    /// band about them, `margin` metres, for the filter's softening) the same: no acne.
+    fn no_acne(with_shadow: &[u8], without: &[u8], shadow_x: std::ops::Range<f32>, margin: f32) {
+        let mut worst = 0;
+        for row in 0..128usize {
+            for column in 0..128usize {
+                let (world_x, world_z) = (
+                    (column as f32 + 0.5 - 64.0) / 16.0,
+                    (row as f32 + 0.5 - 64.0) / 16.0,
+                );
+                let near_card = world_x > shadow_x.start.min(-0.5) - margin
+                    && world_x < shadow_x.end.max(0.5) + margin
+                    && world_z.abs() < 0.5 + margin;
+                if near_card {
+                    continue;
+                }
+                let at = (row * 128 + column) * 4;
+                let difference = (i32::from(with_shadow[at]) - i32::from(without[at])).abs();
+                worst = worst.max(difference);
+            }
+        }
+        assert_eq!(
+            worst, 0,
+            "a lit floor pixel darkened by its own shadow (acne)"
+        );
+    }
+
+    #[test]
+    fn a_lit_floor_does_not_shadow_itself_at_any_angle_of_light() {
+        // from straight down to 80° off: the receiver's bias grows with the slope and its
+        // normal offset, so no lit texel falls behind its own depth
+        for degrees in [0.0f32, 30.0, 60.0, 80.0] {
+            let angle = degrees.to_radians();
+            let light = Light::directional([-angle.sin(), -angle.cos(), 0.0], [1.0; 3]);
+            let (mut lit, meshes) = floor_and_card(shadowed(light));
+            let with_shadow = paint(&lit, &meshes);
+            lit.lights[0].shadow = None;
+            let without = paint(&lit, &meshes);
+            let reach = angle.tan();
+            no_acne(&with_shadow, &without, -0.5 - reach..0.5 - reach, 0.25);
+        }
+    }
+
+    #[test]
+    fn a_spot_and_a_point_light_shadow_the_floor_without_acne() {
+        // 2 m up over the floor's middle: the card at 1 m casts a shadow twice its size, x and z
+        // −1 … 1, seen past the card's own −0.5 … 0.5
+        let spot = shadowed(Light::spot(
+            [0.0, 2.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [8.0; 3],
+            0.0,
+            [1.2, 1.4],
+        ));
+        let point = shadowed(Light::point([0.0, 2.0, 0.0], [8.0; 3], 0.0));
+        for light in [spot, point] {
+            let (mut lit, meshes) = floor_and_card(light);
+            let with_shadow = paint(&lit, &meshes);
+            lit.lights[0].shadow = None;
+            let without = paint(&lit, &meshes);
+            let (dark, bright) = (red_at(&with_shadow, 0.75, 0.0), red_at(&without, 0.75, 0.0));
+            assert!(
+                u16::from(dark) + 60 < u16::from(bright),
+                "{:?}: shadowed {dark} against {bright}",
+                lit.lights[0].kind
+            );
+            // the point light's floor runs across five of its cube's faces, seams included
+            no_acne(&with_shadow, &without, -1.0..1.0, 0.6);
+        }
+    }
+
+    #[test]
+    fn a_shadow_starts_where_its_caster_stands() {
+        // a 1 m wall standing on the floor along z at x = 0, the light from +x at 45°: its
+        // shadow runs from the wall's foot to x = −1 — and must reach the foot (no
+        // peter-panning) within a few centimetres
+        let (mut lit, mut meshes) = floor_and_card(shadowed(slanted()));
+        meshes.insert(
+            2,
+            Arc::new(quad([
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, -1.0],
+                [0.0, 1.0, -1.0],
+                [0.0, 1.0, 1.0],
+            ])),
+        );
+        let with_shadow = paint(&lit, &meshes);
+        lit.lights[0].shadow = None;
+        let without = paint(&lit, &meshes);
+        // the pixel whose centre is 9 cm from the foot, and one well inside
+        for world_x in [-0.09, -0.5] {
+            let (dark, bright) = (
+                red_at(&with_shadow, world_x, 0.0),
+                red_at(&without, world_x, 0.0),
+            );
+            assert!(
+                u16::from(dark) + 60 < u16::from(bright),
+                "{world_x} m from the foot: {dark} against {bright}"
+            );
+        }
+        assert_eq!(
+            red_at(&with_shadow, 0.1, 0.0),
+            red_at(&without, 0.1, 0.0),
+            "the lit side of the wall"
+        );
+    }
+
+    #[test]
+    fn a_skinned_caster_shadows_where_its_pose_puts_it() {
+        // the card skinned to joint 0, which the palette carries 2 m toward +x and back 1 m in
+        // z: its shadow moves with it, to x 0.5 … 1.5, z 0.5 … 1.5
+        let (mut lit, mut meshes) = floor_and_card(shadowed(slanted()));
+        let card = &meshes[&2];
+        let mut parts = MeshParts {
+            positions: bytes_of(&card.positions.iter().flatten().copied().collect::<Vec<_>>()),
+            normals: bytes_of(&card.normals.iter().flatten().copied().collect::<Vec<_>>()),
+            indices: card
+                .indices
+                .iter()
+                .flat_map(|index| (*index as u16).to_le_bytes())
+                .collect(),
+            ..MeshParts::default()
+        };
+        parts.joints = vec![0; 16];
+        parts.weights = bytes_of(&[1.0, 0.0, 0.0, 0.0].repeat(4));
+        meshes.insert(2, Arc::new(Mesh::from_parts(parts).unwrap()));
+        let mut moved = identity();
+        moved[12] = 2.0;
+        moved[14] = 1.0;
+        lit.palettes = vec![Arc::from(&moved[..])];
+        lit.draws[1].palette = Some(0);
+        let with_shadow = paint(&lit, &meshes);
+        lit.lights[0].shadow = None;
+        let without = paint(&lit, &meshes);
+        let (dark, bright) = (red_at(&with_shadow, 1.0, 1.0), red_at(&without, 1.0, 1.0));
+        assert!(
+            u16::from(dark) + 60 < u16::from(bright),
+            "under the posed card: {dark} against {bright}"
+        );
+        assert_eq!(
+            red_at(&with_shadow, -1.0, 0.0),
+            red_at(&without, -1.0, 0.0),
+            "nothing where the card's bind pose would have cast"
+        );
+    }
+
+    #[test]
+    fn a_draw_that_casts_no_shadow_leaves_the_floor_lit() {
+        let (mut lit, meshes) = floor_and_card(shadowed(slanted()));
+        lit.draws[1].material.cast_shadow = false;
+        let with_shadow = paint(&lit, &meshes);
+        lit.lights[0].shadow = None;
+        let without = paint(&lit, &meshes);
+        assert_eq!(with_shadow, without, ":cast-shadow false casts nothing");
+    }
+
+    #[test]
+    fn a_cutout_or_blended_card_casts_only_where_its_alpha_reaches_its_cutoff() {
+        // a texture opaque on its left half (u < 0.5) and clear on its right: the card's
+        // shadow is its left half's (x −1.5 … −1), not its right's (x −1 … −0.5)
+        let texture = [
+            255u8, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 255, 255, 255, 0,
+        ];
+        for surface in [Surface::Cutout, Surface::Blend] {
+            let (mut lit, meshes) = floor_and_card(shadowed(slanted()));
+            lit.draws[1].material.surface = surface;
+            lit.draws[1].material.base = Some(7);
+            let textures = |handle: u32| {
+                (handle == 7).then_some(TextureRef {
+                    w: 4,
+                    h: 1,
+                    rgba: &texture,
+                })
+            };
+            let paint_with = |scene: &Scene| {
+                rasterize(scene, &|handle| meshes.get(&handle).cloned(), &textures).2
+            };
+            let with_shadow = paint_with(&lit);
+            lit.lights[0].shadow = None;
+            let without = paint_with(&lit);
+            let (dark, bright) = (red_at(&with_shadow, -1.3, 0.0), red_at(&without, -1.3, 0.0));
+            assert!(
+                u16::from(dark) + 60 < u16::from(bright),
+                "{surface:?}: the opaque half casts"
+            );
+            assert_eq!(
+                red_at(&with_shadow, -0.7, 0.0),
+                red_at(&without, -0.7, 0.0),
+                "{surface:?}: the clear half does not"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fitted_directional_shadow_covers_every_posed_vertex() {
+        // the bounds both painters fit a directional map to hold the skinned and morphed
+        // vertices, however the palette turns them
+        let mut parts = MeshParts {
+            positions: bytes_of(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+            morphs: vec![(
+                bytes_of(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0]),
+                Vec::new(),
+            )],
+            ..MeshParts::default()
+        };
+        parts.joints = vec![0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0];
+        parts.weights = bytes_of(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0]);
+        let mesh = Mesh::from_parts(parts).unwrap();
+        let mut turned = identity();
+        // joint 1 turned a quarter about y and lifted
+        turned[0] = 0.0;
+        turned[2] = -1.0;
+        turned[8] = 1.0;
+        turned[10] = 0.0;
+        turned[13] = 2.0;
+        let mut posed = scene(Draw {
+            palette: Some(0),
+            morphs: vec![(0, 0.5)],
+            ..draw()
+        });
+        posed.palettes = vec![Arc::from([identity(), turned].concat().as_slice())];
+        let bounds = draw_bounds(&posed, &posed.draws[0], &mesh.bounds).unwrap();
+        for vertex in pose_vertices(&posed, &mesh, &posed.draws[0]) {
+            for axis in 0..3 {
+                assert!(
+                    vertex.world[axis] >= bounds[0][axis] - 1e-5
+                        && vertex.world[axis] <= bounds[1][axis] + 1e-5,
+                    "{:?} outside {bounds:?}",
+                    vertex.world
+                );
+            }
+        }
     }
 }

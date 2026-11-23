@@ -2553,3 +2553,21 @@ draws it too. glTF loading, skeletons, cameras and animation stay Brood (b2d). T
 does not draw scenes yet (`editor/web/frame-json` leaves them out); recorded in the ADR. Run
 here: the new unit tests (`host::gui::mesh`, `the_mesh_shader_validates`) only; the suites are
 CI's (desktop rule).
+
+2026-11-23. **Point and spot lights and shadow maps in a scene (ADR-788).** The game's woman
+stands in a lamp-lit room, and four directional lights could not light it from the lamp or let
+her shadow the floor. A scene's `:lights` now take three kinds, told by their keys: directional
+(`:direction`), point (`:position`, `:range`: inverse-square falloff of `:color`-at-1-m,
+windowed to nothing at the range) and spot (`:cone [inner outer]`, a smoothstep between); up to
+8. `:shadow` on up to 4 of them renders shadow maps every frame — a perspective map for a spot,
+an orthographic one fitted to the scene (or `:extent` about `:center`) for a directional light,
+a six-face cube for a point light — planned once in `mesh::shadow_plan` for both painters from
+per-joint mesh bounds (`MeshBounds`), so neither has to pose vertices to fit them. Casters are
+skinned and morphed as in the colour pass, both faces, `:cutout`/`:blend` alpha-tested at their
+`:cutoff`, `:cast-shadow false` opting out. A 3×3 bilinear PCF read as a 4×4 block of weighted
+comparisons (CPU: 16 reads; GPU: four `textureGatherCompare`s on a comparison sampler), with the
+receiver moved toward the light (slope-scaled) and along its normal, in texels where it stands —
+no rasteriser depth bias, so both painters compute the same thing. A malformed light is now an
+error raised by `gui/draw` (it was silently a white light pointing down). Run here: the targeted
+unit tests (`host::gui::mesh`, `gui_scene_light_tests`, `the_mesh_shader_validates`), each new
+guard sabotaged; the suites are CI's (desktop rule).
