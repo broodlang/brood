@@ -606,7 +606,8 @@ afterwards wins. Needs --features gui. Returns nil.
 (defn render-frame (frame &optional spec)
   "Paint `frame` (a gui/draw frame) into memory as a window described by `spec` would paint it, and return the picture: `{:width :height :rgba :cell [w h] :grid [cols rows] :origin [x y] :inset px :seam row :row-tops [y …]}`, `:rgba` being width*height*4 bytes (row-major, opaque) and the rest the geometry it was painted with — the cell in physical pixels, the grid in cells, where the grid's top-left sits, the inset, the frame's `[:seam row]` (nil without one) and the pixel row every grid row starts at, then where the last one ends (`:row-tops`, `rows + 1` entries — ADR-610). It is the WINDOW's own CPU painter that paints it — the same layout rule (row 0 at the top edge, or at the inset when the frame's seam says row 0 is not a band; the inset a margin left, right and below; the leftover height at the seam or under the last row), the same edge bleed, the same glyph rasteriser — so what a test asserts about the pixels is true of the window. Needs no window and no display, so it runs headless and in `nest test`. `spec` (every key optional) is the window it stands in for: `:width`/`:height` in physical pixels (840x560), `:font` (an installed family's name, as gui/font-register's `:family-name` resolves one, or a family keyword the offscreen painter knows — the bundled `:mono` by default), `:size` (the font px, 15), `:line-height` (1.4), `:inset` (logical px, 0), `:bg` (the window colour), `:fg` (the default text colour, gui/fg), `:scale` (HiDPI, 1), `:text-aa`, `:text-hinting` (ADR-730), `:ligatures`. Read a pixel with gui/pixel, save it with gui/write-png. Needs --features gui.
 
-    (gui/render-frame [[:clear] [:text 0 0 \"hi\" {:fg :red}]] {:width 200 :height 60 :inset 6})   ;~> {:width 200 :height 60 :rgba … :cell [9 21] :grid [20 2] :origin [6 0] :inset 6 :seam nil :row-tops [0 21 42]}"
+    (gui/render-frame [[:clear] [:text 0 0 \"hi\" {:fg :red}]] {:width 200 :height 60 :inset 6})   ;~> {:width 200 :height 60 :rgba … :cell [9 21] :grid [20 2] :origin [6 0] :inset 6 :seam nil :row-tops [0 21 42]}
+    (try (gui/render-frame [[:scene 0 0 8 8 {:camera [1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1] :lights [{:position [0 2 0] :direction [0 -1 0]}]}]]) (catch e (error-message e)))   ;=> \"%gui-render-frame: a [:scene …] op: light 0: a point light has no :direction (give it a :cone to make it a spot); it takes :position :color :range :shadow\""
   (%gui-render-frame frame spec))
 
 (defn capture (id)
@@ -770,16 +771,34 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; pixel rect (x y w h) and composited where the op stands — the 2D ops before it behind, the
 ;; ones after in front, so a game lays a backdrop, a 3D figure and a HUD in one frame with no
 ;; mode to switch. The spec carries a camera (`:camera`, 16 numbers: a column-major
-;; view-projection with clip depth 0 … 1, and `:eye`), up to four directional `:lights`
-;; ({:direction [x y z] :color [r g b]}, linear) over a `:sky`/`:ground` ambient, an
+;; view-projection with clip depth 0 … 1, and `:eye`), up to eight `:lights` over a
+;; `:sky`/`:ground` ambient, an
 ;; `:exposure`, a `:background` ([r g b a], transparent by default), the skeletons' joint
 ;; `:palettes` (16 numbers a joint, or f32 bytes), and the `:draws` — each `{:mesh handle
 ;; :model [16] :palette i :morphs [[target weight] …] :material {…}}`. A material is the fixed
 ;; shading model's parameters: `:surface` (:skin, :standard, :cutout or :blend), `:base` and
 ;; `:normal` (texture handles), `:color`, `:roughness`, `:specular`, `:wrap` and `:scatter`
-;; (light under the skin), `:rim`, `:cutoff`, `:double-sided`. A glTF loader, a skeleton's
-;; maths, a camera — policy above this, in the engine. Both window painters draw a scene: the
-;; GPU target with a depth buffer and 4× multisampling, the CPU painter in software.
+;; (light under the skin), `:rim`, `:cutoff`, `:double-sided`, `:cast-shadow` (true by
+;; default). A glTF loader, a skeleton's maths, a camera — policy above this, in the engine.
+;; Both window painters draw a scene: the GPU target with a depth buffer and 4×
+;; multisampling, the CPU painter in software.
+;;
+;; LIGHTS (ADR-788), linear, their keys saying their kind:
+;;   directional  {:direction [x y z] :color [r g b] :shadow …}   (direction: the way it travels)
+;;   point        {:position [x y z] :color [r g b] :range r :shadow …}
+;;   spot         {:position [x y z] :direction [x y z] :color [r g b] :range r
+;;                 :cone [inner outer] :shadow …}
+;; A point or spot light's `:color` is the light arriving 1 m away; it falls off with the
+;; inverse square of the distance, windowed smoothly to nothing at `:range` (none: no end).
+;; A spot is full inside its inner half-angle and dark past its outer (radians, below π/2).
+;; `:shadow true` (or a map: `:resolution` texels 16 … 4096, default 1024; `:bias` and
+;; `:normal-bias` in texels, default 1 and 1.5; a directional light's `:extent` metres about
+;; `:center`, else fitted to the scene each frame; a spot or point light's `:near`, default
+;; 0.05 m) gives the light a shadow map — six, a cube, for a point light — rendered every
+;; frame from the posed, morphed meshes and filtered 3×3; at most four shadowed lights a
+;; scene. A `:cutout` or `:blend` surface casts where its alpha reaches `:cutoff`. A
+;; malformed light, an unknown key, or too many lights or shadows is an error, raised by the
+;; gui/draw (or gui/render-frame) that carries it.
 
 ;; The mesh counter: handles from 1, process-wide, made at load like the textures' registry.
 (def *meshes* (table/new))

@@ -101,6 +101,26 @@ fn the_text_shaders_validate_the_lcd_one_only_with_dual_source_blending() {
 fn the_mesh_shader_validates() {
     // ADR-786: the WGSL twin of `host::gui::mesh`'s shading model, checked without a device
     validate_wgsl(MESH_SRC, wgpu::naga::valid::Capabilities::default());
+    // ADR-788: the scene uniform holds as many lights and shadow views as the CPU plans, and
+    // `scene_uniform` packs exactly the struct the shader declares
+    use crate::host::gui::mesh::{MAX_LIGHTS, MAX_SHADOW_VIEWS};
+    assert!(MESH_SRC.contains(&format!("lights: array<Light, {MAX_LIGHTS}>")));
+    assert!(MESH_SRC.contains(&format!("shadows: array<ShadowView, {MAX_SHADOW_VIEWS}>")));
+    let module = wgpu::naga::front::wgsl::parse_str(MESH_SRC).expect("parses");
+    let scene_type = module
+        .types
+        .iter()
+        .find(|(_, ty)| ty.name.as_deref() == Some("SceneU"))
+        .map(|(handle, _)| handle)
+        .expect("SceneU");
+    let mut layouter = wgpu::naga::proc::Layouter::default();
+    layouter.update(module.to_ctx()).expect("lays out");
+    let declared = layouter[scene_type].size as usize;
+    let packed = scenes::scene_uniform_len();
+    assert_eq!(
+        declared, packed,
+        "SceneU is {declared} bytes, scene_uniform packs {packed}"
+    );
 }
 
 #[test]

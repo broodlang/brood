@@ -3105,6 +3105,12 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
   directional lights, joint palettes and a fixed skin/standard/cutout/blend material model,
   composited in op order. GPU (depth, 4× MSAA, vertex skinning) and CPU painter (software
   rasteriser). ⬜ The browser tab draws no scenes yet; ⬜ mipmaps.
+  - ✅ **Point and spot lights and shadow maps** (ADR-788, 2026-11-23) — `:lights` take
+    directional, point (inverse-square, windowed to `:range`) and spot (`:cone`) lights, up to
+    8; `:shadow` gives up to 4 of them PCF shadow maps (a cube for a point light), recomputed
+    every frame from the posed meshes, alpha-tested for cutout/blend, `:cast-shadow false` per
+    draw. Both painters, one plan. ⬜ Cascaded maps for a large sunlit scene; ⬜ soft
+    (contact-hardening) shadows.
 - ✅ **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
   deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped

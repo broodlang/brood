@@ -6,6 +6,20 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Added: point and spot lights and shadow maps in a 3D scene (ADR-788).** A `[:scene …]` spec's
+`:lights` now take three kinds, told apart by their keys: directional `{:direction :color}` as
+before, point `{:position :color :range}` and spot `{:position :direction :color :range :cone
+[inner outer]}`, a point or spot light's `:color` being the light 1 m away, falling off with the
+inverse square of the distance and windowed to nothing at `:range`. Up to 8 lights; `:shadow
+true` (or `{:resolution :bias :normal-bias :extent :center :near}`) on up to 4 of them renders
+shadow maps every frame — a perspective map for a spot, an orthographic one fitted to the scene
+(or to `:extent` about `:center`) for a directional light, a cube for a point light — from the
+skinned, morphed meshes, filtered 3×3 with a slope-scaled and normal-offset receiver bias.
+`:cutout` and `:blend` surfaces cast where their alpha reaches `:cutoff`; a material's
+`:cast-shadow false` casts nothing. Both window painters draw them alike. **Breaking:** a
+malformed light (an unknown key, a wrong shape, a `:range` on a directional light) or more than
+8 lights is now an error raised by `gui/draw`, where it used to be ignored.
+
 **Added: smooth textures (ADR-783).** `(gui/texture id image {:filter :smooth})` — and the same
 options map on the `rgba w h` form and on `editor/frontend/display-texture` — makes a texture's
 sprites filter bilinearly, so a painted or photographic sprite drawn scaled or turned keeps

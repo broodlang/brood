@@ -685,6 +685,9 @@ struct GuiOpTags {
     seam_t: value::Symbol,
     above_seam_t: value::Symbol,
     translate_t: value::Symbol,
+    /// The first op the parse refused rather than skipped, and why: `%gui-draw` raises it
+    /// instead of drawing the frame.
+    refusal: std::cell::RefCell<Option<String>>,
 }
 impl GuiOpTags {
     fn new() -> Self {
@@ -722,6 +725,20 @@ impl GuiOpTags {
             seam_t: value::intern("seam"),
             above_seam_t: value::intern("above-seam"),
             translate_t: value::intern("translate"),
+            refusal: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// Keep `why` as the frame's refusal, unless an op before refused it already.
+    fn refuse(&self, why: String) {
+        self.refusal.borrow_mut().get_or_insert(why);
+    }
+
+    /// Why the parse refused the frame, if it did, as the error `who` raises.
+    fn refused(&self, who: &str) -> Result<(), LispError> {
+        match self.refusal.borrow_mut().take() {
+            Some(why) => Err(LispError::runtime(format!("{who}: {why}"))),
+            None => Ok(()),
         }
     }
 }
@@ -1314,7 +1331,8 @@ fn parse_gui_ops(
         } else if tag == tags.scene_t {
             // `[:scene x y w h spec]` — meshes in 3D over a pixel rect (ADR-786); a spec without
             // a 16-number `:camera` is not a scene.
-            if let Some(scene) = scene_spec(
+            // A malformed light is refused, not skipped (ADR-788): the frame is not drawn.
+            match scene_spec(
                 heap,
                 [
                     num(arg(&parts, 1)),
@@ -1325,7 +1343,11 @@ fn parse_gui_ops(
                 arg(&parts, 5),
                 &num,
             ) {
-                ops.push(crate::host::gui::Op::Scene(std::sync::Arc::new(scene)));
+                Ok(Some(scene)) => {
+                    ops.push(crate::host::gui::Op::Scene(std::sync::Arc::new(scene)))
+                }
+                Ok(None) => {}
+                Err(why) => tags.refuse(format!("a [:scene …] op: {why}")),
             }
         } else if tag == tags.burst_t {
             // `[:burst id count]`.
@@ -1476,21 +1498,24 @@ fn emitter_spec(
 
 /// A `[:scene x y w h spec]` op's spec read into a `mesh::Scene` (ADR-786): `:camera` (16
 /// numbers, a column-major view-projection with clip depth 0 … 1 — required), `:eye [x y z]`,
-/// `:lights [{:direction [x y z] :color [r g b]} …]`, `:sky` / `:ground [r g b]` (the
-/// ambient from above and below), `:exposure`, `:background [r g b a]` (0 … 1, transparent by
-/// default), `:palettes` (joint matrices, 16 numbers each: a vector of numbers or f32 bytes per
-/// skeleton) and `:draws [{:mesh h :model [16] :palette i :morphs [[target weight] …]
-/// :material {…}} …]`. Colours and light are linear. A key of the wrong shape keeps its
-/// default; a draw without a mesh handle is dropped.
+/// `:lights` (up to `MAX_LIGHTS`, each directional, point or spot — [`light_spec`], ADR-788),
+/// `:sky` / `:ground [r g b]` (the ambient from above and below), `:exposure`, `:background
+/// [r g b a]` (0 … 1, transparent by default), `:palettes` (joint matrices, 16 numbers each: a
+/// vector of numbers or f32 bytes per skeleton) and `:draws [{:mesh h :model [16] :palette i
+/// :morphs [[target weight] …] :material {…}} …]`. Colours and light are linear. A key of the
+/// wrong shape keeps its default and a draw without a mesh handle is dropped — except the
+/// lights and a material's `:cast-shadow`, where a mistake would light the scene wrongly
+/// without a word: those are refused (`Err`, which `%gui-draw` raises). No 16-number
+/// `:camera` is no scene (`Ok(None)`).
 fn scene_spec(
     heap: &Heap,
     rect: [f32; 4],
     spec: Value,
     num: &dyn Fn(Value) -> f32,
-) -> Option<crate::host::gui::mesh::Scene> {
-    use crate::host::gui::mesh::{Draw, Light, MAX_LIGHTS, MAX_MORPHS, Material, Scene, Surface};
+) -> Result<Option<crate::host::gui::mesh::Scene>, String> {
+    use crate::host::gui::mesh::{Draw, MAX_MORPHS, Material, Scene, Surface};
     let Value::Map(map) = spec else {
-        return None;
+        return Ok(None);
     };
     let is_number = |candidate: Value| {
         matches!(
@@ -1526,22 +1551,10 @@ fn scene_spec(
         })
     };
     let get = |within, key: &str| heap.map_get(within, value::kw(key));
-    let view_proj = matrix(get(map, "camera"))?;
-    let lights = match get(map, "lights") {
-        Some(Value::Vector(id)) => heap
-            .vector(id)
-            .iter()
-            .filter_map(|light| match light {
-                Value::Map(light_map) => Some(Light {
-                    direction: three(get(*light_map, "direction"), [0.0, -1.0, 0.0]),
-                    color: three(get(*light_map, "color"), [1.0, 1.0, 1.0]),
-                }),
-                _ => None,
-            })
-            .take(MAX_LIGHTS)
-            .collect(),
-        _ => Vec::new(),
+    let Some(view_proj) = matrix(get(map, "camera")) else {
+        return Ok(None);
     };
+    let lights = lights_spec(heap, get(map, "lights"), num)?;
     let palettes = match get(map, "palettes") {
         Some(Value::Vector(id)) => heap
             .vector(id)
@@ -1574,10 +1587,10 @@ fn scene_spec(
             .collect(),
         _ => Vec::new(),
     };
-    let material_of = |given: Option<Value>| -> Material {
+    let material_of = |given: Option<Value>| -> Result<Material, String> {
         let mut material = Material::default();
         let Some(Value::Map(material_map)) = given else {
-            return material;
+            return Ok(material);
         };
         let number = |key: &str| match get(material_map, key) {
             Some(item) if is_number(item) => Some(num(item)).filter(|value| value.is_finite()),
@@ -1620,7 +1633,17 @@ fn scene_spec(
         }
         material.double_sided =
             matches!(get(material_map, "double-sided"), Some(Value::Bool(true)));
-        material
+        material.cast_shadow = match get(material_map, "cast-shadow") {
+            None | Some(Value::Bool(true)) => true,
+            Some(Value::Bool(false)) => false,
+            Some(other) => {
+                return Err(format!(
+                    "a material's :cast-shadow is true or false, not {}",
+                    crate::syntax::printer::print(heap, other)
+                ));
+            }
+        };
+        Ok(material)
     };
     let draws = match get(map, "draws") {
         Some(Value::Vector(id)) => heap
@@ -1634,6 +1657,10 @@ fn scene_spec(
                     return None;
                 };
                 let mesh = u32::try_from(mesh).ok()?;
+                let material = match material_of(get(*draw_map, "material")) {
+                    Ok(material) => material,
+                    Err(why) => return Some(Err(why)),
+                };
                 let palette = match get(*draw_map, "palette") {
                     Some(Value::Int(index)) => usize::try_from(index).ok(),
                     _ => None,
@@ -1660,7 +1687,7 @@ fn scene_spec(
                 };
                 morphs.sort_by(|left, right| right.1.abs().total_cmp(&left.1.abs()));
                 morphs.truncate(MAX_MORPHS);
-                Some(Draw {
+                Some(Ok(Draw {
                     mesh,
                     model: matrix(get(*draw_map, "model")).unwrap_or([
                         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
@@ -1668,10 +1695,10 @@ fn scene_spec(
                     ]),
                     palette,
                     morphs,
-                    material: material_of(get(*draw_map, "material")),
-                })
+                    material,
+                }))
             })
-            .collect(),
+            .collect::<Result<Vec<Draw>, String>>()?,
         _ => Vec::new(),
     };
     let exposure = match get(map, "exposure") {
@@ -1680,7 +1707,7 @@ fn scene_spec(
     };
     let background = numbers(get(map, "background"), 4)
         .map_or([0.0; 4], |color| [color[0], color[1], color[2], color[3]]);
-    Some(Scene {
+    Ok(Some(Scene {
         x: rect[0],
         y: rect[1],
         w: rect[2],
@@ -1694,7 +1721,271 @@ fn scene_spec(
         background,
         palettes,
         draws,
-    })
+    }))
+}
+
+/// A scene spec's `:lights` (absent or nil: none) read into `mesh::Light`s, or why they are
+/// not lights: not a vector, more than `MAX_LIGHTS`, a light that is not one ([`light_spec`]),
+/// more than `MAX_SHADOWS` shadowed, or shadow maps past `MAX_SHADOW_TEXELS` together.
+fn lights_spec(
+    heap: &Heap,
+    given: Option<Value>,
+    num: &dyn Fn(Value) -> f32,
+) -> Result<Vec<crate::host::gui::mesh::Light>, String> {
+    use crate::host::gui::mesh::{MAX_LIGHTS, MAX_SHADOW_TEXELS, MAX_SHADOWS};
+    let id = match given {
+        None | Some(Value::Nil) => return Ok(Vec::new()),
+        Some(Value::Vector(id)) => id,
+        Some(other) => {
+            return Err(format!(
+                ":lights is a vector of light maps, not {}",
+                crate::syntax::printer::print(heap, other)
+            ));
+        }
+    };
+    let entries = heap.vector(id);
+    if entries.len() > MAX_LIGHTS {
+        return Err(format!(
+            "{} :lights is more than the {MAX_LIGHTS} a scene lights with",
+            entries.len()
+        ));
+    }
+    let lights = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            light_spec(heap, *entry, num).map_err(|why| format!("light {index}: {why}"))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let shadowed: Vec<_> = lights
+        .iter()
+        .filter(|light| light.shadow.is_some())
+        .collect();
+    if shadowed.len() > MAX_SHADOWS {
+        return Err(format!(
+            "{} lights cast shadows, more than the {MAX_SHADOWS} a scene may have",
+            shadowed.len()
+        ));
+    }
+    // the GPU target keeps every map as a layer as big as the largest
+    let views: usize = shadowed.iter().map(|light| light.shadow_views()).sum();
+    let side = shadowed
+        .iter()
+        .filter_map(|light| light.shadow.as_ref())
+        .map(|shadow| u64::from(shadow.resolution))
+        .max()
+        .unwrap_or(0);
+    let texels = views as u64 * side * side;
+    if texels > MAX_SHADOW_TEXELS {
+        return Err(format!(
+            "the shadow maps need {views} maps of {side}² texels, more than {MAX_SHADOW_TEXELS} \
+             texels together (a point light's shadow is 6 maps): lower a :resolution"
+        ));
+    }
+    Ok(lights)
+}
+
+/// One `:lights` entry read into a `mesh::Light` (ADR-788), or why it is not one. Its keys
+/// say its kind: `:position` and `:cone` a spot, `:position` alone a point light, neither a
+/// directional light; a key that kind does not take is refused, as is a value of the wrong
+/// shape.
+///
+/// - directional: `{:direction [x y z] :color [r g b] :shadow …}`, `:direction` required, the
+///   way the light travels.
+/// - point: `{:position [x y z] :color [r g b] :range r :shadow …}`.
+/// - spot: `{:position [x y z] :direction [x y z] :color [r g b] :range r :cone [inner outer]
+///   :shadow …}`, the half-angles in radians, `0 ≤ inner ≤ outer < π/2`.
+///
+/// `:color` (linear, 0 or more; white by default) is a point or spot light's light 1 m away.
+/// `:range` (above 0) windows its falloff to nothing there. `:shadow` is `true`, `false` or a
+/// map of `:resolution` (texels, 16 … 4096), `:bias` and `:normal-bias` (texels, 0 or more),
+/// for a directional light `:extent` (metres, above 0) and `:center [x y z]`, for a spot or
+/// point light `:near` (metres, above 0).
+fn light_spec(
+    heap: &Heap,
+    given: Value,
+    num: &dyn Fn(Value) -> f32,
+) -> Result<crate::host::gui::mesh::Light, String> {
+    use crate::host::gui::mesh::{Light, LightKind, MAX_SHADOW_SIDE, MIN_SHADOW_SIDE, Shadow};
+    let shown = |value: Value| crate::syntax::printer::print(heap, value);
+    let Value::Map(map) = given else {
+        return Err(format!("a light is a map, not {}", shown(given)));
+    };
+    let get = |within, key: &str| heap.map_get(within, value::kw(key));
+    let number = |value: Value| match value {
+        Value::Int(_) | Value::Float(_) | Value::Ratio(_) | Value::Decimal(_) => {
+            Some(num(value)).filter(|number| number.is_finite())
+        }
+        _ => None,
+    };
+    let numbers = |key: &str, value: Value, count: usize| -> Result<Vec<f32>, String> {
+        let parsed = match value {
+            Value::Vector(id) if heap.vector(id).len() == count => heap
+                .vector(id)
+                .iter()
+                .map(|item| number(*item))
+                .collect::<Option<Vec<f32>>>(),
+            _ => None,
+        };
+        parsed.ok_or_else(|| format!(":{key} is {count} numbers, not {}", shown(value)))
+    };
+    let triple = |key: &str, value: Value| {
+        numbers(key, value, 3).map(|values| [values[0], values[1], values[2]])
+    };
+    let positive = |key: &str, value: Value| match number(value) {
+        Some(amount) if amount > 0.0 => Ok(amount),
+        _ => Err(format!(":{key} is a number above 0, not {}", shown(value))),
+    };
+    let kind = match (get(map, "position").is_some(), get(map, "cone").is_some()) {
+        (false, _) => LightKind::Directional,
+        (true, true) => LightKind::Spot,
+        (true, false) => LightKind::Point,
+    };
+    let (name, takes): (&str, &[&str]) = match kind {
+        LightKind::Directional => ("a directional light", &["direction", "color", "shadow"]),
+        LightKind::Point => ("a point light", &["position", "color", "range", "shadow"]),
+        LightKind::Spot => (
+            "a spot light",
+            &["position", "direction", "color", "range", "cone", "shadow"],
+        ),
+    };
+    let mut light = Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0]);
+    light.kind = kind;
+    let mut has_direction = false;
+    for (key, value) in heap.map_entries(map) {
+        let key_name = match key {
+            Value::Keyword(symbol) => value::symbol_name_ref(symbol),
+            _ => "",
+        };
+        if !takes.contains(&key_name) {
+            let hint = match (kind, key_name) {
+                (LightKind::Point, "direction") => " (give it a :cone to make it a spot)",
+                (LightKind::Directional, "range" | "cone") => {
+                    " (give it a :position to make it a point or spot light)"
+                }
+                _ => "",
+            };
+            return Err(format!(
+                "{name} has no {}{hint}; it takes {}",
+                shown(key),
+                takes
+                    .iter()
+                    .map(|key| format!(":{key}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+        }
+        match key_name {
+            "direction" => {
+                let direction = triple("direction", value)?;
+                if direction.iter().all(|axis| *axis == 0.0) {
+                    return Err(":direction must not be [0 0 0]".to_string());
+                }
+                light.direction = direction;
+                has_direction = true;
+            }
+            "position" => light.position = triple("position", value)?,
+            "color" => {
+                let color = triple("color", value)?;
+                if color.iter().any(|channel| *channel < 0.0) {
+                    return Err(format!(":color is 0 or more, not {}", shown(value)));
+                }
+                light.color = color;
+            }
+            "range" => light.range = positive("range", value)?,
+            "cone" => {
+                let cone = numbers("cone", value, 2)?;
+                if !(0.0 <= cone[0] && cone[0] <= cone[1] && cone[1] < std::f32::consts::FRAC_PI_2)
+                {
+                    return Err(format!(
+                        ":cone is [inner outer] half-angles in radians, 0 ≤ inner ≤ outer < π/2, not {}",
+                        shown(value)
+                    ));
+                }
+                light.cone = [cone[0], cone[1]];
+            }
+            _ => {
+                // "shadow"
+                light.shadow = match value {
+                    Value::Bool(false) | Value::Nil => None,
+                    Value::Bool(true) => Some(Shadow::default()),
+                    Value::Map(options) => {
+                        let mut shadow = Shadow::default();
+                        let directional = kind == LightKind::Directional;
+                        for (option, setting) in heap.map_entries(options) {
+                            let option_name = match option {
+                                Value::Keyword(symbol) => value::symbol_name_ref(symbol),
+                                _ => "",
+                            };
+                            match (option_name, directional) {
+                                ("resolution", _) => {
+                                    shadow.resolution = match setting {
+                                        Value::Int(side)
+                                            if (i64::from(MIN_SHADOW_SIDE)
+                                                ..=i64::from(MAX_SHADOW_SIDE))
+                                                .contains(&side) =>
+                                        {
+                                            side as u32
+                                        }
+                                        _ => {
+                                            return Err(format!(
+                                                ":shadow :resolution is a whole number of texels, {MIN_SHADOW_SIDE} … {MAX_SHADOW_SIDE}, not {}",
+                                                shown(setting)
+                                            ));
+                                        }
+                                    }
+                                }
+                                ("bias" | "normal-bias", _) => {
+                                    let amount = number(setting)
+                                        .filter(|amount| *amount >= 0.0)
+                                        .ok_or_else(|| {
+                                            format!(
+                                                ":shadow :{option_name} is 0 or more texels, not {}",
+                                                shown(setting)
+                                            )
+                                        })?;
+                                    if option_name == "bias" {
+                                        shadow.bias = amount;
+                                    } else {
+                                        shadow.normal_bias = amount;
+                                    }
+                                }
+                                ("extent", true) => {
+                                    shadow.extent = Some(positive("extent", setting)?)
+                                }
+                                ("center", true) => {
+                                    shadow.center = Some(triple("center", setting)?)
+                                }
+                                ("near", false) => shadow.near = positive("near", setting)?,
+                                _ => {
+                                    return Err(format!(
+                                        "{name}'s :shadow has no {}; it takes :resolution :bias :normal-bias {}",
+                                        shown(option),
+                                        if directional {
+                                            ":extent :center"
+                                        } else {
+                                            ":near"
+                                        }
+                                    ));
+                                }
+                            }
+                        }
+                        Some(shadow)
+                    }
+                    other => {
+                        return Err(format!(
+                            ":shadow is true, false or a map of options, not {}",
+                            shown(other)
+                        ));
+                    }
+                };
+            }
+        }
+    }
+    if kind != LightKind::Point && !has_direction {
+        return Err(format!("{name} needs a :direction"));
+    }
+    Ok(light)
 }
 
 /// A byte-valued key of a `%gui-mesh` spec: its bytes, or none when the key is absent or nil.
@@ -1787,6 +2078,7 @@ pub(in crate::builtins) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -
     let tags = GuiOpTags::new();
     let mut pass = fragments::FragmentPass::for_window(win);
     let ops = parse_gui_ops(heap, parsed, &tags, &mut pass);
+    tags.refused("%gui-draw")?;
     crate::host::gui::draw(win, ops).map_err(LispError::runtime)?;
     pass.store(win);
     Ok(Value::nil())
@@ -1806,6 +2098,7 @@ pub(in crate::builtins) fn gui_render_frame(
     let tags = GuiOpTags::new();
     let mut pass = fragments::FragmentPass::empty();
     let ops = parse_gui_ops(heap, parsed, &tags, &mut pass);
+    tags.refused("%gui-render-frame")?;
     let image = crate::host::gui::render_frame(ops, spec).map_err(LispError::runtime)?;
     Ok(frame_image_value(heap, image))
 }
@@ -2640,5 +2933,161 @@ mod window_spec_tests {
             vec![(value::kw("present-events"), Value::boolean(true))],
         );
         assert!(on.present_events);
+    }
+}
+
+#[cfg(test)]
+mod gui_scene_light_tests {
+    use super::{GuiOpTags, parse_gui_ops, tagged_ops};
+    use crate::core::heap::Heap;
+    use crate::host::gui::Op;
+    use crate::host::gui::mesh::{LightKind, Scene};
+
+    const CAMERA: &str = "[1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1]";
+
+    /// `[:scene 0 0 8 8 {:camera … :lights <lights>}]` through `%gui-draw`'s parse: the scene,
+    /// or the error `%gui-draw` raises.
+    fn scene_with(lights: &str, material: &str) -> Result<Scene, String> {
+        let mut heap = Heap::new();
+        let source = format!(
+            "[:scene 0 0 8 8 {{:camera {CAMERA} :lights {lights} :draws [{{:mesh 1 :material {material}}}]}}]"
+        );
+        let op = crate::syntax::reader::read_one(&mut heap, &source).expect("reads");
+        let tags = GuiOpTags::new();
+        let ops = parse_gui_ops(
+            &heap,
+            tagged_ops(&heap, vec![op]),
+            &tags,
+            &mut super::fragments::FragmentPass::empty(),
+        );
+        tags.refused("%gui-draw")
+            .map_err(|error| error.to_string())?;
+        match ops.as_slice() {
+            [Op::Scene(scene)] => Ok((**scene).clone()),
+            _ => panic!("{} ops and no refusal", ops.len()),
+        }
+    }
+
+    fn lights(lights: &str) -> Result<Scene, String> {
+        scene_with(lights, "{}")
+    }
+
+    #[test]
+    fn every_light_kind_reads_and_the_old_form_still_does() {
+        let scene = lights(
+            "[{:direction [0 -1 0] :color [1 1 1]}
+              {:position [0 2 0] :color [3 3 3] :range 6}
+              {:position [0 2 0] :direction [0 -1 0] :color [5 4 3] :range 8 :cone [0.3 0.6]
+               :shadow {:resolution 512 :bias 2 :normal-bias 1 :near 0.1}}
+              {:direction [1 -1 0] :shadow {:extent 3 :center [0 1 0]}}
+              {:position [1 1 1] :shadow true}]",
+        )
+        .expect("lights");
+        let kinds: Vec<LightKind> = scene.lights.iter().map(|light| light.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                LightKind::Directional,
+                LightKind::Point,
+                LightKind::Spot,
+                LightKind::Directional,
+                LightKind::Point
+            ]
+        );
+        assert_eq!(scene.lights[1].range, 6.0);
+        assert_eq!(scene.lights[2].cone, [0.3, 0.6]);
+        let spot_shadow = scene.lights[2].shadow.as_ref().expect("a shadow");
+        assert_eq!(
+            (
+                spot_shadow.resolution,
+                spot_shadow.bias,
+                spot_shadow.normal_bias,
+                spot_shadow.near
+            ),
+            (512, 2.0, 1.0, 0.1)
+        );
+        let sun_shadow = scene.lights[3].shadow.as_ref().expect("a shadow");
+        assert_eq!(
+            (sun_shadow.extent, sun_shadow.center),
+            (Some(3.0), Some([0.0, 1.0, 0.0]))
+        );
+        assert!(scene.lights[4].shadow.is_some());
+        assert!(scene.lights[0].shadow.is_none());
+        assert!(
+            scene.draws[0].material.cast_shadow,
+            "a draw casts by default"
+        );
+        let quiet = scene_with("[]", "{:cast-shadow false}").expect("a scene");
+        assert!(!quiet.draws[0].material.cast_shadow);
+    }
+
+    #[test]
+    fn a_malformed_light_is_refused_with_why() {
+        let refused = |spec: &str, why: &str| {
+            let error = lights(spec).expect_err(spec);
+            assert!(
+                error.contains("%gui-draw") && error.contains(why),
+                "{spec}: {error:?} does not say {why:?}"
+            );
+        };
+        refused("{:direction [0 -1 0]}", ":lights is a vector");
+        refused("[[0 -1 0]]", "a light is a map");
+        refused("[{:direction [0 -1 0] :intensity 2}]", "has no :intensity");
+        refused(
+            "[{:position [0 1 0] :direction [0 -1 0]}]",
+            "give it a :cone",
+        );
+        refused("[{:direction [0 -1 0] :range 4}]", "give it a :position");
+        refused("[{:color [1 1 1]}]", "needs a :direction");
+        refused(
+            "[{:position [0 1 0] :cone [0.2 0.4]}]",
+            "needs a :direction",
+        );
+        refused("[{:direction [0 0 0]}]", "must not be [0 0 0]");
+        refused("[{:direction [0 -1]}]", ":direction is 3 numbers");
+        refused(
+            "[{:direction [0 -1 0] :color [1 -1 1]}]",
+            ":color is 0 or more",
+        );
+        refused(
+            "[{:position [0 1 0] :range 0}]",
+            ":range is a number above 0",
+        );
+        refused(
+            "[{:position [0 1 0] :direction [0 -1 0] :cone [0.5 0.3]}]",
+            "0 ≤ inner ≤ outer < π/2",
+        );
+        refused(
+            "[{:position [0 1 0] :direction [0 -1 0] :cone [0.1 1.6]}]",
+            "0 ≤ inner ≤ outer < π/2",
+        );
+        refused(
+            "[{:direction [0 -1 0] :shadow :yes}]",
+            ":shadow is true, false or a map",
+        );
+        refused(
+            "[{:direction [0 -1 0] :shadow {:resolution 8}}]",
+            ":resolution is a whole number",
+        );
+        refused(
+            "[{:direction [0 -1 0] :shadow {:near 0.1}}]",
+            "has no :near",
+        );
+        refused(
+            "[{:position [0 1 0] :shadow {:extent 2}}]",
+            "has no :extent",
+        );
+        refused(
+            "[{:direction [0 -1 0] :shadow {:bias -1}}]",
+            ":bias is 0 or more",
+        );
+        let nine = "{:direction [0 -1 0]} ".repeat(9);
+        refused(&format!("[{nine}]"), "more than the 8");
+        let five = "{:direction [0 -1 0] :shadow true} ".repeat(5);
+        refused(&format!("[{five}]"), "more than the 4");
+        let big = "{:position [0 1 0] :shadow {:resolution 4096}} ".repeat(2);
+        refused(&format!("[{big}]"), "lower a :resolution");
+        let error = scene_with("[]", "{:cast-shadow :no}").expect_err("cast-shadow");
+        assert!(error.contains(":cast-shadow is true or false"), "{error}");
     }
 }

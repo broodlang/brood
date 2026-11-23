@@ -632,19 +632,32 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The mesh shader (ADR-786): morph, skin and transform a vertex; shade a fragment with the
-/// fixed model `host::gui::mesh` writes for the CPU painter (`shade`, `tone`) — keep the two
-/// in step. Writes premultiplied, sRGB-encoded colour, the space the scene's picture is
-/// composited in.
+/// The mesh shader (ADR-786, ADR-788): morph, skin and transform a vertex; shade a fragment
+/// with the fixed model `host::gui::mesh` writes for the CPU painter (`shade`, `tone`,
+/// `light_arrival`, `shadow_visibility`, `sample_shadow`) — keep the two in step. Writes
+/// premultiplied, sRGB-encoded colour, the space the scene's picture is composited in.
+/// `vs_shadow` / `fs_shadow` render a shadow map: the same posing, seen through the shadow
+/// view the instance index names, alpha-tested for a `:cutout` or `:blend` surface.
 pub(super) const MESH_SRC: &str = r#"
-struct Light { direction: vec4<f32>, color: vec4<f32> };
+struct Light {
+    position: vec4<f32>,        // xyz, range (0: no window)
+    direction: vec4<f32>,       // xyz: the way the light travels
+    color: vec4<f32>,           // rgb
+    cone: vec4<f32>,            // cos inner, cos outer, shadow bias, shadow normal bias
+    shadow: vec4<u32>,          // kind (0 directional, 1 point, 2 spot), first view, view count
+};
+struct ShadowView {
+    view_proj: mat4x4<f32>,
+    info: vec4<f32>,            // texel size (at 1 m for a perspective view), resolution
+};
 struct SceneU {
     view_proj: mat4x4<f32>,
     eye: vec4<f32>,
-    lights: array<Light, 4>,
+    lights: array<Light, 8>,
     sky: vec4<f32>,
     ground: vec4<f32>,
-    params: vec4<f32>,          // exposure, light count
+    params: vec4<f32>,          // exposure, light count, shadow layer side
+    shadows: array<ShadowView, 24>,
 };
 struct DrawU {
     model: mat4x4<f32>,
@@ -658,6 +671,8 @@ struct DrawU {
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
+@group(0) @binding(2) var shadow_maps: texture_depth_2d_array;
+@group(0) @binding(3) var shadow_sampler: sampler_comparison;
 @group(1) @binding(0) var<uniform> draw: DrawU;
 @group(2) @binding(0) var<storage, read> morphs: array<vec4<f32>>;
 @group(3) @binding(0) var base_texture: texture_2d<f32>;
@@ -681,8 +696,14 @@ struct VertexOut {
     @location(3) tangent: vec4<f32>,
 };
 
-@vertex
-fn vs_mesh(input: VertexIn) -> VertexOut {
+// a vertex morphed, and the matrix that skins and places it
+struct Posed {
+    matrix: mat4x4<f32>,
+    position: vec3<f32>,
+    normal: vec3<f32>,
+};
+
+fn pose(input: VertexIn) -> Posed {
     var position = input.position;
     var normal = input.normal;
     for (var slot = 0u; slot < draw.morph_info.x; slot = slot + 1u) {
@@ -712,13 +733,19 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
             matrix = draw.model * skin;
         }
     }
-    let world = matrix * vec4<f32>(position, 1.0);
+    return Posed(matrix, position, normal);
+}
+
+@vertex
+fn vs_mesh(input: VertexIn) -> VertexOut {
+    let posed = pose(input);
+    let world = posed.matrix * vec4<f32>(posed.position, 1.0);
     var out: VertexOut;
     out.clip = scene.view_proj * world;
     out.world = world.xyz;
-    out.normal = (matrix * vec4<f32>(normal, 0.0)).xyz;
+    out.normal = (posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz;
     out.uv = input.uv;
-    out.tangent = vec4<f32>((matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz, input.tangent.w);
+    out.tangent = vec4<f32>((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz, input.tangent.w);
     return out;
 }
 
@@ -752,7 +779,111 @@ fn shininess(roughness: f32) -> f32 {
     return clamp(2.0 / (clamped * clamped * clamped * clamped) - 2.0, 1.0, 4096.0);
 }
 
-fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
+// the inverse square, held below a centimetre, windowed to nothing at the range: the CPU's
+// `distance_falloff`
+fn distance_falloff(distance: f32, range: f32) -> f32 {
+    let inverse_square = 1.0 / max(distance * distance, 1e-4);
+    if (range > 0.0) {
+        let ratio = distance / range;
+        let window = clamp(1.0 - ratio * ratio * ratio * ratio, 0.0, 1.0);
+        return inverse_square * window * window;
+    }
+    return inverse_square;
+}
+
+// the CPU's `cone_falloff`, given the cosines of the half-angles
+fn cone_falloff(cos_angle: f32, cos_inner: f32, cos_outer: f32) -> f32 {
+    let amount = clamp((cos_angle - cos_outer) / max(cos_inner - cos_outer, 1e-4), 0.0, 1.0);
+    return amount * amount * (3.0 - 2.0 * amount);
+}
+
+struct Arrival {
+    to_light: vec3<f32>,
+    amount: f32,
+};
+
+// the CPU's `light_arrival`
+fn light_arrival(light: Light, world: vec3<f32>) -> Arrival {
+    if (light.shadow.x == 0u) {
+        return Arrival(safe_normalize(-light.direction.xyz), 1.0);
+    }
+    let toward = light.position.xyz - world;
+    let to_light = safe_normalize(toward);
+    var amount = distance_falloff(length(toward), light.position.w);
+    if (light.shadow.x == 2u) {
+        let axis = safe_normalize(light.direction.xyz);
+        amount = amount * cone_falloff(-dot(to_light, axis), light.cone.x, light.cone.y);
+    }
+    return Arrival(to_light, amount);
+}
+
+// the CPU's `cube_face`: which of a point light's six views sees `offset` from it
+fn cube_face(offset: vec3<f32>) -> u32 {
+    let magnitude = abs(offset);
+    if (magnitude.x >= magnitude.y && magnitude.x >= magnitude.z) {
+        return select(1u, 0u, offset.x >= 0.0);
+    }
+    if (magnitude.y >= magnitude.z) {
+        return select(3u, 2u, offset.y >= 0.0);
+    }
+    return select(5u, 4u, offset.z >= 0.0);
+}
+
+// the CPU's `sample_shadow`: a 3×3 filter of bilinear taps is a 4×4 block of comparisons
+// weighted (1 − f, 1, 1, f) each way, gathered here 2×2 at a time
+fn shadow_sample(view_index: u32, point: vec3<f32>) -> f32 {
+    let view = scene.shadows[view_index];
+    let clip = view.view_proj * vec4<f32>(point, 1.0);
+    if (!(clip.w > 1e-6)) {
+        return 1.0;
+    }
+    let depth = clip.z / clip.w;
+    let unit = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+    if (!(depth >= 0.0 && depth <= 1.0 && unit.x >= 0.0 && unit.x <= 1.0 && unit.y >= 0.0 && unit.y <= 1.0)) {
+        return 1.0;
+    }
+    let texels = unit * view.info.y - vec2<f32>(0.5);
+    let corner = floor(texels);
+    let fraction = texels - corner;
+    let weights_x = vec4<f32>(1.0 - fraction.x, 1.0, 1.0, fraction.x);
+    let weights_y = vec4<f32>(1.0 - fraction.y, 1.0, 1.0, fraction.y);
+    let layer_side = scene.params.z;
+    var lit = 0.0;
+    for (var block_y = 0u; block_y < 2u; block_y = block_y + 1u) {
+        for (var block_x = 0u; block_x < 2u; block_x = block_x + 1u) {
+            // the block whose top-left texel is (corner − 1 + 2 block): gathered where its four
+            // texels meet, so no rounding picks a neighbour
+            let meet = corner + vec2<f32>(f32(2u * block_x), f32(2u * block_y));
+            let gathered = textureGatherCompare(shadow_maps, shadow_sampler, meet / layer_side, i32(view_index), depth);
+            let left = weights_x[2u * block_x];
+            let right = weights_x[2u * block_x + 1u];
+            let top = weights_y[2u * block_y];
+            let bottom = weights_y[2u * block_y + 1u];
+            // a gather's order: (left, bottom), (right, bottom), (right, top), (left, top)
+            lit = lit + gathered.x * left * bottom + gathered.y * right * bottom
+                + gathered.z * right * top + gathered.w * left * top;
+        }
+    }
+    return lit / 9.0;
+}
+
+// the CPU's `shadow_visibility`: the receiver moved toward the light and along its surface's
+// normal by the light's biases, in texels where it stands, then filtered
+fn shadow_visibility(light: Light, world: vec3<f32>, surface_normal: vec3<f32>, to_light: vec3<f32>) -> f32 {
+    var at = light.shadow.y;
+    if (light.shadow.z == 6u) {
+        at = at + cube_face(world - light.position.xyz);
+    }
+    let view = scene.shadows[at];
+    let texel = view.info.x * max((view.view_proj * vec4<f32>(world, 1.0)).w, 0.0);
+    let facing = clamp(abs(dot(surface_normal, to_light)), 1e-3, 1.0);
+    let slope = min(sqrt(max(1.0 - facing * facing, 0.0)) / facing, 4.0);
+    let toward = light.cone.z * texel * (1.0 + slope);
+    let along = light.cone.w * texel;
+    return shadow_sample(at, world + surface_normal * along + to_light * toward);
+}
+
+fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>) -> vec3<f32> {
     let up = normal.y * 0.5 + 0.5;
     var out = base * mix(scene.ground.rgb, scene.sky.rgb, up);
     let exponent = shininess(draw.material.x);
@@ -760,7 +891,12 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
     let count = u32(scene.params.y);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let light = scene.lights[slot];
-        let to_light = safe_normalize(-light.direction.xyz);
+        let arrival = light_arrival(light, world);
+        var arriving = arrival.amount;
+        if (light.shadow.z > 0u) {
+            arriving = arriving * shadow_visibility(light, world, surface_normal, arrival.to_light);
+        }
+        let to_light = arrival.to_light;
         let facing = dot(normal, to_light);
         let lambert = max(facing, 0.0);
         let half_vector = safe_normalize(to_light + view);
@@ -771,7 +907,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
             let wrapped = clamp((facing + wrap) / (1.0 + wrap), 0.0, 1.0);
             diffuse = vec3<f32>(lambert) + draw.scatter.rgb * (wrapped - lambert);
         }
-        out = out + light.color.rgb * (base * diffuse + vec3<f32>(specular));
+        out = out + light.color.rgb * arriving * (base * diffuse + vec3<f32>(specular));
     }
     let rim = draw.material.z * pow(1.0 - max(dot(normal, view), 0.0), 3.0);
     return out + rim * scene.sky.rgb;
@@ -808,6 +944,8 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location
     if (!front) {
         normal = -normal;
     }
+    // the shadow lookups move the receiver along the surface's own normal, not the normal map's
+    let surface_normal = normal;
     if ((draw.flags.y & 4u) != 0u) {
         let tangent = safe_normalize(fragment.tangent.xyz);
         let bitangent = cross(normal, tangent);
@@ -816,7 +954,32 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location
         normal = safe_normalize(tangent * local.x + sign * bitangent * local.y + normal * local.z);
     }
     let view = safe_normalize(scene.eye.xyz - fragment.world);
-    let lit = tone(shade(base, normal, view), scene.params.x);
+    let lit = tone(shade(base, normal, view, fragment.world, surface_normal), scene.params.x);
     return vec4<f32>(lit * alpha, alpha);
+}
+
+struct ShadowOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> ShadowOut {
+    let posed = pose(input);
+    var out: ShadowOut;
+    out.clip = scene.shadows[view_index].view_proj * (posed.matrix * vec4<f32>(posed.position, 1.0));
+    out.uv = input.uv;
+    return out;
+}
+
+// a `:cutout` or `:blend` surface casts only where its alpha reaches its cutoff, as the CPU's
+// `render_shadow_map` tests it
+@fragment
+fn fs_shadow(fragment: ShadowOut) {
+    let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
+    let alpha = select(1.0, base_texel.a, (draw.flags.y & 1u) != 0u) * draw.color.a;
+    if ((draw.flags.x == 2u || draw.flags.x == 3u) && alpha < draw.material.w) {
+        discard;
+    }
 }
 "#;

@@ -967,10 +967,14 @@ code paints to a terminal or a GUI window unchanged.
   crisp); upload a painted or photographic one with `{:filter :smooth}` so it stays clean
   drawn scaled or turned (ADR-783). The engine above them is the `b2d` package (ADR-374).
 - **3D (games)** = `[:scene x y w h spec]`: meshes uploaded once with `gui/mesh` (glTF-style
-  attribute bytes) drawn into a pixel rect with a camera matrix, directional lights, the
+  attribute bytes) drawn into a pixel rect with a camera matrix, up to 8 lights — directional
+  `{:direction}`, point `{:position :range}` (`:color` is the light 1 m away, inverse-square
+  falloff), spot `{:position :direction :range :cone [inner outer]}` — and `:shadow true` (or
+  `{:resolution :bias :normal-bias …}`) on up to 4 of them for PCF shadow maps (ADR-788), the
   skeletons' joint palettes and a fixed material model (`:skin`, `:standard`, `:cutout`,
-  `:blend`), composited in op order — 2D before it is behind, after it in front (ADR-786).
-  Both window painters draw it; the browser tab does not yet.
+  `:blend`, `:cast-shadow`), composited in op order — 2D before it is behind, after it in
+  front (ADR-786). A malformed light raises from `gui/draw`. Both window painters draw it;
+  the browser tab does not yet.
 - **A picture** (a page, a photo) = `(editor/display/image row col w h source opts)`: PNG / JPEG
   bytes in a cell block, painted at full pixel resolution by both window painters and in
   half-block cells by a terminal (pixels through the kitty graphics protocol where the terminal
