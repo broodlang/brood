@@ -433,7 +433,7 @@ pub(crate) struct ColdHeap {
     /// underneath it must not be journalled as well.
     pub(crate) journal_suppressed: bool,
     /// Source position of LOCAL list forms, keyed by [`form_pos_key`].
-    pub(crate) form_pos: HashMap<u64, FormPos>,
+    pub(crate) form_pos: crate::core::hashing::FastMap<u64, FormPos>,
     /// The file currently being `load`ed, exposed via `(current-file)`.
     pub(crate) current_file: Option<String>,
     /// `current_file` pre-shared as an `Arc<str>`, kept in step by

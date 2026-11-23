@@ -879,14 +879,22 @@ pub enum Op {
         align: Align,
     },
     /// Play sound `id` (a handle `gui-sound` uploaded under) once, at peak amplitude
-    /// `vol` (0..1). A sound is an op of the frame that carries it, so it rides the display
-    /// seam like a texture does: the window that draws the frame plays it — the app's own
-    /// window, a thin client's over the wire, or a browser tab — and a headless test sees
-    /// it in the frame. Fired when the frame is DRAWN (once per `gui-draw`), not on
-    /// every repaint. Draws nothing; the terminal ignores it.
+    /// `vol` (0..1), placed by `pan` between the left (-1) and right (1) speakers (0, the
+    /// centre, plays it as uploaded). A sound is an op of the frame that carries it, so it
+    /// rides the display seam like a texture does: the window that draws the frame plays
+    /// it — the app's own window, a thin client's over the wire, or a browser tab — and a
+    /// headless test sees it in the frame. Fired when the frame is DRAWN (once per
+    /// `gui-draw`), not on every repaint. With a `key` it is an edge, not an event: it
+    /// plays only when neither the frame before nor an earlier op of this frame carries
+    /// the same handle and key, so an app that draws one game step on several frames
+    /// (a present-paced loop at 144 Hz) or keeps a sound in its frames for a while (so a
+    /// skipped step loses nothing) hears it once (ADR-777). Draws nothing; the terminal
+    /// ignores it.
     Sound {
         id: u32,
         vol: f32,
+        pan: f32,
+        key: Option<i64>,
     },
     /// Keep sound `id` LOOPING at peak amplitude `vol` (0..1) for as long as the frames
     /// drawn carry this op — a game's music. Where `Sound` is an event, `Music` is state:
@@ -896,6 +904,18 @@ pub enum Op {
     /// it draws. The first `Music` op of a frame wins. Draws nothing; the terminal
     /// ignores it.
     Music {
+        id: u32,
+        vol: f32,
+    },
+    /// Keep sound `id` LOOPING at peak amplitude `vol` (0..1) for as long as the frames
+    /// drawn carry this op — a layer of ambience (wind, birdsong, a waterfall). State like
+    /// `Music`, but LAYERED: every `Ambience` op of a frame keeps its own sound going, side
+    /// by side with the others and with the music, keyed by handle — the same handle again
+    /// fades to its new `vol`, and a layer the next frame leaves out fades out. So a game
+    /// crossfades two takes of a loop (a dry and a fog-muffled one) by their volumes, and
+    /// a thin client hears every layer from the next frame it draws. The first op for a
+    /// handle in a frame wins. Draws nothing; the terminal ignores it (ADR-777).
+    Ambience {
         id: u32,
         vol: f32,
     },

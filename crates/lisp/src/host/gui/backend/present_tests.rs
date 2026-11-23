@@ -49,3 +49,15 @@ fn the_stamp_is_wall_clock_nanoseconds_and_monotonic() {
         "{first_ns} is not near the wall clock's {wall}"
     );
 }
+
+/// The refresh an app snaps its present times to is re-read once a second while known, and
+/// every few paints while the platform has not said yet — a Wayland window before it is
+/// mapped — so a game's first second is not paced blind.
+#[test]
+fn an_unknown_refresh_is_asked_again_soon() {
+    let ms = Duration::from_millis;
+    assert!(!refresh_reread_due(ms(20), false));
+    assert!(refresh_reread_due(ms(50), false));
+    assert!(!refresh_reread_due(ms(500), true));
+    assert!(refresh_reread_due(ms(1000), true));
+}

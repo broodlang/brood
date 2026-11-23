@@ -24,17 +24,19 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
 
 ;; The on-disk format: bump when the entry shape changes; an older file is simply ignored and
 ;; rebuilt. Line 1 is `(brood-module-index VERSION)`, then one
-;; `("path" size mtime (mods…) own-or-nil (requires…) (refs…) (mentions…))` per file — every `defmodule`
+;; `("path" size mtime (mods…) own-or-nil (requires…) (refs…) (mentions…) (defs…))` per file — every `defmodule`
 ;; the file opens, its own module name as the checker reads it, the modules it directly
 ;; requires, the module prefixes its qualified references name, and the wider lexical set of
 ;; every qualified token in its text (the requires and refs are in the entry so `nest check`
 ;; learns the require graph, and what its preload must load, from the index rather than
 ;; re-parsing every file for them; the mentions are the project image's dependency evidence
-;; for a partial rebuild, ADR-419). v3 added the refs, v4 the mentions.
-(def *index-version* 4)
+;; for a partial rebuild, ADR-419; the defs, every global the file's top-level def forms bind,
+;; are the duplicate-def lint's input, so a warm `nest run` pre-flight parses nothing,
+;; ADR-779). v3 added the refs, v4 the mentions, v5 the defs.
+(def *index-version* 5)
 
 ;; The in-process view of each root's index: `root -> {path -> [size mtime modules own requires
-;; refs mentions]}`. A
+;; refs mentions defs]}`. A
 ;; root's map is read from disk the first time that root is asked about and written back
 ;; whenever a query parsed anything. A cache and nothing more — every answer is
 ;; stat-validated, so a lost update between two processes (or two green processes of one
@@ -53,11 +55,12 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
     (module-index/index-path nil)   ;=> nil"
   (when root (path/join root *index-file*)))
 
-;; One parse of a file, as the entry's tail `[modules own requires refs mentions]`: every
+;; One parse of a file, as the entry's tail `[modules own requires refs mentions defs]`: every
 ;; `(defmodule NAME …)` it declares in source order (symbols), its own module name (a string, as
 ;; the checker reads it), the modules it directly requires (strings, sorted), the module
 ;; prefixes its qualified references name and those of every qualified token in its text
-;; (strings, sorted). `[nil nil [] [] []]` when the
+;; (strings, sorted), and every global its top-level def forms bind (qualified strings, in
+;; source order). `[nil nil [] [] [] []]` when the
 ;; file cannot be read or parsed — the file is then treated as declaring nothing and the
 ;; load surfaces the real error, which is `project-file-feature`'s tolerance too.
 (defn- scan-file (file)
@@ -69,8 +72,9 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
           (get info :module)
           (vec (get info :requires))
           (vec (get info :refs))
-          (vec (get info :mentions))])
-      (catch _ [nil nil [] [] []]))))
+          (vec (get info :mentions))
+          (vec (get info :defs))])
+      (catch _ [nil nil [] [] [] []]))))
 
 ;; The index file as the memo map, or `{}` when absent, unreadable, corrupt or of another
 ;; version — every one of those is "start empty", and the next write repairs it.
@@ -92,7 +96,8 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
                       (nth e 4)
                       (vec (nth e 5))
                       (vec (nth e 6))
-                      (vec (nth e 7))])
+                      (vec (nth e 7))
+                      (vec (nth e 8))])
                 m)))
           {}))
       (catch _ {}))))
@@ -113,7 +118,8 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
                                  (get e 3)
                                  (seq (get e 4))
                                  (seq (get e 5))
-                                 (seq (get e 6)))))))
+                                 (seq (get e 6))
+                                 (seq (get e 7)))))))
       "\n")
     "\n"))
 
@@ -150,11 +156,11 @@ absolute paths). Best-effort on disk: a read-only tree costs a parse, never a wr
       (or (list string) (vector string) nil)
       ->
       (map string (or vector nil)))
-  "The index entry of each of `files` — a map `file -> [modules own requires refs mentions]`:
+  "The index entry of each of `files` — a map `file -> [modules own requires refs mentions defs]`:
 every module symbol the file declares (nil for none), its own module name as a string (nil
 for none), the module names it directly requires, the module prefixes its qualified
-references name, and the prefixes of every qualified token in its text (vectors of
-strings). Every key present. Served from
+references name, the prefixes of every qualified token in its text, and every global its
+top-level def forms bind (vectors of strings). Every key present. Served from
 `root`'s module index for every file whose size and mtime still match its entry; the rest are
 parsed, recorded, and the index rewritten. `root` nil keeps the memo in this process and
 writes nothing. A file that no longer exists maps to nil and is neither counted nor recorded.
@@ -174,13 +180,14 @@ writes nothing. A file that no longer exists maps to nil and is neither counted 
                         mtime (get state :mtime)
                         e (get entries file))
                     (if (and e (= (get e 0) size) (= (get e 1) mtime))
-                      [(assoc result file [(get e 2) (get e 3) (get e 4) (get e 5) (get e 6)])
+                      [(assoc result
+                         file [(get e 2) (get e 3) (get e 4) (get e 5) (get e 6) (get e 7)])
                         entries
                         (+ hits 1)
                         parsed]
-                      (let ([mods own reqs refs mentions] (scan-file file))
-                        [(assoc result file [mods own reqs refs mentions])
-                          (assoc entries file [size mtime mods own reqs refs mentions])
+                      (let ([mods own reqs refs mentions defs] (scan-file file))
+                        [(assoc result file [mods own reqs refs mentions defs])
+                          (assoc entries file [size mtime mods own reqs refs mentions defs])
                           hits
                           (+ parsed 1)])))))))
         [result entries hits parsed] r)
@@ -247,6 +254,23 @@ module.
   (fold (%map-pairs (index-entries root files))
     {}
     (fn (m entry) (let ([f e] entry) (assoc m f (if e (get e 4) nil))))))
+
+(defn defs-of
+  (root:
+      (or string nil)
+    files:
+      (or (list string) (vector string) nil)
+      ->
+      (map string (or vector nil)))
+  "Every global each of `files` binds with a top-level def form — a map `file -> [name …]`
+of qualified names in source order, every key present (nil for a file that cannot be read).
+The duplicate-def lint's input: answered from the index, so an unchanged project's lint
+opens no source file.
+
+    (module-index/defs-of nil (list \"/no/such/file.blsp\"))   ;=> {\"/no/such/file.blsp\" nil}"
+  (fold (%map-pairs (index-entries root files))
+    {}
+    (fn (m entry) (let ([f e] entry) (assoc m f (if e (get e 5) nil))))))
 
 (defn modules-of (root: (or string nil) file:string -> (or (list symbol) nil))
   "Every `(defmodule NAME …)` the source file declares, in source order, as symbols — from

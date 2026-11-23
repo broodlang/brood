@@ -95,7 +95,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], any),
         &["path"],
-        "Parse the file at path (no eval) and return `{:module <name-or-nil> :requires [<module-name> …] :modules (<sym> …)}` — its own module name, the modules it directly `:use`s / `:use-internals` / `(require …)`s, and every `(defmodule …)` it opens in source order (ADR-223). The edge list `project.blsp` closes transitively into each file's check-file reachability set (KI-17); the module index (ADR-380) caches the whole answer per file.",
+        "Parse the file at path (no eval) and return `{:module <name-or-nil> :requires [<module-name> …] :modules (<sym> …)}` — its own module name, the modules it directly `:use`s / `:use-internals` / `(require …)`s, and every `(defmodule …)` it opens in source order (ADR-223); also `:refs` and `:mentions` (the module prefixes its qualified references and tokens name) and `:defs` (every global its top-level def forms bind, qualified). The edge list `project.blsp` closes transitively into each file's check-file reachability set (KI-17); the module index (ADR-380) caches the whole answer per file.",
         module_direct_requires);
     primitives.def(
         "%check-walk-flags",
@@ -495,7 +495,9 @@ fn required_mods_arg(heap: &Heap, v: Value) -> Vec<String> {
 /// every qualified token anywhere in the text — code, quoted data, keywords, comments and the
 /// insides of strings — which the project image's partial rebuild reads as "this file may
 /// depend on that module" (ADR-419). Over-approximating costs a reload, never a stale value.
-/// `std/tool/project.blsp` builds the require graph from these and closes it transitively
+/// `:defs` is every global the file's top-level `def`-family forms bind, qualified, in source
+/// order — the duplicate-def lint's input, read from the module index so a warm `nest run`
+/// pre-flight parses no source file (ADR-779). `std/tool/project.blsp` builds the require graph from these and closes it transitively
 /// into each file's `check-file` reachability set (KI-17). Reads, never evaluates.
 pub(super) fn module_direct_requires(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "%module-direct-requires", arg(args, 0))?;
@@ -542,17 +544,24 @@ pub(super) fn module_direct_requires(args: &[Value], _env: EnvId, heap: &mut Hea
         .map(|m| heap.alloc_string(m))
         .collect();
     let mentions_val = heap.alloc_vector(mention_vals);
+    let def_vals: Vec<Value> = super::source::top_level_definitions(heap, &just_forms)
+        .iter()
+        .map(|definition| heap.alloc_string(&definition.qualified))
+        .collect();
+    let defs_val = heap.alloc_vector(def_vals);
     let module_kw = Value::keyword(value::intern("module"));
     let requires_kw = Value::keyword(value::intern("requires"));
     let modules_kw = Value::keyword(value::intern("modules"));
     let refs_kw = Value::keyword(value::intern("refs"));
     let mentions_kw = Value::keyword(value::intern("mentions"));
+    let defs_kw = Value::keyword(value::intern("defs"));
     Ok(heap.map_from_pairs(vec![
         (module_kw, module_val),
         (requires_kw, requires_val),
         (modules_kw, modules_val),
         (refs_kw, refs_val),
         (mentions_kw, mentions_val),
+        (defs_kw, defs_val),
     ]))
 }
 

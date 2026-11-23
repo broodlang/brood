@@ -325,8 +325,8 @@ not open needs."
 
 (defn display-sound (display pcm rate &optional channels)
   "Keep a sound through `display` — a `gui-display` or a served app's `remote-display`
-(the thin client's window, over the wire) — and return its handle, for a `[:sound snd vol]`
-or `[:music snd vol]` frame op. `pcm` is interleaved PCM16 little-endian samples at `rate` Hz, `channels` 1
+(the thin client's window, over the wire) — and return its handle, for a `[:sound snd vol pan key]`,
+`[:music snd vol]` or `[:ambience snd vol]` frame op. `pcm` is interleaved PCM16 little-endian samples at `rate` Hz, `channels` 1
 (default) or 2. The handle comes from `gui/alloc-sound`; a display without a `:sound`
 entry (the terminal) accepts and ignores the upload.
 

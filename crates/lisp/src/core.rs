@@ -4,6 +4,7 @@
 
 pub mod alloc;
 pub mod blob;
+pub mod hashing; // the fast seeded hasher for the kernel's hot tables
 pub mod heap;
 pub mod keywords;
 pub mod map_champ;

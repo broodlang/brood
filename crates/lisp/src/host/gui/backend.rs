@@ -29,6 +29,8 @@ mod present_tests;
 mod primitives;
 mod render;
 mod rows;
+#[cfg(test)]
+mod sound_tests;
 mod wheel;
 #[cfg(test)]
 mod wheel_tests;
@@ -472,6 +474,66 @@ fn reconcile_music(w: &mut Win, ops: &[Op]) {
     }
 }
 
+/// Make window `w`'s ambience what the frame `ops` asks for: every `[:ambience …]` op's
+/// sound looping at that op's volume, side by side — a layer already playing kept (only
+/// its volume set), a new one started, and one the frame leaves out (or names a sound
+/// this window does not hold) faded out. The first op for a handle wins.
+fn reconcile_ambience(w: &mut Win, ops: &[Op]) {
+    let mut wanted: Vec<(u32, f32)> = Vec::new();
+    for op in ops {
+        if let Op::Ambience { id, vol } = op
+            && w.sounds.contains_key(id)
+            && !wanted.iter().any(|(snd, _)| snd == id)
+        {
+            wanted.push((*id, *vol));
+        }
+    }
+    w.ambience
+        .retain(|snd, _| wanted.iter().any(|(wanted_snd, _)| wanted_snd == snd));
+    for (snd, vol) in wanted {
+        match w.ambience.get(&snd) {
+            Some(layer) => layer.set_volume(vol),
+            None => {
+                if let Some(layer) = crate::host::audio::music(&w.sounds[&snd], vol) {
+                    w.ambience.insert(snd, layer);
+                }
+            }
+        }
+    }
+}
+
+/// The one-shot sounds a frame `ops` plays when it arrives after `previous`, as
+/// `(handle, vol, pan)`: every `[:sound …]` op of a sound the window holds — except a
+/// KEYED one whose handle and key `previous` or an earlier op of `ops` already carried,
+/// which is a sound still being played, not a new one (ADR-777).
+fn sounds_to_play(
+    sounds: &HashMap<u32, std::sync::Arc<crate::host::audio::SoundData>>,
+    previous: &[Op],
+    ops: &[Op],
+) -> Vec<(u32, f32, f32)> {
+    let keyed_in = |frame: &[Op], snd: u32, key: i64| {
+        frame.iter().any(|op| {
+            matches!(op, Op::Sound { id, key: Some(other), .. } if *id == snd && *other == key)
+        })
+    };
+    let mut playing = Vec::new();
+    for (index, op) in ops.iter().enumerate() {
+        let Op::Sound { id, vol, pan, key } = op else {
+            continue;
+        };
+        if !sounds.contains_key(id) {
+            continue;
+        }
+        if let Some(key) = key
+            && (keyed_in(previous, *id, *key) || keyed_in(&ops[..index], *id, *key))
+        {
+            continue;
+        }
+        playing.push((*id, *vol, *pan));
+    }
+    playing
+}
+
 struct Win {
     window: Rc<Window>,
     backend: Backend,
@@ -489,6 +551,9 @@ struct Win {
     /// playing loop, which fades out when dropped — with the window, or by a frame
     /// without it.
     music: Option<(u32, crate::host::audio::Music)>,
+    /// The ambience the frames on screen keep looping (`[:ambience …]`), by handle: each
+    /// layer fades out when dropped — with the window, or by a frame without it.
+    ambience: HashMap<u32, crate::host::audio::Music>,
     frame: Vec<Op>,
     /// `frame` with its edge backgrounds continued over the margin (`bleed`), built once
     /// per frame and window geometry, so a repaint (a caret blink, an expose) reuses it.
@@ -968,6 +1033,24 @@ pub(super) fn period_of(millihertz: Option<u32>) -> Duration {
 /// panels at one scale sends no event, and on some platforms the read is a driver query, too
 /// dear for every paint.
 const FRAME_PERIOD_REREAD: Duration = Duration::from_secs(1);
+
+/// How often a window re-reads its monitor's refresh while it does not know it yet: a
+/// Wayland window learns its monitor only once the compositor maps it (`wl_surface.enter`),
+/// after its first frames, and an app pacing itself by `[:presented t-ns]` (b2d) cannot snap
+/// its frame times to the refresh until it knows it. Measured on GNOME: a full second of
+/// timer-paced, jittering frames at every start while it waited out `FRAME_PERIOD_REREAD`.
+const FRAME_PERIOD_PROBE: Duration = Duration::from_millis(50);
+
+/// Whether a paint `since` the last read of the refresh reads it again: once a second, or
+/// every `FRAME_PERIOD_PROBE` while the platform has not said (`known` false).
+pub(super) fn refresh_reread_due(since: Duration, known: bool) -> bool {
+    let period = if known {
+        FRAME_PERIOD_REREAD
+    } else {
+        FRAME_PERIOD_PROBE
+    };
+    since >= period
+}
 
 /// Recompute `(cols, rows)` from the window's physical size and the cell
 /// metrics, and publish it for `gui-size`.

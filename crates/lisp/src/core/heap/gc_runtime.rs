@@ -6,6 +6,7 @@
 //! collector, so they live on their own. Reaches `Heap`'s private items via
 //! `use super::*`, exactly like `gc.rs`.
 use super::*;
+use crate::core::hashing::FastSet;
 
 /// Which slab a RUNTIME cell lives in, for the drain probe's `visited` set: each slab
 /// numbers its cells from 0, so a cell is its slab, its generation and its index.
@@ -20,7 +21,7 @@ enum SlabKind {
 }
 
 /// The RUNTIME cells a drain probe has read: `(slab, generation, index)`.
-type Visited = HashSet<(SlabKind, usize, usize)>;
+type Visited = FastSet<(SlabKind, usize, usize)>;
 
 impl Heap {
     /// Number of closures in the shared, append-only RUNTIME region. For
@@ -73,7 +74,7 @@ impl Heap {
     /// so for a multi-process runtime this `live` is a lower bound (`reclaimable` an
     /// upper bound) — adequate for a leak estimate, not for an actual collector.
     pub fn runtime_live_closure_count(&self) -> usize {
-        let mut visited: HashSet<usize> = HashSet::new();
+        let mut visited: FastSet<usize> = FastSet::default();
         let mut work: Vec<Value> = Vec::new();
         // Seed: every global binding value + this process's in-flight operand roots +
         // its delivered-message (L1) slots, which can park a shared RUNTIME closure.
@@ -754,8 +755,8 @@ impl Heap {
         if self.runtime.gens[generation].load().is_empty() {
             return false;
         }
-        let mut visited: Visited = HashSet::new();
-        let mut visited_env: HashSet<(usize, usize)> = HashSet::new();
+        let mut visited: Visited = FastSet::default();
+        let mut visited_env: FastSet<(usize, usize)> = FastSet::default();
         let mut work: Vec<Value> = Vec::new();
         let mut env_work: Vec<EnvId> = Vec::new();
 
@@ -862,8 +863,8 @@ impl Heap {
         }
         // `visited` keys on (gen, index): the two generations share one index space,
         // so a bare slab index would conflate gen-0 #5 with gen-1 #5.
-        let mut visited: Visited = HashSet::new();
-        let mut visited_env: HashSet<(usize, usize)> = HashSet::new();
+        let mut visited: Visited = FastSet::default();
+        let mut visited_env: FastSet<(usize, usize)> = FastSet::default();
         let mut work: Vec<Value> = Vec::new();
         let mut env_work: Vec<EnvId> = Vec::new();
         self.seed_phase1_and_walk(
@@ -897,7 +898,7 @@ impl Heap {
         work: &mut Vec<Value>,
         env_work: &mut Vec<EnvId>,
         visited: &mut Visited,
-        visited_env: &mut HashSet<(usize, usize)>,
+        visited_env: &mut FastSet<(usize, usize)>,
     ) -> bool {
         // --- Shared roots: globals + declared `(sig …)` type-exprs. Skipped by the
         // private probe (the drain self-report) — see `runtime_gen_referenced_private`. ---
@@ -957,7 +958,7 @@ impl Heap {
     /// Queue every RUNTIME literal the compiled arms live on this process's stack embed,
     /// each distinct arm once.
     fn push_live_arm_handles(&self, work: &mut Vec<Value>) {
-        let mut seen_arms: HashSet<*const crate::eval::compile::CompiledArm> = HashSet::new();
+        let mut seen_arms: FastSet<*const crate::eval::compile::CompiledArm> = FastSet::default();
         for arm in self.live_vm_arms.iter() {
             if !seen_arms.insert(Arc::as_ptr(arm.arc())) {
                 continue;
@@ -980,8 +981,8 @@ impl Heap {
             generation,
             &mut work,
             &mut Vec::new(),
-            &mut Visited::new(),
-            &mut HashSet::new(),
+            &mut Visited::default(),
+            &mut FastSet::default(),
         )
     }
 
@@ -999,7 +1000,7 @@ impl Heap {
         work: &mut Vec<Value>,
         env_work: &mut Vec<EnvId>,
         visited: &mut Visited,
-        visited_env: &mut HashSet<(usize, usize)>,
+        visited_env: &mut FastSet<(usize, usize)>,
     ) -> bool {
         // `true` when `v` is in the draining generation; a RUNTIME handle elsewhere queued
         let mut note = |v: Value| match runtime_gen_of(v) {
@@ -1074,7 +1075,7 @@ impl Heap {
         work: &mut Vec<Value>,
         env_work: &mut Vec<EnvId>,
         visited: &mut Visited,
-        visited_env: &mut HashSet<(usize, usize)>,
+        visited_env: &mut FastSet<(usize, usize)>,
     ) -> bool {
         // --- Transitive walk. Detect generation `gen`; follow every RUNTIME sub-handle
         // (a gen-current closure can embed a gen-`gen` handle in a body/env). ---
@@ -1539,7 +1540,7 @@ impl Heap {
         // which is exactly why it went unnoticed: a compaction landing on a deep process just
         // took much longer than it needed to. That is the KI-14 shape, in the sibling walk
         // that never got the fix.
-        let mut seen_arms: HashSet<*const crate::eval::compile::CompiledArm> = HashSet::new();
+        let mut seen_arms: FastSet<*const crate::eval::compile::CompiledArm> = FastSet::default();
         for arm in self.live_vm_arms.iter() {
             if !seen_arms.insert(Arc::as_ptr(arm.arc())) {
                 continue;

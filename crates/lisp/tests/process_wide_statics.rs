@@ -94,7 +94,10 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("host/net.rs", "STARTING", OneMachine),
     // One audio thread owns the output device for the whole OS process.
     ("host/audio.rs", "STARTING", OneMachine),
-    ("builtins/filesystem.rs", "LOCK", OneMachine),
+    // uid → user name and gid → group name, read from the OS's account database — the OS
+    // process's, whichever runtime asks. Their locks also serialise libc's static buffer.
+    ("builtins/filesystem.rs", "USER_NAMES", OneMachine),
+    ("builtins/filesystem.rs", "GROUP_NAMES", OneMachine),
     // A signal and its disposition belong to the OS process, and so does a trap of one.
     ("builtins/os.rs", "SIGNAL_TRAPS", OneMachine),
     // The allocator's count, and so the soft memory limit, is the OS process's.

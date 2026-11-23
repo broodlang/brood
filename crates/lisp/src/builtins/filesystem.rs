@@ -1532,45 +1532,58 @@ pub(super) fn file_locked(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     }))
 }
 
-/// The user name for `uid` via `getpwuid`, or `None` if it doesn't resolve. The libc
-/// call returns a pointer into a shared static buffer, so a process-wide lock serialises
-/// our calls (Brood schedules green processes across OS threads); the name is copied out
-/// before the lock drops. `None` off unix.
+/// The user name for `uid` via `getpwuid`, or `None` if it doesn't resolve. `None` off unix.
+///
+/// **Memoised per OS process.** `getpwuid` reads and parses `/etc/passwd` on every call, and
+/// `file/stat` answers `:owner` for every file it stats: the module index stats each source
+/// file on every warm `nest run`, so the passwd parse was a measurable slice of bedit's warm
+/// start. A name changing under a running process is the one case the memo answers stale,
+/// as `ls` does. The libc call returns a pointer into a shared static buffer, so the memo's
+/// lock also serialises the calls (Brood schedules green processes across OS threads); the
+/// name is copied out before the lock drops.
 #[cfg(unix)]
 pub(super) fn uid_name(uid: u32) -> Option<String> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _g = crate::core::sync::lock(&LOCK);
-    // SAFETY: `getpwuid`'s result points into libc's static buffer, which only another
-    // `getpwuid` call can overwrite — and every one in this process holds `LOCK`. The name
-    // is copied out before the guard drops.
-    unsafe {
-        let pw = libc::getpwuid(uid as libc::uid_t);
-        if pw.is_null() {
-            return None;
-        }
-        std::ffi::CStr::from_ptr((*pw).pw_name)
-            .to_str()
-            .ok()
-            .map(|s| s.to_string())
-    }
+    static USER_NAMES: std::sync::Mutex<std::collections::BTreeMap<u32, Option<String>>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let mut names = crate::core::sync::lock(&USER_NAMES);
+    names
+        .entry(uid)
+        // SAFETY: `getpwuid`'s result points into libc's static buffer, which only another
+        // `getpwuid` call can overwrite — and every one in this process holds `USER_NAMES`.
+        // The name is copied out before the guard drops.
+        .or_insert_with(|| unsafe {
+            let pw = libc::getpwuid(uid as libc::uid_t);
+            if pw.is_null() {
+                return None;
+            }
+            std::ffi::CStr::from_ptr((*pw).pw_name)
+                .to_str()
+                .ok()
+                .map(|s| s.to_string())
+        })
+        .clone()
 }
 
-/// The group name for `gid` via `getgrgid` (see `uid_name` for the locking note).
+/// The group name for `gid` via `getgrgid`, memoised like `uid_name` and for the same reason.
 #[cfg(unix)]
 pub(super) fn gid_name(gid: u32) -> Option<String> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _g = crate::core::sync::lock(&LOCK);
-    // SAFETY: as in `uid_name`, for `getgrgid`'s static buffer.
-    unsafe {
-        let gr = libc::getgrgid(gid as libc::gid_t);
-        if gr.is_null() {
-            return None;
-        }
-        std::ffi::CStr::from_ptr((*gr).gr_name)
-            .to_str()
-            .ok()
-            .map(|s| s.to_string())
-    }
+    static GROUP_NAMES: std::sync::Mutex<std::collections::BTreeMap<u32, Option<String>>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let mut names = crate::core::sync::lock(&GROUP_NAMES);
+    names
+        .entry(gid)
+        // SAFETY: as in `uid_name`, for `getgrgid`'s static buffer and `GROUP_NAMES`.
+        .or_insert_with(|| unsafe {
+            let gr = libc::getgrgid(gid as libc::gid_t);
+            if gr.is_null() {
+                return None;
+            }
+            std::ffi::CStr::from_ptr((*gr).gr_name)
+                .to_str()
+                .ok()
+                .map(|s| s.to_string())
+        })
+        .clone()
 }
 
 #[cfg(not(unix))]

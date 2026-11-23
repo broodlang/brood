@@ -842,6 +842,19 @@ only; `tests/` files come from [[collect-tests]].
       (when (not (empty? deaths))
         (error "a parallel load worker exited: " (first deaths))))))
 
+(defn load-modules (entries)
+  "Load each module of `entries` — `[file module-key]` pairs for modules not loaded yet — the
+way a cold build does: in a pool of processes once there are `*load-min-parallel*` of them
+(ADR-426), with whatever the pool leaves loaded after it in the order given. Fewer, or under
+`BROOD_LOAD_SEQUENTIAL=1`, each is `require-one`d in order in this process. Backs the partial
+rebuild's reload (ADR-419), which after an edit to a widely-mentioned module is most of the
+project.
+
+    (project/load-modules nil)   ;=> nil"
+  (if (and (not (= (os/env "BROOD_LOAD_SEQUENTIAL") "1")) (>= (count entries) *load-min-parallel*))
+    (project-load-parallel entries)
+    (doseq (entry entries) (require-one (symbol (second entry))))))
+
 (defn load-sources (root & opts)
   "Load every source file under `root`'s source paths, attributing each file's load-time requires to the root section (KI-37). `:skip-loaded` skips files whose feature is already loaded. A cold walk of many modules loads them in a pool of processes (ADR-426); `BROOD_LOAD_SEQUENTIAL=1` loads them in walk order in this one.
 

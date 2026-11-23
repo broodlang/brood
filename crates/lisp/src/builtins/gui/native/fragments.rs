@@ -226,6 +226,7 @@ fn frame_global(op: &Op) -> bool {
     match op {
         Op::Sound { .. }
         | Op::Music { .. }
+        | Op::Ambience { .. }
         | Op::Ambient { .. }
         | Op::Light { .. }
         | Op::Overlay

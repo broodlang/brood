@@ -150,6 +150,9 @@ wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
 # Cross-platform time: std::time on native, the JS clock on wasm (Instant/SystemTime
 # have no wasm32-unknown-unknown backend). Drop-in, so native behaviour is unchanged.
 web-time = "1"
+# The seeded fast hasher for the kernel's hot tables (`core/hashing.rs`): SipHash was ~3%
+# of a warm start. Already in the tree through hashbrown, so it adds no new code.
+foldhash = "0.2"
 # The tree-sitter runtime + the Ruby/Elixir grammars (feature `treesit`). All
 # three are pulled in only with `--features treesit`; a build without it links no
 # parser. The grammar crates expose a `tree_sitter_language::LanguageFn` (`LANGUAGE`)

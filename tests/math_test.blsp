@@ -26,6 +26,17 @@
     (assert= (round 3.5) 4)
     (assert= (round 3.4) 3)
     (assert= (round -3.5) -4))
+  ;; `round` reads a negative number as -floor(0.5 - x), its old `ceil(x - 0.5)` without the
+  ;; second call; the halves and the values just either side of zero pin it.
+  (test "round agrees with ceil(x - 0.5) below zero, halves away from zero"
+    (assert= (round -0.4) 0)
+    (assert= (round -0.5) -1)
+    (assert= (round -2.5) -3)
+    (assert= (round -2.4999) -2)
+    (assert= (round -1e300) (ceil (- -1e300 0.5)))
+    (assert= (round -7) -7)
+    (assert= (round -7/2) -4)
+    (assert= (round 0.49) 0))
   (test "an Int passes through the rounders unchanged"
     (assert= (math/floor 5) 5)
     (assert= (ceil 5) 5)

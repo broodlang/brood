@@ -31,8 +31,8 @@
 use super::Op;
 use super::OrBail;
 use super::emit::{
-    DeoptReason, Frame, ParamRepr, as_block_arg_for, deopt_code, param_repr, read_words, store_op,
-    store_result,
+    DeoptReason, Frame, ParamRepr, as_block_arg_for, deopt_code, op_is_float, op_maybe_float,
+    param_repr, read_words, store_op, store_result,
 };
 use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, condcodes::IntCC, types};
@@ -134,6 +134,10 @@ pub(super) fn resolve_edges(
     // target holds an `Op::Handle`, which the spill-at-call machinery already covers).
     let mut unified: Vec<ParamRepr> = Vec::with_capacity(depth);
     let mut widened_slots: Vec<usize> = Vec::new();
+    // The widened slots every edge fills with a float, or with what may be one where some
+    // edge is known to: `(if (< pn 0.0) (- 0.0 pn) pn)` is a float result on one edge and
+    // the untyped slot it came from on the other.
+    let mut float_slots: Vec<usize> = Vec::new();
     let mut words_extra: usize = 0;
     for i in 0..depth {
         let r0 = first.reprs[i];
@@ -146,6 +150,11 @@ pub(super) fn resolve_edges(
             let s = frame.blockarg_spill_base + i;
             unified.push(ParamRepr::Slot(s));
             widened_slots.push(s);
+            if edges.iter().any(|e| op_is_float(e.stack[i], frame))
+                && edges.iter().all(|e| op_maybe_float(e.stack[i], frame))
+            {
+                float_slots.push(s);
+            }
         } else {
             unified.push(ParamRepr::Words(words_extra));
             words_extra += 1;
@@ -202,10 +211,14 @@ pub(super) fn resolve_edges(
         b.ins().jump(target, &args);
     }
     // A widened slot holds a different kind of value on each edge, so no single-pass
-    // flag describes it: clear them, and every read of the slot tag-checks.
+    // flag describes it: clear them, and every read of the slot tag-checks. Except the float
+    // guess: a join of a float and what may be one stays flagged float, so the arithmetic
+    // after it takes the float path (still tag-checked, so a wrong guess deopts) rather than
+    // the integer one, which deopted on every call — b2d-physics `warm-start!`'s
+    // `(+ (if (< pn 0.0) (- 0.0 pn) pn) …)` latched off the native tier that way.
     for &s in &widened_slots {
         if let Some(x) = frame.slot_float.borrow_mut().get_mut(s) {
-            *x = false;
+            *x = float_slots.contains(&s);
         }
         if let Some(x) = frame.slot_bool.borrow_mut().get_mut(s) {
             *x = false;

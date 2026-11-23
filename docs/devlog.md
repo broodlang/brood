@@ -2391,3 +2391,49 @@ build, so the second binary used on a checkout (installed beside dev, a profilin
 used evicted (a read touches its slot). Guard `image_slots` drives four builds from one copy of
 the binary whose mtime it resets before each run; red with one image path, and with either
 touch removed (the oldest-written slot goes instead of the least recently used).
+
+2026-11-20 (ADR-777). **Sound for games: pan, keyed one-shots, layered ambience.** dino's sound
+needed a boar heard from the right, a forest of four loops at once that fog muffles by
+crossfade, and footfalls that sound once though a present-paced loop draws a step on two or
+three frames. `[:sound snd vol pan]` places a one-shot (a balance: never louder than `vol`);
+`[:sound snd vol pan key]` plays only when the frame before (or an earlier op of the frame) did
+not carry the same handle and key; `[:ambience snd vol]` keeps any number of loops going, keyed
+by handle, fading like `:music`. One-shots now play from the shared samples instead of a copy a
+play, the device is opened when a window gets its first sound (not on the first play), and it
+asks for a 20 ms buffer instead of rodio's 50. app.js mirrors the three. Guards: `pan_tests`,
+the one-shot source tests, `sound_tests` (keyed edge), the op parser tests. Not run here: the
+full suites (desktop rule).
+
+2026-11-21 (ADR-778). **What dino's hot paths found.** The "stale `&optional` once hot" bug was a
+call spill landing in the block-argument window: `emit_call` bounded call-result spills by the
+whole reserve, so a spill past its half overwrote a value a join had carried (dino's staged tail
+call head, then called as `208`); bounded now, with map/vector reads counted as handle producers
+and capped by the entries actually below a non-tail call. A widened join of a float and an
+untyped slot keeps the float guess, so b2d-physics `warm-start!` no longer latches off native.
+`(- a b c)`/`(/ a b c)` fold like `+`/`*`. `math/round`/`ceil` test finiteness with `(< (- x x)
+1.0)` instead of two ability dispatches (2.1 µs → 0.5 µs a call). The kernel decides a record
+name against a record value (contracted record parameter 9.5 → 2.0 µs, union 13.6 → 2.2 µs) (dropped on merging: main's ADR-773 decider already covers it).
+dino render ~5% faster. Not run here: the full suites, A/B rows, gcstress, fuzz (desktop rule).
+
+2026-11-23. **Startup, second pass: a warm `nest run` reads no source, and an edit restart
+loads in the pool (ADR-779).** Measured on the test machine against bedit (311 modules).
+The `BROOD_NO_CHECK=1` slowdown noted on 2026-11-20 no longer reproduces; it was the
+single-slot caches. What a cached check still cost: the pre-flight's duplicate-def lint
+re-read and re-parsed all 58 files of the entry's closure on every launch, 70 ms of 0.28 s.
+The module index now records each file's top-level definitions (format v5) and every caller
+of the lint reads them there; the interpreted copy of the def scan and a dead symbol counter
+in `project-check` are gone. `file/stat` called `getpwuid` (a parse of `/etc/passwd`) on every
+call, and the index stats every file on every run; the uid and gid names are now memoised per
+OS process. The interner, the source-position maps and the GC's visited sets use a seeded
+`foldhash` instead of SipHash (`core/hashing.rs`). Warm start **0.28 s → 0.18 s**.
+
+An edit to one leaf file (`about`) reloaded 304 of 311 modules: the partial rebuild (ADR-419)
+reloads every module that mentions an edited one, and nearly every module mentions `config`,
+which mentions `about`. That rule is unchanged. The reload was sequential (`require-one` in a
+loop); it now goes through the cold build's pool (`project/load-modules`), 2.2 s → 0.93 s. The
+image write after it walked every registry twice for the same grouping (the prune and the
+owners record; the `%isolate` restores exactly the state the first walk saw), plus a third
+`before-regs` walk before the load that nothing had read since ADR-604. One walk now. Edit
+restart **2.9 s → 1.6–1.7 s**. Guard `nest::warm_run_reads_no_source` makes a source file
+unreadable after a warm-up and expects the run to start and still report the duplicate; red
+with the lint pointed back at a re-scan. Not run here: the full suites (desktop rule).

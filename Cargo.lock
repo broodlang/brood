@@ -527,6 +527,7 @@ dependencies = [
  "divan",
  "ed25519-dalek",
  "flate2",
+ "foldhash 0.2.0",
  "getrandom 0.4.3",
  "hmac",
  "image",

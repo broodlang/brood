@@ -210,7 +210,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(5),
         Sig::new(vec![int, int, int, int, Ty::of_tags(&[Tag::Bytes, Tag::Vector])], nil_ty),
         &["id", "snd", "rate", "channels", "pcm"],
-        "Keep pcm — interleaved PCM16 little-endian bytes (a bytes value or a vector of 0-255 ints) at rate Hz (1..384000) with channels (1 or 2) — as sound snd of window id, for its [:sound snd vol] and [:music snd vol] frame ops. The handle snd is the caller's (gui/sound allocates it), as a texture's is. Errors on a bad rate/channel count or an odd byte count; a silent no-op headless. Returns nil.",
+        "Keep pcm — interleaved PCM16 little-endian bytes (a bytes value or a vector of 0-255 ints) at rate Hz (1..384000) with channels (1 or 2) — as sound snd of window id, for its [:sound snd vol pan key], [:music snd vol] and [:ambience snd vol] frame ops. The handle snd is the caller's (gui/sound allocates it), as a texture's is. Errors on a bad rate/channel count or an odd byte count; a silent no-op headless. Returns nil.",
         gui_sound);
     primitives.def(
         "%gui-sound-free",

@@ -129,6 +129,22 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
                         op: PrimOp::TableGet,
                         ..
                     }
+                    // A map or vector read answers whatever the collection holds — a handle as
+                    // often as not. Left out, an arm reading `(get m k)` or `(nth v i)` under a
+                    // later call ran out of spill slots (and, before the call-spill capacity was
+                    // kept below the block-argument window, spilled ONTO that window).
+                    | Inst::Prim2 {
+                        op: PrimOp::MapGet | PrimOp::VectorRef,
+                        ..
+                    }
+                    | Inst::Prim2SlotSlot {
+                        op: PrimOp::MapGet | PrimOp::VectorRef,
+                        ..
+                    }
+                    | Inst::Prim2SlotInt {
+                        op: PrimOp::MapGet | PrimOp::VectorRef,
+                        ..
+                    }
                     | Inst::Prim3 { .. }
             )
         })
@@ -158,7 +174,19 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
     if non_tail_call_count(code) < 1 {
         return 0;
     }
-    producers.saturating_sub(1) + max_leader_depth(code)
+    // Two bounds on the call-result spills, both sound, so the smaller: one per handle
+    // producer but the last, and the entries that ever sit below a call's operands.
+    producers.saturating_sub(1).min(operands_below_calls(code)) + max_leader_depth(code)
+}
+
+#[cfg(not(feature = "jit"))]
+fn operands_below_calls(_code: &[Inst]) -> usize {
+    0
+}
+
+#[cfg(feature = "jit")]
+fn operands_below_calls(code: &[Inst]) -> usize {
+    crate::eval::compile::jit_lower::prepass::operands_below_calls(code).unwrap_or(usize::MAX)
 }
 
 /// Where a lowering's **block-argument spill** slots live: `(base, len)`, as frame slot
