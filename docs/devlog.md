@@ -2468,3 +2468,11 @@ was read as its bits; the back edge now tag-checks it. Headless dino, 302 frames
 2 000 000: all deopts 4 767 → 619, `block-walk` 3 799 → 0, `hanging-lianas` 114 → 4. Guard
 `cli::polymorphic_arithmetic`. Not run here: the suites, `make ab`/`ab-vm`, gcstress, fuzz
 (desktop rule); CI runs the suites.
+
+2026-11-23. **`file/slurp-bytes-from`: read a growing file from where the last read ended
+(ADR-781).** A follower of a JSON-lines log another program appends to (bedit-agent's session
+watcher) re-read and re-decoded the whole file, several megabytes, twice a second.
+`(file/slurp-bytes-from path offset [limit])` seeks and answers the bytes from `offset` on: nil
+for a missing file, empty bytes at or past the end, a raise for a negative offset or limit.
+Bytes, not a string, because an offset can split a character. Offloadable like
+`file/slurp-bytes`. Tests: `tests/slurp_bytes_test.blsp`.

@@ -3084,7 +3084,7 @@ site, catchable as usual.
 Only long/blocking **data-in/data-out** natives are allowed (`%git-clone`,
 `%git-resolve-ref`, `%git-list-tags`, `%untar-gz`, `%pbkdf2-sha256-bytes`, `%digest`, `%hmac`,
 the compressors `%gzip`/`%gunzip`/`%zlib-compress`/`%zlib-uncompress`/`%deflate`/`%inflate`,
-`file/slurp`, `file/slurp-bytes`, `file/spit`, `file/replace`, `file/spit-bytes`,
+`file/slurp`, `file/slurp-bytes`, `file/slurp-bytes-from`, `file/spit`, `file/replace`, `file/spit-bytes`,
 `file/spit-append`, `file/spit-bytes-append`, `%tls-self-signed`, and `%wasm-call`); anything heap-sharing or env-reading is refused with a
 clear error. Args and the result are deep-copied across (like `send`), so
 they must be sendable values. The package manager's clones already ride it.

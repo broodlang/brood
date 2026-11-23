@@ -144,6 +144,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Read the whole file at path as a bytes value. The byte-faithful read file/slurp can't be (file/slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset.\n\n    (file/slurp-bytes \"logo.png\")   ;~> the file's bytes",
         watched!("file/slurp-bytes", slurp_bytes, 1));
     primitives.def(
+        "file/slurp-bytes-from",
+        Arity::range(2, 3),
+        Sig::with_optional(vec![string, int], vec![int.union(nil_ty)], bytes_ty.union(nil_ty)),
+        &["path", "offset", "limit"],
+        "Read the file at path from byte offset to its end — or at most limit bytes — as a bytes value; nil when the file is missing. An offset at or past the end reads empty bytes. The read a follower of a growing file wants (a log, a JSON-lines journal another program appends to): remember where the last read ended and read only what came after, never the whole file again. Decode with string/bytes->, after the last newline the caller kept back, so a half-written line or character waits for the next read (ADR-781).\n\n    (file/slurp-bytes-from \"app.log\" 1024)   ;~> the bytes written after the first 1024",
+        watched!("file/slurp-bytes-from", slurp_bytes_from, 1));
+    primitives.def(
         "file/spit-bytes",
         Arity::exact(2),
         Sig::new(vec![string, any], nil_ty),
@@ -1062,6 +1069,42 @@ pub(super) fn slurp_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         LispError::runtime(format!("file/slurp-bytes: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
+    Ok(bytes_to_value(&bytes, heap))
+}
+
+/// `(file/slurp-bytes-from path offset [limit])` — the bytes of `path` from `offset` on, at most
+/// `limit` of them, or nil when the file is missing. A follower of a growing file reads only
+/// what was appended since its last read (ADR-781). Seeks, so a large file is not read whole.
+pub(super) fn slurp_bytes_from(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::io::{Read, Seek, SeekFrom};
+    let who = "file/slurp-bytes-from";
+    let path = expect_string(heap, who, arg(args, 0))?;
+    let offset = expect_int(heap, who, arg(args, 1))?;
+    let limit = match arg(args, 2) {
+        Value::Nil => None,
+        v => Some(expect_int(heap, who, v)?),
+    };
+    if offset < 0 || limit.is_some_and(|n| n < 0) {
+        return Err(LispError::runtime(format!(
+            "{}: offset and limit must not be negative, got {} and {:?}",
+            who, offset, limit
+        )));
+    }
+    let io_error = |e: std::io::Error| {
+        LispError::runtime(format!("{}: {}: {}", who, path, e)).with_code(crate::error::error_codes::FILE_IO)
+    };
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Value::nil()),
+        Err(e) => return Err(io_error(e)),
+    };
+    file.seek(SeekFrom::Start(offset as u64)).map_err(io_error)?;
+    let mut bytes = Vec::new();
+    match limit {
+        Some(n) => file.take(n as u64).read_to_end(&mut bytes),
+        None => file.read_to_end(&mut bytes),
+    }
+    .map_err(io_error)?;
     Ok(bytes_to_value(&bytes, heap))
 }
 
