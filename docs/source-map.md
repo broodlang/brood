@@ -70,6 +70,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `core.rs` — Substrate: the value model, the per-process heap, and the byte-counting allocator.
   - `core/alloc.rs` — A process-wide allocator that counts bytes, so Brood can report how much memory a piece of work used — and *cap* it, so a runaway (or hostile) program can't exhaust host RAM and freeze the machine.
   - `core/blob.rs` — Shared, refcounted storage for large immutable byte blobs.
+  - `core/hashing.rs` — The hasher for the runtime's hot internal tables.
   - `core/heap.rs` — The per-process data heap, plus the two shared regions: the immutable **prelude** and a runtime's mutable, shared **code** region.
   - `core/keywords.rs` — The canonical spellings of Brood's special forms and core macros — one `const` per keyword, so the spelling lives in exactly one place.
   - `core/map_champ.rs` — CHAMP — *Compressed Hash-Array Mapped Prefix-tree* — backing for `Value::Map` (ADR-040): a 16-way branching, path-copying, structurally-immutable trie.
