@@ -13,6 +13,11 @@ heap pointer (GHSA-43j2-gcp4-m22g) and unbounded memory growth from empty WASI w
 start with the same repetition. num-bigint stays at 0.4, since bigdecimal and num-rational are
 built on it, and skrifa stays at swash's version.
 
+**Added: `vcs/*untrusted*`.** Bound true, the git backend asks its questions with the
+repository's `core.fsmonitor` switched off, so a checkout that arrived as an archive cannot run
+a program its `.git/config` names when a tool lists its files or reads its status. Unbound, a
+builtin fsmonitor still speeds `status` up. `vcs/changed`'s diff also passes `--no-ext-diff`.
+
 **Changed: a word is letters and digits plus what a word syntax adds (ADR-774).** As in Emacs,
 `editor/buffer/forward-word` and `backward-word` now stop at `_`, `-`, `.`, `'` and every other
 character that is not a Unicode letter, number or combining mark, unless the word syntax passed to
