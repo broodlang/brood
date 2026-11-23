@@ -4,7 +4,16 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.58.0 — file/watch, faster contracts, words by syntax
+
+**Added: `file/watch` and `file/unwatch` (ADR-782).** A process watches a file or a directory and
+receives `[:file-watch handle path kind]` (`:created`, `:modified`, `:removed`) as it changes,
+instead of polling `file/size`. A file is watched through its directory, so one that does not exist
+yet can be watched and a delete-and-recreate or a save-by-rename is seen; bursts coalesce to one
+unreceived message per kind; the watch ends with its process. One OS watcher serves the runtime.
+
+**Added: `file/slurp-bytes-from` (ADR-781).** A file's bytes from a byte offset, at most a
+limit of them: what a follower of a growing log reads, instead of the whole file each time.
 
 **Dependencies: wasmtime 51 and cranelift 0.138**, plus every semver-compatible update. The
 wasmtime release fixes eight advisories, among them a guest aborting the host through a stale GC
