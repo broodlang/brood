@@ -364,12 +364,15 @@ after this gives that one back its live value, which is not the image's write."
         (when (not (image-entry-present? (%map-get before registry nil) path))
           (%registry-update! registry :credit path nil writer))))))
 
-(defn image-prune-foreign-registrations (before-regs:map &optional carried?:any -> int)
+(defn image-prune-foreign-registrations (regs:map &optional carried?:any -> int)
   "Remove from the live registries every registration OWNED by a module this project's
 image does not carry — a std module (or anything else outside `*module-files*`) that
 happened to be loaded in the session that built the image. Returns how many were removed.
-`carried?` says which modules the image carries; it defaults to the project's (`*module-files*`),
-and a release bundle passes its own module set (ADR-484).
+`regs` is the live registrations grouped by owner, `(stdimage/registrations-by-module)` taken
+now: the caller passes it because the image write needs the same grouping for its modules
+record, and the walk over every registry is a third of the write. `carried?` says which
+modules the image carries; it defaults to the project's (`*module-files*`), and a release
+bundle passes its own module set (ADR-484).
 
 The registries travel in the image's root section as whole values, and a value snapshot
 carries the build session's load state with it: on 2026-09-03 the image of this very repo
@@ -392,8 +395,7 @@ loaded used to cover). That exemption is gone (ADR-604): a std module the BUILD 
 before the project — `nest`'s own toolchain from source, when no stdlib image existed yet —
 wrote `:http/response`, `:log/line-backend` … before a single project file loaded, the
 exemption baked them into the image, and the next, imaged run started with record ids whose
-constructors no module had defined. `before-regs` is no longer consulted; it stays in the
-signature for its callers.
+constructors no module had defined.
 
 `write-image` calls this inside an `%isolate`, so the pruning is rolled back the moment
 the image is written and the running session keeps every registration it had — but the
@@ -403,7 +405,6 @@ permanent rather than transient.
     (project-image/image-prune-foreign-registrations (stdimage/registrations-by-module))   ;~> 7 — foreign registrations removed"
   (let (carried? (or carried? project-module-carried?)
         foreign? (fn (m) (not (carried? m)))
-        regs (stdimage/registrations-by-module)
         impls (stdimage/%std-impls-by-module)
         n-regs (fold (seq/filter (keys regs) foreign?)
                  0
@@ -440,12 +441,14 @@ permanent rather than transient.
         (map (sort (keys kept))
           (fn (k) (let ([off len] (get kept k)) [k [:copy off len]])))))))
 
-(defn write-image (root:string before:any before-regs:map &optional reloaded:any kept:any -> any)
+(defn write-image (root:string before:any &optional reloaded:any kept:any -> any)
   "Snapshot the bindings this project load produced into `root`'s image, grouped into
 per-module sections. `before` is the `(reflect/global-names)` list captured *before* the sources
 were loaded. Returns the entry count. Written from a scope in which registrations owned by
 modules the image does not carry are pruned (`image-prune-foreign-registrations`); the
-`%isolate` puts them back once the file is on disk.
+`%isolate` puts them back once the file is on disk. The registrations are grouped by owner
+once, for the prune and the modules record both: the isolate restores exactly the state the
+grouping was taken from.
 
 `reloaded` is the set of modules a partial rebuild loaded from source (ADR-419); nil means
 every module was. `kept` maps each section the partial rebuild kept to its `[offset length]`
@@ -453,7 +456,7 @@ in the image now on disk: those are copied byte for byte rather than re-encoded,
 the rebuild did not touch need not be materialised to be written again. Beside the image goes
 the record the next partial rebuild reads.
 
-    (project-image/write-image \"/path/to/proj\" before (stdimage/registrations-by-module))   ;~> 5310 — entries written to /path/to/proj/.brood/image-<slot>.bin"
+    (project-image/write-image \"/path/to/proj\" before)   ;~> 5310 — entries written to /path/to/proj/.brood/image-<slot>.bin"
   (let (dir (path/dirname (image-path root)))
     (when (not (file/dir? dir)) (file/mkdir dir))
     ;; Before the fingerprint below, which reads this list back.
@@ -461,10 +464,11 @@ the record the next partial rebuild reads.
       (string/join (%included-files) "\n"))
     (let (fp (project-image-fingerprint root)
           previous (if reloaded (read-modules-record root) nil)
+          regs (stdimage/registrations-by-module)
           n (%isolate (fn ()
-                        (image-prune-foreign-registrations before-regs)
+                        (image-prune-foreign-registrations regs)
                         (%image-write (image-path root) (project-partial-sections before kept) fp))))
-      (write-modules-record! root fp reloaded previous)
+      (write-modules-record! root fp regs reloaded previous)
       (prune-image-slots root)
       n)))
 
@@ -473,8 +477,9 @@ the record the next partial rebuild reads.
 ;; the edited module no longer makes does not survive in the image's registry values. The
 ;; kernel journals the writer of every entry (KI-136), but only for loads in THIS process: a
 ;; module the partial rebuild materialised wrote nothing here, so its previous record is kept.
-(defn- project-module-owners (reloaded previous)
-  (let (live (fold (%map-pairs (stdimage/registrations-by-module))
+;; `regs` is `(stdimage/registrations-by-module)`, taken by `write-image`.
+(defn- project-module-owners (regs reloaded previous)
+  (let (live (fold (%map-pairs regs)
                {}
                (fn (m entry)
                  (let ([mod triples] entry)
@@ -513,7 +518,7 @@ the record the next partial rebuild reads.
 
 ;; Best-effort, like the image: a record that cannot be written costs the next edit a full
 ;; rebuild, never a wrong answer.
-(defn- write-modules-record! (root fp reloaded previous)
+(defn- write-modules-record! (root fp regs reloaded previous)
   ;; check-allow :discarded-catch — a best-effort cache write: the next edit rebuilds whole
   (check-allow :discarded-catch
     (try
@@ -526,7 +531,7 @@ the record the next partial rebuild reads.
            :files (fold (sorted-source-files root)
                     {}
                     (fn (m f) (%map-assoc m f (stamp-of f))))
-           :owners (project-module-owners reloaded previous)
+           :owners (project-module-owners regs reloaded previous)
            ;; the registries the root section carries — see `project-redeclare-registries!`
            :registries (seq/filter (%registry-names)
                          (fn (n) (not (includes? *registry-exclusions* n))))
@@ -791,8 +796,9 @@ the record the next partial rebuild reads.
               ;; run`) materialises only what the reloaded modules require. Either way the
               ;; image is written with the unchanged sections COPIED, not re-encoded.
               (when (not lazy?) (materialize-all))
-              (doseq (m (sort (seq invalid)))
-                (require-one (symbol m)))
+              ;; Through the cold build's pool: an edit to a module the rest of the project
+              ;; mentions reloads most of it (304 of bedit's 311 modules for one in `about`).
+              (project/load-modules (map (sort (seq invalid)) (fn (m) [(get own m) m])))
               {:reloaded invalid :kept (table/get chosen :kept)}))))))
 
 (defn materialize-all ()
@@ -886,26 +892,22 @@ program's and the LSP's protocol channel stays clean.
         (let (name (or project/*name* (path/basename root))
               started (os/now-ns)
               before (reflect/global-names)
-              ;; Captured HERE, beside `before`, and for the same reason: what the prune may
-              ;; remove is decided by what this load introduced, so both baselines have to be
-              ;; taken before a single source file is read (KI-106).
-              before-regs (stdimage/registrations-by-module)
               ;; An edit to some modules reloads those and their dependents (ADR-419).
               partial (if (image-usable?)
                         (project-partial-load root files (includes? opts :lazy))
                         nil))
           (if partial
-            (project-report-partial root name partial before before-regs started)
-            (project-build-whole root opts files name started before before-regs))))))
+            (project-report-partial root name partial before started)
+            (project-build-whole root opts files name started before))))))
 
 ;; The partial rebuild's tail: write the image again and say what was reloaded.
-(defn- project-report-partial (root name partial before before-regs started)
+(defn- project-report-partial (root name partial before started)
   (let (reloaded (get partial :reloaded)
         t-load (math/quot (- (os/now-ns) started) 1000000)
         ;; check-allow :discarded-catch — best-effort, as on a whole build: the next edit rebuilds whole
         wrote (check-allow :discarded-catch
                 (try
-                  (write-image root before before-regs reloaded (get partial :kept))
+                  (write-image root before reloaded (get partial :kept))
                   (catch _ nil)))
         t-all (math/quot (- (os/now-ns) started) 1000000)
         n (count reloaded))
@@ -921,7 +923,7 @@ program's and the LSP's protocol channel stays clean.
       :to *err*)
     nil))
 
-(defn- project-build-whole (root opts files name started before before-regs)
+(defn- project-build-whole (root opts files name started before)
   (let (n (count files)
         _ (io/puts (str "Building " name " (" n " file" (if (= n 1) "" "s") ")") :to *err*)
         _ (/apply project/load-sources (cons root opts))
@@ -934,7 +936,7 @@ program's and the LSP's protocol channel stays clean.
         wrote (cond
                 (image-usable?)
                   (try
-                    (write-image root before before-regs)
+                    (write-image root before)
                     (catch e
                       ;; No once-per-key guard needed: this is the cold path, which
                       ;; already prints Building/Built exactly once per build.

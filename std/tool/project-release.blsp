@@ -596,9 +596,8 @@ imaged (a `table` global) raises, and the release ships without one.
     (project-release/write-bundle-image \"/tmp/app.image\")   ;=> RAISED write-bundle-image: this executable is not a `nest release` bundle"
   (when (not (%bundled?))
     (error "write-bundle-image: this executable is not a `nest release` bundle"))
-  ;; Both baselines before a single module loads, as a project image takes them (KI-106).
+  ;; The baseline before a single module loads, as a project image takes it (KI-106).
   (let (before (reflect/global-names)
-        before-regs (stdimage/registrations-by-module)
         [modname _ _] (bundle-boot-load :source))
     (require-one modname)
     ;; The bundle carries the std modules it loaded too, those its own boot loaded before
@@ -615,7 +614,8 @@ imaged (a `table` global) raises, and the release ships without one.
                        (and (> slash 0) (std-loaded? (string/substring spelling 0 slash)))))))
       ;; The prune runs inside the isolate, so it is rolled back once the image is written.
       (%isolate (fn ()
-                  (project-image/image-prune-foreign-registrations before-regs carried?)
+                  (project-image/image-prune-foreign-registrations (stdimage/registrations-by-module)
+                    carried?)
                   (%image-write path
                     (project-image/image-sections before carried?)
                     (bundle-image-stamp)))))))

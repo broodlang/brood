@@ -332,8 +332,7 @@
           _ (file/mkdir dir)
           _ (reflect/add-load-path dir)
           _ (file/spit (path/join dir "zz-imgforeign.blsp")
-              "(defmodule zz-imgforeign)\n(defrecord probe (n))\n")
-          before-regs (stdimage/registrations-by-module))
+              "(defmodule zz-imgforeign)\n(defrecord probe (n))\n"))
       (require-one 'zz-imgforeign)
       (is (contains? *record-ids* :zz-imgforeign/probe))
       ;; a root-level registration — unqualified key, no owning module — is kept
@@ -341,7 +340,7 @@
       ;; one owned by a module the image carries (present in `*module-files*`) is kept
       (%registry-update! '*module-files* :assoc ["zz-imgproj/shapes"] "/nonexistent/shapes.blsp")
       (%registry-update! '*record-ids* :assoc [:zz-imgproj/shapes/circle] 'zz-imgproj/shapes/circle)
-      (let (n (project-image/image-prune-foreign-registrations before-regs))
+      (let (n (project-image/image-prune-foreign-registrations (stdimage/registrations-by-module)))
         (is (> n 0))
         (is (not (contains? *record-ids* :zz-imgforeign/probe)))
         (is (contains? *record-ids* :zz-image-root-probe))
@@ -355,7 +354,7 @@
   ;; a `*multi-algebra*` short by every `num/*` entry, and the checker lost every commutative
   ;; mirror derived from them.
   :isolated (test "a prelude-registered entry whose qualifier names a module is kept"
-    (let (before-regs (stdimage/registrations-by-module))
+    (do
       (is (contains? *multi-algebra* 'num/mul))
-      (project-image/image-prune-foreign-registrations before-regs)
+      (project-image/image-prune-foreign-registrations (stdimage/registrations-by-module))
       (is (contains? *multi-algebra* 'num/mul)))))
