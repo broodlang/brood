@@ -178,7 +178,7 @@ pub(crate) fn internals_grant_key(mod_name: &str) -> value::Symbol {
 /// import `name` (ADR-784), so a bare `name` means the import even where the language ships a
 /// `name` too — the same leading-`/` trick as [`internals_grant_key`].
 pub(crate) fn named_import_key(name: &str) -> value::Symbol {
-    value::intern(&format!("/shadow/{name}"))
+    value::intern(&format!("/named/{name}"))
 }
 
 /// A bare `name` this module imports, where the language ships a `name` too (ADR-750, ADR-784):

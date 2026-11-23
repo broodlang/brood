@@ -1621,8 +1621,8 @@ pub(super) fn resolve_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 ///   qualified call). Re-importing the *same* qualified name (a re-`:use` of the same
 ///   module) is a no-op, so idempotent reloads are fine.
 /// - **Shadow (lazy, ADR-750).** If `bare` names a root name the language ships, the import
-///   is recorded all the same; the resolver refuses a bare use of it unless the header
-///   declares `(:shadow bare)`. `/bare` reaches the root one, `:exclude` drops the import.
+///   is recorded all the same; the resolver refuses a bare use of it unless `:only` named it
+///   (ADR-784). `/bare` reaches the root one, `:exclude` drops the import.
 fn refer_add(
     heap: &mut Heap,
     bare: value::Symbol,
@@ -1645,7 +1645,7 @@ fn refer_add(
         return Ok(());
     }
     // An import spelled like a name the language ships is not refused here: the resolver
-    // refuses a bare USE of it unless the header declares `(:shadow name)` (ADR-750).
+    // refuses a bare USE of it unless `:only` named it (ADR-750, ADR-784).
     heap.add_import(bare, qualified);
     Ok(())
 }

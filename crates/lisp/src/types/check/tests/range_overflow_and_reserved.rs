@@ -58,11 +58,10 @@ fn a_top_level_definition_of_a_reserved_name_warns() {
         w.iter().any(|m| m.contains("`map` is a reserved name")),
         "{w:?}"
     );
-    // An ordinary name, and a module's own declared definition of a shipped spelling, are fine
-    // (asserted empty: an undeclared one fails compilation, ADR-735, which a test looking only
-    // for "reserved" would read as a pass).
+    // An ordinary name, and a module's own definition of a shipped spelling, are fine (asserted
+    // empty: a module definition shadows with no declaration, ADR-784).
     let w = file_warnings("(defn my-dec () 1)");
     assert!(w.iter().all(|m| !m.contains("reserved")), "{w:?}");
-    let w = file_warnings("(defmodule my-app (:shadow dec))\n(defn dec () 1)");
+    let w = file_warnings("(defmodule my-app)\n(defn dec () 1)");
     assert!(w.is_empty(), "{w:?}");
 }

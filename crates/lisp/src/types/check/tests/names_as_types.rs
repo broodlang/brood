@@ -378,7 +378,7 @@ fn a_self_referential_alias_is_typed_at_every_depth() {
 /// that is too NARROW would break), and a bad leaf is caught however deep it sits.
 #[test]
 fn a_self_referential_alias_accepts_a_deep_value_and_refuses_a_deep_leaf() {
-    let head = "(defmodule t (:shadow take))\n\
+    let head = "(defmodule t)\n\
                 (deftype tree (or nil (record :v int :l tree :r tree)))\n\
                 (sig take (tree -> int))\n\
                 (defn take (t) 1)\n";
@@ -405,7 +405,7 @@ fn a_self_referential_alias_accepts_a_deep_value_and_refuses_a_deep_leaf() {
 /// a valid value.
 #[test]
 fn mutual_aliases_collapse_to_one_binder_and_nested_binders_stay_sound() {
-    let src = "(defmodule t (:shadow take))\n\
+    let src = "(defmodule t)\n\
                (deftype jarr (or nil (vector jval)))\n\
                (deftype jval (or nil number string jarr))\n\
                (sig take (jval -> int))\n\
@@ -430,7 +430,7 @@ fn mutual_aliases_collapse_to_one_binder_and_nested_binders_stay_sound() {
     );
     // An alias whose body carries its own `(rec …)` is left to the unrolling — no second
     // binder is created — and a valid value must still pass.
-    let src = "(defmodule t (:shadow take))\n\
+    let src = "(defmodule t)\n\
                (deftype nested (or nil (rec Y (or nil (vector nested)))))\n\
                (sig take (nested -> int))\n\
                (defn take (n) 1)\n\
