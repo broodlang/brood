@@ -7,8 +7,8 @@
 //! payoff: a `Heap` is plain `Vec`s of data, so it is `Send` — a process can be
 //! moved between scheduler threads — and it gives us one place to do GC.
 
+use crate::core::hashing::FastMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
@@ -35,7 +35,8 @@ pub type Symbol = u32;
 // Symbol ids are consistent across scheduler threads — a prerequisite for
 // sending symbols between process heaps.
 static NAMES: LazyLock<boxcar::Vec<String>> = LazyLock::new(boxcar::Vec::new);
-static IDS: LazyLock<Mutex<HashMap<String, Symbol>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static IDS: LazyLock<Mutex<FastMap<String, Symbol>>> =
+    LazyLock::new(|| Mutex::new(FastMap::default()));
 
 // `NAME_HASHES[id]` is a hash of that id's SPELLING, pushed in lockstep with `NAMES`
 // under the same `IDS` lock, so the two tables always agree (KI-166).
@@ -60,7 +61,7 @@ static QUALIFIED_NAMES_MINTED: AtomicU64 = AtomicU64::new(0);
 // Recover from a poisoned `IDS` lock rather than letting one panicking thread
 // wedge symbol interning everywhere (the tables are append-only, so a recovered
 // guard is consistent).
-fn ids() -> MutexGuard<'static, HashMap<String, Symbol>> {
+fn ids() -> MutexGuard<'static, FastMap<String, Symbol>> {
     IDS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -72,7 +73,7 @@ thread_local! {
     // (call heads, keywords, record fields) — a thread-local lookup with no global
     // lock — a global lock on every intern serializes parallel workers. Bounded memory: the symbol set is
     // finite, so each thread caches at most every name it ever interns.
-    static CACHE: RefCell<HashMap<String, Symbol>> = RefCell::new(HashMap::new());
+    static CACHE: RefCell<FastMap<String, Symbol>> = RefCell::new(FastMap::default());
 
     // Per-thread id→spelling-hash cache in front of `NAME_HASHES`, indexed by the id
     // itself: `0` means "not cached here yet", which is why `hash_name` never returns 0.
@@ -83,7 +84,7 @@ thread_local! {
 /// The `__id__` symbol a record's identity key spells (`kw::RECORD_ID`), interned once.
 /// Symbol ids are process-global and never recycled, so one id serves every thread; the
 /// record probes on the map-miss and dispatch paths read it per call, where `intern` would
-/// pay a thread-local `RefCell` borrow and a SipHash of the spelling each time.
+/// pay a thread-local `RefCell` borrow and a hash of the spelling each time.
 pub static RECORD_ID_SYMBOL: LazyLock<Symbol> =
     LazyLock::new(|| intern(crate::core::keywords::RECORD_ID));
 

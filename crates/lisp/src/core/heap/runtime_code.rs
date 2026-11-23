@@ -539,7 +539,7 @@ pub struct RuntimeCode {
     /// generation's leftovers aliased newly-minted pairs at reused indices and
     /// accumulated forever. Keying by generation fixes the first and lets the free purge
     /// exactly its own entries (the KI-7/KI-8 class).
-    pub(super) positions: RwLock<HashMap<u64, FormPos>>,
+    pub(super) positions: RwLock<crate::core::hashing::FastMap<u64, FormPos>>,
     /// Shared JIT native-code cache (ADR-101, the spawn lever): maps a simple
     /// fixed-arity RUNTIME/PRELUDE closure arm's `(closure_id, argc)` key (see
     /// `CompiledArm::share_key`) to its compiled native code as
@@ -913,7 +913,7 @@ impl Default for RuntimeCode {
             removals: AtomicU64::new(0),
             undefined: RwLock::new(std::collections::HashSet::new()),
             def_sites: RwLock::new(HashMap::new()),
-            positions: RwLock::new(HashMap::new()),
+            positions: RwLock::new(crate::core::hashing::FastMap::default()),
             jit_code_cache: RwLock::new(HashMap::new()),
             shared_closures: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
@@ -1069,7 +1069,7 @@ impl RuntimeCode {
             removals: AtomicU64::new(0),
             undefined: RwLock::new(std::collections::HashSet::new()),
             def_sites: RwLock::new(HashMap::new()),
-            positions: RwLock::new(HashMap::new()),
+            positions: RwLock::new(crate::core::hashing::FastMap::default()),
             jit_code_cache: RwLock::new(HashMap::new()),
             shared_closures: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
