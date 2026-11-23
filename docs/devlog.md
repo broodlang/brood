@@ -2437,3 +2437,16 @@ owners record; the `%isolate` restores exactly the state the first walk saw), pl
 restart **2.9 s → 1.6–1.7 s**. Guard `nest::warm_run_reads_no_source` makes a source file
 unreadable after a warm-up and expects the run to start and still report the duplicate; red
 with the lint pointed back at a re-scan. Not run here: the full suites (desktop rule).
+
+2026-11-23. **`make gcstress` green again: a `def` over a draining tail (KI-409).** CI's
+breakage job had failed its GC-stress step on five process files since the merge of
+`b0d11feac`, before the day's perf commits (a baseline run on `b95ab6a28` failed the same
+way). The step printed only `FAILED`; it now prints the exit status and the first panic:
+`runtime string handle` at the test runner's `spawn`. A temporary drain trace on CI showed the
+root acking clean and the drain freeing the generation while the test file loaded; the free
+reaching the root only through `(def test/*units* (cons unit test/*units*))`, whose fresh cell
+kept an old-generation tail that the top-level re-home could not see. Promotion now re-homes
+every older-generation value, env frame and sub-trie it meets. With the free disabled
+(`free_if_last_to_ack` removed, or `BROOD_RT_GC_FLOOR` huge) the five files passed, which is
+why KI-407's fix exposed it. Guard in `runtime_collector`, sabotage-checked. Not run here: the
+suites and gcstress (desktop rule); proved in CI.

@@ -5,6 +5,39 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-409 — a `def` over a draining tail freed the list under the global ✅ fixed 2026-11-23
+
+**Symptom.** `make gcstress` (debug build, `BROOD_GC_STRESS` + `BROOD_GC_VERIFY`) failed
+`concurrency`, `ref_alias`, `agent`, `offload` and `process_limit` on every CI run on main from
+`6a79e6897` (2026-11-23, the merge of `b0d11feac`) on: `brood-main` panicked `runtime string
+handle` in `copy_closure_into`, from the test runner's `spawn` of a unit. Only on a cold boot
+(the stdlib image not yet built); the step printed nothing but `FAILED`.
+
+**Cause.** `promote` returned every already-shared value it met unchanged, and `def` re-homed
+only the top-level value (`rehome_to_current_locked`, ADR-091 Stage 5). The test runner
+registers a unit with `(def test/*units* (cons unit test/*units*))`. With `test/*units*` read
+before an aging flip and consed after it, the promoted cell lands in the current generation
+with its tail in the old one: the top-level check sees a current handle, the global now reaches
+the draining generation, and the drain's self-report skips the shared roots on the invariant
+that none can. The only process (the root) reported clean, the drain freed the old list, and
+the next `spawn` copying a unit read a freed slot. A drain trace on CI showed it: `begin gen=1
+live=[1]`, `ack pid=1 clean=true`, `free gen=1`, from `report_drain_liveness` in the VM, while
+the file was still loading; the panic came at `(test/run-tests)`.
+
+**Why it survived.** The hole is as old as the multi-generation collector; frees were rare
+enough to miss it. KI-407's fix (`b0d11feac`) made the free run at every collector entry and
+at the report that completes a drain, so a drain now completes at once, inside the window, on
+a cold boot under GC stress. It went red on the first CI run after the merge (45133378793);
+the next main run was cancelled, so the red was first read as the 2026-11-23 perf commits'.
+
+**Fix.** Promotion re-homes every older-generation value it meets inside what it copies: a
+value (`promote_in_grown`'s fallback), a captured env frame (`promote_env`) and a shared CHAMP
+sub-trie (`promote_map_node`), through the drain's forwarding map so `=` still sees one copy.
+`make gcstress` now prints a failing file's exit status and its first panic.
+
+**Guard.** `runtime_collector::a_def_of_a_fresh_cell_over_an_old_gen_tail_is_rehomed_off_the_freed_generation`
+— red (`runtime pair handle`) with `_ => v` put back as the fallback. And `make gcstress` in CI.
+
 ## KI-408 — a `deftype` and a function of the same name erased each other ✅ fixed 2026-11-20
 
 **Symptom.** With contracts armed, `(editor/treesit/parse-tag :ok)` raised `contract: unknown

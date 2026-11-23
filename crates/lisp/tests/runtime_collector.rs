@@ -1295,6 +1295,60 @@ fn a_def_of_an_old_gen_value_is_rehomed_off_the_freed_generation() {
     );
 }
 
+/// The same hole one level down: a `def` of a FRESH value that shares structure with a
+/// draining one. `(def units (cons unit units))` with `units` read before an aging flip and
+/// consed after it promotes a new current-generation cell whose tail is the old list, so
+/// re-homing the top-level value (the test above) finds nothing to do, and the global
+/// reaches the draining generation through a root the drain no longer probes. The drain
+/// then freed the old list under it: every `make gcstress` run on main from 2026-11-21 on,
+/// the test runner's registry, `runtime string handle` at the next `spawn` that copied a
+/// unit. Promotion now re-homes every older-generation value it meets inside what it copies.
+///
+/// Sabotage: put back `_ => v` as `promote_in_grown`'s fallback and this panics reading the
+/// freed slab.
+#[test]
+fn a_def_of_a_fresh_cell_over_an_old_gen_tail_is_rehomed_off_the_freed_generation() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    // The list is born in gen 0; hold its gen-0 handle across the flip, as a running
+    // `(cons unit units)` holds `units` in a slot.
+    interp
+        .eval_str(r#"(def units (list "alpha" "beta"))"#)
+        .expect("def units");
+    let global = interp.heap.global();
+    let units_symbol = brood::core::value::intern("units");
+    let units_gen0 = interp
+        .heap
+        .env_get(global, units_symbol)
+        .expect("units is bound");
+
+    assert!(interp.heap.age_runtime(), "age to gen 1");
+    interp.heap.migrate_live_globals(0);
+    interp.heap.collect(&mut [], &mut []);
+
+    // The cons the running code builds after the flip: a LOCAL head cell over the gen-0
+    // tail, then the `def` that publishes it.
+    let fresh = interp.heap.alloc_string("fresh");
+    let consed = interp.heap.alloc_pair(fresh, units_gen0);
+    interp.heap.env_define(global, units_symbol, consed);
+    interp.heap.collect(&mut [], &mut []);
+
+    assert!(
+        interp
+            .heap
+            .free_runtime_gen(0, interp.heap.drain_identity().0),
+        "gen 0 freed"
+    );
+
+    // Every element must still read, the old tail's strings included.
+    let read = interp
+        .eval_str(r#"(str (first units) "," (second units) "," (first (rest (rest units))))"#)
+        .expect("read units after gen 0 freed");
+    assert_eq!(interp.print(read), r#""fresh,alpha,beta""#);
+}
+
 /// KI-86's actual mechanism, pinned. A heap that switched the runtime collector OFF must
 /// stay off across a bulk-promote re-baseline (`rt_gc_rebaseline_all_live`, which the stdlib
 /// image install calls after materialising a module): before the fix that call replaced the

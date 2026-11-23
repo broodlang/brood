@@ -207,8 +207,15 @@ impl Heap {
                 crate::core::table::note_shared(id, fwd.pin_tables);
                 v
             }
-            // Atoms, and values already in PRELUDE/RUNTIME, need no copy.
-            _ => v,
+            // Atoms and PRELUDE values need no copy, and neither does a RUNTIME value of the
+            // current generation. A RUNTIME value of an OLDER generation does: it is the
+            // boundary where the new structure meets existing shared structure (the tail of
+            // `(cons x xs)`, a captured value), and left as it is the promoted copy would
+            // point into a generation that is draining. A `def` publishes that copy to the
+            // globals, which the drain stopped probing once their own values moved, so the
+            // generation was freed under it — `make gcstress`: `(def units (cons unit units))`
+            // with `units` read before an aging flip and consed after it.
+            _ => self.rehome_to_current_locked(v),
         }
     }
 
@@ -328,7 +335,9 @@ impl Heap {
             .iter()
             .map(|&c| match c.region() {
                 LOCAL => self.promote_map_node(c, fwd),
-                _ => c, // already shared
+                // Already shared: kept, unless it is in an older generation (see the
+                // `promote_in_grown` fallback).
+                _ => self.rehome_map_node_to_current_locked(c),
             })
             .collect();
         let new_data: SmallVec<[(Value, Value); 4]> = node
@@ -444,11 +453,15 @@ impl Heap {
 
     /// Deep-copy an environment frame chain from LOCAL into the shared RUNTIME
     /// region, promoting each bound value. Stops at the global scope (the shared
-    /// sentinel). Already-shared (RUNTIME) frames are returned unchanged. Reserves
-    /// its slot before recursing (same cycle break as [`promote_closure`]).
+    /// sentinel). Already-shared (RUNTIME) frames are kept, an older generation's re-homed
+    /// into the current one (see the `promote_in_grown` fallback). Reserves its slot before
+    /// recursing (same cycle break as [`promote_closure`]).
     fn promote_env(&self, env: EnvId, fwd: &mut PromoteForward) -> EnvId {
-        if env == EnvId::GLOBAL || env.region() == RUNTIME {
+        if env == EnvId::GLOBAL {
             return env;
+        }
+        if env.region() == RUNTIME {
+            return self.rehome_env_to_current_locked(env);
         }
         if let Some(&existing) = fwd.envs.get(&env) {
             return existing;

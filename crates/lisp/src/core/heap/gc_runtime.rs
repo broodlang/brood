@@ -272,28 +272,78 @@ impl Heap {
     /// sound; it also stops migration's reconcile from mistaking a concurrent
     /// `(def k old-gen-value)` for a stale binding and clobbering it.
     ///
+    /// The same hole one level down is closed by `promote` itself, which calls this on every
+    /// already-shared value it meets inside the structure it copies (`(def k (cons x xs))`
+    /// with `xs` draining): re-homing only the top-level value missed a fresh cell whose
+    /// tail was old, and the generation was freed under the global.
+    ///
     /// **The caller must already hold `promote_lock` (read)** — this is called from
     /// [`Heap::promote_rehome_publish`], which holds one guard across the promote, this
-    /// re-home *and* the publishing store. Taking (and releasing) the lock here instead
-    /// was the TOCTOU that helper's doc comment describes: the generation this validates
-    /// against could flip before the caller stored the handle. A no-op on the default
+    /// re-home *and* the publishing store, and from inside `promote`, under its guard.
+    /// Taking (and releasing) the lock here instead was the TOCTOU that helper's doc
+    /// comment describes: the generation this validates against could flip before the
+    /// caller stored the handle. A no-op on the default
     /// single-generation path (every RUNTIME value is already current, so the fast-path
     /// check returns immediately).
     pub(crate) fn rehome_to_current_locked(&self, v: Value) -> Value {
-        let g = match runtime_gen_of(v) {
-            Some(g) => g,
-            None => return v,
-        };
-        // Read under the caller's guard: aging (which holds the write lock) cannot flip
-        // it out from under the flush, nor between here and the caller's store.
-        let cur = self.runtime.cur_gen();
-        if g == cur {
-            return v;
+        match runtime_gen_of(v) {
+            Some(generation) => self
+                .copy_out_of_gen_locked(generation, |old, new, forward| {
+                    flush_rt_value(old, new, forward, v)
+                })
+                .unwrap_or(v),
+            None => v,
         }
-        let old_guard = self.runtime.gens[g].load();
-        let dst_guard = self.runtime.gens[cur].load();
-        let copy =
-            |forward: &mut RuntimeForward| flush_rt_value(&old_guard, &dst_guard, forward, v);
+    }
+
+    /// [`rehome_to_current_locked`](Self::rehome_to_current_locked) for an environment
+    /// frame: a RUNTIME frame in a non-current generation comes back as its copy in the
+    /// current one (through the drain's map, as a value does); any other frame unchanged.
+    /// Promotion meets one as the parent of a frame it copies — a closure made inside a
+    /// call of an older closure captures that closure's frame.
+    pub(crate) fn rehome_env_to_current_locked(&self, env: EnvId) -> EnvId {
+        if env == EnvId::GLOBAL || env.region() != RUNTIME {
+            return env;
+        }
+        self.copy_out_of_gen_locked(env.code_gen(), |old, new, forward| {
+            flush_rt_env(old, new, forward, env)
+        })
+        .unwrap_or(env)
+    }
+
+    /// [`rehome_to_current_locked`](Self::rehome_to_current_locked) for a CHAMP trie
+    /// node: a sub-trie a LOCAL map shares with an older RUNTIME map (path copying shares
+    /// every untouched branch).
+    pub(crate) fn rehome_map_node_to_current_locked(&self, node: MapId) -> MapId {
+        if node.region() != RUNTIME {
+            return node;
+        }
+        self.copy_out_of_gen_locked(node.code_gen(), |old, new, forward| {
+            flush_rt_map(old, new, forward, node)
+        })
+        .unwrap_or(node)
+    }
+
+    /// Run `copy` from RUNTIME generation `generation` into the current one, or `None`
+    /// when `generation` IS the current one (nothing to move). The caller holds
+    /// `promote_lock` (read), so the generations cannot flip under the copy or between
+    /// it and the caller's store.
+    fn copy_out_of_gen_locked<T>(
+        &self,
+        generation: usize,
+        copy: impl FnOnce(&CodeSlabs, &CodeSlabs, &mut RuntimeForward) -> T,
+    ) -> Option<T> {
+        let current = self.runtime.cur_gen();
+        if generation == current {
+            return None;
+        }
+        let old_guard = self.runtime.gens[generation].load();
+        let destination_guard = self.runtime.gens[current].load();
+        let mut copy = Some(copy);
+        let mut run = |forward: &mut RuntimeForward| {
+            let copy = copy.take().expect("the copy runs once");
+            copy(&old_guard, &destination_guard, forward)
+        };
         // Through the drain's map when it is for these generations, so the copy is the one
         // the globals and every re-homed process hold; a fresh map otherwise. Either way
         // the re-homed code's source positions follow it, as aging's migration carries
@@ -301,14 +351,16 @@ impl Heap {
         // flight in another process when the generation turned — kept its code and lost
         // every inner position, and an error inside it reported the CALLER's line (the
         // 2026-10-23 parallel cold load lost them on ~1 module in 25).
-        self.runtime
-            .copy_through_drain_map(g, cur, copy)
-            .unwrap_or_else(|| {
-                let mut fresh = RuntimeForward::for_gens(g, cur);
-                let moved = copy(&mut fresh);
-                self.runtime.carry_positions(&fresh.pair_log, g, cur);
-                moved
-            })
+        let through_drain = self
+            .runtime
+            .copy_through_drain_map(generation, current, &mut run);
+        Some(through_drain.unwrap_or_else(|| {
+            let mut fresh = RuntimeForward::for_gens(generation, current);
+            let moved = run(&mut fresh);
+            self.runtime
+                .carry_positions(&fresh.pair_log, generation, current);
+            moved
+        }))
     }
 
     /// **RUNTIME collector — a drain this process's data pins, ended by copying.** A process
