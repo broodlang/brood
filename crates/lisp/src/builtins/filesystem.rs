@@ -144,6 +144,36 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Read the whole file at path as a bytes value. The byte-faithful read file/slurp can't be (file/slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset.\n\n    (file/slurp-bytes \"logo.png\")   ;~> the file's bytes",
         watched!("file/slurp-bytes", slurp_bytes, 1));
     primitives.def(
+        "file/slurp-bytes-from",
+        Arity::range(2, 3),
+        Sig::with_optional(vec![string, int], vec![int.union(nil_ty)], bytes_ty.union(nil_ty)),
+        &["path", "offset", "&optional", "limit"],
+        "Read the file at path from byte offset to its end — or at most limit bytes — as a bytes value; nil when the file is missing. An offset at or past the end reads empty bytes. The read a follower of a growing file wants (a log, a JSON-lines journal another program appends to): remember where the last read ended and read only what came after, never the whole file again. Decode with string/bytes->, after the last newline the caller kept back, so a half-written line or character waits for the next read (ADR-781).\n\n    (file/slurp-bytes-from \"app.log\" 1024)   ;~> the bytes written after the first 1024",
+        watched!("file/slurp-bytes-from", slurp_bytes_from, 1));
+    // Change notification (ADR-782): the OS tells a process its file changed, so a
+    // follower waits in `receive` instead of polling `file/size`.
+    primitives.def(
+        "file/watch",
+        Arity::exact(1),
+        Sig::new(vec![string], ref_ty.union(Ty::of(Tag::Failure))),
+        &["path"],
+        "Watch the file or directory at path for changes: a watch handle (a ref), or a failure saying why not — the directory is missing, or the operating system refused a watch. The calling process then receives [:file-watch handle path kind] each time path changes, kind being :created, :modified or :removed. A file is watched through its directory, so it need not exist yet (its creation is the first message) and the watch survives the file being deleted and recreated or replaced by a rename; a directory is watched itself, not its subdirectories, and each message names the entry that changed. Bursts coalesce: while a message for a path and kind waits unreceived, more changes of that kind send nothing, so re-read the file on each message rather than counting them. The watch ends with file/unwatch or when the calling process exits (ADR-782).\n\n    (file/watch \"app.log\")   ;~> a ref; then (receive ([:file-watch _ path :modified] …))",
+        watched!("file/watch", watch_file, 1));
+    primitives.def(
+        "file/unwatch",
+        Arity::exact(1),
+        Sig::new(vec![ref_ty], bool_ty),
+        &["handle"],
+        "End the file/watch handle: true when it was watching, false when it had already ended. A [:file-watch handle …] message already queued is withdrawn, so no receive after this one sees one (ADR-782).\n\n    (file/unwatch (ref))   ;=> false",
+        unwatch_file);
+    primitives.def(
+        "%file-watch-count",
+        Arity::exact(1),
+        Sig::new(vec![string], int),
+        &["path"],
+        "How many live file/watch handles watch through path's directory (path itself when it is a directory); 0 means no operating-system watch is held there. For tests that prove an ended watch is released (ADR-782).",
+        file_watch_count);
+    primitives.def(
         "file/spit-bytes",
         Arity::exact(2),
         Sig::new(vec![string, any], nil_ty),
@@ -1063,6 +1093,91 @@ pub(super) fn slurp_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(bytes_to_value(&bytes, heap))
+}
+
+/// `(file/slurp-bytes-from path offset [limit])` — the bytes of `path` from `offset` on, at most
+/// `limit` of them, or nil when the file is missing. A follower of a growing file reads only
+/// what was appended since its last read (ADR-781). Seeks, so a large file is not read whole.
+pub(super) fn slurp_bytes_from(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::io::{Read, Seek, SeekFrom};
+    let who = "file/slurp-bytes-from";
+    let path = expect_string(heap, who, arg(args, 0))?;
+    let offset = expect_int(heap, who, arg(args, 1))?;
+    let limit = match arg(args, 2) {
+        Value::Nil => None,
+        v => Some(expect_int(heap, who, v)?),
+    };
+    if offset < 0 || limit.is_some_and(|n| n < 0) {
+        return Err(LispError::runtime(format!(
+            "{}: offset and limit must not be negative, got {} and {:?}",
+            who, offset, limit
+        )));
+    }
+    let io_error = |e: std::io::Error| {
+        LispError::runtime(format!("{}: {}: {}", who, path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    };
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Value::nil()),
+        Err(e) => return Err(io_error(e)),
+    };
+    file.seek(SeekFrom::Start(offset as u64))
+        .map_err(io_error)?;
+    let mut bytes = Vec::new();
+    match limit {
+        Some(n) => file.take(n as u64).read_to_end(&mut bytes),
+        None => file.read_to_end(&mut bytes),
+    }
+    .map_err(io_error)?;
+    Ok(bytes_to_value(&bytes, heap))
+}
+
+/// `(file/watch path)` — a watch handle subscribing the calling process to `path`'s changes,
+/// or a failure (ADR-782). The mechanism is `crate::host::file_watch`.
+pub(super) fn watch_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file/watch", arg(args, 0))?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let watched = crate::host::file_watch::watch(&path, crate::process::self_pid());
+    #[cfg(target_arch = "wasm32")]
+    let watched: Result<u64, String> = Err("this platform has no file change notification".into());
+    Ok(match watched {
+        Ok(id) => Value::ref_(id),
+        Err(reason) => heap.alloc_failure(&format!("file/watch: {path}: {reason}")),
+    })
+}
+
+/// `(file/unwatch handle)` — end a watch; true when it was live (ADR-782).
+pub(super) fn unwatch_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let Value::Ref(id) = arg(args, 0) else {
+        return Err(LispError::wrong_type(
+            heap,
+            "file/unwatch",
+            "watch handle (a ref)",
+            arg(args, 0),
+        ));
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let ended = crate::host::file_watch::unwatch(id);
+    #[cfg(target_arch = "wasm32")]
+    let ended = {
+        let _ = id;
+        false
+    };
+    Ok(Value::boolean(ended))
+}
+
+/// `(%file-watch-count path)` — the live handles watching through `path`'s directory.
+pub(super) fn file_watch_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "%file-watch-count", arg(args, 0))?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let count = crate::host::file_watch::watch_count(&path);
+    #[cfg(target_arch = "wasm32")]
+    let count = {
+        let _ = path;
+        0
+    };
+    Ok(Value::int(count as i64))
 }
 
 /// `(file-size path)` — the size of `path` in bytes, or nil if it's missing.

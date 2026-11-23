@@ -94,6 +94,10 @@ fn retire_pid_tail(pid: u64, reason: Message) {
     // port-dies-with-its-owner semantics. Without this a crashed owner orphaned the
     // child, its registry entry, and both its reader threads for the runtime's life.
     crate::host::subprocess::close_process_procs(pid);
+    // And any file watches it holds (ADR-782): the OS watch on a directory goes with its
+    // last handle, so a watcher that dies holds nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host::file_watch::close_process_watches(pid);
     // And any wasm instances it loaded — each holds a whole store and linear memory.
     #[cfg(feature = "wasm")]
     crate::host::wasm::close_process_instances(pid);

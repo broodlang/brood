@@ -357,7 +357,21 @@ pub(crate) fn jit_any_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
             float_deopt_feedback(heap, arm);
             return;
         }
-        (Some(DeoptReason::EntryParamTag), slot) => slot,
+        // A float-path guard that met an int it could not promote.
+        (
+            Some(
+                DeoptReason::SlotFloatGuard
+                | DeoptReason::HandleFloatGuard
+                | DeoptReason::FloatPairSecondBesideInt,
+            ),
+            _,
+        ) => {
+            arith_dispatch_feedback(heap, arm);
+            return;
+        }
+        // A register-carried param met another type: at entry, or passed by the loop's own
+        // back edge (`SelfCallCarryTag`, KI-410) — either way the slot is polymorphic.
+        (Some(DeoptReason::EntryParamTag | DeoptReason::SelfCallCarryTag), slot) => slot,
         _ => return,
     };
     if slot < 32 {
@@ -391,10 +405,12 @@ const FLOAT_DEOPT_RELOWER: u32 = 4;
 /// float-context and reset it to untried, so its next tier-up routes `Handle` arithmetic
 /// through the float path (`has_float_slot`) — the same optimism a profiled `Float` param
 /// buys, kept sound by the same `as_f64` guards. Once per arm: a flagged arm that still
-/// deopts is genuinely polymorphic and the thrash latch takes it as before.
+/// deopts on a float is genuinely polymorphic, and `arith_dispatch_feedback` takes it.
 fn float_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
     use std::sync::atomic::Ordering::Relaxed;
     if arm.jit_float_context.load(Relaxed) {
+        // Already float-context and the integer path still meets floats: polymorphic.
+        arith_dispatch_feedback(heap, arm);
         return;
     }
     let n = arm.jit_float_deopts.fetch_add(1, Relaxed) + 1;
@@ -403,6 +419,41 @@ fn float_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
         if crate::diagnostics::debug_flags::jit_bail_trace() {
             eprintln!(
                 "[jit-relower] arm={} reason=float-through-erased-reads: {n} integer-guard deopts on a Float; re-tiering in float context",
+                arm.dbg_label()
+            );
+        }
+        reset_arm_untried(heap, arm);
+    }
+}
+
+/// Polymorphic-arithmetic deopts an arm may take before it is re-lowered with its guessed
+/// arithmetic dispatched by tag. Four, like the float context, so the re-tier lands before
+/// the thrash latch's sixteen.
+const ARITH_DISPATCH_RELOWER: u32 = 4;
+
+/// A guess about an arithmetic operand's type failed the other way from the one the float
+/// context fixes: the float path met an `Int` it could not promote (reasons 24/25/46 — an
+/// int where the profile or the float context guessed a float), or the integer path met a
+/// `Float` in an arm the float context has already re-tiered. Either way the operand is
+/// sometimes an int and sometimes a float, so no static guess holds: after
+/// `ARITH_DISPATCH_RELOWER` of these, flag the arm `jit_arith_dispatch` and reset it to
+/// untried, so its next lowering dispatches that arithmetic by tag (`arith_dispatch`,
+/// `cmp_dispatch`). Once per arm: dispatched arithmetic deopts only on a non-number.
+///
+/// Without it, `(defn magnitude (n) (if (< n 0) (- n) n))` with one int caller among float
+/// callers lost its native code for every caller — sixteen deopts and the latch — and a
+/// self-tail loop of that shape, never deopt-watched, deopted on every activation.
+fn arith_dispatch_feedback(heap: &Heap, arm: &CompiledArm) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if arm.jit_arith_dispatch.load(Relaxed) {
+        return;
+    }
+    let n = arm.jit_arith_deopts.fetch_add(1, Relaxed) + 1;
+    if n == ARITH_DISPATCH_RELOWER {
+        arm.jit_arith_dispatch.store(true, Relaxed);
+        if crate::diagnostics::debug_flags::jit_bail_trace() {
+            eprintln!(
+                "[jit-relower] arm={} reason=polymorphic-arithmetic: {n} deopts on an int where a float was guessed, or a float where an int was; re-tiering with that arithmetic dispatched by tag",
                 arm.dbg_label()
             );
         }

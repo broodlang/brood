@@ -98,3 +98,38 @@
       (file/spit-bytes p (string/->bytes "longer first write"))
       (file/spit-bytes p (string/->bytes "short"))
       (assert= (file/slurp p) "short"))))
+
+(describe "slurp-bytes-from: reading what was appended since the last read (ADR-781)"
+  (test "reads from an offset to the end, or at most limit bytes"
+    (let (p (path/join (sb-tmp) "log.txt"))
+      (file/spit p "one\ntwo\n")
+      (assert= (string/bytes-> (file/slurp-bytes-from p 4)) "two\n")
+      (assert= (string/bytes-> (file/slurp-bytes-from p 0 3)) "one")
+      (assert= (string/bytes-> (file/slurp-bytes-from p 4 100)) "two\n")))
+
+  (test "a follower reads only what was appended after its offset"
+    (let (p (path/join (sb-tmp) "journal.jsonl"))
+      (file/spit p "{\"a\":1}\n")
+      (let (end (count (file/slurp-bytes p)))
+        (file/spit-append p "{\"b\":2}\n")
+        (assert= (string/bytes-> (file/slurp-bytes-from p end)) "{\"b\":2}\n"))))
+
+  (test "an offset at or past the end reads empty bytes; a missing file reads nil"
+    (let (dir (sb-tmp)
+          p (path/join dir "short.txt"))
+      (file/spit p "abc")
+      (assert= (count (file/slurp-bytes-from p 3)) 0)
+      (assert= (count (file/slurp-bytes-from p 99)) 0)
+      (is (nil? (file/slurp-bytes-from (path/join dir "missing.txt") 0)))))
+
+  (test "a byte offset can split a character; the bytes are faithful"
+    (let (p (path/join (sb-tmp) "utf8.txt"))
+      ; 'é' is the two bytes 195 169
+      (file/spit p "é")
+      (assert= (into [] (file/slurp-bytes-from p 1)) [169])))
+
+  (test "a negative offset or limit is refused"
+    (let (p (path/join (sb-tmp) "n.txt"))
+      (file/spit p "abc")
+      (assert-error (file/slurp-bytes-from p -1))
+      (assert-error (file/slurp-bytes-from p 0 -1)))))

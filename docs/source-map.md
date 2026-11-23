@@ -111,6 +111,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `host/audio.rs` — Audio output backend — the `audio-beep` builtin's engine (feature `audio`, pulled in by `gui`).
   - `host/clipboard.rs` — OS clipboard access (the `clipboard` feature, via `arboard`).
   - `host/dial.rs` — Dialling a TCP peer by name with every wait bounded — the one policy both the node links (`dist`) and the socket primitives (`host::net`) dial through.
+  - `host/file_watch.rs` — File change notification (ADR-782): a process watches a file or a directory and gets a `[:file-watch handle path kind]` message when it changes, instead of polling `file/size`.
   - `host/gui.rs` — The windowed (GUI) frontend for the M3 display/input seam — ADR-046's second frontend, alongside the terminal (crossterm) one in `builtins.rs`.
   - `host/net.rs` — TCP sockets (ADR-062) — and UDP sockets (ADR-449) — on one **reactor thread** (ADR-143), delivering to process mailboxes (ADR-059).
   - `host/net_wasm.rs` — WASM stub for the TCP/TLS socket mechanism (`crate::host::net`).

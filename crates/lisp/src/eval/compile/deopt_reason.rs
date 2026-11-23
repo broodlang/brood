@@ -115,6 +115,13 @@ pub(crate) enum DeoptReason {
     CountDeclined = 51,
     /// `(nth v i default)` callback declined (not a vector, or not a fixnum index).
     VectorRef3Declined = 52,
+    /// Arithmetic dispatched by tag: the first operand is neither an int nor a float.
+    ArithDispatchFirstOperand = 53,
+    /// Arithmetic dispatched by tag: the second operand is neither an int nor a float.
+    ArithDispatchSecondOperand = 54,
+    /// A self-tail call passed a register-carried parameter a value of another type;
+    /// payload = the slot.
+    SelfCallCarryTag = 55,
     /// Native recursion past the depth cap: drain the subtree on the VM.
     NativeDepthExceeded = 101,
     /// Entry hoist: a vector slot's element base was null (not a vector).
@@ -186,6 +193,9 @@ impl DeoptReason {
         DeoptReason::UnreachableLeader,
         DeoptReason::CountDeclined,
         DeoptReason::VectorRef3Declined,
+        DeoptReason::ArithDispatchFirstOperand,
+        DeoptReason::ArithDispatchSecondOperand,
+        DeoptReason::SelfCallCarryTag,
         DeoptReason::NativeDepthExceeded,
         DeoptReason::HoistedSlotVectorBaseNull,
         DeoptReason::HoistedGlobalUnbound,
@@ -271,6 +281,9 @@ impl DeoptReason {
             DeoptReason::UnreachableLeader => "unreachable-leader",
             DeoptReason::CountDeclined => "count-declined",
             DeoptReason::VectorRef3Declined => "vector-ref3-declined",
+            DeoptReason::ArithDispatchFirstOperand => "arith-dispatch-first-operand",
+            DeoptReason::ArithDispatchSecondOperand => "arith-dispatch-second-operand",
+            DeoptReason::SelfCallCarryTag => "self-call-carry-tag",
             DeoptReason::NativeDepthExceeded => "native-depth-exceeded",
             DeoptReason::HoistedSlotVectorBaseNull => "hoisted-slot-vector-base-null",
             DeoptReason::HoistedGlobalUnbound => "hoisted-global-unbound",
@@ -289,8 +302,8 @@ impl DeoptReason {
             (Some(reason @ (DeoptReason::SlotIntGuard | DeoptReason::HandleIntGuard)), tag) => {
                 format!("{}(tag={tag})", reason.name())
             }
-            (Some(DeoptReason::EntryParamTag), slot) => {
-                format!("{}(slot={slot})", DeoptReason::EntryParamTag.name())
+            (Some(reason @ (DeoptReason::EntryParamTag | DeoptReason::SelfCallCarryTag)), slot) => {
+                format!("{}(slot={slot})", reason.name())
             }
             (Some(reason), _) => reason.name().to_string(),
         }
@@ -380,6 +393,9 @@ mod tests {
                 | DeoptReason::UnreachableLeader
                 | DeoptReason::CountDeclined
                 | DeoptReason::VectorRef3Declined
+                | DeoptReason::ArithDispatchFirstOperand
+                | DeoptReason::ArithDispatchSecondOperand
+                | DeoptReason::SelfCallCarryTag
                 | DeoptReason::NativeDepthExceeded
                 | DeoptReason::HoistedSlotVectorBaseNull
                 | DeoptReason::HoistedGlobalUnbound

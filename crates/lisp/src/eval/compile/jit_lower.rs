@@ -607,6 +607,9 @@ fn jit_lower_arm_inner(
         slot_bool: &slot_bool,
         slot_int_profile: &slot_int_profile,
         float_context: has_float_slot,
+        arith_dispatch: arm
+            .jit_arith_dispatch
+            .load(std::sync::atomic::Ordering::Relaxed),
         blockarg_spill_base,
         blockarg_spill_len,
         slot_f64_cache: &slot_f64_cache,

@@ -694,6 +694,15 @@ pub struct CompiledArm {
     pub jit_float_context: std::sync::atomic::AtomicBool,
     /// Integer-path guard deopts on a `Float` (toward `FLOAT_DEOPT_RELOWER`), cumulative.
     pub jit_float_deopts: std::sync::atomic::AtomicU32,
+    /// Set once `ARITH_DISPATCH_RELOWER` float-path guards (reasons 24/25/46, and 20/21 on a
+    /// `Float` in an arm already float-context) have deopted: the arm's arithmetic is
+    /// genuinely polymorphic — `(defn magnitude (n) (if (< n 0) (- n) n))` called with an
+    /// int among float callers — so each static guess, int or float, deopts on the other
+    /// kind. The next lowering dispatches such arithmetic by tag at runtime
+    /// (`arith_dispatch`/`cmp_dispatch`) instead of guessing, and the arm settles.
+    pub jit_arith_dispatch: std::sync::atomic::AtomicBool,
+    /// Polymorphic-arithmetic guard deopts (toward `ARITH_DISPATCH_RELOWER`), cumulative.
+    pub jit_arith_deopts: std::sync::atomic::AtomicU32,
     /// Free globals this arm reads that held a `Value::Float` when the arm was
     /// enqueued for tiering — the global-read counterpart of the tier-time
     /// `slot_tags` param profile. The profile snapshots the live *frame*, so it
@@ -938,6 +947,8 @@ impl Default for CompiledArm {
             jit_entry_deopts: AtomicU32::new(0),
             jit_float_context: AtomicBool::new(false),
             jit_float_deopts: AtomicU32::new(0),
+            jit_arith_dispatch: AtomicBool::new(false),
+            jit_arith_deopts: AtomicU32::new(0),
             float_globals: OnceLock::new(),
             self_global_ok: AtomicBool::new(false),
             // Sentinel: no binding validated yet.

@@ -1,0 +1,193 @@
+;; tests/file_watch_test.blsp — file change notification (ADR-782): `file/watch` subscribes
+;; the calling process to a path's changes as [:file-watch handle path kind] messages,
+;; `file/unwatch` ends it, and a watcher that exits releases its OS watch.
+;;
+;; Every wait is a receive with a timeout, never a sleep: a positive wait gives the OS five
+;; seconds, and a "nothing more arrives" check is a quiet window after a barrier.
+;; Fixtures live under a unique temp dir per call, purged at load.
+
+(defmodule file-watch-test (:use test))
+
+(purge-stale-temp "brood-fwatch-")
+
+(defn- fw-tmp ()
+  (let (directory (temp-dir "brood-fwatch-"))
+    (file/mkdir directory)
+    directory))
+
+(defn- fw-watch (path)
+  (let (handle (file/watch path))
+    (if (failure? handle) (error "fw-watch: " (error-message handle)) handle)))
+
+(defn- fw-await (handle kind)
+  (receive
+    ([:file-watch ^handle path ^kind] path)
+    (after 5000 :timeout)))
+
+(defn- fw-drain (handle seen)
+  (receive
+    ([:file-watch ^handle path kind] (fw-drain handle (conj seen [path kind])))
+    (after 300 seen)))
+
+(describe "file/watch: a change to a watched file is a message (ADR-782)"
+  (test "an append to a watched file reaches the watcher, naming the path as it was given"
+    (let (path (path/join (fw-tmp) "session.jsonl"))
+      (file/spit path "{\"a\":1}\n")
+      (let (handle (fw-watch path))
+        (is (ref? handle))
+        (file/spit-append path "{\"b\":2}\n")
+        (assert= (fw-await handle :modified) path)
+        (file/unwatch handle))))
+
+  (test "a path that does not exist yet is watched; its creation is the first message"
+    (let (path (path/join (fw-tmp) "later.log")
+          handle (fw-watch path))
+      (file/spit path "now\n")
+      (assert= (fw-await handle :created) path)
+      (file/unwatch handle)))
+
+  (test "the watch survives the file being deleted and recreated"
+    (let (path (path/join (fw-tmp) "rotated.log"))
+      (file/spit path "one\n")
+      (let (handle (fw-watch path))
+        (file/rm path)
+        (assert= (fw-await handle :removed) path)
+        (file/spit path "two\n")
+        (assert= (fw-await handle :created) path)
+        (file/spit-append path "three\n")
+        (assert= (fw-await handle :modified) path)
+        (file/unwatch handle))))
+
+  (test "a sibling's change is not the watched file's"
+    (let (directory (fw-tmp)
+          path (path/join directory "mine.log")
+          other (path/join directory "theirs.log"))
+      (file/spit path "")
+      (let (handle (fw-watch path)
+            barrier (fw-watch other))
+        (file/spit-append other "x\n")
+        ; the barrier's message comes from the same event, so it is routed by then
+        (assert= (fw-await barrier :modified) other)
+        (assert= (fw-drain handle []) [])
+        (file/unwatch handle)
+        (file/unwatch barrier))))
+
+  (test "a watched directory names the entry that changed"
+    (let (directory (fw-tmp)
+          handle (fw-watch directory))
+      (file/spit (path/join directory "new.txt") "x")
+      (assert= (fw-await handle :created) (path/join directory "new.txt"))
+      (file/unwatch handle)))
+
+  (test "a missing directory is a failure, not a raise"
+    (let (watched (file/watch (path/join (fw-tmp) "no-such-dir" "file.log")))
+      (is (failure? watched))
+      (is (includes? (error-message watched) "file/watch")))))
+
+(describe "file/watch: bursts coalesce"
+  (test "many appends with no receive between leave one :modified message"
+    (let (directory (fw-tmp)
+          path (path/join directory "burst.log")
+          barrier-path (path/join directory "barrier.log"))
+      (file/spit path "")
+      (file/spit barrier-path "")
+      (let (handle (fw-watch path)
+            barrier (fw-watch barrier-path))
+        (fold (range 50) nil (fn (_ index) (file/spit-append path (str index "\n"))))
+        (file/spit-append barrier-path "done\n")
+        (assert= (fw-await barrier :modified) barrier-path)
+        ; one message per (path, kind) at most: a backend may add a kind of its own (FSEvents
+        ; carries a recent creation along), never a second message of one kind
+        (let (drained (fw-drain handle []))
+          (assert= drained (vec (seq/distinct drained)))
+          (assert= (count (seq/filter drained (fn ([_ kind]) (= kind :modified)))) 1))
+        ; once received, the next change is a fresh message
+        (file/spit-append path "after\n")
+        (assert= (fw-await handle :modified) path)
+        (file/unwatch handle)
+        (file/unwatch barrier)))))
+
+(describe "file/unwatch ends the watch"
+  (test "after unwatch no message arrives, and the OS watch is released"
+    (let (path (path/join (fw-tmp) "stop.log"))
+      (file/spit path "")
+      (let (handle (fw-watch path))
+        (assert= (%file-watch-count path) 1)
+        (is (file/unwatch handle))
+        (is (not (file/unwatch handle)))
+        (assert= (%file-watch-count path) 0)
+        (file/spit-append path "x\n")
+        (assert= (fw-drain handle []) []))))
+
+  (test "a message already queued is withdrawn by unwatch"
+    (let (path (path/join (fw-tmp) "queued.log"))
+      (file/spit path "")
+      (let (handle (fw-watch path)
+            barrier (fw-watch path))
+        (file/spit-append path "x\n")
+        ; both handles are routed from one event, `handle` first: once the barrier's
+        ; message is here, `handle`'s is queued behind it
+        (assert= (fw-await barrier :modified) path)
+        (file/unwatch handle)
+        (assert= (receive ([:file-watch ^handle _ _] :seen) (after 0 :none)) :none)
+        (file/unwatch barrier)))))
+
+(describe "file/watch across processes"
+  (test "a watcher process that dies leaves no watch behind"
+    (let (path (path/join (fw-tmp) "orphan.log")
+          parent (self))
+      (file/spit path "")
+      (let (child (spawn (fn ()
+                           (send parent [:watching (fw-watch path)])
+                           (receive (:stop :stopped))))
+            monitored (monitor child)
+            handle (receive ([:watching handle] handle) (after 5000 :timeout)))
+        (is (ref? handle))
+        (assert= (%file-watch-count path) 1)
+        (send child :stop)
+        (receive ([:down ^monitored _ _] :down) (after 5000 :timeout))
+        (assert= (%file-watch-count path) 0)
+        (is (not (file/unwatch handle))))))
+
+  (test "many processes watch one file; each hears the append"
+    (let (directory (fw-tmp)
+          path (path/join directory "shared.log")
+          parent (self)
+          workers 8)
+      (file/spit path "")
+      (let (children (map (range workers)
+                       (fn (index)
+                         (spawn (fn ()
+                                  (let (handle (fw-watch path))
+                                    (send parent [:ready index])
+                                    (send parent [:heard index (fw-await handle :modified)])
+                                    (receive (:stop :stopped)))))))
+            ready (fold (range workers)
+                    0
+                    (fn (count-so-far _)
+                      (receive ([:ready _] (inc count-so-far)) (after 5000 count-so-far)))))
+        (assert= ready workers)
+        (assert= (%file-watch-count path) workers)
+        (file/spit-append path "for everyone\n")
+        (let (heard (fold (range workers)
+                      []
+                      (fn (paths _)
+                        (receive
+                          ([:heard _ heard-path] (conj paths heard-path))
+                          (after 5000 paths)))))
+          (assert= heard (vec (map (range workers) (fn (_) path)))))
+        (let (monitors (map children monitor))
+          (map children (fn (child) (send child :stop)))
+          (map monitors
+            (fn (monitored)
+              (receive ([:down ^monitored _ _] :down) (after 5000 :timeout)))))
+        (assert= (%file-watch-count path) 0))))
+
+  (test "a handle sent to another process can be unwatched there"
+    (let (path (path/join (fw-tmp) "handed.log")
+          parent (self))
+      (file/spit path "")
+      (let (handle (fw-watch path))
+        (spawn (fn () (send parent [:ended (file/unwatch handle)])))
+        (assert= (receive ([:ended ended] ended) (after 5000 :timeout)) true)
+        (assert= (%file-watch-count path) 0)))))

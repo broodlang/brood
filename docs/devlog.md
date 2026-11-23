@@ -2454,6 +2454,42 @@ step green without closing the hole. With the fix and the completing free put ba
 files passed 3 cold-and-warm rounds in CI. Guard in `runtime_collector`, sabotage-checked.
 Not run here: the suites and gcstress (desktop rule); proved in CI.
 
+2026-11-23. **Arithmetic no guess can type stays native (ADR-780, KI-410).** b2d's
+`block-walk` deopted ~12 times a frame and dino's `hanging-lianas` on most frames, both
+`handle-int-guard(tag=4)` at `(* (count xs) (hash …))`: in a float-context arm the float path
+refuses the never-float `count` and the integer path deopts on the float, and a self-tail loop
+is never deopt-watched, so the deopt repeated on every activation. Such an op now dispatches by
+tag at runtime (`arith_dispatch`, boxed answer in registers). The general case — `math/abs`
+called with an int among float callers latched BAILED for every caller — gets deopt feedback:
+four int-where-float-guessed deopts re-tier the arm with guessed arithmetic dispatched
+(`[jit-relower] … reason=polymorphic-arithmetic`). Fixing it found a miscompile underneath: a
+self-tail call copied a boxed arg into an int-carried param's register unchecked, so a float there
+was read as its bits; the back edge now tag-checks it. Headless dino, 302 frames at distance
+2 000 000: all deopts 4 767 → 619, `block-walk` 3 799 → 0, `hanging-lianas` 114 → 4. Guard
+`cli::polymorphic_arithmetic`. Not run here: the suites, `make ab`/`ab-vm`, gcstress, fuzz
+(desktop rule); CI runs the suites.
+
+2026-11-23. **`file/slurp-bytes-from`: read a growing file from where the last read ended
+(ADR-781).** A follower of a JSON-lines log another program appends to (bedit-agent's session
+watcher) re-read and re-decoded the whole file, several megabytes, twice a second.
+`(file/slurp-bytes-from path offset [limit])` seeks and answers the bytes from `offset` on: nil
+for a missing file, empty bytes at or past the end, a raise for a negative offset or limit.
+Bytes, not a string, because an offset can split a character. Offloadable like
+`file/slurp-bytes`. Tests: `tests/slurp_bytes_test.blsp`.
+
+2026-11-23. **`file/watch`: a file's changes arrive as messages (ADR-782).** The follow-up
+ADR-781 named: `(file/watch path)` answers a ref and the caller receives
+`[:file-watch handle path kind]` (`:created` `:modified` `:removed`); `(file/unwatch handle)`
+ends it; the owner's exit ends it too (the scheduler's retirement, beside sockets and child
+processes). A file is watched through its directory, so a missing file is watchable and
+delete-and-recreate or save-by-rename keeps the watch. One `notify` watcher serves the OS
+process (Linux allows 128 inotify instances per user), with handles counted per directory.
+Bursts coalesce on the mailbox's delivery credit, one waiting message per handle, path and
+kind, and unwatch withdraws a queued one. New dependency `notify` 9 (native only). Guard
+`tests/file_watch_test.blsp` (12 tests, three guards sabotaged red: the retirement hook, the
+withdrawal, the coalescing). Linux only here; macOS and Windows are CI's. Not run here: the
+suites (desktop rule).
+
 2026-11-23. **The tree-walker job's 120 s timeout was KI-409, and the test now says so.**
 `full.yml` on `258dc646` timed out `rehome_keeps_positions` (3 s on the run before). Rebuilt at
 that commit, its fixture hung on 6 of 6 loaded loops within four runs: a loader process died
