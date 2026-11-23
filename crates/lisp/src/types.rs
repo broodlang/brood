@@ -36,7 +36,7 @@ mod range;
 mod recursive;
 mod term_ops;
 mod term_relations;
-mod union_of_terms;
+pub(crate) mod union_of_terms;
 
 pub use gradual::{GradualTy, set_strict_checking, strict_checking};
 pub(crate) use literal_set::LitSet;
@@ -162,7 +162,7 @@ pub const MAX_TY_NODES: usize = 256;
 /// compiler's own file from 0.6 s to past five minutes. A result with more arms than
 /// this (hatch's `oidc/complete`, five `[:error …]` beside its `[:ok …]`) keeps its tag
 /// because the overflow collapse in `from_terms` merges same-tag shapes first.
-const MAX_TY_TERMS: usize = 4;
+pub(crate) const MAX_TY_TERMS: usize = 4;
 /// The widest int interval read as its enumeration against a literal set
 /// (`Ty::enumerated_int_range`): `(int 1 2) ⊆ 1 | 2` needs the two values listed. A
 /// literal set this checker meets is a `match`'s handful of arms, so a wider interval

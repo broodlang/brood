@@ -640,7 +640,7 @@ fn and_first_conjunct_guard(heap: &Heap, binding: Value, body: Value, ctx: &Ctx)
 /// where `A`/`B` are each either `g` or the remaining chain. `want_then_g` selects the
 /// shape: `true` for `and` — `(if g rest g)` (then is the remainder, else is `g`); `false`
 /// for `or` — `(if g g rest)` (then is `g`, else is the remainder). Returns `(cond, rest)`.
-fn chain_shape(heap: &Heap, test: Value, want_then_g: bool) -> Option<(Value, Value)> {
+pub(super) fn chain_shape(heap: &Heap, test: Value, want_then_g: bool) -> Option<(Value, Value)> {
     let items = list_items(heap, test)?;
     if items.len() != 3
         || !matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, kw::LET))

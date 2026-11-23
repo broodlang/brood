@@ -2323,6 +2323,47 @@ result vector), which is wider than string patterns; the catalog pins the three 
 Every new guard sabotage-verified (the formatter's three, the catalog's `(str (or …))` case).
 
 
+2026-11-20. **The checker says why it reported, keeps the editor current, and a gate pins
+precision through every prelude macro.** From a design review of the type system. (1) A call
+reported by *inclusion* — a precise argument (literal, declared parameter) merely wider than
+its parameter, or any known type under `--strict` — now says so and names what would not fit:
+`… got number (x) — the argument's type is precise, so every value must fit, and float |
+decimal | ratio would not`; the same suffix on declared-return, multimethod and impl returns.
+LSP hover on an argument shows its type and reading (`arg_gradual_at`, `describe_reading`);
+docs/types.md § "Which reading a value gets" is the user-facing rule. (2) The LSP loaded a
+project once and never again, so a module saved later was still checked by its OLD types in
+every caller — now a save runs `project/reload-changed` (output to stderr). That exposed a
+second fault: a start served from the startup image recorded no loaded mtimes, so the first
+`reload-changed` in any tooling image (`nest mcp` too) reloaded the whole project;
+`project/note-image-current` records them on the image-hit and partial paths. (3)
+`precision_gate.rs`: every prelude macro has a case proving a type flows through its
+expansion, or a recorded reason none applies; a new macro must be classified. It found
+`condp` never narrowed (the predicate was bound to a temporary — now called by name when it
+is a symbol) and records three gaps it asserts still silent, so fixing one flips it:
+`receive` clause bindings, and the results of `with-out-str`/`with-err-str`. (4) The docs
+say plainly the checker is advisory in the image and a gate in CI. Every guard
+sabotage-verified (hover reading flipped, LSP refresh removed, image-hit mtimes removed).
+
+2026-11-20. **Nine bugs the design review's research found, fixed.** (1) KI-406: a running
+`defserver`/`defstatem` now runs redefined clauses — the loop is a clause of the server's own
+function reached through its global name — and `code-change` runs the CURRENT definition's
+migration. (2) KI-407: superseded code is reclaimed in a multi-process runtime — the waiting
+root thread reports for itself, the free is tried at every collector entry (the 1-in-64
+stride compounded with the doubling back-off into never) and by the report that completes a
+drain. (3) `seq` of any empty collection is nil (`(seq [])` was `[]`, truthy; std/tool/audit
+printed empty groups). (4) `(def x:int 3)` is refused naming `(sig x int)`; `defrecord` reads
+`n:int` as a typed field. (5) A misspelled type name is reported even capitalised (`x:Strng`),
+and an unknown name in a runtime contract raises instead of admitting anything; `numeric`,
+`ordered` and `record` got contract branches. (6) A union widened blindly past four
+alternatives prints a `gave-up` note. (7) Contracts agree with the checker: a keyword passes an
+arrow type, and a record type holds its declared field types. (8) The same-file return
+fixpoint walks callees first, so a call chain's finding no longer depends on definition order.
+(9) `(or (index-of …) 0)` is reported: an `or` whose first value is a numeric call (not a map
+read) with a literal default never falls back. (10) Found by (5): a `deftype` and a function
+of the same name share the declared-sig store, so the later erased the earlier
+(`editor/treesit`'s `parse-state` type); an alias is stored under its own key now, so a type
+and a function may share a name, as bedit's `liveeval` also does. The record contract checks DECLARED field types only — a record carries what
+`assoc` added. Every guard sabotage-verified.
 2026-11-20 (ADR-775). **A window can tell its app each time a frame is presented.** b2d's loop
 stepped on a timer and drew fire-and-forget into a FIFO window, so a 60 Hz timer beat against
 the panel: frames shown twice or dropped, visible as jitter in dino. `gui/open {:present-events
@@ -2351,6 +2392,29 @@ build, so the second binary used on a checkout (installed beside dev, a profilin
 used evicted (a read touches its slot). Guard `image_slots` drives four builds from one copy of
 the binary whose mtime it resets before each run; red with one image path, and with either
 touch removed (the oldest-written slot goes instead of the least recently used).
+
+2026-11-20 (ADR-777). **Sound for games: pan, keyed one-shots, layered ambience.** dino's sound
+needed a boar heard from the right, a forest of four loops at once that fog muffles by
+crossfade, and footfalls that sound once though a present-paced loop draws a step on two or
+three frames. `[:sound snd vol pan]` places a one-shot (a balance: never louder than `vol`);
+`[:sound snd vol pan key]` plays only when the frame before (or an earlier op of the frame) did
+not carry the same handle and key; `[:ambience snd vol]` keeps any number of loops going, keyed
+by handle, fading like `:music`. One-shots now play from the shared samples instead of a copy a
+play, the device is opened when a window gets its first sound (not on the first play), and it
+asks for a 20 ms buffer instead of rodio's 50. app.js mirrors the three. Guards: `pan_tests`,
+the one-shot source tests, `sound_tests` (keyed edge), the op parser tests. Not run here: the
+full suites (desktop rule).
+
+2026-11-21 (ADR-778). **What dino's hot paths found.** The "stale `&optional` once hot" bug was a
+call spill landing in the block-argument window: `emit_call` bounded call-result spills by the
+whole reserve, so a spill past its half overwrote a value a join had carried (dino's staged tail
+call head, then called as `208`); bounded now, with map/vector reads counted as handle producers
+and capped by the entries actually below a non-tail call. A widened join of a float and an
+untyped slot keeps the float guess, so b2d-physics `warm-start!` no longer latches off native.
+`(- a b c)`/`(/ a b c)` fold like `+`/`*`. `math/round`/`ceil` test finiteness with `(< (- x x)
+1.0)` instead of two ability dispatches (2.1 µs → 0.5 µs a call). The kernel decides a record
+name against a record value (contracted record parameter 9.5 → 2.0 µs, union 13.6 → 2.2 µs) (dropped on merging: main's ADR-773 decider already covers it).
+dino render ~5% faster. Not run here: the full suites, A/B rows, gcstress, fuzz (desktop rule).
 
 2026-11-23. **Startup, second pass: a warm `nest run` reads no source, and an edit restart
 loads in the pool (ADR-779).** Measured on the test machine against bedit (311 modules).

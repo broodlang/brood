@@ -306,7 +306,12 @@ The collector is a tracked follow-up, not part of this stage. → **dedup half
 shipped 2026-05-29 under ADR-042. ADR-091 added the single-process collector: the eval
 safepoint compacts the RUNTIME region past a churn threshold, and `(dev/runtime-collect)`
 forces it. Both run only while the runtime has no other live process (otherwise it
-reports `:ran false`), so a multi-process runtime — an editor — still keeps every version.**
+reports `:ran false`). A multi-process runtime is reclaimed by the two-generation collector
+(age, migrate, drain, free). Until 2026-11-20 its first drain never completed in practice
+(a root thread waiting on its program never acknowledged it, and the free was attempted
+once per 64 doublings), so an editor kept every version; `tests/runtime_drain_completes.rs`
+pins the fix. Still open: a process whose running code reaches the draining generation holds
+the drain until that code returns.**
 
 ---
 

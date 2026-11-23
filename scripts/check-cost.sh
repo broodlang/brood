@@ -40,13 +40,13 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --base) base_ref="$2"; shift 2 ;;
     --scan-alive) scan_alive=1; shift ;;
-    --files) shift; while [ $# -gt 0 ] && [ "" = "$1" ]; do files+=("$1"); shift; done ;;
+    --files) shift; while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do files+=("$1"); shift; done ;;
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
 
-if [  -eq 0 ]; then
+if [ "${#files[@]}" -eq 0 ]; then
   scratch="$(mktemp -d)"
   trap 'rm -rf "$scratch"' EXIT
   printf '(io/puts (str (os/env "HOME")))\n' >"$scratch/os-env.blsp"
@@ -110,7 +110,7 @@ if [ "$scan_alive" -eq 1 ]; then
 else
   printf '%-16s %12s %12s %8s  %s\n' program "base" "new" "delta" "loads base→new"
 fi
-for f in ""; do
+for f in "${files[@]}"; do
   name="$(basename "$f" .blsp)"
   a="$(count "$base_bin" "$f")"
   n="$(count "$new_bin" "$f")"

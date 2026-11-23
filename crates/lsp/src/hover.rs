@@ -8,8 +8,10 @@
 //! No user code runs — see `docs/lsp.md`.
 
 use brood::Interp;
-use brood::syntax::cst::Node;
+use brood::syntax::cst::{Node, NodeKind};
+use brood::syntax::reader;
 use brood::syntax::scope::{BindingKind, Resolution, ScopeTree};
+use brood::types::check;
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 
 use crate::defs;
@@ -43,7 +45,7 @@ pub fn hover(
         });
     }
 
-    let markdown = match tree.resolve_at(root, text, offset) {
+    let mut markdown = match tree.resolve_at(root, text, offset) {
         Resolution::Defined {
             kind: BindingKind::Local,
             ..
@@ -74,6 +76,12 @@ pub fn hover(
         }
         Resolution::NotASymbol => return None,
     };
+    // How a call reads the argument under the cursor — precise (by inclusion) or dynamic
+    // (by overlap), the half of the type relation a reader cannot see from the types
+    // alone (docs/types.md § "Which reading a value gets").
+    if let Some(reading) = argument_reading(interp, text, root, offset) {
+        markdown.push_str(&format!("\n\n**as an argument here:** {reading}"));
+    }
 
     let range = index.range(text, node.span);
     Some(Hover {
@@ -83,6 +91,104 @@ pub fn hover(
         }),
         range: Some(range),
     })
+}
+
+/// The forms whose sub-lists are binders or clauses, not calls: a symbol in one of their
+/// slots is not an argument, so no argument reading is offered there.
+const NOT_CALLS: &[&str] = &[
+    "let",
+    "letrec",
+    "fn",
+    "defn",
+    "defn-",
+    "defmacro",
+    "def",
+    "def-",
+    "defonce",
+    "match",
+    "case",
+    "cond",
+    "condp",
+    "for",
+    "doseq",
+    "fold-for",
+    "when-let",
+    "if-let",
+    "when-some",
+    "if-some",
+    "receive",
+    "with",
+    "binding",
+    "try",
+    "catch",
+    "quote",
+    "quasiquote",
+    "comment",
+    "defmodule",
+    "sig",
+    "sig!",
+    "deftype",
+    "defrecord",
+    "defability",
+    "impl",
+];
+
+/// The argument the symbol at `offset` is — itself (`(f x)`, cursor on `x`) or the head of
+/// a nested call that is one (`(f (g y))`, cursor on `g`) — read the way the call's
+/// argument check reads it ([`check::arg_gradual_at`]). `None` when the symbol is not in an
+/// argument slot, the buffer does not read, or the checker cannot type it.
+fn argument_reading(interp: &mut Interp, text: &str, root: &Node, offset: u32) -> Option<String> {
+    // The chain of nodes from the root down to the symbol.
+    let mut path: Vec<&Node> = Vec::new();
+    let mut node = root;
+    loop {
+        path.push(node);
+        let Some(child) = node.children.iter().find(|c| c.span.contains(offset)) else {
+            break;
+        };
+        node = child;
+    }
+    let sym = *path.last()?;
+    if sym.kind != NodeKind::Symbol {
+        return None;
+    }
+    let index_in = |list: &Node, item: &Node| list.forms().position(|f| std::ptr::eq(f, item));
+    let parent = path.get(path.len().checked_sub(2)?).copied()?;
+    if parent.kind != NodeKind::List {
+        return None;
+    }
+    let (call, arg_index) = match index_in(parent, sym)? {
+        0 => {
+            let grand = path.get(path.len().checked_sub(3)?).copied()?;
+            if grand.kind != NodeKind::List {
+                return None;
+            }
+            (grand, index_in(grand, parent)?)
+        }
+        index => (parent, index),
+    };
+    if arg_index == 0 {
+        return None;
+    }
+    let head = call.head_symbol(text)?;
+    if NOT_CALLS.contains(&head) {
+        return None;
+    }
+    // The call form's opening paren in 1-based reader coordinates (columns count chars).
+    let opening = call.span.start as usize;
+    let line = text[..opening].bytes().filter(|&b| b == b'\n').count() as u32 + 1;
+    let line_start = text[..opening].rfind('\n').map_or(0, |i| i + 1);
+    let col = text[line_start..opening].chars().count() as u32 + 1;
+    let checkpoint = interp.heap.checkpoint();
+    let reading = reader::read_all_positioned(&mut interp.heap, text)
+        .ok()
+        .and_then(|positioned| {
+            let forms: Vec<_> = positioned.into_iter().map(|(form, _)| form).collect();
+            check::arg_gradual_at(&mut interp.heap, &forms, line, col, arg_index)
+        })
+        .map(|gradual| check::describe_reading(&gradual, brood::types::strict_checking()));
+    interp.heap.reset_local_to(checkpoint);
+    reading
 }
 
 fn code(text: &str) -> String {
@@ -152,6 +258,31 @@ mod tests {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup hover"),
         })
+    }
+
+    #[test]
+    fn hover_says_how_a_call_reads_its_argument() {
+        // A declared parameter is precise: a call reads it by inclusion, which is why a
+        // `number` handed to an `int` parameter is reported. A call result is dynamic: read
+        // by overlap, so the same call with `(maybe x)` is silent. The hover says which.
+        let src = "(defn takes-int (n:int -> int) n)\n\
+                   (defn maybe (n:int -> (or int bool)) (if (= n 0) false n))\n\
+                   (defn outer (x:number) (takes-int x))\n\
+                   (defn outer2 (y:int) (takes-int (maybe y)))\n";
+        let at_x = src.rfind("takes-int x").unwrap() + "takes-int ".len();
+        let precise = hover_at(src, &src[at_x..]).expect("hover on x");
+        assert!(
+            precise.contains("as an argument here:") && precise.contains("precise"),
+            "a declared parameter reads as precise: {precise}"
+        );
+        let dynamic = hover_at(src, "maybe y").expect("hover on maybe");
+        assert!(
+            dynamic.contains("as an argument here:") && dynamic.contains("dynamic"),
+            "a call result reads as dynamic: {dynamic}"
+        );
+        // Not an argument: a binder in a parameter list gets no reading.
+        let binder = hover_at(src, "x:number").unwrap_or_default();
+        assert!(!binder.contains("as an argument here"), "{binder}");
     }
 
     #[test]

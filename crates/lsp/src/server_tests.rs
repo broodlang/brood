@@ -542,3 +542,121 @@ fn unknown_request_gets_method_not_found() {
     shutdown(&client);
     handle.join().unwrap().unwrap();
 }
+
+/// A module saved while the server runs is what the next check of a file that uses it reads.
+/// The server loads the project once, at the first open; before `refresh_project`, a saved
+/// edit to another module never reached that image, so a caller kept being checked against
+/// the callee's OLD types — the editor and `nest check` disagreeing about one tree.
+#[test]
+fn a_saved_module_is_what_its_callers_are_checked_against() {
+    let root = std::env::temp_dir().join(format!(
+        "brood-lsp-refresh-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("project.blsp"),
+        "(project :name \"lsprefresh\" :version \"0.1.0\")\n",
+    )
+    .unwrap();
+    let callee = root.join("src/sizes.blsp");
+    std::fs::write(
+        &callee,
+        "(defmodule sizes)\n(defn width (n:int -> int) n)\n",
+    )
+    .unwrap();
+    let caller = root.join("src/user.blsp");
+    let caller_text = "(defmodule user (:use sizes))\n(defn go () (width \"wide\"))\n";
+    std::fs::write(&caller, caller_text).unwrap();
+    let file_uri =
+        |path: &std::path::Path| -> Uri { format!("file://{}", path.display()).parse().unwrap() };
+
+    let (server, client) = Connection::memory();
+    let handle = thread::spawn(move || {
+        main_loop(
+            &server,
+            ClientCaps {
+                snippet: true,
+                document_changes: false,
+            },
+        )
+    });
+    client
+        .sender
+        .send(note(
+            DidOpenTextDocument::METHOD,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: file_uri(&caller),
+                    language_id: "brood".into(),
+                    version: 1,
+                    text: caller_text.into(),
+                },
+            },
+        ))
+        .unwrap();
+    let before = next_diagnostics(&client);
+    assert!(
+        before
+            .iter()
+            .any(|m| m.contains("width: argument 1 expects int")),
+        "the string passed to an int parameter is reported: {before:?}"
+    );
+
+    // The callee now takes a string. Its mtime is moved explicitly: a rewrite inside the
+    // filesystem's timestamp granularity would otherwise look unchanged.
+    std::fs::write(
+        &callee,
+        "(defmodule sizes)\n(defn width (n:string -> int) 1)\n",
+    )
+    .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&callee)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+        .unwrap();
+    client
+        .sender
+        .send(note(
+            DidSaveTextDocument::METHOD,
+            lsp_types::DidSaveTextDocumentParams {
+                text_document: TextDocumentIdentifier {
+                    uri: file_uri(&callee),
+                },
+                text: None,
+            },
+        ))
+        .unwrap();
+    // Re-check the caller, unchanged.
+    client
+        .sender
+        .send(note(
+            DidChangeTextDocument::METHOD,
+            DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: file_uri(&caller),
+                    version: 2,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: caller_text.into(),
+                }],
+            },
+        ))
+        .unwrap();
+    let after = next_diagnostics(&client);
+    assert!(
+        after.iter().all(|m| !m.contains("width: argument")),
+        "the caller is checked against the saved callee: {after:?}"
+    );
+
+    shutdown(&client);
+    handle.join().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}

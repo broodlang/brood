@@ -242,6 +242,19 @@ pub(super) fn report_exhausted_budgets(out: &mut Vec<Finding>) {
             ),
         ));
     }
+    let widened = crate::types::union_of_terms::union_widenings();
+    if widened > 0 {
+        out.push(Finding::new(
+            Lint::GaveUp,
+            None,
+            format!(
+                "checker gave up: {widened} union{} had more than {} alternatives and {} widened — a mismatch with one of the merged alternatives may go unreported",
+                if widened == 1 { "" } else { "s" },
+                crate::types::MAX_TY_TERMS,
+                if widened == 1 { "was" } else { "were" },
+            ),
+        ));
+    }
     let depth_hits = infer::expr_ty_depth_hits();
     if depth_hits > 0 {
         out.push(Finding::new(

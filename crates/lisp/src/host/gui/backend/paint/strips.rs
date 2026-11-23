@@ -29,7 +29,7 @@ pub(super) fn op_band(op: &Op, dy: isize, rows: &RowMap) -> Option<(isize, isize
         Op::Clear => Some((isize::MIN, isize::MAX)),
         Op::CursorZone { .. } => None,
         // A sound paints nothing.
-        Op::Sound { .. } | Op::Music { .. } => None,
+        Op::Sound { .. } | Op::Music { .. } | Op::Ambience { .. } => None,
         // An event and state that paint nothing themselves.
         Op::Burst { .. } => None,
         // Lighting, post-processing and particles reach the whole frame (a frame carrying any
@@ -639,7 +639,11 @@ pub(super) fn region_extent(
     let mut leaves = Vec::new();
     flatten(ops, cell_h, 0, false, &mut leaves);
     let keeps = leaves.iter().all(|leaf| match leaf.op {
-        Op::CursorZone { .. } | Op::Sound { .. } | Op::Music { .. } | Op::Burst { .. } => true,
+        Op::CursorZone { .. }
+        | Op::Sound { .. }
+        | Op::Music { .. }
+        | Op::Ambience { .. }
+        | Op::Burst { .. } => true,
         Op::Text { .. }
         | Op::Cursor { .. }
         | Op::Rect { .. }

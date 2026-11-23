@@ -264,7 +264,8 @@ commits in this repo.**
     **no write barriers for data** — the minor GC relies on *old never points to young* (the
     sole remembered set is for `def`/env-frame *binding* rebinding). Don't add machinery
     (barriers, defensive copies) that only a mutable structure would require.
-- **Types are set-theoretic, gradual, and advisory** (ADR-023/024; `docs/types.md`). A type
+- **Types are set-theoretic and gradual; advisory in the image, a gate in CI** (ADR-023/024;
+  `docs/types.md`). A type
   *is* a set of runtime `Tag`s; subtyping is set inclusion; redefinable globals are
   `dynamic()`, never `Any`. The checker **never gates the live image and never warns on a use
   valid for the image's current state** — a `def`/reload always wins (ADR-123..126). The one

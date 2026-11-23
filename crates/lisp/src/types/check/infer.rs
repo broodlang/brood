@@ -195,6 +195,7 @@ pub(super) fn expr_ty_depth_hits() -> u64 {
 pub(super) fn reset_expr_ty_visits() {
     EXPR_TY_VISITS.with(|c| c.set(0));
     EXPR_TY_DEPTH_HITS.with(|c| c.set(0));
+    crate::types::union_of_terms::reset_union_widenings();
 }
 
 fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {

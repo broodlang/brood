@@ -476,10 +476,11 @@ pub(super) fn check_fn_seeded(
                 Lint::TypeMismatch,
                 heap.form_pos_only(ret_form),
                 format!(
-                    "{}declared return type {} but the body yields {}",
+                    "{}declared return type {} but the body yields {}{}",
                     who,
                     crate::types::check::annot::display_ty(&s.ret),
-                    crate::types::check::annot::display_ty(&g.bound)
+                    crate::types::check::annot::display_ty(&g.bound),
+                    crate::types::check::walk::inclusion_reason(&g, &s.ret, "the body's"),
                 ),
             ));
         } else if ctx.strict()
@@ -1214,6 +1215,63 @@ pub(in crate::types::check) fn let_bind_scope(
 /// Quietly skips a malformed bindings shape (a pattern-target `let`, an
 /// improper list, an odd number of binding items): those are evaluator-level
 /// errors and aren't this checker's job.
+/// **The sentinel `or`** (the constant-condition lint's `or` half, ADR-373). `(or (index-of
+/// s "x") 0)` never falls back: `index-of` answers -1 for "not found", and a number is never
+/// nil or false, so the default is dead and the -1 flows on. The `if` lint above cannot see
+/// it — `or` lowers to `(let (g E) (if g g REST))`, which tests the binding — and it leaves
+/// `or` alone on purpose, since a defensive `(or x "")` over a value already known present is
+/// common and harmless. A NUMBER from a CALL is the narrow case worth reporting: numbers are
+/// never falsy, so the fallback can only be the trap.
+fn check_numeric_or(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<Finding>) {
+    if ctx.is_suppressed(crate::types::check::ctx::SUPPRESS_CONSTANT_COND) {
+        return;
+    }
+    let Some((first, fallback)) = crate::types::check::guards::chain_shape(heap, form, false)
+    else {
+        return;
+    };
+    // The trap's shape exactly: a DEFAULT (a literal fallback, the `(or … 0)` idiom) after a
+    // call that is not a map or record read. A read — `(get m :k)`, `(:k m)` — over a shape
+    // the checker knows has the key types as the field's number, and its fallback is
+    // defensive code, not a mistake; a macro's own `or` (`assert`'s) has no literal default.
+    let literal_fallback = matches!(
+        fallback,
+        Value::Int(_) | Value::Float(_) | Value::Str(_) | Value::Keyword(_) | Value::Nil
+    );
+    let Some(call) = list_items(heap, first) else {
+        return;
+    };
+    let is_read = match call.first() {
+        Some(Value::Keyword(_)) => true,
+        Some(&Value::Sym(head)) => ["get", "get-in", "map/get-in", "nth"]
+            .iter()
+            .any(|name| value::symbol_is(head, name)),
+        _ => false,
+    };
+    if !literal_fallback || is_read {
+        return;
+    }
+    let Some(ty) = crate::types::check::infer::expr_ty(heap, first, ctx) else {
+        return;
+    };
+    if ty.is_never() || ty.is_known_only_by_exclusion() || !ty.is_subtype(&crate::types::Ty::NUMBER)
+    {
+        return;
+    }
+    let pos = heap
+        .form_pos_only(first)
+        .or_else(|| heap.form_pos_only(form));
+    out.push(Finding::new(
+        Lint::ConstantCondition,
+        pos,
+        format!(
+            "this `or` never falls back — its first value is {ty}, and a number is never nil \
+             or false. A function answering a SENTINEL (-1 for \"not found\") needs the \
+             sentinel tested for, not the value"
+        ),
+    ));
+}
+
 pub(super) fn check_let(
     heap: &Heap,
     form: Value,
@@ -1234,6 +1292,9 @@ pub(super) fn check_let(
     };
     if binds.len() % 2 != 0 {
         return;
+    }
+    if !letrec {
+        check_numeric_or(heap, form, ctx, out);
     }
     let mut scope = ctx.clone();
     // letrec: pre-bind every name to `None` (in scope, no known type) so each

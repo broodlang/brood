@@ -382,7 +382,7 @@ impl GpuWindow {
                 // Hover metadata, hit-tested in the event loop (ADR-080); nothing to draw.
                 Op::CursorZone { .. } => {}
                 // Played when the frame arrived (`UserEvent::Draw`); nothing to draw.
-                Op::Sound { .. } | Op::Music { .. } => {}
+                Op::Sound { .. } | Op::Music { .. } | Op::Ambience { .. } => {}
                 // Read off the whole frame by `paint` (`FrameEffects`); nothing to expand.
                 Op::Ambient { .. }
                 | Op::Light { .. }

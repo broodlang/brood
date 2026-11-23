@@ -77,3 +77,18 @@
         (assert= n (count got))
         (doseq (i (range n))
           (assert= [(* i 2) (str "hello, " i)] (get got i)))))))
+
+(describe "a typed name outside a parameter list"
+  ;; `(def x:int 3)` bound a global literally named `x:int`, and `(defrecord r (n:int))` a
+  ;; field literally named `n:int`, both silently.
+  (test "def refuses a typed name, naming the spellings that work"
+    (let (message (error-message (error-of (reflect/eval '(def typed-def-probe:int 3)))))
+      (assert (includes? message "(def typed-def-probe …)"))
+      (assert (includes? message "(sig typed-def-probe int)"))))
+  (test "defrecord reads field:type as a typed field"
+    (reflect/eval '(defrecord typed-field-probe (n:int)))
+    (assert= {:n 7} (fields (reflect/eval '(typed-field-probe 7))))
+    (assert= 7 (reflect/eval '(typed-field-probe-n (typed-field-probe 7)))))
+  (test "a field with a colon and no type is refused"
+    (assert (includes? (error-message (error-of (reflect/eval '(defrecord typed-field-bad (n:)))))
+              "(n TYPE)"))))

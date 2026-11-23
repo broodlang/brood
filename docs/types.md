@@ -1,4 +1,4 @@
-# Brood types — set-theoretic, gradual, advisory
+# Brood types — set-theoretic, gradual; advisory in the image, a gate in CI
 
 **Status:** steps 0–4 done; Step 5+ shipped (ADR-078 onward) — function **arrow**
 types, sequence **element** types, **parametric HOF results**
@@ -22,11 +22,25 @@ Brood's types are **set-theoretic and gradual** (the Castagna line — see
 [research/set-theoretic-types-in-brood.md](research/set-theoretic-types-in-brood.md)),
 not TypeScript's pragmatic-but-unsound model. A type *is a set of values*; subtyping is
 set inclusion; what can't be pinned down statically is `dynamic()` and mixes
-soundly with the rest. Checking is **advisory for the live image**: it warns and
-optimises, and it never gates the running image (a `def`/reload always wins —
-contract #5 below). The one hard reject is **batch/CI only**: `nest check` exits
-nonzero on any warning. (Provably-sound special-form *structure* errors can't be
-wrong because special forms aren't redefinable.)
+soundly with the rest.
+
+The checker has **two roles, and they are different promises**:
+
+- **In the live image it is advisory.** The REPL, the LSP, a hot reload and the pre-check
+  of `nest run`/`nest test` report what they find and never block: a `def` or a reload
+  always wins (contract #5 below). This is what keeps live editing free.
+- **In a batch check it is a gate.** `nest check` exits non-zero on every finding outside
+  the advisory categories (`:gave-up`, `:deprecated`, `:beta`, plus any a project moves
+  there itself), and `--strict` adds a value merely wider than its parameter.
+  Brood holds `std/` and `tests/` at zero in strict mode in CI, and so does bedit. Treat it
+  as you would a static type checker in CI; `(check-allow :category form…)` records a
+  deliberate exception where it is made.
+
+"Advisory" names the first role only. A project that runs `nest check` in CI has a type
+gate, so what makes a finding fire — [which reading a value
+gets](#which-reading-a-value-gets) — matters as much as it would in a statically typed
+language. (Provably-sound special-form *structure* errors can't be wrong because special
+forms aren't redefinable.)
 The language stays fully dynamic; types never inhibit it. Mechanism lives in Rust
 (`Ty`, the `Tag` atoms, primitive signatures); policy (`assert-type`, contracts)
 lives in Brood (ADR-006).
@@ -131,6 +145,41 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   precisely both), and `is_disjoint` gains a precise case per kind so `:c` is
   provably-not-`(or :a :b)` — still sound (a literal set is an enumeration,
   never an over-approximation).
+
+## Which reading a value gets
+
+The same two types can meet two ways, and which one decides whether a call is reported.
+An argument (and a function body against its declared result) is read one of two ways:
+
+| The value is | Examples | Read against the parameter by | So a merely wider value is |
+|---|---|---|---|
+| **precise** | a literal; a declared parameter (`x:number`); integer-closed arithmetic over those | **inclusion** (`⊆`): every value it may be must fit | **reported** |
+| **dynamic** | a call's result; a redefinable global; anything inferred | **overlap** (`∩ ≠ ⊥`): reported only if *no* value of it fits | silent (reported under `--strict` when the type is positively known) |
+
+```clojure fragment
+(defn takes-int (n:int -> int) n)
+(defn maybe (n:int -> (or int bool)) (if (= n 0) false n))
+
+(defn a (x:number) (takes-int x))       ; reported: x is precise, and a float would not fit
+(defn b (y:int) (takes-int (maybe y)))   ; silent: (maybe y) is dynamic, and an int fits
+(defn c (s:string) (takes-int s))        ; reported: no string fits, whichever reading
+```
+
+Why the split: a call result or a global can be redefined while the program runs, so
+the checker treats what it knows of it as the image's current state, not a promise
+(contract #4). Warning on "not guaranteed" there would fire on every `(or T nil)` handed
+to a `T` parameter, and would contradict a redefinition the author intends. A declared
+parameter or a literal cannot change under you, so it is held to every value it admits.
+
+**You can see which reading applied.**
+- A report that fired by inclusion says so and names the values that would not fit:
+  `takes-int: argument 1 expects int, got number (x) — the argument's type is precise, so
+  every value must fit, and float | decimal | ratio would not`. Under `--strict` the
+  reason reads `under --strict every value of a known type must fit`. A disjoint report
+  carries no reason: none of its values fit.
+- In the editor, hovering an argument (or the head of a call passed as one) shows its type
+  and its reading: `` `int | bool` — dynamic: reported only if no value of it fits the
+  parameter ``. The query is `types::check::arg_gradual_at`.
 
 ## The staircase — tackle one at a time
 

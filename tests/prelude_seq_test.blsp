@@ -152,3 +152,14 @@
       (let (results (fold (range n) nil (fn (acc _) (cons (receive) acc))))
         (assert= n (count results))
         (is (every? results (fn (r) (= r expected))))))))
+
+(describe "seq of an empty collection is nil, whatever the kind"
+  ;; `(seq {})` was nil while `(seq [])`, `(seq "")` and `(seq #{})` answered the empty
+  ;; value itself — truthy — so `(when (seq xs) …)` ran for an empty vector
+  ;; (std/tool/audit.blsp printed an empty group).
+  (test "every empty kind"
+    (assert= [nil nil nil nil nil] [(seq []) (seq "") (seq #{}) (seq {}) (seq nil)]))
+  (test "a non-empty one passes through"
+    (assert= [[1] "ab" #{1}] [(seq [1]) (seq "ab") (seq #{1})]))
+  (test "the walkers still answer the empty value of their own kind"
+    (assert= [[] [] 0] [(mapv [] inc) (into [] []) (fold [] 0 +)])))

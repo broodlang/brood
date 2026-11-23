@@ -31,6 +31,7 @@ mod modules_and_imports;
 mod names_as_types;
 mod narrowing_arrows;
 mod order;
+mod precision_gate;
 mod properties;
 mod range_overflow_and_reserved;
 mod reach_gate;

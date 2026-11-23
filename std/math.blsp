@@ -206,28 +206,34 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 ;; would blame floor for `-inf`. The rounders check their own argument first, so the error
 ;; names the call the user wrote. A finite float of any magnitude has an integer floor: past
 ;; 2^63 `floor` promotes to a bignum, so the rounders never see an out-of-range error from it.
-(defn- %rounding-arg (who x)
-  (if (and (float? x) (or (math/nan? x) (math/infinite? x)))
-    (error who ": " x " has no integer value")
-    x))
-
+;;
+;; The check is `(< (- x x) 1.0)`, true exactly for a finite float: `x - x` is 0.0 for every
+;; finite `x` and NaN for an infinity or NaN, and NaN is below nothing. A float subtraction
+;; and a compare, both inline in native code — asked through `math/nan?` and
+;; `math/infinite?`, two ability dispatches, it made a `round` in a drawing loop ~2 µs. Each
+;; rounder spells it out rather than calling a helper, so it stays one call to `floor`.
 (defn ceil (x)
   "Round `x` toward positive infinity to an integer. A float with no integer value (an
 infinity or NaN) is an error naming `math/ceil`; a magnitude past 2^63 promotes to a bignum.
 
     (math/ceil 1.2)       ;=> 2
     (math/ceil -1.2)      ;=> -1"
-  (let (x (%rounding-arg "math/ceil" x) f (math/floor x)) (if (< f x) (+ f 1) f)))
+  (if (and (float? x) (not (< (- x x) 1.0)))
+    (error "math/ceil: " x " has no integer value")
+    (let (whole (math/floor x)) (if (< whole x) (+ whole 1) whole))))
 
-;; round half away from zero: floor(x+0.5) for x>=0, ceil(x-0.5) for x<0.
+;; round half away from zero: floor(x+0.5) for x>=0, ceil(x-0.5) for x<0 — that is
+;; -floor(0.5-x), the same value (a float subtraction is exact under negation).
 (defn round (x)
   "Round `x` to the nearest integer (halves away from zero). A float with no integer
 value (an infinity or NaN) is an error naming `math/round`; a magnitude past 2^63 promotes.
 
     (math/round 2.5)       ;=> 3
     (math/round -2.5)      ;=> -3"
-  (let (x (%rounding-arg "math/round" x))
-    (if (< x 0) (ceil (- x 0.5)) (math/floor (+ x 0.5)))))
+  (cond
+    (and (float? x) (not (< (- x x) 1.0))) (error "math/round: " x " has no integer value")
+    (< x 0) (- (math/floor (- 0.5 x)))
+    else (math/floor (+ x 0.5))))
 
 ;; (pow base exp) — `exp` must be an integer (use `sqrt` for roots). Int base +
 ;; non-negative exp stays an int (overflow raises, like `*`); a negative exp gives

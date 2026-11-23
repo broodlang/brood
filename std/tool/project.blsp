@@ -914,6 +914,15 @@ project.
   "Record `path`'s current mtime as what this image holds."
   (def project/*loaded-mtimes* (assoc project/*loaded-mtimes* path (or (file/mtime path) 0))))
 
+(defn note-image-current (paths)
+  "Record that this image holds the current content of every file in `paths` — what a load
+from the project's startup image must say, since it restored exactly the files its
+fingerprint (path, size and mtime of each) was taken over. Without it [[reload-changed]]
+reads every source as never loaded and reloads the whole project the first time it runs.
+
+    (project/note-image-current [])   ;=> nil"
+  (doseq (path paths) (note-loaded path)))
+
 (defn- changed-sources (root)
   "The project source files under `root` whose mtime has moved since this image loaded
 them — and every source file it has never loaded at all.

@@ -93,3 +93,24 @@ fn a_clean_file_reports_no_cap() {
     );
     assert!(gave_up(&warnings).is_empty(), "{warnings:?}");
 }
+
+#[test]
+fn a_union_widened_blindly_is_reported() {
+    // Unions keep four alternatives; a fifth merges two that a check could tell apart, and a
+    // finding against one of them can vanish. Four tagged arms report the `nil` reaching
+    // `string/upper`; five used to go silent with no note at all.
+    let four = file_warnings(
+        "(defn r (k) (case k :a [:a 1] :b [:b \"x\"] :c [:c true] [:d nil]))\n\
+         (defn u (k) (match (r k) ([:d v] (string/upper v)) (_ \"\")))",
+    );
+    assert!(four.iter().any(|w| w.contains("got nil")), "{four:?}");
+    let five = file_warnings(
+        "(defn r (k) (case k :a [:a 1] :b [:b \"x\"] :c [:c true] :d [:d nil] [:e \"s\"]))\n\
+         (defn u (k) (match (r k) ([:d v] (string/upper v)) (_ \"\")))",
+    );
+    assert!(
+        five.iter()
+            .any(|w| w.contains("alternatives and") && w.contains("widened")),
+        "{five:?}"
+    );
+}

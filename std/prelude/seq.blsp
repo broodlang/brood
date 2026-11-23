@@ -403,8 +403,29 @@ import (and so `(:use set)` can't shadow them).
 ;; and field-presence checking from the existing record-type machinery (ADR-115).
 
 ;; A field spec is a bare `name` (untyped) or `(->string type)` (typed).
-(defn- %defrecord-fname (f) (if (pair? f) (first f) f))
-(defn- %defrecord-ftype (f) (if (pair? f) (second f) nil))
+;; A field written `n:int`, the typed-parameter spelling `defn` takes (ADR-420): `[n int]`,
+;; or nil for any other field. Without it the colon spelling made a field literally named
+;; `n:int`, silently. `n:` with the type as the next form is a parameter-list spelling a
+;; field list cannot read, so it is refused naming `(n TYPE)`.
+(defn- %defrecord-typed-field (f)
+  (if (symbol? f)
+    (let (text (->string f)
+          at (%str-index-of text ":"))
+      (if (> at 0)
+        (if (= at (- (count text) 1))
+          (error "defrecord: field `"
+            text
+            "` names no type — write ("
+            (string/substring text 0 at)
+            " TYPE)")
+          [(symbol (string/substring text 0 at))
+            (symbol (string/substring text (+ at 1) (count text)))])
+        nil))
+    nil))
+(defn- %defrecord-fname (f)
+  (if (pair? f) (first f) (let (typed (%defrecord-typed-field f)) (if typed (first typed) f))))
+(defn- %defrecord-ftype (f)
+  (if (pair? f) (second f) (let (typed (%defrecord-typed-field f)) (if typed (second typed) nil))))
 (defn- %defrecord-acc-sym (rec fld) (symbol (str (->string rec) "-" (->string fld))))
 ;; The form following keyword `kw` in a macro's flat option list, or nil — how `defrecord`
 ;; reads `:derives` and `defability` (abilities.blsp) reads `:sealed`/`:requires`/`:derive-record`.
@@ -459,7 +480,7 @@ held in the value, never among the fields — so `ability` dispatch tells it apa
 map and from other records (a record is NOT `=` to a map with the same fields).
 `record?`/`record-id`/`fields` are the identity API; `get`/`assoc` work on the fields.
 
-A field is a bare symbol or `(field type)`; the constructor result is inferred as a
+A field is a bare symbol, `(field type)` or `field:type`; the constructor result is inferred as a
 record type carrying its id, so a value's identity flows through
 the checker to dispatch sites (`(let (c (circle 2)) (area c))` is checkable). When every
 field is typed, per-accessor signatures are emitted too.

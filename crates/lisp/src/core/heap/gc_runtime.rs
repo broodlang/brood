@@ -1679,18 +1679,15 @@ impl Heap {
         // complete if it later goes quiescent (otherwise the aged-out generation would
         // leak, never freed). Compaction can't run on a generation being drained anyway.
         if self.drain_active() {
-            // Throttle the free-attempt (the O·live-process `report_parked_liveness`
-            // registry scan) to 1/stride of this process's safepoints. A drain that can't
-            // yet complete otherwise re-runs that whole-registry scan on every safepoint of
-            // every worker purely to re-discover "still not drained" — the dominant cost
-            // once the self-report walk is cheap. Every process's O(1) self-report still runs every
-            // frame, so acks stay current and the free is still attempted every `stride`
-            // frames as long as any process reaches a safepoint (no lost wakeup).
-            let t = self.rt_drain_tick.get().wrapping_add(1);
-            self.rt_drain_tick.set(t);
-            if t.is_multiple_of(RT_DRAIN_SCAN_STRIDE) {
-                self.advance_runtime_multigen();
-            }
+            // Try the free on EVERY entry. Entries are already rare: the threshold below
+            // backs off exponentially, so this branch runs once per doubling of the region,
+            // and that is the throttle the whole-registry scan needs. A second throttle
+            // here — one free attempt per 64 entries, from when the threshold was pinned
+            // low and every safepoint re-entered — compounded with it into "once per 64
+            // doublings": the free was never attempted, and a drain armed in a
+            // multi-process runtime stayed armed for good, so superseded code was never
+            // reclaimed again (120 000 redefinitions kept 116 000 closures).
+            self.advance_runtime_multigen();
             // Back off the threshold even while the drain is still armed, rather than
             // pinning it to `count`. Pinning made `rt_gc_due` true every frame, so every
             // safepoint re-entered this branch and paid the `cur_code()` `ArcSwap` loads —
@@ -1699,8 +1696,8 @@ impl Heap {
             // local-call code-pinning limitation). With the exponential back-off the
             // collector is re-entered only at region-growth doublings; the O(1) drain
             // self-report still runs every frame (so acks stay current) and the free is
-            // still attempted at each doubling (no lost wakeup — completion never needs
-            // the free, and a completable drain frees at the next doubling).
+            // attempted at each doubling (no lost wakeup — completion never needs the
+            // free, and a completable drain frees at the next doubling).
             let count = self.runtime.cur_code().closures.count();
             self.rt_gc_threshold = self.floor().max(count.saturating_mul(2));
             return;

@@ -49,10 +49,11 @@
       (assert (type-matches? 'memo-shape lines))
       (reflect/eval '(deftype memo-shape (vector int)))
       (assert (not (type-matches? 'memo-shape lines)))))
-  (test "a defrecord turns an unknown name from accepting into a record check"
+  (test "a defrecord turns an unknown name from an error into a record check"
     (let (plain {:a 1})
-      ;; a name nothing defines accepts anything
-      (assert (type-matches? 'memo-late-record plain))
+      ;; a name nothing defines is a misspelled declaration: it raises, and no verdict is
+      ;; remembered for it
+      (assert-error "unknown type `memo-late-record`" (type-matches? 'memo-late-record plain))
       (reflect/eval '(defrecord memo-late-record (a)))
       (assert (not (type-matches? 'memo-late-record plain)))))
   (test "a collection between checks keeps every verdict right"
@@ -111,8 +112,8 @@
     (assert= false (decided 'memo-rec (memo-rec-other 1)))
     (assert= false (decided 'memo-rec {:a 1 :b 2}))
     (assert= false (decided 'memo-rec 5))
-    ;; a name nothing defines accepts anything, as the walk's unknown-type default does
-    (assert= true (decided 'memo-no-such-type 5)))
+    ;; a name nothing defines is left to the walk, which raises naming it
+    (assert= nil (decided 'memo-no-such-type 5)))
   (test "a record shape over a record instance, its nil field read as nil"
     (assert= true (decided 'memo-rec-shape (memo-rec 1 nil)))
     (assert= false (decided 'memo-rec-shape (memo-rec "1" nil)))

@@ -1220,3 +1220,42 @@ fn a_private_constant_has_its_literal_value_type() {
         "{ws:?}"
     );
 }
+
+#[test]
+fn a_report_by_inclusion_says_why_and_names_what_would_not_fit() {
+    // The gradual relation reads a precise argument by inclusion and a dynamic one by
+    // overlap, and the reader cannot see which from the two types. A report that fired by
+    // inclusion says so and names the values that would not fit; a disjoint one needs no
+    // reason (none of its values fit), so it carries none.
+    let src = "(defn takes-int (n:int -> int) n) \
+               (defn maybe (n:int -> (or int bool)) (if (= n 0) false n)) \
+               (defn wider (x:number) (takes-int x)) \
+               (defn call-result (y:int) (takes-int (maybe y))) \
+               (defn disjoint (s:string) (takes-int s))";
+    let plain = file_warnings_mode(src, false);
+    let wider: Vec<&String> = plain.iter().filter(|w| w.contains("got number")).collect();
+    assert_eq!(wider.len(), 1, "{plain:?}");
+    assert!(
+        wider[0].contains("the argument's type is precise, so every value must fit")
+            && wider[0].contains("float")
+            && !wider[0].contains(" int would not"),
+        "a precise, merely wider argument names the reading and the leftover: {plain:?}"
+    );
+    let disjoint: Vec<&String> = plain.iter().filter(|w| w.contains("got string")).collect();
+    assert_eq!(disjoint.len(), 1, "{plain:?}");
+    assert!(
+        !disjoint[0].contains(" — "),
+        "a disjoint report needs no reason: {plain:?}"
+    );
+    // A call result is dynamic: silent by default, read by inclusion only under --strict,
+    // and the strict report says that is why.
+    assert!(plain.iter().all(|w| !w.contains("(maybe y)")), "{plain:?}");
+    let strict = file_warnings_mode(src, true);
+    assert!(
+        strict.iter().any(|w| w.contains("(maybe y)")
+            && w.contains(
+                "under --strict every value of a known type must fit, and bool would not"
+            )),
+        "{strict:?}"
+    );
+}

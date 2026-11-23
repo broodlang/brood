@@ -499,7 +499,7 @@ function paintOps(ops, ox, oy, cw, ch, dy) {
         drawParticles(op[1]);
         break;
       default:
-        break; // sound, music (heard in `hearFrame`), the effects (`paintFrame`), cursor-zone, cells, cells-rgb and anything newer
+        break; // sound, music, ambience (heard in `hearFrame`), the effects (`paintFrame`), cursor-zone, cells, cells-rgb and anything newer
     }
   }
 }
@@ -706,18 +706,27 @@ function ensureAudio() {
     audio = new (window.AudioContext || window.webkitAudioContext)();
   }
   if (audio && audio.state === "suspended") audio.resume();
-  // music asked for before the gesture starts now
+  // music and ambience asked for before the gesture start now
   hearMusic(lastFrame);
+  hearAmbience(lastFrame);
 }
 
 // A frame's sounds play once, when it arrives — not when a resize or a late texture
-// repaints it — and its music is reconciled, as the runtime's window does.
+// repaints it — and its music and ambience are reconciled, as the runtime's window does.
+// A keyed sound (`[:sound snd vol pan key]`) the frame before, or an earlier op of this
+// one, already carried is still playing, not new (ADR-777). `lastFrame` is still the
+// frame before here: `paintFrame` replaces it after.
 function hearFrame(frame) {
   burstsArrived(frame);
-  for (const op of frame) {
-    if (Array.isArray(op) && op[0] === "sound") playSound(op[1], op[2]);
-  }
+  const keyed = (ops, snd, key) => ops.some((o) => Array.isArray(o) && o[0] === "sound" && o[1] === snd && o[4] === key);
+  frame.forEach((op, index) => {
+    if (!Array.isArray(op) || op[0] !== "sound") return;
+    const key = op[4];
+    if (Number.isInteger(key) && (keyed(lastFrame, op[1], key) || keyed(frame.slice(0, index), op[1], key))) return;
+    playSound(op[1], op[2], op[3]);
+  });
   hearMusic(frame);
+  hearAmbience(frame);
 }
 
 // Music is state: the first `[:music snd vol]` op of the frame on screen keeps that sound
@@ -749,17 +758,71 @@ function hearMusic(frame) {
   source.start();
   music = { snd: op[1], source, gain };
 }
+// Ambience is state too, but layered: every `[:ambience snd vol]` op of the frame keeps its
+// own sound looping beside the others, by handle — the same handle again moves its volume,
+// one the frame leaves out fades out (ADR-777).
+const ambience = new Map(); // handle -> { source, gain }
+
+function hearAmbience(frame) {
+  const wanted = new Map();
+  for (const op of frame) {
+    if (Array.isArray(op) && op[0] === "ambience" && sounds.has(op[1]) && !wanted.has(op[1])) {
+      wanted.set(op[1], op[2] > 0 ? Math.min(1, op[2]) : 0.18);
+    }
+  }
+  for (const [snd, layer] of ambience) {
+    if (wanted.has(snd)) continue;
+    layer.gain.gain.setTargetAtTime(0, audio.currentTime, FADE_SECONDS / 3);
+    layer.source.stop(audio.currentTime + FADE_SECONDS * 2);
+    ambience.delete(snd);
+  }
+  if (!audio || audio.state !== "running") return;
+  for (const [snd, vol] of wanted) {
+    const playing = ambience.get(snd);
+    if (playing) {
+      playing.gain.gain.setTargetAtTime(vol, audio.currentTime, FADE_SECONDS / 3);
+      continue;
+    }
+    const source = audio.createBufferSource();
+    source.buffer = sounds.get(snd);
+    source.loop = true;
+    const gain = audio.createGain();
+    gain.gain.value = 0;
+    gain.gain.setTargetAtTime(vol, audio.currentTime, FADE_SECONDS / 3);
+    source.connect(gain).connect(audio.destination);
+    source.start();
+    ambience.set(snd, { source, gain });
+  }
+}
 canvas.addEventListener("keydown", ensureAudio);
 canvas.addEventListener("mousedown", ensureAudio);
 
-function playSound(snd, vol) {
+// A one-shot at peak amplitude `vol`, placed by `pan` as the runtime places it — a
+// balance: the centre plays both channels at vol, and towards one side the other fades.
+function playSound(snd, vol, pan) {
   const buffer = sounds.get(snd);
   if (!audio || !buffer) return;
   const source = audio.createBufferSource();
   source.buffer = buffer;
-  const gain = audio.createGain();
-  gain.gain.value = vol && vol > 0 ? Math.min(1, vol) : 0.18;
-  source.connect(gain).connect(audio.destination);
+  const level = vol && vol > 0 ? Math.min(1, vol) : 0.18;
+  const place = Number.isFinite(pan) ? Math.max(-1, Math.min(1, pan)) : 0;
+  if (place === 0) {
+    const gain = audio.createGain();
+    gain.gain.value = level;
+    source.connect(gain).connect(audio.destination);
+  } else {
+    const splitter = audio.createChannelSplitter(2);
+    const merger = audio.createChannelMerger(2);
+    const left = audio.createGain();
+    const right = audio.createGain();
+    left.gain.value = level * Math.min(1, 1 - place);
+    right.gain.value = level * Math.min(1, 1 + place);
+    source.connect(splitter);
+    const rightInput = buffer.numberOfChannels > 1 ? 1 : 0;
+    splitter.connect(left, 0).connect(merger, 0, 0);
+    splitter.connect(right, rightInput).connect(merger, 0, 1);
+    merger.connect(audio.destination);
+  }
   source.start();
 }
 

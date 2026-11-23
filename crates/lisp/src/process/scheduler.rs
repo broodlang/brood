@@ -1123,7 +1123,48 @@ pub fn report_drain_liveness(heap: &Heap) {
     }
     if let Some(pid) = current_pid() {
         heap.report_gen_liveness(pid);
+        free_if_last_to_ack(heap);
     }
+}
+
+/// Free the draining generation when the report just made may have been the last one it
+/// waited for — the O(1) gate `old_gen_drained` opens with (acks plus parked processes
+/// cover the live set), then its authoritative check. The free used to be attempted only
+/// from the collector, which runs at doublings of the code region, so a drain that became
+/// complete just after an attempt waited for the region to double again — and a program
+/// whose redefinitions came in a burst (36 000 of them) never reached another doubling, so
+/// nothing it superseded was reclaimed. A completed drain now frees at the report that
+/// completes it.
+fn free_if_last_to_ack(heap: &Heap) {
+    if heap.drain_active()
+        && heap.drain_acked_count() + (parked_count() as u64) >= REGISTRY.len() as u64
+    {
+        free_drained_gen(heap);
+    }
+}
+
+/// The drain report of a ROOT thread that is blocked waiting — on a top-level program it
+/// started as a green process (ADR-135), the shape of every `brood FILE` run. A root
+/// context stays in the live set while it waits, yet it reaches no safepoint (it runs no
+/// Brood code) and it is not a parked green process the drain coordinator can inspect, so
+/// it never acknowledged a drain: one root context minted before the program started (a
+/// check-cache replay's `require`) pinned the first drain for the whole run, and since a
+/// new drain waits for the previous free, superseded code was never reclaimed again
+/// (120 000 redefinitions kept 116 000 closures). The waiting thread owns its heap, so it
+/// reports for itself — and copies out what it pins (`rehome_drain_pins`), exactly as the
+/// parked inspector does for a parked heap. Called from the root's wait loop.
+pub fn report_root_wait_liveness(heap: &mut Heap) {
+    if !heap.drain_active() {
+        return;
+    }
+    let Some(pid) = current_pid() else {
+        return;
+    };
+    heap.report_gen_liveness(pid);
+    if heap.rehome_drain_pins(&mut [], &mut []) {
+        heap.report_gen_liveness(pid);
+    }
+    free_if_last_to_ack(heap);
 }
 
 /// **RUNTIME collector — Stage 5 (parked-process drain inspection, ADR-091).** A parked

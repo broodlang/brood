@@ -180,18 +180,19 @@ this by implementing the `Display` ability, which takes over this name below.
 ;; `type-of`, `%map-pairs`) because `fold` calls it before the `map?` predicate /
 ;; `cond` macro are available.
 (defn seq (coll)
-  "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range or seq-view is realised to a list; a bytes value becomes its list of ints; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection.
+  "A list view of `coll`, or nil when it is empty. A map becomes its `[k v]` pairs; a lazy range or seq-view is realised to a list; a bytes value becomes its list of ints; lists, vectors, strings, and `nil` pass through. Every empty collection answers nil, so `(when (seq xs) …)` tests for items whatever the kind. Used by `map`/`filter`/`fold` so they accept any collection.
 
     (seq (range 3))   ;=> (0 1 2)     ; realised
     (seq {:a 1})      ;=> ([:a 1])    ; a map becomes its [k v] pairs
     (seq [1 2 3])     ;=> [1 2 3]     ; already a sequence — passes through
+    (seq [])          ;=> nil         ; empty, of any kind
     (seq nil)         ;=> nil"
   ;; DISPATCH ORDER IS LOAD-BEARING, as in `fold`: a vector IS its own seq view and
   ;; answers first, before the two predicate calls, the three `%eq`s, `bound?` and the
   ;; `%map-get` keyed by a vector that the chain below costs — dispatch that would
   ;; dominate a small `mapv`. Every eager sequence op calls `seq` once.
   (if (%eq (type-of coll) :vector)
-    coll
+    (if (%eq (%vector-length coll) 0) nil coll)
     (if (range? coll)
       (%range->list coll)
       (if (seqview? coll)
@@ -267,7 +268,13 @@ this by implementing the `Display` ability, which takes over this name below.
                    "Brood takes the collection first and the function last: `(map xs f)`, `(fold xs init f)`, `(seq/filter xs pred)`."
                    nil)}))
 
-(defn- %seq-passthrough (coll t) (if (%scalar-tag? t) (%not-a-collection "seq" coll t) coll))
+(defn- %seq-passthrough (coll t)
+  (if (%scalar-tag? t)
+    (%not-a-collection "seq" coll t)
+    ;; an empty set or string is nil, like every other empty collection `seq` views
+    (if (%eq t :set)
+      (if (%eq (%set-count coll) 0) nil coll)
+      (if (%eq t :string) (if (%eq (%string-length coll) 0) nil coll) coll))))
 
 ;; `who: expected a sequence, got string …`, raised, naming the public function `who` the
 ;; caller called. Without the name the error printed as `%raise: …`; an empty string, which
@@ -1025,12 +1032,43 @@ since its clause either always runs or never does. `else` must be the last test.
             id (record-id v))
         (cond
           members (if (includes? members (%identity-of v)) true false)
-          (and id (%record-id-named? id t)) true
+          ;; The id says which record; the constructor's declared result says what its
+          ;; fields hold. Checking only the id admitted `(assoc (user-id 7) :n "oops")`
+          ;; where `user-id` declares `n:int` — a value the checker refuses.
+          (and id (%record-id-named? id t)) (%record-declared-fields-match? t v)
           ;; Does ANY record carry this name? The kernel answers that once per name and
           ;; remembers it (ADR-480): asked here per checked value, the scan of every id
           ;; through `->string` cost ~240 µs a check in an editor with 67 records.
           (%type-names-record? t) false
-          else true)))))
+          ;; An OPEN ability is permissive: a value of any kind may gain an impl later.
+          (%registry-member? '*abilities* leaf) true
+          ;; A name nothing defines — no base type, alias, record or ability — is a
+          ;; misspelling in the declaration. Accepting it (what this was) made a typo in a
+          ;; `sig!` enforce nothing, silently; the checker reports the same name statically.
+          else (%unknown-contract-type t))))))
+
+(defn- %unknown-contract-type (t)
+  (%raise {:kind :contract
+           :code "E0080"
+           :message (str "contract: unknown type `"
+                      (->string t)
+                      "` — no base type, deftype, record or ability has that name")}))
+
+;; Do record value `v`'s declared fields hold the types record type `t`'s constructor gives
+;; them — the `(record …)` shape after the `->` of its signature? True when the constructor
+;; declares nothing (untyped fields), since then there is nothing to hold it to.
+(defn- %record-declared-fields-match? (t v)
+  (let (sig (%declared-sig t)
+        at (%sig-pos sig '-> 0))
+    (if (%le 0 at)
+      (let (shape (nth sig (inc at)))
+        ;; The DECLARED fields' types only: a record carries what `assoc` added beyond its
+        ;; declaration (an editor buffer's `:saved-rope`), and the id check above already
+        ;; says which record it is.
+        (if (and (pair? shape) (%eq (first shape) 'record))
+          (%record-fields-match? (%shape-without-id (rest shape)) v)
+          true))
+      true)))
 
 ;; A record type's field list — `k1 T1 k2 T2 …` — walked two at a time against `v`. A field
 ;; typed `(optional T)` may be absent or nil; every other field is required, and needs no
@@ -1109,8 +1147,11 @@ call therefore walks only what changed since the last check — the rest is one 
           ;; checked BEFORE the head dispatch below: its head is whatever its first parameter
           ;; type is, so `(map -> int)` would fall into the `map` branch and fail every
           ;; callback argument under BROOD_CONTRACTS=1 (KI-113). Callability is all a
-          ;; contract can check of a function value.
-          (%le 0 (%sig-pos t '-> 0)) (fn? v)
+          ;; contract can check of a function value. A keyword is callable too — it reads
+          ;; its key out of a map (ADR-165), so `(map people :name)` hands one to a callback
+          ;; parameter — and the checker admits it there (`relax_param_for_arg`); the
+          ;; contract refusing what the checker accepts made `sig!` raise on a correct call.
+          (%le 0 (%sig-pos t '-> 0)) (or (fn? v) (keyword? v))
           ;; `(is T)` — a type guard's result (ADR-301): the VALUE is a bool; what it
           ;; proves about the argument is the checker's business, not the contract's.
           (%eq h 'is) (bool? v)
@@ -1246,6 +1287,12 @@ call therefore walks only what changed since the last check — the rest is one 
     (%eq t 'nil) (nil? v)
     (%eq t 'never) false
     (%eq t 'seqable) (or (list? v) (vector? v) (set? v) (map? v) (bytes? v))
+    ;; `numeric` and `ordered` are the domains of `+` and `<`: a number, or a record with a
+    ;; method for the operator (ADR-179) — which a record carries, so a record is let
+    ;; through. `record` is the tag.
+    (%eq t 'numeric) (or (number? v) (%record? v))
+    (%eq t 'ordered) (or (number? v) (%record? v))
+    (%eq t 'record) (%record? v)
     (%eq t 'countable)
       (or (list? v) (vector? v) (set? v) (map? v) (bytes? v) (string? v) (rope? v) (table? v))
     (%eq t 'failure) (failure? v)

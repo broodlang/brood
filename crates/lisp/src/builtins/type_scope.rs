@@ -212,8 +212,12 @@ fn rescope(heap: &mut Heap, key: Symbol, settled: bool) -> Result<(), LispError>
     let Some(entry) = heap.declared_sig_value(key) else {
         return Ok(());
     };
-    if let Some(inner) = super::tooling::alias_form_at(heap, key) {
-        if let Some(scoped) = scope_form(heap, key, inner, settled) {
+    if super::modules::type_alias_name(key) != key
+        && let Some(inner) = super::tooling::alias_form_at(heap, key)
+    {
+        // Scoped in the module of the alias's own name, stored back under its own key.
+        let name = super::modules::type_alias_name(key);
+        if let Some(scoped) = scope_form(heap, name, inner, settled) {
             let marker = Value::symbol(value::intern(super::modules::TYPE_ALIAS_MARKER));
             let wrapped = heap.list(vec![marker, scoped]);
             heap.set_declared_sig(key, wrapped);

@@ -760,6 +760,9 @@ fn macroexpand_all_depth_step_inner(
                 // Typed parameters (ADR-420): `(def NAME (fn (x:int -> int) …))` — what
                 // `defn` expands to — becomes the plain definition plus its declaration,
                 // before anything below sees the parameter list.
+                if value::symbol_is(s, kw::DEF) {
+                    refuse_typed_def_name(heap, &items)?;
+                }
                 if value::symbol_is(s, kw::DEF)
                     && let Some(rewritten) = typed_def(heap, &items)?
                 {

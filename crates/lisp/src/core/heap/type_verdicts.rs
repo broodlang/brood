@@ -197,9 +197,16 @@ enum NameKind {
     Variable,
     /// A sealed ability: the closed set of its members' record ids.
     Sealed(Vec<Symbol>),
-    /// Anything else — a `defrecord` name or a name nothing defines. `names_record`: some
-    /// registered record is called this, so a value that is not one such record fails.
-    Nominal { names_record: bool },
+    /// A `defrecord` name: a value that is not one such record fails. `typed_fields`: its
+    /// constructor declares field types, which the id alone does not prove — a record built
+    /// with `assoc` can carry a wrong one — so a matching record is left to the walk, which
+    /// checks them (`%record-declared-fields-match?`).
+    Nominal { typed_fields: bool },
+    /// An open ability: any value may gain an impl, so any value is admitted.
+    OpenAbility,
+    /// A name nothing defines: a misspelled declaration. Left to the walk, which raises
+    /// naming it — accepting it made a typo in a `sig!` enforce nothing.
+    Unknown,
 }
 
 /// The head symbols [`Heap::decide`] reads a form by, interned once.
@@ -346,7 +353,7 @@ fn base_type_tags() -> &'static HashMap<Symbol, u32, std::hash::BuildHasherDefau
     > = std::sync::OnceLock::new();
     TABLE.get_or_init(|| {
         let set = |tags: &[Tag]| tags.iter().fold(0u32, |set, &tag| set | (1 << tag as u32));
-        let names: [(&str, u32); 29] = [
+        let names: [(&str, u32); 32] = [
             ("any", u32::MAX),
             ("_", u32::MAX),
             ("never", 0),
@@ -395,6 +402,17 @@ fn base_type_tags() -> &'static HashMap<Symbol, u32, std::hash::BuildHasherDefau
                     Tag::Table,
                 ]),
             ),
+            // `numeric` and `ordered`: a number, or a record (which may have a method for the
+            // operator) — the contract's reading; `record` is the tag.
+            (
+                "numeric",
+                set(&[Tag::Int, Tag::Float, Tag::Decimal, Tag::Ratio, Tag::Record]),
+            ),
+            (
+                "ordered",
+                set(&[Tag::Int, Tag::Float, Tag::Decimal, Tag::Ratio, Tag::Record]),
+            ),
+            ("record", set(&[Tag::Record])),
             ("failure", set(&[Tag::Failure])),
             ("rope", set(&[Tag::Rope])),
             ("pid", set(&[Tag::Pid])),
@@ -531,14 +549,16 @@ impl Heap {
                 Value::Record { id, .. } => Some(members.contains(&id)),
                 _ => None,
             },
-            NameKind::Nominal { names_record } => {
+            NameKind::Nominal { typed_fields } => {
                 if let Value::Record { id, .. } = value
                     && self.record_id_named(id, symbol)
                 {
-                    return Some(true);
+                    return if typed_fields { None } else { Some(true) };
                 }
-                Some(!names_record)
+                Some(false)
             }
+            NameKind::OpenAbility => Some(true),
+            NameKind::Unknown => None,
         }
     }
 
@@ -556,15 +576,83 @@ impl Heap {
             NameKind::Variable
         } else if let Some(members) = self.sealed_members(symbol) {
             NameKind::Sealed(members)
-        } else {
+        } else if self.type_names_record(symbol) {
             NameKind::Nominal {
-                names_record: self.type_names_record(symbol),
+                typed_fields: self.record_declares_field_types(symbol),
             }
+        } else if self.names_open_ability(symbol) {
+            NameKind::OpenAbility
+        } else {
+            NameKind::Unknown
         };
         self.synced_verdict_cache()
             .name_kinds
             .insert(symbol, kind.clone());
         kind
+    }
+
+    /// Is `symbol` (as written, or by its last segment) a registered ability?
+    fn names_open_ability(&self, symbol: Symbol) -> bool {
+        let Some(Value::Map(abilities)) = self.env_get(
+            EnvId::GLOBAL,
+            crate::core::value::intern(crate::core::registries::ABILITIES),
+        ) else {
+            return false;
+        };
+        let name = crate::core::value::symbol_name_ref(symbol);
+        let leaf = name
+            .rfind('/')
+            .map(|slash| crate::core::value::intern(&name[slash + 1..]))
+            .unwrap_or(symbol);
+        [symbol, leaf]
+            .into_iter()
+            .any(|key| self.map_get(abilities, Value::Sym(key)).is_some())
+    }
+
+    /// Does the constructor of record `symbol` declare a field type other than `any`, `_` or a
+    /// type variable — in the `(record :__id__ … :field T …)` after its signature's `->`?
+    fn record_declares_field_types(&self, symbol: Symbol) -> bool {
+        let Some(sig) =
+            crate::builtins::modules::sig_type_of(self, self.declared_sig_value(symbol))
+        else {
+            return false;
+        };
+        let Ok(items) = self.list_to_vec(sig) else {
+            return false;
+        };
+        let arrow = crate::core::value::intern("->");
+        let Some(shape) = items
+            .iter()
+            .position(|item| matches!(item, Value::Sym(s) if *s == arrow))
+            .and_then(|at| items.get(at + 1).copied())
+        else {
+            return false;
+        };
+        let Ok(parts) = self.list_to_vec(shape) else {
+            return false;
+        };
+        let any = crate::core::value::intern("any");
+        let open = crate::core::value::intern("_");
+        // `record`, then key/type pairs; `:__id__`'s value is the id keyword, not a type.
+        parts
+            .get(1..)
+            .unwrap_or(&[])
+            .chunks(2)
+            .any(|pair| match pair {
+                [Value::Keyword(key), _]
+                    if crate::core::value::symbol_name_ref(*key) == "__id__" =>
+                {
+                    false
+                }
+                // An untyped field is declared `?field`, a type variable, which checks nothing.
+                [_, Value::Sym(ty)] => {
+                    *ty != any
+                        && *ty != open
+                        && !crate::core::value::symbol_name_ref(*ty).starts_with('?')
+                }
+                [_, _] => true,
+                _ => false,
+            })
     }
 
     /// The sealed member ids of the ability `symbol` names, looked up as written and by its
@@ -689,9 +777,13 @@ impl Heap {
             form,
             |item| matches!(item, Value::Sym(symbol) if symbol == names.arrow),
         ) {
+            // A keyword is callable — it reads its key out of a map (ADR-165) — so it passes
+            // an arrow type, as `%type-match` and the checker both say.
             return Some(matches!(
                 crate::core::value::tag(value),
-                crate::core::value::Tag::Fn | crate::core::value::Tag::Native
+                crate::core::value::Tag::Fn
+                    | crate::core::value::Tag::Native
+                    | crate::core::value::Tag::Keyword
             ));
         }
         let Value::Sym(head) = head else {
