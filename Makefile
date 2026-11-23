@@ -253,8 +253,10 @@ gcstress: ## Run the concurrency/mailbox tests with GC_STRESS+GC_VERIFY armed â€
 		if BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 $$bin --test tests/$$t\_test.blsp >/tmp/gcstress.$$t.log 2>&1; then \
 			echo "ok"; \
 		else \
-			echo "FAILED"; fail=1; \
+			status=$$?; echo "FAILED (exit $$status)"; fail=1; \
 			grep -E "test failed|use-after-GC|tests," /tmp/gcstress.$$t.log | head -5 | sed 's/^/      /'; \
+			echo "      --- last 30 lines of /tmp/gcstress.$$t.log ---"; \
+			tail -n 30 /tmp/gcstress.$$t.log | cut -c1-400 | sed 's/^/      | /'; \
 		fi; \
 	done; \
 	if [ $$fail -ne 0 ]; then echo ">>> gcstress: FAILURES above"; exit 1; fi; \
