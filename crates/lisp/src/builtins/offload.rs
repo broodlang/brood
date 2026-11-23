@@ -20,7 +20,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![any, any], int),
         &["f", "args"],
-        "Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. Only long/blocking data-in/data-out natives are allowed (%git-clone, %git-resolve-ref, %git-list-tags, %pbkdf2-sha256-bytes, %digest, %hmac, file/slurp, file/slurp-bytes, file/slurp-bytes-from, file/spit, file/spit-bytes, file/spit-append, file/spit-bytes-append, %tls-self-signed) — anything heap-sharing or env-reading is refused. Prefer the `proc/offload` wrapper, which parks in a selective receive and rethrows errors.",
+        "Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. Only long/blocking data-in/data-out natives are allowed (%git-clone, %git-resolve-ref, %git-list-tags, %pbkdf2-sha256-bytes, %digest, %hmac, file/slurp, file/slurp-bytes, file/slurp-bytes-from, file/spit, file/spit-bytes, file/spit-append, file/spit-bytes-append, %tls-self-signed, %wasm-call, %sdf-bake) — anything heap-sharing or env-reading is refused. Prefer the `proc/offload` wrapper, which parks in a selective receive and rethrows errors.",
         offload_start);
 }
 
@@ -56,6 +56,8 @@ const OFFLOAD_ALLOWED: &[&str] = &[
     // the handle is an int token, args/results are data, and the instance
     // registry is global with a per-instance mutex — off-worker is sound.
     "%wasm-call",
+    // A G-buffer bake marches for seconds on its own threads; its scene and request are data.
+    "%sdf-bake",
 ];
 
 struct OffloadJob {

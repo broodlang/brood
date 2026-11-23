@@ -48,6 +48,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `builtins/regex_native.rs` — Native regular-expression matching: the MECHANISM under `std/regex` (ADR-389).
   - `builtins/rope.rs` — The rope primitives (ADR-045): the `ropey`-backed editor buffer text — O(log n) insert/delete/slice with line and char indexing.
   - `builtins/rope_regex.rs` — Regular expressions over a ROPE, in place: the primitives under `regex/rope-find`, `regex/rope-find-backward`, `regex/rope-count` and `regex/rope-spans` (ADR-540).
+  - `builtins/sdf.rs` — The signed-distance primitives (ADR-787): a lowered scene read from Brood values into `host::sdf`, checked, probed at points or baked into a G-buffer.
   - `builtins/selfhost_macros.rs` — The checker's and the macro expander's primitives: `%check*`, the file and source signature readers, `reflect/macroexpand-1` and the form metadata table.
   - `builtins/sequences.rs` — The sequence kernel: pairs, vectors, ranges and sequence views, sorting, `compare` and hashing — the primitives the prelude's collection functions are written over.
   - `builtins/signature_types.rs` — The lattice shorthands every domain's `register` spells its signatures in — see `types::Ty` for the algebra.
@@ -118,6 +119,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `host/owned.rs` — A handle table whose entries belong to a green process, indexed by owner.
   - `host/owner_only.rs` — Windows's owner-only (KI-365): a protected DACL with one entry, full control for the user this process runs as.
   - `host/picture.rs` — Pictures for the display's `[:image …]` op (ADR-686): encoded bytes decoded ONCE per content, and the geometry every painter shares — where a picture lands in its rect (`place`), the picture resampled to the pixels it is drawn at (`ScaledPictures`), and the half-block cells a terminal shows it in (`half_blocks`).
+  - `host/sdf.rs` — Signed-distance scenes evaluated natively (ADR-787): a model lowered to flat shape records by the program that defines it (b2d's `b2d-sculpt`), validated here into a [`Scene`] and evaluated per point (distance, region, material) or marched into a G-buffer ([`bake`]).
   - `host/subprocess.rs` — Persistent child processes (ADR-104), built on the blocking-IO → mailbox seam (ADR-059) — the same mechanism `crate::host::net` uses for sockets.
   - `host/tab.rs` — A browser tab as a display, for a program running IN the tab (the `brood-tab` wasm build): the page's script, not a socket, is the other end.
   - `host/text_width.rs` — Display-cell width of text — how many terminal/grid columns a string occupies.
@@ -267,6 +269,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `regex.blsp` (`regex`) — Regular expressions: Brood's pattern language, matched by a native engine.
 - `registry.blsp` (`registry`) — Named registries a program fills as its modules load — `put` a row under a registry id and a key, read them back with `entries` / `lookup` / `ranked`.
 - `resolver.blsp` (`resolver`) — The dependency version resolver (ADR-209), a PubGrub solver.
+- `sdf.blsp` (`sdf`) — Signed-distance scenes, evaluated and baked natively: a model of shapes and joins, LOWERED by the program that defines it into flat records, checked, then asked its distance, region and material at points (`probe`) or marched into a G-buffer on every core (`bake`).
 - `seq.blsp` (`seq`) — Sequence helpers — the derived enumeration API over the bare collection protocol.
 - `set.blsp` (`set`) — Sets — unordered collections of **unique** values with fast membership.
 - `settings.blsp` (`settings`) — Declared settings read from a data config file — `define` a setting once (default, type, doc) under a registry id, then `read-form` the user's `(config …)` form, `value-of` a setting with its fallback, `read-warnings` for a file that did not read as written, `warnings` for every typo, and `default-source` for the documented file to write the first time.

@@ -6,6 +6,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Added: signed-distance scenes evaluated natively (ADR-787).** The `sdf` module takes a model of
+shapes and joins LOWERED to flat records (`sdf/record`, `sdf/material`, `sdf/field`), checks it
+(`sdf/check`), evaluates its distance, region and material at points (`sdf/probe`) and marches it
+into a G-buffer on every core, off the scheduler (`sdf/bake`). The arithmetic is b2d-sculpt's, bit
+for bit, so a native bake is byte for byte the Brood one and does not depend on the thread count;
+b2d's `gbuffer` uses it when the model lowers and marches in Brood otherwise.
+
 **Added: smooth textures (ADR-783).** `(gui/texture id image {:filter :smooth})` — and the same
 options map on the `rgba w h` form and on `editor/frontend/display-texture` — makes a texture's
 sprites filter bilinearly, so a painted or photographic sprite drawn scaled or turned keeps

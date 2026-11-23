@@ -63,6 +63,7 @@ mod line_diff;
 mod records;
 mod regex_native;
 mod rope_regex;
+mod sdf;
 mod text_search;
 // `pub(crate)` for `eval::unbound_error`'s KI-120 diagnostic, which asks whether a missing
 // qualified name belongs to a baked-in module that `*features*` records as loaded.
@@ -245,6 +246,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     terminal::register_reported_colors(&mut primitives);
     // And again: the tokens a half-typed buffer leaves open, for its indenter.
     treesit::register_open_tokens(&mut primitives);
+    // And again: the signed-distance scenes, probed and baked natively (ADR-787).
+    sdf::register(&mut primitives);
 }
 
 #[cfg(test)]

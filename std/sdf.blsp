@@ -1,0 +1,119 @@
+;; std/sdf.blsp — signed-distance scenes evaluated natively (ADR-787). Thin policy over the
+;; `%sdf-*` primitives: the record format spelled out, a record built from a map, and the three
+;; calls (check, probe, bake).
+(defmodule sdf
+  "Signed-distance scenes, evaluated and baked natively: a model of shapes and joins, LOWERED by
+the program that defines it into flat records, checked, then asked its distance, region and
+material at points (`probe`) or marched into a G-buffer on every core (`bake`). The meaning is
+the defining program's (b2d's `b2d-sculpt` is the one there is): the runtime holds a fixed copy
+of its shapes and rules, bit for bit, and a model it cannot encode stays with the program's own
+evaluator.
+
+A SCENE is a map:
+
+    {:records [...]     ; `*record-words*` numbers a part (nil where absent), in pre-order
+     :points [x y ...]  ; the outlines' polygons, end to end
+     :fields [...]      ; the distance grids `:grid` parts read (see `field`)
+     :materials [...]   ; `*material-words*` numbers a material (see `material`)
+     :material 0        ; the material a point gets where no part names one
+     :bounds [min-x min-y min-z max-x max-y max-z]}
+
+A part's record (`record` builds one from a map): its kind (`*kinds*`) and op (`*ops*`), its
+size (records in it and its parts, 1 for a shape), blend, amount and shell, the bounding sphere
+`[x y z radius]` it lies in, its material index and region index, eleven shape parameters, and
+for a tint the colour and the material name it applies to. A group's record is followed by its
+parts'. Shape parameters: `:sphere` centre and radius; `:ellipsoid` centre and radii;
+`:limb` from, to and the two radii; `:box` centre, half sizes and rounding; `:outline` the
+first point's index in `:points` (in pairs) and the count; `:plane` a point and the unit
+normal; `:grid` the field's index.
+
+    (sdf/check {:records (sdf/record {:kind :sphere :params [0.0 0.0 0.0 1.0]}) :materials (sdf/material {:index 0 :albedo [9 9 9]}) :material 0 :bounds [-2 -2 -2 2 2 2]})   ;=> nil")
+
+(def *record-words* 27) ; numbers a part record holds
+
+(def *material-words* 10) ; numbers a material record holds
+
+;; a part's kind, and how it joins what comes before it, as its record numbers them
+(def *kinds* {:group 0 :sphere 1 :ellipsoid 2 :limb 3 :box 4 :outline 5 :plane 6 :grid 7})
+
+(def *ops* {:union 0 :carve 1 :intersect 2 :swell 3 :coat 4 :tint 5})
+
+(defn- padded (values size)
+  ;; `values` with nils after it, `size` long
+  (fold (range (- size (count values))) (into [] values) (fn (found _) (conj found nil))))
+
+(defn record (part)
+  "The record of a part, from a map: `:kind` (a key of `*kinds*`), `:op` (of `*ops*`, default
+`:union`), `:size` (default 1), `:blend`, `:amount`, `:shell`, `:bound` `[x y z radius]`,
+`:material` and `:region` (indices), `:params` (the shape's numbers), and for a tint `:colour`
+`[r g b]` and `:on` (the number of the material name it applies to). Absent is nil.
+
+    (count (sdf/record {:kind :sphere :params [0.0 0.0 0.0 1.0]}))   ;=> 27
+    (take (sdf/record {:kind :box :op :carve}) 3)   ;=> (4 1 1)"
+  (let (kind (get *kinds* (get part :kind))
+        op (get *ops* (or (get part :op) :union))
+        params (or (get part :params) []))
+    (when (nil? kind) (error "sdf/record: no kind " (get part :kind)))
+    (when (nil? op) (error "sdf/record: no op " (get part :op)))
+    (when (> (count params) 11) (error "sdf/record: more than 11 shape parameters: " params))
+    (into []
+      (append [kind op (or (get part :size) 1) (get part :blend) (get part :amount) (get part :shell)]
+        (padded (or (get part :bound) []) 4)
+        [(get part :material) (get part :region)]
+        (padded params 11)
+        (padded (or (get part :colour) []) 3)
+        [(get part :on)]))))
+
+(defn material (entry)
+  "The record of a material, from a map: `:index` (its byte in a G-buffer), `:name` (a number;
+tints match it), `:albedo` `[r g b]`, `:base` `[r g b]` (its material's own albedo, which a
+G-buffer keeps the albedo as a ratio of; nil for the albedo itself), `:alpha` (default 1.0) and
+`:scatter` (skin's scattering radius, nil for none).
+
+    (sdf/material {:index 2 :albedo [1 2 3]})   ;=> [2 nil 1 2 3 nil nil nil 1.0 nil]"
+  (into []
+    (append [(get entry :index) (get entry :name)]
+      (get entry :albedo)
+      (padded (or (get entry :base) []) 3)
+      [(or (get entry :alpha) 1.0) (get entry :scatter)])))
+
+(defn field (body head regions keep)
+  "A distance field for `:fields`: `body` and `head` grids (`head` nil, or a finer grid eased in
+inside its box), `regions` the region index each label byte names (nil for none), `keep` a flag
+a label byte (nil: all kept). A grid is `{:distances bytes :labels bytes :numbers [...]}`: int16
+little-endian distances in steps of the quantum and a label byte a voxel, voxel (i j k) at
+`i + nx (k + nz j)`, and fourteen numbers — origin x y z, spacing, its inverse, nx ny nz,
+quantum, the far corner x y z, the far steps and the half-diagonal steps.
+
+    (get (sdf/field :b nil [nil] nil) :body)   ;=> :b"
+  {:body body :head head :regions regions :keep keep})
+
+(defn check (scene)
+  "nil when `scene` (see the module) is well formed, else a string naming the first record or
+field that is not. Never raises for a malformed scene.
+
+    (string? (sdf/check {:records [9] :materials [] :material 0 :bounds []}))   ;=> true"
+  (%sdf-check scene))
+
+(defn probe (scene points)
+  "`scene` evaluated at `points`, a flat vector `[x y z x y z …]`: six values a point, flat — the
+distance, the region index (nil for none), the material index (into `:materials`) and that
+material's albedo r g b with the colour zones worked in. Raises when the scene is malformed.
+
+    (first (sdf/probe {:records (sdf/record {:kind :sphere :params [0.0 0.0 0.0 1.0]}) :materials (sdf/material {:index 0 :albedo [9 9 9]}) :material 0 :bounds [-2 -2 -2 2 2 2]} [0.0 0.0 3.0]))   ;=> 2.0"
+  (%sdf-probe scene points))
+
+(defn bake (request)
+  "`request`'s scene marched into a G-buffer on every core (off the scheduler, on the offload
+pool), the bytes the same whatever the number of threads: `{:rgba bytes :height rows
+:subsamples n}`, five RGBA texels a pixel. `request`: `:scene`; `:castings`, scenes that shadow, occlude and thin
+the points of some regions, and `:region-castings`, per region index the index of its casting
+(nil: the scene itself);
+`:centre` and `:axes` `[right down forward]`, the view; `:at` `[u v]`, the picture's top-left;
+`:pixel`, units a pixel; `:columns` and `:rows`; `:lights`, each `{:towards [x y z]
+:softness s}` (a nil softness casts no shadow); `:antialias`, nil or `{:depth-step
+:least-facing :always [material bytes]}` to march subsamples where neighbours differ; and
+`:workers` (default every core).
+
+    (get (sdf/bake {:scene {:records (sdf/record {:kind :sphere :params [0.0 0.0 0.0 1.0]}) :materials (sdf/material {:index 0 :albedo [9 9 9]}) :material 0 :bounds [-2 -2 -2 2 2 2]} :centre [0.0 0.0 0.0] :axes [[1.0 0.0 0.0] [0.0 1.0 0.0] [0.0 0.0 -1.0]] :at [-2.0 -2.0] :pixel 1.0 :columns 4 :rows 4 :lights []}) :height)   ;=> 4"
+  (proc/offload %sdf-bake request))

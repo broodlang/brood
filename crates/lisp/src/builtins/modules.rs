@@ -680,6 +680,9 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("sudo", "std/sudo.blsp"),
     // Native window seam (ADR-046/080): policy over the `%gui-*` primitives → `gui/*`.
     embedded_module!("gui", "std/gui.blsp"),
+    // Signed-distance scenes evaluated and baked natively (ADR-787): policy over the `%sdf-*`
+    // primitives → `sdf/*`, the record format a defining program lowers its model to.
+    embedded_module!("sdf", "std/sdf.blsp"),
     // The rope text-engine seam: policy over the `%rope-*` primitives → `text/*`.
     embedded_module!("text", "std/text.blsp"),
     // A quantity as a person reads it → `humanize/*`. Tiny and dependency-free on
